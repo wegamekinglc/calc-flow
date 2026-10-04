@@ -3,12 +3,15 @@ mod admission;
 mod checkpoint;
 mod codec;
 mod copy;
+mod cpu;
 mod duplicate_fallback;
 mod finalize;
 mod identity;
 mod identity_compare;
 mod metadata;
 mod output;
+mod output_plan;
+mod payload_projection;
 mod schema;
 mod spec;
 mod state;
@@ -59,10 +62,11 @@ pub struct StreamAsofJoinOperator {
     inputs: Vec<Port>,
     outputs: Vec<Port>,
     schemas: [SchemaRef; 3],
+    output_columns: Option<[Vec<usize>; 2]>,
+    payload_projection: Option<Box<payload_projection::PayloadProjection>>,
     state: State,
     prepared: Option<checkpoint::PreparedSegment>,
-    /// Exact index length reserved in the state gauge, encoded on the first
-    /// output or checkpoint capture that needs canonical bytes.
+    checkpoint_log: checkpoint::LogState,
     deferred_index_len: Option<u64>,
     /// `Some` when the committed state was eviction-swept under the stamped
     /// inputs; `None` when admissions, removals or a restore may have left
@@ -87,6 +91,18 @@ impl StreamAsofJoinOperator {
     ) -> Result<()> {
         let staging_workspace = self.reserve_admission_staging(&admission)?;
         let (index_len, projected, owners) = self.checked_capacity_admission(&admission)?;
+        let journal = self
+            .prepare_log_admission(&admission, validated.index, &owners)
+            .map_err(|error| self.attempt_error(error))?;
+        let (credit, retention_bytes) = self
+            .prepare_log_retention(
+                &std::collections::BTreeMap::default(),
+                &std::collections::BTreeMap::default(),
+            )
+            .map_err(|error| self.attempt_error(error))?;
+        let projected = self
+            .log_projection(projected, index_len, &journal, retention_bytes)
+            .map_err(|error| self.attempt_error(error))?;
         let mut status = self
             .admitted_status(validated.index, admission.rows.len(), &projected)
             .map_err(|error| self.attempt_error(error))?;
@@ -102,14 +118,25 @@ impl StreamAsofJoinOperator {
             .prepare_right_admission_copies(&admission.right_capacities, context)
             .await
             .map_err(|error| self.attempt_error(error))?;
+        let storage = self
+            .state
+            .right
+            .prepare_storage(&admission.right_capacities, &self.runtime.pool, &self.name)
+            .map_err(|error| self.attempt_error(error))?;
         context.check_cancelled()?;
         // Everything after this point is synchronous and infallible. A dropped
         // future or failed preflight cannot expose a partially admitted row.
+        storage.install(&mut self.state.right);
         copies.install(&mut self.state.right);
         self.state.batches.reserve_admission(batches);
         admission.install(ingress, &mut self.state, &mut status);
         self.state.install_encoding_owners(owners);
         self.status = status;
+        self.checkpoint_log.install_journal(journal);
+        self.checkpoint_log.credit = Some(credit);
+        self.checkpoint_log.retention_bytes = retention_bytes;
+        self.checkpoint_log.pending = None;
+        self.checkpoint_log.dirty_cut = self.checkpoint_log.keeps_delta();
         self.prepared = None;
         self.deferred_index_len = Some(index_len);
         self.swept = None;
@@ -120,9 +147,7 @@ impl StreamAsofJoinOperator {
         debug_assert_eq!(
             self.current_inventory(None)
                 .expect("committed admission inventory")
-                .bytes
-                + index_len
-                + 256,
+                .bytes,
             self.status.state_bytes
         );
         drop((admission, index_workspace, staging_workspace));
@@ -157,8 +182,6 @@ impl StreamAsofJoinOperator {
                 &admission.batches,
                 &self.name,
             )
-            .map_err(|error| self.attempt_error(error))?;
-        self.check_inventory_limits(&projected.1)
             .map_err(|error| self.attempt_error(error))?;
         Ok(projected)
     }
@@ -221,28 +244,40 @@ impl StreamAsofJoinOperator {
             state::SequenceKind::for_side(&schemas[0], spec.left()),
             state::SequenceKind::for_side(&schemas[1], spec.right()),
         ];
+        let name = name.into();
+        let runtime = output::OutputRuntime::new(limit, &name);
         Ok(Self {
             fingerprint,
             schema_digests,
             payload_header_bytes,
-            name: name.into(),
+            name,
             spec,
             inputs,
             outputs,
             schemas,
+            output_columns: None,
+            payload_projection: None,
             state,
             prepared: None,
+            checkpoint_log: checkpoint::LogState::default(),
             deferred_index_len: None,
             swept: None,
             terminal: false,
             next_output_sequence: 0,
             status: StreamAsofJoinStatus::default(),
-            runtime: output::OutputRuntime::new(limit),
+            runtime,
         })
     }
     /// Returns the immutable declaration.
     pub const fn spec(&self) -> &StreamAsofJoinSpec {
         &self.spec
+    }
+
+    /// A physical output projection keeps the logical state schema and
+    /// fingerprint intact. Input validation and duplicate proofs still use
+    /// every declared identity column.
+    pub(crate) fn set_output_projection(&mut self, columns: Vec<usize>) -> Result<()> {
+        self.configure_projection(columns)
     }
     /// Returns payload-free committed state and attempt counters.
     pub fn status(&self) -> StreamAsofJoinStatus {
@@ -332,7 +367,13 @@ impl StreamAsofJoinOperator {
                 identities: self.status.state_rows,
                 right_payloads: self.status.retained_right_rows,
                 identity_only: self.status.identity_only_rows,
-                bytes: self.status.state_bytes,
+                bytes: self
+                    .status
+                    .state_bytes
+                    .saturating_sub(self.checkpoint_log.bytes())
+                    + self
+                        .deferred_index_len
+                        .map_or(0, |length| if length == 0 { 0 } else { length + 256 }),
             },
             index_length: self
                 .deferred_index_len
@@ -345,7 +386,7 @@ impl StreamAsofJoinOperator {
                         .as_ref()
                         .map(|segment| segment.capacity() as u64)
                 })
-                .map_or(0, |bytes| bytes + 256),
+                .map_or(0, |bytes| if bytes == 0 { 0 } else { bytes + 256 }),
         }
     }
 
@@ -423,6 +464,7 @@ impl StreamOperator for StreamAsofJoinOperator {
         self.state.sequence_kinds = self.sequence_kinds();
         self.status = StreamAsofJoinStatus::default();
         self.prepared = None;
+        self.checkpoint_log = checkpoint::LogState::default();
         self.deferred_index_len = None;
         self.swept = None;
         self.terminal = false;
@@ -511,3 +553,6 @@ fn input_ports(left: &SchemaRef, right: &SchemaRef) -> Result<Vec<Port>> {
         })
         .collect()
 }
+
+#[cfg(test)]
+pub(crate) use output::gather_lifecycle_bridge;

@@ -11,21 +11,28 @@ use parking_lot::Mutex;
 use tokio::sync::{mpsc, watch};
 
 use super::{
-    EdgeReceiver, EdgeSender, EnvelopeCost, StreamMessage, StreamMessageKind,
+    EnvelopeCost, StreamMessage, StreamMessageKind,
     context::{StreamTaskContext, wait_for_task_gate},
     entity_work::TaskEntityWorkClient,
     failure::panic_message,
+    local_edge::{LocalEdgeOwner, OperatorEdgeReceiver, OperatorEdgeSender},
     metrics::MetricsRecorder,
     progress::{
         aggregate::{AggregateInput, IngressActivity, MultiInputProgress, ProgressEmissionKind},
         prepare::BindingOrdinal,
     },
-    supervisor::{PreparedPair, RetainedTaskResult, TaskId, TaskSupervisor, contain_task_panic},
+    sql_recovery_work::{
+        SqlCaptureRequest, SqlRecoveryClient, SqlRecoveryContext, SqlRestoreIdentity,
+        SqlRestoreRequest,
+    },
+    supervisor::{
+        PreparedLogicalTask, PreparedTaskGroup, RetainedTaskResult, TaskId, contain_task_panic,
+    },
 };
 use crate::{
     Batch, CalcFlowError, CancellationToken, EdgeBudget, Epoch, EventTime, IngressProgress,
     IngressProgressSnapshot, IngressState, ManifestIngressState, OperatorIngressManifestEntry,
-    OperatorMetadata, Port, Result, StreamCollector, StreamOperatorContext,
+    Port, Result, StreamCollector, StreamOperatorContext,
     operator::{
         LateMetricDelta, LateMetricSink, PreparedLateMetrics, accumulate_late_metrics,
         rolling_metrics::{
@@ -34,6 +41,12 @@ use crate::{
         },
     },
     pipeline::{CompiledStreamOperator, OperatorCheckpointCapability},
+};
+
+#[cfg(test)]
+use super::{
+    EdgeReceiver, EdgeSender,
+    supervisor::{PreparedPair, TaskSupervisor},
 };
 
 #[cfg(test)]
@@ -83,15 +96,15 @@ pub(crate) struct OperatorRestoreState {
 
 pub(crate) struct OperatorIngress {
     pub(crate) edge_id: String,
-    pub(crate) receiver: EdgeReceiver,
+    pub(crate) receiver: OperatorEdgeReceiver,
     saw_explicit_eof: bool,
 }
 
 impl OperatorIngress {
-    pub(crate) fn new(edge_id: String, receiver: EdgeReceiver) -> Self {
+    pub(crate) fn new(edge_id: String, receiver: impl Into<OperatorEdgeReceiver>) -> Self {
         Self {
             edge_id,
-            receiver,
+            receiver: receiver.into(),
             saw_explicit_eof: false,
         }
     }
@@ -160,6 +173,11 @@ impl OperatorProgress {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub(crate) fn preset_output_count_for_test(&self, value: u64) {
+        self.0.lock().fully_fanned_out_batches = value;
+    }
+
     fn record_output(&self) -> Result<()> {
         let mut progress = self.0.lock();
         progress.fully_fanned_out_batches = progress
@@ -171,7 +189,7 @@ impl OperatorProgress {
         Ok(())
     }
 
-    fn mark_ended(&self) {
+    pub(super) fn mark_ended(&self) {
         self.0.lock().ended = true;
     }
 
@@ -239,11 +257,12 @@ impl LateMetricSink for OperatorProgress {
 
 pub(crate) struct OperatorTaskInputs {
     pub(crate) entity_work: Option<TaskEntityWorkClient>,
+    pub(crate) sql_recovery: Option<SqlRecoveryClient>,
     pub(crate) node_id: String,
     pub(crate) operator: CompiledStreamOperator,
     pub(crate) checkpoint_capability: OperatorCheckpointCapability,
     pub(crate) ingresses: BTreeMap<String, OperatorIngress>,
-    pub(crate) outputs: BTreeMap<String, Vec<EdgeSender>>,
+    pub(crate) outputs: BTreeMap<String, Vec<OperatorEdgeSender>>,
     pub(crate) output_ports: BTreeMap<String, Port>,
     pub(crate) late_output_ports: BTreeSet<String>,
     pub(crate) context: StreamTaskContext,
@@ -257,6 +276,133 @@ pub(crate) struct OperatorTaskInputs {
     pub(crate) restore: Option<OperatorRestoreState>,
 }
 
+struct OperatorEntryFrame {
+    entity_work: Option<TaskEntityWorkClient>,
+    sql_recovery: Option<SqlRecoveryClient>,
+    node_id: String,
+    checkpoint_capability: OperatorCheckpointCapability,
+    ingresses: BTreeMap<String, OperatorIngress>,
+    outputs: BTreeMap<String, Vec<OperatorEdgeSender>>,
+    output_ports: BTreeMap<String, Port>,
+    late_output_ports: BTreeSet<String>,
+    context: StreamTaskContext,
+    progress: OperatorProgress,
+    metrics: MetricsRecorder,
+    entry_gate: watch::Receiver<bool>,
+    entry_ack: mpsc::UnboundedSender<OperatorEntryAck>,
+    data_gate: watch::Receiver<bool>,
+    launch_cancel: CancellationToken,
+    checkpoint: Option<OperatorCheckpointPort>,
+    restore: Option<OperatorRestoreState>,
+}
+
+pub(crate) struct RetainedOperatorInputs {
+    inputs: Option<OperatorTaskInputs>,
+    frame: Option<OperatorEntryFrame>,
+    operator: Option<CompiledStreamOperator>,
+}
+
+impl RetainedOperatorInputs {
+    fn new(inputs: OperatorTaskInputs) -> Self {
+        if inputs.sql_recovery.is_none()
+            || inputs.restore.is_none()
+            || !matches!(inputs.operator, CompiledStreamOperator::Sql(_))
+        {
+            return Self {
+                inputs: Some(inputs),
+                frame: None,
+                operator: None,
+            };
+        }
+        let OperatorTaskInputs {
+            entity_work,
+            sql_recovery,
+            node_id,
+            operator,
+            checkpoint_capability,
+            ingresses,
+            outputs,
+            output_ports,
+            late_output_ports,
+            context,
+            progress,
+            metrics,
+            entry_gate,
+            entry_ack,
+            data_gate,
+            launch_cancel,
+            checkpoint,
+            restore,
+        } = inputs;
+        Self {
+            inputs: None,
+            frame: Some(OperatorEntryFrame {
+                entity_work,
+                sql_recovery,
+                node_id,
+                checkpoint_capability,
+                ingresses,
+                outputs,
+                output_ports,
+                late_output_ports,
+                context,
+                progress,
+                metrics,
+                entry_gate,
+                entry_ack,
+                data_gate,
+                launch_cancel,
+                checkpoint,
+                restore,
+            }),
+            operator: Some(operator),
+        }
+    }
+    fn assemble(&mut self) {
+        let OperatorEntryFrame {
+            entity_work,
+            sql_recovery,
+            node_id,
+            checkpoint_capability,
+            ingresses,
+            outputs,
+            output_ports,
+            late_output_ports,
+            context,
+            progress,
+            metrics,
+            entry_gate,
+            entry_ack,
+            data_gate,
+            launch_cancel,
+            checkpoint,
+            restore,
+        } = self.frame.take().expect("owned operator frame");
+        let operator = self.operator.take().expect("returned actual operator");
+        self.inputs = Some(OperatorTaskInputs {
+            entity_work,
+            sql_recovery,
+            node_id,
+            operator,
+            checkpoint_capability,
+            ingresses,
+            outputs,
+            output_ports,
+            late_output_ports,
+            context,
+            progress,
+            metrics,
+            entry_gate,
+            entry_ack,
+            data_gate,
+            launch_cancel,
+            checkpoint,
+            restore,
+        });
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn spawn_operator_task(
     supervisor: &mut TaskSupervisor,
     inputs: OperatorTaskInputs,
@@ -271,6 +417,41 @@ pub(crate) fn spawn_operator_task(
     })
 }
 
+#[cfg(test)]
+pub(crate) fn spawn_fused_operator_task_pair(
+    supervisor: &mut TaskSupervisor,
+    first: OperatorTaskInputs,
+    second: OperatorTaskInputs,
+    proof: &super::runner::operator_fusion::FusionProof,
+    local_edges: Vec<LocalEdgeOwner>,
+) -> Result<[TaskId; 2]> {
+    let pair = prepare_fused_operator_task_pair(supervisor, first, second, proof)?
+        .with_local_edges(local_edges);
+    Ok(supervisor.spawn_prepared_pair(pair))
+}
+
+#[cfg(test)]
+type PreparedOperatorPairResult<F, G> = Result<PreparedPair<F, G>>;
+
+#[cfg(test)]
+pub(crate) fn prepare_fused_operator_task_pair(
+    supervisor: &mut TaskSupervisor,
+    first: OperatorTaskInputs,
+    second: OperatorTaskInputs,
+    proof: &super::runner::operator_fusion::FusionProof,
+) -> PreparedOperatorPairResult<
+    impl Future<Output = RetainedTaskResult<Option<RetainedOperatorInputs>>> + use<>,
+    impl Future<Output = RetainedTaskResult<Option<RetainedOperatorInputs>>> + use<>,
+> {
+    if !proof.matches(&[&first.node_id, &second.node_id]) {
+        return Err(CalcFlowError::Internal {
+            message: "fusion proof does not match operator inputs".into(),
+        });
+    }
+    Ok(prepare_pair(supervisor, first, second, OperatorCooperation::BoundedData).with_readiness())
+}
+
+#[cfg(test)]
 pub(crate) fn spawn_operator_task_pair(
     supervisor: &mut TaskSupervisor,
     first: OperatorTaskInputs,
@@ -280,60 +461,87 @@ pub(crate) fn spawn_operator_task_pair(
     supervisor.spawn_prepared_pair(pair)
 }
 
+#[cfg(test)]
 pub(crate) fn prepare_operator_task_pair(
     supervisor: &mut TaskSupervisor,
     first: OperatorTaskInputs,
     second: OperatorTaskInputs,
 ) -> PreparedPair<
-    impl Future<Output = RetainedTaskResult<Option<OperatorTaskInputs>>> + use<>,
-    impl Future<Output = RetainedTaskResult<Option<OperatorTaskInputs>>> + use<>,
+    impl Future<Output = RetainedTaskResult<Option<RetainedOperatorInputs>>> + use<>,
+    impl Future<Output = RetainedTaskResult<Option<RetainedOperatorInputs>>> + use<>,
+> {
+    prepare_pair(supervisor, first, second, OperatorCooperation::EveryMessage)
+}
+
+#[cfg(test)]
+fn prepare_pair(
+    supervisor: &mut TaskSupervisor,
+    first: OperatorTaskInputs,
+    second: OperatorTaskInputs,
+    cooperation: OperatorCooperation,
+) -> PreparedPair<
+    impl Future<Output = RetainedTaskResult<Option<RetainedOperatorInputs>>> + use<>,
+    impl Future<Output = RetainedTaskResult<Option<RetainedOperatorInputs>>> + use<>,
 > {
     let first_name = format!("operator:{}", first.node_id);
     let second_name = format!("operator:{}", second.node_id);
-    let cooperation = pair_cooperation(&first.operator, &second.operator);
-    let pair = supervisor.prepare_pair_with_failure_signals(
+    supervisor.prepare_pair_with_failure_signals(
         &first_name,
         move |signal| run_retained_operator_task(first, signal.task_id(), cooperation),
         &second_name,
         move |signal| run_retained_operator_task(second, signal.task_id(), cooperation),
-    );
-    if cooperation == OperatorCooperation::BoundedData {
-        pair.with_readiness()
-    } else {
-        pair
+    )
+}
+
+pub(crate) fn prepare_operator_task_group(
+    members: Vec<(OperatorTaskInputs, PreparedLogicalTask)>,
+    proof: Option<super::runner::operator_fusion::FusionProof>,
+    local_edges: Vec<LocalEdgeOwner>,
+) -> Result<PreparedTaskGroup> {
+    let readiness = proof.is_some();
+    let ids: Vec<_> = members
+        .iter()
+        .map(|(inputs, _)| inputs.node_id.as_str())
+        .collect();
+    if proof
+        .as_ref()
+        .map_or(members.len() != 1 || !local_edges.is_empty(), |proof| {
+            !proof.matches(&ids)
+        })
+    {
+        return Err(CalcFlowError::Internal {
+            message: "fusion group does not match prepared operator inputs".into(),
+        });
     }
+    let cooperation = if readiness {
+        OperatorCooperation::BoundedData
+    } else {
+        OperatorCooperation::Disabled
+    };
+    let members = members
+        .into_iter()
+        .map(|(inputs, token)| {
+            token.bind(move |signal| {
+                run_retained_operator_task(inputs, signal.task_id(), cooperation)
+            })
+        })
+        .collect();
+    Ok(PreparedTaskGroup::new(members, local_edges, proof))
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum OperatorCooperation {
     Disabled,
+    #[cfg(test)]
     EveryMessage,
     BoundedData,
-}
-
-fn pair_cooperation(
-    first: &CompiledStreamOperator,
-    second: &CompiledStreamOperator,
-) -> OperatorCooperation {
-    let (CompiledStreamOperator::Rolling(rolling), CompiledStreamOperator::Expression(expression)) =
-        (first, second)
-    else {
-        return OperatorCooperation::EveryMessage;
-    };
-    let Some(input) = rolling.output_ports()[0].schema() else {
-        return OperatorCooperation::EveryMessage;
-    };
-    if expression.is_exact_column_projection(input, expression.output_ports()[0].schema()) {
-        OperatorCooperation::BoundedData
-    } else {
-        OperatorCooperation::EveryMessage
-    }
 }
 
 impl OperatorCooperation {
     fn after_dispatch(self, kind: StreamMessageKind, skipped_data: &mut bool) -> bool {
         match self {
             Self::Disabled => false,
+            #[cfg(test)]
             Self::EveryMessage => true,
             Self::BoundedData if kind == StreamMessageKind::Data && !*skipped_data => {
                 *skipped_data = true;
@@ -362,20 +570,125 @@ async fn run_operator_task_with_cooperation(
 }
 
 async fn run_retained_operator_task(
-    mut inputs: OperatorTaskInputs,
+    inputs: OperatorTaskInputs,
     task_id: TaskId,
     cooperation: OperatorCooperation,
-) -> RetainedTaskResult<Option<OperatorTaskInputs>> {
+) -> RetainedTaskResult<Option<RetainedOperatorInputs>> {
+    let mut retained = RetainedOperatorInputs::new(inputs);
     let result = contain_task_panic(
         task_id,
-        run_operator_task_body(&mut inputs, task_id, cooperation),
+        run_retained_body(&mut retained, task_id, cooperation),
     )
     .await
     .and_then(std::convert::identity);
-    // A failing task must not wake its peers by dropping endpoints before the
-    // supervisor has published its result and completed failure convergence.
-    let retained = result.is_err().then_some(inputs);
+    let retained = result.is_err().then_some(retained);
     RetainedTaskResult { result, retained }
+}
+
+async fn run_retained_body(
+    retained: &mut RetainedOperatorInputs,
+    task_id: TaskId,
+    cooperation: OperatorCooperation,
+) -> Result<()> {
+    if let Some(inputs) = &mut retained.inputs {
+        return run_operator_task_body(inputs, task_id, cooperation).await;
+    }
+    let frame = retained.frame.as_mut().expect("owned entry frame");
+    if !wait_for_task_gate(
+        &mut frame.entry_gate,
+        &frame.launch_cancel,
+        frame.context.job().cancellation(),
+        "operator launch gate closed before release",
+    )
+    .await?
+    {
+        return Ok(());
+    }
+    let restored = frame.restore.as_mut().expect("SQL restore snapshot");
+    let preparation = OperatorInputProgress::restore(
+        frame.ingresses.keys(),
+        &restored.progress,
+        restored.output_frontier,
+    );
+    let preparation = match preparation {
+        Ok(progress) => {
+            let client = frame.sql_recovery.as_ref().expect("job SQL client");
+            let operator = retained.operator.take().expect("actual SQL operator");
+            let CompiledStreamOperator::Sql(operator) = operator else {
+                unreachable!("entry routing checked SQL variant");
+            };
+            let request = SqlRestoreRequest {
+                operator,
+                snapshot: std::mem::take(&mut restored.snapshot),
+                identity: SqlRestoreIdentity {
+                    node_id: frame.node_id.clone(),
+                    node_order: client.node_order,
+                    task_id: Some(task_id),
+                },
+                context: SqlRecoveryContext::from(frame.context.job()),
+                launch_cancel: frame.launch_cancel.clone(),
+            };
+            let submitted = client.owner.submit(request);
+            let completion = match submitted.result {
+                Ok(ticket) => ticket.join().await,
+                Err(error) => {
+                    retained.operator = submitted.operator.map(CompiledStreamOperator::Sql);
+                    Err(error)
+                }
+            };
+            match completion {
+                Ok(completion) => {
+                    install_entry_sql_restore(&mut retained.operator, completion).map(|()| progress)
+                }
+                Err(error) => Err(error),
+            }
+        }
+        Err(error) => Err(error),
+    };
+    let progress = match preparation {
+        Ok(progress) => progress,
+        Err(error) => {
+            frame
+                .entry_ack
+                .send(OperatorEntryAck {
+                    node_id: frame.node_id.clone(),
+                    result: Err(error),
+                })
+                .map_err(|_| CalcFlowError::Internal {
+                    message: "failed SQL entry ack was dropped".into(),
+                })?;
+            tokio::select! {
+                () = frame.launch_cancel.cancelled() => {},
+                () = frame.context.job().cancellation().cancelled() => {},
+            }
+            return Err(CalcFlowError::Cancelled {
+                run_id: frame.context.job().job_id().to_string(),
+            });
+        }
+    };
+    retained.assemble();
+    let inputs = retained
+        .inputs
+        .as_mut()
+        .expect("reconstructed actual inputs");
+    let Some(progress) = acknowledge_entry(inputs, Ok(progress))? else {
+        return Ok(());
+    };
+    run_after_operator_entry(inputs, progress, task_id, cooperation).await
+}
+
+fn install_entry_sql_restore(
+    target: &mut Option<CompiledStreamOperator>,
+    mut completion: super::sql_recovery_work::OwnedSqlRestoreCompletion,
+) -> Result<()> {
+    let current = completion.check_current();
+    *target = Some(CompiledStreamOperator::Sql(completion.operator));
+    let prepared = current.and(completion.prepared)?.into_restore()?;
+    let Some(CompiledStreamOperator::Sql(operator)) = target.as_mut() else {
+        unreachable!("SQL completion returns the original SQL operator");
+    };
+    operator.install_restore(prepared);
+    Ok(())
 }
 
 async fn run_operator_task_body(
@@ -393,9 +706,18 @@ async fn run_operator_task_body(
     {
         return Ok(());
     }
-    let Some(input_progress) = reset_and_acknowledge(inputs, task_id)? else {
+    let Some(input_progress) = reset_and_acknowledge(inputs, task_id).await? else {
         return Ok(());
     };
+    run_after_operator_entry(inputs, input_progress, task_id, cooperation).await
+}
+
+async fn run_after_operator_entry(
+    inputs: &mut OperatorTaskInputs,
+    input_progress: OperatorInputProgress,
+    task_id: TaskId,
+    cooperation: OperatorCooperation,
+) -> Result<()> {
     if !wait_for_task_gate(
         &mut inputs.data_gate,
         &inputs.launch_cancel,
@@ -406,25 +728,39 @@ async fn run_operator_task_body(
     {
         return Ok(());
     }
+    inputs.context.bind_task_id(task_id);
     if let Some(client) = &mut inputs.entity_work {
+        client.activate(task_id);
+    }
+    if let Some(client) = &mut inputs.sql_recovery {
         client.activate(task_id);
     }
     let result = run_operator_loop(inputs, input_progress, cooperation).await;
     normalize_cancelled_result(inputs, result)
 }
 
-fn reset_and_acknowledge(
+async fn reset_and_acknowledge(
     inputs: &mut OperatorTaskInputs,
     task_id: TaskId,
 ) -> Result<Option<OperatorInputProgress>> {
-    let preparation_result = reset_operator(inputs, task_id).and_then(|()| match &inputs.restore {
-        Some(restore) => OperatorInputProgress::restore(
-            inputs.ingresses.keys(),
-            &restore.progress,
-            restore.output_frontier,
-        ),
-        None => Ok(OperatorInputProgress::new(inputs.ingresses.keys())),
-    });
+    let preparation_result =
+        reset_operator(inputs, task_id)
+            .await
+            .and_then(|()| match &inputs.restore {
+                Some(restore) => OperatorInputProgress::restore(
+                    inputs.ingresses.keys(),
+                    &restore.progress,
+                    restore.output_frontier,
+                ),
+                None => Ok(OperatorInputProgress::new(inputs.ingresses.keys())),
+            });
+    acknowledge_entry(inputs, preparation_result)
+}
+
+fn acknowledge_entry(
+    inputs: &mut OperatorTaskInputs,
+    preparation_result: Result<OperatorInputProgress>,
+) -> Result<Option<OperatorInputProgress>> {
     let (ack_result, input_progress) = match preparation_result {
         Ok(input_progress) => (Ok(()), Some(input_progress)),
         Err(error) => (Err(error), None),
@@ -446,7 +782,38 @@ fn reset_and_acknowledge(
     Ok(input_progress)
 }
 
-fn reset_operator(inputs: &mut OperatorTaskInputs, task_id: TaskId) -> Result<()> {
+async fn reset_operator(inputs: &mut OperatorTaskInputs, task_id: TaskId) -> Result<()> {
+    if matches!(inputs.operator, CompiledStreamOperator::StreamAsofJoin(_))
+        && inputs.restore.is_some()
+    {
+        inputs.context.bind_task_id(task_id);
+        match catch_unwind(AssertUnwindSafe(|| inputs.operator.reset())) {
+            Ok(result) => result?,
+            Err(payload) => {
+                return Err(CalcFlowError::TaskPanicked {
+                    task_id: task_id.as_u64(),
+                    message: panic_message(payload.as_ref()),
+                });
+            }
+        }
+        let restore = inputs.restore.as_mut().expect("restore presence checked");
+        let progress = OperatorInputProgress::restore(
+            inputs.ingresses.keys(),
+            &restore.progress,
+            restore.output_frontier,
+        )?
+        .snapshot()?;
+        let snapshot = std::mem::take(&mut restore.snapshot);
+        return restore_asof_managed(
+            &mut inputs.operator,
+            snapshot,
+            progress,
+            restore.output_frontier,
+            inputs.context.job(),
+            Some(task_id),
+        )
+        .await;
+    }
     match catch_unwind(AssertUnwindSafe(|| {
         inputs.operator.reset()?;
         if let Some(restore) = &inputs.restore {
@@ -482,19 +849,55 @@ fn restore_operator_state(
     )
 }
 
+async fn restore_asof_managed(
+    operator: &mut CompiledStreamOperator,
+    snapshot: crate::OperatorStateSnapshot,
+    progress: IngressProgressSnapshot,
+    frontier: Option<EventTime>,
+    job: &crate::StreamJobContext,
+    task: Option<TaskId>,
+) -> Result<()> {
+    let owned = std::mem::replace(operator, CompiledStreamOperator::CheckpointLoan);
+    let CompiledStreamOperator::StreamAsofJoin(owned) = owned else {
+        *operator = owned;
+        return Err(CalcFlowError::Internal {
+            message: "managed ASOF restoration requires ASOF".into(),
+        });
+    };
+    *operator = CompiledStreamOperator::StreamAsofJoin(
+        owned
+            .restore_managed(snapshot, progress, frontier, job, task)
+            .await?,
+    );
+    Ok(())
+}
+
+pub(super) fn validate_sql_restore_progress<'a>(
+    ingresses: impl IntoIterator<Item = &'a String>,
+    progress: &BTreeMap<String, OperatorIngressManifestEntry>,
+) -> Result<()> {
+    OperatorInputProgress::restore(ingresses, progress, None)?.snapshot()?;
+    Ok(())
+}
+
 /// Validates terminal ASOF state through the same ingress contract as task entry.
-pub(super) fn restore_terminal_asof<'a>(
+pub(super) async fn restore_terminal_asof<'a>(
     operator: &mut CompiledStreamOperator,
     ingresses: impl IntoIterator<Item = &'a String>,
-    restore: &OperatorRestoreState,
+    restore: &mut OperatorRestoreState,
+    job: &crate::StreamJobContext,
 ) -> Result<OperatorProgress> {
     let inputs =
         OperatorInputProgress::restore(ingresses, &restore.progress, restore.output_frontier)?;
-    operator.restore_with_progress(
-        &restore.snapshot,
-        &inputs.snapshot()?,
+    restore_asof_managed(
+        operator,
+        std::mem::take(&mut restore.snapshot),
+        inputs.snapshot()?,
         restore.output_frontier,
-    )?;
+        job,
+        None,
+    )
+    .await?;
     let mut status = operator
         .stream_asof_join_status()
         .ok_or_else(|| CalcFlowError::Internal {
@@ -628,7 +1031,8 @@ async fn finish_operator(
         input_progress.snapshot()?,
         output_budget,
         late_metrics,
-    );
+    )
+    .with_task_id(inputs.context.task_id());
     inputs.progress.record_on_end()?;
     let callback = inputs
         .progress
@@ -1045,27 +1449,114 @@ async fn complete_barrier_if_ready(
     Ok(())
 }
 
+async fn prepare_sql_checkpoint(
+    inputs: &mut OperatorTaskInputs,
+) -> Result<Option<crate::OperatorStateSnapshot>> {
+    let CompiledStreamOperator::Sql(operator) = &mut inputs.operator else {
+        return Ok(None);
+    };
+    if !operator.has_stream_aggregate() || !operator.stream_runtime_initialized() {
+        return Ok(None);
+    }
+    let client = inputs
+        .sql_recovery
+        .as_ref()
+        .ok_or_else(|| CalcFlowError::Internal {
+            message: "SQL checkpoint work has no job owner".into(),
+        })?;
+    let task_id = client.task_id.ok_or_else(|| CalcFlowError::Internal {
+        message: "SQL checkpoint work has no registered task identity".into(),
+    })?;
+    let reservation = operator.reserve_checkpoint_envelope(inputs.node_id.len())?;
+    let operator = std::mem::replace(&mut inputs.operator, CompiledStreamOperator::CheckpointLoan);
+    let CompiledStreamOperator::Sql(operator) = operator else {
+        unreachable!("checkpoint routing checked SQL variant");
+    };
+    let submitted = client.owner.submit_capture(SqlCaptureRequest {
+        operator,
+        identity: SqlRestoreIdentity {
+            node_id: inputs.node_id.clone(),
+            node_order: client.node_order,
+            task_id: Some(task_id),
+        },
+        context: SqlRecoveryContext::from(inputs.context.job()),
+        launch_cancel: inputs.launch_cancel.clone(),
+        reservation,
+    });
+    let ticket = match submitted.result {
+        Ok(ticket) => ticket,
+        Err(error) => {
+            inputs.operator = CompiledStreamOperator::Sql(
+                submitted
+                    .operator
+                    .expect("refused work returns its operator"),
+            );
+            return Err(error);
+        }
+    };
+    let mut completion = ticket.join().await?;
+    let current = completion.check_current();
+    inputs.operator = CompiledStreamOperator::Sql(completion.operator);
+    let prepared = current.and(completion.prepared)?.into_checkpoint()?;
+    let snapshot = prepared.snapshot()?;
+    if let CompiledStreamOperator::Sql(operator) = &mut inputs.operator {
+        operator.install_checkpoint_work(prepared);
+    }
+    Ok(Some(snapshot))
+}
+
+async fn capture_prepared_asof(
+    operator: &mut CompiledStreamOperator,
+    epoch: Epoch,
+    job: &crate::StreamJobContext,
+    task: Option<TaskId>,
+) -> Result<crate::OperatorStateSnapshot> {
+    if !matches!(operator, CompiledStreamOperator::StreamAsofJoin(_)) {
+        return operator.checkpoint(epoch);
+    }
+    let owned = std::mem::replace(operator, CompiledStreamOperator::CheckpointLoan);
+    let CompiledStreamOperator::StreamAsofJoin(owned) = owned else {
+        unreachable!("ASOF capture routing checked variant");
+    };
+    let (restored, snapshot) = owned.capture_managed(epoch, job, task).await?;
+    *operator = CompiledStreamOperator::StreamAsofJoin(restored);
+    Ok(snapshot)
+}
+
 async fn capture_operator_checkpoint(
     inputs: &mut OperatorTaskInputs,
     input_progress: &OperatorInputProgress,
     epoch: Epoch,
 ) -> Result<OperatorCheckpointAck> {
-    let context = StreamOperatorContext::for_task(
-        inputs.context.job(),
-        &inputs.node_id,
-        input_progress.input_watermark(),
-        input_progress.snapshot()?,
-        effective_output_budget(&inputs.outputs),
-        Arc::new(inputs.progress.clone()),
-    );
-    inputs.operator.prepare_checkpoint_async(&context).await?;
+    let prepared = prepare_sql_checkpoint(inputs).await?;
+    let snapshot = if let Some(snapshot) = prepared {
+        snapshot
+    } else {
+        let context = StreamOperatorContext::for_task(
+            inputs.context.job(),
+            &inputs.node_id,
+            input_progress.input_watermark(),
+            input_progress.snapshot()?,
+            effective_output_budget(&inputs.outputs),
+            Arc::new(inputs.progress.clone()),
+        )
+        .with_task_id(inputs.context.task_id());
+        inputs.operator.prepare_checkpoint_async(&context).await?;
+        capture_prepared_asof(
+            &mut inputs.operator,
+            epoch,
+            inputs.context.job(),
+            inputs.context.task_id(),
+        )
+        .await?
+    };
     let transaction = inputs
         .checkpoint
         .as_ref()
         .and_then(|checkpoint| checkpoint.transaction.clone());
     let mut snapshot = inputs
         .checkpoint_capability
-        .encode_snapshot(&inputs.node_id, inputs.operator.checkpoint(epoch)?)?;
+        .encode_snapshot(&inputs.node_id, snapshot)?;
     if inputs.operator.requires_output_frontier_state() {
         let value = input_progress
             .output_frontier
@@ -1149,6 +1640,10 @@ async fn send_operator_checkpoint_ack(
             }
         })?,
     }
+    #[cfg(test)]
+    if let CompiledStreamOperator::Sql(operator) = &inputs.operator {
+        operator.checkpoint_acknowledged_for_test();
+    }
     Ok(())
 }
 
@@ -1200,7 +1695,8 @@ async fn dispatch_data(
         ingress_progress,
         output_budget,
         late_metrics,
-    );
+    )
+    .with_task_id(inputs.context.task_id());
     let context = attach_rolling_context(context, callback.as_ref());
     let context = attach_entity_context(context, inputs.entity_work.as_ref());
     let mut collector = ChannelStreamCollector::new(
@@ -1253,7 +1749,8 @@ async fn dispatch_watermark_handler(
         ingress_progress,
         output_budget,
         late_metrics,
-    );
+    )
+    .with_task_id(inputs.context.task_id());
     let context = attach_rolling_context(context, callback.as_ref());
     let context = attach_entity_context(context, inputs.entity_work.as_ref());
     let mut collector = ChannelStreamCollector::new(
@@ -1299,11 +1796,11 @@ fn attach_entity_context<'a>(
     }
 }
 
-fn effective_output_budget(outputs: &BTreeMap<String, Vec<EdgeSender>>) -> EdgeBudget {
+fn effective_output_budget(outputs: &BTreeMap<String, Vec<OperatorEdgeSender>>) -> EdgeBudget {
     outputs
         .values()
         .flatten()
-        .map(EdgeSender::budget)
+        .map(OperatorEdgeSender::budget)
         .reduce(|left, right| EdgeBudget {
             max_rows: left.max_rows.min(right.max_rows),
             max_bytes: left.max_bytes.min(right.max_bytes),
@@ -1343,7 +1840,8 @@ async fn dispatch_progress_transition(
         ingress_progress.clone(),
         output_budget,
         late_metrics,
-    );
+    )
+    .with_task_id(inputs.context.task_id());
     let mut collector = ChannelStreamCollector::new(
         &inputs.node_id,
         inputs.context.job().job_id(),
@@ -1647,7 +2145,7 @@ fn unsupported_control(
 }
 
 async fn forward_control(
-    outputs: &mut BTreeMap<String, Vec<EdgeSender>>,
+    outputs: &mut BTreeMap<String, Vec<OperatorEdgeSender>>,
     late_output_ports: &BTreeSet<String>,
     message: StreamMessage,
     context: &super::StreamJobContext,
@@ -1677,7 +2175,7 @@ pub(crate) struct ChannelStreamCollector<'a> {
     node_id: &'a str,
     job_id: u64,
     output_ports: &'a BTreeMap<String, Port>,
-    outputs: &'a mut BTreeMap<String, Vec<EdgeSender>>,
+    outputs: &'a mut BTreeMap<String, Vec<OperatorEdgeSender>>,
     cancellation: &'a CancellationToken,
     progress: &'a OperatorProgress,
     metrics: &'a MetricsRecorder,
@@ -1689,7 +2187,7 @@ impl<'a> ChannelStreamCollector<'a> {
         node_id: &'a str,
         job_id: u64,
         output_ports: &'a BTreeMap<String, Port>,
-        outputs: &'a mut BTreeMap<String, Vec<EdgeSender>>,
+        outputs: &'a mut BTreeMap<String, Vec<OperatorEdgeSender>>,
         cancellation: &'a CancellationToken,
         progress: &'a OperatorProgress,
         metrics: &'a MetricsRecorder,
@@ -1756,7 +2254,7 @@ fn validate_emission(
 }
 
 fn validate_senders(
-    senders: &[EdgeSender],
+    senders: &[OperatorEdgeSender],
     message: &StreamMessage,
     node_id: &str,
     port: &str,
@@ -1771,7 +2269,7 @@ fn validate_senders(
 }
 
 async fn send_emission(
-    senders: &mut [EdgeSender],
+    senders: &mut [OperatorEdgeSender],
     message: StreamMessage,
     cancellation: &CancellationToken,
     job_id: u64,
@@ -1787,7 +2285,7 @@ async fn send_emission(
 }
 
 async fn send_observed_edge(
-    sender: &mut EdgeSender,
+    sender: &mut OperatorEdgeSender,
     message: StreamMessage,
     cancellation: &CancellationToken,
     job_id: u64,
@@ -1925,6 +2423,7 @@ pub(super) mod tests {
         let mut inputs = OperatorTaskInputs {
             late_output_ports: std::collections::BTreeSet::new(),
             entity_work: None,
+            sql_recovery: None,
             node_id: "node".into(),
             operator: CompiledStreamOperator::External(Box::new(operator)),
             checkpoint_capability: OperatorCheckpointCapability::Stateless,
@@ -2427,6 +2926,7 @@ pub(super) mod tests {
             OperatorTaskInputs {
                 late_output_ports: std::collections::BTreeSet::new(),
                 entity_work: None,
+                sql_recovery: None,
                 node_id: "node".into(),
                 operator: CompiledStreamOperator::External(Box::new(operator)),
                 checkpoint_capability: OperatorCheckpointCapability::Stateless,
@@ -2434,7 +2934,7 @@ pub(super) mod tests {
                     "input".into(),
                     OperatorIngress::new("source->input".into(), input_receiver),
                 )]),
-                outputs: BTreeMap::from([("output".into(), vec![output_sender])]),
+                outputs: BTreeMap::from([("output".into(), vec![output_sender.into()])]),
                 output_ports: BTreeMap::from([("output".into(), output_port)]),
                 context: context.for_node("node").unwrap(),
                 progress: progress.clone(),
@@ -2533,11 +3033,12 @@ pub(super) mod tests {
         let mut inputs = OperatorTaskInputs {
             late_output_ports: std::collections::BTreeSet::new(),
             entity_work: None,
+            sql_recovery: None,
             node_id: "node".into(),
             operator: CompiledStreamOperator::External(Box::new(operator)),
             checkpoint_capability: OperatorCheckpointCapability::Stateless,
             ingresses: BTreeMap::new(),
-            outputs: BTreeMap::from([("output".into(), vec![sender])]),
+            outputs: BTreeMap::from([("output".into(), vec![sender.into()])]),
             output_ports: BTreeMap::from([("output".into(), output_port)]),
             context: job.for_node("node").unwrap(),
             progress: progress.clone(),
@@ -2911,7 +3412,7 @@ pub(super) mod tests {
                 metrics.clone(),
             )
             .unwrap();
-            output_senders.push(sender);
+            output_senders.push(sender.into());
             outputs.push(receiver);
         }
         let (entry, entry_rx) = watch::channel(false);
@@ -2925,6 +3426,7 @@ pub(super) mod tests {
             OperatorTaskInputs {
                 late_output_ports: std::collections::BTreeSet::new(),
                 entity_work: None,
+                sql_recovery: None,
                 node_id: "node".into(),
                 operator,
                 checkpoint_capability,
@@ -2993,7 +3495,7 @@ pub(super) mod tests {
         .unwrap();
 
         let error = send_emission(
-            &mut [sender],
+            &mut [sender.into()],
             StreamMessage::data(batch("S", 0)),
             &cancellation,
             47,

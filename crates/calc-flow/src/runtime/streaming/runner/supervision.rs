@@ -1,8 +1,10 @@
+use crate::runtime::streaming::sql_recovery_work::JobSqlRecoveryOwner;
+
 use std::ops::{Deref, DerefMut};
 
 use super::{
-    Arc, DriverReport, JobEntityWorkOwner, Mutex, SupervisionReport, TaskFailure, TaskSupervisor,
-    task_runtime_failure,
+    Arc, DriverReport, JobEntityWorkOwner, Mutex, RuntimeFailure, SupervisionReport, TaskFailure,
+    TaskSupervisor, task_runtime_failure,
 };
 
 #[derive(Default)]
@@ -11,6 +13,7 @@ struct SupervisionState {
     returned: Option<TaskSupervisor>,
     prepared: Option<DriverReport>,
     secondary: Vec<TaskFailure>,
+    late_cleanup: Vec<Arc<RuntimeFailure>>,
 }
 
 /// The whole supervisor returns here even when its driver future is aborted.
@@ -22,6 +25,8 @@ impl SupervisionHome {
         &self,
         supervisor: TaskSupervisor,
         cpu: JobEntityWorkOwner,
+        sql: JobSqlRecoveryOwner,
+        gather: super::super::gather_work::JobGatherOwner,
     ) -> SupervisorLoan {
         let mut home = self.0.lock();
         assert!(!home.loaned && home.returned.is_none());
@@ -30,10 +35,17 @@ impl SupervisionHome {
             home: self.clone(),
             supervisor: Some(supervisor),
             cpu,
+            sql,
+            gather,
         }
     }
 
-    pub(super) fn take(&self, cpu: JobEntityWorkOwner) -> Option<SupervisorLoan> {
+    pub(super) fn take(
+        &self,
+        cpu: JobEntityWorkOwner,
+        sql: JobSqlRecoveryOwner,
+        gather: super::super::gather_work::JobGatherOwner,
+    ) -> Option<SupervisorLoan> {
         let mut home = self.0.lock();
         assert!(!home.loaned, "only one driver can own the supervisor");
         let supervisor = home.returned.take()?;
@@ -42,6 +54,8 @@ impl SupervisionHome {
             home: self.clone(),
             supervisor: Some(supervisor),
             cpu,
+            sql,
+            gather,
         })
     }
 
@@ -51,7 +65,28 @@ impl SupervisionHome {
         report
             .cleanup_failures
             .extend(home.secondary.drain(..).map(task_runtime_failure));
+        report.cleanup_failures.append(&mut home.late_cleanup);
         home.prepared = Some(report);
+    }
+
+    pub(super) fn append_cleanup(&self, mut failures: Vec<Arc<RuntimeFailure>>) {
+        let mut home = self.0.lock();
+        if let Some(report) = &mut home.prepared {
+            report.cleanup_failures.append(&mut failures);
+        } else {
+            home.late_cleanup.append(&mut failures);
+        }
+    }
+
+    pub(super) fn append_secondary(&self, failures: Vec<TaskFailure>) {
+        let mut home = self.0.lock();
+        if let Some(report) = &mut home.prepared {
+            report
+                .cleanup_failures
+                .extend(failures.into_iter().map(task_runtime_failure));
+        } else {
+            home.secondary.extend(failures);
+        }
     }
 
     pub(super) fn has_report(&self) -> bool {
@@ -90,14 +125,21 @@ pub(super) struct SupervisorLoan {
     home: SupervisionHome,
     supervisor: Option<TaskSupervisor>,
     cpu: JobEntityWorkOwner,
+    sql: JobSqlRecoveryOwner,
+    gather: super::super::gather_work::JobGatherOwner,
 }
 
 impl SupervisorLoan {
     pub(super) async fn join_all(&mut self) -> SupervisionReport {
         self.deref_mut().settle_tasks().await;
         self.cpu.close_admission();
-        let secondary = self.cpu.drain().await;
+        self.gather.close_admission();
+        let mut secondary = self.cpu.drain().await;
+        secondary.extend(self.gather.close_and_drain().await);
         self.home.0.lock().secondary.extend(secondary);
+        self.sql.close_admission();
+        let failures = self.sql.drain().await;
+        self.home.append_cleanup(failures);
         self.deref_mut().take_report()
     }
 }
@@ -118,6 +160,8 @@ impl DerefMut for SupervisorLoan {
 impl Drop for SupervisorLoan {
     fn drop(&mut self) {
         self.cpu.close_admission();
+        self.sql.close_admission();
+        self.gather.close_admission();
         if let Some(mut supervisor) = self.supervisor.take() {
             supervisor.cancel_and_abort();
             let mut home = self.home.0.lock();

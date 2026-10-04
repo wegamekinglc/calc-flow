@@ -10,6 +10,7 @@ from pathlib import Path
 
 from scripts.benchmark_suite.asof import asof_rows
 from scripts.benchmark_suite.asof_e2e import asof_e2e_rows
+from scripts.benchmark_suite.asof_eviction import asof_eviction_rows
 from scripts.benchmark_suite.catalog import CONTRACT
 from scripts.benchmark_suite.join_materialization import materialization_rows
 from scripts.benchmark_suite.legacy import combine_blocks
@@ -21,6 +22,8 @@ from scripts.benchmark_suite.rust_provenance import (
     target_dependency_fingerprint,
     with_compiled_dependencies,
 )
+from scripts.benchmark_suite.sql_stream import sql_stream_rows
+from scripts.benchmark_suite.window_groups import window_groups_rows
 from scripts.verify_sql_datafusion_performance import verify_report
 from scripts.write_criterion_provenance import build_provenance
 
@@ -202,6 +205,15 @@ async def run_binary(
     target: str, binary: Path, source: Path, output: Path, side: str
 ) -> dict:
     environment = {**child_environment(), "CRITERION_HOME": str(output / "criterion")}
+    if target == "stream_asof_eviction":
+        path = output / "asof-eviction.json"
+        await command(
+            [str(binary), "--samples", "20", "--output", str(path)],
+            cwd=source,
+            log=output / "run.log",
+            env=environment,
+        )
+        return asof_eviction_rows(path)
     if target == "stream_asof_perf":
         path = output / "asof.json"
         await command(
@@ -211,6 +223,24 @@ async def run_binary(
             env=environment,
         )
         return asof_rows(path)
+    if target == "stream_window_groups":
+        path = output / "window-groups.json"
+        await command(
+            [str(binary), "--samples", "20", "--output", str(path)],
+            cwd=source,
+            log=output / "run.log",
+            env=environment,
+        )
+        return window_groups_rows(path)
+    if target == "stream_sql_aggregate":
+        path = output / "sql-stream.json"
+        await command(
+            [str(binary), "--samples", "20", "--output", str(path)],
+            cwd=source,
+            log=output / "run.log",
+            env=environment,
+        )
+        return sql_stream_rows(path)
     if target == "stream_asof_e2e":
         path = output / "asof-e2e.json"
         await command(

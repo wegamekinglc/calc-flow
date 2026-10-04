@@ -69,10 +69,11 @@ impl StreamOperatorLifecycle {
 /// the SHA-256 is computed once at construction so re-staging a carried
 /// segment never re-hashes the retained state (spec FR47 capture cost stays
 /// proportional to the dirty set).
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone)]
 pub struct StateSegment {
     bytes: Arc<Vec<u8>>,
     sha256: String,
+    owner: Option<Arc<dyn std::any::Any + Send + Sync>>,
 }
 
 impl StateSegment {
@@ -83,6 +84,7 @@ impl StateSegment {
         Self {
             bytes: Arc::new(bytes),
             sha256,
+            owner: None,
         }
     }
 
@@ -92,7 +94,20 @@ impl StateSegment {
         Self {
             bytes: Arc::new(bytes),
             sha256,
+            owner: None,
         }
+    }
+
+    pub(crate) fn has_owner(&self) -> bool {
+        self.owner.is_some()
+    }
+
+    pub(crate) fn with_owner(mut self, owner: Arc<dyn std::any::Any + Send + Sync>) -> Self {
+        self.owner = Some(match self.owner.take() {
+            None => owner,
+            Some(previous) => Arc::new((previous, owner)),
+        });
+        self
     }
 
     /// Returns the immutable segment bytes.
@@ -113,6 +128,24 @@ impl StateSegment {
         &self.sha256
     }
 }
+
+impl std::fmt::Debug for StateSegment {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StateSegment")
+            .field("bytes", &self.bytes)
+            .field("sha256", &self.sha256)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for StateSegment {
+    fn eq(&self, other: &Self) -> bool {
+        self.bytes == other.bytes && self.sha256 == other.sha256
+    }
+}
+
+impl Eq for StateSegment {}
 
 /// Operator-private state captured at one epoch (API note A2.3).
 ///
@@ -220,6 +253,7 @@ pub struct StreamOperatorContext<'a> {
     late_metrics: Arc<dyn LateMetricSink>,
     rolling_metrics: Option<RollingMetricsRecorder>,
     entity_work: Option<ScopedEntityWorkClient>,
+    task_id: Option<crate::runtime::streaming::gather_work::TaskId>,
 }
 
 impl<'a> StreamOperatorContext<'a> {
@@ -238,6 +272,7 @@ impl<'a> StreamOperatorContext<'a> {
             late_metrics: Arc::new(LateMetricRecorder::default()),
             rolling_metrics: None,
             entity_work: None,
+            task_id: None,
         }
     }
 
@@ -257,6 +292,7 @@ impl<'a> StreamOperatorContext<'a> {
             late_metrics: Arc::new(LateMetricRecorder::default()),
             rolling_metrics: None,
             entity_work: None,
+            task_id: None,
         }
     }
 
@@ -277,6 +313,7 @@ impl<'a> StreamOperatorContext<'a> {
             late_metrics,
             rolling_metrics: None,
             entity_work: None,
+            task_id: None,
         }
     }
 
@@ -287,6 +324,23 @@ impl<'a> StreamOperatorContext<'a> {
 
     pub(crate) fn rolling_metrics(&self) -> Option<&RollingMetricsRecorder> {
         self.rolling_metrics.as_ref()
+    }
+
+    pub(crate) fn with_task_id(
+        mut self,
+        task_id: Option<crate::runtime::streaming::gather_work::TaskId>,
+    ) -> Self {
+        self.task_id = task_id;
+        self
+    }
+
+    pub(crate) fn gather_client(
+        &self,
+        operator: crate::runtime::streaming::gather_work::GatherOperatorId,
+    ) -> crate::runtime::streaming::gather_work::GatherClient {
+        self.job
+            .gather_owner()
+            .client(operator.with_task(self.task_id))
     }
 
     pub(crate) fn with_entity_work(mut self, client: ScopedEntityWorkClient) -> Self {

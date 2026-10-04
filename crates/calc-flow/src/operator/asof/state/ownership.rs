@@ -26,6 +26,12 @@ pub(in super::super) struct OwnerUpdates {
     new_owners: usize,
 }
 
+impl OwnerUpdates {
+    pub fn contains(&self, address: usize) -> bool {
+        self.allocations.contains_key(&address)
+    }
+}
+
 fn metadata_bytes(count: usize) -> u64 {
     if count == 0 {
         0
@@ -35,6 +41,18 @@ fn metadata_bytes(count: usize) -> u64 {
 }
 
 impl EncodingOwners {
+    pub fn contains(&self, address: usize) -> bool {
+        self.allocations.contains_key(&address)
+    }
+    pub fn addresses(&self) -> impl Iterator<Item = usize> + '_ {
+        self.allocations.keys().copied()
+    }
+    pub fn remains_after(&self, address: usize, removals: &OwnerRemovals) -> bool {
+        self.allocations.get(&address).is_some_and(|allocation| {
+            allocation.references > removals.get(&address).copied().unwrap_or(0)
+        })
+    }
+
     pub fn project_add_counts<'a>(
         &self,
         values: impl Iterator<Item = (&'a Encoding, usize)>,

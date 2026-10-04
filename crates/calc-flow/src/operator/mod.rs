@@ -8,10 +8,12 @@ mod expression;
 mod join;
 pub(crate) mod late_output;
 mod output_chunk;
+mod retained_columns;
 pub(crate) mod rolling;
 pub(crate) mod rolling_metrics;
 pub(crate) mod row_cost;
 mod sql;
+pub(crate) use sql::{PreparedSqlCheckpoint, PreparedSqlRestore};
 mod state_budget;
 mod stream;
 mod union;
@@ -669,3 +671,6 @@ impl From<Box<StreamAsofJoinOperator>> for NodeOperator {
         Self::StreamAsofJoin(value)
     }
 }
+
+#[cfg(test)]
+pub(crate) use asof::gather_lifecycle_bridge;

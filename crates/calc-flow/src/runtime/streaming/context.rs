@@ -19,6 +19,7 @@ pub struct StreamJobContext {
     deadline: Option<DateTime<Utc>>,
     cancellation: CancellationToken,
     static_inputs: Arc<BTreeMap<String, Batch>>,
+    gather: super::gather_work::JobGatherOwner,
 }
 
 impl fmt::Debug for StreamJobContext {
@@ -51,6 +52,7 @@ impl StreamJobContext {
             deadline,
             cancellation,
             static_inputs: Arc::new(BTreeMap::new()),
+            gather: super::gather_work::JobGatherOwner::new(job_id.to_string().into()),
         }
     }
 
@@ -58,6 +60,15 @@ impl StreamJobContext {
     #[must_use]
     pub fn with_static_inputs(mut self, inputs: BTreeMap<String, Batch>) -> Self {
         self.static_inputs = Arc::new(inputs);
+        self
+    }
+
+    pub(crate) fn gather_owner(&self) -> &super::gather_work::JobGatherOwner {
+        &self.gather
+    }
+
+    pub(crate) fn with_gather_owner(mut self, gather: super::gather_work::JobGatherOwner) -> Self {
+        self.gather = gather;
         self
     }
 
@@ -114,6 +125,7 @@ impl StreamJobContext {
             job: self.clone(),
             kind,
             scope_id: scope_id.into(),
+            task_id: None,
         })
     }
 
@@ -166,6 +178,7 @@ pub(crate) struct StreamTaskContext {
     job: StreamJobContext,
     kind: StreamTaskKind,
     scope_id: Arc<str>,
+    task_id: Option<super::supervisor::TaskId>,
 }
 
 #[allow(
@@ -179,6 +192,14 @@ impl StreamTaskContext {
 
     pub(crate) const fn kind(&self) -> StreamTaskKind {
         self.kind
+    }
+
+    pub(crate) fn bind_task_id(&mut self, task_id: super::supervisor::TaskId) {
+        self.task_id = Some(task_id);
+    }
+
+    pub(crate) const fn task_id(&self) -> Option<super::supervisor::TaskId> {
+        self.task_id
     }
 
     pub(crate) fn scope_id(&self) -> &str {

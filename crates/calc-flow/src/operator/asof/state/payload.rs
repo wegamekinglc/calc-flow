@@ -245,6 +245,12 @@ impl Drop for PreparedPayloadRemoval {
 }
 
 impl PayloadPool {
+    pub fn references(&self, key: &BatchKey) -> usize {
+        self.by_key
+            .find(self.hasher.hash_one(key), |entry| &entry.key == key)
+            .map_or(0, |entry| self.by_id_entry(entry.id).value.1)
+    }
+
     pub fn checkpoint_right_handles(&self) -> impl Iterator<Item = (u32, u64)> + '_ {
         self.by_id
             .iter()

@@ -2,7 +2,11 @@ use std::{
     collections::{BTreeMap, HashMap},
     future::Future,
     panic::AssertUnwindSafe,
-    sync::Arc,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use futures::FutureExt;
@@ -13,6 +17,9 @@ use self::terminal::TerminalArbiter;
 use super::failure::panic_message;
 use crate::{CalcFlowError, CancellationToken, Result};
 
+#[cfg(test)]
+mod preparation_rollback_tests;
+mod ready_group;
 mod ready_pair;
 pub(crate) mod terminal;
 
@@ -129,7 +136,125 @@ struct TaskRegistration {
     settled: Arc<Mutex<BTreeMap<TaskId, TaskExit>>>,
 }
 
+struct ReservationGuard {
+    registry: TaskRegistry,
+    task_id: TaskId,
+    launched: Arc<AtomicBool>,
+}
+
+impl Drop for ReservationGuard {
+    fn drop(&mut self) {
+        if !self.launched.load(Ordering::SeqCst) {
+            self.registry.remove(self.task_id);
+        }
+    }
+}
+
+pub(crate) struct PreparedLogicalTask {
+    task: TaskRegistration,
+    reservation: ReservationGuard,
+}
+
+pub(crate) struct BoundLogicalTask {
+    task_id: TaskId,
+    child: Pin<Box<dyn Future<Output = TaskId> + Send + 'static>>,
+    started: Arc<AtomicBool>,
+    reservation: ReservationGuard,
+}
+
+impl PreparedLogicalTask {
+    pub(crate) fn bind<F, Fut>(self, make_future: F) -> BoundLogicalTask
+    where
+        F: FnOnce(TaskFailureSignal) -> Fut,
+        Fut: Future + Send + 'static,
+        Fut::Output: TaskOutput,
+    {
+        let task_id = self.task.task_id;
+        let future = make_future(self.task.failure_signal.clone());
+        let started = Arc::new(AtomicBool::new(false));
+        let child_started = Arc::clone(&started);
+        BoundLogicalTask {
+            task_id,
+            started,
+            reservation: self.reservation,
+            child: Box::pin(async move {
+                self.task
+                    .run(child_started.load(Ordering::SeqCst), future)
+                    .await
+            }),
+        }
+    }
+}
+
+pub(crate) struct PreparedTaskGroup {
+    members: Vec<BoundLogicalTask>,
+    local_edges: Vec<super::local_edge::LocalEdgeOwner>,
+    proof: Option<super::runner::operator_fusion::FusionProof>,
+}
+
+impl PreparedTaskGroup {
+    pub(crate) fn new(
+        members: Vec<BoundLogicalTask>,
+        local_edges: Vec<super::local_edge::LocalEdgeOwner>,
+        proof: Option<super::runner::operator_fusion::FusionProof>,
+    ) -> Self {
+        Self {
+            members,
+            local_edges,
+            proof,
+        }
+    }
+
+    async fn run(self, started: bool) -> Vec<TaskId> {
+        let local_edges = self.local_edges;
+        let (children, reservations): (Vec<_>, Vec<_>) = self
+            .members
+            .into_iter()
+            .map(|member| {
+                member.started.store(started, Ordering::SeqCst);
+                (member.child, member.reservation)
+            })
+            .unzip();
+        let ids = if self.proof.is_some() {
+            if children.len() == 2 {
+                let mut children = children;
+                let second = children.pop().expect("two-member group owns downstream");
+                let first = children.pop().expect("two-member group owns upstream");
+                ready_pair::run(
+                    first,
+                    second,
+                    #[cfg(test)]
+                    None,
+                )
+                .await
+                .to_vec()
+            } else {
+                ready_group::run(
+                    children,
+                    #[cfg(test)]
+                    None,
+                )
+                .await
+            }
+        } else {
+            let mut children = children;
+            vec![
+                children
+                    .pop()
+                    .expect("standalone group owns one member")
+                    .await,
+            ]
+        };
+        drop(local_edges);
+        drop(reservations);
+        ids
+    }
+}
+
+#[cfg(test)]
 pub(crate) struct PreparedPair<F, G> {
+    reservations: [ReservationGuard; 2],
+    local_edges: Vec<super::local_edge::LocalEdgeOwner>,
     first_task: TaskRegistration,
     second_task: TaskRegistration,
     first: F,
@@ -139,6 +264,7 @@ pub(crate) struct PreparedPair<F, G> {
     observer: Option<ready_pair::Observer>,
 }
 
+#[cfg(test)]
 impl<F, G> PreparedPair<F, G>
 where
     F: Future + Send,
@@ -148,6 +274,14 @@ where
 {
     pub(crate) fn ids(&self) -> [TaskId; 2] {
         [self.first_task.task_id, self.second_task.task_id]
+    }
+
+    pub(crate) fn with_local_edges(
+        mut self,
+        owners: Vec<super::local_edge::LocalEdgeOwner>,
+    ) -> Self {
+        self.local_edges = owners;
+        self
     }
 
     pub(crate) fn with_readiness(mut self) -> Self {
@@ -162,6 +296,8 @@ where
     }
 
     pub(crate) async fn run(self, started: bool) -> Vec<TaskId> {
+        let reservations = self.reservations;
+        let local_edges = self.local_edges;
         let first = self.first_task.run(started, self.first);
         let second = self.second_task.run(started, self.second);
         let [first, second] = if self.readiness {
@@ -176,6 +312,8 @@ where
             let (second, first) = tokio::join!(biased; second, first);
             [first, second]
         };
+        drop(local_edges);
+        drop(reservations);
         vec![first, second]
     }
 }
@@ -341,6 +479,44 @@ impl TaskSupervisor {
         task_id
     }
 
+    pub(crate) fn reserve_logical(&mut self, name: impl Into<String>) -> PreparedLogicalTask {
+        let task = self.reserve_task(name);
+        self.registry.insert(task.task_id, task.task_name.clone());
+        let reservation = ReservationGuard {
+            registry: self.registry.clone(),
+            task_id: task.task_id,
+            launched: Arc::new(AtomicBool::new(false)),
+        };
+        PreparedLogicalTask { task, reservation }
+    }
+
+    pub(crate) fn spawn_prepared_group(&mut self, group: PreparedTaskGroup) -> Vec<TaskId> {
+        let ids: Vec<_> = group.members.iter().map(|member| member.task_id).collect();
+        let launched: Vec<_> = group
+            .members
+            .iter()
+            .map(|member| Arc::clone(&member.reservation.launched))
+            .collect();
+        #[cfg(test)]
+        {
+            self.ready_pair_spawns += usize::from(group.proof.is_some());
+        }
+        let (start_tx, start_rx) = oneshot::channel();
+        let abort_handle = self
+            .tasks
+            .spawn(async move { group.run(start_rx.await.is_ok()).await });
+        self.stable_ids.insert(abort_handle.id(), ids.clone());
+        for committed in launched {
+            committed.store(true, Ordering::SeqCst);
+        }
+        #[cfg(test)]
+        self.registry.1.lock().push(abort_handle.clone());
+        start_tx
+            .send(())
+            .expect("the newly registered group still owns its start gate");
+        ids
+    }
+
     pub(crate) fn cancel(&self) {
         self.cancellation.cancel();
     }
@@ -363,6 +539,7 @@ impl TaskSupervisor {
         self.spawn_prepared_pair(pair)
     }
 
+    #[cfg(test)]
     pub(crate) fn prepare_pair_with_failure_signals<F, Fut, G, Gut>(
         &mut self,
         first_name: &str,
@@ -386,6 +563,12 @@ impl TaskSupervisor {
         self.registry.insert(ids[0], first_task.task_name.clone());
         self.registry.insert(ids[1], second_task.task_name.clone());
         PreparedPair {
+            local_edges: Vec::new(),
+            reservations: ids.map(|task_id| ReservationGuard {
+                registry: self.registry.clone(),
+                task_id,
+                launched: Arc::new(AtomicBool::new(false)),
+            }),
             first_task,
             second_task,
             first,
@@ -396,6 +579,7 @@ impl TaskSupervisor {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn spawn_prepared_pair<F, G>(&mut self, pair: PreparedPair<F, G>) -> [TaskId; 2]
     where
         F: Future + Send + 'static,
@@ -404,6 +588,10 @@ impl TaskSupervisor {
         G::Output: TaskOutput,
     {
         let ids = pair.ids();
+        let launched = pair
+            .reservations
+            .each_ref()
+            .map(|guard| Arc::clone(&guard.launched));
         #[cfg(test)]
         {
             self.ready_pair_spawns += usize::from(pair.readiness);
@@ -413,6 +601,9 @@ impl TaskSupervisor {
             .tasks
             .spawn(async move { pair.run(start_rx.await.is_ok()).await });
         self.stable_ids.insert(abort_handle.id(), ids.to_vec());
+        for committed in launched {
+            committed.store(true, Ordering::SeqCst);
+        }
         #[cfg(test)]
         self.registry.1.lock().push(abort_handle.clone());
         start_tx

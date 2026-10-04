@@ -10,6 +10,11 @@ use datafusion::{
     execution::memory_pool::{MemoryConsumer, MemoryReservation},
 };
 
+pub(super) struct ReservedIdentities {
+    pub reservation: MemoryReservation,
+    pub rows: usize,
+}
+
 /// Headroom for one identity row: the two owned encodings, the ordered-map
 /// node that will hold them, and row-converter scratch.
 const IDENTITY_ROW_BYTES: u64 = 384;
@@ -93,7 +98,84 @@ impl ColumnWorkspace {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static RANGE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static OUTPUT_SOURCE_REGISTRATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn record_output_source_registration() {
+    OUTPUT_SOURCE_REGISTRATIONS.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(test)]
+pub(super) fn take_output_source_registrations() -> usize {
+    OUTPUT_SOURCE_REGISTRATIONS.with(|count| count.replace(0))
+}
+
+#[cfg(test)]
+pub(super) fn take_range_calls() -> usize {
+    RANGE_CALLS.with(|calls| calls.replace(0))
+}
+
+pub(super) struct OutputColumns {
+    #[cfg(test)]
+    pub fields: usize,
+    fixed: u64,
+    variable: Vec<ColumnWorkspace>,
+}
+
+impl OutputColumns {
+    pub(super) fn new(mut columns: Vec<ColumnWorkspace>, name: &str) -> Result<Self> {
+        #[cfg(test)]
+        let fields = columns.len();
+        let fixed = columns
+            .iter()
+            .try_fold(0, |total, column| checked(name, total, column.fixed))?;
+        columns.retain(|column| {
+            matches!(
+                column.column.data_type(),
+                DataType::Utf8 | DataType::LargeUtf8 | DataType::Binary | DataType::LargeBinary
+            )
+        });
+        Ok(Self {
+            #[cfg(test)]
+            fields,
+            fixed,
+            variable: columns,
+        })
+    }
+
+    pub(super) fn is_fixed_width(&self) -> bool {
+        self.variable.is_empty()
+    }
+
+    pub(super) fn fixed_bytes(&self, count: usize, name: &str) -> Result<u64> {
+        self.fixed.checked_mul(count as u64).ok_or_else(|| {
+            reason(
+                name,
+                StreamingFailureReason::AsofCounterOverflow,
+                "ASOF column workspace arithmetic overflowed",
+            )
+        })
+    }
+
+    pub(super) fn range_bytes(&self, range: std::ops::Range<usize>, name: &str) -> Result<u64> {
+        let fixed = self.fixed_bytes(range.end - range.start, name)?;
+        self.variable.iter().try_fold(fixed, |total, column| {
+            checked(
+                name,
+                total,
+                variable_range_length(&column.column, range.clone())?,
+            )
+        })
+    }
+}
+
 fn variable_range_length(column: &ArrayRef, range: std::ops::Range<usize>) -> Result<u64> {
+    #[cfg(test)]
+    RANGE_CALLS.with(|calls| calls.set(calls.get() + 1));
     let length = match column.data_type() {
         DataType::Utf8 => {
             let values = column
@@ -162,6 +244,16 @@ fn variable_length(column: &ArrayRef, row: usize) -> Result<u64> {
 }
 
 impl StreamAsofJoinOperator {
+    pub(crate) fn reserve_checkpoint_preload(
+        &self,
+        lengths: impl IntoIterator<Item = u64>,
+    ) -> Result<MemoryReservation> {
+        let bytes = lengths.into_iter().try_fold(0, |total, length| {
+            checked(&self.name, checked(&self.name, total, length)?, 256)
+        })?;
+        self.reserve_workspace(bytes)
+    }
+
     pub(super) fn reserve_workspace(&self, bytes: u64) -> Result<MemoryReservation> {
         let bytes = usize::try_from(bytes).map_err(|_| {
             reason(
@@ -193,12 +285,20 @@ impl StreamAsofJoinOperator {
                 continue;
             }
             let event_times = super::admission::times(record, side);
-            let _column_scratch = self.reserve_workspace(record.num_columns() as u64 * 512)?;
+            let _column_scratch = self
+                .reserve_workspace(self.physical_schema(input.index).fields().len() as u64 * 512)?;
+            let retained = self
+                .payload_projection
+                .as_ref()
+                .map(|plan| &plan.columns[input.index]);
             let columns = record
                 .columns()
                 .iter()
-                .cloned()
-                .map(ColumnWorkspace::new)
+                .enumerate()
+                .filter(|(index, _)| {
+                    retained.is_none_or(|columns| columns.binary_search(index).is_ok())
+                })
+                .map(|(_, column)| ColumnWorkspace::new(column.clone()))
                 .collect::<Result<Vec<_>>>()?;
             let mut accepted = 0_u64;
             let mut raw = 0_u64;
@@ -215,7 +315,8 @@ impl StreamAsofJoinOperator {
             if accepted == 0 {
                 continue;
             }
-            let schema = payload_charge(record.schema().as_ref(), &self.name)?.schema_bytes;
+            let schema =
+                payload_charge(self.physical_schema(input.index), &self.name)?.schema_bytes;
             let estimate = checked(&self.name, schema.saturating_mul(2), raw.saturating_mul(4))?;
             bytes = checked(
                 &self.name,
@@ -234,31 +335,58 @@ impl StreamAsofJoinOperator {
         &self,
         batch: &Batch,
         input: super::admission::ValidatedInput,
-    ) -> Result<MemoryReservation> {
-        let mut bytes = 0;
-        for record in batch.table_payload()?.batches() {
+    ) -> Result<ReservedIdentities> {
+        let (mut bytes, rows) = self.identity_batch_workspace(batch, input)?;
+        if rows != 0 {
+            // Exact preallocation keeps the one identity vector alive during
+            // converter startup, before any rows have been encoded. Cover that
+            // overlap even for a single accepted row with one startup slot.
             bytes = checked(
                 &self.name,
                 bytes,
-                self.identity_record_workspace(record, input)?,
+                size_of::<super::admission::InputRow<'_>>() as u64,
             )?;
         }
-        self.reserve_workspace(bytes)
+        Ok(ReservedIdentities {
+            reservation: self.reserve_workspace(bytes)?,
+            rows,
+        })
+    }
+
+    fn identity_batch_workspace(
+        &self,
+        batch: &Batch,
+        input: super::admission::ValidatedInput,
+    ) -> Result<(u64, usize)> {
+        let mut bytes = 0;
+        let mut rows = 0_usize;
+        for record in batch.table_payload()?.batches() {
+            let (record_bytes, accepted) = self.identity_record_workspace(record, input)?;
+            bytes = checked(&self.name, bytes, record_bytes)?;
+            rows = rows.checked_add(accepted).ok_or_else(|| {
+                reason(
+                    &self.name,
+                    StreamingFailureReason::AsofCounterOverflow,
+                    "ASOF accepted identity count exceeds the address domain",
+                )
+            })?;
+        }
+        Ok((bytes, rows))
     }
 
     fn identity_record_workspace(
         &self,
         record: &RecordBatch,
         input: super::admission::ValidatedInput,
-    ) -> Result<u64> {
+    ) -> Result<(u64, usize)> {
         if record.num_rows() == 0 {
-            return Ok(0);
+            return Ok((0, 0));
         }
         let side = input.side(&self.spec);
         let event_times = super::admission::times(record, side);
         let mut ranges = accepted_ranges(event_times.values(), input.watermark).peekable();
         if ranges.peek().is_none() {
-            return Ok(0);
+            return Ok((0, 0));
         }
         let identity_columns = side.keys().len() + side.sequence_by().len();
         let _column_scratch = self.reserve_workspace(identity_columns as u64 * 512)?;
@@ -266,14 +394,16 @@ impl StreamAsofJoinOperator {
         // Converter configuration and Arrow buffer headers remain live while
         // the accepted identities are assembled, including a one-row batch.
         let mut bytes = identity_columns as u64 * 512;
+        let mut rows = 0;
         for range in ranges {
+            rows += range.len();
             bytes = checked(
                 &self.name,
                 bytes,
                 identity_range_workspace(&columns, range, &self.name)?,
             )?;
         }
-        Ok(bytes)
+        Ok((bytes, rows))
     }
 }
 
@@ -805,6 +935,43 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn output_columns_checked_sum_and_range_preserve_overflow_reason() {
+        let fixed = |bytes| ColumnWorkspace {
+            column: Arc::new(UInt64Array::from(vec![1, 2])),
+            fixed: bytes,
+        };
+        let sum = OutputColumns::new(vec![fixed(u64::MAX), fixed(1)], "asof");
+        let multiply = OutputColumns::new(vec![fixed(u64::MAX)], "asof").unwrap();
+        let variable = OutputColumns::new(
+            vec![ColumnWorkspace {
+                column: Arc::new(StringArray::from(vec!["a", "b"])),
+                fixed: u64::MAX,
+            }],
+            "asof",
+        )
+        .unwrap();
+        for result in [
+            sum.map(|_| 0),
+            multiply.fixed_bytes(2, "asof"),
+            variable.range_bytes(0..1, "asof"),
+        ] {
+            assert!(matches!(
+                result,
+                Err(CalcFlowError::OperatorReason {
+                    node_id,
+                    reason_code: StreamingFailureReason::AsofCounterOverflow,
+                    ..
+                }) if node_id == "asof"
+            ));
+        }
+        assert_eq!(multiply.fields, 1);
+        assert_eq!(multiply.fixed_bytes(0, "asof").unwrap(), 0);
+        let empty = OutputColumns::new(Vec::new(), "asof").unwrap();
+        assert_eq!(empty.fields, 0);
+        assert_eq!(empty.range_bytes(0..2, "asof").unwrap(), 0);
     }
 
     #[test]

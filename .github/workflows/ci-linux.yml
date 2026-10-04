@@ -493,7 +493,7 @@ jobs:
             scripts.test_codex_agents \
             scripts.test_generate_rolling_kernel_manifest \
             scripts.test_inspect_wheel \
-            scripts.test_native_checkpoint_compatibility \
+            scripts.test_native_release_identity \
             scripts.test_python_compatibility \
             scripts.test_repair_rust_toolchain \
             scripts.test_release_config \

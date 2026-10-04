@@ -77,3 +77,15 @@ harness = false
 [[bench]]
 name = "stream_asof_e2e"
 harness = false
+
+[[bench]]
+name = "stream_sql_aggregate"
+harness = false
+
+[[bench]]
+name = "stream_asof_eviction"
+harness = false
+
+[[bench]]
+name = "stream_window_groups"
+harness = false

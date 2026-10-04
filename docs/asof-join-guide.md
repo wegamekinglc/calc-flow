@@ -135,6 +135,14 @@ prefixed left fields. Final rows are ordered by
 `(left_time, left_key_tuple, left_sequence_tuple)`; physical batch boundaries
 are not part of the result contract.
 
+A downstream column-only `select` can reduce the fields ASOF materializes.
+The stream compiler combines the column requirements of all direct projection
+consumers, including aliases and reordered selections. A consumer requiring
+the complete row or another expression keeps the full intermediate output.
+This physical optimization preserves the declared graph, source validation,
+output order, and checkpoint identity. It reduces gathering, output workspace,
+and edge traffic; retained input payloads still contain their declared columns.
+
 ## Watermarks, idle, and late input
 
 A left event at `t` is final only when **both** sides have a watermark strictly
@@ -205,6 +213,16 @@ whose backing allocation contains no bytes beyond the accepted slice. Otherwise
 it compacts the accepted rows before retention, including small slices of much larger
 source buffers. Snapshot batch segments share immutable IPC buffers; a row
 index points into one batch.
+
+During admission, temporary rows also use batch-table indices. The admission
+owns each compact payload once, and left chunk preparation transfers a copy
+of that owner table to its blocking worker together with its workspace lease.
+Dropping the preparation future cannot release the worker's input charge early.
+Identity preflight counts accepted rows while estimating their workspace, so
+the identity vector reserves its complete capacity once, including inputs
+with an accepted watermark. Nonempty admission reserves one additional
+identity-row slot for the overlap with converter startup. These temporary
+indices do not change retained row references or the version 3 checkpoint layout.
 
 Admission, sorting, Arrow materialization, encoding, and restore also share
 a **separate workspace ceiling equal to `max_state_bytes`**. Output is further
@@ -283,6 +301,12 @@ in that progress tick have been accepted, then performed once. A cancelled
 tick can therefore retain right payloads that the completed tick would evict;
 its checkpoint still contains the accepted output prefix and every remaining
 pending row.
+
+When a left output range covers one complete Arrow array, materialization can
+share it if its backing buffers fit the visible slice memory charge. Partial
+ranges and arrays backed by larger allocations use the bounded copy path.
+Projected output reserves workspace for the selected columns; the existing
+conservative buffer-growth allowance also applies to shared arrays.
 
 Admission preflights exact incremental identity, batch and index charges before
 synchronously installing new rows. An eviction sweep preflights its row, shared

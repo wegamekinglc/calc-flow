@@ -698,7 +698,9 @@ def _late_policy_line(node: dict[str, object]) -> str:
     )
 
 
-def explain_optimization(document: dict[str, object], /) -> tuple[str, ...]:
+def explain_optimization(
+    document: dict[str, object], /, *, asof_state_layout: int = 4
+) -> tuple[str, ...]:
     """Render deterministic physical sharing and bounded cost facts."""
 
     from calc_flow.symbolic.lower.asof import explain_asof
@@ -731,7 +733,7 @@ def explain_optimization(document: dict[str, object], /) -> tuple[str, ...]:
     return (
         *lines,
         *_window_explain_lines(document, nodes),
-        *explain_asof(nodes),
+        *explain_asof(nodes, asof_state_layout),
         *_late_policy_lines(nodes),
         *(kernels or ("    rolling kernels none",)),
         "  costs",

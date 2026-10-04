@@ -7,9 +7,27 @@ use crate::operator::asof::{
     reason,
     state::{Inventory, LeftPrefix, PreparedLeftDrain, PreparedPayloadRemoval},
 };
-use crate::{Result, StreamCollector, StreamOperatorContext, StreamingFailureReason};
+use crate::{
+    Result, StreamCollector, StreamOperatorContext, StreamingFailureReason,
+    runtime::streaming::gather_work::{GatherStop, OwnedCpuWork},
+};
 use datafusion::execution::memory_pool::MemoryReservation;
-use std::future::Future;
+
+struct DrainWork<F> {
+    prepare: F,
+    workspace: MemoryReservation,
+}
+
+impl<F: FnOnce() -> PreparedLeftDrain + Send + 'static> OwnedCpuWork for DrainWork<F> {
+    type Output = (PreparedLeftDrain, MemoryReservation);
+
+    fn run(self, stop: &GatherStop) -> Result<Self::Output> {
+        stop.check()?;
+        let prepared = (self.prepare)();
+        stop.check()?;
+        Ok((prepared, self.workspace))
+    }
+}
 
 struct PreparedPrefix {
     segment: Option<PreparedSegment>,
@@ -17,6 +35,9 @@ struct PreparedPrefix {
     drain: PreparedLeftDrain,
     inventory: Inventory,
     pool: PreparedPayloadRemoval,
+    journal: crate::operator::asof::checkpoint::index_v3::log::journal::Journal,
+    credit: std::sync::Arc<MemoryReservation>,
+    retention_bytes: u64,
     _workspace: MemoryReservation,
     _drain_workspace: MemoryReservation,
 }
@@ -64,6 +85,11 @@ impl StreamAsofJoinOperator {
         // Right payloads remain until finish_progress sweeps them once.
         self.swept = None;
         self.status = status;
+        self.checkpoint_log.install_journal(prepared.journal);
+        self.checkpoint_log.credit = Some(prepared.credit);
+        self.checkpoint_log.retention_bytes = prepared.retention_bytes;
+        self.checkpoint_log.pending = None;
+        self.checkpoint_log.dirty_cut = self.checkpoint_log.keeps_delta();
         self.prepared = prepared.segment;
         self.deferred_index_len = prepared.deferred_len;
         self.next_output_sequence = next_sequence;
@@ -72,8 +98,7 @@ impl StreamAsofJoinOperator {
                 let inventory = self
                     .current_inventory(self.prepared.as_ref())
                     .expect("committed prefix inventory");
-                inventory.bytes + self.deferred_index_len.map_or(0, |length| length + 256)
-                    == self.status.state_bytes
+                inventory.bytes == self.status.state_bytes
             },
             "prefix inventory must match committed gauge"
         );
@@ -93,6 +118,10 @@ impl StreamAsofJoinOperator {
             &drain,
             &self.name,
         )?;
+        let journal = self.prepare_log_prefix(prefix, &drain)?;
+        let (credit, retention_bytes) =
+            self.prepare_log_retention(&prefix.owners, &prefix.batches)?;
+        let inventory = self.log_projection(inventory, length, &journal, retention_bytes)?;
         let workspace = self.reserve_workspace(length)?;
         let pool = self
             .prepare_pool_compaction(&prefix.batches, context)
@@ -106,6 +135,9 @@ impl StreamAsofJoinOperator {
             drain,
             inventory,
             pool,
+            journal,
+            credit,
+            retention_bytes,
             _workspace: workspace,
             _drain_workspace: drain_workspace,
         })
@@ -129,87 +161,67 @@ impl StreamAsofJoinOperator {
         if bytes == 0 {
             return Ok((input.prepare(), workspace));
         }
-        context.check_cancelled()?;
-        // The reservation and immutable metadata follow detached work, so
-        // cancellation cannot release its workspace before its buffers.
-        let worker = drain_worker(workspace, move || input.prepare());
-        let prepared = await_drain(worker, context).await?;
-        context.check_cancelled()?;
-        Ok(prepared)
-    }
-}
-
-async fn await_drain(
-    worker: impl Future<Output = Result<(PreparedLeftDrain, MemoryReservation)>>,
-    context: &StreamOperatorContext<'_>,
-) -> Result<(PreparedLeftDrain, MemoryReservation)> {
-    tokio::select! {
-        result = worker => result,
-        () = context.job().cancellation().cancelled() => {
-            context.check_cancelled()?;
-            unreachable!("cancelled ASOF prefix compaction")
-        }
-    }
-}
-
-async fn drain_worker<R: Send + 'static>(
-    workspace: MemoryReservation,
-    work: impl FnOnce() -> R + Send + 'static,
-) -> Result<(R, MemoryReservation)> {
-    tokio::task::spawn_blocking(move || (work(), workspace))
+        self.run_cpu_work(
+            DrainWork {
+                workspace,
+                prepare: move || input.prepare(),
+            },
+            context,
+        )
         .await
-        .map_err(|error| crate::CalcFlowError::Internal {
-            message: format!("ASOF prefix compaction task failed: {error}"),
-        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    mod cpu;
+
     use super::*;
     use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryConsumer, MemoryPool};
     use std::sync::Arc;
 
     #[tokio::test(flavor = "current_thread")]
     async fn dropped_compaction_worker_retains_input_reservation_until_exit() {
+        let (operator, _) = cpu::fixture();
+        let job = crate::StreamJobContext::new(
+            1,
+            "asof",
+            crate::JsonMap::new(),
+            None,
+            crate::CancellationToken::new(),
+        );
+        let context = StreamOperatorContext::new(&job, "asof", None);
         let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(8_192));
         let workspace = MemoryConsumer::new("drain-test").register(&pool);
         workspace.try_grow(4_096).unwrap();
         let owner = Arc::new(vec![0_u8; 4_096]);
         let retained = owner.clone();
         let weak = Arc::downgrade(&owner);
-        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let gate = Arc::new(std::sync::Barrier::new(2));
-        let worker_gate = gate.clone();
-        let releaser = std::thread::spawn(move || {
-            let _ = release_rx.recv_timeout(std::time::Duration::from_secs(1));
-            gate.wait();
-        });
-        let mut future = Box::pin(drain_worker(workspace, move || {
-            started_tx.send(()).unwrap();
-            worker_gate.wait();
-            drop(retained);
-        }));
+        let mut future = Box::pin(operator.run_cpu_work(
+            DrainWork {
+                workspace,
+                prepare: move || {
+                    started_tx.send(()).unwrap();
+                    release_rx
+                        .recv_timeout(std::time::Duration::from_secs(10))
+                        .unwrap();
+                    drop(retained);
+                    PreparedLeftDrain::default()
+                },
+            },
+            &context,
+        ));
         assert!(futures::poll!(future.as_mut()).is_pending());
-        started_rx
-            .recv_timeout(std::time::Duration::from_secs(1))
-            .unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        started_rx.await.unwrap();
         drop(future);
         drop(owner);
         assert!(weak.upgrade().is_some());
         assert_eq!(pool.reserved(), 4_096);
         release_tx.send(()).unwrap();
-        tokio::task::spawn_blocking(move || releaser.join().unwrap())
-            .await
-            .unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            while pool.reserved() != 0 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
+        assert!(job.gather_owner().close_and_drain().await.is_empty());
+        assert_eq!(pool.reserved(), 0);
         assert!(weak.upgrade().is_none());
     }
 }

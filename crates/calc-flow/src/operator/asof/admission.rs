@@ -1,9 +1,13 @@
 use super::{
     AsofJoinSide, AsofLatePolicy, StreamAsofJoinOperator, StreamAsofJoinSideStatus,
     StreamAsofJoinSpec, StreamAsofJoinStatus, reason,
-    state::{self, LeftOrder, RowPayload},
+    state::{self, AdmissionRef, LeftOrder},
+    workspace::ReservedIdentities,
 };
-use crate::{Batch, Result, StreamOperatorContext, StreamingFailureReason};
+use crate::{
+    Batch, Result, StreamOperatorContext, StreamingFailureReason,
+    runtime::streaming::gather_work::{GatherStop, OwnedCpuWork},
+};
 use ahash::RandomState;
 use datafusion::arrow::{
     array::{Array, TimestampMicrosecondArray, UInt64Array},
@@ -21,15 +25,15 @@ pub(super) struct ValidatedInput {
 }
 
 type PreparedInput = (
-    Vec<(LeftOrder, RowPayload)>,
+    Vec<(LeftOrder, AdmissionRef)>,
     Option<Vec<state::PreparedLeftChunk>>,
     AdmissionWorkspace,
 );
 
-type InputRow<'a> = (LeftOrder, &'a RecordBatch, usize);
+pub(super) type InputRow<'a> = (LeftOrder, &'a RecordBatch, usize);
 
 pub(super) struct Admission {
-    pub rows: Vec<(LeftOrder, RowPayload)>,
+    pub rows: Vec<(LeftOrder, AdmissionRef)>,
     pub batches: Vec<Arc<state::PayloadBatch>>,
     pub accepted: u64,
     pub left_chunks: Option<Vec<state::PreparedLeftChunk>>,
@@ -41,6 +45,32 @@ struct AdmissionWorkspace {
     _identity: MemoryReservation,
     _payload: MemoryReservation,
     _keys: Option<MemoryReservation>,
+}
+
+struct LeftChunkWork {
+    rows: Vec<(LeftOrder, AdmissionRef)>,
+    batches: Vec<Arc<state::PayloadBatch>>,
+    workspace: AdmissionWorkspace,
+    side: AsofJoinSide,
+    name: String,
+    _descriptor: MemoryReservation,
+}
+
+impl OwnedCpuWork for LeftChunkWork {
+    type Output = PreparedInput;
+
+    fn run(self, stop: &GatherStop) -> Result<PreparedInput> {
+        stop.check()?;
+        let chunks = state::PreparedLeftChunk::prepare_checked(
+            &self.rows,
+            &self.batches,
+            &self.side,
+            &self.name,
+            &|| stop.check(),
+        )?;
+        stop.check()?;
+        Ok((self.rows, Some(chunks), self.workspace))
+    }
 }
 
 struct AdmittedKey {
@@ -328,7 +358,7 @@ impl StreamAsofJoinOperator {
             right_capacities,
             key_workspace,
         } = self
-            .validated_input_identities(batch, input, context)
+            .validated_input_identities(batch, input, identity_workspace.rows, context)
             .await?;
         self.record_duplicates(input.index, duplicates)?;
         let accepted = self.check_admission_rows(input.index, rows.len() as u64)?;
@@ -342,17 +372,20 @@ impl StreamAsofJoinOperator {
             rows,
             input.index,
             base,
-            self.payload_header_bytes[input.index],
+            self.physical_header(input.index),
+            self.payload_projection
+                .as_ref()
+                .map(|plan| plan.columns[input.index].as_slice()),
             &self.name,
         )?;
         let rows = ordered_admission_rows(rows, input.index);
         let workspace = AdmissionWorkspace {
-            _identity: identity_workspace,
+            _identity: identity_workspace.reservation,
             _payload: payload_workspace,
             _keys: key_workspace,
         };
         let (rows, left_chunks, workspace) = self
-            .prepare_input_chunks(rows, workspace, input.index, context)
+            .prepare_input_chunks(rows, &batches, workspace, input.index, context)
             .await?;
         Ok(Admission {
             rows,
@@ -368,9 +401,11 @@ impl StreamAsofJoinOperator {
         &mut self,
         batch: &'a Batch,
         input: ValidatedInput,
+        capacity: usize,
         context: &StreamOperatorContext<'_>,
     ) -> Result<InputIdentities<'a>> {
-        match self.admission_identities(batch.table_payload()?.batches(), input, context) {
+        match self.admission_identities(batch.table_payload()?.batches(), input, capacity, context)
+        {
             Ok(identities) => Ok(identities),
             Err(error)
                 if matches!(
@@ -391,31 +426,51 @@ impl StreamAsofJoinOperator {
 
     async fn prepare_input_chunks(
         &self,
-        rows: Vec<(LeftOrder, RowPayload)>,
+        rows: Vec<(LeftOrder, AdmissionRef)>,
+        batches: &[Arc<state::PayloadBatch>],
         workspace: AdmissionWorkspace,
         side: usize,
         context: &StreamOperatorContext<'_>,
     ) -> Result<PreparedInput> {
-        Ok(if side == 0 {
-            let side = self.spec.left().clone();
-            let name = self.name.clone();
+        if side != 0 {
+            return Ok((rows, None, workspace));
+        }
+        context.check_cancelled()?;
+        if rows.len() <= 256 {
+            let chunks =
+                state::PreparedLeftChunk::prepare(&rows, batches, self.spec.left(), &self.name)?;
             context.check_cancelled()?;
-            let work = chunk_worker(workspace, move || {
-                let chunks = state::PreparedLeftChunk::prepare(&rows, &side, &name)?;
-                Ok((rows, chunks))
-            });
-            let ((rows, chunks), workspace) = tokio::select! {
-                result = work => result?,
-                () = context.job().cancellation().cancelled() => {
-                    context.check_cancelled()?;
-                    unreachable!("cancelled ASOF admission")
-                }
-            };
-            context.check_cancelled()?;
-            (rows, Some(chunks), workspace)
-        } else {
-            (rows, None, workspace)
-        })
+            return Ok((rows, Some(chunks), workspace));
+        }
+        let descriptor = self.reserve_left_work(batches.len())?;
+        let work = LeftChunkWork {
+            rows,
+            batches: batches.to_vec(),
+            workspace,
+            side: self.spec.left().clone(),
+            name: self.name.clone(),
+            _descriptor: descriptor,
+        };
+        self.run_cpu_work(work, context).await
+    }
+
+    fn reserve_left_work(&self, batches: usize) -> Result<MemoryReservation> {
+        let side = self.spec.left();
+        let columns = side.keys().len() + side.sequence_by().len();
+        let names = side
+            .keys()
+            .iter()
+            .chain(side.sequence_by())
+            .map(String::len)
+            .sum::<usize>()
+            + side.event_time().len()
+            + side.prefix().len();
+        let bytes = 256_u64
+            + batches as u64 * size_of::<Arc<state::PayloadBatch>>() as u64
+            + columns as u64 * size_of::<String>() as u64
+            + names as u64
+            + self.name.len() as u64;
+        self.reserve_workspace(bytes)
     }
 
     async fn reserve_admission_identities(
@@ -423,7 +478,7 @@ impl StreamAsofJoinOperator {
         batch: &Batch,
         input: ValidatedInput,
         context: &StreamOperatorContext<'_>,
-    ) -> Result<MemoryReservation> {
+    ) -> Result<ReservedIdentities> {
         match self.identity_workspace(batch, input) {
             Ok(reservation) => Ok(reservation),
             Err(error) => {
@@ -489,14 +544,10 @@ impl StreamAsofJoinOperator {
         &self,
         batches: &'a [RecordBatch],
         input: ValidatedInput,
+        capacity: usize,
         context: &StreamOperatorContext<'_>,
     ) -> Result<InputIdentities<'a>> {
         let side = input.side(&self.spec);
-        let capacity = if input.watermark.is_none() {
-            batches.iter().map(RecordBatch::num_rows).sum()
-        } else {
-            0
-        };
         let mut keys = InputKeys::default();
         let mut rows = Vec::with_capacity(capacity);
         for batch in batches {
@@ -573,10 +624,62 @@ fn prepare_duplicate_probes<'a>(
     context: &StreamOperatorContext<'_>,
 ) -> Result<(bool, Option<HashSet<LeftOrder, RandomState>>)> {
     let sorted = identities_are_sorted((*identities).clone(), context)?;
-    let skip_resident = sorted && identities_are_after_state(state, side, (*identities).clone());
+    let skip_resident = if sorted {
+        identities_are_after_state(state, side, (*identities).clone())
+    } else {
+        unordered_identities_are_after_state(state, side, (*identities).clone(), context)?
+    };
     let seen =
         (!sorted).then(|| HashSet::with_capacity_and_hasher(identities.len(), RandomState::new()));
     Ok((skip_resident, seen))
+}
+
+fn unordered_identities_are_after_state<'a>(
+    state: &state::State,
+    side: usize,
+    identities: impl ExactSizeIterator<Item = &'a LeftOrder>,
+    context: &StreamOperatorContext<'_>,
+) -> Result<bool> {
+    let empty = if side == 0 {
+        state.left.is_empty()
+    } else {
+        state.right.is_empty()
+    };
+    if empty {
+        return Ok(true);
+    }
+    // Limit the history scan to this batch's size.
+    if side != 0 && state.right.len() > identities.len() {
+        return Ok(false);
+    }
+    let earliest = earliest_identity(identities, side, context)?;
+    Ok(identities_are_after_state(
+        state,
+        side,
+        earliest.into_iter(),
+    ))
+}
+
+fn earliest_identity<'a>(
+    identities: impl Iterator<Item = &'a LeftOrder>,
+    side: usize,
+    context: &StreamOperatorContext<'_>,
+) -> Result<Option<&'a LeftOrder>> {
+    let mut earliest = None;
+    for (position, identity) in identities.enumerate() {
+        check_input_cancellation(position, context)?;
+        if earliest.is_none_or(|previous: &LeftOrder| {
+            if side == 0 {
+                identity < previous
+            } else {
+                identity.0 < previous.0
+            }
+        }) {
+            earliest = Some(identity);
+        }
+    }
+    context.check_cancelled()?;
+    Ok(earliest)
 }
 
 fn repeated_identity(
@@ -649,11 +752,12 @@ impl Admission {
             self.rows.clear();
             status.left.accepted_rows = self.accepted;
         } else {
-            for (key, count) in self.right_capacities.drain(..) {
+            for (key, count) in &self.right_capacities {
                 state
                     .right
-                    .bucket_mut_or_kind(key, state.sequence_kinds[1])
-                    .reserve_payloads(count);
+                    .update_unindexed(key.clone(), state.sequence_kinds[1], |bucket| {
+                        bucket.reserve_payloads(*count);
+                    });
             }
             // Each compact payload owns exactly its admitted rows. Attach its
             // reference count once, then resolve row handles without two pool
@@ -664,10 +768,7 @@ impl Admission {
                 .map(|batch| state.batches.attach_batch(batch, batch.record.num_rows()))
                 .collect::<Vec<_>>();
             for (identity, payload) in self.rows.drain(..) {
-                let batch = self
-                    .batches
-                    .partition_point(|batch| batch.key < payload.batch.key);
-                let payload = payload_refs[batch].with_row(
+                let payload = payload_refs[payload.batch_index].with_row(
                     u32::try_from(payload.row).expect("preflighted ASOF payload row index"),
                 );
                 state.right_payload_min = Some(
@@ -677,25 +778,21 @@ impl Admission {
                 );
                 state
                     .right
-                    .bucket_mut_or_default(identity.1)
-                    .insert_admitted((identity.0, identity.2), payload);
+                    .update_unindexed(identity.1, state.sequence_kinds[1], |bucket| {
+                        bucket.insert_admitted((identity.0, identity.2), payload);
+                    });
             }
+            for (key, _) in self.right_capacities.drain(..) {
+                state.right.refresh_key(&key);
+            }
+            [
+                state.right_payload_min,
+                state.right_identity_min,
+                state.right_dominance_min,
+            ] = state.right.minima();
             status.right.accepted_rows = self.accepted;
         }
     }
-}
-
-/// Detached blocking work owns its reservations until every retained input
-/// and temporary sort buffer has been released, even if admission is dropped.
-async fn chunk_worker<R: Send + 'static>(
-    workspace: AdmissionWorkspace,
-    work: impl FnOnce() -> Result<R> + Send + 'static,
-) -> Result<(R, AdmissionWorkspace)> {
-    tokio::task::spawn_blocking(move || Ok((work()?, workspace)))
-        .await
-        .map_err(|error| crate::CalcFlowError::Internal {
-            message: format!("ASOF chunk preparation task failed: {error}"),
-        })?
 }
 
 /// Identity columns in declaration order: keys, sequence columns, event time.
@@ -784,12 +881,15 @@ fn side_status(status: &mut StreamAsofJoinStatus, index: usize) -> &mut StreamAs
     }
 }
 
-type EncodedInput = (Vec<(LeftOrder, RowPayload)>, Vec<Arc<state::PayloadBatch>>);
+type EncodedInput = (
+    Vec<(LeftOrder, AdmissionRef)>,
+    Vec<Arc<state::PayloadBatch>>,
+);
 
 fn ordered_admission_rows(
-    mut rows: Vec<(LeftOrder, RowPayload)>,
+    mut rows: Vec<(LeftOrder, AdmissionRef)>,
     side: usize,
-) -> Vec<(LeftOrder, RowPayload)> {
+) -> Vec<(LeftOrder, AdmissionRef)> {
     if side == 1 && !rows.windows(2).all(|pair| pair[0].0 <= pair[1].0) {
         // Keep each admitted run ordered so a watermark-local reversal
         // does not repeatedly shift a whole per-key right vector.
@@ -809,6 +909,7 @@ fn encode_rows(
     side: usize,
     base: u64,
     header: u64,
+    retained: Option<&[usize]>,
     name: &str,
 ) -> Result<EncodedInput> {
     let mut payloads = Vec::new();
@@ -820,7 +921,16 @@ fn encode_rows(
                 .iter()
                 .take_while(|(_, candidate, _)| std::ptr::eq(*candidate, batch))
                 .count();
-        let compact = compact_accepted_rows(&rows[position..end], batch)?;
+        let projected = retained
+            .filter(|columns| columns.len() != batch.num_columns())
+            .map(|columns| {
+                batch
+                    .project(columns)
+                    .map_err(|error| super::arrow_error(&error))
+            })
+            .transpose()?;
+        let compact =
+            compact_accepted_rows(&rows[position..end], projected.as_ref().unwrap_or(batch))?;
         let payload = encode_payload(compact, side, base + position as u64, header, name)?;
         payloads.push((end - position, payload));
         position = end;
@@ -831,13 +941,13 @@ fn encode_rows(
         .collect();
     let mut input = rows.into_iter();
     let mut result = Vec::with_capacity(input.len());
-    for (count, payload) in payloads {
+    for (batch_index, (count, _payload)) in payloads.into_iter().enumerate() {
         for ordinal in 0..count {
             let (identity, _, _) = input.next().expect("partitioned ASOF input row");
             result.push((
                 identity,
-                RowPayload {
-                    batch: Arc::clone(&payload),
+                AdmissionRef {
+                    batch_index,
                     row: ordinal,
                 },
             ));
@@ -900,51 +1010,111 @@ fn can_share_batch(batch: &RecordBatch) -> Result<bool> {
 
 #[cfg(test)]
 mod identity_tests {
+    mod cpu;
+
     use super::*;
     use crate::{CancellationToken, JsonMap, StreamJobContext};
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn chunk_worker_leaves_timers_running_and_keeps_workspace_until_exit() {
-        let (operator, _) = identity_fixture();
-        let pool = operator.runtime.pool.clone();
-        let workspace = AdmissionWorkspace {
-            _identity: operator.reserve_workspace(4_096).unwrap(),
-            _payload: operator.reserve_workspace(0).unwrap(),
-            _keys: None,
-        };
-        let (started_tx, started_rx) = std::sync::mpsc::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let gate = Arc::new(std::sync::Barrier::new(2));
-        let worker_gate = gate.clone();
-        // A timeout releases the gate even when the synchronous red version
-        // blocks polling, so the regression fails instead of hanging.
-        let releaser = std::thread::spawn(move || {
-            let _ = release_rx.recv_timeout(std::time::Duration::from_secs(1));
-            gate.wait();
-        });
-        let mut future = Box::pin(chunk_worker(workspace, move || {
-            started_tx.send(()).unwrap();
-            worker_gate.wait();
-            Ok(())
-        }));
-        assert!(futures::poll!(future.as_mut()).is_pending());
-        started_rx
-            .recv_timeout(std::time::Duration::from_secs(1))
-            .unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-        drop(future);
-        assert_eq!(pool.reserved(), 4_096);
-        release_tx.send(()).unwrap();
-        tokio::task::spawn_blocking(move || releaser.join().unwrap())
-            .await
-            .unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            while pool.reserved() != 0 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
+    fn repeated_key_batch(
+        schema: &datafusion::arrow::datatypes::SchemaRef,
+        start: i64,
+        count: usize,
+    ) -> RecordBatch {
+        use datafusion::arrow::array::{Int64Array, StringArray};
+        RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["key"; count])),
+                Arc::new(TimestampMicrosecondArray::from(vec![10; count]).with_timezone("UTC")),
+                Arc::new(Int64Array::from_iter_values(
+                    start..start + i64::try_from(count).unwrap(),
+                )),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn admission_rows_own_payload_once_per_record_batch() {
+        let (operator, schema) = identity_fixture();
+        let batch = Batch::table(
+            vec![
+                repeated_key_batch(&schema, 0, 16),
+                repeated_key_batch(&schema, 16, 16),
+            ],
+            crate::BatchMetadata::default(),
+        )
         .unwrap();
+        let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+        let context = StreamOperatorContext::new(&job, "asof", None);
+        let input = ValidatedInput {
+            index: 0,
+            watermark: None,
+        };
+        let workspace = operator.identity_workspace(&batch, input).unwrap();
+        let identities = operator
+            .admission_identities(
+                batch.table_payload().unwrap().batches(),
+                input,
+                workspace.rows,
+                &context,
+            )
+            .unwrap();
+        let (rows, payloads) = encode_rows(
+            identities.rows,
+            0,
+            0,
+            operator.payload_header_bytes[0],
+            None,
+            "asof",
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 32);
+        assert_eq!(payloads.len(), 2);
+        for payload in &payloads {
+            assert_eq!(
+                Arc::strong_count(payload),
+                1,
+                "admission rows retain a payload per row"
+            );
+        }
+    }
+
+    #[test]
+    fn admission_rows_with_permissive_watermark_do_not_reallocate() {
+        let (operator, schema) = identity_fixture();
+        let batch = Batch::table(
+            vec![repeated_key_batch(&schema, 0, 3_072)],
+            crate::BatchMetadata::default(),
+        )
+        .unwrap();
+        let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+        let context = StreamOperatorContext::new(&job, "asof", None);
+        for index in [0, 1] {
+            let mut allocations = Vec::new();
+            for watermark in [None, Some(10)] {
+                let input = ValidatedInput { index, watermark };
+                let workspace = operator.identity_workspace(&batch, input).unwrap();
+                let mut retained = None;
+                allocations.push(allocation_counter::measure(|| {
+                    retained = Some(
+                        operator
+                            .admission_identities(
+                                batch.table_payload().unwrap().batches(),
+                                input,
+                                workspace.rows,
+                                &context,
+                            )
+                            .unwrap(),
+                    );
+                }));
+                assert_eq!(retained.unwrap().rows.len(), 3_072);
+            }
+            assert!(
+                allocations[1].count_total <= allocations[0].count_total,
+                "side={index}: watermark caused identity Vec growth: {allocations:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1040,13 +1210,18 @@ mod identity_tests {
             index: 1,
             watermark: None,
         };
-        let _workspace = operator
+        let workspace = operator
             .identity_workspace(&batch, input)
             .expect("32 copies of the canonical batch buffer fit 2 MiB");
         let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
         let context = StreamOperatorContext::new(&job, "asof", None);
         let identities = operator
-            .admission_identities(batch.table_payload().unwrap().batches(), input, &context)
+            .admission_identities(
+                batch.table_payload().unwrap().batches(),
+                input,
+                workspace.rows,
+                &context,
+            )
             .unwrap();
         assert_eq!(identities.rows.len(), 32);
         let first = identities.rows[0].0.1.as_slice().as_ptr();
@@ -1081,7 +1256,7 @@ mod identity_tests {
         };
         let identity = operator.identity_workspace(&batch, input).unwrap();
         assert!(
-            identity.size() < 2 << 20,
+            identity.reservation.size() < 2 << 20,
             "the original identity workspace fits"
         );
         let error = InputEncodings::new(
@@ -1098,7 +1273,10 @@ mod identity_tests {
                 ..
             }
         ));
-        assert_eq!(operator.runtime.pool.reserved(), identity.size());
+        assert_eq!(
+            operator.runtime.pool.reserved(),
+            identity.reservation.size()
+        );
         drop(identity);
         assert_eq!(operator.runtime.pool.reserved(), 0);
     }
@@ -1149,6 +1327,7 @@ mod identity_tests {
                             index: 1,
                             watermark: Some(1),
                         },
+                        999,
                         &context,
                     )
                     .unwrap()
@@ -1198,7 +1377,7 @@ mod identity_tests {
                 watermark: Some(frontier),
             };
             let reservation = operator.identity_workspace(&batch, input).unwrap();
-            let charge = reservation.size() as u64;
+            let charge = reservation.reservation.size() as u64;
             let mut retained = None;
             let allocation = allocation_counter::measure(|| {
                 retained = Some(
@@ -1206,6 +1385,7 @@ mod identity_tests {
                         .admission_identities(
                             batch.table_payload().unwrap().batches(),
                             input,
+                            reservation.rows,
                             &context,
                         )
                         .unwrap(),
@@ -1241,14 +1421,19 @@ mod identity_tests {
             watermark: None,
         };
         let reservation = operator.identity_workspace(&batch, input).unwrap();
-        let charge = reservation.size() as u64;
+        let charge = reservation.reservation.size() as u64;
         let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
         let context = StreamOperatorContext::new(&job, "asof", None);
         let mut retained = None;
         let allocation = allocation_counter::measure(|| {
             retained = Some(
                 operator
-                    .admission_identities(batch.table_payload().unwrap().batches(), input, &context)
+                    .admission_identities(
+                        batch.table_payload().unwrap().batches(),
+                        input,
+                        reservation.rows,
+                        &context,
+                    )
                     .unwrap(),
             );
         });
@@ -1266,6 +1451,220 @@ mod identity_tests {
             allocation.bytes_max
         );
         assert_eq!(retained.unwrap().rows.len(), 1);
+    }
+
+    #[test]
+    fn unordered_append_runs_skip_resident_identity_probes() {
+        let key = state::Encoding::from_slice(&[1]);
+        let sequence = state::Encoding::from_slice(&[2]);
+        let identity = |time| (time, key.clone(), sequence.clone());
+        let mut resident = state::State::default();
+        resident
+            .left
+            .insert(identity(10), state::RowRef::fixture(0));
+        resident
+            .right
+            .bucket_mut_or_default(key.clone())
+            .insert((10, sequence.clone()), None);
+        let empty = state::State::default();
+        let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+        let context = StreamOperatorContext::new(&job, "asof", None);
+        let rows = [identity(12), identity(11), identity(12)];
+        for state in [&empty, &resident] {
+            for side in [0, 1] {
+                state::take_identity_probes();
+                assert_eq!(
+                    count_duplicate_identities(state, side, rows.iter(), &context).unwrap(),
+                    1
+                );
+                assert_eq!(state::take_identity_probes(), 0, "side={side}");
+            }
+        }
+    }
+
+    #[test]
+    fn unordered_probe_bounds_preserve_equal_and_lower_collisions() {
+        let key = state::Encoding::from_slice(&[1]);
+        let sequence = state::Encoding::from_slice(&[2]);
+        let identity = |time| (time, key.clone(), sequence.clone());
+        let mut state = state::State::default();
+        state.left.insert(identity(10), state::RowRef::fixture(0));
+        state
+            .right
+            .bucket_mut_or_default(key.clone())
+            .insert((10, sequence.clone()), None);
+        state
+            .right
+            .bucket_mut_or_default(state::Encoding::from_slice(&[3]))
+            .insert((20, sequence.clone()), None);
+        let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+        let context = StreamOperatorContext::new(&job, "asof", None);
+        for rows in [
+            vec![identity(11), identity(10), identity(10)],
+            vec![identity(10), identity(9), identity(10)],
+        ] {
+            for side in [0, 1] {
+                state::take_identity_probes();
+                assert_eq!(
+                    count_duplicate_identities(&state, side, rows.iter(), &context).unwrap(),
+                    2
+                );
+                assert_eq!(state::take_identity_probes(), 2, "side={side}");
+            }
+        }
+        let other_key = state::Encoding::from_slice(&[3]);
+        let rows = [
+            (21, other_key.clone(), sequence.clone()),
+            (20, other_key, sequence),
+        ];
+        state::take_identity_probes();
+        assert_eq!(
+            count_duplicate_identities(&state, 1, rows.iter(), &context).unwrap(),
+            1
+        );
+        assert_eq!(state::take_identity_probes(), 2);
+    }
+
+    #[test]
+    fn unordered_same_time_left_append_uses_full_identity_order() {
+        let key = state::Encoding::from_slice(&[1]);
+        let sequence = state::Encoding::from_slice(&[2]);
+        let mut state = state::State::default();
+        state.left.insert(
+            (10, key.clone(), sequence.clone()),
+            state::RowRef::fixture(0),
+        );
+        state
+            .right
+            .bucket_mut_or_default(key.clone())
+            .insert((10, sequence.clone()), None);
+        let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+        let context = StreamOperatorContext::new(&job, "asof", None);
+        for rows in [
+            vec![
+                (10, key.clone(), state::Encoding::from_slice(&[4])),
+                (10, key, state::Encoding::from_slice(&[3])),
+            ],
+            vec![
+                (10, state::Encoding::from_slice(&[4]), sequence.clone()),
+                (10, state::Encoding::from_slice(&[3]), sequence),
+            ],
+        ] {
+            for (side, expected_probes) in [(0, 0), (1, 2)] {
+                state::take_identity_probes();
+                assert_eq!(
+                    count_duplicate_identities(&state, side, rows.iter(), &context).unwrap(),
+                    0
+                );
+                assert_eq!(
+                    state::take_identity_probes(),
+                    expected_probes,
+                    "side={side}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unordered_small_runs_preserve_collisions_in_large_right_dictionary() {
+        let sequence = state::Encoding::from_slice(&[2]);
+        let mut state = state::State::default();
+        for key in 1..=4 {
+            state
+                .right
+                .bucket_mut_or_default(state::Encoding::from_slice(&[key]))
+                .insert((10, sequence.clone()), None);
+        }
+        let key = state::Encoding::from_slice(&[4]);
+        let rows = [(21, key.clone(), sequence.clone()), (10, key, sequence)];
+        let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+        let context = StreamOperatorContext::new(&job, "asof", None);
+        state::take_identity_probes();
+        assert_eq!(
+            count_duplicate_identities(&state, 1, rows.iter(), &context).unwrap(),
+            1
+        );
+        assert_eq!(state::take_identity_probes(), 2);
+    }
+
+    #[test]
+    fn unordered_probe_bound_scan_observes_cancellation() {
+        let key = state::Encoding::from_slice(&[1]);
+        let sequence = state::Encoding::from_slice(&[2]);
+        let mut state = state::State::default();
+        state
+            .right
+            .bucket_mut_or_default(key.clone())
+            .insert((10, sequence.clone()), None);
+        let rows = (11..2_059)
+            .rev()
+            .map(|time| (time, key.clone(), sequence.clone()))
+            .collect::<Vec<_>>();
+        let cancellation = CancellationToken::new();
+        let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, cancellation.clone());
+        let context = StreamOperatorContext::new(&job, "asof", None);
+        let identities = rows.iter().enumerate().map(|(position, identity)| {
+            if position == 1_024 {
+                cancellation.cancel();
+            }
+            identity
+        });
+        state::take_identity_probes();
+        assert!(matches!(
+            unordered_identities_are_after_state(&state, 1, identities, &context),
+            Err(crate::CalcFlowError::Cancelled { .. })
+        ));
+        assert_eq!(state::take_identity_probes(), 0);
+        assert_eq!(state.right.get(&key).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn unordered_probe_bound_uses_only_accepted_rows() {
+        use datafusion::arrow::array::{Int64Array, StringArray};
+        let (mut operator, schema) = identity_fixture();
+        let record = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["key"; 4])),
+                Arc::new(TimestampMicrosecondArray::from(vec![0, 12, 11, 12]).with_timezone("UTC")),
+                Arc::new(Int64Array::from(vec![999, 1, 2, 3])),
+            ],
+        )
+        .unwrap();
+        let key = state::encode_columns(&record, &["key".into()])
+            .unwrap()
+            .row(0);
+        let sequence = state::encode_columns(&record, &["seq".into()])
+            .unwrap()
+            .row(1);
+        operator.state.left.insert(
+            (10, key.clone(), sequence.clone()),
+            state::RowRef::fixture(0),
+        );
+        operator
+            .state
+            .right
+            .bucket_mut_or_default(key)
+            .insert((10, sequence), None);
+        let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+        let context = StreamOperatorContext::new(&job, "asof", None);
+        for index in [0, 1] {
+            state::take_identity_probes();
+            let identities = operator
+                .admission_identities(
+                    std::slice::from_ref(&record),
+                    ValidatedInput {
+                        index,
+                        watermark: Some(10),
+                    },
+                    3,
+                    &context,
+                )
+                .unwrap();
+            assert_eq!(identities.rows.len(), 3);
+            assert_eq!(identities.duplicates, 0);
+            assert_eq!(state::take_identity_probes(), 0, "side={index}");
+        }
     }
 
     #[test]

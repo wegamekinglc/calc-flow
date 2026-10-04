@@ -1,8 +1,8 @@
 //! Sorted Arrow chunks, merged through borrowed cursor heads.
 
 use super::{
-    BatchKey, Encoding, EncodingOwners, LeftOrder, LegacyLeftState, PayloadBatch, PayloadPool,
-    RowPayload, RowRef, SequenceColumn, SequenceKind, SequenceRef,
+    AdmissionRef, BatchKey, Encoding, EncodingOwners, LeftOrder, LegacyLeftState, PayloadBatch,
+    PayloadPool, RowRef, SequenceColumn, SequenceKind, SequenceRef,
 };
 use crate::{
     Result,
@@ -137,12 +137,25 @@ fn copied_chunk_sequences(
 }
 
 impl ChunkData {
+    pub fn checkpoint_capacities(&self) -> [usize; 6] {
+        [
+            self.times.inner().capacity() / 8,
+            self.positions.as_ref().map_or(0, Vec::capacity),
+            self.keys.capacity(),
+            self.key_counts.capacity(),
+            self.key_ids.capacity(),
+            self.sequences.capacity(),
+        ]
+    }
+
     fn prepare(
         rows: &[(&LeftOrder, u32)],
         batch: &PayloadBatch,
         side: &AsofJoinSide,
         name: &str,
+        cancelled: &dyn Fn() -> Result<()>,
     ) -> Result<Self> {
+        cancelled()?;
         let ordered = rows.windows(2).all(|pair| pair[0].0 < pair[1].0);
         let contiguous = rows
             .iter()
@@ -153,6 +166,7 @@ impl ChunkData {
         } else {
             Some(chunk_sort_indices(rows, batch, side, contiguous)?)
         };
+        cancelled()?;
         let positions = chunk_positions(rows, sorted.as_ref(), contiguous);
         let mut keys = Vec::with_capacity(1);
         let mut key_counts = Vec::with_capacity(1);
@@ -166,6 +180,9 @@ impl ChunkData {
         let mut interned = HashMap::<Encoding, u32, ahash::RandomState>::default();
         let mut owners = EncodingOwners::default();
         for ordinal in 0..rows.len() {
+            if ordinal.is_multiple_of(128) {
+                cancelled()?;
+            }
             let row = sorted
                 .as_ref()
                 .map_or(ordinal, |indices| indices.value(ordinal) as usize);
@@ -201,7 +218,7 @@ impl ChunkData {
         })
     }
 
-    fn retained_input_bytes(&self, name: &str) -> Result<u64> {
+    pub fn retained_input_bytes(&self, name: &str) -> Result<u64> {
         let time_buffer = self.times.inner();
         [
             size_of::<Self>() + 2 * size_of::<usize>(),
@@ -337,6 +354,19 @@ pub(in super::super) struct PreparedLeftChunk {
 }
 
 impl PreparedLeftChunk {
+    pub fn batch_key(&self) -> BatchKey {
+        self.owner.key
+    }
+    pub fn journal_version(&self) -> super::super::checkpoint::index_v3::log::journal::Version {
+        super::super::checkpoint::index_v3::log::journal::Version::Left {
+            rows: self.data.sequences.len() as u64,
+            capacities: self.data.checkpoint_capacities(),
+        }
+    }
+    pub fn into_parts(self) -> (Arc<PayloadBatch>, ChunkData) {
+        (self.owner, self.data)
+    }
+
     pub fn key_counts(&self) -> impl Iterator<Item = (&Encoding, usize)> {
         self.data
             .keys
@@ -361,18 +391,32 @@ impl PreparedLeftChunk {
         Self { owner, data }
     }
     pub fn prepare(
-        rows: &[(LeftOrder, RowPayload)],
+        rows: &[(LeftOrder, AdmissionRef)],
+        batches: &[Arc<PayloadBatch>],
         side: &AsofJoinSide,
         name: &str,
     ) -> Result<Vec<Self>> {
+        Self::prepare_checked(rows, batches, side, name, &|| Ok(()))
+    }
+
+    pub fn prepare_checked(
+        rows: &[(LeftOrder, AdmissionRef)],
+        batches: &[Arc<PayloadBatch>],
+        side: &AsofJoinSide,
+        name: &str,
+        cancelled: &dyn Fn() -> Result<()>,
+    ) -> Result<Vec<Self>> {
+        cancelled()?;
         let mut chunks = Vec::new();
         let mut start = 0;
         while start < rows.len() {
-            let owner = &rows[start].1.batch;
+            cancelled()?;
+            let batch_index = rows[start].1.batch_index;
+            let owner = &batches[batch_index];
             let end = start
                 + rows[start..]
                     .iter()
-                    .take_while(|(_, row)| row.batch.key == owner.key)
+                    .take_while(|(_, row)| row.batch_index == batch_index)
                     .count();
             u32::try_from(end - start).map_err(|_| {
                 super::super::reason(
@@ -394,7 +438,7 @@ impl PreparedLeftChunk {
                     Ok((order, position))
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let data = ChunkData::prepare(&identities, owner, side, name)?;
+            let data = ChunkData::prepare(&identities, owner, side, name, cancelled)?;
             chunks.push(Self {
                 owner: owner.clone(),
                 data,
@@ -441,6 +485,41 @@ pub(in super::super) struct LeftState {
 }
 
 impl LeftState {
+    pub fn journal_prefix(
+        &self,
+        prefix: &super::LeftPrefix,
+        prepared: &PreparedLeftDrain,
+        pool: &PayloadPool,
+    ) -> Vec<super::super::checkpoint::index_v3::log::journal::Change> {
+        use super::super::checkpoint::index_v3::log::journal::{Change, Identity, Version};
+        let mut changes = Vec::with_capacity(prefix.batches.len());
+        for (index, chunk) in self.chunks.iter().enumerate() {
+            let batch = pool.key(chunk.reference);
+            let amount = prefix.batches.get(&batch).copied().unwrap_or(0);
+            if amount == 0 {
+                continue;
+            }
+            let rows = chunk.len();
+            let replacement = prepared
+                .compacted
+                .iter()
+                .find(|(current, _)| *current == index)
+                .map_or(chunk.data.as_ref(), |(_, data)| data.as_ref());
+            changes.push(Change {
+                identity: Identity::Left(batch),
+                before: Some(Version::Left {
+                    rows: rows as u64,
+                    capacities: chunk.data.checkpoint_capacities(),
+                }),
+                after: (rows > amount).then_some(Version::Left {
+                    rows: (rows - amount) as u64,
+                    capacities: replacement.checkpoint_capacities(),
+                }),
+            });
+        }
+        changes
+    }
+
     pub fn projected_drain(
         &self,
         prefix: &super::LeftPrefix,
@@ -994,6 +1073,7 @@ impl<'a> Iterator for ChunkIter<'a> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::RowPayload;
     use super::*;
     use crate::operator::asof::admission::times;
     use datafusion::arrow::{
@@ -1002,6 +1082,31 @@ mod tests {
         record_batch::RecordBatch,
     };
     use std::sync::OnceLock;
+
+    fn prepare_owned(
+        rows: &[(LeftOrder, RowPayload)],
+        side: &AsofJoinSide,
+        name: &str,
+    ) -> Result<Vec<PreparedLeftChunk>> {
+        let mut batches = Vec::<Arc<PayloadBatch>>::new();
+        let mut indexed = Vec::with_capacity(rows.len());
+        for (order, payload) in rows {
+            if batches
+                .last()
+                .is_none_or(|owner| owner.key != payload.batch.key)
+            {
+                batches.push(payload.batch.clone());
+            }
+            indexed.push((
+                order.clone(),
+                AdmissionRef {
+                    batch_index: batches.len() - 1,
+                    row: payload.row,
+                },
+            ));
+        }
+        PreparedLeftChunk::prepare(&indexed, &batches, side, name)
+    }
 
     fn identity_arrays() -> Vec<ArrayRef> {
         macro_rules! signed {
@@ -1103,7 +1208,7 @@ mod tests {
                     .iter()
                     .map(|(order, row)| (order, u32::try_from(row.row).unwrap()))
                     .collect::<Vec<_>>();
-                let data = ChunkData::prepare(&compact, &owner, &side, "asof").unwrap();
+                let data = ChunkData::prepare(&compact, &owner, &side, "asof", &|| Ok(())).unwrap();
                 let mut expected = compact
                     .iter()
                     .map(|(identity, _)| (*identity).clone())
@@ -1140,7 +1245,7 @@ mod tests {
             for start in [0, 3] {
                 let (_, side, rows) =
                     fixture(key.slice(start, 3), sequence.slice(start, 3), start as u64);
-                let chunks = PreparedLeftChunk::prepare(&rows, &side, "asof").unwrap();
+                let chunks = prepare_owned(&rows, &side, "asof").unwrap();
                 state.left.install(chunks, &mut state.batches);
             }
             let expected = state
@@ -1223,7 +1328,7 @@ mod tests {
             .iter()
             .map(|(order, row)| (order, *row))
             .collect::<Vec<_>>();
-        let data = ChunkData::prepare(&borrowed_rows, &owner, &side, "asof").unwrap();
+        let data = ChunkData::prepare(&borrowed_rows, &owner, &side, "asof", &|| Ok(())).unwrap();
         assert_eq!(
             (0..6).map(|row| data.position(row)).collect::<Vec<_>>(),
             vec![5, 3, 2, 1, 4, 0]
@@ -1256,7 +1361,7 @@ mod tests {
                             )
                         })
                         .collect::<Vec<_>>();
-                    let chunks = PreparedLeftChunk::prepare(&admitted, &side, "asof").unwrap();
+                    let chunks = prepare_owned(&admitted, &side, "asof").unwrap();
                     state.left.install(chunks, &mut state.batches);
                     drop(admitted);
                     state.commit_left_prefix(removed);
@@ -1318,7 +1423,7 @@ mod tests {
         }
         drop((original, owner));
         let mut state = super::super::State::default();
-        let chunks = PreparedLeftChunk::prepare(&rows, &side, "asof").unwrap();
+        let chunks = prepare_owned(&rows, &side, "asof").unwrap();
         state.left.install(chunks, &mut state.batches);
         drop(rows);
         let mut prefix = super::super::LeftPrefix::default();
@@ -1346,7 +1451,7 @@ mod tests {
         )) as ArrayRef;
         let (_, side, rows) = fixture(key, sequence, 0);
         let mut state = super::super::State::default();
-        let chunks = PreparedLeftChunk::prepare(&rows, &side, "asof").unwrap();
+        let chunks = prepare_owned(&rows, &side, "asof").unwrap();
         state.left.install(chunks, &mut state.batches);
         drop(rows);
         let mut prefix = super::super::LeftPrefix::default();
@@ -1376,7 +1481,7 @@ mod tests {
         let sequence = Arc::new(Int64Array::from_iter_values(0..count)) as ArrayRef;
         let (_, side, rows) = fixture(key, sequence, 0);
         let mut state = super::super::State::default();
-        let chunks = PreparedLeftChunk::prepare(&rows, &side, "asof").unwrap();
+        let chunks = prepare_owned(&rows, &side, "asof").unwrap();
         state.left.install(chunks, &mut state.batches);
         state.commit_left_prefix(4_999);
         assert_eq!(state.left.chunks[0].head, 4_999);
@@ -1455,7 +1560,7 @@ mod tests {
             }
             let mut retained = None;
             let allocation = allocation_counter::measure(|| {
-                retained = Some(PreparedLeftChunk::prepare(&rows, &side, "asof").unwrap());
+                retained = Some(prepare_owned(&rows, &side, "asof").unwrap());
             });
             assert_eq!(retained.as_ref().unwrap()[0].data.positions, None);
             let bound =

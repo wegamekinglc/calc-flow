@@ -167,6 +167,23 @@ impl ExpressionOperator {
                 .is_some_and(|(_, schema)| output.is_none_or(|output| schema == *output))
     }
 
+    pub(crate) fn stream_projection_columns(&self) -> Option<Vec<usize>> {
+        let input = self.input_ports[0].schema()?;
+        if !self.is_exact_column_projection(input, self.output_ports[0].schema()) {
+            return None;
+        }
+        self.column_projection
+            .as_ref()?
+            .schema(input)
+            .map(|(indices, _)| indices)
+    }
+
+    pub(crate) fn set_projected_stream_input(&mut self, schema: SchemaRef) -> Result<()> {
+        self.input_ports[0] =
+            Port::with_schema_ref("input", crate::BatchKind::Table, true, Some(schema))?;
+        Ok(())
+    }
+
     /// Plans the exact stream output schema without processing any rows.
     ///
     /// This internal adapter seam is for expressions without selected UDFs.

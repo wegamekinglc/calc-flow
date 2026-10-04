@@ -114,7 +114,7 @@ def test_empty_runtime_capabilities_are_frozen_and_session_scoped() -> None:
             requires_watermark=False,
             checkpoint_support="checkpointed_stateful",
             state_version=1,
-            state_layouts=(1,),
+            state_layouts=(1, 2),
             deterministic=True,
             replay_safe=True,
         ),
@@ -134,7 +134,7 @@ def test_empty_runtime_capabilities_are_frozen_and_session_scoped() -> None:
             requires_watermark=True,
             checkpoint_support="checkpointed_stateful",
             state_version=3,
-            state_layouts=(3,),
+            state_layouts=(9,),
             deterministic=True,
             replay_safe=True,
         ),
@@ -971,8 +971,11 @@ def test_operator_capability_requires_strict_state_layout_data() -> None:
         ValueError, match="checkpointed_stateful requires at least one state layout"
     ):
         OperatorCapability(**{**stateful, "state_layouts": ()})
-    with pytest.raises(ValueError, match="state_layouts must contain state_version"):
-        OperatorCapability(**{**stateful, "state_layouts": (2,)})
+    distinct_layout = OperatorCapability(
+        **{**stateful, "state_version": 3, "state_layouts": (5, 6)}
+    )
+    assert distinct_layout.state_version == 3
+    assert distinct_layout.state_layouts == (5, 6)
     with pytest.raises(
         ValueError, match="state_layouts must be empty unless checkpointed_stateful"
     ):
@@ -990,10 +993,11 @@ def test_capability_catalog_reports_every_durable_state_layout() -> None:
     assert operators["cross_section"].state_layouts == (1,)
     assert operators["stream_join"].state_layouts == (1,)
     assert operators["stream_asof_join"].state_version == 3
-    assert operators["stream_asof_join"].state_layouts == (3,)
+    assert operators["stream_asof_join"].state_layouts == (9,)
     assert operators["window"].state_layouts == (1,)
     assert operators["expression"].state_layouts == ()
-    assert operators["sql"].state_layouts == (1,)
+    assert operators["sql"].state_version == 1
+    assert operators["sql"].state_layouts == (3, 4)
 
 
 def test_provider_capability_rejects_unprovable_lifecycle_combinations() -> None:

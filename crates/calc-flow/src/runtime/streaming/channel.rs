@@ -19,14 +19,17 @@
 //! with the receiver. Closing the receiver wakes a blocked sender with
 //! [`CalcFlowError::EdgeClosed`].
 
-use std::{collections::VecDeque, fmt, sync::Arc, time::Duration};
+#[cfg(test)]
+pub(crate) mod fusion_observer;
 
-use parking_lot::Mutex;
+use std::{fmt, sync::Arc, time::Duration};
+
 use tokio::sync::Notify;
 
 use super::{
     StreamMessage,
-    metrics::{EdgeTraffic, MetricsRecorder, MetricsTimer},
+    edge_queue::{Dequeue, EdgeQueueCore},
+    metrics::{MetricsRecorder, MetricsTimer},
 };
 use crate::{CalcFlowError, EdgeBudget, Result, batch::checked_accumulate};
 
@@ -143,26 +146,17 @@ impl EnvelopeCost {
     }
 }
 
-#[derive(Default)]
-struct ChannelState {
-    queue: VecDeque<(StreamMessage, EnvelopeCost)>,
-    charged: EnvelopeCost,
-    receiver_closed: bool,
-    sender_closed: bool,
-    high_water: EnvelopeCost,
-    blocked_sends: u64,
-    blocked_duration: Duration,
+struct Shared {
+    core: EdgeQueueCore,
+    capacity_available: Notify,
+    message_available: Notify,
 }
 
-struct Shared {
-    edge: String,
-    budget: EdgeBudget,
-    metrics: MetricsRecorder,
-    state: Mutex<ChannelState>,
-    /// Signalled when reserved capacity is released or the receiver closes.
-    capacity_available: Notify,
-    /// Signalled when a message is enqueued or the sender closes.
-    message_available: Notify,
+impl std::ops::Deref for Shared {
+    type Target = EdgeQueueCore;
+    fn deref(&self) -> &Self::Target {
+        &self.core
+    }
 }
 
 /// A point-in-time snapshot of one edge channel's occupancy and
@@ -188,21 +182,6 @@ pub struct ChannelMetrics {
     pub high_water_bytes: usize,
     pub blocked_sends: u64,
     pub blocked_duration: Duration,
-}
-
-impl ChannelState {
-    fn metrics(&self) -> ChannelMetrics {
-        ChannelMetrics {
-            queue_depth: self.charged.messages(),
-            charged_rows: self.charged.rows(),
-            charged_bytes: self.charged.bytes(),
-            high_water_depth: self.high_water.messages(),
-            high_water_rows: self.high_water.rows(),
-            high_water_bytes: self.high_water.bytes(),
-            blocked_sends: self.blocked_sends,
-            blocked_duration: self.blocked_duration,
-        }
-    }
 }
 
 impl fmt::Debug for Shared {
@@ -253,22 +232,13 @@ pub(crate) fn edge_channel_with_metrics(
     budget: EdgeBudget,
     metrics: MetricsRecorder,
 ) -> Result<(EdgeSender, EdgeReceiver)> {
-    let edge = edge.into();
-    if edge.is_empty() {
-        return Err(CalcFlowError::InvalidArgument {
-            field: "edge".into(),
-            message: "must not be empty".into(),
-        });
-    }
-    EdgeBudget::new(budget.max_rows, budget.max_bytes)?;
     let shared = Arc::new(Shared {
-        edge,
-        budget,
-        metrics,
-        state: Mutex::new(ChannelState::default()),
+        core: EdgeQueueCore::new(edge.into(), budget, metrics)?,
         capacity_available: Notify::new(),
         message_available: Notify::new(),
     });
+    #[cfg(test)]
+    fusion_observer::record(&shared.edge, fusion_observer::Event::Construct);
     Ok((
         EdgeSender {
             shared: Arc::clone(&shared),
@@ -314,31 +284,13 @@ impl fmt::Debug for EdgeReceiver {
     }
 }
 
-/// Returns whether `cost` can be reserved on top of `charged` without
-/// crossing any budget limit. `max_rows` independently caps both queued
-/// envelopes and charged rows. A component sum that overflows `usize`
-/// necessarily exceeds the budget, so it simply does not fit.
-fn fits(charged: &EnvelopeCost, cost: &EnvelopeCost, budget: &EdgeBudget) -> bool {
-    let Some(messages) = charged.messages().checked_add(cost.messages()) else {
-        return false;
-    };
-    let Some(rows) = charged.rows().checked_add(cost.rows()) else {
-        return false;
-    };
-    let Some(bytes) = charged.bytes().checked_add(cost.bytes()) else {
-        return false;
-    };
-    messages <= budget.max_rows && rows <= budget.max_rows && bytes <= budget.max_bytes
-}
-
 impl EdgeSender {
     /// Validates that one message can fit this edge without enqueueing it.
     ///
     /// The operator collector applies this to every fan-out branch before
     /// its first send, which keeps validation failures side-effect free.
     pub(crate) fn validate_message(&self, message: &StreamMessage) -> Result<()> {
-        let cost = EnvelopeCost::of_message(message)?;
-        self.shared.reject_oversize(&cost)
+        self.shared.message_cost(message).map(|_| ())
     }
 
     /// Enqueues one message, awaiting capacity when any hard dimension is
@@ -367,62 +319,30 @@ impl EdgeSender {
         observation: Option<&crate::operator::rolling_metrics::RollingMetricsRecorder>,
     ) -> Result<()> {
         let cost = self.shared.message_cost(&message)?;
+        let mut message = Some(message);
         let notified = self.shared.capacity_available.notified();
         tokio::pin!(notified);
-        let mut blocked_since: Option<tokio::time::Instant> = None;
+        let mut blocked_since = None;
         let mut metrics_blocked_since: Option<MetricsTimer> = None;
         loop {
-            // Register for the wakeup before re-checking the budget so a
-            // release between the check and the await cannot be lost.
             notified.as_mut().enable();
-            {
-                let mut state = self.shared.state.lock();
-                if state.receiver_closed {
-                    return Err(CalcFlowError::EdgeClosed {
-                        edge: self.shared.edge.clone(),
-                    });
-                }
-                if fits(&state.charged, &cost, &self.shared.budget) {
-                    self.shared.prepare_enqueue(
-                        &mut state,
-                        &message,
-                        cost,
-                        blocked_since,
-                        metrics_blocked_since.as_ref(),
-                    )?;
-                    state.queue.push_back((message, cost));
-                    drop(state);
-                    self.shared.message_available.notify_one();
-                    return Ok(());
-                }
-                self.shared.begin_wait(
-                    &mut state,
-                    &mut blocked_since,
-                    &mut metrics_blocked_since,
-                )?;
+            if self.shared.try_enqueue(
+                &mut message,
+                cost,
+                &mut blocked_since,
+                &mut metrics_blocked_since,
+            )? {
+                #[cfg(test)]
+                fusion_observer::record(&self.shared.edge, fusion_observer::Event::Enqueue);
+                self.shared.message_available.notify_one();
+                return Ok(());
             }
-            // Lost-wakeup safety at this await rests on the type-level
-            // single-producer invariant I10 (see the module doc): with at
-            // most one waiting sender, a release notification can never be
-            // consumed by a waiter that cannot make progress.
             {
                 let _wait = observation.map(|recorder| {
                     recorder.stage(crate::operator::rolling_metrics::RollingStage::SendWait)
                 });
                 notified.as_mut().await;
             }
-            // A woken send hands the wakeup on before re-checking the
-            // budget. Under I10 this is a no-op: the sender is the only
-            // task that ever waits on `capacity_available`, its consumed
-            // `Notified` is no longer registered at this point, and
-            // `notify_waiters` — unlike `notify_one` — stores no permit
-            // for a later waiter. The call is insurance for a relaxed
-            // invariant, not load-bearing today: if the channel ever
-            // allowed multiple producers, a release consumed by a woken
-            // send that still does not fit could otherwise strand a parked
-            // peer whose message does fit the freed capacity. A genuine
-            // multi-producer design would still revisit the wakeup
-            // discipline; I10 is what keeps this coordination sound.
             self.shared.capacity_available.notify_waiters();
             notified.set(self.shared.capacity_available.notified());
         }
@@ -436,7 +356,7 @@ impl EdgeSender {
     /// Returns a consistent snapshot of the channel's occupancy and
     /// backpressure counters.
     pub fn metrics(&self) -> ChannelMetrics {
-        self.shared.state.lock().metrics()
+        self.shared.metrics()
     }
 
     pub(crate) fn budget(&self) -> EdgeBudget {
@@ -463,31 +383,15 @@ impl EdgeReceiver {
         tokio::pin!(notified);
         loop {
             notified.as_mut().enable();
-            {
-                let mut state = self.shared.state.lock();
-                if let Some((message, cost)) = state.queue.front() {
-                    self.shared.metrics.record_edge_dequeue(
-                        &self.shared.edge,
-                        EdgeTraffic::of_message(message, *cost)?,
-                    )?;
-                    let (message, cost) =
-                        state
-                            .queue
-                            .pop_front()
-                            .ok_or_else(|| CalcFlowError::Internal {
-                                message: format!(
-                                    "edge {:?} queue front disappeared while its lock was held",
-                                    self.shared.edge
-                                ),
-                            })?;
-                    state.charged = state.charged.checked_sub(&cost)?;
-                    drop(state);
+            match self.shared.try_dequeue()? {
+                Dequeue::Message(message) => {
+                    #[cfg(test)]
+                    fusion_observer::record(&self.shared.edge, fusion_observer::Event::Dequeue);
                     self.shared.capacity_available.notify_one();
                     return Ok(Some(message));
                 }
-                if state.receiver_closed || state.sender_closed {
-                    return Ok(None);
-                }
+                Dequeue::Closed => return Ok(None),
+                Dequeue::Empty => {}
             }
             notified.as_mut().await;
             notified.set(self.shared.message_available.notified());
@@ -502,7 +406,7 @@ impl EdgeReceiver {
     /// Returns a consistent snapshot of the channel's occupancy and
     /// backpressure counters.
     pub fn metrics(&self) -> ChannelMetrics {
-        self.shared.state.lock().metrics()
+        self.shared.metrics()
     }
 
     /// Closes the receiving side of the edge.
@@ -511,9 +415,7 @@ impl EdgeReceiver {
     /// (S10.1). Messages already enqueued remain receivable; once the queue
     /// is drained, [`EdgeReceiver::recv`] returns `None`.
     pub fn close(&mut self) {
-        let mut state = self.shared.state.lock();
-        state.receiver_closed = true;
-        drop(state);
+        self.shared.close_receiver();
         self.shared.capacity_available.notify_waiters();
     }
 }
@@ -524,14 +426,7 @@ impl Drop for EdgeReceiver {
     /// [`CalcFlowError::EdgeClosed`] and payload `Arc`s are released promptly
     /// instead of waiting for the sender to drop.
     fn drop(&mut self) {
-        let mut state = self.shared.state.lock();
-        state.receiver_closed = true;
-        self.shared
-            .metrics
-            .record_edge_drop(&self.shared.edge, state.charged);
-        state.queue.clear();
-        state.charged = EnvelopeCost::ZERO;
-        drop(state);
+        self.shared.drop_receiver();
         self.shared.capacity_available.notify_waiters();
     }
 }
@@ -541,105 +436,8 @@ impl Drop for EdgeSender {
     /// queue is drained; stream termination itself is the explicit
     /// end-of-input message (S1.6), never channel teardown.
     fn drop(&mut self) {
-        let mut state = self.shared.state.lock();
-        state.sender_closed = true;
-        drop(state);
+        self.shared.close_sender();
         self.shared.message_available.notify_waiters();
-    }
-}
-
-impl Shared {
-    fn message_cost(&self, message: &StreamMessage) -> Result<EnvelopeCost> {
-        let cost = EnvelopeCost::of_message(message)?;
-        self.reject_oversize(&cost)?;
-        Ok(cost)
-    }
-
-    fn prepare_enqueue(
-        &self,
-        state: &mut ChannelState,
-        message: &StreamMessage,
-        cost: EnvelopeCost,
-        blocked_since: Option<tokio::time::Instant>,
-        metrics_blocked_since: Option<&MetricsTimer>,
-    ) -> Result<()> {
-        let blocked_elapsed = blocked_since.map(|started| started.elapsed());
-        let blocked_duration = state
-            .blocked_duration
-            .checked_add(blocked_elapsed.unwrap_or_default())
-            .ok_or_else(|| CalcFlowError::InvalidArgument {
-                field: format!("runtime.metrics.{}.blocked_duration", self.edge),
-                message: "counter overflow".into(),
-            })?;
-        let metrics_blocked_elapsed = metrics_blocked_since
-            .map(|timer| timer.elapsed(&self.edge, "blocked_duration"))
-            .transpose()?;
-        self.metrics.record_edge_enqueue(
-            &self.edge,
-            EdgeTraffic::of_message(message, cost)?,
-            metrics_blocked_elapsed,
-        )?;
-        state.charged = state.charged.checked_add(&cost).map_err(|error| {
-            // The caller holds the lock after `fits` rejected every overflow.
-            CalcFlowError::Internal {
-                message: format!(
-                    "edge {:?} charge overflowed after a successful capacity check: {error}",
-                    self.edge
-                ),
-            }
-        })?;
-        state.high_water = state.high_water.max_components(&state.charged);
-        state.blocked_duration = blocked_duration;
-        Ok(())
-    }
-
-    fn begin_wait(
-        &self,
-        state: &mut ChannelState,
-        blocked_since: &mut Option<tokio::time::Instant>,
-        metrics_blocked_since: &mut Option<MetricsTimer>,
-    ) -> Result<()> {
-        if blocked_since.is_none() {
-            let next_blocked = state.blocked_sends.checked_add(1).ok_or_else(|| {
-                CalcFlowError::InvalidArgument {
-                    field: format!("runtime.metrics.{}.blocked_sends", self.edge),
-                    message: "counter overflow".into(),
-                }
-            })?;
-            self.metrics.record_edge_blocked(&self.edge)?;
-            state.blocked_sends = next_blocked;
-            *blocked_since = Some(tokio::time::Instant::now());
-            *metrics_blocked_since = Some(self.metrics.timer());
-        }
-        Ok(())
-    }
-
-    /// Rejects a message that can never fit within the budget, before any
-    /// wait (S10.3).
-    fn reject_oversize(&self, cost: &EnvelopeCost) -> Result<()> {
-        if cost.rows() > self.budget.max_rows {
-            return Err(CalcFlowError::InvalidArgument {
-                field: "message.rows".into(),
-                message: format!(
-                    "{} exceeds edge {:?} row budget {}",
-                    cost.rows(),
-                    self.edge,
-                    self.budget.max_rows
-                ),
-            });
-        }
-        if cost.bytes() > self.budget.max_bytes {
-            return Err(CalcFlowError::InvalidArgument {
-                field: "message.bytes".into(),
-                message: format!(
-                    "{} exceeds edge {:?} byte budget {}",
-                    cost.bytes(),
-                    self.edge,
-                    self.budget.max_bytes
-                ),
-            });
-        }
-        Ok(())
     }
 }
 
@@ -651,6 +449,7 @@ mod tests {
 
     use super::*;
     use crate::{Batch, BatchMetadata, Epoch, EventTime, StreamMessageKind};
+    use parking_lot::Mutex;
 
     fn data_message(values: &[i64]) -> StreamMessage {
         let record = RecordBatch::try_from_iter(vec![(
@@ -986,7 +785,7 @@ mod tests {
         let (mut sender, mut receiver) =
             edge_channel("overflow", EdgeBudget::new(1, 8).unwrap()).unwrap();
         sender.send(data_message(&[1])).await.unwrap();
-        sender.shared.state.lock().blocked_duration = Duration::MAX;
+        sender.shared.set_blocked_duration_for_test(Duration::MAX);
         let message = data_message(&[2]);
         let reference = Arc::downgrade(
             message
