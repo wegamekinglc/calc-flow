@@ -112,7 +112,7 @@ fn single_aggregate(aggregate: &AggregateExec) -> bool {
         && *aggregate.input_order_mode() == InputOrderMode::Linear
         && aggregate.limit_options().is_none()
         && aggregate.group_expr().groups().len() == 1
-        && aggregate.group_expr().expr().len() == 1
+        && !aggregate.group_expr().expr().is_empty()
         && aggregate.filter_expr().iter().all(Option::is_none)
 }
 

@@ -30,6 +30,7 @@ pub(in crate::operator::sql) enum Factory {
     BooleanV1,
     Utf8V1,
     LargeUtf8V1,
+    ColumnV1,
 }
 
 pub(super) fn key_layout(data_type: &DataType) -> Option<(Factory, usize)> {
@@ -47,6 +48,25 @@ pub(super) fn key_layout(data_type: &DataType) -> Option<(Factory, usize)> {
             )
         }),
     }
+}
+
+pub(super) fn group_layout(
+    keys: &[usize],
+    schema: &datafusion::arrow::datatypes::Schema,
+) -> Option<(Factory, usize)> {
+    if let [key] = keys {
+        return key_layout(schema.field(*key).data_type());
+    }
+    if keys.is_empty()
+        || !keys
+            .iter()
+            .all(|key| key_layout(schema.field(*key).data_type()).is_some())
+    {
+        return None;
+    }
+    keys.len()
+        .checked_mul(size_of::<ScalarValue>())
+        .map(|width| (Factory::ColumnV1, width))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]

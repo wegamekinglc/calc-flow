@@ -262,3 +262,18 @@ async fn test_string_key_sum_average_exact_prefix_and_cold_continuation() {
 
 #[path = "grouped_string_safety_tests.rs"]
 mod safety;
+
+fn with_factory(snapshot: &OperatorStateSnapshot, factory: &str) -> OperatorStateSnapshot {
+    let mut control: Value = serde_json::from_slice(snapshot.segments["control"].bytes()).unwrap();
+    control["state_policy"]["sequential_grouped_float_v1"]["factory"] = json!(factory);
+    let segment = StateSegment::new(serde_json::to_vec(&control).unwrap());
+    let mut result = snapshot.clone();
+    result
+        .inline_metadata
+        .insert("control_sha256".into(), json!(segment.sha256()));
+    result.segments.insert("control".into(), segment);
+    result
+}
+
+#[path = "grouped_composite_tests.rs"]
+mod composite;

@@ -3,61 +3,60 @@ use crate::CalcFlowError;
 use datafusion::execution::memory_pool::MemoryConsumer;
 
 #[tokio::test]
-async fn test_string_key_restore_rejects_wrong_factory_atomically() {
-    for dtype in [DataType::Float32, DataType::Float64] {
-        for key_type in [DataType::Utf8, DataType::LargeUtf8] {
-            let job = job();
-            let context = StreamOperatorContext::new(&job, "grouped_float", None);
-            let mut state = string_operator(&dtype, &key_type, ALL);
-            drop(
-                process(
-                    &mut state,
-                    string_input(&dtype, &key_type, &string_arrivals()[0], 0),
-                    &context,
-                )
-                .await,
-            );
-            let snapshot = string_capture(&mut state, &key_type);
-            let opposite = if key_type == DataType::Utf8 {
-                "large_utf8_v1"
-            } else {
-                "utf8_v1"
-            };
-            for factory in ["primitive_v1", "boolean_v1", opposite, "unknown"] {
-                assert!(
-                    StreamOperator::restore(&mut state, &with_factory(&snapshot, factory)).is_err()
-                );
-                same_snapshot(&snapshot, &state.checkpoint(Epoch::INITIAL).unwrap());
-            }
-            let pool = state
-                .stream_state
-                .runtime()
-                .unwrap()
-                .incremental_memory_pool();
-            drop((state, snapshot));
-            assert_eq!(pool.reserved(), 0);
-        }
+async fn test_composite_key_restore_rejects_wrong_factory_atomically() {
+    let dtype = DataType::Float64;
+    let key_type = DataType::Utf8;
+    let bucket_type = DataType::Int64;
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "grouped_float", None);
+    let mut state = composite_operator(&dtype, &key_type, &bucket_type);
+    drop(
+        process(
+            &mut state,
+            composite_input(&dtype, &key_type, &bucket_type, &string_arrivals()[0], 0),
+            &context,
+        )
+        .await,
+    );
+    let snapshot = composite_capture(&mut state);
+    for factory in [
+        "primitive_v1",
+        "boolean_v1",
+        "utf8_v1",
+        "large_utf8_v1",
+        "unknown",
+    ] {
+        assert!(StreamOperator::restore(&mut state, &with_factory(&snapshot, factory)).is_err());
+        same_snapshot(&snapshot, &state.checkpoint(Epoch::INITIAL).unwrap());
     }
+    let pool = state
+        .stream_state
+        .runtime()
+        .unwrap()
+        .incremental_memory_pool();
+    drop((state, snapshot));
+    assert_eq!(pool.reserved(), 0);
 }
 
 #[tokio::test]
-async fn test_string_key_refused_update_refunds_and_retries_exactly() {
-    for key_type in [DataType::Utf8, DataType::LargeUtf8] {
+async fn test_composite_key_refused_update_refunds_and_retries_exactly() {
+    for bucket_type in [DataType::Int64, DataType::Boolean] {
         let dtype = DataType::Float64;
+        let key_type = DataType::Utf8;
         let job = job();
         let context = StreamOperatorContext::new(&job, "grouped_float", None);
-        let mut state = string_operator(&dtype, &key_type, ALL);
+        let mut state = composite_operator(&dtype, &key_type, &bucket_type);
         let mut parts = string_arrivals().into_iter();
         let mut prefix = parts.next().unwrap();
         drop(
             process(
                 &mut state,
-                string_input(&dtype, &key_type, &prefix, 0),
+                composite_input(&dtype, &key_type, &bucket_type, &prefix, 0),
                 &context,
             )
             .await,
         );
-        let snapshot = string_capture(&mut state, &key_type);
+        let snapshot = composite_capture(&mut state);
         let pool = state
             .stream_state
             .runtime()
@@ -65,10 +64,10 @@ async fn test_string_key_refused_update_refunds_and_retries_exactly() {
             .incremental_memory_pool();
         let basis = pool.reserved();
         let next = parts.next().unwrap();
-        let pressure = MemoryConsumer::new("string-update-pressure").register(&pool);
+        let pressure = MemoryConsumer::new("composite-update-pressure").register(&pool);
         pressure.try_grow((1 << 30) - basis - 1).unwrap();
         let held = pool.reserved();
-        let rejected = string_input(&dtype, &key_type, &next, 1);
+        let rejected = composite_input(&dtype, &key_type, &bucket_type, &next, 1);
         let weak = weak_arrays(&rejected);
         let mut output = EdgeCollector::new(state.output_ports().to_vec());
         assert!(
@@ -83,7 +82,7 @@ async fn test_string_key_refused_update_refunds_and_retries_exactly() {
         drop(pressure);
         assert_eq!(pool.reserved(), basis);
         same_snapshot(&snapshot, &state.checkpoint(Epoch::INITIAL).unwrap());
-        let rejected = string_input(&dtype, &key_type, &next, 1);
+        let rejected = composite_input(&dtype, &key_type, &bucket_type, &next, 1);
         let weak = weak_arrays(&rejected);
         assert!(
             matches!(state.process_data("events", rejected, &context, &mut Reject).await,
@@ -94,12 +93,16 @@ async fn test_string_key_refused_update_refunds_and_retries_exactly() {
         same_snapshot(&snapshot, &state.checkpoint(Epoch::INITIAL).unwrap());
         let actual = process(
             &mut state,
-            string_input(&dtype, &key_type, &next, 1),
+            composite_input(&dtype, &key_type, &bucket_type, &next, 1),
             &context,
         )
         .await;
         prefix.extend(next);
-        string_oracle(&actual, ALL, string_input(&dtype, &key_type, &prefix, 1)).await;
+        composite_oracle(
+            &actual,
+            composite_input(&dtype, &key_type, &bucket_type, &prefix, 1),
+        )
+        .await;
         drop((actual, state, snapshot));
         assert_eq!(pool.reserved(), 0);
     }
