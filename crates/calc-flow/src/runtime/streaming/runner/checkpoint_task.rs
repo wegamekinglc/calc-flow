@@ -2,6 +2,9 @@
 
 use super::*;
 
+#[cfg(test)]
+mod tests;
+
 pub(super) struct LiveCheckpointTaskInputs {
     pub(super) checkpoint: OpenedCheckpointRuntime,
     pub(super) channels: LiveCheckpointChannels,
@@ -89,6 +92,7 @@ struct EpochManifestAssembly {
     deferred_publication_error: Option<CalcFlowError>,
     sources: BTreeMap<String, SourceManifestEntry>,
     operators: BTreeMap<String, OperatorManifestEntry>,
+    working_states: BTreeMap<String, Arc<crate::state::WorkingStatePins>>,
     sink_outputs: BTreeMap<String, BTreeMap<String, SinkManifestEntry>>,
     finalized_sink_outputs: BTreeSet<String>,
     timed_phase: Option<CheckpointPhase>,
@@ -110,6 +114,7 @@ impl EpochManifestAssembly {
         }
         self.sources.clear();
         self.operators.clear();
+        self.working_states.clear();
         self.sink_outputs.clear();
         self.finalized_sink_outputs.clear();
         self.terminal = terminal;
@@ -141,6 +146,7 @@ impl EpochManifestAssembly {
         self.epoch = None;
         self.settlement_phase = None;
         self.manifest_installed_unknown = false;
+        self.working_states.clear();
         Ok(())
     }
 
@@ -1117,6 +1123,12 @@ async fn accept_operator_ack(
         ack.epoch,
         "operator",
     )?;
+    if let Some(working) = ack.working {
+        assembly
+            .working_states
+            .entry(ack.node_id.clone())
+            .or_insert(working);
+    }
     coordinator
         .ack(CheckpointAck::operator(
             &ack.node_id,

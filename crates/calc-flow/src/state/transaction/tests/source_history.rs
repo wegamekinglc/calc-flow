@@ -79,6 +79,84 @@ async fn stage(transaction: &ManifestTransaction, epoch: Epoch, bytes: &[u8]) ->
 }
 
 #[tokio::test]
+async fn source_history_staging_owner_protects_unpublished_bytes() {
+    let directory = TempDir::new().unwrap();
+    let transaction = open(directory.path()).await;
+    let staged = Arc::new(
+        transaction
+            .stage_operator_state(
+                "prices",
+                Epoch::INITIAL,
+                snapshot_with_segments(&[("file-0", b"original")]),
+            )
+            .await
+            .unwrap(),
+    );
+    let path = directory
+        .path()
+        .join("state")
+        .join(staged.segments[0].relative_path());
+    let owner = staged.clone();
+    drop(staged);
+    let report = transaction.retain(&identity(), None).await.unwrap();
+    assert_eq!(report.removed_orphan_segments, 0);
+    assert_eq!(std::fs::read(&path).unwrap(), b"original");
+    drop(owner);
+    let report = transaction.retain(&identity(), None).await.unwrap();
+    assert_eq!(report.removed_orphan_segments, 1);
+    assert!(!path.exists());
+}
+
+#[tokio::test]
+async fn source_history_independent_staging_owners_share_one_protection() {
+    let directory = TempDir::new().unwrap();
+    let transaction = open(directory.path()).await;
+    let snapshot = || snapshot_with_segments(&[("file-0", b"original")]);
+    let first = transaction
+        .stage_operator_state("prices", Epoch::INITIAL, snapshot())
+        .await
+        .unwrap();
+    let epoch = Epoch::INITIAL.next().unwrap();
+    let second = transaction
+        .stage_operator_state("prices", epoch, snapshot())
+        .await
+        .unwrap();
+    assert_eq!(first.segments, second.segments);
+    drop(first);
+    assert_eq!(
+        transaction
+            .retain(&identity(), None)
+            .await
+            .unwrap()
+            .removed_orphan_segments,
+        0
+    );
+    let old = second.segments[0].clone();
+    drop(second);
+    assert_eq!(
+        transaction
+            .retain(&identity(), None)
+            .await
+            .unwrap()
+            .removed_orphan_segments,
+        1
+    );
+    let recreated = transaction
+        .stage_operator_state("prices", epoch.next().unwrap(), snapshot())
+        .await
+        .unwrap();
+    assert_ne!(recreated.segments[0].relative_path(), old.relative_path());
+    assert_eq!(
+        transaction
+            .lineage
+            .load_segment(&recreated.segments[0])
+            .await
+            .unwrap(),
+        b"original"
+    );
+}
+
+#[tokio::test]
 async fn source_history_selection_validates_all_retained_terminal_bytes() {
     let directory = TempDir::new().unwrap();
     let transaction = open(directory.path()).await;

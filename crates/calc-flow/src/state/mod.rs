@@ -22,7 +22,7 @@ pub(crate) use transaction::{
 )]
 pub(crate) use transaction::{
     ManifestPublication, ManifestTransaction, PreparedEpochManifest, PreparedManifestIdentity,
-    SelectedManifest, StagedOperatorState,
+    SelectedManifest, StagedOperatorState, WorkingStatePins,
 };
 
 pub(crate) use segment::{

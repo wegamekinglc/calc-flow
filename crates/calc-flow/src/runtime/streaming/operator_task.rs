@@ -67,6 +67,7 @@ pub(crate) struct OperatorCheckpointAck {
     pub(crate) node_id: String,
     pub(crate) epoch: Epoch,
     pub(crate) state: crate::OperatorManifestEntry,
+    pub(crate) working: Option<Arc<crate::state::WorkingStatePins>>,
 }
 
 pub(crate) struct OperatorCheckpointPort {
@@ -1593,6 +1594,7 @@ async fn capture_operator_checkpoint(
         None if snapshot.segments.is_empty() => crate::state::StagedOperatorState {
             inline_metadata: snapshot.inline_metadata,
             segments: Vec::new(),
+            working: None,
         },
         None => {
             return Err(CalcFlowError::Internal {
@@ -1606,6 +1608,7 @@ async fn capture_operator_checkpoint(
     Ok(OperatorCheckpointAck {
         node_id: inputs.node_id.clone(),
         epoch,
+        working: staged.working,
         state: crate::OperatorManifestEntry {
             progress: input_progress.manifest_entries()?,
             inline_metadata: staged.inline_metadata,

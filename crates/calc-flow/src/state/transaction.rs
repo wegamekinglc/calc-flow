@@ -23,6 +23,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use sha2::{Digest as _, Sha256};
 use tokio::sync::Mutex;
 
+mod working;
+pub(crate) use working::WorkingStatePins;
+
 use super::{
     CheckpointManifest, ManifestExpectation, StateHandle, StateLineageBackend, StateLineageKey,
 };
@@ -119,6 +122,7 @@ pub(crate) enum ManifestPublication {
 pub(crate) struct StagedOperatorState {
     pub(crate) inline_metadata: JsonMap,
     pub(crate) segments: Vec<StateHandle>,
+    pub(crate) working: Option<Arc<WorkingStatePins>>,
 }
 
 pub(crate) struct ManifestValidation {
@@ -143,7 +147,7 @@ pub(crate) struct ManifestTransaction {
     manifest_root: PathBuf,
     retained_epochs: usize,
     operation: Mutex<()>,
-    session_segments: parking_lot::Mutex<SessionSegments>,
+    session_segments: Arc<parking_lot::Mutex<SessionSegments>>,
     #[cfg(test)]
     fault_hook: Option<ManifestTransactionFaultHook>,
     #[cfg(test)]
@@ -168,6 +172,7 @@ struct SessionSegments {
     carried: BTreeMap<(String, String), StateHandle>,
     /// Handles whose committed bytes this session wrote or fully verified.
     verified: BTreeSet<StateHandle>,
+    working: BTreeMap<StateHandle, usize>,
 }
 
 impl ManifestTransaction {
@@ -260,7 +265,7 @@ impl ManifestTransaction {
             manifest_root,
             retained_epochs,
             operation: Mutex::new(()),
-            session_segments: parking_lot::Mutex::new(SessionSegments::default()),
+            session_segments: Arc::new(parking_lot::Mutex::new(SessionSegments::default())),
             #[cfg(test)]
             fault_hook: None,
             #[cfg(test)]
@@ -493,6 +498,11 @@ impl ManifestTransaction {
             self.inject_fault(ManifestTransactionFaultPoint::StateStage)?;
         }
         Ok(StagedOperatorState {
+            working: WorkingStatePins::acquire(
+                self.session_segments.clone(),
+                self.lineage.clone(),
+                &staged,
+            )?,
             inline_metadata: snapshot.inline_metadata,
             segments: staged,
         })
@@ -848,9 +858,12 @@ impl ManifestTransaction {
         let RetentionPlan {
             retained_manifests,
             removed_manifests,
-            retained_handles,
+            mut retained_handles,
             removals,
         } = retention_plan(&manifests, self.retained_epochs, in_flight);
+        retained_handles.extend(self.session_segments.lock().working.keys().cloned());
+        retained_handles.sort_unstable();
+        retained_handles.dedup();
         let root = self.manifest_root.clone();
         owner_settled(
             cancellation,
@@ -860,6 +873,15 @@ impl ManifestTransaction {
         .await?;
         #[cfg(test)]
         self.inject_fault(ManifestTransactionFaultPoint::Compaction)?;
+        {
+            let mut session = self.session_segments.lock();
+            session
+                .carried
+                .retain(|_, handle| retained_handles.binary_search(handle).is_ok());
+            session
+                .verified
+                .retain(|handle| retained_handles.binary_search(handle).is_ok());
+        }
         let removed_orphan_segments = owner_settled(
             cancellation,
             "manifest-retain-orphans",
