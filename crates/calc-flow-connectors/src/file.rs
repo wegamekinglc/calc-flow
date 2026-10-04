@@ -230,6 +230,10 @@ impl FileSource {
     }
 
     fn cursor_for(&self, file_index: usize, row: u64) -> Result<Cursor> {
+        let sequence = self
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| Self::fail("read", &self.config.path, "batch sequence exhausted"))?;
         let name = self
             .files
             .get(file_index)
@@ -243,6 +247,7 @@ impl FileSource {
         let payload = BTreeMap::from([
             ("file".to_string(), Value::String(name)),
             ("row".to_string(), Value::from(row)),
+            ("sequence".to_string(), Value::from(sequence)),
         ]);
         Cursor::unbound(order, payload)
     }
@@ -518,17 +523,28 @@ impl StreamSource for FileSource {
         self.file_index = 0;
         self.row_offset = 0;
         self.line_cache = None;
+        self.sequence = 0;
         if let Some(cursor) = cursor {
-            let file = cursor
-                .payload()
+            let invalid = |field| {
+                Self::fail(
+                    "open",
+                    &self.config.path,
+                    &format!("invalid cursor.{field}"),
+                )
+            };
+            let payload = cursor.payload();
+            let file = payload
                 .get("file")
                 .and_then(Value::as_str)
-                .unwrap_or_default();
-            let row = cursor
-                .payload()
+                .ok_or_else(|| invalid("file"))?;
+            let row = payload
                 .get("row")
                 .and_then(Value::as_u64)
-                .unwrap_or_default();
+                .ok_or_else(|| invalid("row"))?;
+            let sequence = payload
+                .get("sequence")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| invalid("sequence"))?;
             let index = self
                 .files
                 .iter()
@@ -540,8 +556,19 @@ impl StreamSource for FileSource {
                         &format!("cursor names unknown file {file:?}"),
                     )
                 })?;
+            let mut order = [0; 16];
+            order[..8].copy_from_slice(&(index as u64).to_be_bytes());
+            order[8..].copy_from_slice(&row.to_be_bytes());
+            if payload.len() != 3 || row == 0 || sequence == 0 || cursor.order() != order {
+                return Err(Self::fail(
+                    "open",
+                    &self.config.path,
+                    "invalid cursor position",
+                ));
+            }
             self.file_index = index;
             self.row_offset = row;
+            self.sequence = sequence;
         }
         Ok(())
     }

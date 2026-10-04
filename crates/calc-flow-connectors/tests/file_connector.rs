@@ -951,6 +951,7 @@ async fn source_replay_rejects_unknown_cursor_files() {
     let payload = BTreeMap::from([
         ("file".to_string(), json!("ghost.csv")),
         ("row".to_string(), json!(0)),
+        ("sequence".to_string(), json!(1)),
     ]);
     let cursor = Cursor::unbound(order, payload).expect("cursor");
     let mut source =
