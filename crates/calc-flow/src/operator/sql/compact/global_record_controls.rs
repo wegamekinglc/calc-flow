@@ -1,6 +1,6 @@
 use super::*;
 
-async fn raw_capture(mut state: SqlOperator, batch: Batch, query: &str) {
+pub(super) async fn raw_capture(mut state: SqlOperator, batch: Batch, query: &str) {
     let job = job();
     let context = StreamOperatorContext::new(&job, "float_extrema", None);
     let expected = DataFusionRuntime::new(DataFusionConfig::default())
@@ -33,7 +33,7 @@ async fn raw_capture(mut state: SqlOperator, batch: Batch, query: &str) {
 }
 
 #[tokio::test]
-async fn test_global_record_nondefault_empty_first_integer_average_stay_raw4() {
+async fn test_global_record_nondefault_and_empty_first_stay_raw4() {
     for (dtype, query) in cases() {
         let mut state = operator(&dtype, query);
         state.set_stream_resources(
@@ -56,12 +56,16 @@ async fn test_global_record_nondefault_empty_first_integer_average_stay_raw4() {
         ],
     )
     .unwrap();
-    raw_capture(
-        operator(&dtype, AVG),
-        Batch::table(vec![record], metadata(0)).unwrap(),
-        AVG,
-    )
-    .await;
+    let mut state = operator(&dtype, AVG);
+    state.set_stream_resources(
+        DataFusionConfig {
+            target_partitions: 4,
+            ..DataFusionConfig::default()
+        },
+        UdfRegistrySnapshot::default(),
+        vec![],
+    );
+    raw_capture(state, Batch::table(vec![record], metadata(0)).unwrap(), AVG).await;
 }
 
 fn policy_snapshot(snapshot: &OperatorStateSnapshot, policy: Value) -> OperatorStateSnapshot {

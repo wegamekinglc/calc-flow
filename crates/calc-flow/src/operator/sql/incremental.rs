@@ -1680,7 +1680,7 @@ fn key_type(data_type: &DataType) -> bool {
     )
 }
 
-fn eligible(expr: &Expr, schema: &SchemaRef, global: bool) -> bool {
+fn eligible(expr: &Expr, schema: &SchemaRef, floating_extrema: bool, global: bool) -> bool {
     let Expr::AggregateFunction(function) = unalias(expr) else {
         return false;
     };
@@ -1712,27 +1712,40 @@ fn eligible(expr: &Expr, schema: &SchemaRef, global: bool) -> bool {
     if count {
         count_argument_supported(field.data_type())
     } else {
-        aggregate_argument_supported(field.data_type(), function.func.name(), global)
+        aggregate_argument_supported(
+            field.data_type(),
+            function.func.name(),
+            floating_extrema,
+            global,
+        )
     }
 }
 
-fn aggregate_argument_supported(data_type: &DataType, function: &str, global: bool) -> bool {
+fn aggregate_argument_supported(
+    data_type: &DataType,
+    function: &str,
+    floating_extrema: bool,
+    global: bool,
+) -> bool {
     match function {
         "sum" => {
             exact_numeric(data_type) || matches!(data_type, DataType::Float32 | DataType::Float64)
         }
-        "min" | "max" => extrema_argument_supported(data_type, global),
-        "avg" => matches!(
-            data_type,
-            DataType::Int64
-                | DataType::UInt64
-                | DataType::Float32
-                | DataType::Float64
-                | DataType::Decimal32(_, 0..)
-                | DataType::Decimal64(_, 0..)
-                | DataType::Decimal128(_, 0..)
-                | DataType::Decimal256(_, 0..)
-        ),
+        "min" | "max" => extrema_argument_supported(data_type, floating_extrema),
+        "avg" => {
+            (global && data_type.is_integer())
+                || matches!(
+                    data_type,
+                    DataType::Int64
+                        | DataType::UInt64
+                        | DataType::Float32
+                        | DataType::Float64
+                        | DataType::Decimal32(_, 0..)
+                        | DataType::Decimal64(_, 0..)
+                        | DataType::Decimal128(_, 0..)
+                        | DataType::Decimal256(_, 0..)
+                )
+        }
         _ => false,
     }
 }
@@ -1890,14 +1903,13 @@ fn plan_inputs(
     let Some((_, raw_aggregate)) = shape(raw) else {
         return Ok(None);
     };
+    let global = raw_aggregate.group_expr.is_empty();
+    let floating_extrema = global || fixed_group_key(raw_aggregate, schema);
     if raw_aggregate.aggr_expr.is_empty()
-        || !raw_aggregate.aggr_expr.iter().all(|expr| {
-            eligible(
-                expr,
-                schema,
-                raw_aggregate.group_expr.is_empty() || fixed_group_key(raw_aggregate, schema),
-            )
-        })
+        || !raw_aggregate
+            .aggr_expr
+            .iter()
+            .all(|expr| eligible(expr, schema, floating_extrema, global))
     {
         return Ok(None);
     }

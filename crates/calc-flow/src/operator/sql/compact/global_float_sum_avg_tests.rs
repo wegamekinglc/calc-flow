@@ -3,6 +3,9 @@ use super::*;
 #[path = "global_record_controls.rs"]
 mod global_record_controls;
 
+#[path = "global_integer_avg_tests.rs"]
+mod global_integer_avg_tests;
+
 const SUM: &str = "SELECT SUM(value) AS total FROM events";
 const AVG: &str = "SELECT AVG(value) AS mean FROM events";
 const MIXED: &str = "SELECT SUM(value) AS total, AVG(value) AS mean FROM events";

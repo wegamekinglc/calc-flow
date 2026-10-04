@@ -134,9 +134,10 @@ pub(super) fn raw_selected(raw: &LogicalPlan, schema: &SchemaRef) -> bool {
         let [Expr::Column(column)] = function.params.args.as_slice() else {
             return false;
         };
-        schema
-            .field_with_name(&column.name)
-            .is_ok_and(|field| matches!(field.data_type(), DataType::Float32 | DataType::Float64))
+        schema.field_with_name(&column.name).is_ok_and(|field| {
+            matches!(field.data_type(), DataType::Float32 | DataType::Float64)
+                || (function.func.name() == "avg" && field.data_type().is_integer())
+        })
     })
 }
 
