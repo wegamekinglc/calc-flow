@@ -60,6 +60,13 @@ pub(crate) fn u64_option(options: &JsonMap, key: &str) -> Result<Option<u64>> {
 }
 
 /// Read a positive integer option, substituting `default` when absent.
+#[cfg(any(
+    test,
+    feature = "http",
+    feature = "websocket",
+    feature = "clickhouse",
+    feature = "mysql"
+))]
 pub(crate) fn positive_option(options: &JsonMap, key: &str, default: u64) -> Result<u64> {
     let value = u64_option(options, key)?.unwrap_or(default);
     if value == 0 {
