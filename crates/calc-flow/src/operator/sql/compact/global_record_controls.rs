@@ -92,6 +92,7 @@ fn zero_input_snapshot(snapshot: &OperatorStateSnapshot) -> OperatorStateSnapsho
             DataType::UInt64 => Arc::new(datafusion::arrow::array::UInt64Array::from(vec![Some(
                 0_u64,
             )])) as ArrayRef,
+            DataType::Float32 => Arc::new(Float32Array::from(vec![None::<f32>])) as ArrayRef,
             DataType::Int64 => Arc::new(Int64Array::from(vec![0_i64])) as ArrayRef,
             DataType::Float64 => Arc::new(Float64Array::from(vec![None::<f64>])) as ArrayRef,
             _ => unreachable!(),

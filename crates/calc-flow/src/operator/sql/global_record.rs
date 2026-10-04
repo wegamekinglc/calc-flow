@@ -1,15 +1,11 @@
 use super::{
     AggregateFunctionExpr, Arc, ArrayRef, DataType, Expr, LogicalPlan, MemoryReservation,
-    PhysicalExpr, RecordBatch, Result, ScalarValue, SchemaRef, checked_bytes, df_error,
+    RecordBatch, Result, ScalarValue, SchemaRef, checked_bytes, df_error,
 };
 use crate::runtime::streaming::gather_work::{
     AdmissionFailure, GatherOperatorId, GatherStop, OwnedCpuWork,
 };
 use crate::{DataFusionConfig, DataFusionRuntime, StreamOperatorContext};
-use datafusion::arrow::{
-    array::{Array, ArrowNativeTypeOp, Float64Array},
-    compute::sum,
-};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -24,7 +20,7 @@ pub(in crate::operator::sql) struct Policy {
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(in crate::operator::sql) enum Factory {
-    ScalarFloat64V1,
+    ScalarNativeV1,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -38,6 +34,8 @@ enum Kind {
     Sum,
     Average,
     Count,
+    Extrema32,
+    Extrema64,
 }
 
 impl Kind {
@@ -45,6 +43,13 @@ impl Kind {
         if expression.fun().name() == "count" && expression.field().data_type() == &DataType::Int64
         {
             return Some(Self::Count);
+        }
+        if matches!(expression.fun().name(), "min" | "max") {
+            return match expression.field().data_type() {
+                DataType::Float32 => Some(Self::Extrema32),
+                DataType::Float64 => Some(Self::Extrema64),
+                _ => None,
+            };
         }
         if expression.field().data_type() != &DataType::Float64 {
             return None;
@@ -58,7 +63,7 @@ impl Kind {
 
     fn width(self) -> usize {
         match self {
-            Self::Sum | Self::Count => 1,
+            Self::Sum | Self::Count | Self::Extrema32 | Self::Extrema64 => 1,
             Self::Average => 2,
         }
     }
@@ -71,72 +76,20 @@ pub(super) struct Proof {
     _reservation: MemoryReservation,
 }
 
-#[derive(Clone, Copy)]
-struct Literal {
-    sum: Option<f64>,
-    count: u64,
-}
-
-impl Literal {
-    fn saved(kind: Kind, values: &[ScalarValue], name: &str) -> Result<Self> {
-        let (sum, count) = match (kind, values) {
-            (_, []) => (None, 0),
-            (Kind::Count, [ScalarValue::Int64(Some(count))]) if *count >= 0 => (
-                None,
-                u64::try_from(*count).map_err(|error| df_error(name, error))?,
-            ),
-            (Kind::Sum, [ScalarValue::Float64(sum)]) => (*sum, 0),
-            (Kind::Average, [ScalarValue::UInt64(Some(count)), ScalarValue::Float64(sum)])
-                if (*count == 0) == sum.is_none() =>
-            {
-                (*sum, *count)
-            }
-            _ => return Err(df_error(name, "global record scalar state is invalid")),
-        };
-        Ok(Self { sum, count })
-    }
-
-    fn update(&mut self, kind: Kind, array: &ArrayRef, name: &str) -> Result<()> {
-        if matches!(kind, Kind::Average | Kind::Count) {
-            self.count = self
-                .count
-                .checked_add(
-                    u64::try_from(array.len() - array.null_count())
-                        .map_err(|error| df_error(name, error))?,
-                )
-                .ok_or_else(|| df_error(name, "global aggregate count overflowed"))?;
+fn saved_count(kind: Kind, values: &[ScalarValue], name: &str) -> Result<u64> {
+    match (kind, values) {
+        (_, [])
+        | (Kind::Sum | Kind::Extrema64, [ScalarValue::Float64(_)])
+        | (Kind::Extrema32, [ScalarValue::Float32(_)]) => Ok(0),
+        (Kind::Count, [ScalarValue::Int64(Some(count))]) => {
+            u64::try_from(*count).map_err(|error| df_error(name, error))
         }
-        if matches!(kind, Kind::Count) {
-            i64::try_from(self.count).map_err(|error| df_error(name, error))?;
-            return Ok(());
+        (Kind::Average, [ScalarValue::UInt64(Some(count)), ScalarValue::Float64(sum)])
+            if (*count == 0) == sum.is_none() =>
+        {
+            Ok(*count)
         }
-        let array = array
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .ok_or_else(|| df_error(name, "global record argument must be Float64"))?;
-        if let Some(value) = sum(array) {
-            let saved = self.sum.get_or_insert(0.0);
-            match kind {
-                Kind::Sum => *saved = saved.add_wrapping(value),
-                Kind::Average => *saved += value,
-                Kind::Count => unreachable!("count returned before summation"),
-            }
-        }
-        Ok(())
-    }
-
-    fn scalars(self, kind: Kind) -> Vec<ScalarValue> {
-        if matches!(kind, Kind::Count) {
-            return vec![ScalarValue::Int64(Some(
-                i64::try_from(self.count).expect("validated count"),
-            ))];
-        }
-        let mut values = Vec::with_capacity(kind.width());
-        if matches!(kind, Kind::Average) {
-            values.push(ScalarValue::UInt64(Some(self.count)));
-        }
-        values.push(ScalarValue::Float64(self.sum));
-        values
+        _ => Err(df_error(name, "global record scalar state is invalid")),
     }
 }
 
@@ -162,7 +115,7 @@ pub(super) fn raw_selected(raw: &LogicalPlan, schema: &SchemaRef) -> bool {
                 [Expr::Column(_) | Expr::Literal(ScalarValue::Int64(Some(1)), _)]
             );
         }
-        if !matches!(function.func.name(), "sum" | "avg") {
+        if !matches!(function.func.name(), "sum" | "avg" | "min" | "max") {
             return false;
         }
         let [Expr::Column(column)] = function.params.args.as_slice() else {
@@ -200,7 +153,7 @@ impl Proof {
         Ok(Some(Self {
             policy: Policy {
                 config: runtime.compact_runtime_config(),
-                factory: Factory::ScalarFloat64V1,
+                factory: Factory::ScalarNativeV1,
                 model: Model::Df54SingleSourceSplitRecordsV1,
             },
             kinds: expressions
@@ -218,7 +171,7 @@ impl Proof {
         values: &[ScalarValue],
         name: &str,
     ) -> Result<ScalarValue> {
-        Literal::saved(self.kinds[index], values, name)?;
+        saved_count(self.kinds[index], values, name)?;
         super::grouped_sum::result(values, name)
     }
 
@@ -248,9 +201,9 @@ impl Proof {
                 *value =
                     ScalarValue::try_from_array(array, 0).map_err(|error| df_error(name, error))?;
             }
-            let saved = Literal::saved(kind, &values[..kind.width()], name)?;
-            if saved.count > rows {
-                return Err(df_error(name, "global AVG count exceeds input rows"));
+            let count = saved_count(kind, &values[..kind.width()], name)?;
+            if count > rows {
+                return Err(df_error(name, "global aggregate count exceeds input rows"));
             }
         }
         if columns.next().is_some() {
@@ -286,27 +239,16 @@ impl Proof {
             )?
         };
         super::ensure_reservation(&credit, charge, name)?;
-        let states = self
-            .kinds
-            .iter()
-            .zip(values)
-            .map(|(&kind, values)| Literal::saved(kind, values, name))
-            .collect::<Result<Vec<_>>>()?;
+        for (&kind, state) in self.kinds.iter().zip(values) {
+            saved_count(kind, state, name)?;
+        }
         if empty {
-            return Ok(states
-                .into_iter()
-                .zip(self.kinds.iter())
-                .map(|(state, &kind)| state.scalars(kind))
-                .collect());
+            return Ok(values.to_vec());
         }
         let work = RecordWork {
             records: records.to_vec(),
-            expressions: expressions
-                .iter()
-                .map(|expression| expression.expressions()[0].clone())
-                .collect(),
-            states,
-            kinds: self.kinds.clone(),
+            expressions: expressions.to_vec(),
+            states: values.to_vec(),
             batch_size: self.policy.config.batch_size,
             name: name.to_owned(),
             _input_owner: input_owner,
@@ -321,12 +263,7 @@ impl Proof {
             })?;
         let output = ticket.finish().await?;
         context.check_cancelled()?;
-        let values = output
-            .value
-            .iter()
-            .zip(self.kinds.iter())
-            .map(|(&state, &kind)| state.scalars(kind))
-            .collect();
+        let values = output.value.clone();
         drop(output);
         Ok(values)
     }
@@ -378,18 +315,39 @@ fn request_charge(
 
 struct RecordWork {
     records: Vec<RecordBatch>,
-    expressions: Vec<Arc<dyn PhysicalExpr>>,
-    states: Vec<Literal>,
-    kinds: Arc<[Kind]>,
+    expressions: Vec<Arc<AggregateFunctionExpr>>,
+    states: Vec<Vec<ScalarValue>>,
     batch_size: usize,
     name: String,
     _input_owner: Option<Arc<MemoryReservation>>,
 }
 
 impl OwnedCpuWork for RecordWork {
-    type Output = Vec<Literal>;
+    type Output = Vec<Vec<ScalarValue>>;
 
-    fn run(mut self, stop: &GatherStop) -> Result<Self::Output> {
+    fn run(self, stop: &GatherStop) -> Result<Self::Output> {
+        let mut accumulators = self
+            .expressions
+            .iter()
+            .zip(&self.states)
+            .map(|(expression, state)| {
+                stop.check()?;
+                let mut accumulator = expression
+                    .create_accumulator()
+                    .map_err(|error| df_error(&self.name, error))?;
+                if !state.is_empty() {
+                    let arrays = state
+                        .iter()
+                        .map(ScalarValue::to_array)
+                        .collect::<datafusion::common::Result<Vec<_>>>()
+                        .map_err(|error| df_error(&self.name, error))?;
+                    accumulator
+                        .merge_batch(&arrays)
+                        .map_err(|error| df_error(&self.name, error))?;
+                }
+                Ok(accumulator)
+            })
+            .collect::<Result<Vec<_>>>()?;
         for record in &self.records {
             stop.check()?;
             if record.num_rows() == 0 {
@@ -399,22 +357,32 @@ impl OwnedCpuWork for RecordWork {
                 stop.check()?;
                 let rows = self.batch_size.min(record.num_rows() - offset);
                 let batch = record.slice(offset, rows);
-                for ((expression, state), &kind) in self
-                    .expressions
-                    .iter()
-                    .zip(&mut self.states)
-                    .zip(self.kinds.iter())
-                {
+                for (expression, accumulator) in self.expressions.iter().zip(&mut accumulators) {
                     stop.check()?;
-                    let array: ArrayRef = expression
-                        .evaluate(&batch)
-                        .and_then(|value| value.into_array(rows))
+                    let arrays = expression
+                        .expressions()
+                        .iter()
+                        .map(|expression| {
+                            expression
+                                .evaluate(&batch)
+                                .and_then(|value| value.into_array(rows))
+                                .map_err(|error| df_error(&self.name, error))
+                        })
+                        .collect::<Result<Vec<ArrayRef>>>()?;
+                    accumulator
+                        .update_batch(&arrays)
                         .map_err(|error| df_error(&self.name, error))?;
-                    state.update(kind, &array, &self.name)?;
-                    stop.check()?;
                 }
             }
         }
-        Ok(self.states)
+        accumulators
+            .iter_mut()
+            .map(|accumulator| {
+                stop.check()?;
+                accumulator
+                    .state()
+                    .map_err(|error| df_error(&self.name, error))
+            })
+            .collect()
     }
 }

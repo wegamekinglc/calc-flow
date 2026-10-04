@@ -45,12 +45,10 @@ fn inspect(plan: &dyn ExecutionPlan, original: &Batch, census: &mut [usize; 2]) 
         assert!(aggregate.group_expr().expr().is_empty());
         assert!(aggregate.group_expr().groups().is_empty());
         assert!(!aggregate.aggr_expr().is_empty());
-        assert!(
-            aggregate
-                .aggr_expr()
-                .iter()
-                .all(|expression| matches!(expression.fun().name(), "sum" | "avg" | "count"))
-        );
+        assert!(aggregate.aggr_expr().iter().all(|expression| matches!(
+            expression.fun().name(),
+            "sum" | "avg" | "count" | "min" | "max"
+        )));
         assert!(aggregate.limit_options().is_none());
         assert!(aggregate.filter_expr().iter().all(Option::is_none));
     } else if let Some(source) = plan.downcast_ref::<DataSourceExec>() {
@@ -160,6 +158,7 @@ async fn test_global_float_executed_source_splits_each_original_record() {
             "SELECT AVG(value) FROM events",
             "SELECT SUM(value), AVG(value) FROM events",
             "SELECT SUM(value), AVG(value), COUNT(value), COUNT(*) FROM events",
+            "SELECT SUM(value), AVG(value), MIN(value), MAX(value), COUNT(value) FROM events",
             "SELECT AVG(value) AS mean, SUM(value) AS total, AVG(value) AS again FROM events",
         ] {
             let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
@@ -210,6 +209,7 @@ async fn test_global_float_default_single_plan_preserves_original_records() {
             "SELECT AVG(value) FROM events",
             "SELECT SUM(value), AVG(value) FROM events",
             "SELECT SUM(value), AVG(value), COUNT(value), COUNT(*) FROM events",
+            "SELECT SUM(value), AVG(value), MIN(value), MAX(value), COUNT(value) FROM events",
             "SELECT AVG(value) AS mean, SUM(value) AS total, AVG(value) AS again FROM events",
         ] {
             let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
