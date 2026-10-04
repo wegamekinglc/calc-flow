@@ -115,7 +115,11 @@ impl SqlOperator {
         if let Some(compact) = &prepared.compact {
             recovery_test_hooks::installing_metadata(self, &compact.state.metadata);
         }
-        self.incremental_checked = prepared.compact.is_some() || prepared.retained.is_some();
+        self.incremental_checked = prepared.compact.is_some()
+            || prepared
+                .retained
+                .as_ref()
+                .is_some_and(|state| state.rows != 0);
         self.retained_capture = prepared.retained_capture;
         if let Some(compact) = prepared.compact {
             self.incremental = Some(compact.native);

@@ -15,6 +15,9 @@ use std::{
     sync::{Arc, Weak},
 };
 
+#[path = "empty_prefix_tests.rs"]
+mod empty_prefix;
+
 type Bits = (u32, u64);
 type Row = (Option<i64>, Option<Bits>);
 type Part = Vec<Row>;

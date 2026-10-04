@@ -926,7 +926,7 @@ impl SqlOperator {
                 .prove_grouped_float_plan(&self.validated, alias, batch, &self.name)
                 .await?
         {
-            self.incremental_checked = true;
+            self.incremental_checked = batch.num_rows() != 0;
             return Ok(None);
         }
         context.check_cancelled()?;
@@ -939,7 +939,7 @@ impl SqlOperator {
                 .prove_global_record_plan(&self.validated, alias, batch, &self.name)
                 .await?
         {
-            self.incremental_checked = true;
+            self.incremental_checked = batch.num_rows() != 0;
             return Ok(None);
         }
         context.check_cancelled()?;
@@ -995,7 +995,7 @@ impl SqlOperator {
         incremental: &mut incremental::IncrementalSql,
         context: &StreamOperatorContext<'_>,
     ) -> Result<()> {
-        if let Some(retained) = self.retained.as_ref() {
+        if let Some(retained) = self.retained.as_ref().filter(|state| state.rows != 0) {
             let runtime = self.stream_state.runtime()?;
             let materialized = retained.materialize(runtime, &self.name)?;
             let transaction = incremental
