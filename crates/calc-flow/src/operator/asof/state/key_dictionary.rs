@@ -356,6 +356,19 @@ impl RightState {
         self.refresh(u32::try_from(id).expect("preflighted ASOF dictionary handle"));
     }
 
+    pub fn replace_admitted(
+        &mut self,
+        key: Encoding,
+        kind: SequenceKind,
+        bucket: Arc<RightBucket>,
+    ) {
+        let id = self.ensure_key(key, kind);
+        let entry = &mut self.entries[id];
+        self.bucket_bytes =
+            self.bucket_bytes - entry.bucket.metadata_bytes() + bucket.metadata_bytes();
+        entry.bucket = bucket;
+    }
+
     fn refresh(&mut self, id: u32) {
         #[cfg(test)]
         super::expiration_cost_tests::record_minima();

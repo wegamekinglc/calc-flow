@@ -18,6 +18,8 @@ use datafusion::execution::memory_pool::MemoryReservation;
 use hashbrown::HashTable;
 use std::{collections::HashSet, hash::BuildHasher, sync::Arc};
 
+pub(super) mod parallel;
+
 #[derive(Clone, Copy)]
 pub(super) struct ValidatedInput {
     pub index: usize,
@@ -38,6 +40,7 @@ pub(super) struct Admission {
     pub accepted: u64,
     pub left_chunks: Option<Vec<state::PreparedLeftChunk>>,
     pub right_capacities: Vec<(state::Encoding, usize)>,
+    pub right_buckets: Option<parallel::PreparedAdmission>,
     _workspace: AdmissionWorkspace,
 }
 
@@ -393,6 +396,7 @@ impl StreamAsofJoinOperator {
             left_chunks,
             accepted,
             right_capacities,
+            right_buckets: None,
             _workspace: workspace,
         })
     }
@@ -752,13 +756,6 @@ impl Admission {
             self.rows.clear();
             status.left.accepted_rows = self.accepted;
         } else {
-            for (key, count) in &self.right_capacities {
-                state
-                    .right
-                    .update_unindexed(key.clone(), state.sequence_kinds[1], |bucket| {
-                        bucket.reserve_payloads(*count);
-                    });
-            }
             // Each compact payload owns exactly its admitted rows. Attach its
             // reference count once, then resolve row handles without two pool
             // lookups for every row. Admission batches are ordered by key.
@@ -767,20 +764,27 @@ impl Admission {
                 .iter()
                 .map(|batch| state.batches.attach_batch(batch, batch.record.num_rows()))
                 .collect::<Vec<_>>();
-            for (identity, payload) in self.rows.drain(..) {
-                let payload = payload_refs[payload.batch_index].with_row(
-                    u32::try_from(payload.row).expect("preflighted ASOF payload row index"),
-                );
-                state.right_payload_min = Some(
+            if let Some(prepared) = self.right_buckets.take() {
+                prepared.install(&mut state.right, state.sequence_kinds[1], &payload_refs);
+                self.rows.clear();
+            } else {
+                for (key, count) in &self.right_capacities {
                     state
-                        .right_payload_min
-                        .map_or(identity.0, |previous| previous.min(identity.0)),
-                );
-                state
-                    .right
-                    .update_unindexed(identity.1, state.sequence_kinds[1], |bucket| {
-                        bucket.insert_admitted((identity.0, identity.2), payload);
-                    });
+                        .right
+                        .update_unindexed(key.clone(), state.sequence_kinds[1], |bucket| {
+                            bucket.reserve_payloads(*count);
+                        });
+                }
+                for (identity, payload) in self.rows.drain(..) {
+                    let payload = payload_refs[payload.batch_index].with_row(
+                        u32::try_from(payload.row).expect("preflighted ASOF payload row index"),
+                    );
+                    state
+                        .right
+                        .update_unindexed(identity.1, state.sequence_kinds[1], |bucket| {
+                            bucket.insert_admitted((identity.0, identity.2), payload);
+                        });
+                }
             }
             for (key, _) in self.right_capacities.drain(..) {
                 state.right.refresh_key(&key);
@@ -1011,6 +1015,7 @@ fn can_share_batch(batch: &RecordBatch) -> Result<bool> {
 #[cfg(test)]
 mod identity_tests {
     mod cpu;
+    mod parallel_cpu;
 
     use super::*;
     use crate::{CancellationToken, JsonMap, StreamJobContext};

@@ -5,6 +5,9 @@ use std::{
     collections::{BTreeSet, btree_set},
 };
 
+#[cfg(test)]
+mod merge_tests;
+
 type OrderRef<'a> = (&'a i64, SequenceRef<'a>);
 type RightRow<'a> = (OrderRef<'a>, Option<&'a RowRef>);
 type ExpiredRow<'a> = (i64, Option<&'a Encoding>, Option<&'a RowRef>);
@@ -511,6 +514,27 @@ impl RightBucket {
             .insert(order, payload);
     }
 
+    pub fn with_admitted(
+        &self,
+        rows: &[(RightOrder, RowRef)],
+        cancelled: &dyn Fn() -> crate::Result<()>,
+    ) -> crate::Result<Self> {
+        cancelled()?;
+        let payloads = merge_admitted(
+            self.payloads.as_deref(),
+            self.identities.sequences.kind(),
+            rows,
+            cancelled,
+        )?;
+        let result = Self {
+            payloads: Some(Box::new(payloads)),
+            identities: self.identities.clone(),
+            general_identities: self.general_identities.clone(),
+        };
+        cancelled()?;
+        Ok(result)
+    }
+
     fn payloads(&self) -> &RightRun<Vec<Option<RowRef>>> {
         self.payloads.as_deref().unwrap_or(&EMPTY_PAYLOADS)
     }
@@ -913,6 +937,73 @@ impl RightBucket {
         }
         self.identities.compact();
     }
+}
+
+fn merge_admitted(
+    previous: Option<&RightRun<Vec<Option<RowRef>>>>,
+    kind: SequenceKind,
+    rows: &[(RightOrder, RowRef)],
+    cancelled: &dyn Fn() -> crate::Result<()>,
+) -> crate::Result<RightRun<Vec<Option<RowRef>>>> {
+    debug_assert!(rows.windows(2).all(|pair| pair[0].0 < pair[1].0));
+    let empty = RightRun::with_capacity(0, kind);
+    let run = previous.unwrap_or(&empty);
+    let capacity = |old: usize| {
+        let required = run.times.len() + rows.len();
+        if previous.is_none() {
+            rows.len()
+        } else if old >= required {
+            old
+        } else {
+            required.max(old * 2).max(4)
+        }
+    };
+    let mut merged = RightRun {
+        times: Vec::with_capacity(capacity(run.times.capacity())),
+        sequences: SequenceColumn::with_capacity(capacity(run.sequences.capacity()), kind),
+        values: Vec::with_capacity(capacity(run.values.capacity())),
+        head: run.head,
+    };
+    for index in 0..run.head {
+        if index.is_multiple_of(128) {
+            cancelled()?;
+        }
+        merged.times.push(run.times[index]);
+        merged.sequences.push(
+            run.sequences
+                .get(index)
+                .expect("retired sequence slot")
+                .into_owned(),
+        );
+        merged.values.push(run.values[index]);
+    }
+    let mut resident = run.head;
+    let mut incoming = 0;
+    while resident < run.times.len() || incoming < rows.len() {
+        if merged.times.len().is_multiple_of(128) {
+            cancelled()?;
+        }
+        let old = run.at(resident);
+        let new = rows.get(incoming);
+        if let Some((order, value)) = old.filter(|(order, _)| {
+            new.is_none_or(|(next, _)| {
+                *order.0 < next.0 || (*order.0 == next.0 && order.1.as_ref() < &next.1)
+            })
+        }) {
+            merged.times.push(*order.0);
+            merged.sequences.push(order.1.into_owned());
+            merged.values.push(Some(*value));
+            resident += 1;
+        } else {
+            let ((time, sequence), value) = new.expect("remaining admitted row");
+            merged.times.push(*time);
+            merged.sequences.push(sequence.clone());
+            merged.values.push(Some(*value));
+            incoming += 1;
+        }
+    }
+    cancelled()?;
+    Ok(merged)
 }
 
 fn grow_column_capacities(capacities: &mut [usize], required: usize) {

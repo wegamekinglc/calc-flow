@@ -1,0 +1,349 @@
+use super::*;
+use crate::{
+    AsofStateLimits, BatchMetadata, EdgeCollector, Epoch, OperatorMetadata, StreamOperator,
+    runtime::streaming::gather_work::TestService,
+};
+use datafusion::arrow::array::{Int64Array, StringArray};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+const ROWS: usize = 8_192;
+
+fn assert_snapshot(actual: &crate::OperatorStateSnapshot, expected: &crate::OperatorStateSnapshot) {
+    assert_eq!(actual.inline_metadata, expected.inline_metadata);
+    assert_eq!(actual.segments, expected.segments);
+}
+
+fn fixture() -> StreamAsofJoinOperator {
+    let (template, schema) = identity_fixture();
+    let spec = StreamAsofJoinSpec::new(
+        template.spec.left().clone(),
+        template.spec.right().clone(),
+        std::time::Duration::from_micros(100_000),
+        AsofStateLimits::new(100_000, 128 << 20).unwrap(),
+    )
+    .unwrap();
+    StreamAsofJoinOperator::new("asof", schema.clone(), schema, spec).unwrap()
+}
+
+fn input(operator: &StreamAsofJoinOperator, start: usize) -> Batch {
+    timed_input(operator, start, 0)
+}
+
+fn timed_input(operator: &StreamAsofJoinOperator, start: usize, offset: i64) -> Batch {
+    let records = (start..start + ROWS)
+        .collect::<Vec<_>>()
+        .chunks(2_048)
+        .map(|indices| {
+            let rows = indices.iter().rev().copied().collect::<Vec<_>>();
+            RecordBatch::try_new(
+                operator.schemas[0].clone(),
+                vec![
+                    Arc::new(StringArray::from_iter_values(
+                        rows.iter()
+                            .map(|row| format!("key-{}-{}", row % 8, "x".repeat(32))),
+                    )),
+                    Arc::new(
+                        TimestampMicrosecondArray::from_iter_values(
+                            rows.iter()
+                                .map(|row| offset + i64::try_from(row % ROWS * 2).unwrap()),
+                        )
+                        .with_timezone("UTC"),
+                    ),
+                    Arc::new(Int64Array::from_iter_values(
+                        rows.iter().map(|row| i64::try_from(*row).unwrap()),
+                    )),
+                ],
+            )
+            .unwrap()
+        })
+        .collect();
+    Batch::table(records, BatchMetadata::default()).unwrap()
+}
+
+#[test]
+fn right_admission_runs_owned_key_units_and_preserves_recovery() {
+    let service = TestService::new(2, 1).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let mut operator = fixture();
+        let pool = operator.runtime.pool.clone();
+        let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new())
+            .with_gather_owner(service.owner("right-admission".into()));
+        let context = StreamOperatorContext::new(&job, "asof", None);
+        let mut output = EdgeCollector::new(operator.output_ports().to_vec());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        operator.admission_hook = Some(Arc::new(move |_| {
+            counter.fetch_add(1, Ordering::Relaxed);
+        }));
+        for start in [0, ROWS] {
+            operator
+                .process_data("right", input(&operator, start), &context, &mut output)
+                .await
+                .unwrap();
+        }
+        operator
+            .process_data(
+                "right",
+                timed_input(&operator, 2 * ROWS, 100_000),
+                &context,
+                &mut output,
+            )
+            .await
+            .unwrap();
+        if std::thread::available_parallelism().map_or(1, usize::from) >= 2 {
+            assert_eq!(
+                calls.load(Ordering::Relaxed),
+                4,
+                "right admission ran no parallel key units"
+            );
+        }
+        operator.prepare_checkpoint_async(&context).await.unwrap();
+        let snapshot = operator.checkpoint(Epoch::INITIAL).unwrap();
+        let mut restored = fixture();
+        let restored_pool = restored.runtime.pool.clone();
+        restored.restore(&snapshot).unwrap();
+        assert_eq!(restored.status, operator.status);
+        let recaptured = restored.checkpoint(Epoch::INITIAL).unwrap();
+        assert_snapshot(&recaptured, &snapshot);
+        for candidate in [&mut operator, &mut restored] {
+            candidate
+                .process_data("left", input(candidate, 0), &context, &mut output)
+                .await
+                .unwrap();
+            candidate.on_end(&context, &mut output).await.unwrap();
+            let mut seen = Vec::new();
+            for message in output.drain("output") {
+                let batch = message.as_data().unwrap();
+                assert_eq!(
+                    batch.metadata(),
+                    &BatchMetadata::new("asof", u64::try_from(seen.len()).unwrap(), JsonMap::new())
+                        .unwrap()
+                );
+                assert_eq!(
+                    batch.table_payload().unwrap().schema(),
+                    &candidate.schemas[2]
+                );
+                for record in batch.table_payload().unwrap().batches() {
+                    let column = |index| {
+                        record
+                            .column(index)
+                            .as_any()
+                            .downcast_ref::<Int64Array>()
+                            .unwrap()
+                    };
+                    seen.extend(
+                        column(2)
+                            .values()
+                            .iter()
+                            .copied()
+                            .zip(column(5).values().iter().copied()),
+                    );
+                }
+            }
+            assert_eq!(
+                seen,
+                (0..ROWS)
+                    .map(|row| (
+                        i64::try_from(row).unwrap(),
+                        i64::try_from(row + ROWS).unwrap()
+                    ))
+                    .collect::<Vec<_>>()
+            );
+        }
+        assert!(job.gather_owner().close_and_drain().await.is_empty());
+        drop((operator, restored, snapshot, recaptured, output, context));
+        drop(job);
+        assert_eq!(pool.reserved(), 0);
+        assert_eq!(restored_pool.reserved(), 0);
+    });
+    drop(runtime);
+    service.shutdown();
+}
+
+#[derive(Default)]
+struct Gate {
+    open: parking_lot::Mutex<bool>,
+    changed: parking_lot::Condvar,
+}
+
+impl Gate {
+    fn wait(&self) {
+        let mut open = self.open.lock();
+        while !*open {
+            self.changed.wait(&mut open);
+        }
+    }
+    fn release(&self) {
+        *self.open.lock() = true;
+        self.changed.notify_all();
+    }
+}
+
+struct Release(Arc<Gate>);
+impl Drop for Release {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
+#[test]
+fn abandoned_right_admission_keeps_owned_buckets_funded_until_exit() {
+    use crate::runtime::streaming::gather_work::{GatherOperatorId, GatherStop};
+    let service = TestService::new(2, 1).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let mut operator = fixture();
+        let pool = operator.runtime.pool.clone();
+        let job = StreamJobContext::new(2, "asof", JsonMap::new(), None, CancellationToken::new())
+            .with_gather_owner(service.owner("right-admission-abandon".into()));
+        let context = StreamOperatorContext::new(&job, "asof", None);
+        let mut output = EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data("right", input(&operator, 0), &context, &mut output)
+            .await
+            .unwrap();
+        let gate = Arc::new(Gate::default());
+        let release = Release(gate.clone());
+        let (entered, receiver) = std::sync::mpsc::channel();
+        operator.admission_hook = Some(Arc::new(move |ordinal| {
+            entered.send(ordinal).unwrap();
+            gate.wait();
+        }));
+        let batch = input(&operator, ROWS);
+        let validated = operator.validate_admission("right", &batch).unwrap();
+        let admission = operator
+            .prepare_admission(validated, &batch, &context)
+            .await
+            .unwrap();
+        let bucket = operator
+            .state
+            .right
+            .owned_bucket(&admission.right_capacities[0].0)
+            .unwrap();
+        let weak = Arc::downgrade(&bucket);
+        drop(bucket);
+        let reserved = pool.reserved();
+        let (work, _, credit) = parallel::capture(&operator, &admission, 2, &context)
+            .await
+            .unwrap();
+        let input_credit = pool.reserved() - reserved - credit.size();
+        assert!(input_credit > 0);
+        let scope = context
+            .gather_client(GatherOperatorId::new("asof".into()))
+            .scope()
+            .unwrap();
+        let ticket = scope
+            .submit_parallel_work(Arc::new(work), credit, GatherStop::from_job(&job))
+            .await
+            .unwrap();
+        let mut started = (0..2)
+            .filter_map(|_| {
+                receiver
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .ok()
+            })
+            .collect::<Vec<_>>();
+        started.sort_unstable();
+        drop((ticket, admission, operator, batch, output));
+        assert!(weak.upgrade().is_some());
+        assert!(pool.reserved() >= input_credit);
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(25),
+                job.gather_owner().close_and_drain()
+            )
+            .await
+            .is_err()
+        );
+        drop(release);
+        assert!(job.gather_owner().close_and_drain().await.is_empty());
+        assert_eq!(started, [0, 1], "right admission units did not overlap");
+        assert!(weak.upgrade().is_none());
+        drop((scope, context));
+        drop(job);
+        assert_eq!(pool.reserved(), 0);
+    });
+    drop(runtime);
+    service.shutdown();
+}
+
+#[tokio::test]
+async fn right_admission_budget_refusal_preserves_state_and_refunds() {
+    let mut operator = fixture();
+    let job = StreamJobContext::new(3, "asof", JsonMap::new(), None, CancellationToken::new());
+    let context = StreamOperatorContext::new(&job, "asof", None);
+    let batch = input(&operator, 0);
+    let validated = operator.validate_admission("right", &batch).unwrap();
+    let admission = operator
+        .prepare_admission(validated, &batch, &context)
+        .await
+        .unwrap();
+    let before = operator.status.clone();
+    let free = operator.spec.limits().max_state_bytes() - operator.runtime.pool.reserved() as u64;
+    let occupied = operator.reserve_workspace(free).unwrap();
+    let reserved = operator.runtime.pool.reserved();
+    assert!(matches!(
+        parallel::capture(&operator, &admission, 2, &context).await,
+        Err(crate::CalcFlowError::OperatorReason {
+            reason_code: StreamingFailureReason::AsofWorkspaceLimitExceeded,
+            ..
+        })
+    ));
+    assert_eq!(operator.status, before);
+    assert_eq!(operator.runtime.pool.reserved(), reserved);
+    assert!(
+        parallel::prepare(&operator, &admission, &context)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(operator.runtime.pool.reserved(), reserved);
+    drop((occupied, admission));
+    assert_eq!(operator.runtime.pool.reserved(), 0);
+}
+
+#[test]
+fn failed_right_admission_worker_preserves_checkpoint_and_state() {
+    let service = TestService::new(2, 1).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let mut operator = fixture();
+        let pool = operator.runtime.pool.clone();
+        let job = StreamJobContext::new(4, "asof", JsonMap::new(), None, CancellationToken::new())
+            .with_gather_owner(service.owner("right-admission-failure".into()));
+        let context = StreamOperatorContext::new(&job, "asof", None);
+        let mut output = EdgeCollector::new(operator.output_ports().to_vec());
+        operator.prepare_checkpoint_async(&context).await.unwrap();
+        let snapshot = operator.checkpoint(Epoch::INITIAL).unwrap();
+        let before = operator.status.clone();
+        operator.admission_hook = Some(Arc::new(|ordinal| {
+            assert_ne!(ordinal, 0, "right-admission-worker-failure");
+        }));
+        assert!(
+            operator
+                .process_data("right", input(&operator, 0), &context, &mut output)
+                .await
+                .is_err()
+        );
+        assert_eq!(operator.status, before);
+        let after = operator.checkpoint(Epoch::INITIAL).unwrap();
+        assert_snapshot(&after, &snapshot);
+        assert!(output.drain("output").is_empty());
+        let _failures = job.gather_owner().close_and_drain().await;
+        drop((operator, snapshot, after, output, context));
+        drop(job);
+        assert_eq!(pool.reserved(), 0);
+    });
+    drop(runtime);
+    service.shutdown();
+}

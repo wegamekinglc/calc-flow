@@ -81,6 +81,8 @@ pub struct StreamAsofJoinOperator {
     payload_header_bytes: [u64; 2],
     #[cfg(test)]
     match_hook: Option<std::sync::Arc<dyn Fn(usize) + Send + Sync>>,
+    #[cfg(test)]
+    admission_hook: Option<std::sync::Arc<dyn Fn(usize) + Send + Sync>>,
 }
 
 impl StreamAsofJoinOperator {
@@ -116,8 +118,20 @@ impl StreamAsofJoinOperator {
             .batches
             .project_admission(&admission.batches, &self.name)?
             .new_batches;
+        if ingress == "right" {
+            admission.right_buckets = admission::parallel::prepare(self, &admission, context)
+                .await
+                .map_err(|error| self.attempt_error(error))?;
+        }
         let copies = self
-            .prepare_right_admission_copies(&admission.right_capacities, context)
+            .prepare_right_admission_copies(
+                if admission.right_buckets.is_some() {
+                    &[]
+                } else {
+                    &admission.right_capacities
+                },
+                context,
+            )
             .await
             .map_err(|error| self.attempt_error(error))?;
         let storage = self
@@ -254,6 +268,8 @@ impl StreamAsofJoinOperator {
             payload_header_bytes,
             #[cfg(test)]
             match_hook: None,
+            #[cfg(test)]
+            admission_hook: None,
             name,
             spec,
             inputs,
