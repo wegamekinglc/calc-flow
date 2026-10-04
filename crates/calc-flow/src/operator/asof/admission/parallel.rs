@@ -144,7 +144,35 @@ fn appends_after_state(
                 .map(|((time, _), _)| *time)
         })
         .max();
-    Ok(latest.is_some_and(|latest| latest < earliest))
+    let Some(latest) = latest else {
+        return Ok(false);
+    };
+    if latest < earliest {
+        return Ok(true);
+    }
+    // Admission rows are ordered within each key.
+    let mut previous = None;
+    for (ordinal, (identity, _)) in admission.rows.iter().enumerate() {
+        if ordinal.is_multiple_of(1_024) {
+            context.check_cancelled()?;
+        }
+        if previous == Some(&identity.1) {
+            continue;
+        }
+        previous = Some(&identity.1);
+        if operator
+            .state
+            .right
+            .get(&identity.1)
+            .and_then(state::RightBucket::last_key_value)
+            .is_some_and(|((time, sequence), _)| {
+                (time, sequence.as_ref()) >= (&identity.0, &identity.2)
+            })
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 pub(super) async fn capture(

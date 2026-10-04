@@ -3,7 +3,10 @@ use crate::{
     AsofStateLimits, BatchMetadata, EdgeCollector, Epoch, OperatorMetadata, StreamOperator,
     runtime::streaming::gather_work::TestService,
 };
-use datafusion::arrow::array::{Int64Array, StringArray};
+use datafusion::arrow::{
+    array::{Int64Array, StringArray},
+    datatypes::SchemaRef,
+};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 const ROWS: usize = 8_192;
@@ -30,6 +33,16 @@ fn input(operator: &StreamAsofJoinOperator, start: usize) -> Batch {
 }
 
 fn timed_input(operator: &StreamAsofJoinOperator, start: usize, offset: i64) -> Batch {
+    keyed_input(operator, start, |row| {
+        offset + i64::try_from(row % ROWS * 2).unwrap()
+    })
+}
+
+fn keyed_input(
+    operator: &StreamAsofJoinOperator,
+    start: usize,
+    time: impl Fn(usize) -> i64,
+) -> Batch {
     let records = (start..start + ROWS)
         .collect::<Vec<_>>()
         .chunks(2_048)
@@ -44,8 +57,7 @@ fn timed_input(operator: &StreamAsofJoinOperator, start: usize, offset: i64) -> 
                     )),
                     Arc::new(
                         TimestampMicrosecondArray::from_iter_values(
-                            rows.iter()
-                                .map(|row| offset + i64::try_from(row % ROWS * 2).unwrap()),
+                            rows.iter().map(|row| time(*row)),
                         )
                         .with_timezone("UTC"),
                     ),
@@ -58,6 +70,110 @@ fn timed_input(operator: &StreamAsofJoinOperator, start: usize, offset: i64) -> 
         })
         .collect();
     Batch::table(records, BatchMetadata::default()).unwrap()
+}
+
+fn matches(output: &mut EdgeCollector, schema: &SchemaRef) -> Vec<(i64, i64)> {
+    let mut seen = Vec::new();
+    for message in output.drain("output") {
+        let batch = message.as_data().unwrap();
+        assert_eq!(
+            batch.metadata(),
+            &BatchMetadata::new("asof", u64::try_from(seen.len()).unwrap(), JsonMap::new())
+                .unwrap()
+        );
+        assert_eq!(batch.table_payload().unwrap().schema(), schema);
+        for record in batch.table_payload().unwrap().batches() {
+            let column = |index| {
+                record
+                    .column(index)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap()
+            };
+            seen.extend(
+                column(2)
+                    .values()
+                    .iter()
+                    .copied()
+                    .zip(column(5).values().iter().copied()),
+            );
+        }
+    }
+    seen
+}
+
+#[test]
+fn per_key_right_append_preserves_ties_and_overlap_recovery() {
+    let service = TestService::new(2, 1).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let mut operator = fixture();
+        let pool = operator.runtime.pool.clone();
+        let job = StreamJobContext::new(5, "asof", JsonMap::new(), None, CancellationToken::new())
+            .with_gather_owner(service.owner("per-key-append".into()));
+        let context = StreamOperatorContext::new(&job, "asof", None);
+        let mut output = EdgeCollector::new(operator.output_ports().to_vec());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        operator.admission_hook = Some(Arc::new(move |_| {
+            counter.fetch_add(1, Ordering::Relaxed);
+        }));
+        let parallel = std::thread::available_parallelism().map_or(1, usize::from) >= 2;
+        for (ordinal, offset, expected_calls) in [(0, 0, 2), (1, 0, 2), (2, 1, 2), (3, 0, 4)] {
+            let batch = keyed_input(&operator, ordinal * ROWS, |row| {
+                i64::try_from(row % 8).unwrap() * 100_000 + offset
+            });
+            operator
+                .process_data("right", batch, &context, &mut output)
+                .await
+                .unwrap();
+            if parallel {
+                assert_eq!(
+                    calls.load(Ordering::Relaxed),
+                    expected_calls,
+                    "per-key append should preserve the in-place path at batch {ordinal}"
+                );
+            }
+        }
+        operator.prepare_checkpoint_async(&context).await.unwrap();
+        let snapshot = operator.checkpoint(Epoch::INITIAL).unwrap();
+        let mut restored = fixture();
+        let restored_pool = restored.runtime.pool.clone();
+        restored.restore(&snapshot).unwrap();
+        assert_eq!(restored.status, operator.status);
+        assert_snapshot(&restored.checkpoint(Epoch::INITIAL).unwrap(), &snapshot);
+        let expected = (0..8)
+            .flat_map(|key| {
+                (key..ROWS).step_by(8).map(move |row| {
+                    (
+                        i64::try_from(row).unwrap(),
+                        i64::try_from(3 * ROWS - 8 + key).unwrap(),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        for candidate in [&mut operator, &mut restored] {
+            let left = keyed_input(candidate, 0, |row| {
+                i64::try_from(row % 8).unwrap() * 100_000 + 1
+            });
+            candidate
+                .process_data("left", left, &context, &mut output)
+                .await
+                .unwrap();
+            candidate.on_end(&context, &mut output).await.unwrap();
+            assert_eq!(matches(&mut output, &candidate.schemas[2]), expected);
+        }
+        assert!(job.gather_owner().close_and_drain().await.is_empty());
+        drop((operator, restored, snapshot, output, context));
+        drop(job);
+        assert_eq!(pool.reserved(), 0);
+        assert_eq!(restored_pool.reserved(), 0);
+    });
+    drop(runtime);
+    service.shutdown();
 }
 
 #[test]
@@ -115,37 +231,8 @@ fn right_admission_runs_owned_key_units_and_preserves_recovery() {
                 .await
                 .unwrap();
             candidate.on_end(&context, &mut output).await.unwrap();
-            let mut seen = Vec::new();
-            for message in output.drain("output") {
-                let batch = message.as_data().unwrap();
-                assert_eq!(
-                    batch.metadata(),
-                    &BatchMetadata::new("asof", u64::try_from(seen.len()).unwrap(), JsonMap::new())
-                        .unwrap()
-                );
-                assert_eq!(
-                    batch.table_payload().unwrap().schema(),
-                    &candidate.schemas[2]
-                );
-                for record in batch.table_payload().unwrap().batches() {
-                    let column = |index| {
-                        record
-                            .column(index)
-                            .as_any()
-                            .downcast_ref::<Int64Array>()
-                            .unwrap()
-                    };
-                    seen.extend(
-                        column(2)
-                            .values()
-                            .iter()
-                            .copied()
-                            .zip(column(5).values().iter().copied()),
-                    );
-                }
-            }
             assert_eq!(
-                seen,
+                matches(&mut output, &candidate.schemas[2]),
                 (0..ROWS)
                     .map(|row| (
                         i64::try_from(row).unwrap(),
