@@ -184,26 +184,31 @@ status surface.
 
 ## Bounded backward ASOF Join
 
-`StreamAsofJoinOperator` owns the separate `stream_asof_join@1` state. Rust
-ordered indexes use typed Arrow row encodings for exact keys and sequence
-ordering; each final left row selects at most one right predecessor in its
-inclusive tolerance. A reused DataFusion session performs the bounded
-ordinal-and-key left join, prefixed projection, and ordinal ordering. This
-avoids an all-matches intermediate and keeps Python limited to declarations,
-analysis, and lowering.
+`StreamAsofJoinOperator` owns the separate `stream_asof_join@1` state. Native
+indexes preserve exact typed key and sequence ordering; each final left row
+selects at most one right predecessor in its inclusive tolerance. Large ordered
+left prefixes reuse a per-key right cursor; smaller outputs or constrained
+workspace use binary search. Output materialization gathers retained Arrow
+columns on a blocking worker, copying consecutive left rows as spans and
+interleaving right candidates with nulls for unmatched rows. Python owns
+declarations, analysis, and lowering.
 
-Pending left rows and right history use compact owned IPC payloads; identity
-and index allocations plus the prepared checkpoint segment join the versioned
-persistent byte charge. A separate workspace budget equal to the configured
-state-byte limit includes admission copies, candidate/output arrays, DataFusion
-reservations, encoding, and restore. It is not a process RSS ceiling.
+Pending left rows keep compact columnar identities and references into retained
+Arrow payload batches. Right history uses ordered per-key indexes and the same
+payload pool. State/layout/accounting version 3 charges retained capacities,
+unique identity buffers, payload batches, and the reserved canonical checkpoint
+index. A separate workspace budget equal to the configured state-byte limit
+covers admission copies, candidate/output arrays, compaction, encoding, and
+restore. It is not a process RSS ceiling.
 
-Asynchronous data/progress handlers prepare a complete compacted state segment
-with bounded workspace and cancellation points. Each preparation is
-`O(retained state)` and repeats for each accepted output chunk; total handler
-work includes those repeated preparations.
-checkpoint capture shares the prepared allocation and bounded metadata. Capture
-cost does not imply constant-cost handlers. The runtime owns persisted ingress
+Admission and output-prefix preparation preflight incremental state and index
+charges. An accepted output chunk synchronously commits its prepared prefix
+without re-encoding the complete state. Right-side eviction runs once after
+the ready chunks in a progress tick have been accepted. A changing eviction
+sweep still traverses retained right buckets; bounded chunks do not imply
+constant-cost handlers. Managed checkpoint preparation writes the canonical
+index and encodes uncached retained payloads before synchronous capture shares
+the immutable segments and bounded metadata. The runtime owns persisted ingress
 progress and output frontier, which ASOF cross-validates with restored state.
 It closes left rows only after both sides strictly pass their time, retains idle
 watermarks, and forwards a conservative frontier. See the

@@ -1,0 +1,742 @@
+{
+  "markdown_count": 89,
+  "shell_count": 126,
+  "shell_raw_pass": 120,
+  "shell_substituted_pass": 126,
+  "python_parsed_count": 62,
+  "python_syntax_exceptions": [
+    {
+      "path": ".codex/artifacts/api-notes/bounded-backward-asof-join.md",
+      "line": 35,
+      "error": "Invalid star expression"
+    },
+    {
+      "path": ".codex/artifacts/api-notes/symbolic-exponential-indicators.md",
+      "line": 7,
+      "error": "Invalid star expression"
+    },
+    {
+      "path": ".codex/artifacts/specs/symbolic-event-window-aggregation.md",
+      "line": 101,
+      "error": "invalid syntax"
+    }
+  ],
+  "python_engine_exceptions": [
+    {
+      "path": ".codex/artifacts/specs/symbolic-event-window-aggregation.md",
+      "line": 174,
+      "problem": "Program call omits engine"
+    }
+  ],
+  "style_findings": [],
+  "existing_fenced_examples_unchanged": true,
+  "agent_non_text_config_unchanged": true,
+  "baseline_main_sha": "29fe284b56ee01306c4da6deab28b9e2f2883746",
+  "baseline_markdown_count": 88,
+  "external_http_results": [
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/tree/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/tree/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/pull/260",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/pull/260"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/pull/243",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/pull/243"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/pull/321",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/pull/321"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/pull/322",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/pull/322"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs/superpowers/audits/2026-08-19-continuous-streaming-v3-current-main.md",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/blob/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs/superpowers/audits/2026-08-19-continuous-streaming-v3-current-main.md"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-linux.yml/badge.svg?branch=main",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-linux.yml/badge.svg?branch=main"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-windows.yml/badge.svg?branch=main",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-windows.yml/badge.svg?branch=main"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/actions/workflows/benchmark-suite.yml/badge.svg?branch=main",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/actions/workflows/benchmark-suite.yml/badge.svg?branch=main"
+    },
+    {
+      "url": "https://app.codacy.com/project/badge/Grade/7416ea8873544e599089cf63aba3717d",
+      "status": 200,
+      "final_url": "https://app.codacy.com/project/badge/Grade/7416ea8873544e599089cf63aba3717d"
+    },
+    {
+      "url": "https://coveralls.io/repos/github/wegamekinglc/calc-flow/badge.svg?branch=main",
+      "status": 200,
+      "final_url": "https://s3.amazonaws.com/assets.coveralls.io/badges/coveralls_93.svg"
+    },
+    {
+      "url": "https://github.com/TA-Lib/ta-lib-python/tree/v0.7.1",
+      "status": 200,
+      "final_url": "https://github.com/TA-Lib/ta-lib-python/tree/v0.7.1"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs/superpowers/specs/2026-08-22-symbolic-computation-engine-design.md",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/blob/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs/superpowers/specs/2026-08-22-symbolic-computation-engine-design.md"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/issues/168",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/issues/168"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs/superpowers/plans/2026-08-22-symbolic-computation-engine.md",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/blob/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs/superpowers/plans/2026-08-22-symbolic-computation-engine.md"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/issues/172",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/issues/172"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/issues/175",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/issues/175"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/issues/181",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/issues/181"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/pull/221",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/pull/221"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/issues/220",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/issues/220"
+    },
+    {
+      "url": "https://nvlpubs.nist.gov/nistpubs/TechnicalNotes/NIST.TN.2119.pdf",
+      "status": 200,
+      "final_url": "https://nvlpubs.nist.gov/nistpubs/TechnicalNotes/NIST.TN.2119.pdf"
+    },
+    {
+      "url": "https://doc.rust-lang.org/cargo/reference/external-tools.html#artifact-messages",
+      "status": 200,
+      "final_url": "https://doc.rust-lang.org/cargo/reference/external-tools.html#artifact-messages"
+    },
+    {
+      "url": "https://docs.astral.sh/uv/",
+      "status": 200,
+      "final_url": "https://docs.astral.sh/uv/"
+    },
+    {
+      "url": "https://arrow.apache.org/docs/format/Columnar.html",
+      "status": 200,
+      "final_url": "https://arrow.apache.org/docs/format/Columnar.html"
+    },
+    {
+      "url": "https://github.com/alpha-miner/Finance-Python/tree/3e33d3e70c3458b4c6dcf76b88df6148229b402c/PyFin/tests/Analysis",
+      "status": 200,
+      "final_url": "https://github.com/alpha-miner/Finance-Python/tree/3e33d3e70c3458b4c6dcf76b88df6148229b402c/PyFin/tests/Analysis"
+    },
+    {
+      "url": "https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow",
+      "status": 200,
+      "final_url": "https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow"
+    },
+    {
+      "url": "https://man7.org/linux/man-pages/man1/perf-record.1.html",
+      "status": 200,
+      "final_url": "https://man7.org/linux/man-pages/man1/perf-record.1.html"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/main/docs/getting-started.md",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/blob/main/docs/getting-started.md"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-linux.yml",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-linux.yml"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-windows.yml",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-windows.yml"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/actions/workflows/benchmark-suite.yml",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/actions/workflows/benchmark-suite.yml"
+    },
+    {
+      "url": "https://app.codacy.com/gh/wegamekinglc/calc-flow/dashboard",
+      "status": 200,
+      "final_url": "https://app.codacy.com/gh/wegamekinglc/calc-flow/dashboard"
+    },
+    {
+      "url": "https://coveralls.io/github/wegamekinglc/calc-flow?branch=main",
+      "status": 403,
+      "error": "HTTP Error 403: Forbidden"
+    }
+  ],
+  "external_url_count": 33,
+  "external_head_200": 32,
+  "baseline_local_link_targets": 886,
+  "baseline_local_link_findings": [],
+  "npm_script_references": [
+    {
+      "path": ".claude/agents/cf-api-designer.md",
+      "script": "sync:api",
+      "defined": true
+    },
+    {
+      "path": ".claude/agents/cf-implementer.md",
+      "script": "sync:api",
+      "defined": true
+    },
+    {
+      "path": ".claude/agents/cf-implementer.md",
+      "script": "build",
+      "defined": true
+    },
+    {
+      "path": ".claude/agents/cf-implementer.md",
+      "script": "sync:api",
+      "defined": true
+    },
+    {
+      "path": ".claude/agents/cf-implementer.md",
+      "script": "test:e2e",
+      "defined": true
+    },
+    {
+      "path": ".claude/agents/cf-reviewer.md",
+      "script": "sync:api",
+      "defined": true
+    },
+    {
+      "path": ".claude/agents/cf-reviewer.md",
+      "script": "build",
+      "defined": true
+    },
+    {
+      "path": ".claude/agents/cf-simplifier.md",
+      "script": "sync:api",
+      "defined": true
+    },
+    {
+      "path": ".claude/agents/cf-tester.md",
+      "script": "test:e2e",
+      "defined": true
+    },
+    {
+      "path": ".claude/specs/head-operator.md",
+      "script": "sync:api",
+      "defined": true
+    },
+    {
+      "path": ".claude/specs/head-operator.md",
+      "script": "build",
+      "defined": true
+    },
+    {
+      "path": ".codex/artifacts/specs/head-operator.md",
+      "script": "sync:api",
+      "defined": true
+    },
+    {
+      "path": ".codex/artifacts/specs/head-operator.md",
+      "script": "build",
+      "defined": true
+    },
+    {
+      "path": "AGENTS.md",
+      "script": "sync:api",
+      "defined": true
+    },
+    {
+      "path": "AGENTS.md",
+      "script": "build",
+      "defined": true
+    },
+    {
+      "path": "AGENTS.md",
+      "script": "test:e2e",
+      "defined": true
+    },
+    {
+      "path": "README.md",
+      "script": "sync:api",
+      "defined": true
+    },
+    {
+      "path": "README.md",
+      "script": "build",
+      "defined": true
+    },
+    {
+      "path": "README.md",
+      "script": "test:e2e",
+      "defined": true
+    },
+    {
+      "path": "docs/api-reference.md",
+      "script": "sync:api",
+      "defined": true
+    },
+    {
+      "path": "docs/getting-started.md",
+      "script": "build",
+      "defined": true
+    },
+    {
+      "path": "docs/getting-started.md",
+      "script": "build",
+      "defined": true
+    },
+    {
+      "path": "docs/plans/2026-09-09-bounded-backward-asof-join.md",
+      "script": "sync:api",
+      "defined": true
+    },
+    {
+      "path": "docs/plans/2026-09-09-bounded-backward-asof-join.md",
+      "script": "generate:api",
+      "defined": true
+    },
+    {
+      "path": "web-ui/README.md",
+      "script": "dev",
+      "defined": true
+    },
+    {
+      "path": "web-ui/README.md",
+      "script": "build:wheel",
+      "defined": true
+    },
+    {
+      "path": "web-ui/README.md",
+      "script": "sync:api",
+      "defined": true
+    },
+    {
+      "path": "web-ui/README.md",
+      "script": "sync:api",
+      "defined": true
+    },
+    {
+      "path": "web-ui/README.md",
+      "script": "build",
+      "defined": true
+    },
+    {
+      "path": "web-ui/README.md",
+      "script": "test:e2e",
+      "defined": true
+    }
+  ],
+  "inline_path_candidates": [
+    {
+      "path": ".agents/skills/code-style/SKILL.md",
+      "target": "src/calc_flow/",
+      "classification": "explicitly_removed_path"
+    },
+    {
+      "path": ".claude/agents/README.md",
+      "target": ".codex/artifacts/specs/tumbling-window.md",
+      "classification": "illustrative_artifact_slug"
+    },
+    {
+      "path": ".claude/agents/README.md",
+      "target": ".codex/artifacts/api-notes/tumbling-window.md",
+      "classification": "illustrative_artifact_slug"
+    },
+    {
+      "path": ".claude/agents/README.md",
+      "target": ".codex/artifacts/critiques/tumbling-window.md",
+      "classification": "illustrative_artifact_slug"
+    },
+    {
+      "path": ".claude/agents/README.md",
+      "target": ".codex/artifacts/specs/tumbling-window.md",
+      "classification": "illustrative_artifact_slug"
+    },
+    {
+      "path": ".claude/agents/cf-implementer.md",
+      "target": "python/calc_flow/_native",
+      "classification": "truncated_wildcard_or_prefix"
+    },
+    {
+      "path": ".claude/agents/cf-implementer.md",
+      "target": "python/calc_flow/_native",
+      "classification": "truncated_wildcard_or_prefix"
+    },
+    {
+      "path": ".claude/agents/cf-orchestrator.md",
+      "target": ".codex/artifacts/specs/tumbling-window.md",
+      "classification": "illustrative_artifact_slug"
+    },
+    {
+      "path": ".claude/agents/cf-orchestrator.md",
+      "target": ".codex/artifacts/critiques/tumbling-window.md",
+      "classification": "illustrative_artifact_slug"
+    },
+    {
+      "path": ".claude/agents/cf-performancer.md",
+      "target": "benchmarks/test_",
+      "classification": "truncated_wildcard_or_prefix"
+    },
+    {
+      "path": ".claude/agents/cf-tester.md",
+      "target": "python/tests/test_",
+      "classification": "truncated_wildcard_or_prefix"
+    },
+    {
+      "path": ".claude/agents/cf-tester.md",
+      "target": "python/tests/test_",
+      "classification": "truncated_wildcard_or_prefix"
+    },
+    {
+      "path": ".claude/agents/cf-tester.md",
+      "target": "python/tests/test_",
+      "classification": "truncated_wildcard_or_prefix"
+    },
+    {
+      "path": ".claude/agents/cf-tester.md",
+      "target": "python/tests/test_",
+      "classification": "truncated_wildcard_or_prefix"
+    },
+    {
+      "path": ".claude/rules/code-style.md",
+      "target": "src/calc_flow/",
+      "classification": "explicitly_removed_path"
+    },
+    {
+      "path": ".claude/specs/head-operator.md",
+      "target": "schemas/project-v2.schema.json",
+      "classification": "historical_design_path"
+    },
+    {
+      "path": ".claude/specs/head-operator.md",
+      "target": "schemas/project-v2.schema.json",
+      "classification": "historical_design_path"
+    },
+    {
+      "path": ".codex/artifacts/analysis/dal-310-weekly-doc-audit-2026-09-27.md",
+      "target": ".codex/agents/cf-",
+      "classification": "truncated_wildcard_or_prefix"
+    },
+    {
+      "path": ".codex/artifacts/analysis/dal-310-weekly-doc-audit-2026-09-27.md",
+      "target": ".claude/agents/cf-",
+      "classification": "truncated_wildcard_or_prefix"
+    },
+    {
+      "path": ".codex/artifacts/specs/head-operator.md",
+      "target": "schemas/project-v2.schema.json",
+      "classification": "historical_design_path"
+    },
+    {
+      "path": ".codex/artifacts/specs/head-operator.md",
+      "target": "schemas/project-v2.schema.json",
+      "classification": "historical_design_path"
+    },
+    {
+      "path": "AGENTS.md",
+      "target": "python/calc_flow/_native",
+      "classification": "truncated_wildcard_or_prefix"
+    },
+    {
+      "path": "AGENTS.md",
+      "target": "src/calc_flow",
+      "classification": "explicitly_removed_path"
+    },
+    {
+      "path": "design/tech_spec.md",
+      "target": "src/calc_flow/engine/array.py",
+      "classification": "historical_design_path"
+    },
+    {
+      "path": "design/tech_spec.md",
+      "target": "tests/calc_flow/engine/test_array.py",
+      "classification": "historical_design_path"
+    },
+    {
+      "path": "docs/plans/2026-09-09-bounded-backward-asof-join.md",
+      "target": "tests/asof_tests.rs",
+      "classification": "historical_design_path"
+    },
+    {
+      "path": "docs/plans/2026-09-30-streaming-asof-acceleration.md",
+      "target": "crates/calc-flow/tests/stream_asof_join_",
+      "classification": "truncated_wildcard_or_prefix"
+    }
+  ],
+  "executed_checks": [
+    {
+      "command": "python3 scripts/run_examples.py --help",
+      "exit_code": 0
+    },
+    {
+      "command": "python3 -m scripts.benchmark_suite catalog",
+      "exit_code": 0,
+      "shards": 21
+    },
+    {
+      "command": "python3 scripts/check_spec_references.py",
+      "exit_code": 0
+    }
+  ],
+  "not_run": [
+    "test suites",
+    "builds",
+    "example calculations",
+    "benchmarks",
+    "Windows PowerShell commands",
+    "CI"
+  ],
+  "runtime": {
+    "python": "3.13.9"
+  },
+  "multica_agent_count": 10,
+  "multica_agent_writes": 0,
+  "proposed_agent_instructions_fields": 2,
+  "canonical_toml_parsed": 10,
+  "link_checks": [
+    {
+      "label": "baseline",
+      "markdown_count": 88,
+      "link_destination_count": 920,
+      "local_destination_count": 886,
+      "external_destination_count": 34,
+      "findings": []
+    },
+    {
+      "label": "final",
+      "markdown_count": 89,
+      "link_destination_count": 924,
+      "local_destination_count": 890,
+      "external_destination_count": 34,
+      "findings": []
+    }
+  ],
+  "changed_tables": [
+    {
+      "path": ".claude/agents/cf-implementer.md",
+      "row_count": 12,
+      "aligned": true
+    },
+    {
+      "path": ".codex/agents/cf-implementer.toml",
+      "row_count": 12,
+      "aligned": true
+    },
+    {
+      "path": "docs/design.md",
+      "row_count": 8,
+      "aligned": true
+    },
+    {
+      "path": "docs/design.md",
+      "row_count": 5,
+      "aligned": true
+    },
+    {
+      "path": "docs/projects-guide.md",
+      "row_count": 10,
+      "aligned": true
+    },
+    {
+      "path": "docs/runtime-envelope.md",
+      "row_count": 7,
+      "aligned": true
+    },
+    {
+      "path": "docs/runtime-envelope.md",
+      "row_count": 8,
+      "aligned": true
+    },
+    {
+      "path": "docs/runtime-envelope.md",
+      "row_count": 6,
+      "aligned": true
+    },
+    {
+      "path": "docs/symbolic-api.md",
+      "row_count": 11,
+      "aligned": true
+    },
+    {
+      "path": "docs/symbolic-api.md",
+      "row_count": 9,
+      "aligned": true
+    },
+    {
+      "path": ".codex/artifacts/analysis/dal-318-doc-audit-2026-10-04.md",
+      "row_count": 16,
+      "aligned": true
+    },
+    {
+      "path": ".codex/artifacts/analysis/dal-318-doc-audit-2026-10-04.md",
+      "row_count": 9,
+      "aligned": true
+    },
+    {
+      "path": ".codex/artifacts/analysis/dal-318-doc-audit-2026-10-04.md",
+      "row_count": 12,
+      "aligned": true
+    }
+  ],
+  "final_style_markdown_count": 89,
+  "source_signature_and_config_checks": "passed",
+  "json_evidence_parse": "passed",
+  "git_diff_check": "passed",
+  "client_adaptations_preserved": true,
+  "final_remote_main_sha": "29fe284b56ee01306c4da6deab28b9e2f2883746",
+  "rest_route_candidates": [
+    {
+      "path": ".claude/agents/cf-api-designer.md",
+      "method": "POST",
+      "route": "/api/v2/projects/{id}/windows",
+      "classification": "illustrative_api_design_example"
+    },
+    {
+      "path": ".codex/artifacts/analysis/dal-310-weekly-doc-audit-2026-09-27.md",
+      "method": "GET",
+      "route": "/api/v3/session",
+      "classification": "historical_record"
+    },
+    {
+      "path": "CHANGELOG.md",
+      "method": "GET",
+      "route": "/api/v3/capabilities",
+      "classification": "historical_record"
+    },
+    {
+      "path": "CHANGELOG.md",
+      "method": "GET",
+      "route": "/api/v3/capabilities",
+      "classification": "historical_record"
+    },
+    {
+      "path": "CHANGELOG.md",
+      "method": "GET",
+      "route": "/api/v2/capabilities",
+      "classification": "historical_record"
+    },
+    {
+      "path": "design/v0.2-refactor-plan.md",
+      "method": "GET",
+      "route": "/api/v1/catalog",
+      "classification": "historical_record"
+    },
+    {
+      "path": "design/v0.2-refactor-plan.md",
+      "method": "POST",
+      "route": "/api/v1/projects",
+      "classification": "historical_record"
+    },
+    {
+      "path": "design/v0.2-refactor-plan.md",
+      "method": "DELETE",
+      "route": "/api/v1/projects/{id}",
+      "classification": "historical_record"
+    },
+    {
+      "path": "design/v0.2-refactor-plan.md",
+      "method": "POST",
+      "route": "/api/v1/projects/{id}/validate",
+      "classification": "historical_record"
+    },
+    {
+      "path": "design/v0.2-refactor-plan.md",
+      "method": "POST",
+      "route": "/api/v1/projects/{id}/runs",
+      "classification": "historical_record"
+    },
+    {
+      "path": "design/v0.2-refactor-plan.md",
+      "method": "GET",
+      "route": "/api/v1/runs/{id}",
+      "classification": "historical_record"
+    },
+    {
+      "path": "design/v0.2-refactor-plan.md",
+      "method": "GET",
+      "route": "/api/v1/runs/{id}/events",
+      "classification": "historical_record"
+    },
+    {
+      "path": "design/v0.2-refactor-plan.md",
+      "method": "DELETE",
+      "route": "/api/v1/runs/{id}",
+      "classification": "historical_record"
+    },
+    {
+      "path": "docs/api-reference.md",
+      "method": "GET",
+      "route": "/api/v3/session",
+      "classification": "current_route_verified"
+    },
+    {
+      "path": "docs/studio-guide.md",
+      "method": "GET",
+      "route": "/api/v3/capabilities",
+      "classification": "current_route_verified"
+    },
+    {
+      "path": "docs/studio-guide.md",
+      "method": "POST",
+      "route": "/api/v3/jobs",
+      "classification": "current_route_verified"
+    },
+    {
+      "path": "docs/studio-guide.md",
+      "method": "GET",
+      "route": "/api/v3/session",
+      "classification": "current_route_verified"
+    },
+    {
+      "path": "web-ui/backend/README.md",
+      "method": "GET",
+      "route": "/api/v3/session",
+      "classification": "current_route_verified"
+    }
+  ],
+  "source_evidence": [
+    "python/calc_flow/symbolic/program.py",
+    "python/calc_flow/symbolic/asof_analysis.py",
+    "python/calc_flow/capabilities.py",
+    "crates/calc-flow/src/operator/sql.rs",
+    "crates/calc-flow/src/operator/asof/output.rs",
+    "crates/calc-flow/src/operator/asof/finalize.rs",
+    "crates/calc-flow/src/operator/asof/finalize/prefix.rs",
+    "crates/calc-flow/src/operator/asof/state.rs",
+    "crates/calc-flow/src/operator/asof/checkpoint.rs",
+    "crates/calc-flow/src/config.rs",
+    "pyproject.toml",
+    "web-ui/backend/pyproject.toml",
+    "AGENTS.md"
+  ]
+}

@@ -51,10 +51,12 @@ After export and reload, this graph's native batch plan instead executes with
 names. Use the document's bindings when reloading; Python logical aliases are
 not serialized or reconstructed from project-v3.
 
-`to_project(runtime=None, /, *, mode="batch", allowed_lateness_micros=0,
+`to_project(runtime=None, /, *, mode=None, allowed_lateness_micros=0,
 late_policy="error")` uses the same lowering and strict validation as compilation.
-Pass a registered runtime for provider-dependent graphs. The document stores
-the native graph and data-only input placeholders, without table/array contents,
+The default mode follows the Program's immutable engine: `"sql"` exports batch
+mode and `"streaming"` exports stream mode. An explicit mode must match that
+engine. Pass a registered runtime for provider-dependent graphs. The document
+stores the native graph and data-only input placeholders, without table/array contents,
 Python builders, expression objects, or running state. It can be passed directly
 to the store and serialization helpers below.
 
@@ -91,8 +93,9 @@ runner, as in [example 10](../examples/10_symbolic_streaming_recovery.py).
 `PipelineBuilder.compile_stream()` remains the explicit graph alternative in
 [example 04](../examples/04_continuous_runtime.py).
 
-`program.to_project(mode="stream")` exports expression graphs in stream mode,
-but its generated input placeholders are not production connector bindings.
+`program.to_project(mode="stream")` exports expression graphs from a Program
+with `engine="streaming"`, but its generated input placeholders are not
+production connector bindings.
 Complete the explicit connector, watermark, delivery, and managed state settings
 before a connector-backed job launch. Python logical aliases do not rename these
 physical bindings, and export never chooses a checkpoint root for the caller.
