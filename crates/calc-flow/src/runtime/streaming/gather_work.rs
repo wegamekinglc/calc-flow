@@ -38,6 +38,8 @@ const _: () = assert!(
 #[cfg(test)]
 pub(crate) mod admission_probe;
 mod columns;
+mod parallel;
+pub(crate) use parallel::ParallelCpuWork;
 mod process;
 mod row_gather;
 #[cfg(test)]
@@ -183,6 +185,7 @@ enum ReadyWork {
         running: bool,
     },
     Columns(columns::Columns),
+    Parallel(parallel::Units),
 }
 
 impl ReadyWork {
@@ -198,6 +201,7 @@ impl ReadyWork {
         match self {
             Self::Single { .. } => 1,
             Self::Columns(columns) => columns.count(),
+            Self::Parallel(units) => units.count(),
         }
     }
 
@@ -205,6 +209,7 @@ impl ReadyWork {
         match self {
             Self::Single { .. } => 1,
             Self::Columns(columns) => columns.workers(),
+            Self::Parallel(units) => units.workers(),
         }
     }
 
@@ -212,6 +217,7 @@ impl ReadyWork {
         match self {
             Self::Single { running, .. } => usize::from(*running),
             Self::Columns(columns) => columns.active(),
+            Self::Parallel(units) => units.active(),
         }
     }
 
@@ -224,6 +230,7 @@ impl ReadyWork {
             }
             Self::Single { .. } => None,
             Self::Columns(columns) => columns.claim(ordinal),
+            Self::Parallel(units) => units.claim(ordinal),
         }
     }
 
@@ -237,12 +244,15 @@ impl ReadyWork {
                 true
             }
             Self::Columns(columns) => columns.complete(ordinal, value),
+            Self::Parallel(units) => units.complete(ordinal, value),
         }
     }
 
     fn cancel_pending(&mut self, run_id: &str) {
-        if let Self::Columns(columns) = self {
-            columns.cancel_pending(run_id);
+        match self {
+            Self::Columns(columns) => columns.cancel_pending(run_id),
+            Self::Parallel(units) => units.cancel_pending(run_id),
+            Self::Single { .. } => {}
         }
     }
 
@@ -257,6 +267,7 @@ impl ReadyWork {
                 outcome.ok_or_else(|| internal("missing unit outcome"))?
             }
             Self::Columns(columns) => columns.finish(home, operator, stop),
+            Self::Parallel(units) => units.finish(home, operator),
         }
     }
 }
@@ -570,6 +581,16 @@ impl Drop for GatherScope {
 }
 
 impl GatherScope {
+    pub(crate) async fn submit_parallel_work<W: ParallelCpuWork>(
+        &self,
+        work: Arc<W>,
+        credit: MemoryReservation,
+        stop: GatherStop,
+    ) -> AdmissionResult<WorkTicket<Vec<W::Output>>> {
+        self.submit_package(parallel::Package(work), credit, stop)
+            .await
+    }
+
     pub(crate) async fn submit(
         &self,
         plan: Arc<dyn GatherPlan>,

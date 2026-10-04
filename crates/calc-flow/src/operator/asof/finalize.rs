@@ -20,6 +20,7 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 
 mod prefix;
+mod probe;
 
 type EvictionProjection = (state::EvictionPreview, u64, state::Inventory, u64);
 
@@ -362,7 +363,17 @@ async fn match_output_prefix(
         workspace,
         &operator.name,
     )?;
-    let prefix = if cursor_workspace.is_some() {
+    let prefix = if let Some(matches) = probe::parallel_matches(operator, count, context).await? {
+        parallel_candidate_rows(
+            operator,
+            count,
+            context,
+            &matches.rows,
+            &mut plan,
+            workspace,
+        )
+        .await?
+    } else if cursor_workspace.is_some() {
         monotonic_candidate_rows(operator, count, context, &mut plan, workspace).await?
     } else {
         binary_search_candidate_rows(operator, count, context, &mut plan, workspace).await?
@@ -370,6 +381,36 @@ async fn match_output_prefix(
     drop(cursor_workspace);
     let plan = plan.finish(operator.physical_schema(1), workspace, &operator.name)?;
     Ok(MatchedPrefix { plan, prefix })
+}
+
+async fn parallel_candidate_rows(
+    operator: &StreamAsofJoinOperator,
+    count: usize,
+    context: &StreamOperatorContext<'_>,
+    matches: &[Option<state::RowRef>],
+    plan: &mut OutputPlanBuilder<'_>,
+    workspace: &mut MemoryReservation,
+) -> Result<LeftPrefix> {
+    let state = &operator.state;
+    let mut prefix = LeftPrefix::default();
+    for (index, ((key, left), right)) in state
+        .left
+        .output_iter()
+        .take(count)
+        .zip(matches)
+        .enumerate()
+    {
+        check_match_progress(index, context).await?;
+        let left = state.batches.view(left);
+        plan.push(
+            left,
+            right.map(|row| state.batches.view(row)),
+            workspace,
+            &operator.name,
+        )?;
+        prefix.visit_owners(key.1, key.2, left.batch.key, &operator.name)?;
+    }
+    Ok(prefix)
 }
 
 async fn binary_search_candidate_rows(

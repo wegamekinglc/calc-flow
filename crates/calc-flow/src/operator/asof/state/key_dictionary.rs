@@ -282,6 +282,11 @@ impl RightState {
         self.get_hashed(self.hasher.hash_one(key.as_slice()), key.as_slice())
     }
 
+    pub fn owned_bucket(&self, key: &Encoding) -> Option<Arc<RightBucket>> {
+        self.find(self.hasher.hash_one(key.as_slice()), key.as_slice())
+            .map(|id| self.entries[id].bucket.clone())
+    }
+
     pub fn get_hashed(&self, hash: u64, bytes: &[u8]) -> Option<&RightBucket> {
         self.find(hash, bytes)
             .map(|id| self.entries[id].bucket.as_ref())

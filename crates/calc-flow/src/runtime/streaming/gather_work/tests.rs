@@ -7,6 +7,8 @@ use datafusion::execution::memory_pool::{
 use super::{GatherOperatorId, GatherStop, TestService, WorkOutput};
 use crate::{CancellationToken, JsonMap, StreamJobContext};
 
+mod parallel;
+
 #[test]
 fn typed_idle_pool_yields_capacity_with_live_context_and_unobserved_ticket() {
     let service = TestService::new(1, 1).unwrap();

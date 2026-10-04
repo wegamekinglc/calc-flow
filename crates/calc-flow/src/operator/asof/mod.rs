@@ -79,6 +79,8 @@ pub struct StreamAsofJoinOperator {
     fingerprint: String,
     schema_digests: [[u8; 32]; 2],
     payload_header_bytes: [u64; 2],
+    #[cfg(test)]
+    match_hook: Option<std::sync::Arc<dyn Fn(usize) + Send + Sync>>,
 }
 
 impl StreamAsofJoinOperator {
@@ -250,6 +252,8 @@ impl StreamAsofJoinOperator {
             fingerprint,
             schema_digests,
             payload_header_bytes,
+            #[cfg(test)]
+            match_hook: None,
             name,
             spec,
             inputs,
