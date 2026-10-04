@@ -23,37 +23,37 @@ impl PartialAccumulator {
         })
     }
 
-    pub fn seed(
+    pub fn seed_batch<'a>(
         &mut self,
-        rank: usize,
-        saved: &[ScalarValue],
+        saved: impl Clone + Iterator<Item = (usize, &'a [ScalarValue])>,
         count: usize,
         name: &str,
     ) -> Result<()> {
-        let value = saved.last().expect("sequential state");
-        if value.is_null() {
+        let saved = saved.filter(|(_, state)| state.last().is_some_and(|value| !value.is_null()));
+        let Some((_, first)) = saved.clone().next() else {
             return Ok(());
-        }
-        let filter = datafusion::arrow::array::BooleanArray::from(vec![true]);
+        };
+        let ranks = saved.clone().map(|(rank, _)| rank).collect::<Vec<_>>();
+        let values = (0..first.len())
+            .map(|field| {
+                ScalarValue::iter_to_array(saved.clone().map(|(_, state)| state[field].clone()))
+            })
+            .collect::<DataFusionResult<Vec<_>>>()
+            .map_err(|error| df_error(name, error))?;
+        let filter = datafusion::arrow::array::BooleanArray::from(vec![true; ranks.len()]);
         if self.numeric {
-            let values = saved
-                .iter()
-                .map(ScalarValue::to_array)
-                .collect::<DataFusionResult<Vec<_>>>()
-                .map_err(|error| df_error(name, error))?;
             self.native
-                .merge_batch(&values, &[rank], Some(&filter), count)
+                .merge_batch(&values, &ranks, Some(&filter), count)
                 .map_err(|error| df_error(name, error))
         } else {
-            let reset = super::grouped_float::reset(value, name)?
-                .to_array()
-                .map_err(|error| df_error(name, error))?;
-            let saved = value.to_array().map_err(|error| df_error(name, error))?;
-            self.native
-                .merge_batch(&[reset], &[rank], Some(&filter), count)
+            let reset = super::grouped_float::reset(first.last().expect("sequential state"), name)?
+                .to_array_of_size(ranks.len())
                 .map_err(|error| df_error(name, error))?;
             self.native
-                .merge_batch(&[saved], &[rank], Some(&filter), count)
+                .merge_batch(&[reset], &ranks, Some(&filter), count)
+                .map_err(|error| df_error(name, error))?;
+            self.native
+                .merge_batch(&values, &ranks, Some(&filter), count)
                 .map_err(|error| df_error(name, error))
         }
     }
@@ -90,3 +90,7 @@ pub(super) fn result(state: &[ScalarValue], name: &str) -> Result<ScalarValue> {
 fn average(sum: f64, count: u64) -> f64 {
     sum / count as f64
 }
+
+#[cfg(test)]
+#[path = "grouped_seed_tests.rs"]
+mod tests;

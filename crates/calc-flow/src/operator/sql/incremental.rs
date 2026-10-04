@@ -278,30 +278,20 @@ impl PartialGroups {
         if !self.sequential.iter().any(|selected| *selected) {
             return Ok(());
         }
-        for rank in self.seeded..self.slots.len() {
-            let candidate = &candidates[&self.slots[rank]];
-            for (index, _) in aggregates.iter().enumerate() {
-                if !self.sequential[index] {
-                    continue;
-                }
-                let saved = &candidate.group.states[index];
-                if !saved.is_empty() {
-                    self.seed_value(index, rank, saved, name)?;
-                }
+        let slots = &self.slots;
+        for (index, _) in aggregates.iter().enumerate() {
+            if self.sequential[index] {
+                let saved = (self.seeded..slots.len()).map(|rank| {
+                    (
+                        rank,
+                        candidates[&slots[rank]].group.states[index].as_slice(),
+                    )
+                });
+                self.accumulators[index].seed_batch(saved, slots.len(), name)?;
             }
         }
         self.seeded = self.slots.len();
         Ok(())
-    }
-
-    fn seed_value(
-        &mut self,
-        index: usize,
-        rank: usize,
-        saved: &[ScalarValue],
-        name: &str,
-    ) -> Result<()> {
-        self.accumulators[index].seed(rank, saved, self.slots.len(), name)
     }
 
     fn update(
