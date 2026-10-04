@@ -75,6 +75,68 @@ fn float_arrivals(reverse: bool) -> Vec<Vec<Part>> {
     ]
 }
 
+#[tokio::test]
+async fn test_grouped_float_sum_average_nan_payload_chronology_native3() {
+    for dtype in [DataType::Float32, DataType::Float64] {
+        for query in [FLOAT_MIXED, FLOAT_ALL] {
+            let job = job();
+            let context = StreamOperatorContext::new(&job, "grouped_float", None);
+            let mut state = operator_query(&dtype, query);
+            let mut prefix = Vec::new();
+            let mut pools = Vec::new();
+            for sequence in 0_usize..4 {
+                let part = (0..100)
+                    .map(|row| {
+                        let index = 90_000 + sequence * 100 + row;
+                        let value = match index % 17 {
+                            0 => NAN,
+                            1 => SECOND_NAN,
+                            2 => SNAN,
+                            3 => (0xff80_0004, 0xfff0_0000_0000_0004),
+                            4 => POS_INF,
+                            5 => NEG_INF,
+                            6 => NEG_ZERO,
+                            _ => ONE,
+                        };
+                        (
+                            (row % 19 != 0).then_some(i64::try_from(index % 64).unwrap()),
+                            (row % 13 != 0).then_some(value),
+                        )
+                    })
+                    .collect::<Part>();
+                let batch = input(&dtype, &[part.clone()], sequence as u64);
+                let weak = weak_arrays(&batch);
+                let actual = process(&mut state, batch, &context).await;
+                prefix.push(part);
+                assert_query_oracle(&actual, query, &dtype, &prefix, sequence as u64).await;
+                let snapshot =
+                    float_capture(&mut state, &dtype, query, &prefix, sequence as u64).await;
+                assert!(weak.iter().all(|array| array.upgrade().is_none()));
+                pools.push(
+                    state
+                        .stream_state
+                        .runtime()
+                        .unwrap()
+                        .incremental_memory_pool(),
+                );
+                drop(state);
+                state = operator_query(&dtype, query);
+                StreamOperator::restore(&mut state, &snapshot).unwrap();
+                same_snapshot(&snapshot, &state.checkpoint(Epoch::INITIAL).unwrap());
+            }
+            pools.push(
+                state
+                    .stream_state
+                    .runtime()
+                    .unwrap()
+                    .incremental_memory_pool(),
+            );
+            drop(state);
+            assert_eq!(pools.iter().map(|pool| pool.reserved()).sum::<usize>(), 0);
+        }
+    }
+}
+
 async fn float_state_expected(dtype: &DataType, parts: &[Part], sequence: u64) -> Batch {
     DataFusionRuntime::new(DataFusionConfig::default())
         .unwrap()
