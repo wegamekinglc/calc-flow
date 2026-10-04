@@ -495,6 +495,12 @@ pub(super) struct Transaction {
     proof: Option<grouped_float::Proof>,
 }
 
+impl Transaction {
+    pub(super) fn changes_state(&self) -> bool {
+        !self.groups.is_empty() || self.new_groups.iter().any(Option::is_some)
+    }
+}
+
 impl IncrementalSql {
     pub async fn plan(
         runtime: &DataFusionRuntime,

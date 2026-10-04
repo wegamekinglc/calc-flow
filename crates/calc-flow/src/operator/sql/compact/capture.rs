@@ -16,6 +16,7 @@ use crate::{Batch, BatchMetadata, OperatorStateSnapshot, Result, StreamOperatorC
 
 pub(in crate::operator::sql) struct CompactCapture {
     pub snapshot: OperatorStateSnapshot,
+    group_state: super::super::StateSegment,
     ledger: QuotaLedger,
     metadata: BatchMetadata,
     _metadata: Arc<metadata::SqlMetadata>,
@@ -49,6 +50,9 @@ impl CompactCapture {
         incremental::ensure_reservation(&reservation, bytes, &operator.name)?;
         let reservation = Arc::new(reservation);
         let mut snapshot = snapshot.clone();
+        let group_state = snapshot.segments["group-state"]
+            .clone()
+            .with_owner(reservation.clone());
         snapshot
             .segments
             .insert("batch-metadata".into(), metadata_owner.segment.clone());
@@ -57,6 +61,7 @@ impl CompactCapture {
         }
         Ok(Arc::new(Self {
             snapshot,
+            group_state,
             ledger,
             metadata,
             _metadata: metadata_owner,
@@ -179,8 +184,7 @@ pub(in crate::operator::sql) async fn prepare_async(
                 .capture
                 .as_ref()
                 .expect("reused native segment")
-                .snapshot
-                .segments["group-state"]
+                .group_state
                 .clone()
         },
         |segment| segment.segment.clone(),
@@ -278,7 +282,7 @@ fn finish(
         inline_metadata: control.inline_metadata(&encoded.segment),
         segments: BTreeMap::from([
             ("control".into(), encoded.segment.clone()),
-            ("group-state".into(), parts.group_state),
+            ("group-state".into(), parts.group_state.clone()),
             ("logical-schema".into(), logical),
             ("batch-metadata".into(), parts.metadata.segment.clone()),
         ]),
@@ -289,6 +293,7 @@ fn finish(
     check()?;
     Ok(Arc::new(CompactCapture {
         snapshot,
+        group_state: parts.group_state,
         ledger: state.ledger,
         metadata: state.metadata.clone(),
         _metadata: parts.metadata,
@@ -308,7 +313,7 @@ fn state_segment(
     if let Some(capture) = &state.capture {
         return Ok((
             native.native_descriptor(&operator.name)?,
-            capture.snapshot.segments["group-state"].clone(),
+            capture.group_state.clone(),
         ));
     }
     let export = native.export_native_state(&operator.name, check)?;

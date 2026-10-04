@@ -1,6 +1,9 @@
 use super::*;
 use crate::operator::sql::incremental::IncrementalSql;
 
+#[path = "grouped_checkpoint_reuse_tests.rs"]
+mod checkpoint_reuse;
+
 fn query(composite: bool, predicate: &str) -> String {
     let keys = if composite { "key, other" } else { "key" };
     format!("SELECT {keys}, {AGGREGATES} FROM events WHERE {predicate} GROUP BY {keys}")

@@ -249,6 +249,67 @@ async fn test_current_compact_empty_schema_strict_boundaries() {
     same_snapshot(&before, &dynamic.checkpoint(Epoch::INITIAL).unwrap());
 }
 
+#[tokio::test]
+async fn test_current_compact_carried_state_releases_prior_capture_credit() {
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "compact", None);
+    let mut state = operator(false, false);
+    drop(
+        process(
+            &mut state,
+            input(false, &[Some("a"), None], &[Some(2), None], 0),
+            &context,
+        )
+        .await,
+    );
+    let snapshot = state.checkpoint(Epoch::INITIAL).unwrap();
+    let payload = snapshot.segments["group-state"].bytes_arc();
+    drop(snapshot);
+    let pool = pool(&state);
+    let basis = pool.reserved();
+    for sequence in 1..10 {
+        let previous = Arc::downgrade(
+            state
+                .compact
+                .as_ref()
+                .unwrap()
+                .capture
+                .as_ref()
+                .unwrap()
+                .checkpoint_fee_for_test(),
+        );
+        let batch = input(false, &[], &[], sequence);
+        let metadata = batch.metadata().clone();
+        drop(process(&mut state, batch, &context).await);
+        if sequence % 2 == 0 {
+            state.prepare_compact_capture_async(&context).await.unwrap();
+        }
+        let snapshot = state.checkpoint(Epoch::INITIAL).unwrap();
+        assert!(Arc::ptr_eq(
+            &payload,
+            &snapshot.segments["group-state"].bytes_arc()
+        ));
+        let actual: BatchMetadata =
+            serde_json::from_slice(snapshot.segments["batch-metadata"].bytes()).unwrap();
+        assert_eq!(actual, metadata);
+        drop(snapshot);
+        assert!(
+            previous.upgrade().is_none(),
+            "carried state retains an old capture reservation"
+        );
+        assert_eq!(
+            pool.reserved(),
+            basis,
+            "unchanged state accumulates reserved bytes"
+        );
+    }
+    drop((state, payload));
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop(context);
+    drop(job);
+    assert_eq!(pool.reserved(), 0);
+}
+
 fn large_metadata() -> BatchMetadata {
     let values = (0..65_536)
         .map(|index| {

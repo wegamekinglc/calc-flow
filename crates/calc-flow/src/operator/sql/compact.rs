@@ -19,7 +19,7 @@ impl SqlOperator {
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
-        let pending = storage::prepare_update(self, &prepared)?;
+        let mut pending = storage::prepare_update(self, &prepared)?;
         let batch = prepared.batch;
         let newly_initialized = initialized.is_some();
         let native = initialized
@@ -38,6 +38,12 @@ impl SqlOperator {
                 &self.name,
             )
             .await?;
+        if !transaction.changes_state() {
+            pending.capture = self
+                .compact
+                .as_ref()
+                .and_then(|state| state.capture.clone());
+        }
         #[cfg(test)]
         {
             self.incremental_work.0 += transaction.rows;
