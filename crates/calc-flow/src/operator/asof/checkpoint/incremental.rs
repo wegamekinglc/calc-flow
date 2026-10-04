@@ -333,7 +333,11 @@ impl StreamAsofJoinOperator {
         inventory.bytes = checked(
             &self.name,
             inventory.bytes,
-            checked(&self.name, frames + journal.bytes(), retention_bytes)?,
+            checked(
+                &self.name,
+                frames + journal.bytes() + self.replay_bytes(),
+                retention_bytes,
+            )?,
         )?;
         self.check_inventory_limits(&inventory)?;
         Ok(inventory)

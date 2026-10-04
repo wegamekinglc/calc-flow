@@ -1,4 +1,5 @@
 use super::*;
+mod source_replay;
 use crate::{
     BatchMetadata, CancellationToken, EdgeBudget, EdgeCollector, Epoch, IngressProgress,
     IngressState, StreamJobContext,
@@ -1076,7 +1077,7 @@ async fn finalizable_prefix_can_use_full_edge_row_budget() {
     .unwrap();
     let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
     let cx = StreamOperatorContext::new(&job, "asof", None)
-        .with_test_output_budget(EdgeBudget::new(8_192, 64 << 20).unwrap());
+        .with_output_budget(EdgeBudget::new(8_192, 64 << 20).unwrap());
     let mut output = EdgeCollector::new(op.output_ports().to_vec());
     op.process_data("left", left, &cx, &mut output)
         .await
@@ -1201,7 +1202,7 @@ async fn finalization_without_eviction_does_not_clone_retained_state() {
     let (mut op, left, right) = prefix_fixture();
     let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
     let cx = StreamOperatorContext::new(&job, "asof", None)
-        .with_test_output_budget(EdgeBudget::new(1, 1 << 20).unwrap());
+        .with_output_budget(EdgeBudget::new(1, 1 << 20).unwrap());
     let mut preload = EdgeCollector::new(op.output_ports().to_vec());
     op.process_data("right", right, &cx, &mut preload)
         .await
@@ -1238,7 +1239,7 @@ async fn finalized_prefixes_release_old_checkpoint_bytes_and_defer_new_encoding(
     let (mut op, left, right) = prefix_fixture();
     let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
     let cx = StreamOperatorContext::new(&job, "asof", None)
-        .with_test_output_budget(EdgeBudget::new(1, 1 << 20).unwrap());
+        .with_output_budget(EdgeBudget::new(1, 1 << 20).unwrap());
     let mut collector = EdgeCollector::new(op.output_ports().to_vec());
     op.process_data("right", right, &cx, &mut collector)
         .await
@@ -1299,7 +1300,7 @@ async fn cancelled_prefix_has_canonical_checkpoint_and_resumes_exactly() {
     let cancel = CancellationToken::new();
     let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, cancel.clone());
     let cx = StreamOperatorContext::new(&job, "asof", None)
-        .with_test_output_budget(EdgeBudget::new(1, 1 << 20).unwrap());
+        .with_output_budget(EdgeBudget::new(1, 1 << 20).unwrap());
     let mut preload = EdgeCollector::new(op.output_ports().to_vec());
     op.process_data("right", right, &cx, &mut preload)
         .await
@@ -1324,7 +1325,7 @@ async fn cancelled_prefix_has_canonical_checkpoint_and_resumes_exactly() {
     let fresh_job =
         StreamJobContext::new(2, "asof", JsonMap::new(), None, CancellationToken::new());
     let resumed_cx = StreamOperatorContext::new(&fresh_job, "asof", None)
-        .with_test_output_budget(EdgeBudget::new(1, 1 << 20).unwrap());
+        .with_output_budget(EdgeBudget::new(1, 1 << 20).unwrap());
     let canonical = op.prepare_checkpoint(&op.state, &resumed_cx).await.unwrap();
     assert!(canonical.segment.is_some());
     let (mut restored, _, _) = prefix_fixture();
@@ -1386,7 +1387,7 @@ async fn evictable_right_state_survives_a_cancelled_output_prefix() {
     let cancel = CancellationToken::new();
     let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, cancel.clone());
     let cx = StreamOperatorContext::new(&job, "asof", None)
-        .with_test_output_budget(EdgeBudget::new(1, 1 << 20).unwrap());
+        .with_output_budget(EdgeBudget::new(1, 1 << 20).unwrap());
     let mut preload = EdgeCollector::new(op.output_ports().to_vec());
     op.process_data("right", right, &cx, &mut preload)
         .await
@@ -1406,7 +1407,7 @@ async fn evictable_right_state_survives_a_cancelled_output_prefix() {
     ]));
     let tick_cx =
         StreamOperatorContext::with_ingress_progress(&job, "asof", None, progress.clone())
-            .with_test_output_budget(EdgeBudget::new(1, 1 << 20).unwrap());
+            .with_output_budget(EdgeBudget::new(1, 1 << 20).unwrap());
     let mut stopped = CancelPrefixCollector {
         cancel,
         accepted: Vec::new(),
@@ -1427,7 +1428,7 @@ async fn evictable_right_state_survives_a_cancelled_output_prefix() {
         StreamJobContext::new(2, "asof", JsonMap::new(), None, CancellationToken::new());
     let resumed_cx =
         StreamOperatorContext::with_ingress_progress(&resumed_job, "asof", None, progress)
-            .with_test_output_budget(EdgeBudget::new(1, 1 << 20).unwrap());
+            .with_output_budget(EdgeBudget::new(1, 1 << 20).unwrap());
     let mut remaining = EdgeCollector::new(restored.output_ports().to_vec());
     restored
         .on_watermark(EventTime::from_micros(103), &resumed_cx, &mut remaining)
@@ -1700,7 +1701,7 @@ async fn finalizes_large_ready_prefix_in_one_bounded_batch() {
     .unwrap();
     let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
     let cx = StreamOperatorContext::new(&job, "asof", None)
-        .with_test_output_budget(EdgeBudget::new(512, 8 << 20).unwrap());
+        .with_output_budget(EdgeBudget::new(512, 8 << 20).unwrap());
     let mut collector = EdgeCollector::new(op.output_ports().to_vec());
     op.process_data("right", right, &cx, &mut collector)
         .await

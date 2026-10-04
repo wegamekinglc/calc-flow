@@ -331,7 +331,7 @@ async fn assert_restored_workspace_output(narrow: bool) {
     assert_eq!(fixture.decoded.len(), SOURCE_BATCHES * 2);
     let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
     let context = StreamOperatorContext::new(&job, "asof", None)
-        .with_test_output_budget(EdgeBudget::new(OUTPUT_ROWS, 256 << 20).unwrap());
+        .with_output_budget(EdgeBudget::new(OUTPUT_ROWS, 256 << 20).unwrap());
     let mut admitted = workspace_operator(&fixture, narrow);
     admit_workspace_input(&mut admitted, &fixture, &context).await;
     let snapshot = admitted.capture(Epoch::INITIAL).unwrap();
@@ -485,7 +485,7 @@ async fn occupied_workspace_rejects_atomically_and_refunds_only_owned_lease() {
     let fixture = restored_workspace_fixture();
     let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
     let context = StreamOperatorContext::new(&job, "asof", None)
-        .with_test_output_budget(EdgeBudget::new(OUTPUT_ROWS, 256 << 20).unwrap());
+        .with_output_budget(EdgeBudget::new(OUTPUT_ROWS, 256 << 20).unwrap());
     let mut operator = workspace_operator(&fixture, true);
     admit_workspace_input(&mut operator, &fixture, &context).await;
     let before = operator.capture(Epoch::INITIAL).unwrap();
@@ -554,7 +554,7 @@ async fn rejected_workspace_prefix_preserves_snapshot_sequence_and_refunds() {
     let fixture = restored_workspace_fixture();
     let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
     let context = StreamOperatorContext::new(&job, "asof", None)
-        .with_test_output_budget(EdgeBudget::new(OUTPUT_ROWS, 256 << 20).unwrap());
+        .with_output_budget(EdgeBudget::new(OUTPUT_ROWS, 256 << 20).unwrap());
     let mut operator = workspace_operator(&fixture, true);
     admit_workspace_input(&mut operator, &fixture, &context).await;
     let before = operator.capture(Epoch::INITIAL).unwrap();

@@ -2,15 +2,36 @@ use super::{FileFormat, FileSource, FileSourceConfig};
 use async_trait::async_trait;
 use calc_flow::{
     Cursor, Result, SourceCapabilities, SourceEvent, SourceHistoryContext, SourceHistoryLimits,
-    SourceHistoryManifestEntry, SourceHistorySpec, StreamSource,
+    SourceHistoryManifestEntry, SourceHistoryReplayFactory, SourceHistorySpec, StreamSource,
 };
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     path::{Component, PathBuf},
+    sync::Arc,
 };
 
 const CONTRACT: &str = "file_frozen_v1";
+
+struct ReplayFactory {
+    config: FileSourceConfig,
+    limits: SourceHistoryLimits,
+}
+
+impl SourceHistoryReplayFactory for ReplayFactory {
+    fn create(&self, history: SourceHistoryContext) -> Result<Box<dyn StreamSource>> {
+        let mut source = FrozenFileSource::with_limits(self.config.clone(), self.limits)?;
+        let manifest =
+            history
+                .manifest()
+                .ok_or_else(|| calc_flow::CalcFlowError::CheckpointMismatch {
+                    message: "missing frozen replay history".into(),
+                })?;
+        source.inner.files = source.filenames(&manifest)?;
+        source.inner.history = Some(history);
+        Ok(Box::new(source.inner))
+    }
+}
 
 /// A file snapshot archived in managed checkpoint storage before opening.
 ///
@@ -134,6 +155,12 @@ impl StreamSource for FrozenFileSource {
             contract: CONTRACT.into(),
             limits: self.limits,
         })
+    }
+    fn history_replay_factory(&self) -> Option<Arc<dyn SourceHistoryReplayFactory>> {
+        Some(Arc::new(ReplayFactory {
+            config: self.inner.config.clone(),
+            limits: self.limits,
+        }))
     }
 
     fn validate_history(&self, history: &SourceHistoryManifestEntry) -> Result<()> {

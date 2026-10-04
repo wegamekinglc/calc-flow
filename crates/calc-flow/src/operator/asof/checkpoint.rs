@@ -95,6 +95,7 @@ impl StreamAsofJoinOperator {
     ) -> Result<Inventory> {
         let mut inventory = self.state.capacity_inventory(prepared, &self.name)?;
         inventory.bytes = super::checked(&self.name, inventory.bytes, self.checkpoint_log.bytes())?;
+        inventory.bytes = super::checked(&self.name, inventory.bytes, self.replay_bytes())?;
         Ok(inventory)
     }
 
@@ -257,6 +258,12 @@ impl StreamAsofJoinOperator {
     }
 
     pub(super) fn capture(&mut self, epoch: Epoch) -> Result<OperatorStateSnapshot> {
+        if self.replay.is_some() {
+            if let Some(snapshot) = self.capture_replay()? {
+                return Ok(snapshot);
+            }
+            self.stop_replay()?;
+        }
         self.ensure_prepared_sync()?;
         self.capture_row_log(epoch)
     }

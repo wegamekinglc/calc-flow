@@ -175,6 +175,9 @@ pub(crate) trait StreamSource: Send {
     fn history_spec(&self) -> Option<crate::SourceHistorySpec> {
         None
     }
+    fn history_replay_factory(&self) -> Option<Arc<dyn crate::SourceHistoryReplayFactory>> {
+        None
+    }
 
     fn validate_history(&self, _history: &crate::SourceHistoryManifestEntry) -> Result<()> {
         Ok(())
@@ -263,6 +266,7 @@ impl AcceptedSequenceRecorder {
 /// One validated source binding. Binding identity is assigned by the job.
 pub(crate) struct SourceBinding {
     history_spec: Option<crate::SourceHistorySpec>,
+    history_replay_factory: Option<Arc<dyn crate::SourceHistoryReplayFactory>>,
     history: Option<crate::SourceHistoryContext>,
     source: Box<dyn StreamSource>,
     capabilities: Option<SourceCapabilities>,
@@ -292,6 +296,7 @@ impl SourceBinding {
         Self {
             source,
             history_spec: None,
+            history_replay_factory: None,
             history: None,
             capabilities: None,
             delivery: None,
@@ -348,6 +353,7 @@ impl SourceBinding {
         }
         let capabilities = self.source.capabilities();
         self.history_spec = self.source.history_spec();
+        self.history_replay_factory = self.source.history_replay_factory();
         self.capabilities = Some(capabilities);
         self.delivery = Some(self.source.delivery_capability());
         self.declared_schema = Some(self.source.declared_schema());
@@ -388,6 +394,12 @@ impl SourceBinding {
 
     pub(crate) fn progress_spec(&self, binding_id: &str) -> Result<SourceBindingSpec> {
         let identity = BindingIdentity::new(binding_id)?;
+        if self.history_replay_factory.is_some() && self.history_spec.is_none() {
+            return Err(CalcFlowError::InvalidArgument {
+                field: "source_history".into(),
+                message: "history replay requires immutable managed history".into(),
+            });
+        }
         if let Some(spec) = &self.history_spec {
             spec.validate()?;
             if !self.sampled_capabilities().replayable
@@ -443,6 +455,11 @@ impl SourceBinding {
 
     pub(crate) fn history_spec(&self) -> Option<&crate::SourceHistorySpec> {
         self.history_spec.as_ref()
+    }
+    pub(crate) fn history_replay_factory(
+        &self,
+    ) -> Option<Arc<dyn crate::SourceHistoryReplayFactory>> {
+        self.history_replay_factory.clone()
     }
 
     pub(crate) fn validate_history(

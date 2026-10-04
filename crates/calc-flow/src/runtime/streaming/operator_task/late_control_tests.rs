@@ -461,7 +461,7 @@ async fn test_late_runtime_collector_preflights_later_wide_chunk_without_state_o
             CancellationToken::new(),
         );
         let context = StreamOperatorContext::new(&job, "roll", Some(EventTime::from_micros(10)))
-            .with_test_output_budget(budget);
+            .with_output_budget(budget);
         let progress = OperatorProgress::default();
         let metrics = MetricsRecorder::default();
         let mut output = ChannelStreamCollector::new(

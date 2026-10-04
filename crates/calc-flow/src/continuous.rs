@@ -338,6 +338,10 @@ pub trait StreamSource: Send {
     fn history_spec(&self) -> Option<crate::SourceHistorySpec> {
         None
     }
+    /// Declares an independent reader for the original archived data events.
+    fn history_replay_factory(&self) -> Option<Arc<dyn SourceHistoryReplayFactory>> {
+        None
+    }
     /// Validates saved connector metadata before opening or terminal recovery.
     ///
     /// # Errors
@@ -380,6 +384,17 @@ pub trait StreamSource: Send {
     async fn close(&mut self) -> Result<()>;
 }
 
+/// Recreates data boundaries and metadata from immutable managed history.
+///
+/// Readers own their resources independently of the live source lifecycle.
+pub trait SourceHistoryReplayFactory: Send + Sync {
+    /// Constructs a reader without I/O; the runtime opens and closes it.
+    ///
+    /// # Errors
+    /// Returns an error for incompatible history or decode configuration.
+    fn create(&self, history: crate::SourceHistoryContext) -> Result<Box<dyn StreamSource>>;
+}
+
 /// Advances a connector-owned durable cursor after manifest publication.
 ///
 /// Streaming sources such as logical replication slots use this hook to keep
@@ -418,6 +433,9 @@ impl<S: StreamSource> SourceAdapter<S> {
 impl<S: StreamSource> InternalStreamSource for SourceAdapter<S> {
     fn history_spec(&self) -> Option<crate::SourceHistorySpec> {
         self.source.history_spec()
+    }
+    fn history_replay_factory(&self) -> Option<Arc<dyn SourceHistoryReplayFactory>> {
+        self.source.history_replay_factory()
     }
 
     fn validate_history(&self, history: &crate::SourceHistoryManifestEntry) -> Result<()> {

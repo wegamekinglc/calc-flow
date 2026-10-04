@@ -2042,8 +2042,13 @@ async fn run_job_driver(
     if let Some(checkpoint) = checkpoint.as_ref() {
         core.runtime_status.lock().checkpoint = Some(checkpoint.status.clone());
     }
-    if let Err(error) =
-        source_history::configure(checkpoint.as_ref(), &mut sources, &core.source_histories).await
+    if let Err(error) = source_history::configure(
+        checkpoint.as_ref(),
+        &mut sources,
+        &core.source_histories,
+        &mut plan,
+    )
+    .await
     {
         return core.prepare_driver_report(checkpoint_start_failure(launch_id, error));
     }

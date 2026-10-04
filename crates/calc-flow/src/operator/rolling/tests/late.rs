@@ -80,7 +80,7 @@ async fn test_native_late_rolling_emit_failure_preserves_state_and_forbids_live_
     for fail_at in [0, 1] {
         let job = job();
         let context = StreamOperatorContext::new(&job, "roll", Some(EventTime::from_micros(10)))
-            .with_test_output_budget(crate::EdgeBudget::new(10, 200).unwrap());
+            .with_output_budget(crate::EdgeBudget::new(10, 200).unwrap());
         let mut side = side_operator(0);
         let mut good = EdgeCollector::new(side.output_ports().to_vec());
         let seed = batch(&[&[(26, "a", 1, Some(26.0))]]);
@@ -260,7 +260,7 @@ fn test_late_preflight_rolling_does_not_copy_oversize_late_payload() {
     .unwrap();
     let job = job();
     let context = StreamOperatorContext::new(&job, "roll", Some(EventTime::from_micros(10)))
-        .with_test_output_budget(crate::EdgeBudget::new(10, 200).unwrap());
+        .with_output_budget(crate::EdgeBudget::new(10, 200).unwrap());
     let mut side = side_operator(0);
     let mut output = EdgeCollector::new(side.output_ports().to_vec());
     let allocations = allocation_counter::measure(|| {
@@ -399,7 +399,7 @@ async fn test_native_late_rolling_preflight_errors_leave_the_whole_envelope_unin
             _ => crate::EdgeBudget::new(10, 200).unwrap(),
         };
         let context = StreamOperatorContext::new(&job, "roll", Some(EventTime::from_micros(12)))
-            .with_test_output_budget(budget);
+            .with_output_budget(budget);
         let mut side = side_operator(2);
         let input = faulty_input(case);
         if case == "sequence" {

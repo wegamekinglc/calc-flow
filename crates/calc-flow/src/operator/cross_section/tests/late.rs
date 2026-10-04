@@ -118,7 +118,7 @@ async fn test_native_late_cross_section_emit_failure_preserves_state_and_forbids
     for fail_at in [0, 1] {
         let job = job();
         let context = StreamOperatorContext::new(&job, "cross", Some(EventTime::from_micros(12)))
-            .with_test_output_budget(crate::EdgeBudget::new(10, 200).unwrap());
+            .with_output_budget(crate::EdgeBudget::new(10, 200).unwrap());
         let mut side = operator(
             LatePolicySpec::SideOutput {
                 metrics_version: 1,
@@ -266,7 +266,7 @@ fn test_late_preflight_cross_section_does_not_copy_oversize_late_payload() {
     .unwrap();
     let job = job();
     let context = StreamOperatorContext::new(&job, "cross", Some(EventTime::from_micros(12)))
-        .with_test_output_budget(crate::EdgeBudget::new(10, 200).unwrap());
+        .with_output_budget(crate::EdgeBudget::new(10, 200).unwrap());
     let mut spec = valid_spec();
     spec.late_policy = LatePolicySpec::SideOutput {
         metrics_version: 1,
@@ -414,7 +414,7 @@ async fn test_native_late_cross_section_preflight_errors_leave_the_whole_envelop
             _ => crate::EdgeBudget::new(10, 200).unwrap(),
         };
         let context = StreamOperatorContext::new(&job, "cross", Some(EventTime::from_micros(12)))
-            .with_test_output_budget(budget);
+            .with_output_budget(budget);
         let mut side = operator(
             LatePolicySpec::SideOutput {
                 metrics_version: 1,

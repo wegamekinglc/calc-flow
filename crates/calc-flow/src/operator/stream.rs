@@ -383,8 +383,7 @@ impl<'a> StreamOperatorContext<'a> {
         self.output_budget
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_test_output_budget(mut self, budget: EdgeBudget) -> Self {
+    pub(crate) fn with_output_budget(mut self, budget: EdgeBudget) -> Self {
         self.output_budget = budget;
         self
     }

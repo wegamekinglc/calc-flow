@@ -94,7 +94,7 @@ async fn test_a03_a10_zero_column_cancelled_prefix_recovers_exactly() {
     let cancellation = CancellationToken::new();
     let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, cancellation.clone());
     let context = StreamOperatorContext::new(&job, "asof", None)
-        .with_test_output_budget(EdgeBudget::new(1, 1 << 20).unwrap());
+        .with_output_budget(EdgeBudget::new(1, 1 << 20).unwrap());
     let mut preload = EdgeCollector::new(operator.output_ports().to_vec());
     operator
         .process_data("right", right, &context, &mut preload)
@@ -129,7 +129,7 @@ async fn test_a03_a10_zero_column_cancelled_prefix_recovers_exactly() {
     assert_log_funded(&restored);
     let job = StreamJobContext::new(2, "asof", JsonMap::new(), None, CancellationToken::new());
     let context = StreamOperatorContext::new(&job, "asof", None)
-        .with_test_output_budget(EdgeBudget::new(1, 1 << 20).unwrap());
+        .with_output_budget(EdgeBudget::new(1, 1 << 20).unwrap());
     let mut output = EdgeCollector::new(restored.output_ports().to_vec());
     restored.on_end(&context, &mut output).await.unwrap();
     stopped.accepted.extend(

@@ -12,6 +12,7 @@ mod metadata;
 mod output;
 mod output_plan;
 mod payload_projection;
+mod replay;
 mod schema;
 mod spec;
 mod state;
@@ -67,6 +68,8 @@ pub struct StreamAsofJoinOperator {
     state: State,
     prepared: Option<checkpoint::PreparedSegment>,
     checkpoint_log: checkpoint::LogState,
+    replay_inputs: Option<Box<replay::Inputs>>,
+    replay: Option<Box<replay::Log>>,
     deferred_index_len: Option<u64>,
     /// `Some` when the committed state was eviction-swept under the stamped
     /// inputs; `None` when admissions, removals or a restore may have left
@@ -86,6 +89,24 @@ pub struct StreamAsofJoinOperator {
 }
 
 impl StreamAsofJoinOperator {
+    async fn admit_batch(
+        &mut self,
+        ingress: &str,
+        batch: &Batch,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<()> {
+        let validated = self.validate_admission(ingress, batch)?;
+        let admission = self
+            .prepare_admission(validated, batch, context)
+            .await
+            .map_err(|error| self.attempt_error(error))?;
+        if admission.rows.is_empty() {
+            return Ok(());
+        }
+        self.install_admission(ingress, admission, validated, context)
+            .await
+    }
+
     async fn install_admission(
         &mut self,
         ingress: &str,
@@ -280,6 +301,8 @@ impl StreamAsofJoinOperator {
             state,
             prepared: None,
             checkpoint_log: checkpoint::LogState::default(),
+            replay_inputs: None,
+            replay: None,
             deferred_index_len: None,
             swept: None,
             terminal: false,
@@ -335,8 +358,9 @@ impl StreamAsofJoinOperator {
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
+        self.record_replay(replay::Callback::Progress, context)?;
         self.observe(context.ingress_progress());
-        self.finalize(
+        self.finalize_with_replay(
             frontier(context.ingress_progress()),
             all_ended(context.ingress_progress()),
             context,
@@ -391,6 +415,7 @@ impl StreamAsofJoinOperator {
                     .status
                     .state_bytes
                     .saturating_sub(self.checkpoint_log.bytes())
+                    .saturating_sub(self.replay_bytes())
                     + self
                         .deferred_index_len
                         .map_or(0, |length| if length == 0 { 0 } else { length + 256 }),
@@ -450,25 +475,31 @@ impl StreamOperator for StreamAsofJoinOperator {
         _output: &mut dyn StreamCollector,
     ) -> Result<()> {
         context.check_cancelled()?;
+        self.record_replay(
+            replay::Callback::Data {
+                side: u8::from(ingress == "right"),
+                sequence: batch.metadata().sequence(),
+            },
+            context,
+        )?;
         self.observe(context.ingress_progress());
-        let validated = self.validate_admission(ingress, &batch)?;
-        let admission = self
-            .prepare_admission(validated, &batch, context)
-            .await
-            .map_err(|error| self.attempt_error(error))?;
-        if admission.rows.is_empty() {
-            // Empty or fully late input: committed state, gauges and the
-            // prepared segment are untouched, so admission would reinstall
-            // an identical state.
-            return Ok(());
+        let previous = self.replay.as_ref().map(|_| self.status.clone());
+        match self.admit_batch(ingress, &batch, context).await {
+            Err(error) if previous.is_some() && replay::is_capacity_error(&error) => {
+                self.status = previous.expect("replay admission saved its counters");
+                self.stop_replay()?;
+                self.admit_batch(ingress, &batch, context).await
+            }
+            result => result,
         }
-        self.install_admission(ingress, admission, validated, context)
-            .await
     }
     async fn prepare_checkpoint_async(
         &mut self,
         context: &StreamOperatorContext<'_>,
     ) -> Result<()> {
+        if self.replay.is_some() {
+            return context.check_cancelled();
+        }
         self.ensure_prepared_async(context).await
     }
     fn checkpoint(&mut self, epoch: crate::Epoch) -> Result<crate::OperatorStateSnapshot> {
@@ -489,6 +520,7 @@ impl StreamOperator for StreamAsofJoinOperator {
         self.swept = None;
         self.terminal = false;
         self.next_output_sequence = 0;
+        self.reset_replay();
         Ok(())
     }
     async fn on_watermark(
@@ -498,7 +530,7 @@ impl StreamOperator for StreamAsofJoinOperator {
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
         if context.ingress_progress().by_ingress().is_empty() {
-            self.finalize(Some(watermark.as_micros()), false, context, output)
+            self.finalize_with_replay(Some(watermark.as_micros()), false, context, output)
                 .await
                 .map_err(|error| self.attempt_error(error))
         } else {
@@ -511,9 +543,10 @@ impl StreamOperator for StreamAsofJoinOperator {
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
+        self.record_replay(replay::Callback::End, context)?;
         self.status.left.ended = true;
         self.status.right.ended = true;
-        self.finalize(None, true, context, output)
+        self.finalize_with_replay(None, true, context, output)
             .await
             .map_err(|error| self.attempt_error(error))
     }

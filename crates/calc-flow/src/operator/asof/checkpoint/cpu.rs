@@ -59,6 +59,11 @@ impl StreamAsofJoinOperator {
         job: &crate::StreamJobContext,
         task: Option<crate::runtime::streaming::gather_work::TaskId>,
     ) -> Result<Box<Self>> {
+        if snapshot.inline_metadata.contains_key("source_replay") {
+            return self
+                .restore_source_replay(snapshot, progress, frontier, job)
+                .await;
+        }
         job.check_cancelled()?;
         let credit = self.reserve_workspace(crate::operator::asof::checked(
             &self.name,

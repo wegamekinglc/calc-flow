@@ -72,9 +72,9 @@ pub use continuous::{
     NativeWatermarkCapability, OperatorStatus, OutputDeliveryStatus, ReplayPositioning,
     RollingCallbackMetrics, RollingMetrics, SinkBinding, SinkDelivery, SinkRecovery, SinkStatus,
     SourceBinding, SourceCapabilities, SourceCheckpointGate, SourceDeliveryCapability, SourceEvent,
-    SourceSchema, SourceStatus, StreamSink, StreamSource, StreamingError, StreamingErrorCategory,
-    StreamingFailureReason, StreamingJob, StreamingRunner, TerminalCause, TransactionalStreamSink,
-    WatermarkPolicy,
+    SourceHistoryReplayFactory, SourceSchema, SourceStatus, StreamSink, StreamSource,
+    StreamingError, StreamingErrorCategory, StreamingFailureReason, StreamingJob, StreamingRunner,
+    TerminalCause, TransactionalStreamSink, WatermarkPolicy,
 };
 pub use datafusion::{
     DATAFUSION_ACTIVE_ENTITIES_METADATA_KEY, DataFusionConfig, DataFusionParallelismMode,
