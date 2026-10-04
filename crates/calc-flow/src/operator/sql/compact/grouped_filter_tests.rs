@@ -1,6 +1,9 @@
 use super::*;
 use datafusion::{arrow::array::BooleanArray, execution::memory_pool::MemoryConsumer};
 
+#[path = "grouped_where_tests.rs"]
+mod predicates;
+
 const AGGREGATES: &str = "SUM(value) FILTER (WHERE accepted) AS total, AVG(value) FILTER (WHERE accepted) AS mean, SUM(value) FILTER (WHERE other) AS other_total, MIN(value) FILTER (WHERE other) AS lo, MAX(value) FILTER (WHERE other) AS hi, COUNT(value) FILTER (WHERE accepted) AS valid, COUNT(*) FILTER (WHERE other) AS selected, COUNT(*) AS rows";
 const COUNTS: &str = "SELECT key, COUNT(value) FILTER (WHERE accepted) AS valid, COUNT(*) FILTER (WHERE other) AS selected, COUNT(*) AS rows FROM events GROUP BY key";
 
@@ -213,9 +216,10 @@ async fn case(dtype: &DataType, key_type: &DataType, text: &str, keys: usize) {
 
 #[tokio::test]
 async fn test_grouped_filtered_refusal_refunds_then_retries_exactly() {
-    let dtype = DataType::Float64;
-    let key_type = DataType::Utf8;
-    let text = query(true);
+    refusal(DataType::Float64, DataType::Utf8, query(true)).await;
+}
+
+async fn refusal(dtype: DataType, key_type: DataType, text: String) {
     let job = job();
     let context = StreamOperatorContext::new(&job, "grouped_float", None);
     let mut state = filtered_operator(&dtype, &key_type, &text);

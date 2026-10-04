@@ -39,6 +39,7 @@ pub(in crate::operator::sql) struct NativeStateDescriptor {
     pub(in crate::operator::sql) aggregate_names: Vec<String>,
     pub(in crate::operator::sql) aggregate_inputs: Vec<Vec<NativeAggregateInput>>,
     pub(in crate::operator::sql) count_all_rows: Vec<bool>,
+    filtered_input: bool,
     pub(in crate::operator::sql) state_fields: Vec<Vec<FieldRef>>,
     pub(in crate::operator::sql) result_fields: Vec<FieldRef>,
     pub(in crate::operator::sql) wire_schema: SchemaRef,
@@ -180,6 +181,7 @@ impl IncrementalSql {
             aggregate_names,
             aggregate_inputs,
             count_all_rows,
+            filtered_input: self.predicate.is_some(),
             state_fields,
             result_fields,
             wire_schema: Arc::new(Schema::new(fields)),
@@ -269,6 +271,7 @@ impl IncrementalSql {
             historical_rows,
             seen_input,
             self.keys.is_empty(),
+            self.predicate.is_some(),
             name,
         )?;
         if let Some(global) = &self.global_records {
@@ -491,7 +494,7 @@ fn validate_records(
         }
     }
     for (count, all_rows) in counts.iter().zip(&descriptor.count_all_rows) {
-        if *all_rows && *count != historical_rows {
+        if *all_rows && !descriptor.filtered_input && *count != historical_rows {
             return Err(df_error(
                 name,
                 "native all-row COUNT differs from historical rows",
@@ -567,13 +570,21 @@ fn add_count(total: &mut u64, count: u64, historical_rows: u64, name: &str) -> R
     Ok(())
 }
 
-fn validate_ledger(groups: usize, rows: u64, seen: bool, scalar: bool, name: &str) -> Result<()> {
+fn validate_ledger(
+    groups: usize,
+    rows: u64,
+    seen: bool,
+    scalar: bool,
+    filtered: bool,
+    name: &str,
+) -> Result<()> {
     let valid = if !seen {
         rows == 0 && groups == 0
     } else if scalar {
         groups == 1
     } else {
-        u64::try_from(groups).is_ok_and(|groups| groups <= rows && (rows == 0 || groups != 0))
+        u64::try_from(groups)
+            .is_ok_and(|groups| groups <= rows && (rows == 0 || groups != 0 || filtered))
     };
     if !valid {
         return Err(df_error(

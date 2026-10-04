@@ -42,6 +42,9 @@ pub(in crate::operator::sql) mod grouped_float;
 #[path = "grouped_sum.rs"]
 mod grouped_sum;
 
+#[path = "predicate.rs"]
+mod predicate;
+
 #[path = "global_record.rs"]
 pub(in crate::operator::sql) mod global_record;
 
@@ -51,6 +54,7 @@ pub(super) struct IncrementalSql {
     output_schema: SchemaRef,
     aggregates: Vec<Arc<AggregateFunctionExpr>>,
     filter_columns: Vec<Option<usize>>,
+    predicate: Option<predicate::InputPredicate>,
     aggregate_bytes: usize,
     finalizer_bytes: usize,
     plan_bytes: usize,
@@ -550,6 +554,7 @@ impl IncrementalSql {
                 (keys.len(), 256),
                 (aggregate.aggr_expr.len(), 1024),
                 (projection.expr.len(), 512),
+                (predicate::plan_nodes(&aggregate.input, &schema), 512),
                 (query.text().len(), 8),
                 (rebound_fields, 512),
             ],
@@ -558,7 +563,7 @@ impl IncrementalSql {
         reservation
             .try_grow(plan_bytes)
             .map_err(|error| df_error(name, error))?;
-        let Some((aggregates, projection, filter_columns)) =
+        let Some((aggregates, projection, filter_columns, predicate)) =
             physical_plan(projection, aggregate, &schema)
         else {
             return Ok(None);
@@ -590,6 +595,7 @@ impl IncrementalSql {
             output_schema: Arc::new(analyzed.schema().as_arrow().clone()),
             aggregates,
             filter_columns,
+            predicate,
             aggregate_bytes,
             finalizer_bytes,
             plan_bytes,
@@ -872,10 +878,11 @@ impl IncrementalSql {
             .output_records(count, &candidates.groups, reservation, context, name)
             .await?;
         let new_count = count - self.groups.len();
-        if self.sequential.is_none() {
+        let staged = self.sequential.is_some() || self.predicate.is_some();
+        if !staged {
             self.reserve_groups(new_count, count, name)?;
         }
-        let container = (self.sequential.is_some() && new_count != 0)
+        let container = (staged && new_count != 0)
             .then(|| self.prepare_container(&candidates.groups, count, name))
             .transpose()?;
         let (groups, new_groups) = self
@@ -951,6 +958,17 @@ impl IncrementalSql {
             [(self.finalizer_bytes, 1), (rows.min(CHUNK_ROWS), width)],
             name,
         )?;
+        let workspace = match &self.predicate {
+            Some(predicate) => checked_bytes(
+                workspace,
+                [(
+                    predicate.workspace(rows.min(CHUNK_ROWS), self.aggregates.len(), name)?,
+                    1,
+                )],
+                name,
+            )?,
+            None => workspace,
+        };
         reservation
             .try_grow(workspace)
             .map_err(|error| df_error(name, error))?;
@@ -1048,9 +1066,21 @@ impl IncrementalSql {
         if self.keys.is_empty() {
             return update_global(&arguments, &mut candidates.groups, name);
         }
+        let selection = self
+            .predicate
+            .as_ref()
+            .map(|predicate| predicate.evaluate(chunk, name))
+            .transpose()?;
         let filters = self.filters(chunk);
+        let combined =
+            predicate::combine(selection.as_ref(), &filters, self.aggregates.len(), name)?;
+        let filters = if selection.is_some() {
+            combined.iter().map(Option::as_ref).collect()
+        } else {
+            filters
+        };
         if let Some(native) = candidates.native.as_mut() {
-            native.intern(chunk.column(self.keys[0]).clone(), name)?;
+            native.intern_selected(chunk.column(self.keys[0]).clone(), selection.as_ref(), name)?;
             let count = native.groups.len();
             let partial = candidates
                 .partial
@@ -1063,7 +1093,14 @@ impl IncrementalSql {
                 .fetch_max(count, std::sync::atomic::Ordering::SeqCst);
             return Ok(());
         }
-        self.update_grouped_chunk(chunk, &arguments, &filters, candidates, name)
+        self.update_grouped_chunk(
+            chunk,
+            &arguments,
+            &filters,
+            selection.as_ref(),
+            candidates,
+            name,
+        )
     }
 
     fn filters<'a>(&self, chunk: &'a RecordBatch) -> Vec<Option<&'a BooleanArray>> {
@@ -1106,6 +1143,7 @@ impl IncrementalSql {
         chunk: &RecordBatch,
         arguments: &[Vec<ArrayRef>],
         filters: &[Option<&BooleanArray>],
+        selection: Option<&BooleanArray>,
         candidates: &mut InputCandidates,
         name: &str,
     ) -> Result<()> {
@@ -1129,6 +1167,10 @@ impl IncrementalSql {
             .expect("grouped partial accumulators");
         let mut indices = Vec::with_capacity(chunk.num_rows());
         for row in 0..chunk.num_rows() {
+            if selection.is_some_and(|selection| !predicate::selected(selection, row)) {
+                indices.push(0);
+                continue;
+            }
             let encoded_row = encoded.row(row);
             let key = encoded_row.as_ref();
             if let Some(&rank) = candidates.touched.get(key) {
@@ -1599,6 +1641,7 @@ fn native_groups_supported(aggregates: &[Arc<AggregateFunctionExpr>]) -> bool {
 fn variable_columns(
     keys: &[usize],
     aggregates: &[Expr],
+    predicate: Option<&Expr>,
     schema: &SchemaRef,
     name: &str,
 ) -> Result<Vec<usize>> {
@@ -1618,6 +1661,13 @@ fn variable_columns(
                 }
             }
         }
+    }
+    for column in predicate.into_iter().flat_map(Expr::column_refs) {
+        variable_columns.insert(
+            schema
+                .index_of(&column.name)
+                .map_err(|error| df_error(name, error))?,
+        );
     }
     Ok(variable_columns
         .into_iter()
@@ -1663,7 +1713,11 @@ fn shape(
     let LogicalPlan::Aggregate(aggregate) = projection.input.as_ref() else {
         return None;
     };
-    if !matches!(aggregate.input.as_ref(), LogicalPlan::TableScan(_)) {
+    if !matches!(aggregate.input.as_ref(), LogicalPlan::TableScan(_))
+        && !matches!(aggregate.input.as_ref(), LogicalPlan::Filter(filter)
+            if !aggregate.group_expr.is_empty()
+                && matches!(filter.input.as_ref(), LogicalPlan::TableScan(_)))
+    {
         return None;
     }
     if !projection
@@ -1939,6 +1993,11 @@ fn plan_inputs(
     let Some((_, raw_aggregate)) = shape(raw) else {
         return Ok(None);
     };
+    if let LogicalPlan::Filter(filter) = raw_aggregate.input.as_ref() {
+        if !predicate::InputPredicate::supported(&filter.predicate, schema) {
+            return Ok(None);
+        }
+    }
     let global = raw_aggregate.group_expr.is_empty();
     let floating_extrema = global || sequential_group_key(raw_aggregate, schema);
     if raw_aggregate.aggr_expr.is_empty()
@@ -1961,7 +2020,12 @@ fn plan_inputs(
         })
         .collect::<Option<Vec<_>>>();
     let Some(keys) = keys else { return Ok(None) };
-    let variable_columns = variable_columns(&keys, &raw_aggregate.aggr_expr, schema, name)?;
+    let predicate = match raw_aggregate.input.as_ref() {
+        LogicalPlan::Filter(filter) => Some(&filter.predicate),
+        _ => None,
+    };
+    let variable_columns =
+        variable_columns(&keys, &raw_aggregate.aggr_expr, predicate, schema, name)?;
     Ok(Some((keys, variable_columns)))
 }
 
@@ -1969,6 +2033,7 @@ type PhysicalSqlPlan = (
     Vec<Arc<AggregateFunctionExpr>>,
     Vec<Arc<dyn PhysicalExpr>>,
     Vec<Option<usize>>,
+    Option<predicate::InputPredicate>,
 );
 
 fn physical_plan(
@@ -2030,7 +2095,16 @@ fn physical_plan(
     else {
         return None;
     };
-    Some((aggregates, projection, filter_columns))
+    let predicate = match aggregate.input.as_ref() {
+        LogicalPlan::Filter(filter) => Some(predicate::InputPredicate::new(
+            &filter.predicate,
+            input,
+            schema,
+            &props,
+        )?),
+        _ => None,
+    };
+    Some((aggregates, projection, filter_columns, predicate))
 }
 
 fn df_error(name: &str, error: impl std::fmt::Display) -> CalcFlowError {

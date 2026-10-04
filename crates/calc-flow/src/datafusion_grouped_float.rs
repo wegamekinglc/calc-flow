@@ -11,6 +11,7 @@ use datafusion::{
     physical_plan::{
         ExecutionPlan, InputOrderMode,
         aggregates::{AggregateExec, AggregateMode},
+        filter::FilterExec,
         projection::ProjectionExec,
     },
 };
@@ -95,6 +96,8 @@ fn inspect(plan: &dyn ExecutionPlan, input: &Batch, census: &mut Census) -> Resu
     } else if let Some(source) = plan.downcast_ref::<DataSourceExec>() {
         census.sources += 1;
         fifo_source(source, input)?
+    } else if let Some(filter) = plan.downcast_ref::<FilterExec>() {
+        filter.fetch().is_none()
     } else {
         plan.is::<ProjectionExec>()
     };
