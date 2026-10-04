@@ -652,8 +652,8 @@ impl IncrementalSql {
             return Err(df_error(name, "restored proof requires an empty candidate"));
         }
         if let grouped_float::Policy::SequentialGroupedFloatV1(policy) = policy {
-            let width = native_key_width(self.schema.field(self.keys[0]).data_type())
-                .expect("certified fixed key");
+            let layout = grouped_float::key_layout(self.schema.field(self.keys[0]).data_type())
+                .expect("certified grouped key");
             let rows =
                 usize::try_from(policy.max_record_rows).map_err(|error| df_error(name, error))?;
             self.sequential = Some(grouped_float::Proof::new(
@@ -661,7 +661,7 @@ impl IncrementalSql {
                 policy.config,
                 groups,
                 rows,
-                width,
+                layout,
                 &self.aggregates,
                 name,
             )?);
@@ -683,14 +683,14 @@ impl IncrementalSql {
                     .iter()
                     .map(RecordBatch::num_rows)
                     .fold(previous_rows, usize::max);
-                let width = native_key_width(self.schema.field(self.keys[0]).data_type())
-                    .expect("certified fixed key");
+                let layout = grouped_float::key_layout(self.schema.field(self.keys[0]).data_type())
+                    .expect("certified grouped key");
                 grouped_float::Proof::new(
                     self.reservation.new_empty(),
                     previous.policy.config,
                     self.groups.len(),
                     rows,
-                    width,
+                    layout,
                     &self.aggregates,
                     name,
                 )
@@ -1126,8 +1126,9 @@ impl IncrementalSql {
                     .len()
                     .checked_add(new_count)
                     .ok_or_else(|| df_error(name, "sequential group count overflowed"))?;
-                let width = native_key_width(self.schema.field(self.keys[0]).data_type())
-                    .expect("certified fixed key");
+                let (_, width) =
+                    grouped_float::key_layout(self.schema.field(self.keys[0]).data_type())
+                        .expect("certified grouped key");
                 proof.grow(count, width, &self.aggregates, name)?;
             }
             let candidate = self.candidate(previous, key, Some((&key_arrays, row)), name)?;
@@ -1869,7 +1870,7 @@ fn initial_grouped_proof(
     if keys.len() != 1 || !runtime.grouped_float_model_supported(name)? {
         return Ok(GroupStrategy::Unsupported);
     }
-    let Some(width) = native_key_width(schema.field(keys[0]).data_type()) else {
+    let Some(layout) = grouped_float::key_layout(schema.field(keys[0]).data_type()) else {
         return Ok(GroupStrategy::Unsupported);
     };
     grouped_float::Proof::new(
@@ -1877,21 +1878,24 @@ fn initial_grouped_proof(
         runtime.compact_runtime_config(),
         0,
         0,
-        width,
+        layout,
         aggregates,
         name,
     )
     .map(GroupStrategy::Sequential)
 }
 
-fn fixed_group_key(aggregate: &datafusion::logical_expr::Aggregate, schema: &SchemaRef) -> bool {
+fn sequential_group_key(
+    aggregate: &datafusion::logical_expr::Aggregate,
+    schema: &SchemaRef,
+) -> bool {
     let [Expr::Column(column)] = aggregate.group_expr.as_slice() else {
         return false;
     };
     schema
         .field_with_name(&column.name)
         .ok()
-        .and_then(|field| native_key_width(field.data_type()))
+        .and_then(|field| grouped_float::key_layout(field.data_type()))
         .is_some()
 }
 
@@ -1904,7 +1908,7 @@ fn plan_inputs(
         return Ok(None);
     };
     let global = raw_aggregate.group_expr.is_empty();
-    let floating_extrema = global || fixed_group_key(raw_aggregate, schema);
+    let floating_extrema = global || sequential_group_key(raw_aggregate, schema);
     if raw_aggregate.aggr_expr.is_empty()
         || !raw_aggregate
             .aggr_expr

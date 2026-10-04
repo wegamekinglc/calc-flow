@@ -28,6 +28,25 @@ pub(in crate::operator::sql) struct SequentialPolicy {
 pub(in crate::operator::sql) enum Factory {
     PrimitiveV1,
     BooleanV1,
+    Utf8V1,
+    LargeUtf8V1,
+}
+
+pub(super) fn key_layout(data_type: &DataType) -> Option<(Factory, usize)> {
+    match data_type {
+        DataType::Utf8 => Some((Factory::Utf8V1, size_of::<ScalarValue>())),
+        DataType::LargeUtf8 => Some((Factory::LargeUtf8V1, size_of::<ScalarValue>())),
+        _ => super::native_key_width(data_type).map(|width| {
+            (
+                if width == 0 {
+                    Factory::BooleanV1
+                } else {
+                    Factory::PrimitiveV1
+                },
+                width,
+            )
+        }),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -73,7 +92,7 @@ impl Proof {
         config: DataFusionConfig,
         groups: usize,
         rows: usize,
-        width: usize,
+        (factory, width): (Factory, usize),
         aggregates: &[Arc<AggregateFunctionExpr>],
         name: &str,
     ) -> Result<Self> {
@@ -83,11 +102,7 @@ impl Proof {
             policy: SequentialPolicy {
                 max_record_rows: u64::try_from(rows).map_err(|error| df_error(name, error))?,
                 config,
-                factory: if width == 0 {
-                    Factory::BooleanV1
-                } else {
-                    Factory::PrimitiveV1
-                },
+                factory,
                 model: Model::Df54SingleLinearMemtableV1,
             },
             reservation,

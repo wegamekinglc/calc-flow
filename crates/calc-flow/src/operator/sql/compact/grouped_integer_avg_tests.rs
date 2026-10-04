@@ -64,7 +64,7 @@ async fn test_grouped_integer_mixed_sum_average_count_prefix_restore() {
     }
 }
 
-fn average_input(dtype: &DataType, parts: &[IntegerPart], sequence: u64) -> Batch {
+pub(super) fn average_input(dtype: &DataType, parts: &[IntegerPart], sequence: u64) -> Batch {
     let records = parts
         .iter()
         .map(|part| {
@@ -154,7 +154,7 @@ fn cancellation_rows(dtype: &DataType, key: i64) -> IntegerPart {
     }
 }
 
-fn average_arrivals(dtype: &DataType) -> Vec<Vec<IntegerPart>> {
+pub(super) fn average_arrivals(dtype: &DataType) -> Vec<Vec<IntegerPart>> {
     let max = match dtype {
         DataType::Int64 => i128::from(i64::MAX),
         _ => i128::from(u64::MAX),
