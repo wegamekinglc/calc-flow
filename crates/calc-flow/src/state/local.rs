@@ -180,6 +180,13 @@ impl StateLineageBackend for LocalStateLineageBackend {
         worker(move || read_validated_file(&paths.committed, &handle)).await
     }
 
+    async fn verify_committed_segment(&self, handle: &StateHandle) -> Result<()> {
+        let paths = self.managed_paths(handle)?;
+        let handle = handle.clone();
+        let _guard = self.publication.lock().await;
+        worker(move || verify_file(&paths.committed, &handle)).await
+    }
+
     async fn collect_orphans(&self, retained: &[StateHandle]) -> Result<usize> {
         let mut retained_paths = BTreeSet::new();
         for handle in retained {
@@ -660,11 +667,49 @@ fn read_validated_file(path: &Path, handle: &StateHandle) -> Result<Vec<u8>> {
         message: "state segment length does not fit usize".into(),
     })?;
     let mut file = File::open(path).map_err(|source| io_error(path, source))?;
-    let mut bytes = Vec::with_capacity(capacity);
-    file.read_to_end(&mut bytes)
+    let mut bytes = vec![0; capacity];
+    file.read_exact(&mut bytes)
         .map_err(|source| io_error(path, source))?;
+    let mut extra = [0; 1];
+    if file
+        .read(&mut extra)
+        .map_err(|source| io_error(path, source))?
+        != 0
+    {
+        return Err(segment_mismatch(handle, "byte length"));
+    }
     validate_expected_bytes(handle, &bytes)?;
     Ok(bytes)
+}
+
+fn verify_file(path: &Path, handle: &StateHandle) -> Result<()> {
+    let metadata = segment_metadata(path, handle)?;
+    validate_segment_metadata(path, handle, &metadata)?;
+    let mut file = File::open(path).map_err(|source| io_error(path, source))?;
+    let mut buffer = [0; 8192];
+    let mut remaining = handle.byte_len();
+    let mut digest = Sha256::new();
+    while remaining != 0 {
+        let count = usize::try_from(remaining.min(8192)).map_err(|_| CalcFlowError::Internal {
+            message: "verification buffer size overflowed".into(),
+        })?;
+        file.read_exact(&mut buffer[..count])
+            .map_err(|source| io_error(path, source))?;
+        digest.update(&buffer[..count]);
+        remaining -= count as u64;
+    }
+    let mut extra = [0; 1];
+    if file
+        .read(&mut extra)
+        .map_err(|source| io_error(path, source))?
+        != 0
+    {
+        return Err(segment_mismatch(handle, "byte length"));
+    }
+    if hex::encode(digest.finalize()) != handle.sha256() {
+        return Err(segment_mismatch(handle, "checksum"));
+    }
+    Ok(())
 }
 
 fn segment_metadata(path: &Path, handle: &StateHandle) -> Result<std::fs::Metadata> {

@@ -90,7 +90,7 @@ pub use postgresql::{PostgresSinkFactory, PostgresSourceFactory, register_postgr
 pub use websocket::{WebSocketSourceFactory, register_websocket_connectors};
 
 #[cfg(feature = "file")]
-pub use file::{FileFormat, FileSource, FileSourceConfig};
+pub use file::{FileFormat, FileSource, FileSourceConfig, FrozenFileSource};
 #[cfg(feature = "file")]
 pub use file_sink::{FileSinkConfig, TransactionalParquetSink};
 

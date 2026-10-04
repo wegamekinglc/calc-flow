@@ -172,6 +172,21 @@ pub(crate) enum SourceDeliveryCapability {
 /// Internal source lifecycle contract for M2 runtime completion.
 #[async_trait]
 pub(crate) trait StreamSource: Send {
+    fn history_spec(&self) -> Option<crate::SourceHistorySpec> {
+        None
+    }
+
+    fn validate_history(&self, _history: &crate::SourceHistoryManifestEntry) -> Result<()> {
+        Ok(())
+    }
+
+    async fn prepare_history(&mut self, _history: crate::SourceHistoryContext) -> Result<()> {
+        Err(CalcFlowError::InvalidArgument {
+            field: "source_history".into(),
+            message: "source does not implement managed history".into(),
+        })
+    }
+
     async fn open(&mut self, cursor: Option<Cursor>) -> Result<()>;
 
     /// May block indefinitely and need not be cancellation-safe for reuse.
@@ -247,6 +262,8 @@ impl AcceptedSequenceRecorder {
 
 /// One validated source binding. Binding identity is assigned by the job.
 pub(crate) struct SourceBinding {
+    history_spec: Option<crate::SourceHistorySpec>,
+    history: Option<crate::SourceHistoryContext>,
     source: Box<dyn StreamSource>,
     capabilities: Option<SourceCapabilities>,
     delivery: Option<SourceDeliveryCapability>,
@@ -274,6 +291,8 @@ impl SourceBinding {
     ) -> Self {
         Self {
             source,
+            history_spec: None,
+            history: None,
             capabilities: None,
             delivery: None,
             declared_schema: None,
@@ -328,6 +347,7 @@ impl SourceBinding {
             return capabilities;
         }
         let capabilities = self.source.capabilities();
+        self.history_spec = self.source.history_spec();
         self.capabilities = Some(capabilities);
         self.delivery = Some(self.source.delivery_capability());
         self.declared_schema = Some(self.source.declared_schema());
@@ -368,6 +388,17 @@ impl SourceBinding {
 
     pub(crate) fn progress_spec(&self, binding_id: &str) -> Result<SourceBindingSpec> {
         let identity = BindingIdentity::new(binding_id)?;
+        if let Some(spec) = &self.history_spec {
+            spec.validate()?;
+            if !self.sampled_capabilities().replayable
+                || self.sampled_delivery() != SourceDeliveryCapability::Lossless
+            {
+                return Err(CalcFlowError::InvalidArgument {
+                    field: "source_history".into(),
+                    message: "managed history requires lossless exact replay".into(),
+                });
+            }
+        }
         Ok(SourceBindingSpec {
             descriptor: SourceDescriptor::new(
                 identity,
@@ -406,8 +437,63 @@ impl SourceBinding {
         Ok(())
     }
 
+    pub(crate) fn history_context(&self) -> Option<crate::SourceHistoryContext> {
+        self.history.as_ref().map(crate::SourceHistoryContext::fork)
+    }
+
+    pub(crate) fn history_spec(&self) -> Option<&crate::SourceHistorySpec> {
+        self.history_spec.as_ref()
+    }
+
+    pub(crate) fn validate_history(
+        &self,
+        source_id: &str,
+        saved: Option<&crate::SourceHistoryManifestEntry>,
+        recovering: bool,
+    ) -> Result<()> {
+        match (&self.history_spec, saved, recovering) {
+            (None, None, _) | (Some(_), None, false) => Ok(()),
+            (Some(spec), Some(history), _) if spec.contract == history.contract => {
+                self.source.validate_history(history)
+            }
+            _ => Err(CalcFlowError::CheckpointMismatch {
+                message: format!("source {source_id:?} history protocol changed"),
+            }),
+        }
+    }
+
+    pub(crate) async fn install_history(
+        &mut self,
+        source_id: &str,
+        transaction: Arc<crate::state::ManifestTransaction>,
+        epoch: Epoch,
+        restored: Option<crate::SourceHistoryManifestEntry>,
+    ) -> Result<()> {
+        if let Some(spec) = &self.history_spec {
+            self.history = Some(
+                crate::SourceHistoryContext::new(
+                    transaction,
+                    source_id,
+                    epoch,
+                    spec.clone(),
+                    restored,
+                )
+                .await?,
+            );
+        }
+        Ok(())
+    }
+
     pub(crate) async fn open(&mut self) -> Result<()> {
         self.open_began = true;
+        if let Some(history) = &self.history {
+            self.source.prepare_history(history.fork()).await?;
+            if history.manifest().is_none() {
+                return Err(CalcFlowError::CheckpointMismatch {
+                    message: "source did not seal its managed history".into(),
+                });
+            }
+        }
         self.source.open(self.resume_cursor.clone()).await
     }
 
@@ -421,7 +507,13 @@ impl SourceBinding {
     }
 
     pub(crate) async fn close(&mut self) -> Result<()> {
-        self.source.close().await
+        let result = self.source.close().await;
+        let history = if let Some(history) = &self.history {
+            history.drain().await.into_iter().next().map_or(Ok(()), Err)
+        } else {
+            Ok(())
+        };
+        result.and(history)
     }
 }
 
@@ -436,6 +528,7 @@ pub(crate) struct SourceProgressSnapshot {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SourceCheckpointCut {
+    pub(crate) history: Option<crate::SourceHistoryManifestEntry>,
     pub(crate) cursor: Option<Cursor>,
     pub(crate) next_sequence: Option<u64>,
     pub(crate) ended: bool,
@@ -444,6 +537,7 @@ pub(crate) struct SourceCheckpointCut {
 impl SourceCheckpointCut {
     pub(crate) fn durable(&self, binding_id: &str) -> Result<super::progress::DurableSourceCut> {
         Ok(super::progress::DurableSourceCut {
+            history: self.history.clone(),
             cursor: self.cursor.as_ref().map(Cursor::manifest_entry),
             next_sequence: self
                 .next_sequence
@@ -712,6 +806,7 @@ impl SourceAcceptance {
 
 #[derive(Clone)]
 pub(crate) struct SourceProgress {
+    history: Option<crate::SourceHistoryManifestEntry>,
     snapshot: Arc<Mutex<SourceProgressSnapshot>>,
     acceptance: Arc<SourceAcceptance>,
     binding_id: String,
@@ -729,6 +824,7 @@ impl std::fmt::Debug for SourceProgress {
         formatter
             .debug_struct("SourceProgress")
             .field("binding_id", &self.binding_id)
+            .field("history", &self.history.is_some())
             .field("snapshot", &*self.snapshot.lock())
             .field("acceptance", &*self.acceptance.state.lock())
             .field(
@@ -790,6 +886,7 @@ impl SourceProgress {
                 let snapshot = self.snapshot.lock().clone();
                 drop(processing);
                 return Ok(SourceCheckpointCut {
+                    history: self.history.clone(),
                     cursor: snapshot.latest_observed_cursor.or(snapshot.durable_cursor),
                     next_sequence: snapshot.next_sequence,
                     ended: snapshot.ended,
@@ -816,6 +913,7 @@ impl SourceProgress {
             let snapshot = self.snapshot.lock().clone();
             if snapshot.ended {
                 return Ok(SourceCheckpointCut {
+                    history: self.history.clone(),
                     cursor: snapshot.latest_observed_cursor.or(snapshot.durable_cursor),
                     next_sequence: snapshot.next_sequence,
                     ended: true,
@@ -925,6 +1023,7 @@ struct LiveSourceProgress {
 }
 
 struct SourcePumpInputs {
+    history: Option<crate::SourceHistoryContext>,
     source: Box<dyn StreamSource>,
     resume_cursor: Option<Cursor>,
     open_began: bool,
@@ -1189,22 +1288,16 @@ fn spawn_validated_source_tasks(
 ) -> SourceProgress {
     let SourceBinding {
         source,
-        capabilities: _,
-        delivery: _,
-        declared_schema: _,
-        native_watermarks: _,
-        replay_positioning: _,
-        existing_toggle_route: _,
+        history,
         durable_cursor_acknowledger,
         checkpoint_gate,
         resume_cursor,
         next_sequence,
         restored_ended,
         open_began,
-        watermark_policy: _,
-        prepared_progress: _,
         #[cfg(test)]
         accepted_sequence_recorder,
+        ..
     } = binding;
     #[cfg(test)]
     let source_acceptance = {
@@ -1220,6 +1313,9 @@ fn spawn_validated_source_tasks(
     let source_acceptance = SourceAcceptance::new();
     let acceptance = Arc::new(source_acceptance);
     let progress = SourceProgress {
+        history: history
+            .as_ref()
+            .and_then(crate::SourceHistoryContext::manifest),
         snapshot: Arc::new(Mutex::new(SourceProgressSnapshot {
             replayable: capabilities.replayable,
             latest_observed_cursor: None,
@@ -1247,6 +1343,7 @@ fn spawn_validated_source_tasks(
             run_source_pump(
                 SourcePumpInputs {
                     source,
+                    history,
                     resume_cursor: pump_resume_cursor,
                     open_began,
                     slot: slot_tx,
@@ -1300,6 +1397,7 @@ async fn run_source_pump(
 ) -> Result<()> {
     let SourcePumpInputs {
         mut source,
+        history,
         resume_cursor,
         open_began,
         slot,
@@ -1329,7 +1427,7 @@ async fn run_source_pump(
         acceptance.mark_pump_operation_failed();
         on_error();
     }
-    let close_failed = match AssertUnwindSafe(source.close()).catch_unwind().await {
+    let mut close_failed = match AssertUnwindSafe(source.close()).catch_unwind().await {
         Ok(Ok(())) => false,
         Ok(Err(error)) => {
             acceptance.record_close_failure(error);
@@ -1343,6 +1441,12 @@ async fn run_source_pump(
             true
         }
     };
+    if let Some(history) = history {
+        for error in history.drain().await {
+            acceptance.record_close_failure(error);
+            close_failed = true;
+        }
+    }
     acceptance.mark_pump_closed();
     match operation {
         Ok(PumpCompletion::Cancelled | PumpCompletion::Draining) if close_failed => {
@@ -3100,6 +3204,7 @@ mod tests {
         let (slot_tx, _slot_rx) = mpsc::channel(1);
         let mut pump = Box::pin(run_source_pump(
             SourcePumpInputs {
+                history: None,
                 source: Box::new(source),
                 resume_cursor: None,
                 open_began: false,

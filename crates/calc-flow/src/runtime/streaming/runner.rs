@@ -1,6 +1,7 @@
 mod asof;
 mod checkpoint_task;
 pub(super) mod operator_fusion;
+mod source_history;
 mod sql_recovery;
 mod supervision;
 
@@ -159,6 +160,7 @@ pub(super) struct JobCore {
     sql_recovery: JobSqlRecoveryOwner,
     gather_work: super::gather_work::JobGatherOwner,
     asof_loads: asof::LoadOwner,
+    source_histories: source_history::HistoryOwner,
     supervision: SupervisionHome,
     #[cfg(test)]
     owned_lane_launches: Arc<AtomicU64>,
@@ -232,6 +234,7 @@ impl JobCore {
             sql_recovery: JobSqlRecoveryOwner::new(),
             gather_work: super::gather_work::JobGatherOwner::new(job_id.to_string().into()),
             asof_loads: asof::LoadOwner::default(),
+            source_histories: source_history::HistoryOwner::default(),
             supervision: SupervisionHome::default(),
             #[cfg(test)]
             owned_lane_launches,
@@ -1610,6 +1613,8 @@ async fn settle_driver_report(core: &Arc<JobCore>, join_error: Option<&str>) -> 
         }
         drop(loan);
     }
+    core.supervision
+        .append_cleanup(core.source_histories.drain().await);
     core.sql_recovery.close_admission();
     let sql_failures = core.sql_recovery.drain().await;
     core.supervision.append_cleanup(sql_failures);
@@ -2036,6 +2041,11 @@ async fn run_job_driver(
     };
     if let Some(checkpoint) = checkpoint.as_ref() {
         core.runtime_status.lock().checkpoint = Some(checkpoint.status.clone());
+    }
+    if let Err(error) =
+        source_history::configure(checkpoint.as_ref(), &mut sources, &core.source_histories).await
+    {
+        return core.prepare_driver_report(checkpoint_start_failure(launch_id, error));
     }
     if let Some(checkpoint) = checkpoint.as_ref()
         && let Some(selected) = checkpoint.selected.as_ref()
@@ -2588,6 +2598,7 @@ fn restored_ended_source_cuts(
             Ok((
                 super::progress::BindingIdentity::new(source_id.as_str())?,
                 DurableSourceCut {
+                    history: entry.history.clone(),
                     cursor: entry.cursor.clone(),
                     next_sequence: entry.sequence,
                     ended: true,

@@ -9008,6 +9008,7 @@ async fn terminal_checkpoint_waits_until_the_periodic_epoch_completes() {
 #[test]
 fn periodic_cut_after_all_sources_end_is_terminal() {
     let cut = |ended| DurableSourceCut {
+        history: None,
         cursor: None,
         next_sequence: 1,
         ended,

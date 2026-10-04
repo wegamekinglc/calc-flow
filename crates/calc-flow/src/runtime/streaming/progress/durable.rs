@@ -16,6 +16,7 @@ use crate::{
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DurableSourceCut {
+    pub(crate) history: Option<crate::SourceHistoryManifestEntry>,
     pub(crate) cursor: Option<CursorManifestEntry>,
     pub(crate) next_sequence: u64,
     pub(crate) ended: bool,

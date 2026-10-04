@@ -694,6 +694,22 @@ impl ManifestTransaction {
             .await
     }
 
+    pub(crate) async fn pin_working_state(
+        &self,
+        owner_id: &str,
+        handles: &[StateHandle],
+    ) -> Result<Option<Arc<WorkingStatePins>>> {
+        let _guard = self.operation.lock().await;
+        for handle in handles {
+            handle.validate_owner(owner_id)?;
+        }
+        WorkingStatePins::acquire(self.session_segments.clone(), self.lineage.clone(), handles)
+    }
+
+    pub(crate) async fn load_source_history(&self, handle: &StateHandle) -> Result<Vec<u8>> {
+        self.lineage.load_segment(handle).await
+    }
+
     pub(crate) async fn load_operator_state_cancellable(
         &self,
         operator_id: &str,
@@ -1078,7 +1094,21 @@ async fn validate_manifest_segments(
     let session_verified = |handle: &StateHandle| {
         session_segments.is_some_and(|session| session.lock().verified.contains(handle))
     };
-    for handle in manifest_handles(manifest) {
+    for source in manifest.sources().values() {
+        if let Some(history) = &source.history {
+            for handle in &history.segments {
+                if !session_verified(handle) {
+                    lineage.verify_committed_segment(handle).await?;
+                }
+            }
+        }
+    }
+    for handle in manifest
+        .operators()
+        .values()
+        .flat_map(|entry| &entry.segments)
+        .chain(manifest.sinks().values().flat_map(|entry| &entry.segments))
+    {
         if !session_verified(handle) {
             lineage.load_segment(handle).await?;
         }

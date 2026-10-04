@@ -225,6 +225,12 @@ pub trait StateLineageBackend: Send + Sync {
     /// Loads committed bytes after validating length and checksum.
     async fn load_segment(&self, handle: &StateHandle) -> Result<Vec<u8>>;
 
+    /// Verifies committed bytes without returning a retained buffer.
+    /// Backends may stream verification; the default loads and drops the bytes.
+    async fn verify_committed_segment(&self, handle: &StateHandle) -> Result<()> {
+        self.load_segment(handle).await.map(drop)
+    }
+
     /// Collects committed segments unreachable from the retained handles.
     async fn collect_orphans(&self, retained: &[StateHandle]) -> Result<usize>;
 }

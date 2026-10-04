@@ -334,6 +334,27 @@ impl Default for WatermarkPolicy {
 pub trait StreamSource: Send {
     /// Returns the descriptor that the runtime samples once before `open`.
     fn capabilities(&self) -> SourceCapabilities;
+    /// Declares optional immutable managed input history before any I/O.
+    fn history_spec(&self) -> Option<crate::SourceHistorySpec> {
+        None
+    }
+    /// Validates saved connector metadata before opening or terminal recovery.
+    ///
+    /// # Errors
+    /// Returns a checkpoint mismatch for incompatible connector metadata.
+    fn validate_history(&self, _history: &crate::SourceHistoryManifestEntry) -> Result<()> {
+        Ok(())
+    }
+    /// Captures or attaches immutable history before `open`, then seals its descriptor.
+    ///
+    /// # Errors
+    /// Returns a connector, storage, or budget error without opening the source.
+    async fn prepare_history(&mut self, _history: crate::SourceHistoryContext) -> Result<()> {
+        Err(CalcFlowError::InvalidArgument {
+            field: "source_history".into(),
+            message: "source does not implement managed history".into(),
+        })
+    }
     /// Opens at the beginning or at an exact owned recovery cursor.
     async fn open(&mut self, cursor: Option<Cursor>) -> Result<()>;
     /// Produces the next event, or `None` when the source has ended.
@@ -395,6 +416,17 @@ impl<S: StreamSource> SourceAdapter<S> {
 
 #[async_trait]
 impl<S: StreamSource> InternalStreamSource for SourceAdapter<S> {
+    fn history_spec(&self) -> Option<crate::SourceHistorySpec> {
+        self.source.history_spec()
+    }
+
+    fn validate_history(&self, history: &crate::SourceHistoryManifestEntry) -> Result<()> {
+        self.source.validate_history(history)
+    }
+
+    async fn prepare_history(&mut self, history: crate::SourceHistoryContext) -> Result<()> {
+        self.source.prepare_history(history).await
+    }
     async fn open(&mut self, cursor: Option<InternalCursor>) -> Result<()> {
         self.source.open(cursor.map(|inner| Cursor { inner })).await
     }

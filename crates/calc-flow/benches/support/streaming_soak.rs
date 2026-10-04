@@ -3192,6 +3192,7 @@ fn prepare_private_barrier_cut_benchmark(
             (
                 BindingIdentity::new(*source_id).unwrap(),
                 DurableSourceCut {
+                    history: None,
                     cursor: Some(CursorManifestEntry {
                         order: format!("{:02x}", index + 1),
                         payload: BTreeMap::new(),

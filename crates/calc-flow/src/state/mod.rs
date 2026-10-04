@@ -8,6 +8,7 @@ mod backend;
 mod local;
 mod manifest;
 mod segment;
+mod source_history;
 mod transaction;
 
 #[cfg(test)]
@@ -37,4 +38,7 @@ pub use manifest::{
     OperatorIngressManifestEntry, OperatorManifestEntry, RecoveryStatus, RetentionClass,
     SOURCE_HISTORY_FORMAT_VERSION, SinkDeliveryManifest, SinkManifestEntry,
     SourceHistoryManifestEntry, SourceManifestEntry, SourceWatermarkManifestState,
+};
+pub use source_history::{
+    SourceHistoryBytes, SourceHistoryContext, SourceHistoryLimits, SourceHistorySpec,
 };

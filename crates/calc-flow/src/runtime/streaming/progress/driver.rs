@@ -319,6 +319,7 @@ mod checkpoint_cut_tests {
                     (
                         binding("left"),
                         DurableSourceCut {
+                            history: None,
                             cursor: Some(CursorManifestEntry {
                                 order: "01".into(),
                                 payload: BTreeMap::new(),
@@ -330,6 +331,7 @@ mod checkpoint_cut_tests {
                     (
                         binding("right"),
                         DurableSourceCut {
+                            history: None,
                             cursor: Some(CursorManifestEntry {
                                 order: "02".into(),
                                 payload: BTreeMap::new(),
@@ -409,6 +411,7 @@ mod checkpoint_cut_tests {
                     &BTreeMap::from([(
                         binding("left"),
                         DurableSourceCut {
+                            history: None,
                             cursor: Some(CursorManifestEntry {
                                 order: "01".into(),
                                 payload: BTreeMap::new(),
@@ -472,6 +475,7 @@ mod checkpoint_cut_tests {
                 &BTreeMap::from([(
                     binding("idle"),
                     DurableSourceCut {
+                        history: None,
                         cursor: None,
                         next_sequence: 0,
                         ended: false,
@@ -538,6 +542,7 @@ mod checkpoint_cut_tests {
                 &BTreeMap::from([(
                     binding("timed"),
                     DurableSourceCut {
+                        history: None,
                         cursor: None,
                         next_sequence: 1,
                         ended: false,
@@ -3481,7 +3486,7 @@ fn durable_source_manifest_entries<C: DriverLogicalClock>(
             Ok((
                 id.to_owned(),
                 SourceManifestEntry {
-                    history: None,
+                    history: cut.history.clone(),
                     cursor: cut.cursor.clone(),
                     identity_hash: state.prepared.identity_hash(),
                     sequence: cut.next_sequence,

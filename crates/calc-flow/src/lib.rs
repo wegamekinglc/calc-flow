@@ -119,7 +119,8 @@ pub use state::{
     MANIFEST_FORMAT_VERSION, MAX_MANIFEST_DOCUMENT_BYTES, ManifestExpectation,
     ManifestIngressState, OperatorIngressManifestEntry, OperatorManifestEntry, RecoveryStatus,
     RetentionClass, SOURCE_HISTORY_FORMAT_VERSION, SinkDeliveryManifest, SinkManifestEntry,
-    SourceHistoryManifestEntry, SourceManifestEntry, SourceWatermarkManifestState, StateBackend,
+    SourceHistoryBytes, SourceHistoryContext, SourceHistoryLimits, SourceHistoryManifestEntry,
+    SourceHistorySpec, SourceManifestEntry, SourceWatermarkManifestState, StateBackend,
     StateHandle, StateLineageBackend, StateLineageKey,
 };
 pub use static_input::{
