@@ -3,7 +3,7 @@ use std::{mem::size_of, sync::Arc};
 use ahash::RandomState;
 use datafusion::{
     arrow::{
-        array::ArrayRef,
+        array::{ArrayRef, BooleanArray},
         datatypes::{DataType, Field, Schema, SchemaRef},
         record_batch::RecordBatch,
         row::{RowConverter, SortField},
@@ -17,6 +17,7 @@ use datafusion::{
         PhysicalExpr,
         aggregate::{AggregateFunctionExpr, LoweredAggregateBuilder},
         create_physical_expr,
+        expressions::Column,
     },
     physical_plan::aggregates::{
         group_values::{GroupValues, new_group_values},
@@ -49,6 +50,7 @@ pub(super) struct IncrementalSql {
     aggregate_schema: SchemaRef,
     output_schema: SchemaRef,
     aggregates: Vec<Arc<AggregateFunctionExpr>>,
+    filter_columns: Vec<Option<usize>>,
     aggregate_bytes: usize,
     finalizer_bytes: usize,
     plan_bytes: usize,
@@ -297,13 +299,21 @@ impl PartialGroups {
     fn update(
         &mut self,
         arguments: &[Vec<ArrayRef>],
+        filters: &[Option<&BooleanArray>],
         indices: &[usize],
         count: usize,
         name: &str,
     ) -> Result<()> {
-        for (accumulator, arguments) in self.accumulators.iter_mut().zip(arguments) {
+        for (index, (accumulator, arguments)) in
+            self.accumulators.iter_mut().zip(arguments).enumerate()
+        {
             accumulator
-                .update_batch(arguments, indices, count)
+                .update_batch(
+                    arguments,
+                    indices,
+                    filters.get(index).copied().flatten(),
+                    count,
+                )
                 .map_err(|error| df_error(name, error))?;
         }
         let actual = self.accumulators.iter().try_fold(
@@ -548,7 +558,9 @@ impl IncrementalSql {
         reservation
             .try_grow(plan_bytes)
             .map_err(|error| df_error(name, error))?;
-        let Some((aggregates, projection)) = physical_plan(projection, aggregate, &schema) else {
+        let Some((aggregates, projection, filter_columns)) =
+            physical_plan(projection, aggregate, &schema)
+        else {
             return Ok(None);
         };
         let Some(aggregate_bytes) = aggregate_bytes(&aggregates, name)? else {
@@ -577,6 +589,7 @@ impl IncrementalSql {
             aggregate_schema: Arc::new(aggregate.schema.as_arrow().clone()),
             output_schema: Arc::new(analyzed.schema().as_arrow().clone()),
             aggregates,
+            filter_columns,
             aggregate_bytes,
             finalizer_bytes,
             plan_bytes,
@@ -1035,6 +1048,7 @@ impl IncrementalSql {
         if self.keys.is_empty() {
             return update_global(&arguments, &mut candidates.groups, name);
         }
+        let filters = self.filters(chunk);
         if let Some(native) = candidates.native.as_mut() {
             native.intern(chunk.column(self.keys[0]).clone(), name)?;
             let count = native.groups.len();
@@ -1043,13 +1057,28 @@ impl IncrementalSql {
                 .as_mut()
                 .expect("grouped partial accumulators");
             partial.reserve(count, name)?;
-            partial.update(&arguments, &native.indices, count, name)?;
+            partial.update(&arguments, &filters, &native.indices, count, name)?;
             #[cfg(test)]
             self.partial_groups
                 .fetch_max(count, std::sync::atomic::Ordering::SeqCst);
             return Ok(());
         }
-        self.update_grouped_chunk(chunk, &arguments, candidates, name)
+        self.update_grouped_chunk(chunk, &arguments, &filters, candidates, name)
+    }
+
+    fn filters<'a>(&self, chunk: &'a RecordBatch) -> Vec<Option<&'a BooleanArray>> {
+        self.filter_columns
+            .iter()
+            .map(|column| {
+                column.map(|column| {
+                    chunk
+                        .column(column)
+                        .as_any()
+                        .downcast_ref::<BooleanArray>()
+                        .expect("validated Boolean aggregate filter")
+                })
+            })
+            .collect()
     }
 
     fn reserve_chunk(
@@ -1076,6 +1105,7 @@ impl IncrementalSql {
         &self,
         chunk: &RecordBatch,
         arguments: &[Vec<ArrayRef>],
+        filters: &[Option<&BooleanArray>],
         candidates: &mut InputCandidates,
         name: &str,
     ) -> Result<()> {
@@ -1128,7 +1158,7 @@ impl IncrementalSql {
             indices.push(rank);
         }
         partial.seed(&candidates.groups, &self.aggregates, name)?;
-        partial.update(arguments, &indices, partial.slots.len(), name)?;
+        partial.update(arguments, filters, &indices, partial.slots.len(), name)?;
         #[cfg(test)]
         self.partial_groups
             .fetch_max(partial.slots.len(), std::sync::atomic::Ordering::SeqCst);
@@ -1678,6 +1708,17 @@ fn eligible(expr: &Expr, schema: &SchemaRef, floating_extrema: bool, global: boo
     if !aggregate_parameters_supported(params) {
         return false;
     }
+    if !params.filter.as_deref().is_none_or(|filter| {
+        let Expr::Column(column) = filter else {
+            return false;
+        };
+        !global
+            && schema
+                .field_with_name(&column.name)
+                .is_ok_and(|field| field.data_type() == &DataType::Boolean)
+    }) {
+        return false;
+    }
     let builtin = datafusion::functions_aggregate::all_default_aggregate_functions()
         .into_iter()
         .any(|candidate| candidate.name() == function.func.name() && candidate == function.func);
@@ -1793,7 +1834,6 @@ fn aggregate_parameters_supported(
     params: &datafusion::logical_expr::expr::AggregateFunctionParams,
 ) -> bool {
     !params.distinct
-        && params.filter.is_none()
         && params.order_by.is_empty()
         && params.null_treatment.is_none()
         && params.args.len() == 1
@@ -1925,7 +1965,11 @@ fn plan_inputs(
     Ok(Some((keys, variable_columns)))
 }
 
-type PhysicalSqlPlan = (Vec<Arc<AggregateFunctionExpr>>, Vec<Arc<dyn PhysicalExpr>>);
+type PhysicalSqlPlan = (
+    Vec<Arc<AggregateFunctionExpr>>,
+    Vec<Arc<dyn PhysicalExpr>>,
+    Vec<Option<usize>>,
+);
 
 fn physical_plan(
     projection: &datafusion::logical_expr::Projection,
@@ -1950,18 +1994,34 @@ fn physical_plan(
         rebound = DFSchema::from_field_specific_qualified_schema(qualifiers, schema).ok()?;
         &rebound
     };
-    let Ok(aggregates) = aggregate
+    let Ok(lowered) = aggregate
         .aggr_expr
         .iter()
-        .map(|expr| {
-            LoweredAggregateBuilder::new(expr, input, schema, &props)
-                .build()
-                .map(|lowered| lowered.aggregate)
-        })
+        .map(|expr| LoweredAggregateBuilder::new(expr, input, schema, &props).build())
         .collect::<datafusion::error::Result<Vec<_>>>()
     else {
         return None;
     };
+    let filter_columns = lowered
+        .iter()
+        .map(|lowered| match &lowered.filter {
+            None => Some(None),
+            Some(filter) => {
+                let column = filter.downcast_ref::<Column>()?;
+                (schema.field(column.index()).data_type() == &DataType::Boolean)
+                    .then_some(Some(column.index()))
+            }
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let filter_columns = if filter_columns.iter().all(Option::is_none) {
+        Vec::new()
+    } else {
+        filter_columns
+    };
+    let aggregates = lowered
+        .into_iter()
+        .map(|lowered| lowered.aggregate)
+        .collect();
     let Ok(projection) = projection
         .expr
         .iter()
@@ -1970,7 +2030,7 @@ fn physical_plan(
     else {
         return None;
     };
-    Some((aggregates, projection))
+    Some((aggregates, projection, filter_columns))
 }
 
 fn df_error(name: &str, error: impl std::fmt::Display) -> CalcFlowError {
@@ -2036,6 +2096,7 @@ mod tests {
         partial
             .update(
                 &[vec![values.to_array_of_size(1024).unwrap()]],
+                &[],
                 &(0..1024).collect::<Vec<_>>(),
                 1024,
                 "totals",
@@ -2045,7 +2106,13 @@ mod tests {
         partial.add_slot(1024, "totals").unwrap();
         let prepaid = partial.reservation.size();
         partial
-            .update(&[vec![values.to_array().unwrap()]], &[1024], 1025, "totals")
+            .update(
+                &[vec![values.to_array().unwrap()]],
+                &[],
+                &[1024],
+                1025,
+                "totals",
+            )
             .unwrap();
         let peak = previous
             + partial.accumulators[0].size()
@@ -2144,6 +2211,7 @@ mod tests {
         partial
             .update(
                 &[vec![value.to_array_of_size(1024).unwrap()]],
+                &[],
                 &(0..1024).collect::<Vec<_>>(),
                 1024,
                 "totals",
@@ -2167,6 +2235,7 @@ mod tests {
                 &[vec![
                     ScalarValue::Decimal256(None, 60, 2).to_array().unwrap(),
                 ]],
+                &[],
                 &[1024],
                 1025,
                 "totals",

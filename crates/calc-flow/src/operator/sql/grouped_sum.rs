@@ -1,6 +1,8 @@
 use super::{AggregateFunctionExpr, ArrayRef, GroupsAccumulator, Result, ScalarValue, df_error};
 use datafusion::{
-    arrow::datatypes::DataType, common::Result as DataFusionResult, logical_expr::EmitTo,
+    arrow::{array::BooleanArray, datatypes::DataType},
+    common::Result as DataFusionResult,
+    logical_expr::EmitTo,
 };
 
 pub(super) fn selected(expression: &AggregateFunctionExpr) -> bool {
@@ -40,7 +42,7 @@ impl PartialAccumulator {
             })
             .collect::<DataFusionResult<Vec<_>>>()
             .map_err(|error| df_error(name, error))?;
-        let filter = datafusion::arrow::array::BooleanArray::from(vec![true; ranks.len()]);
+        let filter = BooleanArray::from(vec![true; ranks.len()]);
         if self.numeric {
             self.native
                 .merge_batch(&values, &ranks, Some(&filter), count)
@@ -62,9 +64,10 @@ impl PartialAccumulator {
         &mut self,
         values: &[ArrayRef],
         indices: &[usize],
+        filter: Option<&BooleanArray>,
         count: usize,
     ) -> DataFusionResult<()> {
-        self.native.update_batch(values, indices, None, count)
+        self.native.update_batch(values, indices, filter, count)
     }
 
     pub fn state(&mut self, emit_to: EmitTo) -> DataFusionResult<Vec<ArrayRef>> {

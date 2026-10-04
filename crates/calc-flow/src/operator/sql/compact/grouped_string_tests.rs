@@ -1,6 +1,9 @@
 use super::*;
 use datafusion::arrow::array::LargeStringArray;
 
+#[path = "grouped_filter_tests.rs"]
+mod filters;
+
 const MIXED: &str = "SELECT key, SUM(value) AS total, AVG(value) AS mean FROM events GROUP BY key";
 const ALL: &str = "SELECT key, MIN(value) AS lo, MAX(value) AS hi, COUNT(value) AS valid, COUNT(*) AS rows, SUM(value) AS total, AVG(value) AS mean FROM events GROUP BY key";
 

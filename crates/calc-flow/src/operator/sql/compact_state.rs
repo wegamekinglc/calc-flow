@@ -132,9 +132,7 @@ impl IncrementalSql {
                     .collect::<Result<Vec<_>>>()
             })
             .collect::<Result<Vec<_>>>()?;
-        let count_all_rows = aggregate_names.iter().zip(&aggregate_inputs).map(|(function, inputs)| {
-            function == "count" && matches!(inputs.as_slice(), [NativeAggregateInput::Literal(value)] if !value.is_null())
-        }).collect::<Vec<_>>();
+        let count_all_rows = self.count_all_rows(&aggregate_names, &aggregate_inputs);
         let projection_slots = self
             .projection
             .iter()
@@ -191,6 +189,23 @@ impl IncrementalSql {
             policy: self.native_policy(),
             _reservation: reservation,
         })
+    }
+
+    fn count_all_rows(
+        &self,
+        functions: &[String],
+        inputs: &[Vec<NativeAggregateInput>],
+    ) -> Vec<bool> {
+        functions
+            .iter()
+            .zip(inputs)
+            .enumerate()
+            .map(|(index, (function, inputs))| {
+                function == "count"
+                    && self.filter_columns.get(index).is_none_or(Option::is_none)
+                    && matches!(inputs.as_slice(), [NativeAggregateInput::Literal(value)] if !value.is_null())
+            })
+            .collect()
     }
 
     pub(in crate::operator::sql) fn export_native_state(
