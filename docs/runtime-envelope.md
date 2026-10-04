@@ -458,12 +458,13 @@ preserves downstream acceptance of later legal rows at `C`. The public
 
 ASOF admission charges the projected index length and installs accepted rows
 without cloning the retained maps. Output prefix commits update the deferred
-length or retain a drained view of the last captured index. Managed barrier
-preparation encodes the deferred index or compacts the drained view
-asynchronously; synchronous capture then shares those bytes. An eviction sweep
-still rebuilds state and its index in bounded asynchronous handler work.
-Restore cross-validates native
-rows/counters/terminal state
+index length and release obsolete prepared index bytes. Right-side eviction
+prepares required copies and resource deltas before changing state in place
+once per completed progress tick; a changing sweep still traverses retained
+right buckets. It also defers index encoding. Managed barrier preparation
+encodes the canonical index and uncached retained payloads asynchronously;
+synchronous capture then shares the immutable segments.
+Restore cross-validates native rows/counters/terminal state
 with the wrapper's ingress progress and output frontier before readiness is
 acknowledged. All sources reaching ASOF must have a non-disabled valid watermark
 policy at preflight. See [ASOF state and recovery](asof-join-guide.md#recovery-status-and-delivery).

@@ -1,0 +1,233 @@
+{
+  "issue": "DAL-318",
+  "date": "2026-10-04",
+  "baseline_main_sha": "29fe284b56ee01306c4da6deab28b9e2f2883746",
+  "scope": [
+    "description",
+    "instructions"
+  ],
+  "writes_authorized": false,
+  "canonical_policy": "Read canonical bodies, preserve existing runtime overlays and client-specific adaptations.",
+  "changed_fields": [
+    {
+      "name": "cf-implementer",
+      "field": "instructions"
+    },
+    {
+      "name": "cf-critic",
+      "field": "instructions"
+    }
+  ],
+  "agents": [
+    {
+      "name": "cf-orchestrator",
+      "id": "a6c22a43-3dc1-4338-8581-3e1317dd9519",
+      "canonical": ".codex/agents/cf-orchestrator.toml",
+      "mirror": ".claude/agents/cf-orchestrator.md",
+      "description": {
+        "status": "equal",
+        "sha256": "b2a1a69d9e61329a1562e57429aa7640fe300e0ae088159ef5232e0dd812a324"
+      },
+      "instructions": {
+        "status": "equal_with_runtime_overlay",
+        "observed_sha256": "61b09be5dbc85639efe3c9ce8bb8336faf07b47ae363ce2a299467e5e77fb255",
+        "proposed_sha256": "61b09be5dbc85639efe3c9ce8bb8336faf07b47ae363ce2a299467e5e77fb255",
+        "baseline_canonical_sha256": "320b2c10a894d15748a123c57615daf9f577418e4d8b91364539bf1518e5edfb",
+        "audited_canonical_sha256": "320b2c10a894d15748a123c57615daf9f577418e4d8b91364539bf1518e5edfb",
+        "preserved_runtime_overlay_sha256": "30f42c839098df97e0dd66e2b34b8e79261ab249ffe11838ea22a5038969b9f3",
+        "replace_fragments": []
+      },
+      "write_performed": false
+    },
+    {
+      "name": "cf-implementer",
+      "id": "227e58dc-a05a-48b6-bd20-94af140da251",
+      "canonical": ".codex/agents/cf-implementer.toml",
+      "mirror": ".claude/agents/cf-implementer.md",
+      "description": {
+        "status": "equal",
+        "sha256": "73734f89175b4b0b24b3770639a8409c692608460498b93f3f33f098cf0061c6"
+      },
+      "instructions": {
+        "status": "proposed_change",
+        "observed_sha256": "451ed6d7dcf7a5963977d82cc6f435c565b7268230a14b43859e64e2a188f164",
+        "proposed_sha256": "f2937f435107df1d51233c2e6632ed6bb4ed08d36440e7b5da2ea0c60bb2d7aa",
+        "baseline_canonical_sha256": "d8cf3d35690b57d28d3d2b0018de0401e65481295bfcdf8fd6508a7c08ba91c9",
+        "audited_canonical_sha256": "4298b24a7720e123a51009f91ab1fe8f88667275a266eca2748b6326d90692f9",
+        "preserved_runtime_overlay_sha256": "d050b55ae23cf8ae293a4b973209712d0edaf0854b9e89db0831a6ef44aed0a9",
+        "replace_fragments": [
+          {
+            "before": "| Element        | Convention                                                                           |\n|----------------|--------------------------------------------------------------------------------------|\n| Rust           | rustfmt clean; clippy `-D warnings`; harness green; llvm-cov ≥90 lines               |\n| Python         | 3.13+; `from __future__ import annotations`; `list[str]`, `dict[str, Any]`, `A \\| B` |\n| Functions      | pure transforms; never mutate inputs or caller-owned objects                         |\n| State          | confined to owned boundaries (stateful operators, runners, stores)                   |\n| Tables         | Arrow-backed; DataFusion is the only table engine                                    |\n| Arrays         | Array API-backed (NumPy/JAX); allowlisted AST, never `eval`                          |\n| UDFs           | `UdfReference(provider, name, version)`; configs never carry callables               |\n| Web            | async I/O; immutable React state updates; clean up async resources                   |\n| Tests          | mirror source layout; `test_<behavior>()`; local fixtures                            |\n| Generated code | never commit `python/calc_flow/_native*.so`; keep outputs under `target/`            |",
+            "after": "| Element        | Convention                                                                                             |\n|----------------|--------------------------------------------------------------------------------------------------------|\n| Rust           | rustfmt clean; clippy `-D warnings`; harness green; llvm-cov ≥90 lines                                 |\n| Python         | core 3.9+; Studio 3.13+; `from __future__ import annotations`; `list[str]`, `dict[str, Any]`, `A \\| B` |\n| Functions      | pure transforms; never mutate inputs or caller-owned objects                                           |\n| State          | confined to owned boundaries (stateful operators, runners, stores)                                     |\n| Tables         | Arrow-backed; DataFusion is the only table engine                                                      |\n| Arrays         | Array API-backed (NumPy/JAX); allowlisted AST, never `eval`                                            |\n| UDFs           | `UdfReference(provider, name, version)`; configs never carry callables                                 |\n| Web            | async I/O; immutable React state updates; clean up async resources                                     |\n| Tests          | mirror source layout; `test_<behavior>()`; local fixtures                                              |\n| Generated code | never commit `python/calc_flow/_native*.so`; keep outputs under `target/`                              |"
+          }
+        ]
+      },
+      "write_performed": false
+    },
+    {
+      "name": "cf-tester",
+      "id": "a553f49e-ae3c-401e-88d4-919d9e078703",
+      "canonical": ".codex/agents/cf-tester.toml",
+      "mirror": ".claude/agents/cf-tester.md",
+      "description": {
+        "status": "equal",
+        "sha256": "a67a09ec4fbded03c7a0dd7155d265ab9d32132381e9d0c5505ba8160065a46c"
+      },
+      "instructions": {
+        "status": "equal_with_runtime_overlay",
+        "observed_sha256": "6191320fd31adac81fe2f3b6582442c39b122711f6f363e843401561ed68091b",
+        "proposed_sha256": "6191320fd31adac81fe2f3b6582442c39b122711f6f363e843401561ed68091b",
+        "baseline_canonical_sha256": "a359558a996560c04d5b132a01d69da1343a30163a92ea35ac72c168d600d6c3",
+        "audited_canonical_sha256": "a359558a996560c04d5b132a01d69da1343a30163a92ea35ac72c168d600d6c3",
+        "preserved_runtime_overlay_sha256": "4bd9781be68924d180a4e9954e9e4d6032c3ed2b32059ccc9c70fcd3d0272933",
+        "replace_fragments": []
+      },
+      "write_performed": false
+    },
+    {
+      "name": "cf-api-designer",
+      "id": "ea5b9d56-eb67-4d40-ba30-d07054d02f77",
+      "canonical": ".codex/agents/cf-api-designer.toml",
+      "mirror": ".claude/agents/cf-api-designer.md",
+      "description": {
+        "status": "equal",
+        "sha256": "0efe9fbdcadd5a06bd5584adaff5d1f5fb80b7f148aea6204427f5805f7f6bfa"
+      },
+      "instructions": {
+        "status": "equal_with_runtime_overlay",
+        "observed_sha256": "2c895893165ddf6d46f41409cd3ed6c6b9df889e1d562ceaa46df352b17940c6",
+        "proposed_sha256": "2c895893165ddf6d46f41409cd3ed6c6b9df889e1d562ceaa46df352b17940c6",
+        "baseline_canonical_sha256": "2688a5f81a5298412b9b43d68579e821758b9da4199117b2cb494594dc49da9c",
+        "audited_canonical_sha256": "2688a5f81a5298412b9b43d68579e821758b9da4199117b2cb494594dc49da9c",
+        "preserved_runtime_overlay_sha256": "cf52fb554a7fe627b213ea543fd59a927ea6a4fbe35f64929265c039959312a7",
+        "replace_fragments": []
+      },
+      "write_performed": false
+    },
+    {
+      "name": "cf-critic",
+      "id": "d29d22b4-ec2a-4a2c-ab7b-861f7f4d0805",
+      "canonical": ".codex/agents/cf-critic.toml",
+      "mirror": ".claude/agents/cf-critic.md",
+      "description": {
+        "status": "equal",
+        "sha256": "73bb088f4015b736d800899b42d7da34dc4cca5cb4225b2606b3c5b8e83e376e"
+      },
+      "instructions": {
+        "status": "proposed_change",
+        "observed_sha256": "ef7426ba5bd6037041aa53ae0740abee3f9ea5133fd574fa73fcf2afbd3ffecc",
+        "proposed_sha256": "2b858c8f32692fe0b02d3fccba7a2fb9bf11803416ac71ea22b0b2c487f5f63a",
+        "baseline_canonical_sha256": "090cf882a8818ef027a4db31847b145f2e6d568d702da51b4f9bb0aa17ca146b",
+        "audited_canonical_sha256": "2b21b2377671e1399d08e9fe8276cb38cc9d1dc4e1b48dbcbb9c2b8950e38fba",
+        "preserved_runtime_overlay_sha256": "c069c8f6a95dae1b19545e8e94234dd357990479890280713a66995ec5b5b9ed",
+        "replace_fragments": [
+          {
+            "before": "- Existing project configs — do they still compile under the v2 `ProjectSpec`/`ProjectDocument` contract?",
+            "after": "- Existing project configs — do they still compile under the project-v3 `ProjectSpec`/`ProjectDocument` contract?"
+          }
+        ]
+      },
+      "write_performed": false
+    },
+    {
+      "name": "cf-reviewer",
+      "id": "a274f526-62bc-481f-93ef-67b4a63d9f3a",
+      "canonical": ".codex/agents/cf-reviewer.toml",
+      "mirror": ".claude/agents/cf-reviewer.md",
+      "description": {
+        "status": "equal",
+        "sha256": "bdd5e3bb4fd94d0ed5fe314d34e6b45a8f99481afffcee994739aaf55e9f9b5b"
+      },
+      "instructions": {
+        "status": "equal_with_runtime_overlay",
+        "observed_sha256": "681d04b0ef36b222cd44a9172bedaaa48577a90b8d5f230dc359f108b740c361",
+        "proposed_sha256": "681d04b0ef36b222cd44a9172bedaaa48577a90b8d5f230dc359f108b740c361",
+        "baseline_canonical_sha256": "2f51fd31945d4ebfa81c5334df4b15e5a40d624ff7672f96dbeff71f6d7dc328",
+        "audited_canonical_sha256": "2f51fd31945d4ebfa81c5334df4b15e5a40d624ff7672f96dbeff71f6d7dc328",
+        "preserved_runtime_overlay_sha256": "4d63bb01d65ab86670ecce50931d6a17a0460631c75393e0bc419f5780af06bd",
+        "replace_fragments": []
+      },
+      "write_performed": false
+    },
+    {
+      "name": "cf-doc-writer",
+      "id": "1b71d01f-a1e8-4e73-97f0-3a2576a7378c",
+      "canonical": ".codex/agents/cf-doc-writer.toml",
+      "mirror": ".claude/agents/cf-doc-writer.md",
+      "description": {
+        "status": "equal",
+        "sha256": "9f43dd6974a041186337b1a0d96544eab4283156eb4c9068abf39cdad3814835"
+      },
+      "instructions": {
+        "status": "equal_with_runtime_overlay",
+        "observed_sha256": "084ee1f4d85391f156efeab34fa0e256ee0a4a92454bc4519906d46f8a6cd2ef",
+        "proposed_sha256": "084ee1f4d85391f156efeab34fa0e256ee0a4a92454bc4519906d46f8a6cd2ef",
+        "baseline_canonical_sha256": "f31c43759adfe769033a79610147e95b1d9cc0df6e0069887d2d2a37879c5787",
+        "audited_canonical_sha256": "f31c43759adfe769033a79610147e95b1d9cc0df6e0069887d2d2a37879c5787",
+        "preserved_runtime_overlay_sha256": "8822174a63d7d54f21fb04743782eee772d92c83f238d17e18cc6deb449478c7",
+        "replace_fragments": []
+      },
+      "write_performed": false
+    },
+    {
+      "name": "cf-simplifier",
+      "id": "113b511d-172f-4673-becd-cc0db10b70b8",
+      "canonical": ".codex/agents/cf-simplifier.toml",
+      "mirror": ".claude/agents/cf-simplifier.md",
+      "description": {
+        "status": "equal",
+        "sha256": "3cbf6d08851af72476eadc7698c3ae8184e0da7b92f68a2245035c0ccd358a8d"
+      },
+      "instructions": {
+        "status": "equal_with_runtime_overlay",
+        "observed_sha256": "96a7bfc5fdd96c2b867ee23e7551d2a68b39db533a1bf4d558eb7ad67910e8ae",
+        "proposed_sha256": "96a7bfc5fdd96c2b867ee23e7551d2a68b39db533a1bf4d558eb7ad67910e8ae",
+        "baseline_canonical_sha256": "0820972771e150b6ec85628ccdf9fb216b9a71be20ad49eb3c8ee334c82c1451",
+        "audited_canonical_sha256": "0820972771e150b6ec85628ccdf9fb216b9a71be20ad49eb3c8ee334c82c1451",
+        "preserved_runtime_overlay_sha256": "e9b6bca57ed4eab1bec018ff93f74d0d44a2591932eacba3784f2fb39de12ffe",
+        "replace_fragments": []
+      },
+      "write_performed": false
+    },
+    {
+      "name": "cf-performancer",
+      "id": "b37225a5-8640-4da1-9500-89adfab9c66b",
+      "canonical": ".codex/agents/cf-performancer.toml",
+      "mirror": ".claude/agents/cf-performancer.md",
+      "description": {
+        "status": "equal",
+        "sha256": "679565e3e664d06621860f754882c0d54d957d427c8fbe4677851756c19ef36e"
+      },
+      "instructions": {
+        "status": "equal_with_runtime_overlay",
+        "observed_sha256": "dded6a47770e4ca23d8dc9a5d3a8739308f93823f4e6227be49d19f963913290",
+        "proposed_sha256": "dded6a47770e4ca23d8dc9a5d3a8739308f93823f4e6227be49d19f963913290",
+        "baseline_canonical_sha256": "40d3a79cd2b613fc424d6bd55916be28dc37b627afb5402c241ef01fb8656448",
+        "audited_canonical_sha256": "40d3a79cd2b613fc424d6bd55916be28dc37b627afb5402c241ef01fb8656448",
+        "preserved_runtime_overlay_sha256": "2590fe6745f51bb075d8bf485655ad39e55349e788f77cd90745ece2b8266c2a",
+        "replace_fragments": []
+      },
+      "write_performed": false
+    },
+    {
+      "name": "cf-spec-writer",
+      "id": "62f89f6b-8158-4c5d-ac1d-8ed6d092473f",
+      "canonical": ".codex/agents/cf-spec-writer.toml",
+      "mirror": ".claude/agents/cf-spec-writer.md",
+      "description": {
+        "status": "equal",
+        "sha256": "2d291bc55f2ff1d66161498d14033842d2e3134bf6ad78faf585c4216b01d55d"
+      },
+      "instructions": {
+        "status": "equal_with_runtime_overlay",
+        "observed_sha256": "d02a081fa2fe1402f176de062651ab7833cd53b3a1df688a8a25a5f5dbc718d1",
+        "proposed_sha256": "d02a081fa2fe1402f176de062651ab7833cd53b3a1df688a8a25a5f5dbc718d1",
+        "baseline_canonical_sha256": "ab59e5640ff5d16ab4914b23168e4651d4522b7547fa6a7eea799a98cf8f4c4d",
+        "audited_canonical_sha256": "ab59e5640ff5d16ab4914b23168e4651d4522b7547fa6a7eea799a98cf8f4c4d",
+        "preserved_runtime_overlay_sha256": "3b6f4f586725ffbdf84f61b193babb47b9c7b1502be5be816fb6e60e81c7a15f",
+        "replace_fragments": []
+      },
+      "write_performed": false
+    }
+  ]
+}

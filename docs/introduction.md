@@ -97,8 +97,10 @@ logical output name. Async forms use the same calculation and cancellation
 contract. See [batch calculations](batch-guide.md).
 
 Use `TableExpr.stream(inputs)` or `Program.stream(inputs)` when data arrives
-over time. Enter with `async with` and consume with `async for`. Declare schemas
-and temporal ordering once; one native job retains state across batches.
+over time. A Program requires `engine="streaming"` for streams and selects
+that engine at construction; `engine="sql"` uses finite collection. Enter
+streams with `async with` and consume with `async for`. Declare schemas and
+temporal ordering once; one native job retains state across batches.
 The table form yields Arrow tables; a Program yields named `StreamOutput`
 events. Inputs bind by logical declaration name. Event-time iterables default
 to nondecreasing arrival times and watermarks that finalize earlier timestamps
@@ -122,9 +124,12 @@ advanced graph, UDF, provider, and lifecycle controls. Rust crate APIs are docum
 
 DataFusion 54 executes table expressions and SQL. SQL nodes accept one
 read-only `SELECT` or CTE. Batch SQL supports multiple aliases; streaming SQL
-accepts one alias and evaluates it separately for each native batch. SQL output
-has a new row lineage and does not inherit temporal ordering. Row-local
-expressions may follow SQL; compute rolling features before a SQL stage.
+accepts one alias. Ordinary aggregates and `GROUP BY` retain input and emit a
+full cumulative snapshot after each native batch; other SQL evaluates each
+batch separately. See
+[SQL stream boundaries](streaming-guide.md#stream-ownership-and-sql-boundaries).
+SQL output has a new row lineage and does not inherit temporal ordering.
+Row-local expressions may follow SQL; compute rolling features before a SQL stage.
 Recursive CTEs and the `generate_series` and `range` table generators are
 rejected. SQL execution uses a 1 GiB DataFusion memory pool per runtime and
 stops collecting a result above 100 million rows or 1 GiB of visible Arrow

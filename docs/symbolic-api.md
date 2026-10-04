@@ -91,7 +91,9 @@ row-local functions, rolling frames (`rows`/`duration`), cross-section groups
 (`exact_time`/`event_time_bucket`), table bridges, and matrix work.
 
 A `Program` declares uniquely named inputs (`table_input` or `parameter`
-values) and outputs (tables or arrays) in declaration order. Outputs accept a
+values) and outputs (tables or arrays) in declaration order. Its required
+keyword-only `engine` is `"sql"` or `"streaming"` and remains fixed on copies
+returned by `with_input` and `output`. Outputs accept a
 mapping or tuple-pair sequence. Omitting `inputs` discovers reachable roots;
 explicit inputs, including an empty sequence, are honored. Its `fingerprint`
 is the runtime-independent `calc_flow.symbolic.declaration.v1` program
@@ -102,10 +104,13 @@ paths such as `inputs.quotes: duplicate_name`. An input referenced by an
 output but missing from `inputs` is reported during analysis as an issue
 rooted at `inputs.<name>`.
 
-`Program.analyze(runtime=None, /, *, mode="batch")` and
-`Program.explain(runtime=None, /, *, mode="batch")` select a default `Runtime`
-when omitted. Pass the registered runtime for providers. Both consume one
-immutable capability snapshot and record its session and revision. From the
+`Program.analyze(runtime=None, /, *, mode=None)` and
+`Program.explain(runtime=None, /, *, mode=None)` select a default `Runtime`
+when omitted. The default mode follows the selected engine: `"batch"` for
+`"sql"` and `"stream"` for `"streaming"`. An explicit mode selects diagnostic
+analysis without changing the engine. Pass the registered runtime for providers.
+Both consume one immutable capability snapshot and record its session and
+revision. From the
 declaration graph alone — no data object, source, sink, or runner is accepted —
 the analysis proves:
 
@@ -197,8 +202,11 @@ the same SQL declaration through two separately selected `Program` instances.
 `Program.compile_batch(runtime=None, /)` and
 `Program.compile_stream(runtime=None, /, *, allowed_lateness_micros=0,
 late_policy="error")` lower a program to the
-existing execution plans. Compilation is declaration processing only: it
-captures one immutable capability snapshot, lowers one strict project-v3
+existing execution plans. Batch compilation requires `engine="sql"`; stream
+compilation requires `engine="streaming"`. Project export follows the same
+engine selection and rejects a conflicting explicit mode.
+Compilation is declaration processing only: it captures one immutable
+capability snapshot, lowers one strict project-v3
 document, and invokes the Rust graph compiler for final port, kind, schema,
 topology, and fingerprint validation. No data object, source, sink, or runner
 is accepted, and no symbolic Python runs while a compiled plan executes.
@@ -503,7 +511,8 @@ create the independent `stream_asof_join@1` primitive. Required `tolerance` and
 
 Each unique declaration digest owns one native ASOF state across outputs.
 Analysis verifies the native stream-only, watermark-requiring,
-`group_final_append_only`, checkpointed-stateful capability and layout 1;
+`group_final_append_only`, checkpointed-stateful capability with
+`state_version=3` and `state_layouts=(3,)`;
 missing or inconsistent evidence fails closed. All ordered side settings,
 tolerance, late policy, prefixes, and limits participate in identity. Output
 ordering derives from the left side, and every right field is nullable.

@@ -1,0 +1,710 @@
+{
+  "baseline_main_sha": "29fe284b56ee01306c4da6deab28b9e2f2883746",
+  "baseline_markdown_count": 88,
+  "files": [
+    {
+      "path": ".agents/skills/code-style/SKILL.md",
+      "sha256": "d23a9e6eae5ed883c4dd6baffbb0fdbe7842c37348d3d1565e8a0064656896fe",
+      "lines": 103,
+      "audited_sha256": "d23a9e6eae5ed883c4dd6baffbb0fdbe7842c37348d3d1565e8a0064656896fe",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": ".claude/agents/README.md",
+      "sha256": "2d289f9401b928db92690c9eacc4bbbc5f7321bd75f646be94938899ade23b8b",
+      "lines": 141,
+      "audited_sha256": "2d289f9401b928db92690c9eacc4bbbc5f7321bd75f646be94938899ade23b8b",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": ".claude/agents/cf-api-designer.md",
+      "sha256": "ab288cb49ee43bf3f57e91fbc84b897a5d6566e88ba98784e0efb48e1bdff038",
+      "lines": 169,
+      "audited_sha256": "ab288cb49ee43bf3f57e91fbc84b897a5d6566e88ba98784e0efb48e1bdff038",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": ".claude/agents/cf-critic.md",
+      "sha256": "ff02a04e9c722cb38daf737af8c5a4351546a5caef0d669d619b72719ef1bf20",
+      "lines": 176,
+      "audited_sha256": "604886d9589e532264f9cb5b27977f779c683606a8af876ed20dcca50647cb1e",
+      "changed": true,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": ".claude/agents/cf-doc-writer.md",
+      "sha256": "d48840f46a0de2b1a379df63e7af87dad650a14b24767e159030bdcddaa1ba16",
+      "lines": 188,
+      "audited_sha256": "d48840f46a0de2b1a379df63e7af87dad650a14b24767e159030bdcddaa1ba16",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": ".claude/agents/cf-implementer.md",
+      "sha256": "9e51ccb30e6525cdab543846cfc56ecd9799e057eb7b23105422724f2c47a587",
+      "lines": 238,
+      "audited_sha256": "895321c49463a267d2b5e53431ae4e1e09e078fb9bd5678287b6e623522b1947",
+      "changed": true,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": ".claude/agents/cf-orchestrator.md",
+      "sha256": "8a5a0a208c54a275d46554b41ca4a1787050168b357a60e3453f355d032a84ed",
+      "lines": 181,
+      "audited_sha256": "8a5a0a208c54a275d46554b41ca4a1787050168b357a60e3453f355d032a84ed",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": ".claude/agents/cf-performancer.md",
+      "sha256": "a90ee16dd63618d52964eac5c4f28d49ea0a5a8eabd220c4b252513780678d8f",
+      "lines": 213,
+      "audited_sha256": "a90ee16dd63618d52964eac5c4f28d49ea0a5a8eabd220c4b252513780678d8f",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": ".claude/agents/cf-reviewer.md",
+      "sha256": "8f5d21cbb6098a85a2b9c26aed39f2827ca1e32d114302b40010db56aacc7c51",
+      "lines": 252,
+      "audited_sha256": "8f5d21cbb6098a85a2b9c26aed39f2827ca1e32d114302b40010db56aacc7c51",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": ".claude/agents/cf-simplifier.md",
+      "sha256": "ab304547298b068b8f8978b9401ee82f6318156a0e466e58caa170239f67701f",
+      "lines": 215,
+      "audited_sha256": "ab304547298b068b8f8978b9401ee82f6318156a0e466e58caa170239f67701f",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": ".claude/agents/cf-spec-writer.md",
+      "sha256": "201b2a4637332ca9ee3285cd486d3d0b23698c07af698313200eed2fe044eb42",
+      "lines": 140,
+      "audited_sha256": "201b2a4637332ca9ee3285cd486d3d0b23698c07af698313200eed2fe044eb42",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": ".claude/agents/cf-tester.md",
+      "sha256": "8c85bd0e623285e6d00d6ee3f97609463dee881be2234a0389821c0fb2f680db",
+      "lines": 167,
+      "audited_sha256": "8c85bd0e623285e6d00d6ee3f97609463dee881be2234a0389821c0fb2f680db",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": ".claude/api-notes/docs-examples.md",
+      "sha256": "9dffa84fa1e224d975461d9fac45cfb0cb53411d95af0949b7ae34be302c3bf7",
+      "lines": 229,
+      "audited_sha256": "9dffa84fa1e224d975461d9fac45cfb0cb53411d95af0949b7ae34be302c3bf7",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": ".claude/rules/code-style.md",
+      "sha256": "3c02c3bf7dacdc0cdad3587071dfccaff96edd70a60cc1e3da37011de76cee6c",
+      "lines": 94,
+      "audited_sha256": "3c02c3bf7dacdc0cdad3587071dfccaff96edd70a60cc1e3da37011de76cee6c",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": ".claude/specs/head-operator.md",
+      "sha256": "4385cdd2eb9895adc0afb0611fcf7399a8bbb01f61c6f413c83b1f6b1b26f611",
+      "lines": 59,
+      "audited_sha256": "4385cdd2eb9895adc0afb0611fcf7399a8bbb01f61c6f413c83b1f6b1b26f611",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": ".codex/agents/README.md",
+      "sha256": "b2e404b36976d64a9b52ff19f3145d18403b5bdcc99c8435f1a27a2e0d5dc4e1",
+      "lines": 124,
+      "audited_sha256": "b2e404b36976d64a9b52ff19f3145d18403b5bdcc99c8435f1a27a2e0d5dc4e1",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": ".codex/artifacts/README.md",
+      "sha256": "eb5cb74531a1ff4520b0fe93cadbb7e63e2a9f7cadaba8b7057c863e6b5e0b36",
+      "lines": 16,
+      "audited_sha256": "eb5cb74531a1ff4520b0fe93cadbb7e63e2a9f7cadaba8b7057c863e6b5e0b36",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": ".codex/artifacts/analysis/dal-310-weekly-doc-audit-2026-09-27.md",
+      "sha256": "0a61bce767c78bbf2a6600f9ea401d7845d7036ff17ba9d218237a7532a5e50b",
+      "lines": 45,
+      "audited_sha256": "0a61bce767c78bbf2a6600f9ea401d7845d7036ff17ba9d218237a7532a5e50b",
+      "changed": false,
+      "review_class": "historical_or_design_artifact"
+    },
+    {
+      "path": ".codex/artifacts/api-notes/bounded-backward-asof-join.md",
+      "sha256": "439d195cf47809b2a73690034c9eaf08376dc1a2714d476197526f97658a4401",
+      "lines": 802,
+      "audited_sha256": "439d195cf47809b2a73690034c9eaf08376dc1a2714d476197526f97658a4401",
+      "changed": false,
+      "review_class": "historical_or_design_artifact"
+    },
+    {
+      "path": ".codex/artifacts/api-notes/docs-examples.md",
+      "sha256": "9dffa84fa1e224d975461d9fac45cfb0cb53411d95af0949b7ae34be302c3bf7",
+      "lines": 229,
+      "audited_sha256": "9dffa84fa1e224d975461d9fac45cfb0cb53411d95af0949b7ae34be302c3bf7",
+      "changed": false,
+      "review_class": "historical_or_design_artifact"
+    },
+    {
+      "path": ".codex/artifacts/api-notes/symbolic-computation-engine.md",
+      "sha256": "d9a2ac0895cc10fd75c9cdf3cf8143ef776cb6ba5e36945c3fe10213b3e490ed",
+      "lines": 1652,
+      "audited_sha256": "d9a2ac0895cc10fd75c9cdf3cf8143ef776cb6ba5e36945c3fe10213b3e490ed",
+      "changed": false,
+      "review_class": "historical_or_design_artifact"
+    },
+    {
+      "path": ".codex/artifacts/api-notes/symbolic-exponential-indicators.md",
+      "sha256": "6604c3f4f5803a9843a915ba65880a8497c9c2177390c8e313167fd49bdc979c",
+      "lines": 40,
+      "audited_sha256": "6604c3f4f5803a9843a915ba65880a8497c9c2177390c8e313167fd49bdc979c",
+      "changed": false,
+      "review_class": "historical_or_design_artifact"
+    },
+    {
+      "path": ".codex/artifacts/api-notes/symbolic-relational-dag.md",
+      "sha256": "e42f4bc17f93fc2b31dec928d43d1b01c5b606b0a8aa3a0d667406e2a682404c",
+      "lines": 140,
+      "audited_sha256": "e42f4bc17f93fc2b31dec928d43d1b01c5b606b0a8aa3a0d667406e2a682404c",
+      "changed": false,
+      "review_class": "historical_or_design_artifact"
+    },
+    {
+      "path": ".codex/artifacts/critiques/bounded-backward-asof-join-arrow-output-addendum.md",
+      "sha256": "b504fb6a38950330702fd1cb640203db8218f114b4731079685fa7ed1cd68034",
+      "lines": 62,
+      "audited_sha256": "b504fb6a38950330702fd1cb640203db8218f114b4731079685fa7ed1cd68034",
+      "changed": false,
+      "review_class": "historical_or_design_artifact"
+    },
+    {
+      "path": ".codex/artifacts/critiques/bounded-backward-asof-join.md",
+      "sha256": "8617d55c4d1e6ea8ff99c768bebb89ff9c4ced5ea2a212fe5ca387e0902f33f5",
+      "lines": 190,
+      "audited_sha256": "8617d55c4d1e6ea8ff99c768bebb89ff9c4ced5ea2a212fe5ca387e0902f33f5",
+      "changed": false,
+      "review_class": "historical_or_design_artifact"
+    },
+    {
+      "path": ".codex/artifacts/critiques/sce-07-rolling-inf-mean.md",
+      "sha256": "aab34c2cc0a5294b3e23a49242deeee2d32c594f4ac7a7436f63a397c9cafc1c",
+      "lines": 186,
+      "audited_sha256": "aab34c2cc0a5294b3e23a49242deeee2d32c594f4ac7a7436f63a397c9cafc1c",
+      "changed": false,
+      "review_class": "historical_or_design_artifact"
+    },
+    {
+      "path": ".codex/artifacts/critiques/symbolic-computation-engine.md",
+      "sha256": "b4a7d307b31e3151ee96e9462920bea00e749860d10df9ba3e241847399b4327",
+      "lines": 132,
+      "audited_sha256": "b4a7d307b31e3151ee96e9462920bea00e749860d10df9ba3e241847399b4327",
+      "changed": false,
+      "review_class": "historical_or_design_artifact"
+    },
+    {
+      "path": ".codex/artifacts/reviews/bounded-backward-asof-join.md",
+      "sha256": "40ad5db9dd1b7e33c5d148eb8925ba37a58d4a0704dfe5609a7b515e757f70ec",
+      "lines": 340,
+      "audited_sha256": "40ad5db9dd1b7e33c5d148eb8925ba37a58d4a0704dfe5609a7b515e757f70ec",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": ".codex/artifacts/specs/bounded-backward-asof-join.md",
+      "sha256": "dc1d845b09b8f001823ad19b1695ae6a6e5baa8f3679a2f6c01dcdf449584c6b",
+      "lines": 290,
+      "audited_sha256": "dc1d845b09b8f001823ad19b1695ae6a6e5baa8f3679a2f6c01dcdf449584c6b",
+      "changed": false,
+      "review_class": "historical_or_design_artifact"
+    },
+    {
+      "path": ".codex/artifacts/specs/head-operator.md",
+      "sha256": "4385cdd2eb9895adc0afb0611fcf7399a8bbb01f61c6f413c83b1f6b1b26f611",
+      "lines": 59,
+      "audited_sha256": "4385cdd2eb9895adc0afb0611fcf7399a8bbb01f61c6f413c83b1f6b1b26f611",
+      "changed": false,
+      "review_class": "historical_or_design_artifact"
+    },
+    {
+      "path": ".codex/artifacts/specs/symbolic-computation-contract.md",
+      "sha256": "e62d128b7658fc527eb92f1bcc888b1d1e9508914713877d7a738b3077eeadaa",
+      "lines": 875,
+      "audited_sha256": "e62d128b7658fc527eb92f1bcc888b1d1e9508914713877d7a738b3077eeadaa",
+      "changed": false,
+      "review_class": "historical_or_design_artifact"
+    },
+    {
+      "path": ".codex/artifacts/specs/symbolic-event-window-aggregation.md",
+      "sha256": "37da01ab4fbb14d95874c606affb5e7c7453caf80dc2bb1ae4892161cc10e6dc",
+      "lines": 746,
+      "audited_sha256": "37da01ab4fbb14d95874c606affb5e7c7453caf80dc2bb1ae4892161cc10e6dc",
+      "changed": false,
+      "review_class": "historical_or_design_artifact"
+    },
+    {
+      "path": ".codex/artifacts/specs/symbolic-exponential-indicators.md",
+      "sha256": "fe7bce2bebe6f452335d19fdcba71c2fd40d433c9ab7b598e1c4af7b21c0a254",
+      "lines": 88,
+      "audited_sha256": "fe7bce2bebe6f452335d19fdcba71c2fd40d433c9ab7b598e1c4af7b21c0a254",
+      "changed": false,
+      "review_class": "historical_or_design_artifact"
+    },
+    {
+      "path": ".codex/artifacts/specs/symbolic-relational-dag.md",
+      "sha256": "d493658f29d3896da44b4b38f25684af6b3e48660cad4e4c755f840df03a8276",
+      "lines": 113,
+      "audited_sha256": "d493658f29d3896da44b4b38f25684af6b3e48660cad4e4c755f840df03a8276",
+      "changed": false,
+      "review_class": "historical_or_design_artifact"
+    },
+    {
+      "path": "AGENTS.md",
+      "sha256": "7207c81463f432621ee7cb5bc3fe683a07196576da44ea49ed37c73ddd198d10",
+      "lines": 391,
+      "audited_sha256": "7207c81463f432621ee7cb5bc3fe683a07196576da44ea49ed37c73ddd198d10",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "CHANGELOG.md",
+      "sha256": "875119a2b0a941c8ca3a453cab3eb776313f6c29e1ce6802a359b1eef68cae66",
+      "lines": 1297,
+      "audited_sha256": "875119a2b0a941c8ca3a453cab3eb776313f6c29e1ce6802a359b1eef68cae66",
+      "changed": false,
+      "review_class": "historical_or_design_artifact"
+    },
+    {
+      "path": "CLAUDE.md",
+      "sha256": "902d52decd5ddc18772ee8ba9ddd2dd23e39c5bc528fe551f804ebefe64bb05b",
+      "lines": 15,
+      "audited_sha256": "902d52decd5ddc18772ee8ba9ddd2dd23e39c5bc528fe551f804ebefe64bb05b",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "README.md",
+      "sha256": "68fe9429dffa8635bf71dc4d462f72735712be05d393c17c614f45c042c4c55a",
+      "lines": 277,
+      "audited_sha256": "68fe9429dffa8635bf71dc4d462f72735712be05d393c17c614f45c042c4c55a",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "benchmarks/README.md",
+      "sha256": "f7ce07f028eea93853873a261d43a32bc784a3ecb1bed3ce713fb4e3471d143f",
+      "lines": 461,
+      "audited_sha256": "f7ce07f028eea93853873a261d43a32bc784a3ecb1bed3ce713fb4e3471d143f",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "benchmarks/symbolic/BASELINE.md",
+      "sha256": "7a3806ab09b94dec829e3af9c0b603db0ca86d5b55b43310c812a152c3a7e048",
+      "lines": 129,
+      "audited_sha256": "7a3806ab09b94dec829e3af9c0b603db0ca86d5b55b43310c812a152c3a7e048",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "benchmarks/symbolic/SCE05.md",
+      "sha256": "5aa2879e9be92ee0916896571a87020e395c22881d69a783cefdf8bea846c5ad",
+      "lines": 64,
+      "audited_sha256": "5aa2879e9be92ee0916896571a87020e395c22881d69a783cefdf8bea846c5ad",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "benchmarks/symbolic/SCE08.md",
+      "sha256": "cf350bedaaf5ff211ff419ea3515afca21cad6c8eea7bdd1070b8a68eab7bc1a",
+      "lines": 68,
+      "audited_sha256": "cf350bedaaf5ff211ff419ea3515afca21cad6c8eea7bdd1070b8a68eab7bc1a",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "benchmarks/symbolic/SCE14.md",
+      "sha256": "80576f3b9c5cfae342dc42924e1a98d4cdb4df4b6f349a84bb2aeebf3dd27d4f",
+      "lines": 92,
+      "audited_sha256": "80576f3b9c5cfae342dc42924e1a98d4cdb4df4b6f349a84bb2aeebf3dd27d4f",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "benchmarks/symbolic/SCE16.md",
+      "sha256": "9ea696d610d7314ca418cb0a8e3bebc63b37f88f58be467b78b8b3a441572fd6",
+      "lines": 76,
+      "audited_sha256": "9ea696d610d7314ca418cb0a8e3bebc63b37f88f58be467b78b8b3a441572fd6",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "crates/calc-flow-connectors/README.md",
+      "sha256": "de8f3500c3ba74c868d75904f2ffc03e8f831631aec5eb59ec82a729882ec93c",
+      "lines": 26,
+      "audited_sha256": "de8f3500c3ba74c868d75904f2ffc03e8f831631aec5eb59ec82a729882ec93c",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "crates/calc-flow/examples/README.md",
+      "sha256": "9a8eed114662a57817261c39d77adc5314a264202e4d985a79383a8b554b9c4e",
+      "lines": 37,
+      "audited_sha256": "9a8eed114662a57817261c39d77adc5314a264202e4d985a79383a8b554b9c4e",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "design/tech_spec.md",
+      "sha256": "ce05943a80c04e85f3bce98ea54c0228d1fceceff387d8640a140f312f956f92",
+      "lines": 105,
+      "audited_sha256": "ce05943a80c04e85f3bce98ea54c0228d1fceceff387d8640a140f312f956f92",
+      "changed": false,
+      "review_class": "historical_or_design_artifact"
+    },
+    {
+      "path": "design/v0.2-refactor-plan.md",
+      "sha256": "b22b5b5fcabf5b10196daf98b983e9a72066f97b9e3e4a803dc6a46c8712aeb2",
+      "lines": 588,
+      "audited_sha256": "b22b5b5fcabf5b10196daf98b983e9a72066f97b9e3e4a803dc6a46c8712aeb2",
+      "changed": false,
+      "review_class": "historical_or_design_artifact"
+    },
+    {
+      "path": "docs/README.md",
+      "sha256": "943089af0068f3ba4132cd68958d914e450945eb02c7e95ef895e6d40b8e3510",
+      "lines": 88,
+      "audited_sha256": "943089af0068f3ba4132cd68958d914e450945eb02c7e95ef895e6d40b8e3510",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "docs/api-reference.md",
+      "sha256": "eba13190a0135b1de6b54ce2e8028ca76777b018a854c3e358663d64fd21400d",
+      "lines": 558,
+      "audited_sha256": "eba13190a0135b1de6b54ce2e8028ca76777b018a854c3e358663d64fd21400d",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "docs/array-guide.md",
+      "sha256": "744166625c39dfdb5d78501e7934e231141d5844e8ec96924b2efd66d24ba762",
+      "lines": 96,
+      "audited_sha256": "744166625c39dfdb5d78501e7934e231141d5844e8ec96924b2efd66d24ba762",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "docs/asof-join-guide.md",
+      "sha256": "5e4f86b2a09caabb8dde8874bee6077565ced59ea01dff2b75f9b02b7aba2c60",
+      "lines": 379,
+      "audited_sha256": "5e4f86b2a09caabb8dde8874bee6077565ced59ea01dff2b75f9b02b7aba2c60",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "docs/batch-guide.md",
+      "sha256": "e364b08941502adc12d6e6956e9adbdd60c958087aaecbbedf5e487abab5c198",
+      "lines": 314,
+      "audited_sha256": "e364b08941502adc12d6e6956e9adbdd60c958087aaecbbedf5e487abab5c198",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "docs/benchmark-suite.md",
+      "sha256": "b2dc818f75d229911eb1e69476c2c5bb15dd8474b7481d23483bd66b65691ed0",
+      "lines": 643,
+      "audited_sha256": "b2dc818f75d229911eb1e69476c2c5bb15dd8474b7481d23483bd66b65691ed0",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "docs/connectors/README.md",
+      "sha256": "24d4ccbc206ab589a16d3f033b8e60ad22a41b072c414ba1cc32722bc5e694c3",
+      "lines": 249,
+      "audited_sha256": "24d4ccbc206ab589a16d3f033b8e60ad22a41b072c414ba1cc32722bc5e694c3",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "docs/connectors/clickhouse.md",
+      "sha256": "5bf80358340e9101be4b2e6ab2be6535f2ef1df0b60f53bf19795f01f8da99ba",
+      "lines": 127,
+      "audited_sha256": "5bf80358340e9101be4b2e6ab2be6535f2ef1df0b60f53bf19795f01f8da99ba",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "docs/connectors/file.md",
+      "sha256": "1b87e2ee25611609ecb16839cf8d129fe54a31ea26f7a9a70e355eea7cc770f2",
+      "lines": 102,
+      "audited_sha256": "1b87e2ee25611609ecb16839cf8d129fe54a31ea26f7a9a70e355eea7cc770f2",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "docs/connectors/http.md",
+      "sha256": "841a8254395b9109fe89593bc14ff3549b4db11621802c5b928eaf1017f21e1c",
+      "lines": 100,
+      "audited_sha256": "841a8254395b9109fe89593bc14ff3549b4db11621802c5b928eaf1017f21e1c",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "docs/connectors/kafka.md",
+      "sha256": "b12aa98ad76a4be71954c472d2f89a8d20b8c3b51477d3f4153e50de2cc61146",
+      "lines": 403,
+      "audited_sha256": "b12aa98ad76a4be71954c472d2f89a8d20b8c3b51477d3f4153e50de2cc61146",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "docs/connectors/mysql.md",
+      "sha256": "d5b3ad4d679cc7d630cf818d24f416e6a133d3b5767dec878b6bdf4eb2896598",
+      "lines": 255,
+      "audited_sha256": "d5b3ad4d679cc7d630cf818d24f416e6a133d3b5767dec878b6bdf4eb2896598",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "docs/connectors/postgresql.md",
+      "sha256": "1646d1bc9f8dedad5fb809e7e1540fb938f14559b0d5cb296229767f58727cba",
+      "lines": 157,
+      "audited_sha256": "1646d1bc9f8dedad5fb809e7e1540fb938f14559b0d5cb296229767f58727cba",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "docs/connectors/websocket.md",
+      "sha256": "f1a9aab088daf73cc84741bfaf95603372dd948af02636682295b9eb2411f5de",
+      "lines": 98,
+      "audited_sha256": "f1a9aab088daf73cc84741bfaf95603372dd948af02636682295b9eb2411f5de",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "docs/design.md",
+      "sha256": "de8a0cb2eae6d3ba6b3646e970247fb7123eb536465a0365757b532c0850a258",
+      "lines": 395,
+      "audited_sha256": "0550b5fe5c3e6c1310562e5954df7e06138ff9591280416f0a09ccb24424b1c6",
+      "changed": true,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "docs/examples.md",
+      "sha256": "fdc00bd5647a221527f73d5d271a493af8d5c45c0da2a7cc301610bf9b1bb5d1",
+      "lines": 130,
+      "audited_sha256": "fdc00bd5647a221527f73d5d271a493af8d5c45c0da2a7cc301610bf9b1bb5d1",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "docs/getting-started.md",
+      "sha256": "615618327d39eaa6cfddc7c30155224cced92231821776e8d1fbd6ca69c778fc",
+      "lines": 358,
+      "audited_sha256": "615618327d39eaa6cfddc7c30155224cced92231821776e8d1fbd6ca69c778fc",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "docs/introduction.md",
+      "sha256": "3a14bbe1e66d6a205d4a3be0b03c6ec7b2ef030e547b1fa4f8fa76f2295ac4e8",
+      "lines": 147,
+      "audited_sha256": "db69d3fa486446df4bb2d70f991120b779da20c0d1a6135a341cc09a3bff0a3b",
+      "changed": true,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "docs/plans/2026-09-09-bounded-backward-asof-join.md",
+      "sha256": "d472ab381e52332c3e65ee9c3563efbb8682bd42fc69db7b3be9851ad86c164a",
+      "lines": 536,
+      "audited_sha256": "d472ab381e52332c3e65ee9c3563efbb8682bd42fc69db7b3be9851ad86c164a",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "docs/plans/2026-09-30-streaming-asof-acceleration.md",
+      "sha256": "db578bda6864c078aad8762c6351e82d7d50703ec95b98a809dec4711c850f67",
+      "lines": 283,
+      "audited_sha256": "db578bda6864c078aad8762c6351e82d7d50703ec95b98a809dec4711c850f67",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "docs/plans/cross-library-performance.md",
+      "sha256": "c0766f0795dcf1f48ba09ec50a5c68d02a905fcc50a1398a3c9e781d0a877f7a",
+      "lines": 200,
+      "audited_sha256": "c0766f0795dcf1f48ba09ec50a5c68d02a905fcc50a1398a3c9e781d0a877f7a",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "docs/projects-guide.md",
+      "sha256": "87cbe084bb09b4e7440e48865771d3a77f1937839c12c27749ca37ac83379831",
+      "lines": 352,
+      "audited_sha256": "460b20736df2ffcdb863823adf17eebcc702f52172dbb4802da0d39106d13655",
+      "changed": true,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "docs/python-api.md",
+      "sha256": "d5315d72d09ed1505afa7d5686107f0d3b1464d812269756cb8091f63af57012",
+      "lines": 1103,
+      "audited_sha256": "d5315d72d09ed1505afa7d5686107f0d3b1464d812269756cb8091f63af57012",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "docs/python-release.md",
+      "sha256": "32b1f749cc35717469b3f7d5c68af7111e5e421fc91cb87b821940e5196c275a",
+      "lines": 81,
+      "audited_sha256": "32b1f749cc35717469b3f7d5c68af7111e5e421fc91cb87b821940e5196c275a",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "docs/runtime-envelope.md",
+      "sha256": "cb4fd531368e3d5f508588fb24a60c67cab00577b1be5b3c82ad39b98af802c8",
+      "lines": 900,
+      "audited_sha256": "6fa53f241585c121001c3922f1520b992c619b20db949c354491e399067ac6e8",
+      "changed": true,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "docs/rust-api.md",
+      "sha256": "ec3b4b888ae5fe4eac0fbd378392d32a1fe448bfbfc7c87999c6b8e9b7548e9e",
+      "lines": 765,
+      "audited_sha256": "ec3b4b888ae5fe4eac0fbd378392d32a1fe448bfbfc7c87999c6b8e9b7548e9e",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "docs/sql-datafusion-performance.md",
+      "sha256": "5d5b49269435afd44886dde326cb7c274049d21eec87067ec2ac5d018db6fed4",
+      "lines": 213,
+      "audited_sha256": "5d5b49269435afd44886dde326cb7c274049d21eec87067ec2ac5d018db6fed4",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "docs/streaming-guide.md",
+      "sha256": "b77bc6c30a535e61babafe6a49feee9df04d1355ea261af36e4728e909812e20",
+      "lines": 1112,
+      "audited_sha256": "b77bc6c30a535e61babafe6a49feee9df04d1355ea261af36e4728e909812e20",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "docs/studio-guide.md",
+      "sha256": "848aa96d02a0cf6a8b2884ae33047b959e148bbb64eef01be04e3a63bc2e0100",
+      "lines": 123,
+      "audited_sha256": "848aa96d02a0cf6a8b2884ae33047b959e148bbb64eef01be04e3a63bc2e0100",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "docs/symbolic-api.md",
+      "sha256": "8e2414d9c93787b03cbef566a2b510a7c92e6c0da122fcf904c123b82e1fb7fa",
+      "lines": 716,
+      "audited_sha256": "209d277bfa66f7e62f2b091aaba892b9195958f4563f795c4e4341c30a2155b3",
+      "changed": true,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "docs/symbolic-design.md",
+      "sha256": "f8a912b71d8e6e7998ee9c20ba29add9f7a6db8a14c3bf5e38bd2e8b93857492",
+      "lines": 269,
+      "audited_sha256": "f8a912b71d8e6e7998ee9c20ba29add9f7a6db8a14c3bf5e38bd2e8b93857492",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "docs/symbolic-workflows.md",
+      "sha256": "cb1552bd49a6957ed3853b787ea662a6d2e86b9f37ffd9ceeae2439789378381",
+      "lines": 321,
+      "audited_sha256": "cb1552bd49a6957ed3853b787ea662a6d2e86b9f37ffd9ceeae2439789378381",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "docs/verification.md",
+      "sha256": "a1bdda0f8672c523a597c08eb71092454e2a08f8deefbfb4b7577167878913ce",
+      "lines": 134,
+      "audited_sha256": "a1bdda0f8672c523a597c08eb71092454e2a08f8deefbfb4b7577167878913ce",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "docs/warm-stream-performance.md",
+      "sha256": "92d3be818b68bd6308344006358abdc28e1b8f490cbd255c55aeba193e1fa660",
+      "lines": 206,
+      "audited_sha256": "92d3be818b68bd6308344006358abdc28e1b8f490cbd255c55aeba193e1fa660",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "examples/README.md",
+      "sha256": "c84d1857cd6c7eb3811fa37705b8ca73d7d0a95b0364f76331f0893d2ee6946e",
+      "lines": 282,
+      "audited_sha256": "c84d1857cd6c7eb3811fa37705b8ca73d7d0a95b0364f76331f0893d2ee6946e",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "fuzz/README.md",
+      "sha256": "ca4d092b7ed26efc2b7e3980798aa8d5c3990e265fb2438b25759e22e4bae798",
+      "lines": 14,
+      "audited_sha256": "ca4d092b7ed26efc2b7e3980798aa8d5c3990e265fb2438b25759e22e4bae798",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "scripts/groupby_diagnostic/README.md",
+      "sha256": "50e2daef9704b089f8407058f6723299cb24c5ed11e4614a0338c79b8f70337b",
+      "lines": 97,
+      "audited_sha256": "50e2daef9704b089f8407058f6723299cb24c5ed11e4614a0338c79b8f70337b",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "tests/fixtures/asof-inner-compat-v1/README.md",
+      "sha256": "dc87d6ae3d1f3fbe3666d105805f1251582d81c2015c9f20d3afee31972ed1fe",
+      "lines": 41,
+      "audited_sha256": "dc87d6ae3d1f3fbe3666d105805f1251582d81c2015c9f20d3afee31972ed1fe",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "web-ui/README.md",
+      "sha256": "4f18552617b0222dc06e1f5d7135a0947b8d30ccfc3d792e55fb2235644ba0e4",
+      "lines": 115,
+      "audited_sha256": "4f18552617b0222dc06e1f5d7135a0947b8d30ccfc3d792e55fb2235644ba0e4",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    },
+    {
+      "path": "web-ui/backend/README.md",
+      "sha256": "5ffaef9cd0510a59bbec3f361eca67a88760eb597a1c6cdaaae6158701bd55b4",
+      "lines": 25,
+      "audited_sha256": "5ffaef9cd0510a59bbec3f361eca67a88760eb597a1c6cdaaae6158701bd55b4",
+      "changed": false,
+      "review_class": "current_documentation_or_guidance"
+    }
+  ]
+}
