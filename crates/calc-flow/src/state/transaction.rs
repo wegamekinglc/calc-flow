@@ -1056,19 +1056,8 @@ async fn validate_manifest_segments(
     let session_verified = |handle: &StateHandle| {
         session_segments.is_some_and(|session| session.lock().verified.contains(handle))
     };
-    for operator in manifest.operators().values() {
-        for handle in &operator.segments {
-            if session_verified(handle) {
-                continue;
-            }
-            lineage.load_segment(handle).await?;
-        }
-    }
-    for sink in manifest.sinks().values() {
-        for handle in &sink.segments {
-            if session_verified(handle) {
-                continue;
-            }
+    for handle in manifest_handles(manifest) {
+        if !session_verified(handle) {
             lineage.load_segment(handle).await?;
         }
     }
@@ -1076,12 +1065,22 @@ async fn validate_manifest_segments(
 }
 
 fn collect_manifest_handles(manifest: &CheckpointManifest, retained: &mut BTreeSet<StateHandle>) {
-    for operator in manifest.operators().values() {
-        retained.extend(operator.segments.iter().cloned());
-    }
-    for sink in manifest.sinks().values() {
-        retained.extend(sink.segments.iter().cloned());
-    }
+    retained.extend(manifest_handles(manifest).cloned());
+}
+
+fn manifest_handles(manifest: &CheckpointManifest) -> impl Iterator<Item = &StateHandle> {
+    manifest
+        .sources()
+        .values()
+        .filter_map(|source| source.history.as_ref())
+        .flat_map(|history| &history.segments)
+        .chain(
+            manifest
+                .operators()
+                .values()
+                .flat_map(|operator| &operator.segments),
+        )
+        .chain(manifest.sinks().values().flat_map(|sink| &sink.segments))
 }
 
 fn list_manifest_candidates(root: &Path) -> Result<Vec<ManifestCandidate>> {
@@ -1611,6 +1610,8 @@ fn io_error(path: &Path, source: std::io::Error) -> CalcFlowError {
 
 #[cfg(test)]
 mod tests {
+    mod source_history;
+
     use std::{
         collections::{BTreeMap, BTreeSet},
         path::Path,

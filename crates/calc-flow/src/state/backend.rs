@@ -10,7 +10,7 @@ use crate::{CalcFlowError, Epoch, Result, json::validate_portable_identifier};
 /// caller-selected filesystem paths.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct StateHandle {
-    /// Stable logical operator or sink identity.
+    /// Stable logical state-owner identity.
     operator_id: String,
     /// Checkpoint epoch that created the segment.
     epoch: Epoch,

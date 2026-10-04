@@ -3481,6 +3481,7 @@ fn durable_source_manifest_entries<C: DriverLogicalClock>(
             Ok((
                 id.to_owned(),
                 SourceManifestEntry {
+                    history: None,
                     cursor: cut.cursor.clone(),
                     identity_hash: state.prepared.identity_hash(),
                     sequence: cut.next_sequence,

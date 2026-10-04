@@ -118,8 +118,9 @@ pub use state::{
     CheckpointManifest, CheckpointManifestFields, CursorManifestEntry, LocalStateBackend,
     MANIFEST_FORMAT_VERSION, MAX_MANIFEST_DOCUMENT_BYTES, ManifestExpectation,
     ManifestIngressState, OperatorIngressManifestEntry, OperatorManifestEntry, RecoveryStatus,
-    RetentionClass, SinkDeliveryManifest, SinkManifestEntry, SourceManifestEntry,
-    SourceWatermarkManifestState, StateBackend, StateHandle, StateLineageBackend, StateLineageKey,
+    RetentionClass, SOURCE_HISTORY_FORMAT_VERSION, SinkDeliveryManifest, SinkManifestEntry,
+    SourceHistoryManifestEntry, SourceManifestEntry, SourceWatermarkManifestState, StateBackend,
+    StateHandle, StateLineageBackend, StateLineageKey,
 };
 pub use static_input::{
     STATIC_INPUT_DIGEST_VERSION, StaticInputDigest, StaticInputSpec, StaticMutability,

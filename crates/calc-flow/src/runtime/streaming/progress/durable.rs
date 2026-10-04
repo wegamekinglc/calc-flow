@@ -208,6 +208,7 @@ mod tests {
         let sources = BTreeMap::from([(
             "source".into(),
             SourceManifestEntry {
+                history: None,
                 cursor: None,
                 identity_hash,
                 sequence: 8,
