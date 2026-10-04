@@ -4,7 +4,13 @@ use crate::{
     IngressProgressSnapshot, IngressState, JsonMap, OperatorMetadata, StreamAsofJoinOperator,
     StreamAsofJoinSpec, StreamJobContext, StreamOperator, StreamOperatorContext,
 };
-use std::{collections::BTreeMap, time::Duration};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
+
+fn with_cursor(batch: &Batch, side: &str) -> Batch {
+    batch.with_source_cursor(Some(Arc::new(
+        crate::Cursor::new(side, vec![1], JsonMap::new()).unwrap(),
+    )))
+}
 
 #[tokio::test]
 async fn replay_recording_pressure_preserves_admission_success() {
@@ -59,7 +65,7 @@ async fn replay_recording_pressure_preserves_admission_success() {
                 let candidate = recorded
                     .process_data(
                         side,
-                        batch.clone(),
+                        with_cursor(&batch, side),
                         &context,
                         &mut EdgeCollector::new(recorded.output_ports().to_vec()),
                     )
@@ -71,6 +77,9 @@ async fn replay_recording_pressure_preserves_admission_success() {
                 );
                 if baseline.is_err() {
                     break;
+                }
+                if limit == 128 * 1024 && count == 1 && side == "left" {
+                    assert!(recorded.replay.is_some());
                 }
             }
             assert_status(&plain, &recorded);

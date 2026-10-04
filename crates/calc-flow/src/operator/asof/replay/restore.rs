@@ -108,8 +108,8 @@ impl StreamAsofJoinOperator {
                 .inline_metadata
                 .get("source_replay")
                 .and_then(serde_json::Value::as_u64)
-                != Some(1)
-            || control.version != 1
+                != Some(2)
+            || control.version != 2
             || control.fingerprint != self.fingerprint
             || control.bindings != inputs.bindings
             || control.frames.len() > MAX_FRAMES
@@ -153,7 +153,13 @@ impl StreamAsofJoinOperator {
                 .segments
                 .get(&descriptor.id)
                 .ok_or_else(|| mismatch("missing callback frame"))?;
-            codec::decode_into(&segment.bytes_arc(), descriptor.count, &mut log.records)?;
+            codec::decode_into(
+                &segment.bytes_arc(),
+                descriptor.count,
+                &mut log.records,
+                &mut log.credit,
+                &|bytes| self.reserve_workspace(bytes),
+            )?;
             log.frames.push(Frame {
                 segment: segment.clone(),
                 descriptor: descriptor.clone(),
@@ -192,12 +198,17 @@ impl StreamAsofJoinOperator {
                     if next[side] != sequence {
                         return Err(mismatch("source batch sequence differs"));
                     }
-                    let batch = next_data(&mut *readers[side], job).await?;
+                    let (batch, cursor) = next_data(&mut *readers[side], job).await?;
                     let binding = &self
                         .replay_inputs
                         .as_ref()
                         .expect("inputs were validated")
                         .bindings[side];
+                    let saved = record
+                        .cursor
+                        .as_ref()
+                        .ok_or_else(|| mismatch("data callback has no cursor"))?;
+                    checked_cursor(saved, cursor, binding)?;
                     let metadata = BatchMetadata::new(
                         binding,
                         sequence,
@@ -205,7 +216,9 @@ impl StreamAsofJoinOperator {
                     )?;
                     self.process_data(
                         SIDES[side],
-                        batch.with_metadata(metadata),
+                        batch
+                            .with_metadata(metadata)
+                            .with_source_cursor(Some(saved.clone())),
                         &context,
                         &mut Discard,
                     )
@@ -225,14 +238,31 @@ impl StreamAsofJoinOperator {
     }
 }
 
-async fn next_data(reader: &mut dyn StreamSource, job: &StreamJobContext) -> Result<Batch> {
+pub(super) fn checked_cursor(
+    saved: &crate::Cursor,
+    cursor: crate::Cursor,
+    binding: &str,
+) -> Result<()> {
+    let cursor = cursor
+        .bind_to(binding)
+        .map_err(|_| mismatch("reader cursor owner differs"))?;
+    if &cursor != saved {
+        return Err(mismatch("reader source cursor differs"));
+    }
+    Ok(())
+}
+
+async fn next_data(
+    reader: &mut dyn StreamSource,
+    job: &StreamJobContext,
+) -> Result<(Batch, crate::Cursor)> {
     loop {
         let event = tokio::select! {
             result = reader.next() => result?,
             () = job.cancellation().cancelled() => return Err(crate::CalcFlowError::Cancelled { run_id: "asof-source-replay".into() }),
         };
         match event {
-            Some(SourceEvent::Data { batch, .. }) => return Ok(batch),
+            Some(SourceEvent::Data { batch, cursor }) => return Ok((batch, cursor)),
             Some(SourceEvent::Watermark(_) | SourceEvent::Idle) => job.check_cancelled()?,
             None => return Err(mismatch("history ended before its recorded callback")),
         }

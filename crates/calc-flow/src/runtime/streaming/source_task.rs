@@ -6,7 +6,6 @@ use std::{panic::AssertUnwindSafe, sync::Arc};
 use async_trait::async_trait;
 use futures::FutureExt;
 use parking_lot::Mutex;
-use serde_json::Value;
 use tokio::sync::{Notify, mpsc, watch};
 
 use super::{
@@ -21,19 +20,31 @@ use super::{
     },
     supervisor::{TaskFailureSignal, TaskId, TaskSupervisor},
 };
-use crate::{
-    Batch, BatchMetadata, CalcFlowError, Epoch, EventTime, JsonMap, Result, canonical_json,
-};
+use crate::{Batch, BatchMetadata, CalcFlowError, Epoch, EventTime, JsonMap, Result};
 
 const MAX_CURSOR_ORDER_BYTES: usize = 16 * 1024;
 
+mod cursor_size;
+
 /// Source-defined position with a bytewise order key and opaque JSON payload.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub(crate) struct Cursor {
     source_id: Option<BindingIdentity>,
-    order: Vec<u8>,
-    payload: JsonMap,
+    order: Arc<[u8]>,
+    payload: Arc<JsonMap>,
+    owned_bytes: usize,
+    payload_bytes: usize,
 }
+
+impl PartialEq for Cursor {
+    fn eq(&self, other: &Self) -> bool {
+        self.source_id == other.source_id
+            && self.order == other.order
+            && self.payload == other.payload
+    }
+}
+
+impl Eq for Cursor {}
 
 impl Cursor {
     pub(crate) fn new(source_id: &str, order: Vec<u8>, payload: JsonMap) -> Result<Self> {
@@ -64,15 +75,32 @@ impl Cursor {
                 message: format!("must not exceed {MAX_CURSOR_ORDER_BYTES} bytes"),
             });
         }
-        let payload_value = Value::Object(payload.clone().into_iter().collect());
-        canonical_json(&payload_value).map_err(|error| CalcFlowError::InvalidArgument {
+        let invalid = |error: CalcFlowError| CalcFlowError::InvalidArgument {
             field: "cursor.payload".into(),
             message: error.to_string(),
-        })?;
+        };
+        for value in payload.values() {
+            crate::json::validate_json_depth_at(value, "cursor payload", 1).map_err(invalid)?;
+        }
+        let owned_bytes = cursor_size::map_bytes(&payload)
+            .and_then(|bytes| bytes.checked_add(order.len()))
+            .and_then(|bytes| bytes.checked_add(256))
+            .ok_or_else(|| CalcFlowError::InvalidArgument {
+                field: "cursor.payload".into(),
+                message: "owned byte count overflowed".into(),
+            })?;
+        let payload_bytes = serde_json::to_vec(&payload)
+            .map_err(|error| CalcFlowError::InvalidArgument {
+                field: "cursor.payload".into(),
+                message: error.to_string(),
+            })?
+            .len();
         Ok(Self {
             source_id,
-            order,
-            payload,
+            order: order.into(),
+            payload: Arc::new(payload),
+            owned_bytes,
+            payload_bytes,
         })
     }
 
@@ -88,14 +116,27 @@ impl Cursor {
         self.source_id.as_ref().map(BindingIdentity::as_str)
     }
 
-    pub(crate) const fn payload(&self) -> &JsonMap {
+    pub(crate) fn payload(&self) -> &JsonMap {
         &self.payload
+    }
+
+    pub(crate) fn retained_bytes(&self) -> Result<usize> {
+        self.owned_bytes
+            .checked_add(self.source_id().map_or(0, str::len))
+            .ok_or_else(|| CalcFlowError::InvalidArgument {
+                field: "cursor.payload".into(),
+                message: "owned byte count overflowed".into(),
+            })
+    }
+
+    pub(crate) const fn payload_bytes(&self) -> usize {
+        self.payload_bytes
     }
 
     pub(crate) fn manifest_entry(&self) -> crate::CursorManifestEntry {
         crate::CursorManifestEntry {
             order: hex::encode(&self.order),
-            payload: self.payload.clone(),
+            payload: self.payload.as_ref().clone(),
         }
     }
 
@@ -110,7 +151,7 @@ impl Cursor {
         )
     }
 
-    fn bind_to(mut self, source_id: &str) -> Result<Self> {
+    pub(crate) fn bind_to(mut self, source_id: &str) -> Result<Self> {
         let expected = BindingIdentity::new(source_id)?;
         if let Some(actual) = &self.source_id
             && actual != &expected
@@ -1022,6 +1063,7 @@ enum PumpSlotCommit {
 
 struct SourceTaskInputs {
     binding_id: String,
+    keep_source_cursor: bool,
     first_sequence: u64,
     resume_cursor: Option<Cursor>,
     outputs: Vec<EdgeSender>,
@@ -1316,6 +1358,7 @@ fn spawn_validated_source_tasks(
         accepted_sequence_recorder,
         ..
     } = binding;
+    let keep_source_cursor = history.is_some();
     #[cfg(test)]
     let source_acceptance = {
         let mut acceptance = SourceAcceptance::new();
@@ -1384,6 +1427,7 @@ fn spawn_validated_source_tasks(
             run_source_task(
                 SourceTaskInputs {
                     binding_id,
+                    keep_source_cursor,
                     first_sequence: next_sequence,
                     resume_cursor,
                     outputs,
@@ -1810,8 +1854,12 @@ async fn process_source_data(
 ) -> Result<SourceLoopStep> {
     let cursor = cursor.bind_to(&inputs.binding_id)?;
     validate_source_cursor(&inputs.binding_id, order.last_cursor.as_ref(), &cursor)?;
-    let (sequence, message, cost) =
-        sequenced_source_message(&inputs.binding_id, order.next_sequence, &batch)?;
+    let (sequence, message, cost) = sequenced_source_message(
+        &inputs.binding_id,
+        order.next_sequence,
+        &batch,
+        inputs.keep_source_cursor.then_some(&cursor),
+    )?;
     if let Some(progress) = &inputs.live_progress {
         inputs
             .metrics
@@ -1845,12 +1893,16 @@ fn sequenced_source_message(
     binding_id: &str,
     next_sequence: Option<u64>,
     batch: &Batch,
+    cursor: Option<&Cursor>,
 ) -> Result<(u64, StreamMessage, EnvelopeCost)> {
     let sequence = next_sequence.ok_or_else(|| CalcFlowError::Internal {
         message: format!("source binding {binding_id:?} sequence is exhausted"),
     })?;
     let metadata = BatchMetadata::new(binding_id, sequence, batch.metadata().attributes().clone())?;
-    let message = StreamMessage::data(batch.with_metadata(metadata));
+    let batch = batch.with_metadata(metadata).with_source_cursor(
+        cursor.map(|cursor| Arc::new(crate::Cursor::from_internal(cursor.clone()))),
+    );
+    let message = StreamMessage::data(batch);
     let cost = EnvelopeCost::of_message(&message)?;
     Ok((sequence, message, cost))
 }
@@ -2061,8 +2113,8 @@ mod tests {
         AcceptedSequenceRecorder, Cursor, SourceAcceptState, SourceAcceptance, SourceBinding,
         SourceCapabilities, SourceDeliveryCapability, SourceEvent, SourceProgressSnapshot,
         SourcePumpInputs, StreamSource, data_upstream_position, end_upstream_position,
-        run_source_pump, spawn_source_tasks, spawn_source_tasks_gated_with_metrics,
-        take_live_progress_binding,
+        run_source_pump, sequenced_source_message, spawn_source_tasks,
+        spawn_source_tasks_gated_with_metrics, take_live_progress_binding,
     };
     use crate::{
         Batch, BatchMetadata, CalcFlowError, CancellationToken, EdgeBudget, EdgeReceiver, Epoch,
@@ -2090,6 +2142,30 @@ mod tests {
                     if message.contains("canonical lowercase even-length hexadecimal")
             ));
         }
+    }
+
+    #[test]
+    fn cursor_clones_share_position_and_compare_independently_of_capacity() {
+        let mut value = String::with_capacity(4096);
+        value.push_str("position");
+        let payload = JsonMap::from([("row".into(), serde_json::Value::String(value))]);
+        let cursor = Cursor::new("orders", vec![1, 2], payload).unwrap();
+        let cloned = cursor.clone();
+        assert!(Arc::ptr_eq(&cursor.order, &cloned.order));
+        assert!(Arc::ptr_eq(&cursor.payload, &cloned.payload));
+        let compact = Cursor::new(
+            "orders",
+            vec![1, 2],
+            JsonMap::from([("row".into(), serde_json::json!("position"))]),
+        )
+        .unwrap();
+        assert_eq!(cursor, compact);
+        assert!(cursor.retained_bytes().unwrap() > compact.retained_bytes().unwrap());
+        assert_eq!(
+            cursor.payload_bytes(),
+            serde_json::to_vec(cursor.payload()).unwrap().len()
+        );
+        assert_eq!(cursor.manifest_entry(), compact.manifest_entry());
     }
 
     struct DriftingDescriptorSource {
@@ -2635,6 +2711,30 @@ mod tests {
         ));
         assert_eq!(*opened_at.lock(), OpenObservation::NotOpened);
         assert_eq!(supervisor.task_count(), 0);
+    }
+
+    #[test]
+    fn sequenced_history_batch_carries_shared_exact_source_cursor() {
+        let input = batch(99);
+        let cursor = cursor_for("orders", 7);
+        let (sequence, message, cost) =
+            sequenced_source_message("orders", Some(5), &input, Some(&cursor)).unwrap();
+        let data = message.as_data().unwrap();
+        let expected = crate::Cursor::from_internal(cursor);
+        assert_eq!(sequence, 5);
+        assert_eq!(data.metadata().sequence(), 5);
+        assert_eq!(data.metadata().source(), "orders");
+        assert_eq!(data.metadata().attributes(), input.metadata().attributes());
+        assert_eq!(cost.bytes(), input.estimated_bytes().unwrap());
+        assert_eq!(data.source_cursor().as_deref(), Some(&expected));
+        let cloned = data.with_metadata(data.metadata().clone());
+        assert!(Arc::ptr_eq(
+            &data.source_cursor().unwrap(),
+            &cloned.source_cursor().unwrap()
+        ));
+        assert!(input.source_cursor().is_none());
+        let (_, ordinary, _) = sequenced_source_message("orders", Some(6), &input, None).unwrap();
+        assert!(ordinary.as_data().unwrap().source_cursor().is_none());
     }
 
     #[tokio::test]

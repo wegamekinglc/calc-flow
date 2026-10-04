@@ -31,13 +31,15 @@ pub(super) enum Callback {
     End,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct Record {
     callback: Callback,
     input_watermark: Option<EventTime>,
     progress: [IngressProgress; 2],
     max_rows: usize,
     max_bytes: usize,
+    cursor: Option<Arc<crate::Cursor>>,
+    cursor_bytes: usize,
 }
 
 struct Frame {
@@ -155,6 +157,7 @@ impl StreamAsofJoinOperator {
     pub(super) fn record_replay(
         &mut self,
         callback: Callback,
+        cursor: Option<Arc<crate::Cursor>>,
         context: &StreamOperatorContext<'_>,
     ) -> Result<()> {
         if self.replay.is_none() {
@@ -167,6 +170,20 @@ impl StreamAsofJoinOperator {
         if context.ingress_progress().len() != 2 {
             return self.stop_replay();
         }
+        let cursor_bytes = match (&callback, &cursor) {
+            (Callback::Data { side, .. }, Some(cursor)) => {
+                if cursor.source_id().is_none()
+                    || self.replay_inputs.as_ref().is_some_and(|inputs| {
+                        cursor.source_id() != Some(inputs.bindings[usize::from(*side)].as_str())
+                    })
+                {
+                    return self.stop_replay();
+                }
+                cursor.retained_bytes()?
+            }
+            (Callback::Progress | Callback::End, None) => 0,
+            _ => return self.stop_replay(),
+        };
         let budget = context.output_budget();
         let record = Record {
             callback,
@@ -174,8 +191,10 @@ impl StreamAsofJoinOperator {
             input_watermark: context.input_watermark(),
             max_rows: budget.max_rows,
             max_bytes: budget.max_bytes,
+            cursor,
+            cursor_bytes,
         };
-        if !self.reserve_replay_record()? {
+        if !self.reserve_replay_record(cursor_bytes)? {
             return self.stop_replay();
         }
         self.replay
@@ -187,19 +206,20 @@ impl StreamAsofJoinOperator {
         Ok(())
     }
 
-    fn reserve_replay_record(&mut self) -> Result<bool> {
+    fn reserve_replay_record(&mut self, cursor_bytes: usize) -> Result<bool> {
         let log = self.replay.as_ref().expect("replay is enabled");
-        if log.records.len() < log.records.capacity() {
-            return Ok(true);
-        }
-        let capacity = log
-            .records
-            .capacity()
-            .max(8)
-            .checked_mul(2)
-            .ok_or_else(|| mismatch("replay capacity overflowed"))?;
+        let capacity = if log.records.len() < log.records.capacity() {
+            log.records.capacity()
+        } else {
+            log.records
+                .capacity()
+                .max(8)
+                .checked_mul(2)
+                .ok_or_else(|| mismatch("replay capacity overflowed"))?
+        };
         let delta = (capacity - log.records.capacity())
             .checked_mul(size_of::<Record>())
+            .and_then(|bytes| bytes.checked_add(cursor_bytes))
             .ok_or_else(|| mismatch("replay byte count overflowed"))?;
         if self
             .current_inventory(None)?

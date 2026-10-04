@@ -358,7 +358,7 @@ impl StreamAsofJoinOperator {
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
-        self.record_replay(replay::Callback::Progress, context)?;
+        self.record_replay(replay::Callback::Progress, None, context)?;
         self.observe(context.ingress_progress());
         self.finalize_with_replay(
             frontier(context.ingress_progress()),
@@ -480,6 +480,7 @@ impl StreamOperator for StreamAsofJoinOperator {
                 side: u8::from(ingress == "right"),
                 sequence: batch.metadata().sequence(),
             },
+            batch.source_cursor(),
             context,
         )?;
         self.observe(context.ingress_progress());
@@ -543,7 +544,7 @@ impl StreamOperator for StreamAsofJoinOperator {
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
-        self.record_replay(replay::Callback::End, context)?;
+        self.record_replay(replay::Callback::End, None, context)?;
         self.status.left.ended = true;
         self.status.right.ended = true;
         self.finalize_with_replay(None, true, context, output)

@@ -178,6 +178,22 @@ pub struct Cursor {
 }
 
 impl Cursor {
+    pub(crate) fn from_internal(inner: InternalCursor) -> Self {
+        Self { inner }
+    }
+
+    pub(crate) fn bind_to(self, source_id: &str) -> Result<Self> {
+        self.inner.bind_to(source_id).map(Self::from_internal)
+    }
+
+    pub(crate) fn retained_bytes(&self) -> Result<usize> {
+        self.inner.retained_bytes()
+    }
+
+    pub(crate) fn payload_bytes(&self) -> usize {
+        self.inner.payload_bytes()
+    }
+
     /// Constructs a cursor already owned by `source_id`.
     ///
     /// # Errors

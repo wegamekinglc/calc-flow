@@ -26,7 +26,7 @@ impl StreamAsofJoinOperator {
             return Ok(None);
         };
         let control = Control {
-            version: 1,
+            version: 2,
             fingerprint: self.fingerprint.clone(),
             bindings: inputs.bindings.clone(),
             record_capacity: log.records.capacity(),
@@ -57,7 +57,7 @@ impl StreamAsofJoinOperator {
             inline_metadata: BTreeMap::from([
                 ("kind".into(), json!("stream_asof_join")),
                 ("state_version".into(), json!(3)),
-                ("source_replay".into(), json!(1)),
+                ("source_replay".into(), json!(2)),
             ]),
             segments,
         }))
@@ -74,10 +74,7 @@ impl StreamAsofJoinOperator {
         let compact = log.frames.len() >= MAX_FRAMES;
         let first = if compact { 0 } else { log.cut };
         let count = log.records.len() - first;
-        let length = count
-            .checked_mul(codec::WIDTH)
-            .and_then(|bytes| bytes.checked_add(codec::HEADER))
-            .ok_or_else(|| mismatch("capture frame size overflowed"))?;
+        let length = codec::encoded_len(&log.records[first..])?;
         let Some(paid) = length
             .checked_mul(2)
             .and_then(|bytes| bytes.checked_add(512))
@@ -97,7 +94,7 @@ impl StreamAsofJoinOperator {
             .ok_or_else(|| mismatch("generation exhausted"))?;
         let id = format!("asof-replay-{generation:020}");
         let segment =
-            StateSegment::new(codec::encode(&log.records[first..])).with_owner(Arc::new(credit));
+            StateSegment::new(codec::encode(&log.records[first..])?).with_owner(Arc::new(credit));
         if compact {
             log.frames.clear();
         }
