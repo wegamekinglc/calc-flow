@@ -153,7 +153,12 @@ async fn integer_prefix(column: &ArrayRef, query: &str) {
 #[tokio::test]
 async fn test_global_integer_average_original_record_bits_native3() {
     for column in integer_columns() {
-        for query in [AVG, MULTIPLE] {
+        for query in [
+            AVG,
+            MULTIPLE,
+            "SELECT AVG(value) AS mean, COUNT(value) AS valid, COUNT(*) AS arrivals FROM events",
+            "SELECT AVG(value) AS mean, COUNT(other) AS other_valid FROM events",
+        ] {
             integer_prefix(&column, query).await;
         }
     }

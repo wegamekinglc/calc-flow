@@ -9,10 +9,11 @@ mod global_integer_avg_tests;
 const SUM: &str = "SELECT SUM(value) AS total FROM events";
 const AVG: &str = "SELECT AVG(value) AS mean FROM events";
 const MIXED: &str = "SELECT SUM(value) AS total, AVG(value) AS mean FROM events";
+const WITH_COUNTS: &str = "SELECT SUM(value) AS total, AVG(value) AS mean, COUNT(value) AS valid, COUNT(*) AS arrivals FROM events";
 const LARGE: Bits = (0x5a80_0000, 0x4350_0000_0000_0000);
 const NEG_LARGE: Bits = (0xda80_0000, 0xc350_0000_0000_0000);
 
-fn cases() -> [(DataType, &'static str); 8] {
+fn cases() -> [(DataType, &'static str); 10] {
     [
         (DataType::Float32, SUM),
         (DataType::Float64, SUM),
@@ -20,6 +21,8 @@ fn cases() -> [(DataType, &'static str); 8] {
         (DataType::Float64, AVG),
         (DataType::Float32, MIXED),
         (DataType::Float64, MIXED),
+        (DataType::Float32, WITH_COUNTS),
+        (DataType::Float64, WITH_COUNTS),
         (
             DataType::Float32,
             "SELECT AVG(value) AS mean, SUM(value) AS total, AVG(value) AS again FROM events",
@@ -109,7 +112,7 @@ async fn capture(
     assert_eq!(fields, descriptor.wire_schema.fields());
     for (field, value) in fields.iter().zip(expected) {
         assert_eq!(field.data_type(), &value.data_type());
-        assert!(field.is_nullable());
+        assert_eq!(field.is_nullable(), value.data_type() != DataType::Int64);
     }
     snapshot
 }
@@ -149,6 +152,14 @@ async fn test_global_float_sum_average_original_record_prefix_bits_native3() {
             prefixes(&dtype, query, finite_arrivals(reverse)).await;
         }
         prefixes(&dtype, query, special_arrivals()).await;
+    }
+}
+
+#[tokio::test]
+async fn test_global_float_sum_average_count_native_original_record_state() {
+    for dtype in [DataType::Float32, DataType::Float64] {
+        prefixes(&dtype, WITH_COUNTS, finite_arrivals(false)).await;
+        prefixes(&dtype, WITH_COUNTS, special_arrivals()).await;
     }
 }
 

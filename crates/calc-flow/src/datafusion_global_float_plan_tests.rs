@@ -49,7 +49,7 @@ fn inspect(plan: &dyn ExecutionPlan, original: &Batch, census: &mut [usize; 2]) 
             aggregate
                 .aggr_expr()
                 .iter()
-                .all(|expression| matches!(expression.fun().name(), "sum" | "avg"))
+                .all(|expression| matches!(expression.fun().name(), "sum" | "avg" | "count"))
         );
         assert!(aggregate.limit_options().is_none());
         assert!(aggregate.filter_expr().iter().all(Option::is_none));
@@ -159,6 +159,7 @@ async fn test_global_float_executed_source_splits_each_original_record() {
             "SELECT SUM(value) FROM events",
             "SELECT AVG(value) FROM events",
             "SELECT SUM(value), AVG(value) FROM events",
+            "SELECT SUM(value), AVG(value), COUNT(value), COUNT(*) FROM events",
             "SELECT AVG(value) AS mean, SUM(value) AS total, AVG(value) AS again FROM events",
         ] {
             let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
@@ -208,6 +209,7 @@ async fn test_global_float_default_single_plan_preserves_original_records() {
             "SELECT SUM(value) FROM events",
             "SELECT AVG(value) FROM events",
             "SELECT SUM(value), AVG(value) FROM events",
+            "SELECT SUM(value), AVG(value), COUNT(value), COUNT(*) FROM events",
             "SELECT AVG(value) AS mean, SUM(value) AS total, AVG(value) AS again FROM events",
         ] {
             let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();

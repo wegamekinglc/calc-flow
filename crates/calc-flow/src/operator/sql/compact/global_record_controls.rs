@@ -92,6 +92,7 @@ fn zero_input_snapshot(snapshot: &OperatorStateSnapshot) -> OperatorStateSnapsho
             DataType::UInt64 => Arc::new(datafusion::arrow::array::UInt64Array::from(vec![Some(
                 0_u64,
             )])) as ArrayRef,
+            DataType::Int64 => Arc::new(Int64Array::from(vec![0_i64])) as ArrayRef,
             DataType::Float64 => Arc::new(Float64Array::from(vec![None::<f64>])) as ArrayRef,
             _ => unreachable!(),
         })
@@ -129,6 +130,41 @@ fn state_snapshot(
     snapshot
 }
 
+fn assert_invalid_counts(snapshot: &OperatorStateSnapshot, dtype: &DataType, query: &str) {
+    let wire = decode_sql_state(snapshot.segments["group-state"].bytes()).unwrap();
+    let columns = wire.table_payload().unwrap().batches()[0].columns();
+    for (index, column) in columns.iter().enumerate() {
+        if column.data_type() == &DataType::Int64 {
+            for count in [-1, 3] {
+                let mut values = columns.to_vec();
+                values[index] = Arc::new(Int64Array::from(vec![count]));
+                assert!(
+                    StreamOperator::restore(
+                        &mut operator(dtype, query),
+                        &state_snapshot(snapshot, values, false),
+                    )
+                    .is_err()
+                );
+            }
+            continue;
+        }
+        if column.data_type() != &DataType::UInt64 {
+            continue;
+        }
+        for count in [None, Some(0), Some(3)] {
+            let mut values = columns.to_vec();
+            values[index] = Arc::new(datafusion::arrow::array::UInt64Array::from(vec![count]));
+            assert!(
+                StreamOperator::restore(
+                    &mut operator(dtype, query),
+                    &state_snapshot(snapshot, values, false),
+                )
+                .is_err()
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn test_global_record_current_policy_required_and_cold_replanned() {
     for (dtype, query) in cases() {
@@ -145,24 +181,7 @@ async fn test_global_record_current_policy_required_and_cold_replanned() {
             )
             .is_err()
         );
-        let wire = decode_sql_state(snapshot.segments["group-state"].bytes()).unwrap();
-        let columns = wire.table_payload().unwrap().batches()[0].columns();
-        for (index, column) in columns.iter().enumerate() {
-            if column.data_type() != &DataType::UInt64 {
-                continue;
-            }
-            for count in [None, Some(0), Some(3)] {
-                let mut values = columns.to_vec();
-                values[index] = Arc::new(datafusion::arrow::array::UInt64Array::from(vec![count]));
-                assert!(
-                    StreamOperator::restore(
-                        &mut operator(&dtype, query),
-                        &state_snapshot(&snapshot, values, false),
-                    )
-                    .is_err()
-                );
-            }
-        }
+        assert_invalid_counts(&snapshot, &dtype, query);
         let control: Value = serde_json::from_slice(snapshot.segments["control"].bytes()).unwrap();
         let original = control["state_policy"].clone();
         assert!(original["global_record_float_v1"].is_object());

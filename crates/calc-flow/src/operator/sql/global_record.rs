@@ -37,10 +37,15 @@ pub(in crate::operator::sql) enum Model {
 enum Kind {
     Sum,
     Average,
+    Count,
 }
 
 impl Kind {
     fn of(expression: &AggregateFunctionExpr) -> Option<Self> {
+        if expression.fun().name() == "count" && expression.field().data_type() == &DataType::Int64
+        {
+            return Some(Self::Count);
+        }
         if expression.field().data_type() != &DataType::Float64 {
             return None;
         }
@@ -53,7 +58,7 @@ impl Kind {
 
     fn width(self) -> usize {
         match self {
-            Self::Sum => 1,
+            Self::Sum | Self::Count => 1,
             Self::Average => 2,
         }
     }
@@ -76,6 +81,10 @@ impl Literal {
     fn saved(kind: Kind, values: &[ScalarValue], name: &str) -> Result<Self> {
         let (sum, count) = match (kind, values) {
             (_, []) => (None, 0),
+            (Kind::Count, [ScalarValue::Int64(Some(count))]) if *count >= 0 => (
+                None,
+                u64::try_from(*count).map_err(|error| df_error(name, error))?,
+            ),
             (Kind::Sum, [ScalarValue::Float64(sum)]) => (*sum, 0),
             (Kind::Average, [ScalarValue::UInt64(Some(count)), ScalarValue::Float64(sum)])
                 if (*count == 0) == sum.is_none() =>
@@ -87,27 +96,41 @@ impl Literal {
         Ok(Self { sum, count })
     }
 
-    fn update(&mut self, kind: Kind, array: &Float64Array, name: &str) -> Result<()> {
-        if matches!(kind, Kind::Average) {
+    fn update(&mut self, kind: Kind, array: &ArrayRef, name: &str) -> Result<()> {
+        if matches!(kind, Kind::Average | Kind::Count) {
             self.count = self
                 .count
                 .checked_add(
                     u64::try_from(array.len() - array.null_count())
                         .map_err(|error| df_error(name, error))?,
                 )
-                .ok_or_else(|| df_error(name, "global AVG count overflowed"))?;
+                .ok_or_else(|| df_error(name, "global aggregate count overflowed"))?;
         }
+        if matches!(kind, Kind::Count) {
+            i64::try_from(self.count).map_err(|error| df_error(name, error))?;
+            return Ok(());
+        }
+        let array = array
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .ok_or_else(|| df_error(name, "global record argument must be Float64"))?;
         if let Some(value) = sum(array) {
             let saved = self.sum.get_or_insert(0.0);
             match kind {
                 Kind::Sum => *saved = saved.add_wrapping(value),
                 Kind::Average => *saved += value,
+                Kind::Count => unreachable!("count returned before summation"),
             }
         }
         Ok(())
     }
 
     fn scalars(self, kind: Kind) -> Vec<ScalarValue> {
+        if matches!(kind, Kind::Count) {
+            return vec![ScalarValue::Int64(Some(
+                i64::try_from(self.count).expect("validated count"),
+            ))];
+        }
         let mut values = Vec::with_capacity(kind.width());
         if matches!(kind, Kind::Average) {
             values.push(ScalarValue::UInt64(Some(self.count)));
@@ -124,10 +147,21 @@ pub(super) fn raw_selected(raw: &LogicalPlan, schema: &SchemaRef) -> bool {
     if !aggregate.group_expr.is_empty() || aggregate.aggr_expr.is_empty() {
         return false;
     }
+    if !aggregate.aggr_expr.iter().any(|expression| {
+        matches!(super::unalias(expression), Expr::AggregateFunction(function) if matches!(function.func.name(), "sum" | "avg"))
+    }) {
+        return false;
+    }
     aggregate.aggr_expr.iter().all(|expression| {
         let Expr::AggregateFunction(function) = super::unalias(expression) else {
             return false;
         };
+        if function.func.name() == "count" {
+            return matches!(
+                function.params.args.as_slice(),
+                [Expr::Column(_) | Expr::Literal(ScalarValue::Int64(Some(1)), _)]
+            );
+        }
         if !matches!(function.func.name(), "sum" | "avg") {
             return false;
         }
@@ -376,14 +410,7 @@ impl OwnedCpuWork for RecordWork {
                         .evaluate(&batch)
                         .and_then(|value| value.into_array(rows))
                         .map_err(|error| df_error(&self.name, error))?;
-                    let values =
-                        array
-                            .as_any()
-                            .downcast_ref::<Float64Array>()
-                            .ok_or_else(|| {
-                                df_error(&self.name, "global record argument must be Float64")
-                            })?;
-                    state.update(kind, values, &self.name)?;
+                    state.update(kind, &array, &self.name)?;
                     stop.check()?;
                 }
             }
