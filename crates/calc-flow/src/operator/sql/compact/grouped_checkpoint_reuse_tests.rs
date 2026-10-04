@@ -98,8 +98,8 @@ async fn reuse_case(dtype: &DataType, key_type: &DataType, text: &str, keys: usi
     assert_prefix(&actual, text, &history, keys).await;
     let updated = capture(&mut recovered);
     assert_ne!(
-        updated.segments["group-state"].sha256(),
-        snapshot.segments["group-state"].sha256()
+        updated.segments["control"].sha256(),
+        snapshot.segments["control"].sha256()
     );
     drop((recovered, actual, snapshot, updated, history));
     assert!(job.gather_owner().close_and_drain().await.is_empty());

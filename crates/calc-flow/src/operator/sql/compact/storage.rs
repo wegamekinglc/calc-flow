@@ -148,7 +148,6 @@ pub(in crate::operator::sql) fn prepare_update(
     let capture = operator
         .compact
         .as_ref()
-        .filter(|_| prepared.batch.num_rows() == 0)
         .and_then(|state| state.capture.clone());
     Ok(CompactSqlState {
         ledger,

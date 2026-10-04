@@ -15,6 +15,7 @@ const STRING_STEP_BYTES: usize = 64 * 1024;
 
 pub(super) struct ExportCursor<'a> {
     native: &'a IncrementalSql,
+    slots: Option<Vec<usize>>,
     name: &'a str,
     records: Vec<RecordBatch>,
     arrays: Vec<ArrayRef>,
@@ -32,22 +33,42 @@ pub(super) struct ExportCursor<'a> {
 
 impl<'a> ExportCursor<'a> {
     pub(super) fn new(native: &'a IncrementalSql, name: &'a str) -> Result<Self> {
-        let descriptor = native.native_descriptor(name)?;
+        Self::create(native, false, name)
+    }
+
+    pub(super) fn dirty(native: &'a IncrementalSql, name: &'a str) -> Result<Self> {
+        Self::create(native, true, name)
+    }
+
+    fn create(native: &'a IncrementalSql, dirty: bool, name: &'a str) -> Result<Self> {
+        let mut descriptor = native.native_descriptor(name)?;
+        let rows = if dirty {
+            native.dirty.slots().len()
+        } else {
+            native.groups.len()
+        };
+        descriptor.group_count = rows;
         let width = descriptor.wire_schema.fields().len();
         if width == 0 && !native.groups.is_empty() {
             return Err(df_error(name, "native groups have no state columns"));
         }
-        let record_count = native.groups.len().div_ceil(CHUNK_ROWS).max(1);
+        let record_count = rows.div_ceil(CHUNK_ROWS).max(1);
         let charge = checked_bytes(
             4096,
             [
                 (record_count, size_of::<RecordBatch>()),
                 (record_count, checked_bytes(0, [(width, 512)], name)?),
+                (usize::from(dirty) * rows, size_of::<usize>()),
             ],
             name,
         )?;
         let reservation = native.reservation.new_empty();
         ensure_reservation(&reservation, charge, name)?;
+        let selected_slots = dirty.then(|| {
+            let mut slots = native.dirty.slots().to_vec();
+            slots.sort_unstable();
+            slots
+        });
         let slots = record_count
             .checked_mul(width)
             .ok_or_else(|| df_error(name, "native export slot count overflowed"))?;
@@ -62,6 +83,7 @@ impl<'a> ExportCursor<'a> {
                 .collect();
         Ok(Self {
             native,
+            slots: selected_slots,
             name,
             descriptor,
             records: Vec::with_capacity(record_count),
@@ -91,9 +113,8 @@ impl<'a> ExportCursor<'a> {
         if self.builder.is_none() {
             let start = self.records.len() * CHUNK_ROWS;
             let rows = self
-                .native
-                .groups
-                .len()
+                .descriptor
+                .group_count
                 .saturating_sub(start)
                 .min(CHUNK_ROWS);
             let column = self.arrays.len();
@@ -110,10 +131,10 @@ impl<'a> ExportCursor<'a> {
             )?);
         }
         let start = self.records.len() * CHUNK_ROWS;
-        let end = (start + CHUNK_ROWS).min(self.native.groups.len());
+        let end = (start + CHUNK_ROWS).min(self.descriptor.group_count);
         let builder = self.builder.as_mut().expect("started export column");
         if builder.step(
-            &self.native.groups[start..end],
+            GroupView::new(&self.native.groups, self.slots.as_deref()).slice(start, end),
             self.columns[self.arrays.len()],
             self.name,
             check,
@@ -135,12 +156,13 @@ impl<'a> ExportCursor<'a> {
     fn census_step(&mut self, check: &mut impl FnMut() -> Result<()>) -> Result<()> {
         check()?;
         for _ in 0..STATE_CHUNK_ROWS {
-            if self.census_row == self.native.groups.len() {
+            if self.census_row == self.descriptor.group_count {
                 ensure_reservation(&self.reservation, self.charge, self.name)?;
                 self.census_complete = true;
                 return Ok(());
             }
-            let group = &self.native.groups[self.census_row];
+            let group =
+                GroupView::new(&self.native.groups, self.slots.as_deref()).get(self.census_row);
             if group.values.len() != self.descriptor.key_fields.len()
                 || group.states.len() != self.descriptor.state_fields.len()
             {
@@ -203,6 +225,33 @@ fn scalar(group: &Group, column: StateColumn) -> &ScalarValue {
     }
 }
 
+#[derive(Clone, Copy)]
+struct GroupView<'a> {
+    groups: &'a [Group],
+    slots: Option<&'a [usize]>,
+}
+
+impl<'a> GroupView<'a> {
+    fn new(groups: &'a [Group], slots: Option<&'a [usize]>) -> Self {
+        Self { groups, slots }
+    }
+
+    fn len(self) -> usize {
+        self.slots.map_or(self.groups.len(), <[usize]>::len)
+    }
+
+    fn get(self, row: usize) -> &'a Group {
+        &self.groups[self.slots.map_or(row, |slots| slots[row])]
+    }
+
+    fn slice(self, start: usize, end: usize) -> Self {
+        match self.slots {
+            Some(slots) => Self::new(self.groups, Some(&slots[start..end])),
+            None => Self::new(&self.groups[start..end], None),
+        }
+    }
+}
+
 struct ColumnExport {
     builder: Box<dyn ArrayBuilder>,
     row: usize,
@@ -251,7 +300,7 @@ impl ColumnExport {
 
     fn step(
         &mut self,
-        groups: &[Group],
+        groups: GroupView<'_>,
         column: StateColumn,
         name: &str,
         check: &mut impl FnMut() -> Result<()>,
@@ -262,7 +311,7 @@ impl ColumnExport {
             if self.row == groups.len() {
                 return Ok(true);
             }
-            let value = scalar(&groups[self.row], column);
+            let value = scalar(groups.get(self.row), column);
             let copied = match value {
                 ScalarValue::Utf8(value) => {
                     self.string::<StringBuilder>(value.as_deref(), STRING_STEP_BYTES - bytes, name)?

@@ -184,10 +184,13 @@ async fn test_compact_storage_two_roundtrips_continue_and_recapture_every_prefix
                 assert_eq!(snapshot.inline_metadata["state_layout"], json!(3));
                 assert_eq!(snapshot.inline_metadata["state_accounting"], json!(3));
                 assert_eq!(snapshot.inline_metadata["rows"], json!(keys.len()));
-                assert_eq!(snapshot.segments.len(), 4);
+                let control: super::control::CompactControl =
+                    serde_json::from_slice(snapshot.segments["control"].bytes()).unwrap();
+                assert_eq!(snapshot.segments.len(), 4 + control.group_log.frames.len());
                 assert_eq!(snapshot.inline_metadata.len(), 6);
                 let decoded = decode_sql_state(snapshot.segments["group-state"].bytes()).unwrap();
-                assert_eq!(decoded.num_rows(), if sequence < 2 { 3 } else { 4 });
+                assert_eq!(decoded.num_rows() as u64, control.group_log.base_groups);
+                assert_eq!(control.groups, if sequence < 2 { 3 } else { 4 });
                 let cached = state.checkpoint(Epoch::INITIAL).unwrap();
                 same_snapshot(&snapshot, &cached);
                 if sequence < 2 {

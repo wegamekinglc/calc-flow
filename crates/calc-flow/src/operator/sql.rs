@@ -772,6 +772,10 @@ impl SqlOperator {
                 .as_mut()
                 .expect("capture retains its original operator")
                 .capture = Some(capture);
+            self.incremental
+                .as_mut()
+                .expect("native compact state")
+                .clear_checkpoint_changes();
         }
         self.retained_capture = prepared.retained;
         #[cfg(test)]

@@ -48,6 +48,7 @@ pub(super) struct CompactControl {
     pub identity: CompactIdentity,
     pub ledger: QuotaLedger,
     pub groups: u64,
+    pub group_log: super::log::LogDescriptor,
     pub segments: SegmentDigests,
 }
 
@@ -182,6 +183,7 @@ fn encode_bound(control: &CompactControl, name: &str) -> Result<usize> {
         incremental::checked_bytes(bound, [(value.len(), 12)], name)
     })?;
     let base = incremental::checked_bytes(base, [(identity.retained_ordinals.len(), 64)], name)?;
+    let base = incremental::checked_bytes(base, [(control.group_log.frames.len(), 4096)], name)?;
     incremental::checked_bytes(
         base,
         [(value_bound(&identity.native_descriptor, 2, name)?, 2)],

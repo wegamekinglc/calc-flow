@@ -4,6 +4,9 @@ use datafusion::{arrow::array::BooleanArray, execution::memory_pool::MemoryConsu
 #[path = "grouped_where_tests.rs"]
 mod predicates;
 
+#[path = "delta_float_tests.rs"]
+mod deltas;
+
 const AGGREGATES: &str = "SUM(value) FILTER (WHERE accepted) AS total, AVG(value) FILTER (WHERE accepted) AS mean, SUM(value) FILTER (WHERE other) AS other_total, MIN(value) FILTER (WHERE other) AS lo, MAX(value) FILTER (WHERE other) AS hi, COUNT(value) FILTER (WHERE accepted) AS valid, COUNT(*) FILTER (WHERE other) AS selected, COUNT(*) AS rows";
 const COUNTS: &str = "SELECT key, COUNT(value) FILTER (WHERE accepted) AS valid, COUNT(*) FILTER (WHERE other) AS selected, COUNT(*) AS rows FROM events GROUP BY key";
 

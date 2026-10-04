@@ -222,6 +222,42 @@ impl IncrementalSql {
         Ok(cursor.finish())
     }
 
+    pub(in crate::operator::sql) fn checkpoint_changes(&self) -> usize {
+        self.dirty.slots().len()
+    }
+
+    pub(in crate::operator::sql) fn group_count(&self) -> usize {
+        self.groups.len()
+    }
+
+    pub(in crate::operator::sql) fn export_dirty_state(
+        &self,
+        name: &str,
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<PaidNativeStateRecords> {
+        let mut cursor = export::ExportCursor::dirty(self, name)?;
+        while !cursor.step(&mut || check())? {}
+        check()?;
+        Ok(cursor.finish())
+    }
+
+    pub(in crate::operator::sql) async fn export_dirty_state_async(
+        &self,
+        name: &str,
+        mut check: impl FnMut() -> Result<()>,
+    ) -> Result<PaidNativeStateRecords> {
+        let mut cursor = export::ExportCursor::dirty(self, name)?;
+        loop {
+            if cursor.step(&mut check)? {
+                break;
+            }
+            check()?;
+            tokio::task::yield_now().await;
+        }
+        check()?;
+        Ok(cursor.finish())
+    }
+
     pub(in crate::operator::sql) async fn export_native_state_async(
         &self,
         name: &str,
@@ -263,6 +299,7 @@ impl IncrementalSql {
             records,
             &descriptor,
             historical_rows,
+            true,
             &mut check_cancelled,
             name,
         )?;
@@ -278,7 +315,110 @@ impl IncrementalSql {
             global.validate_state(records, historical_rows, name)?;
         }
         self.reserve_groups(groups, groups, name)?;
+        self.load_records(records, &descriptor, false, &mut check_cancelled, name)?;
+        check_cancelled()?;
+        Ok(self)
+    }
+
+    pub(in crate::operator::sql) fn apply_delta_state(
+        &mut self,
+        records: &[RecordBatch],
+        historical_rows: u64,
+        check: &dyn Fn() -> Result<()>,
+        name: &str,
+    ) -> Result<()> {
+        let descriptor = self.native_descriptor(name)?;
+        let validation = self.reservation.new_empty();
+        ensure_reservation(
+            &validation,
+            checked_bytes(4096, [(self.aggregates.len(), size_of::<u64>())], name)?,
+            name,
+        )?;
+        let groups = validate_records(
+            records,
+            &descriptor,
+            historical_rows,
+            false,
+            &mut || check(),
+            name,
+        )?;
+        let capacity = self
+            .groups
+            .len()
+            .checked_add(groups)
+            .ok_or_else(|| df_error(name, "native delta capacity overflowed"))?;
+        self.reserve_groups(groups, capacity, name)?;
+        self.load_records(records, &descriptor, true, &mut || check(), name)
+    }
+
+    pub(in crate::operator::sql) fn validate_checkpoint_history(
+        &self,
+        rows: u64,
+        seen: bool,
+        check: &dyn Fn() -> Result<()>,
+        name: &str,
+    ) -> Result<()> {
+        validate_ledger(
+            self.groups.len(),
+            rows,
+            seen,
+            self.keys.is_empty(),
+            self.predicate.is_some(),
+            name,
+        )?;
+        let descriptor = self.native_descriptor(name)?;
+        let reservation = self.reservation.new_empty();
+        ensure_reservation(
+            &reservation,
+            checked_bytes(4096, [(self.aggregates.len(), size_of::<u64>())], name)?,
+            name,
+        )?;
+        let mut counts = vec![0; self.aggregates.len()];
+        for (row, group) in self.groups.iter().enumerate() {
+            if row % STATE_CHUNK_ROWS == 0 {
+                check()?;
+            }
+            for (index, function) in descriptor.aggregate_names.iter().enumerate() {
+                let count = match (function.as_str(), group.states[index].first()) {
+                    ("count", Some(ScalarValue::Int64(Some(count)))) => u64::try_from(*count)
+                        .map_err(|_| df_error(name, "native COUNT state is negative"))?,
+                    ("avg", Some(ScalarValue::UInt64(count))) => count.unwrap_or(0),
+                    _ => continue,
+                };
+                add_count(&mut counts[index], count, rows, name)?;
+            }
+        }
+        for (count, all) in counts.iter().zip(&descriptor.count_all_rows) {
+            if *all && !descriptor.filtered_input && *count != rows {
+                return Err(df_error(
+                    name,
+                    "native all-row COUNT differs from historical rows",
+                ));
+            }
+        }
+        check()
+    }
+
+    fn load_records(
+        &mut self,
+        records: &[RecordBatch],
+        descriptor: &NativeStateDescriptor,
+        replace: bool,
+        check_cancelled: &mut impl FnMut() -> Result<()>,
+        name: &str,
+    ) -> Result<()> {
         let workspace = self.reservation.new_empty();
+        let mut seen = std::collections::BTreeSet::new();
+        let rows = records.iter().try_fold(0usize, |sum, record| {
+            sum.checked_add(record.num_rows())
+                .ok_or_else(|| df_error(name, "native delta row count overflowed"))
+        })?;
+        let seen_credit = self.reservation.new_empty();
+        ensure_reservation(
+            &seen_credit,
+            checked_bytes(4096, [(usize::from(replace) * rows, 128)], name)?,
+            name,
+        )?;
         for record in records {
             if record.num_rows() == 0 {
                 check_cancelled()?;
@@ -325,18 +465,24 @@ impl IncrementalSql {
                 for row in 0..rows {
                     let key = encoded.as_ref().map(|encoded| encoded.row(row));
                     let key = key.as_ref().map_or(&[][..], |key| key.as_ref());
-                    if self.index.contains_key(key) {
+                    if !replace && self.index.contains_key(key) {
                         return Err(df_error(name, "native state contains duplicate keys"));
                     }
-                    let group = self.import_group(&chunk, row, key, &descriptor, name)?;
-                    let slot = self.groups.len();
-                    self.index.insert(group.key.clone(), slot);
-                    self.groups.push(group);
+                    let group = self.import_group(&chunk, row, key, descriptor, name)?;
+                    if replace && !seen.insert(group.key.clone()) {
+                        return Err(df_error(name, "native state contains duplicate keys"));
+                    }
+                    if let Some(&slot) = self.index.get(key) {
+                        self.groups[slot] = group;
+                    } else {
+                        let slot = self.groups.len();
+                        self.index.insert(group.key.clone(), slot);
+                        self.groups.push(group);
+                    }
                 }
             }
         }
-        check_cancelled()?;
-        Ok(self)
+        Ok(())
     }
 
     fn import_group(
@@ -460,6 +606,7 @@ fn validate_records(
     records: &[RecordBatch],
     descriptor: &NativeStateDescriptor,
     historical_rows: u64,
+    complete: bool,
     check_cancelled: &mut impl FnMut() -> Result<()>,
     name: &str,
 ) -> Result<usize> {
@@ -494,7 +641,7 @@ fn validate_records(
         }
     }
     for (count, all_rows) in counts.iter().zip(&descriptor.count_all_rows) {
-        if *all_rows && !descriptor.filtered_input && *count != historical_rows {
+        if complete && *all_rows && !descriptor.filtered_input && *count != historical_rows {
             return Err(df_error(
                 name,
                 "native all-row COUNT differs from historical rows",

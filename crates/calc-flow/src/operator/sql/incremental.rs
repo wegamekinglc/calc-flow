@@ -45,6 +45,9 @@ mod grouped_sum;
 #[path = "predicate.rs"]
 mod predicate;
 
+#[path = "dirty.rs"]
+mod dirty;
+
 #[path = "global_record.rs"]
 pub(in crate::operator::sql) mod global_record;
 
@@ -64,6 +67,7 @@ pub(super) struct IncrementalSql {
     converter: Option<RowConverter>,
     index: HashMap<Arc<[u8]>, usize, RandomState>,
     groups: Vec<Group>,
+    dirty: dirty::DirtyGroups,
     sequential: Option<grouped_float::Proof>,
     global_records: Option<global_record::Proof>,
     container_fee: Option<MemoryReservation>,
@@ -486,10 +490,12 @@ struct GroupContainer {
 
 pub(super) struct Transaction {
     container: Option<GroupContainer>,
+    dirty: Option<dirty::DirtyGroups>,
     pub records: Vec<RecordBatch>,
     #[cfg(test)]
     pub rows: usize,
     groups: Vec<(usize, Group)>,
+    track_updates: bool,
     new_groups: Vec<Option<Group>>,
     _reservation: MemoryReservation,
     proof: Option<grouped_float::Proof>,
@@ -497,7 +503,8 @@ pub(super) struct Transaction {
 
 impl Transaction {
     pub(super) fn changes_state(&self) -> bool {
-        !self.groups.is_empty() || self.new_groups.iter().any(Option::is_some)
+        (self.track_updates && !self.groups.is_empty())
+            || self.new_groups.iter().any(Option::is_some)
     }
 }
 
@@ -610,6 +617,7 @@ impl IncrementalSql {
             variable_columns,
             converter,
             groups: Vec::new(),
+            dirty: dirty::DirtyGroups::empty(reservation.new_empty()),
             sequential,
             global_records,
             container_fee: None,
@@ -860,8 +868,13 @@ impl IncrementalSql {
         let (records, groups, new_groups, container) = self
             .prepare_transaction(candidates, &reservation, context, name)
             .await?;
+        let dirty = self
+            .dirty
+            .prepare(self.groups.len() + new_groups.len(), name)?;
         Ok(Transaction {
             records,
+            track_updates: batch.num_rows() != 0,
+            dirty,
             #[cfg(test)]
             rows: rows_processed,
             groups,
@@ -884,11 +897,9 @@ impl IncrementalSql {
             .output_records(count, &candidates.groups, reservation, context, name)
             .await?;
         let new_count = count - self.groups.len();
-        let staged = self.sequential.is_some() || self.predicate.is_some();
-        if !staged {
-            self.reserve_groups(new_count, count, name)?;
-        }
-        let container = (staged && new_count != 0)
+        let grow =
+            new_count != 0 && (count > self.groups.capacity() || count > self.index.capacity());
+        let container = grow
             .then(|| self.prepare_container(&candidates.groups, count, name))
             .transpose()?;
         let (groups, new_groups) = self
@@ -1573,6 +1584,9 @@ impl IncrementalSql {
     }
 
     pub fn commit(&mut self, transaction: Transaction) {
+        if let Some(dirty) = transaction.dirty {
+            self.dirty = dirty;
+        }
         if let Some(container) = transaction.container {
             self.install_container(container);
         }
@@ -1580,13 +1594,21 @@ impl IncrementalSql {
             self.sequential = Some(proof);
         }
         for (slot, group) in transaction.groups {
+            if transaction.track_updates {
+                self.dirty.mark(slot);
+            }
             self.groups[slot] = group;
         }
         for group in transaction.new_groups.into_iter().flatten() {
             let slot = self.groups.len();
+            self.dirty.mark(slot);
             self.index.insert(group.key.clone(), slot);
             self.groups.push(group);
         }
+    }
+
+    pub(super) fn clear_checkpoint_changes(&mut self) {
+        self.dirty.clear();
     }
 }
 

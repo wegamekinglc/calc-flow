@@ -426,11 +426,14 @@ async fn checked_prefixes(dtype: &DataType, query: &str, parts: Vec<Part>, nativ
         .unwrap()
         .incremental_memory_pool();
     drop((state, snapshot));
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop(context);
+    drop(job);
     assert_eq!(pool.reserved(), 0);
 }
 
 #[tokio::test]
-async fn test_current_float_extrema_grouped_native3_and_mixed_sum_raw4() {
+async fn test_current_float_extrema_grouped_and_mixed_sum_native3() {
     for dtype in [DataType::Float32, DataType::Float64] {
         checked_prefixes(
             &dtype,
@@ -450,7 +453,7 @@ async fn test_current_float_extrema_grouped_native3_and_mixed_sum_raw4() {
             &dtype,
             "SELECT MIN(value) AS lo, MAX(value) AS hi, SUM(value) AS total FROM events",
             vec![vec![Some(ONE)], vec![Some(TWO), None]],
-            false,
+            true,
         )
         .await;
     }

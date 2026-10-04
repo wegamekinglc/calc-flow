@@ -312,6 +312,14 @@ fn capture_state(
         identity,
         ledger,
         groups: export.descriptor.group_count as u64,
+        group_log: super::log::LogDescriptor {
+            version: 1,
+            base_generation: 0,
+            generation: 0,
+            base_groups: export.descriptor.group_count as u64,
+            base_ledger: ledger,
+            frames: Vec::new(),
+        },
         segments: SegmentDigests {
             logical_schema: projection.logical_segment.sha256().into(),
             group_state: encoded_state.segment.sha256().into(),

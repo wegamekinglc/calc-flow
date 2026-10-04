@@ -1,6 +1,7 @@
 mod capture;
 mod control;
 mod identity;
+mod log;
 mod restore;
 mod storage;
 
@@ -104,6 +105,9 @@ mod state_fixture_tests;
 
 #[cfg(test)]
 mod storage_tests;
+
+#[cfg(test)]
+mod delta_tests;
 
 #[cfg(test)]
 pub(in crate::operator::sql) mod direct_async_tests;

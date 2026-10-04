@@ -27,6 +27,18 @@ fn control() -> CompactControl {
             seen_input: true,
         },
         groups: 2,
+        group_log: super::super::log::LogDescriptor {
+            version: 1,
+            base_generation: 0,
+            generation: 0,
+            base_groups: 2,
+            base_ledger: QuotaLedger {
+                rows: 100,
+                bytes: 1600,
+                seen_input: true,
+            },
+            frames: Vec::new(),
+        },
         segments: SegmentDigests {
             logical_schema: "l".repeat(64),
             group_state: "g".repeat(64),

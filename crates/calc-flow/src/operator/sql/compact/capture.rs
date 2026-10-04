@@ -10,13 +10,14 @@ use super::super::{
 use super::{
     control::{self, CompactControl, QuotaLedger, SegmentDigests},
     identity,
+    log::{GroupLog, LogDescriptor, Mode},
     storage::CompactSqlState,
 };
 use crate::{Batch, BatchMetadata, OperatorStateSnapshot, Result, StreamOperatorContext};
 
 pub(in crate::operator::sql) struct CompactCapture {
     pub snapshot: OperatorStateSnapshot,
-    group_state: super::super::StateSegment,
+    group_state: GroupLog,
     ledger: QuotaLedger,
     metadata: BatchMetadata,
     _metadata: Arc<metadata::SqlMetadata>,
@@ -37,10 +38,11 @@ impl CompactCapture {
         operator: &SqlOperator,
         snapshot: &OperatorStateSnapshot,
         ledger: QuotaLedger,
+        descriptor: LogDescriptor,
         metadata: BatchMetadata,
         metadata_owner: Arc<metadata::SqlMetadata>,
     ) -> Result<Arc<Self>> {
-        let reservation = capture_credit(operator)?;
+        let reservation = capture_credit(operator, descriptor.frames.len())?;
         let bytes = snapshot
             .segments
             .values()
@@ -50,9 +52,11 @@ impl CompactCapture {
         incremental::ensure_reservation(&reservation, bytes, &operator.name)?;
         let reservation = Arc::new(reservation);
         let mut snapshot = snapshot.clone();
-        let group_state = snapshot.segments["group-state"]
-            .clone()
-            .with_owner(reservation.clone());
+        let mut group_state = GroupLog::restored(&snapshot, descriptor);
+        group_state.base = group_state.base.with_owner(reservation.clone());
+        for frame in &mut group_state.frames {
+            frame.segment = frame.segment.clone().with_owner(reservation.clone());
+        }
         snapshot
             .segments
             .insert("batch-metadata".into(), metadata_owner.segment.clone());
@@ -72,11 +76,25 @@ impl CompactCapture {
 
 struct CaptureParts {
     identity: identity::PaidIdentity,
-    group_state: super::super::StateSegment,
+    group_state: GroupLog,
     metadata: Arc<metadata::SqlMetadata>,
     groups: usize,
     policy: incremental::grouped_float::Policy,
     reservation: Arc<MemoryReservation>,
+}
+
+fn mode(state: &CompactSqlState, native: &IncrementalSql) -> Mode {
+    state.capture.as_ref().map_or(Mode::Full, |capture| {
+        capture
+            .group_state
+            .mode(native.checkpoint_changes(), native.group_count())
+    })
+}
+
+fn frame_count(state: &CompactSqlState, native: &IncrementalSql) -> usize {
+    state.capture.as_ref().map_or(0, |capture| {
+        capture.group_state.frame_count(mode(state, native))
+    })
 }
 
 fn cached(state: &CompactSqlState) -> Option<Arc<CompactCapture>> {
@@ -98,7 +116,7 @@ pub(in crate::operator::sql) fn prepare(
         return Ok(capture);
     }
     let runtime = operator.retention_runtime()?;
-    let reservation = Arc::new(capture_credit(operator)?);
+    let reservation = Arc::new(capture_credit(operator, frame_count(state, native))?);
     let (descriptor, group_state) = state_segment(operator, state, native, check)?;
     let identity = identity::build(
         operator,
@@ -120,7 +138,7 @@ pub(in crate::operator::sql) fn prepare(
             identity,
             group_state,
             metadata,
-            groups: descriptor.group_count,
+            groups: native.group_count(),
             policy: native.checkpoint_policy(),
             reservation,
         },
@@ -138,15 +156,20 @@ pub(in crate::operator::sql) async fn prepare_async(
     if let Some(capture) = cached(state) {
         return Ok(capture);
     }
-    let reservation = Arc::new(capture_credit(operator)?);
-    let export = if state.capture.is_none() {
-        Some(
+    let reservation = Arc::new(capture_credit(operator, frame_count(state, native))?);
+    let mode = mode(state, native);
+    let export = match mode {
+        Mode::Carry => None,
+        Mode::Full => Some(
             native
                 .export_native_state_async(&operator.name, || context.check_cancelled())
                 .await?,
-        )
-    } else {
-        None
+        ),
+        Mode::Delta => Some(
+            native
+                .export_dirty_state_async(&operator.name, || context.check_cancelled())
+                .await?,
+        ),
     };
     let descriptor = if export.is_none() {
         Some(native.native_descriptor(&operator.name)?)
@@ -157,7 +180,7 @@ pub(in crate::operator::sql) async fn prepare_async(
         || descriptor.as_ref().expect("reused native descriptor"),
         |export| &export.descriptor,
     );
-    let groups = description.group_count;
+    let groups = native.group_count();
     let identity = identity::build(
         operator,
         &state.columns.logical,
@@ -178,17 +201,14 @@ pub(in crate::operator::sql) async fn prepare_async(
     let (segment, metadata, export) =
         encode_sql_state_async(input, metadata, context.job().clone(), attempt).await?;
     context.check_cancelled()?;
-    let group_state = segment.map_or_else(
-        || {
-            state
-                .capture
-                .as_ref()
-                .expect("reused native segment")
-                .group_state
-                .clone()
-        },
-        |segment| segment.segment.clone(),
-    );
+    let group_state = GroupLog::finish(
+        state.capture.as_ref().map(|capture| &capture.group_state),
+        mode,
+        segment.as_ref().map(|segment| segment.segment.clone()),
+        groups,
+        native.checkpoint_changes(),
+        state.ledger,
+    )?;
     let metadata = metadata.expect("encoded compact metadata");
     let capture = finish(
         operator,
@@ -269,11 +289,12 @@ fn finish(
         state_policy: parts.policy,
         identity: parts.identity.value,
         ledger: state.ledger,
+        group_log: parts.group_state.descriptor.clone(),
         groups: u64::try_from(parts.groups)
             .map_err(|_| sql_state_error("SQL compact group count exceeds u64"))?,
         segments: SegmentDigests {
             logical_schema: logical.sha256().into(),
-            group_state: parts.group_state.sha256().into(),
+            group_state: parts.group_state.base.sha256().into(),
             batch_metadata: parts.metadata.segment.sha256().into(),
         },
     };
@@ -282,11 +303,11 @@ fn finish(
         inline_metadata: control.inline_metadata(&encoded.segment),
         segments: BTreeMap::from([
             ("control".into(), encoded.segment.clone()),
-            ("group-state".into(), parts.group_state.clone()),
             ("logical-schema".into(), logical),
             ("batch-metadata".into(), parts.metadata.segment.clone()),
         ]),
     };
+    parts.group_state.segments(&mut snapshot.segments);
     for segment in snapshot.segments.values_mut() {
         *segment = segment.clone().with_owner(parts.reservation.clone());
     }
@@ -306,17 +327,20 @@ fn state_segment(
     state: &CompactSqlState,
     native: &IncrementalSql,
     check: &dyn Fn() -> Result<()>,
-) -> Result<(
-    incremental::compact_state::NativeStateDescriptor,
-    super::super::StateSegment,
-)> {
-    if let Some(capture) = &state.capture {
+) -> Result<(incremental::compact_state::NativeStateDescriptor, GroupLog)> {
+    let mode = mode(state, native);
+    if matches!(mode, Mode::Carry) {
+        let capture = state.capture.as_ref().expect("carried group log");
         return Ok((
             native.native_descriptor(&operator.name)?,
             capture.group_state.clone(),
         ));
     }
-    let export = native.export_native_state(&operator.name, check)?;
+    let export = match mode {
+        Mode::Delta => native.export_dirty_state(&operator.name, check)?,
+        Mode::Full => native.export_native_state(&operator.name, check)?,
+        Mode::Carry => unreachable!(),
+    };
     let runtime = operator.retention_runtime()?;
     let shell = record_copy_reservation(
         runtime,
@@ -342,14 +366,23 @@ fn state_segment(
     let segment = encoded.segment.clone();
     drop(wire);
     drop(shell);
-    Ok((export.into_descriptor(), segment))
+    let log = GroupLog::finish(
+        state.capture.as_ref().map(|capture| &capture.group_state),
+        mode,
+        Some(segment),
+        native.group_count(),
+        native.checkpoint_changes(),
+        state.ledger,
+    )?;
+    Ok((export.into_descriptor(), log))
 }
 
-fn capture_credit(operator: &SqlOperator) -> Result<MemoryReservation> {
+fn capture_credit(operator: &SqlOperator, frames: usize) -> Result<MemoryReservation> {
     let reservation = operator
         .retention_runtime()?
         .incremental_reservation(&operator.name);
-    incremental::ensure_reservation(&reservation, 16384, &operator.name)?;
+    let bytes = incremental::checked_bytes(16384, [(frames, 2048)], &operator.name)?;
+    incremental::ensure_reservation(&reservation, bytes, &operator.name)?;
     Ok(reservation)
 }
 

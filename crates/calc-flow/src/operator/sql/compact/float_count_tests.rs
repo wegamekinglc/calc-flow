@@ -189,10 +189,14 @@ fn native_capture(
     let snapshot = state.checkpoint(Epoch::INITIAL).unwrap();
     assert_eq!(snapshot.inline_metadata["state_layout"], json!(3));
     assert_eq!(snapshot.inline_metadata["state_accounting"], json!(3));
+    let control: super::control::CompactControl =
+        serde_json::from_slice(snapshot.segments["control"].bytes()).unwrap();
+    assert_eq!(snapshot.segments.len(), 4 + control.group_log.frames.len());
     assert_eq!(
         snapshot
             .segments
             .keys()
+            .filter(|id| !id.starts_with("group-delta-"))
             .map(String::as_str)
             .collect::<Vec<_>>(),
         ["batch-metadata", "control", "group-state", "logical-schema"]
@@ -335,7 +339,7 @@ async fn test_current_float_count_rejected_emit_retains_capture_and_retries_once
 }
 
 #[tokio::test]
-async fn test_current_float_count_with_sum_keeps_raw4_fallback() {
+async fn test_current_float_count_with_sum_native3_roundtrip() {
     let query = "SELECT COUNT(value) AS valid, SUM(value) AS total FROM events";
     let finite = [(Some(1), Some(0.25)), (None, Some(0.5)), (Some(2), None)];
     for dtype in [DataType::Float32, DataType::Float64] {
@@ -345,9 +349,13 @@ async fn test_current_float_count_with_sum_keeps_raw4_fallback() {
         let actual = process(&mut state, input(&dtype, &finite, 0), &context).await;
         assert_oracle(&actual, query, &dtype, &finite, 0).await;
         let snapshot = state.checkpoint(Epoch::INITIAL).unwrap();
-        assert_eq!(snapshot.inline_metadata["state_layout"], json!(4));
-        assert_eq!(snapshot.inline_metadata["state_accounting"], json!(4));
-        assert!(state.incremental.is_none() && state.compact.is_none());
-        assert!(snapshot.segments.contains_key("input-retained"));
+        assert_eq!(snapshot.inline_metadata["state_layout"], json!(3));
+        assert_eq!(snapshot.inline_metadata["state_accounting"], json!(3));
+        assert!(state.incremental.is_some() && state.compact.is_some() && state.retained.is_none());
+        let mut restored = operator(&dtype, query);
+        StreamOperator::restore(&mut restored, &snapshot).unwrap();
+        let actual = process(&mut restored, input(&dtype, &finite, 1), &context).await;
+        let all = finite.into_iter().chain(finite).collect::<Vec<_>>();
+        assert_oracle(&actual, query, &dtype, &all, 1).await;
     }
 }
