@@ -1,6 +1,6 @@
 mod asof;
 mod checkpoint_task;
-mod operator_fusion;
+pub(super) mod operator_fusion;
 mod sql_recovery;
 mod supervision;
 
@@ -56,11 +56,12 @@ use super::{
         ContinuousJobSpec, OrdinarySinkBinding, OwningContinuousJob, StableSinkId,
         ValidatedContinuousJob, ValidatedOrdinarySink, preflight_job,
     },
+    local_edge::{LocalEdgeOwner, OperatorEdgeReceiver, OperatorEdgeSender, local_edge},
     metrics::{M2MetricsSnapshot, MetricsRecorder, MetricsTimer, sink_metric_id},
     operator_task::{
         OperatorCheckpointAck, OperatorCheckpointCommand, OperatorCheckpointPort, OperatorIngress,
         OperatorProgress, OperatorProgressSnapshot, OperatorRestoreState, OperatorTaskInputs,
-        OperatorTerminalPort, spawn_operator_task, spawn_operator_task_pair,
+        OperatorTerminalPort, prepare_operator_task_group,
     },
     progress::{
         DurableProgressRestore, DurableSourceCut, LiveProgressCoordinator, LiveProgressEvidence,
@@ -3007,24 +3008,68 @@ impl LiveCheckpointChannels {
     }
 }
 
+#[cfg(test)]
+type OperatorEndpoints = (
+    BTreeMap<String, OperatorEdgeSender>,
+    BTreeMap<String, OperatorEdgeReceiver>,
+);
+
+#[cfg(test)]
 fn create_runtime_channels(
     plan: &StreamRuntimePlanParts,
     metrics: &MetricsRecorder,
-) -> crate::Result<(BTreeMap<String, EdgeSender>, BTreeMap<String, EdgeReceiver>)> {
-    let mut senders = BTreeMap::new();
-    let mut receivers = BTreeMap::new();
-    for edge in plan.edges.values() {
-        let (sender, receiver) =
-            edge_channel_with_metrics(edge.stable_id.clone(), edge.budget, metrics.clone())?;
-        senders.insert(edge.stable_id.clone(), sender);
-        receivers.insert(edge.stable_id.clone(), receiver);
+) -> crate::Result<OperatorEndpoints> {
+    let channels = create_runtime_edges(plan, &BTreeMap::new(), metrics)?;
+    Ok((channels.senders, channels.receivers))
+}
+
+struct RuntimeChannels {
+    senders: BTreeMap<String, OperatorEdgeSender>,
+    receivers: BTreeMap<String, OperatorEdgeReceiver>,
+    local_owners: BTreeMap<String, Vec<LocalEdgeOwner>>,
+}
+
+fn create_runtime_edges(
+    plan: &StreamRuntimePlanParts,
+    layout: &BTreeMap<String, operator_fusion::FusionProof>,
+    metrics: &MetricsRecorder,
+) -> crate::Result<RuntimeChannels> {
+    let local_edges: BTreeMap<_, _> = layout
+        .iter()
+        .flat_map(|(head, proof)| proof.edges().iter().map(move |edge| (edge.as_str(), head)))
+        .collect();
+    let mut channels = RuntimeChannels {
+        senders: BTreeMap::new(),
+        receivers: BTreeMap::new(),
+        local_owners: BTreeMap::new(),
+    };
+    for (edge_id, edge) in &plan.edges {
+        let (sender, receiver) = if let Some(head) = local_edges.get(edge_id.as_str()) {
+            let (sender, receiver, owner) =
+                local_edge(edge_id.clone(), edge.budget, metrics.clone())?;
+            channels
+                .local_owners
+                .entry((*head).clone())
+                .or_default()
+                .push(owner);
+            (
+                OperatorEdgeSender::Local(sender),
+                OperatorEdgeReceiver::Local(receiver),
+            )
+        } else {
+            let (sender, receiver) =
+                edge_channel_with_metrics(edge_id.clone(), edge.budget, metrics.clone())?;
+            (sender.into(), receiver.into())
+        };
+        channels.senders.insert(edge_id.clone(), sender);
+        channels.receivers.insert(edge_id.clone(), receiver);
     }
-    Ok((senders, receivers))
+    Ok(channels)
 }
 
 fn take_node_ingresses(
     node: &RuntimeStreamNode,
-    receivers: &mut BTreeMap<String, EdgeReceiver>,
+    receivers: &mut BTreeMap<String, OperatorEdgeReceiver>,
 ) -> crate::Result<BTreeMap<String, OperatorIngress>> {
     node.ingress_edges
         .iter()
@@ -3047,8 +3092,8 @@ fn take_node_ingresses(
 
 fn take_node_outputs(
     node: &RuntimeStreamNode,
-    senders: &mut BTreeMap<String, EdgeSender>,
-) -> crate::Result<BTreeMap<String, Vec<EdgeSender>>> {
+    senders: &mut BTreeMap<String, OperatorEdgeSender>,
+) -> crate::Result<BTreeMap<String, Vec<OperatorEdgeSender>>> {
     node.output_edges
         .iter()
         .map(|(port, edge_ids)| {
@@ -3092,8 +3137,12 @@ async fn run_operator_entry(
     let (entry_tx, _) = watch::channel(false);
     let (data_tx, _) = watch::channel(false);
     let (ack_tx, mut ack_rx) = mpsc::unbounded_channel();
-    let (mut senders, mut receivers) =
-        create_runtime_channels(&plan, &core.metrics).map_err(preflight_entry_failure)?;
+    let layout = operator_fusion::plan_fusion(&plan);
+    let RuntimeChannels {
+        mut senders,
+        mut receivers,
+        mut local_owners,
+    } = create_runtime_edges(&plan, &layout, &core.metrics).map_err(preflight_entry_failure)?;
     let node_count = plan.nodes.len();
     let registration = &mut OperatorRegistration {
         next_node_order: 0,
@@ -3104,13 +3153,14 @@ async fn run_operator_entry(
         ack_tx: &ack_tx,
         senders: &mut senders,
         receivers: &mut receivers,
+        local_owners: &mut local_owners,
         supervisor: &mut supervisor,
         metrics: &core.metrics,
         runtime_status: &core.runtime_status,
         restores: &mut restores,
         checkpoint: checkpoint.as_ref(),
     };
-    if let Err(failure) = register_operator_nodes(plan.nodes, registration) {
+    if let Err(failure) = register_operator_nodes(plan.nodes, layout, registration) {
         supervisor.cancel();
         let _ = supervisor.join_all().await;
         return Err(failure);
@@ -3161,8 +3211,9 @@ struct OperatorRegistration<'a> {
     entry_tx: &'a watch::Sender<bool>,
     data_tx: &'a watch::Sender<bool>,
     ack_tx: &'a mpsc::UnboundedSender<super::operator_task::OperatorEntryAck>,
-    senders: &'a mut BTreeMap<String, EdgeSender>,
-    receivers: &'a mut BTreeMap<String, EdgeReceiver>,
+    senders: &'a mut BTreeMap<String, OperatorEdgeSender>,
+    receivers: &'a mut BTreeMap<String, OperatorEdgeReceiver>,
+    local_owners: &'a mut BTreeMap<String, Vec<LocalEdgeOwner>>,
     supervisor: &'a mut TaskSupervisor,
     metrics: &'a MetricsRecorder,
     runtime_status: &'a Mutex<RuntimeStatus>,
@@ -3172,30 +3223,66 @@ struct OperatorRegistration<'a> {
 
 fn register_operator_nodes(
     nodes: Vec<RuntimeStreamNode>,
+    mut layout: BTreeMap<String, operator_fusion::FusionProof>,
     registration: &mut OperatorRegistration<'_>,
 ) -> Result<(), EntryFailure> {
-    let mut nodes = nodes.into_iter().peekable();
-    while let Some(first) = nodes.next() {
-        let pair = nodes
-            .peek()
-            .is_some_and(|second| operator_fusion::eligible_pair(&first, second));
-        let first = prepare_operator_task(first, registration)?;
-        if pair {
-            // Scheduling invariant: `operator_fusion::eligible_pair` requires
-            // `is_exact_column_projection`, so `pair_cooperation` classifies
-            // this pair as `OperatorCooperation::BoundedData` and
-            // `prepare_operator_task_pair` always attaches `with_readiness()`
-            // here. The supervisor's non-readiness `tokio::join!` pair branch
-            // and `OperatorCooperation::EveryMessage` therefore run only in
-            // tests.
-            let second = prepare_operator_task(
-                nodes.next().expect("eligible adjacent node exists"),
-                registration,
-            )?;
-            spawn_operator_task_pair(registration.supervisor, first, second);
-        } else {
-            spawn_operator_task(registration.supervisor, first);
+    let mut prepared = BTreeMap::new();
+    let mut original_order = Vec::new();
+    for (ordinal, node) in nodes.into_iter().enumerate() {
+        let inputs = prepare_operator_task(node, registration)?;
+        let token = registration
+            .supervisor
+            .reserve_logical(format!("operator:{}", inputs.node_id));
+        original_order.push(inputs.node_id.clone());
+        prepared.insert(inputs.node_id.clone(), (ordinal, inputs, token));
+    }
+    let mut groups = Vec::new();
+    for node_id in original_order {
+        if !prepared.contains_key(&node_id) {
+            continue;
         }
+        let proof = layout.remove(&node_id);
+        let members = if let Some(proof) = &proof {
+            proof
+                .members()
+                .iter()
+                .map(|(id, ordinal)| {
+                    let (actual_ordinal, inputs, token) = prepared.remove(id).ok_or_else(|| {
+                        preflight_entry_failure(CalcFlowError::Internal {
+                            message: format!("fusion member {id:?} is missing or already claimed"),
+                        })
+                    })?;
+                    if *ordinal != actual_ordinal {
+                        return Err(preflight_entry_failure(CalcFlowError::Internal {
+                            message: format!(
+                                "fusion member {id:?} changed its original registration ordinal"
+                            ),
+                        }));
+                    }
+                    Ok((inputs, token))
+                })
+                .collect::<Result<Vec<_>, EntryFailure>>()?
+        } else {
+            let (_, inputs, token) = prepared
+                .remove(&node_id)
+                .expect("unclaimed original member exists");
+            vec![(inputs, token)]
+        };
+        let owners = registration
+            .local_owners
+            .remove(&node_id)
+            .unwrap_or_default();
+        groups.push(
+            prepare_operator_task_group(members, proof, owners).map_err(preflight_entry_failure)?,
+        );
+    }
+    if !prepared.is_empty() || !layout.is_empty() || !registration.local_owners.is_empty() {
+        return Err(preflight_entry_failure(CalcFlowError::Internal {
+            message: "fusion layout left unowned members or local edges".into(),
+        }));
+    }
+    for group in groups {
+        registration.supervisor.spawn_prepared_group(group);
     }
     Ok(())
 }
@@ -3326,8 +3413,8 @@ type BoundaryEndpoints = (
 fn take_boundary_endpoints(
     source_routes: BTreeMap<String, RuntimeSourceRoute>,
     sink_routes: BTreeMap<String, RuntimeSinkRoute>,
-    senders: &mut BTreeMap<String, EdgeSender>,
-    receivers: &mut BTreeMap<String, EdgeReceiver>,
+    senders: &mut BTreeMap<String, OperatorEdgeSender>,
+    receivers: &mut BTreeMap<String, OperatorEdgeReceiver>,
 ) -> Result<BoundaryEndpoints, EntryFailure> {
     let source_outputs = source_routes
         .into_iter()
@@ -3343,7 +3430,10 @@ fn take_boundary_endpoints(
                     },
                 }))
             })?;
-            Ok((binding_id, vec![sender]))
+            Ok((
+                binding_id,
+                vec![sender.into_physical().map_err(preflight_entry_failure)?],
+            ))
         })
         .collect::<Result<BTreeMap<_, _>, EntryFailure>>()?;
     let sink_inputs = sink_routes
@@ -3360,7 +3450,10 @@ fn take_boundary_endpoints(
                     },
                 }))
             })?;
-            Ok((output_id, receiver))
+            Ok((
+                output_id,
+                receiver.into_physical().map_err(preflight_entry_failure)?,
+            ))
         })
         .collect::<Result<BTreeMap<_, _>, EntryFailure>>()?;
     Ok((source_outputs, sink_inputs))

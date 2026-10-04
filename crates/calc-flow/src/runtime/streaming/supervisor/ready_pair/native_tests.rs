@@ -29,7 +29,7 @@ use crate::{
         metrics::MetricsRecorder,
         operator_task::{
             OperatorEntryAck, OperatorIngress, OperatorProgress, OperatorTaskInputs,
-            prepare_operator_task_pair,
+            prepare_fused_operator_task_pair,
         },
         supervisor::{TaskId, TaskSupervisor},
     },
@@ -169,7 +169,7 @@ fn native_inputs(
             OperatorIngress::new(input.edge().into(), input),
         )]
         .into(),
-        outputs: [("output".into(), vec![output])].into(),
+        outputs: [("output".into(), vec![output.into()])].into(),
         output_ports: node.output_ports,
         progress: OperatorProgress::default(),
         metrics: metrics.clone(),
@@ -210,6 +210,11 @@ fn observed_native_pair(
         cancellation.clone(),
     );
     let [rolling, projection] = native_nodes(budget);
+    let proof = crate::runtime::streaming::runner::operator_fusion::FusionProof::for_test(
+        &rolling,
+        &projection,
+    )
+    .unwrap();
     assert_eq!(
         rolling.output_edges["output"],
         [projection.ingress_edges["input"].clone()]
@@ -234,7 +239,7 @@ fn observed_native_pair(
         &entry_ack,
     );
     let mut supervisor = TaskSupervisor::new(cancellation.clone());
-    let pair = prepare_operator_task_pair(&mut supervisor, first, second);
+    let pair = prepare_fused_operator_task_pair(&mut supervisor, first, second, &proof).unwrap();
     let pair = match observer(&metrics, &rolling_progress) {
         Some(observer) => pair.observe(observer),
         None => pair,

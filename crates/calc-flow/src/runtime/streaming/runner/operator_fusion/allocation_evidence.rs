@@ -28,7 +28,7 @@ use crate::{
     pipeline::StreamRuntimePlanParts,
     runtime::streaming::{
         metrics::MetricsRecorder,
-        operator_task::{spawn_operator_task, spawn_operator_task_pair},
+        operator_task::{spawn_fused_operator_task_pair, spawn_operator_task},
         projection::StatusProjection,
         supervisor::TaskSupervisor,
     },
@@ -336,6 +336,7 @@ impl TaskFixture {
         let (acks, mut ack_rx) = mpsc::unbounded_channel();
         let (mut senders, mut receivers) = create_runtime_channels(&graph, &core.metrics).unwrap();
         let mut restores = BTreeMap::new();
+        let mut local_owners = BTreeMap::new();
         let mut registration = OperatorRegistration {
             next_node_order: 0,
             context: &context,
@@ -345,12 +346,16 @@ impl TaskFixture {
             ack_tx: &acks,
             senders: &mut senders,
             receivers: &mut receivers,
+            local_owners: &mut local_owners,
             supervisor: &mut supervisor,
             metrics: &core.metrics,
             runtime_status: &core.runtime_status,
             restores: &mut restores,
             checkpoint: None,
         };
+        let proof = super::plan_fusion(&graph)
+            .remove(&graph.nodes[0].node_id)
+            .unwrap();
         let mut nodes = graph.nodes.into_iter();
         let Ok(first) = prepare_operator_task(nodes.next().unwrap(), &mut registration) else {
             panic!("rolling task preparation failed");
@@ -364,7 +369,8 @@ impl TaskFixture {
                 spawn_operator_task(&mut supervisor, second);
             }
             TaskMode::Fused => {
-                spawn_operator_task_pair(&mut supervisor, first, second);
+                spawn_fused_operator_task_pair(&mut supervisor, first, second, &proof, Vec::new())
+                    .unwrap();
             }
         }
         entry.send(true).unwrap();

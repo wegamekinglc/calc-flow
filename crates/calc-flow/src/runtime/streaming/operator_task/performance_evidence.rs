@@ -159,7 +159,7 @@ impl Fixture {
                     state_version: 1,
                 },
                 ingresses: BTreeMap::new(),
-                outputs: BTreeMap::from([("output".into(), vec![sender])]),
+                outputs: BTreeMap::from([("output".into(), vec![sender.into()])]),
                 output_ports,
                 context: job.for_node("rolling").unwrap(),
                 progress: OperatorProgress::with_optional_rolling_metrics(

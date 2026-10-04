@@ -198,7 +198,7 @@ fn traced_inputs(
             OperatorIngress::new(receiver.edge().into(), receiver),
         )]
         .into(),
-        outputs: [("output".into(), vec![sender])].into(),
+        outputs: [("output".into(), vec![sender.into()])].into(),
         output_ports,
         progress: OperatorProgress::default(),
         metrics: metrics.clone(),
@@ -247,7 +247,7 @@ async fn fixture(messages: Vec<StreamMessage>) -> Fixture {
     let trace = Arc::new(Mutex::new(Vec::new()));
     let (entry_ack, entry_acks) = mpsc::unbounded_channel();
     let [first, second] = native_operators();
-    let cooperation = pair_cooperation(&first, &second);
+    let cooperation = OperatorCooperation::BoundedData;
     Fixture {
         first: traced_inputs(
             first,
@@ -441,7 +441,7 @@ fn open_native_task(projection: bool) -> OpenNativeTask {
         cancellation.clone(),
     );
     let [rolling, expression] = native_operators();
-    let cooperation = pair_cooperation(&rolling, &expression);
+    let cooperation = OperatorCooperation::BoundedData;
     let trace = Arc::new(Mutex::new(Vec::new()));
     let (entry_ack, entry_acks) = mpsc::unbounded_channel();
     let task = traced_inputs(

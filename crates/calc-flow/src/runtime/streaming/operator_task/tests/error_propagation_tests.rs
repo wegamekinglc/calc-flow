@@ -101,7 +101,7 @@ impl TaskEnvironment {
                 "input".into(),
                 OperatorIngress::new(receiver.edge().into(), receiver),
             )]),
-            outputs: BTreeMap::from([("output".into(), vec![sender])]),
+            outputs: BTreeMap::from([("output".into(), vec![sender.into()])]),
             context: self.job.for_node(node_id).unwrap(),
             progress: OperatorProgress::default(),
             metrics: super::super::MetricsRecorder::default(),

@@ -11,10 +11,11 @@ use parking_lot::Mutex;
 use tokio::sync::{mpsc, watch};
 
 use super::{
-    EdgeReceiver, EdgeSender, EnvelopeCost, StreamMessage, StreamMessageKind,
+    EnvelopeCost, StreamMessage, StreamMessageKind,
     context::{StreamTaskContext, wait_for_task_gate},
     entity_work::TaskEntityWorkClient,
     failure::panic_message,
+    local_edge::{LocalEdgeOwner, OperatorEdgeReceiver, OperatorEdgeSender},
     metrics::MetricsRecorder,
     progress::{
         aggregate::{AggregateInput, IngressActivity, MultiInputProgress, ProgressEmissionKind},
@@ -24,12 +25,14 @@ use super::{
         SqlCaptureRequest, SqlRecoveryClient, SqlRecoveryContext, SqlRestoreIdentity,
         SqlRestoreRequest,
     },
-    supervisor::{PreparedPair, RetainedTaskResult, TaskId, TaskSupervisor, contain_task_panic},
+    supervisor::{
+        PreparedLogicalTask, PreparedTaskGroup, RetainedTaskResult, TaskId, contain_task_panic,
+    },
 };
 use crate::{
     Batch, CalcFlowError, CancellationToken, EdgeBudget, Epoch, EventTime, IngressProgress,
     IngressProgressSnapshot, IngressState, ManifestIngressState, OperatorIngressManifestEntry,
-    OperatorMetadata, Port, Result, StreamCollector, StreamOperatorContext,
+    Port, Result, StreamCollector, StreamOperatorContext,
     operator::{
         LateMetricDelta, LateMetricSink, PreparedLateMetrics, accumulate_late_metrics,
         rolling_metrics::{
@@ -38,6 +41,12 @@ use crate::{
         },
     },
     pipeline::{CompiledStreamOperator, OperatorCheckpointCapability},
+};
+
+#[cfg(test)]
+use super::{
+    EdgeReceiver, EdgeSender,
+    supervisor::{PreparedPair, TaskSupervisor},
 };
 
 #[cfg(test)]
@@ -87,15 +96,15 @@ pub(crate) struct OperatorRestoreState {
 
 pub(crate) struct OperatorIngress {
     pub(crate) edge_id: String,
-    pub(crate) receiver: EdgeReceiver,
+    pub(crate) receiver: OperatorEdgeReceiver,
     saw_explicit_eof: bool,
 }
 
 impl OperatorIngress {
-    pub(crate) fn new(edge_id: String, receiver: EdgeReceiver) -> Self {
+    pub(crate) fn new(edge_id: String, receiver: impl Into<OperatorEdgeReceiver>) -> Self {
         Self {
             edge_id,
-            receiver,
+            receiver: receiver.into(),
             saw_explicit_eof: false,
         }
     }
@@ -162,6 +171,11 @@ impl OperatorProgress {
                     message: "operator input batch counter overflowed".into(),
                 })?;
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn preset_output_count_for_test(&self, value: u64) {
+        self.0.lock().fully_fanned_out_batches = value;
     }
 
     fn record_output(&self) -> Result<()> {
@@ -248,7 +262,7 @@ pub(crate) struct OperatorTaskInputs {
     pub(crate) operator: CompiledStreamOperator,
     pub(crate) checkpoint_capability: OperatorCheckpointCapability,
     pub(crate) ingresses: BTreeMap<String, OperatorIngress>,
-    pub(crate) outputs: BTreeMap<String, Vec<EdgeSender>>,
+    pub(crate) outputs: BTreeMap<String, Vec<OperatorEdgeSender>>,
     pub(crate) output_ports: BTreeMap<String, Port>,
     pub(crate) late_output_ports: BTreeSet<String>,
     pub(crate) context: StreamTaskContext,
@@ -268,7 +282,7 @@ struct OperatorEntryFrame {
     node_id: String,
     checkpoint_capability: OperatorCheckpointCapability,
     ingresses: BTreeMap<String, OperatorIngress>,
-    outputs: BTreeMap<String, Vec<EdgeSender>>,
+    outputs: BTreeMap<String, Vec<OperatorEdgeSender>>,
     output_ports: BTreeMap<String, Port>,
     late_output_ports: BTreeSet<String>,
     context: StreamTaskContext,
@@ -388,6 +402,7 @@ impl RetainedOperatorInputs {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn spawn_operator_task(
     supervisor: &mut TaskSupervisor,
     inputs: OperatorTaskInputs,
@@ -402,6 +417,41 @@ pub(crate) fn spawn_operator_task(
     })
 }
 
+#[cfg(test)]
+pub(crate) fn spawn_fused_operator_task_pair(
+    supervisor: &mut TaskSupervisor,
+    first: OperatorTaskInputs,
+    second: OperatorTaskInputs,
+    proof: &super::runner::operator_fusion::FusionProof,
+    local_edges: Vec<LocalEdgeOwner>,
+) -> Result<[TaskId; 2]> {
+    let pair = prepare_fused_operator_task_pair(supervisor, first, second, proof)?
+        .with_local_edges(local_edges);
+    Ok(supervisor.spawn_prepared_pair(pair))
+}
+
+#[cfg(test)]
+type PreparedOperatorPairResult<F, G> = Result<PreparedPair<F, G>>;
+
+#[cfg(test)]
+pub(crate) fn prepare_fused_operator_task_pair(
+    supervisor: &mut TaskSupervisor,
+    first: OperatorTaskInputs,
+    second: OperatorTaskInputs,
+    proof: &super::runner::operator_fusion::FusionProof,
+) -> PreparedOperatorPairResult<
+    impl Future<Output = RetainedTaskResult<Option<RetainedOperatorInputs>>> + use<>,
+    impl Future<Output = RetainedTaskResult<Option<RetainedOperatorInputs>>> + use<>,
+> {
+    if !proof.matches(&[&first.node_id, &second.node_id]) {
+        return Err(CalcFlowError::Internal {
+            message: "fusion proof does not match operator inputs".into(),
+        });
+    }
+    Ok(prepare_pair(supervisor, first, second, OperatorCooperation::BoundedData).with_readiness())
+}
+
+#[cfg(test)]
 pub(crate) fn spawn_operator_task_pair(
     supervisor: &mut TaskSupervisor,
     first: OperatorTaskInputs,
@@ -411,6 +461,7 @@ pub(crate) fn spawn_operator_task_pair(
     supervisor.spawn_prepared_pair(pair)
 }
 
+#[cfg(test)]
 pub(crate) fn prepare_operator_task_pair(
     supervisor: &mut TaskSupervisor,
     first: OperatorTaskInputs,
@@ -419,52 +470,78 @@ pub(crate) fn prepare_operator_task_pair(
     impl Future<Output = RetainedTaskResult<Option<RetainedOperatorInputs>>> + use<>,
     impl Future<Output = RetainedTaskResult<Option<RetainedOperatorInputs>>> + use<>,
 > {
+    prepare_pair(supervisor, first, second, OperatorCooperation::EveryMessage)
+}
+
+#[cfg(test)]
+fn prepare_pair(
+    supervisor: &mut TaskSupervisor,
+    first: OperatorTaskInputs,
+    second: OperatorTaskInputs,
+    cooperation: OperatorCooperation,
+) -> PreparedPair<
+    impl Future<Output = RetainedTaskResult<Option<RetainedOperatorInputs>>> + use<>,
+    impl Future<Output = RetainedTaskResult<Option<RetainedOperatorInputs>>> + use<>,
+> {
     let first_name = format!("operator:{}", first.node_id);
     let second_name = format!("operator:{}", second.node_id);
-    let cooperation = pair_cooperation(&first.operator, &second.operator);
-    let pair = supervisor.prepare_pair_with_failure_signals(
+    supervisor.prepare_pair_with_failure_signals(
         &first_name,
         move |signal| run_retained_operator_task(first, signal.task_id(), cooperation),
         &second_name,
         move |signal| run_retained_operator_task(second, signal.task_id(), cooperation),
-    );
-    if cooperation == OperatorCooperation::BoundedData {
-        pair.with_readiness()
-    } else {
-        pair
+    )
+}
+
+pub(crate) fn prepare_operator_task_group(
+    members: Vec<(OperatorTaskInputs, PreparedLogicalTask)>,
+    proof: Option<super::runner::operator_fusion::FusionProof>,
+    local_edges: Vec<LocalEdgeOwner>,
+) -> Result<PreparedTaskGroup> {
+    let readiness = proof.is_some();
+    let ids: Vec<_> = members
+        .iter()
+        .map(|(inputs, _)| inputs.node_id.as_str())
+        .collect();
+    if proof
+        .as_ref()
+        .map_or(members.len() != 1 || !local_edges.is_empty(), |proof| {
+            !proof.matches(&ids)
+        })
+    {
+        return Err(CalcFlowError::Internal {
+            message: "fusion group does not match prepared operator inputs".into(),
+        });
     }
+    let cooperation = if readiness {
+        OperatorCooperation::BoundedData
+    } else {
+        OperatorCooperation::Disabled
+    };
+    let members = members
+        .into_iter()
+        .map(|(inputs, token)| {
+            token.bind(move |signal| {
+                run_retained_operator_task(inputs, signal.task_id(), cooperation)
+            })
+        })
+        .collect();
+    Ok(PreparedTaskGroup::new(members, local_edges, proof))
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum OperatorCooperation {
     Disabled,
+    #[cfg(test)]
     EveryMessage,
     BoundedData,
-}
-
-fn pair_cooperation(
-    first: &CompiledStreamOperator,
-    second: &CompiledStreamOperator,
-) -> OperatorCooperation {
-    let (CompiledStreamOperator::Rolling(rolling), CompiledStreamOperator::Expression(expression)) =
-        (first, second)
-    else {
-        return OperatorCooperation::EveryMessage;
-    };
-    let Some(input) = rolling.output_ports()[0].schema() else {
-        return OperatorCooperation::EveryMessage;
-    };
-    if expression.is_exact_column_projection(input, expression.output_ports()[0].schema()) {
-        OperatorCooperation::BoundedData
-    } else {
-        OperatorCooperation::EveryMessage
-    }
 }
 
 impl OperatorCooperation {
     fn after_dispatch(self, kind: StreamMessageKind, skipped_data: &mut bool) -> bool {
         match self {
             Self::Disabled => false,
+            #[cfg(test)]
             Self::EveryMessage => true,
             Self::BoundedData if kind == StreamMessageKind::Data && !*skipped_data => {
                 *skipped_data = true;
@@ -1719,11 +1796,11 @@ fn attach_entity_context<'a>(
     }
 }
 
-fn effective_output_budget(outputs: &BTreeMap<String, Vec<EdgeSender>>) -> EdgeBudget {
+fn effective_output_budget(outputs: &BTreeMap<String, Vec<OperatorEdgeSender>>) -> EdgeBudget {
     outputs
         .values()
         .flatten()
-        .map(EdgeSender::budget)
+        .map(OperatorEdgeSender::budget)
         .reduce(|left, right| EdgeBudget {
             max_rows: left.max_rows.min(right.max_rows),
             max_bytes: left.max_bytes.min(right.max_bytes),
@@ -2068,7 +2145,7 @@ fn unsupported_control(
 }
 
 async fn forward_control(
-    outputs: &mut BTreeMap<String, Vec<EdgeSender>>,
+    outputs: &mut BTreeMap<String, Vec<OperatorEdgeSender>>,
     late_output_ports: &BTreeSet<String>,
     message: StreamMessage,
     context: &super::StreamJobContext,
@@ -2098,7 +2175,7 @@ pub(crate) struct ChannelStreamCollector<'a> {
     node_id: &'a str,
     job_id: u64,
     output_ports: &'a BTreeMap<String, Port>,
-    outputs: &'a mut BTreeMap<String, Vec<EdgeSender>>,
+    outputs: &'a mut BTreeMap<String, Vec<OperatorEdgeSender>>,
     cancellation: &'a CancellationToken,
     progress: &'a OperatorProgress,
     metrics: &'a MetricsRecorder,
@@ -2110,7 +2187,7 @@ impl<'a> ChannelStreamCollector<'a> {
         node_id: &'a str,
         job_id: u64,
         output_ports: &'a BTreeMap<String, Port>,
-        outputs: &'a mut BTreeMap<String, Vec<EdgeSender>>,
+        outputs: &'a mut BTreeMap<String, Vec<OperatorEdgeSender>>,
         cancellation: &'a CancellationToken,
         progress: &'a OperatorProgress,
         metrics: &'a MetricsRecorder,
@@ -2177,7 +2254,7 @@ fn validate_emission(
 }
 
 fn validate_senders(
-    senders: &[EdgeSender],
+    senders: &[OperatorEdgeSender],
     message: &StreamMessage,
     node_id: &str,
     port: &str,
@@ -2192,7 +2269,7 @@ fn validate_senders(
 }
 
 async fn send_emission(
-    senders: &mut [EdgeSender],
+    senders: &mut [OperatorEdgeSender],
     message: StreamMessage,
     cancellation: &CancellationToken,
     job_id: u64,
@@ -2208,7 +2285,7 @@ async fn send_emission(
 }
 
 async fn send_observed_edge(
-    sender: &mut EdgeSender,
+    sender: &mut OperatorEdgeSender,
     message: StreamMessage,
     cancellation: &CancellationToken,
     job_id: u64,
@@ -2857,7 +2934,7 @@ pub(super) mod tests {
                     "input".into(),
                     OperatorIngress::new("source->input".into(), input_receiver),
                 )]),
-                outputs: BTreeMap::from([("output".into(), vec![output_sender])]),
+                outputs: BTreeMap::from([("output".into(), vec![output_sender.into()])]),
                 output_ports: BTreeMap::from([("output".into(), output_port)]),
                 context: context.for_node("node").unwrap(),
                 progress: progress.clone(),
@@ -2961,7 +3038,7 @@ pub(super) mod tests {
             operator: CompiledStreamOperator::External(Box::new(operator)),
             checkpoint_capability: OperatorCheckpointCapability::Stateless,
             ingresses: BTreeMap::new(),
-            outputs: BTreeMap::from([("output".into(), vec![sender])]),
+            outputs: BTreeMap::from([("output".into(), vec![sender.into()])]),
             output_ports: BTreeMap::from([("output".into(), output_port)]),
             context: job.for_node("node").unwrap(),
             progress: progress.clone(),
@@ -3335,7 +3412,7 @@ pub(super) mod tests {
                 metrics.clone(),
             )
             .unwrap();
-            output_senders.push(sender);
+            output_senders.push(sender.into());
             outputs.push(receiver);
         }
         let (entry, entry_rx) = watch::channel(false);
@@ -3418,7 +3495,7 @@ pub(super) mod tests {
         .unwrap();
 
         let error = send_emission(
-            &mut [sender],
+            &mut [sender.into()],
             StreamMessage::data(batch("S", 0)),
             &cancellation,
             47,

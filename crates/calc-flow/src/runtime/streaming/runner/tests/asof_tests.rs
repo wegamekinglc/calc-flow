@@ -1,3 +1,5 @@
+mod fusion_controls;
+
 use super::{
     ContinuousJobSpec, ContinuousJobState, ContinuousRunner, Cursor, M2DeliveryMode,
     NamedSinkBinding, NamedSourceBinding, OrdinarySinkBinding, OrdinaryStreamSink, SourceBinding,
