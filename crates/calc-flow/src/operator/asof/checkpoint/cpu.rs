@@ -64,6 +64,18 @@ impl StreamAsofJoinOperator {
                 .restore_source_replay(snapshot, progress, frontier, job)
                 .await;
         }
+        self.restore_native_managed(snapshot, progress, frontier, job, task)
+            .await
+    }
+
+    pub(in crate::operator::asof) async fn restore_native_managed(
+        self: Box<Self>,
+        snapshot: crate::OperatorStateSnapshot,
+        progress: crate::IngressProgressSnapshot,
+        frontier: Option<crate::EventTime>,
+        job: &crate::StreamJobContext,
+        task: Option<crate::runtime::streaming::gather_work::TaskId>,
+    ) -> Result<Box<Self>> {
         job.check_cancelled()?;
         let credit = self.reserve_workspace(crate::operator::asof::checked(
             &self.name,

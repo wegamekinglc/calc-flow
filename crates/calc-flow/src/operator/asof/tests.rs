@@ -1730,7 +1730,7 @@ async fn finalizes_large_ready_prefix_in_one_bounded_batch() {
     assert_eq!(op.status.pending_left_rows, 0);
 }
 
-fn fixture() -> (StreamAsofJoinOperator, Batch) {
+pub(super) fn fixture() -> (StreamAsofJoinOperator, Batch) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("key", DataType::Utf8, false),
         Field::new(

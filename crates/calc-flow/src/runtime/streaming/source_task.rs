@@ -24,8 +24,6 @@ use crate::{Batch, BatchMetadata, CalcFlowError, Epoch, EventTime, JsonMap, Resu
 
 const MAX_CURSOR_ORDER_BYTES: usize = 16 * 1024;
 
-mod cursor_size;
-
 /// Source-defined position with a bytewise order key and opaque JSON payload.
 #[derive(Clone, Debug)]
 pub(crate) struct Cursor {
@@ -82,7 +80,7 @@ impl Cursor {
         for value in payload.values() {
             crate::json::validate_json_depth_at(value, "cursor payload", 1).map_err(invalid)?;
         }
-        let owned_bytes = cursor_size::map_bytes(&payload)
+        let owned_bytes = crate::json::owned_json_bytes(&payload)
             .and_then(|bytes| bytes.checked_add(order.len()))
             .and_then(|bytes| bytes.checked_add(256))
             .ok_or_else(|| CalcFlowError::InvalidArgument {

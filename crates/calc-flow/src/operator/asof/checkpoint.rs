@@ -259,7 +259,7 @@ impl StreamAsofJoinOperator {
 
     pub(super) fn capture(&mut self, epoch: Epoch) -> Result<OperatorStateSnapshot> {
         if self.replay.is_some() {
-            if let Some(snapshot) = self.capture_replay()? {
+            if let Some(snapshot) = self.capture_replay(epoch)? {
                 return Ok(snapshot);
             }
             self.stop_replay()?;

@@ -1,3 +1,4 @@
+mod anchor;
 mod capture;
 mod codec;
 mod restore;
@@ -17,6 +18,7 @@ use std::{collections::BTreeMap, sync::Arc};
 const MAX_FRAMES: usize = 32;
 const SIDES: [&str; 2] = ["left", "right"];
 const CONTROL_ID: &str = "asof-replay-control";
+const CONTROL_MAX_BYTES: usize = 65536;
 
 pub(super) struct Inputs {
     bindings: [String; 2],
@@ -67,6 +69,49 @@ struct Control {
     terminal: bool,
     next_output_sequence: u64,
     status: StreamAsofJoinStatus,
+    anchor: AnchorControl,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+enum AnchorControl {
+    FromStart,
+    Native {
+        metadata: crate::JsonMap,
+        segments: Vec<String>,
+        starts: String,
+        credit: usize,
+    },
+}
+
+struct Anchor {
+    snapshot: crate::OperatorStateSnapshot,
+    starts: StateSegment,
+    start_id: String,
+    records: Vec<Record>,
+    credit: MemoryReservation,
+}
+
+impl Anchor {
+    fn bytes(&self) -> u64 {
+        self.credit.size() as u64
+            + self.starts.bytes_arc().capacity() as u64
+            + self
+                .snapshot
+                .segments
+                .values()
+                .map(|s| s.bytes_arc().capacity() as u64)
+                .sum::<u64>()
+    }
+
+    fn descriptor(&self) -> AnchorControl {
+        AnchorControl::Native {
+            metadata: self.snapshot.inline_metadata.clone(),
+            segments: self.snapshot.segments.keys().cloned().collect(),
+            starts: self.start_id.clone(),
+            credit: self.credit.size(),
+        }
+    }
 }
 
 pub(super) struct Log {
@@ -75,11 +120,13 @@ pub(super) struct Log {
     frames: Vec<Frame>,
     cut: usize,
     generation: u64,
+    anchor: Option<Box<Anchor>>,
 }
 
 impl Log {
     fn bytes(&self) -> u64 {
         self.credit.size() as u64
+            + self.anchor.as_ref().map_or(0, |anchor| anchor.bytes())
             + self
                 .frames
                 .iter()
@@ -125,6 +172,7 @@ impl StreamAsofJoinOperator {
             frames: Vec::with_capacity(MAX_FRAMES + 1),
             cut: 0,
             generation: 0,
+            anchor: None,
         })
     }
 

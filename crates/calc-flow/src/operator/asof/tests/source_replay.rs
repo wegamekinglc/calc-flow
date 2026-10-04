@@ -120,3 +120,24 @@ fn assert_status(plain: &StreamAsofJoinOperator, recorded: &StreamAsofJoinOperat
     actual.state_bytes = plain.status.state_bytes;
     assert_eq!(actual, plain.status);
 }
+
+#[tokio::test]
+async fn replay_anchor_preparation_cancellation_keeps_log_owned() {
+    let (mut operator, _) = fixture();
+    operator.replay = Some(Box::new(operator.new_replay_log().unwrap()));
+    operator.status.state_bytes = operator.current_inventory(None).unwrap().bytes;
+    let status = operator.status();
+    let pool = operator.runtime.pool.clone();
+    let reserved = pool.reserved();
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, cancellation);
+    let context = StreamOperatorContext::new(&job, "asof", None);
+    assert!(operator.prepare_replay_anchor(&context).await.is_err());
+    assert_eq!(operator.status(), status);
+    assert!(operator.replay.is_some());
+    assert_eq!(pool.reserved(), reserved);
+    drop(operator);
+    assert_eq!(pool.reserved(), 0);
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+}

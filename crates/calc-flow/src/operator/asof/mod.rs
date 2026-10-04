@@ -499,7 +499,7 @@ impl StreamOperator for StreamAsofJoinOperator {
         context: &StreamOperatorContext<'_>,
     ) -> Result<()> {
         if self.replay.is_some() {
-            return context.check_cancelled();
+            return self.prepare_replay_anchor(context).await;
         }
         self.ensure_prepared_async(context).await
     }

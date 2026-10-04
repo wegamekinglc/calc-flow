@@ -154,3 +154,30 @@ fn callback_cursor_rejects_duplicate_json_keys_and_invalid_payloads() {
         assert!(decode(&bytes, 1, &mut Vec::with_capacity(1)).is_err());
     }
 }
+
+#[test]
+fn replay_control_rejects_duplicate_anchor_metadata_and_missing_anchor() {
+    let control = super::Control {
+        version: 3,
+        fingerprint: "test".into(),
+        bindings: ["left".into(), "right".into()],
+        record_capacity: 0,
+        frames: Vec::new(),
+        generation: 0,
+        terminal: false,
+        next_output_sequence: 0,
+        status: crate::StreamAsofJoinStatus::default(),
+        anchor: super::AnchorControl::Native {
+            metadata: JsonMap::from([("field".into(), serde_json::json!(1))]),
+            segments: Vec::new(),
+            starts: "start".into(),
+            credit: 0,
+        },
+    };
+    let encoded = serde_json::to_string(&control).unwrap();
+    let duplicated = encoded.replace("\"field\":1", "\"field\":1,\"field\":2");
+    assert!(super::restore::decode_control(duplicated.as_bytes()).is_err());
+    let mut missing = serde_json::to_value(control).unwrap();
+    missing.as_object_mut().unwrap().remove("anchor");
+    assert!(super::restore::decode_control(&serde_json::to_vec(&missing).unwrap()).is_err());
+}

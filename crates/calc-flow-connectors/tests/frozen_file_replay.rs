@@ -17,14 +17,24 @@ use datafusion::arrow::array::{Int64Array, TimestampMicrosecondArray};
 use serde_json::json;
 use tokio::sync::{Notify, Semaphore};
 
+#[path = "frozen_file_replay/window.rs"]
+mod frozen_file_replay_window;
+
 struct PausedFile {
     inner: FrozenFileSource,
     paused: Arc<Notify>,
-    delivered: bool,
-    recovered: bool,
+    mode: ReadMode,
     native_watermarks: bool,
     pending_watermark: Option<calc_flow::EventTime>,
     gate: Option<Arc<Semaphore>>,
+    replay_count: Option<Arc<std::sync::atomic::AtomicUsize>>,
+    idle_after_first: bool,
+}
+
+enum ReadMode {
+    FirstBatch,
+    Gated,
+    Recovered,
 }
 
 #[async_trait]
@@ -41,7 +51,11 @@ impl StreamSource for PausedFile {
         self.inner.history_spec()
     }
     fn history_replay_factory(&self) -> Option<Arc<dyn calc_flow::SourceHistoryReplayFactory>> {
-        self.inner.history_replay_factory()
+        let factory = self.inner.history_replay_factory()?;
+        Some(self.replay_count.as_ref().map_or_else(
+            || factory.clone(),
+            |count| frozen_file_replay_window::counted_factory(factory.clone(), count.clone()),
+        ))
     }
 
     fn validate_history(&self, history: &calc_flow::SourceHistoryManifestEntry) -> Result<()> {
@@ -53,7 +67,11 @@ impl StreamSource for PausedFile {
     }
 
     async fn open(&mut self, cursor: Option<Cursor>) -> Result<()> {
-        self.recovered = cursor.is_some();
+        self.mode = if cursor.is_some() {
+            ReadMode::Recovered
+        } else {
+            ReadMode::FirstBatch
+        };
         self.inner.open(cursor).await
     }
 
@@ -61,12 +79,15 @@ impl StreamSource for PausedFile {
         if let Some(watermark) = self.pending_watermark.take() {
             return Ok(Some(SourceEvent::Watermark(watermark)));
         }
-        if self.delivered && !self.recovered {
+        if matches!(self.mode, ReadMode::Gated) {
             self.paused.notify_one();
             if let Some(gate) = &self.gate {
                 gate.acquire().await.unwrap().forget();
             } else {
                 std::future::pending::<()>().await;
+            }
+            if self.idle_after_first {
+                return Ok(Some(SourceEvent::Idle));
             }
         }
         let event = self.inner.next().await?;
@@ -91,7 +112,9 @@ impl StreamSource for PausedFile {
                 .unwrap();
             self.pending_watermark = Some(calc_flow::EventTime::from_micros(time - 1));
         }
-        self.delivered = true;
+        if matches!(self.mode, ReadMode::FirstBatch) {
+            self.mode = ReadMode::Gated;
+        }
         Ok(event)
     }
 
@@ -187,6 +210,54 @@ fn runner_configured(
     native_watermarks: bool,
     gates: Option<&[Arc<Semaphore>; 2]>,
 ) -> StreamingRunner {
+    runner_with_replay_count(
+        root,
+        paused,
+        max_batch_rows,
+        max_out_of_orderness,
+        native_watermarks,
+        gates,
+        None,
+    )
+}
+
+fn runner_with_replay_count(
+    root: &Path,
+    paused: [Arc<Notify>; 2],
+    max_batch_rows: usize,
+    max_out_of_orderness: Duration,
+    native_watermarks: bool,
+    gates: Option<&[Arc<Semaphore>; 2]>,
+    replay_count: Option<Arc<std::sync::atomic::AtomicUsize>>,
+) -> StreamingRunner {
+    runner_observed(
+        root,
+        paused,
+        max_batch_rows,
+        max_out_of_orderness,
+        native_watermarks,
+        gates,
+        &ReplayObservation {
+            rows: replay_count,
+            idle_right: false,
+        },
+    )
+}
+
+struct ReplayObservation {
+    rows: Option<Arc<std::sync::atomic::AtomicUsize>>,
+    idle_right: bool,
+}
+
+fn runner_observed(
+    root: &Path,
+    paused: [Arc<Notify>; 2],
+    max_batch_rows: usize,
+    max_out_of_orderness: Duration,
+    native_watermarks: bool,
+    gates: Option<&[Arc<Semaphore>; 2]>,
+    observation: &ReplayObservation,
+) -> StreamingRunner {
     let [left_paused, right_paused] = paused;
     let left = file_source(&root.join("left"), max_batch_rows);
     let right = file_source(&root.join("right"), max_batch_rows);
@@ -205,15 +276,16 @@ fn runner_configured(
         .unwrap()
         .to_string();
     let output = plan.sink_binding_ids()[0].to_string();
-    let bind = |inner, paused, gate| {
+    let bind = |inner, paused, gate, idle_after_first| {
         let source = SourceBinding::new(PausedFile {
             inner,
             paused,
-            delivered: false,
-            recovered: false,
+            mode: ReadMode::FirstBatch,
             native_watermarks,
             pending_watermark: None,
             gate,
+            replay_count: observation.rows.clone(),
+            idle_after_first,
         });
         if native_watermarks {
             return source.with_watermark_policy(WatermarkPolicy::SourceProvided);
@@ -230,11 +302,21 @@ fn runner_configured(
         BTreeMap::from([
             (
                 left_id,
-                bind(left, left_paused, gates.map(|gates| gates[0].clone())),
+                bind(
+                    left,
+                    left_paused,
+                    gates.map(|gates| gates[0].clone()),
+                    false,
+                ),
             ),
             (
                 right_id,
-                bind(right, right_paused, gates.map(|gates| gates[1].clone())),
+                bind(
+                    right,
+                    right_paused,
+                    gates.map(|gates| gates[1].clone()),
+                    observation.idle_right,
+                ),
             ),
         ]),
         BTreeMap::from([(
@@ -520,7 +602,25 @@ async fn test_frozen_asof_replay_compacts_and_resumes_after_33_cuts() {
         )
         .unwrap();
         let segments = &manifest.operators().values().next().unwrap().segments;
-        assert_eq!(segments.len(), if cut == 33 { 2 } else { cut + 1 });
+        if cut == 33 {
+            assert!(
+                segments
+                    .iter()
+                    .any(|handle| { handle.segment_id().starts_with("asof-replay-start-") })
+            );
+            assert!(
+                segments
+                    .iter()
+                    .any(|handle| { handle.segment_id().starts_with("asof-log-") })
+            );
+            assert!(!segments.iter().any(|handle| {
+                handle.segment_id().starts_with("asof-replay-")
+                    && handle.segment_id() != "asof-replay-control"
+                    && !handle.segment_id().starts_with("asof-replay-start-")
+            }));
+        } else {
+            assert_eq!(segments.len(), cut + 1);
+        }
         if cut < 33 {
             for gate in &gates {
                 gate.add_permits(1);

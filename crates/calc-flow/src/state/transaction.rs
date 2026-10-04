@@ -563,6 +563,7 @@ impl ManifestTransaction {
             }
             staged.push(handle);
         }
+        staged.sort_unstable();
         Ok((staged, unpublished))
     }
 
@@ -2062,6 +2063,47 @@ mod tests {
                 ("left-delta-2".to_string(), b"second".to_vec()),
             ])
         );
+    }
+
+    #[tokio::test]
+    async fn staged_carries_are_canonical_when_new_ids_sort_before_old_ids() {
+        let directory = TempDir::new().unwrap();
+        let backend = LocalStateBackend::new(directory.path().join("state"))
+            .await
+            .unwrap();
+        let key = StateLineageKey::new("orders", PIPELINE_FINGERPRINT).unwrap();
+        let lineage: Arc<dyn StateLineageBackend> =
+            Arc::from(backend.open_lineage(&key).await.unwrap());
+        let transaction =
+            ManifestTransaction::open(lineage, &key, directory.path().join("manifests"), 2)
+                .await
+                .unwrap();
+        let first = transaction
+            .stage_operator_state(
+                "window",
+                Epoch::INITIAL,
+                snapshot_with_segments(&[("z-base", b"base")]),
+            )
+            .await
+            .unwrap();
+        let second_epoch = Epoch::INITIAL.next().unwrap();
+        let second = transaction
+            .stage_operator_state(
+                "window",
+                second_epoch,
+                snapshot_with_segments(&[("a-delta", b"delta"), ("z-base", b"base")]),
+            )
+            .await
+            .unwrap();
+        assert!(second.segments.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(second.segments[0], first.segments[0]);
+        transaction
+            .publish(PreparedEpochManifest {
+                manifest: manifest_with_operator_segments(second_epoch, second.segments),
+                staged_segments: BTreeMap::new(),
+            })
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

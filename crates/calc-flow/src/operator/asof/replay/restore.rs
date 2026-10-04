@@ -1,4 +1,7 @@
-use super::{CONTROL_ID, Callback, Control, Frame, Log, MAX_FRAMES, SIDES, codec, mismatch};
+use super::{
+    AnchorControl, CONTROL_ID, CONTROL_MAX_BYTES, Callback, Control, Frame, Log, MAX_FRAMES, SIDES,
+    codec, mismatch,
+};
 use crate::{
     Batch, BatchMetadata, EventTime, IngressProgressSnapshot, OperatorStateSnapshot, Result,
     SourceEvent, StreamAsofJoinOperator, StreamCollector, StreamJobContext, StreamOperator,
@@ -31,15 +34,37 @@ impl StreamAsofJoinOperator {
             .get(CONTROL_ID)
             .ok_or_else(|| mismatch("missing control segment"))?;
         let bytes = control_segment.bytes_arc();
-        if bytes.len() > 65536 {
+        if bytes.len() > CONTROL_MAX_BYTES {
             return Err(mismatch("control exceeds its size limit"));
         }
-        let workspace = self.reserve_workspace((bytes.len() * 8 + 4096) as u64)?;
-        let control: Control =
-            serde_json::from_slice(&bytes).map_err(|error| mismatch(&error.to_string()))?;
+        let workspace = self.reserve_workspace((bytes.len() * 128 + 4096) as u64)?;
+        let control = decode_control(&bytes)?;
         self.validate_replay_control(&snapshot, &control)?;
         let mut log = self.decode_replay_log(&snapshot, &control)?;
         drop(workspace);
+        if let Some(anchor) = &log.anchor {
+            let progress = Self::replay_progress(&anchor.records[0]);
+            let metrics: crate::StreamAsofJoinStatus = serde_json::from_value(
+                anchor
+                    .snapshot
+                    .inline_metadata
+                    .get("metrics")
+                    .ok_or_else(|| mismatch("anchor has no counters"))?
+                    .clone(),
+            )
+            .map_err(|error| mismatch(&error.to_string()))?;
+            self = self
+                .restore_native_managed(
+                    anchor.snapshot.clone(),
+                    progress,
+                    metrics.output_watermark_micros,
+                    job,
+                    None,
+                )
+                .await?;
+            self.clear_anchor_bookkeeping();
+            self.status.state_bytes = self.current_inventory(None)?.bytes;
+        }
         let inputs = self
             .replay_inputs
             .as_ref()
@@ -108,12 +133,18 @@ impl StreamAsofJoinOperator {
                 .inline_metadata
                 .get("source_replay")
                 .and_then(serde_json::Value::as_u64)
-                != Some(2)
-            || control.version != 2
+                != Some(3)
+            || control.version != 3
             || control.fingerprint != self.fingerprint
             || control.bindings != inputs.bindings
             || control.frames.len() > MAX_FRAMES
-            || snapshot.segments.len() != control.frames.len() + 1
+            || snapshot.segments.len()
+                != control.frames.len()
+                    + 1
+                    + match &control.anchor {
+                        AnchorControl::FromStart => 0,
+                        AnchorControl::Native { segments, .. } => segments.len() + 1,
+                    }
             || control.status.state_bytes > self.spec.limits().max_state_bytes()
             || control.status.state_rows > self.spec.limits().max_state_rows()
             || control.record_capacity as u64
@@ -130,6 +161,7 @@ impl StreamAsofJoinOperator {
         control: &Control,
     ) -> Result<Log> {
         let mut log = self.new_replay_log()?;
+        log.anchor = self.decode_replay_anchor(snapshot, &control.anchor)?;
         let bytes = control
             .record_capacity
             .checked_mul(size_of::<super::Record>())
@@ -140,11 +172,15 @@ impl StreamAsofJoinOperator {
         log.records
             .try_reserve_exact(control.record_capacity)
             .map_err(|_| mismatch("record allocation failed"))?;
-        let mut seen = BTreeSet::new();
+        let mut seen = BTreeSet::from([CONTROL_ID.to_string()]);
+        if let Some(anchor) = &log.anchor {
+            seen.insert(anchor.start_id.clone());
+            seen.extend(anchor.snapshot.segments.keys().cloned());
+        }
         for descriptor in &control.frames {
             if descriptor.first != log.records.len() as u64
                 || descriptor.count == 0
-                || !seen.insert(&descriptor.id)
+                || !seen.insert(descriptor.id.clone())
                 || descriptor.count > (control.record_capacity - log.records.len()) as u64
             {
                 return Err(mismatch("frame ranges or identities differ"));
@@ -175,10 +211,23 @@ impl StreamAsofJoinOperator {
         log: &Log,
         job: &StreamJobContext,
     ) -> Result<()> {
-        for reader in readers.iter_mut() {
-            reader.open(None).await?;
-        }
         let mut next = [0_u64; 2];
+        let mut positions = [None, None];
+        if let Some(anchor) = &log.anchor {
+            for record in &anchor.records[1..] {
+                let Callback::Data { side, sequence } = record.callback else {
+                    return Err(mismatch("anchor position is not data"));
+                };
+                let side = usize::from(side);
+                next[side] = sequence
+                    .checked_add(1)
+                    .ok_or_else(|| mismatch("source sequence exhausted"))?;
+                positions[side] = record.cursor.as_deref().cloned();
+            }
+        }
+        for (reader, position) in readers.iter_mut().zip(positions) {
+            reader.open(position).await?;
+        }
         let name = self.name.clone();
         for record in &log.records {
             job.check_cancelled()?;
@@ -236,6 +285,12 @@ impl StreamAsofJoinOperator {
         }
         Ok(())
     }
+}
+
+pub(super) fn decode_control(bytes: &[u8]) -> Result<Control> {
+    let value = crate::json::parse_json_value(bytes, "ASOF replay control")
+        .map_err(|error| mismatch(&error.to_string()))?;
+    serde_json::from_value(value).map_err(|error| mismatch(&error.to_string()))
 }
 
 pub(super) fn checked_cursor(

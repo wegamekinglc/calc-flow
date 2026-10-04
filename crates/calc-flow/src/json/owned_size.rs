@@ -1,7 +1,7 @@
 use crate::JsonMap;
 use serde_json::Value;
 
-pub(super) fn map_bytes(values: &JsonMap) -> Option<usize> {
+pub(crate) fn map_bytes(values: &JsonMap) -> Option<usize> {
     values.iter().try_fold(1024_usize, |total, (key, value)| {
         total
             .checked_add(256)?
