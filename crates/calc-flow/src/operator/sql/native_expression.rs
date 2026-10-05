@@ -111,6 +111,43 @@ pub(super) fn expression_work(expression: &Expr, schema: &DFSchema) -> Option<us
     projection_nodes(expression, schema, 0)
 }
 
+pub(super) fn input_expression_work(expression: &Expr, schema: &DFSchema) -> Option<usize> {
+    if let Expr::Column(_) = unalias(expression) {
+        return Some(1);
+    }
+    if !expression
+        .get_type(schema)
+        .ok()
+        .is_some_and(|dtype| fixed(&dtype))
+        || expression.column_refs().iter().any(|column| {
+            !Expr::Column((*column).clone())
+                .get_type(schema)
+                .is_ok_and(|dtype| fixed(&dtype))
+        })
+    {
+        return None;
+    }
+    expression_work(expression, schema)
+}
+
+pub(super) fn input_work(aggregate: &datafusion::logical_expr::Aggregate) -> Option<usize> {
+    aggregate
+        .aggr_expr
+        .iter()
+        .try_fold(0_usize, |nodes, expression| {
+            let Expr::AggregateFunction(function) = unalias(expression) else {
+                return None;
+            };
+            function
+                .params
+                .args
+                .iter()
+                .try_fold(nodes, |nodes, argument| {
+                    nodes.checked_add(input_expression_work(argument, aggregate.input.schema())?)
+                })
+        })
+}
+
 fn fixed(dtype: &DataType) -> bool {
     dtype.primitive_width().is_some() || matches!(dtype, DataType::Boolean | DataType::Null)
 }

@@ -252,16 +252,18 @@ async fn test_aggregate_float_input_casts_cover_integer_limits_and_nested_casts(
 }
 
 #[tokio::test]
-async fn test_aggregate_float_input_casts_unproven_sources_and_targets_keep_fallback() {
+async fn test_aggregate_input_casts_numeric_targets_and_variable_source_fallback() {
     use datafusion::arrow::array::StringArray;
-    for (dtype, query) in [
+    for (dtype, query, native) in [
         (
             DataType::Utf8,
             "SELECT SUM(CAST(value AS REAL)) AS total FROM events",
+            false,
         ),
         (
             DataType::Float64,
             "SELECT SUM(CAST(value AS SMALLINT)) AS total FROM events",
+            true,
         ),
     ] {
         let job = job();
@@ -301,10 +303,12 @@ async fn test_aggregate_float_input_casts_unproven_sources_and_targets_keep_fall
             expected.table_payload().unwrap().schema()
         );
         assert_eq!(actual.metadata(), expected.metadata());
-        assert!(state.incremental.is_none() && state.compact.is_none() && state.retained.is_some());
+        assert_eq!(state.incremental.is_some(), native);
+        assert_eq!(state.compact.is_some(), native);
+        assert_eq!(state.retained.is_none(), native);
         assert_eq!(
             state.checkpoint(Epoch::INITIAL).unwrap().inline_metadata["state_layout"],
-            json!(4)
+            json!(if native { 3 } else { 4 })
         );
         let pool = state
             .stream_state

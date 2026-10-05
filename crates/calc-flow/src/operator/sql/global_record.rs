@@ -86,6 +86,7 @@ impl Kind {
 }
 
 pub(super) struct Proof {
+    temporary_nodes: usize,
     pub policy: Policy,
     pub coalesced: Option<Arc<coalescer::State>>,
     kinds: Arc<[Kind]>,
@@ -109,7 +110,7 @@ fn saved_count(kind: &Kind, values: &[ScalarValue], name: &str) -> Result<u64> {
     }
 }
 
-pub(super) fn raw_selected(raw: &LogicalPlan, schema: &SchemaRef) -> bool {
+pub(super) fn raw_selected(raw: &LogicalPlan) -> bool {
     let Some((_, aggregate)) = super::shape(raw) else {
         return false;
     };
@@ -134,7 +135,7 @@ pub(super) fn raw_selected(raw: &LogicalPlan, schema: &SchemaRef) -> bool {
             return matches!(
                 function.params.args.as_slice(),
                 [Expr::Literal(ScalarValue::Int64(Some(1)), _)]
-            ) || matches!(function.params.args.as_slice(), [argument] if super::argument_type(argument, schema, 0).is_some());
+            ) || matches!(function.params.args.as_slice(), [argument] if super::argument_type(argument, aggregate.input.schema()).is_some());
         }
         if !matches!(function.func.name(), "sum" | "avg" | "min" | "max") {
             return false;
@@ -142,7 +143,7 @@ pub(super) fn raw_selected(raw: &LogicalPlan, schema: &SchemaRef) -> bool {
         let [argument] = function.params.args.as_slice() else {
             return false;
         };
-        super::argument_type(argument, schema, 0).is_some_and(|dtype| {
+        super::argument_type(argument, aggregate.input.schema()).is_some_and(|dtype| {
             matches!(dtype, DataType::Float32 | DataType::Float64) || dtype.is_integer()
         })
     })
@@ -153,6 +154,7 @@ impl Proof {
         runtime: &DataFusionRuntime,
         expressions: &[Arc<AggregateFunctionExpr>],
         filtered: bool,
+        input_nodes: usize,
         name: &str,
     ) -> Result<Option<Self>> {
         if !runtime.grouped_float_model_supported(name)? {
@@ -172,6 +174,7 @@ impl Proof {
             name,
         )?;
         Ok(Some(Self {
+            temporary_nodes: input_nodes.saturating_sub(expressions.len()),
             policy: Policy {
                 config: runtime.compact_runtime_config(),
                 factory: Factory::ScalarNativeV1,
@@ -259,31 +262,15 @@ impl Proof {
             return Err(df_error(name, "global scalar filter count differs"));
         }
         let empty = records.iter().all(|record| record.num_rows() == 0);
-        let mut charge = if empty {
-            checked_bytes(4096, [(self.kinds.len(), 1024)], name)?
-        } else {
-            request_charge(
-                records,
-                input_owner.is_some(),
-                !filters.is_empty(),
-                self.policy.config.batch_size,
-                self.kinds.len(),
-                name,
-            )?
-        };
-        let coalesced_credit = if !empty && let Some(predicate) = predicate {
-            charge = checked_bytes(
-                charge,
-                [(
-                    predicate.workspace(coalescer::ROWS, expressions.len(), name)?,
-                    1,
-                )],
-                name,
-            )?;
-            Some(Arc::new(credit.new_empty()))
-        } else {
-            None
-        };
+        let charge = self.update_charge(
+            records,
+            input_owner.is_some(),
+            !filters.is_empty(),
+            predicate,
+            name,
+        )?;
+        let coalesced_credit =
+            (!empty && predicate.is_some()).then(|| Arc::new(credit.new_empty()));
         super::ensure_reservation(&credit, charge, name)?;
         for (kind, state) in self.kinds.iter().zip(values) {
             saved_count(kind, state, name)?;
@@ -322,9 +309,63 @@ impl Proof {
         Ok(values)
     }
 
+    fn update_charge(
+        &self,
+        records: &[RecordBatch],
+        has_owner: bool,
+        has_filters: bool,
+        predicate: Option<&super::predicate::InputPredicate>,
+        name: &str,
+    ) -> Result<usize> {
+        if records.iter().all(|record| record.num_rows() == 0) {
+            return checked_bytes(4096, [(self.kinds.len(), 1024)], name);
+        }
+        let charge = request_charge(
+            records,
+            has_owner,
+            has_filters,
+            self.policy.config.batch_size,
+            self.kinds.len(),
+            name,
+        )?;
+        let workspace = expression_workspace(
+            records,
+            self.policy.config.batch_size,
+            self.uses_coalescing(),
+            self.temporary_nodes,
+            name,
+        )?;
+        let predicate = predicate
+            .map(|predicate| predicate.workspace(coalescer::ROWS, self.kinds.len(), name))
+            .transpose()?
+            .unwrap_or(0);
+        checked_bytes(charge, [(workspace, 1), (predicate, 1)], name)
+    }
+
     pub(super) fn uses_coalescing(&self) -> bool {
         self.policy.model == Model::Df54SingleSourceSplitFilterCoalescedV1
     }
+}
+
+fn expression_workspace(
+    records: &[RecordBatch],
+    batch_size: usize,
+    coalesced: bool,
+    nodes: usize,
+    name: &str,
+) -> Result<usize> {
+    let rows = if coalesced {
+        coalescer::ROWS
+    } else {
+        records
+            .iter()
+            .map(RecordBatch::num_rows)
+            .max()
+            .unwrap_or(0)
+            .min(batch_size)
+    };
+    let width = checked_bytes(0, [(nodes, 64)], name)?;
+    checked_bytes(0, [(rows, width)], name)
 }
 
 fn request_charge(

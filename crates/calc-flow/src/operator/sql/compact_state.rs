@@ -206,6 +206,7 @@ impl IncrementalSql {
                 (self.keys.len(), 256),
                 (self.aggregates.len(), 1024),
                 (self.projection_nodes, 512),
+                (self.input_nodes, 512),
             ],
             name,
         )?;

@@ -11,13 +11,14 @@ use datafusion::{
     common::{DFSchema, ScalarValue},
     execution::memory_pool::MemoryReservation,
     logical_expr::{
-        Accumulator, EmitTo, Expr, GroupsAccumulator, LogicalPlan, execution_props::ExecutionProps,
+        Accumulator, EmitTo, Expr, ExprSchemable, GroupsAccumulator, LogicalPlan,
+        execution_props::ExecutionProps,
     },
     physical_expr::{
         PhysicalExpr,
         aggregate::{AggregateFunctionExpr, LoweredAggregateBuilder},
         create_physical_expr,
-        expressions::Column,
+        expressions::{Column, Literal},
     },
     physical_plan::aggregates::{
         group_values::{GroupValues, new_group_values},
@@ -76,6 +77,8 @@ pub(super) struct IncrementalSql {
     post_filter: Option<Arc<dyn PhysicalExpr>>,
     post_order: Option<output_order::OutputOrder>,
     projection_nodes: usize,
+    input_nodes: usize,
+    input_columns: InputColumns,
     keys: Vec<usize>,
     variable_columns: Vec<usize>,
     variable_extrema: Vec<usize>,
@@ -103,6 +106,11 @@ struct Group {
     states: Vec<Vec<ScalarValue>>,
     results: Vec<ScalarValue>,
     reservation: MemoryReservation,
+}
+
+struct InputColumns {
+    all: Vec<usize>,
+    by_aggregate: Vec<Vec<usize>>,
 }
 
 struct Candidate {
@@ -589,6 +597,9 @@ impl IncrementalSql {
         else {
             return Ok(None);
         };
+        let Some(input_nodes) = native_expression::input_work(aggregate) else {
+            return Ok(None);
+        };
         let reservation = runtime.incremental_reservation(name);
         let plan_bytes = initial_plan_charge(
             query,
@@ -596,31 +607,26 @@ impl IncrementalSql {
             &schema,
             keys.len(),
             projection_nodes,
+            input_nodes,
             name,
         )?;
         reservation
             .try_grow(plan_bytes)
             .map_err(|error| df_error(name, error))?;
-        let Some((aggregates, projection, filter_columns, predicate, post_filter)) =
-            physical_plan(projection, aggregate, &schema)
+        let Some((plan, post_order)) = bound_plan(projection, aggregate, &schema, analyzed, name)
         else {
             return Ok(None);
         };
-        let Some(order_plan) = output_order::OutputOrder::bind(analyzed, name) else {
-            return Ok(None);
-        };
-        let post_order = match order_plan {
-            output_order::OrderPlan::Identity => None,
-            output_order::OrderPlan::Ordered(order) => Some(order),
-        };
+        let (aggregates, projection, filter_columns, predicate, post_filter) = plan;
+        let input_columns = input_columns(&aggregates, &keys, &filter_columns);
         let Some(aggregate_bytes) = aggregate_bytes(&aggregates, name)? else {
             return Ok(None);
         };
         if !grouped_aggregates_supported(&keys, &aggregates) {
             return Ok(None);
         }
-        let global_records = if global_record::raw_selected(raw, &schema) {
-            global_record::Proof::new(runtime, &aggregates, predicate.is_some(), name)?
+        let global_records = if global_record::raw_selected(raw) {
+            global_record::Proof::new(runtime, &aggregates, predicate.is_some(), input_nodes, name)?
         } else {
             None
         };
@@ -649,6 +655,8 @@ impl IncrementalSql {
             post_filter,
             post_order,
             projection_nodes,
+            input_nodes,
+            input_columns,
             keys,
             variable_columns,
             variable_extrema,
@@ -1026,12 +1034,20 @@ impl IncrementalSql {
         let reservation = self.reservation.new_empty();
         let width = checked_bytes(
             if self.keys.is_empty() { 0 } else { 128 },
-            [(self.aggregates.len(), 32), (self.keys.len(), 24)],
+            [
+                (self.aggregates.len(), 32),
+                (self.keys.len(), 24),
+                (self.input_nodes.saturating_sub(self.aggregates.len()), 64),
+            ],
             name,
         )?;
         let workspace = checked_bytes(
             4096,
-            [(self.finalizer_bytes, 1), (rows.min(CHUNK_ROWS), width)],
+            [
+                (self.finalizer_bytes, 1),
+                (rows.min(CHUNK_ROWS), width),
+                (self.schema.fields().len(), 256),
+            ],
             name,
         )?;
         let workspace = match &self.predicate {
@@ -1141,15 +1157,26 @@ impl IncrementalSql {
         name: &str,
     ) -> Result<()> {
         self.reserve_chunk(chunk, reservation, workspace, name)?;
-        let arguments = self.arguments(chunk, name)?;
         let selection = self
             .predicate
             .as_ref()
             .map(|predicate| predicate.evaluate(chunk, name))
             .transpose()?;
+        let filtered;
+        let (chunk, selection) = if self.input_nodes > self.aggregates.len()
+            && let Some(selection) = selection.as_ref()
+        {
+            filtered = filter_columns(chunk, selection, &self.input_columns.all, name)?;
+            (&filtered, None)
+        } else {
+            (chunk, selection.as_ref())
+        };
+        if chunk.num_rows() == 0 {
+            return Ok(());
+        }
+        let arguments = self.arguments(chunk, name)?;
         let filters = self.filters(chunk);
-        let combined =
-            predicate::combine(selection.as_ref(), &filters, self.aggregates.len(), name)?;
+        let combined = predicate::combine(selection, &filters, self.aggregates.len(), name)?;
         let filters = if selection.is_some() {
             combined.iter().map(Option::as_ref).collect()
         } else {
@@ -1171,7 +1198,7 @@ impl IncrementalSql {
             return update_global(&arguments, &filters, &mut candidates.groups, name);
         }
         if let Some(native) = candidates.native.as_mut() {
-            native.intern_selected(chunk.column(self.keys[0]).clone(), selection.as_ref(), name)?;
+            native.intern_selected(chunk.column(self.keys[0]).clone(), selection, name)?;
             let count = native.groups.len();
             let partial = candidates
                 .partial
@@ -1184,14 +1211,7 @@ impl IncrementalSql {
                 .fetch_max(count, std::sync::atomic::Ordering::SeqCst);
             return Ok(());
         }
-        self.update_grouped_chunk(
-            chunk,
-            &arguments,
-            &filters,
-            selection.as_ref(),
-            candidates,
-            name,
-        )
+        self.update_grouped_chunk(chunk, &arguments, &filters, selection, candidates, name)
     }
 
     fn filters<'a>(&self, chunk: &'a RecordBatch) -> Vec<Option<&'a BooleanArray>> {
@@ -1399,7 +1419,23 @@ impl IncrementalSql {
     fn arguments(&self, chunk: &RecordBatch, name: &str) -> Result<Vec<Vec<ArrayRef>>> {
         self.aggregates
             .iter()
-            .map(|expr| {
+            .enumerate()
+            .map(|(index, expr)| {
+                if self.keys.is_empty()
+                    && !expr
+                        .expressions()
+                        .iter()
+                        .all(|argument| argument.is::<Column>() || argument.is::<Literal>())
+                    && let Some(column) = self.filter_columns.get(index).copied().flatten()
+                {
+                    return filtered_arguments(
+                        expr,
+                        chunk,
+                        column,
+                        &self.input_columns.by_aggregate[index],
+                        name,
+                    );
+                }
                 expr.expressions()
                     .iter()
                     .map(|arg| {
@@ -1751,6 +1787,107 @@ impl IncrementalSql {
     }
 }
 
+fn input_columns(
+    aggregates: &[Arc<AggregateFunctionExpr>],
+    keys: &[usize],
+    filters: &[Option<usize>],
+) -> InputColumns {
+    use datafusion::physical_expr::utils::collect_columns;
+    use std::collections::BTreeSet;
+    let by_aggregate = aggregates
+        .iter()
+        .map(|aggregate| {
+            aggregate
+                .expressions()
+                .iter()
+                .flat_map(collect_columns)
+                .map(|column| column.index())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let all = by_aggregate
+        .iter()
+        .flatten()
+        .copied()
+        .chain(keys.iter().copied())
+        .chain(filters.iter().copied().flatten())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    InputColumns { all, by_aggregate }
+}
+
+fn filter_columns(
+    chunk: &RecordBatch,
+    selection: &BooleanArray,
+    needed: &[usize],
+    name: &str,
+) -> Result<RecordBatch> {
+    use datafusion::arrow::{compute::FilterBuilder, record_batch::RecordBatchOptions};
+    let predicate = FilterBuilder::new(selection).build();
+    let columns = chunk
+        .columns()
+        .iter()
+        .enumerate()
+        .map(|(index, array)| {
+            if needed.binary_search(&index).is_ok() {
+                predicate
+                    .filter(array.as_ref())
+                    .map_err(|error| df_error(name, error))
+            } else {
+                Ok(array.slice(0, predicate.count()))
+            }
+        })
+        .collect::<Result<Vec<_>>>()?;
+    RecordBatch::try_new_with_options(
+        chunk.schema(),
+        columns,
+        &RecordBatchOptions::new().with_row_count(Some(predicate.count())),
+    )
+    .map_err(|error| df_error(name, error))
+}
+
+fn filtered_arguments(
+    expression: &AggregateFunctionExpr,
+    chunk: &RecordBatch,
+    column: usize,
+    needed: &[usize],
+    name: &str,
+) -> Result<Vec<ArrayRef>> {
+    use datafusion::arrow::array::UInt32Array;
+    let filter = chunk
+        .column(column)
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .ok_or_else(|| df_error(name, "SQL aggregate filter is not Boolean"))?;
+    let filtered = filter_columns(chunk, filter, needed, name)?;
+    let mut selected = 0_u32;
+    let indices = filter
+        .iter()
+        .map(|value| {
+            (value == Some(true)).then(|| {
+                let index = selected;
+                selected += 1;
+                index
+            })
+        })
+        .collect::<UInt32Array>();
+    expression
+        .expressions()
+        .iter()
+        .map(|argument| {
+            let array = argument
+                .evaluate(&filtered)
+                .and_then(|value| value.into_array(filtered.num_rows()))
+                .map_err(|error| df_error(name, error))?;
+            datafusion::arrow::compute::take(array.as_ref(), &indices, None)
+                .map_err(|error| df_error(name, error))
+        })
+        .collect()
+}
+
 fn variable_extrema_slots(aggregates: &[Arc<AggregateFunctionExpr>]) -> Vec<usize> {
     aggregates
         .iter()
@@ -1771,6 +1908,7 @@ fn initial_plan_charge(
     schema: &SchemaRef,
     keys: usize,
     projection_nodes: usize,
+    input_nodes: usize,
     name: &str,
 ) -> Result<usize> {
     let rebound_fields = if aggregate.input.schema().as_arrow() == schema.as_ref() {
@@ -1784,6 +1922,8 @@ fn initial_plan_charge(
             (keys, 256),
             (aggregate.aggr_expr.len(), 1024),
             (projection_nodes, 512),
+            (input_nodes, 512),
+            (schema.fields().len(), 256),
             (predicate::plan_nodes(&aggregate.input, schema), 512),
             (query.text().len(), 8),
             (name.len(), 4),
@@ -1861,7 +2001,7 @@ fn variable_columns(
     for expr in aggregates {
         if let Expr::AggregateFunction(function) = unalias(expr) {
             for argument in &function.params.args {
-                if let Expr::Column(column) = argument {
+                for column in argument.column_refs() {
                     variable_columns.insert(
                         schema
                             .index_of(&column.name)
@@ -1961,7 +2101,13 @@ fn key_type(data_type: &DataType) -> bool {
     )
 }
 
-fn eligible(expr: &Expr, schema: &SchemaRef, floating_extrema: bool, global: bool) -> bool {
+fn eligible(
+    expr: &Expr,
+    schema: &SchemaRef,
+    logical: &DFSchema,
+    floating_extrema: bool,
+    global: bool,
+) -> bool {
     let Expr::AggregateFunction(function) = unalias(expr) else {
         return false;
     };
@@ -1994,39 +2140,19 @@ fn eligible(expr: &Expr, schema: &SchemaRef, floating_extrema: bool, global: boo
     {
         return true;
     }
-    let Some(dtype) = argument_type(&params.args[0], schema, 0) else {
+    let Some(dtype) = argument_type(&params.args[0], logical) else {
         return false;
     };
     if count {
-        count_argument_supported(dtype)
+        count_argument_supported(&dtype)
     } else {
-        aggregate_argument_supported(dtype, function.func.name(), floating_extrema, global)
+        aggregate_argument_supported(&dtype, function.func.name(), floating_extrema, global)
     }
 }
 
-fn argument_type<'a>(
-    expression: &'a Expr,
-    schema: &'a SchemaRef,
-    depth: usize,
-) -> Option<&'a DataType> {
-    match expression {
-        Expr::Column(column) => schema
-            .field_with_name(&column.name)
-            .ok()
-            .map(Field::data_type),
-        Expr::Cast(cast)
-            if depth < 7
-                && matches!(
-                    cast.field.data_type(),
-                    DataType::Float32 | DataType::Float64
-                ) =>
-        {
-            let dtype = argument_type(&cast.expr, schema, depth + 1)?;
-            (dtype.is_integer() || matches!(dtype, DataType::Float32 | DataType::Float64))
-                .then(|| cast.field.data_type())
-        }
-        _ => None,
-    }
+fn argument_type(expression: &Expr, schema: &DFSchema) -> Option<DataType> {
+    native_expression::input_expression_work(expression, schema)?;
+    expression.get_type(schema).ok()
 }
 
 fn aggregate_argument_supported(
@@ -2251,10 +2377,15 @@ fn plan_inputs(
     let global = raw_aggregate.group_expr.is_empty();
     let floating_extrema = global || sequential_group_key(raw_aggregate, schema);
     if raw_aggregate.aggr_expr.is_empty()
-        || !raw_aggregate
-            .aggr_expr
-            .iter()
-            .all(|expr| eligible(expr, schema, floating_extrema, global))
+        || !raw_aggregate.aggr_expr.iter().all(|expr| {
+            eligible(
+                expr,
+                schema,
+                raw_aggregate.input.schema(),
+                floating_extrema,
+                global,
+            )
+        })
     {
         return Ok(None);
     }
@@ -2286,6 +2417,21 @@ type PhysicalSqlPlan = (
     Option<predicate::InputPredicate>,
     Option<Arc<dyn PhysicalExpr>>,
 );
+
+fn bound_plan(
+    projection: &datafusion::logical_expr::Projection,
+    aggregate: &datafusion::logical_expr::Aggregate,
+    schema: &SchemaRef,
+    analyzed: &LogicalPlan,
+    name: &str,
+) -> Option<(PhysicalSqlPlan, Option<output_order::OutputOrder>)> {
+    let plan = physical_plan(projection, aggregate, schema)?;
+    let order = match output_order::OutputOrder::bind(analyzed, name)? {
+        output_order::OrderPlan::Identity => None,
+        output_order::OrderPlan::Ordered(order) => Some(order),
+    };
+    Some((plan, order))
+}
 
 fn physical_plan(
     projection: &datafusion::logical_expr::Projection,
