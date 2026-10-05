@@ -392,9 +392,27 @@ impl Model {
         cancelled: &dyn Fn() -> Result<()>,
     ) -> Result<State> {
         cancelled()?;
+        self.validate_native_credit(workspace, cancelled)?;
+        self.validate_native_census(max_rows)?;
+        let mut state = self.empty_native_state();
+        self.materialize_left(&mut state, cancelled)?;
+        self.materialize_right(&mut state, batches, cancelled)?;
+        self.finish_native_state(&mut state, cancelled)?;
+        Ok(state)
+    }
+
+    fn validate_native_credit(
+        &self,
+        workspace: &MemoryReservation,
+        cancelled: &dyn Fn() -> Result<()>,
+    ) -> Result<()> {
         if (workspace.size() as u64) < self.native_charge(&mut || cancelled())? {
             return Err(mismatch("ASOF native replay exceeds prepaid workspace"));
         }
+        Ok(())
+    }
+
+    fn validate_native_census(&self, max_rows: u64) -> Result<()> {
         if self.left.len() != self.counts[0] || self.right.len() != self.counts[1] {
             return Err(mismatch("ASOF final native container census differs"));
         }
@@ -407,6 +425,10 @@ impl Model {
         if rows != self.counts[2] || rows as u64 + right_rows as u64 > max_rows {
             return Err(mismatch("ASOF final native row census exceeds limits"));
         }
+        Ok(())
+    }
+
+    fn empty_native_state(&self) -> State {
         let mut state = State::empty_tracked();
         state.sequence_kinds = self.kinds;
         state.batches = PayloadPool::with_backing_buckets(self.capacities[0], self.capacities[1]);
@@ -417,6 +439,14 @@ impl Model {
             self.capacities[8..].try_into().expect("eight shards"),
         );
         state.left.reserve_chunks_exact(self.capacities[4]);
+        state
+    }
+
+    fn materialize_left(
+        &self,
+        state: &mut State,
+        cancelled: &dyn Fn() -> Result<()>,
+    ) -> Result<()> {
         let mut left = Vec::with_capacity(self.left.len());
         for chunk in self.left.values() {
             cancelled()?;
@@ -426,52 +456,97 @@ impl Model {
             ));
         }
         state.left.install(left, &mut state.batches);
+        Ok(())
+    }
+
+    fn materialize_right(
+        &self,
+        state: &mut State,
+        batches: &BTreeMap<BatchKey, Arc<PayloadBatch>>,
+        cancelled: &dyn Fn() -> Result<()>,
+    ) -> Result<()> {
         for (key, source) in &self.right {
             cancelled()?;
-            let mut bucket = RightBucket::with_index_capacities(source.capacities, self.kinds[1]);
-            for (ordinal, (order, version)) in source.iter().enumerate() {
-                if ordinal.is_multiple_of(128) {
-                    cancelled()?;
-                }
-                let Version::Right { tag, payload } = version else {
-                    return Err(mismatch("ASOF model right version differs"));
-                };
-                let row = payload
-                    .map(|(batch, row)| {
-                        let batch = batches
-                            .get(&batch)
-                            .ok_or_else(|| mismatch("ASOF model payload batch is missing"))?;
-                        if row as usize >= batch.record.num_rows() {
-                            return Err(mismatch("ASOF model payload position differs"));
-                        }
-                        Ok(state.batches.attach(&RowPayload {
-                            batch: batch.clone(),
-                            row: row as usize,
-                        }))
-                    })
-                    .transpose()?;
-                bucket.push_index(order.clone(), tag, row);
-            }
+            let bucket = materialize_right_bucket(
+                source,
+                self.kinds[1],
+                batches,
+                &mut state.batches,
+                cancelled,
+            )?;
             if !state.right.can_insert_restored(key) {
                 return Err(mismatch("ASOF log right shard capacity is too small"));
             }
             state.right.insert_restored(key.clone(), bucket);
         }
+        Ok(())
+    }
+
+    fn finish_native_state(
+        &self,
+        state: &mut State,
+        cancelled: &dyn Fn() -> Result<()>,
+    ) -> Result<()> {
         state.rebuild_encoding_owners_checked(&mut || cancelled())?;
         [
             state.right_payload_min,
             state.right_identity_min,
             state.right_dominance_min,
         ] = state.right.minima();
-        if capacities(&state) != self.capacities || counts(&state) != self.counts {
+        if capacities(state) != self.capacities || counts(state) != self.counts {
             return Err(mismatch(
                 "ASOF native replay capacity reconstruction differs",
             ));
         }
-        super::super::validate_left_order(&state, cancelled)?;
+        super::super::validate_left_order(state, cancelled)?;
         cancelled()?;
-        Ok(state)
+        Ok(())
     }
+}
+
+fn materialize_right_bucket(
+    source: &Right,
+    kind: SequenceKind,
+    batches: &BTreeMap<BatchKey, Arc<PayloadBatch>>,
+    pool: &mut PayloadPool,
+    cancelled: &dyn Fn() -> Result<()>,
+) -> Result<RightBucket> {
+    let mut bucket = RightBucket::with_index_capacities(source.capacities, kind);
+    for (ordinal, (order, version)) in source.iter().enumerate() {
+        if ordinal.is_multiple_of(128) {
+            cancelled()?;
+        }
+        push_model_row(&mut bucket, order, version, batches, pool)?;
+    }
+    Ok(bucket)
+}
+
+fn push_model_row(
+    bucket: &mut RightBucket,
+    order: &(i64, Encoding),
+    version: Version,
+    batches: &BTreeMap<BatchKey, Arc<PayloadBatch>>,
+    pool: &mut PayloadPool,
+) -> Result<()> {
+    let Version::Right { tag, payload } = version else {
+        return Err(mismatch("ASOF model right version differs"));
+    };
+    let row = payload
+        .map(|(batch, row)| {
+            let batch = batches
+                .get(&batch)
+                .ok_or_else(|| mismatch("ASOF model payload batch is missing"))?;
+            if row as usize >= batch.record.num_rows() {
+                return Err(mismatch("ASOF model payload position differs"));
+            }
+            Ok(pool.attach(&RowPayload {
+                batch: batch.clone(),
+                row: row as usize,
+            }))
+        })
+        .transpose()?;
+    bucket.push_index(order.clone(), tag, row);
+    Ok(())
 }
 
 fn validate_model_workspace(state: &State, workspace: &MemoryReservation) -> Result<()> {
@@ -609,6 +684,119 @@ fn copy_left(
 ) -> Result<ChunkData> {
     let rows = chunk.data.sequences.len() - chunk.head;
     let capacities = chunk.capacities;
+    let dictionary = left_dictionary(chunk, cancelled)?;
+    validate_copy_capacities(capacities, rows, dictionary.len())?;
+    let mut copied = CopiedLeft::new(chunk, &dictionary, kind);
+    copied.copy_rows(chunk, &dictionary, cancelled)?;
+    copied.into_chunk(cancelled)
+}
+
+struct CopiedLeft {
+    times: Vec<i64>,
+    positions: Option<Vec<u32>>,
+    start: u32,
+    keys: Vec<Option<Encoding>>,
+    key_counts: Vec<usize>,
+    key_ids: Vec<u32>,
+    sequences: SequenceColumn,
+}
+
+impl CopiedLeft {
+    fn new(chunk: &Left, dictionary: &BTreeMap<Encoding, u32>, kind: SequenceKind) -> Self {
+        let capacities = chunk.capacities;
+        let times = Vec::with_capacity(capacities[0]);
+        let positions = (capacities[1] != 0).then(|| Vec::with_capacity(capacities[1]));
+        let mut keys = Vec::with_capacity(capacities[2]);
+        keys.extend(dictionary.keys().cloned().map(Some));
+        let mut key_counts = Vec::with_capacity(capacities[3]);
+        key_counts.resize(keys.len(), 0);
+        let key_ids = Vec::with_capacity(capacities[4]);
+        let sequences = SequenceColumn::with_capacity(capacities[5], kind);
+        let start = chunk.data.position(chunk.head);
+        Self {
+            times,
+            positions,
+            start,
+            keys,
+            key_counts,
+            key_ids,
+            sequences,
+        }
+    }
+
+    fn copy_rows(
+        &mut self,
+        chunk: &Left,
+        dictionary: &BTreeMap<Encoding, u32>,
+        cancelled: &dyn Fn() -> Result<()>,
+    ) -> Result<()> {
+        for (offset, ordinal) in (chunk.head..chunk.data.sequences.len()).enumerate() {
+            if offset.is_multiple_of(128) {
+                cancelled()?;
+            }
+            let key = chunk.data.keys[chunk.data.key_ids[ordinal] as usize]
+                .as_ref()
+                .expect("validated key");
+            let id = dictionary[key];
+            self.times.push(chunk.data.times[ordinal]);
+            self.key_ids.push(id);
+            self.key_counts[id as usize] += 1;
+            self.sequences.push(
+                chunk
+                    .data
+                    .sequences
+                    .get(ordinal)
+                    .expect("validated sequence")
+                    .into_owned(),
+            );
+            let position = chunk.data.position(ordinal);
+            self.push_position(offset, position)?;
+        }
+        Ok(())
+    }
+
+    fn push_position(&mut self, offset: usize, position: u32) -> Result<()> {
+        if let Some(positions) = &mut self.positions {
+            positions.push(position);
+        } else if self.start.checked_add(
+            u32::try_from(offset)
+                .map_err(|_| mismatch("ASOF model implicit position exceeds domain"))?,
+        ) != Some(position)
+        {
+            return Err(mismatch("ASOF model implicit payload position differs"));
+        }
+        Ok(())
+    }
+
+    fn into_chunk(self, cancelled: &dyn Fn() -> Result<()>) -> Result<ChunkData> {
+        let owners: EncodingOwners = super::super::left_encoding_owners(
+            &self.times,
+            &self.keys,
+            &self.key_ids,
+            &self.sequences,
+            cancelled,
+        )?;
+        Ok(ChunkData {
+            times: self.times.into(),
+            start: if self.positions.is_none() {
+                self.start
+            } else {
+                0
+            },
+            positions: self.positions,
+            keys: self.keys,
+            key_counts: self.key_counts,
+            key_ids: self.key_ids,
+            sequences: self.sequences,
+            owners,
+        })
+    }
+}
+
+fn left_dictionary(
+    chunk: &Left,
+    cancelled: &dyn Fn() -> Result<()>,
+) -> Result<BTreeMap<Encoding, u32>> {
     let mut dictionary = BTreeMap::<Encoding, u32>::new();
     for ordinal in chunk.head..chunk.data.sequences.len() {
         if ordinal.is_multiple_of(128) {
@@ -623,64 +811,18 @@ fn copy_left(
         *value = u32::try_from(id)
             .map_err(|_| mismatch("ASOF model left key count exceeds handle domain"))?;
     }
+    Ok(dictionary)
+}
+
+fn validate_copy_capacities(capacities: [usize; 6], rows: usize, keys: usize) -> Result<()> {
     for index in [0, 4, 5] {
         super::super::require_capacity(capacities[index], rows)?;
     }
     for index in [2, 3] {
-        super::super::require_capacity(capacities[index], dictionary.len())?;
+        super::super::require_capacity(capacities[index], keys)?;
     }
     if capacities[1] != 0 {
         super::super::require_capacity(capacities[1], rows)?;
     }
-    let mut times = Vec::with_capacity(capacities[0]);
-    let mut positions = (capacities[1] != 0).then(|| Vec::with_capacity(capacities[1]));
-    let mut keys = Vec::with_capacity(capacities[2]);
-    keys.extend(dictionary.keys().cloned().map(Some));
-    let mut key_counts = Vec::with_capacity(capacities[3]);
-    key_counts.resize(keys.len(), 0);
-    let mut key_ids = Vec::with_capacity(capacities[4]);
-    let mut sequences = SequenceColumn::with_capacity(capacities[5], kind);
-    let start = chunk.data.position(chunk.head);
-    for (offset, ordinal) in (chunk.head..chunk.data.sequences.len()).enumerate() {
-        if offset.is_multiple_of(128) {
-            cancelled()?;
-        }
-        let key = chunk.data.keys[chunk.data.key_ids[ordinal] as usize]
-            .as_ref()
-            .expect("validated key");
-        let id = dictionary[key];
-        times.push(chunk.data.times[ordinal]);
-        key_ids.push(id);
-        key_counts[id as usize] += 1;
-        sequences.push(
-            chunk
-                .data
-                .sequences
-                .get(ordinal)
-                .expect("validated sequence")
-                .into_owned(),
-        );
-        let position = chunk.data.position(ordinal);
-        if let Some(positions) = &mut positions {
-            positions.push(position);
-        } else if start.checked_add(
-            u32::try_from(offset)
-                .map_err(|_| mismatch("ASOF model implicit position exceeds domain"))?,
-        ) != Some(position)
-        {
-            return Err(mismatch("ASOF model implicit payload position differs"));
-        }
-    }
-    let owners: EncodingOwners =
-        super::super::left_encoding_owners(&times, &keys, &key_ids, &sequences, cancelled)?;
-    Ok(ChunkData {
-        times: times.into(),
-        positions,
-        start: if capacities[1] == 0 { start } else { 0 },
-        keys,
-        key_counts,
-        key_ids,
-        sequences,
-        owners,
-    })
+    Ok(())
 }
