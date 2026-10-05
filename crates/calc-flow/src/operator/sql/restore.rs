@@ -19,24 +19,7 @@ impl SqlOperator {
         &mut self,
         snapshot: &OperatorStateSnapshot,
     ) -> Result<MemoryReservation> {
-        let metadata = snapshot
-            .inline_metadata
-            .iter()
-            .try_fold(0usize, |bytes, (key, value)| {
-                bytes
-                    .checked_add(key.len())
-                    .and_then(|bytes| bytes.checked_add(recovery_value_bytes(value)?))
-            });
-        let handles = snapshot.segments.keys().try_fold(0usize, |bytes, key| {
-            bytes.checked_add(key.len().checked_add(256)?)
-        });
-        let bound = metadata
-            .zip(handles)
-            .and_then(|(metadata, handles)| metadata.checked_add(handles))
-            .and_then(|bytes| bytes.checked_add(self.name.len().checked_mul(4)?))
-            .and_then(|bytes| bytes.checked_mul(4))
-            .and_then(|bytes| bytes.checked_add(4096))
-            .ok_or_else(|| sql_state_error("SQL recovery envelope size overflowed"))?;
+        let bound = recovery_envelope_bytes(snapshot, &self.name)?;
         self.stream_state.runtime()?;
         let reservation = self
             .retention_runtime()?
@@ -72,38 +55,39 @@ impl SqlOperator {
                 retained_capture: None,
             });
         }
-        let layout = snapshot
-            .inline_metadata
-            .get("state_layout")
-            .and_then(Value::as_u64);
-        if !matches!(layout, Some(3 | 4)) {
-            return Err(sql_state_error(
-                "SQL checkpoint layout is unsupported (expected 3 or 4)",
-            ));
-        }
+        let layout = current_layout(snapshot)?;
         self.stream_state.runtime()?;
-        let prepared = if layout == Some(3) {
+        let prepared = self.prepare_layout_restore(snapshot, layout, check_cancelled)?;
+        check_cancelled()?;
+        Ok(prepared)
+    }
+
+    fn prepare_layout_restore(
+        &mut self,
+        snapshot: &OperatorStateSnapshot,
+        layout: u64,
+        check_cancelled: &dyn Fn() -> Result<()>,
+    ) -> Result<PreparedSqlRestore> {
+        if layout == 3 {
             let compact = super::compact::prepare_restore(self, snapshot, check_cancelled)?;
             #[cfg(test)]
             recovery_test_hooks::prepared_compact(self, &compact.state, &compact.native)?;
-            PreparedSqlRestore {
+            Ok(PreparedSqlRestore {
                 retained: None,
                 compact: Some(compact),
                 retained_capture: None,
-            }
+            })
         } else {
             let (retained, capture) =
                 super::current_retained::prepare_restore(self, snapshot, check_cancelled)?;
             #[cfg(test)]
             recovery_test_hooks::prepared(self, &retained)?;
-            PreparedSqlRestore {
+            Ok(PreparedSqlRestore {
                 retained: Some(retained),
                 compact: None,
                 retained_capture: Some(capture),
-            }
-        };
-        check_cancelled()?;
-        Ok(prepared)
+            })
+        }
     }
 
     pub(crate) fn install_restore(&mut self, prepared: PreparedSqlRestore) {
@@ -151,4 +135,38 @@ fn recovery_value_bytes(value: &Value) -> Option<usize> {
         _ => Some(0),
     }?;
     payload.checked_add(256)
+}
+
+fn recovery_envelope_bytes(snapshot: &OperatorStateSnapshot, name: &str) -> Result<usize> {
+    let metadata = snapshot
+        .inline_metadata
+        .iter()
+        .try_fold(0usize, |bytes, (key, value)| {
+            bytes
+                .checked_add(key.len())
+                .and_then(|bytes| bytes.checked_add(recovery_value_bytes(value)?))
+        });
+    let handles = snapshot.segments.keys().try_fold(0usize, |bytes, key| {
+        bytes.checked_add(key.len().checked_add(256)?)
+    });
+    metadata
+        .zip(handles)
+        .and_then(|(metadata, handles)| metadata.checked_add(handles))
+        .and_then(|bytes| bytes.checked_add(name.len().checked_mul(4)?))
+        .and_then(|bytes| bytes.checked_mul(4))
+        .and_then(|bytes| bytes.checked_add(4096))
+        .ok_or_else(|| sql_state_error("SQL recovery envelope size overflowed"))
+}
+
+fn current_layout(snapshot: &OperatorStateSnapshot) -> Result<u64> {
+    match snapshot
+        .inline_metadata
+        .get("state_layout")
+        .and_then(Value::as_u64)
+    {
+        Some(layout @ (3 | 4)) => Ok(layout),
+        _ => Err(sql_state_error(
+            "SQL checkpoint layout is unsupported (expected 3 or 4)",
+        )),
+    }
 }
