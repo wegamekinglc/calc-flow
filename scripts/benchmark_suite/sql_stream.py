@@ -186,15 +186,12 @@ def _validate_oracle(
         != expected_snapshot_digest(batches, rows, unique_keys, decimal)
     ):
         raise ValueError("invalid SQL stream snapshot oracle")
-    _validate_recovery_oracle(
-        sample, rows, unique_keys, decimal, oracle=oracle, current=current
-    )
+    _validate_recovery_oracle(sample, workload, decimal, oracle=oracle, current=current)
 
 
 def _validate_recovery_oracle(
     sample: dict,
-    rows: int,
-    unique_keys: bool,
+    workload: Workload,
     decimal: DecimalType | None,
     *,
     oracle: bool,
@@ -202,6 +199,7 @@ def _validate_recovery_oracle(
 ) -> None:
     if decimal is None and not current:
         return
+    _, _, rows, unique_keys = workload
     expected = expected_recovery_digest(rows, unique_keys, decimal) if oracle else None
     if (
         "recovery_snapshots_sha256" not in sample
