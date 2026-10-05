@@ -383,6 +383,41 @@ fn edited_control(snapshot: &OperatorStateSnapshot, control: &Value) -> Operator
     snapshot
 }
 
+fn assert_single_complete_record_inventory(
+    state: &mut SqlOperator,
+    before: &OperatorStateSnapshot,
+) {
+    let wire = decode_sql_state(before.segments["global-complete"].bytes()).unwrap();
+    let record = &wire.table_payload().unwrap().batches()[0];
+    let pool = state
+        .stream_state
+        .runtime()
+        .unwrap()
+        .incremental_memory_pool();
+    let basis = pool.reserved();
+    for records in [
+        vec![record.slice(0, 0), record.clone()],
+        vec![record.clone(), record.slice(0, 0)],
+    ] {
+        let batch = Batch::table(records, BatchMetadata::default()).unwrap();
+        let segment = StateSegment::new(encode_sql_state(&batch).unwrap());
+        let mut control: Value =
+            serde_json::from_slice(before.segments["control"].bytes()).unwrap();
+        control["coalescer"]["filter"]["complete"] = json!(segment.sha256());
+        let mut changed = edited_control(before, &control);
+        changed.segments.insert("global-complete".into(), segment);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            StreamOperator::restore(state, &changed)
+        }));
+        same_snapshot(before, &state.checkpoint(Epoch::INITIAL).unwrap());
+        assert_eq!(pool.reserved(), basis);
+        assert!(
+            matches!(result, Ok(Err(_))),
+            "restore must reject extra complete batches without panicking"
+        );
+    }
+}
+
 #[tokio::test]
 async fn test_global_float_where_corrupt_current_tail_and_complete_state_are_atomic() {
     let dtype = DataType::Float64;
@@ -400,6 +435,7 @@ async fn test_global_float_where_corrupt_current_tail_and_complete_state_are_ato
         assert!(StreamOperator::restore(&mut state, &edited_control(&before, &control)).is_err());
         same_snapshot(&before, &state.checkpoint(Epoch::INITIAL).unwrap());
     }
+    assert_single_complete_record_inventory(&mut state, &before);
     for id in ["global-tail", "global-complete"] {
         let mut missing = before.clone();
         missing.segments.remove(id);

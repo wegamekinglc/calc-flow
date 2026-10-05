@@ -176,6 +176,7 @@ impl IncrementalSql {
         let descriptor = self.native_descriptor(name)?;
         if complete.num_rows() != 1
             || complete.table_payload()?.schema() != &descriptor.wire_schema
+            || complete.table_payload()?.batches().len() != 1
             || u64::try_from(tail.num_rows()).ok() != Some(*tail_rows)
             || tail.table_payload()?.schema() != &self.schema
             || tail.table_payload()?.batches().len() != 1
