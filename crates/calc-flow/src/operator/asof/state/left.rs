@@ -427,17 +427,8 @@ impl PreparedLeftChunk {
             })?;
             let identities = rows[start..end]
                 .iter()
-                .map(|(order, row)| {
-                    let position = u32::try_from(row.row).map_err(|_| {
-                        super::super::reason(
-                            name,
-                            crate::StreamingFailureReason::AsofCounterOverflow,
-                            "ASOF payload row exceeds compact reference range",
-                        )
-                    })?;
-                    Ok((order, position))
-                })
-                .collect::<Result<Vec<_>>>()?;
+                .map(|(order, row)| (order, row.row))
+                .collect::<Vec<_>>();
             let data = ChunkData::prepare(&identities, owner, side, name, cancelled)?;
             chunks.push(Self {
                 owner: owner.clone(),
@@ -1101,7 +1092,8 @@ mod tests {
                 order.clone(),
                 AdmissionRef {
                     batch_index: batches.len() - 1,
-                    row: payload.row,
+                    row: u32::try_from(payload.row).unwrap(),
+                    key_index: 0,
                 },
             ));
         }

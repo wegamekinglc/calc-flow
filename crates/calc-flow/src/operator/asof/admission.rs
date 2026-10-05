@@ -32,7 +32,7 @@ type PreparedInput = (
     AdmissionWorkspace,
 );
 
-pub(super) type InputRow<'a> = (LeftOrder, &'a RecordBatch, usize);
+pub(super) type InputRow<'a> = (LeftOrder, &'a RecordBatch, usize, u32);
 
 pub(super) struct Admission {
     pub rows: Vec<(LeftOrder, AdmissionRef)>,
@@ -95,7 +95,7 @@ impl InputKeys {
         bytes: &[u8],
         hash: Option<u64>,
         operator: &StreamAsofJoinOperator,
-    ) -> Result<state::Encoding> {
+    ) -> Result<(state::Encoding, u32)> {
         let resident = &operator.state.right;
         let name = &operator.name;
         let hash = hash.unwrap_or_else(|| resident.hasher().hash_one(bytes));
@@ -104,7 +104,7 @@ impl InputKeys {
         }) {
             let key = &mut self.values[*id as usize];
             key.rows += 1;
-            return Ok(key.encoding.clone());
+            return Ok((key.encoding.clone(), *id));
         }
         state::validate_key_count(self.values.len() as u64 + 1, name)?;
         let id = u32::try_from(self.values.len()).expect("validated ASOF key count");
@@ -120,7 +120,7 @@ impl InputKeys {
         });
         self.index
             .insert_unique(hash, id, |id| self.values[*id as usize].hash);
-        Ok(encoding)
+        Ok((encoding, id))
     }
 
     fn copy_owned_key(
@@ -533,14 +533,14 @@ impl StreamAsofJoinOperator {
         input: ValidatedInput,
         time: i64,
         row: usize,
-    ) -> Result<LeftOrder> {
+    ) -> Result<(LeftOrder, u32)> {
         encodings.with_row(row, |bytes, hash, sequence| {
-            let key = if input.index == 0 && state::Encoding::fits_inline(bytes) {
-                state::Encoding::from_slice(bytes)
+            let (key, key_index) = if input.index == 0 && state::Encoding::fits_inline(bytes) {
+                (state::Encoding::from_slice(bytes), 0)
             } else {
                 keys.intern(bytes, hash, self)?
             };
-            Ok((time, key, sequence))
+            Ok(((time, key, sequence), key_index))
         })
     }
 
@@ -565,14 +565,15 @@ impl StreamAsofJoinOperator {
                 if input.is_late(time) {
                     continue;
                 }
-                let identity = self.input_identity(&mut encodings, &mut keys, input, time, row)?;
-                rows.push((identity, batch, row));
+                let (identity, key_index) =
+                    self.input_identity(&mut encodings, &mut keys, input, time, row)?;
+                rows.push((identity, batch, row, key_index));
             }
         }
         let duplicates = count_duplicate_identities(
             &self.state,
             input.index,
-            rows.iter().map(|(identity, _, _)| identity),
+            rows.iter().map(|(identity, _, _, _)| identity),
             context,
         )?;
         let right_capacities = if input.index == 1 {
@@ -768,21 +769,23 @@ impl Admission {
                 prepared.install(&mut state.right, state.sequence_kinds[1], &payload_refs);
                 self.rows.clear();
             } else {
-                for (key, count) in &self.right_capacities {
-                    state
-                        .right
-                        .update_unindexed(key.clone(), state.sequence_kinds[1], |bucket| {
-                            bucket.reserve_payloads(*count);
-                        });
-                }
+                let handles = self
+                    .right_capacities
+                    .iter()
+                    .map(|(key, count)| {
+                        state.right.reserve_admitted_key(
+                            key.clone(),
+                            state.sequence_kinds[1],
+                            *count,
+                        )
+                    })
+                    .collect::<Vec<_>>();
                 for (identity, payload) in self.rows.drain(..) {
-                    let payload = payload_refs[payload.batch_index].with_row(
-                        u32::try_from(payload.row).expect("preflighted ASOF payload row index"),
-                    );
+                    let row = payload_refs[payload.batch_index].with_row(payload.row);
                     state
                         .right
-                        .update_unindexed(identity.1, state.sequence_kinds[1], |bucket| {
-                            bucket.insert_admitted((identity.0, identity.2), payload);
+                        .update_admitted(handles[payload.key_index as usize], |bucket| {
+                            bucket.insert_admitted((identity.0, identity.2), row);
                         });
                 }
             }
@@ -923,7 +926,7 @@ fn encode_rows(
         let end = position
             + rows[position..]
                 .iter()
-                .take_while(|(_, candidate, _)| std::ptr::eq(*candidate, batch))
+                .take_while(|(_, candidate, _, _)| std::ptr::eq(*candidate, batch))
                 .count();
         let projected = retained
             .filter(|columns| columns.len() != batch.num_columns())
@@ -947,12 +950,19 @@ fn encode_rows(
     let mut result = Vec::with_capacity(input.len());
     for (batch_index, (count, _payload)) in payloads.into_iter().enumerate() {
         for ordinal in 0..count {
-            let (identity, _, _) = input.next().expect("partitioned ASOF input row");
+            let (identity, _, _, key_index) = input.next().expect("partitioned ASOF input row");
             result.push((
                 identity,
                 AdmissionRef {
                     batch_index,
-                    row: ordinal,
+                    row: u32::try_from(ordinal).map_err(|_| {
+                        reason(
+                            name,
+                            StreamingFailureReason::AsofCounterOverflow,
+                            "ASOF payload row exceeds compact reference range",
+                        )
+                    })?,
+                    key_index,
                 },
             ));
         }
@@ -967,7 +977,7 @@ fn compact_accepted_rows(rows: &[InputRow<'_>], batch: &RecordBatch) -> Result<R
     }
     let indices = UInt64Array::from(
         rows.iter()
-            .map(|(_, _, row)| *row as u64)
+            .map(|(_, _, row, _)| *row as u64)
             .collect::<Vec<_>>(),
     );
     let columns = batch
@@ -1037,6 +1047,76 @@ mod identity_tests {
             ],
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn right_install_reuses_admitted_key_handles() {
+        use crate::{OperatorMetadata, StreamOperator};
+
+        let (mut operator, schema) = identity_fixture();
+        let pool = operator.runtime.pool.clone();
+        let job = StreamJobContext::new(7, "asof", JsonMap::new(), None, CancellationToken::new());
+        let context = StreamOperatorContext::new(&job, "asof", None);
+        let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+        for start in [0, 2_048] {
+            let batch = Batch::table(
+                vec![repeated_key_batch(&schema, start, 2_048)],
+                crate::BatchMetadata::default(),
+            )
+            .unwrap();
+            state::take_key_install_lookups();
+            operator
+                .process_data("right", batch, &context, &mut output)
+                .await
+                .unwrap();
+            assert!(
+                state::take_key_install_lookups() <= 2,
+                "right installation must resolve a key per bucket, not per row"
+            );
+        }
+        operator.prepare_checkpoint_async(&context).await.unwrap();
+        let snapshot = operator.checkpoint(crate::Epoch::INITIAL).unwrap();
+        let (mut restored, _) = identity_fixture();
+        let restored_pool = restored.runtime.pool.clone();
+        restored.restore(&snapshot).unwrap();
+        for candidate in [&mut operator, &mut restored] {
+            let left = Batch::table(
+                vec![repeated_key_batch(&schema, 0, 3)],
+                crate::BatchMetadata::default(),
+            )
+            .unwrap();
+            candidate
+                .process_data("left", left, &context, &mut output)
+                .await
+                .unwrap();
+            candidate.on_end(&context, &mut output).await.unwrap();
+            let batches = output.drain("output");
+            let rows = batches
+                .iter()
+                .flat_map(|message| {
+                    let records = message
+                        .as_data()
+                        .unwrap()
+                        .table_payload()
+                        .unwrap()
+                        .batches();
+                    records.iter().flat_map(|record| {
+                        let seq = record
+                            .column(5)
+                            .as_any()
+                            .downcast_ref::<datafusion::arrow::array::Int64Array>()
+                            .unwrap();
+                        seq.values().iter().copied()
+                    })
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(rows, [4_095; 3]);
+        }
+        drop((operator, restored, snapshot, output, context));
+        assert!(job.gather_owner().close_and_drain().await.is_empty());
+        drop(job);
+        assert_eq!(pool.reserved(), 0);
+        assert_eq!(restored_pool.reserved(), 0);
     }
 
     #[test]
@@ -1290,11 +1370,10 @@ mod identity_tests {
     fn admitted_key_handles_distinguish_full_hash_collisions() {
         let (operator, _) = identity_fixture();
         let mut keys = InputKeys::default();
-        for bytes in [b"one".as_slice(), b"two", b"one"] {
-            assert_eq!(
-                keys.intern(bytes, Some(0), &operator).unwrap().as_slice(),
-                bytes
-            );
+        for (bytes, expected) in [(b"one".as_slice(), 0), (b"two", 1), (b"one", 0)] {
+            let (encoding, handle) = keys.intern(bytes, Some(0), &operator).unwrap();
+            assert_eq!(encoding.as_slice(), bytes);
+            assert_eq!(handle, expected);
         }
         assert_eq!(keys.values.len(), 2);
         assert_eq!(keys.values[0].rows, 2);

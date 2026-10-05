@@ -120,7 +120,8 @@ async fn abandoned_preparation(service: &TestService) {
                 (10, keys.row(row), sequences.row(row)),
                 AdmissionRef {
                     batch_index: 0,
-                    row,
+                    row: u32::try_from(row).unwrap(),
+                    key_index: 0,
                 },
             )
         })

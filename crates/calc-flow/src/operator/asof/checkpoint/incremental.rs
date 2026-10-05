@@ -413,10 +413,7 @@ impl StreamAsofJoinOperator {
                     before: None,
                     after: Some(Version::Right {
                         tag: 1,
-                        payload: Some((
-                            batch.key,
-                            u32::try_from(reference.row).expect("validated ASOF row index"),
-                        )),
+                        payload: Some((batch.key, reference.row)),
                     }),
                 });
             }

@@ -1415,7 +1415,8 @@ mod tests {
                 order.clone(),
                 AdmissionRef {
                     batch_index: batches.len() - 1,
-                    row: payload.row,
+                    row: u32::try_from(payload.row).unwrap(),
+                    key_index: 0,
                 },
             ));
         }

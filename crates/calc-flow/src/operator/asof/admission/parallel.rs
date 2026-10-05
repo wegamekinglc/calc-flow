@@ -268,8 +268,7 @@ pub(super) async fn capture(
     for (ordinal, (identity, payload)) in admission.rows.iter().enumerate() {
         cooperate(ordinal, context).await?;
         let &(shard, bucket) = routes.get(&identity.1).expect("accepted right key");
-        let row = references[payload.batch_index]
-            .with_row(u32::try_from(payload.row).expect("preflighted ASOF payload row"));
+        let row = references[payload.batch_index].with_row(payload.row);
         work.shards[shard][bucket]
             .rows
             .push(((identity.0, identity.2.clone()), row));

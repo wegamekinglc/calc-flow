@@ -331,19 +331,21 @@ impl RightState {
     }
 
     fn ensure_key(&mut self, key: Encoding, kind: SequenceKind) -> usize {
+        #[cfg(test)]
+        super::KEY_INSTALL_LOOKUPS.with(|visits| visits.set(visits.get() + 1));
         let hash = self.hasher.hash_one(key.as_slice());
         self.find(hash, key.as_slice())
             .unwrap_or_else(|| self.insert_unique(hash, key, RightBucket::with_sequence_kind(kind)))
     }
 
-    pub fn update_unindexed(
-        &mut self,
-        key: Encoding,
-        kind: SequenceKind,
-        update: impl FnOnce(&mut RightBucket),
-    ) {
-        let id = self.ensure_key(key, kind);
-        let bucket = &mut self.entries[id].bucket;
+    pub fn reserve_admitted_key(&mut self, key: Encoding, kind: SequenceKind, rows: usize) -> u32 {
+        let id = u32::try_from(self.ensure_key(key, kind)).expect("preflighted ASOF key domain");
+        self.update_admitted(id, |bucket| bucket.reserve_payloads(rows));
+        id
+    }
+
+    pub fn update_admitted(&mut self, id: u32, update: impl FnOnce(&mut RightBucket)) {
+        let bucket = &mut self.entries[id as usize].bucket;
         let previous = bucket.metadata_bytes();
         update(Arc::make_mut(bucket));
         self.bucket_bytes = self.bucket_bytes - previous + bucket.metadata_bytes();

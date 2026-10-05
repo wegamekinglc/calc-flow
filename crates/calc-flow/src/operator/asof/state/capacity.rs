@@ -55,7 +55,8 @@ impl State {
             checked(
                 name,
                 owner_workspace,
-                (batches.len() * size_of::<super::RowRef>()) as u64,
+                ((batches.len() * size_of::<super::RowRef>())
+                    + (right_counts.len() * size_of::<u32>())) as u64,
             )?,
             self.batches.project_admission(batches, name)?.workspace,
         )
