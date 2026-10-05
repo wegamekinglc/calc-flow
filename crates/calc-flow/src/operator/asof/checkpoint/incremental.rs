@@ -159,6 +159,15 @@ fn credit_bytes(
     } else {
         4096 + (frames.len() + payloads.len()) as u64 * 1024
     };
+    bytes = registry_credit_bytes(bytes, registry, &owns)?;
+    payload_credit_bytes(bytes, payloads, charges, only_unowned, &payload_live)
+}
+
+fn registry_credit_bytes(
+    mut bytes: u64,
+    registry: Option<&OwnerWriter>,
+    owns: &impl Fn(usize) -> bool,
+) -> Result<u64> {
     if let Some(registry) = registry {
         bytes = checked("asof", bytes, registry.metadata_bytes())?;
         for (address, allocation) in registry.allocations() {
@@ -167,6 +176,16 @@ fn credit_bytes(
             }
         }
     }
+    Ok(bytes)
+}
+
+fn payload_credit_bytes(
+    mut bytes: u64,
+    payloads: &BTreeMap<BatchKey, StateSegment>,
+    charges: &BTreeMap<BatchKey, u64>,
+    only_unowned: bool,
+    payload_live: &impl Fn(&BatchKey) -> bool,
+) -> Result<u64> {
     for (key, segment) in payloads {
         if !payload_live(key) && (!only_unowned || !segment.has_owner()) {
             let capacity = charges
@@ -177,6 +196,47 @@ fn credit_bytes(
         }
     }
     Ok(bytes)
+}
+
+fn admission_changes(
+    admission: &super::super::admission::Admission,
+    side: usize,
+    count: usize,
+) -> Vec<Change> {
+    let mut edits = Vec::with_capacity(count);
+    if side == 0 {
+        for chunk in admission
+            .left_chunks
+            .as_ref()
+            .expect("prepared left chunks")
+        {
+            edits.push(Change {
+                identity: Identity::Left(chunk.batch_key()),
+                before: None,
+                after: Some(chunk.journal_version()),
+            });
+        }
+    } else {
+        for (identity, reference) in &admission.rows {
+            let batch = &admission.batches[reference.batch_index];
+            edits.push(Change {
+                identity: Identity::Right(identity.clone()),
+                before: None,
+                after: Some(Version::Right {
+                    tag: 1,
+                    payload: Some((batch.key, reference.row)),
+                }),
+            });
+        }
+    }
+    edits
+}
+
+fn delta_has_new_left(changes: &[Change], batch: BatchKey) -> bool {
+    changes
+        .binary_search_by(|change| change.identity.cmp(&Identity::Left(batch)))
+        .ok()
+        .is_some_and(|index| changes[index].before.is_none())
 }
 
 fn reserve(pool: &Arc<dyn MemoryPool>, bytes: u64, name: &str) -> Result<MemoryReservation> {
@@ -392,32 +452,7 @@ impl StreamAsofJoinOperator {
             return Ok(Journal::base());
         }
         let _workspace = self.reserve_workspace(count as u64 * size_of::<Change>() as u64 + 256)?;
-        let mut edits = Vec::with_capacity(count);
-        if side == 0 {
-            for chunk in admission
-                .left_chunks
-                .as_ref()
-                .expect("prepared left chunks")
-            {
-                edits.push(Change {
-                    identity: Identity::Left(chunk.batch_key()),
-                    before: None,
-                    after: Some(chunk.journal_version()),
-                });
-            }
-        } else {
-            for (identity, reference) in &admission.rows {
-                let batch = &admission.batches[reference.batch_index];
-                edits.push(Change {
-                    identity: Identity::Right(identity.clone()),
-                    before: None,
-                    after: Some(Version::Right {
-                        tag: 1,
-                        payload: Some((batch.key, reference.row)),
-                    }),
-                });
-            }
-        }
+        let edits = admission_changes(admission, side, count);
         self.checkpoint_log.journal.prepare(
             &edits,
             |address| {
@@ -504,39 +539,13 @@ impl StreamAsofJoinOperator {
             .as_ref()
             .ok_or_else(|| mismatch("ASOF delta registry is missing"))?;
         let changes = self.checkpoint_log.journal.changes();
-        let (buffers, metadata) = self.state.encoding_owner_allocation();
-        let mut bound = checked(
-            &self.name,
-            buffers,
-            metadata
-                + registry.metadata_bytes()
-                + (changes.len() + self.checkpoint_log.journal.keys().len()) as u64
-                    * (size_of::<Change>() + 192) as u64
-                + 4096,
-        )?;
-        for (batch, data, _) in self.state.left.checkpoint_chunks(&self.state.batches) {
-            if changes
-                .binary_search_by(|change| change.identity.cmp(&Identity::Left(batch)))
-                .ok()
-                .is_some_and(|index| changes[index].before.is_none())
-            {
-                bound = checked(&self.name, bound, data.retained_input_bytes(&self.name)?)?;
-            }
-        }
-        for (_, bytes) in registry.allocations() {
-            bound = checked(&self.name, bound, bytes)?;
-        }
+        let bound = self.delta_workspace_bound(registry, changes)?;
         let workspace = self.reserve_workspace(bound)?;
         let mut left = self
             .state
             .left
             .checkpoint_owned_chunks(&self.state.batches)
-            .filter(|(batch, _, _)| {
-                changes
-                    .binary_search_by(|change| change.identity.cmp(&Identity::Left(*batch)))
-                    .ok()
-                    .is_some_and(|index| changes[index].before.is_none())
-            })
+            .filter(|(batch, _, _)| delta_has_new_left(changes, *batch))
             .collect::<Vec<_>>();
         left.sort_unstable_by_key(|(batch, _, _)| *batch);
         let keys = self.checkpoint_log.journal.keys().to_vec();
@@ -562,6 +571,28 @@ impl StreamAsofJoinOperator {
             live: self.state.encoding_addresses().collect(),
             workspace,
         })
+    }
+
+    fn delta_workspace_bound(&self, registry: &OwnerWriter, changes: &[Change]) -> Result<u64> {
+        let (buffers, metadata) = self.state.encoding_owner_allocation();
+        let mut bound = checked(
+            &self.name,
+            buffers,
+            metadata
+                + registry.metadata_bytes()
+                + (changes.len() + self.checkpoint_log.journal.keys().len()) as u64
+                    * (size_of::<Change>() + 192) as u64
+                + 4096,
+        )?;
+        for (batch, data, _) in self.state.left.checkpoint_chunks(&self.state.batches) {
+            if delta_has_new_left(changes, batch) {
+                bound = checked(&self.name, bound, data.retained_input_bytes(&self.name)?)?;
+            }
+        }
+        for (_, bytes) in registry.allocations() {
+            bound = checked(&self.name, bound, bytes)?;
+        }
+        Ok(bound)
     }
 
     fn needs_log_base(&self) -> bool {
@@ -599,23 +630,16 @@ impl StreamAsofJoinOperator {
         .await
     }
 
-    pub(super) async fn prepare_row_log_async(
-        &mut self,
-        context: &StreamOperatorContext<'_>,
-    ) -> Result<()> {
-        context.check_cancelled()?;
-        if self.empty_row_log()? {
-            return Ok(());
-        }
-        if self.checkpoint_log.pending.is_some()
+    fn row_log_ready(&self) -> bool {
+        self.checkpoint_log.pending.is_some()
             || (!self.needs_log_base()
                 && self.checkpoint_log.journal.is_empty()
                 && !self.checkpoint_log.dirty_cut)
-        {
-            return Ok(());
-        }
-        let body = if self.needs_log_base() {
-            self.encode_log_base_async(context).await?
+    }
+
+    async fn encode_log_body_async(&self, context: &StreamOperatorContext<'_>) -> Result<Body> {
+        if self.needs_log_base() {
+            self.encode_log_base_async(context).await
         } else {
             let input = self.owned_delta()?;
             let pool = self.runtime.pool.clone();
@@ -630,14 +654,36 @@ impl StreamAsofJoinOperator {
                 },
                 context,
             )
-            .await?
-        };
-        let body = if self.log_compaction_needed(&body)? {
+            .await
+        }
+    }
+
+    async fn compact_log_body_async(
+        &self,
+        body: Body,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<Body> {
+        if self.log_compaction_needed(&body)? {
             drop(body);
-            self.encode_log_base_async(context).await?
+            self.encode_log_base_async(context).await
         } else {
-            body
-        };
+            Ok(body)
+        }
+    }
+
+    pub(super) async fn prepare_row_log_async(
+        &mut self,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<()> {
+        context.check_cancelled()?;
+        if self.empty_row_log()? {
+            return Ok(());
+        }
+        if self.row_log_ready() {
+            return Ok(());
+        }
+        let body = self.encode_log_body_async(context).await?;
+        let body = self.compact_log_body_async(body, context).await?;
         context.check_cancelled()?;
         self.checkpoint_log.pending = Some(body);
         Ok(())
@@ -647,38 +693,11 @@ impl StreamAsofJoinOperator {
         if self.empty_row_log()? {
             return Ok(());
         }
-        if self.checkpoint_log.pending.is_some()
-            || (!self.needs_log_base()
-                && self.checkpoint_log.journal.is_empty()
-                && !self.checkpoint_log.dirty_cut)
-        {
+        if self.row_log_ready() {
             return Ok(());
         }
         let body = if self.needs_log_base() {
-            let length =
-                index_v3::encoded_length(&self.state, &self.name)?.max(index_v3::BASE_BYTES);
-            let workspace = self.reserve_workspace(index_v3::workspace_bytes(
-                &self.state,
-                length,
-                false,
-                &self.name,
-            )?)?;
-            let owners = index_v3::source_owners(&self.state);
-            let credit = self.reserve_workspace(owners.metadata_bytes())?;
-            let segment = index_v3::encode_sync(
-                &self.state,
-                length,
-                usize::try_from(self.spec.limits().max_state_bytes())
-                    .expect("validated byte limit"),
-            )?;
-            let wire = workspace.split(segment.bytes_arc().capacity() + 256);
-            Body {
-                kind: Kind::Base,
-                segment: segment.with_owner(Arc::new(wire)),
-                owners,
-                credit,
-                records: self.status.state_rows,
-            }
+            self.encode_log_base_sync()?
         } else {
             self.owned_delta()?.encode(
                 &self.runtime.pool,
@@ -751,38 +770,17 @@ impl StreamAsofJoinOperator {
         epoch: crate::Epoch,
     ) -> Result<crate::OperatorStateSnapshot> {
         if self.empty_row_log()? {
-            let mut inline_metadata = self.capture_metadata(epoch, 10)?;
-            if self.payload_projection.is_none() {
-                inline_metadata.remove("retained_payloads");
-            }
-            inline_metadata.insert("checkpoint_log".into(), serde_json::json!({"frames": [], "payloads": [], "generation": 0, "owner_capacity": 0, "base_payloads": []}));
-            return Ok(crate::OperatorStateSnapshot {
-                inline_metadata,
-                segments: BTreeMap::new(),
-            });
+            return self.capture_empty_log(epoch);
         }
         let pending = self.checkpoint_log.pending.take();
-        let pending = match pending {
-            Some(body) if self.log_compaction_needed(&body)? => {
-                drop(body);
-                Some(self.encode_log_base_sync()?)
-            }
-            other => other,
-        };
+        let pending = self.compact_pending_log(pending)?;
         let count = self.checkpoint_log.frames.len()
             + self.checkpoint_log.payloads.len()
             + self.state.batches.len()
             + 1;
         let _metadata_workspace = self.reserve_workspace(8192 + count as u64 * 2048)?;
         let is_base = pending.as_ref().is_some_and(|body| body.kind == Kind::Base);
-        let generation = if is_base {
-            self.checkpoint_log
-                .generation
-                .checked_add(1)
-                .ok_or_else(|| mismatch("ASOF log generation overflowed"))?
-        } else {
-            self.checkpoint_log.generation
-        };
+        let generation = self.captured_log_generation(is_base)?;
         let CapturedPayloads {
             payloads,
             payload_charges,
@@ -794,25 +792,8 @@ impl StreamAsofJoinOperator {
             owners,
             body_credit: _body_credit,
         } = self.capture_log_frames(epoch, pending, is_base, generation)?;
-        let bytes = credit_bytes(
-            &frames,
-            &payloads,
-            Some(&owners),
-            &payload_charges,
-            false,
-            |address| self.state.owns_encoding(address),
-            |key| self.state.batches.references(key) != 0,
-        )?;
-        let paid = credit_bytes(
-            &frames,
-            &payloads,
-            Some(&owners),
-            &payload_charges,
-            true,
-            |address| self.state.owns_encoding(address),
-            |key| self.state.batches.references(key) != 0,
-        )?;
-        let credit = Arc::new(self.reserve_workspace(paid)?);
+        let (bytes, credit) =
+            self.captured_log_credit(&frames, &payloads, &owners, &payload_charges)?;
         let log = LogState {
             journal: Journal::default(),
             frames,
@@ -828,6 +809,14 @@ impl StreamAsofJoinOperator {
             pending: None,
             base_payloads,
         };
+        self.publish_captured_log(log, epoch)
+    }
+
+    fn publish_captured_log(
+        &mut self,
+        log: LogState,
+        epoch: crate::Epoch,
+    ) -> Result<crate::OperatorStateSnapshot> {
         let mut inventory = self.state.capacity_inventory(None, &self.name)?;
         inventory.bytes = checked(&self.name, inventory.bytes, log.bytes())?;
         self.check_inventory_limits(&inventory)?;
@@ -838,6 +827,68 @@ impl StreamAsofJoinOperator {
         self.prepared = None;
         self.deferred_index_len = Some(index_length);
         Ok(snapshot)
+    }
+
+    fn capture_empty_log(&self, epoch: crate::Epoch) -> Result<crate::OperatorStateSnapshot> {
+        let mut inline_metadata = self.capture_metadata(epoch, 10)?;
+        if self.payload_projection.is_none() {
+            inline_metadata.remove("retained_payloads");
+        }
+        inline_metadata.insert("checkpoint_log".into(), serde_json::json!({"frames": [], "payloads": [], "generation": 0, "owner_capacity": 0, "base_payloads": []}));
+        Ok(crate::OperatorStateSnapshot {
+            inline_metadata,
+            segments: BTreeMap::new(),
+        })
+    }
+
+    fn compact_pending_log(&self, pending: Option<Body>) -> Result<Option<Body>> {
+        match pending {
+            Some(body) if self.log_compaction_needed(&body)? => {
+                drop(body);
+                Ok(Some(self.encode_log_base_sync()?))
+            }
+            other => Ok(other),
+        }
+    }
+
+    fn captured_log_generation(&self, is_base: bool) -> Result<u64> {
+        if is_base {
+            self.checkpoint_log
+                .generation
+                .checked_add(1)
+                .ok_or_else(|| mismatch("ASOF log generation overflowed"))
+        } else {
+            Ok(self.checkpoint_log.generation)
+        }
+    }
+
+    fn captured_log_credit(
+        &self,
+        frames: &[Descriptor],
+        payloads: &BTreeMap<BatchKey, StateSegment>,
+        owners: &OwnerWriter,
+        payload_charges: &BTreeMap<BatchKey, u64>,
+    ) -> Result<(u64, Arc<MemoryReservation>)> {
+        let bytes = credit_bytes(
+            frames,
+            payloads,
+            Some(owners),
+            payload_charges,
+            false,
+            |address| self.state.owns_encoding(address),
+            |key| self.state.batches.references(key) != 0,
+        )?;
+        let paid = credit_bytes(
+            frames,
+            payloads,
+            Some(owners),
+            payload_charges,
+            true,
+            |address| self.state.owns_encoding(address),
+            |key| self.state.batches.references(key) != 0,
+        )?;
+        let credit = Arc::new(self.reserve_workspace(paid)?);
+        Ok((bytes, credit))
     }
 
     fn capture_log_payloads(&self, is_base: bool) -> CapturedPayloads {
