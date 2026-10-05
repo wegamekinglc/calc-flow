@@ -379,6 +379,43 @@ fn traffic_routes(
         .collect::<Vec<_>>()
 }
 
+async fn collect_traffic_output(
+    runtime: &mut crate::runtime::streaming::runner::RegisteredRuntime,
+    output_id: &str,
+) -> crate::Result<Vec<Batch>> {
+    let mut output = Vec::new();
+    let receiver = runtime.sink_inputs.get_mut(output_id).unwrap();
+    loop {
+        let message = receiver.recv().await?.expect("output closed before EOF");
+        if let Some(batch) = message.as_data() {
+            output.push(batch.clone());
+        }
+        if message.kind() == StreamMessageKind::EndOfInput {
+            break;
+        }
+    }
+    Ok(output)
+}
+
+async fn drain_unrelated_output(
+    runtime: &mut crate::runtime::streaming::runner::RegisteredRuntime,
+    unrelated_id: Option<&str>,
+) -> crate::Result<()> {
+    if let Some(id) = unrelated_id {
+        let receiver = runtime.sink_inputs.get_mut(id).unwrap();
+        loop {
+            let message = receiver
+                .recv()
+                .await?
+                .expect("unrelated output closed before EOF");
+            if message.kind() == StreamMessageKind::EndOfInput {
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn traffic_observation(two_selects: bool, interposed: bool) -> TrafficObservation {
     let observer = Observer::start();
     let plan = plan(two_selects, interposed);
@@ -433,29 +470,8 @@ async fn traffic_observation(two_selects: bool, interposed: bool) -> TrafficObse
                 .await?;
             sender.send(StreamMessage::end_of_input()).await?;
         }
-        let mut output = Vec::new();
-        let receiver = runtime.sink_inputs.get_mut(&output_id).unwrap();
-        loop {
-            let message = receiver.recv().await?.expect("output closed before EOF");
-            if let Some(batch) = message.as_data() {
-                output.push(batch.clone());
-            }
-            if message.kind() == StreamMessageKind::EndOfInput {
-                break;
-            }
-        }
-        if let Some(id) = &unrelated_id {
-            let receiver = runtime.sink_inputs.get_mut(id).unwrap();
-            loop {
-                let message = receiver
-                    .recv()
-                    .await?
-                    .expect("unrelated output closed before EOF");
-                if message.kind() == StreamMessageKind::EndOfInput {
-                    break;
-                }
-            }
-        }
+        let output = collect_traffic_output(&mut runtime, &output_id).await?;
+        drain_unrelated_output(&mut runtime, unrelated_id.as_deref()).await?;
         Ok::<_, crate::CalcFlowError>(output)
     })
     .await;

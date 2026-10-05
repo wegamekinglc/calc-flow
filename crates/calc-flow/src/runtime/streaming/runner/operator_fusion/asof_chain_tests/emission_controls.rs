@@ -16,6 +16,31 @@ struct Observation {
     released: bool,
 }
 
+fn preset_failure(failure: Failure, metrics: &MetricsRecorder, core: &JobCore) {
+    match failure {
+        Failure::ProducerMetrics => metrics.preset_operator_outputs_for_test("a_asof", u64::MAX),
+        Failure::ProducerProgress => {
+            core.runtime_status.lock().nodes["a_asof"].preset_output_count_for_test(u64::MAX);
+        }
+        Failure::DownstreamMetrics => {
+            metrics.preset_operator_outputs_for_test("c_select1", u64::MAX);
+        }
+    }
+}
+
+fn emission_released(
+    runtime: &crate::runtime::streaming::runner::RegisteredRuntime,
+    snapshot: &M2MetricsSnapshot,
+) -> bool {
+    runtime.supervisor.registry().snapshot().is_empty()
+        && snapshot.edges.values().all(|edge| {
+            edge.channel.queue_depth == 0
+                && edge.channel.charged_rows == 0
+                && edge.channel.charged_bytes == 0
+                && !edge.drop_invariant_violated
+        })
+}
+
 async fn observe(failure: Failure) -> Observation {
     let parts = plan(true, false)
         .into_runtime_parts(EdgeBudget::new(64, 1 << 20).unwrap())
@@ -59,15 +84,7 @@ async fn observe(failure: Failure) -> Observation {
     else {
         panic!("ASOF entry failed")
     };
-    match failure {
-        Failure::ProducerMetrics => metrics.preset_operator_outputs_for_test("a_asof", u64::MAX),
-        Failure::ProducerProgress => {
-            core.runtime_status.lock().nodes["a_asof"].preset_output_count_for_test(u64::MAX);
-        }
-        Failure::DownstreamMetrics => {
-            metrics.preset_operator_outputs_for_test("c_select1", u64::MAX);
-        }
-    }
+    preset_failure(failure, &metrics, &core);
     runtime.data_gate.send(true).unwrap();
     let traffic = tokio::time::timeout(Duration::from_secs(5), async {
         for (binding, port) in routes {
@@ -98,13 +115,7 @@ async fn observe(failure: Failure) -> Observation {
         .clone()
         .unwrap();
     let snapshot = metrics.snapshot();
-    let released = runtime.supervisor.registry().snapshot().is_empty()
-        && snapshot.edges.values().all(|edge| {
-            edge.channel.queue_depth == 0
-                && edge.channel.charged_rows == 0
-                && edge.channel.charged_bytes == 0
-                && !edge.drop_invariant_violated
-        });
+    let released = emission_released(&runtime, &snapshot);
     Observation {
         report,
         status,
