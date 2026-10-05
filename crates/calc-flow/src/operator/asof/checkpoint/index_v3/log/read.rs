@@ -21,6 +21,21 @@ fn header(
     kinds: [SequenceKind; 2],
     max_rows: u64,
 ) -> Result<Header> {
+    validate_prefix(cursor, kinds)?;
+    let (capacities, counts) = header_capacities(cursor, max_rows)?;
+    let owner_capacity = header_owners(cursor, previous)?;
+    let [changes, left, buckets] = header_changes(cursor)?;
+    Ok(Header {
+        capacities,
+        counts,
+        owner_capacity,
+        changes,
+        left,
+        buckets,
+    })
+}
+
+fn validate_prefix(cursor: &mut Cursor<'_>, kinds: [SequenceKind; 2]) -> Result<()> {
     if cursor.take(8)? != MAGIC {
         return Err(mismatch("ASOF current delta magic differs"));
     }
@@ -30,6 +45,10 @@ fn header(
     if cursor.take(6)? != [0; 6] {
         return Err(mismatch("ASOF log delta padding differs"));
     }
+    Ok(())
+}
+
+fn header_capacities(cursor: &mut Cursor<'_>, max_rows: u64) -> Result<([usize; 16], [usize; 3])> {
     let capacities = cursor.capacities(super::super::CAPACITY_WIDTHS)?;
     let counts = cursor.addresses::<3>()?;
     super::super::validate_header_counts(counts[0], counts[1], counts[2], max_rows)?;
@@ -38,31 +57,36 @@ fn header(
         counts[0],
         counts[1],
     )?;
-    for capacity in &capacities[5..8] {
-        super::super::require_capacity(*capacity, counts[1])?;
-        u32::try_from(*capacity)
-            .map_err(|_| mismatch("ASOF log heap capacity exceeds handle domain"))?;
-    }
+    validate_heap_capacities(&capacities[5..8], counts[1])?;
     super::super::validate_shard_capacities(
         capacities[8..].try_into().expect("eight shards"),
         counts[1],
     )?;
+    Ok((capacities, counts))
+}
+
+fn validate_heap_capacities(capacities: &[usize], keys: usize) -> Result<()> {
+    for capacity in capacities {
+        super::super::require_capacity(*capacity, keys)?;
+        u32::try_from(*capacity)
+            .map_err(|_| mismatch("ASOF log heap capacity exceeds handle domain"))?;
+    }
+    Ok(())
+}
+
+fn header_owners(cursor: &mut Cursor<'_>, previous: usize) -> Result<usize> {
     if cursor.address()? != previous {
         return Err(mismatch("ASOF log owner predecessor count differs"));
     }
-    let owner_capacity = cursor.capacity(size_of::<Encoding>())?;
-    let [changes, left, buckets] = cursor.addresses()?;
+    cursor.capacity(size_of::<Encoding>())
+}
+
+fn header_changes(cursor: &mut Cursor<'_>) -> Result<[usize; 3]> {
+    let counts @ [changes, left, buckets] = cursor.addresses()?;
     if changes > cursor.bytes.len() / 11 || left > changes || buckets > cursor.bytes.len() / 17 {
         return Err(mismatch("ASOF log change counts exceed encoded size"));
     }
-    Ok(Header {
-        capacities,
-        counts,
-        owner_capacity,
-        changes,
-        left,
-        buckets,
-    })
+    Ok(counts)
 }
 
 fn owner_domain(cursor: &Cursor<'_>, previous: usize, capacity: usize) -> Result<usize> {
@@ -86,27 +110,33 @@ fn scan_version(
 ) -> Result<()> {
     match cursor.byte()? {
         0 => Ok(()),
-        1 if left => {
-            let rows = cursor.address()?;
-            let capacities = cursor.capacities([
-                8,
-                4,
-                size_of::<Option<Encoding>>(),
-                8,
-                4,
-                kind.storage_bytes(),
-            ])?;
-            validate_left_version(rows as u64, capacities, max_rows)
-        }
-        1 => match cursor.byte()? {
-            0 | 2 => Ok(()),
-            1 => {
-                cursor.take(12)?;
-                Ok(())
-            }
-            _ => Err(mismatch("ASOF log storage tag differs")),
-        },
+        1 if left => scan_left_version(cursor, kind, max_rows),
+        1 => scan_right_version(cursor),
         _ => Err(mismatch("ASOF log version tag differs")),
+    }
+}
+
+fn scan_left_version(cursor: &mut Cursor<'_>, kind: SequenceKind, max_rows: u64) -> Result<()> {
+    let rows = cursor.address()?;
+    let capacities = cursor.capacities([
+        8,
+        4,
+        size_of::<Option<Encoding>>(),
+        8,
+        4,
+        kind.storage_bytes(),
+    ])?;
+    validate_left_version(rows as u64, capacities, max_rows)
+}
+
+fn scan_right_version(cursor: &mut Cursor<'_>) -> Result<()> {
+    match cursor.byte()? {
+        0 | 2 => Ok(()),
+        1 => {
+            cursor.take(12)?;
+            Ok(())
+        }
+        _ => Err(mismatch("ASOF log storage tag differs")),
     }
 }
 
@@ -116,6 +146,10 @@ fn validate_left_version(rows: u64, capacities: [usize; 6], max_rows: u64) -> Re
     }
     let count = usize::try_from(rows)
         .map_err(|_| mismatch("ASOF log left count exceeds address domain"))?;
+    validate_left_capacities(capacities, count)
+}
+
+fn validate_left_capacities(capacities: [usize; 6], count: usize) -> Result<()> {
     for index in [0, 4, 5] {
         super::super::require_capacity(capacities[index], count)?;
     }
@@ -188,39 +222,92 @@ fn restore_charge_checked(
     let mut cursor = Cursor::new(bytes, max_bytes);
     let header = header(&mut cursor, previous, kinds, max_rows)?;
     let owners = owner_domain(&cursor, previous, header.owner_capacity)?;
-    let mut charge =
-        super::super::owners::restore_charge_checked(&mut cursor, &mut check_cancelled)?;
-    charge = super::super::restore_add(charge, owners as u64 * 256 + 512)?;
-    charge = super::super::restore_add(
+    let charge = super::super::owners::restore_charge_checked(&mut cursor, &mut check_cancelled)?;
+    let charge = header_charge(&header, owners, charge)?;
+    scan_changes(
+        &mut cursor,
+        header.changes,
+        kinds,
+        max_rows,
+        &mut check_cancelled,
+    )?;
+    let charge = scan_left_charge(
+        &mut cursor,
+        header.left,
+        max_rows,
+        charge,
+        &mut check_cancelled,
+    )?;
+    scan_buckets(
+        &mut cursor,
+        header.buckets,
+        kinds[1],
+        max_rows,
+        &mut check_cancelled,
+    )?;
+    Ok(charge)
+}
+
+fn header_charge(header: &Header, owners: usize, charge: u64) -> Result<u64> {
+    let charge = super::super::restore_add(charge, owners as u64 * 256 + 512)?;
+    let charge = super::super::restore_add(
         charge,
         header.changes as u64 * (size_of::<Change>() + 2048) as u64,
     )?;
-    charge = super::super::restore_add(
+    let charge = super::super::restore_add(
         charge,
         header.left as u64 * size_of::<(BatchKey, PreparedLeftChunk)>() as u64,
     )?;
-    charge = super::super::restore_add(
+    super::super::restore_add(
         charge,
         header.buckets as u64 * size_of::<BucketCut>() as u64,
-    )?;
-    for ordinal in 0..header.changes {
-        check_every(ordinal, &mut check_cancelled)?;
-        scan_change(&mut cursor, kinds, max_rows)?;
+    )
+}
+
+fn scan_changes(
+    cursor: &mut Cursor<'_>,
+    count: usize,
+    kinds: [SequenceKind; 2],
+    max_rows: u64,
+    check_cancelled: &mut impl FnMut() -> Result<()>,
+) -> Result<()> {
+    for ordinal in 0..count {
+        check_every(ordinal, check_cancelled)?;
+        scan_change(cursor, kinds, max_rows)?;
     }
+    Ok(())
+}
+
+fn scan_left_charge(
+    cursor: &mut Cursor<'_>,
+    count: usize,
+    max_rows: u64,
+    mut charge: u64,
+    check_cancelled: &mut impl FnMut() -> Result<()>,
+) -> Result<u64> {
     let mut rows = 0;
-    for ordinal in 0..header.left {
-        check_every(ordinal, &mut check_cancelled)?;
-        let (count, bytes) = super::super::scan_left(&mut cursor, max_rows - rows)?;
+    for ordinal in 0..count {
+        check_every(ordinal, check_cancelled)?;
+        let (count, bytes) = super::super::scan_left(cursor, max_rows - rows)?;
         rows = super::super::restore_add(rows, count)?;
         charge = super::super::restore_add(charge, bytes)?;
     }
-    for ordinal in 0..header.buckets {
-        check_every(ordinal, &mut check_cancelled)?;
-        cursor.take(16)?;
-        bucket_state(&mut cursor, kinds[1], max_rows)?;
-    }
-    cursor.finish()?;
     Ok(charge)
+}
+
+fn scan_buckets(
+    cursor: &mut Cursor<'_>,
+    count: usize,
+    kind: SequenceKind,
+    max_rows: u64,
+    check_cancelled: &mut impl FnMut() -> Result<()>,
+) -> Result<()> {
+    for ordinal in 0..count {
+        check_every(ordinal, check_cancelled)?;
+        cursor.take(16)?;
+        bucket_state(cursor, kind, max_rows)?;
+    }
+    cursor.finish()
 }
 
 fn change(
@@ -229,21 +316,35 @@ fn change(
     kinds: [SequenceKind; 2],
     max_rows: u64,
 ) -> Result<Change> {
-    let identity = match cursor.byte()? {
-        0 => Identity::Left((0, cursor.integer()?)),
-        1 => {
-            let time = i64::from_le_bytes(cursor.take(8)?.try_into().expect("time width"));
-            let key = owners.reference(cursor)?;
-            let sequence = super::super::sequence(cursor, kinds[1], owners)?;
-            Identity::Right((time, key, sequence))
-        }
-        _ => return Err(mismatch("ASOF log identity tag differs")),
-    };
+    let identity = change_identity(cursor, owners, kinds[1])?;
     let change = Change {
         before: read_version(cursor, &identity, kinds[0])?,
         after: read_version(cursor, &identity, kinds[0])?,
         identity,
     };
+    validate_change(&change, max_rows)?;
+    Ok(change)
+}
+
+fn change_identity(
+    cursor: &mut Cursor<'_>,
+    owners: &mut OwnerReader,
+    kind: SequenceKind,
+) -> Result<Identity> {
+    let identity = match cursor.byte()? {
+        0 => Identity::Left((0, cursor.integer()?)),
+        1 => {
+            let time = i64::from_le_bytes(cursor.take(8)?.try_into().expect("time width"));
+            let key = owners.reference(cursor)?;
+            let sequence = super::super::sequence(cursor, kind, owners)?;
+            Identity::Right((time, key, sequence))
+        }
+        _ => return Err(mismatch("ASOF log identity tag differs")),
+    };
+    Ok(identity)
+}
+
+fn validate_change(change: &Change, max_rows: u64) -> Result<()> {
     change.validate()?;
     for version in [change.before, change.after].into_iter().flatten() {
         if let Version::Left { rows, capacities } = version {
@@ -256,7 +357,7 @@ fn change(
     {
         return Err(mismatch("ASOF log left prefix grows"));
     }
-    Ok(change)
+    Ok(())
 }
 
 fn validate_payloads(
@@ -334,78 +435,32 @@ pub(super) fn decode(
     workspace: MemoryReservation,
     mut check_cancelled: impl FnMut() -> Result<()>,
 ) -> Result<DecodedDelta> {
-    let max_rows = limits.max_state_rows();
-    let max_bytes = limits.max_state_bytes();
-    check_cancelled()?;
-    let workspace_bytes = restore_charge_checked(
+    let (mut cursor, header, mut owners) = decode_header(
         bytes,
-        previous.count(),
+        previous,
         kinds,
-        max_rows,
-        max_bytes,
+        limits,
+        &workspace,
         &mut check_cancelled,
     )?;
-    if u64::try_from(workspace.size()).map_or(true, |bytes| bytes < workspace_bytes) {
-        return Err(mismatch("ASOF log decoding exceeds prepaid workspace"));
-    }
-    let mut cursor = Cursor::new(bytes, max_bytes);
-    let header = header(&mut cursor, previous.count(), kinds, max_rows)?;
-    let mut owners = previous.clone();
-    owners.append_checked(&mut cursor, &mut check_cancelled)?;
-    let mut changes = Vec::with_capacity(header.changes);
-    for ordinal in 0..header.changes {
-        check_every(ordinal, &mut check_cancelled)?;
-        let change = change(&mut cursor, &mut owners, kinds, max_rows)?;
-        if changes
-            .last()
-            .is_some_and(|last: &Change| last.identity >= change.identity)
-        {
-            return Err(mismatch("ASOF log change order is not strict"));
-        }
-        validate_payloads(&change, batches)?;
-        changes.push(change);
-    }
-    let mut left = Vec::with_capacity(header.left);
-    let mut previous_batch = None;
-    let mut rows = 0;
-    for ordinal in 0..header.left {
-        check_every(ordinal, &mut check_cancelled)?;
-        let mut preview = cursor.clone();
-        let left_header =
-            super::super::read_left_header(&mut preview, kinds[0], max_rows - rows, &mut None)?;
-        let expected = changes
-            .binary_search_by(|change| change.identity.cmp(&Identity::Left(left_header.batch)))
-            .ok()
-            .map(|index| &changes[index])
-            .ok_or_else(|| mismatch("ASOF log left installation has no change"))?;
-        if expected.before.is_some()
-            || expected.after
-                != Some(Version::Left {
-                    rows: left_header.rows as u64,
-                    capacities: left_header.capacities,
-                })
-        {
-            return Err(mismatch("ASOF log left installation version differs"));
-        }
-        let chunk = super::super::read_left(
-            &mut cursor,
-            &mut owners,
-            batches,
-            kinds[0],
-            max_rows - rows,
-            &mut previous_batch,
-        )?;
-        rows += left_header.rows as u64;
-        left.push((left_header.batch, chunk));
-    }
-    if changes
-        .iter()
-        .filter(|change| matches!(change.identity, Identity::Left(_)) && change.before.is_none())
-        .count()
-        != left.len()
-    {
-        return Err(mismatch("ASOF log left installation inventory differs"));
-    }
+    let changes = decode_changes(
+        &mut cursor,
+        &mut owners,
+        batches,
+        header.changes,
+        kinds,
+        limits.max_state_rows(),
+        &mut check_cancelled,
+    )?;
+    let left = decode_left(
+        &mut cursor,
+        &mut owners,
+        batches,
+        &changes,
+        (header.left, limits.max_state_rows()),
+        kinds[0],
+        &mut check_cancelled,
+    )?;
     let buckets = decode_buckets(
         &mut cursor,
         &mut owners,
@@ -415,9 +470,7 @@ pub(super) fn decode(
         limits,
         &mut check_cancelled,
     )?;
-    cursor.finish()?;
-    owners.finish()?;
-    check_cancelled()?;
+    let owners = finish_delta(&cursor, owners, &mut check_cancelled)?;
     Ok(DecodedDelta {
         capacities: header.capacities,
         counts: header.counts,
@@ -427,4 +480,132 @@ pub(super) fn decode(
         owners,
         workspace,
     })
+}
+
+fn decode_header<'a>(
+    bytes: &'a [u8],
+    previous: &OwnerReader,
+    kinds: [SequenceKind; 2],
+    limits: &crate::AsofStateLimits,
+    workspace: &MemoryReservation,
+    check_cancelled: &mut impl FnMut() -> Result<()>,
+) -> Result<(Cursor<'a>, Header, OwnerReader)> {
+    let max_rows = limits.max_state_rows();
+    let max_bytes = limits.max_state_bytes();
+    check_cancelled()?;
+    let workspace_bytes = restore_charge_checked(
+        bytes,
+        previous.count(),
+        kinds,
+        max_rows,
+        max_bytes,
+        &mut *check_cancelled,
+    )?;
+    if u64::try_from(workspace.size()).map_or(true, |bytes| bytes < workspace_bytes) {
+        return Err(mismatch("ASOF log decoding exceeds prepaid workspace"));
+    }
+    let mut cursor = Cursor::new(bytes, max_bytes);
+    let header = header(&mut cursor, previous.count(), kinds, max_rows)?;
+    let mut owners = previous.clone();
+    owners.append_checked(&mut cursor, check_cancelled)?;
+    Ok((cursor, header, owners))
+}
+
+fn decode_changes(
+    cursor: &mut Cursor<'_>,
+    owners: &mut OwnerReader,
+    batches: &BTreeMap<BatchKey, Arc<PayloadBatch>>,
+    count: usize,
+    kinds: [SequenceKind; 2],
+    max_rows: u64,
+    check_cancelled: &mut impl FnMut() -> Result<()>,
+) -> Result<Vec<Change>> {
+    let mut changes = Vec::with_capacity(count);
+    for ordinal in 0..count {
+        check_every(ordinal, check_cancelled)?;
+        let change = change(cursor, owners, kinds, max_rows)?;
+        if changes
+            .last()
+            .is_some_and(|last: &Change| last.identity >= change.identity)
+        {
+            return Err(mismatch("ASOF log change order is not strict"));
+        }
+        validate_payloads(&change, batches)?;
+        changes.push(change);
+    }
+    Ok(changes)
+}
+
+fn decode_left(
+    cursor: &mut Cursor<'_>,
+    owners: &mut OwnerReader,
+    batches: &BTreeMap<BatchKey, Arc<PayloadBatch>>,
+    changes: &[Change],
+    limits: (usize, u64),
+    kind: SequenceKind,
+    check_cancelled: &mut impl FnMut() -> Result<()>,
+) -> Result<Vec<(BatchKey, PreparedLeftChunk)>> {
+    let (count, max_rows) = limits;
+    let mut left = Vec::with_capacity(count);
+    let mut previous_batch = None;
+    let mut rows = 0;
+    for ordinal in 0..count {
+        check_every(ordinal, check_cancelled)?;
+        let (batch, count) = left_installation(cursor, changes, kind, max_rows - rows)?;
+        let chunk = super::super::read_left(
+            cursor,
+            owners,
+            batches,
+            kind,
+            max_rows - rows,
+            &mut previous_batch,
+        )?;
+        rows += count;
+        left.push((batch, chunk));
+    }
+    if changes
+        .iter()
+        .filter(|change| matches!(change.identity, Identity::Left(_)) && change.before.is_none())
+        .count()
+        != left.len()
+    {
+        return Err(mismatch("ASOF log left installation inventory differs"));
+    }
+    Ok(left)
+}
+
+fn left_installation(
+    cursor: &Cursor<'_>,
+    changes: &[Change],
+    kind: SequenceKind,
+    max_rows: u64,
+) -> Result<(BatchKey, u64)> {
+    let mut preview = cursor.clone();
+    let header = super::super::read_left_header(&mut preview, kind, max_rows, &mut None)?;
+    let expected = changes
+        .binary_search_by(|change| change.identity.cmp(&Identity::Left(header.batch)))
+        .ok()
+        .map(|index| &changes[index])
+        .ok_or_else(|| mismatch("ASOF log left installation has no change"))?;
+    if expected.before.is_some()
+        || expected.after
+            != Some(Version::Left {
+                rows: header.rows as u64,
+                capacities: header.capacities,
+            })
+    {
+        return Err(mismatch("ASOF log left installation version differs"));
+    }
+    Ok((header.batch, header.rows as u64))
+}
+
+fn finish_delta(
+    cursor: &Cursor<'_>,
+    owners: OwnerReader,
+    check_cancelled: &mut impl FnMut() -> Result<()>,
+) -> Result<OwnerReader> {
+    cursor.finish()?;
+    owners.finish()?;
+    check_cancelled()?;
+    Ok(owners)
 }
