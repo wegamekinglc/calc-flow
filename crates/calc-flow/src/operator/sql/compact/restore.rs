@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use datafusion::{arrow::datatypes::SchemaRef, execution::memory_pool::MemoryReservation};
 
 use super::super::{
@@ -23,14 +25,70 @@ pub(in crate::operator::sql) fn prepare(
     check: &dyn Fn() -> Result<()>,
 ) -> Result<RestoredCompact> {
     check()?;
+    validate_request(operator, snapshot)?;
+    let RestoreBinding {
+        decoded,
+        columns,
+        native,
+        _decode,
+        _identity,
+        _descriptor,
+    } = prepare_binding(operator, snapshot, check)?;
+    let native = restore_groups(native, snapshot, &decoded.value, check, &operator.name)?;
+    check()?;
+    let state = restored_compact_state(operator, snapshot, columns, &decoded.value)?;
+    check()?;
+    Ok(RestoredCompact {
+        state,
+        native: Box::new(native),
+    })
+}
+
+struct RestoreBinding {
+    decoded: control::DecodedControl,
+    columns: Arc<storage::CompactColumns>,
+    native: IncrementalSql,
+    _decode: MemoryReservation,
+    _identity: identity::PaidIdentity,
+    _descriptor: incremental::compact_state::NativeStateDescriptor,
+}
+
+fn validate_request(operator: &SqlOperator, snapshot: &OperatorStateSnapshot) -> Result<()> {
     if operator.aliases.len() != 1 || !operator.stream_aggregate || !operator.udfs.is_empty() {
         return Err(sql_state_error(
             "SQL compact checkpoint requires one native aggregate input",
         ));
     }
     validate_inventory(snapshot)?;
+    Ok(())
+}
+
+fn prepare_binding(
+    operator: &SqlOperator,
+    snapshot: &OperatorStateSnapshot,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<RestoreBinding> {
     let runtime = operator.retention_runtime()?;
-    let _decode = decode_credit(operator, snapshot)?;
+    let decode = decode_credit(operator, snapshot)?;
+    let decoded = restored_control(operator, runtime, snapshot, check)?;
+    let (columns, native) = restored_columns(operator, runtime, snapshot, check)?;
+    let (descriptor, identity) = restored_identity(operator, &columns, &native, &decoded.value)?;
+    Ok(RestoreBinding {
+        decoded,
+        columns,
+        native,
+        _decode: decode,
+        _identity: identity,
+        _descriptor: descriptor,
+    })
+}
+
+fn restored_control(
+    operator: &SqlOperator,
+    runtime: &crate::DataFusionRuntime,
+    snapshot: &OperatorStateSnapshot,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<control::DecodedControl> {
     let decoded = control::decode(
         runtime,
         &snapshot.segments["control"],
@@ -51,6 +109,15 @@ pub(in crate::operator::sql) fn prepare(
         .group_log
         .validate(snapshot, decoded.value.groups, decoded.value.ledger)?;
     storage::validate_budget(operator, decoded.value.ledger)?;
+    Ok(decoded)
+}
+
+fn restored_columns(
+    operator: &SqlOperator,
+    runtime: &crate::DataFusionRuntime,
+    snapshot: &OperatorStateSnapshot,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<(Arc<storage::CompactColumns>, IncrementalSql)> {
     let logical = trusted_logical_schema(operator, snapshot)?;
     check()?;
     let projection = retention::SqlProjection::resolve(
@@ -63,6 +130,18 @@ pub(in crate::operator::sql) fn prepare(
     let columns = storage::columns(operator, logical.clone(), projection)?;
     let native = trusted_plan(operator, logical, columns.physical.clone())?;
     check()?;
+    Ok((columns, native))
+}
+
+fn restored_identity(
+    operator: &SqlOperator,
+    columns: &storage::CompactColumns,
+    native: &IncrementalSql,
+    control: &control::CompactControl,
+) -> Result<(
+    incremental::compact_state::NativeStateDescriptor,
+    identity::PaidIdentity,
+)> {
     let descriptor = native.native_descriptor(&operator.name)?;
     let identity = identity::build(
         operator,
@@ -71,37 +150,55 @@ pub(in crate::operator::sql) fn prepare(
         columns.ordinals.clone(),
         &descriptor,
     )?;
-    decoded.value.validate_identity(&identity.value)?;
-    let native = restore_groups(native, snapshot, &decoded.value, check, &operator.name)?;
-    check()?;
+    control.validate_identity(&identity.value)?;
+    Ok((descriptor, identity))
+}
+
+fn restored_compact_state(
+    operator: &SqlOperator,
+    snapshot: &OperatorStateSnapshot,
+    columns: Arc<storage::CompactColumns>,
+    control: &control::CompactControl,
+) -> Result<CompactSqlState> {
     let (latest, metadata_owner) = metadata::decode(
-        runtime,
+        operator.retention_runtime()?,
         &snapshot.segments["batch-metadata"],
         &operator.name,
     )?;
     let capture = CompactCapture::restored(
         operator,
         snapshot,
-        decoded.value.ledger,
-        decoded.value.group_log.clone(),
+        control.ledger,
+        control.group_log.clone(),
         latest.clone(),
         metadata_owner,
     )?;
-    let state = CompactSqlState::restored(
-        operator,
-        columns,
-        decoded.value.ledger,
-        latest,
-        Some(capture),
-    )?;
-    check()?;
-    Ok(RestoredCompact {
-        state,
-        native: Box::new(native),
-    })
+    CompactSqlState::restored(operator, columns, control.ledger, latest, Some(capture))
 }
 
 fn restore_groups(
+    native: IncrementalSql,
+    snapshot: &OperatorStateSnapshot,
+    control: &control::CompactControl,
+    check: &dyn Fn() -> Result<()>,
+    name: &str,
+) -> Result<IncrementalSql> {
+    let mut native = restore_base(native, snapshot, control, check, name)?;
+    for frame in &control.group_log.frames {
+        check()?;
+        let state = decoded_groups(&snapshot.segments[&frame.id], frame.groups)?;
+        native.apply_delta_state(
+            state.table_payload()?.batches(),
+            frame.ledger.rows,
+            check,
+            name,
+        )?;
+    }
+    validate_rebuilt_groups(&mut native, snapshot, control, check, name)?;
+    Ok(native)
+}
+
+fn restore_base(
     mut native: IncrementalSql,
     snapshot: &OperatorStateSnapshot,
     control: &control::CompactControl,
@@ -116,24 +213,28 @@ fn restore_groups(
         control.ledger.rows,
         name,
     )?;
-    let mut native = native.import_native_state(
+    native.import_native_state(
         state.table_payload()?.batches(),
         control.group_log.base_ledger.rows,
         control.group_log.base_ledger.seen_input,
         check,
         name,
-    )?;
-    for frame in &control.group_log.frames {
-        check()?;
-        let state = decode_sql_state(snapshot.segments[&frame.id].bytes())?;
-        validate_state_census(&state, frame.groups)?;
-        native.apply_delta_state(
-            state.table_payload()?.batches(),
-            frame.ledger.rows,
-            check,
-            name,
-        )?;
-    }
+    )
+}
+
+fn decoded_groups(segment: &crate::StateSegment, groups: u64) -> Result<crate::Batch> {
+    let state = decode_sql_state(segment.bytes())?;
+    validate_state_census(&state, groups)?;
+    Ok(state)
+}
+
+fn validate_rebuilt_groups(
+    native: &mut IncrementalSql,
+    snapshot: &OperatorStateSnapshot,
+    control: &control::CompactControl,
+    check: &dyn Fn() -> Result<()>,
+    name: &str,
+) -> Result<()> {
     if native.group_count() as u64 != control.groups {
         return Err(sql_state_error(
             "SQL compact reconstructed group census is invalid",
@@ -153,7 +254,7 @@ fn restore_groups(
         name,
     )?;
     check()?;
-    Ok(native)
+    Ok(())
 }
 
 fn validate_inventory(snapshot: &OperatorStateSnapshot) -> Result<()> {
