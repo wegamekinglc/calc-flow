@@ -593,13 +593,13 @@ impl IncrementalSql {
         analyzed: &LogicalPlan,
         name: &str,
     ) -> Result<Option<Self>> {
-        let Some(variable_columns) = plan_inputs(raw, &schema, name)? else {
-            return Ok(None);
-        };
         let normalized = normalize_groups::plans(runtime, query, raw, analyzed, &schema, name)?;
         let (raw, analyzed) = normalized
             .as_ref()
             .map_or((raw, analyzed), |plans| (&plans.raw, &plans.analyzed));
+        let Some(variable_columns) = plan_inputs(raw, &schema, name)? else {
+            return Ok(None);
+        };
         let Some((projection, aggregate)) = shape(analyzed) else {
             return Ok(None);
         };
@@ -2476,13 +2476,28 @@ fn physical_plan(
     let input = if logical.as_arrow() == schema.as_ref() {
         logical.as_ref()
     } else {
+        let scan = match aggregate.input.as_ref() {
+            LogicalPlan::TableScan(scan) => scan,
+            LogicalPlan::Filter(filter) => {
+                let LogicalPlan::TableScan(scan) = filter.input.as_ref() else {
+                    return None;
+                };
+                scan
+            }
+            _ => return None,
+        };
+        let source = scan.source.schema();
         let qualifiers = schema
             .fields()
             .iter()
             .map(|field| {
-                let index = logical.as_arrow().index_of(field.name()).ok()?;
-                let (qualifier, original) = logical.qualified_field(index);
-                (original == field).then(|| qualifier.cloned())
+                if let Ok(index) = logical.as_arrow().index_of(field.name()) {
+                    let (qualifier, original) = logical.qualified_field(index);
+                    (original == field).then(|| qualifier.cloned())
+                } else {
+                    let original = source.field_with_name(field.name()).ok()?;
+                    (original == field.as_ref()).then(|| Some(scan.table_name.clone()))
+                }
             })
             .collect::<Option<Vec<_>>>()?;
         rebound = DFSchema::from_field_specific_qualified_schema(qualifiers, schema).ok()?;
