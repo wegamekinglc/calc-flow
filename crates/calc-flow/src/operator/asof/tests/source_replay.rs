@@ -2,7 +2,8 @@ use super::{fixture, indexed_input};
 use crate::{
     AsofStateLimits, Batch, BatchMetadata, CancellationToken, EdgeCollector, IngressProgress,
     IngressProgressSnapshot, IngressState, JsonMap, OperatorMetadata, StreamAsofJoinOperator,
-    StreamAsofJoinSpec, StreamJobContext, StreamOperator, StreamOperatorContext,
+    StreamAsofJoinSpec, StreamAsofJoinStatus, StreamJobContext, StreamOperator,
+    StreamOperatorContext, runtime::streaming::gather_work::TestService,
 };
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
@@ -12,12 +13,28 @@ fn with_cursor(batch: &Batch, side: &str) -> Batch {
     )))
 }
 
-#[tokio::test]
-async fn replay_recording_pressure_preserves_admission_success() {
+#[test]
+fn replay_recording_pressure_preserves_admission_success() {
     let (template, _) = fixture();
     let schema = template.schemas[0].clone();
-    let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
-    let progress = IngressProgressSnapshot::new(BTreeMap::from([
+    let service = TestService::new(8, 1).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        for limit in [32 * 1024, 64 * 1024, 128 * 1024] {
+            for count in [1, 4, 16, 64, 256] {
+                run_pressure_pair(&template, &schema, limit, count, &service).await;
+            }
+        }
+    });
+    drop(runtime);
+    service.shutdown();
+}
+
+fn pressure_progress() -> IngressProgressSnapshot {
+    IngressProgressSnapshot::new(BTreeMap::from([
         (
             "left".into(),
             IngressProgress::new(IngressState::Active, None),
@@ -26,20 +43,7 @@ async fn replay_recording_pressure_preserves_admission_success() {
             "right".into(),
             IngressProgress::new(IngressState::Active, None),
         ),
-    ]));
-    let context = StreamOperatorContext::with_ingress_progress(&job, "asof", None, progress);
-    let mut pools = Vec::new();
-    for limit in [32 * 1024, 64 * 1024, 128 * 1024] {
-        for count in [1, 4, 16, 64, 256] {
-            pools.extend(run_pressure_pair(&template, &schema, limit, count, &context).await);
-        }
-    }
-    assert!(job.gather_owner().close_and_drain().await.is_empty());
-    drop(context);
-    drop(job);
-    for pool in pools {
-        assert_eq!(pool.reserved(), 0);
-    }
+    ]))
 }
 
 async fn run_pressure_pair(
@@ -47,8 +51,8 @@ async fn run_pressure_pair(
     schema: &datafusion::arrow::datatypes::SchemaRef,
     limit: u64,
     count: i32,
-    context: &StreamOperatorContext<'_>,
-) -> [Arc<dyn datafusion::execution::memory_pool::MemoryPool>; 2] {
+    service: &TestService,
+) {
     let spec = StreamAsofJoinSpec::new(
         template.spec.left().clone(),
         template.spec.right().clone(),
@@ -56,7 +60,7 @@ async fn run_pressure_pair(
         AsofStateLimits::new(10_000, limit).unwrap(),
     )
     .unwrap();
-    let mut plain =
+    let plain =
         StreamAsofJoinOperator::new("asof", schema.clone(), schema.clone(), spec.clone()).unwrap();
     let mut recorded =
         StreamAsofJoinOperator::new("asof", schema.clone(), schema.clone(), spec).unwrap();
@@ -66,64 +70,91 @@ async fn run_pressure_pair(
         .map(|sequence| ("A", 100, i64::from(sequence)))
         .collect::<Vec<_>>();
     let batch = Batch::table(vec![indexed_input(schema, &rows)], BatchMetadata::default()).unwrap();
-    for side in ["left", "right"] {
-        let baseline = plain
-            .process_data(
-                side,
-                batch.clone(),
-                context,
-                &mut EdgeCollector::new(plain.output_ports().to_vec()),
-            )
-            .await;
-        let candidate = recorded
-            .process_data(
-                side,
-                with_cursor(&batch, side),
-                context,
-                &mut EdgeCollector::new(recorded.output_ports().to_vec()),
-            )
-            .await;
-        assert_eq!(
-            candidate.is_ok(),
-            baseline.is_ok(),
-            "limit={limit}, rows={count}, side={side}: baseline={baseline:?}, candidate={candidate:?}"
-        );
-        if baseline.is_err() {
-            break;
-        }
-        if limit == 128 * 1024 && count == 1 && side == "left" {
-            assert!(recorded.replay.is_some());
-        }
-    }
-    assert_status(&plain, &recorded);
-    let baseline = plain
-        .on_end(
-            context,
-            &mut EdgeCollector::new(plain.output_ports().to_vec()),
-        )
-        .await;
-    let candidate = recorded
-        .on_end(
-            context,
-            &mut EdgeCollector::new(recorded.output_ports().to_vec()),
-        )
-        .await;
-    if baseline.is_ok() {
+    let baseline = run_pressure_operator(plain, &batch, false, service).await;
+    let candidate =
+        run_pressure_operator(recorded, &batch, limit == 128 * 1024 && count == 1, service).await;
+    assert_eq!(
+        candidate.accepted, baseline.accepted,
+        "limit={limit}, rows={count}"
+    );
+    assert_status(&baseline.admitted, candidate.admitted);
+    if baseline.finalized.is_ok() {
         assert!(
-            candidate.is_ok(),
-            "limit={limit}, rows={count}, finalization: {candidate:?}"
+            candidate.finalized.is_ok(),
+            "limit={limit}, rows={count}, finalization: {:?}",
+            candidate.finalized
         );
-        assert_status(&plain, &recorded);
+        assert_status(&baseline.finished, candidate.finished);
     }
-    plain.reset().unwrap();
-    recorded.reset().unwrap();
-    [plain.runtime.pool.clone(), recorded.runtime.pool.clone()]
 }
 
-fn assert_status(plain: &StreamAsofJoinOperator, recorded: &StreamAsofJoinOperator) {
-    let mut actual = recorded.status();
-    actual.state_bytes = plain.status.state_bytes;
-    assert_eq!(actual, plain.status);
+struct PressureOutcome {
+    accepted: Vec<bool>,
+    admitted: StreamAsofJoinStatus,
+    finalized: crate::Result<()>,
+    finished: StreamAsofJoinStatus,
+}
+
+async fn run_pressure_operator(
+    mut operator: StreamAsofJoinOperator,
+    batch: &Batch,
+    keep_replay: bool,
+    service: &TestService,
+) -> PressureOutcome {
+    let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new())
+        .with_gather_owner(service.owner("asof-pressure".into()));
+    let context =
+        StreamOperatorContext::with_ingress_progress(&job, "asof", None, pressure_progress());
+    let recorded = operator.replay.is_some();
+    let mut accepted = Vec::new();
+    for side in ["left", "right"] {
+        let input = if recorded {
+            with_cursor(batch, side)
+        } else {
+            batch.clone()
+        };
+        let result = operator
+            .process_data(
+                side,
+                input,
+                &context,
+                &mut EdgeCollector::new(operator.output_ports().to_vec()),
+            )
+            .await;
+        accepted.push(result.is_ok());
+        if result.is_err() {
+            break;
+        }
+        if keep_replay && side == "left" {
+            assert!(operator.replay.is_some());
+        }
+    }
+    let admitted = operator.status();
+    let finalized = operator
+        .on_end(
+            &context,
+            &mut EdgeCollector::new(operator.output_ports().to_vec()),
+        )
+        .await;
+    let finished = operator.status();
+    let pool = operator.runtime.pool.clone();
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    operator.reset().unwrap();
+    drop(operator);
+    drop(context);
+    drop(job);
+    assert_eq!(pool.reserved(), 0);
+    PressureOutcome {
+        accepted,
+        admitted,
+        finalized,
+        finished,
+    }
+}
+
+fn assert_status(plain: &StreamAsofJoinStatus, mut recorded: StreamAsofJoinStatus) {
+    recorded.state_bytes = plain.state_bytes;
+    assert_eq!(&recorded, plain);
 }
 
 #[tokio::test]
