@@ -43,47 +43,52 @@ pub(super) fn encode(records: &[Record]) -> Result<Vec<u8>> {
     bytes.extend_from_slice(MAGIC);
     bytes.extend_from_slice(&(records.len() as u64).to_le_bytes());
     for record in records {
-        let (kind, side, sequence) = match record.callback {
-            Callback::Data { side, sequence } => (0, side, sequence),
-            Callback::Progress => (1, 0, 0),
-            Callback::End => (2, 0, 0),
-        };
-        bytes.extend_from_slice(&[kind, side]);
-        bytes.extend_from_slice(&sequence.to_le_bytes());
-        time(&mut bytes, record.input_watermark);
-        for progress in record.progress {
-            bytes.push(match progress.state() {
-                IngressState::Active => 0,
-                IngressState::Idle => 1,
-                IngressState::Ended => 2,
-            });
-            time(&mut bytes, progress.watermark());
-        }
-        bytes.extend_from_slice(&(record.max_rows as u64).to_le_bytes());
-        bytes.extend_from_slice(&(record.max_bytes as u64).to_le_bytes());
-        bytes.push(u8::from(record.cursor.is_some()));
-        if let Some(cursor) = &record.cursor {
-            let owner = cursor
-                .source_id()
-                .expect("encoded length validated cursor owner");
-            for value in [
-                record.cursor_bytes,
-                owner.len(),
-                cursor.order().len(),
-                cursor.payload_bytes(),
-            ] {
-                bytes.extend_from_slice(&(value as u64).to_le_bytes());
-            }
-            bytes.extend_from_slice(owner.as_bytes());
-            bytes.extend_from_slice(cursor.order());
-            serde_json::to_writer(&mut bytes, cursor.payload())
-                .map_err(|error| mismatch(&error.to_string()))?;
-        }
+        encode_record(&mut bytes, record)?;
     }
     if bytes.len() != length {
         return Err(mismatch("encoded cursor length differs"));
     }
     Ok(bytes)
+}
+
+fn encode_record(bytes: &mut Vec<u8>, record: &Record) -> Result<()> {
+    let (kind, side, sequence) = match record.callback {
+        Callback::Data { side, sequence } => (0, side, sequence),
+        Callback::Progress => (1, 0, 0),
+        Callback::End => (2, 0, 0),
+    };
+    bytes.extend_from_slice(&[kind, side]);
+    bytes.extend_from_slice(&sequence.to_le_bytes());
+    time(bytes, record.input_watermark);
+    for progress in record.progress {
+        bytes.push(match progress.state() {
+            IngressState::Active => 0,
+            IngressState::Idle => 1,
+            IngressState::Ended => 2,
+        });
+        time(bytes, progress.watermark());
+    }
+    bytes.extend_from_slice(&(record.max_rows as u64).to_le_bytes());
+    bytes.extend_from_slice(&(record.max_bytes as u64).to_le_bytes());
+    bytes.push(u8::from(record.cursor.is_some()));
+    if let Some(cursor) = &record.cursor {
+        let owner = cursor
+            .source_id()
+            .expect("encoded length validated cursor owner");
+        for value in [
+            record.cursor_bytes,
+            owner.len(),
+            cursor.order().len(),
+            cursor.payload_bytes(),
+        ] {
+            bytes.extend_from_slice(&(value as u64).to_le_bytes());
+        }
+        bytes.extend_from_slice(owner.as_bytes());
+        bytes.extend_from_slice(cursor.order());
+        serde_json::to_writer(bytes, cursor.payload())
+            .map_err(|error| mismatch(&error.to_string()))?;
+    }
+    Ok(())
 }
 
 fn time(bytes: &mut Vec<u8>, time: Option<EventTime>) {
@@ -99,6 +104,20 @@ pub(super) fn decode_into(
     reserve: &dyn Fn(u64) -> Result<MemoryReservation>,
 ) -> Result<()> {
     let count = usize::try_from(expected).map_err(|_| mismatch("record count overflowed"))?;
+    let mut reader = frame_reader(bytes, count, expected)?;
+    if records.capacity() - records.len() < count {
+        return Err(mismatch("records exceed prepaid capacity"));
+    }
+    for _ in 0..count {
+        records.push(reader.record(credit, reserve)?);
+    }
+    if !reader.bytes.is_empty() {
+        return Err(mismatch("frame has trailing bytes"));
+    }
+    Ok(())
+}
+
+fn frame_reader(bytes: &[u8], count: usize, expected: u64) -> Result<Reader<'_>> {
     let minimum = count
         .checked_mul(WIDTH)
         .and_then(|length| length.checked_add(HEADER))
@@ -110,16 +129,7 @@ pub(super) fn decode_into(
     if reader.integer()? != expected {
         return Err(mismatch("frame record count differs"));
     }
-    if records.capacity() - records.len() < count {
-        return Err(mismatch("records exceed prepaid capacity"));
-    }
-    for _ in 0..count {
-        records.push(reader.record(credit, reserve)?);
-    }
-    if !reader.bytes.is_empty() {
-        return Err(mismatch("frame has trailing bytes"));
-    }
-    Ok(())
+    Ok(reader)
 }
 
 struct Reader<'a> {
@@ -172,25 +182,25 @@ impl<'a> Reader<'a> {
         Ok(IngressProgress::new(state, self.time()?))
     }
 
+    fn callback(&mut self) -> Result<Callback> {
+        let (kind, side, sequence) = (self.byte()?, self.byte()?, self.integer()?);
+        match (kind, side, sequence) {
+            (0, side @ 0..=1, sequence) => Ok(Callback::Data { side, sequence }),
+            (1, 0, 0) => Ok(Callback::Progress),
+            (2, 0, 0) => Ok(Callback::End),
+            _ => Err(mismatch("invalid callback identity")),
+        }
+    }
+
     fn record(
         &mut self,
         credit: &mut MemoryReservation,
         reserve: &dyn Fn(u64) -> Result<MemoryReservation>,
     ) -> Result<Record> {
-        let (kind, side, sequence) = (self.byte()?, self.byte()?, self.integer()?);
-        let callback = match (kind, side, sequence) {
-            (0, side @ 0..=1, sequence) => Callback::Data { side, sequence },
-            (1, 0, 0) => Callback::Progress,
-            (2, 0, 0) => Callback::End,
-            _ => return Err(mismatch("invalid callback identity")),
-        };
+        let callback = self.callback()?;
         let input_watermark = self.time()?;
         let progress = [self.progress()?, self.progress()?];
-        let max_rows = self.length()?;
-        let max_bytes = self.length()?;
-        if max_rows == 0 || max_bytes == 0 {
-            return Err(mismatch("empty output budget"));
-        }
+        let (max_rows, max_bytes) = self.output_budget()?;
         let (cursor, cursor_bytes) = self.cursor(callback, credit, reserve)?;
         Ok(Record {
             callback,
@@ -201,6 +211,15 @@ impl<'a> Reader<'a> {
             cursor,
             cursor_bytes,
         })
+    }
+
+    fn output_budget(&mut self) -> Result<(usize, usize)> {
+        let max_rows = self.length()?;
+        let max_bytes = self.length()?;
+        if max_rows == 0 || max_bytes == 0 {
+            return Err(mismatch("empty output budget"));
+        }
+        Ok((max_rows, max_bytes))
     }
 
     fn cursor(
@@ -214,49 +233,80 @@ impl<'a> Reader<'a> {
             (Callback::Progress | Callback::End, 0) => return Ok((None, 0)),
             _ => return Err(mismatch("callback cursor tag differs")),
         }
-        let (paid, owner_len, order_len, payload_len) = (
+        let input = self.cursor_input()?;
+        let (paid, owner, order, payload) = input;
+        let workspace = cursor_workspace(owner.len(), order.len(), payload.len())?;
+        let _workspace = reserve(workspace as u64)?;
+        grow_cursor_credit(credit, paid)?;
+        let result = decoded_cursor(owner, order, payload, paid);
+        if result.is_err() {
+            credit.shrink(paid);
+        }
+        result
+    }
+
+    fn cursor_extents(&mut self) -> Result<[usize; 4]> {
+        Ok([
             self.length()?,
             self.length()?,
             self.length()?,
             self.length()?,
-        );
-        if paid == 0 || order_len == 0 || order_len > 16 * 1024 || owner_len == 0 {
+        ])
+    }
+
+    fn cursor_input(&mut self) -> Result<CursorInput<'a>> {
+        let [paid, owner_len, order_len, payload_len] = self.cursor_extents()?;
+        if !valid_cursor_extents(paid, owner_len, order_len) {
             return Err(mismatch("cursor lengths or credit differ"));
         }
         let owner = std::str::from_utf8(self.take(owner_len)?)
             .map_err(|_| mismatch("cursor owner is not UTF-8"))?;
         let order = self.take(order_len)?;
         let payload = self.take(payload_len)?;
-        let workspace = payload_len
-            .checked_mul(512)
-            .and_then(|bytes| bytes.checked_add(owner_len))
-            .and_then(|bytes| bytes.checked_add(order_len))
-            .and_then(|bytes| bytes.checked_add(4096))
-            .ok_or_else(|| mismatch("cursor workspace overflowed"))?;
-        let _workspace = reserve(workspace as u64)?;
-        credit
-            .size()
-            .checked_add(paid)
-            .ok_or_else(|| mismatch("cursor credit overflowed"))?;
-        credit
-            .try_grow(paid)
-            .map_err(|_| mismatch("cursor exceeds prepaid state limits"))?;
-        let result = (|| {
-            let value = crate::json::parse_json_value(payload, "ASOF replay cursor")
-                .map_err(|error| mismatch(&error.to_string()))?;
-            let serde_json::Value::Object(payload) = value else {
-                return Err(mismatch("cursor payload is not an object"));
-            };
-            let cursor = Cursor::new(owner, order.to_vec(), payload.into_iter().collect())
-                .map_err(|error| mismatch(&error.to_string()))?;
-            if cursor.retained_bytes()? > paid {
-                return Err(mismatch("cursor exceeds its retained credit"));
-            }
-            Ok((Some(Arc::new(cursor)), paid))
-        })();
-        if result.is_err() {
-            credit.shrink(paid);
-        }
-        result
+        Ok((paid, owner, order, payload))
     }
+}
+
+type CursorInput<'a> = (usize, &'a str, &'a [u8], &'a [u8]);
+
+fn valid_cursor_extents(paid: usize, owner_len: usize, order_len: usize) -> bool {
+    paid != 0 && owner_len != 0 && order_len != 0 && order_len <= 16 * 1024
+}
+
+fn cursor_workspace(owner_len: usize, order_len: usize, payload_len: usize) -> Result<usize> {
+    payload_len
+        .checked_mul(512)
+        .and_then(|bytes| bytes.checked_add(owner_len))
+        .and_then(|bytes| bytes.checked_add(order_len))
+        .and_then(|bytes| bytes.checked_add(4096))
+        .ok_or_else(|| mismatch("cursor workspace overflowed"))
+}
+
+fn grow_cursor_credit(credit: &mut MemoryReservation, paid: usize) -> Result<()> {
+    credit
+        .size()
+        .checked_add(paid)
+        .ok_or_else(|| mismatch("cursor credit overflowed"))?;
+    credit
+        .try_grow(paid)
+        .map_err(|_| mismatch("cursor exceeds prepaid state limits"))
+}
+
+fn decoded_cursor(
+    owner: &str,
+    order: &[u8],
+    payload: &[u8],
+    paid: usize,
+) -> Result<(Option<Arc<Cursor>>, usize)> {
+    let value = crate::json::parse_json_value(payload, "ASOF replay cursor")
+        .map_err(|error| mismatch(&error.to_string()))?;
+    let serde_json::Value::Object(payload) = value else {
+        return Err(mismatch("cursor payload is not an object"));
+    };
+    let cursor = Cursor::new(owner, order.to_vec(), payload.into_iter().collect())
+        .map_err(|error| mismatch(&error.to_string()))?;
+    if cursor.retained_bytes()? > paid {
+        return Err(mismatch("cursor exceeds its retained credit"));
+    }
+    Ok((Some(Arc::new(cursor)), paid))
 }
