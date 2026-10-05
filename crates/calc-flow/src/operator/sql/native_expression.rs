@@ -131,6 +131,13 @@ pub(super) fn input_expression_work(expression: &Expr, schema: &DFSchema) -> Opt
 }
 
 pub(super) fn aggregate_filter_work(expression: &Expr, schema: &DFSchema) -> Option<usize> {
+    if contains_case(expression)? && !infallible_predicate(expression) {
+        return None;
+    }
+    input_expression_work(expression, schema)
+}
+
+fn contains_case(expression: &Expr) -> Option<bool> {
     use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
     let mut has_case = false;
     expression
@@ -139,10 +146,7 @@ pub(super) fn aggregate_filter_work(expression: &Expr, schema: &DFSchema) -> Opt
             Ok(TreeNodeRecursion::Continue)
         })
         .ok()?;
-    if has_case && !infallible_predicate(expression) {
-        return None;
-    }
-    input_expression_work(expression, schema)
+    Some(has_case)
 }
 
 fn infallible_predicate(expression: &Expr) -> bool {
@@ -223,6 +227,12 @@ fn fixed(dtype: &DataType) -> bool {
 
 fn projection_nodes(expression: &Expr, schema: &DFSchema, depth: usize) -> Option<usize> {
     if depth > 8 {
+        return None;
+    }
+    if expression.get_type(schema).ok()? == DataType::Boolean
+        && contains_case(expression)?
+        && !infallible_predicate(expression)
+    {
         return None;
     }
     match unalias(expression) {

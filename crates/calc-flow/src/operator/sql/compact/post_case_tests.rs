@@ -1,5 +1,61 @@
 use super::*;
 
+#[tokio::test]
+async fn test_boolean_case_error_semantics_across_aggregate_contexts() {
+    let dtype = DataType::Float64;
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "float_extrema", None);
+    let mut pools = Vec::new();
+    for query in [
+        "SELECT COUNT(CASE WHEN key = 2 THEN FALSE ELSE 100 / (key - 2) > 0 END) AS n FROM events",
+        "SELECT COUNT(CASE WHEN key = 2 THEN 0 ELSE 100 / (key - 2) END = 0) AS n FROM events",
+        "SELECT CASE WHEN COUNT(*) = 2 THEN FALSE ELSE 100 / (COUNT(*) - 2) > 0 END AS accepted FROM events",
+        "SELECT SUM(value) AS total FROM events HAVING CASE WHEN COUNT(*) = 2 THEN FALSE ELSE 100 / (COUNT(*) - 2) > 0 END",
+        "SELECT key, SUM(value) AS total FROM events GROUP BY key ORDER BY CASE WHEN key = 2 THEN FALSE ELSE 100 / (key - 2) > 0 END, key",
+    ] {
+        let incoming = post_input(&dtype, &[vec![Some(ONE); 2]], 0);
+        let expected = DataFusionRuntime::new(DataFusionConfig::default())
+            .unwrap()
+            .sql(
+                query,
+                &BTreeMap::from([("events".into(), incoming.clone())]),
+                Some("boolean-case-oracle"),
+            )
+            .await;
+        let mut state = operator(&dtype, query);
+        let mut collector = EdgeCollector::new(state.output_ports().to_vec());
+        let actual = state
+            .process_data("events", incoming, &context, &mut collector)
+            .await;
+        assert_eq!(actual.is_err(), expected.is_err(), "{query}");
+        if let Ok(expected) = expected {
+            let outputs = collector.drain("output");
+            assert_eq!(outputs.len(), 1, "{query}");
+            let actual = outputs[0].as_data().unwrap();
+            assert_eq!(rows(actual), rows(&expected), "{query}");
+            assert_eq!(
+                actual.table_payload().unwrap().schema(),
+                expected.table_payload().unwrap().schema()
+            );
+            assert_eq!(actual.metadata(), expected.metadata());
+        } else {
+            assert!(collector.drain("output").is_empty(), "{query}");
+        }
+        pools.push(
+            state
+                .stream_state
+                .runtime()
+                .unwrap()
+                .incremental_memory_pool(),
+        );
+        drop(state);
+    }
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop(context);
+    drop(job);
+    assert_eq!(pools.iter().map(|pool| pool.reserved()).sum::<usize>(), 0);
+}
+
 const GLOBAL_CASE: &str = "SELECT CASE WHEN COUNT(value) = 0 THEN NULL ELSE SUM(value) END AS total, CASE COUNT(value) WHEN 0 THEN -1 WHEN 3 THEN MAX(value) ELSE AVG(value) END AS selected FROM events";
 const GROUPED_CASE: &str = "SELECT key, CASE key WHEN 1 THEN SUM(value) WHEN 2 THEN AVG(value) END AS selected FROM events GROUP BY key";
 const ORDERED_CASE: &str = "SELECT key, CASE WHEN COUNT(value) = 0 THEN NULL ELSE SUM(value) END AS selected FROM events GROUP BY key HAVING CASE WHEN COUNT(*) >= 2 THEN TRUE ELSE FALSE END ORDER BY CASE WHEN selected IS NULL THEN 1 ELSE 0 END, key LIMIT 2";
