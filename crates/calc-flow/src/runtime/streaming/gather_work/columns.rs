@@ -139,31 +139,9 @@ impl Columns {
         operator: &GatherOperatorId,
         stop: &super::GatherStop,
     ) -> Result<ErasedOutput> {
-        let primary = self
-            .cells
-            .iter()
-            .position(|cell| {
-                matches!(&cell.outcome, Some(Err(error)) if !matches!(error, crate::CalcFlowError::Cancelled { .. }))
-            })
-            .or_else(|| self.cells.iter().position(|cell| matches!(&cell.outcome, Some(Err(_)))));
-        let mut columns = Vec::with_capacity(self.cells.len());
-        let mut error = None;
-        for (ordinal, cell) in self.cells.into_iter().enumerate() {
-            match cell
-                .outcome
-                .ok_or_else(|| internal("missing column outcome"))?
-            {
-                Ok(value) => {
-                    columns.push(
-                        *value
-                            .downcast::<super::ArrayRef>()
-                            .map_err(|_| internal("column output identity mismatch"))?,
-                    );
-                }
-                Err(value) if Some(ordinal) == primary => error = Some(value),
-                Err(value) => home.retain_error(operator, &value),
-            }
-        }
+        let primary = primary_error(&self.cells);
+        let CompletedColumns { columns, error } =
+            collect_columns(self.cells, primary, home, operator)?;
         let outcome = match error {
             Some(error) => Err(error),
             None => match self.rows {
@@ -174,4 +152,45 @@ impl Columns {
         drop(self.plan);
         Ok(Box::new(outcome?))
     }
+}
+
+fn primary_error(cells: &[Cell]) -> Option<usize> {
+    cells
+            .iter()
+            .position(|cell| {
+                matches!(&cell.outcome, Some(Err(error)) if !matches!(error, crate::CalcFlowError::Cancelled { .. }))
+            })
+            .or_else(|| cells.iter().position(|cell| matches!(&cell.outcome, Some(Err(_)))))
+}
+
+struct CompletedColumns {
+    columns: Vec<super::ArrayRef>,
+    error: Option<crate::CalcFlowError>,
+}
+
+fn collect_columns(
+    cells: Vec<Cell>,
+    primary: Option<usize>,
+    home: &GatherHome,
+    operator: &GatherOperatorId,
+) -> Result<CompletedColumns> {
+    let mut columns = Vec::with_capacity(cells.len());
+    let mut error = None;
+    for (ordinal, cell) in cells.into_iter().enumerate() {
+        match cell
+            .outcome
+            .ok_or_else(|| internal("missing column outcome"))?
+        {
+            Ok(value) => {
+                columns.push(
+                    *value
+                        .downcast::<super::ArrayRef>()
+                        .map_err(|_| internal("column output identity mismatch"))?,
+                );
+            }
+            Err(value) if Some(ordinal) == primary => error = Some(value),
+            Err(value) => home.retain_error(operator, &value),
+        }
+    }
+    Ok(CompletedColumns { columns, error })
 }

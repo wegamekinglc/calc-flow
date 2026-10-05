@@ -401,16 +401,8 @@ impl Registration {
             if record.handles.iter().filter(|slot| slot.is_some()).count() >= workers {
                 break;
             }
-            let permit = if let Some(permit) = self.permit.take() {
-                permit
-            } else {
-                if self.service.pressure.load(Ordering::Acquire) > 0 {
-                    break;
-                }
-                let Ok(permit) = self.service.workers.clone().try_acquire_owned() else {
-                    break;
-                };
-                permit
+            let Some(permit) = launch_permit(&mut self.permit, &self.service) else {
+                break;
             };
             let ordinal = record
                 .handles
@@ -428,6 +420,19 @@ impl Registration {
         self.pool.home.native_changed.notify_all();
         Ok(())
     }
+}
+
+fn launch_permit(
+    permit: &mut Option<OwnedSemaphorePermit>,
+    service: &ProcessService,
+) -> Option<OwnedSemaphorePermit> {
+    if let Some(permit) = permit.take() {
+        return Some(permit);
+    }
+    if service.pressure.load(Ordering::Acquire) > 0 {
+        return None;
+    }
+    service.workers.clone().try_acquire_owned().ok()
 }
 
 fn launch_worker(
