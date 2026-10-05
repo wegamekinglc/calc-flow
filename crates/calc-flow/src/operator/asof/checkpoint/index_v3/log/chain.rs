@@ -188,44 +188,14 @@ pub(in crate::operator::asof) fn validate_chain<'a>(
     let mut preceding: Option<&Descriptor> = None;
     for (ordinal, descriptor) in inventory.iter().enumerate() {
         check_cancelled()?;
-        if descriptor.ordinal as usize != ordinal || descriptor.epoch > current_epoch {
-            return Err(super::super::mismatch(
-                "ASOF log inventory coordinate differs",
-            ));
-        }
-        let segment = segments
-            .get(&descriptor.name())
-            .ok_or_else(|| super::super::mismatch("ASOF log segment is missing"))?;
-        if segment.sha256() != descriptor.sha256 || segment.bytes().len() as u64 != descriptor.bytes
-        {
-            return Err(super::super::mismatch(
-                "ASOF log inventory digest or length differs",
-            ));
-        }
-        let frame = decode(segment, fingerprint)?;
-        if (frame.generation, frame.ordinal, frame.epoch)
-            != (descriptor.generation, descriptor.ordinal, descriptor.epoch)
-        {
-            return Err(super::super::mismatch(
-                "ASOF log header and inventory differ",
-            ));
-        }
-        match preceding {
-            None if frame.kind == Kind::Base
-                && frame.preceding_epoch == 0
-                && frame.preceding_sha256 == [0; 32] => {}
-            Some(previous)
-                if frame.kind == Kind::Delta
-                    && frame.generation == previous.generation
-                    && previous.epoch < frame.epoch
-                    && frame.preceding_epoch == previous.epoch
-                    && frame.preceding_sha256 == digest(&previous.sha256)? => {}
-            _ => {
-                return Err(super::super::mismatch(
-                    "ASOF log materialized ancestry differs",
-                ));
-            }
-        }
+        let frame = validated_frame(
+            ordinal,
+            descriptor,
+            segments,
+            current_epoch,
+            fingerprint,
+            preceding,
+        )?;
         frames.push(frame);
         preceding = Some(descriptor);
     }
@@ -260,4 +230,70 @@ pub(in crate::operator::asof) fn requires_compaction(
             .and_then(|bytes| bytes.checked_add(next_metadata_bytes))
             .is_none_or(|bytes| bytes > max_state_bytes)
         || (retired_bytes != 0 && retired_bytes >= full_base_bytes)
+}
+
+fn validated_frame<'a>(
+    ordinal: usize,
+    descriptor: &Descriptor,
+    segments: &'a BTreeMap<String, StateSegment>,
+    current_epoch: u64,
+    fingerprint: &str,
+    preceding: Option<&Descriptor>,
+) -> Result<Frame<'a>> {
+    if descriptor.ordinal as usize != ordinal || descriptor.epoch > current_epoch {
+        return Err(super::super::mismatch(
+            "ASOF log inventory coordinate differs",
+        ));
+    }
+    let segment = checked_segment(segments, descriptor)?;
+    let frame = decode(segment, fingerprint)?;
+    if (frame.generation, frame.ordinal, frame.epoch)
+        != (descriptor.generation, descriptor.ordinal, descriptor.epoch)
+    {
+        return Err(super::super::mismatch(
+            "ASOF log header and inventory differ",
+        ));
+    }
+    validate_ancestry(&frame, preceding)?;
+    Ok(frame)
+}
+
+fn checked_segment<'a>(
+    segments: &'a BTreeMap<String, StateSegment>,
+    descriptor: &Descriptor,
+) -> Result<&'a StateSegment> {
+    let segment = segments
+        .get(&descriptor.name())
+        .ok_or_else(|| super::super::mismatch("ASOF log segment is missing"))?;
+    if segment.sha256() != descriptor.sha256 || segment.bytes().len() as u64 != descriptor.bytes {
+        return Err(super::super::mismatch(
+            "ASOF log inventory digest or length differs",
+        ));
+    }
+    Ok(segment)
+}
+
+fn validate_ancestry(frame: &Frame<'_>, preceding: Option<&Descriptor>) -> Result<()> {
+    let valid = match preceding {
+        None => {
+            frame.kind == Kind::Base
+                && frame.preceding_epoch == 0
+                && frame.preceding_sha256 == [0; 32]
+        }
+        Some(previous) => valid_delta_ancestry(frame, previous)?,
+    };
+    if !valid {
+        return Err(super::super::mismatch(
+            "ASOF log materialized ancestry differs",
+        ));
+    }
+    Ok(())
+}
+
+fn valid_delta_ancestry(frame: &Frame<'_>, previous: &Descriptor) -> Result<bool> {
+    Ok(frame.kind == Kind::Delta
+        && frame.generation == previous.generation
+        && previous.epoch < frame.epoch
+        && frame.preceding_epoch == previous.epoch
+        && frame.preceding_sha256 == digest(&previous.sha256)?)
 }

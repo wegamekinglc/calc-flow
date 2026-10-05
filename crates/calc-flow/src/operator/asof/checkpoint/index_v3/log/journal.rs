@@ -113,16 +113,44 @@ impl Journal {
         mut reserve: impl FnMut(u64) -> Result<MemoryReservation>,
         name: &str,
     ) -> Result<Self> {
+        let scratch_bytes = self.edit_scratch(edits.len())?;
+        let _scratch = reserve(scratch_bytes)?;
+        let pending = self.pending_edits(edits)?;
+        let dirty_keys = self.dirty_keys(edits);
+        let mut changes = Vec::with_capacity(pending.len());
+        changes.extend(pending.into_values());
+        if changes.is_empty() && dirty_keys.is_empty() {
+            return Ok(Self::default());
+        }
+        let bytes = journal_bytes(
+            &changes,
+            &dirty_keys,
+            (changes.capacity(), dirty_keys.capacity()),
+            &live_allocation_after_commit,
+            name,
+        )?;
+        let lease = reserve(bytes)?;
+        Ok(Self {
+            changes,
+            keys: dirty_keys,
+            lease: Some(lease),
+            rebase: false,
+        })
+    }
+
+    fn edit_scratch(&self, edits: usize) -> Result<u64> {
         let count = self
             .changes
             .len()
-            .checked_add(edits.len())
+            .checked_add(edits)
             .ok_or_else(|| super::super::mismatch("ASOF journal count overflowed"))?;
-        let scratch_bytes = (count as u64)
+        (count as u64)
             .checked_mul((size_of::<Change>() + 512) as u64)
             .and_then(|bytes| bytes.checked_add(self.keys.len() as u64 * 512 + 4096))
-            .ok_or_else(|| super::super::mismatch("ASOF journal workspace overflowed"))?;
-        let _scratch = reserve(scratch_bytes)?;
+            .ok_or_else(|| super::super::mismatch("ASOF journal workspace overflowed"))
+    }
+
+    fn pending_edits(&self, edits: &[Change]) -> Result<BTreeMap<Identity, Change>> {
         let mut pending = self
             .changes
             .iter()
@@ -146,6 +174,10 @@ impl Journal {
                 pending.insert(edit.identity.clone(), edit.clone());
             }
         }
+        Ok(pending)
+    }
+
+    fn dirty_keys(&self, edits: &[Change]) -> Vec<Encoding> {
         let mut keys = self
             .keys
             .iter()
@@ -159,38 +191,37 @@ impl Journal {
         }
         let mut dirty_keys = Vec::with_capacity(keys.len());
         dirty_keys.extend(keys.into_values());
-        let mut changes = Vec::with_capacity(pending.len());
-        changes.extend(pending.into_values());
-        if changes.is_empty() && dirty_keys.is_empty() {
-            return Ok(Self::default());
-        }
-        let mut retired = BTreeMap::new();
-        for encoding in changes
-            .iter()
-            .flat_map(Change::encodings)
-            .chain(dirty_keys.iter())
-        {
-            if let Some((address, bytes)) = encoding.allocation()
-                && !live_allocation_after_commit(address)
-            {
-                retired.entry(address).or_insert(bytes);
-            }
-        }
-        let bytes = changes.capacity() as u64 * size_of::<Change>() as u64
-            + dirty_keys.capacity() as u64 * size_of::<Encoding>() as u64;
-        let bytes = retired
-            .values()
-            .try_fold(bytes, |bytes, retired| checked(name, bytes, *retired))?;
-        let lease = reserve(bytes)?;
-        Ok(Self {
-            changes,
-            keys: dirty_keys,
-            lease: Some(lease),
-            rebase: false,
-        })
+        dirty_keys
     }
 
     pub fn install(&mut self, prepared: Self) {
         *self = prepared;
     }
+}
+
+fn journal_bytes(
+    changes: &[Change],
+    dirty_keys: &[Encoding],
+    capacities: (usize, usize),
+    live_allocation_after_commit: &impl Fn(usize) -> bool,
+    name: &str,
+) -> Result<u64> {
+    let mut retired = BTreeMap::new();
+    for encoding in changes
+        .iter()
+        .flat_map(Change::encodings)
+        .chain(dirty_keys.iter())
+    {
+        if let Some((address, bytes)) = encoding.allocation()
+            && !live_allocation_after_commit(address)
+        {
+            retired.entry(address).or_insert(bytes);
+        }
+    }
+    let bytes = capacities.0 as u64 * size_of::<Change>() as u64
+        + capacities.1 as u64 * size_of::<Encoding>() as u64;
+    let bytes = retired
+        .values()
+        .try_fold(bytes, |bytes, retired| checked(name, bytes, *retired))?;
+    Ok(bytes)
 }
