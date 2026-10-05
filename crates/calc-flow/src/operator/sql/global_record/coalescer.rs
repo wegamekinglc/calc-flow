@@ -37,27 +37,35 @@ fn capacity(
         .enumerate()
         .try_fold(base, |bytes, (column, field)| {
             stop.check()?;
-            let backing = match field.data_type() {
-                DataType::Utf8 => string_capacity::<i32>(records, previous, column, stop, name)?,
-                DataType::LargeUtf8 => {
-                    string_capacity::<i64>(records, previous, column, stop, name)?
-                }
-                dtype => {
-                    let width = dtype
-                        .primitive_width()
-                        .or_else(|| {
-                            matches!(dtype, DataType::Boolean | DataType::Null).then_some(1)
-                        })
-                        .ok_or_else(|| df_error(name, "global coalescer column is unsupported"))?;
-                    checked_bytes(0, [(ROWS, width)], name)?
-                }
-            };
+            let backing =
+                column_capacity(field.data_type(), records, previous, column, stop, name)?;
             checked_bytes(
                 bytes,
                 [(backing, 1), (ROWS.div_ceil(8), 1), (1, 1024)],
                 name,
             )
         })
+}
+
+fn column_capacity(
+    dtype: &DataType,
+    records: &[RecordBatch],
+    previous: Option<&State>,
+    column: usize,
+    stop: &GatherStop,
+    name: &str,
+) -> Result<usize> {
+    match dtype {
+        DataType::Utf8 => string_capacity::<i32>(records, previous, column, stop, name),
+        DataType::LargeUtf8 => string_capacity::<i64>(records, previous, column, stop, name),
+        dtype => {
+            let width = dtype
+                .primitive_width()
+                .or_else(|| matches!(dtype, DataType::Boolean | DataType::Null).then_some(1))
+                .ok_or_else(|| df_error(name, "global coalescer column is unsupported"))?;
+            checked_bytes(0, [(ROWS, width)], name)
+        }
+    }
 }
 
 fn string_capacity<O: OffsetSizeTrait>(
@@ -79,15 +87,21 @@ fn string_capacity<O: OffsetSizeTrait>(
         let offsets = array.value_offsets();
         let bytes = (offsets[array.len()] - offsets[0]).as_usize();
         total = checked_bytes(total, [(bytes, 1)], name)?;
-        for (index, pair) in offsets.windows(2).enumerate() {
-            if index % ROWS == 0 {
-                stop.check()?;
-            }
-            largest = largest.max((pair[1] - pair[0]).as_usize());
-        }
+        largest = largest.max(largest_string(offsets, stop)?);
     }
     let values = checked_bytes(0, [(ROWS, largest)], name)?.min(total);
     checked_bytes(values, [(ROWS + 1, size_of::<O>())], name)
+}
+
+fn largest_string<O: OffsetSizeTrait>(offsets: &[O], stop: &GatherStop) -> Result<usize> {
+    let mut largest = 0;
+    for (index, pair) in offsets.windows(2).enumerate() {
+        if index % ROWS == 0 {
+            stop.check()?;
+        }
+        largest = largest.max((pair[1] - pair[0]).as_usize());
+    }
+    Ok(largest)
 }
 
 pub(super) fn run(
@@ -95,6 +109,36 @@ pub(super) fn run(
     predicate: &super::super::predicate::InputPredicate,
     stop: &GatherStop,
 ) -> Result<Update> {
+    reserve_buffers(work, stop)?;
+    let saved = work
+        .previous
+        .as_ref()
+        .map_or(work.states.as_slice(), |state| state.complete.as_slice());
+    let check = || stop.check();
+    let mut accumulators = work.accumulators(saved, &check)?;
+    let schema = work.records[0].schema();
+    let mut coalescer =
+        BatchCoalescer::new(schema.clone(), ROWS).with_biggest_coalesce_batch_size(Some(ROWS / 2));
+    restore_tail(work, &mut coalescer, stop)?;
+    update_records(
+        work,
+        predicate,
+        &mut coalescer,
+        &mut accumulators,
+        stop,
+        &check,
+    )?;
+    finish_update(
+        work,
+        &mut accumulators,
+        &mut coalescer,
+        schema,
+        stop,
+        &check,
+    )
+}
+
+fn reserve_buffers(work: &RecordWork, stop: &GatherStop) -> Result<()> {
     let bound = capacity(&work.records, work.previous.as_deref(), stop, &work.name)?;
     super::super::ensure_reservation(
         work.coalesced_scratch
@@ -110,15 +154,14 @@ pub(super) fn run(
         checked_bytes(bound, [(work.expressions.len(), 4096)], &work.name)?,
         &work.name,
     )?;
-    let saved = work
-        .previous
-        .as_ref()
-        .map_or(work.states.as_slice(), |state| state.complete.as_slice());
-    let check = || stop.check();
-    let mut accumulators = work.accumulators(saved, &check)?;
-    let schema = work.records[0].schema();
-    let mut coalescer =
-        BatchCoalescer::new(schema.clone(), ROWS).with_biggest_coalesce_batch_size(Some(ROWS / 2));
+    Ok(())
+}
+
+fn restore_tail(
+    work: &RecordWork,
+    coalescer: &mut BatchCoalescer,
+    stop: &GatherStop,
+) -> Result<()> {
     if let Some(previous) = &work.previous {
         for offset in (0..previous.tail.num_rows()).step_by(ROWS / 2) {
             stop.check()?;
@@ -131,37 +174,95 @@ pub(super) fn run(
                 .map_err(|error| df_error(&work.name, error))?;
         }
     }
+    Ok(())
+}
+
+type Accumulators = [Box<dyn datafusion::logical_expr::Accumulator>];
+
+fn update_records(
+    work: &RecordWork,
+    predicate: &super::super::predicate::InputPredicate,
+    coalescer: &mut BatchCoalescer,
+    accumulators: &mut Accumulators,
+    stop: &GatherStop,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<()> {
     for record in &work.records {
         stop.check()?;
         for offset in (0..record.num_rows()).step_by(work.batch_size) {
             stop.check()?;
             let batch = record.slice(offset, work.batch_size.min(record.num_rows() - offset));
-            let mask = predicate.evaluate(&batch, &work.name)?;
-            coalescer
-                .push_batch_with_filter(batch, &mask)
-                .map_err(|error| df_error(&work.name, error))?;
-            while let Some(batch) = coalescer.next_completed_batch() {
-                work.update_batch(&batch, &mut accumulators, &check)?;
-            }
+            push_filtered(work, predicate, batch, coalescer, accumulators, check)?;
         }
     }
-    let complete = work.values(&mut accumulators, &check)?;
+    Ok(())
+}
+
+fn push_filtered(
+    work: &RecordWork,
+    predicate: &super::super::predicate::InputPredicate,
+    batch: RecordBatch,
+    coalescer: &mut BatchCoalescer,
+    accumulators: &mut Accumulators,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<()> {
+    let mask = predicate.evaluate(&batch, &work.name)?;
+    coalescer
+        .push_batch_with_filter(batch, &mask)
+        .map_err(|error| df_error(&work.name, error))?;
+    while let Some(batch) = coalescer.next_completed_batch() {
+        work.update_batch(&batch, accumulators, check)?;
+    }
+    Ok(())
+}
+
+fn finish_update(
+    work: &RecordWork,
+    accumulators: &mut Accumulators,
+    coalescer: &mut BatchCoalescer,
+    schema: super::SchemaRef,
+    stop: &GatherStop,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<Update> {
+    let complete = work.values(accumulators, check)?;
+    let tail = finish_tail(coalescer, schema, &work.name)?;
+    if tail.num_rows() != 0 {
+        work.update_batch(&tail, accumulators, check)?;
+    }
+    let values = work.values(accumulators, check)?;
+    let state = finish_state(work, complete, tail, stop)?;
+    Ok(Update {
+        values,
+        coalesced: Some(state),
+    })
+}
+
+fn finish_tail(
+    coalescer: &mut BatchCoalescer,
+    schema: super::SchemaRef,
+    name: &str,
+) -> Result<RecordBatch> {
     coalescer
         .finish_buffered_batch()
-        .map_err(|error| df_error(&work.name, error))?;
+        .map_err(|error| df_error(name, error))?;
     let tail = coalescer
         .next_completed_batch()
         .unwrap_or_else(|| RecordBatch::new_empty(schema));
     if tail.num_rows() >= ROWS || coalescer.next_completed_batch().is_some() {
         return Err(df_error(
-            &work.name,
+            name,
             "global coalescer tail exceeds one partial batch",
         ));
     }
-    if tail.num_rows() != 0 {
-        work.update_batch(&tail, &mut accumulators, &check)?;
-    }
-    let values = work.values(&mut accumulators, &check)?;
+    Ok(tail)
+}
+
+fn finish_state(
+    work: &RecordWork,
+    complete: Vec<Vec<ScalarValue>>,
+    tail: RecordBatch,
+    stop: &GatherStop,
+) -> Result<Arc<State>> {
     let reservation = work
         .coalesced_credit
         .as_ref()
@@ -173,14 +274,11 @@ pub(super) fn run(
         reservation.shrink(reservation.size() - charge);
     }
     stop.check()?;
-    Ok(Update {
-        values,
-        coalesced: Some(Arc::new(State {
-            complete,
-            tail,
-            _reservation: reservation,
-        })),
-    })
+    Ok(Arc::new(State {
+        complete,
+        tail,
+        _reservation: reservation,
+    }))
 }
 
 fn retained_bytes(complete: &[Vec<ScalarValue>], tail: &RecordBatch, name: &str) -> Result<usize> {
