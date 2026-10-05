@@ -2,12 +2,13 @@ use super::{FileFormat, FileSource, FileSourceConfig};
 use async_trait::async_trait;
 use calc_flow::{
     Cursor, Result, SourceCapabilities, SourceEvent, SourceHistoryContext, SourceHistoryLimits,
-    SourceHistoryManifestEntry, SourceHistoryReplayFactory, SourceHistorySpec, StreamSource,
+    SourceHistoryManifestEntry, SourceHistoryReplayFactory, SourceHistorySpec, StateHandle,
+    StreamSource,
 };
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
-    path::{Component, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::Arc,
 };
 
@@ -80,39 +81,57 @@ impl FrozenFileSource {
     }
 
     fn filenames(&self, history: &SourceHistoryManifestEntry) -> Result<Vec<PathBuf>> {
-        let invalid = || calc_flow::CalcFlowError::CheckpointMismatch {
-            message: "invalid frozen file history".into(),
-        };
+        self.validate_history_configuration(history)?;
+        let files = history
+            .inline_metadata
+            .get("files")
+            .and_then(Value::as_array)
+            .ok_or_else(invalid_history)?;
+        if files.len() != history.segments.len() || files.len() > self.limits.max_segments {
+            return Err(invalid_history());
+        }
+        let mut paths = Vec::with_capacity(files.len());
+        for (index, file) in files.iter().enumerate() {
+            let path = self.history_filename(
+                file,
+                index,
+                &history.segments[index],
+                paths.last().map(PathBuf::as_path),
+            )?;
+            paths.push(path);
+        }
+        Ok(paths)
+    }
+
+    fn validate_history_configuration(&self, history: &SourceHistoryManifestEntry) -> Result<()> {
         if history.contract != CONTRACT
             || history.format_version != calc_flow::SOURCE_HISTORY_FORMAT_VERSION
             || history.inline_metadata.len() != 2
             || history.inline_metadata.get("configuration") != Some(&self.configuration())
         {
-            return Err(invalid());
+            return Err(invalid_history());
         }
-        let files = history
-            .inline_metadata
-            .get("files")
-            .and_then(Value::as_array)
-            .ok_or_else(invalid)?;
-        if files.len() != history.segments.len() || files.len() > self.limits.max_segments {
-            return Err(invalid());
+        Ok(())
+    }
+
+    fn history_filename(
+        &self,
+        file: &Value,
+        index: usize,
+        handle: &StateHandle,
+        previous: Option<&Path>,
+    ) -> Result<PathBuf> {
+        let name = file.as_str().ok_or_else(invalid_history)?;
+        let path = PathBuf::from(name);
+        if path.components().count() != 1
+            || !matches!(path.components().next(), Some(Component::Normal(_)))
+            || previous.is_some_and(|last| last >= path.as_path())
+            || handle.segment_id() != segment_id(index)
+            || handle.byte_len() > self.inner.config.max_file_bytes
+        {
+            return Err(invalid_history());
         }
-        let mut paths = Vec::with_capacity(files.len());
-        for (index, file) in files.iter().enumerate() {
-            let name = file.as_str().ok_or_else(invalid)?;
-            let path = PathBuf::from(name);
-            if path.components().count() != 1
-                || !matches!(path.components().next(), Some(Component::Normal(_)))
-                || paths.last().is_some_and(|last| last >= &path)
-                || history.segments[index].segment_id() != segment_id(index)
-                || history.segments[index].byte_len() > self.inner.config.max_file_bytes
-            {
-                return Err(invalid());
-            }
-            paths.push(path);
-        }
-        Ok(paths)
+        Ok(path)
     }
 
     async fn capture(&mut self, history: &SourceHistoryContext) -> Result<()> {
@@ -197,5 +216,11 @@ impl StreamSource for FrozenFileSource {
 
     async fn close(&mut self) -> Result<()> {
         self.inner.close().await
+    }
+}
+
+fn invalid_history() -> calc_flow::CalcFlowError {
+    calc_flow::CalcFlowError::CheckpointMismatch {
+        message: "invalid frozen file history".into(),
     }
 }
