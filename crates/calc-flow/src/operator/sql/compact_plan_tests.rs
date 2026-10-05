@@ -56,15 +56,6 @@ async fn test_compact_paid_sync_native_ineligible_and_untrusted_bindings_release
         (DataType::Float64, "SELECT SUM(value) FROM events"),
         (DataType::Int64, "SELECT AVG(value) FROM events"),
         (DataType::Int64, "SELECT COUNT(DISTINCT value) FROM events"),
-        (DataType::Int64, "SELECT SUM(value + 1) FROM events"),
-        (
-            DataType::Int64,
-            "SELECT SUM(value) FILTER (WHERE value > 0) FROM events",
-        ),
-        (
-            DataType::Int64,
-            "SELECT SUM(value) FROM events WHERE value > 0",
-        ),
         (
             DataType::Decimal128(10, -1),
             "SELECT AVG(value) FROM events",
@@ -95,7 +86,43 @@ async fn test_compact_paid_sync_native_ineligible_and_untrusted_bindings_release
         );
         assert_eq!(pool.reserved(), 0);
     }
+    eligible_expression_plans_release_credit(&runtime, &pool).await;
     untrusted_bindings_release_credit(&runtime, &pool);
+}
+
+async fn eligible_expression_plans_release_credit(
+    runtime: &DataFusionRuntime,
+    pool: &Arc<dyn MemoryPool>,
+) {
+    for text in [
+        "SELECT SUM(value + 1) FROM events",
+        "SELECT SUM(value) FILTER (WHERE value > 0) FROM events",
+        "SELECT SUM(value) FROM events WHERE value > 0",
+    ] {
+        let query = crate::expression::parse_select_query(text).unwrap();
+        let logical = schema(&DataType::Int64);
+        let (raw, analyzed) = runtime
+            .incremental_sql_plan(&query, "events", logical.clone(), "native")
+            .await
+            .unwrap();
+        let actual =
+            IncrementalSql::from_plan(runtime, &query, logical.clone(), &raw, &analyzed, "native")
+                .unwrap()
+                .unwrap();
+        let expected = IncrementalSql::plan_sync(
+            runtime,
+            &query,
+            "events",
+            logical.clone(),
+            logical,
+            "native",
+        )
+        .unwrap()
+        .unwrap();
+        same_native(&actual, &expected);
+        drop((actual, expected));
+        assert_eq!(pool.reserved(), 0);
+    }
 }
 
 fn untrusted_bindings_release_credit(runtime: &DataFusionRuntime, pool: &Arc<dyn MemoryPool>) {
@@ -156,7 +183,7 @@ fn untrusted_bindings_release_credit(runtime: &DataFusionRuntime, pool: &Arc<dyn
     )
     .unwrap()
     .unwrap();
-    assert_eq!(candidate.keys, vec![1]);
+    assert_eq!(key_columns(&candidate), vec![1]);
     assert_eq!(candidate.variable_columns, Vec::<usize>::new());
     drop(candidate);
     assert_eq!(pool.reserved(), 0);
@@ -582,7 +609,7 @@ async fn native_parity(runtime: &DataFusionRuntime, kind: DataType, grouped: boo
         .unwrap();
         same_native(&actual, &oracle);
         assert_eq!(
-            actual.keys,
+            key_columns(&actual),
             if grouped {
                 vec![physical.index_of("key").unwrap()]
             } else {
@@ -605,11 +632,31 @@ async fn native_parity(runtime: &DataFusionRuntime, kind: DataType, grouped: boo
     }
 }
 
+fn key_columns(plan: &IncrementalSql) -> Vec<usize> {
+    plan.keys
+        .iter()
+        .map(|key| {
+            key.expression
+                .downcast_ref::<Column>()
+                .expect("direct column key")
+                .index()
+        })
+        .collect()
+}
+
+fn same_group_keys(actual: &IncrementalSql, oracle: &IncrementalSql) {
+    assert_eq!(actual.keys.len(), oracle.keys.len());
+    for (actual, oracle) in actual.keys.iter().zip(&oracle.keys) {
+        assert_eq!(actual.field, oracle.field);
+        assert!(actual.expression.as_ref().eq(oracle.expression.as_ref()));
+    }
+}
+
 fn same_native(actual: &IncrementalSql, oracle: &IncrementalSql) {
     assert_eq!(actual.schema, oracle.schema);
     assert_eq!(actual.aggregate_schema, oracle.aggregate_schema);
     assert_eq!(actual.output_schema, oracle.output_schema);
-    assert_eq!(actual.keys, oracle.keys);
+    same_group_keys(actual, oracle);
     assert_eq!(actual.variable_columns, oracle.variable_columns);
     assert_eq!(
         (

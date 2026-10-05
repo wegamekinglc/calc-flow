@@ -22,6 +22,7 @@ enum StateColumn {
 }
 
 pub(in crate::operator::sql) struct NativeStateDescriptor {
+    pub(in crate::operator::sql) key_inputs: Vec<NativeAggregateInput>,
     pub(in crate::operator::sql) key_fields: Vec<FieldRef>,
     pub(in crate::operator::sql) aggregate_names: Vec<String>,
     pub(in crate::operator::sql) aggregate_inputs: Vec<Vec<NativeAggregateInput>>,
@@ -84,11 +85,7 @@ impl IncrementalSql {
         name: &str,
     ) -> Result<NativeStateDescriptor> {
         let reservation = self.descriptor_reservation(name)?;
-        let key_fields = self
-            .keys
-            .iter()
-            .map(|&key| self.schema.fields()[key].clone())
-            .collect::<Vec<_>>();
+        let (key_fields, key_inputs) = self.native_keys_descriptor(name)?;
         let aggregate_names = self
             .aggregates
             .iter()
@@ -121,6 +118,7 @@ impl IncrementalSql {
         let expression_identity_bytes = aggregate_inputs
             .iter()
             .flatten()
+            .chain(&key_inputs)
             .chain(aggregate_filters.iter().flatten())
             .chain(&projection)
             .chain(&post_filter)
@@ -165,6 +163,7 @@ impl IncrementalSql {
             )
             .collect::<Vec<_>>();
         Ok(NativeStateDescriptor {
+            key_inputs,
             key_fields,
             aggregate_names,
             aggregate_inputs,
@@ -183,6 +182,23 @@ impl IncrementalSql {
             policy: self.native_policy(),
             _reservation: reservation,
         })
+    }
+
+    fn native_keys_descriptor(
+        &self,
+        name: &str,
+    ) -> Result<(Vec<FieldRef>, Vec<NativeAggregateInput>)> {
+        let key_fields = self
+            .keys
+            .iter()
+            .map(|key| key.field.clone())
+            .collect::<Vec<_>>();
+        let key_inputs = self
+            .keys
+            .iter()
+            .map(|key| describe_input(key.expression.as_ref(), &self.schema, 0, name))
+            .collect::<Result<Vec<_>>>()?;
+        Ok((key_fields, key_inputs))
     }
 
     fn native_aggregate_filters(&self, name: &str) -> Result<Vec<Option<NativeAggregateInput>>> {

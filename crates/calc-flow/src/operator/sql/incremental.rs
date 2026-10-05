@@ -58,6 +58,10 @@ pub(in crate::operator::sql) mod global_record;
 #[path = "native_expression.rs"]
 mod native_expression;
 
+#[path = "group_key.rs"]
+mod group_key;
+
+use group_key::GroupKey;
 use native_expression::output_work;
 
 #[path = "output_order.rs"]
@@ -79,7 +83,7 @@ pub(super) struct IncrementalSql {
     projection_nodes: usize,
     input_nodes: usize,
     input_columns: InputColumns,
-    keys: Vec<usize>,
+    keys: Vec<GroupKey>,
     variable_columns: Vec<usize>,
     variable_extrema: Vec<usize>,
     converter: Option<RowConverter>,
@@ -435,7 +439,7 @@ impl PartialGroups {
 }
 
 fn grouped_finalizer_charge(
-    keys: &[usize],
+    keys: &[GroupKey],
     aggregates: &[Arc<AggregateFunctionExpr>],
     name: &str,
 ) -> Result<usize> {
@@ -586,7 +590,7 @@ impl IncrementalSql {
         analyzed: &LogicalPlan,
         name: &str,
     ) -> Result<Option<Self>> {
-        let Some((keys, variable_columns)) = plan_inputs(raw, &schema, name)? else {
+        let Some(variable_columns) = plan_inputs(raw, &schema, name)? else {
             return Ok(None);
         };
         let Some((projection, aggregate)) = shape(analyzed) else {
@@ -605,7 +609,7 @@ impl IncrementalSql {
             query,
             aggregate,
             &schema,
-            keys.len(),
+            aggregate.group_expr.len(),
             projection_nodes,
             input_nodes,
             name,
@@ -617,7 +621,7 @@ impl IncrementalSql {
         else {
             return Ok(None);
         };
-        let (aggregates, projection, aggregate_filters, predicate, post_filter) = plan;
+        let (aggregates, projection, aggregate_filters, predicate, post_filter, keys) = plan;
         let input_columns = input_columns(&aggregates, &keys, &aggregate_filters);
         let Some(aggregate_bytes) = aggregate_bytes(&aggregates, name)? else {
             return Ok(None);
@@ -633,13 +637,13 @@ impl IncrementalSql {
         let sequential = if global_records.is_some() {
             None
         } else {
-            match initial_grouped_proof(runtime, &reservation, &keys, &schema, &aggregates, name)? {
+            match initial_grouped_proof(runtime, &reservation, &keys, &aggregates, name)? {
                 GroupStrategy::Unsupported => return Ok(None),
                 GroupStrategy::Exact => None,
                 GroupStrategy::Sequential(proof) => Some(proof),
             }
         };
-        let (converter, finalizer_bytes) = grouped_layout(&keys, &aggregates, &schema, name)?;
+        let (converter, finalizer_bytes) = grouped_layout(&keys, &aggregates, name)?;
         let variable_extrema = variable_extrema_slots(&aggregates);
         Ok(Some(Self {
             schema,
@@ -726,8 +730,7 @@ impl IncrementalSql {
             return Err(df_error(name, "restored proof requires an empty candidate"));
         }
         if let grouped_float::Policy::SequentialGroupedFloatV1(policy) = policy {
-            let layout = grouped_float::group_layout(&self.keys, &self.schema)
-                .expect("certified grouped key");
+            let layout = grouped_float::group_layout(&self.keys).expect("certified grouped key");
             let rows =
                 usize::try_from(policy.max_record_rows).map_err(|error| df_error(name, error))?;
             self.sequential = Some(grouped_float::Proof::new(
@@ -757,8 +760,8 @@ impl IncrementalSql {
                     .iter()
                     .map(RecordBatch::num_rows)
                     .fold(previous_rows, usize::max);
-                let layout = grouped_float::group_layout(&self.keys, &self.schema)
-                    .expect("certified grouped key");
+                let layout =
+                    grouped_float::group_layout(&self.keys).expect("certified grouped key");
                 grouped_float::Proof::new(
                     self.reservation.new_empty(),
                     previous.policy.config,
@@ -1138,12 +1141,10 @@ impl IncrementalSql {
         self.keys
             .first()
             .filter(|_| self.keys.len() == 1)
-            .and_then(|&index| {
-                native_key_width(self.schema.field(index).data_type()).map(|width| (index, width))
-            })
-            .map(|(index, width)| {
+            .and_then(|key| native_key_width(key.field.data_type()).map(|width| (key, width)))
+            .map(|(key, width)| {
                 NativeKeys::new(
-                    self.schema.field(index),
+                    &key.field,
                     rows.min(CHUNK_ROWS),
                     width,
                     self.reservation.new_empty(),
@@ -1179,6 +1180,7 @@ impl IncrementalSql {
         if chunk.num_rows() == 0 {
             return Ok(());
         }
+        let key_arrays = group_key::evaluate(&self.keys, chunk, name)?;
         let owned_filters = if self.keys.is_empty() {
             self.filters(chunk, name)?
         } else {
@@ -1213,7 +1215,7 @@ impl IncrementalSql {
             return update_global(&arguments, &filters, &mut candidates.groups, name);
         }
         if let Some(native) = candidates.native.as_mut() {
-            native.intern_selected(chunk.column(self.keys[0]).clone(), selection, name)?;
+            native.intern_selected(key_arrays[0].clone(), selection, name)?;
             let count = native.groups.len();
             let partial = candidates
                 .partial
@@ -1226,7 +1228,14 @@ impl IncrementalSql {
                 .fetch_max(count, std::sync::atomic::Ordering::SeqCst);
             return Ok(());
         }
-        self.update_grouped_chunk(chunk, &arguments, &filters, selection, candidates, name)
+        self.update_grouped_chunk(
+            &key_arrays,
+            &arguments,
+            &filters,
+            selection,
+            candidates,
+            name,
+        )
     }
 
     fn filters(&self, chunk: &RecordBatch, name: &str) -> Result<Vec<Option<BooleanArray>>> {
@@ -1263,33 +1272,29 @@ impl IncrementalSql {
 
     fn update_grouped_chunk(
         &self,
-        chunk: &RecordBatch,
+        key_arrays: &[ArrayRef],
         arguments: &[Vec<ArrayRef>],
         filters: &[Option<&BooleanArray>],
         selection: Option<&BooleanArray>,
         candidates: &mut InputCandidates,
         name: &str,
     ) -> Result<()> {
-        let key_arrays = self
-            .keys
-            .iter()
-            .map(|&index| chunk.column(index).clone())
-            .collect::<Vec<_>>();
+        let rows = key_arrays[0].len();
         #[cfg(test)]
         self.encoded_rows
-            .fetch_add(chunk.num_rows(), std::sync::atomic::Ordering::SeqCst);
+            .fetch_add(rows, std::sync::atomic::Ordering::SeqCst);
         let encoded = self
             .converter
             .as_ref()
             .expect("grouped key converter")
-            .convert_columns(&key_arrays)
+            .convert_columns(key_arrays)
             .map_err(|error| df_error(name, error))?;
         let partial = candidates
             .partial
             .as_mut()
             .expect("grouped partial accumulators");
-        let mut indices = Vec::with_capacity(chunk.num_rows());
-        for row in 0..chunk.num_rows() {
+        let mut indices = Vec::with_capacity(rows);
+        for row in 0..rows {
             if selection.is_some_and(|selection| !predicate::selected(selection, row)) {
                 indices.push(0);
                 continue;
@@ -1311,11 +1316,11 @@ impl IncrementalSql {
                     .len()
                     .checked_add(new_count)
                     .ok_or_else(|| df_error(name, "sequential group count overflowed"))?;
-                let (_, width) = grouped_float::group_layout(&self.keys, &self.schema)
-                    .expect("certified grouped key");
+                let (_, width) =
+                    grouped_float::group_layout(&self.keys).expect("certified grouped key");
                 proof.grow(count, width, &self.aggregates, name)?;
             }
-            let candidate = self.candidate(previous, key, Some((&key_arrays, row)), name)?;
+            let candidate = self.candidate(previous, key, Some((key_arrays, row)), name)?;
             let rank = partial.add_slot(slot, name)?;
             candidates.touched.insert(candidate.group.key.clone(), rank);
             candidates.groups.insert(slot, candidate);
@@ -1822,7 +1827,7 @@ fn aggregate_filter(
 
 fn input_columns(
     aggregates: &[Arc<AggregateFunctionExpr>],
-    keys: &[usize],
+    keys: &[GroupKey],
     filters: &[Option<Arc<dyn PhysicalExpr>>],
 ) -> InputColumns {
     use datafusion::physical_expr::utils::collect_columns;
@@ -1844,7 +1849,11 @@ fn input_columns(
         .iter()
         .flatten()
         .copied()
-        .chain(keys.iter().copied())
+        .chain(
+            keys.iter()
+                .flat_map(|key| collect_columns(&key.expression))
+                .map(|column| column.index()),
+        )
         .chain(
             filters
                 .iter()
@@ -1991,24 +2000,23 @@ fn prepare_sync_plan(
 }
 
 fn grouped_layout(
-    keys: &[usize],
+    keys: &[GroupKey],
     aggregates: &[Arc<AggregateFunctionExpr>],
-    schema: &SchemaRef,
     name: &str,
 ) -> Result<(Option<RowConverter>, usize)> {
     Ok((
-        row_converter(keys, schema, name)?,
+        row_converter(keys, name)?,
         grouped_finalizer_charge(keys, aggregates, name)?,
     ))
 }
 
-fn row_converter(keys: &[usize], schema: &SchemaRef, name: &str) -> Result<Option<RowConverter>> {
+fn row_converter(keys: &[GroupKey], name: &str) -> Result<Option<RowConverter>> {
     if keys.is_empty() {
         return Ok(None);
     }
     RowConverter::new(
         keys.iter()
-            .map(|&index| SortField::new(schema.field(index).data_type().clone()))
+            .map(|key| SortField::new(key.field.data_type().clone()))
             .collect(),
     )
     .map(Some)
@@ -2022,7 +2030,7 @@ fn native_groups_supported(aggregates: &[Arc<AggregateFunctionExpr>]) -> bool {
 }
 
 fn variable_columns(
-    keys: &[usize],
+    keys: &[Expr],
     aggregates: &[Expr],
     predicate: Option<&Expr>,
     schema: &SchemaRef,
@@ -2030,8 +2038,13 @@ fn variable_columns(
 ) -> Result<Vec<usize>> {
     let mut variable_columns = keys
         .iter()
-        .copied()
-        .collect::<std::collections::BTreeSet<_>>();
+        .flat_map(Expr::column_refs)
+        .map(|column| {
+            schema
+                .index_of(&column.name)
+                .map_err(|error| df_error(name, error))
+        })
+        .collect::<Result<std::collections::BTreeSet<_>>>()?;
     for expr in aggregates {
         if let Expr::AggregateFunction(function) = unalias(expr) {
             for argument in &function.params.args {
@@ -2238,7 +2251,10 @@ fn exact_numeric(data_type: &DataType) -> bool {
     )
 }
 
-fn grouped_aggregates_supported(keys: &[usize], aggregates: &[Arc<AggregateFunctionExpr>]) -> bool {
+fn grouped_aggregates_supported(
+    keys: &[GroupKey],
+    aggregates: &[Arc<AggregateFunctionExpr>],
+) -> bool {
     keys.is_empty() || native_groups_supported(aggregates)
 }
 
@@ -2331,8 +2347,7 @@ enum GroupStrategy {
 fn initial_grouped_proof(
     runtime: &DataFusionRuntime,
     reservation: &MemoryReservation,
-    keys: &[usize],
-    schema: &SchemaRef,
+    keys: &[GroupKey],
     aggregates: &[Arc<AggregateFunctionExpr>],
     name: &str,
 ) -> Result<GroupStrategy> {
@@ -2353,7 +2368,7 @@ fn initial_grouped_proof(
     if !runtime.grouped_float_model_supported(name)? {
         return Ok(GroupStrategy::Unsupported);
     }
-    let Some(layout) = grouped_float::group_layout(keys, schema) else {
+    let Some(layout) = grouped_float::group_layout(keys) else {
         return Ok(GroupStrategy::Unsupported);
     };
     grouped_float::Proof::new(
@@ -2368,28 +2383,17 @@ fn initial_grouped_proof(
     .map(GroupStrategy::Sequential)
 }
 
-fn sequential_group_key(
-    aggregate: &datafusion::logical_expr::Aggregate,
-    schema: &SchemaRef,
-) -> bool {
+fn sequential_group_key(aggregate: &datafusion::logical_expr::Aggregate) -> bool {
     !aggregate.group_expr.is_empty()
         && aggregate.group_expr.iter().all(|expression| {
-            let Expr::Column(column) = expression else {
-                return false;
-            };
-            schema
-                .field_with_name(&column.name)
-                .ok()
-                .and_then(|field| grouped_float::key_layout(field.data_type()))
-                .is_some()
+            native_expression::aggregate_filter_work(expression, aggregate.input.schema()).is_some()
+                && expression
+                    .get_type(aggregate.input.schema())
+                    .is_ok_and(|dtype| key_type(&dtype))
         })
 }
 
-fn plan_inputs(
-    raw: &LogicalPlan,
-    schema: &SchemaRef,
-    name: &str,
-) -> Result<Option<(Vec<usize>, Vec<usize>)>> {
+fn plan_inputs(raw: &LogicalPlan, schema: &SchemaRef, name: &str) -> Result<Option<Vec<usize>>> {
     let Some((_, raw_aggregate)) = shape(raw) else {
         return Ok(None);
     };
@@ -2399,7 +2403,7 @@ fn plan_inputs(
         }
     }
     let global = raw_aggregate.group_expr.is_empty();
-    let floating_extrema = global || sequential_group_key(raw_aggregate, schema);
+    let floating_extrema = global || sequential_group_key(raw_aggregate);
     if raw_aggregate.aggr_expr.is_empty()
         || !raw_aggregate
             .aggr_expr
@@ -2408,25 +2412,26 @@ fn plan_inputs(
     {
         return Ok(None);
     }
-    let keys = raw_aggregate
-        .group_expr
-        .iter()
-        .map(|expr| {
-            let Expr::Column(column) = expr else {
-                return None;
-            };
-            let index = schema.index_of(&column.name).ok()?;
-            key_type(schema.field(index).data_type()).then_some(index)
-        })
-        .collect::<Option<Vec<_>>>();
-    let Some(keys) = keys else { return Ok(None) };
+    if raw_aggregate.group_expr.iter().any(|expression| {
+        native_expression::aggregate_filter_work(expression, raw_aggregate.input.schema()).is_none()
+            || !expression
+                .get_type(raw_aggregate.input.schema())
+                .is_ok_and(|dtype| key_type(&dtype))
+    }) {
+        return Ok(None);
+    }
     let predicate = match raw_aggregate.input.as_ref() {
         LogicalPlan::Filter(filter) => Some(&filter.predicate),
         _ => None,
     };
-    let variable_columns =
-        variable_columns(&keys, &raw_aggregate.aggr_expr, predicate, schema, name)?;
-    Ok(Some((keys, variable_columns)))
+    let variable_columns = variable_columns(
+        &raw_aggregate.group_expr,
+        &raw_aggregate.aggr_expr,
+        predicate,
+        schema,
+        name,
+    )?;
+    Ok(Some(variable_columns))
 }
 
 type PhysicalSqlPlan = (
@@ -2435,6 +2440,7 @@ type PhysicalSqlPlan = (
     Vec<Option<Arc<dyn PhysicalExpr>>>,
     Option<predicate::InputPredicate>,
     Option<Arc<dyn PhysicalExpr>>,
+    Vec<GroupKey>,
 );
 
 fn bound_plan(
@@ -2475,6 +2481,7 @@ fn physical_plan(
         rebound = DFSchema::from_field_specific_qualified_schema(qualifiers, schema).ok()?;
         &rebound
     };
+    let keys = group_key::bind(aggregate, input, schema, &props)?;
     let Ok(lowered) = aggregate
         .aggr_expr
         .iter()
@@ -2536,6 +2543,7 @@ fn physical_plan(
         aggregate_filters,
         predicate,
         post_filter,
+        keys,
     ))
 }
 

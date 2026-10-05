@@ -50,17 +50,14 @@ pub(super) fn key_layout(data_type: &DataType) -> Option<(Factory, usize)> {
     }
 }
 
-pub(super) fn group_layout(
-    keys: &[usize],
-    schema: &datafusion::arrow::datatypes::Schema,
-) -> Option<(Factory, usize)> {
+pub(super) fn group_layout(keys: &[super::GroupKey]) -> Option<(Factory, usize)> {
     if let [key] = keys {
-        return key_layout(schema.field(*key).data_type());
+        return key_layout(key.field.data_type());
     }
     if keys.is_empty()
         || !keys
             .iter()
-            .all(|key| key_layout(schema.field(*key).data_type()).is_some())
+            .all(|key| key_layout(key.field.data_type()).is_some())
     {
         return None;
     }

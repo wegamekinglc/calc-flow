@@ -178,6 +178,7 @@ fn native_json(descriptor: &NativeStateDescriptor) -> Result<Value> {
         .collect::<Result<Vec<_>>>()?;
     Ok(
         json!({"policy":descriptor.policy, "keys":fields_json(&descriptor.key_fields)?,
+        "key_inputs":descriptor.key_inputs.iter().map(input_json).collect::<Result<Vec<_>>>()?,
         "aggregates":aggregates, "projection":descriptor.projection.iter().map(input_json).collect::<Result<Vec<_>>>()?,
         "post_filter":descriptor.post_filter.as_ref().map(input_json).transpose()?,
         "post_order":descriptor.post_order.as_ref().map(|order| {

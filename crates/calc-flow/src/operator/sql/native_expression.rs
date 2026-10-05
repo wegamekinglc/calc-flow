@@ -184,10 +184,19 @@ fn infallible_predicate(expression: &Expr) -> bool {
 }
 
 pub(super) fn input_work(aggregate: &datafusion::logical_expr::Aggregate) -> Option<usize> {
+    let key_nodes = aggregate
+        .group_expr
+        .iter()
+        .try_fold(0_usize, |nodes, expression| {
+            nodes.checked_add(
+                aggregate_filter_work(expression, aggregate.input.schema())?
+                    .saturating_sub(usize::from(matches!(unalias(expression), Expr::Column(_)))),
+            )
+        })?;
     aggregate
         .aggr_expr
         .iter()
-        .try_fold(0_usize, |nodes, expression| {
+        .try_fold(key_nodes, |nodes, expression| {
             let Expr::AggregateFunction(function) = unalias(expression) else {
                 return None;
             };
