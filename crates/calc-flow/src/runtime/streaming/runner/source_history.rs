@@ -8,6 +8,16 @@ pub(super) async fn configure(
     owner: &HistoryOwner,
     plan: &mut StreamRuntimePlanParts,
 ) -> crate::Result<()> {
+    configure_sources(checkpoint, sources, owner).await?;
+    configure_replay_nodes(checkpoint, sources, plan);
+    Ok(())
+}
+
+async fn configure_sources(
+    checkpoint: Option<&OpenedCheckpointRuntime>,
+    sources: &mut BTreeMap<String, SourceBinding>,
+    owner: &HistoryOwner,
+) -> crate::Result<()> {
     for (source_id, source) in sources.iter_mut() {
         let restored = checkpoint
             .and_then(|checkpoint| checkpoint.selected.as_ref())
@@ -19,12 +29,7 @@ pub(super) async fn configure(
             checkpoint.is_some_and(|checkpoint| checkpoint.selected.is_some()),
         )?;
         if source.history_spec().is_some() {
-            let checkpoint = checkpoint
-                .filter(|checkpoint| checkpoint.managed || cfg!(test))
-                .ok_or_else(|| CalcFlowError::InvalidArgument {
-                    field: "source_history".into(),
-                    message: "immutable history requires managed checkpoint storage".into(),
-                })?;
+            let checkpoint = managed_checkpoint(checkpoint)?;
             source
                 .install_history(
                     source_id,
@@ -38,6 +43,25 @@ pub(super) async fn configure(
             }
         }
     }
+    Ok(())
+}
+
+fn managed_checkpoint(
+    checkpoint: Option<&OpenedCheckpointRuntime>,
+) -> crate::Result<&OpenedCheckpointRuntime> {
+    checkpoint
+        .filter(|checkpoint| checkpoint.managed || cfg!(test))
+        .ok_or_else(|| CalcFlowError::InvalidArgument {
+            field: "source_history".into(),
+            message: "immutable history requires managed checkpoint storage".into(),
+        })
+}
+
+fn configure_replay_nodes(
+    checkpoint: Option<&OpenedCheckpointRuntime>,
+    sources: &BTreeMap<String, SourceBinding>,
+    plan: &mut StreamRuntimePlanParts,
+) {
     let mut configured = BTreeMap::new();
     for node in &plan.nodes {
         if !matches!(
@@ -52,15 +76,8 @@ pub(super) async fn configure(
         if selected.is_some_and(|entry| !entry.inline_metadata.contains_key("source_replay")) {
             continue;
         }
-        let bindings = ["left", "right"].map(|port| {
-            let (binding, steps) = replay_path(plan, &node.node_id, port)?;
-            let source = sources.get(&binding)?;
-            Some((
-                binding,
-                source.history_context()?,
-                projection::factory(source.history_replay_factory()?, steps),
-            ))
-        });
+        let bindings =
+            ["left", "right"].map(|port| replay_binding(plan, &node.node_id, port, sources));
         let [Some(left), Some(right)] = bindings else {
             continue;
         };
@@ -78,7 +95,27 @@ pub(super) async fn configure(
             );
         }
     }
-    Ok(())
+}
+
+type ReplayBinding = (
+    String,
+    crate::SourceHistoryContext,
+    Arc<dyn crate::SourceHistoryReplayFactory>,
+);
+
+fn replay_binding(
+    plan: &StreamRuntimePlanParts,
+    node_id: &str,
+    port: &str,
+    sources: &BTreeMap<String, SourceBinding>,
+) -> Option<ReplayBinding> {
+    let (binding, steps) = replay_path(plan, node_id, port)?;
+    let source = sources.get(&binding)?;
+    Some((
+        binding,
+        source.history_context()?,
+        projection::factory(source.history_replay_factory()?, steps),
+    ))
 }
 
 fn replay_path(
@@ -97,20 +134,28 @@ fn replay_path(
                 return Some((binding_id.clone(), steps));
             }
             crate::pipeline::RuntimeProducer::Node { node_id, port } => {
-                if port != "output" {
-                    return None;
-                }
-                let node = plan.nodes.iter().find(|node| node.node_id == *node_id)?;
-                let crate::pipeline::CompiledStreamOperator::Expression(operator) = &node.operator
-                else {
-                    return None;
-                };
-                steps.push(operator.source_replay_projection()?);
-                target = (node.node_id.as_str(), "input");
+                let (source_id, operator) = projection_step(plan, node_id, port)?;
+                steps.push(operator);
+                target = (source_id, "input");
             }
         }
     }
     None
+}
+
+fn projection_step<'a>(
+    plan: &'a StreamRuntimePlanParts,
+    node_id: &str,
+    port: &str,
+) -> Option<(&'a str, crate::ExpressionOperator)> {
+    if port != "output" {
+        return None;
+    }
+    let node = plan.nodes.iter().find(|node| node.node_id == node_id)?;
+    let crate::pipeline::CompiledStreamOperator::Expression(operator) = &node.operator else {
+        return None;
+    };
+    Some((node.node_id.as_str(), operator.source_replay_projection()?))
 }
 
 #[derive(Default)]
