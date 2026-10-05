@@ -92,8 +92,22 @@ impl StreamSource for PausedFile {
             }
         }
         let event = self.inner.next().await?;
+        self.save_watermark(event.as_ref())?;
+        if matches!(self.mode, ReadMode::FirstBatch) {
+            self.mode = ReadMode::Gated;
+        }
+        Ok(event)
+    }
+
+    async fn close(&mut self) -> Result<()> {
+        self.inner.close().await
+    }
+}
+
+impl PausedFile {
+    fn save_watermark(&mut self, event: Option<&SourceEvent>) -> Result<()> {
         if self.native_watermarks
-            && let Some(SourceEvent::Data { batch, .. }) = &event
+            && let Some(SourceEvent::Data { batch, .. }) = event
         {
             let time = batch
                 .table_payload()?
@@ -113,14 +127,7 @@ impl StreamSource for PausedFile {
                 .unwrap();
             self.pending_watermark = Some(calc_flow::EventTime::from_micros(time - 1));
         }
-        if matches!(self.mode, ReadMode::FirstBatch) {
-            self.mode = ReadMode::Gated;
-        }
-        Ok(event)
-    }
-
-    async fn close(&mut self) -> Result<()> {
-        self.inner.close().await
+        Ok(())
     }
 }
 
@@ -169,16 +176,7 @@ fn plan_with_projection(
     } else {
         left_input.clone()
     };
-    let side = |prefix: &str| {
-        let renamed = projected_left && prefix == "left";
-        AsofJoinSide::new(
-            vec!["key".into()],
-            if renamed { "ts" } else { "time" }.into(),
-            vec![if renamed { "seq" } else { "sequence" }.into()],
-            prefix.into(),
-        )
-        .unwrap()
-    };
+    let side = |prefix| asof_side(prefix, projected_left);
     let spec = StreamAsofJoinSpec::new(
         side("left"),
         side("right"),
@@ -241,6 +239,17 @@ fn plan_with_projection(
             &StreamRequirements::default(),
         )
         .unwrap()
+}
+
+fn asof_side(prefix: &str, projected_left: bool) -> AsofJoinSide {
+    let renamed = projected_left && prefix == "left";
+    AsofJoinSide::new(
+        vec!["key".into()],
+        if renamed { "ts" } else { "time" }.into(),
+        vec![if renamed { "seq" } else { "sequence" }.into()],
+        prefix.into(),
+    )
+    .unwrap()
 }
 
 fn aliased_left_schema(input: &Arc<Schema>) -> Arc<Schema> {
@@ -766,25 +775,7 @@ async fn test_frozen_asof_replay_compacts_and_resumes_after_33_cuts() {
         )
         .unwrap();
         let segments = &manifest.operators().values().next().unwrap().segments;
-        if cut == 33 {
-            assert!(
-                segments
-                    .iter()
-                    .any(|handle| { handle.segment_id().starts_with("asof-replay-start-") })
-            );
-            assert!(
-                segments
-                    .iter()
-                    .any(|handle| { handle.segment_id().starts_with("asof-log-") })
-            );
-            assert!(!segments.iter().any(|handle| {
-                handle.segment_id().starts_with("asof-replay-")
-                    && handle.segment_id() != "asof-replay-control"
-                    && !handle.segment_id().starts_with("asof-replay-start-")
-            }));
-        } else {
-            assert_eq!(segments.len(), cut + 1);
-        }
+        assert_replay_cut_segments(cut, segments);
         if cut < 33 {
             for gate in &gates {
                 gate.add_permits(1);
@@ -806,4 +797,26 @@ async fn test_frozen_asof_replay_compacts_and_resumes_after_33_cuts() {
     .unwrap();
     assert_eq!(second.wait().await.state, JobState::Completed);
     assert_eq!(right_values(root.path()), vec![9; 35]);
+}
+
+fn assert_replay_cut_segments(cut: usize, segments: &[calc_flow::StateHandle]) {
+    if cut == 33 {
+        assert!(
+            segments
+                .iter()
+                .any(|handle| { handle.segment_id().starts_with("asof-replay-start-") })
+        );
+        assert!(
+            segments
+                .iter()
+                .any(|handle| { handle.segment_id().starts_with("asof-log-") })
+        );
+        assert!(!segments.iter().any(|handle| {
+            handle.segment_id().starts_with("asof-replay-")
+                && handle.segment_id() != "asof-replay-control"
+                && !handle.segment_id().starts_with("asof-replay-start-")
+        }));
+    } else {
+        assert_eq!(segments.len(), cut + 1);
+    }
 }
