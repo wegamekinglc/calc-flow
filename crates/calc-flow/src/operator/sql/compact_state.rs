@@ -80,6 +80,20 @@ impl PaidNativeStateRecords {
     }
 }
 
+struct NativeAggregateDescriptor {
+    aggregate_names: Vec<String>,
+    aggregate_inputs: Vec<Vec<NativeAggregateInput>>,
+    count_all_rows: Vec<bool>,
+    aggregate_filters: Vec<Option<NativeAggregateInput>>,
+    input_checks: Vec<NativeAggregateInput>,
+}
+
+struct NativeOutputDescriptor {
+    projection: Vec<NativeAggregateInput>,
+    post_filter: Option<NativeAggregateInput>,
+    post_order: Option<super::output_order::OrderDescriptor>,
+}
+
 impl IncrementalSql {
     pub(in crate::operator::sql) fn native_descriptor(
         &self,
@@ -87,26 +101,18 @@ impl IncrementalSql {
     ) -> Result<NativeStateDescriptor> {
         let reservation = self.descriptor_reservation(name)?;
         let (key_fields, key_inputs) = self.native_keys_descriptor(name)?;
-        let aggregate_names = self
-            .aggregates
-            .iter()
-            .map(|expression| expression.fun().name().to_owned())
-            .collect::<Vec<_>>();
-        let aggregate_inputs = self.native_aggregate_inputs(name)?;
-        let count_all_rows = self.count_all_rows(&aggregate_names, &aggregate_inputs);
-        let aggregate_filters = self.native_aggregate_filters(name)?;
-        let input_checks = self.native_input_checks(name)?;
-        let projection = self
-            .projection
-            .iter()
-            .map(|expression| describe_input(expression.as_ref(), &self.aggregate_schema, 0, name))
-            .collect::<Result<Vec<_>>>()?;
-        let post_filter = self
-            .post_filter
-            .as_ref()
-            .map(|expression| describe_input(expression.as_ref(), &self.aggregate_schema, 0, name))
-            .transpose()?;
-        let post_order = self.native_output_order(name)?;
+        let NativeAggregateDescriptor {
+            aggregate_names,
+            aggregate_inputs,
+            count_all_rows,
+            aggregate_filters,
+            input_checks,
+        } = self.native_aggregate_descriptor(name)?;
+        let NativeOutputDescriptor {
+            projection,
+            post_filter,
+            post_order,
+        } = self.native_output_descriptor(name)?;
         let expression_identity_bytes = aggregate_inputs
             .iter()
             .flatten()
@@ -175,6 +181,44 @@ impl IncrementalSql {
             group_count: self.groups.len(),
             policy: self.native_policy(),
             _reservation: reservation,
+        })
+    }
+
+    fn native_aggregate_descriptor(&self, name: &str) -> Result<NativeAggregateDescriptor> {
+        let aggregate_names = self
+            .aggregates
+            .iter()
+            .map(|expression| expression.fun().name().to_owned())
+            .collect::<Vec<_>>();
+        let aggregate_inputs = self.native_aggregate_inputs(name)?;
+        let count_all_rows = self.count_all_rows(&aggregate_names, &aggregate_inputs);
+        let aggregate_filters = self.native_aggregate_filters(name)?;
+        let input_checks = self.native_input_checks(name)?;
+        Ok(NativeAggregateDescriptor {
+            aggregate_names,
+            aggregate_inputs,
+            count_all_rows,
+            aggregate_filters,
+            input_checks,
+        })
+    }
+
+    fn native_output_descriptor(&self, name: &str) -> Result<NativeOutputDescriptor> {
+        let projection = self
+            .projection
+            .iter()
+            .map(|expression| describe_input(expression.as_ref(), &self.aggregate_schema, 0, name))
+            .collect::<Result<Vec<_>>>()?;
+        let post_filter = self
+            .post_filter
+            .as_ref()
+            .map(|expression| describe_input(expression.as_ref(), &self.aggregate_schema, 0, name))
+            .transpose()?;
+        let post_order = self.native_output_order(name)?;
+        Ok(NativeOutputDescriptor {
+            projection,
+            post_filter,
+            post_order,
         })
     }
 
@@ -477,6 +521,29 @@ impl IncrementalSql {
     ) -> Result<()> {
         let workspace = self.reservation.new_empty();
         let mut seen = std::collections::BTreeSet::new();
+        let _seen_credit = self.load_seen_credit(records, replace, name)?;
+        for record in records {
+            if record.num_rows() == 0 {
+                check_cancelled()?;
+            }
+            for start in (0..record.num_rows()).step_by(STATE_CHUNK_ROWS) {
+                check_cancelled()?;
+                let rows = STATE_CHUNK_ROWS.min(record.num_rows() - start);
+                let charge = self.load_chunk_charge(record, start, rows, descriptor, name)?;
+                ensure_reservation(&workspace, charge, name)?;
+                let chunk = record.slice(start, rows);
+                self.load_state_chunk(&chunk, descriptor, replace, &mut seen, name)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn load_seen_credit(
+        &self,
+        records: &[RecordBatch],
+        replace: bool,
+        name: &str,
+    ) -> Result<MemoryReservation> {
         let rows = records.iter().try_fold(0usize, |sum, record| {
             sum.checked_add(record.num_rows())
                 .ok_or_else(|| df_error(name, "native delta row count overflowed"))
@@ -487,68 +554,89 @@ impl IncrementalSql {
             checked_bytes(4096, [(usize::from(replace) * rows, 128)], name)?,
             name,
         )?;
-        for record in records {
-            if record.num_rows() == 0 {
-                check_cancelled()?;
+        Ok(seen_credit)
+    }
+
+    fn load_chunk_charge(
+        &self,
+        record: &RecordBatch,
+        start: usize,
+        rows: usize,
+        descriptor: &NativeStateDescriptor,
+        name: &str,
+    ) -> Result<usize> {
+        let variable = record_variable_bytes(record, start, rows, name)?;
+        checked_bytes(
+            4096,
+            [
+                (self.finalizer_bytes, 1),
+                (self.aggregate_bytes, 1),
+                (variable, 4),
+                (
+                    rows,
+                    checked_bytes(
+                        256,
+                        [
+                            (self.keys.len(), 128),
+                            (
+                                descriptor.wire_schema.fields().len(),
+                                size_of::<ScalarValue>() * 2,
+                            ),
+                        ],
+                        name,
+                    )?,
+                ),
+            ],
+            name,
+        )
+    }
+
+    fn load_state_chunk(
+        &mut self,
+        chunk: &RecordBatch,
+        descriptor: &NativeStateDescriptor,
+        replace: bool,
+        seen: &mut std::collections::BTreeSet<Arc<[u8]>>,
+        name: &str,
+    ) -> Result<()> {
+        let encoded = if let Some(converter) = &self.converter {
+            let columns = chunk.columns()[..self.keys.len()].to_vec();
+            Some(
+                converter
+                    .convert_columns(&columns)
+                    .map_err(|error| df_error(name, error))?,
+            )
+        } else {
+            None
+        };
+        for row in 0..chunk.num_rows() {
+            let key = encoded.as_ref().map(|encoded| encoded.row(row));
+            let key = key.as_ref().map_or(&[][..], |key| key.as_ref());
+            if !replace && self.index.contains_key(key) {
+                return Err(df_error(name, "native state contains duplicate keys"));
             }
-            for start in (0..record.num_rows()).step_by(STATE_CHUNK_ROWS) {
-                check_cancelled()?;
-                let rows = STATE_CHUNK_ROWS.min(record.num_rows() - start);
-                let variable = record_variable_bytes(record, start, rows, name)?;
-                let charge = checked_bytes(
-                    4096,
-                    [
-                        (self.finalizer_bytes, 1),
-                        (self.aggregate_bytes, 1),
-                        (variable, 4),
-                        (
-                            rows,
-                            checked_bytes(
-                                256,
-                                [
-                                    (self.keys.len(), 128),
-                                    (
-                                        descriptor.wire_schema.fields().len(),
-                                        size_of::<ScalarValue>() * 2,
-                                    ),
-                                ],
-                                name,
-                            )?,
-                        ),
-                    ],
-                    name,
-                )?;
-                ensure_reservation(&workspace, charge, name)?;
-                let chunk = record.slice(start, rows);
-                let encoded = if let Some(converter) = &self.converter {
-                    let columns = chunk.columns()[..self.keys.len()].to_vec();
-                    Some(
-                        converter
-                            .convert_columns(&columns)
-                            .map_err(|error| df_error(name, error))?,
-                    )
-                } else {
-                    None
-                };
-                for row in 0..rows {
-                    let key = encoded.as_ref().map(|encoded| encoded.row(row));
-                    let key = key.as_ref().map_or(&[][..], |key| key.as_ref());
-                    if !replace && self.index.contains_key(key) {
-                        return Err(df_error(name, "native state contains duplicate keys"));
-                    }
-                    let group = self.import_group(&chunk, row, key, descriptor, name)?;
-                    if replace && !seen.insert(group.key.clone()) {
-                        return Err(df_error(name, "native state contains duplicate keys"));
-                    }
-                    if let Some(&slot) = self.index.get(key) {
-                        self.groups[slot] = group;
-                    } else {
-                        let slot = self.groups.len();
-                        self.index.insert(group.key.clone(), slot);
-                        self.groups.push(group);
-                    }
-                }
-            }
+            let group = self.import_group(chunk, row, key, descriptor, name)?;
+            self.install_imported_group(group, replace, seen, name)?;
+        }
+        Ok(())
+    }
+
+    fn install_imported_group(
+        &mut self,
+        group: Group,
+        replace: bool,
+        seen: &mut std::collections::BTreeSet<Arc<[u8]>>,
+        name: &str,
+    ) -> Result<()> {
+        if replace && !seen.insert(group.key.clone()) {
+            return Err(df_error(name, "native state contains duplicate keys"));
+        }
+        if let Some(&slot) = self.index.get(group.key.as_ref()) {
+            self.groups[slot] = group;
+        } else {
+            let slot = self.groups.len();
+            self.index.insert(group.key.clone(), slot);
+            self.groups.push(group);
         }
         Ok(())
     }
@@ -588,6 +676,22 @@ impl IncrementalSql {
                 ScalarValue::try_from_array(array, row).map_err(|error| df_error(name, error))
             })
             .collect::<Result<Vec<_>>>()?;
+        let (states, results) = self.import_aggregate_states(record, row, descriptor, name)?;
+        Ok(Group {
+            key: Arc::from(key),
+            values: Arc::from(values),
+            states,
+            results,
+            reservation,
+        })
+    }
+    fn import_aggregate_states(
+        &self,
+        record: &RecordBatch,
+        row: usize,
+        descriptor: &NativeStateDescriptor,
+        name: &str,
+    ) -> Result<(Vec<Vec<ScalarValue>>, Vec<ScalarValue>)> {
         let mut states = Vec::with_capacity(self.aggregates.len());
         let mut results = Vec::with_capacity(self.aggregates.len());
         let mut column = self.keys.len();
@@ -599,27 +703,30 @@ impl IncrementalSql {
                     ScalarValue::try_from_array(array, row).map_err(|error| df_error(name, error))
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let result = if let Some(global) = &self.global_records {
-                global.result(aggregate, &state, name)?
-            } else if self.requires_grouped_float_proof()
-                && super::grouped_float::selected(expression)
-            {
-                super::grouped_sum::result(&state, name)?
-            } else {
-                restored_result(expression, &state, !self.keys.is_empty(), name)?
-            };
+            let result = self.imported_result(aggregate, expression, &state, name)?;
             validate_scalar(&result, &descriptor.result_fields[aggregate], name)?;
             states.push(state);
             results.push(result);
             column += width;
         }
-        Ok(Group {
-            key: Arc::from(key),
-            values: Arc::from(values),
-            states,
-            results,
-            reservation,
-        })
+        Ok((states, results))
+    }
+
+    fn imported_result(
+        &self,
+        aggregate: usize,
+        expression: &AggregateFunctionExpr,
+        state: &[ScalarValue],
+        name: &str,
+    ) -> Result<ScalarValue> {
+        if let Some(global) = &self.global_records {
+            global.result(aggregate, state, name)
+        } else if self.requires_grouped_float_proof() && super::grouped_float::selected(expression)
+        {
+            super::grouped_sum::result(state, name)
+        } else {
+            restored_result(expression, state, !self.keys.is_empty(), name)
+        }
     }
 }
 
@@ -779,25 +886,29 @@ fn record_variable_bytes(
     let mut bytes = 0;
     for array in record.columns() {
         for row in start..start + rows {
-            let width = match array.data_type() {
-                DataType::Utf8 => array
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .ok_or_else(|| df_error(name, "native Utf8 key differs"))?
-                    .value(row)
-                    .len(),
-                DataType::LargeUtf8 => array
-                    .as_any()
-                    .downcast_ref::<LargeStringArray>()
-                    .ok_or_else(|| df_error(name, "native LargeUtf8 key differs"))?
-                    .value(row)
-                    .len(),
-                _ => 0,
-            };
+            let width = variable_value_bytes(array, row, name)?;
             bytes = checked_bytes(bytes, [(width, 1)], name)?;
         }
     }
     Ok(bytes)
+}
+
+fn variable_value_bytes(array: &ArrayRef, row: usize, name: &str) -> Result<usize> {
+    Ok(match array.data_type() {
+        DataType::Utf8 => array
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| df_error(name, "native Utf8 key differs"))?
+            .value(row)
+            .len(),
+        DataType::LargeUtf8 => array
+            .as_any()
+            .downcast_ref::<LargeStringArray>()
+            .ok_or_else(|| df_error(name, "native LargeUtf8 key differs"))?
+            .value(row)
+            .len(),
+        _ => 0,
+    })
 }
 
 fn restored_result(
