@@ -5,6 +5,7 @@ use datafusion::{
         datatypes::{Field, FieldRef, Schema, SchemaRef},
         record_batch::RecordBatch,
     },
+    common::ScalarValue,
     execution::memory_pool::MemoryReservation,
 };
 use serde_json::{Value, json};
@@ -30,6 +31,20 @@ pub(super) fn build(
     descriptor: &NativeStateDescriptor,
 ) -> Result<PaidIdentity> {
     let runtime = operator.retention_runtime()?;
+    validate_ports(operator, logical, descriptor)?;
+    let reservation = reserve(runtime, logical, physical, descriptor, &operator.name)?;
+    let value = identity_value(operator, runtime, logical, physical, ordinals, descriptor)?;
+    Ok(PaidIdentity {
+        value,
+        _reservation: reservation,
+    })
+}
+
+fn validate_ports(
+    operator: &SqlOperator,
+    logical: &SchemaRef,
+    descriptor: &NativeStateDescriptor,
+) -> Result<()> {
     if operator.input_ports[0]
         .schema()
         .is_some_and(|schema| schema != logical)
@@ -41,8 +56,18 @@ pub(super) fn build(
             "SQL compact identity differs from declared ports",
         ));
     }
-    let reservation = reserve(runtime, logical, physical, descriptor, &operator.name)?;
-    let value = CompactIdentity {
+    Ok(())
+}
+
+fn identity_value(
+    operator: &SqlOperator,
+    runtime: &DataFusionRuntime,
+    logical: &SchemaRef,
+    physical: &SchemaRef,
+    ordinals: Vec<usize>,
+    descriptor: &NativeStateDescriptor,
+) -> Result<CompactIdentity> {
+    Ok(CompactIdentity {
         query_sha256: operator.query_digest(),
         input_alias: operator.aliases[0].clone(),
         runtime_config: runtime.compact_runtime_config(),
@@ -52,10 +77,6 @@ pub(super) fn build(
         state_schema_sha256: retention::schema_digest(&descriptor.wire_schema)?,
         output_schema_sha256: retention::schema_digest(&descriptor.output_schema)?,
         native_descriptor: native_json(descriptor)?,
-    };
-    Ok(PaidIdentity {
-        value,
-        _reservation: reservation,
     })
 }
 
@@ -102,24 +123,7 @@ fn input_json(input: &NativeAggregateInput) -> Result<Value> {
         NativeAggregateInput::Column { index, field } => Ok(json!({
             "kind":"column", "index":index, "field":fields_json(std::slice::from_ref(field))?
         })),
-        NativeAggregateInput::Literal(value) => {
-            let schema = Arc::new(Schema::new(vec![Field::new(
-                "literal",
-                value.data_type(),
-                value.is_null(),
-            )]));
-            let array = value
-                .to_array()
-                .map_err(|error| sql_state_error(&error.to_string()))?;
-            let record = RecordBatch::try_new(schema.clone(), vec![array])
-                .map_err(|error| sql_state_error(&error.to_string()))?;
-            let batch = Batch::table(vec![record], BatchMetadata::default())?;
-            let segment = super::super::StateSegment::new(encode_sql_state(&batch)?);
-            Ok(
-                json!({"kind":"literal", "schema_sha256":retention::schema_digest(&schema)?,
-                "ipc_sha256":segment.sha256()}),
-            )
-        }
+        NativeAggregateInput::Literal(value) => literal_json(value),
         NativeAggregateInput::Cast { input, field, safe } => Ok(json!({
             "kind":"cast", "input":input_json(input)?,
             "field":fields_json(std::slice::from_ref(field))?, "safe":safe,
@@ -135,10 +139,7 @@ fn input_json(input: &NativeAggregateInput) -> Result<Value> {
             op,
             right,
             fail_on_overflow,
-        } => Ok(json!({
-            "kind":"binary", "left":input_json(left)?, "operator":op.to_string(),
-            "right":input_json(right)?, "fail_on_overflow":fail_on_overflow
-        })),
+        } => binary_json(left, *op, right, *fail_on_overflow),
         NativeAggregateInput::Unary { input, op } => Ok(json!({
             "kind":"unary", "input":input_json(input)?, "operator":op
         })),
@@ -146,17 +147,54 @@ fn input_json(input: &NativeAggregateInput) -> Result<Value> {
             operand,
             branches,
             fallback,
-        } => {
-            let branches = branches
-                .iter()
-                .map(|(when, then)| Ok(json!({"when":input_json(when)?,"then":input_json(then)?})))
-                .collect::<Result<Vec<_>>>()?;
-            Ok(
-                json!({"kind":"case","operand":operand.as_deref().map(input_json).transpose()?,
-                "branches":branches,"fallback":fallback.as_deref().map(input_json).transpose()?}),
-            )
-        }
+        } => case_json(operand.as_deref(), branches, fallback.as_deref()),
     }
+}
+
+fn literal_json(value: &ScalarValue) -> Result<Value> {
+    let schema = Arc::new(Schema::new(vec![Field::new(
+        "literal",
+        value.data_type(),
+        value.is_null(),
+    )]));
+    let array = value
+        .to_array()
+        .map_err(|error| sql_state_error(&error.to_string()))?;
+    let record = RecordBatch::try_new(schema.clone(), vec![array])
+        .map_err(|error| sql_state_error(&error.to_string()))?;
+    let batch = Batch::table(vec![record], BatchMetadata::default())?;
+    let segment = super::super::StateSegment::new(encode_sql_state(&batch)?);
+    Ok(
+        json!({"kind":"literal", "schema_sha256":retention::schema_digest(&schema)?,
+        "ipc_sha256":segment.sha256()}),
+    )
+}
+
+fn binary_json(
+    left: &NativeAggregateInput,
+    op: datafusion::logical_expr::Operator,
+    right: &NativeAggregateInput,
+    fail_on_overflow: bool,
+) -> Result<Value> {
+    Ok(
+        json!({"kind":"binary", "left":input_json(left)?, "operator":op.to_string(),
+        "right":input_json(right)?, "fail_on_overflow":fail_on_overflow}),
+    )
+}
+
+fn case_json(
+    operand: Option<&NativeAggregateInput>,
+    branches: &[(NativeAggregateInput, NativeAggregateInput)],
+    fallback: Option<&NativeAggregateInput>,
+) -> Result<Value> {
+    let branches = branches
+        .iter()
+        .map(|(when, then)| Ok(json!({"when":input_json(when)?,"then":input_json(then)?})))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(
+        json!({"kind":"case","operand":operand.map(input_json).transpose()?,
+        "branches":branches,"fallback":fallback.map(input_json).transpose()?}),
+    )
 }
 
 fn native_json(descriptor: &NativeStateDescriptor) -> Result<Value> {
@@ -164,31 +202,61 @@ fn native_json(descriptor: &NativeStateDescriptor) -> Result<Value> {
         .aggregate_names
         .iter()
         .enumerate()
-        .map(|(slot, function)| {
-            let inputs = descriptor.aggregate_inputs[slot]
-                .iter()
-                .map(input_json)
-                .collect::<Result<Vec<_>>>()?;
-            Ok(json!({"function":function, "inputs":inputs,
-            "filter":descriptor.aggregate_filters[slot].as_ref().map(input_json).transpose()?,
-            "all_rows":descriptor.count_all_rows[slot],
-            "state_fields":fields_json(&descriptor.state_fields[slot])?,
-            "result_field":fields_json(std::slice::from_ref(&descriptor.result_fields[slot]))?}))
-        })
+        .map(|(slot, function)| aggregate_json(descriptor, slot, function))
         .collect::<Result<Vec<_>>>()?;
-    Ok(
-        json!({"policy":descriptor.policy, "keys":fields_json(&descriptor.key_fields)?,
-        "key_inputs":descriptor.key_inputs.iter().map(input_json).collect::<Result<Vec<_>>>()?,
-        "input_checks":descriptor.input_checks.iter().map(input_json).collect::<Result<Vec<_>>>()?,
-        "aggregates":aggregates, "projection":descriptor.projection.iter().map(input_json).collect::<Result<Vec<_>>>()?,
+    let keys = fields_json(&descriptor.key_fields)?;
+    let key_inputs = descriptor
+        .key_inputs
+        .iter()
+        .map(input_json)
+        .collect::<Result<Vec<_>>>()?;
+    let input_checks = descriptor
+        .input_checks
+        .iter()
+        .map(input_json)
+        .collect::<Result<Vec<_>>>()?;
+    native_output_json(descriptor, &aggregates, &keys, &key_inputs, &input_checks)
+}
+
+fn aggregate_json(
+    descriptor: &NativeStateDescriptor,
+    slot: usize,
+    function: &str,
+) -> Result<Value> {
+    let inputs = descriptor.aggregate_inputs[slot]
+        .iter()
+        .map(input_json)
+        .collect::<Result<Vec<_>>>()?;
+    Ok(json!({"function":function, "inputs":inputs,
+        "filter":descriptor.aggregate_filters[slot].as_ref().map(input_json).transpose()?,
+        "all_rows":descriptor.count_all_rows[slot],
+        "state_fields":fields_json(&descriptor.state_fields[slot])?,
+        "result_field":fields_json(std::slice::from_ref(&descriptor.result_fields[slot]))?}))
+}
+
+fn native_output_json(
+    descriptor: &NativeStateDescriptor,
+    aggregates: &[Value],
+    keys: &Value,
+    key_inputs: &[Value],
+    input_checks: &[Value],
+) -> Result<Value> {
+    Ok(json!({"policy":descriptor.policy, "keys":keys,
+        "key_inputs":key_inputs, "input_checks":input_checks, "aggregates":aggregates,
+        "projection":descriptor.projection.iter().map(input_json).collect::<Result<Vec<_>>>()?,
         "post_filter":descriptor.post_filter.as_ref().map(input_json).transpose()?,
-        "post_order":descriptor.post_order.as_ref().map(|order| {
-            let keys = order.keys.iter().map(|(input, descending, nulls_first)| {
-                Ok(json!({"input":input_json(input)?,"descending":descending,"nulls_first":nulls_first}))
-            }).collect::<Result<Vec<_>>>()?;
-            Ok::<_,crate::CalcFlowError>(json!({"keys":keys,"skip":order.skip,"fetch":order.fetch}))
-        }).transpose()?,
+        "post_order":descriptor.post_order.as_ref().map(|order| order_json(&order.keys, order.skip, order.fetch)).transpose()?,
         "wire_schema_sha256":retention::schema_digest(&descriptor.wire_schema)?,
-        "output_schema_sha256":retention::schema_digest(&descriptor.output_schema)?}),
-    )
+        "output_schema_sha256":retention::schema_digest(&descriptor.output_schema)?}))
+}
+
+fn order_json(
+    keys: &[(NativeAggregateInput, bool, bool)],
+    skip: usize,
+    fetch: Option<usize>,
+) -> Result<Value> {
+    let keys = keys.iter().map(|(input, descending, nulls_first)| {
+        Ok(json!({"input":input_json(input)?,"descending":descending,"nulls_first":nulls_first}))
+    }).collect::<Result<Vec<_>>>()?;
+    Ok(json!({"keys":keys,"skip":skip,"fetch":fetch}))
 }
