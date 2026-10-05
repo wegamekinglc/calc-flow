@@ -11,6 +11,75 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 const ROWS: usize = 8_192;
 
+#[tokio::test]
+async fn right_key_routing_survives_new_keys_and_batch_reordering() {
+    let mut operator = fixture();
+    let pool = operator.runtime.pool.clone();
+    let job = StreamJobContext::new(6, "asof", JsonMap::new(), None, CancellationToken::new());
+    let context = StreamOperatorContext::new(&job, "asof", None);
+    let first = input(&operator, 0);
+    let expected = key_routes(&mut operator, &first, 2, &context).await;
+    let mut output = EdgeCollector::new(operator.output_ports().to_vec());
+    operator
+        .process_data("right", first, &context, &mut output)
+        .await
+        .unwrap();
+    operator.prepare_checkpoint_async(&context).await.unwrap();
+    let snapshot = operator.checkpoint(Epoch::INITIAL).unwrap();
+    let mut restored = fixture();
+    let restored_pool = restored.runtime.pool.clone();
+    restored.restore(&snapshot).unwrap();
+    let extra = RecordBatch::try_new(
+        operator.schemas[1].clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["aaa-new-key"])),
+            Arc::new(TimestampMicrosecondArray::from(vec![-1]).with_timezone("UTC")),
+            Arc::new(Int64Array::from(vec![-1])),
+        ],
+    )
+    .unwrap();
+    let next = input(&operator, ROWS);
+    let mut records = vec![extra];
+    records.extend(next.table_payload().unwrap().batches().iter().cloned());
+    let next = Batch::table(records, BatchMetadata::default()).unwrap();
+    let actual = key_routes(&mut operator, &next, 2, &context).await;
+    for (key, unit) in expected {
+        assert_eq!(
+            actual[&key], unit,
+            "new keys must not reroute retained keys"
+        );
+    }
+    for units in [2, 3, 4, 8] {
+        let expected = key_routes(&mut operator, &next, units, &context).await;
+        assert_eq!(
+            key_routes(&mut restored, &next, units, &context).await,
+            expected
+        );
+    }
+    drop((operator, restored, snapshot, output, context));
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop(job);
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(restored_pool.reserved(), 0);
+}
+
+async fn key_routes(
+    operator: &mut StreamAsofJoinOperator,
+    input: &Batch,
+    units: usize,
+    context: &StreamOperatorContext<'_>,
+) -> std::collections::BTreeMap<state::Encoding, usize> {
+    let validated = operator.validate_admission("right", input).unwrap();
+    let admission = operator
+        .prepare_admission(validated, input, context)
+        .await
+        .unwrap();
+    let (work, _, _credit) = parallel::capture(operator, &admission, units, context)
+        .await
+        .unwrap();
+    work.key_units()
+}
+
 fn assert_snapshot(actual: &crate::OperatorStateSnapshot, expected: &crate::OperatorStateSnapshot) {
     assert_eq!(actual.inline_metadata, expected.inline_metadata);
     assert_eq!(actual.segments, expected.segments);

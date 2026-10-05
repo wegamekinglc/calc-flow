@@ -54,6 +54,19 @@ impl ParallelCpuWork for AdmissionWork {
     }
 }
 
+#[cfg(test)]
+impl AdmissionWork {
+    pub(super) fn key_units(&self) -> std::collections::BTreeMap<state::Encoding, usize> {
+        self.shards
+            .iter()
+            .enumerate()
+            .flat_map(|(unit, buckets)| {
+                buckets.iter().map(move |bucket| (bucket.key.clone(), unit))
+            })
+            .collect()
+    }
+}
+
 pub(in super::super) struct PreparedAdmission {
     buckets: Vec<Buckets>,
     references: Vec<state::RowRef>,
@@ -81,7 +94,7 @@ pub(in super::super) async fn prepare(
 ) -> Result<Option<PreparedAdmission>> {
     let units = (admission.rows.len() / 4_096)
         .min(admission.right_capacities.len())
-        .min(8);
+        .min(state::KEY_SHARDS);
     if units < 2 {
         return Ok(None);
     }
@@ -242,8 +255,8 @@ pub(super) async fn capture(
         admission.right_capacities.len(),
         ahash::RandomState::new(),
     );
-    for (ordinal, (key, count)) in admission.right_capacities.iter().enumerate() {
-        let shard = ordinal % units;
+    for (key, count) in &admission.right_capacities {
+        let shard = state::key_shard(key) % units;
         let target = &mut work.shards[shard];
         routes.insert(key, (shard, target.len()));
         target.push(InputBucket {
