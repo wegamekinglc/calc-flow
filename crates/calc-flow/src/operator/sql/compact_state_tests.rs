@@ -183,14 +183,12 @@ async fn test_compact_native_state_roundtrip_exact_widths_and_continuation() {
                     matches!(input, NativeAggregateInput::Column { index: 1, field } if field == &original.schema.fields()[1])
                 );
             }
-            assert_eq!(
-                descriptor.projection_slots[usize::from(grouped) + 4],
-                usize::from(grouped) + all_rows
-            );
-            assert_eq!(
-                descriptor.projection_slots[usize::from(grouped) + 5],
-                usize::from(grouped) + all_rows
-            );
+            for output in [4, 5] {
+                assert!(
+                    matches!(descriptor.projection[usize::from(grouped) + output],
+                    NativeAggregateInput::Column { index, .. } if index == usize::from(grouped) + all_rows)
+                );
+            }
             assert_eq!(
                 descriptor.wire_schema.fields().len(),
                 descriptor.key_fields.len()

@@ -10,7 +10,7 @@ use datafusion::arrow::{
     array::{Array, Int64Array, LargeStringArray, StringArray, UInt64Array},
     datatypes::FieldRef,
 };
-use datafusion::physical_expr::expressions::{CastExpr, Column, Literal};
+use datafusion::physical_expr::expressions::{CastExpr, Column, Literal, TryCastExpr};
 
 const STATE_CHUNK_ROWS: usize = 128;
 
@@ -32,6 +32,10 @@ pub(in crate::operator::sql) enum NativeAggregateInput {
         field: FieldRef,
         safe: bool,
     },
+    TryCast {
+        input: Box<Self>,
+        dtype: DataType,
+    },
 }
 
 pub(in crate::operator::sql) struct NativeStateDescriptor {
@@ -44,7 +48,7 @@ pub(in crate::operator::sql) struct NativeStateDescriptor {
     pub(in crate::operator::sql) result_fields: Vec<FieldRef>,
     pub(in crate::operator::sql) wire_schema: SchemaRef,
     pub(in crate::operator::sql) output_schema: SchemaRef,
-    pub(in crate::operator::sql) projection_slots: Vec<usize>,
+    pub(in crate::operator::sql) projection: Vec<NativeAggregateInput>,
     pub(in crate::operator::sql) group_count: usize,
     pub(in crate::operator::sql) policy: &'static str,
     _reservation: MemoryReservation,
@@ -106,7 +110,7 @@ impl IncrementalSql {
                 (schema_bytes, 4),
                 (self.keys.len(), 256),
                 (self.aggregates.len(), 1024),
-                (self.projection.len(), size_of::<usize>()),
+                (self.projection_nodes, 512),
             ],
             name,
         )?;
@@ -134,15 +138,10 @@ impl IncrementalSql {
             })
             .collect::<Result<Vec<_>>>()?;
         let count_all_rows = self.count_all_rows(&aggregate_names, &aggregate_inputs);
-        let projection_slots = self
+        let projection = self
             .projection
             .iter()
-            .map(|expression| {
-                expression
-                    .downcast_ref::<Column>()
-                    .map(Column::index)
-                    .ok_or_else(|| df_error(name, "native output projection is not a column"))
-            })
+            .map(|expression| describe_input(expression.as_ref(), &self.aggregate_schema, 0, name))
             .collect::<Result<Vec<_>>>()?;
         let state_fields = self
             .aggregates
@@ -186,7 +185,7 @@ impl IncrementalSql {
             result_fields,
             wire_schema: Arc::new(Schema::new(fields)),
             output_schema: self.output_schema.clone(),
-            projection_slots,
+            projection,
             group_count: self.groups.len(),
             policy: self.native_policy(),
             _reservation: reservation,
@@ -567,7 +566,11 @@ fn describe_input(
     if let Some(column) = expression.downcast_ref::<Column>() {
         return Ok(NativeAggregateInput::Column {
             index: column.index(),
-            field: schema.fields()[column.index()].clone(),
+            field: schema
+                .fields()
+                .get(column.index())
+                .ok_or_else(|| df_error(name, "native expression column is absent"))?
+                .clone(),
         });
     }
     if let Some(literal) = expression.downcast_ref::<Literal>() {
@@ -587,6 +590,17 @@ fn describe_input(
             )?),
             field: cast.target_field().clone(),
             safe: cast.cast_options().safe,
+        });
+    }
+    if let Some(cast) = expression.downcast_ref::<TryCastExpr>() {
+        return Ok(NativeAggregateInput::TryCast {
+            input: Box::new(describe_input(
+                cast.expr().as_ref(),
+                schema,
+                depth + 1,
+                name,
+            )?),
+            dtype: cast.cast_type().clone(),
         });
     }
     Err(df_error(

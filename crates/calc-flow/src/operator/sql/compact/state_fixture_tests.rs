@@ -900,6 +900,11 @@ fn input_json(input: &NativeAggregateInput) -> Value {
             json!({"kind": "cast", "input": input_json(input),
             "field": fields_json(std::slice::from_ref(field)), "safe": safe, "format_policy": "datafusion_default"})
         }
+        NativeAggregateInput::TryCast { input, dtype } => {
+            json!({"kind":"try_cast", "input":input_json(input),
+                "field":fields_json(&[Arc::new(Field::new("try_cast", dtype.clone(), true))]),
+                "format_policy":"datafusion_default"})
+        }
     }
 }
 
@@ -909,6 +914,6 @@ fn native_json(descriptor: &NativeStateDescriptor) -> Value {
             "function": function, "inputs": descriptor.aggregate_inputs[slot].iter().map(input_json).collect::<Vec<_>>(),
             "all_rows": descriptor.count_all_rows[slot], "state_fields": fields_json(&descriptor.state_fields[slot]),
             "result_field": fields_json(std::slice::from_ref(&descriptor.result_fields[slot])),
-        })).collect::<Vec<_>>(), "projection_slots": descriptor.projection_slots,
+        })).collect::<Vec<_>>(), "projection": descriptor.projection.iter().map(input_json).collect::<Vec<_>>(),
         "wire_schema_sha256": schema_digest(&descriptor.wire_schema), "output_schema_sha256": schema_digest(&descriptor.output_schema)})
 }

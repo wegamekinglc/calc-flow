@@ -65,6 +65,7 @@ pub(super) struct IncrementalSql {
     finalizer_bytes: usize,
     plan_bytes: usize,
     projection: Vec<Arc<dyn PhysicalExpr>>,
+    projection_nodes: usize,
     keys: Vec<usize>,
     variable_columns: Vec<usize>,
     variable_extrema: Vec<usize>,
@@ -573,6 +574,9 @@ impl IncrementalSql {
         let Some((projection, aggregate)) = shape(analyzed) else {
             return Ok(None);
         };
+        let Some(projection_nodes) = projection_work(&projection.expr) else {
+            return Ok(None);
+        };
         let reservation = runtime.incremental_reservation(name);
         let rebound_fields = if aggregate.input.schema().as_arrow() == schema.as_ref() {
             0
@@ -584,7 +588,7 @@ impl IncrementalSql {
             [
                 (keys.len(), 256),
                 (aggregate.aggr_expr.len(), 1024),
-                (projection.expr.len(), 512),
+                (projection_nodes, 512),
                 (predicate::plan_nodes(&aggregate.input, &schema), 512),
                 (query.text().len(), 8),
                 (rebound_fields, 512),
@@ -642,6 +646,7 @@ impl IncrementalSql {
             finalizer_bytes,
             plan_bytes,
             projection,
+            projection_nodes,
             keys,
             variable_columns,
             variable_extrema,
@@ -1491,7 +1496,7 @@ impl IncrementalSql {
             [
                 (self.keys.len(), 128),
                 (self.aggregates.len(), 128),
-                (self.projection.len(), 128),
+                (self.projection_nodes, 128),
             ],
             name,
         )?;
@@ -1834,14 +1839,34 @@ fn shape(
     {
         return None;
     }
-    if !projection
-        .expr
-        .iter()
-        .all(|expr| matches!(unalias(expr), Expr::Column(_)))
-    {
+    projection_work(&projection.expr)?;
+    Some((projection, aggregate))
+}
+
+fn projection_work(expressions: &[Expr]) -> Option<usize> {
+    expressions.iter().try_fold(0_usize, |total, expression| {
+        total.checked_add(projection_nodes(expression, 0)?)
+    })
+}
+
+fn projection_nodes(expression: &Expr, depth: usize) -> Option<usize> {
+    if depth > 8 {
         return None;
     }
-    Some((projection, aggregate))
+    let fixed = |dtype: &DataType| {
+        dtype.primitive_width().is_some() || matches!(dtype, DataType::Boolean | DataType::Null)
+    };
+    match unalias(expression) {
+        Expr::Column(_) => Some(1),
+        Expr::Literal(value, _) if fixed(&value.data_type()) => Some(1),
+        Expr::Cast(cast) if fixed(cast.field.data_type()) => {
+            projection_nodes(&cast.expr, depth + 1)?.checked_add(1)
+        }
+        Expr::TryCast(cast) if fixed(cast.field.data_type()) => {
+            projection_nodes(&cast.expr, depth + 1)?.checked_add(1)
+        }
+        _ => None,
+    }
 }
 
 fn unalias(mut expr: &Expr) -> &Expr {
