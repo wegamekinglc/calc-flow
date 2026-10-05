@@ -54,6 +54,11 @@ mod variable_extrema;
 #[path = "global_record.rs"]
 pub(in crate::operator::sql) mod global_record;
 
+#[path = "native_expression.rs"]
+mod native_expression;
+
+use native_expression::projection_work;
+
 pub(super) struct IncrementalSql {
     schema: SchemaRef,
     aggregate_schema: SchemaRef,
@@ -1841,32 +1846,6 @@ fn shape(
     }
     projection_work(&projection.expr)?;
     Some((projection, aggregate))
-}
-
-fn projection_work(expressions: &[Expr]) -> Option<usize> {
-    expressions.iter().try_fold(0_usize, |total, expression| {
-        total.checked_add(projection_nodes(expression, 0)?)
-    })
-}
-
-fn projection_nodes(expression: &Expr, depth: usize) -> Option<usize> {
-    if depth > 8 {
-        return None;
-    }
-    let fixed = |dtype: &DataType| {
-        dtype.primitive_width().is_some() || matches!(dtype, DataType::Boolean | DataType::Null)
-    };
-    match unalias(expression) {
-        Expr::Column(_) => Some(1),
-        Expr::Literal(value, _) if fixed(&value.data_type()) => Some(1),
-        Expr::Cast(cast) if fixed(cast.field.data_type()) => {
-            projection_nodes(&cast.expr, depth + 1)?.checked_add(1)
-        }
-        Expr::TryCast(cast) if fixed(cast.field.data_type()) => {
-            projection_nodes(&cast.expr, depth + 1)?.checked_add(1)
-        }
-        _ => None,
-    }
 }
 
 fn unalias(mut expr: &Expr) -> &Expr {

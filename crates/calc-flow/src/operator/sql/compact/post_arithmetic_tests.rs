@@ -1,55 +1,12 @@
 use super::*;
 
-#[path = "post_arithmetic_tests.rs"]
-mod post_arithmetic_tests;
-
-const GLOBAL_CAST: &str = "SELECT CAST(SUM(value) AS REAL) AS total, CAST(AVG(value) AS REAL) AS mean, CAST(COUNT(*) AS DECIMAL(20, 0)) AS rows, 7 AS constant FROM events";
-const GROUPED_CAST: &str = "SELECT CAST(key AS SMALLINT) AS bucket, CAST(SUM(value) AS REAL) AS total, CAST(COUNT(*) AS DECIMAL(20, 0)) AS rows, 7 AS constant FROM events GROUP BY key";
-const TRY_CAST: &str = "SELECT TRY_CAST(SUM(value) AS SMALLINT) AS safe, CAST(COUNT(*) AS DECIMAL(20, 0)) AS rows, NULL AS nothing FROM events";
-
-fn post_input(dtype: &DataType, parts: &[Part], sequence: u64) -> Batch {
-    let original = input(dtype, parts, sequence);
-    let records = original
-        .table_payload()
-        .unwrap()
-        .batches()
-        .iter()
-        .map(|record| {
-            let mut columns = record.columns().to_vec();
-            columns[0] = Arc::new(Int64Array::from(
-                (0..record.num_rows())
-                    .map(|row| i64::try_from(row % 3).unwrap() + 1)
-                    .collect::<Vec<_>>(),
-            ));
-            RecordBatch::try_new(record.schema(), columns).unwrap()
-        })
-        .collect();
-    Batch::table(records, original.metadata().clone()).unwrap()
-}
-
-async fn post_oracle(actual: &Batch, query: &str, dtype: &DataType, parts: &[Part], sequence: u64) {
-    let prefix = post_input(dtype, parts, sequence);
-    let expected = DataFusionRuntime::new(DataFusionConfig::default())
-        .unwrap()
-        .sql(
-            query,
-            &BTreeMap::from([("events".into(), prefix)]),
-            Some("post-oracle"),
-        )
-        .await
-        .unwrap();
-    assert_eq!(rows(actual), rows(&expected));
-    assert_eq!(
-        actual.table_payload().unwrap().schema(),
-        expected.table_payload().unwrap().schema()
-    );
-    assert_eq!(actual.metadata(), expected.metadata());
-}
+const GLOBAL_MATH: &str = "SELECT SUM(value) + 1.0 AS shifted, AVG(value) * 2.0 AS weighted, MAX(value) - MIN(value) AS spread, COUNT(*) / 2 AS pairs, COUNT(*) % 3 AS residue, -SUM(value) AS negated, NOT (COUNT(value) = 0) AS present, SUM(value) IS NULL AS missing FROM events";
+const GROUPED_MATH: &str = "SELECT key + 10 AS bucket, (SUM(value) - MIN(value)) * 2.0 AS adjusted, CAST(COUNT(*) AS DECIMAL(20, 0)) + CAST(1 AS DECIMAL(20, 0)) AS shifted_rows, COUNT(value) > 0 AND COUNT(*) > 0 AS present FROM events GROUP BY key";
 
 #[tokio::test]
-async fn test_postaggregate_casts_release_input_and_restore_exact_prefixes() {
+async fn test_postaggregate_arithmetic_keeps_native_state_and_exact_cold_prefixes() {
     for dtype in [DataType::Float32, DataType::Float64] {
-        for query in [GLOBAL_CAST, GROUPED_CAST, TRY_CAST] {
+        for query in [GLOBAL_MATH, GROUPED_MATH] {
             let job = job();
             let context = StreamOperatorContext::new(&job, "float_extrema", None);
             let mut state = operator(&dtype, query);
@@ -59,7 +16,8 @@ async fn test_postaggregate_casts_release_input_and_restore_exact_prefixes() {
             boundary[0] = Some((0x5a80_0000, 0x4350_0000_0000_0000));
             boundary[8192] = Some((0xda80_0000, 0xc350_0000_0000_0000));
             for (sequence, parts) in [
-                vec![vec![Some(NEG_ZERO), None, Some(ONE)]],
+                vec![vec![None; 3]],
+                vec![vec![Some(NEG_ZERO), Some(ONE), Some(TWO)]],
                 vec![boundary],
                 vec![vec![Some(NAN_A), Some(SNAN), Some(POS_INF)]],
                 vec![vec![]],
@@ -76,14 +34,13 @@ async fn test_postaggregate_casts_release_input_and_restore_exact_prefixes() {
                     state.incremental.is_some()
                         && state.compact.is_some()
                         && state.retained.is_none(),
-                    "postaggregate casts must keep native cumulative state"
+                    "postaggregate arithmetic must keep native cumulative state"
                 );
                 assert!(weak.iter().all(|array| array.upgrade().is_none()));
                 if sequence % 2 == 0 {
                     state.prepare_compact_capture_async(&context).await.unwrap();
                 }
                 let snapshot = state.checkpoint(Epoch::INITIAL).unwrap();
-                assert_eq!(snapshot.inline_metadata["state_layout"], json!(3));
                 pools.push(
                     state
                         .stream_state
@@ -113,10 +70,10 @@ async fn test_postaggregate_casts_release_input_and_restore_exact_prefixes() {
 }
 
 #[tokio::test]
-async fn test_postaggregate_cast_errors_and_refusal_preserve_state_and_retry() {
+async fn test_postaggregate_division_errors_and_refusal_preserve_state_and_retry() {
     use datafusion::execution::memory_pool::MemoryConsumer;
     let dtype = DataType::Float64;
-    let query = "SELECT CAST(SUM(value) AS SMALLINT) AS total FROM events";
+    let query = "SELECT 100 / (3 - COUNT(*)) AS remaining, SUM(value) AS total FROM events";
     let job = job();
     let context = StreamOperatorContext::new(&job, "float_extrema", None);
     let mut state = operator(&dtype, query);
@@ -130,16 +87,16 @@ async fn test_postaggregate_cast_errors_and_refusal_preserve_state_and_retry() {
         .unwrap()
         .incremental_memory_pool();
     let basis = pool.reserved();
-    let invalid = input(&dtype, &[vec![Some(POS_INF)]], 1);
+    let invalid = input(&dtype, &[vec![Some(TWO), Some(TWO)]], 1);
     let expected = DataFusionRuntime::new(DataFusionConfig::default())
         .unwrap()
         .sql(
             query,
             &BTreeMap::from([(
                 "events".into(),
-                input(&dtype, &[vec![Some(ONE)], vec![Some(POS_INF)]], 1),
+                input(&dtype, &[first[0].clone(), vec![Some(TWO), Some(TWO)]], 1),
             )]),
-            Some("cast-error-oracle"),
+            Some("division-error-oracle"),
         )
         .await;
     assert!(expected.is_err());
@@ -163,7 +120,7 @@ async fn test_postaggregate_cast_errors_and_refusal_preserve_state_and_retry() {
     assert!(weak.iter().all(|array| array.upgrade().is_none()));
     assert_eq!(pool.reserved(), basis);
     same_snapshot(&before, &state.checkpoint(Epoch::INITIAL).unwrap());
-    let pressure = MemoryConsumer::new("post-cast-pressure").register(&pool);
+    let pressure = MemoryConsumer::new("post-arithmetic-pressure").register(&pool);
     pressure.try_grow((1 << 30) - basis - 1).unwrap();
     let held = pool.reserved();
     let next = input(&dtype, &[vec![Some(TWO)]], 1);
@@ -188,18 +145,7 @@ async fn test_postaggregate_cast_errors_and_refusal_preserve_state_and_retry() {
         1,
     )
     .await;
-    let accepted = state.checkpoint(Epoch::INITIAL).unwrap();
-    let mut control: Value = serde_json::from_slice(accepted.segments["control"].bytes()).unwrap();
-    control["identity"]["native_descriptor"]["projection"][0]["safe"] = json!(true);
-    let segment = StateSegment::new(serde_json::to_vec(&control).unwrap());
-    let mut corrupt = accepted.clone();
-    corrupt
-        .inline_metadata
-        .insert("control_sha256".into(), json!(segment.sha256()));
-    corrupt.segments.insert("control".into(), segment);
-    assert!(StreamOperator::restore(&mut state, &corrupt).is_err());
-    same_snapshot(&accepted, &state.checkpoint(Epoch::INITIAL).unwrap());
-    drop((state, before, accepted, corrupt, actual));
+    drop((state, before, actual));
     assert!(job.gather_owner().close_and_drain().await.is_empty());
     drop(context);
     drop(job);
@@ -207,34 +153,46 @@ async fn test_postaggregate_cast_errors_and_refusal_preserve_state_and_retry() {
 }
 
 #[tokio::test]
-async fn test_postaggregate_unproven_functions_keep_retained_fallback() {
+async fn test_postaggregate_binary_identity_corruption_rejects_atomically() {
     let dtype = DataType::Float64;
-    let query = "SELECT SQRT(SUM(value)) AS root FROM events";
     let job = job();
     let context = StreamOperatorContext::new(&job, "float_extrema", None);
-    let mut state = operator(&dtype, query);
-    let mut parts = Vec::new();
-    for (sequence, part) in [vec![Some(ONE)], vec![Some(TWO)]].into_iter().enumerate() {
-        let actual = process(
-            &mut state,
-            input(&dtype, std::slice::from_ref(&part), sequence as u64),
-            &context,
-        )
-        .await;
-        parts.push(part);
-        assert_oracle(&actual, query, &dtype, &parts, sequence as u64).await;
-        assert!(state.incremental.is_none() && state.compact.is_none() && state.retained.is_some());
-        assert_eq!(
-            state.checkpoint(Epoch::INITIAL).unwrap().inline_metadata["state_layout"],
-            json!(4)
-        );
-    }
+    let mut state = operator(&dtype, GLOBAL_MATH);
+    drop(process(&mut state, input(&dtype, &[vec![Some(ONE)]], 0), &context).await);
+    let accepted = state.checkpoint(Epoch::INITIAL).unwrap();
     let pool = state
         .stream_state
         .runtime()
         .unwrap()
         .incremental_memory_pool();
-    drop(state);
+    let basis = pool.reserved();
+    for (field, value) in [("operator", json!("-")), ("fail_on_overflow", json!(true))] {
+        let mut control: Value =
+            serde_json::from_slice(accepted.segments["control"].bytes()).unwrap();
+        let binary = &mut control["identity"]["native_descriptor"]["projection"][0];
+        assert_eq!(binary["kind"], json!("binary"));
+        assert_ne!(binary[field], value);
+        binary[field] = value;
+        let segment = StateSegment::new(serde_json::to_vec(&control).unwrap());
+        let mut corrupt = accepted.clone();
+        corrupt
+            .inline_metadata
+            .insert("control_sha256".into(), json!(segment.sha256()));
+        corrupt.segments.insert("control".into(), segment);
+        assert!(StreamOperator::restore(&mut state, &corrupt).is_err());
+        assert_eq!(pool.reserved(), basis);
+        same_snapshot(&accepted, &state.checkpoint(Epoch::INITIAL).unwrap());
+    }
+    let actual = process(&mut state, input(&dtype, &[vec![Some(TWO)]], 1), &context).await;
+    assert_oracle(
+        &actual,
+        GLOBAL_MATH,
+        &dtype,
+        &[vec![Some(ONE)], vec![Some(TWO)]],
+        1,
+    )
+    .await;
+    drop((state, accepted, actual));
     assert!(job.gather_owner().close_and_drain().await.is_empty());
     drop(context);
     drop(job);

@@ -1,16 +1,17 @@
 #[path = "compact_state/export.rs"]
 mod export;
 
+pub(in crate::operator::sql) use super::native_expression::NativeAggregateInput;
+use super::native_expression::describe_input;
 use super::{
     AggregateFunctionExpr, Arc, ArrayRef, CHUNK_ROWS, DataType, Field, Group, IncrementalSql,
-    MemoryReservation, PhysicalExpr, RecordBatch, Result, ScalarValue, Schema, SchemaRef,
-    checked_bytes, df_error, ensure_reservation, native_grouped_result,
+    MemoryReservation, RecordBatch, Result, ScalarValue, Schema, SchemaRef, checked_bytes,
+    df_error, ensure_reservation, native_grouped_result,
 };
 use datafusion::arrow::{
     array::{Array, Int64Array, LargeStringArray, StringArray, UInt64Array},
     datatypes::FieldRef,
 };
-use datafusion::physical_expr::expressions::{CastExpr, Column, Literal, TryCastExpr};
 
 const STATE_CHUNK_ROWS: usize = 128;
 
@@ -18,24 +19,6 @@ const STATE_CHUNK_ROWS: usize = 128;
 enum StateColumn {
     Key(usize),
     Aggregate(usize, usize),
-}
-
-#[derive(Debug, PartialEq)]
-pub(in crate::operator::sql) enum NativeAggregateInput {
-    Column {
-        index: usize,
-        field: FieldRef,
-    },
-    Literal(ScalarValue),
-    Cast {
-        input: Box<Self>,
-        field: FieldRef,
-        safe: bool,
-    },
-    TryCast {
-        input: Box<Self>,
-        dtype: DataType,
-    },
 }
 
 pub(in crate::operator::sql) struct NativeStateDescriptor {
@@ -49,6 +32,7 @@ pub(in crate::operator::sql) struct NativeStateDescriptor {
     pub(in crate::operator::sql) wire_schema: SchemaRef,
     pub(in crate::operator::sql) output_schema: SchemaRef,
     pub(in crate::operator::sql) projection: Vec<NativeAggregateInput>,
+    pub(in crate::operator::sql) expression_identity_bytes: usize,
     pub(in crate::operator::sql) group_count: usize,
     pub(in crate::operator::sql) policy: &'static str,
     _reservation: MemoryReservation,
@@ -96,26 +80,7 @@ impl IncrementalSql {
         &self,
         name: &str,
     ) -> Result<NativeStateDescriptor> {
-        let input_bytes =
-            super::super::ipc::schema_bytes(&self.schema).map_err(|error| df_error(name, error))?;
-        let aggregate_bytes = super::super::ipc::schema_bytes(&self.aggregate_schema)
-            .map_err(|error| df_error(name, error))?;
-        let output_bytes = super::super::ipc::schema_bytes(&self.output_schema)
-            .map_err(|error| df_error(name, error))?;
-        let schema_bytes =
-            checked_bytes(input_bytes, [(aggregate_bytes, 1), (output_bytes, 1)], name)?;
-        let bytes = checked_bytes(
-            4096,
-            [
-                (schema_bytes, 4),
-                (self.keys.len(), 256),
-                (self.aggregates.len(), 1024),
-                (self.projection_nodes, 512),
-            ],
-            name,
-        )?;
-        let reservation = self.reservation.new_empty();
-        ensure_reservation(&reservation, bytes, name)?;
+        let reservation = self.descriptor_reservation(name)?;
         let key_fields = self
             .keys
             .iter()
@@ -143,6 +108,13 @@ impl IncrementalSql {
             .iter()
             .map(|expression| describe_input(expression.as_ref(), &self.aggregate_schema, 0, name))
             .collect::<Result<Vec<_>>>()?;
+        let expression_identity_bytes = aggregate_inputs
+            .iter()
+            .flatten()
+            .chain(&projection)
+            .try_fold(0, |bytes, input| {
+                checked_bytes(bytes, [(input.identity_bytes(name)?, 1)], name)
+            })?;
         let state_fields = self
             .aggregates
             .iter()
@@ -186,10 +158,34 @@ impl IncrementalSql {
             wire_schema: Arc::new(Schema::new(fields)),
             output_schema: self.output_schema.clone(),
             projection,
+            expression_identity_bytes,
             group_count: self.groups.len(),
             policy: self.native_policy(),
             _reservation: reservation,
         })
+    }
+
+    fn descriptor_reservation(&self, name: &str) -> Result<MemoryReservation> {
+        let schema_bytes = [&self.schema, &self.aggregate_schema, &self.output_schema]
+            .into_iter()
+            .try_fold(0, |bytes, schema| {
+                let encoded = super::super::ipc::schema_bytes(schema)
+                    .map_err(|error| df_error(name, error))?;
+                checked_bytes(bytes, [(encoded, 1)], name)
+            })?;
+        let bytes = checked_bytes(
+            4096,
+            [
+                (schema_bytes, 4),
+                (self.keys.len(), 256),
+                (self.aggregates.len(), 1024),
+                (self.projection_nodes, 512),
+            ],
+            name,
+        )?;
+        let reservation = self.reservation.new_empty();
+        ensure_reservation(&reservation, bytes, name)?;
+        Ok(reservation)
     }
 
     fn count_all_rows(
@@ -552,61 +548,6 @@ impl IncrementalSql {
             reservation,
         })
     }
-}
-
-fn describe_input(
-    expression: &dyn PhysicalExpr,
-    schema: &Schema,
-    depth: usize,
-    name: &str,
-) -> Result<NativeAggregateInput> {
-    if depth > 8 {
-        return Err(df_error(name, "native aggregate input is too deep"));
-    }
-    if let Some(column) = expression.downcast_ref::<Column>() {
-        return Ok(NativeAggregateInput::Column {
-            index: column.index(),
-            field: schema
-                .fields()
-                .get(column.index())
-                .ok_or_else(|| df_error(name, "native expression column is absent"))?
-                .clone(),
-        });
-    }
-    if let Some(literal) = expression.downcast_ref::<Literal>() {
-        return Ok(NativeAggregateInput::Literal(literal.value().clone()));
-    }
-    if let Some(cast) = expression.downcast_ref::<CastExpr>() {
-        if cast.cast_options().format_options != datafusion::common::format::DEFAULT_FORMAT_OPTIONS
-        {
-            return Err(df_error(name, "native cast has unsupported format options"));
-        }
-        return Ok(NativeAggregateInput::Cast {
-            input: Box::new(describe_input(
-                cast.expr().as_ref(),
-                schema,
-                depth + 1,
-                name,
-            )?),
-            field: cast.target_field().clone(),
-            safe: cast.cast_options().safe,
-        });
-    }
-    if let Some(cast) = expression.downcast_ref::<TryCastExpr>() {
-        return Ok(NativeAggregateInput::TryCast {
-            input: Box::new(describe_input(
-                cast.expr().as_ref(),
-                schema,
-                depth + 1,
-                name,
-            )?),
-            dtype: cast.cast_type().clone(),
-        });
-    }
-    Err(df_error(
-        name,
-        "native aggregate input has an unsupported expression",
-    ))
 }
 
 fn validate_scalar(value: &ScalarValue, field: &Field, name: &str) -> Result<()> {

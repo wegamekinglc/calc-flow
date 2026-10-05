@@ -905,6 +905,18 @@ fn input_json(input: &NativeAggregateInput) -> Value {
                 "field":fields_json(&[Arc::new(Field::new("try_cast", dtype.clone(), true))]),
                 "format_policy":"datafusion_default"})
         }
+        NativeAggregateInput::Binary {
+            left,
+            op,
+            right,
+            fail_on_overflow,
+        } => {
+            json!({"kind":"binary", "left":input_json(left), "operator":op.to_string(),
+                "right":input_json(right), "fail_on_overflow":fail_on_overflow})
+        }
+        NativeAggregateInput::Unary { input, op } => {
+            json!({"kind":"unary", "input":input_json(input), "operator":op})
+        }
     }
 }
 

@@ -76,6 +76,8 @@ fn reserve(
     .try_fold(131_072, |bytes, schema| {
         incremental::checked_bytes(bytes, [(ipc::schema_bytes(schema)?, 64)], name)
     })?;
+    let bound =
+        incremental::checked_bytes(bound, [(descriptor.expression_identity_bytes, 1)], name)?;
     let reservation = runtime.incremental_reservation(name);
     incremental::ensure_reservation(&reservation, bound, name)?;
     Ok(reservation)
@@ -127,6 +129,18 @@ fn input_json(input: &NativeAggregateInput) -> Result<Value> {
             "kind":"try_cast", "input":input_json(input)?,
             "field":fields_json(&[Arc::new(Field::new("try_cast", dtype.clone(), true))])?,
             "format_policy":"datafusion_default"
+        })),
+        NativeAggregateInput::Binary {
+            left,
+            op,
+            right,
+            fail_on_overflow,
+        } => Ok(json!({
+            "kind":"binary", "left":input_json(left)?, "operator":op.to_string(),
+            "right":input_json(right)?, "fail_on_overflow":fail_on_overflow
+        })),
+        NativeAggregateInput::Unary { input, op } => Ok(json!({
+            "kind":"unary", "input":input_json(input)?, "operator":op
         })),
     }
 }
