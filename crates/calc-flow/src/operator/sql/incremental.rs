@@ -516,6 +516,7 @@ pub(super) struct Transaction {
     new_groups: Vec<Option<Group>>,
     _reservation: MemoryReservation,
     proof: Option<grouped_float::Proof>,
+    coalesced: Option<Arc<global_record::coalescer::State>>,
 }
 
 impl Transaction {
@@ -605,7 +606,7 @@ impl IncrementalSql {
             return Ok(None);
         }
         let global_records = if global_record::raw_selected(raw, &schema) {
-            global_record::Proof::new(runtime, &aggregates, name)?
+            global_record::Proof::new(runtime, &aggregates, predicate.is_some(), name)?
         } else {
             None
         };
@@ -669,6 +670,12 @@ impl IncrementalSql {
 
     pub(super) fn requires_global_record_proof(&self) -> bool {
         self.global_records.is_some()
+    }
+
+    pub(in crate::operator::sql) fn requires_global_coalescer(&self) -> bool {
+        self.global_records
+            .as_ref()
+            .is_some_and(global_record::Proof::uses_coalescing)
     }
 
     fn native_policy(&self) -> &'static str {
@@ -871,6 +878,7 @@ impl IncrementalSql {
         let (reservation, workspace, mut candidates) =
             self.input_candidates(batch.num_rows(), name)?;
         candidates.proof = proof;
+        let mut coalesced = None;
         let rows_processed = if let Some(global) = &self.global_records {
             let candidate = candidates.groups.get_mut(&0).expect("global candidate");
             let values = global
@@ -880,13 +888,15 @@ impl IncrementalSql {
                         &self.aggregates,
                         &self.filter_columns,
                         &candidate.group.states,
+                        self.predicate.as_ref(),
                     ),
                     self.reservation.new_empty(),
                     context,
                     name,
                 )
                 .await?;
-            for (index, state) in values.into_iter().enumerate() {
+            coalesced = values.coalesced;
+            for (index, state) in values.values.into_iter().enumerate() {
                 candidate.group.results[index] = global.result(index, &state, name)?;
                 candidate.group.states[index] = state;
             }
@@ -923,6 +933,7 @@ impl IncrementalSql {
             _reservation: reservation,
             proof,
             container,
+            coalesced,
         })
     }
 
@@ -1654,6 +1665,12 @@ impl IncrementalSql {
     }
 
     pub fn commit(&mut self, transaction: Transaction) {
+        if let Some(coalesced) = transaction.coalesced {
+            self.global_records
+                .as_mut()
+                .expect("global coalescer model")
+                .coalesced = Some(coalesced);
+        }
         if let Some(dirty) = transaction.dirty {
             self.dirty = dirty;
         }

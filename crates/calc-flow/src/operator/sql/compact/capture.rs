@@ -80,6 +80,7 @@ struct CaptureParts {
     metadata: Arc<metadata::SqlMetadata>,
     groups: usize,
     policy: incremental::grouped_float::Policy,
+    coalescer: Option<incremental::global_record::coalescer::Capture>,
     reservation: Arc<MemoryReservation>,
 }
 
@@ -140,6 +141,7 @@ pub(in crate::operator::sql) fn prepare(
             metadata,
             groups: native.group_count(),
             policy: native.checkpoint_policy(),
+            coalescer: native.capture_coalescer(&operator.name, check)?,
             reservation,
         },
         check,
@@ -219,6 +221,9 @@ pub(in crate::operator::sql) async fn prepare_async(
             metadata,
             groups,
             policy: native.checkpoint_policy(),
+            coalescer: native
+                .capture_coalescer_async(&operator.name, context)
+                .await?,
             reservation,
         },
         &|| context.check_cancelled(),
@@ -287,6 +292,10 @@ fn finish(
         native_semantics: 1,
         datafusion_version: "54.0.0".into(),
         state_policy: parts.policy,
+        coalescer: parts.coalescer.as_ref().map_or(
+            incremental::global_record::coalescer::Inventory::None,
+            incremental::global_record::coalescer::Capture::inventory,
+        ),
         identity: parts.identity.value,
         ledger: state.ledger,
         group_log: parts.group_state.descriptor.clone(),
@@ -308,6 +317,14 @@ fn finish(
         ]),
     };
     parts.group_state.segments(&mut snapshot.segments);
+    if let Some(coalescer) = parts.coalescer {
+        snapshot
+            .segments
+            .insert("global-complete".into(), coalescer.complete);
+        snapshot
+            .segments
+            .insert("global-tail".into(), coalescer.tail);
+    }
     for segment in snapshot.segments.values_mut() {
         *segment = segment.clone().with_owner(parts.reservation.clone());
     }

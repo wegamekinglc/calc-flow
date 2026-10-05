@@ -10,6 +10,7 @@ use datafusion::{
     physical_plan::{
         ExecutionPlan, InputOrderMode,
         aggregates::{AggregateExec, AggregateMode},
+        filter::FilterExec,
         projection::ProjectionExec,
     },
 };
@@ -77,6 +78,9 @@ fn inspect(plan: &dyn ExecutionPlan, original: &Batch, census: &mut [usize; 2]) 
                 assert!(Arc::ptr_eq(actual, expected));
             }
         }
+    } else if let Some(filter) = plan.downcast_ref::<FilterExec>() {
+        assert_eq!(filter.batch_size(), 8192);
+        assert!(filter.fetch().is_none());
     } else {
         assert!(
             plan.is::<ProjectionExec>(),

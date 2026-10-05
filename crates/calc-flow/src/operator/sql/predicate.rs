@@ -12,6 +12,7 @@ use datafusion::{
 };
 use std::sync::Arc;
 
+#[derive(Clone)]
 pub(super) struct InputPredicate {
     expression: Arc<dyn PhysicalExpr>,
     nodes: usize,

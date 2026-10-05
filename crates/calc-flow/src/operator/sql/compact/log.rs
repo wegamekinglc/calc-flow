@@ -184,7 +184,9 @@ impl LogDescriptor {
         if ledger.rows < previous.rows
             || ledger.bytes < previous.bytes
             || !ledger.seen_input
-            || snapshot.segments.len() != 4 + self.frames.len()
+            || snapshot.segments.len()
+                != 4 + self.frames.len()
+                    + usize::from(snapshot.segments.contains_key("global-tail")) * 2
         {
             return Err(sql_state_error(
                 "SQL group log ledger or inventory is invalid",

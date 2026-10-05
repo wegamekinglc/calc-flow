@@ -6,6 +6,7 @@ use datafusion::{
     physical_plan::{
         ExecutionPlan, ExecutionPlanProperties, InputOrderMode,
         aggregates::{AggregateExec, AggregateMode},
+        filter::FilterExec,
         projection::ProjectionExec,
     },
 };
@@ -16,6 +17,7 @@ impl DataFusionRuntime {
         query: &ValidatedQuery,
         alias: &str,
         input: &Batch,
+        coalesced: bool,
         node: &str,
     ) -> Result<bool> {
         if !self.grouped_float_model_supported(node)? || input.num_rows() == 0 {
@@ -30,13 +32,13 @@ impl DataFusionRuntime {
         let planned = self
             .prepare_query(context, query, &tables, Some(node))
             .await?;
-        let mut census = [0, 0];
+        let mut census = [0, 0, 0];
         let valid = inspect(planned.physical_plan.as_ref(), input, &mut census)?;
-        Ok(valid && census == [1, 1])
+        Ok(valid && census == [1, 1, usize::from(coalesced)])
     }
 }
 
-fn inspect(plan: &dyn ExecutionPlan, input: &Batch, census: &mut [usize; 2]) -> Result<bool> {
+fn inspect(plan: &dyn ExecutionPlan, input: &Batch, census: &mut [usize; 3]) -> Result<bool> {
     if plan.output_partitioning().partition_count() != 1 {
         return Ok(false);
     }
@@ -46,6 +48,9 @@ fn inspect(plan: &dyn ExecutionPlan, input: &Batch, census: &mut [usize; 2]) -> 
     } else if let Some(source) = plan.downcast_ref::<DataSourceExec>() {
         census[1] += 1;
         super::grouped_float::fifo_source(source, input)?
+    } else if let Some(filter) = plan.downcast_ref::<FilterExec>() {
+        census[2] += 1;
+        filter.batch_size() == 8192 && filter.fetch().is_none()
     } else {
         plan.is::<ProjectionExec>()
     };

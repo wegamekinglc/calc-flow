@@ -304,6 +304,7 @@ fn capture_state(
     .unwrap();
     let identity = fixture_identity(source, config, &projection, &export.descriptor, native);
     let control = CompactControl {
+        coalescer: incremental::global_record::coalescer::Inventory::None,
         state_layout: 3,
         state_accounting: 3,
         native_semantics: 1,

@@ -1,6 +1,9 @@
 use super::*;
 use datafusion::arrow::array::BooleanArray;
 
+#[path = "global_float_where_tests.rs"]
+mod global_float_where_tests;
+
 const FILTERED: &str = "SELECT SUM(value) FILTER (WHERE selected) AS total, AVG(value) FILTER (WHERE selected) AS mean, SUM(alternate) FILTER (WHERE other) AS other_total, AVG(alternate) FILTER (WHERE other) AS other_mean, MIN(value) FILTER (WHERE other) AS lo, MAX(value) FILTER (WHERE selected) AS hi, COUNT(value) FILTER (WHERE selected) AS valid, COUNT(*) FILTER (WHERE other) AS hits, COUNT(*) AS rows, AVG(value) FILTER (WHERE selected) AS again FROM events";
 
 fn filtered_schema(dtype: &DataType) -> SchemaRef {
@@ -145,10 +148,10 @@ async fn capture(state: &mut SqlOperator, query: &str, prefix: &Batch) -> Operat
     snapshot
 }
 
-async fn prefixes(dtype: &DataType, arrivals: Vec<Vec<Part>>) {
+async fn prefixes(dtype: &DataType, query: &str, arrivals: Vec<Vec<Part>>) {
     let job = job();
     let context = StreamOperatorContext::new(&job, "float_extrema", None);
-    let mut state = filtered_operator(dtype, FILTERED);
+    let mut state = filtered_operator(dtype, query);
     let mut history = Vec::new();
     let mut pools = Vec::new();
     for (sequence, parts) in arrivals.into_iter().enumerate() {
@@ -156,13 +159,16 @@ async fn prefixes(dtype: &DataType, arrivals: Vec<Vec<Part>>) {
         let weak = weak_arrays(&incoming);
         let actual = process(&mut state, incoming, &context).await;
         history.push(parts);
-        let prefix = oracle(&actual, dtype, FILTERED, &history).await;
+        let prefix = oracle(&actual, dtype, query, &history).await;
         assert!(
             state.incremental.is_some() && state.compact.is_some() && state.retained.is_none(),
             "filtered floating aggregates must own chronological native state"
         );
         assert!(weak.iter().all(|array| array.upgrade().is_none()));
-        let snapshot = capture(&mut state, FILTERED, &prefix).await;
+        if sequence % 2 == 0 {
+            state.prepare_compact_capture_async(&context).await.unwrap();
+        }
+        let snapshot = capture(&mut state, query, &prefix).await;
         pools.push(
             state
                 .stream_state
@@ -171,7 +177,7 @@ async fn prefixes(dtype: &DataType, arrivals: Vec<Vec<Part>>) {
                 .incremental_memory_pool(),
         );
         drop(state);
-        state = filtered_operator(dtype, FILTERED);
+        state = filtered_operator(dtype, query);
         StreamOperator::restore(&mut state, &snapshot).unwrap();
         same_snapshot(&snapshot, &state.checkpoint(Epoch::INITIAL).unwrap());
     }
@@ -193,9 +199,9 @@ async fn prefixes(dtype: &DataType, arrivals: Vec<Vec<Part>>) {
 async fn test_global_float_filters_exact_bits_native_state_and_cold_continuation() {
     for dtype in [DataType::Float32, DataType::Float64] {
         for reverse in [false, true] {
-            prefixes(&dtype, finite_arrivals(reverse)).await;
+            prefixes(&dtype, FILTERED, finite_arrivals(reverse)).await;
         }
-        prefixes(&dtype, special_arrivals()).await;
+        prefixes(&dtype, FILTERED, special_arrivals()).await;
     }
 }
 

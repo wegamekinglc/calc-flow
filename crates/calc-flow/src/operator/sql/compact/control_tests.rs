@@ -10,6 +10,7 @@ fn control() -> CompactControl {
         native_semantics: 1,
         datafusion_version: "54.0.0".into(),
         state_policy: incremental::grouped_float::Policy::ExactNumericV1,
+        coalescer: incremental::global_record::coalescer::Inventory::None,
         identity: CompactIdentity {
             query_sha256: "q".repeat(64),
             input_alias: "events".into(),

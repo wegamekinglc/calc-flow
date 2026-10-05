@@ -8,11 +8,21 @@ use crate::runtime::streaming::gather_work::{
 use crate::{DataFusionConfig, DataFusionRuntime, StreamOperatorContext};
 use serde::{Deserialize, Serialize};
 
+#[path = "global_record/coalescer.rs"]
+pub(in crate::operator::sql) mod coalescer;
+
 type Arguments<'a> = (
     &'a [Arc<AggregateFunctionExpr>],
     &'a [Option<usize>],
     &'a [Vec<ScalarValue>],
+    Option<&'a super::predicate::InputPredicate>,
 );
+
+#[derive(Clone)]
+pub(super) struct Update {
+    pub values: Vec<Vec<ScalarValue>>,
+    pub coalesced: Option<Arc<coalescer::State>>,
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -33,6 +43,7 @@ pub(in crate::operator::sql) enum Factory {
 #[serde(rename_all = "snake_case")]
 pub(in crate::operator::sql) enum Model {
     Df54SingleSourceSplitRecordsV1,
+    Df54SingleSourceSplitFilterCoalescedV1,
 }
 
 #[derive(Clone)]
@@ -76,6 +87,7 @@ impl Kind {
 
 pub(super) struct Proof {
     pub policy: Policy,
+    pub coalesced: Option<Arc<coalescer::State>>,
     kinds: Arc<[Kind]>,
     operator: GatherOperatorId,
     _reservation: MemoryReservation,
@@ -104,7 +116,9 @@ pub(super) fn raw_selected(raw: &LogicalPlan, schema: &SchemaRef) -> bool {
     if !aggregate.group_expr.is_empty() || aggregate.aggr_expr.is_empty() {
         return false;
     }
-    if !matches!(aggregate.input.as_ref(), LogicalPlan::TableScan(_)) {
+    if !matches!(aggregate.input.as_ref(), LogicalPlan::TableScan(_))
+        && !matches!(aggregate.input.as_ref(), LogicalPlan::Filter(filter) if matches!(filter.input.as_ref(), LogicalPlan::TableScan(_)))
+    {
         return false;
     }
     if !aggregate.aggr_expr.iter().any(|expression| {
@@ -139,6 +153,7 @@ impl Proof {
     pub(super) fn new(
         runtime: &DataFusionRuntime,
         expressions: &[Arc<AggregateFunctionExpr>],
+        filtered: bool,
         name: &str,
     ) -> Result<Option<Self>> {
         if !runtime.grouped_float_model_supported(name)? {
@@ -161,8 +176,13 @@ impl Proof {
             policy: Policy {
                 config: runtime.compact_runtime_config(),
                 factory: Factory::ScalarNativeV1,
-                model: Model::Df54SingleSourceSplitRecordsV1,
+                model: if filtered {
+                    Model::Df54SingleSourceSplitFilterCoalescedV1
+                } else {
+                    Model::Df54SingleSourceSplitRecordsV1
+                },
             },
+            coalesced: None,
             kinds: expressions
                 .iter()
                 .map(|expression| Kind::of(expression).expect("selected kind"))
@@ -226,10 +246,13 @@ impl Proof {
         credit: MemoryReservation,
         context: &StreamOperatorContext<'_>,
         name: &str,
-    ) -> Result<Vec<Vec<ScalarValue>>> {
+    ) -> Result<Update> {
         context.check_cancelled()?;
         let (records, input_owner) = input;
-        let (expressions, filters, values) = arguments;
+        let (expressions, filters, values, predicate) = arguments;
+        if self.uses_coalescing() != predicate.is_some() {
+            return Err(df_error(name, "global scalar predicate differs from model"));
+        }
         if expressions.len() != self.kinds.len() || values.len() != self.kinds.len() {
             return Err(df_error(name, "global scalar argument count differs"));
         }
@@ -237,7 +260,7 @@ impl Proof {
             return Err(df_error(name, "global scalar filter count differs"));
         }
         let empty = records.iter().all(|record| record.num_rows() == 0);
-        let charge = if empty {
+        let mut charge = if empty {
             checked_bytes(4096, [(self.kinds.len(), 1024)], name)?
         } else {
             request_charge(
@@ -249,18 +272,38 @@ impl Proof {
                 name,
             )?
         };
+        let coalesced_credit = if !empty && let Some(predicate) = predicate {
+            charge = checked_bytes(
+                charge,
+                [(
+                    predicate.workspace(coalescer::ROWS, expressions.len(), name)?,
+                    1,
+                )],
+                name,
+            )?;
+            Some(Arc::new(credit.new_empty()))
+        } else {
+            None
+        };
         super::ensure_reservation(&credit, charge, name)?;
         for (kind, state) in self.kinds.iter().zip(values) {
             saved_count(kind, state, name)?;
         }
         if empty {
-            return Ok(values.to_vec());
+            return Ok(Update {
+                values: values.to_vec(),
+                coalesced: None,
+            });
         }
         let work = RecordWork {
             records: records.to_vec(),
             expressions: expressions.to_vec(),
             filters: filters.to_vec(),
             states: values.to_vec(),
+            predicate: predicate.cloned(),
+            previous: self.coalesced.clone(),
+            coalesced_scratch: coalesced_credit.as_ref().map(|owner| owner.new_empty()),
+            coalesced_credit,
             batch_size: self.policy.config.batch_size,
             name: name.to_owned(),
             _input_owner: input_owner,
@@ -278,6 +321,10 @@ impl Proof {
         let values = output.value.clone();
         drop(output);
         Ok(values)
+    }
+
+    pub(super) fn uses_coalescing(&self) -> bool {
+        self.policy.model == Model::Df54SingleSourceSplitFilterCoalescedV1
     }
 }
 
@@ -359,21 +406,50 @@ struct RecordWork {
     expressions: Vec<Arc<AggregateFunctionExpr>>,
     filters: Vec<Option<usize>>,
     states: Vec<Vec<ScalarValue>>,
+    predicate: Option<super::predicate::InputPredicate>,
+    previous: Option<Arc<coalescer::State>>,
+    coalesced_scratch: Option<MemoryReservation>,
+    coalesced_credit: Option<Arc<MemoryReservation>>,
     batch_size: usize,
     name: String,
     _input_owner: Option<Arc<MemoryReservation>>,
 }
 
 impl OwnedCpuWork for RecordWork {
-    type Output = Vec<Vec<ScalarValue>>;
+    type Output = Update;
 
-    fn run(self, stop: &GatherStop) -> Result<Self::Output> {
-        let mut accumulators = self
-            .expressions
-            .iter()
-            .zip(&self.states)
-            .map(|(expression, state)| {
+    fn run(mut self, stop: &GatherStop) -> Result<Self::Output> {
+        if let Some(predicate) = self.predicate.take() {
+            return coalescer::run(&self, &predicate, stop);
+        }
+        let check = || stop.check();
+        let mut accumulators = self.accumulators(&self.states, &check)?;
+        for record in &self.records {
+            stop.check()?;
+            for offset in (0..record.num_rows()).step_by(self.batch_size) {
                 stop.check()?;
+                let rows = self.batch_size.min(record.num_rows() - offset);
+                self.update_batch(&record.slice(offset, rows), &mut accumulators, &check)?;
+            }
+        }
+        Ok(Update {
+            values: self.values(&mut accumulators, &check)?,
+            coalesced: None,
+        })
+    }
+}
+
+impl RecordWork {
+    fn accumulators(
+        &self,
+        states: &[Vec<ScalarValue>],
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<Vec<Box<dyn datafusion::logical_expr::Accumulator>>> {
+        self.expressions
+            .iter()
+            .zip(states)
+            .map(|(expression, state)| {
+                check()?;
                 let mut accumulator = expression
                     .create_accumulator()
                     .map_err(|error| df_error(&self.name, error))?;
@@ -389,59 +465,65 @@ impl OwnedCpuWork for RecordWork {
                 }
                 Ok(accumulator)
             })
-            .collect::<Result<Vec<_>>>()?;
-        for record in &self.records {
-            stop.check()?;
-            if record.num_rows() == 0 {
-                continue;
-            }
-            for offset in (0..record.num_rows()).step_by(self.batch_size) {
-                stop.check()?;
-                let rows = self.batch_size.min(record.num_rows() - offset);
-                let batch = record.slice(offset, rows);
-                for (index, (expression, accumulator)) in
-                    self.expressions.iter().zip(&mut accumulators).enumerate()
-                {
-                    stop.check()?;
-                    let filtered;
-                    let batch = if let Some(column) = self.filters.get(index).copied().flatten() {
-                        let filter = batch
-                            .columns()
-                            .get(column)
-                            .and_then(|array| {
-                                array
-                                    .as_any()
-                                    .downcast_ref::<datafusion::arrow::array::BooleanArray>()
-                            })
-                            .ok_or_else(|| {
-                                df_error(&self.name, "global scalar filter is not Boolean")
-                            })?;
-                        filtered = datafusion::arrow::compute::filter_record_batch(&batch, filter)
-                            .map_err(|error| df_error(&self.name, error))?;
-                        &filtered
-                    } else {
-                        &batch
-                    };
-                    let arrays = expression
-                        .expressions()
-                        .iter()
-                        .map(|expression| {
-                            expression
-                                .evaluate(batch)
-                                .and_then(|value| value.into_array(batch.num_rows()))
-                                .map_err(|error| df_error(&self.name, error))
-                        })
-                        .collect::<Result<Vec<ArrayRef>>>()?;
-                    accumulator
-                        .update_batch(&arrays)
-                        .map_err(|error| df_error(&self.name, error))?;
-                }
-            }
+            .collect()
+    }
+
+    fn update_batch(
+        &self,
+        batch: &RecordBatch,
+        accumulators: &mut [Box<dyn datafusion::logical_expr::Accumulator>],
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<()> {
+        for (index, (expression, accumulator)) in self
+            .expressions
+            .iter()
+            .zip(accumulators.iter_mut())
+            .enumerate()
+        {
+            check()?;
+            let filtered;
+            let batch = if let Some(column) = self.filters.get(index).copied().flatten() {
+                let filter = batch
+                    .columns()
+                    .get(column)
+                    .and_then(|array| {
+                        array
+                            .as_any()
+                            .downcast_ref::<datafusion::arrow::array::BooleanArray>()
+                    })
+                    .ok_or_else(|| df_error(&self.name, "global scalar filter is not Boolean"))?;
+                filtered = datafusion::arrow::compute::filter_record_batch(batch, filter)
+                    .map_err(|error| df_error(&self.name, error))?;
+                &filtered
+            } else {
+                batch
+            };
+            let arrays = expression
+                .expressions()
+                .iter()
+                .map(|expression| {
+                    expression
+                        .evaluate(batch)
+                        .and_then(|value| value.into_array(batch.num_rows()))
+                        .map_err(|error| df_error(&self.name, error))
+                })
+                .collect::<Result<Vec<ArrayRef>>>()?;
+            accumulator
+                .update_batch(&arrays)
+                .map_err(|error| df_error(&self.name, error))?;
         }
+        Ok(())
+    }
+
+    fn values(
+        &self,
+        accumulators: &mut [Box<dyn datafusion::logical_expr::Accumulator>],
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<Vec<Vec<ScalarValue>>> {
         accumulators
             .iter_mut()
             .map(|accumulator| {
-                stop.check()?;
+                check()?;
                 accumulator
                     .state()
                     .map_err(|error| df_error(&self.name, error))

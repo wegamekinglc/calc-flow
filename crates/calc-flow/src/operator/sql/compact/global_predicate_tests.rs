@@ -180,9 +180,9 @@ async fn test_global_float_filters_release_inputs_and_restore_exact_prefixes() {
 }
 
 #[tokio::test]
-async fn test_global_float_where_keeps_exact_retained_fallback() {
+async fn test_global_float_where_releases_inputs_and_restores_exact_prefixes() {
     let query = "SELECT SUM(amount) AS total, AVG(amount) AS mean, COUNT(*) AS rows FROM events WHERE selected OR key IS NULL";
-    recovery_case(&DataType::Utf8, query, false).await;
+    recovery_case(&DataType::Utf8, query, true).await;
 }
 
 #[tokio::test]

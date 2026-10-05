@@ -45,6 +45,7 @@ pub(in crate::operator::sql) fn prepare(
         &snapshot.segments["group-state"],
         &snapshot.segments["batch-metadata"],
     )?;
+    decoded.value.coalescer.validate(snapshot)?;
     decoded
         .value
         .group_log
@@ -144,20 +145,28 @@ fn restore_groups(
         check,
         name,
     )?;
+    native.restore_coalescer(
+        &control.coalescer,
+        snapshot,
+        control.ledger.rows,
+        check,
+        name,
+    )?;
     check()?;
     Ok(native)
 }
 
 fn validate_inventory(snapshot: &OperatorStateSnapshot) -> Result<()> {
     let required = ["batch-metadata", "control", "group-state", "logical-schema"];
-    if snapshot.segments.len() > 4 + super::log::MAX_FRAMES
+    if snapshot.segments.len() > 6 + super::log::MAX_FRAMES
         || required
             .iter()
             .any(|id| !snapshot.segments.contains_key(*id))
-        || snapshot
-            .segments
-            .keys()
-            .any(|id| !required.contains(&id.as_str()) && !id.starts_with("group-delta-"))
+        || snapshot.segments.keys().any(|id| {
+            !required.contains(&id.as_str())
+                && !["global-complete", "global-tail"].contains(&id.as_str())
+                && !id.starts_with("group-delta-")
+        })
     {
         return Err(sql_state_error(
             "SQL compact checkpoint segment inventory is invalid",

@@ -45,6 +45,7 @@ pub(super) struct CompactControl {
     pub native_semantics: u32,
     pub datafusion_version: String,
     pub state_policy: incremental::grouped_float::Policy,
+    pub coalescer: incremental::global_record::coalescer::Inventory,
     pub identity: CompactIdentity,
     pub ledger: QuotaLedger,
     pub groups: u64,
