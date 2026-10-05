@@ -144,6 +144,8 @@ async fn recovery_case(dtype: &DataType, query: &str, native: bool) {
     );
     drop(state);
     assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop(context);
+    drop(job);
     assert_eq!(pools.iter().map(|pool| pool.reserved()).sum::<usize>(), 0);
 }
 
@@ -172,13 +174,15 @@ async fn test_global_where_and_filters_preserve_empty_selected_prefixes() {
 }
 
 #[tokio::test]
-async fn test_global_float_predicates_keep_exact_retained_fallback() {
-    for query in [
-        "SELECT SUM(amount) FILTER (WHERE selected) AS total, AVG(amount) FILTER (WHERE other) AS mean, COUNT(*) AS rows FROM events",
-        "SELECT SUM(amount) AS total, AVG(amount) AS mean, COUNT(*) AS rows FROM events WHERE selected OR key IS NULL",
-    ] {
-        recovery_case(&DataType::Utf8, query, false).await;
-    }
+async fn test_global_float_filters_release_inputs_and_restore_exact_prefixes() {
+    let query = "SELECT SUM(amount) FILTER (WHERE selected) AS total, AVG(amount) FILTER (WHERE other) AS mean, COUNT(*) AS rows FROM events";
+    recovery_case(&DataType::Utf8, query, true).await;
+}
+
+#[tokio::test]
+async fn test_global_float_where_keeps_exact_retained_fallback() {
+    let query = "SELECT SUM(amount) AS total, AVG(amount) AS mean, COUNT(*) AS rows FROM events WHERE selected OR key IS NULL";
+    recovery_case(&DataType::Utf8, query, false).await;
 }
 
 #[tokio::test]

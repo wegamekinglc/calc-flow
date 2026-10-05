@@ -8,6 +8,12 @@ use crate::runtime::streaming::gather_work::{
 use crate::{DataFusionConfig, DataFusionRuntime, StreamOperatorContext};
 use serde::{Deserialize, Serialize};
 
+type Arguments<'a> = (
+    &'a [Arc<AggregateFunctionExpr>],
+    &'a [Option<usize>],
+    &'a [Vec<ScalarValue>],
+);
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(in crate::operator::sql) struct Policy {
@@ -110,9 +116,6 @@ pub(super) fn raw_selected(raw: &LogicalPlan, schema: &SchemaRef) -> bool {
         let Expr::AggregateFunction(function) = super::unalias(expression) else {
             return false;
         };
-        if function.params.filter.is_some() {
-            return false;
-        }
         if function.func.name() == "count" {
             return matches!(
                 function.params.args.as_slice(),
@@ -219,16 +222,19 @@ impl Proof {
     pub(super) async fn update(
         &self,
         input: (&[RecordBatch], Option<Arc<MemoryReservation>>),
-        arguments: (&[Arc<AggregateFunctionExpr>], &[Vec<ScalarValue>]),
+        arguments: Arguments<'_>,
         credit: MemoryReservation,
         context: &StreamOperatorContext<'_>,
         name: &str,
     ) -> Result<Vec<Vec<ScalarValue>>> {
         context.check_cancelled()?;
         let (records, input_owner) = input;
-        let (expressions, values) = arguments;
+        let (expressions, filters, values) = arguments;
         if expressions.len() != self.kinds.len() || values.len() != self.kinds.len() {
             return Err(df_error(name, "global scalar argument count differs"));
+        }
+        if !filters.is_empty() && filters.len() != expressions.len() {
+            return Err(df_error(name, "global scalar filter count differs"));
         }
         let empty = records.iter().all(|record| record.num_rows() == 0);
         let charge = if empty {
@@ -237,6 +243,7 @@ impl Proof {
             request_charge(
                 records,
                 input_owner.is_some(),
+                !filters.is_empty(),
                 self.policy.config.batch_size,
                 self.kinds.len(),
                 name,
@@ -252,6 +259,7 @@ impl Proof {
         let work = RecordWork {
             records: records.to_vec(),
             expressions: expressions.to_vec(),
+            filters: filters.to_vec(),
             states: values.to_vec(),
             batch_size: self.policy.config.batch_size,
             name: name.to_owned(),
@@ -276,6 +284,7 @@ impl Proof {
 fn request_charge(
     records: &[RecordBatch],
     has_owner: bool,
+    has_filters: bool,
     batch_size: usize,
     aggregates: usize,
     name: &str,
@@ -286,7 +295,7 @@ fn request_charge(
         .max()
         .unwrap_or(0)
         .min(batch_size);
-    records.iter().try_fold(
+    let bytes = records.iter().try_fold(
         checked_bytes(
             131_072,
             [
@@ -314,12 +323,41 @@ fn request_charge(
                 name,
             )
         },
-    )
+    )?;
+    if has_filters {
+        checked_bytes(
+            bytes,
+            [(filter_workspace(records, batch_size, name)?, 4)],
+            name,
+        )
+    } else {
+        Ok(bytes)
+    }
+}
+
+fn filter_workspace(records: &[RecordBatch], batch_size: usize, name: &str) -> Result<usize> {
+    let mut peak = 0;
+    for record in records {
+        for offset in (0..record.num_rows()).step_by(batch_size) {
+            let rows = batch_size.min(record.num_rows() - offset);
+            let bytes = record.columns().iter().try_fold(0, |bytes, array| {
+                let size = array
+                    .slice(offset, rows)
+                    .to_data()
+                    .get_slice_memory_size()
+                    .map_err(|error| df_error(name, error))?;
+                checked_bytes(bytes, [(size, 1)], name)
+            })?;
+            peak = peak.max(bytes);
+        }
+    }
+    Ok(peak)
 }
 
 struct RecordWork {
     records: Vec<RecordBatch>,
     expressions: Vec<Arc<AggregateFunctionExpr>>,
+    filters: Vec<Option<usize>>,
     states: Vec<Vec<ScalarValue>>,
     batch_size: usize,
     name: String,
@@ -361,15 +399,36 @@ impl OwnedCpuWork for RecordWork {
                 stop.check()?;
                 let rows = self.batch_size.min(record.num_rows() - offset);
                 let batch = record.slice(offset, rows);
-                for (expression, accumulator) in self.expressions.iter().zip(&mut accumulators) {
+                for (index, (expression, accumulator)) in
+                    self.expressions.iter().zip(&mut accumulators).enumerate()
+                {
                     stop.check()?;
+                    let filtered;
+                    let batch = if let Some(column) = self.filters.get(index).copied().flatten() {
+                        let filter = batch
+                            .columns()
+                            .get(column)
+                            .and_then(|array| {
+                                array
+                                    .as_any()
+                                    .downcast_ref::<datafusion::arrow::array::BooleanArray>()
+                            })
+                            .ok_or_else(|| {
+                                df_error(&self.name, "global scalar filter is not Boolean")
+                            })?;
+                        filtered = datafusion::arrow::compute::filter_record_batch(&batch, filter)
+                            .map_err(|error| df_error(&self.name, error))?;
+                        &filtered
+                    } else {
+                        &batch
+                    };
                     let arrays = expression
                         .expressions()
                         .iter()
                         .map(|expression| {
                             expression
-                                .evaluate(&batch)
-                                .and_then(|value| value.into_array(rows))
+                                .evaluate(batch)
+                                .and_then(|value| value.into_array(batch.num_rows()))
                                 .map_err(|error| df_error(&self.name, error))
                         })
                         .collect::<Result<Vec<ArrayRef>>>()?;

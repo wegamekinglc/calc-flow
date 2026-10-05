@@ -876,7 +876,11 @@ impl IncrementalSql {
             let values = global
                 .update(
                     (table.batches(), input_owner),
-                    (&self.aggregates, &candidate.group.states),
+                    (
+                        &self.aggregates,
+                        &self.filter_columns,
+                        &candidate.group.states,
+                    ),
                     self.reservation.new_empty(),
                     context,
                     name,

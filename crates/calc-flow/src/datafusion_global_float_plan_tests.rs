@@ -1,10 +1,12 @@
 use super::*;
 use datafusion::{
     arrow::{
-        array::{ArrayRef, Float32Array, Float64Array},
+        array::{ArrayRef, BooleanArray, Float32Array, Float64Array},
+        compute::filter_record_batch,
         datatypes::{DataType, Field, Schema},
     },
     datasource::memory::{DataSourceExec, MemorySourceConfig},
+    physical_expr::expressions::Column,
     physical_plan::{
         ExecutionPlan, InputOrderMode,
         aggregates::{AggregateExec, AggregateMode},
@@ -50,7 +52,12 @@ fn inspect(plan: &dyn ExecutionPlan, original: &Batch, census: &mut [usize; 2]) 
             "sum" | "avg" | "count" | "min" | "max"
         )));
         assert!(aggregate.limit_options().is_none());
-        assert!(aggregate.filter_expr().iter().all(Option::is_none));
+        assert!(aggregate.filter_expr().iter().all(|filter| {
+            filter.as_ref().is_none_or(|filter| {
+                filter.downcast_ref::<Column>().is_some()
+                    && filter.data_type(&aggregate.input().schema()).unwrap() == DataType::Boolean
+            })
+        }));
     } else if let Some(source) = plan.downcast_ref::<DataSourceExec>() {
         census[1] += 1;
         let scan = source
@@ -129,13 +136,34 @@ impl DataFusionRuntime {
             .unwrap();
         while let Some(record) = stream.next().await {
             let record = record.unwrap();
-            for (expression, accumulator) in aggregate.aggr_expr().iter().zip(&mut accumulators) {
+            for ((expression, filter), accumulator) in aggregate
+                .aggr_expr()
+                .iter()
+                .zip(aggregate.filter_expr())
+                .zip(&mut accumulators)
+            {
+                let filtered;
+                let record = if let Some(filter) = filter {
+                    let mask = filter
+                        .evaluate(&record)
+                        .unwrap()
+                        .into_array(record.num_rows())
+                        .unwrap();
+                    filtered = filter_record_batch(
+                        &record,
+                        mask.as_any().downcast_ref::<BooleanArray>().unwrap(),
+                    )
+                    .unwrap();
+                    &filtered
+                } else {
+                    &record
+                };
                 let values = expression
                     .expressions()
                     .iter()
                     .map(|argument| {
                         argument
-                            .evaluate(&record)
+                            .evaluate(record)
                             .and_then(|value| value.into_array(record.num_rows()))
                             .unwrap()
                     })
