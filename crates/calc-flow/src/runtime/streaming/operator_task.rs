@@ -578,7 +578,7 @@ async fn run_retained_operator_task(
     let mut retained = RetainedOperatorInputs::new(inputs);
     let result = contain_task_panic(
         task_id,
-        run_retained_body(&mut retained, task_id, cooperation),
+        Box::pin(run_retained_body(&mut retained, task_id, cooperation)),
     )
     .await
     .and_then(std::convert::identity);
