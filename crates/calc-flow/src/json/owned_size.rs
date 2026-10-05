@@ -21,16 +21,7 @@ fn string_bytes(value: &String) -> Option<usize> {
 fn value_bytes(value: &Value) -> Option<usize> {
     match value {
         Value::String(value) => string_bytes(value),
-        Value::Array(values) => {
-            let slots = values
-                .capacity()
-                .max(values.len().checked_next_power_of_two()?.max(4));
-            values
-                .iter()
-                .try_fold(slots.checked_mul(size_of::<Value>())?, |total, value| {
-                    total.checked_add(value_bytes(value)?)
-                })
-        }
+        Value::Array(values) => array_bytes(values),
         Value::Object(values) => values.iter().try_fold(1024_usize, |total, (key, value)| {
             total
                 .checked_add(256)?
@@ -39,4 +30,15 @@ fn value_bytes(value: &Value) -> Option<usize> {
         }),
         _ => Some(0),
     }
+}
+
+fn array_bytes(values: &Vec<Value>) -> Option<usize> {
+    let slots = values
+        .capacity()
+        .max(values.len().checked_next_power_of_two()?.max(4));
+    values
+        .iter()
+        .try_fold(slots.checked_mul(size_of::<Value>())?, |total, value| {
+            total.checked_add(value_bytes(value)?)
+        })
 }

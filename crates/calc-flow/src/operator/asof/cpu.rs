@@ -5,6 +5,7 @@ use crate::{
         AdmissionFailure, GatherOperatorId, GatherStop, OwnedCpuWork,
     },
 };
+use datafusion::execution::memory_pool::MemoryReservation;
 use std::sync::Arc;
 
 impl StreamAsofJoinOperator {
@@ -14,11 +15,7 @@ impl StreamAsofJoinOperator {
         context: &StreamOperatorContext<'_>,
     ) -> Result<W::Output> {
         context.check_cancelled()?;
-        let credit = self.reserve_workspace(super::checked(
-            &self.name,
-            1024 + size_of::<W>() as u64,
-            self.name.len() as u64 * 2,
-        )?)?;
+        let credit = self.cpu_work_credit(size_of::<W>())?;
         let operator = GatherOperatorId::new(Arc::from(self.name.as_str()));
         let scope = context.gather_client(operator).scope()?;
         let ticket = scope
@@ -35,5 +32,13 @@ impl StreamAsofJoinOperator {
         let output = ticket.finish().await?;
         context.check_cancelled()?;
         Ok(output.value)
+    }
+
+    fn cpu_work_credit(&self, work_bytes: usize) -> Result<MemoryReservation> {
+        self.reserve_workspace(super::checked(
+            &self.name,
+            1024 + work_bytes as u64,
+            self.name.len() as u64 * 2,
+        )?)
     }
 }

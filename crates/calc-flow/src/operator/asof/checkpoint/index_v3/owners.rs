@@ -187,10 +187,7 @@ pub(super) fn restore_charge_checked(
     cursor: &mut Cursor<'_>,
     mut check_cancelled: impl FnMut() -> Result<()>,
 ) -> Result<u64> {
-    let count = cursor.address()?;
-    if count > cursor.bytes.len() / 34 || u32::try_from(count).is_err() {
-        return Err(mismatch("ASOF v3 owner count exceeds index size"));
-    }
+    let count = restore_owner_count(cursor)?;
     let mut charge = count as u64 * 256;
     let mut largest = 0;
     for ordinal in 0..count {
@@ -203,6 +200,14 @@ pub(super) fn restore_charge_checked(
     }
 
     super::restore_add(charge, largest)
+}
+
+fn restore_owner_count(cursor: &mut Cursor<'_>) -> Result<usize> {
+    let count = cursor.address()?;
+    if count > cursor.bytes.len() / 34 || u32::try_from(count).is_err() {
+        return Err(mismatch("ASOF v3 owner count exceeds index size"));
+    }
+    Ok(count)
 }
 
 #[derive(Clone)]

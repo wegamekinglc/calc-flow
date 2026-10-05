@@ -379,8 +379,17 @@ async fn match_output_prefix(
         binary_search_candidate_rows(operator, count, context, &mut plan, workspace).await?
     };
     drop(cursor_workspace);
-    let plan = plan.finish(operator.physical_schema(1), workspace, &operator.name)?;
-    Ok(MatchedPrefix { plan, prefix })
+    finish_output_prefix(operator, plan, prefix, workspace)
+}
+
+fn finish_output_prefix(
+    operator: &StreamAsofJoinOperator,
+    plan: OutputPlanBuilder<'_>,
+    prefix: LeftPrefix,
+    workspace: &mut MemoryReservation,
+) -> Result<MatchedPrefix> {
+    plan.finish(operator.physical_schema(1), workspace, &operator.name)
+        .map(|plan| MatchedPrefix { plan, prefix })
 }
 
 async fn parallel_candidate_rows(
