@@ -4,7 +4,8 @@ use super::output_plan::{OutputPlan, OutputSide, Span};
 #[cfg(test)]
 use super::state::{BatchKey, PayloadView};
 use crate::runtime::streaming::gather_work::{
-    AdmissionFailure, GatherOperatorId, GatherPlan as OwnedGatherPlan, GatherStop, RowGather,
+    AdmissionFailure, GatherOperatorId, GatherPlan as OwnedGatherPlan, GatherScope, GatherStop,
+    RowGather, WorkOutput,
 };
 use crate::{Batch, BatchMetadata, DataFusionConfig, Result, StreamOperatorContext};
 #[cfg(test)]
@@ -169,26 +170,12 @@ impl OutputRuntime {
         name: &str,
         context: &StreamOperatorContext<'_>,
     ) -> Result<(Batch, MemoryReservation)> {
-        self.config.validate()?;
-        tokio::task::yield_now().await;
-        context.check_cancelled()?;
-        reserve_column_types(schema, &mut workspace, name)?;
+        self.prepare_output(schema, &mut workspace, name, context)
+            .await?;
         let requests = column_requests(schema, self.output_columns.as_deref());
         let rows = owned.len;
-        if requests.is_empty() {
-            return Ok((materialize_batch(Vec::new(), schema, rows)?, workspace));
-        }
-        let left_fields = owned.left.batches.first().map_or(0, Vec::len);
-        if requests.iter().all(|request| request.index < left_fields) {
-            let left = GatherPlan::new(&owned.left, false);
-            let shared = requests
-                .iter()
-                .map(|request| left.shared_column(request.index))
-                .collect::<Result<Option<Vec<_>>>>()?;
-            if let Some(columns) = shared {
-                context.check_cancelled()?;
-                return Ok((materialize_batch(columns, schema, rows)?, workspace));
-            }
+        if let Some(batch) = shared_output(&owned, &requests, schema, context)? {
+            return Ok((batch, workspace));
         }
         let input = Arc::new(MaterializationInput {
             rows: owned,
@@ -200,21 +187,71 @@ impl OutputRuntime {
         });
         let client = context.gather_client(self.operator.clone());
         let scope = client.scope()?;
-        let ticket = scope
-            .submit(input, workspace, GatherStop::from_job(context.job()))
-            .await
-            .map_err(|failure| match failure {
-                AdmissionFailure::Budget { stage, source } => super::reason(
-                    name,
-                    crate::StreamingFailureReason::AsofWorkspaceLimitExceeded,
-                    &format!("native {stage} admission failed: {source}"),
-                ),
-                AdmissionFailure::Runtime(error) => error,
-            })?;
-        let output = ticket.finish().await?;
+        let output = gather_materialization(&scope, input, workspace, name, context).await?;
         let batch = materialize_batch(output.value, schema, rows)?;
         Ok((batch, output.credit))
     }
+    async fn prepare_output(
+        &self,
+        schema: &SchemaRef,
+        workspace: &mut MemoryReservation,
+        name: &str,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<()> {
+        self.config.validate()?;
+        tokio::task::yield_now().await;
+        context.check_cancelled()?;
+        reserve_column_types(schema, workspace, name)
+    }
+}
+
+fn shared_output(
+    owned: &OutputPlan,
+    requests: &[ColumnRequest],
+    schema: &SchemaRef,
+    context: &StreamOperatorContext<'_>,
+) -> Result<Option<Batch>> {
+    if requests.is_empty() {
+        return Ok(Some(materialize_batch(Vec::new(), schema, owned.len)?));
+    }
+    let Some(columns) = shared_columns(owned, requests)? else {
+        return Ok(None);
+    };
+    context.check_cancelled()?;
+    Ok(Some(materialize_batch(columns, schema, owned.len)?))
+}
+
+fn shared_columns(owned: &OutputPlan, requests: &[ColumnRequest]) -> Result<Option<Vec<ArrayRef>>> {
+    let left_fields = owned.left.batches.first().map_or(0, Vec::len);
+    if !requests.iter().all(|request| request.index < left_fields) {
+        return Ok(None);
+    }
+    let left = GatherPlan::new(&owned.left, false);
+    requests
+        .iter()
+        .map(|request| left.shared_column(request.index))
+        .collect()
+}
+
+async fn gather_materialization(
+    scope: &GatherScope,
+    input: Arc<MaterializationInput>,
+    workspace: MemoryReservation,
+    name: &str,
+    context: &StreamOperatorContext<'_>,
+) -> Result<WorkOutput<Vec<ArrayRef>>> {
+    let ticket = scope
+        .submit(input, workspace, GatherStop::from_job(context.job()))
+        .await
+        .map_err(|failure| match failure {
+            AdmissionFailure::Budget { stage, source } => super::reason(
+                name,
+                crate::StreamingFailureReason::AsofWorkspaceLimitExceeded,
+                &format!("native {stage} admission failed: {source}"),
+            ),
+            AdmissionFailure::Runtime(error) => error,
+        })?;
+    ticket.finish().await
 }
 
 fn reserve_column_types(

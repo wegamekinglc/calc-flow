@@ -12,6 +12,12 @@ pub(super) struct PayloadProjection {
     _lease: MemoryReservation,
 }
 
+struct ProjectedSchemas {
+    schemas: [SchemaRef; 2],
+    digests: [[u8; 32]; 2],
+    headers: [u64; 2],
+}
+
 #[derive(Serialize)]
 pub(super) struct RetainedDescriptor {
     pub columns: [Vec<usize>; 2],
@@ -26,26 +32,11 @@ impl StreamAsofJoinOperator {
             .map_err(|error| arrow_error(&error))?;
         let logical_left = self.schemas[0].fields().len();
         let retained = self.retained_output_dependencies(&columns);
-        let schemas = [
-            Arc::new(
-                self.schemas[0]
-                    .project(&retained[0])
-                    .map_err(|error| arrow_error(&error))?,
-            ),
-            Arc::new(
-                self.schemas[1]
-                    .project(&retained[1])
-                    .map_err(|error| arrow_error(&error))?,
-            ),
-        ];
-        let digests = [
-            codec::schema_digest(&schemas[0])?,
-            codec::schema_digest(&schemas[1])?,
-        ];
-        let headers = [
-            workspace::payload_header_bytes(&schemas[0])?,
-            workspace::payload_header_bytes(&schemas[1])?,
-        ];
+        let ProjectedSchemas {
+            schemas,
+            digests,
+            headers,
+        } = self.projected_schemas(&retained)?;
         let physical = columns
             .into_iter()
             .map(|index| {
@@ -95,6 +86,34 @@ impl StreamAsofJoinOperator {
             _lease: lease,
         }));
         Ok(())
+    }
+
+    fn projected_schemas(&self, retained: &[Vec<usize>; 2]) -> Result<ProjectedSchemas> {
+        let schemas = [
+            Arc::new(
+                self.schemas[0]
+                    .project(&retained[0])
+                    .map_err(|error| arrow_error(&error))?,
+            ),
+            Arc::new(
+                self.schemas[1]
+                    .project(&retained[1])
+                    .map_err(|error| arrow_error(&error))?,
+            ),
+        ];
+        let digests = [
+            codec::schema_digest(&schemas[0])?,
+            codec::schema_digest(&schemas[1])?,
+        ];
+        let headers = [
+            workspace::payload_header_bytes(&schemas[0])?,
+            workspace::payload_header_bytes(&schemas[1])?,
+        ];
+        Ok(ProjectedSchemas {
+            schemas,
+            digests,
+            headers,
+        })
     }
 
     fn projection_configuration_lease(&self, output_columns: usize) -> Result<MemoryReservation> {
