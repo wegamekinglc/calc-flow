@@ -111,45 +111,10 @@ pub(super) async fn restore_terminal(
             .transaction
             .load_operator_state_cancellable(id, entry, context.cancellation())
             .await?;
-        let mut snapshot = node.checkpoint_capability.decode_snapshot(id, snapshot)?;
-        if snapshot
-            .inline_metadata
-            .remove(crate::pipeline::OUTPUT_FRONTIER_METADATA_KEY_V1)
-            .is_some()
-        {
-            return Err(CalcFlowError::CheckpointMismatch {
-                message: format!(
-                    "SQL checkpoint operator {id:?} unexpectedly contains an output frontier"
-                ),
-            });
-        }
-        validate_sql_restore_progress(node.ingress_edges.keys(), &entry.progress)?;
-        let (frame, operator) = NodeFrame::split(frames.current.take().unwrap());
-        let identity = SqlRestoreIdentity {
-            node_id: frame.node_id.clone(),
-            node_order: order,
-            task_id: None,
-        };
-        frames.frame = Some(frame);
-        let submitted = owner.submit(SqlRestoreRequest {
-            operator,
-            snapshot,
-            identity,
-            context: SqlRecoveryContext::from(context),
-            launch_cancel: launch_cancel.clone(),
-        });
-        let ticket = match submitted.result {
-            Ok(ticket) => ticket,
-            Err(error) => {
-                frames.operator = submitted.operator;
-                return Err(error);
-            }
-        };
-        let mut completion = ticket.join().await?;
-        let current = completion.check_current();
-        frames.operator = Some(completion.operator);
-        let prepared = current.and(completion.prepared)?.into_restore()?;
-        frames.operator.as_mut().unwrap().install_restore(prepared);
+        let snapshot = terminal_snapshot(node, entry, snapshot)?;
+        frames
+            .restore_candidate(snapshot, order, context, owner, launch_cancel)
+            .await?;
         let frame = frames.frame.take().unwrap();
         let progress = OperatorProgress::default();
         progress.mark_ended();
@@ -162,4 +127,67 @@ pub(super) async fn restore_terminal(
     plan.nodes = std::mem::take(&mut frames.completed);
     frames.remaining = None;
     Ok(statuses)
+}
+
+impl TerminalSqlFrames {
+    async fn restore_candidate(
+        &mut self,
+        snapshot: crate::OperatorStateSnapshot,
+        order: usize,
+        context: &StreamJobContext,
+        owner: &JobSqlRecoveryOwner,
+        launch_cancel: &CancellationToken,
+    ) -> Result<()> {
+        let (frame, operator) = NodeFrame::split(self.current.take().unwrap());
+        let identity = SqlRestoreIdentity {
+            node_id: frame.node_id.clone(),
+            node_order: order,
+            task_id: None,
+        };
+        self.frame = Some(frame);
+        let submitted = owner.submit(SqlRestoreRequest {
+            operator,
+            snapshot,
+            identity,
+            context: SqlRecoveryContext::from(context),
+            launch_cancel: launch_cancel.clone(),
+        });
+        let ticket = match submitted.result {
+            Ok(ticket) => ticket,
+            Err(error) => {
+                self.operator = submitted.operator;
+                return Err(error);
+            }
+        };
+        let mut completion = ticket.join().await?;
+        let current = completion.check_current();
+        self.operator = Some(completion.operator);
+        let prepared = current.and(completion.prepared)?.into_restore()?;
+        self.operator.as_mut().unwrap().install_restore(prepared);
+        Ok(())
+    }
+}
+
+fn terminal_snapshot(
+    node: &RuntimeStreamNode,
+    entry: &crate::OperatorManifestEntry,
+    snapshot: crate::OperatorStateSnapshot,
+) -> Result<crate::OperatorStateSnapshot> {
+    let id = node.operator_id.as_str();
+    let mut snapshot = node
+        .checkpoint_capability
+        .decode_snapshot(node.operator_id.as_str(), snapshot)?;
+    if snapshot
+        .inline_metadata
+        .remove(crate::pipeline::OUTPUT_FRONTIER_METADATA_KEY_V1)
+        .is_some()
+    {
+        return Err(CalcFlowError::CheckpointMismatch {
+            message: format!(
+                "SQL checkpoint operator {id:?} unexpectedly contains an output frontier"
+            ),
+        });
+    }
+    validate_sql_restore_progress(node.ingress_edges.keys(), &entry.progress)?;
+    Ok(snapshot)
 }
