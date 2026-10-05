@@ -73,7 +73,11 @@ fn nodes(expression: &Expr, schema: &SchemaRef, depth: usize) -> Option<usize> {
     if depth > 32 {
         return None;
     }
-    let children = match expression {
+    child_nodes(expression, schema, depth)?.checked_add(1)
+}
+
+fn child_nodes(expression: &Expr, schema: &SchemaRef, depth: usize) -> Option<usize> {
+    match expression {
         Expr::Column(column) => {
             scalar_type(schema.field_with_name(&column.name).ok()?.data_type()).then_some(0)
         }
@@ -113,8 +117,7 @@ fn nodes(expression: &Expr, schema: &SchemaRef, depth: usize) -> Option<usize> {
             nodes(&cast.expr, schema, depth + 1)
         }
         _ => None,
-    }?;
-    children.checked_add(1)
+    }
 }
 
 pub(super) fn selected(selection: &BooleanArray, row: usize) -> bool {

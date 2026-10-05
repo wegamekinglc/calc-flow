@@ -79,6 +79,10 @@ impl Bounds {
             }
             state = checked_bytes(state, [(entry.state, 1)], name)?;
         }
+        self.reserve_state(state, credit, name)?;
+        Ok(growth)
+    }
+    fn reserve_state(&self, state: usize, credit: &MemoryReservation, name: &str) -> Result<()> {
         if !self.entries.is_empty() {
             ensure_reservation(
                 credit,
@@ -86,7 +90,7 @@ impl Bounds {
                 name,
             )?;
         }
-        Ok(growth)
+        Ok(())
     }
 }
 

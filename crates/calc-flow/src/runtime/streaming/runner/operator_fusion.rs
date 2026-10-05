@@ -77,14 +77,7 @@ pub(super) fn plan_fusion(plan: &StreamRuntimePlanParts) -> BTreeMap<String, Fus
             };
             let second = &plan.nodes[ordinal];
             if claimed.contains(&ordinal)
-                || edge.kind != RuntimeEdgeKind::Internal
-                || ingress != "input"
-                || edge.producer
-                    != (RuntimeProducer::Node {
-                        node_id: first.node_id.clone(),
-                        port: "output".into(),
-                    })
-                || !eligible_pair(first, second)
+                || !eligible_link(first, second, edge.kind, ingress, &edge.producer)
             {
                 break;
             }
@@ -98,6 +91,23 @@ pub(super) fn plan_fusion(plan: &StreamRuntimePlanParts) -> BTreeMap<String, Fus
         }
     }
     groups
+}
+
+fn eligible_link(
+    first: &RuntimeStreamNode,
+    second: &RuntimeStreamNode,
+    kind: RuntimeEdgeKind,
+    ingress: &str,
+    producer: &RuntimeProducer,
+) -> bool {
+    kind == RuntimeEdgeKind::Internal
+        && ingress == "input"
+        && producer
+            == &(RuntimeProducer::Node {
+                node_id: first.node_id.clone(),
+                port: "output".into(),
+            })
+        && eligible_pair(first, second)
 }
 
 pub(super) fn eligible_pair(first: &RuntimeStreamNode, second: &RuntimeStreamNode) -> bool {
@@ -163,9 +173,7 @@ fn directly_connected(first: &RuntimeStreamNode, second: &RuntimeStreamNode) -> 
         || first.ingress_edges.len() != head_inputs
         || first.output_ports.len() != 1
         || first.output_edges.len() != 1
-        || second.input_ports.len() != 1
-        || second.ingress_edges.len() != 1
-        || second.output_ports.len() != 1
+        || !single_projection_consumer(second)
     {
         return false;
     }
@@ -173,6 +181,10 @@ fn directly_connected(first: &RuntimeStreamNode, second: &RuntimeStreamNode) -> 
         return false;
     };
     second.ingress_edges.get("input") == Some(edge)
+}
+
+fn single_projection_consumer(node: &RuntimeStreamNode) -> bool {
+    node.input_ports.len() == 1 && node.ingress_edges.len() == 1 && node.output_ports.len() == 1
 }
 
 #[cfg(test)]

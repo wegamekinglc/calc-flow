@@ -218,18 +218,7 @@ impl Policy {
                 Ok(())
             }
             (Self::SequentialGroupedFloatV1(actual), Self::SequentialGroupedFloatV1(trusted)) => {
-                if actual.config != trusted.config
-                    || actual.factory != trusted.factory
-                    || actual.model != trusted.model
-                    || actual.max_record_rows > rows
-                    || (rows != 0 && actual.max_record_rows == 0)
-                {
-                    return Err(df_error(
-                        name,
-                        "sequential checkpoint proof differs from trusted model",
-                    ));
-                }
-                Ok(())
+                validate_sequential_policy(actual, trusted, rows, name)
             }
             _ => Err(df_error(
                 name,
@@ -237,6 +226,26 @@ impl Policy {
             )),
         }
     }
+}
+
+fn validate_sequential_policy(
+    actual: &SequentialPolicy,
+    trusted: &SequentialPolicy,
+    rows: u64,
+    name: &str,
+) -> Result<()> {
+    if actual.config != trusted.config
+        || actual.factory != trusted.factory
+        || actual.model != trusted.model
+        || actual.max_record_rows > rows
+        || (rows != 0 && actual.max_record_rows == 0)
+    {
+        return Err(df_error(
+            name,
+            "sequential checkpoint proof differs from trusted model",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
