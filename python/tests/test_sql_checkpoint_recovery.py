@@ -111,12 +111,16 @@ def _assert_projected_checkpoint(tmp_path: Path) -> None:
     assert len(entries) == 1
     entry = entries[0]
     metadata = entry["inline_metadata"]
-    assert metadata.get("state_layout", 1) == 2
-    assert metadata["state_accounting"] == 2
-    assert metadata["retained_ordinals"] == [0, 1]
+    assert metadata["state_layout"] == 4
+    assert metadata["state_accounting"] == 4
     assert metadata["rows"] == 3
     segments = {handle["segment_id"]: handle for handle in entry["segments"]}
-    assert set(segments) == {"input-projected", "logical-schema", "batch-metadata"}
+    assert set(segments) == {
+        "input-retained",
+        "logical-schema",
+        "batch-metadata",
+        "control",
+    }
 
     def body(name: str) -> bytes:
         handle = segments[name]
@@ -125,7 +129,9 @@ def _assert_projected_checkpoint(tmp_path: Path) -> None:
         assert hashlib.sha256(raw).hexdigest() == handle["sha256"]
         return raw
 
-    projected = pa.ipc.open_file(pa.BufferReader(body("input-projected"))).read_all()
+    control = json.loads(body("control"))
+    assert control["identity"]["retained_ordinals"] == [0, 1]
+    projected = pa.ipc.open_file(pa.BufferReader(body("input-retained"))).read_all()
     assert projected.schema.equals(
         pa.schema(list(_schema())[:2], metadata=_schema().metadata),
         check_metadata=True,
@@ -150,7 +156,9 @@ def test_sql_projected_checkpoint_restores_and_continues(tmp_path: Path) -> None
     def runner(source: _Source) -> cf.StreamingRunner:
         plan = (
             cf.PipelineBuilder("sql-projected-recovery")
-            .sql("totals", "SELECT key, SUM(value) AS total FROM input GROUP BY key")
+            .sql(
+                "totals", "SELECT key, SUM(abs(value)) AS total FROM input GROUP BY key"
+            )
             .compile_stream()
         )
         assert plan.source_binding_ids == ("input",)
