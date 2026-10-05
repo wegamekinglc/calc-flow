@@ -146,16 +146,18 @@ fn read_version(
                 ])?;
                 Ok(Some(Version::Left { rows, capacities }))
             }
-            Identity::Right(_) => {
-                let tag = cursor.byte()?;
-                let payload = match tag {
-                    0 | 2 => None,
-                    1 => Some(((1, cursor.integer()?), cursor.small()?)),
-                    _ => return Err(mismatch("ASOF log storage tag differs")),
-                };
-                Ok(Some(Version::Right { tag, payload }))
-            }
+            Identity::Right(_) => read_right_version(cursor),
         },
         _ => Err(mismatch("ASOF log version tag differs")),
     }
+}
+
+fn read_right_version(cursor: &mut Cursor<'_>) -> Result<Option<Version>> {
+    let tag = cursor.byte()?;
+    let payload = match tag {
+        0 | 2 => None,
+        1 => Some(((1, cursor.integer()?), cursor.small()?)),
+        _ => return Err(mismatch("ASOF log storage tag differs")),
+    };
+    Ok(Some(Version::Right { tag, payload }))
 }

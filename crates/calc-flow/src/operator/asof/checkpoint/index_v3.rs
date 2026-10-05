@@ -367,9 +367,29 @@ fn write_left_checked(
         .collect::<Vec<_>>();
     keys.sort_unstable_by(|left, right| left.1.cmp(right.1));
     let mut remap = vec![0_u32; data.keys.len()];
+    write_left_header(bytes, batch, data, head, kind, keys.len());
+    write_left_key_refs(bytes, keys, &mut remap, owners, cancel)?;
+    write_left_times(bytes, data, head, cancel)?;
+    for (ordinal, key) in data.key_ids[head..].iter().enumerate() {
+        check_step(ordinal, cancel)?;
+        bytes.extend_from_slice(&remap[*key as usize].to_le_bytes());
+    }
+    write_left_sequences(bytes, data, head, kind, owners, cancel)?;
+    write_left_positions(bytes, data, head, cancel)?;
+    cancel()
+}
+
+fn write_left_header(
+    bytes: &mut Vec<u8>,
+    batch: BatchKey,
+    data: &ChunkData,
+    head: usize,
+    kind: SequenceKind,
+    keys: usize,
+) {
     put(bytes, batch.1);
     put(bytes, (data.sequences.len() - head) as u64);
-    put(bytes, keys.len() as u64);
+    put(bytes, keys as u64);
     bytes.push(kind.flag());
     let capacities = [
         data.times.inner().capacity() / 8,
@@ -382,11 +402,31 @@ fn write_left_checked(
     for capacity in capacities {
         put(bytes, capacity as u64);
     }
+}
+
+fn write_left_key_refs(
+    bytes: &mut Vec<u8>,
+    keys: Vec<(usize, &Encoding)>,
+    remap: &mut [u32],
+    owners: &OwnerWriter,
+    cancel: &dyn Fn() -> Result<()>,
+) -> Result<()> {
     for (id, (old, key)) in keys.into_iter().enumerate() {
         check_step(id, cancel)?;
         remap[old] = u32::try_from(id).expect("preflighted key domain");
         owners.reference(bytes, key);
     }
+    Ok(())
+}
+
+fn write_left_times(
+    bytes: &mut Vec<u8>,
+    data: &ChunkData,
+    head: usize,
+    cancel: &dyn Fn() -> Result<()>,
+) -> Result<()> {
+    #[cfg(target_endian = "big")]
+    let _ = cancel;
     #[cfg(target_endian = "little")]
     for chunk in data.times.inner().as_slice()[head * 8..].chunks(128 * 8) {
         cancel()?;
@@ -396,10 +436,17 @@ fn write_left_checked(
     for time in &data.times[head..] {
         bytes.extend_from_slice(&time.to_le_bytes());
     }
-    for (ordinal, key) in data.key_ids[head..].iter().enumerate() {
-        check_step(ordinal, cancel)?;
-        bytes.extend_from_slice(&remap[*key as usize].to_le_bytes());
-    }
+    Ok(())
+}
+
+fn write_left_sequences(
+    bytes: &mut Vec<u8>,
+    data: &ChunkData,
+    head: usize,
+    kind: SequenceKind,
+    owners: &OwnerWriter,
+    cancel: &dyn Fn() -> Result<()>,
+) -> Result<()> {
     if let Some(values) = data.sequences.integer_slice(head..data.sequences.len()) {
         for chunk in values.chunks(128 * kind.width().expect("integer sequence width")) {
             cancel()?;
@@ -411,11 +458,20 @@ fn write_left_checked(
             write_sequence(bytes, kind, sequence.as_ref(), owners);
         }
     }
+    Ok(())
+}
+
+fn write_left_positions(
+    bytes: &mut Vec<u8>,
+    data: &ChunkData,
+    head: usize,
+    cancel: &dyn Fn() -> Result<()>,
+) -> Result<()> {
     for ordinal in head..data.sequences.len() {
         check_step(ordinal - head, cancel)?;
         bytes.extend_from_slice(&data.position(ordinal).to_le_bytes());
     }
-    cancel()
+    Ok(())
 }
 
 fn write_right(
@@ -461,21 +517,45 @@ fn write_right_columns_checked(
         put(bytes, capacity as u64);
     }
     if let Some((times, sequences)) = bucket.checkpoint_integer_columns() {
-        for (ordinal, time) in times.iter().enumerate() {
-            check_step(ordinal, cancel)?;
-            bytes.extend_from_slice(&time.to_le_bytes());
-        }
-        for chunk in sequences.chunks(128 * kind.width().expect("integer sequence width")) {
-            cancel()?;
-            bytes.extend_from_slice(chunk);
-        }
-        bytes.resize(
-            bytes.len() + bucket.len(),
-            u8::from(bucket.payload_len() != 0),
-        );
+        write_right_integer_columns(bytes, bucket, kind, times, sequences, cancel)?;
         write_right_payload_refs_checked(bytes, bucket, &batch_id, cancel)?;
         return cancel();
     }
+    write_right_canonical_columns(bytes, bucket, kind, owners, cancel)?;
+    write_right_payload_refs_checked(bytes, bucket, &batch_id, cancel)?;
+    cancel()
+}
+
+fn write_right_integer_columns(
+    bytes: &mut Vec<u8>,
+    bucket: &RightBucket,
+    kind: SequenceKind,
+    times: &[i64],
+    sequences: &[u8],
+    cancel: &dyn Fn() -> Result<()>,
+) -> Result<()> {
+    for (ordinal, time) in times.iter().enumerate() {
+        check_step(ordinal, cancel)?;
+        bytes.extend_from_slice(&time.to_le_bytes());
+    }
+    for chunk in sequences.chunks(128 * kind.width().expect("integer sequence width")) {
+        cancel()?;
+        bytes.extend_from_slice(chunk);
+    }
+    bytes.resize(
+        bytes.len() + bucket.len(),
+        u8::from(bucket.payload_len() != 0),
+    );
+    Ok(())
+}
+
+fn write_right_canonical_columns(
+    bytes: &mut Vec<u8>,
+    bucket: &RightBucket,
+    kind: SequenceKind,
+    owners: &OwnerWriter,
+    cancel: &dyn Fn() -> Result<()>,
+) -> Result<()> {
     for (ordinal, ((time, _), _)) in bucket.into_iter().enumerate() {
         check_step(ordinal, cancel)?;
         bytes.extend_from_slice(&time.to_le_bytes());
@@ -488,8 +568,7 @@ fn write_right_columns_checked(
         check_step(ordinal, cancel)?;
         bytes.push(tag);
     }
-    write_right_payload_refs_checked(bytes, bucket, &batch_id, cancel)?;
-    cancel()
+    Ok(())
 }
 
 fn write_right_payload_refs_checked(
