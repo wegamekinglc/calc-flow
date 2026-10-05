@@ -313,80 +313,75 @@ impl Model {
 
     pub fn native_charge(&self, mut cancel: impl FnMut() -> Result<()>) -> Result<u64> {
         cancel()?;
-        let mut bytes = 4096;
-        for (capacity, width) in self
-            .capacities
-            .into_iter()
-            .zip(super::super::CAPACITY_WIDTHS)
-        {
-            bytes = super::super::restore_add(
-                bytes,
-                super::super::allocation(capacity, width, u64::MAX)?,
-            )?;
-        }
+        let mut bytes = capacity_charge(4096, self.capacities, super::super::CAPACITY_WIDTHS)?;
         let mut allocations = BTreeSet::new();
+        bytes = self.right_native_charge(bytes, &mut allocations, &mut cancel)?;
+        bytes = self.left_native_charge(bytes, &mut allocations, &mut cancel)?;
+        super::super::restore_add(bytes, allocations.len() as u64 * 256)
+    }
+
+    fn right_native_charge(
+        &self,
+        mut bytes: u64,
+        allocations: &mut BTreeSet<usize>,
+        cancel: &mut impl FnMut() -> Result<()>,
+    ) -> Result<u64> {
         for (key, bucket) in &self.right {
             if let Some((id, _)) = key.allocation() {
                 allocations.insert(id);
             }
-            let counts = tag_counts(bucket, &mut cancel)?;
+            let counts = tag_counts(bucket, cancel)?;
             super::super::validate_right_capacities(bucket.capacities, counts)?;
             bytes = super::super::restore_add(bytes, 256 + counts[2] as u64 * 512)?;
-            for (capacity, width) in bucket.capacities.into_iter().zip([
-                8,
-                self.kinds[1].storage_bytes(),
-                8,
-                8,
-                self.kinds[1].storage_bytes(),
-            ]) {
-                bytes = super::super::restore_add(
-                    bytes,
-                    super::super::allocation(capacity, width, u64::MAX)?,
-                )?;
-            }
-            for (ordinal, ((_, sequence), _)) in bucket.iter().enumerate() {
-                if ordinal.is_multiple_of(128) {
-                    cancel()?;
-                }
-                if let Some((id, _)) = sequence.allocation() {
-                    allocations.insert(id);
-                }
-            }
+            bytes = capacity_charge(
+                bytes,
+                bucket.capacities,
+                [
+                    8,
+                    self.kinds[1].storage_bytes(),
+                    8,
+                    8,
+                    self.kinds[1].storage_bytes(),
+                ],
+            )?;
+            collect_allocations(
+                allocations,
+                bucket.iter().map(|((_, sequence), _)| sequence),
+                cancel,
+            )?;
         }
+        Ok(bytes)
+    }
+
+    fn left_native_charge(
+        &self,
+        mut bytes: u64,
+        allocations: &mut BTreeSet<usize>,
+        cancel: &mut impl FnMut() -> Result<()>,
+    ) -> Result<u64> {
         for chunk in self.left.values() {
-            for (capacity, width) in chunk.capacities.into_iter().zip([
-                8,
-                4,
-                size_of::<Option<Encoding>>(),
-                8,
-                4,
-                self.kinds[0].storage_bytes(),
-            ]) {
-                bytes = super::super::restore_add(
-                    bytes,
-                    super::super::allocation(capacity, width, u64::MAX)?,
-                )?;
-            }
+            bytes = capacity_charge(
+                bytes,
+                chunk.capacities,
+                [
+                    8,
+                    4,
+                    size_of::<Option<Encoding>>(),
+                    8,
+                    4,
+                    self.kinds[0].storage_bytes(),
+                ],
+            )?;
             let rows = chunk.data.sequences.len() - chunk.head;
             bytes = super::super::restore_add(bytes, 1024 + rows as u64 * 256)?;
-            for (ordinal, key) in chunk.data.keys.iter().flatten().enumerate() {
-                if ordinal.is_multiple_of(128) {
-                    cancel()?;
-                }
-                if let Some((id, _)) = key.allocation() {
-                    allocations.insert(id);
-                }
-            }
-            for (ordinal, sequence) in chunk.data.sequences.iter().skip(chunk.head).enumerate() {
-                if ordinal.is_multiple_of(128) {
-                    cancel()?;
-                }
-                if let Some((id, _)) = sequence.allocation() {
-                    allocations.insert(id);
-                }
-            }
+            collect_allocations(allocations, chunk.data.keys.iter().flatten(), cancel)?;
+            collect_allocations(
+                allocations,
+                chunk.data.sequences.iter().skip(chunk.head),
+                cancel,
+            )?;
         }
-        super::super::restore_add(bytes, allocations.len() as u64 * 256)
+        Ok(bytes)
     }
 
     pub fn materialize(
@@ -557,6 +552,38 @@ fn capture_model_right(
         );
     }
     Ok(right)
+}
+
+fn capacity_charge<const N: usize>(
+    mut bytes: u64,
+    capacities: [usize; N],
+    widths: [usize; N],
+) -> Result<u64> {
+    for (capacity, width) in capacities.into_iter().zip(widths) {
+        bytes =
+            super::super::restore_add(bytes, super::super::allocation(capacity, width, u64::MAX)?)?;
+    }
+    Ok(bytes)
+}
+
+fn collect_allocations<I, E>(
+    allocations: &mut BTreeSet<usize>,
+    encodings: I,
+    cancel: &mut impl FnMut() -> Result<()>,
+) -> Result<()>
+where
+    I: Iterator<Item = E>,
+    E: std::ops::Deref<Target = Encoding>,
+{
+    for (ordinal, encoding) in encodings.enumerate() {
+        if ordinal.is_multiple_of(128) {
+            cancel()?;
+        }
+        if let Some((id, _)) = encoding.allocation() {
+            allocations.insert(id);
+        }
+    }
+    Ok(())
 }
 
 fn tag_counts(bucket: &Right, cancelled: &mut impl FnMut() -> Result<()>) -> Result<[usize; 3]> {
