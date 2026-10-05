@@ -56,22 +56,22 @@ pub(in crate::operator::sql) enum NativeAggregateInput {
 
 impl NativeAggregateInput {
     pub(super) fn identity_bytes(&self, name: &str) -> Result<usize> {
-        let bytes = match self {
-            Self::Column { field, .. } => checked_bytes(2048, [(field.name().len(), 8)], name)?,
-            Self::Literal(_) => 4096,
+        match self {
+            Self::Column { field, .. } => checked_bytes(2048, [(field.name().len(), 8)], name),
+            Self::Literal(_) => Ok(4096),
             Self::Cast { input, field, .. } => checked_bytes(
                 input.identity_bytes(name)?,
                 [(1, 2048), (field.name().len(), 8)],
                 name,
-            )?,
+            ),
             Self::TryCast { input, .. } | Self::Unary { input, .. } => {
-                checked_bytes(input.identity_bytes(name)?, [(1, 2048)], name)?
+                checked_bytes(input.identity_bytes(name)?, [(1, 2048)], name)
             }
             Self::Binary { left, right, .. } => checked_bytes(
                 left.identity_bytes(name)?,
                 [(right.identity_bytes(name)?, 1), (1, 2048)],
                 name,
-            )?,
+            ),
             Self::Case {
                 operand,
                 branches,
@@ -83,9 +83,8 @@ impl NativeAggregateInput {
                 .chain(fallback.iter().map(Box::as_ref))
                 .try_fold(4096, |bytes, input| {
                     checked_bytes(bytes, [(input.identity_bytes(name)?, 1)], name)
-                })?,
-        };
-        Ok(bytes)
+                }),
+        }
     }
 }
 
@@ -143,17 +142,7 @@ pub(super) fn infallible_projection(expression: &Expr, schema: &DFSchema) -> boo
     }
     match unalias(expression) {
         Expr::Column(_) | Expr::Literal(_, _) => true,
-        Expr::BinaryExpr(binary)
-            if matches!(
-                binary.op,
-                Operator::Plus | Operator::Minus | Operator::Multiply
-            ) && expression
-                .get_type(schema)
-                .is_ok_and(|dtype| matches!(dtype, DataType::Float32 | DataType::Float64)) =>
-        {
-            infallible_projection(&binary.left, schema)
-                && infallible_projection(&binary.right, schema)
-        }
+        Expr::BinaryExpr(binary) => infallible_binary_projection(binary, expression, schema),
         Expr::Negative(input)
             if expression
                 .get_type(schema)
@@ -174,6 +163,21 @@ pub(super) fn infallible_projection(expression: &Expr, schema: &DFSchema) -> boo
         Expr::TryCast(cast) => infallible_projection(&cast.expr, schema),
         _ => false,
     }
+}
+
+fn infallible_binary_projection(
+    binary: &datafusion::logical_expr::expr::BinaryExpr,
+    expression: &Expr,
+    schema: &DFSchema,
+) -> bool {
+    matches!(
+        binary.op,
+        Operator::Plus | Operator::Minus | Operator::Multiply
+    ) && expression
+        .get_type(schema)
+        .is_ok_and(|dtype| matches!(dtype, DataType::Float32 | DataType::Float64))
+        && infallible_projection(&binary.left, schema)
+        && infallible_projection(&binary.right, schema)
 }
 
 fn contains_case(expression: &Expr) -> Option<bool> {
@@ -265,31 +269,18 @@ fn fixed(dtype: &DataType) -> bool {
 }
 
 fn projection_nodes(expression: &Expr, schema: &DFSchema, depth: usize) -> Option<usize> {
-    if depth > 8 {
+    if depth > 8 || !projection_type_supported(expression, schema)? {
         return None;
     }
-    if expression.get_type(schema).ok()? == DataType::Boolean
-        && contains_case(expression)?
-        && !infallible_predicate(expression)
-    {
-        return None;
-    }
+    projection_shape_nodes(expression, schema, depth)
+}
+
+fn projection_shape_nodes(expression: &Expr, schema: &DFSchema, depth: usize) -> Option<usize> {
     match unalias(expression) {
         Expr::Column(_) => Some(1),
         Expr::Literal(value, _) if fixed(&value.data_type()) => Some(1),
-        Expr::Cast(cast) if fixed(cast.field.data_type()) => {
-            projection_nodes(&cast.expr, schema, depth + 1)?.checked_add(1)
-        }
-        Expr::TryCast(cast) if fixed(cast.field.data_type()) => {
-            projection_nodes(&cast.expr, schema, depth + 1)?.checked_add(1)
-        }
-        Expr::Negative(inner) | Expr::Not(inner) | Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
-            projection_nodes(inner, schema, depth + 1)?.checked_add(1)
-        }
         Expr::BinaryExpr(binary) if supported_operator(binary.op) => {
-            projection_nodes(&binary.left, schema, depth + 1)?
-                .checked_add(projection_nodes(&binary.right, schema, depth + 1)?)?
-                .checked_add(1)
+            binary_projection_nodes(binary, schema, depth)
         }
         Expr::Case(case)
             if expression
@@ -297,21 +288,60 @@ fn projection_nodes(expression: &Expr, schema: &DFSchema, depth: usize) -> Optio
                 .ok()
                 .is_some_and(|dtype| fixed(&dtype)) =>
         {
-            case.expr
-                .iter()
-                .map(Box::as_ref)
-                .chain(
-                    case.when_then_expr
-                        .iter()
-                        .flat_map(|(when, then)| [when.as_ref(), then.as_ref()]),
-                )
-                .chain(case.else_expr.iter().map(Box::as_ref))
-                .try_fold(1_usize, |nodes, expression| {
-                    nodes.checked_add(projection_nodes(expression, schema, depth + 1)?)
-                })
+            case_projection_nodes(case, schema, depth)
+        }
+        expression => {
+            projection_nodes(projection_child(expression)?, schema, depth + 1)?.checked_add(1)
+        }
+    }
+}
+
+fn projection_type_supported(expression: &Expr, schema: &DFSchema) -> Option<bool> {
+    Some(
+        expression.get_type(schema).ok()? != DataType::Boolean
+            || !contains_case(expression)?
+            || infallible_predicate(expression),
+    )
+}
+
+fn projection_child(expression: &Expr) -> Option<&Expr> {
+    match expression {
+        Expr::Cast(cast) if fixed(cast.field.data_type()) => Some(&cast.expr),
+        Expr::TryCast(cast) if fixed(cast.field.data_type()) => Some(&cast.expr),
+        Expr::Negative(inner) | Expr::Not(inner) | Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
+            Some(inner)
         }
         _ => None,
     }
+}
+
+fn binary_projection_nodes(
+    binary: &datafusion::logical_expr::expr::BinaryExpr,
+    schema: &DFSchema,
+    depth: usize,
+) -> Option<usize> {
+    projection_nodes(&binary.left, schema, depth + 1)?
+        .checked_add(projection_nodes(&binary.right, schema, depth + 1)?)?
+        .checked_add(1)
+}
+
+fn case_projection_nodes(
+    case: &datafusion::logical_expr::expr::Case,
+    schema: &DFSchema,
+    depth: usize,
+) -> Option<usize> {
+    case.expr
+        .iter()
+        .map(Box::as_ref)
+        .chain(
+            case.when_then_expr
+                .iter()
+                .flat_map(|(when, then)| [when.as_ref(), then.as_ref()]),
+        )
+        .chain(case.else_expr.iter().map(Box::as_ref))
+        .try_fold(1_usize, |nodes, expression| {
+            nodes.checked_add(projection_nodes(expression, schema, depth + 1)?)
+        })
 }
 
 fn supported_operator(op: Operator) -> bool {
@@ -357,21 +387,17 @@ pub(super) fn describe_input(
     if let Some(literal) = expression.downcast_ref::<Literal>() {
         return Ok(NativeAggregateInput::Literal(literal.value().clone()));
     }
+    describe_composite(expression, schema, depth, name)
+}
+
+fn describe_composite(
+    expression: &dyn PhysicalExpr,
+    schema: &Schema,
+    depth: usize,
+    name: &str,
+) -> Result<NativeAggregateInput> {
     if let Some(cast) = expression.downcast_ref::<CastExpr>() {
-        if cast.cast_options().format_options != datafusion::common::format::DEFAULT_FORMAT_OPTIONS
-        {
-            return Err(df_error(name, "native cast has unsupported format options"));
-        }
-        return Ok(NativeAggregateInput::Cast {
-            input: Box::new(describe_input(
-                cast.expr().as_ref(),
-                schema,
-                depth + 1,
-                name,
-            )?),
-            field: cast.target_field().clone(),
-            safe: cast.cast_options().safe,
-        });
+        return describe_cast(cast, schema, depth, name);
     }
     if let Some(cast) = expression.downcast_ref::<TryCastExpr>() {
         return Ok(NativeAggregateInput::TryCast {
@@ -385,27 +411,7 @@ pub(super) fn describe_input(
         });
     }
     if let Some(binary) = expression.downcast_ref::<BinaryExpr>() {
-        if !supported_operator(*binary.op()) {
-            return Err(df_error(name, "native binary operator is unsupported"));
-        }
-        let checked = BinaryExpr::new(binary.left().clone(), *binary.op(), binary.right().clone())
-            .with_fail_on_overflow(true);
-        return Ok(NativeAggregateInput::Binary {
-            left: Box::new(describe_input(
-                binary.left().as_ref(),
-                schema,
-                depth + 1,
-                name,
-            )?),
-            op: *binary.op(),
-            right: Box::new(describe_input(
-                binary.right().as_ref(),
-                schema,
-                depth + 1,
-                name,
-            )?),
-            fail_on_overflow: binary == &checked,
-        });
+        return describe_binary(binary, schema, depth, name);
     }
     if let Some(case) = expression.downcast_ref::<CaseExpr>() {
         return describe_case(case, schema, depth, name);
@@ -420,6 +426,56 @@ pub(super) fn describe_input(
         name,
         "native aggregate input has an unsupported expression",
     ))
+}
+
+fn describe_cast(
+    cast: &CastExpr,
+    schema: &Schema,
+    depth: usize,
+    name: &str,
+) -> Result<NativeAggregateInput> {
+    if cast.cast_options().format_options != datafusion::common::format::DEFAULT_FORMAT_OPTIONS {
+        return Err(df_error(name, "native cast has unsupported format options"));
+    }
+    Ok(NativeAggregateInput::Cast {
+        input: Box::new(describe_input(
+            cast.expr().as_ref(),
+            schema,
+            depth + 1,
+            name,
+        )?),
+        field: cast.target_field().clone(),
+        safe: cast.cast_options().safe,
+    })
+}
+
+fn describe_binary(
+    binary: &BinaryExpr,
+    schema: &Schema,
+    depth: usize,
+    name: &str,
+) -> Result<NativeAggregateInput> {
+    if !supported_operator(*binary.op()) {
+        return Err(df_error(name, "native binary operator is unsupported"));
+    }
+    let checked = BinaryExpr::new(binary.left().clone(), *binary.op(), binary.right().clone())
+        .with_fail_on_overflow(true);
+    Ok(NativeAggregateInput::Binary {
+        left: Box::new(describe_input(
+            binary.left().as_ref(),
+            schema,
+            depth + 1,
+            name,
+        )?),
+        op: *binary.op(),
+        right: Box::new(describe_input(
+            binary.right().as_ref(),
+            schema,
+            depth + 1,
+            name,
+        )?),
+        fail_on_overflow: binary == &checked,
+    })
 }
 
 fn describe_case(
