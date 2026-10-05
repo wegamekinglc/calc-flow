@@ -99,48 +99,12 @@ impl SourceHistoryContext {
     ) -> Result<Self> {
         spec.validate()?;
         let ledger = Ledger::new(spec.limits);
-        let mut history = History::default();
-        if let Some(restored) = restored {
-            if restored.contract != spec.contract
-                || restored.format_version != super::SOURCE_HISTORY_FORMAT_VERSION
-            {
-                return Err(history_mismatch(source_id, "history contract changed"));
+        let history = match restored {
+            Some(restored) => {
+                restored_history(&transaction, source_id, &spec, &ledger, restored).await?
             }
-            if restored.segments.len() > spec.limits.max_segments {
-                return Err(limit_error(
-                    "max_segments",
-                    "raw history exceeds its segment limit",
-                ));
-            }
-            let credits = restored
-                .segments
-                .iter()
-                .map(|handle| {
-                    ledger.buffer(handle.byte_len())?;
-                    ledger.storage(handle.byte_len())
-                })
-                .collect::<Result<Vec<_>>>()?;
-            let working = transaction
-                .pin_working_state(source_id, &restored.segments)
-                .await?;
-            for (handle, storage) in restored.segments.iter().zip(credits) {
-                let segment = Arc::new(Segment {
-                    handle: handle.clone(),
-                    _working: working
-                        .clone()
-                        .ok_or_else(|| history_mismatch(source_id, "missing segment protection"))?,
-                    _storage: storage,
-                });
-                if history
-                    .segments
-                    .insert(handle.segment_id().into(), segment)
-                    .is_some()
-                {
-                    return Err(history_mismatch(source_id, "duplicate history segment"));
-                }
-            }
-            history.sealed = Some(restored);
-        }
+            None => History::default(),
+        };
         Ok(Self(Arc::new(Inner {
             transaction,
             source_id: source_id.into(),
@@ -196,16 +160,7 @@ impl SourceHistoryContext {
         path: &Path,
         max_file_bytes: u64,
     ) -> Result<StateHandle> {
-        crate::json::validate_portable_identifier("source_history.segment_id", segment_id)?;
-        {
-            let history = self.0.history.lock();
-            if history.sealed.is_some() || history.segments.contains_key(segment_id) {
-                return Err(limit_error(
-                    "segment_id",
-                    "history is sealed or the segment already exists",
-                ));
-            }
-        }
+        self.validate_archive_member(segment_id)?;
         let transaction = self.0.transaction.clone();
         let ledger = self.0.ledger.clone();
         let history = self.0.history.clone();
@@ -226,28 +181,33 @@ impl SourceHistoryContext {
                             message: format!("history file read failed: {error}"),
                         })??;
                 let (segment, storage) = read;
-                let mut staged = transaction
-                    .stage_operator_state(
-                        &source_id,
-                        epoch,
-                        OperatorStateSnapshot {
-                            inline_metadata: BTreeMap::new(),
-                            segments: BTreeMap::from([(segment_id.clone(), segment)]),
-                        },
-                    )
-                    .await?;
-                let handle = staged.segments.remove(0);
-                let entry = Arc::new(Segment {
-                    handle: handle.clone(),
-                    _working: staged.working.ok_or_else(|| {
-                        history_mismatch(&source_id, "missing segment protection")
-                    })?,
-                    _storage: storage,
-                });
+                let (handle, entry) = archived_segment(
+                    &transaction,
+                    &source_id,
+                    epoch,
+                    &segment_id,
+                    segment,
+                    storage,
+                )
+                .await?;
                 history.lock().segments.insert(segment_id, entry);
                 Ok(handle)
             })
             .await
+    }
+
+    fn validate_archive_member(&self, segment_id: &str) -> Result<()> {
+        crate::json::validate_portable_identifier("source_history.segment_id", segment_id)?;
+        {
+            let history = self.0.history.lock();
+            if history.sealed.is_some() || history.segments.contains_key(segment_id) {
+                return Err(limit_error(
+                    "segment_id",
+                    "history is sealed or the segment already exists",
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Seals the captured membership and connector metadata for every later checkpoint.
@@ -312,6 +272,114 @@ fn read_file(
     ledger: &Arc<Ledger>,
     max_file_bytes: u64,
 ) -> Result<(StateSegment, StorageCredit)> {
+    let length = file_length(path, max_file_bytes)?;
+    let storage = ledger.storage(length)?;
+    let buffer = ledger.buffer(length)?;
+    let len = usize::try_from(length)
+        .map_err(|_| limit_error("max_buffer_bytes", "file length exceeds address space"))?;
+    let mut bytes = vec![0; len];
+    read_file_bytes(path, &mut bytes)?;
+    Ok((StateSegment::new(bytes).with_owner(buffer), storage))
+}
+
+pub(crate) fn history_mismatch(source_id: &str, message: &str) -> CalcFlowError {
+    CalcFlowError::CheckpointMismatch {
+        message: format!("source {source_id:?}: {message}"),
+    }
+}
+
+async fn restored_history(
+    transaction: &ManifestTransaction,
+    source_id: &str,
+    spec: &SourceHistorySpec,
+    ledger: &Arc<Ledger>,
+    restored: SourceHistoryManifestEntry,
+) -> Result<History> {
+    validate_restored_history(source_id, spec, &restored)?;
+    let mut history = History::default();
+    let credits = restored_storage(ledger, &restored.segments)?;
+    let working = transaction
+        .pin_working_state(source_id, &restored.segments)
+        .await?;
+    for (handle, storage) in restored.segments.iter().zip(credits) {
+        let segment = Arc::new(Segment {
+            handle: handle.clone(),
+            _working: working
+                .clone()
+                .ok_or_else(|| history_mismatch(source_id, "missing segment protection"))?,
+            _storage: storage,
+        });
+        if history
+            .segments
+            .insert(handle.segment_id().into(), segment)
+            .is_some()
+        {
+            return Err(history_mismatch(source_id, "duplicate history segment"));
+        }
+    }
+    history.sealed = Some(restored);
+    Ok(history)
+}
+
+fn validate_restored_history(
+    source_id: &str,
+    spec: &SourceHistorySpec,
+    restored: &SourceHistoryManifestEntry,
+) -> Result<()> {
+    if restored.contract != spec.contract
+        || restored.format_version != super::SOURCE_HISTORY_FORMAT_VERSION
+    {
+        return Err(history_mismatch(source_id, "history contract changed"));
+    }
+    if restored.segments.len() > spec.limits.max_segments {
+        return Err(limit_error(
+            "max_segments",
+            "raw history exceeds its segment limit",
+        ));
+    }
+    Ok(())
+}
+
+fn restored_storage(ledger: &Arc<Ledger>, segments: &[StateHandle]) -> Result<Vec<StorageCredit>> {
+    segments
+        .iter()
+        .map(|handle| {
+            ledger.buffer(handle.byte_len())?;
+            ledger.storage(handle.byte_len())
+        })
+        .collect()
+}
+
+async fn archived_segment(
+    transaction: &ManifestTransaction,
+    source_id: &str,
+    epoch: Epoch,
+    segment_id: &str,
+    segment: StateSegment,
+    storage: StorageCredit,
+) -> Result<(StateHandle, Arc<Segment>)> {
+    let mut staged = transaction
+        .stage_operator_state(
+            source_id,
+            epoch,
+            OperatorStateSnapshot {
+                inline_metadata: BTreeMap::new(),
+                segments: BTreeMap::from([(segment_id.to_owned(), segment)]),
+            },
+        )
+        .await?;
+    let handle = staged.segments.remove(0);
+    let entry = Arc::new(Segment {
+        handle: handle.clone(),
+        _working: staged
+            .working
+            .ok_or_else(|| history_mismatch(source_id, "missing segment protection"))?,
+        _storage: storage,
+    });
+    Ok((handle, entry))
+}
+
+fn file_length(path: &Path, max_file_bytes: u64) -> Result<u64> {
     let metadata = std::fs::symlink_metadata(path).map_err(|source| CalcFlowError::Io {
         path: path.display().to_string(),
         source,
@@ -325,20 +393,18 @@ fn read_file(
             "file exceeds its acquisition limit",
         ));
     }
-    let storage = ledger.storage(metadata.len())?;
-    let buffer = ledger.buffer(metadata.len())?;
-    let len = usize::try_from(metadata.len())
-        .map_err(|_| limit_error("max_buffer_bytes", "file length exceeds address space"))?;
-    let mut bytes = vec![0; len];
+    Ok(metadata.len())
+}
+
+fn read_file_bytes(path: &Path, bytes: &mut [u8]) -> Result<()> {
     let mut file = std::fs::File::open(path).map_err(|source| CalcFlowError::Io {
         path: path.display().to_string(),
         source,
     })?;
-    file.read_exact(&mut bytes)
-        .map_err(|source| CalcFlowError::Io {
-            path: path.display().to_string(),
-            source,
-        })?;
+    file.read_exact(bytes).map_err(|source| CalcFlowError::Io {
+        path: path.display().to_string(),
+        source,
+    })?;
     let mut extra = [0; 1];
     if file.read(&mut extra).map_err(|source| CalcFlowError::Io {
         path: path.display().to_string(),
@@ -347,11 +413,5 @@ fn read_file(
     {
         return Err(limit_error("path", "file grew during history acquisition"));
     }
-    Ok((StateSegment::new(bytes).with_owner(buffer), storage))
-}
-
-pub(crate) fn history_mismatch(source_id: &str, message: &str) -> CalcFlowError {
-    CalcFlowError::CheckpointMismatch {
-        message: format!("source {source_id:?}: {message}"),
-    }
+    Ok(())
 }

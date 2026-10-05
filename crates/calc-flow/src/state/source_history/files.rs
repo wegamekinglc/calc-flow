@@ -35,6 +35,10 @@ pub(super) fn discover(path: &Path, extension: &str, max_files: usize) -> Result
         regular_file(path, extension)?;
         return Ok(vec![path.to_path_buf()]);
     }
+    directory_files(path, extension, max_files)
+}
+
+fn directory_files(path: &Path, extension: &str, max_files: usize) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     for entry in std::fs::read_dir(path).map_err(|source| CalcFlowError::Io {
         path: path.display().to_string(),
