@@ -62,13 +62,12 @@ pub(super) fn projection(plan: &LogicalPlan) -> Option<&Projection> {
 
 pub(super) fn work_nodes(plan: &LogicalPlan) -> Option<usize> {
     let shape = shape(plan)?;
-    shape
-        .sort
-        .into_iter()
-        .flat_map(|sort| &sort.expr)
-        .try_fold(usize::from(shape.limited), |total, expression| {
-            total.checked_add(expression_work(&expression.expr)?)
-        })
+    shape.sort.into_iter().flat_map(|sort| &sort.expr).try_fold(
+        usize::from(shape.limited),
+        |total, expression| {
+            total.checked_add(expression_work(&expression.expr, &shape.projection.schema)?)
+        },
+    )
 }
 
 #[derive(Clone)]
@@ -111,7 +110,7 @@ impl OutputOrder {
             .into_iter()
             .flat_map(|sort| &sort.expr)
             .map(|sort| {
-                expression_work(&sort.expr)?;
+                expression_work(&sort.expr, &shape.projection.schema)?;
                 Some(Key {
                     expression: create_physical_expr(&sort.expr, &shape.projection.schema, &props)
                         .ok()?,

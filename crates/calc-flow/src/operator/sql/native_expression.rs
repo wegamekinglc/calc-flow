@@ -3,10 +3,11 @@ use super::{
 };
 use datafusion::{
     arrow::datatypes::FieldRef,
-    logical_expr::{LogicalPlan, Operator, Projection},
+    common::DFSchema,
+    logical_expr::{ExprSchemable, LogicalPlan, Operator, Projection},
     physical_expr::expressions::{
-        BinaryExpr, CastExpr, Column, IsNotNullExpr, IsNullExpr, Literal, NegativeExpr, NotExpr,
-        TryCastExpr,
+        BinaryExpr, CaseExpr, CastExpr, Column, IsNotNullExpr, IsNullExpr, Literal, NegativeExpr,
+        NotExpr, TryCastExpr,
     },
 };
 use serde::Serialize;
@@ -46,6 +47,11 @@ pub(in crate::operator::sql) enum NativeAggregateInput {
         input: Box<Self>,
         op: UnaryKind,
     },
+    Case {
+        operand: Option<Box<Self>>,
+        branches: Vec<(Self, Self)>,
+        fallback: Option<Box<Self>>,
+    },
 }
 
 impl NativeAggregateInput {
@@ -66,6 +72,18 @@ impl NativeAggregateInput {
                 [(right.identity_bytes(name)?, 1), (1, 2048)],
                 name,
             )?,
+            Self::Case {
+                operand,
+                branches,
+                fallback,
+            } => operand
+                .iter()
+                .map(Box::as_ref)
+                .chain(branches.iter().flat_map(|(when, then)| [when, then]))
+                .chain(fallback.iter().map(Box::as_ref))
+                .try_fold(4096, |bytes, input| {
+                    checked_bytes(bytes, [(input.identity_bytes(name)?, 1)], name)
+                })?,
         };
         Ok(bytes)
     }
@@ -76,24 +94,28 @@ pub(super) fn output_work(projection: &Projection) -> Option<usize> {
         .expr
         .iter()
         .try_fold(0_usize, |total, expression| {
-            total.checked_add(projection_nodes(expression, 0)?)
+            total.checked_add(projection_nodes(expression, projection.input.schema(), 0)?)
         })?;
     match projection.input.as_ref() {
-        LogicalPlan::Filter(filter) => nodes.checked_add(projection_nodes(&filter.predicate, 0)?),
+        LogicalPlan::Filter(filter) => nodes.checked_add(projection_nodes(
+            &filter.predicate,
+            filter.input.schema(),
+            0,
+        )?),
         LogicalPlan::Aggregate(_) => Some(nodes),
         _ => None,
     }
 }
 
-pub(super) fn expression_work(expression: &Expr) -> Option<usize> {
-    projection_nodes(expression, 0)
+pub(super) fn expression_work(expression: &Expr, schema: &DFSchema) -> Option<usize> {
+    projection_nodes(expression, schema, 0)
 }
 
 fn fixed(dtype: &DataType) -> bool {
     dtype.primitive_width().is_some() || matches!(dtype, DataType::Boolean | DataType::Null)
 }
 
-fn projection_nodes(expression: &Expr, depth: usize) -> Option<usize> {
+fn projection_nodes(expression: &Expr, schema: &DFSchema, depth: usize) -> Option<usize> {
     if depth > 8 {
         return None;
     }
@@ -101,18 +123,37 @@ fn projection_nodes(expression: &Expr, depth: usize) -> Option<usize> {
         Expr::Column(_) => Some(1),
         Expr::Literal(value, _) if fixed(&value.data_type()) => Some(1),
         Expr::Cast(cast) if fixed(cast.field.data_type()) => {
-            projection_nodes(&cast.expr, depth + 1)?.checked_add(1)
+            projection_nodes(&cast.expr, schema, depth + 1)?.checked_add(1)
         }
         Expr::TryCast(cast) if fixed(cast.field.data_type()) => {
-            projection_nodes(&cast.expr, depth + 1)?.checked_add(1)
+            projection_nodes(&cast.expr, schema, depth + 1)?.checked_add(1)
         }
         Expr::Negative(inner) | Expr::Not(inner) | Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
-            projection_nodes(inner, depth + 1)?.checked_add(1)
+            projection_nodes(inner, schema, depth + 1)?.checked_add(1)
         }
         Expr::BinaryExpr(binary) if supported_operator(binary.op) => {
-            projection_nodes(&binary.left, depth + 1)?
-                .checked_add(projection_nodes(&binary.right, depth + 1)?)?
+            projection_nodes(&binary.left, schema, depth + 1)?
+                .checked_add(projection_nodes(&binary.right, schema, depth + 1)?)?
                 .checked_add(1)
+        }
+        Expr::Case(case)
+            if expression
+                .get_type(schema)
+                .ok()
+                .is_some_and(|dtype| fixed(&dtype)) =>
+        {
+            case.expr
+                .iter()
+                .map(Box::as_ref)
+                .chain(
+                    case.when_then_expr
+                        .iter()
+                        .flat_map(|(when, then)| [when.as_ref(), then.as_ref()]),
+                )
+                .chain(case.else_expr.iter().map(Box::as_ref))
+                .try_fold(1_usize, |nodes, expression| {
+                    nodes.checked_add(projection_nodes(expression, schema, depth + 1)?)
+                })
         }
         _ => None,
     }
@@ -211,6 +252,9 @@ pub(super) fn describe_input(
             fail_on_overflow: binary == &checked,
         });
     }
+    if let Some(case) = expression.downcast_ref::<CaseExpr>() {
+        return describe_case(case, schema, depth, name);
+    }
     if let Some((op, input)) = unary(expression) {
         return Ok(NativeAggregateInput::Unary {
             input: Box::new(describe_input(input, schema, depth + 1, name)?),
@@ -221,6 +265,35 @@ pub(super) fn describe_input(
         name,
         "native aggregate input has an unsupported expression",
     ))
+}
+
+fn describe_case(
+    case: &CaseExpr,
+    schema: &Schema,
+    depth: usize,
+    name: &str,
+) -> Result<NativeAggregateInput> {
+    let optional = |expression: Option<&std::sync::Arc<dyn PhysicalExpr>>| {
+        expression
+            .map(|expression| describe_input(expression.as_ref(), schema, depth + 1, name))
+            .transpose()
+            .map(|input| input.map(Box::new))
+    };
+    let branches = case
+        .when_then_expr()
+        .iter()
+        .map(|(when, then)| {
+            Ok((
+                describe_input(when.as_ref(), schema, depth + 1, name)?,
+                describe_input(then.as_ref(), schema, depth + 1, name)?,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(NativeAggregateInput::Case {
+        operand: optional(case.expr())?,
+        branches,
+        fallback: optional(case.else_expr())?,
+    })
 }
 
 fn unary(expression: &dyn PhysicalExpr) -> Option<(UnaryKind, &dyn PhysicalExpr)> {

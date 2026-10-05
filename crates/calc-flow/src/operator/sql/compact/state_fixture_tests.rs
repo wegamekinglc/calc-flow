@@ -917,6 +917,16 @@ fn input_json(input: &NativeAggregateInput) -> Value {
         NativeAggregateInput::Unary { input, op } => {
             json!({"kind":"unary", "input":input_json(input), "operator":op})
         }
+        NativeAggregateInput::Case {
+            operand,
+            branches,
+            fallback,
+        } => {
+            json!({"kind":"case","operand":operand.as_deref().map(input_json),
+                "branches":branches.iter().map(|(when,then)| json!({
+                    "when":input_json(when),"then":input_json(then),
+                })).collect::<Vec<_>>(),"fallback":fallback.as_deref().map(input_json)})
+        }
     }
 }
 
