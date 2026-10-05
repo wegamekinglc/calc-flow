@@ -85,6 +85,10 @@ pub(super) fn output_work(projection: &Projection) -> Option<usize> {
     }
 }
 
+pub(super) fn expression_work(expression: &Expr) -> Option<usize> {
+    projection_nodes(expression, 0)
+}
+
 fn fixed(dtype: &DataType) -> bool {
     dtype.primitive_width().is_some() || matches!(dtype, DataType::Boolean | DataType::Null)
 }

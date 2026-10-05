@@ -59,6 +59,9 @@ mod native_expression;
 
 use native_expression::output_work;
 
+#[path = "output_order.rs"]
+mod output_order;
+
 pub(super) struct IncrementalSql {
     schema: SchemaRef,
     aggregate_schema: SchemaRef,
@@ -71,6 +74,7 @@ pub(super) struct IncrementalSql {
     plan_bytes: usize,
     projection: Vec<Arc<dyn PhysicalExpr>>,
     post_filter: Option<Arc<dyn PhysicalExpr>>,
+    post_order: Option<output_order::OutputOrder>,
     projection_nodes: usize,
     keys: Vec<usize>,
     variable_columns: Vec<usize>,
@@ -580,25 +584,18 @@ impl IncrementalSql {
         let Some((projection, aggregate)) = shape(analyzed) else {
             return Ok(None);
         };
-        let Some(projection_nodes) = output_work(projection) else {
+        let Some(projection_nodes) = output_work(projection)
+            .and_then(|nodes| nodes.checked_add(output_order::work_nodes(analyzed)?))
+        else {
             return Ok(None);
         };
         let reservation = runtime.incremental_reservation(name);
-        let rebound_fields = if aggregate.input.schema().as_arrow() == schema.as_ref() {
-            0
-        } else {
-            schema.fields().len()
-        };
-        let plan_bytes = checked_bytes(
-            4096,
-            [
-                (keys.len(), 256),
-                (aggregate.aggr_expr.len(), 1024),
-                (projection_nodes, 512),
-                (predicate::plan_nodes(&aggregate.input, &schema), 512),
-                (query.text().len(), 8),
-                (rebound_fields, 512),
-            ],
+        let plan_bytes = initial_plan_charge(
+            query,
+            aggregate,
+            &schema,
+            keys.len(),
+            projection_nodes,
             name,
         )?;
         reservation
@@ -608,6 +605,13 @@ impl IncrementalSql {
             physical_plan(projection, aggregate, &schema)
         else {
             return Ok(None);
+        };
+        let Some(order_plan) = output_order::OutputOrder::bind(analyzed, name) else {
+            return Ok(None);
+        };
+        let post_order = match order_plan {
+            output_order::OrderPlan::Identity => None,
+            output_order::OrderPlan::Ordered(order) => Some(order),
         };
         let Some(aggregate_bytes) = aggregate_bytes(&aggregates, name)? else {
             return Ok(None);
@@ -630,17 +634,7 @@ impl IncrementalSql {
             }
         };
         let (converter, finalizer_bytes) = grouped_layout(&keys, &aggregates, &schema, name)?;
-        let variable_extrema = aggregates
-            .iter()
-            .enumerate()
-            .filter_map(|(index, expression)| {
-                matches!(
-                    expression.field().data_type(),
-                    DataType::Utf8 | DataType::LargeUtf8
-                )
-                .then_some(index)
-            })
-            .collect();
+        let variable_extrema = variable_extrema_slots(&aggregates);
         Ok(Some(Self {
             schema,
             aggregate_schema: Arc::new(aggregate.schema.as_arrow().clone()),
@@ -653,6 +647,7 @@ impl IncrementalSql {
             plan_bytes,
             projection,
             post_filter,
+            post_order,
             projection_nodes,
             keys,
             variable_columns,
@@ -1486,7 +1481,27 @@ impl IncrementalSql {
             tokio::task::yield_now().await;
         }
         if records.is_empty() {
-            records.push(RecordBatch::new_empty(self.output_schema.clone()));
+            let schema = if self
+                .post_order
+                .as_ref()
+                .is_some_and(output_order::OutputOrder::project_after_limit)
+            {
+                self.aggregate_schema.clone()
+            } else {
+                self.output_schema.clone()
+            };
+            records.push(RecordBatch::new_empty(schema));
+        }
+        if let Some(order) = &self.post_order {
+            records = order.apply(records, reservation, context, name).await?;
+            if records.is_empty() {
+                records.push(RecordBatch::new_empty(self.output_schema.clone()));
+            } else if order.project_after_limit() {
+                records = records
+                    .iter()
+                    .map(|record| self.project_output(record, name))
+                    .collect::<Result<Vec<_>>>()?;
+            }
         }
         Ok(records)
     }
@@ -1559,11 +1574,22 @@ impl IncrementalSql {
         } else {
             aggregate
         };
+        if self
+            .post_order
+            .as_ref()
+            .is_some_and(output_order::OutputOrder::project_after_limit)
+        {
+            return Ok(aggregate);
+        }
+        self.project_output(&aggregate, name)
+    }
+
+    fn project_output(&self, aggregate: &RecordBatch, name: &str) -> Result<RecordBatch> {
         let output = self
             .projection
             .iter()
             .map(|expr| {
-                expr.evaluate(&aggregate)
+                expr.evaluate(aggregate)
                     .and_then(|value| value.into_array(aggregate.num_rows()))
                     .map_err(|error| df_error(name, error))
             })
@@ -1725,6 +1751,48 @@ impl IncrementalSql {
     }
 }
 
+fn variable_extrema_slots(aggregates: &[Arc<AggregateFunctionExpr>]) -> Vec<usize> {
+    aggregates
+        .iter()
+        .enumerate()
+        .filter_map(|(index, expression)| {
+            matches!(
+                expression.field().data_type(),
+                DataType::Utf8 | DataType::LargeUtf8
+            )
+            .then_some(index)
+        })
+        .collect()
+}
+
+fn initial_plan_charge(
+    query: &ValidatedQuery,
+    aggregate: &datafusion::logical_expr::Aggregate,
+    schema: &SchemaRef,
+    keys: usize,
+    projection_nodes: usize,
+    name: &str,
+) -> Result<usize> {
+    let rebound_fields = if aggregate.input.schema().as_arrow() == schema.as_ref() {
+        0
+    } else {
+        schema.fields().len()
+    };
+    checked_bytes(
+        4096,
+        [
+            (keys, 256),
+            (aggregate.aggr_expr.len(), 1024),
+            (projection_nodes, 512),
+            (predicate::plan_nodes(&aggregate.input, schema), 512),
+            (query.text().len(), 8),
+            (name.len(), 4),
+            (rebound_fields, 512),
+        ],
+        name,
+    )
+}
+
 fn prepare_sync_plan(
     runtime: &DataFusionRuntime,
     query: &ValidatedQuery,
@@ -1848,9 +1916,7 @@ fn shape(
     &datafusion::logical_expr::Projection,
     &datafusion::logical_expr::Aggregate,
 )> {
-    let LogicalPlan::Projection(projection) = plan else {
-        return None;
-    };
+    let projection = output_order::projection(plan)?;
     let aggregate = match projection.input.as_ref() {
         LogicalPlan::Aggregate(aggregate) => aggregate,
         LogicalPlan::Filter(filter) => {

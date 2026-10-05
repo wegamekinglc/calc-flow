@@ -33,6 +33,7 @@ pub(in crate::operator::sql) struct NativeStateDescriptor {
     pub(in crate::operator::sql) output_schema: SchemaRef,
     pub(in crate::operator::sql) projection: Vec<NativeAggregateInput>,
     pub(in crate::operator::sql) post_filter: Option<NativeAggregateInput>,
+    pub(in crate::operator::sql) post_order: Option<super::output_order::OrderDescriptor>,
     pub(in crate::operator::sql) expression_identity_bytes: usize,
     pub(in crate::operator::sql) group_count: usize,
     pub(in crate::operator::sql) policy: &'static str,
@@ -114,11 +115,17 @@ impl IncrementalSql {
             .as_ref()
             .map(|expression| describe_input(expression.as_ref(), &self.aggregate_schema, 0, name))
             .transpose()?;
+        let post_order = self.native_output_order(name)?;
         let expression_identity_bytes = aggregate_inputs
             .iter()
             .flatten()
             .chain(&projection)
             .chain(&post_filter)
+            .chain(
+                post_order
+                    .iter()
+                    .flat_map(|order| order.keys.iter().map(|key| &key.0)),
+            )
             .try_fold(0, |bytes, input| {
                 checked_bytes(bytes, [(input.identity_bytes(name)?, 1)], name)
             })?;
@@ -166,11 +173,22 @@ impl IncrementalSql {
             output_schema: self.output_schema.clone(),
             projection,
             post_filter,
+            post_order,
             expression_identity_bytes,
             group_count: self.groups.len(),
             policy: self.native_policy(),
             _reservation: reservation,
         })
+    }
+
+    fn native_output_order(
+        &self,
+        name: &str,
+    ) -> Result<Option<super::output_order::OrderDescriptor>> {
+        self.post_order
+            .as_ref()
+            .map(|order| order.descriptor(&self.output_schema, name))
+            .transpose()
     }
 
     fn descriptor_reservation(&self, name: &str) -> Result<MemoryReservation> {

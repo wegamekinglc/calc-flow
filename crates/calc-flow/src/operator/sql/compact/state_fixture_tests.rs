@@ -928,5 +928,10 @@ fn native_json(descriptor: &NativeStateDescriptor) -> Value {
             "result_field": fields_json(std::slice::from_ref(&descriptor.result_fields[slot])),
         })).collect::<Vec<_>>(), "projection": descriptor.projection.iter().map(input_json).collect::<Vec<_>>(),
         "post_filter":descriptor.post_filter.as_ref().map(input_json),
+        "post_order":descriptor.post_order.as_ref().map(|order| json!({
+            "keys":order.keys.iter().map(|(input, descending, nulls_first)| json!({
+                "input":input_json(input),"descending":descending,"nulls_first":nulls_first,
+            })).collect::<Vec<_>>(),"skip":order.skip,"fetch":order.fetch,
+        })),
         "wire_schema_sha256": schema_digest(&descriptor.wire_schema), "output_schema_sha256": schema_digest(&descriptor.output_schema)})
 }

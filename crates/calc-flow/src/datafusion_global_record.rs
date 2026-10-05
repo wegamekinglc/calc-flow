@@ -7,7 +7,9 @@ use datafusion::{
         ExecutionPlan, ExecutionPlanProperties, InputOrderMode,
         aggregates::{AggregateExec, AggregateMode},
         filter::FilterExec,
+        limit::{GlobalLimitExec, LocalLimitExec},
         projection::ProjectionExec,
+        sorts::sort::SortExec,
     },
 };
 
@@ -58,6 +60,10 @@ fn inspect(
         filter.batch_size() == 8192 && filter.fetch().is_none()
     } else {
         plan.is::<ProjectionExec>()
+            || !in_input
+                && (plan.is::<SortExec>()
+                    || plan.is::<GlobalLimitExec>()
+                    || plan.is::<LocalLimitExec>())
     };
     if !valid {
         return Ok(false);

@@ -12,7 +12,9 @@ use datafusion::{
         ExecutionPlan, InputOrderMode,
         aggregates::{AggregateExec, AggregateMode},
         filter::FilterExec,
+        limit::{GlobalLimitExec, LocalLimitExec},
         projection::ProjectionExec,
+        sorts::sort::SortExec,
     },
 };
 
@@ -75,7 +77,7 @@ impl DataFusionRuntime {
             .prepare_query(context, query, &tables, Some(node))
             .await?;
         let mut census = Census::default();
-        let valid = inspect(planned.physical_plan.as_ref(), input, &mut census)?;
+        let valid = inspect(planned.physical_plan.as_ref(), input, false, &mut census)?;
         Ok(valid && census.aggregates == 1 && census.sources == 1)
     }
 }
@@ -86,7 +88,12 @@ struct Census {
     sources: usize,
 }
 
-fn inspect(plan: &dyn ExecutionPlan, input: &Batch, census: &mut Census) -> Result<bool> {
+fn inspect(
+    plan: &dyn ExecutionPlan,
+    input: &Batch,
+    in_input: bool,
+    census: &mut Census,
+) -> Result<bool> {
     if plan.output_partitioning().partition_count() != 1 {
         return Ok(false);
     }
@@ -100,12 +107,17 @@ fn inspect(plan: &dyn ExecutionPlan, input: &Batch, census: &mut Census) -> Resu
         filter.fetch().is_none()
     } else {
         plan.is::<ProjectionExec>()
+            || (!in_input
+                && (plan.is::<SortExec>()
+                    || plan.is::<GlobalLimitExec>()
+                    || plan.is::<LocalLimitExec>()))
     };
     if !valid {
         return Ok(false);
     }
     for child in plan.children() {
-        if !inspect(child.as_ref(), input, census)? {
+        let child_in_input = in_input || plan.is::<AggregateExec>();
+        if !inspect(child.as_ref(), input, child_in_input, census)? {
             return Ok(false);
         }
     }

@@ -165,6 +165,12 @@ fn native_json(descriptor: &NativeStateDescriptor) -> Result<Value> {
         json!({"policy":descriptor.policy, "keys":fields_json(&descriptor.key_fields)?,
         "aggregates":aggregates, "projection":descriptor.projection.iter().map(input_json).collect::<Result<Vec<_>>>()?,
         "post_filter":descriptor.post_filter.as_ref().map(input_json).transpose()?,
+        "post_order":descriptor.post_order.as_ref().map(|order| {
+            let keys = order.keys.iter().map(|(input, descending, nulls_first)| {
+                Ok(json!({"input":input_json(input)?,"descending":descending,"nulls_first":nulls_first}))
+            }).collect::<Result<Vec<_>>>()?;
+            Ok::<_,crate::CalcFlowError>(json!({"keys":keys,"skip":order.skip,"fetch":order.fetch}))
+        }).transpose()?,
         "wire_schema_sha256":retention::schema_digest(&descriptor.wire_schema)?,
         "output_schema_sha256":retention::schema_digest(&descriptor.output_schema)?}),
     )
