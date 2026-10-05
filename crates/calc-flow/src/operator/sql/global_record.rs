@@ -95,6 +95,21 @@ pub(super) struct Proof {
     _reservation: MemoryReservation,
 }
 
+fn saved_values<'a>(
+    columns: &mut impl Iterator<Item = &'a ArrayRef>,
+    width: usize,
+    name: &str,
+) -> Result<[ScalarValue; 2]> {
+    let mut values = [ScalarValue::Null, ScalarValue::Null];
+    for value in &mut values[..width] {
+        let array = columns
+            .next()
+            .ok_or_else(|| df_error(name, "global scalar state is missing"))?;
+        *value = ScalarValue::try_from_array(array, 0).map_err(|error| df_error(name, error))?;
+    }
+    Ok(values)
+}
+
 fn saved_count(kind: &Kind, values: &[ScalarValue], name: &str) -> Result<u64> {
     match (kind, values) {
         (_, []) => Ok(0),
@@ -128,25 +143,30 @@ pub(super) fn raw_selected(raw: &LogicalPlan) -> bool {
     }) {
         return false;
     }
-    aggregate.aggr_expr.iter().all(|expression| {
-        let Expr::AggregateFunction(function) = super::unalias(expression) else {
-            return false;
-        };
-        if function.func.name() == "count" {
-            return matches!(
-                function.params.args.as_slice(),
-                [Expr::Literal(ScalarValue::Int64(Some(1)), _)]
-            ) || matches!(function.params.args.as_slice(), [argument] if super::argument_type(argument, aggregate.input.schema()).is_some());
-        }
-        if !matches!(function.func.name(), "sum" | "avg" | "min" | "max") {
-            return false;
-        }
-        let [argument] = function.params.args.as_slice() else {
-            return false;
-        };
-        super::argument_type(argument, aggregate.input.schema()).is_some_and(|dtype| {
-            matches!(dtype, DataType::Float32 | DataType::Float64) || dtype.is_integer()
-        })
+    aggregate
+        .aggr_expr
+        .iter()
+        .all(|expression| global_expression_supported(expression, aggregate.input.schema()))
+}
+
+fn global_expression_supported(expression: &Expr, schema: &datafusion::common::DFSchema) -> bool {
+    let Expr::AggregateFunction(function) = super::unalias(expression) else {
+        return false;
+    };
+    if function.func.name() == "count" {
+        return matches!(
+            function.params.args.as_slice(),
+            [Expr::Literal(ScalarValue::Int64(Some(1)), _)]
+        ) || matches!(function.params.args.as_slice(), [argument] if super::argument_type(argument, schema).is_some());
+    }
+    if !matches!(function.func.name(), "sum" | "avg" | "min" | "max") {
+        return false;
+    }
+    let [argument] = function.params.args.as_slice() else {
+        return false;
+    };
+    super::argument_type(argument, schema).is_some_and(|dtype| {
+        matches!(dtype, DataType::Float32 | DataType::Float64) || dtype.is_integer()
     })
 }
 
@@ -223,14 +243,7 @@ impl Proof {
             .expect("scalar row");
         let mut columns = record.columns().iter();
         for kind in self.kinds.iter() {
-            let mut values = [ScalarValue::Null, ScalarValue::Null];
-            for value in &mut values[..kind.width()] {
-                let array = columns
-                    .next()
-                    .ok_or_else(|| df_error(name, "global scalar state is missing"))?;
-                *value =
-                    ScalarValue::try_from_array(array, 0).map_err(|error| df_error(name, error))?;
-            }
+            let values = saved_values(&mut columns, kind.width(), name)?;
             let count = saved_count(kind, &values[..kind.width()], name)?;
             if count > rows {
                 return Err(df_error(name, "global aggregate count exceeds input rows"));
@@ -253,26 +266,9 @@ impl Proof {
         context.check_cancelled()?;
         let (records, input_owner) = input;
         let (expressions, filters, values, predicate, input_checks) = arguments;
-        if self.uses_coalescing() != predicate.is_some() {
-            return Err(df_error(name, "global scalar predicate differs from model"));
-        }
-        if expressions.len() != self.kinds.len() || values.len() != self.kinds.len() {
-            return Err(df_error(name, "global scalar argument count differs"));
-        }
-        if !filters.is_empty() && filters.len() != expressions.len() {
-            return Err(df_error(name, "global scalar filter count differs"));
-        }
-        let empty = records.iter().all(|record| record.num_rows() == 0);
-        let charge = self.update_charge(
-            records,
-            input_owner.is_some(),
-            !filters.is_empty(),
-            predicate,
-            name,
-        )?;
-        let coalesced_credit =
-            (!empty && predicate.is_some()).then(|| Arc::new(credit.new_empty()));
-        super::ensure_reservation(&credit, charge, name)?;
+        self.validate_update_arguments(arguments, name)?;
+        let (empty, coalesced_credit) =
+            self.reserve_update(records, input_owner.is_some(), arguments, &credit, name)?;
         for (kind, state) in self.kinds.iter().zip(values) {
             saved_count(kind, state, name)?;
         }
@@ -296,6 +292,48 @@ impl Proof {
             name: name.to_owned(),
             _input_owner: input_owner,
         };
+        self.submit_record_work(work, credit, context, name).await
+    }
+
+    fn validate_update_arguments(&self, arguments: Arguments<'_>, name: &str) -> Result<()> {
+        let (expressions, filters, values, predicate, _) = arguments;
+        if self.uses_coalescing() != predicate.is_some() {
+            return Err(df_error(name, "global scalar predicate differs from model"));
+        }
+        if expressions.len() != self.kinds.len() || values.len() != self.kinds.len() {
+            return Err(df_error(name, "global scalar argument count differs"));
+        }
+        if !filters.is_empty() && filters.len() != expressions.len() {
+            return Err(df_error(name, "global scalar filter count differs"));
+        }
+        Ok(())
+    }
+
+    fn reserve_update(
+        &self,
+        records: &[RecordBatch],
+        has_owner: bool,
+        arguments: Arguments<'_>,
+        credit: &MemoryReservation,
+        name: &str,
+    ) -> Result<(bool, Option<Arc<MemoryReservation>>)> {
+        let (_, filters, _, predicate, _) = arguments;
+        let empty = records.iter().all(|record| record.num_rows() == 0);
+        let charge =
+            self.update_charge(records, has_owner, !filters.is_empty(), predicate, name)?;
+        let coalesced_credit =
+            (!empty && predicate.is_some()).then(|| Arc::new(credit.new_empty()));
+        super::ensure_reservation(credit, charge, name)?;
+        Ok((empty, coalesced_credit))
+    }
+
+    async fn submit_record_work(
+        &self,
+        work: RecordWork,
+        credit: MemoryReservation,
+        context: &StreamOperatorContext<'_>,
+        name: &str,
+    ) -> Result<Update> {
         let scope = context.gather_client(self.operator.clone()).scope()?;
         let ticket = scope
             .submit_work(work, credit, GatherStop::from_job(context.job()))
@@ -467,14 +505,7 @@ impl OwnedCpuWork for RecordWork {
         }
         let check = || stop.check();
         let mut accumulators = self.accumulators(&self.states, &check)?;
-        for record in &self.records {
-            stop.check()?;
-            for offset in (0..record.num_rows()).step_by(self.batch_size) {
-                stop.check()?;
-                let rows = self.batch_size.min(record.num_rows() - offset);
-                self.update_batch(&record.slice(offset, rows), &mut accumulators, &check)?;
-            }
-        }
+        self.update_records(&mut accumulators, stop, &check)?;
         Ok(Update {
             values: self.values(&mut accumulators, &check)?,
             coalesced: None,
@@ -483,6 +514,23 @@ impl OwnedCpuWork for RecordWork {
 }
 
 impl RecordWork {
+    fn update_records(
+        &self,
+        accumulators: &mut [Box<dyn datafusion::logical_expr::Accumulator>],
+        stop: &GatherStop,
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<()> {
+        for record in &self.records {
+            stop.check()?;
+            for offset in (0..record.num_rows()).step_by(self.batch_size) {
+                stop.check()?;
+                let rows = self.batch_size.min(record.num_rows() - offset);
+                self.update_batch(&record.slice(offset, rows), accumulators, check)?;
+            }
+        }
+        Ok(())
+    }
+
     fn accumulators(
         &self,
         states: &[Vec<ScalarValue>],
@@ -525,15 +573,8 @@ impl RecordWork {
             .enumerate()
         {
             check()?;
-            let filtered;
-            let batch = if let Some(expression) = self.filters.get(index).and_then(Option::as_ref) {
-                let filter = super::aggregate_filter(expression.as_ref(), batch, &self.name)?;
-                filtered = datafusion::arrow::compute::filter_record_batch(batch, &filter)
-                    .map_err(|error| df_error(&self.name, error))?;
-                &filtered
-            } else {
-                batch
-            };
+            let filtered = self.filtered_batch(index, batch)?;
+            let batch = filtered.as_ref().unwrap_or(batch);
             let arrays = expression
                 .expressions()
                 .iter()
@@ -549,6 +590,17 @@ impl RecordWork {
                 .map_err(|error| df_error(&self.name, error))?;
         }
         Ok(())
+    }
+
+    fn filtered_batch(&self, index: usize, batch: &RecordBatch) -> Result<Option<RecordBatch>> {
+        if let Some(expression) = self.filters.get(index).and_then(Option::as_ref) {
+            let filter = super::aggregate_filter(expression.as_ref(), batch, &self.name)?;
+            datafusion::arrow::compute::filter_record_batch(batch, &filter)
+                .map(Some)
+                .map_err(|error| df_error(&self.name, error))
+        } else {
+            Ok(None)
+        }
     }
 
     fn values(
