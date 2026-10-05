@@ -80,6 +80,12 @@ impl PaidNativeStateRecords {
     }
 }
 
+struct ValidatedNativeImport {
+    descriptor: NativeStateDescriptor,
+    groups: usize,
+    _validation: MemoryReservation,
+}
+
 struct NativeAggregateDescriptor {
     aggregate_names: Vec<String>,
     aggregate_inputs: Vec<Vec<NativeAggregateInput>>,
@@ -400,36 +406,80 @@ impl IncrementalSql {
         if !self.groups.is_empty() || !self.index.is_empty() {
             return Err(df_error(name, "native state import requires an empty plan"));
         }
-        let descriptor = self.native_descriptor(name)?;
-        let validation = self.reservation.new_empty();
-        ensure_reservation(
-            &validation,
-            checked_bytes(0, [(self.aggregates.len(), size_of::<u64>())], name)?,
+        let ValidatedNativeImport {
+            descriptor,
+            groups,
+            _validation,
+        } = self.prepare_native_import(
+            records,
+            historical_rows,
+            seen_input,
+            &mut check_cancelled,
             name,
         )?;
+        self.reserve_groups(groups, groups, name)?;
+        self.load_records(records, &descriptor, false, &mut check_cancelled, name)?;
+        check_cancelled()?;
+        Ok(self)
+    }
+
+    fn prepare_native_import(
+        &self,
+        records: &[RecordBatch],
+        historical_rows: u64,
+        seen_input: bool,
+        check_cancelled: &mut impl FnMut() -> Result<()>,
+        name: &str,
+    ) -> Result<ValidatedNativeImport> {
+        let descriptor = self.native_descriptor(name)?;
+        let validation = self.validation_credit(0, name)?;
         let groups = validate_records(
             records,
             &descriptor,
             historical_rows,
             true,
-            &mut check_cancelled,
+            check_cancelled,
             name,
         )?;
+        self.validate_import_history(records, groups, (historical_rows, seen_input), name)?;
+        Ok(ValidatedNativeImport {
+            descriptor,
+            groups,
+            _validation: validation,
+        })
+    }
+
+    fn validate_import_history(
+        &self,
+        records: &[RecordBatch],
+        groups: usize,
+        history: (u64, bool),
+        name: &str,
+    ) -> Result<()> {
         validate_ledger(
             groups,
-            historical_rows,
-            seen_input,
+            history.0,
+            history.1,
             self.keys.is_empty(),
             self.predicate.is_some(),
             name,
         )?;
-        if seen_input && let Some(global) = &self.global_records {
-            global.validate_state(records, historical_rows, name)?;
+        if history.1
+            && let Some(global) = &self.global_records
+        {
+            global.validate_state(records, history.0, name)?;
         }
-        self.reserve_groups(groups, groups, name)?;
-        self.load_records(records, &descriptor, false, &mut check_cancelled, name)?;
-        check_cancelled()?;
-        Ok(self)
+        Ok(())
+    }
+
+    fn validation_credit(&self, base: usize, name: &str) -> Result<MemoryReservation> {
+        let reservation = self.reservation.new_empty();
+        ensure_reservation(
+            &reservation,
+            checked_bytes(base, [(self.aggregates.len(), size_of::<u64>())], name)?,
+            name,
+        )?;
+        Ok(reservation)
     }
 
     pub(in crate::operator::sql) fn apply_delta_state(
@@ -440,18 +490,14 @@ impl IncrementalSql {
         name: &str,
     ) -> Result<()> {
         let descriptor = self.native_descriptor(name)?;
-        let validation = self.reservation.new_empty();
-        ensure_reservation(
-            &validation,
-            checked_bytes(4096, [(self.aggregates.len(), size_of::<u64>())], name)?,
-            name,
-        )?;
+        let _validation = self.validation_credit(4096, name)?;
+        let mut check = check;
         let groups = validate_records(
             records,
             &descriptor,
             historical_rows,
             false,
-            &mut || check(),
+            &mut check,
             name,
         )?;
         let capacity = self
@@ -460,7 +506,7 @@ impl IncrementalSql {
             .checked_add(groups)
             .ok_or_else(|| df_error(name, "native delta capacity overflowed"))?;
         self.reserve_groups(groups, capacity, name)?;
-        self.load_records(records, &descriptor, true, &mut || check(), name)
+        self.load_records(records, &descriptor, true, &mut check, name)
     }
 
     pub(in crate::operator::sql) fn validate_checkpoint_history(
@@ -479,36 +525,27 @@ impl IncrementalSql {
             name,
         )?;
         let descriptor = self.native_descriptor(name)?;
-        let reservation = self.reservation.new_empty();
-        ensure_reservation(
-            &reservation,
-            checked_bytes(4096, [(self.aggregates.len(), size_of::<u64>())], name)?,
-            name,
-        )?;
+        let _validation = self.validation_credit(4096, name)?;
+        let counts = self.history_counts(&descriptor, rows, check, name)?;
+        validate_all_row_totals(&counts, &descriptor, rows, true, name)?;
+        check()
+    }
+
+    fn history_counts(
+        &self,
+        descriptor: &NativeStateDescriptor,
+        rows: u64,
+        check: &dyn Fn() -> Result<()>,
+        name: &str,
+    ) -> Result<Vec<u64>> {
         let mut counts = vec![0; self.aggregates.len()];
         for (row, group) in self.groups.iter().enumerate() {
             if row % STATE_CHUNK_ROWS == 0 {
                 check()?;
             }
-            for (index, function) in descriptor.aggregate_names.iter().enumerate() {
-                let count = match (function.as_str(), group.states[index].first()) {
-                    ("count", Some(ScalarValue::Int64(Some(count)))) => u64::try_from(*count)
-                        .map_err(|_| df_error(name, "native COUNT state is negative"))?,
-                    ("avg", Some(ScalarValue::UInt64(count))) => count.unwrap_or(0),
-                    _ => continue,
-                };
-                add_count(&mut counts[index], count, rows, name)?;
-            }
+            add_group_counts(group, descriptor, rows, &mut counts, name)?;
         }
-        for (count, all) in counts.iter().zip(&descriptor.count_all_rows) {
-            if *all && !descriptor.filtered_input && *count != rows {
-                return Err(df_error(
-                    name,
-                    "native all-row COUNT differs from historical rows",
-                ));
-            }
-        }
-        check()
+        Ok(counts)
     }
 
     fn load_records(
@@ -523,17 +560,40 @@ impl IncrementalSql {
         let mut seen = std::collections::BTreeSet::new();
         let _seen_credit = self.load_seen_credit(records, replace, name)?;
         for record in records {
-            if record.num_rows() == 0 {
-                check_cancelled()?;
-            }
-            for start in (0..record.num_rows()).step_by(STATE_CHUNK_ROWS) {
-                check_cancelled()?;
-                let rows = STATE_CHUNK_ROWS.min(record.num_rows() - start);
-                let charge = self.load_chunk_charge(record, start, rows, descriptor, name)?;
-                ensure_reservation(&workspace, charge, name)?;
-                let chunk = record.slice(start, rows);
-                self.load_state_chunk(&chunk, descriptor, replace, &mut seen, name)?;
-            }
+            self.load_record(
+                record,
+                descriptor,
+                replace,
+                &mut (&workspace, &mut seen),
+                check_cancelled,
+                name,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn load_record(
+        &mut self,
+        record: &RecordBatch,
+        descriptor: &NativeStateDescriptor,
+        replace: bool,
+        buffers: &mut (
+            &MemoryReservation,
+            &mut std::collections::BTreeSet<Arc<[u8]>>,
+        ),
+        check_cancelled: &mut impl FnMut() -> Result<()>,
+        name: &str,
+    ) -> Result<()> {
+        if record.num_rows() == 0 {
+            check_cancelled()?;
+        }
+        for start in (0..record.num_rows()).step_by(STATE_CHUNK_ROWS) {
+            check_cancelled()?;
+            let rows = STATE_CHUNK_ROWS.min(record.num_rows() - start);
+            let charge = self.load_chunk_charge(record, start, rows, descriptor, name)?;
+            ensure_reservation(buffers.0, charge, name)?;
+            let chunk = record.slice(start, rows);
+            self.load_state_chunk(&chunk, descriptor, replace, buffers.1, name)?;
         }
         Ok(())
     }
@@ -751,39 +811,88 @@ fn validate_records(
     let mut groups = 0usize;
     let mut counts = vec![0u64; descriptor.aggregate_names.len()];
     for record in records {
-        if record.num_rows() == 0 {
-            check_cancelled()?;
-        }
-        if record.schema() != descriptor.wire_schema {
-            return Err(df_error(
-                name,
-                "native state schema differs from trusted plan",
-            ));
-        }
-        for (array, field) in record.columns().iter().zip(descriptor.wire_schema.fields()) {
-            if !field.is_nullable() && array.null_count() != 0 {
-                return Err(df_error(name, "native state has nulls in a required field"));
-            }
-        }
+        let rows = validate_record_envelope(record, descriptor, check_cancelled, name)?;
         groups = groups
-            .checked_add(record.num_rows())
+            .checked_add(rows)
             .ok_or_else(|| df_error(name, "native group count overflowed"))?;
-        for start in (0..record.num_rows()).step_by(STATE_CHUNK_ROWS) {
-            check_cancelled()?;
-            for row in start..(start + STATE_CHUNK_ROWS).min(record.num_rows()) {
-                validate_counts(record, row, descriptor, historical_rows, &mut counts, name)?;
-            }
+        validate_record_counts(
+            record,
+            descriptor,
+            historical_rows,
+            &mut counts,
+            check_cancelled,
+            name,
+        )?;
+    }
+    validate_all_row_totals(&counts, descriptor, historical_rows, complete, name)?;
+    Ok(groups)
+}
+
+fn validate_record_envelope(
+    record: &RecordBatch,
+    descriptor: &NativeStateDescriptor,
+    check_cancelled: &mut impl FnMut() -> Result<()>,
+    name: &str,
+) -> Result<usize> {
+    if record.num_rows() == 0 {
+        check_cancelled()?;
+    }
+    validate_record_schema(record, descriptor, name)?;
+    Ok(record.num_rows())
+}
+
+fn validate_record_schema(
+    record: &RecordBatch,
+    descriptor: &NativeStateDescriptor,
+    name: &str,
+) -> Result<()> {
+    if record.schema() != descriptor.wire_schema {
+        return Err(df_error(
+            name,
+            "native state schema differs from trusted plan",
+        ));
+    }
+    for (array, field) in record.columns().iter().zip(descriptor.wire_schema.fields()) {
+        if !field.is_nullable() && array.null_count() != 0 {
+            return Err(df_error(name, "native state has nulls in a required field"));
         }
     }
-    for (count, all_rows) in counts.iter().zip(&descriptor.count_all_rows) {
-        if complete && *all_rows && !descriptor.filtered_input && *count != historical_rows {
+    Ok(())
+}
+
+fn validate_record_counts(
+    record: &RecordBatch,
+    descriptor: &NativeStateDescriptor,
+    historical_rows: u64,
+    totals: &mut [u64],
+    check_cancelled: &mut impl FnMut() -> Result<()>,
+    name: &str,
+) -> Result<()> {
+    for start in (0..record.num_rows()).step_by(STATE_CHUNK_ROWS) {
+        check_cancelled()?;
+        for row in start..(start + STATE_CHUNK_ROWS).min(record.num_rows()) {
+            validate_counts(record, row, descriptor, historical_rows, totals, name)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_all_row_totals(
+    totals: &[u64],
+    descriptor: &NativeStateDescriptor,
+    rows: u64,
+    complete: bool,
+    name: &str,
+) -> Result<()> {
+    for (count, all_rows) in totals.iter().zip(&descriptor.count_all_rows) {
+        if complete && *all_rows && !descriptor.filtered_input && *count != rows {
             return Err(df_error(
                 name,
                 "native all-row COUNT differs from historical rows",
             ));
         }
     }
-    Ok(groups)
+    Ok(())
 }
 
 fn validate_counts(
@@ -798,37 +907,24 @@ fn validate_counts(
     for (aggregate, function) in descriptor.aggregate_names.iter().enumerate() {
         match function.as_str() {
             "count" => {
-                let array = record
-                    .column(column)
-                    .as_any()
-                    .downcast_ref::<Int64Array>()
-                    .ok_or_else(|| df_error(name, "native COUNT state is not Int64"))?;
-                let count = u64::try_from(array.value(row))
-                    .map_err(|_| df_error(name, "native COUNT state is negative"))?;
-                add_count(&mut totals[aggregate], count, historical_rows, name)?;
-                if descriptor.count_all_rows[aggregate]
-                    && !descriptor.key_fields.is_empty()
-                    && count == 0
-                {
-                    return Err(df_error(name, "native grouped all-row COUNT is zero"));
-                }
+                validate_count_state(
+                    record.column(column),
+                    row,
+                    historical_rows,
+                    &mut totals[aggregate],
+                    descriptor.count_all_rows[aggregate] && !descriptor.key_fields.is_empty(),
+                    name,
+                )?;
             }
             "avg" => {
-                let counts = record
-                    .column(column)
-                    .as_any()
-                    .downcast_ref::<UInt64Array>()
-                    .ok_or_else(|| df_error(name, "native AVG count is not UInt64"))?;
-                let count = if counts.is_null(row) {
-                    0
-                } else {
-                    counts.value(row)
-                };
-                add_count(&mut totals[aggregate], count, historical_rows, name)?;
-                let null_sum = record.column(column + 1).is_null(row);
-                if count > historical_rows || (count == 0) != null_sum {
-                    return Err(df_error(name, "native AVG count and sum are inconsistent"));
-                }
+                validate_avg_state(
+                    record.column(column),
+                    record.column(column + 1),
+                    row,
+                    historical_rows,
+                    &mut totals[aggregate],
+                    name,
+                )?;
             }
             _ => {
                 if historical_rows == 0 && !record.column(column).is_null(row) {
@@ -840,6 +936,52 @@ fn validate_counts(
             }
         }
         column += descriptor.state_fields[aggregate].len();
+    }
+    Ok(())
+}
+
+fn validate_count_state(
+    array: &ArrayRef,
+    row: usize,
+    historical_rows: u64,
+    total: &mut u64,
+    grouped_all: bool,
+    name: &str,
+) -> Result<()> {
+    let array = array
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .ok_or_else(|| df_error(name, "native COUNT state is not Int64"))?;
+    let count = u64::try_from(array.value(row))
+        .map_err(|_| df_error(name, "native COUNT state is negative"))?;
+    add_count(total, count, historical_rows, name)?;
+    if grouped_all && count == 0 {
+        return Err(df_error(name, "native grouped all-row COUNT is zero"));
+    }
+    Ok(())
+}
+
+fn validate_avg_state(
+    counts: &ArrayRef,
+    sum: &ArrayRef,
+    row: usize,
+    historical_rows: u64,
+    total: &mut u64,
+    name: &str,
+) -> Result<()> {
+    let counts = counts
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .ok_or_else(|| df_error(name, "native AVG count is not UInt64"))?;
+    let count = if counts.is_null(row) {
+        0
+    } else {
+        counts.value(row)
+    };
+    add_count(total, count, historical_rows, name)?;
+    let null_sum = sum.is_null(row);
+    if count > historical_rows || (count == 0) != null_sum {
+        return Err(df_error(name, "native AVG count and sum are inconsistent"));
     }
     Ok(())
 }
@@ -938,3 +1080,22 @@ fn restored_result(
 #[path = "compact_state_tests.rs"]
 #[cfg(test)]
 mod tests;
+
+fn add_group_counts(
+    group: &Group,
+    descriptor: &NativeStateDescriptor,
+    rows: u64,
+    totals: &mut [u64],
+    name: &str,
+) -> Result<()> {
+    for (index, function) in descriptor.aggregate_names.iter().enumerate() {
+        let count = match (function.as_str(), group.states[index].first()) {
+            ("count", Some(ScalarValue::Int64(Some(count)))) => u64::try_from(*count)
+                .map_err(|_| df_error(name, "native COUNT state is negative"))?,
+            ("avg", Some(ScalarValue::UInt64(count))) => count.unwrap_or(0),
+            _ => continue,
+        };
+        add_count(&mut totals[index], count, rows, name)?;
+    }
+    Ok(())
+}
