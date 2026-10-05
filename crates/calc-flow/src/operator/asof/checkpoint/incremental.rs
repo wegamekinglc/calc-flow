@@ -62,6 +62,17 @@ struct RecoveredRows {
     workspaces: Vec<MemoryReservation>,
 }
 
+struct PaidControl {
+    control: Control,
+    workspace: MemoryReservation,
+}
+
+struct LogRecoveryInput {
+    direct_wire: Arc<MemoryReservation>,
+    workspace: MemoryReservation,
+    batches: BTreeMap<BatchKey, Arc<PayloadBatch>>,
+}
+
 pub(in crate::operator::asof) struct Body {
     pub kind: Kind,
     pub segment: StateSegment,
@@ -1077,15 +1088,7 @@ impl StreamAsofJoinOperator {
                 return Err(mismatch("ASOF log payload order differs"));
             }
             previous = Some(payload.key);
-            let encoded = snapshot
-                .segments
-                .get(&payload_segments::batch_segment(payload.key))
-                .ok_or_else(|| mismatch("ASOF historical payload is missing"))?;
-            if encoded.sha256() != payload.sha256 || encoded.bytes().len() as u64 != payload.bytes {
-                return Err(mismatch("ASOF historical payload digest or length differs"));
-            }
-            let body = super::super::codec::payload_body_bytes(encoded.bytes())
-                .map_err(|_| mismatch("ASOF invalid Arrow batch framing"))?;
+            let body = validated_payload_body(payload, snapshot)?;
             payload_workspace_bytes = checked(
                 &self.name,
                 payload_workspace_bytes,
@@ -1135,6 +1138,32 @@ impl StreamAsofJoinOperator {
         workspace: &MemoryReservation,
         cancel: &dyn Fn() -> Result<()>,
     ) -> Result<RecoveredRows> {
+        let (mut state, mut owners) =
+            self.decode_log_base_rows(control, frames, batches, cancel)?;
+        let mut workspaces = Vec::with_capacity(36);
+        if frames.len() > 1 {
+            let recovered = self.apply_log_frames(state, owners, frames, batches, cancel)?;
+            state = recovered.state;
+            owners = recovered.owners;
+            workspaces = recovered.workspaces;
+        } else {
+            lease_recovered_index(&mut state, workspace)?;
+        }
+        self.validate_indexed_rows(&state)?;
+        Ok(RecoveredRows {
+            state,
+            owners,
+            workspaces,
+        })
+    }
+
+    fn decode_log_base_rows(
+        &self,
+        control: &Control,
+        frames: &[chain::Frame<'_>],
+        batches: &BTreeMap<BatchKey, Arc<PayloadBatch>>,
+        cancel: &dyn Fn() -> Result<()>,
+    ) -> Result<(State, OwnerReader)> {
         if control
             .base_payloads
             .windows(2)
@@ -1153,7 +1182,7 @@ impl StreamAsofJoinOperator {
                     .ok_or_else(|| mismatch("ASOF base payload is missing"))
             })
             .collect::<Result<BTreeMap<_, _>>>()?;
-        let (mut state, mut owners) = index_v3::decode_registered_bytes_checked(
+        let (state, owners) = index_v3::decode_registered_bytes_checked(
             frames[0].body,
             &base_batches,
             self.spec.limits().max_state_rows(),
@@ -1165,94 +1194,91 @@ impl StreamAsofJoinOperator {
         if frames[0].records != base_inventory.identities {
             return Err(mismatch("ASOF base row census differs"));
         }
-        let mut workspaces = Vec::with_capacity(36);
-        if frames.len() > 1 {
-            let recovered = self.apply_log_frames(state, owners, frames, batches, cancel)?;
-            state = recovered.state;
-            owners = recovered.owners;
-            workspaces = recovered.workspaces;
-        } else {
-            let auxiliary = state.right.auxiliary_bytes();
-            if auxiliary > workspace.size() {
-                return Err(mismatch("ASOF recovery index exceeds prepaid workspace"));
-            }
-            state
-                .right
-                .install_recovery_lease(workspace.split(auxiliary));
-        }
-        self.validate_indexed_rows(&state)?;
-        Ok(RecoveredRows {
-            state,
-            owners,
-            workspaces,
-        })
+        Ok((state, owners))
     }
 
     fn apply_log_frames(
         &self,
-        mut state: State,
+        state: State,
         mut owners: OwnerReader,
         frames: &[chain::Frame<'_>],
         batches: &BTreeMap<BatchKey, Arc<PayloadBatch>>,
         cancel: &dyn Fn() -> Result<()>,
     ) -> Result<RecoveredRows> {
         let base_inventory = state.capacity_inventory(None, &self.name)?;
-        let mut workspaces = Vec::with_capacity(36);
-        let model_bytes = usize::try_from(base_inventory.identities)
-            .map_err(|_| mismatch("ASOF model exceeds address domain"))?
-            .saturating_mul(size_of::<((i64, Encoding), Version)>())
-            .saturating_add(state.right.len().saturating_mul(512))
-            .saturating_add(
-                state
-                    .left
-                    .checkpoint_chunks(&state.batches)
-                    .len()
-                    .saturating_mul(512),
-            )
-            .saturating_add(4096);
+        let workspaces = Vec::with_capacity(36);
+        let model_bytes = log_model_bytes(&state, &base_inventory)?;
         let mut model = log::model::Model::from_state(
             &state,
             self.reserve_workspace(model_bytes as u64)?,
             cancel,
         )?;
         drop(state);
+        owners = self.apply_model_frames(&mut model, owners, frames, batches, cancel)?;
+        self.materialize_log_model(model, owners, batches, workspaces, cancel)
+    }
+
+    fn apply_model_frames(
+        &self,
+        model: &mut log::model::Model,
+        mut owners: OwnerReader,
+        frames: &[chain::Frame<'_>],
+        batches: &BTreeMap<BatchKey, Arc<PayloadBatch>>,
+        cancel: &dyn Fn() -> Result<()>,
+    ) -> Result<OwnerReader> {
         for frame in frames.iter().skip(1) {
             cancel()?;
-            let bytes = log::restore_charge(
-                frame.body,
-                owners.count(),
-                self.sequence_kinds(),
-                self.spec.limits().max_state_rows(),
-                self.spec.limits().max_state_bytes(),
-            )?;
-            let delta = log::decode(
-                frame.body,
-                &owners,
-                batches,
-                self.sequence_kinds(),
-                &self.spec.limits(),
-                self.reserve_workspace(bytes)?,
-                cancel,
-            )?;
-            if delta.changes.len() as u64 != frame.records {
-                return Err(mismatch("ASOF delta row census differs"));
-            }
+            let delta = self.decode_log_frame(frame, &owners, batches, cancel)?;
             owners = model.apply(delta, cancel)?;
         }
+        Ok(owners)
+    }
+
+    fn decode_log_frame(
+        &self,
+        frame: &chain::Frame<'_>,
+        owners: &OwnerReader,
+        batches: &BTreeMap<BatchKey, Arc<PayloadBatch>>,
+        cancel: &dyn Fn() -> Result<()>,
+    ) -> Result<log::DecodedDelta> {
+        let bytes = log::restore_charge(
+            frame.body,
+            owners.count(),
+            self.sequence_kinds(),
+            self.spec.limits().max_state_rows(),
+            self.spec.limits().max_state_bytes(),
+        )?;
+        let delta = log::decode(
+            frame.body,
+            owners,
+            batches,
+            self.sequence_kinds(),
+            &self.spec.limits(),
+            self.reserve_workspace(bytes)?,
+            cancel,
+        )?;
+        if delta.changes.len() as u64 != frame.records {
+            return Err(mismatch("ASOF delta row census differs"));
+        }
+        Ok(delta)
+    }
+
+    fn materialize_log_model(
+        &self,
+        model: log::model::Model,
+        owners: OwnerReader,
+        batches: &BTreeMap<BatchKey, Arc<PayloadBatch>>,
+        mut workspaces: Vec<MemoryReservation>,
+        cancel: &dyn Fn() -> Result<()>,
+    ) -> Result<RecoveredRows> {
         let candidate = self.reserve_workspace(model.native_charge(cancel)?)?;
-        state = model.materialize(
+        let mut state = model.materialize(
             batches,
             &candidate,
             self.spec.limits().max_state_rows(),
             cancel,
         )?;
-        let auxiliary = state.right.auxiliary_bytes();
-        if auxiliary > candidate.size() {
-            return Err(mismatch("ASOF recovery index exceeds prepaid workspace"));
-        }
-        state
-            .right
-            .install_recovery_lease(candidate.split(auxiliary));
+        lease_recovered_index(&mut state, &candidate)?;
         workspaces.extend(model.into_workspaces());
         workspaces.push(candidate);
         Ok(RecoveredRows {
@@ -1277,14 +1303,7 @@ impl StreamAsofJoinOperator {
         let mut segments = BTreeMap::new();
         for frame in &control.frames {
             let segment = &snapshot.segments[&frame.name()];
-            segments.insert(
-                frame.name(),
-                if segment.has_owner() {
-                    segment.clone()
-                } else {
-                    segment.clone().with_owner(direct_wire.clone())
-                },
-            );
+            segments.insert(frame.name(), segment_with_wire_owner(segment, direct_wire));
         }
         let payloads = control
             .payloads
@@ -1292,11 +1311,7 @@ impl StreamAsofJoinOperator {
             .map(|payload| {
                 (payload.key, {
                     let segment = &snapshot.segments[&payload_segments::batch_segment(payload.key)];
-                    if segment.has_owner() {
-                        segment.clone()
-                    } else {
-                        segment.clone().with_owner(direct_wire.clone())
-                    }
+                    segment_with_wire_owner(segment, direct_wire)
                 })
             })
             .collect::<BTreeMap<_, _>>();
@@ -1356,31 +1371,58 @@ impl StreamAsofJoinOperator {
         if snapshot.segments.is_empty() {
             return self.decode_empty_log(snapshot, metadata, raw);
         }
-        let control_workspace = self.reserve_workspace(control_bound(raw, 0)? + 8192)?;
-        let serialized =
-            serde_json::to_string(raw).map_err(|error| mismatch(&error.to_string()))?;
-        let control: Control =
-            serde_json::from_str(&serialized).map_err(|error| mismatch(&error.to_string()))?;
-        if control.frames.is_empty()
-            || control.frames.len() > chain::MAX_DELTAS + 1
-            || control.generation == 0
-            || control
-                .frames
-                .iter()
-                .any(|frame| frame.generation != control.generation)
-            || control.payloads.len() + control.frames.len() != snapshot.segments.len()
-        {
-            return Err(mismatch("ASOF log control inventory differs"));
-        }
+        self.decode_nonempty_row_log(snapshot, metadata, raw, cancel)
+    }
+
+    fn decode_nonempty_row_log(
+        &self,
+        snapshot: &crate::OperatorStateSnapshot,
+        metadata: &super::Metadata<'_>,
+        raw: &serde_json::Value,
+        cancel: &dyn Fn() -> Result<()>,
+    ) -> Result<super::DecodedSnapshot> {
+        let paid = self.decode_log_control(raw, snapshot)?;
+        let control = &paid.control;
         let frames = chain::validate_chain(
             &control.frames,
             &snapshot.segments,
             metadata.epoch,
             &self.fingerprint,
-            &control_workspace,
+            &paid.workspace,
             cancel,
         )?;
-        let payload_workspace_bytes = self.log_payload_workspace(&control, snapshot, cancel)?;
+        let input = self.prepare_log_recovery(control, snapshot, &frames, cancel)?;
+        super::validate_batch_ranges(&input.batches, &metadata.metrics)?;
+        let recovered =
+            self.decode_log_rows(control, &frames, &input.batches, &input.workspace, cancel)?;
+        self.finish_log_restore(paid, snapshot, metadata, recovered, input, cancel)
+    }
+
+    fn decode_log_control(
+        &self,
+        raw: &serde_json::Value,
+        snapshot: &crate::OperatorStateSnapshot,
+    ) -> Result<PaidControl> {
+        let control_workspace = self.reserve_workspace(control_bound(raw, 0)? + 8192)?;
+        let serialized =
+            serde_json::to_string(raw).map_err(|error| mismatch(&error.to_string()))?;
+        let control: Control =
+            serde_json::from_str(&serialized).map_err(|error| mismatch(&error.to_string()))?;
+        validate_log_control(&control, snapshot)?;
+        Ok(PaidControl {
+            control,
+            workspace: control_workspace,
+        })
+    }
+
+    fn prepare_log_recovery(
+        &self,
+        control: &Control,
+        snapshot: &crate::OperatorStateSnapshot,
+        frames: &[chain::Frame<'_>],
+        cancel: &dyn Fn() -> Result<()>,
+    ) -> Result<LogRecoveryInput> {
+        let payload_workspace_bytes = self.log_payload_workspace(control, snapshot, cancel)?;
         let wire_bytes = snapshot
             .segments
             .values()
@@ -1402,21 +1444,36 @@ impl StreamAsofJoinOperator {
                     cancel,
                 )?,
         )?;
-        let batches = self.decode_log_payloads(&control, snapshot, &direct_wire, cancel)?;
-        super::validate_batch_ranges(&batches, &metadata.metrics)?;
+        let batches = self.decode_log_payloads(control, snapshot, &direct_wire, cancel)?;
+        Ok(LogRecoveryInput {
+            direct_wire,
+            workspace,
+            batches,
+        })
+    }
+
+    fn finish_log_restore(
+        &self,
+        paid: PaidControl,
+        snapshot: &crate::OperatorStateSnapshot,
+        metadata: &super::Metadata<'_>,
+        recovered: RecoveredRows,
+        input: LogRecoveryInput,
+        cancel: &dyn Fn() -> Result<()>,
+    ) -> Result<super::DecodedSnapshot> {
         let RecoveredRows {
             state,
             owners,
             mut workspaces,
-        } = self.decode_log_rows(&control, &frames, &batches, &workspace, cancel)?;
+        } = recovered;
         let (checkpoint_log, registry_work) =
-            self.restore_log_inventory(control, snapshot, &state, owners, &direct_wire)?;
+            self.restore_log_inventory(paid.control, snapshot, &state, owners, &input.direct_wire)?;
         let mut base_inventory = state.capacity_inventory(None, &self.name)?;
         base_inventory.bytes = checked(&self.name, base_inventory.bytes, checkpoint_log.bytes())?;
         super::validate_gauges(&base_inventory, state.left.len() as u64, &metadata.metrics)?;
         self.validate_restored_limits(&base_inventory, metadata)?;
-        workspaces.push(workspace);
-        workspaces.push(control_workspace);
+        workspaces.push(input.workspace);
+        workspaces.push(paid.workspace);
         workspaces.push(registry_work);
         cancel()?;
         Ok(super::DecodedSnapshot {
@@ -1429,6 +1486,72 @@ impl StreamAsofJoinOperator {
             _workspaces: workspaces,
         })
     }
+}
+
+fn validated_payload_body(
+    payload: &Payload,
+    snapshot: &crate::OperatorStateSnapshot,
+) -> Result<u64> {
+    let encoded = snapshot
+        .segments
+        .get(&payload_segments::batch_segment(payload.key))
+        .ok_or_else(|| mismatch("ASOF historical payload is missing"))?;
+    if encoded.sha256() != payload.sha256 || encoded.bytes().len() as u64 != payload.bytes {
+        return Err(mismatch("ASOF historical payload digest or length differs"));
+    }
+    let body = super::super::codec::payload_body_bytes(encoded.bytes())
+        .map_err(|_| mismatch("ASOF invalid Arrow batch framing"))?;
+    Ok(body)
+}
+
+fn segment_with_wire_owner(segment: &StateSegment, wire: &Arc<MemoryReservation>) -> StateSegment {
+    if segment.has_owner() {
+        segment.clone()
+    } else {
+        segment.clone().with_owner(wire.clone())
+    }
+}
+
+fn validate_log_control(control: &Control, snapshot: &crate::OperatorStateSnapshot) -> Result<()> {
+    if control.frames.is_empty()
+        || control.frames.len() > chain::MAX_DELTAS + 1
+        || control.generation == 0
+        || control
+            .frames
+            .iter()
+            .any(|frame| frame.generation != control.generation)
+        || control.payloads.len() + control.frames.len() != snapshot.segments.len()
+    {
+        return Err(mismatch("ASOF log control inventory differs"));
+    }
+    Ok(())
+}
+
+fn lease_recovered_index(state: &mut State, workspace: &MemoryReservation) -> Result<()> {
+    let auxiliary = state.right.auxiliary_bytes();
+    if auxiliary > workspace.size() {
+        return Err(mismatch("ASOF recovery index exceeds prepaid workspace"));
+    }
+    state
+        .right
+        .install_recovery_lease(workspace.split(auxiliary));
+    Ok(())
+}
+
+fn log_model_bytes(state: &State, base_inventory: &Inventory) -> Result<usize> {
+    let model_bytes = usize::try_from(base_inventory.identities)
+        .map_err(|_| mismatch("ASOF model exceeds address domain"))?
+        .saturating_mul(size_of::<((i64, Encoding), Version)>())
+        .saturating_add(state.right.len().saturating_mul(512))
+        .saturating_add(
+            state
+                .left
+                .checkpoint_chunks(&state.batches)
+                .len()
+                .saturating_mul(512),
+        )
+        .saturating_add(4096);
+    Ok(model_bytes)
 }
 
 fn control_bound(value: &serde_json::Value, depth: usize) -> Result<u64> {
