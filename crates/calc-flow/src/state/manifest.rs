@@ -607,37 +607,53 @@ fn validate_sources(
     paths: &mut BTreeSet<String>,
 ) -> Result<()> {
     for (source_id, source) in sources {
-        validate_portable_identifier("sources.id", source_id)?;
-        validate_sha256("sources.identity_hash", &source.identity_hash)?;
-        if let Some(cursor) = &source.cursor {
-            validate_portable_identifier("sources.cursor.order", &cursor.order)?;
-            validate_json_map(&cursor.payload, "source cursor payload")?;
-        }
+        validate_source_identity(source_id, source)?;
         if let Some(history) = &source.history {
-            if history.format_version != SOURCE_HISTORY_FORMAT_VERSION {
-                return Err(format_error(format!(
-                    "sources.{source_id}.history.format_version {} is unsupported (expected {SOURCE_HISTORY_FORMAT_VERSION})",
-                    history.format_version
-                )));
-            }
-            validate_portable_identifier(
-                &format!("sources.{source_id}.history.contract"),
-                &history.contract,
-            )?;
-            validate_json_map(
-                &history.inline_metadata,
-                &format!("sources.{source_id}.history.inline_metadata"),
-            )?;
-            validate_handles(
-                "source",
-                source_id,
-                &history.segments,
-                manifest_epoch,
-                identities,
-                paths,
-            )?;
+            validate_source_history(source_id, history, manifest_epoch, identities, paths)?;
         }
     }
+    Ok(())
+}
+
+fn validate_source_identity(source_id: &str, source: &SourceManifestEntry) -> Result<()> {
+    validate_portable_identifier("sources.id", source_id)?;
+    validate_sha256("sources.identity_hash", &source.identity_hash)?;
+    if let Some(cursor) = &source.cursor {
+        validate_portable_identifier("sources.cursor.order", &cursor.order)?;
+        validate_json_map(&cursor.payload, "source cursor payload")?;
+    }
+    Ok(())
+}
+
+fn validate_source_history(
+    source_id: &str,
+    history: &SourceHistoryManifestEntry,
+    manifest_epoch: Epoch,
+    identities: &mut BTreeSet<(String, Epoch, String)>,
+    paths: &mut BTreeSet<String>,
+) -> Result<()> {
+    if history.format_version != SOURCE_HISTORY_FORMAT_VERSION {
+        return Err(format_error(format!(
+            "sources.{source_id}.history.format_version {} is unsupported (expected {SOURCE_HISTORY_FORMAT_VERSION})",
+            history.format_version
+        )));
+    }
+    validate_portable_identifier(
+        &format!("sources.{source_id}.history.contract"),
+        &history.contract,
+    )?;
+    validate_json_map(
+        &history.inline_metadata,
+        &format!("sources.{source_id}.history.inline_metadata"),
+    )?;
+    validate_handles(
+        "source",
+        source_id,
+        &history.segments,
+        manifest_epoch,
+        identities,
+        paths,
+    )?;
     Ok(())
 }
 

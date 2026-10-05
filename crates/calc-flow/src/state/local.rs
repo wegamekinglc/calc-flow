@@ -686,18 +686,7 @@ fn verify_file(path: &Path, handle: &StateHandle) -> Result<()> {
     let metadata = segment_metadata(path, handle)?;
     validate_segment_metadata(path, handle, &metadata)?;
     let mut file = File::open(path).map_err(|source| io_error(path, source))?;
-    let mut buffer = [0; 8192];
-    let mut remaining = handle.byte_len();
-    let mut digest = Sha256::new();
-    while remaining != 0 {
-        let count = usize::try_from(remaining.min(8192)).map_err(|_| CalcFlowError::Internal {
-            message: "verification buffer size overflowed".into(),
-        })?;
-        file.read_exact(&mut buffer[..count])
-            .map_err(|source| io_error(path, source))?;
-        digest.update(&buffer[..count]);
-        remaining -= count as u64;
-    }
+    let digest = file_digest(&mut file, path, handle.byte_len())?;
     let mut extra = [0; 1];
     if file
         .read(&mut extra)
@@ -710,6 +699,22 @@ fn verify_file(path: &Path, handle: &StateHandle) -> Result<()> {
         return Err(segment_mismatch(handle, "checksum"));
     }
     Ok(())
+}
+
+fn file_digest(file: &mut File, path: &Path, length: u64) -> Result<Sha256> {
+    let mut buffer = [0; 8192];
+    let mut remaining = length;
+    let mut digest = Sha256::new();
+    while remaining != 0 {
+        let count = usize::try_from(remaining.min(8192)).map_err(|_| CalcFlowError::Internal {
+            message: "verification buffer size overflowed".into(),
+        })?;
+        file.read_exact(&mut buffer[..count])
+            .map_err(|source| io_error(path, source))?;
+        digest.update(&buffer[..count]);
+        remaining -= count as u64;
+    }
+    Ok(digest)
 }
 
 fn segment_metadata(path: &Path, handle: &StateHandle) -> Result<std::fs::Metadata> {
