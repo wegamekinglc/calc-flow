@@ -138,69 +138,7 @@ async fn test_compact_native_state_roundtrip_exact_widths_and_continuation() {
             let saved = snapshot(&original);
             let descriptor = original.native_descriptor("codec").unwrap();
             let exported = original.export_native_state("codec", || Ok(())).unwrap();
-            assert_eq!(exported.descriptor.wire_schema, descriptor.wire_schema);
-            assert_eq!(exported.descriptor.group_count, original.groups.len());
-            assert_eq!(descriptor.key_fields.len(), usize::from(grouped));
-            assert_eq!(descriptor.aggregate_names.len(), original.aggregates.len());
-            assert_eq!(descriptor.output_schema, original.output_schema);
-            assert_eq!(
-                descriptor.policy,
-                if !grouped && kind.is_integer() {
-                    "global-record-float-v1"
-                } else {
-                    "exact-numeric-v1"
-                }
-            );
-            assert_eq!(descriptor.aggregate_inputs.len(), original.aggregates.len());
-            let all_rows = descriptor
-                .count_all_rows
-                .iter()
-                .position(|all| *all)
-                .unwrap();
-            assert!(
-                matches!(descriptor.aggregate_inputs[all_rows].as_slice(), [NativeAggregateInput::Literal(value)] if !value.is_null())
-            );
-            let input = &descriptor.aggregate_inputs[0][0];
-            if matches!(
-                kind,
-                DataType::Int8
-                    | DataType::Int16
-                    | DataType::Int32
-                    | DataType::UInt8
-                    | DataType::UInt16
-                    | DataType::UInt32
-            ) {
-                let NativeAggregateInput::Cast { input, field, safe } = input else {
-                    panic!("expected actual native SUM coercion")
-                };
-                assert!(!safe);
-                assert!(
-                    matches!(input.as_ref(), NativeAggregateInput::Column { index: 1, field } if field == &original.schema.fields()[1])
-                );
-                assert_eq!(
-                    field.data_type(),
-                    &if matches!(kind, DataType::UInt8 | DataType::UInt16 | DataType::UInt32) {
-                        DataType::UInt64
-                    } else {
-                        DataType::Int64
-                    }
-                );
-            } else {
-                assert!(
-                    matches!(input, NativeAggregateInput::Column { index: 1, field } if field == &original.schema.fields()[1])
-                );
-            }
-            for output in [4, 5] {
-                assert!(
-                    matches!(descriptor.projection[usize::from(grouped) + output],
-                    NativeAggregateInput::Column { index, .. } if index == usize::from(grouped) + all_rows)
-                );
-            }
-            assert_eq!(
-                descriptor.wire_schema.fields().len(),
-                descriptor.key_fields.len()
-                    + descriptor.state_fields.iter().map(Vec::len).sum::<usize>()
-            );
+            assert_native_descriptor(&original, &descriptor, &exported, &kind, grouped);
             let mut restored = plan(&runtime, &kind, grouped)
                 .import_native_state(exported.records(), 3, true, || Ok(()), "codec")
                 .unwrap();
@@ -219,6 +157,85 @@ async fn test_compact_native_state_roundtrip_exact_widths_and_continuation() {
             drop((exported, descriptor, restored, original));
             assert_eq!(pool(&runtime).reserved(), 0);
         }
+    }
+}
+
+fn assert_native_descriptor(
+    original: &IncrementalSql,
+    descriptor: &NativeStateDescriptor,
+    exported: &PaidNativeStateRecords,
+    kind: &DataType,
+    grouped: bool,
+) {
+    assert_eq!(exported.descriptor.wire_schema, descriptor.wire_schema);
+    assert_eq!(exported.descriptor.group_count, original.groups.len());
+    assert_eq!(descriptor.key_fields.len(), usize::from(grouped));
+    assert_eq!(descriptor.aggregate_names.len(), original.aggregates.len());
+    assert_eq!(descriptor.output_schema, original.output_schema);
+    assert_eq!(
+        descriptor.policy,
+        if !grouped && kind.is_integer() {
+            "global-record-float-v1"
+        } else {
+            "exact-numeric-v1"
+        }
+    );
+    assert_eq!(descriptor.aggregate_inputs.len(), original.aggregates.len());
+    let all_rows = descriptor
+        .count_all_rows
+        .iter()
+        .position(|all| *all)
+        .unwrap();
+    assert!(
+        matches!(descriptor.aggregate_inputs[all_rows].as_slice(), [NativeAggregateInput::Literal(value)] if !value.is_null())
+    );
+    assert_native_sum_input(original, descriptor, kind);
+    for output in [4, 5] {
+        assert!(
+            matches!(descriptor.projection[usize::from(grouped) + output],
+                    NativeAggregateInput::Column { index, .. } if index == usize::from(grouped) + all_rows)
+        );
+    }
+    assert_eq!(
+        descriptor.wire_schema.fields().len(),
+        descriptor.key_fields.len() + descriptor.state_fields.iter().map(Vec::len).sum::<usize>()
+    );
+}
+
+fn assert_native_sum_input(
+    original: &IncrementalSql,
+    descriptor: &NativeStateDescriptor,
+    kind: &DataType,
+) {
+    let input = &descriptor.aggregate_inputs[0][0];
+    if matches!(
+        kind,
+        DataType::Int8
+            | DataType::Int16
+            | DataType::Int32
+            | DataType::UInt8
+            | DataType::UInt16
+            | DataType::UInt32
+    ) {
+        let NativeAggregateInput::Cast { input, field, safe } = input else {
+            panic!("expected actual native SUM coercion")
+        };
+        assert!(!safe);
+        assert!(
+            matches!(input.as_ref(), NativeAggregateInput::Column { index: 1, field } if field == &original.schema.fields()[1])
+        );
+        assert_eq!(
+            field.data_type(),
+            &if matches!(kind, DataType::UInt8 | DataType::UInt16 | DataType::UInt32) {
+                DataType::UInt64
+            } else {
+                DataType::Int64
+            }
+        );
+    } else {
+        assert!(
+            matches!(input, NativeAggregateInput::Column { index: 1, field } if field == &original.schema.fields()[1])
+        );
     }
 }
 
@@ -732,6 +749,7 @@ async fn apply(plan: &mut IncrementalSql, kind: &DataType, values: &[Option<i64>
     let context = StreamOperatorContext::new(&job, "codec", None);
     let transaction = plan.update(&input, &context, "codec").await.unwrap();
     plan.commit(transaction);
+    job.gather_owner().close_and_drain().await;
 }
 
 type Saved = Vec<(Vec<ScalarValue>, Vec<Vec<ScalarValue>>, Vec<ScalarValue>)>;
