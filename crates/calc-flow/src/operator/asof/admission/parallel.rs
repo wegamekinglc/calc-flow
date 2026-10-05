@@ -1,9 +1,7 @@
 use super::{Admission, StreamAsofJoinOperator, state};
 use crate::{
     Result, StreamOperatorContext,
-    runtime::streaming::gather_work::{
-        AdmissionFailure, GatherOperatorId, GatherStop, ParallelCpuWork,
-    },
+    runtime::streaming::gather_work::{GatherOperatorId, GatherStop, ParallelCpuWork},
 };
 use datafusion::execution::memory_pool::MemoryReservation;
 use std::{collections::BTreeSet, sync::Arc};
@@ -113,16 +111,11 @@ pub(in super::super) async fn prepare(
     let scope = context
         .gather_client(GatherOperatorId::new(Arc::from(operator.name.as_str())))
         .scope()?;
-    let ticket = match scope
-        .submit_parallel_work(Arc::new(work), credit, GatherStop::from_job(context.job()))
-        .await
-    {
-        Ok(ticket) => ticket,
-        Err(AdmissionFailure::Budget { .. }) => return Ok(None),
-        Err(AdmissionFailure::Runtime(error)) => return Err(error),
+    let Some(output) =
+        super::super::cpu::finish_parallel_work(work, credit, &scope, context).await?
+    else {
+        return Ok(None);
     };
-    let output = ticket.finish().await?;
-    context.check_cancelled()?;
     Ok(Some(PreparedAdmission {
         buckets: output.value,
         references,
@@ -160,7 +153,14 @@ fn appends_after_state(
     if latest < earliest {
         return Ok(true);
     }
-    // Admission rows are ordered within each key.
+    follows_key_tails(operator, admission, context)
+}
+
+fn follows_key_tails(
+    operator: &StreamAsofJoinOperator,
+    admission: &Admission,
+    context: &StreamOperatorContext<'_>,
+) -> Result<bool> {
     let mut previous = None;
     for (ordinal, (identity, _)) in admission.rows.iter().enumerate() {
         if ordinal.is_multiple_of(1_024) {
@@ -197,45 +197,9 @@ pub(super) async fn capture(
         + admission.batches.len() as u64 * 128
         + 8_192;
     let input_credit = operator.reserve_workspace(scratch)?;
-    let mut buffers = operator.state.encoding_owner_allocation().0;
-    let mut owners = BTreeSet::new();
-    for (ordinal, (identity, _)) in admission.rows.iter().enumerate() {
-        cooperate(ordinal, context).await?;
-        for encoding in [&identity.1, &identity.2] {
-            if let Some((address, bytes)) = encoding.allocation() {
-                if owners.insert(address) {
-                    buffers = super::super::checked(name, buffers, bytes)?;
-                }
-            }
-        }
-    }
-    let mut retained = buffers;
-    let mut output = buffers
-        + admission.right_capacities.len() as u64 * 256
-        + admission.batches.len() as u64 * 16
-        + 1_024;
-    let kind = operator.state.sequence_kinds[1];
-    for (key, count) in &admission.right_capacities {
-        let empty = state::RightBucket::with_sequence_kind(kind);
-        let bucket = operator.state.right.get(key).unwrap_or(&empty);
-        retained = super::super::checked(name, retained, bucket.metadata_bytes() + 256)?;
-        output = super::super::checked(name, output, bucket.projected_admission_bytes(*count))?;
-    }
-    input_credit
-        .try_grow(usize::try_from(retained).map_err(|_| {
-            super::super::reason(
-                name,
-                crate::StreamingFailureReason::AsofCounterOverflow,
-                "ASOF parallel admission extent overflowed",
-            )
-        })?)
-        .map_err(|_| {
-            super::super::reason(
-                name,
-                crate::StreamingFailureReason::AsofWorkspaceLimitExceeded,
-                "ASOF parallel admission input credit exceeded",
-            )
-        })?;
+    let buffers = encoding_buffers(operator, admission, context).await?;
+    let (retained, output, kind) = admission_extents(operator, admission, buffers)?;
+    grow_input_credit(&input_credit, retained, name)?;
     let credit = operator.reserve_workspace(output)?;
     let references = operator
         .state
@@ -259,6 +223,78 @@ pub(super) async fn capture(
             rows: Vec::with_capacity(*count),
         });
     }
+    fill_rows(&mut work, admission, &references, &routes, context).await?;
+    Ok((work, references, credit))
+}
+
+fn admission_extents(
+    operator: &StreamAsofJoinOperator,
+    admission: &Admission,
+    buffers: u64,
+) -> Result<(u64, u64, state::SequenceKind)> {
+    let name = &operator.name;
+    let mut retained = buffers;
+    let mut output = buffers
+        + admission.right_capacities.len() as u64 * 256
+        + admission.batches.len() as u64 * 16
+        + 1_024;
+    let kind = operator.state.sequence_kinds[1];
+    for (key, count) in &admission.right_capacities {
+        let empty = state::RightBucket::with_sequence_kind(kind);
+        let bucket = operator.state.right.get(key).unwrap_or(&empty);
+        retained = super::super::checked(name, retained, bucket.metadata_bytes() + 256)?;
+        output = super::super::checked(name, output, bucket.projected_admission_bytes(*count))?;
+    }
+    Ok((retained, output, kind))
+}
+
+async fn encoding_buffers(
+    operator: &StreamAsofJoinOperator,
+    admission: &Admission,
+    context: &StreamOperatorContext<'_>,
+) -> Result<u64> {
+    let name = &operator.name;
+    let mut buffers = operator.state.encoding_owner_allocation().0;
+    let mut owners = BTreeSet::new();
+    for (ordinal, (identity, _)) in admission.rows.iter().enumerate() {
+        cooperate(ordinal, context).await?;
+        for encoding in [&identity.1, &identity.2] {
+            if let Some((address, bytes)) = encoding.allocation() {
+                if owners.insert(address) {
+                    buffers = super::super::checked(name, buffers, bytes)?;
+                }
+            }
+        }
+    }
+    Ok(buffers)
+}
+
+fn grow_input_credit(input_credit: &MemoryReservation, retained: u64, name: &str) -> Result<()> {
+    input_credit
+        .try_grow(usize::try_from(retained).map_err(|_| {
+            super::super::reason(
+                name,
+                crate::StreamingFailureReason::AsofCounterOverflow,
+                "ASOF parallel admission extent overflowed",
+            )
+        })?)
+        .map_err(|_| {
+            super::super::reason(
+                name,
+                crate::StreamingFailureReason::AsofWorkspaceLimitExceeded,
+                "ASOF parallel admission input credit exceeded",
+            )
+        })?;
+    Ok(())
+}
+
+async fn fill_rows(
+    work: &mut AdmissionWork,
+    admission: &Admission,
+    references: &[state::RowRef],
+    routes: &[(usize, usize)],
+    context: &StreamOperatorContext<'_>,
+) -> Result<()> {
     for (ordinal, (identity, payload)) in admission.rows.iter().enumerate() {
         cooperate(ordinal, context).await?;
         let (shard, bucket) = routes[payload.key_index as usize];
@@ -267,7 +303,7 @@ pub(super) async fn capture(
             .rows
             .push(((identity.0, identity.2.clone()), row));
     }
-    Ok((work, references, credit))
+    Ok(())
 }
 
 async fn cooperate(ordinal: usize, context: &StreamOperatorContext<'_>) -> Result<()> {

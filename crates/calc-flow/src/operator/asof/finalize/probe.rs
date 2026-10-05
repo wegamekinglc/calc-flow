@@ -1,9 +1,7 @@
 use super::{StreamAsofJoinOperator, check_match_progress, checked, retryable, state};
 use crate::{
     Result, StreamOperatorContext,
-    runtime::streaming::gather_work::{
-        AdmissionFailure, GatherOperatorId, GatherStop, ParallelCpuWork,
-    },
+    runtime::streaming::gather_work::{GatherOperatorId, GatherStop, ParallelCpuWork},
 };
 use ahash::RandomState;
 use datafusion::execution::memory_pool::MemoryReservation;
@@ -92,26 +90,26 @@ pub(super) async fn parallel_matches(
     let scope = context
         .gather_client(GatherOperatorId::new(Arc::from(operator.name.as_str())))
         .scope()?;
-    let ticket = match scope
-        .submit_parallel_work(Arc::new(work), credit, GatherStop::from_job(context.job()))
-        .await
-    {
-        Ok(ticket) => ticket,
-        Err(AdmissionFailure::Budget { .. }) => return Ok(None),
-        Err(AdmissionFailure::Runtime(error)) => return Err(error),
+    let Some(output) =
+        super::super::cpu::finish_parallel_work(work, credit, &scope, context).await?
+    else {
+        return Ok(None);
     };
-    let output = ticket.finish().await?;
-    context.check_cancelled()?;
-    let mut rows = vec![None; count];
-    for shard in output.value {
-        for (position, row) in shard {
-            rows[position] = row;
-        }
-    }
+    let rows = restore_order(output.value, count);
     Ok(Some(ProbedRows {
         rows,
         _credit: output.credit,
     }))
+}
+
+fn restore_order(matches: Vec<Matches>, count: usize) -> Vec<Option<state::RowRef>> {
+    let mut rows = vec![None; count];
+    for shard in matches {
+        for (position, row) in shard {
+            rows[position] = row;
+        }
+    }
+    rows
 }
 
 async fn capture(
@@ -121,18 +119,7 @@ async fn capture(
     context: &StreamOperatorContext<'_>,
 ) -> Result<(ProbeWork, MemoryReservation)> {
     let keys = count.min(operator.state.right.len());
-    let temporary = checked(&operator.name, count as u64 * 64, keys as u64 * 256 + 8_192)?;
-    let temporary = checked(
-        &operator.name,
-        temporary,
-        operator.state.left.iter_workspace_bytes(),
-    )?;
-    let retained = checked(
-        &operator.name,
-        operator.state.right.metadata_bytes(),
-        operator.state.encoding_owner_allocation().0,
-    )?;
-    let input_credit = operator.reserve_workspace(checked(&operator.name, temporary, retained)?)?;
+    let input_credit = input_credit(operator, count, keys)?;
     let credit = operator.reserve_workspace(count as u64 * 48 + 1_024)?;
     let mut work = ProbeWork {
         shards: (0..workers).map(|_| Shard::default()).collect(),
@@ -162,4 +149,23 @@ async fn capture(
     }
     work.shards.retain(|shard| !shard.rows.is_empty());
     Ok((work, credit))
+}
+
+fn input_credit(
+    operator: &StreamAsofJoinOperator,
+    count: usize,
+    keys: usize,
+) -> Result<MemoryReservation> {
+    let temporary = checked(&operator.name, count as u64 * 64, keys as u64 * 256 + 8_192)?;
+    let temporary = checked(
+        &operator.name,
+        temporary,
+        operator.state.left.iter_workspace_bytes(),
+    )?;
+    let retained = checked(
+        &operator.name,
+        operator.state.right.metadata_bytes(),
+        operator.state.encoding_owner_allocation().0,
+    )?;
+    operator.reserve_workspace(checked(&operator.name, temporary, retained)?)
 }

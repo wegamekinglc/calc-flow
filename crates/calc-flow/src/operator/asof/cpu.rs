@@ -2,7 +2,8 @@ use super::StreamAsofJoinOperator;
 use crate::{
     Result, StreamOperatorContext,
     runtime::streaming::gather_work::{
-        AdmissionFailure, GatherOperatorId, GatherStop, OwnedCpuWork,
+        AdmissionFailure, GatherOperatorId, GatherScope, GatherStop, OwnedCpuWork, ParallelCpuWork,
+        WorkOutput,
     },
 };
 use datafusion::execution::memory_pool::MemoryReservation;
@@ -41,4 +42,23 @@ impl StreamAsofJoinOperator {
             self.name.len() as u64 * 2,
         )?)
     }
+}
+
+pub(super) async fn finish_parallel_work<W: ParallelCpuWork>(
+    work: W,
+    credit: MemoryReservation,
+    scope: &GatherScope,
+    context: &StreamOperatorContext<'_>,
+) -> Result<Option<WorkOutput<Vec<W::Output>>>> {
+    let ticket = match scope
+        .submit_parallel_work(Arc::new(work), credit, GatherStop::from_job(context.job()))
+        .await
+    {
+        Ok(ticket) => ticket,
+        Err(AdmissionFailure::Budget { .. }) => return Ok(None),
+        Err(AdmissionFailure::Runtime(error)) => return Err(error),
+    };
+    let output = ticket.finish().await?;
+    context.check_cancelled()?;
+    Ok(Some(output))
 }
