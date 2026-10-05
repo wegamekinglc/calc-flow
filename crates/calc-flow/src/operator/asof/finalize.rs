@@ -17,12 +17,22 @@ use ahash::RandomState;
 use datafusion::execution::memory_pool::MemoryReservation;
 #[cfg(test)]
 use std::collections::BTreeMap;
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 mod prefix;
 mod probe;
 
 type EvictionProjection = (state::EvictionPreview, u64, state::Inventory, u64);
+
+struct CapacityEviction {
+    preview: state::EvictionPreview,
+    length: u64,
+    inventory: state::Inventory,
+    journal: super::checkpoint::index_v3::log::journal::Journal,
+    credit: Arc<MemoryReservation>,
+    retention_bytes: u64,
+    columns: MemoryReservation,
+}
 
 struct PreparedOutput {
     batch: Batch,
@@ -167,12 +177,15 @@ impl StreamAsofJoinOperator {
         context: &StreamOperatorContext<'_>,
     ) -> Result<()> {
         let staging = self.reserve_capacity_eviction_staging()?;
-        let (preview, length, inventory, bytes) = self.capacity_eviction_projection()?;
-        let journal = self.prepare_log_eviction(&preview)?;
-        let (credit, retention_bytes) =
-            self.prepare_log_retention(&preview.owners, &preview.batches)?;
-        let inventory = self.log_projection(inventory, length, &journal, retention_bytes)?;
-        let columns = self.reserve_workspace(bytes)?;
+        let CapacityEviction {
+            preview,
+            length,
+            inventory,
+            journal,
+            credit,
+            retention_bytes,
+            columns,
+        } = self.prepare_capacity_eviction()?;
         let dictionary = self.state.right.prepare_compaction(
             self.state.right.len() - preview.projected_right.0,
             &columns,
@@ -205,10 +218,7 @@ impl StreamAsofJoinOperator {
         self.deferred_index_len = (length != 0).then_some(length);
         self.swept = Some(SweepStamp::current(&self.status));
         self.terminal = ended;
-        if ended && self.state.left.is_empty() && self.state.right.is_empty() {
-            self.status.state_bytes -= self.checkpoint_log.bytes();
-            self.checkpoint_log = super::checkpoint::LogState::default();
-        }
+        self.finish_capacity_log(ended);
         debug_assert_eq!(
             self.current_inventory(None)
                 .expect("committed eviction inventory")
@@ -217,6 +227,31 @@ impl StreamAsofJoinOperator {
         );
         drop((preview, columns, staging));
         Ok(())
+    }
+
+    fn prepare_capacity_eviction(&self) -> Result<CapacityEviction> {
+        let (preview, length, inventory, bytes) = self.capacity_eviction_projection()?;
+        let journal = self.prepare_log_eviction(&preview)?;
+        let (credit, retention_bytes) =
+            self.prepare_log_retention(&preview.owners, &preview.batches)?;
+        let inventory = self.log_projection(inventory, length, &journal, retention_bytes)?;
+        let columns = self.reserve_workspace(bytes)?;
+        Ok(CapacityEviction {
+            preview,
+            length,
+            inventory,
+            journal,
+            credit,
+            retention_bytes,
+            columns,
+        })
+    }
+
+    fn finish_capacity_log(&mut self, ended: bool) {
+        if ended && self.state.left.is_empty() && self.state.right.is_empty() {
+            self.status.state_bytes -= self.checkpoint_log.bytes();
+            self.checkpoint_log = super::checkpoint::LogState::default();
+        }
     }
 
     fn reserve_capacity_eviction_staging(&self) -> Result<MemoryReservation> {
