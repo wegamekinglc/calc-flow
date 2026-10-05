@@ -68,7 +68,7 @@ pub(super) struct IncrementalSql {
     aggregate_schema: SchemaRef,
     output_schema: SchemaRef,
     aggregates: Vec<Arc<AggregateFunctionExpr>>,
-    filter_columns: Vec<Option<usize>>,
+    aggregate_filters: Vec<Option<Arc<dyn PhysicalExpr>>>,
     predicate: Option<predicate::InputPredicate>,
     aggregate_bytes: usize,
     finalizer_bytes: usize,
@@ -617,8 +617,8 @@ impl IncrementalSql {
         else {
             return Ok(None);
         };
-        let (aggregates, projection, filter_columns, predicate, post_filter) = plan;
-        let input_columns = input_columns(&aggregates, &keys, &filter_columns);
+        let (aggregates, projection, aggregate_filters, predicate, post_filter) = plan;
+        let input_columns = input_columns(&aggregates, &keys, &aggregate_filters);
         let Some(aggregate_bytes) = aggregate_bytes(&aggregates, name)? else {
             return Ok(None);
         };
@@ -646,7 +646,7 @@ impl IncrementalSql {
             aggregate_schema: Arc::new(aggregate.schema.as_arrow().clone()),
             output_schema: Arc::new(analyzed.schema().as_arrow().clone()),
             aggregates,
-            filter_columns,
+            aggregate_filters,
             predicate,
             aggregate_bytes,
             finalizer_bytes,
@@ -901,7 +901,7 @@ impl IncrementalSql {
                     (table.batches(), input_owner),
                     (
                         &self.aggregates,
-                        &self.filter_columns,
+                        &self.aggregate_filters,
                         &candidate.group.states,
                         self.predicate.as_ref(),
                     ),
@@ -1031,6 +1031,11 @@ impl IncrementalSql {
     }
 
     fn input_workspace(&self, rows: usize, name: &str) -> Result<(MemoryReservation, usize)> {
+        let rows = if self.global_records.is_some() {
+            0
+        } else {
+            rows
+        };
         let reservation = self.reservation.new_empty();
         let width = checked_bytes(
             if self.keys.is_empty() { 0 } else { 128 },
@@ -1174,8 +1179,18 @@ impl IncrementalSql {
         if chunk.num_rows() == 0 {
             return Ok(());
         }
-        let arguments = self.arguments(chunk, name)?;
-        let filters = self.filters(chunk);
+        let owned_filters = if self.keys.is_empty() {
+            self.filters(chunk, name)?
+        } else {
+            Vec::new()
+        };
+        let arguments = self.arguments(chunk, &owned_filters, name)?;
+        let owned_filters = if self.keys.is_empty() {
+            owned_filters
+        } else {
+            self.filters(chunk, name)?
+        };
+        let filters = owned_filters.iter().map(Option::as_ref).collect::<Vec<_>>();
         let combined = predicate::combine(selection, &filters, self.aggregates.len(), name)?;
         let filters = if selection.is_some() {
             combined.iter().map(Option::as_ref).collect()
@@ -1214,17 +1229,14 @@ impl IncrementalSql {
         self.update_grouped_chunk(chunk, &arguments, &filters, selection, candidates, name)
     }
 
-    fn filters<'a>(&self, chunk: &'a RecordBatch) -> Vec<Option<&'a BooleanArray>> {
-        self.filter_columns
+    fn filters(&self, chunk: &RecordBatch, name: &str) -> Result<Vec<Option<BooleanArray>>> {
+        self.aggregate_filters
             .iter()
-            .map(|column| {
-                column.map(|column| {
-                    chunk
-                        .column(column)
-                        .as_any()
-                        .downcast_ref::<BooleanArray>()
-                        .expect("validated Boolean aggregate filter")
-                })
+            .map(|expression| {
+                expression
+                    .as_ref()
+                    .map(|expression| aggregate_filter(expression.as_ref(), chunk, name))
+                    .transpose()
             })
             .collect()
     }
@@ -1416,7 +1428,12 @@ impl IncrementalSql {
         Ok(())
     }
 
-    fn arguments(&self, chunk: &RecordBatch, name: &str) -> Result<Vec<Vec<ArrayRef>>> {
+    fn arguments(
+        &self,
+        chunk: &RecordBatch,
+        filters: &[Option<BooleanArray>],
+        name: &str,
+    ) -> Result<Vec<Vec<ArrayRef>>> {
         self.aggregates
             .iter()
             .enumerate()
@@ -1426,12 +1443,12 @@ impl IncrementalSql {
                         .expressions()
                         .iter()
                         .all(|argument| argument.is::<Column>() || argument.is::<Literal>())
-                    && let Some(column) = self.filter_columns.get(index).copied().flatten()
+                    && let Some(filter) = filters.get(index).and_then(Option::as_ref)
                 {
                     return filtered_arguments(
                         expr,
                         chunk,
-                        column,
+                        filter,
                         &self.input_columns.by_aggregate[index],
                         name,
                     );
@@ -1787,10 +1804,26 @@ impl IncrementalSql {
     }
 }
 
+fn aggregate_filter(
+    expression: &dyn PhysicalExpr,
+    chunk: &RecordBatch,
+    name: &str,
+) -> Result<BooleanArray> {
+    let array = expression
+        .evaluate(chunk)
+        .and_then(|value| value.into_array(chunk.num_rows()))
+        .map_err(|error| df_error(name, error))?;
+    array
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .cloned()
+        .ok_or_else(|| df_error(name, "SQL aggregate filter is not Boolean"))
+}
+
 fn input_columns(
     aggregates: &[Arc<AggregateFunctionExpr>],
     keys: &[usize],
-    filters: &[Option<usize>],
+    filters: &[Option<Arc<dyn PhysicalExpr>>],
 ) -> InputColumns {
     use datafusion::physical_expr::utils::collect_columns;
     use std::collections::BTreeSet;
@@ -1812,7 +1845,13 @@ fn input_columns(
         .flatten()
         .copied()
         .chain(keys.iter().copied())
-        .chain(filters.iter().copied().flatten())
+        .chain(
+            filters
+                .iter()
+                .flatten()
+                .flat_map(collect_columns)
+                .map(|column| column.index()),
+        )
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
@@ -1852,16 +1891,11 @@ fn filter_columns(
 fn filtered_arguments(
     expression: &AggregateFunctionExpr,
     chunk: &RecordBatch,
-    column: usize,
+    filter: &BooleanArray,
     needed: &[usize],
     name: &str,
 ) -> Result<Vec<ArrayRef>> {
     use datafusion::arrow::array::UInt32Array;
-    let filter = chunk
-        .column(column)
-        .as_any()
-        .downcast_ref::<BooleanArray>()
-        .ok_or_else(|| df_error(name, "SQL aggregate filter is not Boolean"))?;
     let filtered = filter_columns(chunk, filter, needed, name)?;
     let mut selected = 0_u32;
     let indices = filter
@@ -2101,13 +2135,7 @@ fn key_type(data_type: &DataType) -> bool {
     )
 }
 
-fn eligible(
-    expr: &Expr,
-    schema: &SchemaRef,
-    logical: &DFSchema,
-    floating_extrema: bool,
-    global: bool,
-) -> bool {
+fn eligible(expr: &Expr, logical: &DFSchema, floating_extrema: bool, global: bool) -> bool {
     let Expr::AggregateFunction(function) = unalias(expr) else {
         return false;
     };
@@ -2116,12 +2144,8 @@ fn eligible(
         return false;
     }
     if !params.filter.as_deref().is_none_or(|filter| {
-        let Expr::Column(column) = filter else {
-            return false;
-        };
-        schema
-            .field_with_name(&column.name)
-            .is_ok_and(|field| field.data_type() == &DataType::Boolean)
+        native_expression::aggregate_filter_work(filter, logical).is_some()
+            && filter.get_type(logical).ok() == Some(DataType::Boolean)
     }) {
         return false;
     }
@@ -2377,15 +2401,10 @@ fn plan_inputs(
     let global = raw_aggregate.group_expr.is_empty();
     let floating_extrema = global || sequential_group_key(raw_aggregate, schema);
     if raw_aggregate.aggr_expr.is_empty()
-        || !raw_aggregate.aggr_expr.iter().all(|expr| {
-            eligible(
-                expr,
-                schema,
-                raw_aggregate.input.schema(),
-                floating_extrema,
-                global,
-            )
-        })
+        || !raw_aggregate
+            .aggr_expr
+            .iter()
+            .all(|expr| eligible(expr, raw_aggregate.input.schema(), floating_extrema, global))
     {
         return Ok(None);
     }
@@ -2413,7 +2432,7 @@ fn plan_inputs(
 type PhysicalSqlPlan = (
     Vec<Arc<AggregateFunctionExpr>>,
     Vec<Arc<dyn PhysicalExpr>>,
-    Vec<Option<usize>>,
+    Vec<Option<Arc<dyn PhysicalExpr>>>,
     Option<predicate::InputPredicate>,
     Option<Arc<dyn PhysicalExpr>>,
 );
@@ -2464,21 +2483,20 @@ fn physical_plan(
     else {
         return None;
     };
-    let filter_columns = lowered
+    let aggregate_filters = lowered
         .iter()
         .map(|lowered| match &lowered.filter {
             None => Some(None),
             Some(filter) => {
-                let column = filter.downcast_ref::<Column>()?;
-                (schema.field(column.index()).data_type() == &DataType::Boolean)
-                    .then_some(Some(column.index()))
+                native_expression::describe_input(filter.as_ref(), schema, 0, "sql-filter").ok()?;
+                (filter.data_type(schema).ok()? == DataType::Boolean).then(|| Some(filter.clone()))
             }
         })
         .collect::<Option<Vec<_>>>()?;
-    let filter_columns = if filter_columns.iter().all(Option::is_none) {
+    let aggregate_filters = if aggregate_filters.iter().all(Option::is_none) {
         Vec::new()
     } else {
-        filter_columns
+        aggregate_filters
     };
     let aggregates = lowered
         .into_iter()
@@ -2515,7 +2533,7 @@ fn physical_plan(
     Some((
         aggregates,
         projection,
-        filter_columns,
+        aggregate_filters,
         predicate,
         post_filter,
     ))
@@ -3186,7 +3204,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let arguments = plan.arguments(&record, "totals").unwrap();
+        let arguments = plan.arguments(&record, &[], "totals").unwrap();
         for (expression, arguments) in plan.aggregates.iter().zip(arguments) {
             let mut accumulator = expression.create_accumulator().unwrap();
             accumulator.update_batch(&arguments).unwrap();
@@ -3389,9 +3407,9 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let seed = plan.arguments(&record.slice(0, 1), "totals").unwrap();
-        let first = plan.arguments(&record.slice(1, 1), "totals").unwrap();
-        let second = plan.arguments(&record.slice(2, 2), "totals").unwrap();
+        let seed = plan.arguments(&record.slice(0, 1), &[], "totals").unwrap();
+        let first = plan.arguments(&record.slice(1, 1), &[], "totals").unwrap();
+        let second = plan.arguments(&record.slice(2, 2), &[], "totals").unwrap();
         let mut results = [Vec::new(), Vec::new(), Vec::new()];
         for (index, expression) in plan.aggregates.iter().enumerate() {
             assert!(expression.groups_accumulator_supported());

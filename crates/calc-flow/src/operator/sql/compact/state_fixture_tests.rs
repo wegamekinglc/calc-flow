@@ -934,6 +934,7 @@ fn native_json(descriptor: &NativeStateDescriptor) -> Value {
     json!({"policy": descriptor.policy, "keys": fields_json(&descriptor.key_fields),
         "aggregates": descriptor.aggregate_names.iter().enumerate().map(|(slot, function)| json!({
             "function": function, "inputs": descriptor.aggregate_inputs[slot].iter().map(input_json).collect::<Vec<_>>(),
+            "filter": descriptor.aggregate_filters[slot].as_ref().map(input_json),
             "all_rows": descriptor.count_all_rows[slot], "state_fields": fields_json(&descriptor.state_fields[slot]),
             "result_field": fields_json(std::slice::from_ref(&descriptor.result_fields[slot])),
         })).collect::<Vec<_>>(), "projection": descriptor.projection.iter().map(input_json).collect::<Vec<_>>(),

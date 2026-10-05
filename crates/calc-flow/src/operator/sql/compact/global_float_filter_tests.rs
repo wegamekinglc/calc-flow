@@ -262,16 +262,11 @@ async fn test_global_float_filters_refusal_preserves_state_and_once_retry() {
 }
 
 #[tokio::test]
-async fn test_global_float_filters_unproven_plans_keep_retained_fallback() {
+async fn test_global_float_computed_filters_and_nondefault_plans() {
     for dtype in [DataType::Float32, DataType::Float64] {
         let parts = vec![vec![Some(ONE), None, Some(TWO)]];
         let computed = "SELECT SUM(value) FILTER (WHERE selected OR other), AVG(value) FILTER (WHERE NOT selected) FROM events";
-        global_record_controls::raw_capture(
-            filtered_operator(&dtype, computed),
-            filtered_input(&dtype, &parts, 1),
-            computed,
-        )
-        .await;
+        prefixes(&dtype, computed, finite_arrivals(false)).await;
         let mut state = filtered_operator(&dtype, FILTERED);
         state.set_stream_resources(
             DataFusionConfig {

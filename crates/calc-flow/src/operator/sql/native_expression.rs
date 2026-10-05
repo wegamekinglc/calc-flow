@@ -130,6 +130,59 @@ pub(super) fn input_expression_work(expression: &Expr, schema: &DFSchema) -> Opt
     expression_work(expression, schema)
 }
 
+pub(super) fn aggregate_filter_work(expression: &Expr, schema: &DFSchema) -> Option<usize> {
+    use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
+    let mut has_case = false;
+    expression
+        .apply(|expression| {
+            has_case |= matches!(expression, Expr::Case(_));
+            Ok(TreeNodeRecursion::Continue)
+        })
+        .ok()?;
+    if has_case && !infallible_predicate(expression) {
+        return None;
+    }
+    input_expression_work(expression, schema)
+}
+
+fn infallible_predicate(expression: &Expr) -> bool {
+    match unalias(expression) {
+        Expr::Column(_) | Expr::Literal(_, _) => true,
+        Expr::Not(inner) | Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
+            infallible_predicate(inner)
+        }
+        Expr::BinaryExpr(binary)
+            if matches!(
+                binary.op,
+                Operator::Eq
+                    | Operator::NotEq
+                    | Operator::Lt
+                    | Operator::LtEq
+                    | Operator::Gt
+                    | Operator::GtEq
+                    | Operator::And
+                    | Operator::Or
+                    | Operator::IsDistinctFrom
+                    | Operator::IsNotDistinctFrom
+            ) =>
+        {
+            infallible_predicate(&binary.left) && infallible_predicate(&binary.right)
+        }
+        Expr::Case(case) => case
+            .expr
+            .iter()
+            .map(Box::as_ref)
+            .chain(
+                case.when_then_expr
+                    .iter()
+                    .flat_map(|(when, then)| [when.as_ref(), then.as_ref()]),
+            )
+            .chain(case.else_expr.iter().map(Box::as_ref))
+            .all(infallible_predicate),
+        _ => false,
+    }
+}
+
 pub(super) fn input_work(aggregate: &datafusion::logical_expr::Aggregate) -> Option<usize> {
     aggregate
         .aggr_expr
@@ -138,13 +191,20 @@ pub(super) fn input_work(aggregate: &datafusion::logical_expr::Aggregate) -> Opt
             let Expr::AggregateFunction(function) = unalias(expression) else {
                 return None;
             };
-            function
+            let nodes = function
                 .params
                 .args
                 .iter()
                 .try_fold(nodes, |nodes, argument| {
                     nodes.checked_add(input_expression_work(argument, aggregate.input.schema())?)
-                })
+                })?;
+            match function.params.filter.as_deref() {
+                Some(filter) => nodes.checked_add(
+                    aggregate_filter_work(filter, aggregate.input.schema())?
+                        .saturating_sub(usize::from(matches!(unalias(filter), Expr::Column(_)))),
+                ),
+                None => Some(nodes),
+            }
         })
 }
 

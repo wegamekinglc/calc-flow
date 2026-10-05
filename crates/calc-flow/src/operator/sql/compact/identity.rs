@@ -170,6 +170,7 @@ fn native_json(descriptor: &NativeStateDescriptor) -> Result<Value> {
                 .map(input_json)
                 .collect::<Result<Vec<_>>>()?;
             Ok(json!({"function":function, "inputs":inputs,
+            "filter":descriptor.aggregate_filters[slot].as_ref().map(input_json).transpose()?,
             "all_rows":descriptor.count_all_rows[slot],
             "state_fields":fields_json(&descriptor.state_fields[slot])?,
             "result_field":fields_json(std::slice::from_ref(&descriptor.result_fields[slot]))?}))

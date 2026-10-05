@@ -195,14 +195,22 @@ impl IncrementalSql {
                 |bytes, array| checked_bytes(bytes, [(array.get_array_memory_size(), 8)], name),
             )?;
         let predicate = self.predicate.as_ref().expect("filtered model");
+        let expression_width = checked_bytes(
+            0,
+            [(self.input_nodes.saturating_sub(self.aggregates.len()), 64)],
+            name,
+        )?;
         super::super::super::ensure_reservation(
             &reservation,
             checked_bytes(
                 bytes,
-                [(
-                    predicate.workspace(tail.num_rows(), self.aggregates.len(), name)?,
-                    1,
-                )],
+                [
+                    (
+                        predicate.workspace(tail.num_rows(), self.aggregates.len(), name)?,
+                        1,
+                    ),
+                    (tail.num_rows(), expression_width),
+                ],
                 name,
             )?,
             name,
@@ -258,7 +266,7 @@ impl IncrementalSql {
         let work = super::super::RecordWork {
             records: Vec::new(),
             expressions: self.aggregates.clone(),
-            filters: self.filter_columns.clone(),
+            filters: self.aggregate_filters.clone(),
             states: Vec::new(),
             predicate: None,
             previous: None,

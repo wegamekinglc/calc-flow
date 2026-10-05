@@ -6,7 +6,6 @@ use datafusion::{
     arrow::datatypes::DataType,
     datasource::memory::{DataSourceExec, MemorySourceConfig},
     optimizer::{analyzer::Analyzer, optimizer::Optimizer},
-    physical_expr::expressions::Column,
     physical_optimizer::optimizer::PhysicalOptimizer,
     physical_plan::{
         ExecutionPlan, InputOrderMode,
@@ -132,10 +131,9 @@ fn single_aggregate(aggregate: &AggregateExec) -> bool {
         && !aggregate.group_expr().expr().is_empty()
         && aggregate.filter_expr().iter().all(|filter| {
             filter.as_ref().is_none_or(|filter| {
-                filter.is::<Column>()
-                    && filter
-                        .data_type(&aggregate.input().schema())
-                        .is_ok_and(|dtype| dtype == DataType::Boolean)
+                filter
+                    .data_type(&aggregate.input().schema())
+                    .is_ok_and(|dtype| dtype == DataType::Boolean)
             })
         })
 }

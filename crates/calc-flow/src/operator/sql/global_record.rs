@@ -13,7 +13,7 @@ pub(in crate::operator::sql) mod coalescer;
 
 type Arguments<'a> = (
     &'a [Arc<AggregateFunctionExpr>],
-    &'a [Option<usize>],
+    &'a [Option<Arc<dyn super::PhysicalExpr>>],
     &'a [Vec<ScalarValue>],
     Option<&'a super::predicate::InputPredicate>,
 );
@@ -444,7 +444,7 @@ fn filter_workspace(records: &[RecordBatch], batch_size: usize, name: &str) -> R
 struct RecordWork {
     records: Vec<RecordBatch>,
     expressions: Vec<Arc<AggregateFunctionExpr>>,
-    filters: Vec<Option<usize>>,
+    filters: Vec<Option<Arc<dyn super::PhysicalExpr>>>,
     states: Vec<Vec<ScalarValue>>,
     predicate: Option<super::predicate::InputPredicate>,
     previous: Option<Arc<coalescer::State>>,
@@ -522,17 +522,9 @@ impl RecordWork {
         {
             check()?;
             let filtered;
-            let batch = if let Some(column) = self.filters.get(index).copied().flatten() {
-                let filter = batch
-                    .columns()
-                    .get(column)
-                    .and_then(|array| {
-                        array
-                            .as_any()
-                            .downcast_ref::<datafusion::arrow::array::BooleanArray>()
-                    })
-                    .ok_or_else(|| df_error(&self.name, "global scalar filter is not Boolean"))?;
-                filtered = datafusion::arrow::compute::filter_record_batch(batch, filter)
+            let batch = if let Some(expression) = self.filters.get(index).and_then(Option::as_ref) {
+                let filter = super::aggregate_filter(expression.as_ref(), batch, &self.name)?;
+                filtered = datafusion::arrow::compute::filter_record_batch(batch, &filter)
                     .map_err(|error| df_error(&self.name, error))?;
                 &filtered
             } else {

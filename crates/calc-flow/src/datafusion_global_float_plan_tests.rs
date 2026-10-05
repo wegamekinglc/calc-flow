@@ -6,7 +6,6 @@ use datafusion::{
         datatypes::{DataType, Field, Schema},
     },
     datasource::memory::{DataSourceExec, MemorySourceConfig},
-    physical_expr::expressions::Column,
     physical_plan::{
         ExecutionPlan, InputOrderMode,
         aggregates::{AggregateExec, AggregateMode},
@@ -55,8 +54,7 @@ fn inspect(plan: &dyn ExecutionPlan, original: &Batch, census: &mut [usize; 2]) 
         assert!(aggregate.limit_options().is_none());
         assert!(aggregate.filter_expr().iter().all(|filter| {
             filter.as_ref().is_none_or(|filter| {
-                filter.downcast_ref::<Column>().is_some()
-                    && filter.data_type(&aggregate.input().schema()).unwrap() == DataType::Boolean
+                filter.data_type(&aggregate.input().schema()).unwrap() == DataType::Boolean
             })
         }));
     } else if let Some(source) = plan.downcast_ref::<DataSourceExec>() {

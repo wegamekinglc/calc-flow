@@ -25,6 +25,7 @@ pub(in crate::operator::sql) struct NativeStateDescriptor {
     pub(in crate::operator::sql) key_fields: Vec<FieldRef>,
     pub(in crate::operator::sql) aggregate_names: Vec<String>,
     pub(in crate::operator::sql) aggregate_inputs: Vec<Vec<NativeAggregateInput>>,
+    pub(in crate::operator::sql) aggregate_filters: Vec<Option<NativeAggregateInput>>,
     pub(in crate::operator::sql) count_all_rows: Vec<bool>,
     filtered_input: bool,
     pub(in crate::operator::sql) state_fields: Vec<Vec<FieldRef>>,
@@ -105,6 +106,7 @@ impl IncrementalSql {
             })
             .collect::<Result<Vec<_>>>()?;
         let count_all_rows = self.count_all_rows(&aggregate_names, &aggregate_inputs);
+        let aggregate_filters = self.native_aggregate_filters(name)?;
         let projection = self
             .projection
             .iter()
@@ -119,6 +121,7 @@ impl IncrementalSql {
         let expression_identity_bytes = aggregate_inputs
             .iter()
             .flatten()
+            .chain(aggregate_filters.iter().flatten())
             .chain(&projection)
             .chain(&post_filter)
             .chain(
@@ -165,6 +168,7 @@ impl IncrementalSql {
             key_fields,
             aggregate_names,
             aggregate_inputs,
+            aggregate_filters,
             count_all_rows,
             filtered_input: self.predicate.is_some(),
             state_fields,
@@ -179,6 +183,18 @@ impl IncrementalSql {
             policy: self.native_policy(),
             _reservation: reservation,
         })
+    }
+
+    fn native_aggregate_filters(&self, name: &str) -> Result<Vec<Option<NativeAggregateInput>>> {
+        (0..self.aggregates.len())
+            .map(|index| {
+                self.aggregate_filters
+                    .get(index)
+                    .and_then(Option::as_ref)
+                    .map(|filter| describe_input(filter.as_ref(), &self.schema, 0, name))
+                    .transpose()
+            })
+            .collect()
     }
 
     fn native_output_order(
@@ -226,7 +242,7 @@ impl IncrementalSql {
             .enumerate()
             .map(|(index, (function, inputs))| {
                 function == "count"
-                    && self.filter_columns.get(index).is_none_or(Option::is_none)
+                    && self.aggregate_filters.get(index).is_none_or(Option::is_none)
                     && matches!(inputs.as_slice(), [NativeAggregateInput::Literal(value)] if !value.is_null())
             })
             .collect()

@@ -2,7 +2,6 @@ use super::{BTreeMap, Batch, DataFusionRuntime, Result, ValidatedQuery, datafusi
 use datafusion::{
     arrow::datatypes::DataType,
     datasource::memory::DataSourceExec,
-    physical_expr::expressions::Column,
     physical_plan::{
         ExecutionPlan, ExecutionPlanProperties, InputOrderMode,
         aggregates::{AggregateExec, AggregateMode},
@@ -100,10 +99,9 @@ fn scalar_shape(aggregate: &AggregateExec) -> bool {
         && aggregate.limit_options().is_none()
         && aggregate.filter_expr().iter().all(|filter| {
             filter.as_ref().is_none_or(|filter| {
-                filter.downcast_ref::<Column>().is_some()
-                    && filter
-                        .data_type(&aggregate.input().schema())
-                        .is_ok_and(|dtype| dtype == DataType::Boolean)
+                filter
+                    .data_type(&aggregate.input().schema())
+                    .is_ok_and(|dtype| dtype == DataType::Boolean)
             })
         })
 }
