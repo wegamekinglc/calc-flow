@@ -27,6 +27,7 @@ thread_local! {
     static LEFT_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static IDENTITY_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static KEY_INSTALL_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static ENCODING_HASHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -42,6 +43,11 @@ pub(super) fn take_identity_probes() -> usize {
 #[cfg(test)]
 pub(super) fn take_key_install_lookups() -> usize {
     KEY_INSTALL_LOOKUPS.with(|visits| visits.replace(0))
+}
+
+#[cfg(test)]
+pub(super) fn take_encoding_hashes() -> usize {
+    ENCODING_HASHES.with(|visits| visits.replace(0))
 }
 
 fn left_row_refs(row: &(LeftOrder, RowRef)) -> (&LeftOrder, &RowRef) {
@@ -257,6 +263,8 @@ impl Ord for Encoding {
 
 impl Hash for Encoding {
     fn hash<H: Hasher>(&self, state: &mut H) {
+        #[cfg(test)]
+        ENCODING_HASHES.with(|visits| visits.set(visits.get() + 1));
         self.as_slice().hash(state);
     }
 }

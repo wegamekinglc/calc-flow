@@ -6,10 +6,7 @@ use crate::{
     },
 };
 use datafusion::execution::memory_pool::MemoryReservation;
-use std::{
-    collections::{BTreeSet, HashMap},
-    sync::Arc,
-};
+use std::{collections::BTreeSet, sync::Arc};
 
 type Rows = Vec<(state::RightOrder, state::RowRef)>;
 type Buckets = Vec<(state::Encoding, Arc<state::RightBucket>)>;
@@ -251,14 +248,11 @@ pub(super) async fn capture(
         hook: operator.admission_hook.clone(),
         _input_credit: input_credit,
     };
-    let mut routes = HashMap::with_capacity_and_hasher(
-        admission.right_capacities.len(),
-        ahash::RandomState::new(),
-    );
+    let mut routes = Vec::with_capacity(admission.right_capacities.len());
     for (key, count) in &admission.right_capacities {
         let shard = state::key_shard(key) % units;
         let target = &mut work.shards[shard];
-        routes.insert(key, (shard, target.len()));
+        routes.push((shard, target.len()));
         target.push(InputBucket {
             key: key.clone(),
             previous: operator.state.right.owned_bucket(key),
@@ -267,7 +261,7 @@ pub(super) async fn capture(
     }
     for (ordinal, (identity, payload)) in admission.rows.iter().enumerate() {
         cooperate(ordinal, context).await?;
-        let &(shard, bucket) = routes.get(&identity.1).expect("accepted right key");
+        let (shard, bucket) = routes[payload.key_index as usize];
         let row = references[payload.batch_index].with_row(payload.row);
         work.shards[shard][bucket]
             .rows

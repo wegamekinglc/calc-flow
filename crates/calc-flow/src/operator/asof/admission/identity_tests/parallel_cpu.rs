@@ -12,6 +12,35 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 const ROWS: usize = 8_192;
 
 #[tokio::test]
+async fn parallel_key_routes_do_not_hash_each_row() {
+    let mut operator = fixture();
+    let pool = operator.runtime.pool.clone();
+    let job = StreamJobContext::new(8, "asof", JsonMap::new(), None, CancellationToken::new());
+    let context = StreamOperatorContext::new(&job, "asof", None);
+    let batch = input(&operator, 0);
+    let validated = operator.validate_admission("right", &batch).unwrap();
+    let admission = operator
+        .prepare_admission(validated, &batch, &context)
+        .await
+        .unwrap();
+    state::take_encoding_hashes();
+    let (work, references, credit) = parallel::capture(&operator, &admission, 2, &context)
+        .await
+        .unwrap();
+    assert!(
+        state::take_encoding_hashes() <= admission.right_capacities.len() * 2,
+        "parallel routing must reuse handles instead of hashing each row"
+    );
+    assert_eq!(work.key_units().len(), admission.right_capacities.len());
+    drop((
+        work, references, credit, admission, operator, batch, context,
+    ));
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop(job);
+    assert_eq!(pool.reserved(), 0);
+}
+
+#[tokio::test]
 async fn right_key_routing_survives_new_keys_and_batch_reordering() {
     let mut operator = fixture();
     let pool = operator.runtime.pool.clone();
