@@ -218,19 +218,8 @@ impl StreamAsofJoinOperator {
         if context.ingress_progress().len() != 2 {
             return self.stop_replay();
         }
-        let cursor_bytes = match (&callback, &cursor) {
-            (Callback::Data { side, .. }, Some(cursor)) => {
-                if cursor.source_id().is_none()
-                    || self.replay_inputs.as_ref().is_some_and(|inputs| {
-                        cursor.source_id() != Some(inputs.bindings[usize::from(*side)].as_str())
-                    })
-                {
-                    return self.stop_replay();
-                }
-                cursor.retained_bytes()?
-            }
-            (Callback::Progress | Callback::End, None) => 0,
-            _ => return self.stop_replay(),
+        let Some(cursor_bytes) = self.replay_cursor_bytes(&callback, cursor.as_deref())? else {
+            return self.stop_replay();
         };
         let budget = context.output_budget();
         let record = Record {
@@ -254,21 +243,30 @@ impl StreamAsofJoinOperator {
         Ok(())
     }
 
+    fn replay_cursor_bytes(
+        &self,
+        callback: &Callback,
+        cursor: Option<&crate::Cursor>,
+    ) -> Result<Option<usize>> {
+        match (callback, cursor) {
+            (Callback::Data { side, .. }, Some(cursor)) => {
+                if cursor.source_id().is_none()
+                    || self.replay_inputs.as_ref().is_some_and(|inputs| {
+                        cursor.source_id() != Some(inputs.bindings[usize::from(*side)].as_str())
+                    })
+                {
+                    return Ok(None);
+                }
+                cursor.retained_bytes().map(Some)
+            }
+            (Callback::Progress | Callback::End, None) => Ok(Some(0)),
+            _ => Ok(None),
+        }
+    }
+
     fn reserve_replay_record(&mut self, cursor_bytes: usize) -> Result<bool> {
         let log = self.replay.as_ref().expect("replay is enabled");
-        let capacity = if log.records.len() < log.records.capacity() {
-            log.records.capacity()
-        } else {
-            log.records
-                .capacity()
-                .max(8)
-                .checked_mul(2)
-                .ok_or_else(|| mismatch("replay capacity overflowed"))?
-        };
-        let delta = (capacity - log.records.capacity())
-            .checked_mul(size_of::<Record>())
-            .and_then(|bytes| bytes.checked_add(cursor_bytes))
-            .ok_or_else(|| mismatch("replay byte count overflowed"))?;
+        let (capacity, delta) = replay_record_allocation(log, cursor_bytes)?;
         if self
             .current_inventory(None)?
             .bytes
@@ -314,4 +312,21 @@ pub(super) fn is_capacity_error(error: &crate::CalcFlowError) -> bool {
             ..
         }
     )
+}
+
+fn replay_record_allocation(log: &Log, cursor_bytes: usize) -> Result<(usize, usize)> {
+    let capacity = if log.records.len() < log.records.capacity() {
+        log.records.capacity()
+    } else {
+        log.records
+            .capacity()
+            .max(8)
+            .checked_mul(2)
+            .ok_or_else(|| mismatch("replay capacity overflowed"))?
+    };
+    let delta = (capacity - log.records.capacity())
+        .checked_mul(size_of::<Record>())
+        .and_then(|bytes| bytes.checked_add(cursor_bytes))
+        .ok_or_else(|| mismatch("replay byte count overflowed"))?;
+    Ok((capacity, delta))
 }

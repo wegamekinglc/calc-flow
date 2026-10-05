@@ -1,7 +1,8 @@
 use super::{
-    AnchorControl, CONTROL_ID, CONTROL_MAX_BYTES, Control, Descriptor, Frame, codec, mismatch,
+    AnchorControl, CONTROL_ID, CONTROL_MAX_BYTES, Control, Descriptor, Frame, Log, codec, mismatch,
 };
 use crate::{Epoch, OperatorStateSnapshot, Result, StateSegment, StreamAsofJoinOperator};
+use datafusion::execution::memory_pool::MemoryReservation;
 use serde_json::json;
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -56,40 +57,15 @@ impl StreamAsofJoinOperator {
                 .as_ref()
                 .map_or(AnchorControl::FromStart, |anchor| anchor.descriptor()),
         };
-        if self.status.state_bytes > self.spec.limits().max_state_bytes() {
+        let Some(bytes) = control_bytes(
+            &control,
+            self.status.state_bytes,
+            self.spec.limits().max_state_bytes(),
+        )?
+        else {
             return Ok(None);
-        }
-        let bytes = serde_json::to_vec(&control).map_err(|error| mismatch(&error.to_string()))?;
-        if bytes.len() > CONTROL_MAX_BYTES {
-            return Ok(None);
-        }
-        let mut segments = log
-            .frames
-            .iter()
-            .map(|frame| (frame.descriptor.id.clone(), frame.segment.clone()))
-            .collect::<BTreeMap<_, _>>();
-        if let Some(anchor) = &log.anchor {
-            segments.extend(
-                anchor
-                    .snapshot
-                    .segments
-                    .iter()
-                    .map(|(id, segment)| (id.clone(), segment.clone())),
-            );
-            segments.insert(anchor.start_id.clone(), anchor.starts.clone());
-        }
-        segments.insert(
-            CONTROL_ID.into(),
-            StateSegment::new(bytes).with_owner(Arc::new(credit)),
-        );
-        Ok(Some(OperatorStateSnapshot {
-            inline_metadata: BTreeMap::from([
-                ("kind".into(), json!("stream_asof_join")),
-                ("state_version".into(), json!(3)),
-                ("source_replay".into(), json!(3)),
-            ]),
-            segments,
-        }))
+        };
+        Ok(Some(replay_snapshot(log, bytes, credit)))
     }
 
     fn capture_replay_frame(&mut self) -> Result<bool> {
@@ -134,5 +110,50 @@ impl StreamAsofJoinOperator {
         log.cut = log.records.len();
         log.generation = generation;
         Ok(true)
+    }
+}
+
+fn control_bytes(
+    control: &Control,
+    state_bytes: u64,
+    max_state_bytes: u64,
+) -> Result<Option<Vec<u8>>> {
+    if state_bytes > max_state_bytes {
+        return Ok(None);
+    }
+    let bytes = serde_json::to_vec(control).map_err(|error| mismatch(&error.to_string()))?;
+    if bytes.len() > CONTROL_MAX_BYTES {
+        return Ok(None);
+    }
+    Ok(Some(bytes))
+}
+
+fn replay_snapshot(log: &Log, bytes: Vec<u8>, credit: MemoryReservation) -> OperatorStateSnapshot {
+    let mut segments = log
+        .frames
+        .iter()
+        .map(|frame| (frame.descriptor.id.clone(), frame.segment.clone()))
+        .collect::<BTreeMap<_, _>>();
+    if let Some(anchor) = &log.anchor {
+        segments.extend(
+            anchor
+                .snapshot
+                .segments
+                .iter()
+                .map(|(id, segment)| (id.clone(), segment.clone())),
+        );
+        segments.insert(anchor.start_id.clone(), anchor.starts.clone());
+    }
+    segments.insert(
+        CONTROL_ID.into(),
+        StateSegment::new(bytes).with_owner(Arc::new(credit)),
+    );
+    OperatorStateSnapshot {
+        inline_metadata: BTreeMap::from([
+            ("kind".into(), json!("stream_asof_join")),
+            ("state_version".into(), json!(3)),
+            ("source_replay".into(), json!(3)),
+        ]),
+        segments,
     }
 }
