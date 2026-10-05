@@ -1669,6 +1669,9 @@ mod grouped_float;
 #[path = "datafusion_global_record.rs"]
 mod global_record;
 
+#[path = "datafusion_eager_input.rs"]
+mod eager_input;
+
 #[cfg(test)]
 #[path = "datafusion_global_float_plan_tests.rs"]
 mod global_float_plan_tests;

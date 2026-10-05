@@ -27,6 +27,7 @@ pub(in crate::operator::sql) struct NativeStateDescriptor {
     pub(in crate::operator::sql) aggregate_names: Vec<String>,
     pub(in crate::operator::sql) aggregate_inputs: Vec<Vec<NativeAggregateInput>>,
     pub(in crate::operator::sql) aggregate_filters: Vec<Option<NativeAggregateInput>>,
+    pub(in crate::operator::sql) input_checks: Vec<NativeAggregateInput>,
     pub(in crate::operator::sql) count_all_rows: Vec<bool>,
     filtered_input: bool,
     pub(in crate::operator::sql) state_fields: Vec<Vec<FieldRef>>,
@@ -91,19 +92,10 @@ impl IncrementalSql {
             .iter()
             .map(|expression| expression.fun().name().to_owned())
             .collect::<Vec<_>>();
-        let aggregate_inputs = self
-            .aggregates
-            .iter()
-            .map(|expression| {
-                expression
-                    .expressions()
-                    .iter()
-                    .map(|input| describe_input(input.as_ref(), &self.schema, 0, name))
-                    .collect::<Result<Vec<_>>>()
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let aggregate_inputs = self.native_aggregate_inputs(name)?;
         let count_all_rows = self.count_all_rows(&aggregate_names, &aggregate_inputs);
         let aggregate_filters = self.native_aggregate_filters(name)?;
+        let input_checks = self.native_input_checks(name)?;
         let projection = self
             .projection
             .iter()
@@ -120,6 +112,7 @@ impl IncrementalSql {
             .flatten()
             .chain(&key_inputs)
             .chain(aggregate_filters.iter().flatten())
+            .chain(&input_checks)
             .chain(&projection)
             .chain(&post_filter)
             .chain(
@@ -168,6 +161,7 @@ impl IncrementalSql {
             aggregate_names,
             aggregate_inputs,
             aggregate_filters,
+            input_checks,
             count_all_rows,
             filtered_input: self.predicate.is_some(),
             state_fields,
@@ -182,6 +176,26 @@ impl IncrementalSql {
             policy: self.native_policy(),
             _reservation: reservation,
         })
+    }
+
+    fn native_aggregate_inputs(&self, name: &str) -> Result<Vec<Vec<NativeAggregateInput>>> {
+        self.aggregates
+            .iter()
+            .map(|expression| {
+                expression
+                    .expressions()
+                    .iter()
+                    .map(|input| describe_input(input.as_ref(), &self.schema, 0, name))
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn native_input_checks(&self, name: &str) -> Result<Vec<NativeAggregateInput>> {
+        self.input_checks
+            .iter()
+            .map(|expression| describe_input(expression.as_ref(), &self.schema, 0, name))
+            .collect()
     }
 
     fn native_keys_descriptor(

@@ -30,6 +30,9 @@ mod cte_tests;
 #[path = "cte_input_tests.rs"]
 mod cte_input_tests;
 
+#[path = "cte_eager_tests.rs"]
+mod cte_eager_tests;
+
 const GLOBAL_CAST: &str = "SELECT CAST(SUM(value) AS REAL) AS total, CAST(AVG(value) AS REAL) AS mean, CAST(COUNT(*) AS DECIMAL(20, 0)) AS rows, 7 AS constant FROM events";
 const GROUPED_CAST: &str = "SELECT CAST(key AS SMALLINT) AS bucket, CAST(SUM(value) AS REAL) AS total, CAST(COUNT(*) AS DECIMAL(20, 0)) AS rows, 7 AS constant FROM events GROUP BY key";
 const TRY_CAST: &str = "SELECT TRY_CAST(SUM(value) AS SMALLINT) AS safe, CAST(COUNT(*) AS DECIMAL(20, 0)) AS rows, NULL AS nothing FROM events";

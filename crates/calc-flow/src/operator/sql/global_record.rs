@@ -16,6 +16,7 @@ type Arguments<'a> = (
     &'a [Option<Arc<dyn super::PhysicalExpr>>],
     &'a [Vec<ScalarValue>],
     Option<&'a super::predicate::InputPredicate>,
+    &'a [Arc<dyn super::PhysicalExpr>],
 );
 
 #[derive(Clone)]
@@ -251,7 +252,7 @@ impl Proof {
     ) -> Result<Update> {
         context.check_cancelled()?;
         let (records, input_owner) = input;
-        let (expressions, filters, values, predicate) = arguments;
+        let (expressions, filters, values, predicate, input_checks) = arguments;
         if self.uses_coalescing() != predicate.is_some() {
             return Err(df_error(name, "global scalar predicate differs from model"));
         }
@@ -287,6 +288,7 @@ impl Proof {
             filters: filters.to_vec(),
             states: values.to_vec(),
             predicate: predicate.cloned(),
+            input_checks: input_checks.to_vec(),
             previous: self.coalesced.clone(),
             coalesced_scratch: coalesced_credit.as_ref().map(|owner| owner.new_empty()),
             coalesced_credit,
@@ -447,6 +449,7 @@ struct RecordWork {
     filters: Vec<Option<Arc<dyn super::PhysicalExpr>>>,
     states: Vec<Vec<ScalarValue>>,
     predicate: Option<super::predicate::InputPredicate>,
+    input_checks: Vec<Arc<dyn super::PhysicalExpr>>,
     previous: Option<Arc<coalescer::State>>,
     coalesced_scratch: Option<MemoryReservation>,
     coalesced_credit: Option<Arc<MemoryReservation>>,
@@ -514,6 +517,7 @@ impl RecordWork {
         accumulators: &mut [Box<dyn datafusion::logical_expr::Accumulator>],
         check: &dyn Fn() -> Result<()>,
     ) -> Result<()> {
+        super::input_checks::evaluate(&self.input_checks, batch, &self.name)?;
         for (index, (expression, accumulator)) in self
             .expressions
             .iter()

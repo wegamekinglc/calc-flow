@@ -23,7 +23,7 @@ async fn test_throwing_cte_projection_precedes_aggregate_filter_and_is_atomic() 
         )
         .await,
     );
-    assert!(state.incremental.is_none() && state.retained.is_some());
+    assert!(state.incremental.is_some() && state.retained.is_none());
     let accepted = state.checkpoint(Epoch::INITIAL).unwrap();
     let pool = state
         .stream_state
@@ -145,7 +145,12 @@ async fn test_cte_float_input_expressions_keep_native_state_and_exact_cold_prefi
 
 #[tokio::test]
 async fn test_cte_input_expression_refusal_refunds_and_retry_is_once() {
-    for query in [QUERIES[0], QUERIES[1], QUERIES[2]] {
+    for query in [
+        QUERIES[0],
+        QUERIES[1],
+        QUERIES[2],
+        "WITH incoming AS (SELECT key, 100 / key AS price FROM events) SELECT key, SUM(price) AS total FROM incoming GROUP BY key",
+    ] {
         let dtype = DataType::Float64;
         let job = job();
         let context = StreamOperatorContext::new(&job, "float_extrema", None);

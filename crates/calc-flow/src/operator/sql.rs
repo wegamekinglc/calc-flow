@@ -921,6 +921,24 @@ impl SqlOperator {
         }
         let mut initialized = self.plan_incremental(alias, batch, plans).await?;
         context.check_cancelled()?;
+        if let Some(plan) = initialized.as_ref()
+            && !plan.eager_input_checks().is_empty()
+            && !self
+                .stream_state
+                .runtime()?
+                .prove_eager_sql_input(
+                    &self.validated,
+                    alias,
+                    batch,
+                    plan.eager_input_checks(),
+                    &self.name,
+                )
+                .await?
+        {
+            self.incremental_checked = batch.num_rows() != 0;
+            return Ok(None);
+        }
+        context.check_cancelled()?;
         if initialized
             .as_ref()
             .is_some_and(|plan| plan.requires_grouped_float_proof())

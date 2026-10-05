@@ -933,6 +933,7 @@ fn input_json(input: &NativeAggregateInput) -> Value {
 fn native_json(descriptor: &NativeStateDescriptor) -> Value {
     json!({"policy": descriptor.policy, "keys": fields_json(&descriptor.key_fields),
         "key_inputs": descriptor.key_inputs.iter().map(input_json).collect::<Vec<_>>(),
+        "input_checks": descriptor.input_checks.iter().map(input_json).collect::<Vec<_>>(),
         "aggregates": descriptor.aggregate_names.iter().enumerate().map(|(slot, function)| json!({
             "function": function, "inputs": descriptor.aggregate_inputs[slot].iter().map(input_json).collect::<Vec<_>>(),
             "filter": descriptor.aggregate_filters[slot].as_ref().map(input_json),

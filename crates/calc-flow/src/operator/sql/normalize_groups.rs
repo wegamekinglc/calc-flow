@@ -15,6 +15,7 @@ use super::{
 pub(super) struct Plans {
     pub raw: LogicalPlan,
     pub analyzed: LogicalPlan,
+    pub checks: Vec<(Expr, Arc<datafusion::common::DFSchema>)>,
     _reservation: MemoryReservation,
 }
 
@@ -68,17 +69,22 @@ pub(super) fn plans(
             .optimize(plan, &config, |_, _| {})
             .map_err(|error| df_error(name, error))?;
         if !aliases {
-            return Ok(normalized);
+            return Ok((normalized, Vec::new()));
         }
-        let normalized = inline_input_projection(normalized, &reservation, name)
+        let mut checks = Vec::new();
+        let normalized = inline_input_projection(normalized, &reservation, name, &mut checks)
             .map_err(|error| df_error(name, error))?;
         optimizer
             .optimize(normalized, &config, |_, _| {})
+            .map(|plan| (plan, checks))
             .map_err(|error| df_error(name, error))
     };
+    let (raw, _) = normalize(raw)?;
+    let (analyzed, checks) = normalize(analyzed)?;
     Ok(Some(Plans {
-        raw: normalize(raw)?,
-        analyzed: normalize(analyzed)?,
+        raw,
+        analyzed,
+        checks,
         _reservation: reservation,
     }))
 }
@@ -87,6 +93,7 @@ fn inline_input_projection(
     plan: LogicalPlan,
     reservation: &MemoryReservation,
     name: &str,
+    checks: &mut Vec<(Expr, Arc<datafusion::common::DFSchema>)>,
 ) -> datafusion::error::Result<LogicalPlan> {
     plan.transform_up(|plan| {
         let LogicalPlan::Aggregate(aggregate) = plan else {
@@ -99,16 +106,27 @@ fn inline_input_projection(
             .expr
             .iter()
             .map(|expression| {
-                super::native_expression::infallible_projection(
+                super::native_expression::input_expression_work(
                     expression,
                     projection.input.schema(),
                 )
-                .then(|| super::unalias(expression).clone())
+                .map(|_| super::unalias(expression).clone())
             })
             .collect::<Option<Vec<_>>>();
         let Some(inputs) = inputs else {
             return Ok(Transformed::no(LogicalPlan::Aggregate(aggregate)));
         };
+        checks.extend(
+            inputs
+                .iter()
+                .filter(|expression| {
+                    !super::native_expression::infallible_projection(
+                        expression,
+                        projection.input.schema(),
+                    )
+                })
+                .map(|expression| (expression.clone(), Arc::clone(projection.input.schema()))),
+        );
         let mapping = projection
             .schema
             .columns()

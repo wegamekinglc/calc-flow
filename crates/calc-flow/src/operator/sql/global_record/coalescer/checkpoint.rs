@@ -269,6 +269,7 @@ impl IncrementalSql {
             filters: self.aggregate_filters.clone(),
             states: Vec::new(),
             predicate: None,
+            input_checks: self.input_checks.clone(),
             previous: None,
             coalesced_scratch: None,
             coalesced_credit: None,

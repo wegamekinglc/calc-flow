@@ -64,6 +64,9 @@ mod group_key;
 #[path = "normalize_groups.rs"]
 mod normalize_groups;
 
+#[path = "input_checks.rs"]
+mod input_checks;
+
 use group_key::GroupKey;
 use native_expression::output_work;
 
@@ -85,6 +88,7 @@ pub(super) struct IncrementalSql {
     post_order: Option<output_order::OutputOrder>,
     projection_nodes: usize,
     input_nodes: usize,
+    input_checks: Vec<Arc<dyn PhysicalExpr>>,
     input_columns: InputColumns,
     keys: Vec<GroupKey>,
     variable_columns: Vec<usize>,
@@ -608,7 +612,9 @@ impl IncrementalSql {
         else {
             return Ok(None);
         };
-        let Some(input_nodes) = native_expression::input_work(aggregate) else {
+        let Some((input_checks, input_nodes)) =
+            input_checks::bind(aggregate, normalized.as_ref(), &schema)
+        else {
             return Ok(None);
         };
         let reservation = runtime.incremental_reservation(name);
@@ -667,6 +673,7 @@ impl IncrementalSql {
             post_order,
             projection_nodes,
             input_nodes,
+            input_checks,
             input_columns,
             keys,
             variable_columns,
@@ -692,6 +699,10 @@ impl IncrementalSql {
 
     pub(super) fn requires_grouped_float_proof(&self) -> bool {
         self.sequential.is_some()
+    }
+
+    pub(super) fn eager_input_checks(&self) -> &[Arc<dyn PhysicalExpr>] {
+        &self.input_checks
     }
 
     pub(super) fn requires_global_record_proof(&self) -> bool {
@@ -914,6 +925,7 @@ impl IncrementalSql {
                         &self.aggregate_filters,
                         &candidate.group.states,
                         self.predicate.as_ref(),
+                        &self.input_checks,
                     ),
                     self.reservation.new_empty(),
                     context,
@@ -1187,6 +1199,7 @@ impl IncrementalSql {
         if chunk.num_rows() == 0 {
             return Ok(());
         }
+        input_checks::evaluate(&self.input_checks, chunk, name)?;
         let key_arrays = group_key::evaluate(&self.keys, chunk, name)?;
         let owned_filters = if self.keys.is_empty() {
             self.filters(chunk, name)?
