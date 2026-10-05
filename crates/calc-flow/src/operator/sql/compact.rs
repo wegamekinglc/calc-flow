@@ -27,9 +27,7 @@ impl SqlOperator {
             .as_mut()
             .or(self.incremental.as_mut())
             .expect("proved native SQL plan");
-        let _descriptor = newly_initialized
-            .then(|| native.native_descriptor(&self.name))
-            .transpose()?;
+        let _descriptor = activation_descriptor(native, newly_initialized, &self.name)?;
         let runtime = self.stream_state.runtime()?;
         let transaction = native
             .update_with_input_owner(
@@ -39,12 +37,11 @@ impl SqlOperator {
                 &self.name,
             )
             .await?;
-        if !transaction.changes_state() {
-            pending.capture = self
-                .compact
-                .as_ref()
-                .and_then(|state| state.capture.clone());
-        }
+        carry_clean_capture(
+            transaction.changes_state(),
+            &mut pending,
+            self.compact.as_deref(),
+        );
         #[cfg(test)]
         {
             self.incremental_work.0 += transaction.rows;
@@ -54,6 +51,15 @@ impl SqlOperator {
         context.check_cancelled()?;
         output.emit("output", produced).await?;
         native.commit(transaction);
+        self.install_compact_update(initialized, pending);
+        Ok(())
+    }
+
+    fn install_compact_update(
+        &mut self,
+        initialized: Option<Box<incremental::IncrementalSql>>,
+        pending: CompactSqlState,
+    ) {
         if initialized.is_some() {
             self.incremental = initialized;
         }
@@ -61,7 +67,6 @@ impl SqlOperator {
         self.compact = Some(Box::new(pending));
         self.retained = None;
         self.retained_capture = None;
-        Ok(())
     }
 
     pub(super) fn prepare_compact_capture(&mut self, check: &dyn Fn() -> Result<()>) -> Result<()> {
@@ -97,6 +102,28 @@ impl SqlOperator {
             .expect("capture installed")
             .snapshot
             .clone())
+    }
+}
+
+fn activation_descriptor(
+    native: &incremental::IncrementalSql,
+    newly_initialized: bool,
+    name: &str,
+) -> Result<Option<incremental::compact_state::NativeStateDescriptor>> {
+    if newly_initialized {
+        native.native_descriptor(name).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+fn carry_clean_capture(
+    changes_state: bool,
+    pending: &mut CompactSqlState,
+    state: Option<&CompactSqlState>,
+) {
+    if !changes_state {
+        pending.capture = state.and_then(|state| state.capture.clone());
     }
 }
 

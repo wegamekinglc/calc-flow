@@ -149,38 +149,43 @@ impl LogDescriptor {
         groups: u64,
         ledger: QuotaLedger,
     ) -> Result<()> {
-        if self.version != 1
-            || self.frames.len() > MAX_FRAMES
-            || self.generation.checked_sub(self.base_generation) != Some(self.frames.len() as u64)
-            || self.base_groups > groups
-            || !self.base_ledger.seen_input
-            || (self.base_groups > self.base_ledger.rows
-                && !(self.base_groups == 1 && self.base_ledger.rows == 0))
-        {
-            return Err(sql_state_error("SQL group log base is invalid"));
-        }
+        self.validate_base(groups)?;
         let mut previous = self.base_ledger;
         for (index, frame) in self.frames.iter().enumerate() {
             let generation = self
                 .base_generation
                 .checked_add(index as u64 + 1)
                 .ok_or_else(|| sql_state_error("SQL group log generation overflowed"))?;
-            if frame.id != frame_id(generation)
-                || frame.groups == 0
-                || frame.groups > groups
-                || !frame.ledger.seen_input
-                || frame.ledger.rows <= previous.rows
-                || frame.ledger.bytes < previous.bytes
-                || frame.groups > frame.ledger.rows
-                || snapshot
-                    .segments
-                    .get(&frame.id)
-                    .is_none_or(|segment| segment.sha256() != frame.sha256)
-            {
-                return Err(sql_state_error("SQL group log frame is invalid"));
-            }
+            frame.validate(snapshot, generation, groups, previous)?;
             previous = frame.ledger;
         }
+        self.validate_inventory(snapshot, ledger, previous)
+    }
+
+    fn valid_base_counts(&self, groups: u64) -> bool {
+        self.base_groups <= groups
+            && self.base_ledger.seen_input
+            && (self.base_groups <= self.base_ledger.rows
+                || (self.base_groups == 1 && self.base_ledger.rows == 0))
+    }
+
+    fn validate_base(&self, groups: u64) -> Result<()> {
+        if self.version != 1
+            || self.frames.len() > MAX_FRAMES
+            || self.generation.checked_sub(self.base_generation) != Some(self.frames.len() as u64)
+            || !self.valid_base_counts(groups)
+        {
+            return Err(sql_state_error("SQL group log base is invalid"));
+        }
+        Ok(())
+    }
+
+    fn validate_inventory(
+        &self,
+        snapshot: &OperatorStateSnapshot,
+        ledger: QuotaLedger,
+        previous: QuotaLedger,
+    ) -> Result<()> {
         if ledger.rows < previous.rows
             || ledger.bytes < previous.bytes
             || !ledger.seen_input
@@ -191,6 +196,36 @@ impl LogDescriptor {
             return Err(sql_state_error(
                 "SQL group log ledger or inventory is invalid",
             ));
+        }
+        Ok(())
+    }
+}
+
+impl FrameDescriptor {
+    fn follows_ledger(&self, previous: QuotaLedger) -> bool {
+        self.ledger.seen_input
+            && self.ledger.rows > previous.rows
+            && self.ledger.bytes >= previous.bytes
+            && self.groups <= self.ledger.rows
+    }
+
+    fn validate(
+        &self,
+        snapshot: &OperatorStateSnapshot,
+        generation: u64,
+        groups: u64,
+        previous: QuotaLedger,
+    ) -> Result<()> {
+        if self.id != frame_id(generation)
+            || self.groups == 0
+            || self.groups > groups
+            || !self.follows_ledger(previous)
+            || snapshot
+                .segments
+                .get(&self.id)
+                .is_none_or(|segment| segment.sha256() != self.sha256)
+        {
+            return Err(sql_state_error("SQL group log frame is invalid"));
         }
         Ok(())
     }

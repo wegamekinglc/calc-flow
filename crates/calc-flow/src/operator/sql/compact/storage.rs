@@ -95,56 +95,10 @@ pub(in crate::operator::sql) fn prepare_update(
     operator: &SqlOperator,
     prepared: &PreparedRetention,
 ) -> Result<CompactSqlState> {
-    let previous = operator.retained.as_ref();
-    let ledger = if let Some(state) = &operator.compact {
-        let rows = u64::try_from(prepared.batch.num_rows())
-            .map_err(|_| sql_state_error("input row count exceeds u64"))?;
-        let bytes = if rows == 0 {
-            0
-        } else {
-            u64::try_from(prepared.batch.estimated_bytes()?)
-                .map_err(|_| sql_state_error("input byte count exceeds u64"))?
-        };
-        QuotaLedger {
-            rows: state
-                .ledger
-                .rows
-                .checked_add(rows)
-                .ok_or_else(|| sql_state_error("retained row count overflowed"))?,
-            bytes: state
-                .ledger
-                .bytes
-                .checked_add(bytes)
-                .ok_or_else(|| sql_state_error("retained byte count overflowed"))?,
-            seen_input: true,
-        }
-    } else {
-        let (rows, bytes) = operator.accumulated_charge(&prepared.batch, previous)?;
-        QuotaLedger {
-            rows,
-            bytes,
-            seen_input: true,
-        }
-    };
+    let ledger = update_ledger(operator, &prepared.batch)?;
     validate_budget(operator, ledger)?;
     let reservation = state_credit(operator, prepared.batch.metadata())?;
-    let columns = if let Some(state) = &operator.compact {
-        if !state.ignores_empty_schema(operator, &prepared.batch) {
-            check_schema(
-                &state.columns.physical,
-                prepared.batch.table_payload()?.schema(),
-            )?;
-        }
-        state.columns.clone()
-    } else {
-        if let Some(state) = previous {
-            check_schema(
-                &state.records[0].schema(),
-                prepared.batch.table_payload()?.schema(),
-            )?;
-        }
-        prepare_columns(operator, prepared)?
-    };
+    let columns = update_columns(operator, prepared)?;
     let capture = operator
         .compact
         .as_ref()
@@ -156,6 +110,69 @@ pub(in crate::operator::sql) fn prepare_update(
         capture,
         _reservation: reservation,
     })
+}
+
+fn update_ledger(operator: &SqlOperator, batch: &Batch) -> Result<QuotaLedger> {
+    if let Some(state) = &operator.compact {
+        extend_ledger(state.ledger, batch)
+    } else {
+        let (rows, bytes) = operator.accumulated_charge(batch, operator.retained.as_ref())?;
+        Ok(QuotaLedger {
+            rows,
+            bytes,
+            seen_input: true,
+        })
+    }
+}
+
+fn batch_charge(batch: &Batch) -> Result<(u64, u64)> {
+    let rows = u64::try_from(batch.num_rows())
+        .map_err(|_| sql_state_error("input row count exceeds u64"))?;
+    let bytes = if rows == 0 {
+        0
+    } else {
+        u64::try_from(batch.estimated_bytes()?)
+            .map_err(|_| sql_state_error("input byte count exceeds u64"))?
+    };
+    Ok((rows, bytes))
+}
+
+fn extend_ledger(previous: QuotaLedger, batch: &Batch) -> Result<QuotaLedger> {
+    let (rows, bytes) = batch_charge(batch)?;
+    Ok(QuotaLedger {
+        rows: previous
+            .rows
+            .checked_add(rows)
+            .ok_or_else(|| sql_state_error("retained row count overflowed"))?,
+        bytes: previous
+            .bytes
+            .checked_add(bytes)
+            .ok_or_else(|| sql_state_error("retained byte count overflowed"))?,
+        seen_input: true,
+    })
+}
+
+fn update_columns(
+    operator: &SqlOperator,
+    prepared: &PreparedRetention,
+) -> Result<Arc<CompactColumns>> {
+    if let Some(state) = &operator.compact {
+        if !state.ignores_empty_schema(operator, &prepared.batch) {
+            check_schema(
+                &state.columns.physical,
+                prepared.batch.table_payload()?.schema(),
+            )?;
+        }
+        Ok(state.columns.clone())
+    } else {
+        if let Some(state) = operator.retained.as_ref() {
+            check_schema(
+                &state.records[0].schema(),
+                prepared.batch.table_payload()?.schema(),
+            )?;
+        }
+        prepare_columns(operator, prepared)
+    }
 }
 
 pub(super) fn columns(
