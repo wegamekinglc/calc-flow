@@ -1,6 +1,7 @@
 use super::{
-    Arc, BatchKey, ChunkData, DecodedDelta, Encoding, Identity, MemoryReservation, OwnerReader,
-    PayloadBatch, PreparedLeftChunk, Result, SequenceKind, Version, mismatch,
+    Arc, BatchKey, BucketCut, Change, ChunkData, DecodedDelta, Encoding, Identity,
+    MemoryReservation, OwnerReader, PayloadBatch, PreparedLeftChunk, Result, SequenceKind, Version,
+    mismatch,
 };
 use crate::operator::asof::state::{
     EncodingOwners, PayloadPool, RightBucket, RightState, RowPayload, SequenceColumn, State,
@@ -113,69 +114,9 @@ impl Model {
         cancel: &dyn Fn() -> Result<()>,
     ) -> Result<Self> {
         cancel()?;
-        let rows = state
-            .right
-            .values()
-            .map(RightBucket::len)
-            .sum::<usize>()
-            .checked_add(state.left.len())
-            .ok_or_else(|| mismatch("ASOF model row count overflowed"))?;
-        if workspace.size()
-            < rows
-                .saturating_mul(size_of::<((i64, Encoding), Version)>())
-                .saturating_add(state.right.len().saturating_mul(512))
-                .saturating_add(
-                    state
-                        .left
-                        .checkpoint_chunks(&state.batches)
-                        .len()
-                        .saturating_mul(512),
-                )
-                .saturating_add(4096)
-        {
-            return Err(mismatch("ASOF model exceeds prepaid workspace"));
-        }
-        let left = state
-            .left
-            .checkpoint_owned_chunks(&state.batches)
-            .enumerate()
-            .map(|(ordinal, (batch, data, head))| {
-                super::super::check_step(ordinal, cancel)?;
-                let capacities = data.checkpoint_capacities();
-                Ok((
-                    batch,
-                    Left {
-                        owner: state.batches[&batch].0.clone(),
-                        data,
-                        head,
-                        capacities,
-                    },
-                ))
-            })
-            .collect::<Result<BTreeMap<_, _>>>()?;
-        let mut right = BTreeMap::new();
-        for (key, bucket) in state.right.ordered_iter() {
-            cancel()?;
-            let mut rows = Vec::with_capacity(bucket.len());
-            for (ordinal, ((time, sequence), payload, tag)) in bucket.checkpoint_rows().enumerate()
-            {
-                super::super::check_step(ordinal, cancel)?;
-                let payload = payload.map(|row| (state.batches.key(*row), row.row));
-                rows.push((
-                    (*time, sequence.into_owned()),
-                    Version::Right { tag, payload },
-                ));
-            }
-            right.insert(
-                key.clone(),
-                Right {
-                    rows,
-                    edits: BTreeMap::new(),
-                    len: bucket.len(),
-                    capacities: bucket.checkpoint_capacities(),
-                },
-            );
-        }
+        validate_model_workspace(state, &workspace)?;
+        let left = capture_model_left(state, cancel)?;
+        let right = capture_model_right(state, cancel)?;
         let mut workspaces = Vec::with_capacity(33);
         workspaces.push(workspace);
         Ok(Self {
@@ -250,73 +191,119 @@ impl Model {
         } = delta;
         self.workspaces.push(workspace);
         let mut installed = left.into_iter().collect::<BTreeMap<_, _>>();
-        for (ordinal, change) in changes.into_iter().enumerate() {
-            if ordinal.is_multiple_of(128) {
-                cancelled()?;
-            }
-            match change.identity {
-                Identity::Left(batch) => {
-                    self.apply_left(batch, change.before, change.after, &mut installed)?;
-                }
-                Identity::Right((time, key, sequence)) => {
-                    let order = (time, sequence);
-                    let actual = self.right.get(&key).and_then(|bucket| bucket.get(&order));
-                    if actual != change.before {
-                        return Err(mismatch("ASOF log right predecessor differs"));
-                    }
-                    match change.after {
-                        None => {
-                            let bucket = self.right.get_mut(&key).ok_or_else(|| {
-                                mismatch("ASOF log deleted right bucket is missing")
-                            })?;
-                            bucket.edits.insert(order, None);
-                            bucket.len -= 1;
-                        }
-                        Some(version) => {
-                            let bucket = self.right.entry(key).or_insert_with(|| Right {
-                                rows: Vec::new(),
-                                edits: BTreeMap::new(),
-                                len: 0,
-                                capacities: [0; 5],
-                            });
-                            if actual.is_none() {
-                                bucket.len += 1;
-                            }
-                            bucket.edits.insert(order, Some(version));
-                        }
-                    }
-                }
-            }
-        }
-        if !installed.is_empty() {
-            return Err(mismatch("ASOF log has extra installed left chunks"));
-        }
-        for (ordinal, cut) in buckets.into_iter().enumerate() {
-            if ordinal.is_multiple_of(128) {
-                cancelled()?;
-            }
-            let actual = self.right.get(&cut.key);
-            match cut.state {
-                None if actual.is_none_or(|bucket| bucket.len == 0) => {
-                    self.right.remove(&cut.key);
-                }
-                Some((rows, capacities))
-                    if actual.is_some_and(|bucket| bucket.len as u64 == rows) =>
-                {
-                    let counts = tag_counts(actual.expect("validated bucket"), &mut cancelled)?;
-                    super::super::validate_right_capacities(capacities, counts)?;
-                    self.right
-                        .get_mut(&cut.key)
-                        .expect("validated bucket")
-                        .capacities = capacities;
-                }
-                _ => return Err(mismatch("ASOF log final bucket census differs")),
-            }
-        }
+        self.apply_changes(changes, &mut installed, &mut cancelled)?;
+        self.apply_cuts(buckets, &mut cancelled)?;
         self.capacities = capacities;
         self.counts = counts;
         cancelled()?;
         Ok(owners)
+    }
+
+    fn apply_changes(
+        &mut self,
+        changes: Vec<Change>,
+        installed: &mut BTreeMap<BatchKey, PreparedLeftChunk>,
+        cancelled: &mut impl FnMut() -> Result<()>,
+    ) -> Result<()> {
+        for (ordinal, change) in changes.into_iter().enumerate() {
+            if ordinal.is_multiple_of(128) {
+                cancelled()?;
+            }
+            self.apply_change(change, installed)?;
+        }
+        if !installed.is_empty() {
+            return Err(mismatch("ASOF log has extra installed left chunks"));
+        }
+        Ok(())
+    }
+
+    fn apply_change(
+        &mut self,
+        change: Change,
+        installed: &mut BTreeMap<BatchKey, PreparedLeftChunk>,
+    ) -> Result<()> {
+        match change.identity {
+            Identity::Left(batch) => {
+                self.apply_left(batch, change.before, change.after, installed)?;
+            }
+            Identity::Right((time, key, sequence)) => {
+                self.apply_right((time, sequence), key, change.before, change.after)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_right(
+        &mut self,
+        order: (i64, Encoding),
+        key: Encoding,
+        before: Option<Version>,
+        after: Option<Version>,
+    ) -> Result<()> {
+        let actual = self.right.get(&key).and_then(|bucket| bucket.get(&order));
+        if actual != before {
+            return Err(mismatch("ASOF log right predecessor differs"));
+        }
+        match after {
+            None => {
+                let bucket = self
+                    .right
+                    .get_mut(&key)
+                    .ok_or_else(|| mismatch("ASOF log deleted right bucket is missing"))?;
+                bucket.edits.insert(order, None);
+                bucket.len -= 1;
+            }
+            Some(version) => {
+                let bucket = self.right.entry(key).or_insert_with(|| Right {
+                    rows: Vec::new(),
+                    edits: BTreeMap::new(),
+                    len: 0,
+                    capacities: [0; 5],
+                });
+                if actual.is_none() {
+                    bucket.len += 1;
+                }
+                bucket.edits.insert(order, Some(version));
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_cuts(
+        &mut self,
+        buckets: Vec<BucketCut>,
+        cancelled: &mut impl FnMut() -> Result<()>,
+    ) -> Result<()> {
+        for (ordinal, cut) in buckets.into_iter().enumerate() {
+            if ordinal.is_multiple_of(128) {
+                cancelled()?;
+            }
+            self.apply_bucket_cut(&cut, cancelled)?;
+        }
+        Ok(())
+    }
+
+    fn apply_bucket_cut(
+        &mut self,
+        cut: &BucketCut,
+        cancelled: &mut impl FnMut() -> Result<()>,
+    ) -> Result<()> {
+        let actual = self.right.get(&cut.key);
+        match cut.state {
+            None if actual.is_none_or(|bucket| bucket.len == 0) => {
+                self.right.remove(&cut.key);
+            }
+            Some((rows, capacities)) if actual.is_some_and(|bucket| bucket.len as u64 == rows) => {
+                let counts = tag_counts(actual.expect("validated bucket"), cancelled)?;
+                super::super::validate_right_capacities(capacities, counts)?;
+                self.right
+                    .get_mut(&cut.key)
+                    .expect("validated bucket")
+                    .capacities = capacities;
+            }
+            _ => return Err(mismatch("ASOF log final bucket census differs")),
+        }
+        Ok(())
     }
 
     pub fn into_workspaces(self) -> Vec<MemoryReservation> {
@@ -490,6 +477,86 @@ impl Model {
         cancelled()?;
         Ok(state)
     }
+}
+
+fn validate_model_workspace(state: &State, workspace: &MemoryReservation) -> Result<()> {
+    let rows = state
+        .right
+        .values()
+        .map(RightBucket::len)
+        .sum::<usize>()
+        .checked_add(state.left.len())
+        .ok_or_else(|| mismatch("ASOF model row count overflowed"))?;
+    if workspace.size()
+        < rows
+            .saturating_mul(size_of::<((i64, Encoding), Version)>())
+            .saturating_add(state.right.len().saturating_mul(512))
+            .saturating_add(
+                state
+                    .left
+                    .checkpoint_chunks(&state.batches)
+                    .len()
+                    .saturating_mul(512),
+            )
+            .saturating_add(4096)
+    {
+        return Err(mismatch("ASOF model exceeds prepaid workspace"));
+    }
+    Ok(())
+}
+
+fn capture_model_left(
+    state: &State,
+    cancel: &dyn Fn() -> Result<()>,
+) -> Result<BTreeMap<BatchKey, Left>> {
+    let left = state
+        .left
+        .checkpoint_owned_chunks(&state.batches)
+        .enumerate()
+        .map(|(ordinal, (batch, data, head))| {
+            super::super::check_step(ordinal, cancel)?;
+            let capacities = data.checkpoint_capacities();
+            Ok((
+                batch,
+                Left {
+                    owner: state.batches[&batch].0.clone(),
+                    data,
+                    head,
+                    capacities,
+                },
+            ))
+        })
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    Ok(left)
+}
+
+fn capture_model_right(
+    state: &State,
+    cancel: &dyn Fn() -> Result<()>,
+) -> Result<BTreeMap<Encoding, Right>> {
+    let mut right = BTreeMap::new();
+    for (key, bucket) in state.right.ordered_iter() {
+        cancel()?;
+        let mut rows = Vec::with_capacity(bucket.len());
+        for (ordinal, ((time, sequence), payload, tag)) in bucket.checkpoint_rows().enumerate() {
+            super::super::check_step(ordinal, cancel)?;
+            let payload = payload.map(|row| (state.batches.key(*row), row.row));
+            rows.push((
+                (*time, sequence.into_owned()),
+                Version::Right { tag, payload },
+            ));
+        }
+        right.insert(
+            key.clone(),
+            Right {
+                rows,
+                edits: BTreeMap::new(),
+                len: bucket.len(),
+                capacities: bucket.checkpoint_capacities(),
+            },
+        );
+    }
+    Ok(right)
 }
 
 fn tag_counts(bucket: &Right, cancelled: &mut impl FnMut() -> Result<()>) -> Result<[usize; 3]> {
