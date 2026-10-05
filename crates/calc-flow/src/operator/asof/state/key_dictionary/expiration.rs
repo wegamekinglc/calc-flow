@@ -1,4 +1,4 @@
-use super::Entry;
+use super::{Entry, entries::Entries};
 
 pub(super) const ABSENT: u32 = u32::MAX;
 
@@ -111,7 +111,7 @@ impl Heap {
         self.collect_subtree(position * 2 + 2, cutoff, ids);
     }
 
-    pub fn replace(&mut self, entries: &mut [Entry], id: u32, time: Option<i64>) {
+    pub fn replace(&mut self, entries: &mut Entries, id: u32, time: Option<i64>) {
         let position = self.kind.position(&entries[id as usize]);
         match (position, time) {
             (ABSENT, None) => {}
@@ -124,14 +124,14 @@ impl Heap {
         }
     }
 
-    fn insert(&mut self, entries: &mut [Entry], deadline: Deadline) {
+    fn insert(&mut self, entries: &mut Entries, deadline: Deadline) {
         let position = self.values.len();
         self.values.push(deadline);
         self.set_position(entries, position);
         self.sift_up(entries, position);
     }
 
-    fn remove(&mut self, entries: &mut [Entry], position: usize) {
+    fn remove(&mut self, entries: &mut Entries, position: usize) {
         let removed = self.values.swap_remove(position);
         self.kind
             .set_position(&mut entries[removed.id as usize], ABSENT);
@@ -141,7 +141,7 @@ impl Heap {
         }
     }
 
-    pub fn rename(&mut self, entries: &mut [Entry], id: u32) {
+    pub fn rename(&mut self, entries: &mut Entries, id: u32) {
         let position = self.kind.position(&entries[id as usize]);
         if position != ABSENT {
             self.values[position as usize].id = id;
@@ -149,7 +149,7 @@ impl Heap {
         }
     }
 
-    fn repair(&mut self, entries: &mut [Entry], position: usize) {
+    fn repair(&mut self, entries: &mut Entries, position: usize) {
         if position > 0 && self.values[position] < self.values[(position - 1) / 2] {
             self.sift_up(entries, position);
         } else {
@@ -157,7 +157,7 @@ impl Heap {
         }
     }
 
-    fn sift_up(&mut self, entries: &mut [Entry], mut position: usize) {
+    fn sift_up(&mut self, entries: &mut Entries, mut position: usize) {
         while position > 0 {
             let parent = (position - 1) / 2;
             if self.values[parent] <= self.values[position] {
@@ -168,7 +168,7 @@ impl Heap {
         }
     }
 
-    fn sift_down(&mut self, entries: &mut [Entry], mut position: usize) {
+    fn sift_down(&mut self, entries: &mut Entries, mut position: usize) {
         while let Some(child) = self.smaller_child(position) {
             if self.values[position] <= self.values[child] {
                 break;
@@ -193,13 +193,13 @@ impl Heap {
         )
     }
 
-    fn swap(&mut self, entries: &mut [Entry], left: usize, right: usize) {
+    fn swap(&mut self, entries: &mut Entries, left: usize, right: usize) {
         self.values.swap(left, right);
         self.set_position(entries, left);
         self.set_position(entries, right);
     }
 
-    fn set_position(&self, entries: &mut [Entry], position: usize) {
+    fn set_position(&self, entries: &mut Entries, position: usize) {
         let id = self.values[position].id;
         self.kind.set_position(
             &mut entries[id as usize],

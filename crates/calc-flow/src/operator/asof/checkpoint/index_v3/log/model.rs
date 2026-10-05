@@ -71,7 +71,7 @@ impl Right {
 }
 
 pub(in crate::operator::asof) struct Model {
-    capacities: [usize; 8],
+    capacities: [usize; 16],
     counts: [usize; 3],
     kinds: [SequenceKind; 2],
     left: BTreeMap<BatchKey, Left>,
@@ -79,11 +79,12 @@ pub(in crate::operator::asof) struct Model {
     workspaces: Vec<MemoryReservation>,
 }
 
-pub(in crate::operator::asof) fn capacities(state: &State) -> [usize; 8] {
+pub(in crate::operator::asof) fn capacities(state: &State) -> [usize; 16] {
     let pool = state.batches.backing_buckets();
     let right = state.right.checkpoint_capacities();
     let heaps = state.right.heap_capacities();
-    [
+    let mut values = [0; 16];
+    values[..8].copy_from_slice(&[
         pool.0,
         pool.1,
         right[0],
@@ -92,7 +93,9 @@ pub(in crate::operator::asof) fn capacities(state: &State) -> [usize; 8] {
         heaps[0],
         heaps[1],
         heaps[2],
-    ]
+    ]);
+    values[8..].copy_from_slice(&state.right.shard_capacities());
+    values
 }
 
 pub(in crate::operator::asof) fn counts(state: &State) -> [usize; 3] {
@@ -327,7 +330,7 @@ impl Model {
         for (capacity, width) in self
             .capacities
             .into_iter()
-            .zip([25, 25, 48, 5, 32, 16, 16, 16])
+            .zip(super::super::CAPACITY_WIDTHS)
         {
             bytes = super::super::restore_add(
                 bytes,
@@ -428,7 +431,8 @@ impl Model {
         state.right = RightState::with_index_capacities(
             self.capacities[2],
             self.capacities[3],
-            self.capacities[5..].try_into().expect("three heaps"),
+            self.capacities[5..8].try_into().expect("three heaps"),
+            self.capacities[8..].try_into().expect("eight shards"),
         );
         state.left.reserve_chunks_exact(self.capacities[4]);
         let mut left = Vec::with_capacity(self.left.len());
@@ -465,6 +469,9 @@ impl Model {
                     })
                     .transpose()?;
                 bucket.push_index(order.clone(), tag, row);
+            }
+            if !state.right.can_insert_restored(key) {
+                return Err(mismatch("ASOF log right shard capacity is too small"));
             }
             state.right.insert_restored(key.clone(), bucket);
         }

@@ -1,7 +1,7 @@
 mod cpu;
 mod incremental;
 #[cfg(test)]
-const INDEX_SEGMENT: &str = "asof-log-v9-1-0-1";
+const INDEX_SEGMENT: &str = "asof-log-v10-1-0-1";
 pub(super) mod index_v3;
 mod payload_segments;
 mod prepared;
@@ -247,7 +247,7 @@ impl StreamAsofJoinOperator {
         let mut inline_metadata: crate::JsonMap = serde_json::to_value(metadata)
             .and_then(serde_json::from_value)
             .map_err(|error| mismatch(&error.to_string()))?;
-        if layout == 9 {
+        if layout == 10 {
             inline_metadata.insert(
                 "retained_payloads".into(),
                 serde_json::to_value(self.retained_descriptor())
@@ -306,7 +306,7 @@ impl StreamAsofJoinOperator {
             || metadata.state_version != 3
             || !matches!(
                 (metadata.layout_version, metadata.accounting_version),
-                (9, 9)
+                (10, 10)
             )
             || metadata.row_encoding != "arrow-batch-58.3.0"
             || metadata.fingerprint != self.fingerprint
@@ -1092,10 +1092,10 @@ mod tests {
         assert_eq!(operator.status.state_rows, 1);
         let mut snapshot = operator.capture(Epoch::INITIAL).unwrap();
         let mut bytes = snapshot.segments[index_v3::INDEX_SEGMENT].bytes().to_vec();
-        assert_eq!(u64::from_le_bytes(bytes[224..232].try_into().unwrap()), 1);
-        assert_eq!(bytes[232], 1, "one Binary owner retains both sequence rows");
-        assert_eq!(u64::from_le_bytes(bytes[234..242].try_into().unwrap()), 2);
-        bytes[266] = 0;
+        assert_eq!(u64::from_le_bytes(bytes[288..296].try_into().unwrap()), 1);
+        assert_eq!(bytes[296], 1, "one Binary owner retains both sequence rows");
+        assert_eq!(u64::from_le_bytes(bytes[298..306].try_into().unwrap()), 2);
+        bytes[330] = 0;
         let segment = StateSegment::new(bytes);
         snapshot.inline_metadata.get_mut("checkpoint_log").unwrap()["frames"][0]["sha256"] =
             serde_json::json!(segment.sha256());

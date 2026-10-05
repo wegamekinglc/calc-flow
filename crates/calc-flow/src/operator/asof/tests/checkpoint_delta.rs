@@ -336,7 +336,7 @@ fn assert_delta_rejected(
         baseline
             .segments
             .iter()
-            .find(|(name, _)| name.starts_with("asof-log-v9-"))
+            .find(|(name, _)| name.starts_with("asof-log-v10-"))
             .unwrap()
             .1,
         &operator.fingerprint,

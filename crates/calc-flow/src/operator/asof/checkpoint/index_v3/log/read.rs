@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 struct Header {
-    capacities: [usize; 8],
+    capacities: [usize; 16],
     counts: [usize; 3],
     owner_capacity: usize,
     changes: usize,
@@ -30,7 +30,7 @@ fn header(
     if cursor.take(6)? != [0; 6] {
         return Err(mismatch("ASOF log delta padding differs"));
     }
-    let capacities = cursor.capacities([25, 25, 48, 5, 32, 16, 16, 16])?;
+    let capacities = cursor.capacities(super::super::CAPACITY_WIDTHS)?;
     let counts = cursor.addresses::<3>()?;
     super::super::validate_header_counts(counts[0], counts[1], counts[2], max_rows)?;
     super::super::validate_header_capacities(
@@ -38,11 +38,15 @@ fn header(
         counts[0],
         counts[1],
     )?;
-    for capacity in &capacities[5..] {
+    for capacity in &capacities[5..8] {
         super::super::require_capacity(*capacity, counts[1])?;
         u32::try_from(*capacity)
             .map_err(|_| mismatch("ASOF log heap capacity exceeds handle domain"))?;
     }
+    super::super::validate_shard_capacities(
+        capacities[8..].try_into().expect("eight shards"),
+        counts[1],
+    )?;
     if cursor.address()? != previous {
         return Err(mismatch("ASOF log owner predecessor count differs"));
     }

@@ -20,9 +20,11 @@ use owners::{OwnerReader, OwnerWriter};
 use std::{collections::BTreeMap, sync::Arc};
 
 #[cfg(test)]
-pub(super) const INDEX_SEGMENT: &str = "asof-log-v9-1-0-1";
-const MAGIC: &[u8; 8] = b"CFASOF09";
-pub(in super::super) const BASE_BYTES: u64 = 104;
+pub(super) const INDEX_SEGMENT: &str = "asof-log-v10-1-0-1";
+const MAGIC: &[u8; 8] = b"CFASOF10";
+pub(in super::super) const BASE_BYTES: u64 = 168;
+pub(super) const CAPACITY_WIDTHS: [usize; 16] =
+    [25, 25, 8, 5, 32, 16, 16, 16, 56, 56, 56, 56, 56, 56, 56, 56];
 const LEFT_HEADER: u64 = 73;
 const RIGHT_HEADER: u64 = 65;
 
@@ -288,6 +290,9 @@ pub(super) fn encode_sync(state: &State, length: u64, limit: usize) -> Result<St
     ] {
         put(&mut bytes, value as u64);
     }
+    for capacity in state.right.shard_capacities() {
+        put(&mut bytes, capacity as u64);
+    }
     owners.write(&mut bytes);
     for (batch, data, head) in state.left.checkpoint_chunks(&state.batches) {
         write_left(
@@ -546,6 +551,7 @@ struct Header {
     left_rows: usize,
     capacities: [usize; 5],
     heaps: [usize; 3],
+    shards: [usize; 8],
 }
 
 fn read_header(cursor: &mut Cursor<'_>, max_rows: u64) -> Result<Header> {
@@ -555,7 +561,7 @@ fn read_header(cursor: &mut Cursor<'_>, max_rows: u64) -> Result<Header> {
     }
     let [chunks, buckets, left_rows] = cursor.addresses()?;
     validate_header_counts(chunks, buckets, left_rows, max_rows)?;
-    let capacities = cursor.capacities([25, 25, 48, 5, 32])?;
+    let capacities = cursor.capacities([25, 25, 8, 5, 32])?;
     validate_header_capacities(capacities, chunks, buckets)?;
     let heaps = cursor.capacities([16, 16, 16])?;
     for capacity in heaps {
@@ -563,13 +569,27 @@ fn read_header(cursor: &mut Cursor<'_>, max_rows: u64) -> Result<Header> {
         u32::try_from(capacity)
             .map_err(|_| mismatch("ASOF heap capacity exceeds handle domain"))?;
     }
+    let shards = cursor.capacities([56; 8])?;
+    validate_shard_capacities(shards, buckets)?;
     Ok(Header {
         chunks,
         buckets,
         left_rows,
         capacities,
         heaps,
+        shards,
     })
+}
+
+fn validate_shard_capacities(shards: [usize; 8], buckets: usize) -> Result<()> {
+    let total = shards.into_iter().try_fold(0_usize, |total, capacity| {
+        u32::try_from(capacity)
+            .map_err(|_| mismatch("ASOF shard capacity exceeds handle domain"))?;
+        total
+            .checked_add(capacity)
+            .ok_or_else(|| mismatch("ASOF shard capacity overflowed"))
+    })?;
+    require_capacity(total, buckets)
 }
 
 fn validate_header_counts(
@@ -645,11 +665,14 @@ fn scan_column_charge(
 
 fn header_restore_charge(header: &Header, max_bytes: u64) -> Result<u64> {
     let mut charge = 0;
-    for (capacity, width) in header.capacities.into_iter().zip([25, 25, 48, 5, 32]) {
+    for (capacity, width) in header.capacities.into_iter().zip([25, 25, 8, 5, 32]) {
         charge = restore_add(charge, allocation(capacity, width, max_bytes)?)?;
     }
     for capacity in header.heaps {
         charge = restore_add(charge, allocation(capacity, 16, max_bytes)?)?;
+    }
+    for capacity in header.shards {
+        charge = restore_add(charge, allocation(capacity, 56, max_bytes)?)?;
     }
     restore_add(
         charge,
@@ -836,8 +859,12 @@ pub(in crate::operator::asof) fn decode_registered_bytes_checked(
     let mut state = State::empty_tracked();
     state.sequence_kinds = kinds;
     state.batches = PayloadPool::with_backing_buckets(header.capacities[0], header.capacities[1]);
-    state.right =
-        RightState::with_index_capacities(header.capacities[2], header.capacities[3], header.heaps);
+    state.right = RightState::with_index_capacities(
+        header.capacities[2],
+        header.capacities[3],
+        header.heaps,
+        header.shards,
+    );
     state.left.reserve_chunks_exact(header.capacities[4]);
     decode_left_chunks(
         &mut cursor,
@@ -941,6 +968,9 @@ fn decode_right_buckets(
         {
             return Err(mismatch("ASOF v3 right key order is not strict"));
         }
+        if !state.right.can_insert_restored(&key) {
+            return Err(mismatch("ASOF right shard capacity is too small"));
+        }
         state.right.insert_restored(key, bucket);
     }
     Ok(())
@@ -950,6 +980,7 @@ fn validate_reconstructed_capacities(state: &State, header: &Header) -> Result<(
     if state.batches.backing_buckets() != (header.capacities[0], header.capacities[1])
         || state.right.checkpoint_capacities() != [header.capacities[2], header.capacities[3]]
         || state.right.heap_capacities() != header.heaps
+        || state.right.shard_capacities() != header.shards
         || state.left.chunk_capacity() != header.capacities[4]
     {
         return Err(mismatch("ASOF v3 capacity reconstruction differs"));
@@ -1536,6 +1567,14 @@ mod tests {
             u64::from(right),
             u64::from(right),
             u64::from(right),
+            u64::from(right),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
         ] {
             put(&mut bytes, capacity);
         }
@@ -1584,6 +1623,39 @@ mod tests {
             .map(|(identity, _)| identity.2.allocation().unwrap().0)
             .collect::<Vec<_>>();
         assert!(owners.iter().all(|owner| *owner == owners[0]));
+    }
+
+    #[test]
+    fn columnar_index_rejects_capacity_assigned_to_the_wrong_shard() {
+        let (state, batches) = fixture();
+        let segment =
+            encode_sync(&state, encoded_length(&state, "test").unwrap(), 1_000_000).unwrap();
+        let mut bytes = segment.bytes().to_vec();
+        let shards = state.right.shard_capacities();
+        let occupied = shards.iter().position(|&capacity| capacity != 0).unwrap();
+        let empty = shards.iter().position(|&capacity| capacity == 0).unwrap();
+        let capacity = &bytes[96 + occupied * 8..104 + occupied * 8].to_vec();
+        bytes[96 + empty * 8..104 + empty * 8].copy_from_slice(capacity);
+        bytes[96 + occupied * 8..104 + occupied * 8].fill(0);
+        let error = decode_registered_bytes(
+            &bytes,
+            &batches,
+            100,
+            1_000_000,
+            [SequenceKind::Canonical; 2],
+        )
+        .err()
+        .unwrap();
+        assert!(
+            error.to_string().contains("shard capacity is too small"),
+            "{error}"
+        );
+        assert_eq!(
+            encode_sync(&state, encoded_length(&state, "test").unwrap(), 1_000_000)
+                .unwrap()
+                .bytes(),
+            segment.bytes()
+        );
     }
 
     #[test]
@@ -1796,7 +1868,7 @@ mod tests {
         let segment =
             encode_sync(&state, encoded_length(&state, "test").unwrap(), 1_000_000).unwrap();
         let mut padding = segment.bytes().to_vec();
-        padding[97] = 1;
+        padding[usize::try_from(BASE_BYTES).unwrap() + 1] = 1;
         assert!(
             decode(
                 &StateSegment::new(padding),

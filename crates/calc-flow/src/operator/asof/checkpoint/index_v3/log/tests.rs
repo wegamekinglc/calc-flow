@@ -130,7 +130,7 @@ fn test_a12_row_delta_encodes_one_identity_and_restores_canonical_owner_under_cr
         state: Some((1, [0; 5])),
     }];
     let input = Input {
-        capacities: [0, 0, 1, 4, 0, 1, 1, 1],
+        capacities: [0, 0, 1, 4, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
         counts: [0, 1, 0],
         kinds: [SequenceKind::Canonical, SequenceKind::Unsigned(8)],
         changes: &changes,

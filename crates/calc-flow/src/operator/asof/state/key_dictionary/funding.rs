@@ -1,4 +1,4 @@
-use super::{Encoding, Entry, Heap, RightState, hash_allocation};
+use super::{Encoding, Heap, RightState, entries, hash_allocation};
 use crate::{Result, StreamingFailureReason};
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryPool, MemoryReservation};
 use hashbrown::HashTable;
@@ -46,7 +46,7 @@ impl Drop for Growth {
 }
 
 pub(in super::super::super) struct PreparedStorage {
-    entries: Option<Vec<Entry>>,
+    entries: entries::PreparedEntries,
     buckets: Option<HashTable<u32>>,
     payloads: Option<Heap>,
     identities: Option<Heap>,
@@ -57,9 +57,7 @@ pub(in super::super::super) struct PreparedStorage {
 
 impl PreparedStorage {
     pub fn install(self, state: &mut RightState) {
-        if let Some(entries) = self.entries {
-            state.entries = entries;
-        }
+        self.entries.install(&mut state.entries);
         if let Some(buckets) = self.buckets {
             state.buckets = buckets;
         }
@@ -100,7 +98,8 @@ impl RightState {
     }
 
     pub fn auxiliary_bytes(&self) -> usize {
-        self.entries.capacity() * 16
+        self.entries.capacities().directory * 8
+            + self.entries.capacities().shards.into_iter().sum::<usize>() * 24
             + self.payloads.allocation_bytes()
             + self.identities.allocation_bytes()
             + self.dominance.allocation_bytes()
@@ -113,30 +112,32 @@ impl RightState {
         name: &str,
     ) -> Result<PreparedStorage> {
         let (capacity, backing) = self.admission_capacities(additions);
-        u32::try_from(capacity).map_err(|_| failure(name))?;
+        for value in std::iter::once(capacity.directory).chain(capacity.shards) {
+            u32::try_from(value).map_err(|_| failure(name))?;
+        }
         let auxiliary = self.auxiliary_capacity_bytes(capacity, name)?;
         let growth = Growth::new(self.lease.as_ref(), auxiliary, pool, name)?;
         let bytes = self.storage_workspace(capacity, backing, name)?;
         let workspace = MemoryConsumer::new("asof-dictionary-preparation").register(pool);
         workspace.try_grow(bytes).map_err(|_| failure(name))?;
         Ok(PreparedStorage {
-            entries: self.copy_entries(capacity),
+            entries: self.entries.prepare(capacity),
             buckets: self.copy_hash(backing),
-            payloads: Self::copy_heap(&self.payloads, capacity),
-            identities: Self::copy_heap(&self.identities, capacity),
-            dominance: Self::copy_heap(&self.dominance, capacity),
+            payloads: Self::copy_heap(&self.payloads, capacity.directory),
+            identities: Self::copy_heap(&self.identities, capacity.directory),
+            dominance: Self::copy_heap(&self.dominance, capacity.directory),
             growth,
             _workspace: workspace,
         })
     }
 
-    fn auxiliary_capacity_bytes(&self, capacity: usize, name: &str) -> Result<usize> {
+    fn auxiliary_capacity_bytes(&self, capacity: entries::Capacities, name: &str) -> Result<usize> {
         total(
             &[
-                allocation(capacity, 16, name)?,
-                allocation(capacity.max(self.payloads.capacity()), 16, name)?,
-                allocation(capacity.max(self.identities.capacity()), 16, name)?,
-                allocation(capacity.max(self.dominance.capacity()), 16, name)?,
+                capacity.auxiliary_bytes(name)?,
+                allocation(capacity.directory.max(self.payloads.capacity()), 16, name)?,
+                allocation(capacity.directory.max(self.identities.capacity()), 16, name)?,
+                allocation(capacity.directory.max(self.dominance.capacity()), 16, name)?,
             ],
             name,
         )
@@ -144,24 +145,14 @@ impl RightState {
 
     fn storage_workspace(
         &self,
-        capacity: usize,
+        capacity: entries::Capacities,
         backing: Option<usize>,
         name: &str,
     ) -> Result<usize> {
-        let entries = if capacity > self.entries.capacity() {
-            total(
-                &[
-                    allocation(self.entries.capacity(), size_of::<Entry>(), name)?,
-                    allocation(capacity, size_of::<Entry>() - 16, name)?,
-                ],
-                name,
-            )?
-        } else {
-            0
-        };
+        let entries = self.entries.copy_workspace(capacity, name)?;
         let heaps = [&self.payloads, &self.identities, &self.dominance]
             .into_iter()
-            .filter(|heap| capacity > heap.capacity())
+            .filter(|heap| capacity.directory > heap.capacity())
             .map(Heap::allocation_bytes)
             .sum::<usize>();
         let buckets = backing.map_or(0, |backing| {
@@ -169,15 +160,6 @@ impl RightState {
                 + hash_allocation(backing)
         });
         total(&[entries, heaps, buckets], name)
-    }
-
-    fn copy_entries(&self, capacity: usize) -> Option<Vec<Entry>> {
-        if capacity <= self.entries.capacity() {
-            return None;
-        }
-        let mut entries = Vec::with_capacity(capacity);
-        entries.extend_from_slice(&self.entries);
-        Some(entries)
     }
 
     fn copy_hash(&self, backing: Option<usize>) -> Option<HashTable<u32>> {

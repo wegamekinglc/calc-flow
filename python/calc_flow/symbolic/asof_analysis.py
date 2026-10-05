@@ -84,7 +84,7 @@ def _capability(analyzer: _Analyzer, path: str) -> None:
     }
     if (
         len(offered) == 1
-        and 9 in offered[0].state_layouts
+        and 10 in offered[0].state_layouts
         and all(getattr(offered[0], name) == value for name, value in expected.items())
     ):
         return

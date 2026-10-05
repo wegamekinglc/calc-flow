@@ -15,8 +15,8 @@ use datafusion::execution::memory_pool::MemoryReservation;
 use journal::{Change, Identity, Version};
 use std::{collections::BTreeMap, sync::Arc};
 
-const MAGIC: &[u8; 8] = b"CFASRW09";
-const HEADER_BYTES: u64 = 144;
+const MAGIC: &[u8; 8] = b"CFASRW10";
+const HEADER_BYTES: u64 = 208;
 
 pub(in crate::operator::asof) struct BucketCut {
     pub key: Encoding,
@@ -24,7 +24,7 @@ pub(in crate::operator::asof) struct BucketCut {
 }
 
 pub(in crate::operator::asof) struct Input<'a> {
-    pub capacities: [usize; 8],
+    pub capacities: [usize; 16],
     pub counts: [usize; 3],
     pub kinds: [SequenceKind; 2],
     pub changes: &'a [Change],
@@ -39,7 +39,7 @@ pub(in crate::operator::asof) struct EncodedDelta {
 }
 
 pub(in crate::operator::asof) struct DecodedDelta {
-    pub capacities: [usize; 8],
+    pub capacities: [usize; 16],
     pub counts: [usize; 3],
     pub changes: Vec<Change>,
     pub left: Vec<(BatchKey, PreparedLeftChunk)>,

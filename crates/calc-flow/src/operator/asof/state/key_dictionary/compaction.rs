@@ -1,18 +1,19 @@
 use super::funding::{Growth, allocation, failure, total};
-use super::{Entry, Heap, Kind, RightBucket, RightState, hash_allocation, required_backing};
+use super::{Heap, Kind, RightBucket, RightState, entries, hash_allocation, required_backing};
 use crate::Result;
 use datafusion::execution::memory_pool::{MemoryPool, MemoryReservation};
 use hashbrown::HashTable;
 use std::sync::Arc;
 
 pub(super) struct Capacities {
-    entries: usize,
+    entries: entries::Capacities,
     backing: usize,
 }
 
 impl Capacities {
     pub fn container_bytes(&self, keys: usize) -> u64 {
-        (self.entries * (size_of::<Entry>() + 48)
+        (self.entries.metadata_bytes()
+            + self.entries.directory * 48
             + hash_allocation(self.backing)
             + keys * (size_of::<RightBucket>() + 2 * size_of::<usize>())) as u64
     }
@@ -20,9 +21,10 @@ impl Capacities {
     pub fn workspace_bytes(&self, state: &RightState, name: &str) -> Result<usize> {
         total(
             &[
-                allocation(state.entries.capacity(), size_of::<Entry>() - 16, name)?,
+                state.entries.capacities().metadata_bytes(),
                 hash_allocation(super::super::payload::backing_buckets(&state.buckets)),
-                allocation(self.entries, size_of::<Entry>() + 48, name)?,
+                self.entries.metadata_bytes(),
+                allocation(self.entries.directory, 48, name)?,
                 hash_allocation(self.backing),
             ],
             name,
@@ -31,7 +33,7 @@ impl Capacities {
 }
 
 pub(in super::super::super) struct PreparedCompaction {
-    entries: Vec<Entry>,
+    entries: entries::Entries,
     buckets: HashTable<u32>,
     payloads: Heap,
     identities: Heap,
@@ -42,7 +44,7 @@ pub(in super::super::super) struct PreparedCompaction {
 
 impl PreparedCompaction {
     pub fn install(mut self, state: &mut RightState) {
-        self.entries.append(&mut state.entries);
+        self.entries.extend_from_entries(&state.entries);
         for (id, entry) in self.entries.iter().enumerate() {
             #[cfg(test)]
             super::super::expiration_cost_tests::record_compaction();
@@ -81,7 +83,7 @@ impl RightState {
                 super::super::payload::backing_buckets(&self.buckets),
             ));
         (capacity > keys * 4).then(|| Capacities {
-            entries: keys,
+            entries: self.entries.compacted(keys),
             backing: required_backing(keys * 2),
         })
     }
@@ -103,13 +105,13 @@ impl RightState {
         }
         let workspace = workspace.split(bytes);
         Ok(Some(PreparedCompaction {
-            entries: Vec::with_capacity(capacities.entries),
+            entries: entries::Entries::with_capacities(capacities.entries),
             buckets: HashTable::with_capacity(super::super::payload::bucket_capacity(
                 capacities.backing,
             )),
-            payloads: Heap::new(Kind::Payload, capacities.entries),
-            identities: Heap::new(Kind::Identity, capacities.entries),
-            dominance: Heap::new(Kind::Dominance, capacities.entries),
+            payloads: Heap::new(Kind::Payload, capacities.entries.directory),
+            identities: Heap::new(Kind::Identity, capacities.entries.directory),
+            dominance: Heap::new(Kind::Dominance, capacities.entries.directory),
             growth,
             _workspace: workspace,
         }))

@@ -305,13 +305,13 @@ fn sequence_width(flag: u8) -> usize {
 }
 
 fn columnar_entry_ranges(bytes: &[u8]) -> [Vec<Range<usize>>; 3] {
-    assert_eq!(&bytes[..8], b"CFASDL09");
-    assert_eq!(&bytes[128..136], b"CFASOF09");
+    assert_eq!(&bytes[..8], b"CFASDL10");
+    assert_eq!(&bytes[128..136], b"CFASOF10");
     let mut cursor = 136;
     let chunks = read_count(bytes, &mut cursor);
     let buckets = read_count(bytes, &mut cursor);
     read_count(bytes, &mut cursor);
-    cursor += 64;
+    cursor += 128;
     let owners = read_count(bytes, &mut cursor);
     for _ in 0..owners {
         let kind = bytes[cursor];
@@ -361,7 +361,7 @@ fn columnar_entry_ranges(bytes: &[u8]) -> [Vec<Range<usize>>; 3] {
 #[tokio::test]
 async fn test_asof_v3_restore_rejects_serialized_duplicates_and_noncanonical_order_atomically() {
     let original = populated_snapshot().await;
-    let bytes = original.segments["asof-log-v9-1-0-1"].bytes();
+    let bytes = original.segments["asof-log-v10-1-0-1"].bytes();
     let mut target = operator(10);
     seed_live_state(&mut target, &schema()).await;
     for (entries, message) in columnar_entry_ranges(bytes).into_iter().zip([
@@ -397,7 +397,7 @@ async fn test_asof_v3_restore_rejects_serialized_duplicates_and_noncanonical_ord
             frame["bytes"] = json!(replacement.bytes().len());
             damaged
                 .segments
-                .insert("asof-log-v9-1-0-1".into(), replacement);
+                .insert("asof-log-v10-1-0-1".into(), replacement);
             reject_without_replacing_state(
                 &mut target,
                 &damaged,

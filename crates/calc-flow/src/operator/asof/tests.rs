@@ -405,13 +405,13 @@ async fn new_checkpoint_uses_columnar_v6_and_restores_the_same_state_charge() {
         serde_json::json!(3)
     );
     for field in ["layout_version", "accounting_version"] {
-        assert_eq!(snapshot.inline_metadata[field], serde_json::json!(9));
+        assert_eq!(snapshot.inline_metadata[field], serde_json::json!(10));
     }
     let index = snapshot
         .segments
-        .get("asof-log-v9-1-0-1")
+        .get("asof-log-v10-1-0-1")
         .expect("columnar v6 index");
-    assert_eq!(&index.bytes()[..8], b"CFASDL09");
+    assert_eq!(&index.bytes()[..8], b"CFASDL10");
     let (mut restored, _, _) = prefix_fixture();
     restored.restore(&snapshot).unwrap();
     assert_eq!(restored.status.state_bytes, operator.status.state_bytes);
@@ -891,7 +891,7 @@ async fn admission_prepares_index_only_when_checkpoint_is_captured() {
     assert!(op.prepared.is_none(), "admission must defer index encoding");
     let charged = op.status.state_bytes;
     let snapshot = op.capture(Epoch::INITIAL).unwrap();
-    assert!(snapshot.segments.contains_key("asof-log-v9-1-0-1"));
+    assert!(snapshot.segments.contains_key("asof-log-v10-1-0-1"));
     assert!(op.status.state_bytes > charged);
     assert_log_funded(&op);
     assert!(!op.checkpoint_log.frames.is_empty());
@@ -1228,7 +1228,7 @@ async fn finalization_without_eviction_does_not_clone_retained_state() {
     let expected = op.prepare_checkpoint(&op.state, &cx).await.unwrap();
     let captured = op.capture(Epoch::INITIAL).unwrap();
     let frame = checkpoint::index_v3::log::chain::decode(
-        &captured.segments["asof-log-v9-1-0-1"],
+        &captured.segments["asof-log-v10-1-0-1"],
         &op.fingerprint,
     )
     .unwrap();
@@ -1247,7 +1247,7 @@ async fn finalized_prefixes_release_old_checkpoint_bytes_and_defer_new_encoding(
     op.process_data("left", left, &cx, &mut collector)
         .await
         .unwrap();
-    let committed = op.capture(Epoch::INITIAL).unwrap().segments["asof-log-v9-1-0-1"].bytes_arc();
+    let committed = op.capture(Epoch::INITIAL).unwrap().segments["asof-log-v10-1-0-1"].bytes_arc();
     let owners = Arc::strong_count(&committed);
     op.on_watermark(EventTime::from_micros(103), &cx, &mut collector)
         .await
@@ -1666,7 +1666,7 @@ async fn finalized_prefix_keeps_index_deferred_until_capture() {
         Some(checkpoint::v3_encoded_length(&op.state, &op.name).unwrap())
     );
     let snapshot = op.capture(Epoch::INITIAL).unwrap();
-    assert!(snapshot.segments.contains_key("asof-log-v9-1-0-1"));
+    assert!(snapshot.segments.contains_key("asof-log-v10-1-0-1"));
 }
 
 #[tokio::test]
@@ -1899,6 +1899,9 @@ async fn admit_repro_rows(rows: u64) -> StreamAsofJoinOperator {
 
     assert_eq!(operator.status.left.accepted_rows, rows);
     assert_eq!(operator.status.pending_left_rows, rows);
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop(cx);
+    drop(job);
     assert_eq!(operator.runtime.pool.reserved(), 0);
     operator
 }

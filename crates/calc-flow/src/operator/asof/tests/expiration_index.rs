@@ -16,7 +16,7 @@ async fn populated_current_snapshot() -> (StreamAsofJoinOperator, crate::Operato
     let snapshot = operator.capture(Epoch::INITIAL).unwrap();
     assert_eq!(
         snapshot.inline_metadata["layout_version"],
-        serde_json::json!(9)
+        serde_json::json!(10)
     );
     (operator, snapshot)
 }
@@ -156,7 +156,15 @@ async fn test_a03_expiration_index_keeps_live_capacity_funded() {
         .unwrap();
     let dictionary = operator.state.right.checkpoint_capacities()[0];
     let heaps = operator.state.right.heap_capacities();
-    let expected = dictionary * 16 + heaps.into_iter().sum::<usize>() * 16;
+    let expected = dictionary * 8
+        + operator
+            .state
+            .right
+            .shard_capacities()
+            .into_iter()
+            .sum::<usize>()
+            * 24
+        + heaps.into_iter().sum::<usize>() * 16;
     assert!(expected > 0);
     assert_eq!(
         operator.runtime.pool.reserved(),
@@ -269,18 +277,18 @@ async fn test_a03_expiration_index_captures_distinct_accounting_layout() {
     );
     assert_eq!(
         snapshot.inline_metadata["layout_version"],
-        serde_json::json!(9)
+        serde_json::json!(10)
     );
     assert_eq!(
         snapshot.inline_metadata["accounting_version"],
-        serde_json::json!(9)
+        serde_json::json!(10)
     );
     assert_eq!(
-        &snapshot.segments["asof-log-v9-1-0-1"].bytes()[..8],
-        b"CFASDL09"
+        &snapshot.segments["asof-log-v10-1-0-1"].bytes()[..8],
+        b"CFASDL10"
     );
     assert!(!snapshot.segments.contains_key("asof-index-v3"));
-    let bytes = &snapshot.segments["asof-log-v9-1-0-1"].bytes()[128..];
+    let bytes = &snapshot.segments["asof-log-v10-1-0-1"].bytes()[128..];
     let declared = [
         u64::from_le_bytes(bytes[72..80].try_into().unwrap()),
         u64::from_le_bytes(bytes[80..88].try_into().unwrap()),

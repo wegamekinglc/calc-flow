@@ -199,7 +199,7 @@ fn reserve(pool: &Arc<dyn MemoryPool>, bytes: u64, name: &str) -> Result<MemoryR
 }
 
 struct OwnedDelta {
-    capacities: [usize; 8],
+    capacities: [usize; 16],
     counts: [usize; 3],
     kinds: [super::super::state::SequenceKind; 2],
     changes: Vec<Change>,
@@ -751,7 +751,7 @@ impl StreamAsofJoinOperator {
         epoch: crate::Epoch,
     ) -> Result<crate::OperatorStateSnapshot> {
         if self.empty_row_log()? {
-            let mut inline_metadata = self.capture_metadata(epoch, 9)?;
+            let mut inline_metadata = self.capture_metadata(epoch, 10)?;
             if self.payload_projection.is_none() {
                 inline_metadata.remove("retained_payloads");
             }
@@ -941,7 +941,7 @@ impl StreamAsofJoinOperator {
         epoch: crate::Epoch,
         inventory: &Inventory,
     ) -> Result<crate::OperatorStateSnapshot> {
-        let mut inline_metadata = self.capture_metadata(epoch, 9)?;
+        let mut inline_metadata = self.capture_metadata(epoch, 10)?;
         let credit = log.credit.as_ref().expect("captured log credit");
         inline_metadata
             .get_mut("metrics")

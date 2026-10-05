@@ -26,7 +26,7 @@ async fn test_a03_a10_projected_restore_preserves_multiplicity_and_funding() {
     let snapshot = operator.capture(Epoch::INITIAL).unwrap();
     assert_eq!(
         snapshot.inline_metadata["layout_version"],
-        serde_json::json!(9)
+        serde_json::json!(10)
     );
     let (mut restored, _, _) = prefix_fixture();
     restored.set_output_projection(vec![2, 5, 5]).unwrap();
@@ -116,6 +116,9 @@ async fn test_a03_a10_zero_column_cancelled_prefix_recovers_exactly() {
     ));
     assert_eq!(operator.status.pending_left_rows, 2);
     assert_eq!(operator.next_output_sequence, 1);
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop(context);
+    drop(job);
     assert_eq!(
         operator.runtime.pool.reserved(),
         configured + operator.state.right.auxiliary_bytes()
@@ -147,6 +150,9 @@ async fn test_a03_a10_zero_column_cancelled_prefix_recovers_exactly() {
     assert_eq!(restored.status.emitted_left_rows, 3);
     assert_eq!(restored.status.matched_rows, 3);
     assert_eq!(restored.status.state_bytes, 0);
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop(context);
+    drop(job);
     assert_eq!(restored.runtime.pool.reserved(), restored_configured);
     let restored_pool = restored.runtime.pool.clone();
     drop(restored);
@@ -390,7 +396,7 @@ async fn test_cropped_dominance_only_progress_restores_typed_identity_and_comple
     let snapshot = operator.capture(Epoch::INITIAL).unwrap();
     assert_eq!(
         snapshot.inline_metadata["layout_version"],
-        serde_json::json!(9)
+        serde_json::json!(10)
     );
     assert_eq!(
         snapshot.inline_metadata["retained_payloads"]["columns"],
@@ -464,7 +470,7 @@ async fn assert_empty_terminal_wire_roundtrips(
     ]));
     assert_eq!(
         terminal.inline_metadata["layout_version"],
-        serde_json::json!(9)
+        serde_json::json!(10)
     );
     let wire = terminal.clone();
     let mut target = tiny_empty_operator();
@@ -489,11 +495,11 @@ async fn test_empty_default_checkpoint_keeps_tiny_budget_and_managed_progress() 
     let snapshot = source.capture(Epoch::INITIAL).unwrap();
     assert_eq!(
         snapshot.inline_metadata["layout_version"],
-        serde_json::json!(9)
+        serde_json::json!(10)
     );
     assert_eq!(
         snapshot.inline_metadata["accounting_version"],
-        serde_json::json!(9)
+        serde_json::json!(10)
     );
     assert!(!snapshot.inline_metadata.contains_key("retained_payloads"));
     assert!(snapshot.segments.is_empty());
@@ -618,7 +624,7 @@ async fn test_empty_checkpoint_preserves_history_and_configured_descriptor() {
         let snapshot = source.capture(Epoch::INITIAL).unwrap();
         assert_eq!(
             snapshot.inline_metadata["layout_version"],
-            serde_json::json!(9)
+            serde_json::json!(10)
         );
         assert_eq!(
             snapshot.inline_metadata.contains_key("retained_payloads"),
@@ -688,10 +694,13 @@ fn test_current_empty_wire_restore_needs_no_copy_reservation() {
         1 << 20,
     ));
     let wire = source.capture(Epoch::INITIAL).unwrap();
-    assert_eq!(wire.inline_metadata["layout_version"], serde_json::json!(9));
+    assert_eq!(
+        wire.inline_metadata["layout_version"],
+        serde_json::json!(10)
+    );
     assert_eq!(
         wire.inline_metadata["accounting_version"],
-        serde_json::json!(9)
+        serde_json::json!(10)
     );
     assert!(!wire.inline_metadata.contains_key("retained_payloads"));
     assert!(wire.segments.is_empty());

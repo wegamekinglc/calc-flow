@@ -12,6 +12,53 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 const ROWS: usize = 8_192;
 
 #[tokio::test]
+async fn right_bucket_storage_is_sharded_before_and_after_cold_restore() {
+    let mut operator = fixture();
+    let pool = operator.runtime.pool.clone();
+    let job = StreamJobContext::new(9, "asof", JsonMap::new(), None, CancellationToken::new());
+    let context = StreamOperatorContext::new(&job, "asof", None);
+    let mut output = EdgeCollector::new(operator.output_ports().to_vec());
+    operator
+        .process_data("right", input(&operator, 0), &context, &mut output)
+        .await
+        .unwrap();
+    let mut expected = [0; state::KEY_SHARDS];
+    for (_, key) in operator.state.right.indexed_keys() {
+        expected[state::key_shard(key)] += 1;
+    }
+    assert!(expected.iter().filter(|count| **count != 0).count() > 1);
+    assert_eq!(operator.state.right.storage_shard_counts(), expected);
+    operator.prepare_checkpoint_async(&context).await.unwrap();
+    let snapshot = operator.checkpoint(Epoch::INITIAL).unwrap();
+    let mut restored = fixture();
+    let restored_pool = restored.runtime.pool.clone();
+    restored.restore(&snapshot).unwrap();
+    assert_eq!(restored.state.right.storage_shard_counts(), expected);
+    assert_eq!(restored.status, operator.status);
+    for candidate in [&mut operator, &mut restored] {
+        candidate
+            .process_data("left", input(candidate, 0), &context, &mut output)
+            .await
+            .unwrap();
+        candidate.on_end(&context, &mut output).await.unwrap();
+        assert_eq!(
+            matches(&mut output, &candidate.schemas[2]),
+            (0..ROWS)
+                .map(|row| {
+                    let sequence = i64::try_from(row).unwrap();
+                    (sequence, sequence)
+                })
+                .collect::<Vec<_>>()
+        );
+    }
+    drop((operator, restored, snapshot, output, context));
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop(job);
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(restored_pool.reserved(), 0);
+}
+
+#[tokio::test]
 async fn parallel_key_routes_do_not_hash_each_row() {
     let mut operator = fixture();
     let pool = operator.runtime.pool.clone();

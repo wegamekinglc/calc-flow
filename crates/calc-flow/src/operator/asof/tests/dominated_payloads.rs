@@ -254,13 +254,13 @@ async fn dominated_payload_checkpoint_pays_for_current_layout_six() {
     );
     assert_eq!(
         snapshot.inline_metadata["layout_version"],
-        serde_json::json!(9)
+        serde_json::json!(10)
     );
     assert_eq!(
         snapshot.inline_metadata["accounting_version"],
-        serde_json::json!(9)
+        serde_json::json!(10)
     );
-    assert!(snapshot.segments.contains_key("asof-log-v9-1-0-1"));
+    assert!(snapshot.segments.contains_key("asof-log-v10-1-0-1"));
     assert_log_funded(&operator);
 }
 

@@ -383,16 +383,16 @@ async fn capture_uses_layout_six_and_exact_physical_descriptor() {
     let snapshot = operator.capture(Epoch::INITIAL).unwrap();
     assert_eq!(snapshot.inline_metadata["fingerprint"], json!(fingerprint));
     assert_eq!(snapshot.inline_metadata["state_version"], json!(3));
-    assert_eq!(snapshot.inline_metadata["layout_version"], json!(9));
-    assert_eq!(snapshot.inline_metadata["accounting_version"], json!(9));
+    assert_eq!(snapshot.inline_metadata["layout_version"], json!(10));
+    assert_eq!(snapshot.inline_metadata["accounting_version"], json!(10));
     assert_eq!(
         snapshot.inline_metadata.get("retained_payloads"),
         Some(&descriptor(&operator, [&[0, 1, 2, 3], &[0, 1, 2, 3]]))
     );
     assert!(
-        snapshot.segments["asof-log-v9-1-0-1"]
+        snapshot.segments["asof-log-v10-1-0-1"]
             .bytes()
-            .starts_with(b"CFASDL09")
+            .starts_with(b"CFASDL10")
     );
 }
 
@@ -442,7 +442,7 @@ async fn same_retained_set_accepts_different_output_order_and_repeats() {
 async fn wrong_missing_or_mixed_physical_descriptor_refuses_before_install() {
     let (mut source, _, _) = admitted(Some(NARROW)).await;
     let snapshot = source.capture(Epoch::INITIAL).unwrap();
-    assert_eq!(snapshot.inline_metadata["layout_version"], json!(9));
+    assert_eq!(snapshot.inline_metadata["layout_version"], json!(10));
     let good = descriptor(&source, [&[0, 1, 2, 3], &[0, 1, 2, 3]]);
     assert_eq!(snapshot.inline_metadata["retained_payloads"], good);
     let mut bad = Vec::new();
@@ -476,7 +476,7 @@ async fn wrong_missing_or_mixed_physical_descriptor_refuses_before_install() {
 async fn physical_payload_type_order_and_identity_columns_are_bound_to_descriptor() {
     let (mut source, _, _) = admitted(Some(NARROW)).await;
     let snapshot = source.capture(Epoch::INITIAL).unwrap();
-    assert_eq!(snapshot.inline_metadata["layout_version"], json!(9));
+    assert_eq!(snapshot.inline_metadata["layout_version"], json!(10));
     let (key, (payload, _)) = source.state.batches.iter().next().unwrap();
     let record = &payload.record;
     let mut fields = record
@@ -526,7 +526,7 @@ async fn physical_payload_type_order_and_identity_columns_are_bound_to_descripto
 async fn current_full_snapshot_preserves_gauges_metadata_and_complete_output() {
     let (mut source, _, _) = admitted(None).await;
     let snapshot = source.capture(Epoch::INITIAL).unwrap();
-    assert_eq!(snapshot.inline_metadata["layout_version"], json!(9));
+    assert_eq!(snapshot.inline_metadata["layout_version"], json!(10));
     let mut target = operator(None);
     target.restore(&snapshot).unwrap();
     assert_eq!(target.status.state_rows, 6);

@@ -3,7 +3,7 @@ use datafusion::execution::memory_pool::MemoryReservation;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::Arc};
 
-const MAGIC: &[u8; 8] = b"CFASDL09";
+const MAGIC: &[u8; 8] = b"CFASDL10";
 pub(in crate::operator::asof) const HEADER_BYTES: usize = 128;
 pub(in crate::operator::asof) const MAX_DELTAS: usize = 32;
 
@@ -26,7 +26,7 @@ pub(in crate::operator::asof) struct Descriptor {
 impl Descriptor {
     pub fn name(&self) -> String {
         format!(
-            "asof-log-v9-{}-{}-{}",
+            "asof-log-v10-{}-{}-{}",
             self.generation, self.ordinal, self.epoch
         )
     }

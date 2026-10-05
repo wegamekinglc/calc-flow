@@ -18,7 +18,7 @@ struct Bucket {
 }
 
 pub(in crate::operator::asof) struct Index {
-    capacities: [usize; 8],
+    capacities: [usize; 16],
     kinds: [SequenceKind; 2],
     left_rows: usize,
     left: Vec<LeftChunk>,
@@ -97,8 +97,6 @@ impl Index {
         if !state.left.legacy.is_empty() {
             return Err(mismatch("ASOF legacy rows must migrate before v3 capture"));
         }
-        let pool = state.batches.backing_buckets();
-        let right_capacity = state.right.checkpoint_capacities();
         let left = capture_left_chunks(state, context).await?;
         let right = capture_right_buckets(state, left.len(), context).await?;
         let mut count = left.len() + right.len();
@@ -110,16 +108,7 @@ impl Index {
         }
         context.check_cancelled()?;
         Ok(Self {
-            capacities: [
-                pool.0,
-                pool.1,
-                right_capacity[0],
-                right_capacity[1],
-                state.left.chunk_capacity(),
-                state.right.heap_capacities()[0],
-                state.right.heap_capacities()[1],
-                state.right.heap_capacities()[2],
-            ],
+            capacities: super::log::model::capacities(state),
             kinds: state.sequence_kinds,
             left_rows: state.left.len(),
             left,

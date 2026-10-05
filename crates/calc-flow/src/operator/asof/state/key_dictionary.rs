@@ -10,6 +10,7 @@ use std::ops::{Deref, DerefMut};
 use std::{hash::BuildHasher, sync::Arc};
 
 mod compaction;
+mod entries;
 mod expiration;
 mod funding;
 pub(in super::super) use compaction::PreparedCompaction;
@@ -29,7 +30,7 @@ const _: () = assert!(size_of::<Entry>() == 48);
 
 pub(in super::super) struct RightState {
     pub(in super::super) buckets: HashTable<u32>,
-    entries: Vec<Entry>,
+    entries: entries::Entries,
     hasher: RandomState,
     payloads: Heap,
     identities: Heap,
@@ -42,7 +43,7 @@ impl Default for RightState {
     fn default() -> Self {
         Self {
             buckets: HashTable::new(),
-            entries: Vec::new(),
+            entries: entries::Entries::default(),
             hasher: RandomState::with_seed(ahash::RandomState::new().hash_one(0_u64)),
             payloads: Heap::new(Kind::Payload, 0),
             identities: Heap::new(Kind::Identity, 0),
@@ -54,6 +55,11 @@ impl Default for RightState {
 }
 
 impl RightState {
+    #[cfg(test)]
+    pub fn storage_shard_counts(&self) -> [usize; super::KEY_SHARDS] {
+        self.entries.counts()
+    }
+
     pub fn checkpoint_capacities(&self) -> [usize; 2] {
         [
             self.entries.capacity(),
@@ -61,9 +67,25 @@ impl RightState {
         ]
     }
 
-    pub fn with_index_capacities(entries: usize, buckets: usize, heaps: [usize; 3]) -> Self {
+    pub fn shard_capacities(&self) -> [usize; super::KEY_SHARDS] {
+        self.entries.capacities().shards
+    }
+
+    pub fn can_insert_restored(&self, key: &Encoding) -> bool {
+        self.entries.can_insert(key)
+    }
+
+    pub fn with_index_capacities(
+        entries: usize,
+        buckets: usize,
+        heaps: [usize; 3],
+        shards: [usize; super::KEY_SHARDS],
+    ) -> Self {
         Self {
-            entries: Vec::with_capacity(entries),
+            entries: entries::Entries::with_capacities(entries::Capacities {
+                directory: entries,
+                shards,
+            }),
             payloads: Heap::new(Kind::Payload, heaps[0]),
             identities: Heap::new(Kind::Identity, heaps[1]),
             dominance: Heap::new(Kind::Dominance, heaps[2]),
@@ -117,7 +139,7 @@ impl RightState {
     }
 
     pub fn container_bytes(&self) -> u64 {
-        (self.entries.capacity() * size_of::<Entry>()
+        (self.entries.capacities().metadata_bytes()
             + self.payloads.allocation_bytes()
             + self.identities.allocation_bytes()
             + self.dominance.allocation_bytes()
@@ -168,10 +190,13 @@ impl RightState {
         let (capacity, replacement) = self.admission_capacities(additions);
         let previous_buckets = super::payload::backing_buckets(&self.buckets);
         let buckets = replacement.unwrap_or(previous_buckets);
-        let mut bytes = ((capacity - self.entries.capacity()) * size_of::<Entry>()
-            + capacity.saturating_sub(self.payloads.capacity()) * 16
-            + capacity.saturating_sub(self.identities.capacity()) * 16
-            + capacity.saturating_sub(self.dominance.capacity()) * 16
+        let mut bytes = (capacity.metadata_bytes() - self.entries.capacities().metadata_bytes()
+            + capacity.directory.saturating_sub(self.payloads.capacity()) * 16
+            + capacity
+                .directory
+                .saturating_sub(self.identities.capacity())
+                * 16
+            + capacity.directory.saturating_sub(self.dominance.capacity()) * 16
             + hash_allocation(buckets)
             - hash_allocation(previous_buckets)
             + new * (size_of::<RightBucket>() + 2 * size_of::<usize>()))
@@ -184,22 +209,20 @@ impl RightState {
         bytes
     }
 
-    fn admission_capacities(&self, additions: &[(Encoding, usize)]) -> (usize, Option<usize>) {
-        let new = additions
-            .iter()
-            .filter(|(key, _)| !self.contains_key(key))
-            .count();
-        let required = self.entries.len() + new;
-        let mut capacity = self.entries.capacity();
-        if capacity == 0 && new > 0 {
-            capacity = 1;
+    fn admission_capacities(
+        &self,
+        additions: &[(Encoding, usize)],
+    ) -> (entries::Capacities, Option<usize>) {
+        let mut new = [0; super::KEY_SHARDS];
+        for (key, _) in additions {
+            if !self.contains_key(key) {
+                new[super::key_shard(key)] += 1;
+            }
         }
-        while capacity < required {
-            capacity = (capacity * 2).max(4);
-        }
+        let required = self.entries.len() + new.iter().sum::<usize>();
         let backing =
             (self.buckets.capacity() < required).then(|| self.replacement_backing(required));
-        (capacity, backing)
+        (self.entries.projected(new), backing)
     }
 
     fn replacement_backing(&self, required: usize) -> usize {
@@ -480,10 +503,6 @@ impl RightState {
 
     fn insert_unindexed(&mut self, hash: u64, key: Encoding, bucket: RightBucket) -> usize {
         let id = u32::try_from(self.entries.len()).expect("preflighted ASOF key domain");
-        if self.entries.capacity() == 0 {
-            // Vec's four-entry minimum is unnecessary for a sparse dictionary.
-            self.entries = Vec::with_capacity(1);
-        }
         self.bucket_bytes += bucket.metadata_bytes();
         self.entries.push(Entry {
             key,
@@ -570,7 +589,7 @@ pub(in super::super) fn validate_key_count(count: u64, name: &str) -> Result<()>
     Ok(())
 }
 
-pub(in super::super) struct RightStateIter<'a>(std::slice::Iter<'a, Entry>);
+pub(in super::super) struct RightStateIter<'a>(entries::Iter<'a>);
 
 impl<'a> Iterator for RightStateIter<'a> {
     type Item = (&'a Encoding, &'a RightBucket);
@@ -594,6 +613,75 @@ impl<'a> IntoIterator for &'a RightState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn growth_copies_only_the_affected_storage_shard_and_refunds_on_drop() {
+        use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
+
+        let keys = (0_u32..100)
+            .map(|key| Encoding::from_slice(&key.to_le_bytes()))
+            .collect::<Vec<_>>();
+        let first = &keys[0];
+        let same = keys
+            .iter()
+            .skip(1)
+            .find(|key| super::super::key_shard(key) == super::super::key_shard(first))
+            .unwrap();
+        let other = keys
+            .iter()
+            .find(|key| super::super::key_shard(key) != super::super::key_shard(first))
+            .unwrap();
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+        let mut state = RightState::default();
+        state.insert(first.clone(), RightBucket::default());
+        state.insert(other.clone(), RightBucket::default());
+        state
+            .prepare_storage(&[], &pool, "asof")
+            .unwrap()
+            .install(&mut state);
+        let before = pool.reserved();
+        let growing = state.entries[0].bucket.clone();
+        let untouched = state.entries[1].bucket.clone();
+        let prepared = state
+            .prepare_storage(&[(same.clone(), 1)], &pool, "asof")
+            .unwrap();
+        assert_eq!(Arc::strong_count(&growing), 3);
+        assert_eq!(Arc::strong_count(&untouched), 2);
+        drop(prepared);
+        assert_eq!(Arc::strong_count(&growing), 2);
+        assert_eq!(pool.reserved(), before);
+        state
+            .prepare_storage(&[(same.clone(), 1)], &pool, "asof")
+            .unwrap()
+            .install(&mut state);
+        state.insert(same.clone(), RightBucket::default());
+        assert_eq!(state.len(), 3);
+        assert!(Arc::ptr_eq(&untouched, &state.entries[1].bucket));
+        assert_eq!(pool.reserved(), state.auxiliary_bytes());
+        drop(state);
+        assert_eq!(pool.reserved(), 0);
+    }
+
+    #[test]
+    fn removal_preserves_global_handles_across_storage_shards() {
+        let mut state = RightState::default();
+        let mut keys = (0_u32..64)
+            .map(|key| Encoding::from_slice(&key.to_le_bytes()))
+            .collect::<Vec<_>>();
+        for key in &keys {
+            state.insert_unique(0, key.clone(), RightBucket::default());
+        }
+        while !keys.is_empty() {
+            let id = keys.len() / 3;
+            state.remove(u32::try_from(id).unwrap());
+            let removed = keys.swap_remove(id);
+            assert_eq!(state.find(0, removed.as_slice()), None);
+            for (id, key) in keys.iter().enumerate() {
+                assert_eq!(state.find(0, key.as_slice()), Some(id));
+                assert_eq!(state.entries[id].key, *key);
+            }
+        }
+    }
 
     #[test]
     fn test_a03_tombstone_rehash_cost_is_amortized_under_churn() {
