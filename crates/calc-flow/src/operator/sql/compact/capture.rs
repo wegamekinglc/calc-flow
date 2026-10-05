@@ -13,7 +13,9 @@ use super::{
     log::{GroupLog, LogDescriptor, Mode},
     storage::CompactSqlState,
 };
-use crate::{Batch, BatchMetadata, OperatorStateSnapshot, Result, StreamOperatorContext};
+use crate::{
+    Batch, BatchMetadata, DataFusionRuntime, OperatorStateSnapshot, Result, StreamOperatorContext,
+};
 
 pub(in crate::operator::sql) struct CompactCapture {
     pub snapshot: OperatorStateSnapshot,
@@ -118,6 +120,22 @@ pub(in crate::operator::sql) fn prepare(
     }
     let runtime = operator.retention_runtime()?;
     let reservation = Arc::new(capture_credit(operator, frame_count(state, native))?);
+    let (parts, _descriptor) =
+        sync_capture_parts(operator, state, native, runtime, reservation, check)?;
+    finish(operator, state, parts, check)
+}
+
+fn sync_capture_parts(
+    operator: &SqlOperator,
+    state: &CompactSqlState,
+    native: &IncrementalSql,
+    runtime: &DataFusionRuntime,
+    reservation: Arc<MemoryReservation>,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<(
+    CaptureParts,
+    incremental::compact_state::NativeStateDescriptor,
+)> {
     let (descriptor, group_state) = state_segment(operator, state, native, check)?;
     let identity = identity::build(
         operator,
@@ -132,20 +150,16 @@ pub(in crate::operator::sql) fn prepare(
         metadata::reserve(runtime, &state.metadata, &operator.name)?,
         check,
     )?;
-    finish(
-        operator,
-        state,
-        CaptureParts {
-            identity,
-            group_state,
-            metadata,
-            groups: native.group_count(),
-            policy: native.checkpoint_policy(),
-            coalescer: native.capture_coalescer(&operator.name, check)?,
-            reservation,
-        },
-        check,
-    )
+    let parts = CaptureParts {
+        identity,
+        group_state,
+        metadata,
+        groups: native.group_count(),
+        policy: native.checkpoint_policy(),
+        coalescer: native.capture_coalescer(&operator.name, check)?,
+        reservation,
+    };
+    Ok((parts, descriptor))
 }
 
 pub(in crate::operator::sql) async fn prepare_async(
@@ -159,25 +173,27 @@ pub(in crate::operator::sql) async fn prepare_async(
         return Ok(capture);
     }
     let reservation = Arc::new(capture_credit(operator, frame_count(state, native))?);
+    let input = prepare_async_input(operator, state, native, context).await?;
+    finish_async_capture(operator, state, native, input, reservation, context).await
+}
+
+struct AsyncCaptureInput {
+    input: Option<SqlCheckpointInput>,
+    metadata: Option<(BatchMetadata, MemoryReservation)>,
+    identity: identity::PaidIdentity,
+    descriptor: Option<incremental::compact_state::NativeStateDescriptor>,
+    mode: Mode,
+    groups: usize,
+}
+
+async fn prepare_async_input(
+    operator: &SqlOperator,
+    state: &CompactSqlState,
+    native: &IncrementalSql,
+    context: &StreamOperatorContext<'_>,
+) -> Result<AsyncCaptureInput> {
     let mode = mode(state, native);
-    let export = match mode {
-        Mode::Carry => None,
-        Mode::Full => Some(
-            native
-                .export_native_state_async(&operator.name, || context.check_cancelled())
-                .await?,
-        ),
-        Mode::Delta => Some(
-            native
-                .export_dirty_state_async(&operator.name, || context.check_cancelled())
-                .await?,
-        ),
-    };
-    let descriptor = if export.is_none() {
-        Some(native.native_descriptor(&operator.name)?)
-    } else {
-        None
-    };
+    let (export, descriptor) = async_state_export(native, mode, &operator.name, context).await?;
     let description = export.as_ref().map_or_else(
         || descriptor.as_ref().expect("reused native descriptor"),
         |export| &export.descriptor,
@@ -197,17 +213,35 @@ pub(in crate::operator::sql) async fn prepare_async(
     let runtime = operator.retention_runtime()?;
     let metadata_fee = metadata::reserve(runtime, &state.metadata, &operator.name)?;
     let metadata = Some((state.metadata.clone(), metadata_fee));
+    Ok(AsyncCaptureInput {
+        input,
+        metadata,
+        identity,
+        descriptor,
+        mode,
+        groups,
+    })
+}
+
+async fn finish_async_capture(
+    operator: &SqlOperator,
+    state: &CompactSqlState,
+    native: &IncrementalSql,
+    input: AsyncCaptureInput,
+    reservation: Arc<MemoryReservation>,
+    context: &StreamOperatorContext<'_>,
+) -> Result<Arc<CompactCapture>> {
     context.check_cancelled()?;
     let attempt = tokio_util::sync::CancellationToken::new();
     let _cancel_on_drop = attempt.clone().drop_guard();
     let (segment, metadata, export) =
-        encode_sql_state_async(input, metadata, context.job().clone(), attempt).await?;
+        encode_sql_state_async(input.input, input.metadata, context.job().clone(), attempt).await?;
     context.check_cancelled()?;
     let group_state = GroupLog::finish(
         state.capture.as_ref().map(|capture| &capture.group_state),
-        mode,
+        input.mode,
         segment.as_ref().map(|segment| segment.segment.clone()),
-        groups,
+        input.groups,
         native.checkpoint_changes(),
         state.ledger,
     )?;
@@ -216,10 +250,10 @@ pub(in crate::operator::sql) async fn prepare_async(
         operator,
         state,
         CaptureParts {
-            identity,
+            identity: input.identity,
             group_state,
             metadata,
-            groups,
+            groups: input.groups,
             policy: native.checkpoint_policy(),
             coalescer: native
                 .capture_coalescer_async(&operator.name, context)
@@ -229,8 +263,38 @@ pub(in crate::operator::sql) async fn prepare_async(
         &|| context.check_cancelled(),
     )?;
     drop(export);
-    drop(descriptor);
+    drop(input.descriptor);
     Ok(capture)
+}
+
+async fn async_state_export(
+    native: &IncrementalSql,
+    mode: Mode,
+    name: &str,
+    context: &StreamOperatorContext<'_>,
+) -> Result<(
+    Option<incremental::compact_state::PaidNativeStateRecords>,
+    Option<incremental::compact_state::NativeStateDescriptor>,
+)> {
+    let export = match mode {
+        Mode::Carry => None,
+        Mode::Full => Some(
+            native
+                .export_native_state_async(name, || context.check_cancelled())
+                .await?,
+        ),
+        Mode::Delta => Some(
+            native
+                .export_dirty_state_async(name, || context.check_cancelled())
+                .await?,
+        ),
+    };
+    let descriptor = if export.is_none() {
+        Some(native.native_descriptor(name)?)
+    } else {
+        None
+    };
+    Ok((export, descriptor))
 }
 
 async fn native_checkpoint_input(
@@ -353,11 +417,38 @@ fn state_segment(
             capture.group_state.clone(),
         ));
     }
-    let export = match mode {
-        Mode::Delta => native.export_dirty_state(&operator.name, check)?,
-        Mode::Full => native.export_native_state(&operator.name, check)?,
+    let export = sync_state_export(native, mode, &operator.name, check)?;
+    let encoded = encode_native_segment(operator, &export, check)?;
+    let segment = encoded.segment.clone();
+    let log = GroupLog::finish(
+        state.capture.as_ref().map(|capture| &capture.group_state),
+        mode,
+        Some(segment),
+        native.group_count(),
+        native.checkpoint_changes(),
+        state.ledger,
+    )?;
+    Ok((export.into_descriptor(), log))
+}
+
+fn sync_state_export(
+    native: &IncrementalSql,
+    mode: Mode,
+    name: &str,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<incremental::compact_state::PaidNativeStateRecords> {
+    match mode {
+        Mode::Delta => native.export_dirty_state(name, check),
+        Mode::Full => native.export_native_state(name, check),
         Mode::Carry => unreachable!(),
-    };
+    }
+}
+
+fn encode_native_segment(
+    operator: &SqlOperator,
+    export: &incremental::compact_state::PaidNativeStateRecords,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<Arc<ipc::SqlInputSegment>> {
     let runtime = operator.retention_runtime()?;
     let shell = record_copy_reservation(
         runtime,
@@ -380,18 +471,9 @@ fn state_segment(
             .incremental_reservation(&operator.name),
         check,
     )?;
-    let segment = encoded.segment.clone();
     drop(wire);
     drop(shell);
-    let log = GroupLog::finish(
-        state.capture.as_ref().map(|capture| &capture.group_state),
-        mode,
-        Some(segment),
-        native.group_count(),
-        native.checkpoint_changes(),
-        state.ledger,
-    )?;
-    Ok((export.into_descriptor(), log))
+    Ok(encoded)
 }
 
 fn capture_credit(operator: &SqlOperator, frames: usize) -> Result<MemoryReservation> {
