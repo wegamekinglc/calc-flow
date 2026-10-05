@@ -89,7 +89,8 @@ impl ColumnProjection {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        Batch::table(records, batch.metadata().clone()).map(Some)
+        Batch::table(records, batch.metadata().clone())
+            .map(|projected| Some(projected.with_source_cursor(batch.source_cursor())))
     }
 }
 

@@ -1,5 +1,7 @@
 use super::*;
 
+mod projection;
+
 pub(super) async fn configure(
     checkpoint: Option<&OpenedCheckpointRuntime>,
     sources: &mut BTreeMap<String, SourceBinding>,
@@ -36,11 +38,14 @@ pub(super) async fn configure(
             }
         }
     }
-    for node in &mut plan.nodes {
-        let crate::pipeline::CompiledStreamOperator::StreamAsofJoin(operator) = &mut node.operator
-        else {
+    let mut configured = BTreeMap::new();
+    for node in &plan.nodes {
+        if !matches!(
+            node.operator,
+            crate::pipeline::CompiledStreamOperator::StreamAsofJoin(_)
+        ) {
             continue;
-        };
+        }
         let selected = checkpoint
             .and_then(|checkpoint| checkpoint.selected.as_ref())
             .and_then(|selected| selected.manifest.operators().get(node.operator_id.as_str()));
@@ -48,23 +53,64 @@ pub(super) async fn configure(
             continue;
         }
         let bindings = ["left", "right"].map(|port| {
-            let route = plan
-                .source_routes
-                .values()
-                .find(|route| route.target.node_id == node.node_id && route.target.port == port)?;
-            let source = sources.get(&route.binding_id)?;
+            let (binding, steps) = replay_path(plan, &node.node_id, port)?;
+            let source = sources.get(&binding)?;
             Some((
-                route.binding_id.clone(),
+                binding,
                 source.history_context()?,
-                source.history_replay_factory()?,
+                projection::factory(source.history_replay_factory()?, steps),
             ))
         });
         let [Some(left), Some(right)] = bindings else {
             continue;
         };
-        operator.configure_source_replay([left.0, right.0], [left.1, right.1], [left.2, right.2]);
+        configured.insert(node.node_id.clone(), [left, right]);
+    }
+    for node in &mut plan.nodes {
+        if let crate::pipeline::CompiledStreamOperator::StreamAsofJoin(operator) =
+            &mut node.operator
+            && let Some([left, right]) = configured.remove(&node.node_id)
+        {
+            operator.configure_source_replay(
+                [left.0, right.0],
+                [left.1, right.1],
+                [left.2, right.2],
+            );
+        }
     }
     Ok(())
+}
+
+fn replay_path(
+    plan: &StreamRuntimePlanParts,
+    node_id: &str,
+    ingress: &str,
+) -> Option<(String, Vec<crate::ExpressionOperator>)> {
+    let mut target = (node_id, ingress);
+    let mut steps = Vec::new();
+    for _ in 0..=plan.nodes.len() {
+        let node = plan.nodes.iter().find(|node| node.node_id == target.0)?;
+        let edge = plan.edges.get(node.ingress_edges.get(target.1)?)?;
+        match &edge.producer {
+            crate::pipeline::RuntimeProducer::Source { binding_id } => {
+                steps.reverse();
+                return Some((binding_id.clone(), steps));
+            }
+            crate::pipeline::RuntimeProducer::Node { node_id, port } => {
+                if port != "output" {
+                    return None;
+                }
+                let node = plan.nodes.iter().find(|node| node.node_id == *node_id)?;
+                let crate::pipeline::CompiledStreamOperator::Expression(operator) = &node.operator
+                else {
+                    return None;
+                };
+                steps.push(operator.source_replay_projection()?);
+                target = (node.node_id.as_str(), "input");
+            }
+        }
+    }
+    None
 }
 
 #[derive(Default)]

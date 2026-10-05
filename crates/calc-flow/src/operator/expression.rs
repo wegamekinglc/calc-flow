@@ -178,6 +178,36 @@ impl ExpressionOperator {
             .map(|(indices, _)| indices)
     }
 
+    pub(crate) fn source_replay_projection(&self) -> Option<Self> {
+        let input = self.input_ports[0].schema()?;
+        if !self.is_exact_column_projection(input, self.output_ports[0].schema()) {
+            return None;
+        }
+        let (_, schema) = self.column_projection.as_ref()?.schema(input)?;
+        let output = Port::with_schema_ref(
+            "output",
+            crate::BatchKind::Table,
+            self.output_ports[0].required(),
+            Some(schema),
+        )
+        .ok()?;
+        self.clone()
+            .with_ports(self.input_ports[0].clone(), output)
+            .ok()
+    }
+
+    pub(crate) fn project_replay_batch(&self, batch: &Batch) -> Result<Batch> {
+        self.input_ports[0].validate(batch, &format!("{}.replay.input", self.name))?;
+        self.column_projection
+            .as_ref()
+            .map(|projection| projection.apply(batch, &self.name))
+            .transpose()?
+            .flatten()
+            .ok_or_else(|| CalcFlowError::CheckpointMismatch {
+                message: format!("{}: source replay projection differs", self.name),
+            })
+    }
+
     pub(crate) fn set_projected_stream_input(&mut self, schema: SchemaRef) -> Result<()> {
         self.input_ports[0] =
             Port::with_schema_ref("input", crate::BatchKind::Table, true, Some(schema))?;
@@ -411,6 +441,131 @@ mod tests {
             BatchMetadata::new("quotes", 7, BTreeMap::new()).unwrap(),
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn exact_projection_preserves_shared_source_cursor() {
+        let cursor = Arc::new(crate::Cursor::new("quotes", vec![1], JsonMap::new()).unwrap());
+        let input = projection_input().with_source_cursor(Some(cursor.clone()));
+        let mut operator = ExpressionOperator::new(
+            "select",
+            "",
+            vec!["symbol AS ticker".into()],
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+        let projected = operator.process_standalone(input.clone()).await.unwrap();
+        assert!(
+            projected
+                .source_cursor()
+                .is_some_and(|actual| Arc::ptr_eq(&actual, &cursor))
+        );
+        assert_eq!(projected.num_rows(), input.num_rows());
+        assert_eq!(projected.metadata(), input.metadata());
+        assert!(Arc::ptr_eq(&input.source_cursor().unwrap(), &cursor));
+    }
+
+    #[test]
+    fn replay_projection_keeps_exact_schema_buffers_and_empty_cursors() {
+        let cursor = Arc::new(crate::Cursor::new("quotes", vec![7], JsonMap::new()).unwrap());
+        let input = projection_input().with_source_cursor(Some(cursor.clone()));
+        let schema = input.table_payload().unwrap().schema().clone();
+        let operator = ExpressionOperator::new(
+            "replay",
+            "",
+            vec!["symbol AS ticker".into(), r#""Price" AS last"#.into()],
+            None,
+            vec![],
+        )
+        .unwrap()
+        .with_ports(
+            Port::with_schema_ref("input", crate::BatchKind::Table, true, Some(schema.clone()))
+                .unwrap(),
+            table_port("output").unwrap(),
+        )
+        .unwrap();
+        let replay = operator.source_replay_projection().unwrap();
+        for input in [
+            input.clone(),
+            Batch::table(
+                vec![RecordBatch::new_empty(schema.clone())],
+                input.metadata().clone(),
+            )
+            .unwrap()
+            .with_source_cursor(Some(cursor.clone())),
+        ] {
+            let output = replay.project_replay_batch(&input).unwrap();
+            assert_eq!(output.num_rows(), input.num_rows());
+            assert_eq!(output.metadata(), input.metadata());
+            assert!(Arc::ptr_eq(&output.source_cursor().unwrap(), &cursor));
+            let record = &output.table_payload().unwrap().batches()[0];
+            let original = &input.table_payload().unwrap().batches()[0];
+            assert_eq!(Some(record.schema_ref()), replay.output_ports()[0].schema());
+            assert!(Arc::ptr_eq(record.column(0), original.column(1)));
+            assert!(Arc::ptr_eq(record.column(1), original.column(0)));
+            assert!(!replay.stream_runtime_initialized());
+        }
+        let wrong = Batch::table(
+            vec![RecordBatch::new_empty(Arc::new(Schema::empty()))],
+            input.metadata().clone(),
+        )
+        .unwrap();
+        assert!(replay.project_replay_batch(&wrong).is_err());
+    }
+
+    #[test]
+    fn replay_projection_rejects_unproven_declarations() {
+        let schema = projection_input().table_payload().unwrap().schema().clone();
+        let plain =
+            ExpressionOperator::new("replay", "", vec!["symbol".into()], None, vec![]).unwrap();
+        assert!(plain.source_replay_projection().is_none());
+        let with_input = |operator: ExpressionOperator| {
+            operator
+                .with_ports(
+                    Port::with_schema_ref(
+                        "input",
+                        crate::BatchKind::Table,
+                        true,
+                        Some(schema.clone()),
+                    )
+                    .unwrap(),
+                    table_port("output").unwrap(),
+                )
+                .unwrap()
+        };
+        for (select, filter) in [
+            (vec!["length(symbol) AS len".into()], None),
+            (vec!["symbol".into()], Some("symbol = 'A'".into())),
+            (vec!["missing".into()], None),
+        ] {
+            let operator =
+                with_input(ExpressionOperator::new("replay", "", select, filter, vec![]).unwrap());
+            assert!(operator.source_replay_projection().is_none());
+        }
+        let exact = with_input(plain);
+        assert!(exact.source_replay_projection().is_some());
+        let incompatible = exact
+            .clone()
+            .with_ports(
+                exact.input_ports[0].clone(),
+                Port::with_schema_ref("output", crate::BatchKind::Table, true, Some(schema))
+                    .unwrap(),
+            )
+            .unwrap();
+        assert!(incompatible.source_replay_projection().is_none());
+        let udf =
+            UdfReference::new("test", "custom", "1", crate::UdfKind::DataFusionScalar).unwrap();
+        let mut declared = exact.clone();
+        declared.udfs.push(udf.clone());
+        assert!(declared.source_replay_projection().is_none());
+        let mut selected = exact;
+        selected.set_stream_resources(
+            DataFusionConfig::default(),
+            crate::UdfRegistry::new().snapshot(),
+            vec![udf],
+        );
+        assert!(selected.source_replay_projection().is_none());
     }
 
     #[tokio::test]

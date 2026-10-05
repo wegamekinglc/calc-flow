@@ -2,6 +2,7 @@
 
 use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
 
+use arrow::datatypes::Schema;
 use async_trait::async_trait;
 use calc_flow::{
     ArrowFieldSpec, AsofJoinSide, AsofStateLimits, CheckpointManifest, Cursor, JobState,
@@ -147,16 +148,33 @@ fn file_source(path: &Path, max_batch_rows: usize) -> FrozenFileSource {
     FrozenFileSource::new(FileSourceConfig::from_options(&options).unwrap()).unwrap()
 }
 
-fn plan(left: &FrozenFileSource, right: &FrozenFileSource) -> StreamExecutionPlan {
+fn plan_with_projection(
+    left: &FrozenFileSource,
+    right: &FrozenFileSource,
+    projection: ProjectionMode,
+) -> StreamExecutionPlan {
     let exact = |source: &FrozenFileSource| match source.capabilities().schema {
         SourceSchema::Exact(schema) => schema,
         SourceSchema::DynamicOrUnknown => panic!("file replay requires exact schemas"),
     };
+    let projected_left = projection != ProjectionMode::None;
+    let root_input = exact(left);
+    let left_input = if projection == ProjectionMode::ReorderedAlias {
+        Arc::new(root_input.project(&[3, 2, 1, 0]).unwrap())
+    } else {
+        root_input.clone()
+    };
+    let left_schema = if projected_left {
+        aliased_left_schema(&root_input)
+    } else {
+        left_input.clone()
+    };
     let side = |prefix: &str| {
+        let renamed = projected_left && prefix == "left";
         AsofJoinSide::new(
             vec!["key".into()],
-            "time".into(),
-            vec!["sequence".into()],
+            if renamed { "ts" } else { "time" }.into(),
+            vec![if renamed { "seq" } else { "sequence" }.into()],
             prefix.into(),
         )
         .unwrap()
@@ -168,18 +186,137 @@ fn plan(left: &FrozenFileSource, right: &FrozenFileSource) -> StreamExecutionPla
         AsofStateLimits::new(10_000, 8 * 1024 * 1024).unwrap(),
     )
     .unwrap();
-    PipelineBuilder::new("frozen_asof_recovery")
+    let mut builder = PipelineBuilder::new("frozen_asof_recovery")
         .unwrap()
         .add_node(
             "asof",
-            Box::new(StreamAsofJoinOperator::new("asof", exact(left), exact(right), spec).unwrap()),
+            Box::new(
+                StreamAsofJoinOperator::new("asof", left_schema.clone(), exact(right), spec)
+                    .unwrap(),
+            ),
         )
-        .unwrap()
+        .unwrap();
+    if projected_left {
+        let project = project_left(&left_input, &left_schema, projection);
+        builder = builder
+            .add_node("project_left", Box::new(project))
+            .unwrap()
+            .connect(calc_flow::Edge::new(
+                calc_flow::PortEndpoint::new("project_left", "output").unwrap(),
+                calc_flow::PortEndpoint::new("asof", "left").unwrap(),
+            ))
+            .unwrap();
+        if projection == ProjectionMode::ReorderedAlias {
+            let first = calc_flow::ExpressionOperator::new(
+                "project_left_input",
+                "",
+                vec![
+                    "value".into(),
+                    "sequence".into(),
+                    "time".into(),
+                    "key".into(),
+                ],
+                None,
+                Vec::new(),
+            )
+            .unwrap()
+            .with_ports(
+                projection_port("input", &root_input),
+                projection_port("output", &left_input),
+            )
+            .unwrap();
+            builder = builder
+                .add_node("project_left_input", Box::new(first))
+                .unwrap()
+                .connect(calc_flow::Edge::new(
+                    calc_flow::PortEndpoint::new("project_left_input", "output").unwrap(),
+                    calc_flow::PortEndpoint::new("project_left", "input").unwrap(),
+                ))
+                .unwrap();
+        }
+    }
+    builder
         .compile_stream(
             &UdfRegistry::new().snapshot(),
             &StreamRequirements::default(),
         )
         .unwrap()
+}
+
+fn aliased_left_schema(input: &Arc<Schema>) -> Arc<Schema> {
+    Arc::new(Schema::new_with_metadata(
+        input
+            .fields()
+            .iter()
+            .map(|field| {
+                field
+                    .as_ref()
+                    .clone()
+                    .with_name(match field.name().as_str() {
+                        "time" => "ts",
+                        "sequence" => "seq",
+                        "value" => "v",
+                        name => name,
+                    })
+            })
+            .collect::<Vec<_>>(),
+        input.metadata().clone(),
+    ))
+}
+
+fn project_left(
+    input: &Arc<Schema>,
+    output: &Arc<Schema>,
+    projection: ProjectionMode,
+) -> calc_flow::ExpressionOperator {
+    calc_flow::ExpressionOperator::new(
+        "project_left",
+        "",
+        vec![
+            "key".into(),
+            "time AS ts".into(),
+            "sequence AS seq".into(),
+            if projection == ProjectionMode::Computed {
+                "value + 0 AS v"
+            } else {
+                "value AS v"
+            }
+            .into(),
+        ],
+        (projection == ProjectionMode::Filtered).then(|| "value >= 0".into()),
+        Vec::new(),
+    )
+    .unwrap()
+    .with_ports(
+        projection_port("input", input),
+        projection_port("output", output),
+    )
+    .unwrap()
+}
+
+fn projection_port(name: &str, schema: &Arc<Schema>) -> calc_flow::Port {
+    calc_flow::Port::new(
+        name,
+        calc_flow::BatchKind::Table,
+        name == "input",
+        Some(
+            schema
+                .fields()
+                .iter()
+                .map(|field| field.as_ref().clone())
+                .collect(),
+        ),
+    )
+    .unwrap()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProjectionMode {
+    None,
+    Aliased,
+    ReorderedAlias,
+    Computed,
+    Filtered,
 }
 
 fn runner(root: &Path, paused: [Arc<Notify>; 2]) -> StreamingRunner {
@@ -240,6 +377,7 @@ fn runner_with_replay_count(
         &ReplayObservation {
             rows: replay_count,
             idle_right: false,
+            projection: ProjectionMode::None,
         },
     )
 }
@@ -247,6 +385,7 @@ fn runner_with_replay_count(
 struct ReplayObservation {
     rows: Option<Arc<std::sync::atomic::AtomicUsize>>,
     idle_right: bool,
+    projection: ProjectionMode,
 }
 
 fn runner_observed(
@@ -261,14 +400,23 @@ fn runner_observed(
     let [left_paused, right_paused] = paused;
     let left = file_source(&root.join("left"), max_batch_rows);
     let right = file_source(&root.join("right"), max_batch_rows);
-    let plan = plan(&left, &right);
+    let plan = plan_with_projection(&left, &right, observation.projection);
     let ids = plan.source_binding_ids();
-    let left_id = ids
+    let left_id = plan
+        .external_inputs()
         .iter()
-        .copied()
-        .find(|id| id.ends_with("left"))
-        .unwrap()
-        .to_string();
+        .find(|(_, endpoint)| {
+            let (node, port) = match observation.projection {
+                ProjectionMode::None => ("asof", "left"),
+                ProjectionMode::Aliased | ProjectionMode::Computed | ProjectionMode::Filtered => {
+                    ("project_left", "input")
+                }
+                ProjectionMode::ReorderedAlias => ("project_left_input", "input"),
+            };
+            endpoint.node_id == node && endpoint.port == port
+        })
+        .map(|(id, _)| id.clone())
+        .unwrap();
     let right_id = ids
         .iter()
         .copied()
@@ -343,6 +491,31 @@ fn row(time: u64, sequence: u64, value: i64) -> Vec<u8> {
 }
 
 fn right_values(root: &Path) -> Vec<i64> {
+    let mut found = output_batches(root)
+        .iter()
+        .flat_map(|batch| {
+            batch
+                .table_payload()
+                .unwrap()
+                .batches()
+                .iter()
+                .flat_map(|record| {
+                    record
+                        .column_by_name("right__value")
+                        .unwrap()
+                        .as_any()
+                        .downcast_ref::<Int64Array>()
+                        .unwrap()
+                        .iter()
+                        .map(Option::unwrap)
+                })
+        })
+        .collect::<Vec<_>>();
+    found.sort_unstable();
+    found
+}
+
+fn output_batches(root: &Path) -> Vec<calc_flow::Batch> {
     use calc_flow::{DecodeBounds, FormatDecoder};
     let codec = calc_flow_connectors::parquet::ParquetCodec::new("1").unwrap();
     let mut found = Vec::new();
@@ -370,18 +543,9 @@ fn right_values(root: &Path) -> Vec<i64> {
                     &[],
                 )
                 .unwrap();
-            for record in batch.table_payload().unwrap().batches() {
-                let column = record
-                    .column_by_name("right__value")
-                    .unwrap()
-                    .as_any()
-                    .downcast_ref::<Int64Array>()
-                    .unwrap();
-                found.extend(column.iter().map(|value| value.unwrap()));
-            }
+            found.push(batch);
         }
     }
-    found.sort_unstable();
     found
 }
 
