@@ -1120,15 +1120,6 @@ impl IncrementalSql {
     ) -> Result<()> {
         self.reserve_chunk(chunk, reservation, workspace, name)?;
         let arguments = self.arguments(chunk, name)?;
-        if self.keys.is_empty() {
-            let candidate = candidates.groups.get_mut(&0).expect("global candidate");
-            if let Some(variable) = candidate.variable.as_mut() {
-                for row in 0..chunk.num_rows() {
-                    variable.observe(&arguments, &[], row, &candidate.group.reservation, name)?;
-                }
-            }
-            return update_global(&arguments, &mut candidates.groups, name);
-        }
         let selection = self
             .predicate
             .as_ref()
@@ -1142,6 +1133,21 @@ impl IncrementalSql {
         } else {
             filters
         };
+        if self.keys.is_empty() {
+            let candidate = candidates.groups.get_mut(&0).expect("global candidate");
+            if let Some(variable) = candidate.variable.as_mut() {
+                for row in 0..chunk.num_rows() {
+                    variable.observe(
+                        &arguments,
+                        &filters,
+                        row,
+                        &candidate.group.reservation,
+                        name,
+                    )?;
+                }
+            }
+            return update_global(&arguments, &filters, &mut candidates.groups, name);
+        }
         if let Some(native) = candidates.native.as_mut() {
             native.intern_selected(chunk.column(self.keys[0]).clone(), selection.as_ref(), name)?;
             let count = native.groups.len();
@@ -1803,8 +1809,7 @@ fn shape(
     };
     if !matches!(aggregate.input.as_ref(), LogicalPlan::TableScan(_))
         && !matches!(aggregate.input.as_ref(), LogicalPlan::Filter(filter)
-            if !aggregate.group_expr.is_empty()
-                && matches!(filter.input.as_ref(), LogicalPlan::TableScan(_)))
+            if matches!(filter.input.as_ref(), LogicalPlan::TableScan(_)))
     {
         return None;
     }
@@ -1854,10 +1859,9 @@ fn eligible(expr: &Expr, schema: &SchemaRef, floating_extrema: bool, global: boo
         let Expr::Column(column) = filter else {
             return false;
         };
-        !global
-            && schema
-                .field_with_name(&column.name)
-                .is_ok_and(|field| field.data_type() == &DataType::Boolean)
+        schema
+            .field_with_name(&column.name)
+            .is_ok_and(|field| field.data_type() == &DataType::Boolean)
     }) {
         return false;
     }
@@ -2005,11 +2009,29 @@ pub(super) fn ensure_reservation(
 
 fn update_global(
     arguments: &[Vec<ArrayRef>],
+    filters: &[Option<&BooleanArray>],
     candidates: &mut CandidateMap,
     name: &str,
 ) -> Result<()> {
     let candidate = candidates.get_mut(&0).expect("global candidate");
-    for (arguments, accumulator) in arguments.iter().zip(&mut candidate.accumulators) {
+    for (index, (arguments, accumulator)) in arguments
+        .iter()
+        .zip(&mut candidate.accumulators)
+        .enumerate()
+    {
+        let filtered;
+        let arguments = if let Some(filter) = filters.get(index).copied().flatten() {
+            filtered = arguments
+                .iter()
+                .map(|array| {
+                    datafusion::arrow::compute::filter(array.as_ref(), filter)
+                        .map_err(|error| df_error(name, error))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            &filtered
+        } else {
+            arguments
+        };
         accumulator
             .as_mut()
             .expect("global summary accumulator")

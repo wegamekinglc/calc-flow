@@ -13,6 +13,9 @@ use crate::{CancellationToken, EdgeCollector, StreamJobContext};
 
 type Row = (Option<i64>, Option<String>);
 
+#[path = "global_predicate_tests.rs"]
+mod global_predicates;
+
 fn schema(dtype: &DataType) -> SchemaRef {
     Arc::new(Schema::new_with_metadata(
         vec![

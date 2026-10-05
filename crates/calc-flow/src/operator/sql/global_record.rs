@@ -98,6 +98,9 @@ pub(super) fn raw_selected(raw: &LogicalPlan, schema: &SchemaRef) -> bool {
     if !aggregate.group_expr.is_empty() || aggregate.aggr_expr.is_empty() {
         return false;
     }
+    if !matches!(aggregate.input.as_ref(), LogicalPlan::TableScan(_)) {
+        return false;
+    }
     if !aggregate.aggr_expr.iter().any(|expression| {
         matches!(super::unalias(expression), Expr::AggregateFunction(function) if matches!(function.func.name(), "sum" | "avg"))
     }) {
@@ -107,6 +110,9 @@ pub(super) fn raw_selected(raw: &LogicalPlan, schema: &SchemaRef) -> bool {
         let Expr::AggregateFunction(function) = super::unalias(expression) else {
             return false;
         };
+        if function.params.filter.is_some() {
+            return false;
+        }
         if function.func.name() == "count" {
             return matches!(
                 function.params.args.as_slice(),
