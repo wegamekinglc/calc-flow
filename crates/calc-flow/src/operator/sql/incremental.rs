@@ -1666,22 +1666,27 @@ impl IncrementalSql {
                 }
                 context.check_cancelled()?;
             }
-            for (index, accumulator) in candidate.accumulators.iter_mut().enumerate() {
-                if let Some(accumulator) = accumulator {
-                    let state = accumulator.state().map_err(|error| df_error(name, error))?;
-                    let result = self.candidate_result(
-                        &self.aggregates[index],
-                        &state,
-                        accumulator.as_mut(),
-                        name,
-                    )?;
-                    candidate.group.states[index] = state;
-                    candidate.group.results[index] = result;
-                }
-            }
+            self.finalize_candidate(candidate, name)?;
             #[cfg(test)]
             self.finalized_groups
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        Ok(())
+    }
+
+    fn finalize_candidate(&self, candidate: &mut Candidate, name: &str) -> Result<()> {
+        for (index, accumulator) in candidate.accumulators.iter_mut().enumerate() {
+            if let Some(accumulator) = accumulator {
+                let state = accumulator.state().map_err(|error| df_error(name, error))?;
+                let result = self.candidate_result(
+                    &self.aggregates[index],
+                    &state,
+                    accumulator.as_mut(),
+                    name,
+                )?;
+                candidate.group.states[index] = state;
+                candidate.group.results[index] = result;
+            }
         }
         Ok(())
     }
@@ -1698,6 +1703,18 @@ impl IncrementalSql {
         reservation
             .try_grow(output_charge)
             .map_err(|error| df_error(name, error))?;
+        let records = self.output_chunks(count, candidates, context, name).await?;
+        self.apply_output_order(records, reservation, context, name)
+            .await
+    }
+
+    async fn output_chunks(
+        &self,
+        count: usize,
+        candidates: &CandidateMap,
+        context: &StreamOperatorContext<'_>,
+        name: &str,
+    ) -> Result<Vec<RecordBatch>> {
         let mut records = Vec::new();
         for start in (0..count).step_by(CHUNK_ROWS) {
             context.check_cancelled()?;
@@ -1717,6 +1734,16 @@ impl IncrementalSql {
             };
             records.push(RecordBatch::new_empty(schema));
         }
+        Ok(records)
+    }
+
+    async fn apply_output_order(
+        &self,
+        mut records: Vec<RecordBatch>,
+        reservation: &MemoryReservation,
+        context: &StreamOperatorContext<'_>,
+        name: &str,
+    ) -> Result<Vec<RecordBatch>> {
         if let Some(order) = &self.post_order {
             records = order.apply(records, reservation, context, name).await?;
             if records.is_empty() {
@@ -1768,6 +1795,25 @@ impl IncrementalSql {
         candidates: &CandidateMap,
         name: &str,
     ) -> Result<RecordBatch> {
+        let aggregate = self.aggregate_output_chunk(start, end, candidates, name)?;
+        let aggregate = self.apply_having(aggregate, name)?;
+        if self
+            .post_order
+            .as_ref()
+            .is_some_and(output_order::OutputOrder::project_after_limit)
+        {
+            return Ok(aggregate);
+        }
+        self.project_output(&aggregate, name)
+    }
+
+    fn aggregate_output_chunk(
+        &self,
+        start: usize,
+        end: usize,
+        candidates: &CandidateMap,
+        name: &str,
+    ) -> Result<RecordBatch> {
         let columns = (0..self.keys.len() + self.aggregates.len())
             .map(|column| {
                 ScalarValue::iter_to_array((start..end).map(|slot| {
@@ -1783,9 +1829,12 @@ impl IncrementalSql {
                 .map_err(|error| df_error(name, error))
             })
             .collect::<Result<Vec<ArrayRef>>>()?;
-        let aggregate = RecordBatch::try_new(self.aggregate_schema.clone(), columns)
-            .map_err(|error| df_error(name, error))?;
-        let aggregate = if let Some(predicate) = &self.post_filter {
+        RecordBatch::try_new(self.aggregate_schema.clone(), columns)
+            .map_err(|error| df_error(name, error))
+    }
+
+    fn apply_having(&self, aggregate: RecordBatch, name: &str) -> Result<RecordBatch> {
+        if let Some(predicate) = &self.post_filter {
             let selection = predicate
                 .evaluate(&aggregate)
                 .and_then(|value| value.into_array(aggregate.num_rows()))
@@ -1795,18 +1844,10 @@ impl IncrementalSql {
                 .downcast_ref::<BooleanArray>()
                 .ok_or_else(|| df_error(name, "SQL HAVING is not Boolean"))?;
             datafusion::arrow::compute::filter_record_batch(&aggregate, selection)
-                .map_err(|error| df_error(name, error))?
+                .map_err(|error| df_error(name, error))
         } else {
-            aggregate
-        };
-        if self
-            .post_order
-            .as_ref()
-            .is_some_and(output_order::OutputOrder::project_after_limit)
-        {
-            return Ok(aggregate);
+            Ok(aggregate)
         }
-        self.project_output(&aggregate, name)
     }
 
     fn project_output(&self, aggregate: &RecordBatch, name: &str) -> Result<RecordBatch> {
@@ -1884,30 +1925,39 @@ impl IncrementalSql {
             self.install_container(container);
             return Ok(());
         }
-        if new_count != 0 {
-            let capacity = count
-                .checked_next_power_of_two()
-                .ok_or_else(|| df_error(name, "incremental capacity overflowed"))?;
-            let charge = checked_bytes(
-                self.plan_bytes,
-                [
-                    (capacity, size_of::<Group>()),
-                    (
-                        capacity,
-                        4 * (size_of::<Arc<[u8]>>() + size_of::<usize>() + 1),
-                    ),
-                ],
-                name,
-            )?;
-            ensure_reservation(&self.reservation, charge, name)?;
-            self.groups
-                .try_reserve_exact(new_count)
-                .map_err(|error| df_error(name, error))?;
-            self.index
-                .try_reserve(new_count)
-                .map_err(|error| df_error(name, error))?;
+        self.reserve_standard_groups(new_count, count, name)
+    }
+
+    fn reserve_standard_groups(
+        &mut self,
+        new_count: usize,
+        count: usize,
+        name: &str,
+    ) -> Result<()> {
+        if new_count == 0 {
+            return Ok(());
         }
-        Ok(())
+        let capacity = count
+            .checked_next_power_of_two()
+            .ok_or_else(|| df_error(name, "incremental capacity overflowed"))?;
+        let charge = checked_bytes(
+            self.plan_bytes,
+            [
+                (capacity, size_of::<Group>()),
+                (
+                    capacity,
+                    4 * (size_of::<Arc<[u8]>>() + size_of::<usize>() + 1),
+                ),
+            ],
+            name,
+        )?;
+        ensure_reservation(&self.reservation, charge, name)?;
+        self.groups
+            .try_reserve_exact(new_count)
+            .map_err(|error| df_error(name, error))?;
+        self.index
+            .try_reserve(new_count)
+            .map_err(|error| df_error(name, error))
     }
 
     async fn prepare_groups(
