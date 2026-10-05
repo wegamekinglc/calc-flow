@@ -943,28 +943,16 @@ impl IncrementalSql {
             self.input_candidates(batch.num_rows(), name)?;
         candidates.proof = proof;
         let mut coalesced = None;
-        let rows_processed = if let Some(global) = &self.global_records {
-            let candidate = candidates.groups.get_mut(&0).expect("global candidate");
-            let values = global
-                .update(
-                    (table.batches(), input_owner),
-                    (
-                        &self.aggregates,
-                        &self.aggregate_filters,
-                        &candidate.group.states,
-                        self.predicate.as_ref(),
-                        &self.input_checks,
-                    ),
-                    self.reservation.new_empty(),
+        let rows_processed = if self.global_records.is_some() {
+            coalesced = self
+                .update_global_records(
+                    table.batches(),
+                    input_owner,
+                    candidates.groups.get_mut(&0).expect("global candidate"),
                     context,
                     name,
                 )
                 .await?;
-            coalesced = values.coalesced;
-            for (index, state) in values.values.into_iter().enumerate() {
-                candidate.group.results[index] = global.result(index, &state, name)?;
-                candidate.group.states[index] = state;
-            }
             batch.num_rows()
         } else {
             self.update_records(
@@ -976,8 +964,26 @@ impl IncrementalSql {
             )
             .await?
         };
-        #[cfg(not(test))]
-        let _ = rows_processed;
+        self.finish_transaction(
+            candidates,
+            reservation,
+            coalesced,
+            context,
+            name,
+            (batch.num_rows() != 0, rows_processed),
+        )
+        .await
+    }
+
+    async fn finish_transaction(
+        &mut self,
+        mut candidates: InputCandidates,
+        reservation: MemoryReservation,
+        coalesced: Option<Arc<global_record::coalescer::State>>,
+        context: &StreamOperatorContext<'_>,
+        name: &str,
+        input: (bool, usize),
+    ) -> Result<Transaction> {
         self.finish_candidates(&mut candidates, context, name)
             .await?;
         let proof = candidates.proof.take();
@@ -989,10 +995,10 @@ impl IncrementalSql {
             .prepare(self.groups.len() + new_groups.len(), name)?;
         Ok(Transaction {
             records,
-            track_updates: batch.num_rows() != 0,
+            track_updates: input.0,
             dirty,
             #[cfg(test)]
-            rows: rows_processed,
+            rows: input.1,
             groups,
             new_groups,
             _reservation: reservation,
@@ -1000,6 +1006,38 @@ impl IncrementalSql {
             container,
             coalesced,
         })
+    }
+
+    async fn update_global_records(
+        &self,
+        records: &[RecordBatch],
+        input_owner: Option<Arc<MemoryReservation>>,
+        candidate: &mut Candidate,
+        context: &StreamOperatorContext<'_>,
+        name: &str,
+    ) -> Result<Option<Arc<global_record::coalescer::State>>> {
+        let global = self.global_records.as_ref().expect("global record proof");
+        let values = global
+            .update(
+                (records, input_owner),
+                (
+                    &self.aggregates,
+                    &self.aggregate_filters,
+                    &candidate.group.states,
+                    self.predicate.as_ref(),
+                    &self.input_checks,
+                ),
+                self.reservation.new_empty(),
+                context,
+                name,
+            )
+            .await?;
+        let coalesced = values.coalesced;
+        for (index, state) in values.values.into_iter().enumerate() {
+            candidate.group.results[index] = global.result(index, &state, name)?;
+            candidate.group.states[index] = state;
+        }
+        Ok(coalesced)
     }
 
     async fn prepare_transaction(
@@ -2265,13 +2303,7 @@ fn variable_columns(
     for expr in aggregates {
         if let Expr::AggregateFunction(function) = unalias(expr) {
             for argument in &function.params.args {
-                for column in argument.column_refs() {
-                    variable_columns.insert(
-                        schema
-                            .index_of(&column.name)
-                            .map_err(|error| df_error(name, error))?,
-                    );
-                }
+                insert_expression_columns(&mut variable_columns, argument, schema, name)?;
             }
         }
     }
@@ -2291,6 +2323,22 @@ fn variable_columns(
             )
         })
         .collect::<Vec<_>>())
+}
+
+fn insert_expression_columns(
+    columns: &mut std::collections::BTreeSet<usize>,
+    expression: &Expr,
+    schema: &SchemaRef,
+    name: &str,
+) -> Result<()> {
+    for column in expression.column_refs() {
+        columns.insert(
+            schema
+                .index_of(&column.name)
+                .map_err(|error| df_error(name, error))?,
+        );
+    }
+    Ok(())
 }
 
 fn aggregate_bytes(aggregates: &[Arc<AggregateFunctionExpr>], name: &str) -> Result<Option<usize>> {
@@ -2373,10 +2421,7 @@ fn eligible(expr: &Expr, logical: &DFSchema, floating_extrema: bool, global: boo
     if !aggregate_parameters_supported(params) {
         return false;
     }
-    if !params.filter.as_deref().is_none_or(|filter| {
-        native_expression::aggregate_filter_work(filter, logical).is_some()
-            && filter.get_type(logical).ok() == Some(DataType::Boolean)
-    }) {
+    if !aggregate_filter_supported(params, logical) {
         return false;
     }
     let builtin = datafusion::functions_aggregate::all_default_aggregate_functions()
@@ -2402,6 +2447,16 @@ fn eligible(expr: &Expr, logical: &DFSchema, floating_extrema: bool, global: boo
     } else {
         aggregate_argument_supported(&dtype, function.func.name(), floating_extrema, global)
     }
+}
+
+fn aggregate_filter_supported(
+    params: &datafusion::logical_expr::expr::AggregateFunctionParams,
+    logical: &DFSchema,
+) -> bool {
+    params.filter.as_deref().is_none_or(|filter| {
+        native_expression::aggregate_filter_work(filter, logical).is_some()
+            && filter.get_type(logical).ok() == Some(DataType::Boolean)
+    })
 }
 
 fn argument_type(expression: &Expr, schema: &DFSchema) -> Option<DataType> {
@@ -2614,10 +2669,8 @@ fn plan_inputs(raw: &LogicalPlan, schema: &SchemaRef, name: &str) -> Result<Opti
     let Some((_, raw_aggregate)) = shape(raw) else {
         return Ok(None);
     };
-    if let LogicalPlan::Filter(filter) = raw_aggregate.input.as_ref() {
-        if !predicate::InputPredicate::supported(&filter.predicate, schema) {
-            return Ok(None);
-        }
+    if !supported_input_filter(raw_aggregate, schema) {
+        return Ok(None);
     }
     let global = raw_aggregate.group_expr.is_empty();
     let floating_extrema = global || sequential_group_key(raw_aggregate);
@@ -2641,14 +2694,26 @@ fn plan_inputs(raw: &LogicalPlan, schema: &SchemaRef, name: &str) -> Result<Opti
         LogicalPlan::Filter(filter) => Some(&filter.predicate),
         _ => None,
     };
-    let variable_columns = variable_columns(
+    variable_columns(
         &raw_aggregate.group_expr,
         &raw_aggregate.aggr_expr,
         predicate,
         schema,
         name,
-    )?;
-    Ok(Some(variable_columns))
+    )
+    .map(Some)
+}
+
+fn supported_input_filter(
+    aggregate: &datafusion::logical_expr::Aggregate,
+    schema: &SchemaRef,
+) -> bool {
+    match aggregate.input.as_ref() {
+        LogicalPlan::Filter(filter) => {
+            predicate::InputPredicate::supported(&filter.predicate, schema)
+        }
+        _ => true,
+    }
 }
 
 type PhysicalSqlPlan = (
