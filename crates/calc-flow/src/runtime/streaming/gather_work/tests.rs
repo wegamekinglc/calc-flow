@@ -636,9 +636,7 @@ fn typed_external_final_drop_without_tokio_waits_for_native_exit_and_credit() {
     let retained = weak.upgrade().is_some() && pool.reserved() >= 32_768;
     gate.release();
     let until = std::time::Instant::now() + Duration::from_secs(5);
-    while std::time::Instant::now() < until
-        && (weak.upgrade().is_some() || pool.reserved() != 0 || service.joined_workers() == 0)
-    {
+    while std::time::Instant::now() < until && external_resources_live(&weak, &pool, &service) {
         std::thread::sleep(Duration::from_millis(2));
     }
     let joined_before_cleanup = service.joined_workers() == 1;
@@ -647,6 +645,14 @@ fn typed_external_final_drop_without_tokio_waits_for_native_exit_and_credit() {
     assert!(started && retained);
     assert!(joined_before_cleanup && released_before_cleanup);
     assert!(funded_drop.load(std::sync::atomic::Ordering::Acquire));
+}
+
+fn external_resources_live(
+    weak: &std::sync::Weak<FundedInput>,
+    pool: &Arc<dyn MemoryPool>,
+    service: &TestService,
+) -> bool {
+    weak.upgrade().is_some() || pool.reserved() != 0 || service.joined_workers() == 0
 }
 
 struct TypedGateRelease(Arc<TypedGate>);
@@ -956,11 +962,7 @@ fn typed_waiting_job_gets_native_capacity_before_old_job_resubmission() {
         (queued, pressured, first_succeeded, winner)
     });
     let waiting_won = winner.as_ref().is_some_and(|(waiting, _)| *waiting);
-    let winner_started = match &winner {
-        Some((true, Ok(_))) => waiting_rx.recv_timeout(Duration::from_secs(3)).is_ok(),
-        Some((false, Ok(_))) => old_rx.recv_timeout(Duration::from_secs(3)).is_ok(),
-        _ => false,
-    };
+    let winner_started = capacity_winner_started(winner.as_ref(), &waiting_rx, &old_rx);
     later_gate.release();
     let outputs_succeeded = runtime.block_on(finish_capacity_race(
         winner,
@@ -1002,6 +1004,25 @@ fn gated_numeric_work(
 
 type NumericTicket = super::AdmissionResult<super::WorkTicket<PreparedNumeric>>;
 
+fn capacity_winner_started(
+    winner: Option<&(bool, NumericTicket)>,
+    waiting_rx: &std::sync::mpsc::Receiver<()>,
+    old_rx: &std::sync::mpsc::Receiver<()>,
+) -> bool {
+    match winner {
+        Some((true, Ok(_))) => waiting_rx.recv_timeout(Duration::from_secs(3)).is_ok(),
+        Some((false, Ok(_))) => old_rx.recv_timeout(Duration::from_secs(3)).is_ok(),
+        _ => false,
+    }
+}
+
+async fn finish_numeric_ticket(ticket: NumericTicket, expected: u64) -> crate::Result<bool> {
+    let output = ticket?.finish().await?;
+    let correct = output.value.sum == expected && output.credit.size() >= 32_768;
+    drop(output);
+    Ok(correct)
+}
+
 async fn finish_capacity_race(
     winner: Option<(bool, NumericTicket)>,
     mut old_request: Pin<&mut impl Future<Output = NumericTicket>>,
@@ -1010,25 +1031,14 @@ async fn finish_capacity_race(
     let Some((waiting, first)) = winner else {
         return false;
     };
-    let first = async {
-        let output = first?.finish().await?;
-        let expected = if waiting { 73 } else { 63 };
-        let correct = output.value.sum == expected && output.credit.size() >= 32_768;
-        drop(output);
-        Ok::<_, crate::CalcFlowError>(correct)
-    }
-    .await;
+    let first = finish_numeric_ticket(first, if waiting { 73 } else { 63 }).await;
     let second = tokio::time::timeout(Duration::from_secs(3), async {
         let ticket = if waiting {
             old_request.as_mut().await?
         } else {
             waiting_request.as_mut().await?
         };
-        let output = ticket.finish().await?;
-        let expected = if waiting { 63 } else { 73 };
-        let correct = output.value.sum == expected && output.credit.size() >= 32_768;
-        drop(output);
-        Ok::<_, crate::CalcFlowError>(correct)
+        finish_numeric_ticket(Ok(ticket), if waiting { 63 } else { 73 }).await
     })
     .await;
     matches!(first, Ok(true)) && matches!(second, Ok(Ok(true)))
@@ -1134,6 +1144,38 @@ fn multi_arrow_rows_abort_keeps_whole_attempt_paid_until_last_native_unit_and_jo
     multi_arrow_abort(true);
 }
 
+fn multi_input(
+    row_mode: bool,
+    pool: &Arc<dyn MemoryPool>,
+    first_error: bool,
+) -> crate::operator::gather_lifecycle_bridge::multi::Input {
+    if row_mode {
+        crate::operator::gather_lifecycle_bridge::multi::row_materialization(pool, first_error)
+    } else {
+        crate::operator::gather_lifecycle_bridge::multi::materialization(pool, first_error)
+    }
+}
+
+fn multi_sources_paid(
+    scope: &super::GatherScope,
+    pool: &Arc<dyn MemoryPool>,
+    probe: &crate::operator::gather_lifecycle_bridge::multi::Probe,
+) -> bool {
+    multi_funded(scope, pool)
+        && probe.source.upgrade().is_some()
+        && probe
+            .shared_source
+            .as_ref()
+            .is_none_or(|source| source.upgrade().is_some())
+}
+
+fn assert_multi_cleanup(observed: [bool; 4], joined: usize, pool: &Arc<dyn MemoryPool>) {
+    let [bounded, source_gone, shared_gone, row_ranges] = observed;
+    assert!(bounded && source_gone && shared_gone && row_ranges);
+    assert_eq!(joined, 2);
+    assert_eq!(pool.reserved(), 0);
+}
+
 fn multi_arrow_abort(row_mode: bool) {
     let service = TestService::new(2, 1).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1142,11 +1184,7 @@ fn multi_arrow_abort(row_mode: bool) {
         .unwrap();
     let context = job(31, &service);
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(67_108_864));
-    let input = if row_mode {
-        crate::operator::gather_lifecycle_bridge::multi::row_materialization(&pool, false)
-    } else {
-        crate::operator::gather_lifecycle_bridge::multi::materialization(&pool, false)
-    };
+    let input = multi_input(row_mode, &pool, false);
     let scope = context
         .gather_owner()
         .client(GatherOperatorId::new("operator:asof".into()))
@@ -1164,13 +1202,7 @@ fn multi_arrow_abort(row_mode: bool) {
             .await
             .is_err()
     });
-    let paid_both = multi_funded(&scope, &pool)
-        && input.probe.source.upgrade().is_some()
-        && input
-            .probe
-            .shared_source
-            .as_ref()
-            .is_none_or(|source| source.upgrade().is_some());
+    let paid_both = multi_sources_paid(&scope, &pool, &input.probe);
     input.probe.release(0);
     let first_settled = runtime.block_on(multi_one_settled(&scope));
     let pending_one = pending_both
@@ -1179,13 +1211,7 @@ fn multi_arrow_abort(row_mode: bool) {
                 .await
                 .is_err()
         });
-    let paid_one = multi_funded(&scope, &pool)
-        && input.probe.source.upgrade().is_some()
-        && input
-            .probe
-            .shared_source
-            .as_ref()
-            .is_none_or(|source| source.upgrade().is_some());
+    let paid_one = multi_sources_paid(&scope, &pool, &input.probe);
     input.probe.release_all();
     drop(drain);
     let (bounded, joined) = multi_close(&runtime, &scope, &context, service, attempt);
@@ -1202,9 +1228,11 @@ fn multi_arrow_abort(row_mode: bool) {
     drop(runtime);
     assert!(started && first_settled);
     assert!(pending_both && pending_one && paid_both && paid_one);
-    assert!(bounded && source_gone && shared_gone && row_ranges);
-    assert_eq!(joined, 2);
-    assert_eq!(pool.reserved(), 0);
+    assert_multi_cleanup(
+        [bounded, source_gone, shared_gone, row_ranges],
+        joined,
+        &pool,
+    );
 }
 
 #[test]
@@ -1225,11 +1253,7 @@ fn multi_arrow_first_error(row_mode: bool) {
         .unwrap();
     let context = job(32, &service);
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(67_108_864));
-    let input = if row_mode {
-        crate::operator::gather_lifecycle_bridge::multi::row_materialization(&pool, true)
-    } else {
-        crate::operator::gather_lifecycle_bridge::multi::materialization(&pool, true)
-    };
+    let input = multi_input(row_mode, &pool, true);
     let scope = context
         .gather_owner()
         .client(GatherOperatorId::new("operator:asof".into()))
@@ -1247,13 +1271,7 @@ fn multi_arrow_first_error(row_mode: bool) {
         tokio::time::timeout(Duration::from_millis(100), finish.as_mut()).await
     });
     let pending = observed.is_err();
-    let paid = multi_funded(&scope, &pool)
-        && input.probe.source.upgrade().is_some()
-        && input
-            .probe
-            .shared_source
-            .as_ref()
-            .is_none_or(|source| source.upgrade().is_some());
+    let paid = multi_sources_paid(&scope, &pool, &input.probe);
     input.probe.release_all();
     let completed = if pending {
         runtime
@@ -1283,7 +1301,10 @@ fn multi_arrow_first_error(row_mode: bool) {
     drop(context);
     drop(runtime);
     assert!(started && first_settled && pending && paid);
-    assert!(primary && bounded && source_gone && shared_gone && row_ranges);
-    assert_eq!(joined, 2);
-    assert_eq!(pool.reserved(), 0);
+    assert!(primary);
+    assert_multi_cleanup(
+        [bounded, source_gone, shared_gone, row_ranges],
+        joined,
+        &pool,
+    );
 }
