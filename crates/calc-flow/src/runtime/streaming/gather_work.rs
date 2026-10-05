@@ -20,6 +20,15 @@ use super::supervisor::TaskFailure;
 pub(crate) use super::supervisor::TaskId;
 use crate::{CalcFlowError, CancellationToken, Result};
 
+fn launch_registration(registered: process::Registration, workers: usize) -> Result<()> {
+    catch_unwind(AssertUnwindSafe(|| registered.launch(workers))).unwrap_or_else(|payload| {
+        Err(internal(&format!(
+            "native worker launch panic: {}",
+            worker::panic_summary(payload.as_ref())
+        )))
+    })
+}
+
 const DIAGNOSTIC_LIMIT: usize = 8;
 const DIAGNOSTIC_CAPACITY: usize = DIAGNOSTIC_LIMIT + 1;
 const DIAGNOSTIC_NAME_BYTES: usize = 256;
@@ -803,13 +812,7 @@ impl GatherHome {
             None => service.register(self.clone(), stop).await?,
         };
         let generation = registered.generation;
-        let launched = catch_unwind(AssertUnwindSafe(|| registered.launch(workers)))
-            .unwrap_or_else(|payload| {
-                Err(internal(&format!(
-                    "native worker launch panic: {}",
-                    worker::panic_summary(payload.as_ref())
-                )))
-            });
+        let launched = launch_registration(registered, workers);
         if let Err(error) = launched {
             self.wait_generation_cleanup(generation).await;
             return Err(error.into());

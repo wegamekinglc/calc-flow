@@ -77,11 +77,7 @@ impl StreamAsofJoinOperator {
         task: Option<crate::runtime::streaming::gather_work::TaskId>,
     ) -> Result<Box<Self>> {
         job.check_cancelled()?;
-        let credit = self.reserve_workspace(crate::operator::asof::checked(
-            &self.name,
-            1024 + size_of::<RestoreWork>() as u64,
-            self.name.len() as u64 * 2,
-        )?)?;
+        let credit = self.cpu_work_credit(size_of::<RestoreWork>())?;
         let name = self.name.clone();
         let operator = GatherOperatorId::new(Arc::from(name.as_str())).with_task(task);
         let scope = job.gather_owner().client(operator).scope()?;
@@ -132,11 +128,7 @@ impl StreamAsofJoinOperator {
         task: Option<crate::runtime::streaming::gather_work::TaskId>,
     ) -> Result<(Box<Self>, crate::OperatorStateSnapshot)> {
         job.check_cancelled()?;
-        let credit = self.reserve_workspace(crate::operator::asof::checked(
-            &self.name,
-            1024 + size_of::<CaptureWork>() as u64,
-            self.name.len() as u64 * 2,
-        )?)?;
+        let credit = self.cpu_work_credit(size_of::<CaptureWork>())?;
         let name = self.name.clone();
         let operator = GatherOperatorId::new(Arc::from(name.as_str())).with_task(task);
         let scope = job.gather_owner().client(operator).scope()?;

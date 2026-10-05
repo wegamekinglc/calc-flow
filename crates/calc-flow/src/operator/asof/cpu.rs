@@ -34,7 +34,7 @@ impl StreamAsofJoinOperator {
         Ok(output.value)
     }
 
-    fn cpu_work_credit(&self, work_bytes: usize) -> Result<MemoryReservation> {
+    pub(super) fn cpu_work_credit(&self, work_bytes: usize) -> Result<MemoryReservation> {
         self.reserve_workspace(super::checked(
             &self.name,
             1024 + work_bytes as u64,

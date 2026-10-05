@@ -102,15 +102,7 @@ fn preload_owner(
 }
 
 fn request_bytes(entry: &OperatorManifestEntry) -> Option<u64> {
-    let metadata = entry
-        .inline_metadata
-        .iter()
-        .try_fold(1024_u64, |total, (key, value)| {
-            total
-                .checked_add(u64::try_from(key.len()).ok()?.checked_mul(2)?)?
-                .checked_add(value_bytes(value, 0)?)?
-                .checked_add(128)
-        })?;
+    let metadata = metadata_request_bytes(entry)?;
     entry.segments.iter().try_fold(metadata, |total, handle| {
         let strings = [
             handle.operator_id(),
@@ -126,6 +118,18 @@ fn request_bytes(entry: &OperatorManifestEntry) -> Option<u64> {
     })
 }
 
+fn metadata_request_bytes(entry: &OperatorManifestEntry) -> Option<u64> {
+    entry
+        .inline_metadata
+        .iter()
+        .try_fold(1024_u64, |total, (key, value)| {
+            total
+                .checked_add(u64::try_from(key.len()).ok()?.checked_mul(2)?)?
+                .checked_add(value_bytes(value, 0)?)?
+                .checked_add(128)
+        })
+}
+
 fn value_bytes(value: &serde_json::Value, depth: usize) -> Option<u64> {
     if depth >= 128 {
         return None;
@@ -137,16 +141,21 @@ fn value_bytes(value: &serde_json::Value, depth: usize) -> Option<u64> {
         serde_json::Value::Array(values) => values.iter().try_fold(128_u64, |total, value| {
             total.checked_add(value_bytes(value, depth + 1)?)
         }),
-        serde_json::Value::Object(values) => {
-            values.iter().try_fold(128_u64, |total, (key, value)| {
-                total
-                    .checked_add(128)?
-                    .checked_add(u64::try_from(key.len()).ok()?.checked_mul(2)?)?
-                    .checked_add(value_bytes(value, depth + 1)?)
-            })
-        }
+        serde_json::Value::Object(values) => object_value_bytes(values, depth),
         _ => Some(128),
     }
+}
+
+fn object_value_bytes(
+    values: &serde_json::Map<String, serde_json::Value>,
+    depth: usize,
+) -> Option<u64> {
+    values.iter().try_fold(128_u64, |total, (key, value)| {
+        total
+            .checked_add(128)?
+            .checked_add(u64::try_from(key.len()).ok()?.checked_mul(2)?)?
+            .checked_add(value_bytes(value, depth + 1)?)
+    })
 }
 
 pub(super) async fn restore_terminal(

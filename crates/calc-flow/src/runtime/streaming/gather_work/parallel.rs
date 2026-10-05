@@ -120,9 +120,7 @@ impl Units {
         home: &GatherHome,
         operator: &GatherOperatorId,
     ) -> Result<ErasedOutput> {
-        let primary = self.cells.iter().position(|cell| {
-            matches!(&cell.outcome, Some(Err(error)) if !matches!(error, crate::CalcFlowError::Cancelled { .. }))
-        }).or_else(|| self.cells.iter().position(|cell| matches!(&cell.outcome, Some(Err(_)))));
+        let primary = self.primary_failure();
         let mut values = Vec::with_capacity(self.cells.len());
         let mut error = None;
         for (ordinal, cell) in self.cells.into_iter().enumerate() {
@@ -139,6 +137,12 @@ impl Units {
             Some(error) => Err(error),
             None => (self.collect)(values),
         }
+    }
+
+    fn primary_failure(&self) -> Option<usize> {
+        self.cells.iter().position(|cell| {
+            matches!(&cell.outcome, Some(Err(error)) if !matches!(error, crate::CalcFlowError::Cancelled { .. }))
+        }).or_else(|| self.cells.iter().position(|cell| matches!(&cell.outcome, Some(Err(_)))))
     }
 }
 
