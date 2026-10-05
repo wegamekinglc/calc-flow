@@ -302,17 +302,30 @@ impl PartialGroups {
     }
 
     fn reserve(&mut self, count: usize, name: &str) -> Result<()> {
-        let capacity = if self.sequential.iter().any(|selected| *selected) {
-            grouped_float::capacity(count, name)?
+        let capacity = self.capacity(count, name)?;
+        let bytes = self.charge(capacity, name)?;
+        ensure_reservation(&self.reservation, bytes, name)?;
+        self.slots
+            .try_reserve_exact(capacity - self.slots.len())
+            .map_err(|error| df_error(name, error))?;
+        Ok(())
+    }
+
+    fn capacity(&self, count: usize, name: &str) -> Result<usize> {
+        if self.sequential.iter().any(|selected| *selected) {
+            grouped_float::capacity(count, name)
         } else {
             count
                 .max(4)
                 .checked_next_power_of_two()
-                .ok_or_else(|| df_error(name, "partial group capacity overflowed"))?
-        };
+                .ok_or_else(|| df_error(name, "partial group capacity overflowed"))
+        }
+    }
+
+    fn charge(&self, capacity: usize, name: &str) -> Result<usize> {
         let bitmap_bytes = checked_bytes(0, [(capacity.div_ceil(512), 64)], name)?;
         let bitmap_copies = checked_bytes(0, [(self.state_fields, 3)], name)?;
-        let bytes = checked_bytes(
+        checked_bytes(
             self.base_bytes,
             [
                 (capacity, self.group_bytes),
@@ -320,12 +333,7 @@ impl PartialGroups {
                 (self.variable_bytes, variable_extrema::STATE_STRING_FACTOR),
             ],
             name,
-        )?;
-        ensure_reservation(&self.reservation, bytes, name)?;
-        self.slots
-            .try_reserve_exact(capacity - self.slots.len())
-            .map_err(|error| df_error(name, error))?;
-        Ok(())
+        )
     }
 
     fn reserve_variable(&mut self, growth: usize, name: &str) -> Result<()> {
@@ -408,15 +416,7 @@ impl PartialGroups {
         name: &str,
     ) -> Result<()> {
         context.check_cancelled()?;
-        let states = self
-            .accumulators
-            .iter_mut()
-            .map(|accumulator| {
-                accumulator
-                    .state(EmitTo::All)
-                    .map_err(|error| df_error(name, error))
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let states = self.emit_states(name)?;
         for (rank, slot) in self.slots.iter().enumerate() {
             if rank % 128 == 0 {
                 context.check_cancelled()?;
@@ -425,28 +425,50 @@ impl PartialGroups {
             let candidate = candidates
                 .get_mut(slot)
                 .expect("candidate for partial group");
-            for (index, arrays) in states.iter().enumerate() {
-                if self.sequential[index] {
-                    let state = arrays
-                        .iter()
-                        .map(|array| {
-                            ScalarValue::try_from_array(array, rank)
-                                .map_err(|error| df_error(name, error))
-                        })
-                        .collect::<Result<Vec<_>>>()?;
-                    candidate.group.results[index] = grouped_sum::result(&state, name)?;
-                    candidate.group.states[index] = state;
-                } else {
-                    let arrays = arrays
-                        .iter()
-                        .map(|array| array.slice(rank, 1))
-                        .collect::<Vec<_>>();
-                    candidate.accumulators[index]
-                        .as_mut()
-                        .expect("summary accumulator")
-                        .merge_batch(&arrays)
-                        .map_err(|error| df_error(name, error))?;
-                }
+            self.merge_rank(candidate, &states, rank, name)?;
+        }
+        Ok(())
+    }
+
+    fn emit_states(&mut self, name: &str) -> Result<Vec<Vec<ArrayRef>>> {
+        self.accumulators
+            .iter_mut()
+            .map(|accumulator| {
+                accumulator
+                    .state(EmitTo::All)
+                    .map_err(|error| df_error(name, error))
+            })
+            .collect::<Result<Vec<_>>>()
+    }
+
+    fn merge_rank(
+        &self,
+        candidate: &mut Candidate,
+        states: &[Vec<ArrayRef>],
+        rank: usize,
+        name: &str,
+    ) -> Result<()> {
+        for (index, arrays) in states.iter().enumerate() {
+            if self.sequential[index] {
+                let state = arrays
+                    .iter()
+                    .map(|array| {
+                        ScalarValue::try_from_array(array, rank)
+                            .map_err(|error| df_error(name, error))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                candidate.group.results[index] = grouped_sum::result(&state, name)?;
+                candidate.group.states[index] = state;
+            } else {
+                let arrays = arrays
+                    .iter()
+                    .map(|array| array.slice(rank, 1))
+                    .collect::<Vec<_>>();
+                candidate.accumulators[index]
+                    .as_mut()
+                    .expect("summary accumulator")
+                    .merge_batch(&arrays)
+                    .map_err(|error| df_error(name, error))?;
             }
         }
         Ok(())
@@ -870,8 +892,7 @@ impl IncrementalSql {
         previous: Option<&Group>,
         name: &str,
     ) -> Result<Vec<Option<Box<dyn Accumulator>>>> {
-        let accumulators = self
-            .aggregates
+        self.aggregates
             .iter()
             .enumerate()
             .map(|(index, expr)| {
@@ -895,8 +916,7 @@ impl IncrementalSql {
                 }
                 Ok(Some(accumulator))
             })
-            .collect::<Result<Vec<_>>>()?;
-        Ok(accumulators)
+            .collect::<Result<Vec<_>>>()
     }
 
     pub async fn update(
@@ -1021,24 +1041,7 @@ impl IncrementalSql {
         name: &str,
     ) -> Result<(MemoryReservation, usize, InputCandidates)> {
         let (reservation, workspace) = self.input_workspace(rows, name)?;
-        let mut partial = if self.keys.is_empty() {
-            None
-        } else {
-            Some(PartialGroups::new(
-                &self.aggregates,
-                self.reservation.new_empty(),
-                name,
-            )?)
-        };
-        if self.sequential.is_some() {
-            if let Some(partial) = &mut partial {
-                partial.sequential = self
-                    .aggregates
-                    .iter()
-                    .map(|expression| grouped_float::selected(expression))
-                    .collect();
-            }
-        }
+        let partial = self.partial_groups(name)?;
         let native = if self.sequential.is_some() {
             None
         } else {
@@ -1060,6 +1063,21 @@ impl IncrementalSql {
         Ok((reservation, workspace, candidates))
     }
 
+    fn partial_groups(&self, name: &str) -> Result<Option<PartialGroups>> {
+        if self.keys.is_empty() {
+            return Ok(None);
+        }
+        let mut partial = PartialGroups::new(&self.aggregates, self.reservation.new_empty(), name)?;
+        if self.sequential.is_some() {
+            partial.sequential = self
+                .aggregates
+                .iter()
+                .map(|expression| grouped_float::selected(expression))
+                .collect();
+        }
+        Ok(Some(partial))
+    }
+
     fn input_workspace(&self, rows: usize, name: &str) -> Result<(MemoryReservation, usize)> {
         let rows = if self.global_records.is_some() {
             0
@@ -1067,6 +1085,14 @@ impl IncrementalSql {
             rows
         };
         let reservation = self.reservation.new_empty();
+        let workspace = self.input_workspace_charge(rows, name)?;
+        reservation
+            .try_grow(workspace)
+            .map_err(|error| df_error(name, error))?;
+        Ok((reservation, workspace))
+    }
+
+    fn input_workspace_charge(&self, rows: usize, name: &str) -> Result<usize> {
         let width = checked_bytes(
             if self.keys.is_empty() { 0 } else { 128 },
             [
@@ -1085,7 +1111,7 @@ impl IncrementalSql {
             ],
             name,
         )?;
-        let workspace = match &self.predicate {
+        match &self.predicate {
             Some(predicate) => checked_bytes(
                 workspace,
                 [(
@@ -1093,13 +1119,9 @@ impl IncrementalSql {
                     1,
                 )],
                 name,
-            )?,
-            None => workspace,
-        };
-        reservation
-            .try_grow(workspace)
-            .map_err(|error| df_error(name, error))?;
-        Ok((reservation, workspace))
+            ),
+            None => Ok(workspace),
+        }
     }
 
     async fn update_records(
