@@ -510,6 +510,28 @@ fn sync_plan(
         ));
     }
     let state = runtime.context_for_rows(0, None, "not_evaluated").state();
+    validate_planning_extensions(&state)?;
+    let options = state.config_options();
+    let declared = declared_lookup(&state, query, alias)?;
+    let source = MemTable::try_new(schema.clone(), vec![vec![RecordBatch::new_empty(schema)]])
+        .map_err(|error| datafusion_error(Some("compact-parity"), error))?;
+    let provider = SingleInput {
+        state: &state,
+        declared,
+        source: provider_as_source(Arc::new(source)),
+        lookups: Cell::new(0),
+    };
+    let raw = SqlToRel::new_with_options(&provider, ParserOptions::from(&options.sql_parser))
+        .statement_to_plan(query.statement())
+        .map_err(|error| datafusion_error(Some("compact-parity"), error))?;
+    let analyzed = state
+        .analyzer()
+        .execute_and_check(raw.clone(), options, |_, _| {})
+        .map_err(|error| datafusion_error(Some("compact-parity"), error))?;
+    Ok((raw, analyzed))
+}
+
+fn validate_planning_extensions(state: &SessionState) -> Result<()> {
     let mut inspection = SessionStateBuilder::new_from_existing(state.clone());
     if inspection.type_planner().is_some()
         || state
@@ -525,6 +547,14 @@ fn sync_plan(
             ),
         ));
     }
+    Ok(())
+}
+
+fn declared_lookup(
+    state: &SessionState,
+    query: &ValidatedQuery,
+    alias: &str,
+) -> Result<ResolvedTableReference> {
     let options = state.config_options();
     let declared = TableReference::from(alias).resolve(
         &options.catalog.default_catalog,
@@ -544,22 +574,7 @@ fn sync_plan(
             DataFusionError::Plan("compact planner requires one declared input lookup".into()),
         ));
     }
-    let source = MemTable::try_new(schema.clone(), vec![vec![RecordBatch::new_empty(schema)]])
-        .map_err(|error| datafusion_error(Some("compact-parity"), error))?;
-    let provider = SingleInput {
-        state: &state,
-        declared,
-        source: provider_as_source(Arc::new(source)),
-        lookups: Cell::new(0),
-    };
-    let raw = SqlToRel::new_with_options(&provider, ParserOptions::from(&options.sql_parser))
-        .statement_to_plan(query.statement())
-        .map_err(|error| datafusion_error(Some("compact-parity"), error))?;
-    let analyzed = state
-        .analyzer()
-        .execute_and_check(raw.clone(), options, |_, _| {})
-        .map_err(|error| datafusion_error(Some("compact-parity"), error))?;
-    Ok((raw, analyzed))
+    Ok(declared)
 }
 
 struct SingleInput<'a> {
@@ -681,15 +696,7 @@ fn native_argument(expr: &Expr, schema: &SchemaRef) -> bool {
         return false;
     };
     let params = &function.params;
-    if params.distinct
-        || params.filter.is_some()
-        || !params.order_by.is_empty()
-        || params.null_treatment.is_some()
-        || params.args.len() != 1
-        || !datafusion::functions_aggregate::all_default_aggregate_functions()
-            .iter()
-            .any(|builtin| builtin.as_ref() == function.func.as_ref())
-    {
+    if !native_parameters_supported(function) {
         return false;
     }
     if function.func.name() == "count"
@@ -730,6 +737,20 @@ fn native_argument(expr: &Expr, schema: &SchemaRef) -> bool {
     }
 }
 
+fn native_parameters_supported(
+    function: &datafusion::logical_expr::expr::AggregateFunction,
+) -> bool {
+    let params = &function.params;
+    !(params.distinct
+        || params.filter.is_some()
+        || !params.order_by.is_empty()
+        || params.null_treatment.is_some()
+        || params.args.len() != 1
+        || !datafusion::functions_aggregate::all_default_aggregate_functions()
+            .iter()
+            .any(|builtin| builtin.as_ref() == function.func.as_ref()))
+}
+
 fn exact_numeric(kind: &DataType) -> bool {
     matches!(
         kind,
@@ -748,23 +769,11 @@ fn exact_numeric(kind: &DataType) -> bool {
     )
 }
 
-fn native_census(
-    raw: &LogicalPlan,
-    analyzed: &LogicalPlan,
+fn native_keys(
+    aggregate: &datafusion::logical_expr::Aggregate,
     schema: &SchemaRef,
-) -> DFResult<Option<NativeCensus>> {
-    let Some((_, raw_aggregate)) = aggregate_shape(raw) else {
-        return Ok(None);
-    };
-    if raw_aggregate.aggr_expr.is_empty()
-        || !raw_aggregate
-            .aggr_expr
-            .iter()
-            .all(|expr| native_argument(expr, schema))
-    {
-        return Ok(None);
-    }
-    let keys = raw_aggregate
+) -> Option<Vec<usize>> {
+    aggregate
         .group_expr
         .iter()
         .map(|expr| {
@@ -788,21 +797,28 @@ fn native_census(
             )
             .then_some(ordinal)
         })
-        .collect::<Option<Vec<_>>>();
-    let Some(keys) = keys else { return Ok(None) };
+        .collect::<Option<Vec<_>>>()
+}
+
+fn native_census(
+    raw: &LogicalPlan,
+    analyzed: &LogicalPlan,
+    schema: &SchemaRef,
+) -> DFResult<Option<NativeCensus>> {
+    let Some((_, raw_aggregate)) = aggregate_shape(raw) else {
+        return Ok(None);
+    };
+    if !native_aggregates_supported(raw_aggregate, schema) {
+        return Ok(None);
+    }
+    let Some(keys) = native_keys(raw_aggregate, schema) else {
+        return Ok(None);
+    };
     let Some((projection, aggregate)) = aggregate_shape(analyzed) else {
         return Ok(None);
     };
     let logical = aggregate.input.schema();
-    let qualifiers = schema
-        .fields()
-        .iter()
-        .map(|field| {
-            let index = logical.as_arrow().index_of(field.name()).ok()?;
-            let (qualifier, original) = logical.qualified_field(index);
-            (original == field).then(|| qualifier.cloned())
-        })
-        .collect::<Option<Vec<_>>>();
+    let qualifiers = native_qualifiers(logical, schema);
     let Some(qualifiers) = qualifiers else {
         return Ok(None);
     };
@@ -817,27 +833,10 @@ fn native_census(
                 .map(|lowered| lowered.aggregate)
         })
         .collect::<DFResult<Vec<_>>>()?;
-    if aggregates
-        .iter()
-        .any(|expr| expr.create_accumulator().is_err())
-        || (!keys.is_empty()
-            && aggregates.iter().any(|expr| {
-                !expr.groups_accumulator_supported() || expr.create_groups_accumulator().is_err()
-            }))
-    {
+    if !native_accumulators_supported(&aggregates, !keys.is_empty()) {
         return Ok(None);
     }
-    let projection_types = projection
-        .expr
-        .iter()
-        .map(|expr| {
-            let physical = create_physical_expr(expr, &aggregate.schema, &props)?;
-            Ok((
-                physical.data_type(aggregate.schema.as_arrow())?,
-                physical.nullable(aggregate.schema.as_arrow())?,
-            ))
-        })
-        .collect::<DFResult<Vec<_>>>()?;
+    let projection_types = native_projection_types(projection, aggregate, &props)?;
     Ok(Some(NativeCensus {
         keys,
         states: aggregates
@@ -848,6 +847,63 @@ fn native_census(
         output: Arc::new(analyzed.schema().as_arrow().clone()),
         projection_types,
     }))
+}
+
+fn native_aggregates_supported(
+    aggregate: &datafusion::logical_expr::Aggregate,
+    schema: &SchemaRef,
+) -> bool {
+    !aggregate.aggr_expr.is_empty()
+        && aggregate
+            .aggr_expr
+            .iter()
+            .all(|expr| native_argument(expr, schema))
+}
+
+fn native_qualifiers(
+    logical: &DFSchema,
+    schema: &SchemaRef,
+) -> Option<Vec<Option<TableReference>>> {
+    schema
+        .fields()
+        .iter()
+        .map(|field| {
+            let index = logical.as_arrow().index_of(field.name()).ok()?;
+            let (qualifier, original) = logical.qualified_field(index);
+            (original == field).then(|| qualifier.cloned())
+        })
+        .collect()
+}
+
+fn native_accumulators_supported(
+    aggregates: &[Arc<datafusion::physical_expr::aggregate::AggregateFunctionExpr>],
+    grouped: bool,
+) -> bool {
+    !(aggregates
+        .iter()
+        .any(|expr| expr.create_accumulator().is_err())
+        || (grouped
+            && aggregates.iter().any(|expr| {
+                !expr.groups_accumulator_supported() || expr.create_groups_accumulator().is_err()
+            })))
+}
+
+fn native_projection_types(
+    projection: &datafusion::logical_expr::Projection,
+    aggregate: &datafusion::logical_expr::Aggregate,
+    props: &ExecutionProps,
+) -> DFResult<Vec<(DataType, bool)>> {
+    projection
+        .expr
+        .iter()
+        .map(|expr| {
+            let physical = create_physical_expr(expr, &aggregate.schema, props)?;
+            Ok((
+                physical.data_type(aggregate.schema.as_arrow())?,
+                physical.nullable(aggregate.schema.as_arrow())?,
+            ))
+        })
+        .collect::<DFResult<Vec<_>>>()
 }
 
 #[derive(Debug)]
