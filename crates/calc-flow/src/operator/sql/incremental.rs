@@ -48,6 +48,9 @@ mod predicate;
 #[path = "dirty.rs"]
 mod dirty;
 
+#[path = "variable_extrema.rs"]
+mod variable_extrema;
+
 #[path = "global_record.rs"]
 pub(in crate::operator::sql) mod global_record;
 
@@ -64,6 +67,7 @@ pub(super) struct IncrementalSql {
     projection: Vec<Arc<dyn PhysicalExpr>>,
     keys: Vec<usize>,
     variable_columns: Vec<usize>,
+    variable_extrema: Vec<usize>,
     converter: Option<RowConverter>,
     index: HashMap<Arc<[u8]>, usize, RandomState>,
     groups: Vec<Group>,
@@ -87,12 +91,13 @@ struct Group {
     values: Arc<[ScalarValue]>,
     states: Vec<Vec<ScalarValue>>,
     results: Vec<ScalarValue>,
-    _reservation: MemoryReservation,
+    reservation: MemoryReservation,
 }
 
 struct Candidate {
     accumulators: Vec<Option<Box<dyn Accumulator>>>,
     group: Group,
+    variable: Option<Box<variable_extrema::Bounds>>,
 }
 
 struct InputCandidates {
@@ -214,6 +219,7 @@ struct PartialGroups {
     base_bytes: usize,
     group_bytes: usize,
     state_fields: usize,
+    variable_bytes: usize,
     reservation: MemoryReservation,
 }
 
@@ -240,6 +246,7 @@ impl PartialGroups {
             base_bytes,
             group_bytes,
             state_fields,
+            variable_bytes: 0,
             reservation,
         })
     }
@@ -269,13 +276,25 @@ impl PartialGroups {
         let bitmap_copies = checked_bytes(0, [(self.state_fields, 3)], name)?;
         let bytes = checked_bytes(
             self.base_bytes,
-            [(capacity, self.group_bytes), (bitmap_bytes, bitmap_copies)],
+            [
+                (capacity, self.group_bytes),
+                (bitmap_bytes, bitmap_copies),
+                (self.variable_bytes, variable_extrema::STATE_STRING_FACTOR),
+            ],
             name,
         )?;
         ensure_reservation(&self.reservation, bytes, name)?;
         self.slots
             .try_reserve_exact(capacity - self.slots.len())
             .map_err(|error| df_error(name, error))?;
+        Ok(())
+    }
+
+    fn reserve_variable(&mut self, growth: usize, name: &str) -> Result<()> {
+        if growth != 0 {
+            self.variable_bytes = checked_bytes(self.variable_bytes, [(growth, 1)], name)?;
+            self.reserve(self.slots.len(), name)?;
+        }
         Ok(())
     }
 
@@ -463,9 +482,7 @@ fn native_state_charge(
                 .map_err(|error| df_error(name, error))?;
             let count = checked_bytes(count, [(fields.len(), 1)], name)?;
             let bytes = fields.iter().try_fold(bytes, |bytes, field| {
-                let width = field.data_type().primitive_width().ok_or_else(|| {
-                    df_error(name, "native SQL aggregate has variable-width state")
-                })?;
+                let width = variable_extrema::state_width(field.data_type(), name)?;
                 checked_bytes(bytes, [(3, width)], name)
             })?;
             Ok((bytes, count))
@@ -602,6 +619,17 @@ impl IncrementalSql {
             }
         };
         let (converter, finalizer_bytes) = grouped_layout(&keys, &aggregates, &schema, name)?;
+        let variable_extrema = aggregates
+            .iter()
+            .enumerate()
+            .filter_map(|(index, expression)| {
+                matches!(
+                    expression.field().data_type(),
+                    DataType::Utf8 | DataType::LargeUtf8
+                )
+                .then_some(index)
+            })
+            .collect();
         Ok(Some(Self {
             schema,
             aggregate_schema: Arc::new(aggregate.schema.as_arrow().clone()),
@@ -615,6 +643,7 @@ impl IncrementalSql {
             projection,
             keys,
             variable_columns,
+            variable_extrema,
             converter,
             groups: Vec::new(),
             dirty: dirty::DirtyGroups::empty(reservation.new_empty()),
@@ -746,6 +775,13 @@ impl IncrementalSql {
         reservation
             .try_grow(bytes)
             .map_err(|error| df_error(name, error))?;
+        let variable = variable_extrema::Bounds::new(
+            &self.variable_extrema,
+            previous,
+            bytes,
+            &reservation,
+            name,
+        )?;
         let (key, values) = if let Some(previous) = previous {
             (previous.key.clone(), previous.values.clone())
         } else {
@@ -771,9 +807,10 @@ impl IncrementalSql {
                     |previous| previous.states.clone(),
                 ),
                 results: vec![ScalarValue::Null; self.aggregates.len()],
-                _reservation: reservation,
+                reservation,
             },
             accumulators,
+            variable,
         })
     }
 
@@ -1052,6 +1089,9 @@ impl IncrementalSql {
     }
 
     fn native_keys(&self, rows: usize, name: &str) -> Result<Option<NativeKeys>> {
+        if !self.variable_extrema.is_empty() {
+            return Ok(None);
+        }
         self.keys
             .first()
             .filter(|_| self.keys.len() == 1)
@@ -1081,6 +1121,12 @@ impl IncrementalSql {
         self.reserve_chunk(chunk, reservation, workspace, name)?;
         let arguments = self.arguments(chunk, name)?;
         if self.keys.is_empty() {
+            let candidate = candidates.groups.get_mut(&0).expect("global candidate");
+            if let Some(variable) = candidate.variable.as_mut() {
+                for row in 0..chunk.num_rows() {
+                    variable.observe(&arguments, &[], row, &candidate.group.reservation, name)?;
+                }
+            }
             return update_global(&arguments, &mut candidates.groups, name);
         }
         let selection = self
@@ -1215,6 +1261,18 @@ impl IncrementalSql {
             candidates.groups.insert(slot, candidate);
             candidates.new_count = new_count;
             indices.push(rank);
+        }
+        if !self.variable_extrema.is_empty() {
+            let growth = variable_extrema::prepare_grouped(
+                arguments,
+                filters,
+                selection,
+                &indices,
+                &partial.slots,
+                &mut candidates.groups,
+                name,
+            )?;
+            partial.reserve_variable(growth, name)?;
         }
         partial.seed(&candidates.groups, &self.aggregates, name)?;
         partial.update(arguments, filters, &indices, partial.slots.len(), name)?;
@@ -1417,11 +1475,13 @@ impl IncrementalSql {
             name,
         )?;
         let output_charge = checked_bytes(0, [(count, width)], name)?;
+        let variable = !self.variable_extrema.is_empty();
         let output_charge =
-            key_output_charge(output_charge, self.groups.iter(), context, name).await?;
+            key_output_charge(output_charge, self.groups.iter(), variable, context, name).await?;
         key_output_charge(
             output_charge,
             candidates.values().map(|candidate| &candidate.group),
+            variable,
             context,
             name,
         )
@@ -1865,6 +1925,7 @@ fn aggregate_argument_supported(
 
 fn extrema_argument_supported(data_type: &DataType, global: bool) -> bool {
     exact_numeric(data_type)
+        || matches!(data_type, DataType::Utf8 | DataType::LargeUtf8)
         || (global && matches!(data_type, DataType::Float32 | DataType::Float64))
 }
 
@@ -1899,6 +1960,7 @@ fn grouped_aggregates_supported(keys: &[usize], aggregates: &[Arc<AggregateFunct
 async fn key_output_charge<'a>(
     mut charge: usize,
     groups: impl Iterator<Item = &'a Group>,
+    variable: bool,
     context: &StreamOperatorContext<'_>,
     name: &str,
 ) -> Result<usize> {
@@ -1908,6 +1970,13 @@ async fn key_output_charge<'a>(
             tokio::task::yield_now().await;
         }
         charge = checked_bytes(charge, [(group.key.len(), 4)], name)?;
+        if variable {
+            charge = checked_bytes(
+                charge,
+                [(variable_extrema::result_bytes(group, name)?, 4)],
+                name,
+            )?;
+        }
     }
     Ok(charge)
 }

@@ -196,9 +196,7 @@ fn headroom(
             fields
                 .iter()
                 .try_fold(checked_bytes(bytes, [(1, 4096)], name)?, |bytes, field| {
-                    let width = field.data_type().primitive_width().ok_or_else(|| {
-                        df_error(name, "sequential native state must be fixed width")
-                    })?;
+                    let width = super::variable_extrema::state_width(field.data_type(), name)?;
                     checked_bytes(bytes, [(capacity, width * 2), (bitmap, 6)], name)
                 })
         },

@@ -119,4 +119,7 @@ mod float_count_tests;
 mod float_extrema_tests;
 
 #[cfg(test)]
+mod string_extrema_tests;
+
+#[cfg(test)]
 mod grouped_float_tests;

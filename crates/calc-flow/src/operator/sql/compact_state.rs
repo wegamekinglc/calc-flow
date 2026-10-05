@@ -426,7 +426,7 @@ impl IncrementalSql {
             for start in (0..record.num_rows()).step_by(STATE_CHUNK_ROWS) {
                 check_cancelled()?;
                 let rows = STATE_CHUNK_ROWS.min(record.num_rows() - start);
-                let variable = key_variable_bytes(record, self.keys.len(), start, rows, name)?;
+                let variable = record_variable_bytes(record, start, rows, name)?;
                 let charge = checked_bytes(
                     4096,
                     [
@@ -493,7 +493,7 @@ impl IncrementalSql {
         descriptor: &NativeStateDescriptor,
         name: &str,
     ) -> Result<Group> {
-        let variable = key_variable_bytes(record, self.keys.len(), row, 1, name)?;
+        let variable = record_variable_bytes(record, row, 1, name)?;
         let charge = checked_bytes(
             self.aggregate_bytes,
             [
@@ -550,7 +550,7 @@ impl IncrementalSql {
             values: Arc::from(values),
             states,
             results,
-            _reservation: reservation,
+            reservation,
         })
     }
 }
@@ -742,15 +742,14 @@ fn validate_ledger(
     Ok(())
 }
 
-fn key_variable_bytes(
+fn record_variable_bytes(
     record: &RecordBatch,
-    keys: usize,
     start: usize,
     rows: usize,
     name: &str,
 ) -> Result<usize> {
     let mut bytes = 0;
-    for array in &record.columns()[..keys] {
+    for array in record.columns() {
         for row in start..start + rows {
             let width = match array.data_type() {
                 DataType::Utf8 => array

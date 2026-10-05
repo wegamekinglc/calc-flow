@@ -98,7 +98,7 @@ async fn test_compact_native_state_composite_string_null_keys_rebuild_lookup_and
         for (slot, group) in restored.groups.iter().enumerate() {
             assert_eq!(restored.index.get(&group.key), Some(&slot));
             let Group {
-                _reservation: credit,
+                reservation: credit,
                 ..
             } = group;
             assert!(credit.size() >= group.key.len());

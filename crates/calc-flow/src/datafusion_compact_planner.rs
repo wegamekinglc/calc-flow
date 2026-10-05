@@ -79,6 +79,37 @@ async fn test_compact_sync_integer_native_fields_match_async_planner() {
 }
 
 #[tokio::test]
+async fn test_compact_sync_string_extrema_native_fields_match_async_planner() {
+    for rolling in [false, true] {
+        let runtime = configured_runtime(rolling);
+        for kind in [DataType::Utf8, DataType::LargeUtf8] {
+            for grouped in [false, true] {
+                let (prefix, suffix) = if grouped {
+                    ("key, ", " GROUP BY key")
+                } else {
+                    ("", "")
+                };
+                let sql = format!(
+                    "SELECT {prefix}MIN(value), MAX(value), COUNT(value), COUNT(*), MIN(value) AS again FROM events{suffix}"
+                );
+                let census = assert_parity(&runtime, &sql, input_schema(kind.clone()), "events")
+                    .await
+                    .unwrap();
+                assert_eq!(census.states.len(), 4);
+                assert_eq!(census.results.len(), 4);
+                for index in 0..2 {
+                    assert_eq!(census.states[index].len(), 1);
+                    assert_eq!(census.states[index][0].data_type(), &kind);
+                    assert_eq!(census.results[index].data_type(), &kind);
+                }
+                assert_eq!(census.output.fields().len(), 5 + usize::from(grouped));
+                assert_eq!(census.keys, if grouped { vec![0] } else { vec![] });
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_compact_sync_decimal_native_promotions_match_async_planner() {
     let runtime = configured_runtime(true);
     for (width, precision) in [(32, 9), (64, 18), (128, 38), (256, 76)] {
@@ -676,7 +707,11 @@ fn native_argument(expr: &Expr, schema: &SchemaRef) -> bool {
         return false;
     };
     match function.func.name() {
-        "sum" | "min" | "max" => exact_numeric(field.data_type()),
+        "sum" => exact_numeric(field.data_type()),
+        "min" | "max" => {
+            exact_numeric(field.data_type())
+                || matches!(field.data_type(), DataType::Utf8 | DataType::LargeUtf8)
+        }
         "count" => {
             exact_numeric(field.data_type())
                 || matches!(
