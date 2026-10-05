@@ -32,12 +32,7 @@ async fn test_having_filters_full_snapshots_without_discarding_groups() {
                 let actual = process(&mut state, incoming, &context).await;
                 history.push(part);
                 post_oracle(&actual, query, &dtype, &history, sequence as u64).await;
-                assert!(
-                    state.incremental.is_some()
-                        && state.compact.is_some()
-                        && state.retained.is_none(),
-                    "HAVING must filter native full snapshots without retaining input"
-                );
+                assert_having_native_state(&state);
                 let count = if query == GROUPED_HAVING { 3 } else { 1 };
                 assert_eq!(
                     state
@@ -83,6 +78,13 @@ async fn test_having_filters_full_snapshots_without_discarding_groups() {
             assert_eq!(pools.iter().map(|pool| pool.reserved()).sum::<usize>(), 0);
         }
     }
+}
+
+fn assert_having_native_state(state: &SqlOperator) {
+    assert!(
+        state.incremental.is_some() && state.compact.is_some() && state.retained.is_none(),
+        "HAVING must filter native full snapshots without retaining input"
+    );
 }
 
 #[tokio::test]

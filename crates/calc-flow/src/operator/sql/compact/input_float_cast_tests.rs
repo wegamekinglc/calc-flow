@@ -144,17 +144,42 @@ async fn test_aggregate_float_input_casts_refusal_refunds_and_once_retry() {
 }
 
 fn integer_input(dtype: &DataType, last: bool) -> Batch {
-    let value = match dtype {
-        DataType::Int8 => ScalarValue::Int8(Some(if last { i8::MIN } else { i8::MAX })),
-        DataType::Int16 => ScalarValue::Int16(Some(if last { i16::MIN } else { i16::MAX })),
-        DataType::Int32 => ScalarValue::Int32(Some(if last { i32::MIN } else { i32::MAX })),
-        DataType::Int64 => ScalarValue::Int64(Some(if last { i64::MIN } else { i64::MAX })),
-        DataType::UInt8 => ScalarValue::UInt8(Some(if last { 0 } else { u8::MAX })),
-        DataType::UInt16 => ScalarValue::UInt16(Some(if last { 0 } else { u16::MAX })),
-        DataType::UInt32 => ScalarValue::UInt32(Some(if last { 0 } else { u32::MAX })),
-        DataType::UInt64 => ScalarValue::UInt64(Some(if last { 0 } else { u64::MAX })),
+    let (min, max) = match dtype {
+        DataType::Int8 => (
+            ScalarValue::Int8(Some(i8::MIN)),
+            ScalarValue::Int8(Some(i8::MAX)),
+        ),
+        DataType::Int16 => (
+            ScalarValue::Int16(Some(i16::MIN)),
+            ScalarValue::Int16(Some(i16::MAX)),
+        ),
+        DataType::Int32 => (
+            ScalarValue::Int32(Some(i32::MIN)),
+            ScalarValue::Int32(Some(i32::MAX)),
+        ),
+        DataType::Int64 => (
+            ScalarValue::Int64(Some(i64::MIN)),
+            ScalarValue::Int64(Some(i64::MAX)),
+        ),
+        DataType::UInt8 => (
+            ScalarValue::UInt8(Some(0)),
+            ScalarValue::UInt8(Some(u8::MAX)),
+        ),
+        DataType::UInt16 => (
+            ScalarValue::UInt16(Some(0)),
+            ScalarValue::UInt16(Some(u16::MAX)),
+        ),
+        DataType::UInt32 => (
+            ScalarValue::UInt32(Some(0)),
+            ScalarValue::UInt32(Some(u32::MAX)),
+        ),
+        DataType::UInt64 => (
+            ScalarValue::UInt64(Some(0)),
+            ScalarValue::UInt64(Some(u64::MAX)),
+        ),
         _ => unreachable!(),
     };
+    let value = if last { min } else { max };
     let null = ScalarValue::try_new_null(dtype).unwrap();
     let array = ScalarValue::iter_to_array([value, null]).unwrap();
     let record = RecordBatch::try_new(
