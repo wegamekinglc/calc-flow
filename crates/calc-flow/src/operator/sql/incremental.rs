@@ -61,6 +61,9 @@ mod native_expression;
 #[path = "group_key.rs"]
 mod group_key;
 
+#[path = "normalize_groups.rs"]
+mod normalize_groups;
+
 use group_key::GroupKey;
 use native_expression::output_work;
 
@@ -593,6 +596,10 @@ impl IncrementalSql {
         let Some(variable_columns) = plan_inputs(raw, &schema, name)? else {
             return Ok(None);
         };
+        let normalized = normalize_groups::plans(runtime, query, raw, analyzed, &schema, name)?;
+        let (raw, analyzed) = normalized
+            .as_ref()
+            .map_or((raw, analyzed), |plans| (&plans.raw, &plans.analyzed));
         let Some((projection, aggregate)) = shape(analyzed) else {
             return Ok(None);
         };
