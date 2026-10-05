@@ -1,10 +1,23 @@
 use super::super::super::super::{
     SqlCheckpointInput, decode_sql_state, encode_sql_state_async, ipc, sql_state_error,
 };
-use super::super::super::IncrementalSql;
+use super::super::super::{
+    IncrementalSql, compact_state::NativeStateDescriptor, predicate::InputPredicate,
+};
 use super::{RecordBatch, Result, State, checked_bytes, df_error};
 use crate::{Batch, BatchMetadata, OperatorStateSnapshot, StateSegment, StreamOperatorContext};
+use datafusion::{
+    arrow::datatypes::SchemaRef, common::ScalarValue, execution::memory_pool::MemoryReservation,
+};
 use serde::{Deserialize, Serialize};
+
+type SavedStates = Vec<Vec<ScalarValue>>;
+
+struct CoalescerRestoreInput {
+    complete: Batch,
+    tail: Batch,
+    descriptor: NativeStateDescriptor,
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -70,12 +83,7 @@ impl IncrementalSql {
     fn coalescer_records(
         &self,
         name: &str,
-    ) -> Result<
-        Option<(
-            [RecordBatch; 2],
-            datafusion::execution::memory_pool::MemoryReservation,
-        )>,
-    > {
+    ) -> Result<Option<([RecordBatch; 2], MemoryReservation)>> {
         if !self.requires_global_coalescer() {
             return Ok(None);
         }
@@ -85,6 +93,12 @@ impl IncrementalSql {
             .and_then(|proof| proof.coalesced.as_ref())
             .ok_or_else(|| df_error(name, "global coalescer state is missing"))?;
         let descriptor = self.native_descriptor(name)?;
+        let reservation = self.coalescer_capture_credit(state, name)?;
+        let complete = state.complete_record(descriptor.wire_schema, name)?;
+        Ok(Some(([complete, state.tail.clone()], reservation)))
+    }
+
+    fn coalescer_capture_credit(&self, state: &State, name: &str) -> Result<MemoryReservation> {
         let reservation = self.reservation.new_empty();
         let bytes = state
             .tail
@@ -98,8 +112,7 @@ impl IncrementalSql {
             checked_bytes(bytes, [(self.aggregates.len(), 4096)], name)?,
             name,
         )?;
-        let complete = state.complete_record(descriptor.wire_schema, name)?;
-        Ok(Some(([complete, state.tail.clone()], reservation)))
+        Ok(reservation)
     }
 
     pub(in crate::operator::sql) fn capture_coalescer(
@@ -156,12 +169,34 @@ impl IncrementalSql {
         check: &dyn Fn() -> Result<()>,
         name: &str,
     ) -> Result<()> {
+        let Some(tail_rows) = self.coalescer_tail_rows(inventory, snapshot, rows, name)? else {
+            return Ok(());
+        };
+        check()?;
+        let input = self.coalescer_restore_input(snapshot, tail_rows, name)?;
+        let (states, tail, reservation) =
+            self.prepare_coalescer_restore(&input, rows, check, name)?;
+        check()?;
+        self.global_records
+            .as_mut()
+            .expect("global coalescer proof")
+            .coalesced = Some(State::restore(states, tail, reservation, name)?);
+        Ok(())
+    }
+
+    fn coalescer_tail_rows(
+        &self,
+        inventory: &Inventory,
+        snapshot: &OperatorStateSnapshot,
+        rows: u64,
+        name: &str,
+    ) -> Result<Option<u64>> {
         inventory.validate(snapshot)?;
         let Inventory::Filter { tail_rows, .. } = inventory else {
             return if self.requires_global_coalescer() {
                 Err(df_error(name, "global coalescer checkpoint is missing"))
             } else {
-                Ok(())
+                Ok(None)
             };
         };
         if !self.requires_global_coalescer() || *tail_rows > rows {
@@ -170,23 +205,49 @@ impl IncrementalSql {
                 "global coalescer checkpoint differs from plan",
             ));
         }
-        check()?;
+        Ok(Some(*tail_rows))
+    }
+
+    fn coalescer_restore_input(
+        &self,
+        snapshot: &OperatorStateSnapshot,
+        tail_rows: u64,
+        name: &str,
+    ) -> Result<CoalescerRestoreInput> {
         let complete = decode_sql_state(snapshot.segments["global-complete"].bytes())?;
         let tail = decode_sql_state(snapshot.segments["global-tail"].bytes())?;
         let descriptor = self.native_descriptor(name)?;
-        if complete.num_rows() != 1
-            || complete.table_payload()?.schema() != &descriptor.wire_schema
-            || complete.table_payload()?.batches().len() != 1
-            || u64::try_from(tail.num_rows()).ok() != Some(*tail_rows)
-            || tail.table_payload()?.schema() != &self.schema
-            || tail.table_payload()?.batches().len() != 1
-        {
-            return Err(df_error(
-                name,
-                "global coalescer checkpoint schema or rows are invalid",
-            ));
-        }
-        let record = &complete.table_payload()?.batches()[0];
+        validate_complete_record(&complete, &descriptor.wire_schema, name)?;
+        validate_tail_record(&tail, &self.schema, tail_rows, name)?;
+        Ok(CoalescerRestoreInput {
+            complete,
+            tail,
+            descriptor,
+        })
+    }
+
+    fn prepare_coalescer_restore(
+        &self,
+        input: &CoalescerRestoreInput,
+        rows: u64,
+        check: &dyn Fn() -> Result<()>,
+        name: &str,
+    ) -> Result<(SavedStates, RecordBatch, MemoryReservation)> {
+        let record = &input.complete.table_payload()?.batches()[0];
+        let (reservation, predicate) = self.coalescer_restore_workspace(&input.tail, name)?;
+        let states = complete_states(record, &input.descriptor, self.aggregates.len(), name)?;
+        let tail = input.tail.table_payload()?.batches()[0].clone();
+        validate_tail_selection(predicate, &tail, name)?;
+        self.validate_coalescer_counts(&states, rows, tail.num_rows(), name)?;
+        self.validate_coalescer_prefix(&states, &tail, check, name)?;
+        Ok((states, tail, reservation))
+    }
+
+    fn coalescer_restore_workspace(
+        &self,
+        tail: &Batch,
+        name: &str,
+    ) -> Result<(MemoryReservation, &InputPredicate)> {
         let reservation = self.reservation.new_empty();
         let bytes = tail.table_payload()?.batches()[0]
             .columns()
@@ -216,50 +277,34 @@ impl IncrementalSql {
             )?,
             name,
         )?;
-        let mut column = 0;
-        let mut states = Vec::with_capacity(self.aggregates.len());
-        for fields in &descriptor.state_fields {
-            let state = (column..column + fields.len())
-                .map(|index| {
-                    datafusion::common::ScalarValue::try_from_array(record.column(index), 0)
-                })
-                .collect::<datafusion::common::Result<Vec<_>>>()
-                .map_err(|error| df_error(name, error))?;
-            column += fields.len();
-            states.push(state);
-        }
-        let tail = tail.table_payload()?.batches()[0].clone();
-        let mask = predicate.evaluate(&tail, name)?;
-        if mask.iter().any(|selected| selected != Some(true)) {
-            return Err(df_error(
-                name,
-                "global coalescer tail contains rejected rows",
-            ));
-        }
+        Ok((reservation, predicate))
+    }
+
+    fn validate_coalescer_counts(
+        &self,
+        states: &[Vec<ScalarValue>],
+        rows: u64,
+        tail_rows: usize,
+        name: &str,
+    ) -> Result<()> {
         let proof = self
             .global_records
             .as_ref()
             .expect("global coalescer proof");
-        for (kind, state) in proof.kinds.iter().zip(&states) {
-            if super::super::saved_count(kind, state, name)? > rows - tail.num_rows() as u64 {
+        for (kind, state) in proof.kinds.iter().zip(states) {
+            if super::super::saved_count(kind, state, name)? > rows - tail_rows as u64 {
                 return Err(df_error(
                     name,
                     "global completed count exceeds input history",
                 ));
             }
         }
-        self.validate_coalescer_prefix(&states, &tail, check, name)?;
-        check()?;
-        self.global_records
-            .as_mut()
-            .expect("global coalescer proof")
-            .coalesced = Some(State::restore(states, tail, reservation, name)?);
         Ok(())
     }
 
     fn validate_coalescer_prefix(
         &self,
-        states: &[Vec<datafusion::common::ScalarValue>],
+        states: &[Vec<ScalarValue>],
         tail: &RecordBatch,
         check: &dyn Fn() -> Result<()>,
         name: &str,
@@ -302,8 +347,68 @@ impl IncrementalSql {
     }
 }
 
-fn scalar_equal(a: &datafusion::common::ScalarValue, b: &datafusion::common::ScalarValue) -> bool {
-    use datafusion::common::ScalarValue;
+fn validate_complete_record(complete: &Batch, schema: &SchemaRef, name: &str) -> Result<()> {
+    if complete.num_rows() != 1
+        || complete.table_payload()?.schema() != schema
+        || complete.table_payload()?.batches().len() != 1
+    {
+        return Err(df_error(
+            name,
+            "global coalescer checkpoint schema or rows are invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_tail_record(tail: &Batch, schema: &SchemaRef, rows: u64, name: &str) -> Result<()> {
+    if u64::try_from(tail.num_rows()).ok() != Some(rows)
+        || tail.table_payload()?.schema() != schema
+        || tail.table_payload()?.batches().len() != 1
+    {
+        return Err(df_error(
+            name,
+            "global coalescer checkpoint schema or rows are invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn complete_states(
+    record: &RecordBatch,
+    descriptor: &NativeStateDescriptor,
+    count: usize,
+    name: &str,
+) -> Result<SavedStates> {
+    let mut column = 0;
+    let mut states = Vec::with_capacity(count);
+    for fields in &descriptor.state_fields {
+        let state = (column..column + fields.len())
+            .map(|index| ScalarValue::try_from_array(record.column(index), 0))
+            .collect::<datafusion::common::Result<Vec<_>>>()
+            .map_err(|error| df_error(name, error))?;
+        column += fields.len();
+        states.push(state);
+    }
+    Ok(states)
+}
+
+fn validate_tail_selection(
+    predicate: &InputPredicate,
+    tail: &RecordBatch,
+    name: &str,
+) -> Result<()> {
+    let mask = predicate.evaluate(tail, name)?;
+    if mask.iter().any(|selected| selected != Some(true)) {
+        return Err(df_error(
+            name,
+            "global coalescer tail contains rejected rows",
+        ));
+    }
+    Ok(())
+}
+
+fn scalar_equal(a: &ScalarValue, b: &ScalarValue) -> bool {
+    use ScalarValue;
     match (a, b) {
         (ScalarValue::Float32(a), ScalarValue::Float32(b)) => {
             a.map(f32::to_bits) == b.map(f32::to_bits)
@@ -317,7 +422,7 @@ fn scalar_equal(a: &datafusion::common::ScalarValue, b: &datafusion::common::Sca
 
 async fn encode(
     record: RecordBatch,
-    credit: &datafusion::execution::memory_pool::MemoryReservation,
+    credit: &MemoryReservation,
     context: &StreamOperatorContext<'_>,
     name: &str,
 ) -> Result<StateSegment> {
