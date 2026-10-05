@@ -147,6 +147,19 @@ impl PreparedSqlCheckpoint {
     }
 }
 
+fn install_retained_parts(
+    state: &mut RetainedSqlInput,
+    segment: Option<std::sync::Arc<ipc::SqlInputSegment>>,
+    metadata: Option<std::sync::Arc<metadata::SqlMetadata>>,
+) {
+    if segment.is_some() {
+        state.segment = segment;
+    }
+    if metadata.is_some() {
+        state.metadata_segment = metadata;
+    }
+}
+
 fn record_copy_reservation(
     runtime: &DataFusionRuntime,
     name: &str,
@@ -580,6 +593,16 @@ impl SqlOperator {
                 _reservation: None,
             });
         };
+        self.project_retention(&batch, plans, projection, runtime)
+    }
+
+    fn project_retention(
+        &self,
+        batch: &Batch,
+        plans: Option<RetentionPlans>,
+        projection: std::sync::Arc<retention::SqlProjection>,
+        runtime: &DataFusionRuntime,
+    ) -> Result<PreparedRetention> {
         let (reservation, projected) = self.project_retained_records(
             runtime,
             batch.table_payload()?.batches(),
@@ -619,40 +642,50 @@ impl SqlOperator {
         Option<RetentionPlans>,
         Option<std::sync::Arc<retention::SqlProjection>>,
     )> {
-        let existing = self
-            .retained
+        let (plans, projection) = match self.existing_retention_projection() {
+            Some(projection) => (None, Some(projection)),
+            None => {
+                self.resolve_retention_projection(batch, alias, runtime)
+                    .await?
+            }
+        };
+        context.check_cancelled()?;
+        Ok((plans, projection))
+    }
+
+    fn existing_retention_projection(&self) -> Option<std::sync::Arc<retention::SqlProjection>> {
+        self.retained
             .as_ref()
             .and_then(|state| state.projection.clone())
             .or_else(|| {
                 self.compact
                     .as_deref()
                     .and_then(compact::CompactSqlState::projection)
-            });
-        let mut plans = None;
-        let projection = if let Some(projection) = existing {
-            Some(projection)
-        } else {
-            let schema = self.retained.as_ref().map_or_else(
-                || batch.table_payload().map(|table| table.schema().clone()),
-                |state| Ok(state.records[0].schema()),
-            )?;
-            let projection = retention::SqlProjection::resolve(
-                runtime,
-                &self.validated,
-                alias,
-                schema,
-                &self.name,
-            )?;
-            if let Some(projection) = projection {
-                plans = projection
-                    .prepare_plan(runtime, &self.validated, alias, &self.name)
-                    .await?;
-                plans.as_ref().map(|_| projection)
-            } else {
-                None
-            }
+            })
+    }
+
+    async fn resolve_retention_projection(
+        &self,
+        batch: &Batch,
+        alias: &str,
+        runtime: &DataFusionRuntime,
+    ) -> Result<(
+        Option<RetentionPlans>,
+        Option<std::sync::Arc<retention::SqlProjection>>,
+    )> {
+        let schema = self.retained.as_ref().map_or_else(
+            || batch.table_payload().map(|table| table.schema().clone()),
+            |state| Ok(state.records[0].schema()),
+        )?;
+        let projection =
+            retention::SqlProjection::resolve(runtime, &self.validated, alias, schema, &self.name)?;
+        let Some(projection) = projection else {
+            return Ok((None, None));
         };
-        context.check_cancelled()?;
+        let plans = projection
+            .prepare_plan(runtime, &self.validated, alias, &self.name)
+            .await?;
+        let projection = plans.as_ref().map(|_| projection);
         Ok((plans, projection))
     }
 
@@ -920,8 +953,63 @@ impl SqlOperator {
             return Ok(None);
         }
         let mut initialized = self.plan_incremental(alias, batch, plans).await?;
+        if !self
+            .prove_incremental_plan(initialized.as_deref(), alias, batch, context)
+            .await?
+        {
+            self.incremental_checked = batch.num_rows() != 0;
+            return Ok(None);
+        }
+        if let Some(incremental) = initialized.as_mut() {
+            #[cfg(test)]
+            {
+                self.incremental_work.1 += 1;
+            }
+            self.rebuild_incremental(incremental, context).await?;
+        } else {
+            self.incremental_checked = true;
+        }
+        Ok(initialized)
+    }
+
+    async fn prove_incremental_plan(
+        &mut self,
+        plan: Option<&incremental::IncrementalSql>,
+        alias: &str,
+        batch: &Batch,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<bool> {
+        if !self
+            .prove_incremental_eager(plan, alias, batch, context)
+            .await?
+        {
+            return Ok(false);
+        }
+        if !self
+            .prove_incremental_grouped(plan, alias, batch, context)
+            .await?
+        {
+            return Ok(false);
+        }
+        if !self
+            .prove_incremental_global(plan, alias, batch, context)
+            .await?
+        {
+            return Ok(false);
+        }
         context.check_cancelled()?;
-        if let Some(plan) = initialized.as_ref()
+        Ok(true)
+    }
+
+    async fn prove_incremental_eager(
+        &mut self,
+        plan: Option<&incremental::IncrementalSql>,
+        alias: &str,
+        batch: &Batch,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<bool> {
+        context.check_cancelled()?;
+        if let Some(plan) = plan
             && !plan.eager_input_checks().is_empty()
             && !self
                 .stream_state
@@ -935,26 +1023,40 @@ impl SqlOperator {
                 )
                 .await?
         {
-            self.incremental_checked = batch.num_rows() != 0;
-            return Ok(None);
+            return Ok(false);
         }
+        Ok(true)
+    }
+
+    async fn prove_incremental_grouped(
+        &mut self,
+        plan: Option<&incremental::IncrementalSql>,
+        alias: &str,
+        batch: &Batch,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<bool> {
         context.check_cancelled()?;
-        if initialized
-            .as_ref()
-            .is_some_and(|plan| plan.requires_grouped_float_proof())
+        if plan.is_some_and(incremental::IncrementalSql::requires_grouped_float_proof)
             && !self
                 .stream_state
                 .runtime()?
                 .prove_grouped_float_plan(&self.validated, alias, batch, &self.name)
                 .await?
         {
-            self.incremental_checked = batch.num_rows() != 0;
-            return Ok(None);
+            return Ok(false);
         }
+        Ok(true)
+    }
+
+    async fn prove_incremental_global(
+        &mut self,
+        plan: Option<&incremental::IncrementalSql>,
+        alias: &str,
+        batch: &Batch,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<bool> {
         context.check_cancelled()?;
-        if initialized
-            .as_ref()
-            .is_some_and(|plan| plan.requires_global_record_proof())
+        if plan.is_some_and(incremental::IncrementalSql::requires_global_record_proof)
             && !self
                 .stream_state
                 .runtime()?
@@ -962,27 +1064,14 @@ impl SqlOperator {
                     &self.validated,
                     alias,
                     batch,
-                    initialized
-                        .as_ref()
-                        .is_some_and(|plan| plan.requires_global_coalescer()),
+                    plan.is_some_and(incremental::IncrementalSql::requires_global_coalescer),
                     &self.name,
                 )
                 .await?
         {
-            self.incremental_checked = batch.num_rows() != 0;
-            return Ok(None);
+            return Ok(false);
         }
-        context.check_cancelled()?;
-        if let Some(incremental) = initialized.as_mut() {
-            #[cfg(test)]
-            {
-                self.incremental_work.1 += 1;
-            }
-            self.rebuild_incremental(incremental, context).await?;
-        } else {
-            self.incremental_checked = true;
-        }
-        Ok(initialized)
+        Ok(true)
     }
 
     async fn plan_incremental(
@@ -1037,6 +1126,84 @@ impl SqlOperator {
             }
             incremental.commit(transaction);
         }
+        Ok(())
+    }
+
+    fn stream_alias(
+        &self,
+        ingress: &str,
+        batch: &Batch,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<String> {
+        let [alias] = self.aliases.as_slice() else {
+            return Err(CalcFlowError::Operator {
+                node_id: self.name.clone(),
+                message: "multi-input SQL has no incremental stream semantics".into(),
+            });
+        };
+        if ingress != alias {
+            return Err(CalcFlowError::Operator {
+                node_id: self.name.clone(),
+                message: format!("unknown ingress {ingress:?}; expected {alias:?}"),
+            });
+        }
+        context.check_cancelled()?;
+        self.input_ports[0].validate(batch, &format!("{}.{alias}", self.name))?;
+        Ok(alias.clone())
+    }
+
+    async fn prepare_stream_retention(
+        &mut self,
+        batch: Batch,
+        alias: &str,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<PreparedRetention> {
+        if self.stream_aggregate {
+            self.stream_state.runtime()?;
+        }
+        self.prepare_retention(batch, alias, context).await
+    }
+
+    fn retained_candidate(&self, prepared: &PreparedRetention) -> Result<Option<RetainedSqlInput>> {
+        if self.stream_aggregate {
+            self.accumulate(prepared).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn process_retained(
+        &mut self,
+        prepared: PreparedRetention,
+        alias: String,
+        context: &StreamOperatorContext<'_>,
+        output: &mut dyn StreamCollector,
+    ) -> Result<()> {
+        let next = self.retained_candidate(&prepared)?;
+        let runtime = self.stream_state.runtime()?;
+        let materialized = next
+            .as_ref()
+            .map(|state| state.materialize(runtime, &self.name))
+            .transpose()?;
+        let tables = BTreeMap::from([(
+            alias.clone(),
+            materialized
+                .as_ref()
+                .map_or(prepared.batch, |state| state.batch.clone()),
+        )]);
+        #[cfg(test)]
+        {
+            self.incremental_work.0 += tables.values().map(Batch::num_rows).sum::<usize>();
+            self.incremental_work.1 += 1;
+        }
+        let runtime = self.stream_state.runtime()?;
+        let produced = runtime
+            .sql_validated(&self.validated, &tables, Some(&self.name))
+            .await?;
+        context.check_cancelled()?;
+        output.emit("output", produced).await?;
+        self.retained = next;
+        self.retained_capture = None;
         Ok(())
     }
 
@@ -1144,25 +1311,10 @@ impl StreamOperator for SqlOperator {
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
-        let [alias] = self.aliases.as_slice() else {
-            return Err(CalcFlowError::Operator {
-                node_id: self.name.clone(),
-                message: "multi-input SQL has no incremental stream semantics".into(),
-            });
-        };
-        if ingress != alias {
-            return Err(CalcFlowError::Operator {
-                node_id: self.name.clone(),
-                message: format!("unknown ingress {ingress:?}; expected {alias:?}"),
-            });
-        }
-        context.check_cancelled()?;
-        self.input_ports[0].validate(&batch, &format!("{}.{alias}", self.name))?;
-        let alias = alias.clone();
-        if self.stream_aggregate {
-            self.stream_state.runtime()?;
-        }
-        let mut prepared = self.prepare_retention(batch, &alias, context).await?;
+        let alias = self.stream_alias(ingress, &batch, context)?;
+        let mut prepared = self
+            .prepare_stream_retention(batch, &alias, context)
+            .await?;
         if self.stream_aggregate && self.udfs.is_empty() {
             let initialized = self
                 .initialize_incremental(&alias, &prepared.batch, context, prepared.plans.take())
@@ -1173,36 +1325,8 @@ impl StreamOperator for SqlOperator {
                     .await;
             }
         }
-        let next = if self.stream_aggregate {
-            Some(self.accumulate(&prepared)?)
-        } else {
-            None
-        };
-        let runtime = self.stream_state.runtime()?;
-        let materialized = next
-            .as_ref()
-            .map(|state| state.materialize(runtime, &self.name))
-            .transpose()?;
-        let tables = BTreeMap::from([(
-            alias.clone(),
-            materialized
-                .as_ref()
-                .map_or(prepared.batch, |state| state.batch.clone()),
-        )]);
-        #[cfg(test)]
-        {
-            self.incremental_work.0 += tables.values().map(Batch::num_rows).sum::<usize>();
-            self.incremental_work.1 += 1;
-        }
-        let runtime = self.stream_state.runtime()?;
-        let produced = runtime
-            .sql_validated(&self.validated, &tables, Some(&self.name))
-            .await?;
-        context.check_cancelled()?;
-        output.emit("output", produced).await?;
-        self.retained = next;
-        self.retained_capture = None;
-        Ok(())
+        self.process_retained(prepared, alias, context, output)
+            .await
     }
 
     async fn on_watermark(
@@ -1249,12 +1373,7 @@ impl StreamOperator for SqlOperator {
         drop(native);
         context.check_cancelled()?;
         let state = self.retained.as_mut().expect("retained during preparation");
-        if segment.is_some() {
-            state.segment = segment;
-        }
-        if metadata.is_some() {
-            state.metadata_segment = metadata;
-        }
+        install_retained_parts(state, segment, metadata);
         Ok(())
     }
 

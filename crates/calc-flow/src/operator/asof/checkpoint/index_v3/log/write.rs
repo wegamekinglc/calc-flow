@@ -250,7 +250,7 @@ struct PreparedOwners {
     copy_credit: MemoryReservation,
 }
 
-fn encodingscratch_bytes(
+fn encoding_scratch_bytes(
     input: &Input<'_>,
     name: &str,
     cancel: &dyn Fn() -> Result<()>,
@@ -277,7 +277,7 @@ fn prepare_owners(
     name: &str,
     cancel: &dyn Fn() -> Result<()>,
 ) -> Result<PreparedOwners> {
-    let scratch = reserve(encodingscratch_bytes(input, name, cancel)?)?;
+    let scratch = reserve(encoding_scratch_bytes(input, name, cancel)?)?;
     validate(input, cancel)?;
     let (owner_count, owner_bytes) = owner_bound(input, previous, name, cancel)?;
     let owner_capacity = previous.capacity().max(owner_count);
