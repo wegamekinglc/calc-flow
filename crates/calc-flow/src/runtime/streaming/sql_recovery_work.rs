@@ -476,12 +476,7 @@ impl JobSqlRecoveryOwner {
             let (start, gate) = std::sync::mpsc::sync_channel(1);
             let task_id = attempt.identity.task_id;
             let node_id = attempt.identity.node_id.clone();
-            let launched = catch_unwind(AssertUnwindSafe(|| {
-                tokio::task::spawn_blocking(move || {
-                    let _ = gate.recv();
-                    run(work)
-                })
-            }));
+            let launched = launch_work(work, gate);
             let handle = match launched {
                 Ok(handle) => handle,
                 Err(payload) => {
@@ -549,6 +544,20 @@ impl JobSqlRecoveryOwner {
         })
     }
 
+    fn check_waiting(&self, id: u64, run_id: u64) -> Result<()> {
+        if !self.0.state.lock().attempts.contains_key(&id) {
+            return Err(CalcFlowError::Cancelled {
+                run_id: run_id.to_string(),
+            });
+        }
+        if self.retire_stopped_queue(id) {
+            return Err(CalcFlowError::Cancelled {
+                run_id: run_id.to_string(),
+            });
+        }
+        Ok(())
+    }
+
     async fn join(&self, id: u64, run_id: u64) -> Result<OwnedSqlRestoreCompletion> {
         loop {
             let changed = self.0.changed.notified();
@@ -557,16 +566,7 @@ impl JobSqlRecoveryOwner {
             if self.retire_abandoned_queue() {
                 continue;
             }
-            if !self.0.state.lock().attempts.contains_key(&id) {
-                return Err(CalcFlowError::Cancelled {
-                    run_id: run_id.to_string(),
-                });
-            }
-            if self.retire_stopped_queue(id) {
-                return Err(CalcFlowError::Cancelled {
-                    run_id: run_id.to_string(),
-                });
-            }
+            self.check_waiting(id, run_id)?;
             let queued_stop = self.queued_stop(id);
             if let Some(loan) = self.claim_abandoned(id) {
                 match &queued_stop {
@@ -762,7 +762,19 @@ impl Drop for SqlRecoveryJoinLoan {
     }
 }
 
-fn run(mut work: Work) -> OwnedSqlRestoreCompletion {
+fn launch_work(
+    work: Work,
+    gate: std::sync::mpsc::Receiver<()>,
+) -> std::thread::Result<JoinHandle<OwnedSqlRestoreCompletion>> {
+    catch_unwind(AssertUnwindSafe(|| {
+        tokio::task::spawn_blocking(move || {
+            let _ = gate.recv();
+            run(work)
+        })
+    }))
+}
+
+fn prepare_work(work: &mut Work) -> Result<PreparedSqlWork> {
     let check = || {
         check_stop(
             &work.context,
@@ -771,19 +783,21 @@ fn run(mut work: Work) -> OwnedSqlRestoreCompletion {
             &work.home_stop,
         )
     };
-    let prepared = match catch_unwind(AssertUnwindSafe(|| {
-        check()?;
-        let prepared = match &work.operation {
-            SqlWorkOperation::Restore(snapshot) => {
-                PreparedSqlWork::Restore(Box::new(work.operator.prepare_restore(snapshot, &check)?))
-            }
-            SqlWorkOperation::Capture => {
-                PreparedSqlWork::Capture(work.operator.prepare_checkpoint_work(&check)?)
-            }
-        };
-        check()?;
-        Ok(prepared)
-    })) {
+    check()?;
+    let prepared = match &work.operation {
+        SqlWorkOperation::Restore(snapshot) => {
+            PreparedSqlWork::Restore(Box::new(work.operator.prepare_restore(snapshot, &check)?))
+        }
+        SqlWorkOperation::Capture => {
+            PreparedSqlWork::Capture(work.operator.prepare_checkpoint_work(&check)?)
+        }
+    };
+    check()?;
+    Ok(prepared)
+}
+
+fn run(mut work: Work) -> OwnedSqlRestoreCompletion {
+    let prepared = match catch_unwind(AssertUnwindSafe(|| prepare_work(&mut work))) {
         Ok(result) => result,
         Err(payload) => Err(panicked(
             work.identity.task_id,
