@@ -1,4 +1,4 @@
-use super::{BTreeMap, Batch, DataFusionRuntime, Result, ValidatedQuery, datafusion_error};
+use super::{BTreeMap, Batch, DataFusionRuntime, Result, ValidatedQuery};
 use datafusion::{
     arrow::datatypes::DataType,
     datasource::memory::DataSourceExec,
@@ -6,9 +6,6 @@ use datafusion::{
         ExecutionPlan, ExecutionPlanProperties, InputOrderMode,
         aggregates::{AggregateExec, AggregateMode},
         filter::FilterExec,
-        limit::{GlobalLimitExec, LocalLimitExec},
-        projection::ProjectionExec,
-        sorts::sort::SortExec,
     },
 };
 
@@ -21,12 +18,9 @@ impl DataFusionRuntime {
         coalesced: bool,
         node: &str,
     ) -> Result<bool> {
-        if !self.grouped_float_model_supported(node)? || input.num_rows() == 0 {
+        let Some(_fee) = self.reserve_grouped_proof(input, query, node)? else {
             return Ok(false);
-        }
-        let fee = self.incremental_reservation(node);
-        fee.try_grow(super::grouped_float::plan_charge(input, query, node)?)
-            .map_err(|error| datafusion_error(Some(node), error))?;
+        };
         let _guard = self.query_lock.lock().await;
         let context = self.context_for_rows(input.num_rows(), None, "not_evaluated");
         let tables = BTreeMap::from([(alias.to_owned(), input.clone())]);
@@ -48,22 +42,7 @@ fn inspect(
     if plan.output_partitioning().partition_count() != 1 {
         return Ok(false);
     }
-    let valid = if let Some(aggregate) = plan.downcast_ref::<AggregateExec>() {
-        census[0] += 1;
-        scalar_aggregate(aggregate)
-    } else if let Some(source) = plan.downcast_ref::<DataSourceExec>() {
-        census[1] += 1;
-        super::grouped_float::fifo_source(source, input)?
-    } else if let Some(filter) = plan.downcast_ref::<FilterExec>() {
-        census[2] += usize::from(in_input);
-        filter.batch_size() == 8192 && filter.fetch().is_none()
-    } else {
-        plan.is::<ProjectionExec>()
-            || !in_input
-                && (plan.is::<SortExec>()
-                    || plan.is::<GlobalLimitExec>()
-                    || plan.is::<LocalLimitExec>())
-    };
+    let valid = inspect_node(plan, input, in_input, census)?;
     if !valid {
         return Ok(false);
     }
@@ -78,6 +57,28 @@ fn inspect(
         }
     }
     Ok(true)
+}
+
+fn inspect_node(
+    plan: &dyn ExecutionPlan,
+    input: &Batch,
+    in_input: bool,
+    census: &mut [usize; 3],
+) -> Result<bool> {
+    Ok(
+        if let Some(aggregate) = plan.downcast_ref::<AggregateExec>() {
+            census[0] += 1;
+            scalar_aggregate(aggregate)
+        } else if let Some(source) = plan.downcast_ref::<DataSourceExec>() {
+            census[1] += 1;
+            super::grouped_float::fifo_source(source, input)?
+        } else if let Some(filter) = plan.downcast_ref::<FilterExec>() {
+            census[2] += usize::from(in_input);
+            filter.batch_size() == 8192 && filter.fetch().is_none()
+        } else {
+            super::grouped_float::output_node(plan, in_input)
+        },
+    )
 }
 
 fn scalar_aggregate(aggregate: &AggregateExec) -> bool {
