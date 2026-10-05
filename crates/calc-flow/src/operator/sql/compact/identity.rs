@@ -164,6 +164,7 @@ fn native_json(descriptor: &NativeStateDescriptor) -> Result<Value> {
     Ok(
         json!({"policy":descriptor.policy, "keys":fields_json(&descriptor.key_fields)?,
         "aggregates":aggregates, "projection":descriptor.projection.iter().map(input_json).collect::<Result<Vec<_>>>()?,
+        "post_filter":descriptor.post_filter.as_ref().map(input_json).transpose()?,
         "wire_schema_sha256":retention::schema_digest(&descriptor.wire_schema)?,
         "output_schema_sha256":retention::schema_digest(&descriptor.output_schema)?}),
     )

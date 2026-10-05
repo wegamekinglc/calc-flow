@@ -32,6 +32,7 @@ pub(in crate::operator::sql) struct NativeStateDescriptor {
     pub(in crate::operator::sql) wire_schema: SchemaRef,
     pub(in crate::operator::sql) output_schema: SchemaRef,
     pub(in crate::operator::sql) projection: Vec<NativeAggregateInput>,
+    pub(in crate::operator::sql) post_filter: Option<NativeAggregateInput>,
     pub(in crate::operator::sql) expression_identity_bytes: usize,
     pub(in crate::operator::sql) group_count: usize,
     pub(in crate::operator::sql) policy: &'static str,
@@ -108,10 +109,16 @@ impl IncrementalSql {
             .iter()
             .map(|expression| describe_input(expression.as_ref(), &self.aggregate_schema, 0, name))
             .collect::<Result<Vec<_>>>()?;
+        let post_filter = self
+            .post_filter
+            .as_ref()
+            .map(|expression| describe_input(expression.as_ref(), &self.aggregate_schema, 0, name))
+            .transpose()?;
         let expression_identity_bytes = aggregate_inputs
             .iter()
             .flatten()
             .chain(&projection)
+            .chain(&post_filter)
             .try_fold(0, |bytes, input| {
                 checked_bytes(bytes, [(input.identity_bytes(name)?, 1)], name)
             })?;
@@ -158,6 +165,7 @@ impl IncrementalSql {
             wire_schema: Arc::new(Schema::new(fields)),
             output_schema: self.output_schema.clone(),
             projection,
+            post_filter,
             expression_identity_bytes,
             group_count: self.groups.len(),
             policy: self.native_policy(),

@@ -57,7 +57,7 @@ pub(in crate::operator::sql) mod global_record;
 #[path = "native_expression.rs"]
 mod native_expression;
 
-use native_expression::projection_work;
+use native_expression::output_work;
 
 pub(super) struct IncrementalSql {
     schema: SchemaRef,
@@ -70,6 +70,7 @@ pub(super) struct IncrementalSql {
     finalizer_bytes: usize,
     plan_bytes: usize,
     projection: Vec<Arc<dyn PhysicalExpr>>,
+    post_filter: Option<Arc<dyn PhysicalExpr>>,
     projection_nodes: usize,
     keys: Vec<usize>,
     variable_columns: Vec<usize>,
@@ -579,7 +580,7 @@ impl IncrementalSql {
         let Some((projection, aggregate)) = shape(analyzed) else {
             return Ok(None);
         };
-        let Some(projection_nodes) = projection_work(&projection.expr) else {
+        let Some(projection_nodes) = output_work(projection) else {
             return Ok(None);
         };
         let reservation = runtime.incremental_reservation(name);
@@ -603,7 +604,7 @@ impl IncrementalSql {
         reservation
             .try_grow(plan_bytes)
             .map_err(|error| df_error(name, error))?;
-        let Some((aggregates, projection, filter_columns, predicate)) =
+        let Some((aggregates, projection, filter_columns, predicate, post_filter)) =
             physical_plan(projection, aggregate, &schema)
         else {
             return Ok(None);
@@ -651,6 +652,7 @@ impl IncrementalSql {
             finalizer_bytes,
             plan_bytes,
             projection,
+            post_filter,
             projection_nodes,
             keys,
             variable_columns,
@@ -1543,12 +1545,26 @@ impl IncrementalSql {
             .collect::<Result<Vec<ArrayRef>>>()?;
         let aggregate = RecordBatch::try_new(self.aggregate_schema.clone(), columns)
             .map_err(|error| df_error(name, error))?;
+        let aggregate = if let Some(predicate) = &self.post_filter {
+            let selection = predicate
+                .evaluate(&aggregate)
+                .and_then(|value| value.into_array(aggregate.num_rows()))
+                .map_err(|error| df_error(name, error))?;
+            let selection = selection
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .ok_or_else(|| df_error(name, "SQL HAVING is not Boolean"))?;
+            datafusion::arrow::compute::filter_record_batch(&aggregate, selection)
+                .map_err(|error| df_error(name, error))?
+        } else {
+            aggregate
+        };
         let output = self
             .projection
             .iter()
             .map(|expr| {
                 expr.evaluate(&aggregate)
-                    .and_then(|value| value.into_array(end - start))
+                    .and_then(|value| value.into_array(aggregate.num_rows()))
                     .map_err(|error| df_error(name, error))
             })
             .collect::<Result<Vec<_>>>()?;
@@ -1835,8 +1851,15 @@ fn shape(
     let LogicalPlan::Projection(projection) = plan else {
         return None;
     };
-    let LogicalPlan::Aggregate(aggregate) = projection.input.as_ref() else {
-        return None;
+    let aggregate = match projection.input.as_ref() {
+        LogicalPlan::Aggregate(aggregate) => aggregate,
+        LogicalPlan::Filter(filter) => {
+            let LogicalPlan::Aggregate(aggregate) = filter.input.as_ref() else {
+                return None;
+            };
+            aggregate
+        }
+        _ => return None,
     };
     if !matches!(aggregate.input.as_ref(), LogicalPlan::TableScan(_))
         && !matches!(aggregate.input.as_ref(), LogicalPlan::Filter(filter)
@@ -1844,7 +1867,7 @@ fn shape(
     {
         return None;
     }
-    projection_work(&projection.expr)?;
+    output_work(projection)?;
     Some((projection, aggregate))
 }
 
@@ -2195,6 +2218,7 @@ type PhysicalSqlPlan = (
     Vec<Arc<dyn PhysicalExpr>>,
     Vec<Option<usize>>,
     Option<predicate::InputPredicate>,
+    Option<Arc<dyn PhysicalExpr>>,
 );
 
 fn physical_plan(
@@ -2248,6 +2272,17 @@ fn physical_plan(
         .into_iter()
         .map(|lowered| lowered.aggregate)
         .collect();
+    let post_filter = match projection.input.as_ref() {
+        LogicalPlan::Filter(filter) => {
+            Some(create_physical_expr(&filter.predicate, &aggregate.schema, &props).ok()?)
+        }
+        _ => None,
+    };
+    if post_filter.as_ref().is_some_and(|expression| {
+        expression.data_type(aggregate.schema.as_arrow()).ok() != Some(DataType::Boolean)
+    }) {
+        return None;
+    }
     let Ok(projection) = projection
         .expr
         .iter()
@@ -2265,7 +2300,13 @@ fn physical_plan(
         )?),
         _ => None,
     };
-    Some((aggregates, projection, filter_columns, predicate))
+    Some((
+        aggregates,
+        projection,
+        filter_columns,
+        predicate,
+        post_filter,
+    ))
 }
 
 fn df_error(name: &str, error: impl std::fmt::Display) -> CalcFlowError {

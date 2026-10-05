@@ -33,12 +33,17 @@ impl DataFusionRuntime {
             .prepare_query(context, query, &tables, Some(node))
             .await?;
         let mut census = [0, 0, 0];
-        let valid = inspect(planned.physical_plan.as_ref(), input, &mut census)?;
+        let valid = inspect(planned.physical_plan.as_ref(), input, &mut census, false)?;
         Ok(valid && census == [1, 1, usize::from(coalesced)])
     }
 }
 
-fn inspect(plan: &dyn ExecutionPlan, input: &Batch, census: &mut [usize; 3]) -> Result<bool> {
+fn inspect(
+    plan: &dyn ExecutionPlan,
+    input: &Batch,
+    census: &mut [usize; 3],
+    in_input: bool,
+) -> Result<bool> {
     if plan.output_partitioning().partition_count() != 1 {
         return Ok(false);
     }
@@ -49,7 +54,7 @@ fn inspect(plan: &dyn ExecutionPlan, input: &Batch, census: &mut [usize; 3]) -> 
         census[1] += 1;
         super::grouped_float::fifo_source(source, input)?
     } else if let Some(filter) = plan.downcast_ref::<FilterExec>() {
-        census[2] += 1;
+        census[2] += usize::from(in_input);
         filter.batch_size() == 8192 && filter.fetch().is_none()
     } else {
         plan.is::<ProjectionExec>()
@@ -58,7 +63,12 @@ fn inspect(plan: &dyn ExecutionPlan, input: &Batch, census: &mut [usize; 3]) -> 
         return Ok(false);
     }
     for child in plan.children() {
-        if !inspect(child.as_ref(), input, census)? {
+        if !inspect(
+            child.as_ref(),
+            input,
+            census,
+            in_input || plan.is::<AggregateExec>(),
+        )? {
             return Ok(false);
         }
     }

@@ -3,7 +3,7 @@ use super::{
 };
 use datafusion::{
     arrow::datatypes::FieldRef,
-    logical_expr::Operator,
+    logical_expr::{LogicalPlan, Operator, Projection},
     physical_expr::expressions::{
         BinaryExpr, CastExpr, Column, IsNotNullExpr, IsNullExpr, Literal, NegativeExpr, NotExpr,
         TryCastExpr,
@@ -71,10 +71,18 @@ impl NativeAggregateInput {
     }
 }
 
-pub(super) fn projection_work(expressions: &[Expr]) -> Option<usize> {
-    expressions.iter().try_fold(0_usize, |total, expression| {
-        total.checked_add(projection_nodes(expression, 0)?)
-    })
+pub(super) fn output_work(projection: &Projection) -> Option<usize> {
+    let nodes = projection
+        .expr
+        .iter()
+        .try_fold(0_usize, |total, expression| {
+            total.checked_add(projection_nodes(expression, 0)?)
+        })?;
+    match projection.input.as_ref() {
+        LogicalPlan::Filter(filter) => nodes.checked_add(projection_nodes(&filter.predicate, 0)?),
+        LogicalPlan::Aggregate(_) => Some(nodes),
+        _ => None,
+    }
 }
 
 fn fixed(dtype: &DataType) -> bool {
