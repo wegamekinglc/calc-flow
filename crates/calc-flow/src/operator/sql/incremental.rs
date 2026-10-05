@@ -124,6 +124,14 @@ struct InputColumns {
     by_aggregate: Vec<Vec<usize>>,
 }
 
+struct ChunkInput {
+    keys: Vec<ArrayRef>,
+    arguments: Vec<Vec<ArrayRef>>,
+    filters: Vec<Option<BooleanArray>>,
+}
+
+type ChunkArguments = (Vec<Vec<ArrayRef>>, Vec<Option<BooleanArray>>);
+
 struct Candidate {
     accumulators: Vec<Option<Box<dyn Accumulator>>>,
     group: Group,
@@ -1187,32 +1195,71 @@ impl IncrementalSql {
             .as_ref()
             .map(|predicate| predicate.evaluate(chunk, name))
             .transpose()?;
-        let filtered;
-        let (chunk, selection) = if self.input_nodes > self.aggregates.len()
-            && let Some(selection) = selection.as_ref()
-        {
-            filtered = filter_columns(chunk, selection, &self.input_columns.all, name)?;
-            (&filtered, None)
-        } else {
-            (chunk, selection.as_ref())
-        };
+        let filtered = self.selected_chunk(chunk, selection.as_ref(), name)?;
+        let (chunk, selection) = filtered
+            .as_ref()
+            .map_or((chunk, selection.as_ref()), |filtered| (filtered, None));
         if chunk.num_rows() == 0 {
             return Ok(());
         }
+        let input = self.chunk_input(chunk, name)?;
+        self.update_chunk_input(chunk.num_rows(), &input, selection, candidates, name)
+    }
+
+    fn selected_chunk(
+        &self,
+        chunk: &RecordBatch,
+        selection: Option<&BooleanArray>,
+        name: &str,
+    ) -> Result<Option<RecordBatch>> {
+        if self.input_nodes > self.aggregates.len()
+            && let Some(selection) = selection
+        {
+            return Ok(Some(filter_columns(
+                chunk,
+                selection,
+                &self.input_columns.all,
+                name,
+            )?));
+        }
+        Ok(None)
+    }
+
+    fn chunk_input(&self, chunk: &RecordBatch, name: &str) -> Result<ChunkInput> {
         input_checks::evaluate(&self.input_checks, chunk, name)?;
-        let key_arrays = group_key::evaluate(&self.keys, chunk, name)?;
-        let owned_filters = if self.keys.is_empty() {
+        let keys = group_key::evaluate(&self.keys, chunk, name)?;
+        let (arguments, filters) = self.chunk_arguments(chunk, name)?;
+        Ok(ChunkInput {
+            keys,
+            arguments,
+            filters,
+        })
+    }
+
+    fn chunk_arguments(&self, chunk: &RecordBatch, name: &str) -> Result<ChunkArguments> {
+        let filters = if self.keys.is_empty() {
             self.filters(chunk, name)?
         } else {
             Vec::new()
         };
-        let arguments = self.arguments(chunk, &owned_filters, name)?;
-        let owned_filters = if self.keys.is_empty() {
-            owned_filters
+        let arguments = self.arguments(chunk, &filters, name)?;
+        let filters = if self.keys.is_empty() {
+            filters
         } else {
             self.filters(chunk, name)?
         };
-        let filters = owned_filters.iter().map(Option::as_ref).collect::<Vec<_>>();
+        Ok((arguments, filters))
+    }
+
+    fn update_chunk_input(
+        &self,
+        rows: usize,
+        input: &ChunkInput,
+        selection: Option<&BooleanArray>,
+        candidates: &mut InputCandidates,
+        name: &str,
+    ) -> Result<()> {
+        let filters = input.filters.iter().map(Option::as_ref).collect::<Vec<_>>();
         let combined = predicate::combine(selection, &filters, self.aggregates.len(), name)?;
         let filters = if selection.is_some() {
             combined.iter().map(Option::as_ref).collect()
@@ -1220,42 +1267,80 @@ impl IncrementalSql {
             filters
         };
         if self.keys.is_empty() {
-            let candidate = candidates.groups.get_mut(&0).expect("global candidate");
-            if let Some(variable) = candidate.variable.as_mut() {
-                for row in 0..chunk.num_rows() {
-                    variable.observe(
-                        &arguments,
-                        &filters,
-                        row,
-                        &candidate.group.reservation,
-                        name,
-                    )?;
-                }
-            }
-            return update_global(&arguments, &filters, &mut candidates.groups, name);
+            return Self::update_global_chunk(
+                rows,
+                &input.arguments,
+                &filters,
+                &mut candidates.groups,
+                name,
+            );
         }
-        if let Some(native) = candidates.native.as_mut() {
-            native.intern_selected(key_arrays[0].clone(), selection, name)?;
-            let count = native.groups.len();
-            let partial = candidates
-                .partial
-                .as_mut()
-                .expect("grouped partial accumulators");
-            partial.reserve(count, name)?;
-            partial.update(&arguments, &filters, &native.indices, count, name)?;
+        if Self::update_native_chunk(
+            &input.keys,
+            &input.arguments,
+            &filters,
+            selection,
+            candidates,
+            name,
+        )? {
             #[cfg(test)]
-            self.partial_groups
-                .fetch_max(count, std::sync::atomic::Ordering::SeqCst);
+            self.partial_groups.fetch_max(
+                candidates
+                    .native
+                    .as_ref()
+                    .expect("native grouping")
+                    .groups
+                    .len(),
+                std::sync::atomic::Ordering::SeqCst,
+            );
             return Ok(());
         }
         self.update_grouped_chunk(
-            &key_arrays,
-            &arguments,
+            &input.keys,
+            &input.arguments,
             &filters,
             selection,
             candidates,
             name,
         )
+    }
+
+    fn update_global_chunk(
+        rows: usize,
+        arguments: &[Vec<ArrayRef>],
+        filters: &[Option<&BooleanArray>],
+        candidates: &mut CandidateMap,
+        name: &str,
+    ) -> Result<()> {
+        let candidate = candidates.get_mut(&0).expect("global candidate");
+        if let Some(variable) = candidate.variable.as_mut() {
+            for row in 0..rows {
+                variable.observe(arguments, filters, row, &candidate.group.reservation, name)?;
+            }
+        }
+        update_global(arguments, filters, candidates, name)
+    }
+
+    fn update_native_chunk(
+        keys: &[ArrayRef],
+        arguments: &[Vec<ArrayRef>],
+        filters: &[Option<&BooleanArray>],
+        selection: Option<&BooleanArray>,
+        candidates: &mut InputCandidates,
+        name: &str,
+    ) -> Result<bool> {
+        let Some(native) = candidates.native.as_mut() else {
+            return Ok(false);
+        };
+        native.intern_selected(keys[0].clone(), selection, name)?;
+        let count = native.groups.len();
+        let partial = candidates
+            .partial
+            .as_mut()
+            .expect("grouped partial accumulators");
+        partial.reserve(count, name)?;
+        partial.update(arguments, filters, &native.indices, count, name)?;
+        Ok(true)
     }
 
     fn filters(&self, chunk: &RecordBatch, name: &str) -> Result<Vec<Option<BooleanArray>>> {
@@ -1309,10 +1394,6 @@ impl IncrementalSql {
             .expect("grouped key converter")
             .convert_columns(key_arrays)
             .map_err(|error| df_error(name, error))?;
-        let partial = candidates
-            .partial
-            .as_mut()
-            .expect("grouped partial accumulators");
         let mut indices = Vec::with_capacity(rows);
         for row in 0..rows {
             if selection.is_some_and(|selection| !predicate::selected(selection, row)) {
@@ -1320,39 +1401,83 @@ impl IncrementalSql {
                 continue;
             }
             let encoded_row = encoded.row(row);
-            let key = encoded_row.as_ref();
-            if let Some(&rank) = candidates.touched.get(key) {
-                indices.push(rank);
-                continue;
-            }
-            #[cfg(test)]
-            self.historical_key_lookups
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let (slot, previous, new_count) =
-                self.candidate_slot(key, candidates.new_count, name)?;
-            if let Some(proof) = &candidates.proof {
-                let count = self
-                    .groups
-                    .len()
-                    .checked_add(new_count)
-                    .ok_or_else(|| df_error(name, "sequential group count overflowed"))?;
-                let (_, width) =
-                    grouped_float::group_layout(&self.keys).expect("certified grouped key");
-                proof.grow(count, width, &self.aggregates, name)?;
-            }
-            let candidate = self.candidate(previous, key, Some((key_arrays, row)), name)?;
-            let rank = partial.add_slot(slot, name)?;
-            candidates.touched.insert(candidate.group.key.clone(), rank);
-            candidates.groups.insert(slot, candidate);
-            candidates.new_count = new_count;
-            indices.push(rank);
+            indices.push(self.group_rank(
+                encoded_row.as_ref(),
+                key_arrays,
+                row,
+                candidates,
+                name,
+            )?);
         }
+        self.update_partial_chunk(arguments, filters, selection, &indices, candidates, name)
+    }
+
+    fn group_rank(
+        &self,
+        key: &[u8],
+        arrays: &[ArrayRef],
+        row: usize,
+        candidates: &mut InputCandidates,
+        name: &str,
+    ) -> Result<usize> {
+        if let Some(&rank) = candidates.touched.get(key) {
+            return Ok(rank);
+        }
+        #[cfg(test)]
+        self.historical_key_lookups
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let (slot, previous, new_count) = self.candidate_slot(key, candidates.new_count, name)?;
+        self.grow_sequential_proof(candidates.proof.as_ref(), new_count, name)?;
+        let candidate = self.candidate(previous, key, Some((arrays, row)), name)?;
+        let rank = candidates
+            .partial
+            .as_mut()
+            .expect("grouped partial accumulators")
+            .add_slot(slot, name)?;
+        candidates.touched.insert(candidate.group.key.clone(), rank);
+        candidates.groups.insert(slot, candidate);
+        candidates.new_count = new_count;
+        Ok(rank)
+    }
+
+    fn grow_sequential_proof(
+        &self,
+        proof: Option<&grouped_float::Proof>,
+        new_count: usize,
+        name: &str,
+    ) -> Result<()> {
+        if let Some(proof) = proof {
+            let count = self
+                .groups
+                .len()
+                .checked_add(new_count)
+                .ok_or_else(|| df_error(name, "sequential group count overflowed"))?;
+            let (_, width) =
+                grouped_float::group_layout(&self.keys).expect("certified grouped key");
+            proof.grow(count, width, &self.aggregates, name)?;
+        }
+        Ok(())
+    }
+
+    fn update_partial_chunk(
+        &self,
+        arguments: &[Vec<ArrayRef>],
+        filters: &[Option<&BooleanArray>],
+        selection: Option<&BooleanArray>,
+        indices: &[usize],
+        candidates: &mut InputCandidates,
+        name: &str,
+    ) -> Result<()> {
+        let partial = candidates
+            .partial
+            .as_mut()
+            .expect("grouped partial accumulators");
         if !self.variable_extrema.is_empty() {
             let growth = variable_extrema::prepare_grouped(
                 arguments,
                 filters,
                 selection,
-                &indices,
+                indices,
                 &partial.slots,
                 &mut candidates.groups,
                 name,
@@ -1360,7 +1485,7 @@ impl IncrementalSql {
             partial.reserve_variable(growth, name)?;
         }
         partial.seed(&candidates.groups, &self.aggregates, name)?;
-        partial.update(arguments, filters, &indices, partial.slots.len(), name)?;
+        partial.update(arguments, filters, indices, partial.slots.len(), name)?;
         #[cfg(test)]
         self.partial_groups
             .fetch_max(partial.slots.len(), std::sync::atomic::Ordering::SeqCst);
