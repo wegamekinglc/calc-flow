@@ -577,6 +577,18 @@ impl State {
     ) -> Result<()> {
         cancel()?;
         let mut owners = EncodingOwners::default();
+        self.register_left_encodings(&mut owners, &mut cancel)?;
+        self.register_right_encodings(&mut owners, &mut cancel)?;
+        cancel()?;
+        self.encoding_owners = Some(owners);
+        Ok(())
+    }
+
+    fn register_left_encodings(
+        &self,
+        owners: &mut EncodingOwners,
+        cancel: &mut impl FnMut() -> Result<()>,
+    ) -> Result<()> {
         for (ordinal, ((_, key, sequence), _)) in self.left.unordered_iter().enumerate() {
             if ordinal.is_multiple_of(128) {
                 cancel()?;
@@ -584,6 +596,14 @@ impl State {
             owners.attach(key);
             owners.attach(sequence.as_ref());
         }
+        Ok(())
+    }
+
+    fn register_right_encodings(
+        &self,
+        owners: &mut EncodingOwners,
+        cancel: &mut impl FnMut() -> Result<()>,
+    ) -> Result<()> {
         for (key, bucket) in &self.right {
             cancel()?;
             for (ordinal, ((_, sequence), _)) in bucket.into_iter().enumerate() {
@@ -594,8 +614,6 @@ impl State {
                 owners.attach(sequence.as_ref());
             }
         }
-        cancel()?;
-        self.encoding_owners = Some(owners);
         Ok(())
     }
 
