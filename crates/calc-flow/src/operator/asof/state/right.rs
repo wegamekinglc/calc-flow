@@ -723,19 +723,8 @@ impl RightBucket {
                 .expect("expired payload sequence")
                 .into_owned();
             let row = payloads.values.get(index);
-            let after = if super::identity_expired(time, status) {
-                None
-            } else {
-                promoted += 1;
-                let order = (time, sequence.clone());
-                let tag = if ordered_last.as_ref().is_none_or(|last| last < &order) {
-                    ordered_last = Some(order);
-                    0
-                } else {
-                    2
-                };
-                Some(Version::Right { tag, payload: None })
-            };
+            let after = promoted_version(time, &sequence, status, &mut ordered_last);
+            promoted += usize::from(after.is_some());
             changes.push(Change {
                 identity: Identity::Right((time, key.clone(), sequence)),
                 before: Some(Version::Right {
@@ -939,31 +928,41 @@ impl RightBucket {
     }
 }
 
-fn merge_admitted(
-    previous: Option<&RightRun<Vec<Option<RowRef>>>>,
-    kind: SequenceKind,
-    rows: &[(RightOrder, RowRef)],
+fn promoted_version(
+    time: i64,
+    sequence: &Encoding,
+    status: &super::super::StreamAsofJoinStatus,
+    ordered_last: &mut Option<RightOrder>,
+) -> Option<super::super::checkpoint::index_v3::log::journal::Version> {
+    use super::super::checkpoint::index_v3::log::journal::Version;
+    if super::identity_expired(time, status) {
+        return None;
+    }
+    let order = (time, sequence.clone());
+    let tag = if ordered_last.as_ref().is_none_or(|last| last < &order) {
+        *ordered_last = Some(order);
+        0
+    } else {
+        2
+    };
+    Some(Version::Right { tag, payload: None })
+}
+
+fn admitted_capacity(old: usize, required: usize, fresh: bool, incoming: usize) -> usize {
+    if fresh {
+        incoming
+    } else if old >= required {
+        old
+    } else {
+        required.max(old * 2).max(4)
+    }
+}
+
+fn copy_retired(
+    run: &RightRun<Vec<Option<RowRef>>>,
+    merged: &mut RightRun<Vec<Option<RowRef>>>,
     cancelled: &dyn Fn() -> crate::Result<()>,
-) -> crate::Result<RightRun<Vec<Option<RowRef>>>> {
-    debug_assert!(rows.windows(2).all(|pair| pair[0].0 < pair[1].0));
-    let empty = RightRun::with_capacity(0, kind);
-    let run = previous.unwrap_or(&empty);
-    let capacity = |old: usize| {
-        let required = run.times.len() + rows.len();
-        if previous.is_none() {
-            rows.len()
-        } else if old >= required {
-            old
-        } else {
-            required.max(old * 2).max(4)
-        }
-    };
-    let mut merged = RightRun {
-        times: Vec::with_capacity(capacity(run.times.capacity())),
-        sequences: SequenceColumn::with_capacity(capacity(run.sequences.capacity()), kind),
-        values: Vec::with_capacity(capacity(run.values.capacity())),
-        head: run.head,
-    };
+) -> crate::Result<()> {
     for index in 0..run.head {
         if index.is_multiple_of(128) {
             cancelled()?;
@@ -977,6 +976,33 @@ fn merge_admitted(
         );
         merged.values.push(run.values[index]);
     }
+    Ok(())
+}
+
+fn precedes_admitted(order: &OrderRef<'_>, new: Option<&(RightOrder, RowRef)>) -> bool {
+    new.is_none_or(|(next, _)| {
+        *order.0 < next.0 || (*order.0 == next.0 && order.1.as_ref() < &next.1)
+    })
+}
+
+fn merge_admitted(
+    previous: Option<&RightRun<Vec<Option<RowRef>>>>,
+    kind: SequenceKind,
+    rows: &[(RightOrder, RowRef)],
+    cancelled: &dyn Fn() -> crate::Result<()>,
+) -> crate::Result<RightRun<Vec<Option<RowRef>>>> {
+    debug_assert!(rows.windows(2).all(|pair| pair[0].0 < pair[1].0));
+    let empty = RightRun::with_capacity(0, kind);
+    let run = previous.unwrap_or(&empty);
+    let required = run.times.len() + rows.len();
+    let capacity = |old| admitted_capacity(old, required, previous.is_none(), rows.len());
+    let mut merged = RightRun {
+        times: Vec::with_capacity(capacity(run.times.capacity())),
+        sequences: SequenceColumn::with_capacity(capacity(run.sequences.capacity()), kind),
+        values: Vec::with_capacity(capacity(run.values.capacity())),
+        head: run.head,
+    };
+    copy_retired(run, &mut merged, cancelled)?;
     let mut resident = run.head;
     let mut incoming = 0;
     while resident < run.times.len() || incoming < rows.len() {
@@ -985,11 +1011,7 @@ fn merge_admitted(
         }
         let old = run.at(resident);
         let new = rows.get(incoming);
-        if let Some((order, value)) = old.filter(|(order, _)| {
-            new.is_none_or(|(next, _)| {
-                *order.0 < next.0 || (*order.0 == next.0 && order.1.as_ref() < &next.1)
-            })
-        }) {
+        if let Some((order, value)) = old.filter(|(order, _)| precedes_admitted(order, new)) {
             merged.times.push(*order.0);
             merged.sequences.push(order.1.into_owned());
             merged.values.push(Some(*value));
