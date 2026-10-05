@@ -8,7 +8,7 @@ use super::{
     RetainedSqlInput, SqlOperator, StateSegment, decode_sql_state, incremental, ipc, metadata,
     record_copy_reservation, retention, sql_state_error,
 };
-use crate::{DataFusionConfig, JsonMap, OperatorStateSnapshot, Result};
+use crate::{Batch, DataFusionConfig, DataFusionRuntime, JsonMap, OperatorStateSnapshot, Result};
 
 #[derive(PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -105,37 +105,9 @@ pub(super) fn capture(
 ) -> Result<Arc<RetainedCapture>> {
     check()?;
     let runtime = operator.retention_runtime()?;
-    let logical = state.projection.as_ref().map_or_else(
-        || state.records[0].schema(),
-        |projection| projection.columns.logical_schema().clone(),
-    );
-    let binding = binding(operator, &logical, check)?;
-    if binding.physical != state.records[0].schema()
-        || binding.projection.is_some() != state.projection.is_some()
-    {
-        return Err(sql_state_error(
-            "SQL retained input differs from current dependencies",
-        ));
-    }
-    let input = if let Some(input) = &state.segment {
-        input.clone()
-    } else {
-        let materialized = state.materialize(runtime, &operator.name)?;
-        ipc::encode(
-            &materialized.batch,
-            runtime.incremental_reservation(&operator.name),
-            check,
-        )?
-    };
-    let encoded_metadata = if let Some(metadata) = &state.metadata_segment {
-        metadata.clone()
-    } else {
-        metadata::encode(
-            &state.metadata,
-            metadata::reserve(runtime, &state.metadata, &operator.name)?,
-            check,
-        )?
-    };
+    let binding = capture_binding(operator, state, check)?;
+    let input = capture_input(operator, runtime, state, check)?;
+    let encoded_metadata = capture_metadata(operator, runtime, state, check)?;
     let reservation = capture_reservation(operator, &binding.logical_segment, &input.segment)?;
     let control = RetainedControl {
         state_layout: 4,
@@ -162,6 +134,61 @@ pub(super) fn capture(
     owned_capture(snapshot, reservation, encoded_metadata, check)
 }
 
+fn capture_binding(
+    operator: &SqlOperator,
+    state: &RetainedSqlInput,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<RetainedBinding> {
+    let logical = state.projection.as_ref().map_or_else(
+        || state.records[0].schema(),
+        |projection| projection.columns.logical_schema().clone(),
+    );
+    let binding = binding(operator, &logical, check)?;
+    if binding.physical != state.records[0].schema()
+        || binding.projection.is_some() != state.projection.is_some()
+    {
+        return Err(sql_state_error(
+            "SQL retained input differs from current dependencies",
+        ));
+    }
+    Ok(binding)
+}
+
+fn capture_input(
+    operator: &SqlOperator,
+    runtime: &DataFusionRuntime,
+    state: &RetainedSqlInput,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<Arc<ipc::SqlInputSegment>> {
+    if let Some(input) = &state.segment {
+        Ok(input.clone())
+    } else {
+        let materialized = state.materialize(runtime, &operator.name)?;
+        ipc::encode(
+            &materialized.batch,
+            runtime.incremental_reservation(&operator.name),
+            check,
+        )
+    }
+}
+
+fn capture_metadata(
+    operator: &SqlOperator,
+    runtime: &DataFusionRuntime,
+    state: &RetainedSqlInput,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<Arc<metadata::SqlMetadata>> {
+    if let Some(metadata) = &state.metadata_segment {
+        Ok(metadata.clone())
+    } else {
+        metadata::encode(
+            &state.metadata,
+            metadata::reserve(runtime, &state.metadata, &operator.name)?,
+            check,
+        )
+    }
+}
+
 fn owned_capture(
     mut snapshot: OperatorStateSnapshot,
     reservation: Arc<MemoryReservation>,
@@ -185,14 +212,7 @@ fn binding(
     check: &dyn Fn() -> Result<()>,
 ) -> Result<RetainedBinding> {
     check()?;
-    if !operator.stream_aggregate
-        || operator.aliases.len() != 1
-        || operator.input_ports[0]
-            .schema()
-            .is_some_and(|declared| declared != logical)
-    {
-        return Err(sql_state_error("SQL retained logical binding is invalid"));
-    }
+    validate_logical_binding(operator, logical)?;
     let reservation = descriptor_reservation(operator, logical)?;
     let runtime = operator.retention_runtime()?;
     let plan = runtime.retained_sql_plan_sync(
@@ -203,8 +223,58 @@ fn binding(
         runtime.incremental_reservation(&operator.name),
     )?;
     check()?;
-    let projection = trusted_projection(operator, logical, &plan)?;
-    let physical = projection.as_ref().map_or_else(
+    build_binding(operator, runtime, logical, &plan, reservation, check)
+}
+
+fn validate_logical_binding(operator: &SqlOperator, logical: &SchemaRef) -> Result<()> {
+    if !operator.stream_aggregate
+        || operator.aliases.len() != 1
+        || operator.input_ports[0]
+            .schema()
+            .is_some_and(|declared| declared != logical)
+    {
+        return Err(sql_state_error("SQL retained logical binding is invalid"));
+    }
+    Ok(())
+}
+
+fn build_binding(
+    operator: &SqlOperator,
+    runtime: &DataFusionRuntime,
+    logical: &SchemaRef,
+    plan: &crate::datafusion::compact::PaidSqlPlan,
+    reservation: Arc<MemoryReservation>,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<RetainedBinding> {
+    let projection = trusted_projection(operator, logical, plan)?;
+    let (physical, output) = binding_schemas(operator, logical, projection.as_deref(), plan)?;
+    let logical_segment = retention::encode_schema(logical)?.with_owner(reservation.clone());
+    let identity = retained_identity(
+        operator,
+        runtime,
+        logical,
+        &physical,
+        &output,
+        projection.as_deref(),
+        &logical_segment,
+    )?;
+    check()?;
+    Ok(RetainedBinding {
+        logical_segment,
+        physical,
+        projection,
+        identity,
+        _reservation: reservation,
+    })
+}
+
+fn binding_schemas(
+    operator: &SqlOperator,
+    logical: &SchemaRef,
+    projection: Option<&retention::SqlProjection>,
+    plan: &crate::datafusion::compact::PaidSqlPlan,
+) -> Result<(SchemaRef, SchemaRef)> {
+    let physical = projection.map_or_else(
         || logical.clone(),
         |projection| projection.columns.physical_schema().clone(),
     );
@@ -217,27 +287,30 @@ fn binding(
             "SQL retained output differs from its declared port",
         ));
     }
-    let logical_segment = retention::encode_schema(logical)?.with_owner(reservation.clone());
-    let identity = RetainedIdentity {
+    Ok((physical, output))
+}
+
+fn retained_identity(
+    operator: &SqlOperator,
+    runtime: &DataFusionRuntime,
+    logical: &SchemaRef,
+    physical: &SchemaRef,
+    output: &SchemaRef,
+    projection: Option<&retention::SqlProjection>,
+    logical_segment: &StateSegment,
+) -> Result<RetainedIdentity> {
+    Ok(RetainedIdentity {
         query_sha256: operator.query_digest(),
         input_alias: operator.aliases[0].clone(),
         udfs: operator.udfs.iter().map(super::udf_configuration).collect(),
         runtime_config: runtime.compact_runtime_config(),
         logical_schema_sha256: logical_segment.sha256().into(),
-        physical_schema_sha256: retention::schema_digest(&physical)?,
-        retained_ordinals: projection.as_ref().map_or_else(
+        physical_schema_sha256: retention::schema_digest(physical)?,
+        retained_ordinals: projection.map_or_else(
             || (0..logical.fields().len()).collect(),
             |projection| projection.columns.ordinals().to_vec(),
         ),
-        output_schema_sha256: retention::schema_digest(&output)?,
-    };
-    check()?;
-    Ok(RetainedBinding {
-        logical_segment,
-        physical,
-        projection,
-        identity,
-        _reservation: reservation,
+        output_schema_sha256: retention::schema_digest(output)?,
     })
 }
 
@@ -396,6 +469,47 @@ pub(super) fn prepare_restore(
     check: &dyn Fn() -> Result<()>,
 ) -> Result<(RetainedSqlInput, Arc<RetainedCapture>)> {
     check()?;
+    validate_retained_inventory(snapshot)?;
+    let runtime = operator.retention_runtime()?;
+    let RestoreDescriptor {
+        control,
+        binding,
+        control_reservation,
+        schema_reservation,
+    } = restore_descriptor(operator, snapshot, check)?;
+    let (decoded, backing) = restored_input(operator, snapshot, &control, &binding, check)?;
+    let records = restored_records(
+        operator,
+        runtime,
+        snapshot,
+        binding.projection,
+        &control,
+        &decoded,
+        backing,
+    )?;
+    finish_retained_restore(
+        operator,
+        snapshot,
+        records,
+        (control_reservation, schema_reservation),
+        check,
+    )
+}
+
+struct RestoreDescriptor {
+    control: RetainedControl,
+    binding: RetainedBinding,
+    control_reservation: MemoryReservation,
+    schema_reservation: MemoryReservation,
+}
+
+struct RestoredRecords {
+    retained: RetainedSqlInput,
+    metadata: Arc<metadata::SqlMetadata>,
+    copies: MemoryReservation,
+}
+
+fn validate_retained_inventory(snapshot: &OperatorStateSnapshot) -> Result<()> {
     if snapshot.segments.len() != 4
         || [
             "control",
@@ -408,7 +522,14 @@ pub(super) fn prepare_restore(
     {
         return Err(sql_state_error("SQL retained segment inventory is invalid"));
     }
-    let runtime = operator.retention_runtime()?;
+    Ok(())
+}
+
+fn restore_descriptor(
+    operator: &SqlOperator,
+    snapshot: &OperatorStateSnapshot,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<RestoreDescriptor> {
     let control_reservation = decode_reservation(operator, &snapshot.segments["control"], 64)?;
     let value = crate::json::parse_json_value(
         snapshot.segments["control"].bytes(),
@@ -421,6 +542,21 @@ pub(super) fn prepare_restore(
     let logical = retention::decode_schema(&snapshot.segments["logical-schema"])?;
     let binding = binding(operator, &logical, check)?;
     control.validate(snapshot, &binding)?;
+    Ok(RestoreDescriptor {
+        control,
+        binding,
+        control_reservation,
+        schema_reservation,
+    })
+}
+
+fn restored_input(
+    operator: &SqlOperator,
+    snapshot: &OperatorStateSnapshot,
+    control: &RetainedControl,
+    binding: &RetainedBinding,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<(Batch, Arc<MemoryReservation>)> {
     check()?;
     let backing = Arc::new(decode_reservation(
         operator,
@@ -433,6 +569,18 @@ pub(super) fn prepare_restore(
         return Err(sql_state_error("SQL retained physical schema is invalid"));
     }
     operator.validate_checkpoint_charge(&decoded, control.rows, control.bytes)?;
+    Ok((decoded, backing))
+}
+
+fn restored_records(
+    operator: &SqlOperator,
+    runtime: &DataFusionRuntime,
+    snapshot: &OperatorStateSnapshot,
+    projection: Option<Arc<retention::SqlProjection>>,
+    control: &RetainedControl,
+    decoded: &Batch,
+    backing: Arc<MemoryReservation>,
+) -> Result<RestoredRecords> {
     let (latest, metadata) = metadata::decode(
         runtime,
         &snapshot.segments["batch-metadata"],
@@ -449,7 +597,7 @@ pub(super) fn prepare_restore(
     let mut retained = RetainedSqlInput {
         records: Vec::new(),
         metadata: latest,
-        projection: binding.projection,
+        projection,
         projection_checked: true,
         backing_reservations: vec![backing.clone()],
         reservation: None,
@@ -468,6 +616,26 @@ pub(super) fn prepare_restore(
         table.schema().fields().len(),
     )?;
     retained.records.extend(table.batches().iter().cloned());
+    Ok(RestoredRecords {
+        retained,
+        metadata,
+        copies,
+    })
+}
+
+fn finish_retained_restore(
+    operator: &SqlOperator,
+    snapshot: &OperatorStateSnapshot,
+    records: RestoredRecords,
+    credits: (MemoryReservation, MemoryReservation),
+    check: &dyn Fn() -> Result<()>,
+) -> Result<(RetainedSqlInput, Arc<RetainedCapture>)> {
+    let RestoredRecords {
+        retained,
+        metadata,
+        copies,
+    } = records;
+    let (control_reservation, schema_reservation) = credits;
     let reservation = capture_reservation(
         operator,
         &snapshot.segments["logical-schema"],
