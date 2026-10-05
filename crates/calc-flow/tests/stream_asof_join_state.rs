@@ -1079,3 +1079,129 @@ fn malformed_metadata_does_not_copy_unbounded_error_values() {
     );
     assert_eq!(op.status().state_rows, 0);
 }
+
+#[tokio::test]
+async fn direct_checkpoint_rebases_nonincreasing_epochs_for_cold_restore() {
+    use calc_flow::Epoch;
+    for prepared in [false, true] {
+        for (epoch, dirty) in [
+            (Epoch::new(2).unwrap(), true),
+            (Epoch::INITIAL, true),
+            (Epoch::INITIAL, false),
+            (Epoch::new(2).unwrap(), false),
+        ] {
+            assert_direct_checkpoint_epoch(prepared, epoch, dirty).await;
+        }
+    }
+}
+
+async fn assert_direct_checkpoint_epoch(prepared: bool, epoch: calc_flow::Epoch, dirty: bool) {
+    use calc_flow::Epoch;
+    let mut op = operator(10);
+    let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+    let cx = StreamOperatorContext::new(&job, "asof", None);
+    let mut out = EdgeCollector::new(op.output_ports().to_vec());
+    op.process_data("right", batch(&[("A", 100, 1, 5)]), &cx, &mut out)
+        .await
+        .unwrap();
+    op.process_data("left", batch(&[("A", 101, 1, 8)]), &cx, &mut out)
+        .await
+        .unwrap();
+    let first = op.checkpoint(Epoch::new(2).unwrap()).unwrap();
+    let original_metadata = first.inline_metadata.clone();
+    let original_bytes = first
+        .segments
+        .iter()
+        .map(|(name, segment)| (name.clone(), segment.bytes().to_vec()))
+        .collect::<BTreeMap<_, _>>();
+    if dirty {
+        op.process_data("right", batch(&[("A", 102, 2, 7)]), &cx, &mut out)
+            .await
+            .unwrap();
+        op.process_data("left", batch(&[("A", 103, 2, 9)]), &cx, &mut out)
+            .await
+            .unwrap();
+    }
+    if prepared {
+        op.prepare_checkpoint_async(&cx).await.unwrap();
+    }
+    let current = op.checkpoint(epoch).unwrap();
+    assert_eq!(current.inline_metadata["epoch"], epoch.as_u64());
+    assert_eq!(
+        current.inline_metadata["checkpoint_log"]["frames"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    if dirty || epoch.as_u64() < 2 {
+        assert_eq!(current.inline_metadata["checkpoint_log"]["generation"], 2);
+        assert_eq!(
+            current.inline_metadata["checkpoint_log"]["frames"][0]["epoch"],
+            epoch.as_u64()
+        );
+    } else {
+        assert_eq!(current.inline_metadata["checkpoint_log"]["generation"], 1);
+        for (name, segment) in &first.segments {
+            assert!(std::sync::Arc::ptr_eq(
+                &segment.bytes_arc(),
+                &current.segments[name].bytes_arc()
+            ));
+        }
+    }
+    assert_eq!(first.inline_metadata, original_metadata);
+    for (name, segment) in &first.segments {
+        assert_eq!(segment.bytes(), original_bytes[name]);
+    }
+    let mut restored = operator(10);
+    restored.restore(&current).unwrap();
+    restored
+        .process_data("right", batch(&[("A", 104, 3, 11)]), &cx, &mut out)
+        .await
+        .unwrap();
+    restored
+        .process_data("left", batch(&[("A", 105, 3, 13)]), &cx, &mut out)
+        .await
+        .unwrap();
+    let continued = restored.checkpoint(epoch.next().unwrap()).unwrap();
+    let mut final_op = operator(10);
+    final_op.restore(&continued).unwrap();
+    final_op.on_end(&cx, &mut out).await.unwrap();
+    let expected = if dirty {
+        vec![(1, 5), (2, 7), (3, 11)]
+    } else {
+        vec![(1, 5), (3, 11)]
+    };
+    assert_eq!(checkpoint_output_values(out.drain("output")), expected);
+    let mut original = operator(10);
+    original.restore(&first).unwrap();
+    original.on_end(&cx, &mut out).await.unwrap();
+    assert_eq!(checkpoint_output_values(out.drain("output")), vec![(1, 5)]);
+    final_op.reset().unwrap();
+    assert_eq!(final_op.status().state_bytes, 0);
+}
+
+fn checkpoint_output_values(messages: Vec<calc_flow::StreamMessage>) -> Vec<(i64, i64)> {
+    use datafusion::arrow::array::Int64Array;
+    let mut values = Vec::new();
+    for message in messages {
+        let batch = message
+            .as_data()
+            .expect("checkpoint continuation emitted control");
+        for record in batch.table_payload().unwrap().batches() {
+            let column = |name: &str| {
+                record
+                    .column_by_name(name)
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap()
+            };
+            let sequence = column("left__sequence");
+            let value = column("right__value");
+            values
+                .extend((0..record.num_rows()).map(|row| (sequence.value(row), value.value(row))));
+        }
+    }
+    values
+}

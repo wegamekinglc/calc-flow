@@ -784,7 +784,7 @@ impl StreamAsofJoinOperator {
             return self.capture_empty_log(epoch);
         }
         let pending = self.checkpoint_log.pending.take();
-        let pending = self.compact_pending_log(pending)?;
+        let pending = self.compact_pending_log(pending, epoch)?;
         let count = self.checkpoint_log.frames.len()
             + self.checkpoint_log.payloads.len()
             + self.state.batches.len()
@@ -852,7 +852,15 @@ impl StreamAsofJoinOperator {
         })
     }
 
-    fn compact_pending_log(&self, pending: Option<Body>) -> Result<Option<Body>> {
+    fn compact_pending_log(
+        &self,
+        pending: Option<Body>,
+        epoch: crate::Epoch,
+    ) -> Result<Option<Body>> {
+        if self.log_epoch_requires_base(epoch, pending.is_some()) {
+            drop(pending);
+            return Ok(Some(self.encode_log_base_sync()?));
+        }
         match pending {
             Some(body) if self.log_compaction_needed(&body)? => {
                 drop(body);
@@ -860,6 +868,12 @@ impl StreamAsofJoinOperator {
             }
             other => Ok(other),
         }
+    }
+
+    fn log_epoch_requires_base(&self, epoch: crate::Epoch, pending: bool) -> bool {
+        self.checkpoint_log.frames.last().is_some_and(|previous| {
+            previous.epoch > epoch.as_u64() || (pending && previous.epoch == epoch.as_u64())
+        })
     }
 
     fn captured_log_generation(&self, is_base: bool) -> Result<u64> {
