@@ -973,11 +973,20 @@ fn output_plan_one_copied_column_enters_two_row_workers_while_left_stays_shared(
     assert!(left.upgrade().is_none() && right.upgrade().is_none());
     assert!(paid && exact && input_lifecycle);
     assert_eq!(joined, 2);
+    assert_narrow_worker_ranges(first, second);
+}
+
+type WorkerRange = (usize, std::ops::Range<usize>, std::thread::ThreadId);
+
+fn assert_narrow_worker_ranges(first: Option<WorkerRange>, second: Option<WorkerRange>) {
     assert!(
         matches!((first, second), (Some((1, a, ta)), Some((1, b, tb)))
         if ta != tb && !a.is_empty() && !b.is_empty()
-                && a.end <= 100_000 && b.end <= 100_000
-                && ((a.start == 0 && a.end == b.start && b.end == 100_000)
-                    || (b.start == 0 && b.end == a.start && a.end == 100_000)))
+            && a.end <= 100_000 && b.end <= 100_000 && ranges_cover_rows(&a, &b))
     );
+}
+
+fn ranges_cover_rows(a: &std::ops::Range<usize>, b: &std::ops::Range<usize>) -> bool {
+    (a.start == 0 && a.end == b.start && b.end == 100_000)
+        || (b.start == 0 && b.end == a.start && a.end == 100_000)
 }

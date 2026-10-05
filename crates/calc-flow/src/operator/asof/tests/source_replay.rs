@@ -31,80 +31,7 @@ async fn replay_recording_pressure_preserves_admission_success() {
     let mut pools = Vec::new();
     for limit in [32 * 1024, 64 * 1024, 128 * 1024] {
         for count in [1, 4, 16, 64, 256] {
-            let spec = StreamAsofJoinSpec::new(
-                template.spec.left().clone(),
-                template.spec.right().clone(),
-                Duration::from_micros(10),
-                AsofStateLimits::new(10_000, limit).unwrap(),
-            )
-            .unwrap();
-            let mut plain =
-                StreamAsofJoinOperator::new("asof", schema.clone(), schema.clone(), spec.clone())
-                    .unwrap();
-            let mut recorded =
-                StreamAsofJoinOperator::new("asof", schema.clone(), schema.clone(), spec).unwrap();
-            recorded.replay = Some(Box::new(recorded.new_replay_log().unwrap()));
-            recorded.status.state_bytes = recorded.current_inventory(None).unwrap().bytes;
-            let rows = (0..count)
-                .map(|sequence| ("A", 100, i64::from(sequence)))
-                .collect::<Vec<_>>();
-            let batch = Batch::table(
-                vec![indexed_input(&schema, &rows)],
-                BatchMetadata::default(),
-            )
-            .unwrap();
-            for side in ["left", "right"] {
-                let baseline = plain
-                    .process_data(
-                        side,
-                        batch.clone(),
-                        &context,
-                        &mut EdgeCollector::new(plain.output_ports().to_vec()),
-                    )
-                    .await;
-                let candidate = recorded
-                    .process_data(
-                        side,
-                        with_cursor(&batch, side),
-                        &context,
-                        &mut EdgeCollector::new(recorded.output_ports().to_vec()),
-                    )
-                    .await;
-                assert_eq!(
-                    candidate.is_ok(),
-                    baseline.is_ok(),
-                    "limit={limit}, rows={count}, side={side}: baseline={baseline:?}, candidate={candidate:?}"
-                );
-                if baseline.is_err() {
-                    break;
-                }
-                if limit == 128 * 1024 && count == 1 && side == "left" {
-                    assert!(recorded.replay.is_some());
-                }
-            }
-            assert_status(&plain, &recorded);
-            let baseline = plain
-                .on_end(
-                    &context,
-                    &mut EdgeCollector::new(plain.output_ports().to_vec()),
-                )
-                .await;
-            let candidate = recorded
-                .on_end(
-                    &context,
-                    &mut EdgeCollector::new(recorded.output_ports().to_vec()),
-                )
-                .await;
-            if baseline.is_ok() {
-                assert!(
-                    candidate.is_ok(),
-                    "limit={limit}, rows={count}, finalization: {candidate:?}"
-                );
-                assert_status(&plain, &recorded);
-            }
-            plain.reset().unwrap();
-            recorded.reset().unwrap();
-            pools.extend([plain.runtime.pool.clone(), recorded.runtime.pool.clone()]);
+            pools.extend(run_pressure_pair(&template, &schema, limit, count, &context).await);
         }
     }
     assert!(job.gather_owner().close_and_drain().await.is_empty());
@@ -113,6 +40,84 @@ async fn replay_recording_pressure_preserves_admission_success() {
     for pool in pools {
         assert_eq!(pool.reserved(), 0);
     }
+}
+
+async fn run_pressure_pair(
+    template: &StreamAsofJoinOperator,
+    schema: &datafusion::arrow::datatypes::SchemaRef,
+    limit: u64,
+    count: i32,
+    context: &StreamOperatorContext<'_>,
+) -> [Arc<dyn datafusion::execution::memory_pool::MemoryPool>; 2] {
+    let spec = StreamAsofJoinSpec::new(
+        template.spec.left().clone(),
+        template.spec.right().clone(),
+        Duration::from_micros(10),
+        AsofStateLimits::new(10_000, limit).unwrap(),
+    )
+    .unwrap();
+    let mut plain =
+        StreamAsofJoinOperator::new("asof", schema.clone(), schema.clone(), spec.clone()).unwrap();
+    let mut recorded =
+        StreamAsofJoinOperator::new("asof", schema.clone(), schema.clone(), spec).unwrap();
+    recorded.replay = Some(Box::new(recorded.new_replay_log().unwrap()));
+    recorded.status.state_bytes = recorded.current_inventory(None).unwrap().bytes;
+    let rows = (0..count)
+        .map(|sequence| ("A", 100, i64::from(sequence)))
+        .collect::<Vec<_>>();
+    let batch = Batch::table(vec![indexed_input(schema, &rows)], BatchMetadata::default()).unwrap();
+    for side in ["left", "right"] {
+        let baseline = plain
+            .process_data(
+                side,
+                batch.clone(),
+                context,
+                &mut EdgeCollector::new(plain.output_ports().to_vec()),
+            )
+            .await;
+        let candidate = recorded
+            .process_data(
+                side,
+                with_cursor(&batch, side),
+                context,
+                &mut EdgeCollector::new(recorded.output_ports().to_vec()),
+            )
+            .await;
+        assert_eq!(
+            candidate.is_ok(),
+            baseline.is_ok(),
+            "limit={limit}, rows={count}, side={side}: baseline={baseline:?}, candidate={candidate:?}"
+        );
+        if baseline.is_err() {
+            break;
+        }
+        if limit == 128 * 1024 && count == 1 && side == "left" {
+            assert!(recorded.replay.is_some());
+        }
+    }
+    assert_status(&plain, &recorded);
+    let baseline = plain
+        .on_end(
+            context,
+            &mut EdgeCollector::new(plain.output_ports().to_vec()),
+        )
+        .await;
+    let candidate = recorded
+        .on_end(
+            context,
+            &mut EdgeCollector::new(recorded.output_ports().to_vec()),
+        )
+        .await;
+    if baseline.is_ok() {
+        assert!(
+            candidate.is_ok(),
+            "limit={limit}, rows={count}, finalization: {candidate:?}"
+        );
+        assert_status(&plain, &recorded);
+    }
+    plain.reset().unwrap();
+    recorded.reset().unwrap();
+    [plain.runtime.pool.clone(), recorded.runtime.pool.clone()]
 }
 
 fn assert_status(plain: &StreamAsofJoinOperator, recorded: &StreamAsofJoinOperator) {

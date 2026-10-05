@@ -145,32 +145,7 @@ fn assert_output(
             &BatchMetadata::new("asof", rows.len() as u64, JsonMap::new()).unwrap()
         );
         for record in batch.table_payload().unwrap().batches() {
-            let left = record
-                .column(if narrow { 0 } else { 2 })
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .unwrap();
-            let right = (!narrow).then(|| {
-                record
-                    .column(6)
-                    .as_any()
-                    .downcast_ref::<Int64Array>()
-                    .unwrap()
-            });
-            let price = record
-                .column(if narrow { 1 } else { 7 })
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .unwrap();
-            for row in 0..record.num_rows() {
-                rows.push((
-                    left.value(row),
-                    right
-                        .filter(|column| !column.is_null(row))
-                        .map(|column| column.value(row)),
-                    (!price.is_null(row)).then(|| price.value(row).to_bits()),
-                ));
-            }
+            append_record_rows(record, narrow, &mut rows);
             encoded.push(
                 crate::operator::asof::codec::encode_batch(record, 8 << 20, &mut Vec::new())
                     .unwrap(),
@@ -183,6 +158,39 @@ fn assert_output(
         .collect::<Vec<_>>();
     assert_eq!(rows, expected);
     encoded
+}
+
+fn append_record_rows(
+    record: &RecordBatch,
+    narrow: bool,
+    rows: &mut Vec<(i64, Option<i64>, Option<u64>)>,
+) {
+    let left = record
+        .column(if narrow { 0 } else { 2 })
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    let right = (!narrow).then(|| {
+        record
+            .column(6)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+    });
+    let price = record
+        .column(if narrow { 1 } else { 7 })
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap();
+    for row in 0..record.num_rows() {
+        rows.push((
+            left.value(row),
+            right
+                .filter(|column| !column.is_null(row))
+                .map(|column| column.value(row)),
+            (!price.is_null(row)).then(|| price.value(row).to_bits()),
+        ));
+    }
 }
 
 #[test]
