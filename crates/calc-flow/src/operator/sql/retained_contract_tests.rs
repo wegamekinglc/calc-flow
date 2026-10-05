@@ -227,7 +227,8 @@ async fn test_sql_retained_alias_collision_keeps_source_column() {
 
 #[tokio::test]
 async fn test_sql_retained_unproved_lineage_keeps_full_schema() {
-    let query = "WITH selected AS (SELECT * FROM events) SELECT SUM(value) AS total FROM selected";
+    let query =
+        "WITH selected AS (SELECT * FROM events) SELECT SUM(abs(value)) AS total FROM selected";
     let (mut operator, job, mut output) = setup(query);
     let context = StreamOperatorContext::new(&job, "totals", None);
     operator
@@ -503,6 +504,9 @@ async fn test_sql_retained_snapshot_holds_input_and_metadata_body_credits_after_
             .unwrap();
         let snapshot = operator.checkpoint(Epoch::INITIAL).unwrap();
         StreamOperator::reset(&mut operator).unwrap();
+        assert!(job.gather_owner().close_and_drain().await.is_empty());
+        drop(context);
+        drop(job);
         let probe = operator
             .stream_state
             .runtime()

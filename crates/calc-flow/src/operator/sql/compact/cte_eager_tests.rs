@@ -8,6 +8,63 @@ const QUERIES: [&str; 4] = [
 ];
 
 #[tokio::test]
+async fn test_cte_filtered_global_sum_ignores_unused_binary_after_cold_restore() {
+    use datafusion::arrow::array::{BinaryArray, BooleanArray, Float64Array};
+
+    let query = "WITH prepared AS (SELECT value, keep FROM events) SELECT SUM(value) AS total FROM prepared WHERE keep";
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "float_extrema", None);
+    let make = || SqlOperator::new("float_extrema", query, vec!["events".into()], vec![]).unwrap();
+    let mut state = make();
+    let mut history = Vec::new();
+    for sequence in 0..2 {
+        let record = RecordBatch::try_from_iter(vec![
+            (
+                "value",
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])) as ArrayRef,
+            ),
+            (
+                "keep",
+                Arc::new(BooleanArray::from(vec![true, false, true])) as ArrayRef,
+            ),
+            (
+                "unused",
+                Arc::new(BinaryArray::from(vec![b"unused".as_slice(); 3])) as ArrayRef,
+            ),
+        ])
+        .unwrap();
+        let metadata = BatchMetadata::new("cte-unused", sequence, JsonMap::new()).unwrap();
+        let incoming = Batch::table(vec![record.clone()], metadata.clone()).unwrap();
+        history.push(record);
+        let actual = process(&mut state, incoming, &context).await;
+        let expected = DataFusionRuntime::new(DataFusionConfig::default())
+            .unwrap()
+            .sql(
+                query,
+                &BTreeMap::from([(
+                    "events".into(),
+                    Batch::table(history.clone(), metadata).unwrap(),
+                )]),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows(&actual), rows(&expected));
+        assert_eq!(
+            actual.table_payload().unwrap().schema(),
+            expected.table_payload().unwrap().schema()
+        );
+        assert_eq!(actual.metadata(), expected.metadata());
+        let snapshot = state.checkpoint(Epoch::INITIAL).unwrap();
+        drop(state);
+        state = make();
+        StreamOperator::restore(&mut state, &snapshot).unwrap();
+    }
+    drop(state);
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+}
+
+#[tokio::test]
 async fn test_eager_cte_projections_keep_native_state_and_exact_cold_prefixes() {
     for dtype in [DataType::Float32, DataType::Float64] {
         for query in QUERIES {

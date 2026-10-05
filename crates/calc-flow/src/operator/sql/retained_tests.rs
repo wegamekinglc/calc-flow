@@ -8,7 +8,7 @@ use datafusion::arrow::{
 
 use super::*;
 
-const RAW_SUM: &str = "SELECT SUM(value) AS total FROM events WHERE value IS NOT NULL";
+const RAW_SUM: &str = "SELECT SUM(abs(value)) AS total FROM events WHERE value IS NOT NULL";
 
 fn wide_input(sequence: u64) -> (Batch, Weak<dyn Array>, Buffer) {
     let unused: ArrayRef = Arc::new(StringArray::from(vec![

@@ -211,7 +211,7 @@ impl Proof {
         rows: u64,
         name: &str,
     ) -> Result<()> {
-        if rows == 0 || records.iter().map(RecordBatch::num_rows).sum::<usize>() != 1 {
+        if records.iter().map(RecordBatch::num_rows).sum::<usize>() != 1 {
             return Err(df_error(
                 name,
                 "global checkpoint must contain one scalar row",

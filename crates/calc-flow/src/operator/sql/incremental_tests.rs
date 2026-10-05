@@ -460,23 +460,49 @@ async fn test_sql_incremental_empty_other_schema_preserves_values_and_incoming_m
 }
 
 #[tokio::test]
-async fn test_sql_incremental_unsupported_queries_use_whole_query_fallback() {
-    for query in [
-        "SELECT SUM(value) AS total, AVG(value) AS mean FROM events",
-        "SELECT COUNT(DISTINCT value) AS unique_values FROM events",
-        "SELECT SUM(value + 1) AS computed FROM events",
-        "SELECT SUM(CAST(value AS BIGINT)) AS cast_total FROM events",
-        "SELECT SUM(value) AS total FROM events WHERE value > 1",
-        "SELECT value, SUM(value) AS total FROM events GROUP BY value HAVING SUM(value) > 1",
-        "SELECT value, COUNT(*) AS rows FROM events GROUP BY value ORDER BY value DESC LIMIT 2",
-        "WITH source AS (SELECT value FROM events) SELECT SUM(value) AS total FROM source",
-        "SELECT SUM(value) FILTER (WHERE value > 1) AS total FROM events",
-        "SELECT SUM(value) OVER () AS total FROM events GROUP BY value",
+async fn test_sql_incremental_supported_and_fallback_queries_match_cumulative_oracle() {
+    for (query, eligible) in [
+        (
+            "SELECT SUM(value) AS total, AVG(value) AS mean FROM events",
+            true,
+        ),
+        (
+            "SELECT COUNT(DISTINCT value) AS unique_values FROM events",
+            false,
+        ),
+        ("SELECT SUM(value + 1) AS computed FROM events", true),
+        (
+            "SELECT SUM(CAST(value AS BIGINT)) AS cast_total FROM events",
+            true,
+        ),
+        (
+            "SELECT SUM(value) AS total FROM events WHERE value > 1",
+            true,
+        ),
+        (
+            "SELECT value, SUM(value) AS total FROM events GROUP BY value HAVING SUM(value) > 1",
+            true,
+        ),
+        (
+            "SELECT value, COUNT(*) AS rows FROM events GROUP BY value ORDER BY value DESC LIMIT 2",
+            true,
+        ),
+        (
+            "WITH source AS (SELECT value FROM events) SELECT SUM(value) AS total FROM source",
+            true,
+        ),
+        (
+            "SELECT SUM(value) FILTER (WHERE value > 1) AS total FROM events",
+            true,
+        ),
+        (
+            "SELECT SUM(value) OVER () AS total FROM events GROUP BY value",
+            false,
+        ),
     ] {
-        assert_prefix_oracle(query, &[batch(&[1, 2]), batch(&[2, 3])], false).await;
+        assert_prefix_oracle(query, &[batch(&[1, 2]), batch(&[2, 3])], eligible).await;
     }
 }
-
 #[tokio::test]
 async fn test_sql_incremental_float_decimal_queries_preserve_cumulative_engine() {
     use datafusion::arrow::array::{Decimal128Array, Float64Array};
@@ -753,7 +779,7 @@ async fn test_sql_incremental_pending_empty_record_copies_are_reserved() {
     let input = Batch::table(vec![record; 12_000], BatchMetadata::default()).unwrap();
     let mut operator = SqlOperator::new(
         "totals",
-        "SELECT SUM(value) AS total FROM events WHERE value IS NOT NULL",
+        "SELECT SUM(abs(value)) AS total FROM events WHERE value IS NOT NULL",
         vec!["events".into()],
         vec![],
     )
@@ -1094,7 +1120,7 @@ pub(super) fn after_record_copies(metadata: &BatchMetadata, count: usize) {
 
 #[tokio::test]
 async fn test_sql_incremental_restore_reserves_empty_record_handles_atomically() {
-    let query = "SELECT COUNT(*) AS rows FROM events WHERE value IS NOT NULL";
+    let query = "SELECT COUNT(*) AS rows FROM events WHERE abs(value) IS NOT NULL";
     let record = RecordBatch::try_from_iter(vec![(
         "value",
         Arc::new(Int64Array::from(Vec::<i64>::new())) as Arc<dyn Array>,
@@ -1153,7 +1179,7 @@ async fn test_sql_incremental_prepare_stops_copying_records_when_cancelled() {
     .unwrap();
     let mut operator = SqlOperator::new(
         "totals",
-        "SELECT COUNT(*) AS rows FROM events WHERE value IS NOT NULL",
+        "SELECT COUNT(*) AS rows FROM events WHERE abs(value) IS NOT NULL",
         vec!["events".into()],
         vec![],
     )

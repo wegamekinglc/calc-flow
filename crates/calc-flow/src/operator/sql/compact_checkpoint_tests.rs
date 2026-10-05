@@ -635,7 +635,7 @@ async fn assert_scalar_and_fallback_controls(
         context,
     )
     .await;
-    let fallback = "SELECT key, COUNT(*) AS rows, SUM(value) AS total FROM events WHERE value IS NOT NULL GROUP BY key";
+    let fallback = "SELECT key, COUNT(*) AS rows, SUM(abs(value)) AS total FROM events WHERE value IS NOT NULL GROUP BY key";
     let mut retained = operator(fallback);
     push_oracle(
         &mut retained,

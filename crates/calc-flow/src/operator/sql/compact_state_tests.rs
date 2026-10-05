@@ -143,7 +143,14 @@ async fn test_compact_native_state_roundtrip_exact_widths_and_continuation() {
             assert_eq!(descriptor.key_fields.len(), usize::from(grouped));
             assert_eq!(descriptor.aggregate_names.len(), original.aggregates.len());
             assert_eq!(descriptor.output_schema, original.output_schema);
-            assert_eq!(descriptor.policy, "exact-numeric-v1");
+            assert_eq!(
+                descriptor.policy,
+                if !grouped && kind.is_integer() {
+                    "global-record-float-v1"
+                } else {
+                    "exact-numeric-v1"
+                }
+            );
             assert_eq!(descriptor.aggregate_inputs.len(), original.aggregates.len());
             let all_rows = descriptor
                 .count_all_rows
@@ -595,7 +602,7 @@ fn late_import_refusal(
         "codec",
     );
     assert!(matches!(refused, Err(CalcFlowError::DataFusion { .. })));
-    assert!(checks >= 5);
+    assert!(checks > 1, "late refusal must follow initial validation");
     drop(pressure);
     assert_eq!(pool(runtime).reserved(), before + exported.reserved_bytes());
     assert_eq!(&snapshot(original), saved);

@@ -379,7 +379,7 @@ impl IncrementalSql {
             self.predicate.is_some(),
             name,
         )?;
-        if let Some(global) = &self.global_records {
+        if seen_input && let Some(global) = &self.global_records {
             global.validate_state(records, historical_rows, name)?;
         }
         self.reserve_groups(groups, groups, name)?;
