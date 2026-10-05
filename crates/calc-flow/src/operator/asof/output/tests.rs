@@ -260,6 +260,26 @@ async fn cancellation_during_manifest_capture_releases_its_workspace() {
     assert_eq!(pool.reserved(), 0);
 }
 
+async fn wait_worker_started(
+    mut work: std::pin::Pin<&mut impl Future>,
+    started: &std::sync::mpsc::Receiver<()>,
+) {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            assert!(futures::poll!(work.as_mut()).is_pending());
+            match started.try_recv() {
+                Ok(()) => break,
+                Err(std::sync::mpsc::TryRecvError::Empty) => tokio::task::yield_now().await,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    panic!("worker start sender dropped")
+                }
+            }
+        }
+    })
+    .await
+    .unwrap();
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn materialization_worker_owns_unique_batches_without_row_payload_clones() {
     let (_, schemas, row) = fixture();
@@ -273,7 +293,7 @@ async fn materialization_worker_owns_unique_batches_without_row_payload_clones()
     let mut future = Box::pin(runtime.materialize(&rows, &schemas[2], reservation, || Ok(())));
     assert!(futures::poll!(future.as_mut()).is_pending());
     assert!(futures::poll!(future.as_mut()).is_pending());
-    started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    wait_worker_started(future.as_mut(), &started_rx).await;
     let during = Arc::strong_count(&row.batch);
     drop(future);
     gate.wait();
@@ -294,7 +314,7 @@ async fn dropped_materialization_keeps_worker_memory_reserved_until_exit() {
     let mut future = Box::pin(runtime.materialize(&rows, &schemas[2], reservation, || Ok(())));
     assert!(futures::poll!(future.as_mut()).is_pending());
     assert!(futures::poll!(future.as_mut()).is_pending());
-    started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    wait_worker_started(future.as_mut(), &started_rx).await;
     let paid = pool.reserved();
     drop(future);
     let retained = pool.reserved();
@@ -357,7 +377,7 @@ async fn output_plan_worker_retains_source_backing_and_credit_after_observer_dro
         Box::pin(runtime.materialize_plan(plan, &schemas[2], workspace, "asof", &context));
     assert!(futures::poll!(future.as_mut()).is_pending());
     assert!(futures::poll!(future.as_mut()).is_pending());
-    started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    wait_worker_started(future.as_mut(), &started_rx).await;
     let paid = pool.reserved();
     drop(future);
     let retained = pool.reserved();
@@ -427,7 +447,7 @@ async fn output_plan_worker_holds_arrays_without_source_or_output_schema_metadat
     let mut future = Box::pin(runtime.materialize_plan(plan, &schema, workspace, "asof", &context));
     assert!(futures::poll!(future.as_mut()).is_pending());
     assert!(futures::poll!(future.as_mut()).is_pending());
-    started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    wait_worker_started(future.as_mut(), &started_rx).await;
     let paid = pool.reserved();
     drop(future);
     drop(schema);
