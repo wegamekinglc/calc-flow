@@ -280,16 +280,26 @@ mod tests {
         asof.prepare_checkpoint_async(&context).await.unwrap();
         let snapshot = asof.checkpoint(Epoch::new(1).unwrap()).unwrap();
 
-        // The physical optimization can restore through the original full
-        // ASOF schema, and retains every original input column in state.
         let mut original = graph(&[])
             .compile_stream(&udfs, &StreamRequirements::default())
             .unwrap();
         let CompiledStreamOperator::StreamAsofJoin(full) = &mut original.nodes[0].operator else {
             unreachable!()
         };
-        full.restore(&snapshot).unwrap();
+        assert!(full.restore(&snapshot).is_err());
         let mut full_collector = EdgeCollector::new(full.output_ports().to_vec());
+        let schema = full.input_ports()[0].schema().unwrap().clone();
+        full.process_data(
+            "right",
+            input(schema.clone(), true),
+            &context,
+            &mut full_collector,
+        )
+        .await
+        .unwrap();
+        full.process_data("left", input(schema, false), &context, &mut full_collector)
+            .await
+            .unwrap();
         full.on_end(&context, &mut full_collector).await.unwrap();
         let full_output = full_collector.drain("output");
         let full_record = &full_output[0]
@@ -300,8 +310,24 @@ mod tests {
             .batches()[0];
         assert_eq!(full_record.num_columns(), 8);
 
-        asof.on_end(&context, &mut collector).await.unwrap();
-        let joined = collector.drain("output");
+        let selections: &[&[&str]] = if right_only {
+            &[&["right__value AS price"]]
+        } else {
+            &[
+                &["right__value AS price", "left__seq AS sequence"],
+                &["right__seq"],
+            ]
+        };
+        let mut restored = graph(selections)
+            .compile_stream(&udfs, &StreamRequirements::default())
+            .unwrap();
+        let CompiledStreamOperator::StreamAsofJoin(cold) = &mut restored.nodes[0].operator else {
+            unreachable!()
+        };
+        cold.restore(&snapshot).unwrap();
+        let mut cold_collector = EdgeCollector::new(cold.output_ports().to_vec());
+        cold.on_end(&context, &mut cold_collector).await.unwrap();
+        let joined = cold_collector.drain("output");
         let joined = joined[0].as_data().unwrap().clone();
         let joined_record = &joined.table_payload().unwrap().batches()[0];
         let indices = if right_only { vec![7] } else { vec![2, 6, 7] };
@@ -310,7 +336,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn physical_asof_projection_preserves_aliases_nulls_and_full_state_restore() {
+    async fn physical_asof_projection_preserves_aliases_nulls_and_projected_state_restore() {
         use crate::{
             CancellationToken, EdgeCollector, JsonMap, StreamJobContext, StreamOperatorContext,
         };
