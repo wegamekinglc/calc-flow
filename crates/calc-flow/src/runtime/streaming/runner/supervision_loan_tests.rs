@@ -309,7 +309,7 @@ async fn gather_aborted_report_loan_keeps_native_join_and_original_failure() {
     })
     .await
     .is_ok();
-    assert!(started && source_retained && waited && aborted && cleaned);
+    assert_aborted_gather_observations([started, source_retained, waited, aborted, cleaned]);
     assert_eq!((joined_funding.1, joined_funding.2), (0, 0));
     let report = report.expect("returned supervisor completes actual native drain");
     assert_eq!(report.primary_errors().len(), 1);
@@ -324,4 +324,9 @@ impl Drop for GatherWorkerRelease {
     fn drop(&mut self) {
         self.0.release();
     }
+}
+
+fn assert_aborted_gather_observations(observed: [bool; 5]) {
+    let [started, source_retained, waited, aborted, cleaned] = observed;
+    assert!(started && source_retained && waited && aborted && cleaned);
 }

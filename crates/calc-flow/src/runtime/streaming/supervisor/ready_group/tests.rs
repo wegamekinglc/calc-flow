@@ -85,16 +85,7 @@ fn a13_three_member_real_native_wake_at_register_poll_and_idle_is_not_lost() {
         let fixture = fixture();
         let armed = Arc::new(AtomicBool::new(false));
         let fired = Arc::new(AtomicBool::new(false));
-        let observer: Observer = {
-            let armed = armed.clone();
-            let fired = fired.clone();
-            Arc::new(move |at, _, wakers| {
-                if at == phase && armed.load(SeqCst) && !fired.swap(true, SeqCst) {
-                    let wake = wakers[0].clone();
-                    std::thread::spawn(move || wake.wake()).join().unwrap();
-                }
-            })
-        };
+        let observer = native_wake_observer(phase, armed.clone(), fired.clone());
         let mut driver = Box::pin(run(fixture.children, Some(observer)));
         let parent = Arc::new(ParentWake::default());
         let waker = Waker::from(parent.clone());
@@ -179,4 +170,13 @@ fn a13_three_member_retained_native_wakers_do_not_keep_dropped_driver_alive() {
             .iter()
             .all(|weak| weak.upgrade().is_none())
     );
+}
+
+fn native_wake_observer(phase: Phase, armed: Arc<AtomicBool>, fired: Arc<AtomicBool>) -> Observer {
+    Arc::new(move |at, _, wakers| {
+        if at == phase && armed.load(SeqCst) && !fired.swap(true, SeqCst) {
+            let wake = wakers[0].clone();
+            std::thread::spawn(move || wake.wake()).join().unwrap();
+        }
+    })
 }
