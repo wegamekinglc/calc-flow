@@ -1,4 +1,4 @@
-use std::{mem::size_of, sync::Arc};
+use std::{borrow::Cow, mem::size_of, sync::Arc};
 
 use ahash::RandomState;
 use datafusion::{
@@ -8,15 +8,15 @@ use datafusion::{
         record_batch::RecordBatch,
         row::{RowConverter, SortField},
     },
-    common::{DFSchema, ScalarValue},
+    common::{DFSchema, ScalarValue, TableReference},
     execution::memory_pool::MemoryReservation,
     logical_expr::{
-        Accumulator, EmitTo, Expr, ExprSchemable, GroupsAccumulator, LogicalPlan,
+        Accumulator, EmitTo, Expr, ExprSchemable, GroupsAccumulator, LogicalPlan, TableScan,
         execution_props::ExecutionProps,
     },
     physical_expr::{
         PhysicalExpr,
-        aggregate::{AggregateFunctionExpr, LoweredAggregateBuilder},
+        aggregate::{AggregateFunctionExpr, LoweredAggregate, LoweredAggregateBuilder},
         create_physical_expr,
         expressions::{Column, Literal},
     },
@@ -637,13 +637,17 @@ impl IncrementalSql {
         let Some((projection, aggregate)) = shape(analyzed) else {
             return Ok(None);
         };
-        let Some(projection_nodes) = output_work(projection)
-            .and_then(|nodes| nodes.checked_add(output_order::work_nodes(analyzed)?))
-        else {
-            return Ok(None);
-        };
-        let Some((input_checks, input_nodes)) =
-            input_checks::bind(aggregate, normalized.as_ref(), &schema)
+        let Some(PlanWork {
+            projection_nodes,
+            input_checks,
+            input_nodes,
+        }) = plan_work(
+            projection,
+            aggregate,
+            analyzed,
+            normalized.as_ref(),
+            &schema,
+        )
         else {
             return Ok(None);
         };
@@ -669,22 +673,20 @@ impl IncrementalSql {
         let Some(aggregate_bytes) = aggregate_bytes(&aggregates, name)? else {
             return Ok(None);
         };
-        if !grouped_aggregates_supported(&keys, &aggregates) {
+        let Some(NativeStrategy {
+            global_records,
+            sequential,
+        }) = native_strategy(
+            runtime,
+            &reservation,
+            raw,
+            &aggregates,
+            &keys,
+            (predicate.is_some(), input_nodes),
+            name,
+        )?
+        else {
             return Ok(None);
-        }
-        let global_records = if global_record::raw_selected(raw) {
-            global_record::Proof::new(runtime, &aggregates, predicate.is_some(), input_nodes, name)?
-        } else {
-            None
-        };
-        let sequential = if global_records.is_some() {
-            None
-        } else {
-            match initial_grouped_proof(runtime, &reservation, &keys, &aggregates, name)? {
-                GroupStrategy::Unsupported => return Ok(None),
-                GroupStrategy::Exact => None,
-                GroupStrategy::Sequential(proof) => Some(proof),
-            }
         };
         let (converter, finalizer_bytes) = grouped_layout(&keys, &aggregates, name)?;
         let variable_extrema = variable_extrema_slots(&aggregates);
@@ -2610,6 +2612,66 @@ fn update_global(
     Ok(())
 }
 
+struct PlanWork {
+    projection_nodes: usize,
+    input_checks: Vec<Arc<dyn PhysicalExpr>>,
+    input_nodes: usize,
+}
+
+fn plan_work(
+    projection: &datafusion::logical_expr::Projection,
+    aggregate: &datafusion::logical_expr::Aggregate,
+    analyzed: &LogicalPlan,
+    normalized: Option<&normalize_groups::Plans>,
+    schema: &SchemaRef,
+) -> Option<PlanWork> {
+    let projection_nodes = output_work(projection)
+        .and_then(|nodes| nodes.checked_add(output_order::work_nodes(analyzed)?))?;
+    let (input_checks, input_nodes) = input_checks::bind(aggregate, normalized, schema)?;
+    Some(PlanWork {
+        projection_nodes,
+        input_checks,
+        input_nodes,
+    })
+}
+
+struct NativeStrategy {
+    global_records: Option<global_record::Proof>,
+    sequential: Option<grouped_float::Proof>,
+}
+
+fn native_strategy(
+    runtime: &DataFusionRuntime,
+    reservation: &MemoryReservation,
+    raw: &LogicalPlan,
+    aggregates: &[Arc<AggregateFunctionExpr>],
+    keys: &[GroupKey],
+    input: (bool, usize),
+    name: &str,
+) -> Result<Option<NativeStrategy>> {
+    if !grouped_aggregates_supported(keys, aggregates) {
+        return Ok(None);
+    }
+    let global_records = if global_record::raw_selected(raw) {
+        global_record::Proof::new(runtime, aggregates, input.0, input.1, name)?
+    } else {
+        None
+    };
+    let sequential = if global_records.is_some() {
+        None
+    } else {
+        match initial_grouped_proof(runtime, reservation, keys, aggregates, name)? {
+            GroupStrategy::Unsupported => return Ok(None),
+            GroupStrategy::Exact => None,
+            GroupStrategy::Sequential(proof) => Some(proof),
+        }
+    };
+    Ok(Some(NativeStrategy {
+        global_records,
+        sequential,
+    }))
+}
+
 enum GroupStrategy {
     Unsupported,
     Exact,
@@ -2746,77 +2808,22 @@ fn physical_plan(
     schema: &SchemaRef,
 ) -> Option<PhysicalSqlPlan> {
     let props = ExecutionProps::new();
-    let logical = aggregate.input.schema();
-    let rebound;
-    let input = if logical.as_arrow() == schema.as_ref() {
-        logical.as_ref()
-    } else {
-        let scan = match aggregate.input.as_ref() {
-            LogicalPlan::TableScan(scan) => scan,
-            LogicalPlan::Filter(filter) => {
-                let LogicalPlan::TableScan(scan) = filter.input.as_ref() else {
-                    return None;
-                };
-                scan
-            }
-            _ => return None,
-        };
-        let source = scan.source.schema();
-        let qualifiers = schema
-            .fields()
-            .iter()
-            .map(|field| {
-                if let Ok(index) = logical.as_arrow().index_of(field.name()) {
-                    let (qualifier, original) = logical.qualified_field(index);
-                    (original == field).then(|| qualifier.cloned())
-                } else {
-                    let original = source.field_with_name(field.name()).ok()?;
-                    (original == field.as_ref()).then(|| Some(scan.table_name.clone()))
-                }
-            })
-            .collect::<Option<Vec<_>>>()?;
-        rebound = DFSchema::from_field_specific_qualified_schema(qualifiers, schema).ok()?;
-        &rebound
-    };
-    let keys = group_key::bind(aggregate, input, schema, &props)?;
+    let input = input_schema(aggregate, schema)?;
+    let keys = group_key::bind(aggregate, &input, schema, &props)?;
     let Ok(lowered) = aggregate
         .aggr_expr
         .iter()
-        .map(|expr| LoweredAggregateBuilder::new(expr, input, schema, &props).build())
+        .map(|expr| LoweredAggregateBuilder::new(expr, &input, schema, &props).build())
         .collect::<datafusion::error::Result<Vec<_>>>()
     else {
         return None;
     };
-    let aggregate_filters = lowered
-        .iter()
-        .map(|lowered| match &lowered.filter {
-            None => Some(None),
-            Some(filter) => {
-                native_expression::describe_input(filter.as_ref(), schema, 0, "sql-filter").ok()?;
-                (filter.data_type(schema).ok()? == DataType::Boolean).then(|| Some(filter.clone()))
-            }
-        })
-        .collect::<Option<Vec<_>>>()?;
-    let aggregate_filters = if aggregate_filters.iter().all(Option::is_none) {
-        Vec::new()
-    } else {
-        aggregate_filters
-    };
+    let aggregate_filters = lower_aggregate_filters(&lowered, schema)?;
     let aggregates = lowered
         .into_iter()
         .map(|lowered| lowered.aggregate)
         .collect();
-    let post_filter = match projection.input.as_ref() {
-        LogicalPlan::Filter(filter) => {
-            Some(create_physical_expr(&filter.predicate, &aggregate.schema, &props).ok()?)
-        }
-        _ => None,
-    };
-    if post_filter.as_ref().is_some_and(|expression| {
-        expression.data_type(aggregate.schema.as_arrow()).ok() != Some(DataType::Boolean)
-    }) {
-        return None;
-    }
+    let post_filter = bind_post_filter(projection, aggregate, &props)?.0;
     let Ok(projection) = projection
         .expr
         .iter()
@@ -2828,7 +2835,7 @@ fn physical_plan(
     let predicate = match aggregate.input.as_ref() {
         LogicalPlan::Filter(filter) => Some(predicate::InputPredicate::new(
             &filter.predicate,
-            input,
+            &input,
             schema,
             &props,
         )?),
@@ -2842,6 +2849,98 @@ fn physical_plan(
         post_filter,
         keys,
     ))
+}
+
+fn input_schema<'a>(
+    aggregate: &'a datafusion::logical_expr::Aggregate,
+    schema: &SchemaRef,
+) -> Option<Cow<'a, DFSchema>> {
+    let logical = aggregate.input.schema();
+    if logical.as_arrow() == schema.as_ref() {
+        return Some(Cow::Borrowed(logical.as_ref()));
+    }
+    let scan = input_scan(aggregate)?;
+    let source = scan.source.schema();
+    let qualifiers = schema
+        .fields()
+        .iter()
+        .map(|field| rebound_qualifier(scan, &source, logical, field).map(|qualifier| qualifier.0))
+        .collect::<Option<Vec<_>>>()?;
+    DFSchema::from_field_specific_qualified_schema(qualifiers, schema)
+        .ok()
+        .map(Cow::Owned)
+}
+
+fn input_scan(aggregate: &datafusion::logical_expr::Aggregate) -> Option<&TableScan> {
+    match aggregate.input.as_ref() {
+        LogicalPlan::TableScan(scan) => Some(scan),
+        LogicalPlan::Filter(filter) => {
+            let LogicalPlan::TableScan(scan) = filter.input.as_ref() else {
+                return None;
+            };
+            Some(scan)
+        }
+        _ => None,
+    }
+}
+
+struct ReboundQualifier(Option<TableReference>);
+
+fn rebound_qualifier(
+    scan: &TableScan,
+    source: &SchemaRef,
+    logical: &DFSchema,
+    field: &datafusion::arrow::datatypes::FieldRef,
+) -> Option<ReboundQualifier> {
+    if let Ok(index) = logical.as_arrow().index_of(field.name()) {
+        let (qualifier, original) = logical.qualified_field(index);
+        (original == field).then(|| ReboundQualifier(qualifier.cloned()))
+    } else {
+        let original = source.field_with_name(field.name()).ok()?;
+        (original == field.as_ref()).then(|| ReboundQualifier(Some(scan.table_name.clone())))
+    }
+}
+
+fn lower_aggregate_filters(
+    lowered: &[LoweredAggregate],
+    schema: &SchemaRef,
+) -> Option<Vec<Option<Arc<dyn PhysicalExpr>>>> {
+    let aggregate_filters = lowered
+        .iter()
+        .map(|lowered| match &lowered.filter {
+            None => Some(None),
+            Some(filter) => {
+                native_expression::describe_input(filter.as_ref(), schema, 0, "sql-filter").ok()?;
+                (filter.data_type(schema).ok()? == DataType::Boolean).then(|| Some(filter.clone()))
+            }
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(if aggregate_filters.iter().all(Option::is_none) {
+        Vec::new()
+    } else {
+        aggregate_filters
+    })
+}
+
+struct BoundPostFilter(Option<Arc<dyn PhysicalExpr>>);
+
+fn bind_post_filter(
+    projection: &datafusion::logical_expr::Projection,
+    aggregate: &datafusion::logical_expr::Aggregate,
+    props: &ExecutionProps,
+) -> Option<BoundPostFilter> {
+    let post_filter = match projection.input.as_ref() {
+        LogicalPlan::Filter(filter) => {
+            Some(create_physical_expr(&filter.predicate, &aggregate.schema, props).ok()?)
+        }
+        _ => None,
+    };
+    if post_filter.as_ref().is_some_and(|expression| {
+        expression.data_type(aggregate.schema.as_arrow()).ok() != Some(DataType::Boolean)
+    }) {
+        return None;
+    }
+    Some(BoundPostFilter(post_filter))
 }
 
 fn df_error(name: &str, error: impl std::fmt::Display) -> CalcFlowError {
