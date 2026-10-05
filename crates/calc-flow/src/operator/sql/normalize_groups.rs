@@ -70,7 +70,8 @@ pub(super) fn plans(
         if !aliases {
             return Ok(normalized);
         }
-        let normalized = inline_input_columns(normalized).map_err(|error| df_error(name, error))?;
+        let normalized = inline_input_projection(normalized, &reservation, name)
+            .map_err(|error| df_error(name, error))?;
         optimizer
             .optimize(normalized, &config, |_, _| {})
             .map_err(|error| df_error(name, error))
@@ -82,7 +83,11 @@ pub(super) fn plans(
     }))
 }
 
-fn inline_input_columns(plan: LogicalPlan) -> datafusion::error::Result<LogicalPlan> {
+fn inline_input_projection(
+    plan: LogicalPlan,
+    reservation: &MemoryReservation,
+    name: &str,
+) -> datafusion::error::Result<LogicalPlan> {
     plan.transform_up(|plan| {
         let LogicalPlan::Aggregate(aggregate) = plan else {
             return Ok(Transformed::no(plan));
@@ -90,23 +95,27 @@ fn inline_input_columns(plan: LogicalPlan) -> datafusion::error::Result<LogicalP
         let LogicalPlan::Projection(projection) = aggregate.input.as_ref() else {
             return Ok(Transformed::no(LogicalPlan::Aggregate(aggregate)));
         };
-        let columns = projection
+        let inputs = projection
             .expr
             .iter()
-            .map(|expression| match super::unalias(expression) {
-                Expr::Column(column) => Some(column.clone()),
-                _ => None,
+            .map(|expression| {
+                super::native_expression::infallible_projection(
+                    expression,
+                    projection.input.schema(),
+                )
+                .then(|| super::unalias(expression).clone())
             })
             .collect::<Option<Vec<_>>>();
-        let Some(columns) = columns else {
+        let Some(inputs) = inputs else {
             return Ok(Transformed::no(LogicalPlan::Aggregate(aggregate)));
         };
         let mapping = projection
             .schema
             .columns()
             .into_iter()
-            .zip(columns)
+            .zip(inputs)
             .collect::<Vec<_>>();
+        reserve_expansion(&aggregate, &mapping, reservation, name)?;
         let replace = |expression: &Expr| {
             expression
                 .clone()
@@ -115,7 +124,7 @@ fn inline_input_columns(plan: LogicalPlan) -> datafusion::error::Result<LogicalP
                         && let Some((_, source)) =
                             mapping.iter().find(|(output, _)| output == column)
                     {
-                        return Ok(Transformed::yes(Expr::Column(source.clone())));
+                        return Ok(Transformed::yes(source.clone()));
                     }
                     Ok(Transformed::no(expression))
                 })
@@ -201,4 +210,45 @@ fn inline_aliases(plan: LogicalPlan) -> datafusion::error::Result<LogicalPlan> {
             .map(Transformed::yes)
     })
     .map(|transformed| transformed.data)
+}
+
+fn reserve_expansion(
+    aggregate: &Aggregate,
+    mapping: &[(datafusion::common::Column, Expr)],
+    reservation: &MemoryReservation,
+    name: &str,
+) -> datafusion::error::Result<()> {
+    let mut nodes = 0usize;
+    for expression in aggregate.group_expr.iter().chain(&aggregate.aggr_expr) {
+        expression.apply(|expression| {
+            let source = match expression {
+                Expr::Column(column) => mapping
+                    .iter()
+                    .find(|(output, _)| output == column)
+                    .map(|(_, source)| source),
+                _ => None,
+            };
+            if let Some(source) = source {
+                source.apply(|_| {
+                    nodes = nodes.checked_add(1).ok_or_else(|| {
+                        datafusion::error::DataFusionError::Plan(
+                            "projection expansion overflowed".into(),
+                        )
+                    })?;
+                    Ok(TreeNodeRecursion::Continue)
+                })?;
+            } else {
+                nodes = nodes.checked_add(1).ok_or_else(|| {
+                    datafusion::error::DataFusionError::Plan(
+                        "projection expansion overflowed".into(),
+                    )
+                })?;
+            }
+            Ok(TreeNodeRecursion::Continue)
+        })?;
+    }
+    let charge = checked_bytes(4096, [(nodes, 1024), (mapping.len(), 512)], name)
+        .map_err(|error| datafusion::error::DataFusionError::External(Box::new(error)))?;
+    reservation.try_grow(charge)?;
+    Ok(())
 }

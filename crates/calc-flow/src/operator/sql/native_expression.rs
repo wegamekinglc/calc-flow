@@ -137,6 +137,45 @@ pub(super) fn aggregate_filter_work(expression: &Expr, schema: &DFSchema) -> Opt
     input_expression_work(expression, schema)
 }
 
+pub(super) fn infallible_projection(expression: &Expr, schema: &DFSchema) -> bool {
+    if input_expression_work(expression, schema).is_none() {
+        return false;
+    }
+    match unalias(expression) {
+        Expr::Column(_) | Expr::Literal(_, _) => true,
+        Expr::BinaryExpr(binary)
+            if matches!(
+                binary.op,
+                Operator::Plus | Operator::Minus | Operator::Multiply
+            ) && expression
+                .get_type(schema)
+                .is_ok_and(|dtype| matches!(dtype, DataType::Float32 | DataType::Float64)) =>
+        {
+            infallible_projection(&binary.left, schema)
+                && infallible_projection(&binary.right, schema)
+        }
+        Expr::Negative(input)
+            if expression
+                .get_type(schema)
+                .is_ok_and(|dtype| matches!(dtype, DataType::Float32 | DataType::Float64)) =>
+        {
+            infallible_projection(input, schema)
+        }
+        Expr::Cast(cast)
+            if matches!(
+                cast.field.data_type(),
+                DataType::Float32 | DataType::Float64
+            ) && cast.expr.get_type(schema).is_ok_and(|dtype| {
+                dtype.is_integer() || matches!(dtype, DataType::Float32 | DataType::Float64)
+            }) =>
+        {
+            infallible_projection(&cast.expr, schema)
+        }
+        Expr::TryCast(cast) => infallible_projection(&cast.expr, schema),
+        _ => false,
+    }
+}
+
 fn contains_case(expression: &Expr) -> Option<bool> {
     use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
     let mut has_case = false;
