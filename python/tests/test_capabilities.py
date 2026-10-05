@@ -113,8 +113,8 @@ def test_empty_runtime_capabilities_are_frozen_and_session_scoped() -> None:
             microbatch_invariant=False,
             requires_watermark=False,
             checkpoint_support="checkpointed_stateful",
-            state_version=1,
-            state_layouts=(1, 2),
+            state_version=2,
+            state_layouts=(3, 4),
             deterministic=True,
             replay_safe=True,
         ),
@@ -996,7 +996,7 @@ def test_capability_catalog_reports_every_durable_state_layout() -> None:
     assert operators["stream_asof_join"].state_layouts == (10,)
     assert operators["window"].state_layouts == (1,)
     assert operators["expression"].state_layouts == ()
-    assert operators["sql"].state_version == 1
+    assert operators["sql"].state_version == 2
     assert operators["sql"].state_layouts == (3, 4)
 
 

@@ -42,9 +42,9 @@ def default_state_layout(capabilities: RuntimeCapabilities) -> int:
             for operator in capabilities.operators
             if operator.kind == "stream_asof_join"
             for layout in operator.state_layouts
-            if layout == 9
+            if layout == 10
         ),
-        default=9,
+        default=10,
     )
 
 
