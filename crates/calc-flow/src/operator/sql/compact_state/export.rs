@@ -49,19 +49,7 @@ impl<'a> ExportCursor<'a> {
         };
         descriptor.group_count = rows;
         let width = descriptor.wire_schema.fields().len();
-        if width == 0 && !native.groups.is_empty() {
-            return Err(df_error(name, "native groups have no state columns"));
-        }
-        let record_count = rows.div_ceil(CHUNK_ROWS).max(1);
-        let charge = checked_bytes(
-            4096,
-            [
-                (record_count, size_of::<RecordBatch>()),
-                (record_count, checked_bytes(0, [(width, 512)], name)?),
-                (usize::from(dirty) * rows, size_of::<usize>()),
-            ],
-            name,
-        )?;
+        let (record_count, charge) = export_structure_charge(native, rows, width, dirty, name)?;
         let reservation = native.reservation.new_empty();
         ensure_reservation(&reservation, charge, name)?;
         let selected_slots = dirty.then(|| {
@@ -110,25 +98,36 @@ impl<'a> ExportCursor<'a> {
             self.finish_record()?;
             return Ok(self.records.len() == self.record_count);
         }
+        self.step_column(check)?;
+        check()?;
+        Ok(false)
+    }
+
+    fn start_column(&mut self) -> Result<()> {
+        let start = self.records.len() * CHUNK_ROWS;
+        let rows = self
+            .descriptor
+            .group_count
+            .saturating_sub(start)
+            .min(CHUNK_ROWS);
+        let column = self.arrays.len();
+        let bytes = self
+            .string_bytes
+            .get(self.records.len() * self.columns.len() + column)
+            .copied()
+            .unwrap_or(0);
+        self.builder = Some(ColumnExport::new(
+            self.descriptor.wire_schema.field(column).data_type(),
+            rows,
+            bytes,
+            self.name,
+        )?);
+        Ok(())
+    }
+
+    fn step_column(&mut self, check: &mut impl FnMut() -> Result<()>) -> Result<()> {
         if self.builder.is_none() {
-            let start = self.records.len() * CHUNK_ROWS;
-            let rows = self
-                .descriptor
-                .group_count
-                .saturating_sub(start)
-                .min(CHUNK_ROWS);
-            let column = self.arrays.len();
-            let bytes = self
-                .string_bytes
-                .get(self.records.len() * self.columns.len() + column)
-                .copied()
-                .unwrap_or(0);
-            self.builder = Some(ColumnExport::new(
-                self.descriptor.wire_schema.field(column).data_type(),
-                rows,
-                bytes,
-                self.name,
-            )?);
+            self.start_column()?;
         }
         let start = self.records.len() * CHUNK_ROWS;
         let end = (start + CHUNK_ROWS).min(self.descriptor.group_count);
@@ -149,8 +148,7 @@ impl<'a> ExportCursor<'a> {
             super::super::super::compact::direct_async_tests::after_array(self.name, &array);
             self.arrays.push(array);
         }
-        check()?;
-        Ok(false)
+        Ok(())
     }
 
     fn census_step(&mut self, check: &mut impl FnMut() -> Result<()>) -> Result<()> {
@@ -161,44 +159,46 @@ impl<'a> ExportCursor<'a> {
                 self.census_complete = true;
                 return Ok(());
             }
-            let group =
-                GroupView::new(&self.native.groups, self.slots.as_deref()).get(self.census_row);
-            if group.values.len() != self.descriptor.key_fields.len()
-                || group.states.len() != self.descriptor.state_fields.len()
-            {
-                return Err(df_error(self.name, "native group field census differs"));
-            }
-            let column = self.columns[self.census_column];
-            if let StateColumn::Aggregate(aggregate, _) = column
-                && group.states[aggregate].len() != self.descriptor.state_fields[aggregate].len()
-            {
-                return Err(df_error(self.name, "native aggregate field census differs"));
-            }
-            let value = scalar(group, column);
-            validate_scalar(
-                value,
-                self.descriptor.wire_schema.field(self.census_column),
+            let native = self.native;
+            let row = self
+                .slots
+                .as_ref()
+                .map_or(self.census_row, |slots| slots[self.census_row]);
+            let value = census_scalar(
+                &native.groups[row],
+                &self.descriptor,
+                self.columns[self.census_column],
+                self.census_column,
                 self.name,
             )?;
-            self.charge = checked_bytes(self.charge, [(value.size(), 4), (1, 128)], self.name)?;
-            let slot = (self.census_row / CHUNK_ROWS) * self.columns.len() + self.census_column;
-            if self.string_bytes.len() == slot {
-                self.string_bytes.push(0);
-            }
-            if let ScalarValue::Utf8(Some(value)) | ScalarValue::LargeUtf8(Some(value)) = value {
-                self.string_bytes[slot] = self.string_bytes[slot]
-                    .checked_add(value.len())
-                    .ok_or_else(|| df_error(self.name, "native export string size overflowed"))?;
-            }
-            self.census_column += 1;
-            if self.census_column == self.columns.len() {
-                self.census_column = 0;
-                self.census_row += 1;
-            }
+            self.charge_census_value(value)?;
+            self.advance_census();
         }
         #[cfg(test)]
         super::super::super::compact::direct_async_tests::after_census(self.name, self.census_row);
         Ok(())
+    }
+
+    fn charge_census_value(&mut self, value: &ScalarValue) -> Result<()> {
+        self.charge = checked_bytes(self.charge, [(value.size(), 4), (1, 128)], self.name)?;
+        let slot = (self.census_row / CHUNK_ROWS) * self.columns.len() + self.census_column;
+        if self.string_bytes.len() == slot {
+            self.string_bytes.push(0);
+        }
+        if let ScalarValue::Utf8(Some(value)) | ScalarValue::LargeUtf8(Some(value)) = value {
+            self.string_bytes[slot] = self.string_bytes[slot]
+                .checked_add(value.len())
+                .ok_or_else(|| df_error(self.name, "native export string size overflowed"))?;
+        }
+        Ok(())
+    }
+
+    fn advance_census(&mut self) {
+        self.census_column += 1;
+        if self.census_column == self.columns.len() {
+            self.census_column = 0;
+            self.census_row += 1;
+        }
     }
 
     fn finish_record(&mut self) -> Result<()> {
@@ -216,6 +216,28 @@ impl<'a> ExportCursor<'a> {
             _reservation: self.reservation,
         }
     }
+}
+
+fn census_scalar<'a>(
+    group: &'a Group,
+    descriptor: &NativeStateDescriptor,
+    column: StateColumn,
+    ordinal: usize,
+    name: &str,
+) -> Result<&'a ScalarValue> {
+    if group.values.len() != descriptor.key_fields.len()
+        || group.states.len() != descriptor.state_fields.len()
+    {
+        return Err(df_error(name, "native group field census differs"));
+    }
+    if let StateColumn::Aggregate(aggregate, _) = column
+        && group.states[aggregate].len() != descriptor.state_fields[aggregate].len()
+    {
+        return Err(df_error(name, "native aggregate field census differs"));
+    }
+    let value = scalar(group, column);
+    validate_scalar(value, descriptor.wire_schema.field(ordinal), name)?;
+    Ok(value)
 }
 
 fn scalar(group: &Group, column: StateColumn) -> &ScalarValue {
@@ -312,21 +334,7 @@ impl ColumnExport {
                 return Ok(true);
             }
             let value = scalar(groups.get(self.row), column);
-            let copied = match value {
-                ScalarValue::Utf8(value) => {
-                    self.string::<StringBuilder>(value.as_deref(), STRING_STEP_BYTES - bytes, name)?
-                }
-                ScalarValue::LargeUtf8(value) => self.string::<LargeStringBuilder>(
-                    value.as_deref(),
-                    STRING_STEP_BYTES - bytes,
-                    name,
-                )?,
-                _ => {
-                    append_fixed(self.builder.as_mut(), value, name)?;
-                    self.row += 1;
-                    0
-                }
-            };
+            let copied = self.copy_scalar(value, STRING_STEP_BYTES - bytes, name)?;
             bytes += copied;
             #[cfg(test)]
             super::super::super::compact::direct_async_tests::after_bytes(name, copied);
@@ -335,6 +343,20 @@ impl ColumnExport {
             }
         }
         Ok(self.row == groups.len())
+    }
+
+    fn copy_scalar(&mut self, value: &ScalarValue, limit: usize, name: &str) -> Result<usize> {
+        match value {
+            ScalarValue::Utf8(value) => self.string::<StringBuilder>(value.as_deref(), limit, name),
+            ScalarValue::LargeUtf8(value) => {
+                self.string::<LargeStringBuilder>(value.as_deref(), limit, name)
+            }
+            _ => {
+                append_fixed(self.builder.as_mut(), value, name)?;
+                self.row += 1;
+                Ok(0)
+            }
+        }
     }
 
     fn string<B: StringExport>(
@@ -411,6 +433,14 @@ fn append_fixed(builder: &mut dyn ArrayBuilder, value: &ScalarValue, name: &str)
     {
         return Ok(());
     }
+    append_other_fixed(builder, value, name)
+}
+
+fn append_other_fixed(
+    builder: &mut dyn ArrayBuilder,
+    value: &ScalarValue,
+    name: &str,
+) -> Result<()> {
     match value {
         ScalarValue::Null => builder
             .as_any_mut()
@@ -465,4 +495,27 @@ fn append_decimal(builder: &mut dyn ArrayBuilder, value: &ScalarValue, name: &st
         _ => return Ok(false),
     }
     Ok(true)
+}
+
+fn export_structure_charge(
+    native: &IncrementalSql,
+    rows: usize,
+    width: usize,
+    dirty: bool,
+    name: &str,
+) -> Result<(usize, usize)> {
+    if width == 0 && !native.groups.is_empty() {
+        return Err(df_error(name, "native groups have no state columns"));
+    }
+    let record_count = rows.div_ceil(CHUNK_ROWS).max(1);
+    let charge = checked_bytes(
+        4096,
+        [
+            (record_count, size_of::<RecordBatch>()),
+            (record_count, checked_bytes(0, [(width, 512)], name)?),
+            (usize::from(dirty) * rows, size_of::<usize>()),
+        ],
+        name,
+    )?;
+    Ok((record_count, charge))
 }
