@@ -167,6 +167,49 @@ impl OutputOrder {
         if self.keys.is_empty() {
             return Ok(clip(records, self.skip, self.fetch));
         }
+        let credit = self.reserve_sort(&records, reservation, name)?;
+        let schema = records
+            .first()
+            .ok_or_else(|| df_error(name, "SQL ordered snapshot is absent"))?
+            .schema();
+        let work = SortWork {
+            records,
+            keys: self.keys.clone(),
+            schema,
+            skip: self.skip,
+            fetch: self.fetch,
+            name: name.to_owned(),
+        };
+        self.execute_sort(work, credit, context, name).await
+    }
+
+    async fn execute_sort(
+        &self,
+        work: SortWork,
+        credit: MemoryReservation,
+        context: &StreamOperatorContext<'_>,
+        name: &str,
+    ) -> Result<Vec<RecordBatch>> {
+        let scope = context.gather_client(self.operator.clone()).scope()?;
+        let ticket = scope
+            .submit_work(work, credit, GatherStop::from_job(context.job()))
+            .await
+            .map_err(|failure| match failure {
+                AdmissionFailure::Budget { source, .. } => df_error(name, source),
+                AdmissionFailure::Runtime(error) => error,
+            })?;
+        let output = ticket.finish().await?;
+        context.check_cancelled()?;
+        let records = output.value.clone();
+        drop(output);
+        Ok(records)
+    }
+    fn reserve_sort(
+        &self,
+        records: &[RecordBatch],
+        reservation: &MemoryReservation,
+        name: &str,
+    ) -> Result<MemoryReservation> {
         let width = checked_bytes(0, [(self.keys.len(), 256)], name)?;
         let bytes = records.iter().try_fold(8192, |bytes, record| {
             checked_bytes(
@@ -181,31 +224,7 @@ impl OutputOrder {
         })?;
         let credit = reservation.new_empty();
         ensure_reservation(&credit, bytes, name)?;
-        let schema = records
-            .first()
-            .ok_or_else(|| df_error(name, "SQL ordered snapshot is absent"))?
-            .schema();
-        let work = SortWork {
-            records,
-            keys: self.keys.clone(),
-            schema,
-            skip: self.skip,
-            fetch: self.fetch,
-            name: name.to_owned(),
-        };
-        let scope = context.gather_client(self.operator.clone()).scope()?;
-        let ticket = scope
-            .submit_work(work, credit, GatherStop::from_job(context.job()))
-            .await
-            .map_err(|failure| match failure {
-                AdmissionFailure::Budget { source, .. } => df_error(name, source),
-                AdmissionFailure::Runtime(error) => error,
-            })?;
-        let output = ticket.finish().await?;
-        context.check_cancelled()?;
-        let records = output.value.clone();
-        drop(output);
-        Ok(records)
+        Ok(credit)
     }
 }
 
@@ -239,22 +258,7 @@ impl OwnedCpuWork for SortWork {
         stop.check()?;
         let input = concat_batches(&self.schema, &self.records)
             .map_err(|error| df_error(&self.name, error))?;
-        let keys = self
-            .keys
-            .iter()
-            .map(|key| {
-                stop.check()?;
-                let values = key
-                    .expression
-                    .evaluate(&input)
-                    .and_then(|value| value.into_array(input.num_rows()))
-                    .map_err(|error| df_error(&self.name, error))?;
-                Ok(SortColumn {
-                    values,
-                    options: Some(key.options),
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let keys = self.sort_keys(&input, stop)?;
         let indices = lexsort_to_indices(
             &keys,
             self.fetch.map(|fetch| self.skip.saturating_add(fetch)),
@@ -263,18 +267,47 @@ impl OwnedCpuWork for SortWork {
         let start = self.skip.min(indices.len());
         let count = indices.len() - start;
         let indices = indices.slice(start, count);
-        let columns = input
-            .columns()
-            .iter()
-            .map(|column| {
-                stop.check()?;
-                take(column.as_ref(), &indices, None).map_err(|error| df_error(&self.name, error))
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let columns = self.sorted_columns(&input, &indices, stop)?;
         stop.check()?;
         Ok(vec![
             RecordBatch::try_new(self.schema, columns)
                 .map_err(|error| df_error(&self.name, error))?,
         ])
+    }
+}
+
+impl SortWork {
+    fn sort_keys(&self, input: &RecordBatch, stop: &GatherStop) -> Result<Vec<SortColumn>> {
+        self.keys
+            .iter()
+            .map(|key| {
+                stop.check()?;
+                let values = key
+                    .expression
+                    .evaluate(input)
+                    .and_then(|value| value.into_array(input.num_rows()))
+                    .map_err(|error| df_error(&self.name, error))?;
+                Ok(SortColumn {
+                    values,
+                    options: Some(key.options),
+                })
+            })
+            .collect::<Result<Vec<_>>>()
+    }
+
+    fn sorted_columns(
+        &self,
+        input: &RecordBatch,
+        indices: &datafusion::arrow::array::UInt32Array,
+        stop: &GatherStop,
+    ) -> Result<Vec<datafusion::arrow::array::ArrayRef>> {
+        input
+            .columns()
+            .iter()
+            .map(|column| {
+                stop.check()?;
+                take(column.as_ref(), indices, None).map_err(|error| df_error(&self.name, error))
+            })
+            .collect::<Result<Vec<_>>>()
     }
 }

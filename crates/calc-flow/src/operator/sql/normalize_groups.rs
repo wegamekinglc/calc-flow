@@ -12,10 +12,12 @@ use super::{
     ValidatedQuery, checked_bytes, df_error,
 };
 
+type InputChecks = Vec<(Expr, Arc<datafusion::common::DFSchema>)>;
+
 pub(super) struct Plans {
     pub raw: LogicalPlan,
     pub analyzed: LogicalPlan,
-    pub checks: Vec<(Expr, Arc<datafusion::common::DFSchema>)>,
+    pub checks: InputChecks,
     _reservation: MemoryReservation,
 }
 
@@ -59,28 +61,9 @@ pub(super) fn plans(
         .without_query_execution_start_time()
         .with_skip_failing_rules(false)
         .with_max_passes(3);
-    let normalize = |plan: &LogicalPlan| {
-        let plan = if aliases {
-            inline_aliases(plan.clone()).map_err(|error| df_error(name, error))?
-        } else {
-            plan.clone()
-        };
-        let normalized = optimizer
-            .optimize(plan, &config, |_, _| {})
-            .map_err(|error| df_error(name, error))?;
-        if !aliases {
-            return Ok((normalized, Vec::new()));
-        }
-        let mut checks = Vec::new();
-        let normalized = inline_input_projection(normalized, &reservation, name, &mut checks)
-            .map_err(|error| df_error(name, error))?;
-        optimizer
-            .optimize(normalized, &config, |_, _| {})
-            .map(|plan| (plan, checks))
-            .map_err(|error| df_error(name, error))
-    };
-    let (raw, _) = normalize(raw)?;
-    let (analyzed, checks) = normalize(analyzed)?;
+    let (raw, _) = normalize_plan(raw, aliases, &optimizer, &config, &reservation, name)?;
+    let (analyzed, checks) =
+        normalize_plan(analyzed, aliases, &optimizer, &config, &reservation, name)?;
     Ok(Some(Plans {
         raw,
         analyzed,
@@ -89,11 +72,39 @@ pub(super) fn plans(
     }))
 }
 
+fn normalize_plan(
+    plan: &LogicalPlan,
+    aliases: bool,
+    optimizer: &Optimizer,
+    config: &OptimizerContext,
+    reservation: &MemoryReservation,
+    name: &str,
+) -> Result<(LogicalPlan, InputChecks)> {
+    let plan = if aliases {
+        inline_aliases(plan.clone()).map_err(|error| df_error(name, error))?
+    } else {
+        plan.clone()
+    };
+    let normalized = optimizer
+        .optimize(plan, config, |_, _| {})
+        .map_err(|error| df_error(name, error))?;
+    if !aliases {
+        return Ok((normalized, Vec::new()));
+    }
+    let mut checks = Vec::new();
+    let normalized = inline_input_projection(normalized, reservation, name, &mut checks)
+        .map_err(|error| df_error(name, error))?;
+    optimizer
+        .optimize(normalized, config, |_, _| {})
+        .map(|plan| (plan, checks))
+        .map_err(|error| df_error(name, error))
+}
+
 fn inline_input_projection(
     plan: LogicalPlan,
     reservation: &MemoryReservation,
     name: &str,
-    checks: &mut Vec<(Expr, Arc<datafusion::common::DFSchema>)>,
+    checks: &mut InputChecks,
 ) -> datafusion::error::Result<LogicalPlan> {
     plan.transform_up(|plan| {
         let LogicalPlan::Aggregate(aggregate) = plan else {
@@ -236,37 +247,47 @@ fn reserve_expansion(
     reservation: &MemoryReservation,
     name: &str,
 ) -> datafusion::error::Result<()> {
-    let mut nodes = 0usize;
-    for expression in aggregate.group_expr.iter().chain(&aggregate.aggr_expr) {
-        expression.apply(|expression| {
-            let source = match expression {
-                Expr::Column(column) => mapping
-                    .iter()
-                    .find(|(output, _)| output == column)
-                    .map(|(_, source)| source),
-                _ => None,
-            };
-            if let Some(source) = source {
-                source.apply(|_| {
-                    nodes = nodes.checked_add(1).ok_or_else(|| {
-                        datafusion::error::DataFusionError::Plan(
-                            "projection expansion overflowed".into(),
-                        )
-                    })?;
-                    Ok(TreeNodeRecursion::Continue)
-                })?;
-            } else {
-                nodes = nodes.checked_add(1).ok_or_else(|| {
-                    datafusion::error::DataFusionError::Plan(
-                        "projection expansion overflowed".into(),
-                    )
-                })?;
-            }
-            Ok(TreeNodeRecursion::Continue)
-        })?;
-    }
+    let nodes = expanded_nodes(aggregate, mapping)?;
     let charge = checked_bytes(4096, [(nodes, 1024), (mapping.len(), 512)], name)
         .map_err(|error| datafusion::error::DataFusionError::External(Box::new(error)))?;
     reservation.try_grow(charge)?;
     Ok(())
+}
+
+fn expanded_nodes(
+    aggregate: &Aggregate,
+    mapping: &[(datafusion::common::Column, Expr)],
+) -> datafusion::error::Result<usize> {
+    let mut nodes = 0;
+    for expression in aggregate.group_expr.iter().chain(&aggregate.aggr_expr) {
+        expression.apply(|expression| expansion_node(expression, mapping, &mut nodes))?;
+    }
+    Ok(nodes)
+}
+
+fn expansion_node(
+    expression: &Expr,
+    mapping: &[(datafusion::common::Column, Expr)],
+    nodes: &mut usize,
+) -> datafusion::error::Result<TreeNodeRecursion> {
+    let source = match expression {
+        Expr::Column(column) => mapping
+            .iter()
+            .find(|(output, _)| output == column)
+            .map(|(_, source)| source),
+        _ => None,
+    };
+    if let Some(source) = source {
+        source.apply(|_| count_expansion_node(nodes))?;
+    } else {
+        count_expansion_node(nodes)?;
+    }
+    Ok(TreeNodeRecursion::Continue)
+}
+
+fn count_expansion_node(nodes: &mut usize) -> datafusion::error::Result<TreeNodeRecursion> {
+    *nodes = nodes.checked_add(1).ok_or_else(|| {
+        datafusion::error::DataFusionError::Plan("projection expansion overflowed".into())
+    })?;
+    Ok(TreeNodeRecursion::Continue)
 }
