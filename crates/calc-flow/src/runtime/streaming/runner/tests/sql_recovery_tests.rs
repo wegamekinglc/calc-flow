@@ -485,6 +485,54 @@ fn recovery_refund_probe(
     refund_probe
 }
 
+fn callback_backing_alive(state: &Witness) -> bool {
+    !state.execution.callback_exited
+        && state.ledger.paid
+        && !state.ledger.backing.is_empty()
+        && state
+            .ledger
+            .backing
+            .iter()
+            .all(|weak| weak.upgrade().is_some())
+        && state
+            .ledger
+            .arrays
+            .iter()
+            .all(|weak| weak.upgrade().is_some())
+}
+
+fn callback_arrays_alive(state: &Witness) -> bool {
+    state.ledger.paid
+        && !state.execution.callback_exited
+        && !state.ledger.arrays.is_empty()
+        && !state.ledger.backing.is_empty()
+        && state
+            .ledger
+            .arrays
+            .iter()
+            .all(|weak| weak.upgrade().is_some())
+        && state
+            .ledger
+            .backing
+            .iter()
+            .all(|weak| weak.upgrade().is_some())
+}
+
+fn start_untouched(probe: &Probe) -> bool {
+    probe.source_opens.load(Ordering::SeqCst) == 0
+        && probe.source_reads.load(Ordering::SeqCst) == 0
+        && probe.sink_opens.load(Ordering::SeqCst) == 0
+        && !probe.start_completed.load(Ordering::SeqCst)
+}
+
+fn terminal_unopened(probe: &Probe) -> bool {
+    probe.source_opens.load(Ordering::SeqCst) == 0
+        && probe.source_reads.load(Ordering::SeqCst) == 0
+        && probe.sink_opens.load(Ordering::SeqCst) == 0
+        && probe.sink_recovers.load(Ordering::SeqCst) == 0
+        && probe.sink_commits.load(Ordering::SeqCst) == 0
+}
+
 fn cancelled_start_controller(
     gate: &Arc<Gate>,
     core: Arc<JobCore>,
@@ -511,24 +559,9 @@ fn cancelled_start_controller(
             let pending = control_core.state.lock().outcome.is_none();
             let candidate_alive = {
                 let state = control_gate.state.lock().unwrap();
-                !state.execution.callback_exited
-                    && state.ledger.paid
-                    && !state.ledger.backing.is_empty()
-                    && state
-                        .ledger
-                        .backing
-                        .iter()
-                        .all(|weak| weak.upgrade().is_some())
-                    && state
-                        .ledger
-                        .arrays
-                        .iter()
-                        .all(|weak| weak.upgrade().is_some())
+                callback_backing_alive(&state)
             };
-            let untouched = control_probe.source_opens.load(Ordering::SeqCst) == 0
-                && control_probe.source_reads.load(Ordering::SeqCst) == 0
-                && control_probe.sink_opens.load(Ordering::SeqCst) == 0
-                && !control_probe.start_completed.load(Ordering::SeqCst);
+            let untouched = start_untouched(&control_probe);
             control_gate.release();
             entered && registered && pending && candidate_alive && untouched
         })),
@@ -863,6 +896,19 @@ async fn terminal_attempt(root: &Path, source: &str) -> (bool, Arc<Probe>) {
     (failed, probe)
 }
 
+fn assert_terminal_damage(damage: Damage, direct: &CalcFlowError) {
+    if matches!(damage, Damage::Codec) {
+        assert!(
+            matches!(direct, CalcFlowError::Format { message } if message == "SQL state segment has no Arrow IPC file magic")
+        );
+    }
+    if matches!(damage, Damage::FullSchema) {
+        assert!(
+            matches!(direct, CalcFlowError::Format { message } if message.contains("declared input"))
+        );
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn compact_terminal_native3_sql_validates_native_state_before_sink_recovery() {
     let mut refusals = vec![];
@@ -878,16 +924,7 @@ async fn compact_terminal_native3_sql_validates_native_state_before_sink_recover
         let invalid = damaged_manifest(directory.path(), &valid, damage).await;
         let invalid_snapshot = snapshot(directory.path(), &invalid).await;
         let direct = StreamOperator::restore(&mut sql().await, &invalid_snapshot).unwrap_err();
-        if matches!(damage, Damage::Codec) {
-            assert!(
-                matches!(direct, CalcFlowError::Format { ref message } if message == "SQL state segment has no Arrow IPC file magic")
-            );
-        }
-        if matches!(damage, Damage::FullSchema) {
-            assert!(
-                matches!(direct, CalcFlowError::Format { ref message } if message.contains("declared input"))
-            );
-        }
+        assert_terminal_damage(damage, &direct);
         let (failed, probe) = terminal_attempt(directory.path(), source).await;
         refusals.push(
             failed
@@ -973,26 +1010,9 @@ async fn compact_terminal_sql_drop_retains_paid_candidate_until_native_join() {
                 .is_empty();
             let alive = {
                 let state = control_gate.state.lock().unwrap();
-                state.ledger.paid
-                    && !state.execution.callback_exited
-                    && !state.ledger.arrays.is_empty()
-                    && !state.ledger.backing.is_empty()
-                    && state
-                        .ledger
-                        .arrays
-                        .iter()
-                        .all(|weak| weak.upgrade().is_some())
-                    && state
-                        .ledger
-                        .backing
-                        .iter()
-                        .all(|weak| weak.upgrade().is_some())
+                callback_arrays_alive(&state)
             };
-            let unopened = control_probe.source_opens.load(Ordering::SeqCst) == 0
-                && control_probe.source_reads.load(Ordering::SeqCst) == 0
-                && control_probe.sink_opens.load(Ordering::SeqCst) == 0
-                && control_probe.sink_recovers.load(Ordering::SeqCst) == 0
-                && control_probe.sink_commits.load(Ordering::SeqCst) == 0;
+            let unopened = terminal_unopened(&control_probe);
             control_gate.release();
             entered && pending && loaned && no_supervisor && alive && unopened
         })),
@@ -1162,19 +1182,7 @@ fn aborted_driver_controller(control_gate: Arc<Gate>, control_core: Arc<JobCore>
             let pending = control_core.state.lock().outcome.is_none();
             let alive = {
                 let state = control_gate.state.lock().unwrap();
-                state.ledger.paid
-                    && !state.execution.callback_exited
-                    && !state.ledger.backing.is_empty()
-                    && state
-                        .ledger
-                        .backing
-                        .iter()
-                        .all(|weak| weak.upgrade().is_some())
-                    && state
-                        .ledger
-                        .arrays
-                        .iter()
-                        .all(|weak| weak.upgrade().is_some())
+                callback_backing_alive(&state)
             };
             control_gate.release();
             entered && returned && home_owns_join && pending && alive
@@ -1473,20 +1481,7 @@ fn returned_active_controller(
             let home_owns_join =
                 control_owner.live_counts() == (2, 0) && control_owner.returned_loans() == 1;
             let state = control_gate.state.lock().unwrap();
-            let paid_alive = state.ledger.paid
-                && !state.execution.callback_exited
-                && !state.ledger.arrays.is_empty()
-                && !state.ledger.backing.is_empty()
-                && state
-                    .ledger
-                    .arrays
-                    .iter()
-                    .all(|weak| weak.upgrade().is_some())
-                && state
-                    .ledger
-                    .backing
-                    .iter()
-                    .all(|weak| weak.upgrade().is_some());
+            let paid_alive = callback_arrays_alive(&state);
             drop(state);
             control_ready.notify_one();
             control_gate.release();

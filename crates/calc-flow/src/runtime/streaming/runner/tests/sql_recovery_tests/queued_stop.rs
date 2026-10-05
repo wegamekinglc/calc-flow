@@ -276,6 +276,10 @@ fn assert_queued_observations(
     assert!(drain.drain_waited_for_held_active);
     assert_eq!(drain.held_counts_during_drain, (1, 1));
     assert_eq!(oracle.queued_starts_before_cleanup, 0);
+    assert_queue_result(stop, stopped);
+}
+
+fn assert_queue_result(stop: QueuedStop, stopped: &StopObservation) {
     if matches!(stop, QueuedStop::Unchanged) {
         assert_eq!(stopped.stop_wakes, 0);
         assert!(
