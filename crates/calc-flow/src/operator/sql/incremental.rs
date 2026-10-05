@@ -1926,21 +1926,38 @@ fn eligible(expr: &Expr, schema: &SchemaRef, floating_extrema: bool, global: boo
     {
         return true;
     }
-    let Expr::Column(column) = &params.args[0] else {
-        return false;
-    };
-    let Ok(field) = schema.field_with_name(&column.name) else {
+    let Some(dtype) = argument_type(&params.args[0], schema, 0) else {
         return false;
     };
     if count {
-        count_argument_supported(field.data_type())
+        count_argument_supported(dtype)
     } else {
-        aggregate_argument_supported(
-            field.data_type(),
-            function.func.name(),
-            floating_extrema,
-            global,
-        )
+        aggregate_argument_supported(dtype, function.func.name(), floating_extrema, global)
+    }
+}
+
+fn argument_type<'a>(
+    expression: &'a Expr,
+    schema: &'a SchemaRef,
+    depth: usize,
+) -> Option<&'a DataType> {
+    match expression {
+        Expr::Column(column) => schema
+            .field_with_name(&column.name)
+            .ok()
+            .map(Field::data_type),
+        Expr::Cast(cast)
+            if depth < 7
+                && matches!(
+                    cast.field.data_type(),
+                    DataType::Float32 | DataType::Float64
+                ) =>
+        {
+            let dtype = argument_type(&cast.expr, schema, depth + 1)?;
+            (dtype.is_integer() || matches!(dtype, DataType::Float32 | DataType::Float64))
+                .then(|| cast.field.data_type())
+        }
+        _ => None,
     }
 }
 

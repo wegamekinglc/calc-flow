@@ -133,18 +133,17 @@ pub(super) fn raw_selected(raw: &LogicalPlan, schema: &SchemaRef) -> bool {
         if function.func.name() == "count" {
             return matches!(
                 function.params.args.as_slice(),
-                [Expr::Column(_) | Expr::Literal(ScalarValue::Int64(Some(1)), _)]
-            );
+                [Expr::Literal(ScalarValue::Int64(Some(1)), _)]
+            ) || matches!(function.params.args.as_slice(), [argument] if super::argument_type(argument, schema, 0).is_some());
         }
         if !matches!(function.func.name(), "sum" | "avg" | "min" | "max") {
             return false;
         }
-        let [Expr::Column(column)] = function.params.args.as_slice() else {
+        let [argument] = function.params.args.as_slice() else {
             return false;
         };
-        schema.field_with_name(&column.name).is_ok_and(|field| {
-            matches!(field.data_type(), DataType::Float32 | DataType::Float64)
-                || field.data_type().is_integer()
+        super::argument_type(argument, schema, 0).is_some_and(|dtype| {
+            matches!(dtype, DataType::Float32 | DataType::Float64) || dtype.is_integer()
         })
     })
 }

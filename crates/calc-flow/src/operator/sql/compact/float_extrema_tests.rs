@@ -23,6 +23,9 @@ mod global_float_sum_avg_tests;
 #[path = "post_projection_tests.rs"]
 mod post_projection_tests;
 
+#[path = "input_float_cast_tests.rs"]
+mod input_float_cast_tests;
+
 type Bits = (u32, u64);
 type Part = Vec<Option<Bits>>;
 const ZERO: Bits = (0, 0);
