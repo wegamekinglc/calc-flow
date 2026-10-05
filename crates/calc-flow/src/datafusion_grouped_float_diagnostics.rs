@@ -68,19 +68,21 @@ struct Shape {
     empty: usize,
 }
 
+fn non_single_linear(aggregate: &AggregateExec) -> bool {
+    *aggregate.mode() != AggregateMode::Single
+        || *aggregate.input_order_mode() != InputOrderMode::Linear
+        || aggregate.input().output_partitioning().partition_count() != 1
+        || aggregate.limit_options().is_some()
+        || aggregate.group_expr().groups().len() != 1
+        || aggregate.filter_expr().iter().any(Option::is_some)
+}
+
 fn inspect(plan: &dyn ExecutionPlan, shape: &mut Shape) -> Value {
     let mut node = json!({"node": plan.name(), "partitions": plan.output_partitioning().partition_count(),
         "statistics": format!("{:?}", plan.partition_statistics(None))});
     if let Some(aggregate) = plan.downcast_ref::<AggregateExec>() {
         shape.aggregates += 1;
-        shape.non_single_linear += usize::from(
-            *aggregate.mode() != AggregateMode::Single
-                || *aggregate.input_order_mode() != InputOrderMode::Linear
-                || aggregate.input().output_partitioning().partition_count() != 1
-                || aggregate.limit_options().is_some()
-                || aggregate.group_expr().groups().len() != 1
-                || aggregate.filter_expr().iter().any(Option::is_some),
-        );
+        shape.non_single_linear += usize::from(non_single_linear(aggregate));
         node["aggregate"] = json!({"mode": format!("{:?}", aggregate.mode()),
             "order": format!("{:?}", aggregate.input_order_mode()),
             "input_partitions": aggregate.input().output_partitioning().partition_count(),
