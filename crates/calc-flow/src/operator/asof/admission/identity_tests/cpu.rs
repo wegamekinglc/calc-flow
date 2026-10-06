@@ -112,7 +112,7 @@ fn inline_preparation_bounds_rows_identity_bytes_and_order() {
         .map(|row| {
             (
                 (
-                    row as i64,
+                    i64::from(row),
                     state::Encoding::from_slice(b"key"),
                     state::Encoding::from_slice(b"seq"),
                 ),
