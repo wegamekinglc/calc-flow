@@ -57,6 +57,27 @@ def report() -> dict:
 
 
 class AsofEvictionEvidenceTests(unittest.IsolatedAsyncioTestCase):
+    def test_recovery_charge_matches_captured_state_after_preparation(self):
+        evidence = copy.deepcopy(report())
+        for case in evidence["cases"]:
+            oracle = case["oracle"]
+            oracle["checkpoint_state_bytes"] = oracle["restored_state_bytes"] + 500
+            oracle["restored_state_bytes"] = oracle["checkpoint_state_bytes"]
+        with TemporaryDirectory() as raw:
+            path = Path(raw) / "eviction.json"
+            path.write_text(json.dumps(evidence))
+            self.assertEqual(len(asof_eviction_rows(path)), 8)
+            for captured in (-1, True, None):
+                invalid = copy.deepcopy(evidence)
+                invalid["cases"][0]["oracle"]["checkpoint_state_bytes"] = captured
+                path.write_text(json.dumps(invalid))
+                with self.assertRaises(ValueError):
+                    asof_eviction_rows(path)
+            evidence["cases"][0]["oracle"]["restored_state_bytes"] -= 1
+            path.write_text(json.dumps(evidence))
+            with self.assertRaises(ValueError):
+                asof_eviction_rows(path)
+
     def test_inventory_and_complete_observations_are_preserved(self):
         self.assertEqual(len(CASES), 8)
         with TemporaryDirectory() as raw:

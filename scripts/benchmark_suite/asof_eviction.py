@@ -156,12 +156,14 @@ def _validate_snapshot(sample: dict) -> None:
 
 def _validate_recovery_counts(sample: dict, config: dict) -> None:
     status = sample["statuses"][-1]
+    captured_bytes = sample.get("checkpoint_state_bytes", status["state_bytes"])
     if (
         sample.get("validated_recovery") is not True
         or sample.get("probe_rows") != config["keys"]
         or type(sample.get("probe_rows")) is not int
         or sample.get("restored_state_rows") != status["state_rows"]
-        or sample.get("restored_state_bytes") != status["state_bytes"]
+        or not _count(captured_bytes)
+        or sample.get("restored_state_bytes") != captured_bytes
     ):
         raise ValueError("invalid eviction recovery/value oracle")
 
