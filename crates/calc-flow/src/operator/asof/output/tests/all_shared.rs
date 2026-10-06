@@ -1,5 +1,135 @@
 use super::*;
 use crate::runtime::streaming::gather_work::TestService;
+use datafusion::arrow::buffer::{BooleanBuffer, Buffer, NullBuffer};
+
+#[test]
+fn right_sharing_rejects_missing_reordered_repeated_and_unpaid_backing() {
+    let column: ArrayRef = Arc::new(Int64Array::from(vec![0, 1, 2, 3, 4, 5, 6, 7]));
+    let side = || OutputSide {
+        batches: vec![vec![column.clone()]],
+        positions: (0..8).map(|row| (1, row)).collect(),
+        spans: Vec::new(),
+        has_nulls: false,
+    };
+    assert!(
+        GatherPlan::new(&side(), true)
+            .shared_column(0)
+            .unwrap()
+            .is_some()
+    );
+    let mut missing = side();
+    missing.has_nulls = true;
+    assert!(
+        GatherPlan::new(&missing, true)
+            .shared_column(0)
+            .unwrap()
+            .is_none()
+    );
+    let mut reordered = side();
+    reordered.positions.swap(2, 3);
+    assert!(
+        GatherPlan::new(&reordered, true)
+            .shared_column(0)
+            .unwrap()
+            .is_none()
+    );
+    let mut repeated = side();
+    repeated.positions[3] = repeated.positions[2];
+    assert!(
+        GatherPlan::new(&repeated, true)
+            .shared_column(0)
+            .unwrap()
+            .is_none()
+    );
+    let mut sliced = side();
+    sliced.batches[0][0] = sliced.batches[0][0].slice(0, 7);
+    sliced.positions.pop();
+    assert!(
+        GatherPlan::new(&sliced, true)
+            .shared_column(0)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn matched_right_column_shares_complete_array_without_native_work() {
+    let service = TestService::new(1, 1).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let observed = runtime.block_on(async {
+        let job = crate::StreamJobContext::new(
+            93,
+            "both-shared",
+            crate::JsonMap::new(),
+            None,
+            crate::CancellationToken::new(),
+        )
+        .with_gather_owner(service.owner("93".into()));
+        let context = StreamOperatorContext::new(&job, "asof", None);
+        let mut output = OutputRuntime::new(1_048_576, "asof");
+        let pool = output.pool.clone();
+        let workspace = MemoryConsumer::new("both-shared").register(&pool);
+        workspace.try_grow(32_768).unwrap();
+        let (mut plan, left_schema, _) = shared_plan();
+        let right: ArrayRef = Arc::new(Int64Array::new(
+            vec![80, 81, 82, 83, 84, 85, 86, 87].into(),
+            Some(NullBuffer::new(BooleanBuffer::new(
+                Buffer::from_vec(vec![0b1111_0111_u8]),
+                0,
+                8,
+            ))),
+        ));
+        let source = Arc::downgrade(&right);
+        plan.right.batches = vec![vec![right.clone()]];
+        plan.right.positions = (0..8).map(|row| (1, row)).collect();
+        plan.matched = 8;
+        let schema = Arc::new(Schema::new(vec![
+            left_schema.field(0).clone(),
+            Field::new("right__value", DataType::Int64, true),
+        ]));
+        let (batch, workspace) = output
+            .materialize_plan(plan, &schema, workspace, "asof", &context)
+            .await
+            .unwrap();
+        let record = &batch.table_payload().unwrap().batches()[0];
+        let same_array = Arc::ptr_eq(record.column(1), &right);
+        let same_schema = record.schema() == schema;
+        let same_nulls = record.column(1).null_count() == 1 && record.column(1).is_null(3);
+        let failures = job.gather_owner().close_and_drain().await;
+        let joined = service.joined_workers();
+        let capacity = service.available_capacity();
+        drop((batch, workspace, right));
+        let released = source.upgrade().is_none();
+        let reserved = pool.reserved();
+        drop(context);
+        drop(job);
+        (
+            same_array,
+            same_schema,
+            same_nulls,
+            released,
+            failures,
+            joined,
+            reserved,
+            capacity,
+        )
+    });
+    drop(runtime);
+    service.shutdown();
+    let (same_array, same_schema, same_nulls, released, failures, joined, reserved, capacity) =
+        observed;
+    assert!(
+        same_array,
+        "right output must share the complete paid array"
+    );
+    assert!(same_schema && same_nulls && released);
+    assert!(failures.is_empty());
+    assert_eq!((joined, reserved), (0, 0));
+    assert_eq!(capacity, (1, 1, 0));
+}
 
 fn shared_plan() -> (OutputPlan, SchemaRef, std::sync::Weak<dyn Array>) {
     let column: ArrayRef = Arc::new(Int64Array::from(vec![0, 1, 2, 3, 4, 5, 6, 7]));

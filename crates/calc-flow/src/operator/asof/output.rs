@@ -90,7 +90,7 @@ impl OwnedGatherPlan for MaterializationInput {
         if request.index < left_fields {
             GatherPlan::new(&self.rows.left, false).shared_column(request.index)
         } else {
-            Ok(None)
+            GatherPlan::new(&self.rows.right, true).shared_column(request.index - left_fields)
         }
     }
 
@@ -223,13 +223,17 @@ fn shared_output(
 
 fn shared_columns(owned: &OutputPlan, requests: &[ColumnRequest]) -> Result<Option<Vec<ArrayRef>>> {
     let left_fields = owned.left.batches.first().map_or(0, Vec::len);
-    if !requests.iter().all(|request| request.index < left_fields) {
-        return Ok(None);
-    }
     let left = GatherPlan::new(&owned.left, false);
+    let right = GatherPlan::new(&owned.right, true);
     requests
         .iter()
-        .map(|request| left.shared_column(request.index))
+        .map(|request| {
+            if request.index < left_fields {
+                left.shared_column(request.index)
+            } else {
+                right.shared_column(request.index - left_fields)
+            }
+        })
         .collect()
 }
 
@@ -446,13 +450,36 @@ impl<'a> GatherPlan<'a> {
     }
 
     fn shared_column(&self, index: usize) -> Result<Option<ArrayRef>> {
-        let [span] = self.spans else {
-            return Ok(None);
+        let column = if let Some(positions) = self.positions {
+            if self.has_nulls {
+                return Ok(None);
+            }
+            let Some(&(source, 0)) = positions.first() else {
+                return Ok(None);
+            };
+            let Some(batch) = source.checked_sub(1) else {
+                return Ok(None);
+            };
+            let column = &self.batches[batch][index];
+            if positions.len() != column.len()
+                || !positions
+                    .iter()
+                    .enumerate()
+                    .all(|(row, &position)| position == (source, row))
+            {
+                return Ok(None);
+            }
+            column
+        } else {
+            let [span] = self.spans else {
+                return Ok(None);
+            };
+            let column = &self.batches[span.source][index];
+            if span.start != 0 || span.end != column.len() {
+                return Ok(None);
+            }
+            column
         };
-        let column = &self.batches[span.source][index];
-        if span.start != 0 || span.end != column.len() {
-            return Ok(None);
-        }
         let data = column.to_data();
         // Queue budgets charge visible slices. Reuse a complete array only
         // when it retains no additional, uncharged backing bytes.
