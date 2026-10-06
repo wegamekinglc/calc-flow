@@ -2,7 +2,11 @@ use super::*;
 use crate::runtime::streaming::gather_work::TestService;
 use std::time::Duration;
 
-async fn blocked_tokio_preparation(service: &TestService, rows: usize) -> (bool, bool) {
+async fn blocked_tokio_preparation(
+    service: &TestService,
+    rows: usize,
+    ordered: bool,
+) -> (bool, bool) {
     let (mut operator, schema) = identity_fixture();
     let pool = operator.runtime.pool.clone();
     let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new())
@@ -18,6 +22,14 @@ async fn blocked_tokio_preparation(service: &TestService, rows: usize) -> (bool,
     let mut completed = true;
     for round in 0..2 {
         let record = repeated_key_batch(&schema, 0, rows);
+        let record = if ordered {
+            record
+        } else {
+            let indices = datafusion::arrow::array::UInt32Array::from_iter_values(
+                (0..u32::try_from(rows).unwrap()).rev(),
+            );
+            datafusion::arrow::compute::take_record_batch(&record, &indices).unwrap()
+        };
         let batch = Batch::table(vec![record.clone()], crate::BatchMetadata::default()).unwrap();
         let input = ValidatedInput {
             index: 0,
@@ -29,6 +41,11 @@ async fn blocked_tokio_preparation(service: &TestService, rows: usize) -> (bool,
         )
         .await;
         let Ok(Ok(mut admitted)) = result else {
+            match result {
+                Ok(Err(error)) => eprintln!("left preparation failed: {error}"),
+                Err(error) => eprintln!("left preparation timed out: {error}"),
+                Ok(Ok(_)) => unreachable!(),
+            }
             completed = false;
             break;
         };
@@ -56,14 +73,15 @@ async fn blocked_tokio_preparation(service: &TestService, rows: usize) -> (bool,
     (completed, used_pool)
 }
 
-fn preparation_case(rows: usize, expect_pool: bool) {
+fn preparation_case(rows: usize, ordered: bool, expect_pool: bool) {
     let service = TestService::new(1, 1).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .max_blocking_threads(1)
         .build()
         .unwrap();
-    let (completed, used_pool) = runtime.block_on(blocked_tokio_preparation(&service, rows));
+    let (completed, used_pool) =
+        runtime.block_on(blocked_tokio_preparation(&service, rows, ordered));
     drop(runtime);
     service.shutdown();
     assert!(
@@ -75,12 +93,50 @@ fn preparation_case(rows: usize, expect_pool: bool) {
 
 #[test]
 fn small_left_admission_completes_without_a_cpu_worker() {
-    preparation_case(32, false);
+    preparation_case(32, true, false);
 }
 
 #[test]
-fn large_left_admission_reuses_owned_cpu_workers() {
-    preparation_case(1024, true);
+fn unordered_left_admission_reuses_owned_cpu_workers() {
+    preparation_case(1024, false, true);
+}
+
+#[test]
+fn ordered_scalar_left_admission_avoids_cpu_worker() {
+    preparation_case(1024, true, false);
+}
+
+#[test]
+fn inline_preparation_bounds_rows_identity_bytes_and_order() {
+    let rows = (0..4096)
+        .map(|row| {
+            (
+                (
+                    row as i64,
+                    state::Encoding::from_slice(b"key"),
+                    state::Encoding::from_slice(b"seq"),
+                ),
+                AdmissionRef {
+                    batch_index: 0,
+                    row,
+                    key_index: 0,
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(can_prepare_inline(&rows));
+    let mut too_many = rows.clone();
+    too_many.push(rows[0].clone());
+    assert!(!can_prepare_inline(&too_many));
+    let mut unordered = rows.clone();
+    unordered.swap(0, 1);
+    assert!(!can_prepare_inline(&unordered));
+    let mut wide = rows;
+    let key = state::Encoding::from_slice(&[1; 128]);
+    for (order, _) in &mut wide {
+        order.1 = key.clone();
+    }
+    assert!(!can_prepare_inline(&wide));
 }
 
 struct GateWork {

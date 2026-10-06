@@ -440,7 +440,7 @@ impl StreamAsofJoinOperator {
             return Ok((rows, None, workspace));
         }
         context.check_cancelled()?;
-        if rows.len() <= 256 {
+        if can_prepare_inline(&rows) {
             let chunks =
                 state::PreparedLeftChunk::prepare(&rows, batches, self.spec.left(), &self.name)?;
             context.check_cancelled()?;
@@ -892,6 +892,22 @@ type EncodedInput = (
     Vec<(LeftOrder, AdmissionRef)>,
     Vec<Arc<state::PayloadBatch>>,
 );
+
+fn can_prepare_inline(rows: &[(LeftOrder, AdmissionRef)]) -> bool {
+    if rows.len() <= 256 {
+        return true;
+    }
+    if rows.len() > 4096 {
+        return false;
+    }
+    let bytes = rows.iter().fold(0_usize, |bytes, (order, _)| {
+        bytes
+            .saturating_add(size_of::<i64>())
+            .saturating_add(order.1.as_slice().len())
+            .saturating_add(order.2.as_slice().len())
+    });
+    bytes <= 128 * 1024 && rows.windows(2).all(|pair| pair[0].0 < pair[1].0)
+}
 
 fn ordered_admission_rows(
     mut rows: Vec<(LeftOrder, AdmissionRef)>,
