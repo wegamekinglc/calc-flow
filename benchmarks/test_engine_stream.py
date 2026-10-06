@@ -277,6 +277,7 @@ def test_static_join_seals_dimension_before_feeding_any_quote():
             sink,
             {name: (data, watermark) for name in ("left", "right")},
             SimpleNamespace(status=status),
+            static_join=True,
         )
         assert output.equals(batch.to_pyarrow())
         assert [name for name, _event in events] == ["right", "right", "left", "left"]

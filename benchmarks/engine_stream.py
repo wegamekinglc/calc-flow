@@ -8,6 +8,7 @@ from datetime import timedelta
 from pathlib import Path
 
 import pyarrow as pa
+import pyarrow.compute as pc
 
 from benchmarks.engine_lifecycle import interleaved_events, run_with_completion
 from benchmarks.warm_stream import BASE, BASE_MICROS, _InteractiveSource
@@ -20,9 +21,13 @@ from calc_flow import (
     JoinStateLimits,
     JoinTimeBounds,
     ManagedCheckpointRuntime,
+    NativeWatermarkCapability,
+    ReplayPositioning,
     Runtime,
     SinkBinding,
     SourceBinding,
+    SourceCapabilities,
+    SourceDeliveryCapability,
     SourceProvidedWatermarks,
     StreamingRunner,
     StreamRuntimeConfig,
@@ -43,7 +48,7 @@ from calc_flow.symbolic import (
 from calc_flow.symbolic import (
     table as tables,
 )
-from scripts.benchmark_suite.catalog import BATCH_ROWS
+from scripts.benchmark_suite.catalog import BATCH_ROWS, stream_dimensions
 
 QUOTE_FIELDS = (
     Field("event_time", "timestamp[us, UTC]", nullable=False),
@@ -86,14 +91,14 @@ def _join_span(table: pa.Table) -> timedelta:
     return timedelta(microseconds=span)
 
 
-def _join_limits(dimension_rows: int) -> JoinStateLimits:
+def _join_limits(dimension_rows: int, batch_rows: int | None = None) -> JoinStateLimits:
     """Bound the sealed static dimension and one in-flight quote batch."""
 
-    capacity = dimension_rows + BATCH_ROWS
+    capacity = dimension_rows + (BATCH_ROWS if batch_rows is None else batch_rows)
     return JoinStateLimits(capacity, max(capacity << 10, 1 << 30), capacity)
 
 
-def _join_stream_output(table: pa.Table, dimension: pa.Table, quotes):
+def _join_stream_output(table: pa.Table, dimension: pa.Table, quotes, batch_rows: int):
     """Return the bounded temporal join output and its program inputs."""
 
     if table is None or dimension is None:
@@ -118,7 +123,7 @@ def _join_stream_output(table: pa.Table, dimension: pa.Table, quotes):
         left_event_time="event_time",
         right_event_time="event_time",
         bounds=JoinTimeBounds(_join_span(table), timedelta()),
-        limits=_join_limits(dimension.num_rows),
+        limits=_join_limits(dimension.num_rows, batch_rows),
         left_prefix="quote",
         right_prefix="dimension",
     )
@@ -176,8 +181,13 @@ def _scalar_stream_output(scenario: str, quotes):
 
 
 def stream_plan(
-    scenario: str, table: pa.Table | None = None, dimension: pa.Table | None = None
+    scenario: str,
+    table: pa.Table | None = None,
+    dimension: pa.Table | None = None,
+    *,
+    batch_rows: int | None = None,
 ):
+    batch_rows = BATCH_ROWS if batch_rows is None else batch_rows
     quotes = table_input(
         "quotes",
         schema=QUOTE_FIELDS,
@@ -208,7 +218,7 @@ def stream_plan(
             quotes,
             reference,
             tolerance=timedelta(),
-            limits=AsofStateLimits(2 * BATCH_ROWS + 128, 1 << 30),
+            limits=AsofStateLimits(2 * batch_rows + 128, 1 << 30),
         )
         output = joined.select(
             sequence=joined["left__sequence"], value=joined["right__price"]
@@ -228,7 +238,33 @@ def stream_plan(
             aggregates=(window.sum("price", output="value"),),
         ).select("symbol", "value")
     elif scenario == "join":
-        output, inputs = _join_stream_output(table, dimension, quotes)
+        output, inputs = _join_stream_output(table, dimension, quotes, batch_rows)
+    elif scenario == "interval_join":
+        reference = table_input(
+            "reference",
+            schema=QUOTE_FIELDS,
+            entity_by=("symbol",),
+            event_time="event_time",
+            sequence_by=("sequence",),
+        )
+        joined = tables.stream_join(
+            quotes,
+            reference,
+            left_keys=("symbol",),
+            right_keys=("symbol",),
+            left_event_time="event_time",
+            right_event_time="event_time",
+            bounds=JoinTimeBounds(timedelta(seconds=5), timedelta(seconds=5)),
+            limits=JoinStateLimits(2 * batch_rows + 768, 1 << 30, 11 * batch_rows),
+            left_prefix="left",
+            right_prefix="right",
+        )
+        output = joined.select(
+            sequence=joined["left__sequence"],
+            right_sequence=joined["right__sequence"],
+            value=joined["left__price"] * joined["right__price"],
+        )
+        inputs = (quotes, reference)
     else:
         output = _scalar_stream_output(scenario, quotes)
     return Program(
@@ -237,21 +273,44 @@ def stream_plan(
 
 
 def stream_events(
-    table: pa.Table, entities: int, *, close_windows: bool = False
+    table: pa.Table,
+    entities: int,
+    *,
+    close_windows: bool = False,
+    batch_rows: int | None = None,
+    checkpoint_split: bool = False,
 ) -> tuple:
+    batch_rows = BATCH_ROWS if batch_rows is None else batch_rows
     # Never finalize half an entity tick before the next data batch.
-    size = max(entities, BATCH_ROWS // entities * entities)
+    size = max(entities, batch_rows // entities * entities)
+    starts = list(range(0, table.num_rows, size))
+    if checkpoint_split and len(starts) == 1 and table.num_rows > 1:
+        prefix = max(1, table.num_rows // 2 // entities * entities)
+        if prefix == 1:
+            prefix = table.num_rows // 2
+        starts = [0, prefix]
     events = []
-    for start in range(0, table.num_rows, size):
-        part = table.slice(start, size)
+    for position, start in enumerate(starts):
+        end = starts[position + 1] if position + 1 < len(starts) else table.num_rows
+        part = table.slice(start, end - start)
         end = start + part.num_rows
         events.append(
             Data(
-                Batch.from_pyarrow(part), Cursor(end.to_bytes(8, "big"), {"rows": end})
+                Batch.from_pyarrow(part),
+                Cursor(
+                    end.to_bytes(8, "big"),
+                    {"rows": end, "event_index": len(events) + 1},
+                ),
             )
         )
-        micros = part["event_time"][-1].value - int(BASE_MICROS) + 1
-        events.append(Watermark(BASE + timedelta(microseconds=micros)))
+        micros = int(pc.max(part["event_time"]).value) + 1
+        if end < table.num_rows:
+            micros = min(
+                micros, int(pc.min(table.slice(end, size)["event_time"]).value)
+            )
+        events.append(
+            Watermark(BASE + timedelta(microseconds=micros - int(BASE_MICROS)))
+        )
     if close_windows:
         # Close the final ten-second tumbling window before awaiting its output.
         final_tick = (table.num_rows - 1) // entities
@@ -266,7 +325,7 @@ def dimension_events(dimension: pa.Table, quotes: pa.Table) -> tuple:
     return (
         Data(
             Batch.from_pyarrow(dimension),
-            Cursor(rows.to_bytes(8, "big"), {"rows": rows}),
+            Cursor(rows.to_bytes(8, "big"), {"rows": rows, "event_index": 1}),
         ),
         Watermark(BASE + _join_span(quotes)),
         None,
@@ -274,8 +333,10 @@ def dimension_events(dimension: pa.Table, quotes: pa.Table) -> tuple:
 
 
 class _ReadySource(_InteractiveSource):
-    def __init__(self) -> None:
-        super().__init__(max_batch_rows=BATCH_ROWS)
+    def __init__(self, *, max_batch_rows: int | None = None) -> None:
+        super().__init__(
+            max_batch_rows=BATCH_ROWS if max_batch_rows is None else max_batch_rows
+        )
         self._events = asyncio.Queue(maxsize=1)
         self.ready = asyncio.Event()
 
@@ -283,6 +344,64 @@ class _ReadySource(_InteractiveSource):
         # The first poll proves that the runtime's startup data gate opened.
         self.ready.set()
         return await super().next()
+
+
+class _ReplaySource(_ReadySource):
+    """Gate an immutable event log with exact next-data cursor recovery."""
+
+    def __init__(self, events: tuple, *, batch_rows: int) -> None:
+        super().__init__(max_batch_rows=batch_rows)
+        self.events = events
+        self.position = 0
+        self._pushed = 0
+        if not events or events[-1] is not None:
+            raise ValueError("replay event log must end with EOF")
+        if any(
+            event.batch.num_rows > batch_rows
+            for event in events
+            if isinstance(event, Data)
+        ):
+            raise ValueError("replay event log exceeds declared batch rows")
+
+    def capabilities(self) -> SourceCapabilities:
+        return SourceCapabilities(
+            ReplayPositioning.EXACT_PAUSE_REPORT_AND_SEEK,
+            SourceDeliveryCapability.LOSSLESS,
+            self._max_batch_rows,
+            32 << 20,
+            native_watermarks=NativeWatermarkCapability.EMITS_NATIVE,
+        )
+
+    async def open(self, cursor: Cursor | None) -> None:
+        self.position = 0
+        if cursor is not None:
+            position = cursor.payload.get("event_index")
+            if type(position) is not int or not 1 <= position < len(self.events):
+                raise ValueError("invalid replay cursor position")
+            previous = self.events[position - 1]
+            if (
+                not isinstance(previous, Data)
+                or previous.cursor.order != cursor.order
+                or dict(previous.cursor.payload) != dict(cursor.payload)
+            ):
+                raise ValueError(
+                    "replay cursor does not identify the recorded data position"
+                )
+            self.position = position
+        self._pushed = self.position
+        self.opened.set()
+
+    async def push(self, event: Data | Watermark | None) -> None:
+        expected = self.events[self._pushed]
+        if event is not expected and event != expected:
+            raise ValueError("replay feed differs from the immutable event log")
+        self._pushed += 1
+        await super().push(event)
+
+    async def next(self) -> Data | Watermark | None:
+        event = await super().next()
+        self.position += 1
+        return event
 
 
 class _CollectSink:
@@ -338,7 +457,12 @@ def _require_ready_sources(
 
 
 async def _measure_ready(
-    sources: dict[str, _ReadySource], sink: _CollectSink, streams: dict[str, tuple], job
+    sources: dict[str, _ReadySource],
+    sink: _CollectSink,
+    streams: dict[str, tuple],
+    job,
+    *,
+    static_join: bool = False,
 ) -> tuple[pa.Table, float]:
     await asyncio.wait_for(
         asyncio.gather(*(source.ready.wait() for source in sources.values())),
@@ -346,7 +470,6 @@ async def _measure_ready(
     )
     _require_ready_sources(sources, sink)
     pending = streams
-    static_join = set(streams) == {"left", "right"} and len(streams["right"]) == 2
     if static_join:
         for event in streams["right"]:
             await sources["right"].push(event)
@@ -408,7 +531,12 @@ async def _wait_static_dimension_progress(job, watermark: int) -> None:
 
 
 async def run_stream(
-    plan, streams: dict[str, tuple], root: Path, expected_rows: int
+    plan,
+    streams: dict[str, tuple],
+    root: Path,
+    expected_rows: int,
+    *,
+    static_join: bool = False,
 ) -> tuple[pa.Table, float]:
     timed = _validated_timed_streams(plan, streams)
     sources = {name: _ReadySource() for name in streams}
@@ -428,7 +556,9 @@ async def run_stream(
     ).start_async()
 
     async def measure_and_end():
-        result = await _measure_ready(sources, sink, timed, job)
+        result = await _measure_ready(
+            sources, sink, timed, job, static_join=static_join
+        )
         for source in sources.values():
             await source.push(None)
         return result
@@ -440,3 +570,249 @@ async def run_stream(
         return table, seconds
     finally:
         await job.cancel_async()
+
+
+async def _with_running_job(operation, completion):
+    """Cancel pending benchmark work as soon as its owned runtime terminates."""
+
+    running = asyncio.ensure_future(operation)
+    finished = asyncio.ensure_future(completion)
+    try:
+        done, _ = await asyncio.wait(
+            (running, finished), return_when=asyncio.FIRST_COMPLETED
+        )
+        if finished in done:
+            outcome = await finished
+            raise RuntimeError(
+                f"stream terminated before checkpoint cut: {outcome.state}: "
+                f"{outcome.errors}"
+            )
+        return await running
+    finally:
+        for task in (running, finished):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(running, finished, return_exceptions=True)
+
+
+async def _interval_observation(job, streams: dict[str, tuple]) -> dict:
+    """Await accepted eviction frontiers after the throughput timer stopped."""
+
+    targets = {
+        name: int(BASE_MICROS) + (events[-2].at - BASE) // timedelta(microseconds=1)
+        for name, events in streams.items()
+    }
+    while True:
+        observation = job.status()["stream_joins"]
+        statuses = tuple(observation.values())
+        if len(statuses) != 1:
+            raise RuntimeError("interval Join requires exactly one Join status")
+        if all(
+            statuses[0][side]["watermark_micros"] is not None
+            and statuses[0][side]["watermark_micros"] >= target
+            for side, target in targets.items()
+        ):
+            return observation
+        await asyncio.sleep(0.001)
+
+
+async def _start_replay_job(
+    plan,
+    streams: dict[str, tuple],
+    root: Path,
+    expected_rows: int,
+    batch_rows: int,
+    checkpoint: bool,
+):
+    _validated_timed_streams(plan, streams)
+    sources = {
+        name: _ReplaySource(events, batch_rows=batch_rows)
+        for name, events in streams.items()
+    }
+    sink = _CollectSink(expected_rows)
+    job = await StreamingRunner(
+        plan,
+        {
+            name: SourceBinding(source, watermark_policy=SourceProvidedWatermarks())
+            for name, source in sources.items()
+        },
+        {"output": [SinkBinding.ordinary("suite", sink)]},
+        ManagedCheckpointRuntime(root),
+        config=StreamRuntimeConfig(
+            checkpoint_interval=timedelta(milliseconds=100)
+            if checkpoint
+            else timedelta(hours=24),
+            edge_budget=EdgeBudget(max_rows=batch_rows, max_bytes=64 << 20),
+        ),
+    ).start_async()
+    return sources, sink, job
+
+
+async def run_variant_stream(
+    plan_factory,
+    streams: dict[str, tuple],
+    root: Path,
+    expected_rows: int,
+    *,
+    case: dict,
+) -> tuple[pa.Table, float, dict]:
+    """Run replay-backed throughput or an explicitly paced recovery lifecycle."""
+
+    batch_rows = case["batch_rows"]
+    checkpoint = case["checkpoint_interval_millis"] is not None
+    dimensions = stream_dimensions(case["scenario"], batch_rows, checkpoint)
+    plan = plan_factory()
+    dimensions["source_bindings"] = sorted(plan.source_binding_ids)
+    timed = _validated_timed_streams(plan, streams)
+    sources, sink, job = await _start_replay_job(
+        plan, streams, root, expected_rows, batch_rows, checkpoint
+    )
+    if not checkpoint:
+
+        async def measure_and_end():
+            result = await _measure_ready(
+                sources, sink, timed, job, static_join=case["scenario"] == "join"
+            )
+            observation = (
+                await asyncio.wait_for(_interval_observation(job, streams), 600)
+                if case["scenario"] == "interval_join"
+                else {}
+            )
+            lookup = (
+                _require_static_join_no_left_state(job)
+                if case["scenario"] == "join"
+                else None
+            )
+            for source in sources.values():
+                await source.push(None)
+            return (
+                *result,
+                {
+                    **dimensions,
+                    "nonterminal_epochs": [],
+                    "recovery": "not-requested",
+                    "interval_join": observation,
+                    **({"lookup_join": lookup} if lookup is not None else {}),
+                },
+            )
+
+        try:
+            result = await run_with_completion(measure_and_end(), job.wait_async())
+            if sink.rows != expected_rows:
+                raise RuntimeError(
+                    "stream output row count changed after the timed result"
+                )
+            return result
+        finally:
+            await job.cancel_async()
+
+    primary = (
+        "quotes.input"
+        if "quotes.input" in streams
+        else "left"
+        if "left" in streams
+        else "input"
+    )
+    prefix_rows = streams[primary][0].batch.num_rows
+    if not 0 < prefix_rows < case["rows"]:
+        await job.cancel_async()
+        raise ValueError("checkpoint workload requires a nonterminal input prefix")
+    prefix_outputs = (
+        sum(max(0, prefix_rows - abs(offset) * 64) for offset in range(-5, 6))
+        if case["scenario"] == "interval_join"
+        else prefix_rows
+    )
+
+    async def checkpoint_cut():
+        await asyncio.wait_for(
+            asyncio.gather(*(source.ready.wait() for source in sources.values())), 30
+        )
+        _require_ready_sources(sources, sink)
+        prefix = {name: events[:2] for name, events in streams.items()}
+        if case["scenario"] == "join":
+            for event in prefix.pop("right"):
+                await sources["right"].push(event)
+            delta = streams["right"][1].at - BASE
+            await asyncio.wait_for(
+                _wait_static_dimension_progress(
+                    job, BASE_MICROS + delta // timedelta(microseconds=1)
+                ),
+                600,
+            )
+        started = time.perf_counter_ns()
+        for name, event in interleaved_events(prefix):
+            await sources[name].push(event)
+        await asyncio.wait_for(sink.wait_for_rows(prefix_outputs), 600)
+        await asyncio.sleep(0.1)
+        epoch = await job.trigger_checkpoint_async()
+        completed = job.status()["checkpoint"]["last_completed_epoch"]
+        if type(completed) is not int or completed < epoch:
+            raise RuntimeError("checkpoint acknowledgement lacks durable publication")
+        if case["scenario"] == "join":
+            _require_static_join_no_left_state(job)
+        return started, epoch, tuple(sink.tables), sink.rows
+
+    try:
+        started, epoch, prefix_tables, delivered = await _with_running_job(
+            checkpoint_cut(), job.wait_async()
+        )
+    finally:
+        await job.cancel_async()
+
+    restored_plan = plan_factory()
+    resumed_sources, resumed_sink, resumed = await _start_replay_job(
+        restored_plan, streams, root, expected_rows - delivered, batch_rows, True
+    )
+
+    async def complete_recovery():
+        await asyncio.wait_for(
+            asyncio.gather(
+                *(source.ready.wait() for source in resumed_sources.values())
+            ),
+            30,
+        )
+        _require_ready_sources(resumed_sources, resumed_sink)
+        pending = {}
+        for name, source in resumed_sources.items():
+            events = source.events[source.position : -1]
+            while events and not isinstance(events[0], Data):
+                await source.push(events[0])
+                events = events[1:]
+            pending[name] = events
+        await _measure_ready(resumed_sources, resumed_sink, pending, resumed)
+        table = pa.concat_tables((*prefix_tables, *resumed_sink.tables))
+        seconds = (time.perf_counter_ns() - started) / 1e9
+        observation = (
+            await asyncio.wait_for(_interval_observation(resumed, streams), 600)
+            if case["scenario"] == "interval_join"
+            else {}
+        )
+        lookup = (
+            _require_static_join_no_left_state(resumed)
+            if case["scenario"] == "join"
+            else None
+        )
+        for source in resumed_sources.values():
+            await source.push(None)
+        return (
+            table,
+            seconds,
+            {
+                **dimensions,
+                "nonterminal_epochs": [epoch],
+                "rows_before_checkpoint": prefix_rows,
+                "recovery": "verified",
+                "interval_join": observation,
+                **({"lookup_join": lookup} if lookup is not None else {}),
+            },
+        )
+
+    try:
+        result = await run_with_completion(complete_recovery(), resumed.wait_async())
+        if resumed_sink.rows + delivered != expected_rows:
+            raise RuntimeError(
+                "recovery output row count differs from the timed workload"
+            )
+        return result
+    finally:
+        await resumed.cancel_async()

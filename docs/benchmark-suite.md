@@ -41,7 +41,7 @@ benchmark cases without a second hand-written case list.
 | Family          | Dimensions                                          | Cases per dimension                                       |
 |-----------------|-----------------------------------------------------|-----------------------------------------------------------|
 | Python          | overhead 1k, small 10k, standard 100k, nightly 1M   | All collected non-lifecycle pytest benchmarks             |
-| Engines         | 10, 100, 1k, 10k, 100k, 1M, 10M rows                | 48 at every tier, including Polars 1T and 32T             |
+| Engines         | 10, 100, 1k, 10k, 100k, 1M, 10M rows                | 57 through 10k, 65 at 100k/1M, 51 at 10M                  |
 | Warm streaming  | 10, 100, 1k, 10k, 100k, 1M, 10M history; append 64  | SMA(20), SMA(5) minus SMA(20)                             |
 | Warm append     | History 1M; append 1, 4, 16, 64, 640, 6,400, 64,000 | Both indicators; append 64 shared with history matrix     |
 | Rust            | Every `[[bench]]` target in the core crate          | Core, allocation, state/window, Join/ASOF, SQL/DataFusion |
@@ -53,7 +53,7 @@ scale and four selected `Program.execute` cases. The Rust `stream_union` target
 measures native Union forwarding. These cases extend the inventory without
 adding a new shard or changing the scheduled 06:00 and 18:00 runs.
 
-There are 336 engine cases and 26 warm cases, in addition to dynamically
+There are 409 engine cases and 26 warm cases, in addition to dynamically
 discovered cases. Warm cases use one entity to support one-row appends.
 Compare measurements only when entity count, history depth, append size,
 and timing boundaries match.
@@ -65,14 +65,14 @@ throughput side by side in the step log and uploads
 `decode-throughput/run.log` with the shard's measured results. It carries
 no regression verdict.
 
-| Backend          | Projection  | Filter      | Group by    | Join        | SMA(20) | Dual SMA |
-|------------------|-------------|-------------|-------------|-------------|---------|----------|
-| Calc Flow SQL    | Yes         | Yes         | Yes         | Yes         | Yes     | Yes      |
-| Raw DataFusion   | Yes         | Yes         | Yes         | Yes         | Yes     | Yes      |
-| Polars 1T / 32T  | Yes         | Yes         | Yes         | Yes         | Yes     | Yes      |
-| Native streaming | Yes         | Yes         | Yes         | Yes         | Yes     | Yes      |
-| TA-Lib           | Unsupported | Unsupported | Unsupported | Unsupported | Yes     | Yes      |
-| Finance-Python   | Unsupported | Unsupported | Unsupported | Unsupported | Yes     | Yes      |
+| Backend          | Projection  | Filter      | Group by    | Join        | SMA(20) | Dual SMA | Interval Join |
+|------------------|-------------|-------------|-------------|-------------|---------|----------|---------------|
+| Calc Flow SQL    | Yes         | Yes         | Yes         | Yes         | Yes     | Yes      | Through 1M    |
+| Raw DataFusion   | Yes         | Yes         | Yes         | Yes         | Yes     | Yes      | Through 1M    |
+| Polars 1T / 32T  | Yes         | Yes         | Yes         | Yes         | Yes     | Yes      | Through 1M    |
+| Native streaming | Yes         | Yes         | Yes         | Yes         | Yes     | Yes      | Through 1M    |
+| TA-Lib           | Unsupported | Unsupported | Unsupported | Unsupported | Yes     | Yes      | Unsupported   |
+| Finance-Python   | Unsupported | Unsupported | Unsupported | Unsupported | Yes     | Yes      | Unsupported   |
 
 | Backend          | Average     | Argmax 64   | Argmax 256  | Unique 64   | CS mean     | Window sum  | ASOF join   |
 |------------------|-------------|-------------|-------------|-------------|-------------|-------------|-------------|
@@ -116,6 +116,46 @@ This controls decimal accumulation drift in long rolling performance runs;
 it is not a claim of numerical accuracy on arbitrary decimal sequences.
 Decimal numerical regression fixtures are checked separately from the
 performance workload.
+
+`interval_join` uses exactly 64 keys and inclusive bounds of five seconds
+before and after each left event. Both inputs contain the same Arrow rows and
+project `sequence`, `right_sequence`, and the price product. The oracle checks
+all pair identities and values, including boundary equality and duplicate-key
+multiplicity. Native execution retains both sides and exercises watermark
+eviction; an on-time out-of-order fixture covers arrival order separately.
+SQL/DataFusion and Polars use eleven equivalent integer-second offset equality
+probes for this one-tick-per-key grid. Their case identity records
+`integer-second-offset-equality-v1`; these references do not measure arbitrary
+non-grid interval SQL. Every interval backend has an explicit 1M-input-row
+cap: the 10M fixture would emit roughly 110M rows. Its native timing scope is
+`ready-enqueue-to-arrow/retained-interval-v1`.
+
+Join, interval Join, ASOF, and projection also have native throughput cases
+with 1,024-row input batches and exact-cursor event-log sources. Their scope is
+`ready-enqueue-to-arrow/exact-cursor-batch-1024-v1`. The 64,000-row cases remain.
+The interval cap applies to both batch sizes.
+
+Checkpoint/recovery variants run at 100k and 1M input rows with both batch
+sizes. They use a declared 100 ms checkpoint interval and a distinct
+`checkpoint-duration` workload. After a nonterminal input prefix reaches the
+sink, feeding stops, a declared 100 ms delay runs, and the adapter awaits a
+durable epoch acknowledgement. It cancels before additional input, restarts
+the same graph and bindings from the managed manifest, and combines the
+accepted prefix with the resumed suffix without deduplication. Ordinary sink
+delivery remains at-least-once. Each source restores the exact next data
+position from a stable cursor and legally replays its equal watermark.
+
+The lifecycle scope
+`ready-enqueue-checkpoint-100ms-ack-recover-to-arrow-v1` includes the delay,
+checkpoint acknowledgement, cancellation, manifest reading, plan recompilation
+and runner restart. Initial input construction, compilation and readiness
+precede timing; final EOF/terminal checkpoint/cleanup and validation follow it.
+Reports show lifecycle variants in a separate table; their duration is not a
+throughput-kernel measurement. Raw evidence must attest batch rows, interval,
+source mode and binding IDs, replay mode, workload, scope, an acknowledged
+nonterminal epoch, and successful recovery. Merely configuring a timer fails
+validation. New variants remain `new-coverage` until a matching baseline
+catalog declares the same dimensions and scope.
 Independent NumPy/direct-window oracles check every measured output, all
 payload columns, row counts, warm-up NaNs and finalization. Floating results
 use `rtol=1e-10`, `atol=1e-10`, `equal_nan=True`. Both engine-matrix SMA forms

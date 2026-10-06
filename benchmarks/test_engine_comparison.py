@@ -96,7 +96,7 @@ print(json.dumps({'threads': pl.thread_pool_size(), 'samples': samples}))
         check=True,
         timeout=30,
     )
-    assert json.loads(result.stdout) == {"threads": 1, "samples": [True] * 7}
+    assert json.loads(result.stdout) == {"threads": 1, "samples": [True] * 8}
 
 
 def test_single_thread_reference_rejects_a_process_with_a_larger_pool(
@@ -200,18 +200,19 @@ def test_asof_waits_for_delayed_chunk_watermarks(binding, monkeypatch, tmp_path)
 
 
 def test_asof_small_batches_complete_without_reading_job_status(monkeypatch, tmp_path):
-    from benchmarks import engine_stream
     from calc_flow import StreamingJob
 
     def status(_self):
         raise AssertionError("ASOF progress must await sink delivery")
 
-    monkeypatch.setattr(engine_stream, "BATCH_ROWS", 1_024)
     monkeypatch.setattr(StreamingJob, "status", status)
     case = next(
         case
         for case in engine_cases(4_097)
-        if case["backend"] == "calc-flow-stream" and case["scenario"] == "asof_join"
+        if case["backend"] == "calc-flow-stream"
+        and case["scenario"] == "asof_join"
+        and case.get("batch_rows") == 1024
+        and case.get("checkpoint_interval_millis") is None
     )
     runner = EngineCase(case, tmp_path)
     try:
