@@ -558,8 +558,84 @@ mod checkpoint_cut_tests {
             StreamMessageKind::Data
         );
         assert_eq!(
+            receiver.recv().await.unwrap().unwrap().as_watermark(),
+            Some(crate::EventTime::from_micros(9))
+        );
+        assert_eq!(
+            receiver.recv().await.unwrap().unwrap().as_barrier(),
+            Some(Epoch::INITIAL)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timer_becoming_ready_during_checkpoint_lock_handoff_is_drained() {
+        let prepared = Arc::new(
+            prepare_stream_job(
+                "compiled",
+                &[generated_source("timed")],
+                StreamProgressRuntimeConfig::default(),
+            )
+            .unwrap(),
+        );
+        let (sender, mut receiver) = edge_channel(
+            "timed",
+            EdgeBudget {
+                max_rows: 8,
+                max_bytes: 1 << 20,
+            },
+        )
+        .unwrap();
+        let cancellation = CancellationToken::new();
+        let coordinator = LiveProgressCoordinator::new(
+            &prepared,
+            BTreeMap::from([("timed".into(), vec![sender])]),
+            cancellation.clone(),
+        )
+        .unwrap();
+        coordinator
+            .submit(
+                binding("timed"),
+                RawIngressEvent::Data(timestamp_batch(0, 10)),
+                exact(1),
+            )
+            .await
+            .unwrap();
+        let cuts = BTreeMap::from([(
+            binding("timed"),
+            DurableSourceCut {
+                history: None,
+                cursor: None,
+                next_sequence: 1,
+                ended: false,
+            },
+        )]);
+        let initial_lock = coordinator.0.driver.lock().await;
+        let mut cut = Box::pin(coordinator.checkpoint_cut(Epoch::INITIAL, &cuts, &cancellation));
+        assert!(futures::poll!(cut.as_mut()).is_pending());
+        let mut intervening_lock = Box::pin(coordinator.0.driver.lock());
+        assert!(futures::poll!(intervening_lock.as_mut()).is_pending());
+        drop(initial_lock);
+        assert!(futures::poll!(cut.as_mut()).is_pending());
+        let intervening_lock = intervening_lock.await;
+        tokio::time::advance(std::time::Duration::from_secs(5)).await;
+        drop(intervening_lock);
+        let durable = cut.await.unwrap();
+        assert_eq!(durable["timed"].sequence, 1);
+        assert_eq!(
+            durable["timed"].watermark_policy,
+            SourceWatermarkManifestState::BoundedOutOfOrderness {
+                observed_max_micros: Some(crate::EventTime::from_micros(10)),
+                last_emitted_micros: Some(crate::EventTime::from_micros(9)),
+                idle: false,
+            }
+        );
+        assert_eq!(
             receiver.recv().await.unwrap().unwrap().kind(),
-            StreamMessageKind::Watermark
+            StreamMessageKind::Data
+        );
+        assert_eq!(
+            receiver.recv().await.unwrap().unwrap().as_watermark(),
+            Some(crate::EventTime::from_micros(9))
         );
         assert_eq!(
             receiver.recv().await.unwrap().unwrap().as_barrier(),
@@ -3231,10 +3307,9 @@ impl LiveProgressCoordinator {
         cancellation: &crate::CancellationToken,
     ) -> Result<BTreeMap<String, SourceManifestEntry>> {
         let _drive = self.0.drive_serial.lock().await;
-        self.drive_ready(cancellation).await?;
         let (live_ordinals, durable) = {
-            let driver = self.0.driver.lock().await;
-            if driver.unsettled_receipts() != 0 || driver.has_ready() {
+            let driver = self.settled_checkpoint_driver(cancellation).await?;
+            if driver.unsettled_receipts() != 0 {
                 return Err(CalcFlowError::Internal {
                     message: format!(
                         "checkpoint epoch {} reached an unsettled progress cut",
@@ -3284,9 +3359,8 @@ impl LiveProgressCoordinator {
         cancellation: &crate::CancellationToken,
     ) -> Result<BTreeMap<String, SourceManifestEntry>> {
         let _drive = self.0.drive_serial.lock().await;
-        self.drive_ready(cancellation).await?;
-        let driver = self.0.driver.lock().await;
-        if driver.unsettled_receipts() != 0 || driver.has_ready() {
+        let driver = self.settled_checkpoint_driver(cancellation).await?;
+        if driver.unsettled_receipts() != 0 {
             return Err(CalcFlowError::Internal {
                 message: format!(
                     "terminal checkpoint epoch {} reached an unsettled progress cut",
@@ -3311,6 +3385,19 @@ impl LiveProgressCoordinator {
             });
         }
         durable_source_manifest_entries(&driver, source_cuts)
+    }
+
+    async fn settled_checkpoint_driver(
+        &self,
+        cancellation: &crate::CancellationToken,
+    ) -> Result<tokio::sync::MutexGuard<'_, StreamProgressDriver<RuntimeLogicalClock>>> {
+        loop {
+            self.drive_ready(cancellation).await?;
+            let driver = self.0.driver.lock().await;
+            if !driver.has_ready() {
+                return Ok(driver);
+            }
+        }
     }
 
     async fn drive_ready(&self, cancellation: &crate::CancellationToken) -> Result<()> {
