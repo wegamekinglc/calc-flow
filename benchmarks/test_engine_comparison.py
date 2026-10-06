@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-import json
-import subprocess
-import sys
+import multiprocessing
+import os
 from pathlib import Path
 
 import numpy as np
@@ -61,6 +60,55 @@ def test_polars_asof_case_matches_the_shared_oracle(tmp_path):
         runner.close()
 
 
+def _polars_reference_samples(connection, root, rows, environment):
+    os.environ.update(environment)
+    import polars as pl
+
+    samples = []
+    for case in engine_cases(rows):
+        if case["backend"] != "polars-1t":
+            continue
+        runner = EngineCase(case, root)
+        try:
+            samples.append(runner.sample()["correctness"]["passed"])
+        finally:
+            runner.close()
+    connection.send(
+        {"pid": os.getpid(), "threads": pl.thread_pool_size(), "samples": samples}
+    )
+    connection.close()
+
+
+def _fresh_polars_samples(root, rows, site, source):
+    context = multiprocessing.get_context("spawn")
+    receiving, sending = context.Pipe(duplex=False)
+    process = context.Process(
+        target=_polars_reference_samples,
+        args=(
+            sending,
+            root,
+            rows,
+            child_environment(site, source=source, polars_threads=1),
+        ),
+    )
+    try:
+        process.start()
+        sending.close()
+        process.join(timeout=30)
+        if process.is_alive():
+            raise TimeoutError("single-thread Polars reference worker timed out")
+        if process.exitcode != 0 or not receiving.poll():
+            raise RuntimeError(f"Polars reference worker exited {process.exitcode}")
+        return receiving.recv()
+    finally:
+        sending.close()
+        if process.is_alive():
+            process.kill()
+            process.join()
+        receiving.close()
+        process.close()
+
+
 @pytest.mark.parametrize("rows", (10, 101))
 def test_polars_single_thread_reference_matches_oracles_in_a_fresh_process(
     tmp_path, rows
@@ -69,34 +117,10 @@ def test_polars_single_thread_reference_matches_oracles_in_a_fresh_process(
 
     source = Path(__file__).resolve().parents[1]
     site = Path(calc_flow.__file__).resolve().parents[1]
-    script = """
-import json
-import sys
-from pathlib import Path
-import polars as pl
-from benchmarks.engine_comparison import EngineCase
-from scripts.benchmark_suite.catalog import engine_cases
-samples = []
-for case in engine_cases(int(sys.argv[2])):
-    if case['backend'] != 'polars-1t':
-        continue
-    runner = EngineCase(case, Path(sys.argv[1]))
-    try:
-        samples.append(runner.sample()['correctness']['passed'])
-    finally:
-        runner.close()
-print(json.dumps({'threads': pl.thread_pool_size(), 'samples': samples}))
-"""
-    result = subprocess.run(
-        [sys.executable, "-c", script, str(tmp_path), str(rows)],
-        cwd=source,
-        env=child_environment(site, source=source, polars_threads=1),
-        capture_output=True,
-        text=True,
-        check=True,
-        timeout=30,
-    )
-    assert json.loads(result.stdout) == {"threads": 1, "samples": [True] * 7}
+    result = _fresh_polars_samples(tmp_path, rows, site, source)
+    assert result["pid"] != os.getpid()
+    assert result["threads"] == 1
+    assert result["samples"] == [True] * 7
 
 
 def test_single_thread_reference_rejects_a_process_with_a_larger_pool(

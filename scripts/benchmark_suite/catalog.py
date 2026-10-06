@@ -358,19 +358,18 @@ def _constant_range_bounds(node: ast.expr) -> tuple[int, int] | None:
     return None
 
 
-def _baseline_engine_ids(constants: dict[str, _CatalogConstant]) -> frozenset[str]:
+def _baseline_cap(constants: dict[str, _CatalogConstant], name: str) -> int | None:
+    value = constants.get(name)
+    return value if type(value) is int else None
+
+
+def _baseline_engine_columns(constants: dict[str, _CatalogConstant]) -> tuple:
     sql, rolling = constants["SQL_CASES"], constants["ROLLING_CASES"]
     stream = constants.get("STREAM_CASES", rolling)
     scope = constants.get("STREAM_SCOPE")
     if isinstance(scope, str) and scope != STREAM_SCOPE:
         stream = ()
-    join_cap = constants.get("STREAM_JOIN_MAX_ROWS")
-    cap = join_cap if type(join_cap) is int else None
-    asof_cap = constants.get("STREAM_ASOF_MAX_ROWS")
-    asof_cap = asof_cap if type(asof_cap) is int else None
-    window_cap = constants.get("STREAM_WINDOW_MAX_ROWS")
-    window_cap = window_cap if type(window_cap) is int else None
-    columns = (
+    return (
         ("calc-flow-sql", sql),
         ("datafusion", sql),
         ("polars", constants.get("POLARS_CASES", sql)),
@@ -379,20 +378,24 @@ def _baseline_engine_ids(constants: dict[str, _CatalogConstant]) -> frozenset[st
         ("ta-lib", rolling),
         ("finance-python", constants.get("FINANCE_CASES", ())),
     )
+
+
+def _baseline_engine_ids(constants: dict[str, _CatalogConstant]) -> frozenset[str]:
+    caps = {
+        "asof_join": _baseline_cap(constants, "STREAM_ASOF_MAX_ROWS"),
+        "window_sum": _baseline_cap(constants, "STREAM_WINDOW_MAX_ROWS"),
+    }
+    join_cap = _baseline_cap(constants, "STREAM_JOIN_MAX_ROWS")
     return frozenset(
         f"engines/{rows}/{backend}/{scenario}"
         for rows in constants["ROW_SCALES"]
-        for backend, scenarios in columns
+        for backend, scenarios in _baseline_engine_columns(constants)
         for scenario in scenarios
         if _measured_stream_case(
             backend,
             scenario,
             int(rows),
-            asof_cap
-            if scenario == "asof_join"
-            else window_cap
-            if scenario == "window_sum"
-            else cap,
+            caps.get(scenario, join_cap),
         )
     )
 
