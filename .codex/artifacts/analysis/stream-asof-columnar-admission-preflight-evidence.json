@@ -1,0 +1,13 @@
+{
+  "contract": "issue363-a4-functional-preflight-evidence-archive-v1",
+  "archive": "target/issue363-asof-columnar-admission-perf/evidence-a4-preflight-v1.tar.gz",
+  "archive_bytes": 438976412,
+  "archive_sha256": "52053586634c6e085e1fb5627bad5442444e012d6b6d9902cfd63cfb4dae9d67",
+  "files": 3205,
+  "members": 3206,
+  "all_members_stream_verified": true,
+  "manifest_sha256": "0c6f9d3db177da91a569604ba6435ededea14a2f0a4c809e25cbb0b2df62b365",
+  "scope": "26 existing functional preflights only; formal performance samples 0",
+  "excluded": "large matched build closures/wheels/source archives; retained separately under immutable release-v1 build seals",
+  "owned_native_processes": 0
+}

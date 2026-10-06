@@ -1,0 +1,38 @@
+{
+  "artifacts": {
+    ".worktrees/stream-asof-columnar-admission-main/.codex/artifacts/reviews/stream-asof-columnar-admission-preflight.md": {
+      "bytes": 10925,
+      "sha256": "8bc0a4e5300879326afab0a08500692c1ace66b05f5b8f05e084d736a7dcec91"
+    },
+    "target/issue363-a4-preflight-review/completion-proof-match.json": {
+      "bytes": 605,
+      "sha256": "fc2999b99c2af7142cc5509a9ac27f249bb36f7a83442bed9bac1aa8a1184114"
+    },
+    "target/issue363-a4-preflight-review/proof.json": {
+      "bytes": 834102,
+      "sha256": "adc40f899f15179800fefba9e6de7dfa623a8da7cccd2315ab73962ab7b84de4"
+    },
+    "target/issue363-a4-preflight-review/verification-initial-checkpoint-normalization.log": {
+      "bytes": 298,
+      "sha256": "298b7359a2f69fc4444bb0edeee92b9be19fa9ce814a7cb5a795cada7c98664c"
+    },
+    "target/issue363-a4-preflight-review/verification-initial-output-watermark-normalization.log": {
+      "bytes": 288,
+      "sha256": "140f6aff7513b7633b978a08bd3e80fbe5e132fd3f31fcaa235471960ba643d8"
+    },
+    "target/issue363-a4-preflight-review/verification.log": {
+      "bytes": 471,
+      "sha256": "e29bde27f074bcfa10cf40d9e96d03eca6d6bd088e32c7fd9419290735af153e"
+    },
+    "target/issue363-a4-preflight-review/verify_preflight.py": {
+      "bytes": 15682,
+      "sha256": "199cc83dc757837c0379b70fc4cf7988d9cfaf291a1ab0d55cfbd4d860141147"
+    }
+  },
+  "formal_performance_samples": 0,
+  "markdown_links_whitespace_newline": "passed",
+  "owned_processes": 0,
+  "reviewer_native_import_build_probe_functional_execution_measurements": 0,
+  "scope": "A4 existing functional preflight evidence only",
+  "verdict": "Approve"
+}

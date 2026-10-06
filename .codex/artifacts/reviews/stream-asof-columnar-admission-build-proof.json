@@ -1,0 +1,36 @@
+{
+  "artifacts": {
+    ".worktrees/stream-asof-columnar-admission-main/.codex/artifacts/reviews/stream-asof-columnar-admission-build.md": {
+      "sha256": "f4b883dd3a3727f5fc59086f31370893dd925065d6641592630da1d75c2f5f14",
+      "size": 10301
+    },
+    "target/issue363-a4-build-review/proof.json": {
+      "sha256": "000d801dff8f2b8963a71fdf6d638c2b99b904c7f89f6613197efdd62fbddeac",
+      "size": 2802811
+    },
+    "target/issue363-a4-build-review/receipt-match.json": {
+      "sha256": "71dfe99d8dc769eee03b99c764287ca13b69122a83e404b25ddbb803831f9a4a",
+      "size": 552
+    },
+    "target/issue363-a4-build-review/verification-initial-json-encoding.log": {
+      "sha256": "70ff744ef1f4ad00537b736a68c817e68096c26cdf20141b696c5597c28ceb2f",
+      "size": 874
+    },
+    "target/issue363-a4-build-review/verification.log": {
+      "sha256": "3dcbfbdd478a20ba8a6ab793190a44dc9e55087c67719d8f0a3ca0accfb3fa4e",
+      "size": 1849
+    },
+    "target/issue363-a4-build-review/verify_build.py": {
+      "sha256": "813d37470eb8396b7145dd6070e97cd14ac7c136e4aa9931aa3eec86992956dd",
+      "size": 14692
+    }
+  },
+  "entry_sha256": "73a86e218e705ad8a6545e6667a225063c97d7be16341011006bd43fe45d6730",
+  "final_newline": true,
+  "markdown_links_checked": 3,
+  "reviewer_native_build_import_probe_functional_timing_runs": 0,
+  "reviewer_owned_processes": 0,
+  "scope": "A4 matched release build-only provenance; separately granted functional preflight still required",
+  "trailing_whitespace": false,
+  "verdict": "Approve"
+}
