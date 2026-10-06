@@ -65,5 +65,18 @@ are recorded in [the performance report](stream-asof-runs-performance.md).
 The single corrected-head CI snapshot passed Windows Rust tests but failed
 the Linux lib cleanup assertion in
 `key_sharded_finalization_preserves_order_bits_and_cold_recovery`
-(`pool.reserved()` 39,552 versus zero). Diagnosis remains open. Passing local
-serial tests and performance oracles do not resolve this required failure.
+(`pool.reserved()` 39,552 versus zero). A follow-up fixture deterministically
+demonstrates the lifecycle distinction: with Tokio's blocking worker held,
+gather-owner drain completes while a payload retirement still owns its input
+and 4,096-byte reservation. The original pre-shutdown zero assertion fails;
+after complete runtime and service shutdown the reservation is exactly zero
+and the payload weak owner is dead. This does not attribute the original
+39,552 bytes to one specific allocation.
+
+The recovery test now checks both original and restored pools after those
+lifecycles finish, retaining its full canonical row/bit oracle, output IPC
+bytes comparison and exact zero assertions. All six probe tests and scoped
+library/test Clippy passed. Final specialist review approved the lifecycle
+boundary and its deterministic fixture. This follow-up changes tests only;
+measured native source and production memory budgets are unchanged. Remote CI
+of the follow-up is still required to resolve the observed failure.
