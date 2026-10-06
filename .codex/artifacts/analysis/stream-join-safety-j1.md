@@ -91,10 +91,17 @@ J2 representation changes and ASOF traversal changes are separate work.
   metadata and segment bytes remain unchanged. Integrated core lib/tests
   Clippy also passes with warnings denied. The final-capture continuation
   wording correction changes documentation only.
-- Asynchronous compaction ownership checks, final specialist review, and
-  paired performance measurements remain pending. No measured performance
+- Final specialist review approved the integrated Phase 0.6 and J1.1–J1.5
+  source and artifact, including the corrected final-capture continuation
+  description. Asynchronous compaction ownership is a later J1.6 slice, and
+  paired performance measurements are still pending. No measured performance
   improvement is claimed. Full workspace regression, coverage, and
   cross-platform gates remain CI responsibilities.
+- The property schedule's reference state now uses explicit left/right slots
+  and a separate retention predicate to address the Codacy complexity finding.
+  Physical IDs, both interval directions and the independent checkpoint oracle
+  remain intact. All four properties and scoped target Clippy pass; final
+  specialist review approved the reference refactor and review-status record.
 
 Shared Cargo artifacts use relative dependency paths and timestamp freshness.
 The first inline filter reused another worktree's newer test binary and ran

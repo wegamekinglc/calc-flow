@@ -9,6 +9,11 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-06: Maintain streaming Join retained-state gauges, expiration indexes
+  and pending checkpoint operations incrementally. Decode timestamp units once
+  per record and canonicalize incoming keys once. Preserve physical row IDs,
+  ordered matches, logical resource limits and the frozen layout-1 captures.
+
 - 2026-10-06: Expose inner Join ingress watermark, idle, and end observations
   through Rust, Python and Studio, including non-terminal managed restart at
   startup.

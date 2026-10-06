@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-import json
-import subprocess
-import sys
+import multiprocessing
+import os
 from pathlib import Path
 
 import numpy as np
@@ -61,6 +60,55 @@ def test_polars_asof_case_matches_the_shared_oracle(tmp_path):
         runner.close()
 
 
+def _polars_reference_samples(connection, root, rows, environment):
+    os.environ.update(environment)
+    import polars as pl
+
+    samples = []
+    for case in engine_cases(rows):
+        if case["backend"] != "polars-1t":
+            continue
+        runner = EngineCase(case, root)
+        try:
+            samples.append(runner.sample()["correctness"]["passed"])
+        finally:
+            runner.close()
+    connection.send(
+        {"pid": os.getpid(), "threads": pl.thread_pool_size(), "samples": samples}
+    )
+    connection.close()
+
+
+def _fresh_polars_samples(root, rows, site, source):
+    context = multiprocessing.get_context("spawn")
+    receiving, sending = context.Pipe(duplex=False)
+    process = context.Process(
+        target=_polars_reference_samples,
+        args=(
+            sending,
+            root,
+            rows,
+            child_environment(site, source=source, polars_threads=1),
+        ),
+    )
+    try:
+        process.start()
+        sending.close()
+        process.join(timeout=30)
+        if process.is_alive():
+            raise TimeoutError("single-thread Polars reference worker timed out")
+        if process.exitcode != 0 or not receiving.poll():
+            raise RuntimeError(f"Polars reference worker exited {process.exitcode}")
+        return receiving.recv()
+    finally:
+        sending.close()
+        if process.is_alive():
+            process.kill()
+            process.join()
+        receiving.close()
+        process.close()
+
+
 @pytest.mark.parametrize("rows", (10, 101))
 def test_polars_single_thread_reference_matches_oracles_in_a_fresh_process(
     tmp_path, rows
@@ -69,34 +117,10 @@ def test_polars_single_thread_reference_matches_oracles_in_a_fresh_process(
 
     source = Path(__file__).resolve().parents[1]
     site = Path(calc_flow.__file__).resolve().parents[1]
-    script = """
-import json
-import sys
-from pathlib import Path
-import polars as pl
-from benchmarks.engine_comparison import EngineCase
-from scripts.benchmark_suite.catalog import engine_cases
-samples = []
-for case in engine_cases(int(sys.argv[2])):
-    if case['backend'] != 'polars-1t':
-        continue
-    runner = EngineCase(case, Path(sys.argv[1]))
-    try:
-        samples.append(runner.sample()['correctness']['passed'])
-    finally:
-        runner.close()
-print(json.dumps({'threads': pl.thread_pool_size(), 'samples': samples}))
-"""
-    result = subprocess.run(
-        [sys.executable, "-c", script, str(tmp_path), str(rows)],
-        cwd=source,
-        env=child_environment(site, source=source, polars_threads=1),
-        capture_output=True,
-        text=True,
-        check=True,
-        timeout=30,
-    )
-    assert json.loads(result.stdout) == {"threads": 1, "samples": [True] * 7}
+    result = _fresh_polars_samples(tmp_path, rows, site, source)
+    assert result["pid"] != os.getpid()
+    assert result["threads"] == 1
+    assert result["samples"] == [True] * 7
 
 
 def test_single_thread_reference_rejects_a_process_with_a_larger_pool(
@@ -165,6 +189,79 @@ def test_static_join_waits_for_delayed_dimension_progress(monkeypatch, tmp_path)
         assert runner.sample()["correctness"]["passed"]
     finally:
         runner.close()
+
+
+def _static_join_status_measurement(left_counter, monkeypatch):
+    from benchmarks import engine_stream
+    from calc_flow import Batch, Watermark
+
+    table = pa.table({"value": [1.0]})
+    sink = engine_stream._CollectSink(1)
+    sink.opened.set()
+    clock_reads = []
+
+    def clock():
+        clock_reads.append(len(clock_reads))
+        return clock_reads[-1] * 1_000_000
+
+    monkeypatch.setattr(engine_stream.time, "perf_counter_ns", clock)
+
+    class Source:
+        def __init__(self, name):
+            self.name = name
+            self.ready = asyncio.Event()
+            self.opened = asyncio.Event()
+            self.ready.set()
+            self.opened.set()
+
+        async def push(self, _event):
+            if self.name == "left":
+                await sink.write(Batch.from_pyarrow(table))
+
+    class Job:
+        reads = 0
+
+        def status(self):
+            self.reads += 1
+            quoted = self.reads >= 3
+            if self.reads > 1:
+                assert len(clock_reads) == 2, "status proof must follow timer stop"
+            left = {"retained_rows": 0, "evicted_rows": 0}
+            if quoted and left_counter:
+                left[left_counter] = 1
+            return {
+                "stream_joins": {
+                    "join": {
+                        "left": left,
+                        "right": {"watermark_micros": engine_stream.BASE_MICROS},
+                        "emitted_match_rows": int(quoted),
+                    }
+                }
+            }
+
+    job = Job()
+    sources = {name: Source(name) for name in ("left", "right")}
+    streams = {
+        "left": (object(),),
+        "right": (object(), Watermark(engine_stream.BASE)),
+    }
+    result = asyncio.run(engine_stream._measure_ready(sources, sink, streams, job))
+    return result, job.reads
+
+
+@pytest.mark.parametrize("left_counter", ("retained_rows", "evicted_rows"))
+def test_static_join_rejects_post_quote_state_after_a_stale_snapshot(
+    left_counter, monkeypatch
+):
+    with pytest.raises(RuntimeError, match="retained or evicted quote rows"):
+        _static_join_status_measurement(left_counter, monkeypatch)
+
+
+def test_static_join_accepts_the_causal_post_quote_status_outside_timing(monkeypatch):
+    (table, seconds), reads = _static_join_status_measurement(None, monkeypatch)
+    assert table == pa.table({"value": [1.0]})
+    assert seconds == 0.001
+    assert reads == 3
 
 
 @pytest.mark.parametrize("binding", ("reference.input", "quotes.input"))

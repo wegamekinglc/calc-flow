@@ -19,7 +19,7 @@ def _unsigned_range(value: str) -> str:
 
 def _signed_range(value: str) -> str:
     if not _I64_MIN <= int(value) <= _I64_MAX:
-        raise ValueError("ASOF watermark exceeds i64")
+        raise ValueError("watermark exceeds i64")
     return value
 
 

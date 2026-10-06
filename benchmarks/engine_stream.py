@@ -372,7 +372,9 @@ async def _measure_ready(
     table = pa.concat_tables(sink.tables)
     seconds = (time.perf_counter_ns() - started) / 1e9
     if static_join:
-        _require_static_join_no_left_state(job)
+        await asyncio.wait_for(
+            _wait_static_quote_progress(job, sink.expected_rows), timeout=600
+        )
     return table, seconds
 
 
@@ -388,19 +390,31 @@ async def _feed_asof_chunks(
         await asyncio.wait_for(sink.wait_for_rows(rows), timeout=600)
 
 
-def _require_static_join_no_left_state(job) -> dict:
+def _static_join_status(job) -> dict:
     statuses = tuple(job.status()["stream_joins"].values())
     if len(statuses) != 1:
         raise RuntimeError("static Join requires exactly one Join status")
-    status = statuses[0]
+    return statuses[0]
+
+
+def _require_static_join_no_left_state(status: dict) -> None:
     if status["left"]["retained_rows"] or status["left"]["evicted_rows"]:
         raise RuntimeError("static Join retained or evicted quote rows")
-    return status
+
+
+async def _wait_static_quote_progress(job, expected_rows: int) -> None:
+    while True:
+        status = _static_join_status(job)
+        if status["emitted_match_rows"] >= expected_rows:
+            _require_static_join_no_left_state(status)
+            return
+        await asyncio.sleep(0.001)
 
 
 async def _wait_static_dimension_progress(job, watermark: int) -> None:
     while True:
-        status = _require_static_join_no_left_state(job)
+        status = _static_join_status(job)
+        _require_static_join_no_left_state(status)
         accepted = status["right"]["watermark_micros"]
         if accepted is not None and accepted >= watermark:
             return

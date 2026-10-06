@@ -495,6 +495,26 @@ fn ordered_job() -> StreamJobContext {
     )
 }
 
+#[derive(Default)]
+struct OrderedSide {
+    rows: Vec<OrderedRow>,
+    watermark: Option<i64>,
+    next_id: u64,
+}
+
+fn retains_ordered_row(
+    row: &OrderedRow,
+    own: Option<i64>,
+    opposite: Option<i64>,
+    extension: i64,
+) -> bool {
+    row.key.is_some()
+        && row.ts.is_some_and(|ts| {
+            own.is_none_or(|watermark| ts >= watermark)
+                && opposite.is_none_or(|watermark| ts + extension >= watermark)
+        })
+}
+
 async fn ordered_schedule(
     bounds: (u64, u64),
     steps: &[Step],
@@ -503,46 +523,23 @@ async fn ordered_schedule(
     let mut operator = ordered_operator(bounds);
     let job = ordered_job();
     let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
-    let (mut left_watermark, mut right_watermark) = (None, None);
-    let (mut next_left, mut next_right) = (0, 0);
-    let (mut left, mut right) = (Vec::new(), Vec::new());
+    let mut sides = [OrderedSide::default(), OrderedSide::default()];
     let (mut emitted, mut sequences) = (Vec::new(), Vec::new());
     for (index, step) in steps.iter().enumerate() {
         let (ingress, input, watermark, incoming_left) = match step {
             Step::Left(rows, watermark) => ("left", rows, watermark, true),
             Step::Right(rows, watermark) => ("right", rows, watermark, false),
         };
-        let own = if incoming_left {
-            left_watermark
-        } else {
-            right_watermark
-        };
-        let opposite_watermark = if incoming_left {
-            right_watermark
-        } else {
-            left_watermark
-        };
-        let rows = ordered_input(
-            input,
-            own,
-            if incoming_left {
-                &mut next_left
-            } else {
-                &mut next_right
-            },
-        );
-        let expected = reference_step(
-            &rows,
-            if incoming_left { &right } else { &left },
-            incoming_left,
-            own,
-            bounds,
-        );
+        let side = usize::from(!incoming_left);
+        let own = sides[side].watermark;
+        let opposite_watermark = sides[1 - side].watermark;
+        let rows = ordered_input(input, own, &mut sides[side].next_id);
+        let expected = reference_step(&rows, &sides[1 - side].rows, incoming_left, own, bounds);
         let context = StreamOperatorContext::with_ingress_progress(
             &job,
             "match",
             None,
-            both_sides(left_watermark, right_watermark),
+            both_sides(sides[0].watermark, sides[1].watermark),
         );
         operator
             .process_data(ingress, ordered_batch(&rows), &context, &mut collector)
@@ -552,32 +549,25 @@ async fn ordered_schedule(
         assert_eq!(actual, expected, "schedule step {index}: {steps:?}");
         emitted.extend(actual);
         sequences.extend(batch_sequences);
-        let retained = if incoming_left { &mut left } else { &mut right };
-        let extension = i64::try_from(if incoming_left { bounds.1 } else { bounds.0 }).unwrap();
-        retained.extend(rows.into_iter().filter(|row| {
-            row.key.is_some()
-                && row.ts.is_some_and(|ts| {
-                    own.is_none_or(|watermark| ts >= watermark)
-                        && opposite_watermark.is_none_or(|watermark| ts + extension >= watermark)
-                })
-        }));
-        if incoming_left {
-            left_watermark = Some(*watermark);
-        } else {
-            right_watermark = Some(*watermark);
-        }
+        let retained = &mut sides[side].rows;
+        let extension = i64::try_from([bounds.1, bounds.0][side]).unwrap();
+        retained.extend(
+            rows.into_iter()
+                .filter(|row| retains_ordered_row(row, own, opposite_watermark, extension)),
+        );
+        sides[side].watermark = Some(*watermark);
         let context = StreamOperatorContext::with_ingress_progress(
             &job,
             "match",
             None,
-            both_sides(left_watermark, right_watermark),
+            both_sides(sides[0].watermark, sides[1].watermark),
         );
         operator
             .on_ingress_progress(ingress, &context)
             .await
             .unwrap();
-        let expired = if incoming_left { &mut right } else { &mut left };
-        let extension = i64::try_from(if incoming_left { bounds.0 } else { bounds.1 }).unwrap();
+        let expired = &mut sides[1 - side].rows;
+        let extension = i64::try_from([bounds.0, bounds.1][side]).unwrap();
         expired.retain(|row| row.ts.unwrap() + extension >= *watermark);
         if checkpoint_cuts.get(index).copied().unwrap_or(false) {
             let epoch = Epoch::new(u64::try_from(index).unwrap() + 1).unwrap();
@@ -585,7 +575,7 @@ async fn ordered_schedule(
                 &mut operator,
                 bounds,
                 epoch,
-                (next_left, next_right),
+                (sides[0].next_id, sides[1].next_id),
                 &context,
             )
             .await;
