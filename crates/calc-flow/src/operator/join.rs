@@ -1776,6 +1776,8 @@ mod tests {
         }
     }
 
+    mod checkpoint_compaction_tests;
+
     async fn v1_fixture_captures() -> Vec<OperatorStateSnapshot> {
         let mut operator =
             StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
@@ -2859,6 +2861,12 @@ pub struct StreamJoinOperator {
     state: StreamJoinState,
     retained_key_cache: RetainedKeyCache,
     ingress_progress: IngressProgressSnapshot,
+    compaction_release: Option<tokio::sync::oneshot::Receiver<()>>,
+    compaction_cleanup: Option<crate::runtime::streaming::gather_work::AttemptCleanup>,
+    #[cfg(test)]
+    checkpoint_gate: Option<std::sync::Mutex<checkpoint_compaction::TestGate>>,
+    #[cfg(test)]
+    checkpoint_retirement_gate: Option<std::sync::Mutex<checkpoint_compaction::TestRetirementGate>>,
 }
 
 const MAX_RETAINED_KEY_CACHE_BYTES_PER_SIDE: usize = 32 * 1024 * 1024;
@@ -3076,7 +3084,7 @@ impl PendingLog {
 
 /// Prepared checkpoint segments and the dirty log (spec FR45/FR47).
 ///
-/// Bulk encoding and compaction are prepared during data/progress handlers;
+/// Bulk encoding and compaction are prepared asynchronously before capture;
 /// `checkpoint` only shares the prepared segment allocations and encodes the
 /// dirty ops.
 #[derive(Default)]
@@ -3111,8 +3119,8 @@ struct JoinMetrics {
 
 #[derive(Default)]
 struct StreamJoinState {
-    left: Vec<StoredRow>,
-    right: Vec<StoredRow>,
+    left: RetainedRows,
+    right: RetainedRows,
     left_expirations: ExpirationIndex,
     right_expirations: ExpirationIndex,
     next_left_row_id: u64,
@@ -3122,6 +3130,29 @@ struct StreamJoinState {
     ended: bool,
     last_checkpoint_epoch: Option<Epoch>,
     deltas: DeltaTracking,
+}
+
+#[derive(Default)]
+struct RetainedRows(Arc<Vec<StoredRow>>);
+
+impl From<Vec<StoredRow>> for RetainedRows {
+    fn from(rows: Vec<StoredRow>) -> Self {
+        Self(Arc::new(rows))
+    }
+}
+
+impl std::ops::Deref for RetainedRows {
+    type Target = Vec<StoredRow>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for RetainedRows {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        Arc::get_mut(&mut self.0).expect("compaction input released before retained mutation")
+    }
 }
 
 #[derive(Default)]
@@ -3178,6 +3209,7 @@ struct JoinCheckpointMetadata {
     epoch: u64,
 }
 
+mod checkpoint_compaction;
 mod materialization;
 mod row_ipc;
 
@@ -3228,6 +3260,12 @@ impl StreamJoinOperator {
             state: StreamJoinState::default(),
             retained_key_cache: RetainedKeyCache::default(),
             ingress_progress: IngressProgressSnapshot::default(),
+            compaction_release: None,
+            compaction_cleanup: None,
+            #[cfg(test)]
+            checkpoint_gate: None,
+            #[cfg(test)]
+            checkpoint_retirement_gate: None,
         })
     }
 
@@ -3554,7 +3592,7 @@ impl StreamJoinOperator {
             && existing
                 .row_ids
                 .iter()
-                .zip(opposite)
+                .zip(opposite.iter())
                 .all(|(row_id, row)| *row_id == row.row_id)
         {
             return Ok(existing.batch.clone());
@@ -3824,9 +3862,7 @@ impl StreamOperator for StreamJoinOperator {
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
         context.check_cancelled()?;
-        if self.state.deltas.needs_compaction {
-            compact_base(&mut self.state, &self.name)?;
-        }
+        self.await_compaction_release(context).await?;
         let prepared = self.prepare_batch(ingress, &batch, context).await?;
         self.emit_prepared(&prepared, context, output).await?;
         let emitted = u64::try_from(prepared.output.len())
@@ -3853,9 +3889,7 @@ impl StreamOperator for StreamJoinOperator {
                 &format!("missing progress for ingress {ingress:?}"),
             )
         })?;
-        if self.state.deltas.needs_compaction {
-            compact_base(&mut self.state, &self.name)?;
-        }
+        self.await_compaction_release(context).await?;
         match ingress {
             "left" => {
                 let before = self.state.right.len();
@@ -3915,9 +3949,10 @@ impl StreamOperator for StreamJoinOperator {
 
     async fn on_end(
         &mut self,
-        _context: &StreamOperatorContext<'_>,
+        context: &StreamOperatorContext<'_>,
         _output: &mut dyn StreamCollector,
     ) -> Result<()> {
+        self.await_compaction_release(context).await?;
         let left_identities = self.state.left_expirations.identities(&self.state.left);
         record_tombstones(
             &mut self.state.deltas.pending,
@@ -3948,6 +3983,13 @@ impl StreamOperator for StreamJoinOperator {
         self.retained_key_cache = RetainedKeyCache::default();
         self.ingress_progress = IngressProgressSnapshot::default();
         Ok(())
+    }
+
+    async fn prepare_checkpoint_async(
+        &mut self,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<()> {
+        self.prepare_compaction(context).await
     }
 
     fn checkpoint(&mut self, epoch: Epoch) -> Result<OperatorStateSnapshot> {
@@ -4036,8 +4078,8 @@ impl StreamOperator for StreamJoinOperator {
         self.state = StreamJoinState {
             left_expirations: ExpirationIndex::restored(&left),
             right_expirations: ExpirationIndex::restored(&right),
-            left,
-            right,
+            left: left.into(),
+            right: right.into(),
             next_left_row_id: metadata.next_left_row_id,
             next_right_row_id: metadata.next_right_row_id,
             next_output_sequence: metadata.next_output_sequence,
@@ -4782,24 +4824,8 @@ pub(crate) fn supported_key_type(data_type: &DataType) -> bool {
 
 const JOIN_STATE_MAGIC: &[u8; 8] = b"CFJOIN1\0";
 
-/// Rebuilds one canonical base from live state, replacing every carried
-/// delta (spec FR45). Compaction runs only inside data/progress handlers.
-fn compact_base(state: &mut StreamJoinState, operator_id: &str) -> Result<()> {
-    let left = encode_side(&state.left, operator_id, "left")?;
-    let right = encode_side(&state.right, operator_id, "right")?;
-    state.deltas.base = BTreeMap::from([
-        ("left", StateSegment::new(left)),
-        ("right", StateSegment::new(right)),
-    ]);
-    state.deltas.segments.clear();
-    state.deltas.pending.clear();
-    state.deltas.segments_since_base = 0;
-    state.deltas.needs_compaction = false;
-    Ok(())
-}
-
 /// Number of carried delta segments that triggers compaction on the next
-/// data/progress handler (spec FR45).
+/// asynchronous checkpoint preparation (spec FR10).
 const JOIN_DELTA_COMPACTION_SEGMENTS: u32 = 4;
 
 const JOIN_DELTA_MAGIC: &[u8; 8] = b"CFJDLT1\0";
@@ -5149,9 +5175,17 @@ fn decode_delta_segment(
     Ok(())
 }
 
-fn encode_side(rows: &[StoredRow], operator_id: &str, side: &str) -> Result<Vec<u8>> {
+fn encode_side(
+    rows: &[StoredRow],
+    operator_id: &str,
+    side: &str,
+    check: &impl Fn() -> Result<()>,
+) -> Result<Vec<u8>> {
+    check()?;
     let mut ordered = rows.iter().collect::<Vec<_>>();
+    check()?;
     ordered.sort_by(|a, b| identity_order(a, b));
+    check()?;
     let mut output = Vec::new();
     output.extend_from_slice(JOIN_STATE_MAGIC);
     output.extend_from_slice(
@@ -5161,6 +5195,7 @@ fn encode_side(rows: &[StoredRow], operator_id: &str, side: &str) -> Result<Vec<
     );
     let mut ipc_encoder = row_ipc::RowIpcEncoder::default();
     for row in ordered {
+        check()?;
         let ipc = ipc_encoder.encode(&row.record, operator_id, side)?;
         output.extend_from_slice(&row.row_id.to_le_bytes());
         output.extend_from_slice(&row.event_time.as_micros().to_le_bytes());
@@ -5172,6 +5207,7 @@ fn encode_side(rows: &[StoredRow], operator_id: &str, side: &str) -> Result<Vec<
         );
         output.extend_from_slice(&ipc);
     }
+    check()?;
     Ok(output)
 }
 
