@@ -11,6 +11,7 @@ from scripts.benchmark_suite.catalog import (
     THREADS,
     baseline_case_ids,
     comparison_kind,
+    polars_thread_count,
     shard_cases,
 )
 from scripts.benchmark_suite.process import ROOT, Worker, install
@@ -18,12 +19,14 @@ from scripts.benchmark_suite.provenance import harness_sha256
 from scripts.benchmark_suite.report import ROUNDS, SAMPLES, comparison
 
 
-def validate_environment(environment: dict, release: dict) -> dict:
+def validate_environment(
+    environment: dict, release: dict, *, polars_threads: int = THREADS
+) -> dict:
     if environment["native_sha256"] != release["native_sha256"]:
         raise ValueError(
             "worker loaded a different native module than the release wheel"
         )
-    if environment["polars_threads"] != THREADS or environment[
+    if environment["polars_threads"] != polars_threads or environment[
         "tokio_worker_threads"
     ] != str(THREADS):
         raise ValueError("worker thread configuration does not match the catalog")
@@ -46,7 +49,9 @@ async def _prepare(workers: dict, releases: dict, case: dict) -> dict:
     identities = {}
     for side, worker in workers.items():
         identities[side] = validate_environment(
-            await worker.request(operation="hello"), releases[side]
+            await worker.request(operation="hello"),
+            releases[side],
+            polars_threads=polars_thread_count(case),
         )
         response = await worker.request(operation="prepare", case=case)
         if response["case"] != case:
@@ -84,7 +89,12 @@ async def _round(case: dict, workers_by_side: dict, releases: dict, root: Path) 
     workers = {}
     try:
         for side, (site, source) in workers_by_side.items():
-            workers[side] = await Worker.start(site, root / side, source=source)
+            workers[side] = await Worker.start(
+                site,
+                root / side,
+                source=source,
+                polars_threads=polars_thread_count(case),
+            )
         environment = await _prepare(workers, releases, case)
         samples = await _samples(workers)
         completion = {}

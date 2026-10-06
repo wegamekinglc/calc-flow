@@ -353,7 +353,8 @@ def _cross_library_table(cases: list[dict]) -> str:
             "Native stream (ready)",
             "Calc Flow SQL",
             "DataFusion",
-            "Polars",
+            "Polars (32T)",
+            "Polars (1T)",
             "TA-Lib",
             "Finance-Python",
         ],
@@ -367,6 +368,7 @@ def _cross_library_row(size: int, scenario: str, index: dict) -> list[object]:
         "calc-flow-sql",
         "datafusion",
         "polars",
+        "polars-1t",
         "ta-lib",
         "finance-python",
     )

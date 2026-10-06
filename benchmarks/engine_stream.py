@@ -292,6 +292,7 @@ class _CollectSink:
         self.tables: list[pa.Table] = []
         self.opened = asyncio.Event()
         self.complete = asyncio.Event()
+        self.progress = asyncio.Event()
 
     async def open(self) -> None:
         self.opened.set()
@@ -300,8 +301,14 @@ class _CollectSink:
         table = batch.to_pyarrow()
         self.tables.append(table)
         self.rows += table.num_rows
+        self.progress.set()
         if self.rows >= self.expected_rows:
             self.complete.set()
+
+    async def wait_for_rows(self, rows: int) -> None:
+        while self.rows < rows:
+            self.progress.clear()
+            await self.progress.wait()
 
     async def close(self) -> None:
         return None
@@ -344,7 +351,7 @@ async def _measure_ready(
         set(streams) == {"reference.input", "quotes.input"}
         and len(streams["quotes.input"]) > 2
     ):
-        await _feed_asof_chunks(sources, streams, job)
+        await _feed_asof_chunks(sources, streams, sink)
         pending = {}
     elif (
         set(streams) == {"left", "right"}
@@ -368,34 +375,16 @@ async def _measure_ready(
     return table, (time.perf_counter_ns() - started) / 1e9
 
 
-async def _feed_asof_chunks(sources: dict, streams: dict[str, tuple], job) -> None:
+async def _feed_asof_chunks(
+    sources: dict, streams: dict[str, tuple], sink: _CollectSink
+) -> None:
     rows = 0
     for start in range(0, len(streams["quotes.input"]), 2):
         chunk = {name: events[start : start + 2] for name, events in streams.items()}
         for name, event in interleaved_events(chunk):
             await sources[name].push(event)
         rows += chunk["quotes.input"][0].batch.num_rows
-        frontier = int(BASE_MICROS) + (chunk["quotes.input"][1].at - BASE) // timedelta(
-            microseconds=1
-        )
-        await asyncio.wait_for(_wait_asof_progress(job, rows, frontier), timeout=600)
-
-
-async def _wait_asof_progress(job, rows: int, frontier: int) -> None:
-    while True:
-        statuses = tuple(job.status()["stream_asof_joins"].values())
-        if (
-            len(statuses) == 1
-            and statuses[0]["emitted_left_rows"] >= rows
-            and statuses[0]["pending_left_rows"] == 0
-            and all(
-                statuses[0][side]["watermark_micros"] is not None
-                and statuses[0][side]["watermark_micros"] >= frontier
-                for side in ("left", "right")
-            )
-        ):
-            return
-        await asyncio.sleep(0.001)
+        await asyncio.wait_for(sink.wait_for_rows(rows), timeout=600)
 
 
 async def _wait_static_join_progress(job, rows: int) -> None:

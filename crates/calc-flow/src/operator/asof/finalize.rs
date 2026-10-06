@@ -62,6 +62,7 @@ impl StreamAsofJoinOperator {
     ) -> Result<()> {
         loop {
             context.check_cancelled()?;
+            self.retirement.wait(context).await?;
             if !self.has_finalizable(frontier, ended) {
                 break;
             }
@@ -226,7 +227,7 @@ impl StreamAsofJoinOperator {
             self.status.state_bytes
         );
         drop((preview, columns, staging));
-        Ok(())
+        self.retirement.wait(context).await
     }
 
     fn prepare_capacity_eviction(&self) -> Result<CapacityEviction> {

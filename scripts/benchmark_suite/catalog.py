@@ -17,6 +17,7 @@ POLARS_CASES = (
     "dual_sma",
     "asof_join",
 )
+POLARS_SINGLE_THREAD_CASES = POLARS_CASES[:]
 ROLLING_CASES = SQL_CASES[-2:]
 # Keep this a literal tuple: the suite resolves baseline case ids by parsing
 # the baseline catalog's declarative forms, and derived assignments fail
@@ -52,6 +53,7 @@ CAPABILITIES = {
     "calc-flow-sql": SQL_CASES,
     "datafusion": SQL_CASES,
     "polars": POLARS_CASES,
+    "polars-1t": POLARS_SINGLE_THREAD_CASES,
     "calc-flow-stream": STREAM_CASES,
     "ta-lib": ROLLING_CASES,
     "finance-python": FINANCE_CASES,
@@ -62,8 +64,14 @@ STREAM_WINDOW_MAX_ROWS = None
 THREADS = 32
 BATCH_ROWS = 64_000
 CONTRACT = "calc-flow-benchmark-suite-v3"
-STREAM_SCOPE = "ready-enqueue-to-arrow/interleaved-inputs-v4"
+STREAM_SCOPE = "ready-enqueue-to-arrow/interleaved-inputs-v5"
 FINANCE_SCOPE = "pandas-transform-to-numpy"
+
+
+def polars_thread_count(case: dict) -> int:
+    """Return the process-local Polars pool size for one catalog case."""
+
+    return 1 if case.get("backend") == "polars-1t" else THREADS
 
 
 def comparison_kind(case: dict, baseline_ids: frozenset[str] | None) -> str:
@@ -186,18 +194,21 @@ def shard_cases(shard: dict) -> list[dict]:
     raise ValueError("legacy benchmark cases are discovered from their native runners")
 
 
+_CatalogConstant = tuple[str, ...] | int | str
+
+
 def _baseline_catalog_constants(
     catalog_path: Path,
-) -> dict[str, tuple[str, ...] | int] | None:
+) -> dict[str, _CatalogConstant] | None:
     """Read the baseline catalog's declarative constants without executing code.
 
-    Only literal string-tuple and integer assignments are accepted, and every
+    Only literal string-tuple, string and integer assignments are accepted, and every
     required constant must resolve to a string tuple; anything else fails
     closed so an unparseable baseline keeps every paired case gated.
     """
 
     tree = ast.parse(catalog_path.read_text(encoding="utf-8"))
-    constants: dict[str, tuple[str, ...] | int] = {}
+    constants: dict[str, _CatalogConstant] = {}
     for node in tree.body:
         assigned = _assigned_constant(node, constants)
         if assigned is not None:
@@ -209,8 +220,8 @@ def _baseline_catalog_constants(
 
 
 def _assigned_constant(
-    node: ast.stmt, constants: dict[str, tuple[str, ...]]
-) -> tuple[str, tuple[str, ...] | int] | None:
+    node: ast.stmt, constants: dict[str, _CatalogConstant]
+) -> tuple[str, _CatalogConstant] | None:
     """Return one top-level ``NAME = literal`` assignment, else ``None``."""
 
     if not isinstance(node, ast.Assign) or len(node.targets) != 1:
@@ -218,22 +229,22 @@ def _assigned_constant(
     target = node.targets[0]
     if not isinstance(target, ast.Name):
         return None
-    value: tuple[str, ...] | int | None = _declarative_tuple(node.value, constants)
+    value: _CatalogConstant | None = _declarative_tuple(node.value, constants)
     if value is None:
-        value = _declarative_int(node.value)
+        value = _declarative_scalar(node.value)
     return None if value is None else (target.id, value)
 
 
-def _declarative_int(node: ast.expr) -> int | None:
-    """Accept a literal integer assignment."""
+def _declarative_scalar(node: ast.expr) -> int | str | None:
+    """Accept a literal string or integer assignment."""
 
-    if isinstance(node, ast.Constant) and type(node.value) is int:
+    if isinstance(node, ast.Constant) and type(node.value) in (int, str):
         return node.value
     return None
 
 
 def _declarative_tuple(
-    node: ast.expr, constants: dict[str, tuple[str, ...]]
+    node: ast.expr, constants: dict[str, _CatalogConstant]
 ) -> tuple[str, ...] | None:
     """Accept a literal string tuple or the catalog's derived forms."""
 
@@ -250,14 +261,14 @@ def _declarative_tuple(
 
 
 def _sliced_tuple(
-    node: ast.expr, constants: dict[str, tuple[str, ...]]
+    node: ast.expr, constants: dict[str, _CatalogConstant]
 ) -> tuple[str, ...] | None:
     """Match ``KNOWN_TUPLE[lower:upper]`` over already-parsed constants."""
 
     if not isinstance(node, ast.Subscript) or not isinstance(node.value, ast.Name):
         return None
     source = constants.get(node.value.id)
-    if source is None:
+    if not isinstance(source, tuple):
         return None
     part = node.slice
     if not isinstance(part, ast.Slice):
@@ -347,37 +358,44 @@ def _constant_range_bounds(node: ast.expr) -> tuple[int, int] | None:
     return None
 
 
-def _baseline_engine_ids(constants: dict[str, tuple[str, ...] | int]) -> frozenset[str]:
+def _baseline_cap(constants: dict[str, _CatalogConstant], name: str) -> int | None:
+    value = constants.get(name)
+    return value if type(value) is int else None
+
+
+def _baseline_engine_columns(constants: dict[str, _CatalogConstant]) -> tuple:
     sql, rolling = constants["SQL_CASES"], constants["ROLLING_CASES"]
     stream = constants.get("STREAM_CASES", rolling)
-    join_cap = constants.get("STREAM_JOIN_MAX_ROWS")
-    cap = join_cap if type(join_cap) is int else None
-    asof_cap = constants.get("STREAM_ASOF_MAX_ROWS")
-    asof_cap = asof_cap if type(asof_cap) is int else None
-    window_cap = constants.get("STREAM_WINDOW_MAX_ROWS")
-    window_cap = window_cap if type(window_cap) is int else None
-    columns = (
+    scope = constants.get("STREAM_SCOPE")
+    if isinstance(scope, str) and scope != STREAM_SCOPE:
+        stream = ()
+    return (
         ("calc-flow-sql", sql),
         ("datafusion", sql),
         ("polars", constants.get("POLARS_CASES", sql)),
+        ("polars-1t", constants.get("POLARS_SINGLE_THREAD_CASES", ())),
         ("calc-flow-stream", stream),
         ("ta-lib", rolling),
         ("finance-python", constants.get("FINANCE_CASES", ())),
     )
+
+
+def _baseline_engine_ids(constants: dict[str, _CatalogConstant]) -> frozenset[str]:
+    caps = {
+        "asof_join": _baseline_cap(constants, "STREAM_ASOF_MAX_ROWS"),
+        "window_sum": _baseline_cap(constants, "STREAM_WINDOW_MAX_ROWS"),
+    }
+    join_cap = _baseline_cap(constants, "STREAM_JOIN_MAX_ROWS")
     return frozenset(
         f"engines/{rows}/{backend}/{scenario}"
         for rows in constants["ROW_SCALES"]
-        for backend, scenarios in columns
+        for backend, scenarios in _baseline_engine_columns(constants)
         for scenario in scenarios
         if _measured_stream_case(
             backend,
             scenario,
             int(rows),
-            asof_cap
-            if scenario == "asof_join"
-            else window_cap
-            if scenario == "window_sum"
-            else cap,
+            caps.get(scenario, join_cap),
         )
     )
 

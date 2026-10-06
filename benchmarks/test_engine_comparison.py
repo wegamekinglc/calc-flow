@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import multiprocessing
+import os
 from pathlib import Path
 
 import numpy as np
@@ -15,6 +17,7 @@ from benchmarks.engine_comparison import (
     workload,
 )
 from scripts.benchmark_suite.catalog import STREAM_CASES, engine_cases
+from scripts.benchmark_suite.process import child_environment
 
 
 def test_sql_queries_reject_unknown_scenario_names():
@@ -55,6 +58,80 @@ def test_polars_asof_case_matches_the_shared_oracle(tmp_path):
         assert sample["correctness"]["rows"] == 101
     finally:
         runner.close()
+
+
+def _polars_reference_samples(connection, root, rows, environment):
+    os.environ.update(environment)
+    import polars as pl
+
+    samples = []
+    for case in engine_cases(rows):
+        if case["backend"] != "polars-1t":
+            continue
+        runner = EngineCase(case, root)
+        try:
+            samples.append(runner.sample()["correctness"]["passed"])
+        finally:
+            runner.close()
+    connection.send(
+        {"pid": os.getpid(), "threads": pl.thread_pool_size(), "samples": samples}
+    )
+    connection.close()
+
+
+def _fresh_polars_samples(root, rows, site, source):
+    context = multiprocessing.get_context("spawn")
+    receiving, sending = context.Pipe(duplex=False)
+    process = context.Process(
+        target=_polars_reference_samples,
+        args=(
+            sending,
+            root,
+            rows,
+            child_environment(site, source=source, polars_threads=1),
+        ),
+    )
+    try:
+        process.start()
+        sending.close()
+        process.join(timeout=30)
+        if process.is_alive():
+            raise TimeoutError("single-thread Polars reference worker timed out")
+        if process.exitcode != 0 or not receiving.poll():
+            raise RuntimeError(f"Polars reference worker exited {process.exitcode}")
+        return receiving.recv()
+    finally:
+        sending.close()
+        if process.is_alive():
+            process.kill()
+            process.join()
+        receiving.close()
+        process.close()
+
+
+@pytest.mark.parametrize("rows", (10, 101))
+def test_polars_single_thread_reference_matches_oracles_in_a_fresh_process(
+    tmp_path, rows
+):
+    import calc_flow
+
+    source = Path(__file__).resolve().parents[1]
+    site = Path(calc_flow.__file__).resolve().parents[1]
+    result = _fresh_polars_samples(tmp_path, rows, site, source)
+    assert result["pid"] != os.getpid()
+    assert result["threads"] == 1
+    assert result["samples"] == [True] * 7
+
+
+def test_single_thread_reference_rejects_a_process_with_a_larger_pool(
+    monkeypatch, tmp_path
+):
+    import polars as pl
+
+    monkeypatch.setattr(pl, "thread_pool_size", lambda: 32)
+    case = next(case for case in engine_cases(101) if case["backend"] == "polars-1t")
+    with pytest.raises(ValueError, match="single-thread.*one thread"):
+        EngineCase(case, tmp_path)
 
 
 @pytest.mark.parametrize("scenario", STREAM_CASES)
@@ -137,6 +214,27 @@ def test_asof_waits_for_delayed_chunk_watermarks(binding, monkeypatch, tmp_path)
     case = next(
         case
         for case in engine_cases(320_000)
+        if case["backend"] == "calc-flow-stream" and case["scenario"] == "asof_join"
+    )
+    runner = EngineCase(case, tmp_path)
+    try:
+        assert runner.sample()["correctness"]["passed"]
+    finally:
+        runner.close()
+
+
+def test_asof_small_batches_complete_without_reading_job_status(monkeypatch, tmp_path):
+    from benchmarks import engine_stream
+    from calc_flow import StreamingJob
+
+    def status(_self):
+        raise AssertionError("ASOF progress must await sink delivery")
+
+    monkeypatch.setattr(engine_stream, "BATCH_ROWS", 1_024)
+    monkeypatch.setattr(StreamingJob, "status", status)
+    case = next(
+        case
+        for case in engine_cases(4_097)
         if case["backend"] == "calc-flow-stream" and case["scenario"] == "asof_join"
     )
     runner = EngineCase(case, tmp_path)
@@ -229,7 +327,14 @@ def test_new_stream_operators_match_independent_oracle(scenario, tmp_path):
 
 
 @pytest.mark.parametrize(
-    "case", [*engine_cases(10), *engine_cases(101)], ids=lambda case: case["id"]
+    "case",
+    [
+        case
+        for rows in (10, 101)
+        for case in engine_cases(rows)
+        if case["backend"] != "polars-1t"
+    ],
+    ids=lambda case: case["id"],
 )
 def test_engine_outputs_match_independent_oracle(case: dict, tmp_path: Path):
     runner = EngineCase(case, tmp_path)

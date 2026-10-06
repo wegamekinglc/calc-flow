@@ -7,7 +7,8 @@ import pytest
 
 from benchmarks import engine_stream
 from benchmarks.engine_comparison import EngineCase
-from calc_flow import Data
+from benchmarks.warm_stream import BASE
+from calc_flow import Batch, Cursor, Data, Watermark
 from scripts.benchmark_suite.catalog import engine_cases
 
 
@@ -205,39 +206,101 @@ def test_static_join_waits_for_committed_matches_and_eviction(monkeypatch):
     assert waits == [0.001, 0.001]
 
 
-def test_asof_waits_for_output_and_both_committed_watermarks(monkeypatch):
-    states = iter(
-        (
-            (0, 0, 100, 100),
-            (64_000, 64_000, 100, 100),
-            (64_000, 0, 100, None),
-            (64_000, 0, 99, 100),
-            (64_000, 0, 100, 100),
-        )
-    )
-    waits = []
+def test_sink_waits_for_cumulative_delivery_across_output_chunks():
+    async def exercise():
+        sink = engine_stream._CollectSink(5)
+        batch = Batch.from_pyarrow(engine_stream.pa.table({"value": range(5)}))
+        waiting = asyncio.create_task(sink.wait_for_rows(3))
+        try:
+            await sink.write(Batch.from_pyarrow(batch.to_pyarrow().slice(0, 2)))
+            await asyncio.sleep(0)
+            assert not waiting.done()
+            await sink.write(Batch.from_pyarrow(batch.to_pyarrow().slice(2, 1)))
+            await asyncio.wait_for(waiting, 1)
+            assert not sink.complete.is_set()
+            waiting = asyncio.create_task(sink.wait_for_rows(5))
+            await sink.write(Batch.from_pyarrow(batch.to_pyarrow().slice(0, 0)))
+            await asyncio.sleep(0)
+            assert not waiting.done(), (
+                "an earlier delivery must not release a later wait"
+            )
+            await sink.write(Batch.from_pyarrow(batch.to_pyarrow().slice(3, 2)))
+            await asyncio.wait_for(waiting, 1)
+            await asyncio.wait_for(sink.wait_for_rows(5), 1)
+            assert sink.complete.is_set()
+        finally:
+            waiting.cancel()
+            await asyncio.gather(waiting, return_exceptions=True)
 
-    def status():
-        emitted, pending, left, right = next(states)
-        return {
-            "stream_asof_joins": {
-                "asof": {
-                    "emitted_left_rows": emitted,
-                    "pending_left_rows": pending,
-                    "left": {"watermark_micros": left},
-                    "right": {"watermark_micros": right},
-                }
-            }
+    asyncio.run(exercise())
+
+
+def test_asof_lockstep_waits_for_sink_delivery_without_status_calls():
+    async def exercise():
+        expected = engine_stream.pa.table({"value": range(5)})
+        sink = engine_stream._CollectSink(5)
+        await sink.open()
+        delivered = []
+        tasks = []
+
+        class Source:
+            def __init__(self, name):
+                self.name = name
+                self.ready = asyncio.Event()
+                self.opened = asyncio.Event()
+                self.ready.set()
+                self.opened.set()
+                self.fed = 0
+                self.pending = None
+
+            async def push(self, event):
+                if isinstance(event, Data):
+                    assert sink.rows >= self.fed, (
+                        "the next pair arrived before delivery"
+                    )
+                    self.pending = event.batch
+                    self.fed += event.batch.num_rows
+                elif self.name == "quotes.input":
+                    tasks.append(asyncio.create_task(self.deliver()))
+
+            async def deliver(self):
+                await asyncio.sleep(0)
+                await sink.write(self.pending)
+                delivered.append(sink.rows)
+
+        def status():
+            raise AssertionError("status polling perturbs the timed operator")
+
+        streams = {
+            name: tuple(
+                event
+                for offset, count in ((0, 3), (3, 2))
+                for event in (
+                    Data(
+                        Batch.from_pyarrow(expected.slice(offset, count)),
+                        Cursor(offset.to_bytes(8, "big"), {"offset": offset}),
+                    ),
+                    Watermark(BASE),
+                )
+            )
+            for name in ("reference.input", "quotes.input")
         }
+        sources = {name: Source(name) for name in streams}
+        try:
+            table, _ = await asyncio.wait_for(
+                engine_stream._measure_ready(
+                    sources, sink, streams, SimpleNamespace(status=status)
+                ),
+                1,
+            )
+            assert table.equals(expected)
+            assert delivered == [3, 5]
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def sleep(seconds):
-        waits.append(seconds)
-
-    monkeypatch.setattr(engine_stream.asyncio, "sleep", sleep)
-    asyncio.run(
-        engine_stream._wait_asof_progress(SimpleNamespace(status=status), 64_000, 100)
-    )
-    assert waits == [0.001] * 4
+    asyncio.run(exercise())
 
 
 def test_stream_timer_excludes_startup_and_cleanup_but_includes_arrow(

@@ -113,6 +113,7 @@ class BenchmarkSuiteTests(unittest.TestCase):
                 "calc-flow-sql",
                 "datafusion",
                 "polars",
+                "polars-1t",
                 "ta-lib",
                 "finance-python",
             },
@@ -153,6 +154,75 @@ class BenchmarkSuiteTests(unittest.TestCase):
         self.assertEqual(len({c["id"] for c in cases}), len(cases))
         self.assertTrue(all(c["rows"] > 0 for c in cases))
 
+    def test_polars_thread_references_cover_identical_workloads_and_scales(self):
+        cases = engine_cases()
+        references = {
+            backend: {
+                (case["rows"], case["scenario"])
+                for case in cases
+                if case["backend"] == backend
+            }
+            for backend in ("polars", "polars-1t")
+        }
+        self.assertTrue(references["polars-1t"])
+        self.assertEqual(references["polars"], references["polars-1t"])
+
+    def test_cross_library_table_distinguishes_polars_thread_counts(self):
+        report = render_report(
+            [
+                measured_case(
+                    id=f"engines/100/{backend}/join",
+                    backend=backend,
+                    scenario="join",
+                    comparison="external",
+                    baseline=[],
+                    candidate=[[seconds] * 10] * 2,
+                )
+                for backend, seconds in (("polars", 0.002), ("polars-1t", 0.001))
+            ],
+            [],
+        )
+        table = report.split("## Cross-library comparison")[1]
+        self.assertIn("Polars (32T)", table)
+        self.assertIn("Polars (1T)", table)
+        join = next(line for line in table.splitlines() if "| join " in line)
+        self.assertIn("2.000000", join)
+        self.assertIn("1.000000", join)
+
+    def test_single_thread_reference_evidence_rejects_mislabeled_thread_pools(self):
+        from scripts.benchmark_suite.validation import _validate_evidence
+
+        release = {"native_sha256": "a" * 64}
+        row = measured_case(
+            backend="polars-1t",
+            comparison="external",
+            baseline=[],
+            candidate=[[0.01] * 10] * 2,
+        )
+        row["evidence"] = [
+            {
+                "environment": {"polars_threads": 1, "tokio_worker_threads": "32"},
+                "samples": {
+                    "candidate": [{"seconds": 0.01, "correctness": {"passed": True}}]
+                    * 10
+                },
+                "completion": {"candidate": {"state": "completed"}},
+                "native_sha256": {"candidate": release["native_sha256"]},
+            }
+            for _ in range(2)
+        ]
+        _validate_evidence(row, {"candidate": release})
+        for backend, polars_threads in (("polars-1t", 32), ("polars", 1)):
+            bad = deepcopy(row)
+            bad["backend"] = backend
+            for evidence in bad["evidence"]:
+                evidence["environment"]["polars_threads"] = polars_threads
+            with (
+                self.subTest(backend=backend),
+                self.assertRaisesRegex(ValueError, "thread"),
+            ):
+                _validate_evidence(bad, {"candidate": release})
+
     def test_reopened_stream_cases_cover_all_row_scales(self):
         for scenario in ("join", "asof_join", "window_sum"):
             with self.subTest(scenario=scenario):
@@ -187,8 +257,31 @@ class BenchmarkSuiteTests(unittest.TestCase):
         cases = [c for c in engine_cases() if c["backend"] == "calc-flow-stream"]
         self.assertEqual(
             {c["scope"] for c in cases},
-            {"ready-enqueue-to-arrow/interleaved-inputs-v4"},
+            {"ready-enqueue-to-arrow/interleaved-inputs-v5"},
         )
+
+    def test_changed_stream_scope_is_new_coverage_without_disabling_sql_pairs(self):
+        source = Path(__file__).resolve().parents[1]
+        original = (source / "scripts/benchmark_suite/catalog.py").read_text()
+        for scope in ("interleaved-inputs-v4", "interleaved-inputs-v5"):
+            with self.subTest(scope=scope), TemporaryDirectory() as directory:
+                base = Path(directory)
+                path = base / "scripts/benchmark_suite/catalog.py"
+                path.parent.mkdir(parents=True)
+                path.write_text(
+                    original.replace(
+                        catalog.STREAM_SCOPE, f"ready-enqueue-to-arrow/{scope}"
+                    )
+                )
+                ids = baseline_case_ids(base, {"family": "engines"})
+                for case in engine_cases(100):
+                    if case["backend"] == "calc-flow-stream":
+                        expected = "new" if scope.endswith("v4") else "interleaved"
+                        self.assertEqual(catalog.comparison_kind(case, ids), expected)
+                    elif case["backend"] == "calc-flow-sql":
+                        self.assertEqual(
+                            catalog.comparison_kind(case, ids), "interleaved"
+                        )
 
     def test_finance_matrix_declares_its_pandas_output_boundary(self):
         cases = [c for c in engine_cases() if c["backend"] == "finance-python"]
@@ -231,6 +324,7 @@ class BenchmarkSuiteTests(unittest.TestCase):
                 "STREAM_JOIN_MAX_ROWS = 100_000\n"
                 "STREAM_ASOF_MAX_ROWS = 10_000\n"
                 "STREAM_WINDOW_MAX_ROWS = 10_000\n"
+                f"STREAM_SCOPE = {catalog.STREAM_SCOPE!r}\n"
             )
             ids = baseline_case_ids(base, {"family": "engines"})
             self.assertIsNotNone(ids)
