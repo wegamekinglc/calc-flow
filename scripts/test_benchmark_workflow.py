@@ -227,6 +227,22 @@ class BenchmarkWorkflowTests(unittest.TestCase):
         counts = Counter(re.findall(r"scripts\.test_[a-z0-9_]+", linux + suite))
         self.assertEqual(counts, dict.fromkeys(expected, 1))
 
+    def test_retained_script_checks_are_collected_by_unittest(self):
+        checks = unittest.defaultTestLoader.loadTestsFromName(
+            "scripts.test_retained_benchmark_suite"
+        )
+        self.assertGreaterEqual(checks.countTestCases(), 9)
+
+    def test_retained_adapter_checks_run_in_the_benchmark_workflow(self):
+        suite = (ROOT / ".github/workflows/benchmark-suite.yml").read_text(
+            encoding="utf-8"
+        )
+        adapters = suite.split(
+            "- name: Verify locked dependencies and benchmark adapters\n", 1
+        )[1].split("      - name:", 1)[0]
+        self.assertIn("benchmarks/test_retained_stream.py", adapters)
+        self.assertIn("-m pytest", adapters)
+
     def test_complete_suite_is_the_only_scheduled_benchmark_workflow(self):
         diagnostics = (ROOT / ".github/workflows/benchmarks.yml").read_text(
             encoding="utf-8"

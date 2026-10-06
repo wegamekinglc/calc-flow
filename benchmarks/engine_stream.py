@@ -495,7 +495,9 @@ async def _measure_ready(
     table = pa.concat_tables(sink.tables)
     seconds = (time.perf_counter_ns() - started) / 1e9
     if static_join:
-        _require_static_join_no_left_state(job)
+        await asyncio.wait_for(
+            _wait_static_quote_progress(job, sink.expected_rows), timeout=600
+        )
     return table, seconds
 
 
@@ -511,14 +513,31 @@ async def _feed_asof_chunks(
         await asyncio.wait_for(sink.wait_for_rows(rows), timeout=600)
 
 
-def _require_static_join_no_left_state(job) -> dict:
+def _static_join_status(job) -> dict:
     statuses = tuple(job.status()["stream_joins"].values())
     if len(statuses) != 1:
         raise RuntimeError("static Join requires exactly one Join status")
-    status = statuses[0]
+    return statuses[0]
+
+
+def _require_static_left_counters(status: dict) -> None:
     if status["left"]["retained_rows"] or status["left"]["evicted_rows"]:
         raise RuntimeError("static Join retained or evicted quote rows")
+
+
+def _require_static_join_no_left_state(job) -> dict:
+    status = _static_join_status(job)
+    _require_static_left_counters(status)
     return status
+
+
+async def _wait_static_quote_progress(job, expected_rows: int) -> dict:
+    while True:
+        status = _static_join_status(job)
+        if status["emitted_match_rows"] >= expected_rows:
+            _require_static_left_counters(status)
+            return status
+        await asyncio.sleep(0.001)
 
 
 async def _wait_static_dimension_progress(job, watermark: int) -> None:
@@ -711,6 +730,20 @@ async def _checkpoint_cut(job, sources, sink, streams, case):
         asyncio.gather(*(source.ready.wait() for source in sources.values())), 30
     )
     _require_ready_sources(sources, sink)
+    prefix = await _checkpoint_pending_prefix(job, sources, streams, case)
+    started = time.perf_counter_ns()
+    for name, event in interleaved_events(prefix):
+        await sources[name].push(event)
+    await asyncio.wait_for(sink.wait_for_rows(prefix_outputs), 600)
+    await asyncio.sleep(0.1)
+    epoch = await job.trigger_checkpoint_async()
+    _require_checkpoint_ack(job, epoch)
+    if case["scenario"] == "join":
+        await asyncio.wait_for(_wait_static_quote_progress(job, prefix_outputs), 600)
+    return started, epoch, tuple(sink.tables), sink.rows
+
+
+async def _checkpoint_pending_prefix(job, sources, streams, case):
     prefix = {name: events[:2] for name, events in streams.items()}
     if case["scenario"] == "join":
         for event in prefix.pop("right"):
@@ -722,18 +755,13 @@ async def _checkpoint_cut(job, sources, sink, streams, case):
             ),
             600,
         )
-    started = time.perf_counter_ns()
-    for name, event in interleaved_events(prefix):
-        await sources[name].push(event)
-    await asyncio.wait_for(sink.wait_for_rows(prefix_outputs), 600)
-    await asyncio.sleep(0.1)
-    epoch = await job.trigger_checkpoint_async()
+    return prefix
+
+
+def _require_checkpoint_ack(job, epoch: int) -> None:
     completed = job.status()["checkpoint"]["last_completed_epoch"]
     if type(completed) is not int or completed < epoch:
         raise RuntimeError("checkpoint acknowledgement lacks durable publication")
-    if case["scenario"] == "join":
-        _require_static_join_no_left_state(job)
-    return started, epoch, tuple(sink.tables), sink.rows
 
 
 def _checkpoint_prefix_rows(streams, case):
@@ -751,6 +779,17 @@ def _checkpoint_prefix_rows(streams, case):
         else prefix_rows
     )
     return prefix_rows, prefix_outputs
+
+
+async def _recovery_pending_events(sources: dict) -> dict:
+    pending = {}
+    for name, source in sources.items():
+        events = source.events[source.position : -1]
+        while events and not isinstance(events[0], Data):
+            await source.push(events[0])
+            events = events[1:]
+        pending[name] = events
+    return pending
 
 
 async def _run_checkpoint_stream(plan_factory, streams, root, expected_rows, case):
@@ -782,13 +821,7 @@ async def _run_checkpoint_stream(plan_factory, streams, root, expected_rows, cas
             30,
         )
         _require_ready_sources(resumed_sources, resumed_sink)
-        pending = {}
-        for name, source in resumed_sources.items():
-            events = source.events[source.position : -1]
-            while events and not isinstance(events[0], Data):
-                await source.push(events[0])
-                events = events[1:]
-            pending[name] = events
+        pending = await _recovery_pending_events(resumed_sources)
         await _measure_ready(resumed_sources, resumed_sink, pending, resumed)
         table = pa.concat_tables((*prefix_tables, *resumed_sink.tables))
         seconds = (time.perf_counter_ns() - started) / 1e9
@@ -798,7 +831,9 @@ async def _run_checkpoint_stream(plan_factory, streams, root, expected_rows, cas
             else {}
         )
         lookup = (
-            _require_static_join_no_left_state(resumed)
+            await asyncio.wait_for(
+                _wait_static_quote_progress(resumed, expected_rows), 600
+            )
             if case["scenario"] == "join"
             else None
         )

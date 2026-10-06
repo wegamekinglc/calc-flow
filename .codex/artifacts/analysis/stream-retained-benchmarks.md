@@ -111,3 +111,11 @@ scenarios also passed their complete output oracles. Native code was not
 rebuilt. Measurement artifacts retain their original sealed harness revision;
 this helper extraction has functional verification only. Final specialist
 review approved this correction; required CI still gates merge.
+
+The subsequent required coverage run failed the existing ASOF recovery
+pool-cleanup assertion, rather than its line-coverage floor. The approved
+test-only lifecycle correction from PR #367 is also applied here: both original
+and restored reservations are checked after full runtime shutdown, with the
+canonical row/bit and output IPC oracles retained. Its deterministic blocking
+worker fixture preserves exact owner and refund checks. Production code and
+memory budgets are unchanged; the next remote coverage run remains required.

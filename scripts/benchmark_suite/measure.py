@@ -52,26 +52,37 @@ def validate_stream_sample(case: dict, sample: dict) -> None:
     if case.get("backend") != "calc-flow-stream" or "batch_rows" not in case:
         return
     evidence = sample.get("stream_evidence")
+    _validate_stream_dimensions(case, evidence)
+    if case["checkpoint_interval_millis"] is not None:
+        _validate_checkpoint_proof(case, sample, evidence)
+
+
+def _validate_stream_dimensions(case: dict, evidence: object) -> None:
     if not isinstance(evidence, dict) or any(
         key not in evidence or evidence[key] != case[key]
         for key in STREAM_EVIDENCE_FIELDS
     ):
         raise ValueError("stream evidence dimensions differ from the prepared case")
-    if case["checkpoint_interval_millis"] is not None:
-        epochs = evidence.get("nonterminal_epochs")
-        rows = evidence.get("rows_before_checkpoint")
-        if (
-            not isinstance(epochs, list)
-            or not epochs
-            or any(type(epoch) is not int or epoch < 1 for epoch in epochs)
-            or type(rows) is not int
-            or not 0 < rows < case["rows"]
-            or evidence.get("recovery") != "verified"
-            or sample["seconds"] < case["checkpoint_interval_millis"] / 1000
-        ):
-            raise ValueError(
-                "checkpoint evidence lacks durable nonterminal recovery proof"
-            )
+
+
+def _valid_checkpoint_epochs(epochs: object) -> bool:
+    return (
+        isinstance(epochs, list)
+        and bool(epochs)
+        and all(type(epoch) is int and epoch >= 1 for epoch in epochs)
+    )
+
+
+def _validate_checkpoint_proof(case: dict, sample: dict, evidence: dict) -> None:
+    rows = evidence.get("rows_before_checkpoint")
+    if (
+        not _valid_checkpoint_epochs(evidence.get("nonterminal_epochs"))
+        or type(rows) is not int
+        or not 0 < rows < case["rows"]
+        or evidence.get("recovery") != "verified"
+        or sample["seconds"] < case["checkpoint_interval_millis"] / 1000
+    ):
+        raise ValueError("checkpoint evidence lacks durable nonterminal recovery proof")
 
 
 async def _prepare(workers: dict, releases: dict, case: dict) -> dict:

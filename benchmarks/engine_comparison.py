@@ -215,6 +215,54 @@ def sql_query(scenario: str) -> str:
             "SELECT sequence, price * factor AS value "
             "FROM input JOIN dimension USING (symbol)"
         ),
+        "interval_join": " UNION ALL ".join(
+            (
+                "SELECT input.sequence, reference.sequence AS right_sequence, "
+                "input.price * reference.price AS value "
+                "FROM input JOIN reference ON input.symbol = reference.symbol "
+                "AND reference.event_time = input.event_time + INTERVAL '-5 seconds'",
+                "SELECT input.sequence, reference.sequence AS right_sequence, "
+                "input.price * reference.price AS value "
+                "FROM input JOIN reference ON input.symbol = reference.symbol "
+                "AND reference.event_time = input.event_time + INTERVAL '-4 seconds'",
+                "SELECT input.sequence, reference.sequence AS right_sequence, "
+                "input.price * reference.price AS value "
+                "FROM input JOIN reference ON input.symbol = reference.symbol "
+                "AND reference.event_time = input.event_time + INTERVAL '-3 seconds'",
+                "SELECT input.sequence, reference.sequence AS right_sequence, "
+                "input.price * reference.price AS value "
+                "FROM input JOIN reference ON input.symbol = reference.symbol "
+                "AND reference.event_time = input.event_time + INTERVAL '-2 seconds'",
+                "SELECT input.sequence, reference.sequence AS right_sequence, "
+                "input.price * reference.price AS value "
+                "FROM input JOIN reference ON input.symbol = reference.symbol "
+                "AND reference.event_time = input.event_time + INTERVAL '-1 seconds'",
+                "SELECT input.sequence, reference.sequence AS right_sequence, "
+                "input.price * reference.price AS value "
+                "FROM input JOIN reference ON input.symbol = reference.symbol "
+                "AND reference.event_time = input.event_time + INTERVAL '0 seconds'",
+                "SELECT input.sequence, reference.sequence AS right_sequence, "
+                "input.price * reference.price AS value "
+                "FROM input JOIN reference ON input.symbol = reference.symbol "
+                "AND reference.event_time = input.event_time + INTERVAL '1 seconds'",
+                "SELECT input.sequence, reference.sequence AS right_sequence, "
+                "input.price * reference.price AS value "
+                "FROM input JOIN reference ON input.symbol = reference.symbol "
+                "AND reference.event_time = input.event_time + INTERVAL '2 seconds'",
+                "SELECT input.sequence, reference.sequence AS right_sequence, "
+                "input.price * reference.price AS value "
+                "FROM input JOIN reference ON input.symbol = reference.symbol "
+                "AND reference.event_time = input.event_time + INTERVAL '3 seconds'",
+                "SELECT input.sequence, reference.sequence AS right_sequence, "
+                "input.price * reference.price AS value "
+                "FROM input JOIN reference ON input.symbol = reference.symbol "
+                "AND reference.event_time = input.event_time + INTERVAL '4 seconds'",
+                "SELECT input.sequence, reference.sequence AS right_sequence, "
+                "input.price * reference.price AS value "
+                "FROM input JOIN reference ON input.symbol = reference.symbol "
+                "AND reference.event_time = input.event_time + INTERVAL '5 seconds'",
+            )
+        ),
         "sma20": (
             "SELECT event_time, sequence, symbol, price, "
             "CASE WHEN COUNT(price) OVER slow = 20 "
@@ -232,14 +280,6 @@ def sql_query(scenario: str) -> str:
             "ROWS BETWEEN 4 PRECEDING AND CURRENT ROW)"
         ),
     }
-    if scenario == "interval_join":
-        return " UNION ALL ".join(
-            "SELECT input.sequence, reference.sequence AS right_sequence, "
-            "input.price * reference.price AS value "
-            "FROM input JOIN reference ON input.symbol = reference.symbol "
-            f"AND reference.event_time = input.event_time + INTERVAL '{offset} seconds'"
-            for offset in range(-5, 6)
-        )
     try:
         return queries[scenario]
     except KeyError as error:
