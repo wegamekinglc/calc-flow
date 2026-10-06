@@ -29,7 +29,24 @@ and checkpoint layout/accounting remain intact.
   whitespace and generated-contract checks passed. Final specialist review
   approved the source and evidence artifact.
 
-The 1,024-to-four visit reduction is a complexity result, not a measured
-throughput improvement. Interleaved chunks can require a binary search per
-short run. Sealed paired throughput measurements must cover that case before
-claiming a general speedup. Full CI and workspace coverage remain unverified.
+## Interleaved-run correction
+
+The first sealed implementation at `c1ab9b48` regressed on an interleaved
+64k-row diagnostic: baseline P50 37.807 ms versus 50.840 ms (+34.47%). Two
+paired rounds produced intervals of [+22.42%, +44.90%] and [+36.39%, +45.62%],
+both exceeding the +5% regression threshold. The original seals and samples
+are retained under `target/issue363-asof-runs-perf/overlap/`.
+
+A focused comparison-work test reproduced excessive searching of the whole
+remaining chunk even when the next run held only one row. The iterator now
+checks the adjacent row first, then uses exponential expansion before bounded
+binary search. Its work follows the emitted run length rather than the full
+remaining suffix. Independent row oracles additionally cover overlapping
+ranges of varied lengths. All eleven focused left-state tests passed, along
+with scoped production Clippy, formatting and whitespace checks. Final
+specialist review approved this correction.
+
+The 1,024-to-four heap-visit reduction remains a complexity result. Corrected
+sealed paired throughput measurements must pass the same interleaved fixture
+before any general speedup claim. Full CI and workspace coverage remain
+unverified.

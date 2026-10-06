@@ -1000,6 +1000,11 @@ struct Cursor<'a> {
     chunk: &'a LeftChunk,
     ordinal: usize,
 }
+
+#[cfg(test)]
+thread_local! {
+    static CHUNK_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 impl PartialEq for Cursor<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.cmp(other).is_eq()
@@ -1013,6 +1018,8 @@ impl PartialOrd for Cursor<'_> {
 }
 impl Ord for Cursor<'_> {
     fn cmp(&self, other: &Self) -> Ordering {
+        #[cfg(test)]
+        CHUNK_COMPARISONS.with(|comparisons| comparisons.set(comparisons.get() + 1));
         let left = &self.chunk.data;
         let right = &other.chunk.data;
         left.times[self.ordinal]
@@ -1057,11 +1064,21 @@ impl<'a> ChunkIter<'a> {
             return len;
         };
         let at = |ordinal| Cursor { ordinal, ..cursor };
+        let mut start = cursor.ordinal + 1;
+        if start == len || at(start) >= *next {
+            return start;
+        }
         if at(len - 1) < *next {
             return len;
         }
-        let mut start = cursor.ordinal + 1;
-        let mut end = len;
+        start += 1;
+        let mut end = start;
+        let mut stride = 1_usize;
+        while end < len && at(end) < *next {
+            start = end + 1;
+            stride = stride.saturating_mul(2);
+            end = end.saturating_add(stride).min(len);
+        }
         while start < end {
             let middle = start + (end - start) / 2;
             if at(middle) < *next {
@@ -1256,7 +1273,7 @@ mod tests {
     }
 
     #[test]
-    fn overlapping_chunk_runs_preserve_canonical_sequence_order() {
+    fn overlapping_chunk_runs_preserve_order_with_bounded_comparisons() {
         let mut state = super::super::State::default();
         let mut expected = Vec::new();
         for parity in [1_i64, 0] {
@@ -1270,12 +1287,44 @@ mod tests {
             state.left.install(chunks, &mut state.batches);
         }
         expected.sort_unstable();
+        CHUNK_COMPARISONS.with(|comparisons| comparisons.set(0));
         let actual = state
             .left
             .iter()
             .map(|(order, _)| (*order.0, order.1.clone(), order.2.into_owned()))
             .collect::<Vec<_>>();
         assert_eq!(actual, expected);
+        let comparisons = CHUNK_COMPARISONS.with(std::cell::Cell::get);
+        assert!(
+            comparisons <= expected.len() * 5,
+            "short runs repeatedly searched the entire remaining chunk: {comparisons}"
+        );
+    }
+
+    #[test]
+    fn galloping_chunk_runs_match_the_row_oracle_at_varied_overlap_lengths() {
+        for width in [2, 3, 7, 31] {
+            let mut state = super::super::State::default();
+            let mut expected = Vec::new();
+            for partition in [2_i64, 0, 1] {
+                let sequences = (0..257_i64)
+                    .filter(|row| (row / width) % 3 == partition)
+                    .collect::<Vec<_>>();
+                let key = Arc::new(StringArray::from(vec!["A"; sequences.len()])) as ArrayRef;
+                let sequence = Arc::new(Int64Array::from(sequences)) as ArrayRef;
+                let (_, side, rows) = fixture(key, sequence, u64::try_from(partition).unwrap());
+                expected.extend(rows.iter().map(|(order, _)| order.clone()));
+                let chunks = prepare_owned(&rows, &side, "asof").unwrap();
+                state.left.install(chunks, &mut state.batches);
+            }
+            expected.sort_unstable();
+            let actual = state
+                .left
+                .iter()
+                .map(|(order, _)| (*order.0, order.1.clone(), order.2.into_owned()))
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected, "overlap width {width}");
+        }
     }
 
     #[test]
