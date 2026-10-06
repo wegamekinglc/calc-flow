@@ -120,7 +120,7 @@ def test_polars_single_thread_reference_matches_oracles_in_a_fresh_process(
     result = _fresh_polars_samples(tmp_path, rows, site, source)
     assert result["pid"] != os.getpid()
     assert result["threads"] == 1
-    assert result["samples"] == [True] * 7
+    assert result["samples"] == [True] * 8
 
 
 def test_single_thread_reference_rejects_a_process_with_a_larger_pool(
@@ -245,7 +245,9 @@ def _static_join_status_measurement(left_counter, monkeypatch):
         "left": (object(),),
         "right": (object(), Watermark(engine_stream.BASE)),
     }
-    result = asyncio.run(engine_stream._measure_ready(sources, sink, streams, job))
+    result = asyncio.run(
+        engine_stream._measure_ready(sources, sink, streams, job, static_join=True)
+    )
     return result, job.reads
 
 
@@ -297,18 +299,19 @@ def test_asof_waits_for_delayed_chunk_watermarks(binding, monkeypatch, tmp_path)
 
 
 def test_asof_small_batches_complete_without_reading_job_status(monkeypatch, tmp_path):
-    from benchmarks import engine_stream
     from calc_flow import StreamingJob
 
     def status(_self):
         raise AssertionError("ASOF progress must await sink delivery")
 
-    monkeypatch.setattr(engine_stream, "BATCH_ROWS", 1_024)
     monkeypatch.setattr(StreamingJob, "status", status)
     case = next(
         case
         for case in engine_cases(4_097)
-        if case["backend"] == "calc-flow-stream" and case["scenario"] == "asof_join"
+        if case["backend"] == "calc-flow-stream"
+        and case["scenario"] == "asof_join"
+        and case.get("batch_rows") == 1024
+        and case.get("checkpoint_interval_millis") is None
     )
     runner = EngineCase(case, tmp_path)
     try:

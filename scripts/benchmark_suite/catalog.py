@@ -7,12 +7,21 @@ from pathlib import Path
 
 ROW_SCALES = tuple(10**power for power in range(1, 8))
 LEGACY_SCALES = ("overhead", "small", "standard", "nightly")
-SQL_CASES = ("projection", "filter", "group_by", "join", "sma20", "dual_sma")
+SQL_CASES = (
+    "projection",
+    "filter",
+    "group_by",
+    "join",
+    "interval_join",
+    "sma20",
+    "dual_sma",
+)
 POLARS_CASES = (
     "projection",
     "filter",
     "group_by",
     "join",
+    "interval_join",
     "sma20",
     "dual_sma",
     "asof_join",
@@ -27,6 +36,7 @@ STREAM_CASES = (
     "filter",
     "group_by",
     "join",
+    "interval_join",
     "sma20",
     "dual_sma",
     "average",
@@ -66,6 +76,82 @@ BATCH_ROWS = 64_000
 CONTRACT = "calc-flow-benchmark-suite-v3"
 STREAM_SCOPE = "ready-enqueue-to-arrow/bounded-feeds-v6"
 FINANCE_SCOPE = "pandas-transform-to-numpy"
+INTERVAL_MAX_ROWS = 1_000_000
+INTERVAL_SCOPE = "ready-enqueue-to-arrow/retained-interval-v1"
+SMALL_BATCH_ROWS = 1024
+SMALL_BATCH_SCENARIOS = ("projection", "join", "interval_join", "asof_join")
+SMALL_BATCH_SCOPE = "ready-enqueue-to-arrow/exact-cursor-batch-1024-v1"
+CHECKPOINT_ROW_SCALES = ("100000", "1000000")
+CHECKPOINT_SCOPE = "ready-enqueue-checkpoint-100ms-ack-recover-to-arrow-v1"
+STREAM_EVIDENCE_FIELDS = (
+    "batch_rows",
+    "checkpoint_interval_millis",
+    "replay_mode",
+    "workload",
+    "scope",
+    "source_mode",
+    "source_bindings",
+)
+
+
+def stream_dimensions(scenario: str, batch_rows: int, checkpoint: bool) -> dict:
+    """Describe a ready throughput or checkpoint/recovery lifecycle case."""
+
+    return {
+        "batch_rows": batch_rows,
+        "checkpoint_interval_millis": 100 if checkpoint else None,
+        "replay_mode": "exact-cursor",
+        "workload": "checkpoint-duration" if checkpoint else "throughput",
+        "scope": CHECKPOINT_SCOPE
+        if checkpoint
+        else INTERVAL_SCOPE
+        if scenario == "interval_join" and batch_rows == BATCH_ROWS
+        else SMALL_BATCH_SCOPE,
+        "source_mode": "immutable-event-log-v1",
+        "source_bindings": ["left", "right"]
+        if scenario in ("join", "interval_join")
+        else ["quotes.input", "reference.input"]
+        if scenario == "asof_join"
+        else ["input"],
+    }
+
+
+def stream_variant_cases(rows: int, *, checkpoint_duration: bool = False) -> list[dict]:
+    """Return small-batch cases and the explicitly paced checkpoint matrix."""
+
+    cases = []
+    for scenario in SMALL_BATCH_SCENARIOS:
+        if scenario == "interval_join" and rows > INTERVAL_MAX_ROWS:
+            continue
+        for batch_rows, checkpoint in _stream_variant_dimensions(
+            rows, checkpoint_duration
+        ):
+            cases.append(_stream_variant_case(rows, scenario, batch_rows, checkpoint))
+    return cases
+
+
+def _stream_variant_dimensions(rows: int, checkpoint_duration: bool) -> tuple:
+    small = ((SMALL_BATCH_ROWS, False),)
+    if str(rows) in CHECKPOINT_ROW_SCALES or checkpoint_duration:
+        return (*small, (BATCH_ROWS, True), (SMALL_BATCH_ROWS, True))
+    return small
+
+
+def _stream_variant_case(
+    rows: int, scenario: str, batch_rows: int, checkpoint: bool
+) -> dict:
+    suffix = f"batch-{batch_rows}" + (
+        "/checkpoint-100ms-duration-recovery" if checkpoint else ""
+    )
+    return {
+        "id": f"engines/{rows}/calc-flow-stream/{scenario}/{suffix}",
+        "family": "engines",
+        "backend": "calc-flow-stream",
+        "scenario": scenario,
+        "rows": rows,
+        "variant": "checkpoint-recovery" if checkpoint else "small-batch",
+        **stream_dimensions(scenario, batch_rows, checkpoint),
+    }
 
 
 def polars_thread_count(case: dict) -> int:
@@ -110,7 +196,7 @@ def _measured_stream_case(
 
 def engine_cases(rows: int | None = None) -> list[dict]:
     sizes = ROW_SCALES if rows is None else (rows,)
-    return [
+    cases = [
         {
             "id": f"engines/{size}/{backend}/{scenario}",
             "family": "engines",
@@ -128,6 +214,7 @@ def engine_cases(rows: int | None = None) -> list[dict]:
         for size in sizes
         for backend, scenarios in CAPABILITIES.items()
         for scenario in scenarios
+        if scenario != "interval_join" or size <= INTERVAL_MAX_ROWS
         if _measured_stream_case(
             backend,
             scenario,
@@ -141,6 +228,16 @@ def engine_cases(rows: int | None = None) -> list[dict]:
             ),
         )
     ]
+    for case in cases:
+        if case["scenario"] == "interval_join":
+            case["reference_algorithm"] = (
+                "native-interval-v1"
+                if case["backend"] == "calc-flow-stream"
+                else "integer-second-offset-equality-v1"
+            )
+            if case["backend"] == "calc-flow-stream":
+                case.update(stream_dimensions("interval_join", BATCH_ROWS, False))
+    return [*cases, *(case for size in sizes for case in stream_variant_cases(size))]
 
 
 def warm_cases(history: int) -> list[dict]:
@@ -368,7 +465,7 @@ def _baseline_engine_columns(constants: dict[str, _CatalogConstant]) -> tuple:
     stream = constants.get("STREAM_CASES", rolling)
     scope = constants.get("STREAM_SCOPE")
     if isinstance(scope, str) and scope != STREAM_SCOPE:
-        stream = ()
+        stream = tuple(scenario for scenario in stream if scenario == "interval_join")
     return (
         ("calc-flow-sql", sql),
         ("datafusion", sql),
@@ -380,23 +477,72 @@ def _baseline_engine_columns(constants: dict[str, _CatalogConstant]) -> tuple:
     )
 
 
-def _baseline_engine_ids(constants: dict[str, _CatalogConstant]) -> frozenset[str]:
+def _baseline_interval_matches(constants: dict, backend: str, scenario: str, rows: int):
+    if scenario != "interval_join":
+        return True
+    if rows > constants.get("INTERVAL_MAX_ROWS", INTERVAL_MAX_ROWS):
+        return False
+    return (
+        backend != "calc-flow-stream"
+        or constants.get("INTERVAL_SCOPE") == INTERVAL_SCOPE
+    )
+
+
+def _baseline_standard_ids(constants: dict[str, _CatalogConstant]) -> set[str]:
     caps = {
         "asof_join": _baseline_cap(constants, "STREAM_ASOF_MAX_ROWS"),
         "window_sum": _baseline_cap(constants, "STREAM_WINDOW_MAX_ROWS"),
     }
     join_cap = _baseline_cap(constants, "STREAM_JOIN_MAX_ROWS")
-    return frozenset(
+    return {
         f"engines/{rows}/{backend}/{scenario}"
         for rows in constants["ROW_SCALES"]
         for backend, scenarios in _baseline_engine_columns(constants)
         for scenario in scenarios
+        if _baseline_interval_matches(constants, backend, scenario, int(rows))
         if _measured_stream_case(
             backend,
             scenario,
             int(rows),
             caps.get(scenario, join_cap),
         )
+    }
+
+
+def _baseline_variant_dimensions_match(constants: dict, case: dict) -> bool:
+    if case["scenario"] not in constants.get("SMALL_BATCH_SCENARIOS", ()):
+        return False
+    declared_rows = constants.get(
+        "SMALL_BATCH_ROWS" if case["batch_rows"] == SMALL_BATCH_ROWS else "BATCH_ROWS"
+    )
+    if declared_rows != case["batch_rows"]:
+        return False
+    return case["scenario"] != "interval_join" or case["rows"] <= constants.get(
+        "INTERVAL_MAX_ROWS", 0
+    )
+
+
+def _baseline_variant_scope_matches(constants: dict, case: dict) -> bool:
+    if case["checkpoint_interval_millis"] is None:
+        return constants.get("SMALL_BATCH_SCOPE") == SMALL_BATCH_SCOPE
+    return constants.get("CHECKPOINT_SCOPE") == CHECKPOINT_SCOPE and str(
+        case["rows"]
+    ) in constants.get("CHECKPOINT_ROW_SCALES", ())
+
+
+def _baseline_variant_ids(constants: dict[str, _CatalogConstant]) -> set[str]:
+    return {
+        case["id"]
+        for rows in constants["ROW_SCALES"]
+        for case in stream_variant_cases(int(rows))
+        if _baseline_variant_dimensions_match(constants, case)
+        if _baseline_variant_scope_matches(constants, case)
+    }
+
+
+def _baseline_engine_ids(constants: dict[str, _CatalogConstant]) -> frozenset[str]:
+    return frozenset(
+        _baseline_standard_ids(constants) | _baseline_variant_ids(constants)
     )
 
 

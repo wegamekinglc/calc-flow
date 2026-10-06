@@ -16,6 +16,7 @@ import pyarrow as pa
 from benchmarks.engine_stream import (
     dimension_events,
     run_stream,
+    run_variant_stream,
     stream_dimension,
     stream_events,
     stream_plan,
@@ -38,10 +39,10 @@ class Workload:
     entities: int
 
 
-def workload(count: int) -> Workload:
+def workload(count: int, *, scenario: str | None = None) -> Workload:
     if type(count) is not int or count <= 0:
         raise ValueError("rows must be a positive integer")
-    entities = min(64, max(1, count // 40))
+    entities = 64 if scenario == "interval_join" else min(64, max(1, count // 40))
     table = _segment(0, count, entities)
     sequence = table["sequence"].to_numpy()
     # Exact binary fractions keep long-running performance fixtures separate
@@ -123,10 +124,46 @@ def _window_sum_expected(data: Workload) -> pa.Table:
     )
 
 
+def _interval_expected(data: Workload) -> pa.Table:
+    table = data.table
+    prices = table["price"].to_numpy()
+    sequence = table["sequence"].to_numpy()
+    sequence_order = np.argsort(sequence)
+    chunks = []
+    for offset in range(-5, 6):
+        right = sequence.astype(np.int64) + offset * data.entities
+        mask = (right >= 0) & (right < table.num_rows)
+        positions = np.searchsorted(sequence[sequence_order], right[mask])
+        chunks.append(
+            pa.table(
+                {
+                    "sequence": sequence[mask],
+                    "right_sequence": right[mask].astype(np.uint64),
+                    "value": prices[mask] * prices[sequence_order[positions]],
+                }
+            )
+        )
+    return pa.concat_tables(chunks)
+
+
+def _group_by_expected(data: Workload) -> pa.Table:
+    prices = data.table["price"].to_numpy()
+    sums = [
+        float(np.sum(prices[index :: data.entities])) for index in range(data.entities)
+    ]
+    return pa.table({"symbol": data.dimension["symbol"], "value": sums})
+
+
 def expected_output(data: Workload, scenario: str) -> pa.Table:
     table = data.table
     prices = table["price"].to_numpy()
     sequence = table["sequence"].to_numpy()
+    table_oracles = {
+        "interval_join": _interval_expected,
+        "window_sum": _window_sum_expected,
+    }
+    if scenario in table_oracles:
+        return table_oracles[scenario](data)
     if scenario in ("sma20", "dual_sma"):
         return table.append_column("value", pa.array(_rolling_expected(data, scenario)))
     if scenario == "average":
@@ -153,16 +190,10 @@ def expected_output(data: Workload, scenario: str) -> pa.Table:
                 "value": _cross_section_mean(prices, data.entities),
             }
         )
-    if scenario == "window_sum":
-        return _window_sum_expected(data)
     if scenario == "asof_join":
         return pa.table({"sequence": table["sequence"], "value": prices})
     if scenario == "group_by":
-        sums = [
-            float(np.sum(prices[index :: data.entities]))
-            for index in range(data.entities)
-        ]
-        return pa.table({"symbol": data.dimension["symbol"], "value": sums})
+        return _group_by_expected(data)
     if scenario == "filter":
         mask = sequence % 4 == 0
         return pa.table({"sequence": sequence[mask], "value": prices[mask]})
@@ -183,6 +214,54 @@ def sql_query(scenario: str) -> str:
         "join": (
             "SELECT sequence, price * factor AS value "
             "FROM input JOIN dimension USING (symbol)"
+        ),
+        "interval_join": " UNION ALL ".join(
+            (
+                "SELECT input.sequence, reference.sequence AS right_sequence, "
+                "input.price * reference.price AS value "
+                "FROM input JOIN reference ON input.symbol = reference.symbol "
+                "AND reference.event_time = input.event_time + INTERVAL '-5 seconds'",
+                "SELECT input.sequence, reference.sequence AS right_sequence, "
+                "input.price * reference.price AS value "
+                "FROM input JOIN reference ON input.symbol = reference.symbol "
+                "AND reference.event_time = input.event_time + INTERVAL '-4 seconds'",
+                "SELECT input.sequence, reference.sequence AS right_sequence, "
+                "input.price * reference.price AS value "
+                "FROM input JOIN reference ON input.symbol = reference.symbol "
+                "AND reference.event_time = input.event_time + INTERVAL '-3 seconds'",
+                "SELECT input.sequence, reference.sequence AS right_sequence, "
+                "input.price * reference.price AS value "
+                "FROM input JOIN reference ON input.symbol = reference.symbol "
+                "AND reference.event_time = input.event_time + INTERVAL '-2 seconds'",
+                "SELECT input.sequence, reference.sequence AS right_sequence, "
+                "input.price * reference.price AS value "
+                "FROM input JOIN reference ON input.symbol = reference.symbol "
+                "AND reference.event_time = input.event_time + INTERVAL '-1 seconds'",
+                "SELECT input.sequence, reference.sequence AS right_sequence, "
+                "input.price * reference.price AS value "
+                "FROM input JOIN reference ON input.symbol = reference.symbol "
+                "AND reference.event_time = input.event_time + INTERVAL '0 seconds'",
+                "SELECT input.sequence, reference.sequence AS right_sequence, "
+                "input.price * reference.price AS value "
+                "FROM input JOIN reference ON input.symbol = reference.symbol "
+                "AND reference.event_time = input.event_time + INTERVAL '1 seconds'",
+                "SELECT input.sequence, reference.sequence AS right_sequence, "
+                "input.price * reference.price AS value "
+                "FROM input JOIN reference ON input.symbol = reference.symbol "
+                "AND reference.event_time = input.event_time + INTERVAL '2 seconds'",
+                "SELECT input.sequence, reference.sequence AS right_sequence, "
+                "input.price * reference.price AS value "
+                "FROM input JOIN reference ON input.symbol = reference.symbol "
+                "AND reference.event_time = input.event_time + INTERVAL '3 seconds'",
+                "SELECT input.sequence, reference.sequence AS right_sequence, "
+                "input.price * reference.price AS value "
+                "FROM input JOIN reference ON input.symbol = reference.symbol "
+                "AND reference.event_time = input.event_time + INTERVAL '4 seconds'",
+                "SELECT input.sequence, reference.sequence AS right_sequence, "
+                "input.price * reference.price AS value "
+                "FROM input JOIN reference ON input.symbol = reference.symbol "
+                "AND reference.event_time = input.event_time + INTERVAL '5 seconds'",
+            )
         ),
         "sma20": (
             "SELECT event_time, sequence, symbol, price, "
@@ -208,7 +287,13 @@ def sql_query(scenario: str) -> str:
 
 
 def _calc_flow(data: Workload, scenario: str):
-    aliases = ("input", "dimension") if scenario == "join" else ("input",)
+    aliases = (
+        ("input", "dimension")
+        if scenario == "join"
+        else ("input", "reference")
+        if scenario == "interval_join"
+        else ("input",)
+    )
     plan = (
         PipelineBuilder("suite-sql")
         .with_datafusion_config(target_partitions=THREADS, batch_size=8192)
@@ -218,6 +303,8 @@ def _calc_flow(data: Workload, scenario: str):
     inputs = {"input": Batch.from_pyarrow(data.table)}
     if scenario == "join":
         inputs["dimension"] = Batch.from_pyarrow(data.dimension)
+    elif scenario == "interval_join":
+        inputs["reference"] = inputs["input"]
     return lambda: plan.execute(inputs).outputs["output"].to_pyarrow()
 
 
@@ -235,6 +322,8 @@ def _datafusion(data: Workload, scenario: str):
         context.register_record_batches("input", [batches])
         if scenario == "join":
             context.register_record_batches("dimension", [dimension])
+        elif scenario == "interval_join":
+            context.register_record_batches("reference", [batches])
         return pa.Table.from_batches(context.sql(query).collect())
 
     return execute
@@ -256,6 +345,27 @@ def _polars_plan(data: Workload, scenario: str):
     if scenario == "join":
         return frame.join(pl.from_arrow(data.dimension).lazy(), on="symbol").select(
             "sequence", (value * pl.col("factor")).alias("value")
+        )
+    if scenario == "interval_join":
+        return pl.concat(
+            [
+                frame.join(
+                    frame.select(
+                        "symbol",
+                        (pl.col("event_time") - pl.duration(seconds=offset)).alias(
+                            "event_time"
+                        ),
+                        pl.col("sequence").alias("right_sequence"),
+                        pl.col("price").alias("right_price"),
+                    ),
+                    on=["symbol", "event_time"],
+                ).select(
+                    "sequence",
+                    "right_sequence",
+                    (value * pl.col("right_price")).alias("value"),
+                )
+                for offset in range(-5, 6)
+            ]
         )
     if scenario == "asof_join":
         reference = frame.select("symbol", "event_time", pl.col("price").alias("value"))
@@ -343,7 +453,7 @@ class EngineCase:
             if pl.thread_pool_size() != 1:
                 raise ValueError("Polars single-thread reference requires one thread")
         self.case, self.root, self.count = case, root, 0
-        self.data = workload(case["rows"])
+        self.data = workload(case["rows"], scenario=scenario)
         self.expected = expected_output(self.data, scenario)
         self.loop = None
         self.finance = None
@@ -352,6 +462,8 @@ class EngineCase:
                 self.data.table,
                 self.data.entities,
                 close_windows=scenario == "window_sum",
+                batch_rows=case.get("batch_rows", BATCH_ROWS),
+                checkpoint_split=case.get("checkpoint_interval_millis") is not None,
             )
             self.streams = (
                 {
@@ -362,7 +474,9 @@ class EngineCase:
                 }
                 if scenario == "join"
                 else (
-                    {"reference.input": self.events, "quotes.input": self.events}
+                    {"left": self.events, "right": self.events}
+                    if scenario == "interval_join"
+                    else {"reference.input": self.events, "quotes.input": self.events}
                     if scenario == "asof_join"
                     else {"input": self.events}
                 )
@@ -396,6 +510,21 @@ class EngineCase:
         self.count += 1
         # Each single-use plan starts with empty rolling state. Compilation and
         # runner startup both precede the adapter's ready-to-Arrow timer.
+        if "batch_rows" in self.case:
+            return self.loop.run_until_complete(
+                run_variant_stream(
+                    lambda: stream_plan(
+                        self.case["scenario"],
+                        self.data.table,
+                        self.data.dimension,
+                        batch_rows=self.case["batch_rows"],
+                    ),
+                    self.streams,
+                    self.root / f"sample-{self.count}",
+                    self.expected.num_rows,
+                    case=self.case,
+                )
+            )
         plan = stream_plan(self.case["scenario"], self.data.table, self.data.dimension)
         return self.loop.run_until_complete(
             run_stream(
@@ -403,6 +532,7 @@ class EngineCase:
                 self.streams,
                 self.root / f"sample-{self.count}",
                 self.expected.num_rows,
+                static_join=self.case["scenario"] == "join",
             )
         )
 
@@ -416,6 +546,8 @@ class EngineCase:
             if self.case["scenario"] == "window_sum"
             else "symbol"
             if self.case["scenario"] == "group_by"
+            else [("sequence", "ascending"), ("right_sequence", "ascending")]
+            if self.case["scenario"] == "interval_join"
             else "sequence"
         )
         expected = self.expected.sort_by(key)
@@ -451,12 +583,22 @@ class EngineCase:
                 "finance_python": self.finance.identity,
             }
         if self.loop is not None:
-            result, seconds = self._stream()
+            streamed = self._stream()
+            result, seconds = streamed[:2]
+            evidence = streamed[2] if len(streamed) == 3 else None
         else:
             started = time.perf_counter_ns()
             result = self.calculate()
             seconds = (time.perf_counter_ns() - started) / 1e9
-        return {"seconds": seconds, "correctness": self.validate(result)}
+        return {
+            "seconds": seconds,
+            "correctness": self.validate(result),
+            **(
+                {"stream_evidence": evidence}
+                if self.loop is not None and evidence is not None
+                else {}
+            ),
+        }
 
     def finish(self) -> dict:
         return {"state": "completed"}

@@ -103,7 +103,7 @@ impl StreamAsofJoinOperator {
             "prefix inventory must match committed gauge"
         );
         drop(output.workspace);
-        Ok(())
+        self.retirement.wait(context).await
     }
 
     async fn prepare_prefix_checkpoint(

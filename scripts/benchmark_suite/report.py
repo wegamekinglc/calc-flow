@@ -8,6 +8,8 @@ from collections import Counter
 
 from scripts.benchmark_suite.catalog import (
     CAPABILITIES,
+    INTERVAL_MAX_ROWS,
+    INTERVAL_SCOPE,
     REPORT_CASES,
     STREAM_ASOF_MAX_ROWS,
     STREAM_JOIN_MAX_ROWS,
@@ -274,6 +276,44 @@ def render_report(cases: list[dict], errors: list[str]) -> str:
                 cross_library,
             ]
         )
+    for variant, title in (
+        ("small-batch", "Small-batch native variants"),
+        ("checkpoint-recovery", "Checkpoint lifecycle variants"),
+    ):
+        selected = [case for case in cases if case.get("variant") == variant]
+        if selected:
+            rows = [
+                [
+                    case["rows"],
+                    case["scenario"],
+                    case["batch_rows"],
+                    _head_p50_cell(case),
+                    case["scope"],
+                ]
+                for case in selected
+            ]
+            parts.extend(
+                [
+                    "",
+                    f"## {title}",
+                    "",
+                    (
+                        "Checkpoint lifecycle timing includes its declared 100 ms "
+                        "delay, durable epoch acknowledgement, cancellation, "
+                        "manifest recovery and runner restart. "
+                        "It is separate from throughput timing."
+                    )
+                    if variant == "checkpoint-recovery"
+                    else (
+                        "Ready native execution with 1,024-row batches "
+                        "and exact-cursor sources."
+                    ),
+                    "",
+                    table(
+                        ["Rows", "Scenario", "Batch rows", "Head P50 ms", "Scope"], rows
+                    ),
+                ]
+            )
     if failures:
         parts.extend(
             [
@@ -321,21 +361,34 @@ def validate_metric(case: dict) -> None:
             raise ValueError("invalid allocation metric")
 
 
-def _reference_cell(case: dict | None) -> str:
-    if case is None:
-        return "missing"
+def _head_p50_cell(case: dict) -> str:
     if case["status"] != "ok":
         return "error"
-    if case.get("backend") == "calc-flow-stream" and case.get("scope") != STREAM_SCOPE:
-        return "invalid scope"
     try:
         return _milliseconds(comparison(case)["head_p50"])
     except (KeyError, TypeError, ValueError):
         return "invalid"
 
 
+def _reference_cell(case: dict | None) -> str:
+    if case is None:
+        return "missing"
+    if (
+        case["status"] == "ok"
+        and case.get("backend") == "calc-flow-stream"
+        and case.get("scope")
+        != (INTERVAL_SCOPE if case.get("scenario") == "interval_join" else STREAM_SCOPE)
+    ):
+        return "invalid scope"
+    return _head_p50_cell(case)
+
+
 def _cross_library_table(cases: list[dict]) -> str:
-    selected = [case for case in cases if case.get("family") == "engines"]
+    selected = [
+        case
+        for case in cases
+        if case.get("family") == "engines" and not case.get("variant")
+    ]
     if not selected:
         return ""
     index = {
@@ -379,8 +432,11 @@ def _cross_library_row(size: int, scenario: str, index: dict) -> list[object]:
             "asof_join": STREAM_ASOF_MAX_ROWS,
             "window_sum": STREAM_WINDOW_MAX_ROWS,
         }.get(scenario)
-        if scenario not in CAPABILITIES[backend] or (
-            backend == "calc-flow-stream" and cap is not None and size > cap
+        if (
+            scenario not in CAPABILITIES[backend]
+            or scenario == "interval_join"
+            and size > INTERVAL_MAX_ROWS
+            or (backend == "calc-flow-stream" and cap is not None and size > cap)
         ):
             return "unsupported"
         return _reference_cell(index.get((size, scenario, backend)))
