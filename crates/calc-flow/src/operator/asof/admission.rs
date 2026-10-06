@@ -782,11 +782,11 @@ impl Admission {
                     .collect::<Vec<_>>();
                 for (identity, payload) in self.rows.drain(..) {
                     let row = payload_refs[payload.batch_index].with_row(payload.row);
-                    state
-                        .right
-                        .update_admitted(handles[payload.key_index as usize], |bucket| {
-                            bucket.insert_admitted((identity.0, identity.2), row);
-                        });
+                    state.right.insert_reserved(
+                        handles[payload.key_index as usize],
+                        (identity.0, identity.2),
+                        row,
+                    );
                 }
             }
             for (key, _) in self.right_capacities.drain(..) {
@@ -1065,6 +1065,7 @@ mod identity_tests {
             )
             .unwrap();
             state::take_key_install_lookups();
+            state::take_admission_accounting_visits();
             operator
                 .process_data("right", batch, &context, &mut output)
                 .await
@@ -1072,6 +1073,21 @@ mod identity_tests {
             assert!(
                 state::take_key_install_lookups() <= 2,
                 "right installation must resolve a key per bucket, not per row"
+            );
+            let accounting = state::take_admission_accounting_visits();
+            assert!(
+                accounting <= 2,
+                "right allocation accounting must be per bucket: {accounting}"
+            );
+            assert_eq!(
+                operator.state.right.metadata_bytes(),
+                operator.state.right.container_bytes()
+                    + operator
+                        .state
+                        .right
+                        .values()
+                        .map(state::RightBucket::metadata_bytes)
+                        .sum::<u64>()
             );
         }
         operator.prepare_checkpoint_async(&context).await.unwrap();
