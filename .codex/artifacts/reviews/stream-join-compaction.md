@@ -123,3 +123,113 @@ are unchanged.
 or documentation finding remains. Performance measurement and required CI
 gates remain handoff work; this local specialist approval is not a green-CI
 or merge-ready claim.
+
+## PR #371 Follow-up Source Review: Compaction complexity
+
+**Author:** Cheng Li | **Branch:** `feature/stream-join-compaction-main` → `main` | **Files:** 2
+
+**Delta base:** `f78528873f2b6a5f54287cea2805ee5278253c02`.
+**Reviewed source seal:** `ae26a5552303eb9223fdaee1b8a595faa582d456`.
+**Source tree:** `68b7e7a7b9bf9c6cb64a6bfe4f819dae7a0ede6f`.
+
+This addendum reviews only the final complexity-refactor delta and its
+verification evidence. The original source review above remains the basis
+for unchanged implementation and passing Join/gather/property checks.
+The parent owns updating the PR and its remote CI snapshot; no remote action
+was performed by this reviewer.
+
+### Summary
+
+Codacy reported complexity 13 for `BaseWork::run` and 15 for
+`prepare_compaction`, against the limit of 8. The refactor extracts test-gate
+waiting, side encoding, workspace reservation, owned work construction,
+admission error projection and synchronous base installation. Lizard now
+reports 6 and 4 for those entry points; the maximum helper is 8, with no
+suppression or threshold change.
+
+### Build and Test Results
+
+- Rust: **Passed scoped author checks**: 14 compaction tests, the one frozen
+  V1 fixture test, core lib/tests Clippy with `-D warnings`, fmt, Lizard,
+  generated-contract and whitespace checks.
+- Python: **Not touched**; not run.
+- Studio backend: **Not touched**; not run.
+- Studio frontend: **Not touched**; not run.
+- New failures: None in final checks. An initial helper signature needed
+  `&mut self` for the existing lazy runtime initialization; the compile
+  correction is recorded separately from behavioral RED evidence.
+- Regressions: None identified in this delta or its scoped checks.
+
+Author commands used the handed-off repository root target, two build jobs
+and the existing debug configuration:
+
+```bash
+cargo test --locked -p calc-flow --lib \
+  operator::join::tests::checkpoint_compaction_tests:: -- --test-threads=1
+cargo test --locked -p calc-flow --lib \
+  frozen_v1_checkpoint_fixture_preserves_wire_bytes_and_continuation \
+  -- --test-threads=1
+cargo clippy --locked -p calc-flow --lib --tests -- -D warnings
+lizard -l rust -C 8 -w crates/calc-flow/src/operator/join/checkpoint_compaction.rs
+cargo fmt --all --check
+git diff --check
+```
+
+The compaction tests returned exit 0 in author session `27455`; lib/tests
+Clippy returned exit 0 in session `67574`. The frozen fixture and Lizard also
+returned exit 0. The author confirmed all owned native processes exited and
+returned the shared cache. The reviewer performed read-only source/evidence
+and diff inspection; no native build, tests or timing were run. Required
+remote CI/Codacy, cross-platform and coverage results are separate gates.
+The unchanged 57/26/4 passing suites were not repeated.
+
+### Blocking Issues
+
+None. The final refactor preserves every fallible operation and await in
+order: prior cleanup, compaction decision, workspace funding, scope and
+retirement acquisition, snapshot/receiver construction, observed submission,
+ticket completion, snapshot release, synchronous installation and cleanup
+clear. It retains observer publication before cancellable native work.
+
+`BaseWork::run` keeps the initial stop check, test gate, left encode/segment
+construction/stop check, then right encode/segment construction/stop check.
+The extracted installation checks cancellation before replacing the base and
+clearing dirty state. Its error path drops the owned base before returning to
+the unchanged output-credit/retirement boundary, as the original closure did.
+
+`BaseWork`, `InputOwners`, explicit owner Drop, observed submission, escaping
+output ownership, original gather layouts and fee formulas are unchanged.
+No new gather control field, payload owner or workspace lifetime is introduced.
+
+### Style Issues
+
+None. All functions in the changed source file meet the limit of 8. Helpers
+name existing phases and keep mutation in the owned operator; the mutable
+workspace receiver preserves the original runtime initialization boundary.
+No lint allow/ignore, unsafe change, caller mutation or public API is added.
+
+### Test Coverage
+
+The focused compaction tests cover the directly affected preparation and
+ownership paths. The frozen V1 test checks all five actual byte captures and
+final restore/continuation. Original cancellation, admission, cleanup and
+funding evidence remains applicable because the corresponding data fields,
+drop boundaries and gather implementation were not changed. This is a
+behavior-preserving refactor and does not claim a new behavioral RED.
+
+### Documentation Consistency
+
+The single analysis artifact records the final helper scope, actual command
+results, complexity values and compile-signature correction accurately.
+The private refactor preserves the documented async preparation, cancellation,
+wire format and logical funding contracts; no normative documentation update
+is needed. Source diff whitespace and review Markdown/local links passed.
+
+### Verdict
+
+**Approve** for source `ae26a5552303eb9223fdaee1b8a595faa582d456`
+and tree `68b7e7a7b9bf9c6cb64a6bfe4f819dae7a0ede6f`.
+
+No blocking source, style, test or documentation finding remains in this
+follow-up. This source approval does not assert green remote CI or authorize
+merging with unresolved required checks.

@@ -131,6 +131,42 @@ blocked-admission schedules passed the single focused check; this is evidence
 strengthening without a production change or invented RED. A custom Wake observer also
 verifies that actual reservation refund wakes an expired-home waiter.
 
+## PR371 complexity refactor
+
+Codacy identified `BaseWork::run` at complexity 13 and `prepare_compaction`
+at 15 against a limit of eight. The follow-up extracts the test gate, one-side
+encoding, workspace reservation, owned snapshot construction, admission error
+projection, and synchronous installation into focused helpers. It preserves
+the original cancellation checks, left-before-right encoding, funded admission
+and observer publication, owner/credit retirement, and install/dirty-clear order.
+No data fields, control fee formulas, generic gather code, or wire format change.
+This is a behavior-preserving refactor; no independent RED is invented.
+
+Local Lizard reports `run` at six, `prepare_compaction` at four, and the largest
+helper (`rebuild_compaction_base`) at eight. Every function in the file meets
+the same limit. After the parent's debug-cache grant, the following affected
+checks passed with the same root target and two build jobs:
+
+```bash
+cargo test --locked -p calc-flow --lib \
+  operator::join::tests::checkpoint_compaction_tests:: -- --test-threads=1
+# 14 passed; 2m43s build, 0.10s runtime.
+cargo test --locked -p calc-flow --lib \
+  frozen_v1_checkpoint_fixture_preserves_wire_bytes_and_continuation \
+  -- --test-threads=1
+# 1 passed, covering five byte identities and final restore/continuation.
+cargo clippy --locked -p calc-flow --lib --tests -- -D warnings
+# Passed, 1m12s.
+lizard -l rust -C 8 -w crates/calc-flow/src/operator/join/checkpoint_compaction.rs
+# Exit 0, no function above eight.
+```
+
+Format, whitespace, and unchanged-contract checks also passed. The extracted
+workspace helper retains the mutable receiver required for the existing lazy
+runtime initialization; its initial compile-signature correction is not RED
+evidence. Earlier unchanged Join/gather/property suites are not repeated for
+this refactor. Remote Codacy and required CI results remain the parent's handoff.
+
 ## Local verification and measurement handoff
 
 Observed local checks:

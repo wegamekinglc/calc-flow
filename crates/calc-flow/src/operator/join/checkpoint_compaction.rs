@@ -15,7 +15,25 @@ use crate::runtime::streaming::gather_work::{
     AdmissionFailure, GatherOperatorId, GatherStop, OwnedCpuWork, cleanup_control_bytes,
 };
 use crate::{CalcFlowError, Result, StateSegment, StreamOperatorContext};
+use datafusion::execution::memory_pool::MemoryReservation;
 use std::{collections::BTreeMap, sync::Arc};
+
+#[cfg(test)]
+impl TestGate {
+    fn wait_for_release(self, input: &[StoredRow], name: &str, stop: &GatherStop) -> Result<()> {
+        self.entered
+            .send((input.as_ptr() as usize, std::thread::current().id()))
+            .map_err(|_| memory_error(name, "checkpoint test observer dropped"))?;
+        self.wait
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .map_err(|error| memory_error(name, &error.to_string()))?;
+        stop.check()?;
+        if self.failed {
+            return Err(memory_error(name, "injected checkpoint failure"));
+        }
+        Ok(())
+    }
+}
 
 struct InputOwners {
     left: Option<Arc<Vec<StoredRow>>>,
@@ -76,25 +94,24 @@ impl OwnedCpuWork for BaseWork {
         let right = self.inputs.right.as_ref().expect("right compaction input");
         #[cfg(test)]
         if let Some(gate) = self.gate {
-            gate.entered
-                .send((left.as_ptr() as usize, std::thread::current().id()))
-                .map_err(|_| memory_error(&self.name, "checkpoint test observer dropped"))?;
-            gate.wait
-                .recv_timeout(std::time::Duration::from_secs(10))
-                .map_err(|error| memory_error(&self.name, &error.to_string()))?;
-            stop.check()?;
-            if gate.failed {
-                return Err(memory_error(&self.name, "injected checkpoint failure"));
-            }
+            gate.wait_for_release(left, &self.name, stop)?;
         }
-        let left = encode_side(left, &self.name, "left", &|| stop.check())?;
-        let left = StateSegment::new(left);
-        stop.check()?;
-        let right = encode_side(right, &self.name, "right", &|| stop.check())?;
-        let right = StateSegment::new(right);
-        stop.check()?;
+        let left = encode_base_side(left, &self.name, "left", stop)?;
+        let right = encode_base_side(right, &self.name, "right", stop)?;
         Ok(BTreeMap::from([("left", left), ("right", right)]))
     }
+}
+
+fn encode_base_side(
+    rows: &[StoredRow],
+    name: &str,
+    side: &str,
+    stop: &GatherStop,
+) -> Result<StateSegment> {
+    let encoded = encode_side(rows, name, side, &|| stop.check())?;
+    let segment = StateSegment::new(encoded);
+    stop.check()?;
+    Ok(segment)
 }
 
 impl StreamJoinOperator {
@@ -147,18 +164,46 @@ impl StreamJoinOperator {
         if !self.state.deltas.needs_compaction {
             return Ok(());
         }
+        self.rebuild_compaction_base(context).await
+    }
+
+    async fn rebuild_compaction_base(&mut self, context: &StreamOperatorContext<'_>) -> Result<()> {
+        let credit = self.reserve_compaction_workspace()?;
+        let scope = context
+            .gather_client(GatherOperatorId::new(Arc::from(self.name.as_str())))
+            .scope()?;
+        let retirement = context.job().gather_owner().retain_retirement()?;
+        let work = self.compaction_work();
+        let ticket = scope
+            .submit_observed_work(
+                work,
+                credit,
+                GatherStop::from_job(context.job()),
+                retirement,
+                &mut self.compaction_cleanup,
+            )
+            .await
+            .map_err(|failure| admission_error(&self.name, failure))?;
+        let prepared = ticket.finish().await?;
+        self.await_snapshot_release(context).await?;
+        prepared.install(|base| self.install_compaction_base(base, context))?;
+        self.compaction_cleanup = None;
+        Ok(())
+    }
+
+    fn reserve_compaction_workspace(&mut self) -> Result<MemoryReservation> {
         let workspace = self.compaction_workspace()?;
         let credit = self.runtime.runtime()?.incremental_reservation(&self.name);
         credit
             .try_grow(workspace)
             .map_err(|error| memory_error(&self.name, &error.to_string()))?;
-        let scope = context
-            .gather_client(GatherOperatorId::new(Arc::from(self.name.as_str())))
-            .scope()?;
-        let retirement = context.job().gather_owner().retain_retirement()?;
+        Ok(credit)
+    }
+
+    fn compaction_work(&mut self) -> BaseWork {
         let (released, receiver) = tokio::sync::oneshot::channel();
         self.compaction_release = Some(receiver);
-        let work = BaseWork {
+        BaseWork {
             inputs: InputOwners {
                 left: Some(Arc::clone(&self.state.left.0)),
                 right: Some(Arc::clone(&self.state.right.0)),
@@ -175,35 +220,20 @@ impl StreamJoinOperator {
                 .checkpoint_gate
                 .take()
                 .map(|gate| gate.into_inner().expect("exclusive checkpoint test gate")),
-        };
-        let ticket = scope
-            .submit_observed_work(
-                work,
-                credit,
-                GatherStop::from_job(context.job()),
-                retirement,
-                &mut self.compaction_cleanup,
-            )
-            .await
-            .map_err(|failure| match failure {
-                AdmissionFailure::Budget { stage, source } => memory_error(
-                    &self.name,
-                    &format!("checkpoint {stage} admission: {source}"),
-                ),
-                AdmissionFailure::Runtime(error) => error,
-            })?;
-        let prepared = ticket.finish().await?;
-        self.await_snapshot_release(context).await?;
-        prepared.install(|base| {
-            context.check_cancelled()?;
-            self.state.deltas.base = base;
-            self.state.deltas.segments.clear();
-            self.state.deltas.pending.clear();
-            self.state.deltas.segments_since_base = 0;
-            self.state.deltas.needs_compaction = false;
-            Ok(())
-        })?;
-        self.compaction_cleanup = None;
+        }
+    }
+
+    fn install_compaction_base(
+        &mut self,
+        base: BTreeMap<&'static str, StateSegment>,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<()> {
+        context.check_cancelled()?;
+        self.state.deltas.base = base;
+        self.state.deltas.segments.clear();
+        self.state.deltas.pending.clear();
+        self.state.deltas.segments_since_base = 0;
+        self.state.deltas.needs_compaction = false;
         Ok(())
     }
 
@@ -225,6 +255,15 @@ impl StreamJoinOperator {
             .zip(descriptors)
             .and_then(|(logical, descriptors)| logical.checked_add(descriptors))
             .ok_or_else(|| memory_error(&self.name, "checkpoint workspace size overflow"))
+    }
+}
+
+fn admission_error(name: &str, failure: AdmissionFailure) -> CalcFlowError {
+    match failure {
+        AdmissionFailure::Budget { stage, source } => {
+            memory_error(name, &format!("checkpoint {stage} admission: {source}"))
+        }
+        AdmissionFailure::Runtime(error) => error,
     }
 }
 
