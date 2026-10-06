@@ -49,6 +49,7 @@ struct SideBuilder<'a> {
     sources: HashMap<BatchKey, usize, RandomState>,
     selected: Option<&'a [usize]>,
     recent: Option<(BatchKey, usize)>,
+    span: Option<Span>,
     run: Option<SourceRun>,
     raw: u64,
     right: bool,
@@ -88,14 +89,24 @@ impl<'a> OutputPlanBuilder<'a> {
         })
     }
 
-    pub fn push(
+    pub fn left_source(
         &mut self,
         left: PayloadView<'_>,
+        workspace: &mut MemoryReservation,
+        name: &str,
+    ) -> Result<usize> {
+        self.left.source(left, workspace, name)
+    }
+
+    pub fn push_reference(
+        &mut self,
+        source: usize,
+        row: usize,
         right: Option<PayloadView<'_>>,
         workspace: &mut MemoryReservation,
         name: &str,
     ) -> Result<()> {
-        self.left.push(left, workspace, name)?;
+        self.left.record_span(source, row, name)?;
         if let Some(right) = right {
             self.right.push(right, workspace, name)?;
             self.matched += 1;
@@ -107,12 +118,25 @@ impl<'a> OutputPlanBuilder<'a> {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub fn push(
+        &mut self,
+        left: PayloadView<'_>,
+        right: Option<PayloadView<'_>>,
+        workspace: &mut MemoryReservation,
+        name: &str,
+    ) -> Result<()> {
+        let source = self.left_source(left, workspace, name)?;
+        self.push_reference(source, left.row, right, workspace, name)
+    }
+
     pub fn finish(
         mut self,
         right_schema: &Schema,
         workspace: &mut MemoryReservation,
         name: &str,
     ) -> Result<OutputPlan> {
+        self.left.flush_span(name)?;
         self.left.flush_run(name)?;
         self.right.flush_run(name)?;
         self.reserve_buffers(right_schema, workspace, name)?;
@@ -166,18 +190,19 @@ impl<'a> SideBuilder<'a> {
         Self {
             rows: OutputSide {
                 batches: Vec::new(),
-                positions: Vec::with_capacity(capacity),
-                has_nulls: false,
-                spans: if right {
-                    Vec::new()
-                } else {
+                positions: if right {
                     Vec::with_capacity(capacity)
+                } else {
+                    Vec::new()
                 },
+                has_nulls: false,
+                spans: Vec::new(),
             },
             columns: Vec::new(),
             sources: HashMap::with_hasher(RandomState::new()),
             selected,
             recent: None,
+            span: None,
             run: None,
             raw: 0,
             right,
@@ -190,6 +215,10 @@ impl<'a> SideBuilder<'a> {
         workspace: &mut MemoryReservation,
         name: &str,
     ) -> Result<usize> {
+        #[cfg(test)]
+        if !self.right {
+            super::workspace::record_left_output_source_visit();
+        }
         if let Some((key, source)) = self.recent
             && key == row.batch.key
         {
@@ -253,46 +282,63 @@ impl<'a> SideBuilder<'a> {
         name: &str,
     ) -> Result<()> {
         let source = self.source(row, workspace, name)?;
-        self.record_run(source, row.row, name)?;
+        let end = row.row + 1;
+        self.record_range(source, row.row..end, name)?;
         self.rows
             .positions
             .push((source + usize::from(self.right), row.row));
-        if !self.right {
-            self.record_span(source, row.row);
-        }
         Ok(())
     }
 
-    fn record_span(&mut self, source: usize, row: usize) {
-        if let Some(span) = self.rows.spans.last_mut()
+    fn record_span(&mut self, source: usize, row: usize, name: &str) -> Result<()> {
+        if let Some(span) = self.span.as_mut()
             && span.source == source
             && span.end == row
         {
             span.end += 1;
         } else {
-            self.rows.spans.push(Span {
+            self.flush_span(name)?;
+            self.span = Some(Span {
                 source,
                 start: row,
                 end: row + 1,
             });
         }
+        Ok(())
     }
 
-    fn record_run(&mut self, source: usize, row: usize, name: &str) -> Result<()> {
+    fn flush_span(&mut self, name: &str) -> Result<()> {
+        if let Some(span) = self.span.take() {
+            self.record_range(span.source, span.start..span.end, name)?;
+            self.rows.spans.push(span);
+        }
+        Ok(())
+    }
+
+    fn record_range(
+        &mut self,
+        source: usize,
+        range: std::ops::Range<usize>,
+        name: &str,
+    ) -> Result<()> {
+        #[cfg(test)]
+        if !self.right {
+            super::workspace::record_left_output_range_visit();
+        }
         if let Some(run) = self.run.as_mut()
             && run.source == source
-            && (self.columns[source].is_fixed_width() || run.end == row)
+            && (self.columns[source].is_fixed_width() || run.end == range.start)
         {
-            run.end = row + 1;
-            run.count += 1;
+            run.end = range.end;
+            run.count += range.len();
             return Ok(());
         }
         self.flush_run(name)?;
         self.run = Some(SourceRun {
             source,
-            start: row,
-            end: row + 1,
-            count: 1,
+            start: range.start,
+            end: range.end,
+            count: range.len(),
         });
         Ok(())
     }

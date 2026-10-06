@@ -9,6 +9,11 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-07: Coalesce streaming ASOF left output planning over canonical
+  sources and physical row ranges, removing unused left row-position storage.
+  Existing span gathering, backing charges, output budgets, prefix commits
+  and checkpoint encoding retain their contracts.
+
 - 2026-10-06: Aggregate streaming ASOF left batch, key and sequence-owner
   bookkeeping over ordered runs. Prefix matching, canonical encoding, capacity
   charges and cancellation/resource decisions retain their contracts.
