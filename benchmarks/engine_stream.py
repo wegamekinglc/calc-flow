@@ -341,6 +341,12 @@ async def _measure_ready(
     started = time.perf_counter_ns()
     pending = streams
     if (
+        set(streams) == {"reference.input", "quotes.input"}
+        and len(streams["quotes.input"]) > 2
+    ):
+        await _feed_asof_chunks(sources, streams, job)
+        pending = {}
+    elif (
         set(streams) == {"left", "right"}
         and len(streams["right"]) == 2
         and len(streams["left"]) > 2
@@ -360,6 +366,36 @@ async def _measure_ready(
         raise RuntimeError("stream output row count differs from the timed workload")
     table = pa.concat_tables(sink.tables)
     return table, (time.perf_counter_ns() - started) / 1e9
+
+
+async def _feed_asof_chunks(sources: dict, streams: dict[str, tuple], job) -> None:
+    rows = 0
+    for start in range(0, len(streams["quotes.input"]), 2):
+        chunk = {name: events[start : start + 2] for name, events in streams.items()}
+        for name, event in interleaved_events(chunk):
+            await sources[name].push(event)
+        rows += chunk["quotes.input"][0].batch.num_rows
+        frontier = int(BASE_MICROS) + (chunk["quotes.input"][1].at - BASE) // timedelta(
+            microseconds=1
+        )
+        await asyncio.wait_for(_wait_asof_progress(job, rows, frontier), timeout=600)
+
+
+async def _wait_asof_progress(job, rows: int, frontier: int) -> None:
+    while True:
+        statuses = tuple(job.status()["stream_asof_joins"].values())
+        if (
+            len(statuses) == 1
+            and statuses[0]["emitted_left_rows"] >= rows
+            and statuses[0]["pending_left_rows"] == 0
+            and all(
+                statuses[0][side]["watermark_micros"] is not None
+                and statuses[0][side]["watermark_micros"] >= frontier
+                for side in ("left", "right")
+            )
+        ):
+            return
+        await asyncio.sleep(0.001)
 
 
 async def _wait_static_join_progress(job, rows: int) -> None:

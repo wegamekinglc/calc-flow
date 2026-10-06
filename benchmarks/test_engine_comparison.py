@@ -114,6 +114,38 @@ def test_static_join_waits_for_delayed_dimension_progress(monkeypatch, tmp_path)
         runner.close()
 
 
+@pytest.mark.parametrize("binding", ("reference.input", "quotes.input"))
+def test_asof_waits_for_delayed_chunk_watermarks(binding, monkeypatch, tmp_path):
+    from benchmarks import engine_stream
+    from calc_flow import Watermark
+
+    names = iter(("reference.input", "quotes.input"))
+
+    class DelayedWatermarkSource(engine_stream._ReadySource):
+        def __init__(self):
+            super().__init__()
+            self.delay = next(names) == binding
+
+        async def next(self):
+            event = await super().next()
+            if self.delay and isinstance(event, Watermark):
+                self.delay = False
+                await asyncio.sleep(2)
+            return event
+
+    monkeypatch.setattr(engine_stream, "_ReadySource", DelayedWatermarkSource)
+    case = next(
+        case
+        for case in engine_cases(320_000)
+        if case["backend"] == "calc-flow-stream" and case["scenario"] == "asof_join"
+    )
+    runner = EngineCase(case, tmp_path)
+    try:
+        assert runner.sample()["correctness"]["passed"]
+    finally:
+        runner.close()
+
+
 @pytest.mark.parametrize("count", [64_001, 128_000])
 @pytest.mark.parametrize(
     "scenario",

@@ -187,7 +187,7 @@ class BenchmarkSuiteTests(unittest.TestCase):
         cases = [c for c in engine_cases() if c["backend"] == "calc-flow-stream"]
         self.assertEqual(
             {c["scope"] for c in cases},
-            {"ready-enqueue-to-arrow/interleaved-inputs-v3"},
+            {"ready-enqueue-to-arrow/interleaved-inputs-v4"},
         )
 
     def test_finance_matrix_declares_its_pandas_output_boundary(self):

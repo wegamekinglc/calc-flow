@@ -205,6 +205,41 @@ def test_static_join_waits_for_committed_matches_and_eviction(monkeypatch):
     assert waits == [0.001, 0.001]
 
 
+def test_asof_waits_for_output_and_both_committed_watermarks(monkeypatch):
+    states = iter(
+        (
+            (0, 0, 100, 100),
+            (64_000, 64_000, 100, 100),
+            (64_000, 0, 100, None),
+            (64_000, 0, 99, 100),
+            (64_000, 0, 100, 100),
+        )
+    )
+    waits = []
+
+    def status():
+        emitted, pending, left, right = next(states)
+        return {
+            "stream_asof_joins": {
+                "asof": {
+                    "emitted_left_rows": emitted,
+                    "pending_left_rows": pending,
+                    "left": {"watermark_micros": left},
+                    "right": {"watermark_micros": right},
+                }
+            }
+        }
+
+    async def sleep(seconds):
+        waits.append(seconds)
+
+    monkeypatch.setattr(engine_stream.asyncio, "sleep", sleep)
+    asyncio.run(
+        engine_stream._wait_asof_progress(SimpleNamespace(status=status), 64_000, 100)
+    )
+    assert waits == [0.001] * 4
+
+
 def test_stream_timer_excludes_startup_and_cleanup_but_includes_arrow(
     tmp_path, stream_probe
 ):
