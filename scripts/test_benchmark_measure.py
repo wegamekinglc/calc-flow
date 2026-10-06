@@ -29,6 +29,7 @@ class BenchmarkMeasureTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(measure, "install", AsyncMock(side_effect=sites.values())),
                 patch.object(measure, "baseline_case_ids", return_value=frozenset()),
                 patch.object(measure, "shard_cases", return_value=[case]),
+                patch.object(measure, "_case_order", return_value=[0]),
                 patch.object(
                     measure, "measure_case", AsyncMock(return_value={})
                 ) as run,
