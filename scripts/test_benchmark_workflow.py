@@ -49,6 +49,10 @@ class BenchmarkWorkflowTests(unittest.TestCase):
             encoding="utf-8"
         )
         recovery = workflow.split("  suite-recovery:\n", 1)[1]
+        measurement = recovery.split(
+            "- name: Run complete recovery shard with resource diagnostics\n", 1
+        )[1].split("        run:", 1)[0]
+        self.assertIn("shell: bash", measurement)
         for required in (
             "sudo systemd-run --wait --pipe --collect",
             "--property=MemoryHigh=10G",

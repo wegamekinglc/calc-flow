@@ -375,6 +375,7 @@ jobs:
               raise ValueError("recovery supports Python wheel shards")
           PY
       - name: Run complete recovery shard with resource diagnostics
+        shell: bash
         env:
           FINANCE_PYTHON_PYTHON: target/finance-python-venv/bin/python
         run: |
