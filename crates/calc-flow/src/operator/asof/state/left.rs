@@ -1086,29 +1086,39 @@ impl<'a> OutputRun<'a> {
                 return prefix.visit_owners(identity.1, identity.2, pool.key(row), name);
             }
         };
-        let data = &run.chunk.data;
         let batch = pool.key(run.chunk.reference);
         prefix.visit_batch(batch, count, name)?;
-        {
-            let mut key_ids = data.key_ids[run.start..run.start + count].to_vec();
-            key_ids.sort_unstable();
-            let mut ids = key_ids.iter().copied().peekable();
-            while let Some(id) = ids.next() {
-                let mut amount = 1;
-                while ids.peek() == Some(&id) {
-                    ids.next();
-                    amount += 1;
-                }
-                let key = data.keys[id as usize].as_ref().expect("live ASOF key");
-                prefix.visit_key(key, batch, amount);
+        run.visit_keys(count, prefix, batch);
+        run.visit_sequence_owners(count, prefix, batch);
+        Ok(())
+    }
+}
+
+impl ChunkRun<'_> {
+    fn visit_keys(self, count: usize, prefix: &mut super::LeftPrefix, batch: BatchKey) {
+        let data = &self.chunk.data;
+        let mut key_ids = data.key_ids[self.start..self.start + count].to_vec();
+        key_ids.sort_unstable();
+        let mut ids = key_ids.iter().copied().peekable();
+        while let Some(id) = ids.next() {
+            let mut amount = 1;
+            while ids.peek() == Some(&id) {
+                ids.next();
+                amount += 1;
             }
+            let key = data.keys[id as usize].as_ref().expect("live ASOF key");
+            prefix.visit_key(key, batch, amount);
         }
+    }
+
+    fn visit_sequence_owners(self, count: usize, prefix: &mut super::LeftPrefix, batch: BatchKey) {
+        let data = &self.chunk.data;
         if data.sequences.kind() != SequenceKind::Canonical {
-            return Ok(());
+            return;
         }
         // See .codex/artifacts/analysis/stream-asof-owner-runs.md for scratch funding.
         let mut owners = Vec::new();
-        for ordinal in run.start..run.start + count {
+        for ordinal in self.start..self.start + count {
             if let Some((address, _)) = data
                 .sequences
                 .owner_encoding(ordinal)
@@ -1130,7 +1140,6 @@ impl<'a> OutputRun<'a> {
             }
             prefix.visit_sequence_owner(address, batch, amount);
         }
-        Ok(())
     }
 }
 impl<'a> ChunkIter<'a> {

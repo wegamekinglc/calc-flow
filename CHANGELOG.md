@@ -9,6 +9,10 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-06: Aggregate streaming ASOF left batch, key and sequence-owner
+  bookkeeping over ordered runs. Prefix matching, canonical encoding, capacity
+  charges and cancellation/resource decisions retain their contracts.
+
 - 2026-10-06: Use sink delivery events for ready-stream ASOF benchmark
   lockstep, replacing timed status polling. Stream scope v5 treats declared
   older scopes as new coverage. Cross-library reports include independently

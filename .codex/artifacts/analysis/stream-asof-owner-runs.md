@@ -88,3 +88,12 @@ Package formatting, whitespace, and generated-contract drift checks passed.
 Final specialist review approved the source and artifact. CI and paired
 release measurements remain unverified; no performance acceptance is claimed.
 The implementer made no remote changes.
+
+## Analysis follow-up
+
+The run-owner visitor is split into batch, key and sequence helpers to address
+Codacy's complexity finding. Key scratch finishes before sequence scratch is
+allocated, preserving the original allocation inventory and update order.
+All five focused ownership tests and package library/test Clippy pass. Final
+specialist review approved this decomposition and the A2 changelog entry.
+Paired release measurements must identify this revised production source.
