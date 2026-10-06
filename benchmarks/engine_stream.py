@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pyarrow as pa
 
-from benchmarks.engine_lifecycle import run_with_completion
+from benchmarks.engine_lifecycle import interleaved_events, run_with_completion
 from benchmarks.warm_stream import BASE, BASE_MICROS, _InteractiveSource
 from calc_flow import (
     AsofStateLimits,
@@ -86,10 +86,10 @@ def _join_span(table: pa.Table) -> timedelta:
     return timedelta(microseconds=span)
 
 
-def _join_limits(rows: int) -> JoinStateLimits:
-    """Declare room for one fully retained side plus one input batch."""
+def _join_limits(dimension_rows: int) -> JoinStateLimits:
+    """Bound the static dimension and two in-flight input batches."""
 
-    capacity = rows + BATCH_ROWS
+    capacity = dimension_rows + 2 * BATCH_ROWS
     return JoinStateLimits(capacity, max(capacity << 10, 1 << 30), capacity)
 
 
@@ -110,10 +110,6 @@ def _join_stream_output(table: pa.Table, dimension: pa.Table, quotes):
         event_time="event_time",
         sequence_by=("sequence",),
     )
-    # The dimension side completes at the stream origin and the inclusive
-    # `before` bound spans the whole workload, so every quote row matches
-    # exactly its symbol's factor row — the stream equivalent of the
-    # suite's shared `join` query in engine_comparison.sql_query.
     joined = tables.stream_join(
         quotes,
         factors,
@@ -122,7 +118,7 @@ def _join_stream_output(table: pa.Table, dimension: pa.Table, quotes):
         left_event_time="event_time",
         right_event_time="event_time",
         bounds=JoinTimeBounds(_join_span(table), timedelta()),
-        limits=_join_limits(table.num_rows),
+        limits=_join_limits(dimension.num_rows),
         left_prefix="quote",
         right_prefix="dimension",
     )
@@ -212,7 +208,7 @@ def stream_plan(
             quotes,
             reference,
             tolerance=timedelta(),
-            limits=AsofStateLimits(2 * table.num_rows + BATCH_ROWS, 1 << 30),
+            limits=AsofStateLimits(2 * BATCH_ROWS + 128, 1 << 30),
         )
         output = joined.select(
             sequence=joined["left__sequence"], value=joined["right__price"]
@@ -263,8 +259,8 @@ def stream_events(
     return (*events, None)
 
 
-def dimension_events(dimension: pa.Table) -> tuple:
-    """Seed the dimension side at the origin, then advance and end it."""
+def dimension_events(dimension: pa.Table, quotes: pa.Table) -> tuple:
+    """Seed the static dimension and seal the quote time range."""
 
     rows = dimension.num_rows
     return (
@@ -272,7 +268,7 @@ def dimension_events(dimension: pa.Table) -> tuple:
             Batch.from_pyarrow(dimension),
             Cursor(rows.to_bytes(8, "big"), {"rows": rows}),
         ),
-        Watermark(BASE + timedelta(microseconds=1)),
+        Watermark(BASE + _join_span(quotes)),
         None,
     )
 
@@ -280,6 +276,7 @@ def dimension_events(dimension: pa.Table) -> tuple:
 class _ReadySource(_InteractiveSource):
     def __init__(self) -> None:
         super().__init__(max_batch_rows=BATCH_ROWS)
+        self._events = asyncio.Queue(maxsize=1)
         self.ready = asyncio.Event()
 
     async def next(self) -> Data | Watermark | None:
@@ -342,9 +339,8 @@ async def _measure_ready(
     )
     _require_ready_sources(sources, sink)
     started = time.perf_counter_ns()
-    for name, events in streams.items():
-        for event in events:
-            await sources[name].push(event)
+    for name, event in interleaved_events(streams):
+        await sources[name].push(event)
     await asyncio.wait_for(sink.complete.wait(), timeout=600)
     if sink.rows != sink.expected_rows:
         raise RuntimeError("stream output row count differs from the timed workload")

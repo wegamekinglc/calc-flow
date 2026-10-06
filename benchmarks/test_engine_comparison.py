@@ -71,6 +71,20 @@ def test_ready_stream_repeated_samples_use_fresh_execution_plans(scenario, tmp_p
         runner.close()
 
 
+@pytest.mark.parametrize("scenario", ("join", "asof_join"))
+def test_join_streams_complete_many_chunks_with_bounded_state(scenario, tmp_path):
+    case = next(
+        case
+        for case in engine_cases(320_000)
+        if case["backend"] == "calc-flow-stream" and case["scenario"] == scenario
+    )
+    runner = EngineCase(case, tmp_path)
+    try:
+        assert runner.sample()["correctness"]["passed"]
+    finally:
+        runner.close()
+
+
 @pytest.mark.parametrize("count", [64_001, 128_000])
 @pytest.mark.parametrize(
     "scenario",

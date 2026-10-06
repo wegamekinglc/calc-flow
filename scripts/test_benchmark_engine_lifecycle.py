@@ -4,7 +4,30 @@ import asyncio
 import unittest
 from types import SimpleNamespace
 
-from benchmarks.engine_lifecycle import run_with_completion
+from benchmarks.engine_lifecycle import interleaved_events, run_with_completion
+
+
+class EngineInputTests(unittest.TestCase):
+    def test_inputs_advance_together_without_changing_source_order(self):
+        streams = {"right": ("r0", "rw0", "r1", "rw1"), "left": ("l0", "lw0")}
+        self.assertEqual(
+            list(interleaved_events(streams)),
+            [
+                ("right", "r0"),
+                ("left", "l0"),
+                ("right", "rw0"),
+                ("left", "lw0"),
+                ("right", "r1"),
+                ("right", "rw1"),
+            ],
+        )
+        self.assertEqual(streams["left"], ("l0", "lw0"))
+
+    def test_interleaving_preserves_none_and_empty_inputs(self):
+        self.assertEqual(
+            list(interleaved_events({"empty": (), "input": (None,)})),
+            [("input", None)],
+        )
 
 
 class EngineLifecycleTests(unittest.IsolatedAsyncioTestCase):

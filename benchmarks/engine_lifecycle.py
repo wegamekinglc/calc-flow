@@ -3,10 +3,19 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Iterator
+from itertools import zip_longest
 from typing import Any, TypeVar
 
 _T = TypeVar("_T")
+
+
+def interleaved_events(streams: dict[str, tuple]) -> Iterator[tuple[str, object]]:
+    missing = object()
+    for events in zip_longest(*streams.values(), fillvalue=missing):
+        for name, event in zip(streams, events):
+            if event is not missing:
+                yield name, event
 
 
 def _require_completed(outcome: Any) -> None:
