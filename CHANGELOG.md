@@ -9,6 +9,11 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-06: Traverse streaming ASOF left chunks in ordered runs, advancing
+  the merge heap once per run. Adjacent-row checks and exponential search bound
+  interleaved-run lookup work. Canonical row order, typed sequence ownership,
+  checkpoint encoding and workspace accounting retain their contracts.
+
 - 2026-10-06: Expose inner Join ingress watermark, idle, and end observations
   through Rust, Python and Studio, including non-terminal managed restart at
   startup.
