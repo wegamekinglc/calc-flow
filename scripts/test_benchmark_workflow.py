@@ -44,6 +44,27 @@ class BenchmarkWorkflowTests(unittest.TestCase):
         self.assertIn("if: always()", recovery)
         self.assertNotIn("--benchmark-disable", recovery)
 
+    def test_recovery_bounds_memory_and_preserves_resource_evidence(self):
+        workflow = (ROOT / ".github/workflows/benchmarks.yml").read_text(
+            encoding="utf-8"
+        )
+        recovery = workflow.split("  suite-recovery:\n", 1)[1]
+        for required in (
+            "sudo systemd-run --wait --pipe --collect",
+            "--property=MemoryHigh=10G",
+            "--property=MemoryMax=12G",
+            "--property=MemorySwapMax=8G",
+            "--property=OOMPolicy=continue",
+            'sudo systemctl stop "$recovery_unit"',
+            'sudo swapoff "$recovery_swap"',
+            "resource-profile/run.log",
+        ):
+            self.assertIn(required, recovery)
+        self.assertLess(
+            recovery.index("trap stop_monitor EXIT"),
+            recovery.index("sudo fallocate"),
+        )
+
     def test_dependency_lock_excludes_the_current_workspace_distribution(self):
         project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
             "project"

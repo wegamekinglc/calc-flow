@@ -378,7 +378,9 @@ jobs:
         env:
           FINANCE_PYTHON_PYTHON: target/finance-python-venv/bin/python
         run: |
-          mkdir -p target/benchmark-results
+          mkdir -p target/benchmark-results/resource-profile
+          recovery_unit="calc-flow-benchmark-recovery-${{ github.run_id }}-${{ github.run_attempt }}"
+          recovery_swap="$GITHUB_WORKSPACE/target/benchmark-recovery.swap"
           monitor_resources() {
             while true; do
               date -u
@@ -391,16 +393,37 @@ jobs:
           monitor_resources &
           monitor_pid=$!
           stop_monitor() {
+            sudo systemctl stop "$recovery_unit" 2>/dev/null || true
+            sudo journalctl -u "$recovery_unit" --no-pager \
+              > target/benchmark-results/resource-profile/unit.log || true
             pkill -P "$monitor_pid" 2>/dev/null || true
             kill "$monitor_pid" 2>/dev/null || true
             wait "$monitor_pid" 2>/dev/null || true
+            sudo swapoff "$recovery_swap" 2>/dev/null || true
+            sudo rm -f -- "$recovery_swap"
           }
           trap stop_monitor EXIT
-          target/benchmark-venv/bin/python -m scripts.benchmark_suite run \
+          sudo fallocate -l 8G "$recovery_swap"
+          sudo chmod 600 "$recovery_swap"
+          sudo mkswap "$recovery_swap"
+          sudo swapon "$recovery_swap"
+          printf '%s\n' MemoryHigh=10G MemoryMax=12G MemorySwapMax=8G \
+            OOMPolicy=continue \
+            > target/benchmark-results/resource-profile/properties.log
+          sudo systemd-run --wait --pipe --collect \
+            --unit="$recovery_unit" --uid="$(id -u)" --gid="$(id -g)" \
+            --working-directory="$GITHUB_WORKSPACE" \
+            --property=MemoryHigh=10G --property=MemoryMax=12G \
+            --property=MemorySwapMax=8G --property=OOMPolicy=continue \
+            --setenv="PATH=$PATH" --setenv="UV_CACHE_DIR=$UV_CACHE_DIR" \
+            --setenv="FINANCE_PYTHON_PYTHON=$FINANCE_PYTHON_PYTHON" \
+            "$GITHUB_WORKSPACE/target/benchmark-venv/bin/python" \
+            -m scripts.benchmark_suite run \
             --shard "$BENCHMARK_SHARD" \
             --baseline target/releases/baseline/release.json \
             --candidate target/releases/candidate/release.json \
-            --baseline-source target/base --output target/benchmark-results
+            --baseline-source target/base --output target/benchmark-results \
+            | tee target/benchmark-results/resource-profile/run.log
       - name: Retain recovered measurements
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
