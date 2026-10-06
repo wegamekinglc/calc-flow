@@ -401,7 +401,7 @@ jobs:
             kill "$monitor_pid" 2>/dev/null || true
             wait "$monitor_pid" 2>/dev/null || true
             sudo swapoff "$recovery_swap" 2>/dev/null || true
-            sudo rm -f -- "$recovery_swap"
+            sudo rm -f -- "$recovery_swap" || true
           }
           trap stop_monitor EXIT
           sudo fallocate -l 8G "$recovery_swap"

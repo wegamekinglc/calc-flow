@@ -61,6 +61,7 @@ class BenchmarkWorkflowTests(unittest.TestCase):
             "--property=OOMPolicy=continue",
             'sudo systemctl stop "$recovery_unit"',
             'sudo swapoff "$recovery_swap"',
+            'sudo rm -f -- "$recovery_swap" || true',
             "resource-profile/run.log",
         ):
             self.assertIn(required, recovery)
