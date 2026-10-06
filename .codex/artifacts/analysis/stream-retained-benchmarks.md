@@ -94,3 +94,20 @@ incorrect results and nonfinite samples. Shared guarded P50 formatting now
 retains invalid rows and the complete evidence-failure report; all eight
 affected report tests and scoped Ruff/format checks passed. Final specialist
 re-review approved the correction and the complete Phase 0.3/0.4 delivery.
+
+## CI complexity remediation
+
+The first PR #368 CI snapshot passed ordinary Ruff but failed the separate
+complexity ratchet: the interval oracle and combined throughput/recovery
+function added C901 findings, with argument/statement findings in the replay
+adapter. The baseline and thresholds remain unchanged. Separate pure interval
+and grouped oracles, throughput execution, checkpoint cuts and prefix sizing
+now preserve the same fixture, timing boundaries, cursor handling and cleanup.
+
+The actual ratchet failure preceded the extraction. The ratchet and scoped
+Ruff subsequently passed; 14 affected interval/reference/checkpoint tests and
+10 grouped/window reference tests passed. All four 4,097-row small-batch
+scenarios also passed their complete output oracles. Native code was not
+rebuilt. Measurement artifacts retain their original sealed harness revision;
+this helper extraction has functional verification only. Final specialist
+review approved this correction; required CI still gates merge.

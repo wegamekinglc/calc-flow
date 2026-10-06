@@ -621,9 +621,10 @@ async def _start_replay_job(
     streams: dict[str, tuple],
     root: Path,
     expected_rows: int,
-    batch_rows: int,
-    checkpoint: bool,
+    case: dict,
 ):
+    batch_rows = case["batch_rows"]
+    checkpoint = case["checkpoint_interval_millis"] is not None
     _validated_timed_streams(plan, streams)
     sources = {
         name: _ReplaySource(events, batch_rows=batch_rows)
@@ -648,64 +649,94 @@ async def _start_replay_job(
     return sources, sink, job
 
 
-async def run_variant_stream(
-    plan_factory,
-    streams: dict[str, tuple],
-    root: Path,
-    expected_rows: int,
-    *,
-    case: dict,
-) -> tuple[pa.Table, float, dict]:
-    """Run replay-backed throughput or an explicitly paced recovery lifecycle."""
-
-    batch_rows = case["batch_rows"]
-    checkpoint = case["checkpoint_interval_millis"] is not None
-    dimensions = stream_dimensions(case["scenario"], batch_rows, checkpoint)
+async def _start_variant_job(plan_factory, streams, root, expected_rows, case):
     plan = plan_factory()
+    dimensions = stream_dimensions(
+        case["scenario"],
+        case["batch_rows"],
+        case["checkpoint_interval_millis"] is not None,
+    )
     dimensions["source_bindings"] = sorted(plan.source_binding_ids)
     timed = _validated_timed_streams(plan, streams)
     sources, sink, job = await _start_replay_job(
-        plan, streams, root, expected_rows, batch_rows, checkpoint
+        plan, streams, root, expected_rows, case
     )
-    if not checkpoint:
+    return dimensions, timed, sources, sink, job
 
-        async def measure_and_end():
-            result = await _measure_ready(
-                sources, sink, timed, job, static_join=case["scenario"] == "join"
-            )
-            observation = (
-                await asyncio.wait_for(_interval_observation(job, streams), 600)
-                if case["scenario"] == "interval_join"
-                else {}
-            )
-            lookup = (
-                _require_static_join_no_left_state(job)
-                if case["scenario"] == "join"
-                else None
-            )
-            for source in sources.values():
-                await source.push(None)
-            return (
-                *result,
-                {
-                    **dimensions,
-                    "nonterminal_epochs": [],
-                    "recovery": "not-requested",
-                    "interval_join": observation,
-                    **({"lookup_join": lookup} if lookup is not None else {}),
-                },
-            )
 
-        try:
-            result = await run_with_completion(measure_and_end(), job.wait_async())
-            if sink.rows != expected_rows:
-                raise RuntimeError(
-                    "stream output row count changed after the timed result"
-                )
-            return result
-        finally:
-            await job.cancel_async()
+async def _run_throughput_stream(plan_factory, streams, root, expected_rows, case):
+    dimensions, timed, sources, sink, job = await _start_variant_job(
+        plan_factory, streams, root, expected_rows, case
+    )
 
+    async def measure_and_end():
+        result = await _measure_ready(
+            sources, sink, timed, job, static_join=case["scenario"] == "join"
+        )
+        observation = (
+            await asyncio.wait_for(_interval_observation(job, streams), 600)
+            if case["scenario"] == "interval_join"
+            else {}
+        )
+        lookup = (
+            _require_static_join_no_left_state(job)
+            if case["scenario"] == "join"
+            else None
+        )
+        for source in sources.values():
+            await source.push(None)
+        return (
+            *result,
+            {
+                **dimensions,
+                "nonterminal_epochs": [],
+                "recovery": "not-requested",
+                "interval_join": observation,
+                **({"lookup_join": lookup} if lookup is not None else {}),
+            },
+        )
+
+    try:
+        result = await run_with_completion(measure_and_end(), job.wait_async())
+        if sink.rows != expected_rows:
+            raise RuntimeError("stream output row count changed after the timed result")
+        return result
+    finally:
+        await job.cancel_async()
+
+
+async def _checkpoint_cut(job, sources, sink, streams, case):
+    prefix_outputs = _checkpoint_prefix_rows(streams, case)[1]
+    await asyncio.wait_for(
+        asyncio.gather(*(source.ready.wait() for source in sources.values())), 30
+    )
+    _require_ready_sources(sources, sink)
+    prefix = {name: events[:2] for name, events in streams.items()}
+    if case["scenario"] == "join":
+        for event in prefix.pop("right"):
+            await sources["right"].push(event)
+        delta = streams["right"][1].at - BASE
+        await asyncio.wait_for(
+            _wait_static_dimension_progress(
+                job, BASE_MICROS + delta // timedelta(microseconds=1)
+            ),
+            600,
+        )
+    started = time.perf_counter_ns()
+    for name, event in interleaved_events(prefix):
+        await sources[name].push(event)
+    await asyncio.wait_for(sink.wait_for_rows(prefix_outputs), 600)
+    await asyncio.sleep(0.1)
+    epoch = await job.trigger_checkpoint_async()
+    completed = job.status()["checkpoint"]["last_completed_epoch"]
+    if type(completed) is not int or completed < epoch:
+        raise RuntimeError("checkpoint acknowledgement lacks durable publication")
+    if case["scenario"] == "join":
+        _require_static_join_no_left_state(job)
+    return started, epoch, tuple(sink.tables), sink.rows
+
+
+def _checkpoint_prefix_rows(streams, case):
     primary = (
         "quotes.input"
         if "quotes.input" in streams
@@ -714,54 +745,33 @@ async def run_variant_stream(
         else "input"
     )
     prefix_rows = streams[primary][0].batch.num_rows
-    if not 0 < prefix_rows < case["rows"]:
-        await job.cancel_async()
-        raise ValueError("checkpoint workload requires a nonterminal input prefix")
     prefix_outputs = (
         sum(max(0, prefix_rows - abs(offset) * 64) for offset in range(-5, 6))
         if case["scenario"] == "interval_join"
         else prefix_rows
     )
+    return prefix_rows, prefix_outputs
 
-    async def checkpoint_cut():
-        await asyncio.wait_for(
-            asyncio.gather(*(source.ready.wait() for source in sources.values())), 30
-        )
-        _require_ready_sources(sources, sink)
-        prefix = {name: events[:2] for name, events in streams.items()}
-        if case["scenario"] == "join":
-            for event in prefix.pop("right"):
-                await sources["right"].push(event)
-            delta = streams["right"][1].at - BASE
-            await asyncio.wait_for(
-                _wait_static_dimension_progress(
-                    job, BASE_MICROS + delta // timedelta(microseconds=1)
-                ),
-                600,
-            )
-        started = time.perf_counter_ns()
-        for name, event in interleaved_events(prefix):
-            await sources[name].push(event)
-        await asyncio.wait_for(sink.wait_for_rows(prefix_outputs), 600)
-        await asyncio.sleep(0.1)
-        epoch = await job.trigger_checkpoint_async()
-        completed = job.status()["checkpoint"]["last_completed_epoch"]
-        if type(completed) is not int or completed < epoch:
-            raise RuntimeError("checkpoint acknowledgement lacks durable publication")
-        if case["scenario"] == "join":
-            _require_static_join_no_left_state(job)
-        return started, epoch, tuple(sink.tables), sink.rows
+
+async def _run_checkpoint_stream(plan_factory, streams, root, expected_rows, case):
+    dimensions, _, sources, sink, job = await _start_variant_job(
+        plan_factory, streams, root, expected_rows, case
+    )
+    prefix_rows, _ = _checkpoint_prefix_rows(streams, case)
+    if not 0 < prefix_rows < case["rows"]:
+        await job.cancel_async()
+        raise ValueError("checkpoint workload requires a nonterminal input prefix")
 
     try:
         started, epoch, prefix_tables, delivered = await _with_running_job(
-            checkpoint_cut(), job.wait_async()
+            _checkpoint_cut(job, sources, sink, streams, case), job.wait_async()
         )
     finally:
         await job.cancel_async()
 
     restored_plan = plan_factory()
     resumed_sources, resumed_sink, resumed = await _start_replay_job(
-        restored_plan, streams, root, expected_rows - delivered, batch_rows, True
+        restored_plan, streams, root, expected_rows - delivered, case
     )
 
     async def complete_recovery():
@@ -816,3 +826,21 @@ async def run_variant_stream(
         return result
     finally:
         await resumed.cancel_async()
+
+
+async def run_variant_stream(
+    plan_factory,
+    streams: dict[str, tuple],
+    root: Path,
+    expected_rows: int,
+    *,
+    case: dict,
+) -> tuple[pa.Table, float, dict]:
+    """Run replay-backed throughput or an explicitly paced recovery lifecycle."""
+
+    run = (
+        _run_checkpoint_stream
+        if case["checkpoint_interval_millis"] is not None
+        else _run_throughput_stream
+    )
+    return await run(plan_factory, streams, root, expected_rows, case)

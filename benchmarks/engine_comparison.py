@@ -124,27 +124,46 @@ def _window_sum_expected(data: Workload) -> pa.Table:
     )
 
 
+def _interval_expected(data: Workload) -> pa.Table:
+    table = data.table
+    prices = table["price"].to_numpy()
+    sequence = table["sequence"].to_numpy()
+    sequence_order = np.argsort(sequence)
+    chunks = []
+    for offset in range(-5, 6):
+        right = sequence.astype(np.int64) + offset * data.entities
+        mask = (right >= 0) & (right < table.num_rows)
+        positions = np.searchsorted(sequence[sequence_order], right[mask])
+        chunks.append(
+            pa.table(
+                {
+                    "sequence": sequence[mask],
+                    "right_sequence": right[mask].astype(np.uint64),
+                    "value": prices[mask] * prices[sequence_order[positions]],
+                }
+            )
+        )
+    return pa.concat_tables(chunks)
+
+
+def _group_by_expected(data: Workload) -> pa.Table:
+    prices = data.table["price"].to_numpy()
+    sums = [
+        float(np.sum(prices[index :: data.entities])) for index in range(data.entities)
+    ]
+    return pa.table({"symbol": data.dimension["symbol"], "value": sums})
+
+
 def expected_output(data: Workload, scenario: str) -> pa.Table:
     table = data.table
     prices = table["price"].to_numpy()
     sequence = table["sequence"].to_numpy()
-    if scenario == "interval_join":
-        sequence_order = np.argsort(sequence)
-        chunks = []
-        for offset in range(-5, 6):
-            right = sequence.astype(np.int64) + offset * data.entities
-            mask = (right >= 0) & (right < table.num_rows)
-            positions = np.searchsorted(sequence[sequence_order], right[mask])
-            chunks.append(
-                pa.table(
-                    {
-                        "sequence": sequence[mask],
-                        "right_sequence": right[mask].astype(np.uint64),
-                        "value": prices[mask] * prices[sequence_order[positions]],
-                    }
-                )
-            )
-        return pa.concat_tables(chunks)
+    table_oracles = {
+        "interval_join": _interval_expected,
+        "window_sum": _window_sum_expected,
+    }
+    if scenario in table_oracles:
+        return table_oracles[scenario](data)
     if scenario in ("sma20", "dual_sma"):
         return table.append_column("value", pa.array(_rolling_expected(data, scenario)))
     if scenario == "average":
@@ -171,16 +190,10 @@ def expected_output(data: Workload, scenario: str) -> pa.Table:
                 "value": _cross_section_mean(prices, data.entities),
             }
         )
-    if scenario == "window_sum":
-        return _window_sum_expected(data)
     if scenario == "asof_join":
         return pa.table({"sequence": table["sequence"], "value": prices})
     if scenario == "group_by":
-        sums = [
-            float(np.sum(prices[index :: data.entities]))
-            for index in range(data.entities)
-        ]
-        return pa.table({"symbol": data.dimension["symbol"], "value": sums})
+        return _group_by_expected(data)
     if scenario == "filter":
         mask = sequence % 4 == 0
         return pa.table({"sequence": sequence[mask], "value": prices[mask]})
