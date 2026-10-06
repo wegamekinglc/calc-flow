@@ -9,6 +9,14 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-06: Add 64-key inclusive five-second interval Join benchmark
+  references through 1M input rows, explicit 1,024-row native variants, and
+  separate 100 ms checkpoint/recovery lifecycle cases at 100k and 1M rows.
+  Replay sources seek stable cursors and replay legal watermarks; original
+  sample evidence requires actual nonterminal publication and recovery with
+  unchanged output multiplicity. Lifecycle durations remain separate from
+  throughput references.
+
 - 2026-10-06: Traverse streaming ASOF left chunks in ordered runs, advancing
   the merge heap once per run. Adjacent-row checks and exponential search bound
   interleaved-run lookup work. Canonical row order, typed sequence ownership,

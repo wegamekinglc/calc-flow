@@ -69,6 +69,7 @@ jobs:
           scripts.test_benchmark_asof_eviction
           scripts.test_benchmark_engine_lifecycle
           scripts.test_benchmark_measure
+          scripts.test_retained_benchmark_suite
           scripts.test_benchmark_join_materialization
           scripts.test_benchmark_sql_decimal
           scripts.test_benchmark_sql_stream
@@ -225,7 +226,8 @@ jobs:
           PYTHONPATH=target/adapter-site:. POLARS_MAX_THREADS=32 \
             TOKIO_WORKER_THREADS=32 JAX_PLATFORMS=cpu \
             target/benchmark-venv/bin/python -m pytest \
-            benchmarks/test_engine_comparison.py benchmarks/test_engine_stream.py -q
+            benchmarks/test_engine_comparison.py benchmarks/test_engine_stream.py \
+            benchmarks/test_retained_stream.py -q
       - name: Verify benchmark controllers and warm-stream scenarios
         if: matrix.id == 'warm-10'
         run: |

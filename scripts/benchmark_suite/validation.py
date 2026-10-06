@@ -12,6 +12,7 @@ from scripts.benchmark_suite.catalog import (
     polars_thread_count,
     shard_cases,
 )
+from scripts.benchmark_suite.measure import validate_stream_sample
 from scripts.benchmark_suite.provenance import harness_sha256
 from scripts.benchmark_suite.report import SAMPLES, comparison, validate_shards
 from scripts.toolkit import FULL_SHA
@@ -70,6 +71,8 @@ def _validate_round(case: dict, evidence: dict, releases: dict) -> None:
         raise ValueError("raw worker native hashes differ from release manifests")
     for samples in evidence["samples"].values():
         _validate_measurements(samples)
+        for sample in samples:
+            validate_stream_sample(case, sample)
     if case["family"] == "warm":
         _validate_cursors(case, evidence)
 

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from scripts.benchmark_suite.catalog import (
     CONTRACT,
+    STREAM_EVIDENCE_FIELDS,
     THREADS,
     baseline_case_ids,
     comparison_kind,
@@ -45,6 +46,45 @@ def validate_sample(sample: dict) -> float:
     return seconds
 
 
+def validate_stream_sample(case: dict, sample: dict) -> None:
+    """Require original adapter evidence for every replay-backed dimension."""
+
+    if case.get("backend") != "calc-flow-stream" or "batch_rows" not in case:
+        return
+    evidence = sample.get("stream_evidence")
+    _validate_stream_dimensions(case, evidence)
+    if case["checkpoint_interval_millis"] is not None:
+        _validate_checkpoint_proof(case, sample, evidence)
+
+
+def _validate_stream_dimensions(case: dict, evidence: object) -> None:
+    if not isinstance(evidence, dict) or any(
+        key not in evidence or evidence[key] != case[key]
+        for key in STREAM_EVIDENCE_FIELDS
+    ):
+        raise ValueError("stream evidence dimensions differ from the prepared case")
+
+
+def _valid_checkpoint_epochs(epochs: object) -> bool:
+    return (
+        isinstance(epochs, list)
+        and bool(epochs)
+        and all(type(epoch) is int and epoch >= 1 for epoch in epochs)
+    )
+
+
+def _validate_checkpoint_proof(case: dict, sample: dict, evidence: dict) -> None:
+    rows = evidence.get("rows_before_checkpoint")
+    if (
+        not _valid_checkpoint_epochs(evidence.get("nonterminal_epochs"))
+        or type(rows) is not int
+        or not 0 < rows < case["rows"]
+        or evidence.get("recovery") != "verified"
+        or sample["seconds"] < case["checkpoint_interval_millis"] / 1000
+    ):
+        raise ValueError("checkpoint evidence lacks durable nonterminal recovery proof")
+
+
 async def _prepare(workers: dict, releases: dict, case: dict) -> dict:
     identities = {}
     for side, worker in workers.items():
@@ -57,12 +97,13 @@ async def _prepare(workers: dict, releases: dict, case: dict) -> dict:
         if response["case"] != case:
             raise ValueError("worker prepared a different workload")
         validate_sample(response["warmup"])
+        validate_stream_sample(case, response["warmup"])
     if "baseline" in identities and identities["baseline"] != identities["candidate"]:
         raise ValueError("base/head machine, dependency or thread fingerprints differ")
     return identities["candidate"]
 
 
-async def _samples(workers: dict) -> dict:
+async def _samples(workers: dict, case: dict) -> dict:
     collected = {side: [] for side in workers}
     for index in range(SAMPLES):
         order = (
@@ -73,6 +114,7 @@ async def _samples(workers: dict) -> dict:
                 continue
             sample = await workers[side].request(operation="sample")
             validate_sample(sample)
+            validate_stream_sample(case, sample)
             collected[side].append(sample)
         if len(workers) == 2:
             _check_latest_cursors(collected)
@@ -96,7 +138,7 @@ async def _round(case: dict, workers_by_side: dict, releases: dict, root: Path) 
                 polars_threads=polars_thread_count(case),
             )
         environment = await _prepare(workers, releases, case)
-        samples = await _samples(workers)
+        samples = await _samples(workers, case)
         completion = {}
         for side, worker in workers.items():
             result = await worker.request(operation="finish")
