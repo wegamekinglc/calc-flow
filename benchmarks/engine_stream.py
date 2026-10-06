@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pyarrow as pa
 
+from benchmarks.engine_lifecycle import run_with_completion
 from benchmarks.warm_stream import BASE, BASE_MICROS, _InteractiveSource
 from calc_flow import (
     AsofStateLimits,
@@ -370,14 +371,15 @@ async def run_stream(
             edge_budget=EdgeBudget(max_rows=BATCH_ROWS, max_bytes=64 << 20),
         ),
     ).start_async()
-    try:
-        table, seconds = await _measure_ready(sources, sink, timed)
-        # Complete and verify the job, but do not time EOF/shutdown bookkeeping.
+
+    async def measure_and_end():
+        result = await _measure_ready(sources, sink, timed)
         for source in sources.values():
             await source.push(None)
-        outcome = await asyncio.wait_for(job.wait_async(), timeout=600)
-        if outcome.state != "completed":
-            raise RuntimeError(f"stream failed: {outcome.errors}")
+        return result
+
+    try:
+        table, seconds = await run_with_completion(measure_and_end(), job.wait_async())
         if sink.rows != expected_rows:
             raise RuntimeError("stream output row count changed after the timed result")
         return table, seconds
