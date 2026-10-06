@@ -482,6 +482,9 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIn(install_test_dependencies, rust_core)
         rust_core_header = rust_core.split("    steps:\n", 1)[0]
         self.assertNotIn("RUST_TEST_THREADS", rust_core_header)
+        self.assertIn('CARGO_BUILD_JOBS: "3"', rust_core_header)
+        self.assertIn('CARGO_PROFILE_DEV_DEBUG: "0"', rust_core_header)
+        self.assertIn('CARGO_PROFILE_TEST_DEBUG: "0"', rust_core_header)
         self.assertLess(
             rust_core.index(setup_python),
             rust_core.index(
