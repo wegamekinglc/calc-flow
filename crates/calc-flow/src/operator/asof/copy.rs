@@ -15,6 +15,15 @@ pub(super) struct PreparedRightCopies {
     originals: Buckets,
     replacements: Buckets,
     workspace: Option<MemoryReservation>,
+    ticket: Option<super::retirement::Ticket>,
+}
+
+// Field order keeps refunds after owner and reservation destruction.
+struct RetiredCopies {
+    _originals: Buckets,
+    _replacements: Buckets,
+    _workspace: Option<MemoryReservation>,
+    _ticket: Option<super::retirement::Ticket>,
 }
 
 impl PreparedRightCopies {
@@ -35,7 +44,13 @@ impl Drop for PreparedRightCopies {
         if originals.is_empty() && replacements.is_empty() {
             return;
         }
-        let release = move || drop((originals, replacements, workspace));
+        let retired = RetiredCopies {
+            _originals: originals,
+            _replacements: replacements,
+            _workspace: workspace,
+            _ticket: self.ticket.take(),
+        };
+        let release = move || drop(retired);
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn_blocking(release);
         } else {
@@ -71,7 +86,12 @@ impl StreamAsofJoinOperator {
         workspace: MemoryReservation,
         context: &StreamOperatorContext<'_>,
     ) -> Result<PreparedPayloadRemoval> {
-        let mut prepared = PreparedPayloadRemoval::capture(&self.state.batches, layout, workspace);
+        let mut prepared = PreparedPayloadRemoval::capture(
+            &self.state.batches,
+            layout,
+            workspace,
+            Some(self.retirement.register(context)?),
+        );
         for (ordinal, (id, batch, references)) in
             self.state.batches.compaction_entries(removals).enumerate()
         {
@@ -138,6 +158,7 @@ impl StreamAsofJoinOperator {
                 originals: Vec::new(),
                 replacements: Vec::new(),
                 workspace: None,
+                ticket: None,
             });
         }
         let buffers = self
@@ -145,7 +166,13 @@ impl StreamAsofJoinOperator {
             .await?;
         let workspace = self.reserve_workspace(checked(&self.name, bytes, buffers)?)?;
         let originals = capture_right_buckets(selected, count, context).await?;
-        copy_right_buckets(originals, workspace, context).await
+        let prepared = PreparedRightCopies {
+            originals,
+            replacements: Vec::new(),
+            workspace: Some(workspace),
+            ticket: Some(self.retirement.register(context)?),
+        };
+        copy_right_buckets(prepared, context).await
     }
 
     fn right_copy_scratch_bytes<'a>(
@@ -264,15 +291,14 @@ async fn capture_right_buckets<'a>(
 }
 
 async fn copy_right_buckets(
-    originals: Buckets,
-    workspace: MemoryReservation,
+    prepared: PreparedRightCopies,
     context: &StreamOperatorContext<'_>,
 ) -> Result<PreparedRightCopies> {
     let cancellation = context.job().cancellation().clone();
     let run_id = context.job().job_id();
     let deadline = context.job().deadline().copied();
     context.check_cancelled()?;
-    let worker = copy_worker(originals, workspace, move || {
+    let worker = copy_worker(prepared, move || {
         if cancellation.is_cancelled()
             || deadline.is_some_and(|deadline| chrono::Utc::now() >= deadline)
         {
@@ -330,16 +356,11 @@ fn copy_extent<'a>(
 }
 
 async fn copy_worker(
-    originals: Buckets,
-    workspace: MemoryReservation,
+    mut prepared: PreparedRightCopies,
     check: impl Fn() -> Result<()> + Send + 'static,
 ) -> Result<PreparedRightCopies> {
     tokio::task::spawn_blocking(move || {
-        let mut prepared = PreparedRightCopies {
-            replacements: Vec::with_capacity(originals.len()),
-            originals,
-            workspace: Some(workspace),
-        };
+        prepared.replacements = Vec::with_capacity(prepared.originals.len());
         copy_columns(&mut prepared, check)?;
         Ok(prepared)
     })
@@ -364,6 +385,105 @@ mod tests {
     use super::*;
     use crate::operator::asof::state::SequenceKind;
     use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryConsumer, MemoryPool};
+
+    struct RefundWake {
+        pool: Arc<dyn MemoryPool>,
+        owner: std::sync::Weak<RightBucket>,
+        premature: std::sync::atomic::AtomicBool,
+        observed: tokio::sync::Notify,
+    }
+
+    impl std::task::Wake for RefundWake {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            if self.pool.reserved() != 0 || self.owner.upgrade().is_some() {
+                self.premature
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
+            self.observed.notify_one();
+        }
+    }
+
+    async fn assert_pre_spawn_copy_refunds_after_owners(cancelled: bool) {
+        use std::future::Future;
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(8_192));
+        let workspace = MemoryConsumer::new("pre-spawn-copy").register(&pool);
+        workspace.try_grow(4_096).unwrap();
+        let mut bucket = RightBucket::with_sequence_kind(SequenceKind::Canonical);
+        bucket.insert((0, Encoding::from_slice(&[7; 2_048])), None);
+        let source = Arc::new(bucket);
+        let cancellation = crate::CancellationToken::new();
+        let job = crate::StreamJobContext::new(
+            1,
+            "copy",
+            crate::JsonMap::new(),
+            None,
+            cancellation.clone(),
+        );
+        let context = StreamOperatorContext::new(&job, "asof", None);
+        let owner = super::super::retirement::Owner::default();
+        let probe = Arc::new(RefundWake {
+            pool: pool.clone(),
+            owner: Arc::downgrade(&source),
+            premature: std::sync::atomic::AtomicBool::new(false),
+            observed: tokio::sync::Notify::new(),
+        });
+        let prepared = PreparedRightCopies {
+            originals: vec![(0, source)],
+            replacements: Vec::new(),
+            workspace: Some(workspace),
+            ticket: Some(owner.register(&context).unwrap()),
+        };
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        tokio::task::spawn_blocking(move || {
+            entered.send(()).unwrap();
+            blocked
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+        });
+        ready.await.unwrap();
+        let waker = std::task::Waker::from(probe.clone());
+        let mut task = std::task::Context::from_waker(&waker);
+        let mut drain = Box::pin(job.gather_owner().close_and_drain());
+        assert!(drain.as_mut().poll(&mut task).is_pending());
+        let mut operation = Box::pin(copy_right_buckets(prepared, &context));
+        if cancelled {
+            cancellation.cancel();
+            assert!(matches!(
+                futures::poll!(operation.as_mut()),
+                std::task::Poll::Ready(Err(CalcFlowError::Cancelled { .. }))
+            ));
+        }
+        drop(operation);
+        assert_eq!(pool.reserved(), 4_096);
+        assert!(probe.owner.upgrade().is_some());
+        release.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), probe.observed.notified())
+            .await
+            .unwrap();
+        assert!(!probe.premature.load(std::sync::atomic::Ordering::Acquire));
+        assert!(drain.await.is_empty());
+        assert_eq!(pool.reserved(), 0);
+        assert!(probe.owner.upgrade().is_none());
+    }
+
+    #[test]
+    fn pre_spawn_right_copy_cancellation_preserves_refund_order() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            for cancelled in [false, true] {
+                assert_pre_spawn_copy_refunds_after_owners(cancelled).await;
+            }
+        });
+    }
 
     fn bucket(kind: SequenceKind) -> Arc<RightBucket> {
         let mut bucket = RightBucket::with_sequence_kind(kind);
@@ -462,6 +582,7 @@ mod tests {
                 originals: vec![(0, source)],
                 replacements: Vec::with_capacity(1),
                 workspace: Some(workspace),
+                ticket: None,
             };
             let allocations =
                 allocation_counter::measure(|| copy_columns(&mut prepared, || Ok(())).unwrap());
@@ -491,8 +612,12 @@ mod tests {
         let worker_gate = gate.clone();
         let (started_tx, started_rx) = std::sync::mpsc::channel();
         let mut operation = Box::pin(copy_worker(
-            vec![(0, source.clone())],
-            workspace,
+            PreparedRightCopies {
+                originals: vec![(0, source.clone())],
+                replacements: Vec::new(),
+                workspace: Some(workspace),
+                ticket: None,
+            },
             move || {
                 started_tx.send(()).unwrap();
                 let (flag, changed) = worker_gate.as_ref();
