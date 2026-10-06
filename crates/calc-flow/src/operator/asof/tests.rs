@@ -263,11 +263,12 @@ async fn accepted_prefix_installs_pool_compaction_without_allocating() {
         allocation.count_total, 0,
         "post-delivery commit allocated: {allocation:?}"
     );
-    assert!(matches!(result.unwrap(), std::task::Poll::Ready(Ok(()))));
+    assert!(matches!(result.unwrap(), std::task::Poll::Pending));
     drop(operation);
     assert_eq!(op.status.emitted_left_rows, 800);
     assert_eq!(op.state.batches.len(), 224);
     assert_eq!(collector.batch.unwrap().num_rows(), 800);
+    op.retirement.wait(&cx).await.unwrap();
 }
 
 #[test]

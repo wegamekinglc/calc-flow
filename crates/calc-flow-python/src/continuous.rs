@@ -1906,6 +1906,9 @@ fn stream_join_side_to_py<'py>(
         "max_lateness_micros" => side.max_lateness.map(duration_micros),
         "null_event_time_rows" => side.null_event_time_rows,
         "null_key_rows" => side.null_key_rows,
+        "watermark_micros" => side.watermark_micros.map(calc_flow::EventTime::as_micros),
+        "idle" => side.idle,
+        "ended" => side.ended,
     });
     Ok(value)
 }
@@ -2320,6 +2323,69 @@ mod tests {
                     .unwrap()
                     .is_empty()
             );
+        });
+    }
+
+    #[test]
+    fn join_status_preserves_progress_and_native_integer_ranges() {
+        Python::initialize();
+        Python::attach(|py| {
+            for (watermark, idle, ended) in [
+                (None, false, false),
+                (Some(i64::MIN), true, false),
+                (Some(i64::MAX), false, true),
+            ] {
+                let side = calc_flow::StreamJoinSideStatus {
+                    retained_rows: u64::MAX,
+                    retained_bytes: 0,
+                    evicted_rows: 0,
+                    late_rows: 0,
+                    late_affected_batches: 0,
+                    max_lateness: None,
+                    null_event_time_rows: 0,
+                    null_key_rows: 0,
+                    watermark_micros: watermark.map(EventTime::from_micros),
+                    idle,
+                    ended,
+                };
+                let value = super::stream_join_side_to_py(py, &side).unwrap();
+                assert_eq!(
+                    value
+                        .get_item("retained_rows")
+                        .unwrap()
+                        .unwrap()
+                        .extract::<u64>()
+                        .unwrap(),
+                    u64::MAX
+                );
+                assert_eq!(
+                    value
+                        .get_item("watermark_micros")
+                        .unwrap()
+                        .unwrap()
+                        .extract::<Option<i64>>()
+                        .unwrap(),
+                    watermark
+                );
+                assert_eq!(
+                    value
+                        .get_item("idle")
+                        .unwrap()
+                        .unwrap()
+                        .extract::<bool>()
+                        .unwrap(),
+                    idle
+                );
+                assert_eq!(
+                    value
+                        .get_item("ended")
+                        .unwrap()
+                        .unwrap()
+                        .extract::<bool>()
+                        .unwrap(),
+                    ended
+                );
+            }
         });
     }
 

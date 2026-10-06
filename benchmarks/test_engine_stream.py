@@ -42,13 +42,17 @@ def _source_type(probe, advance, output):
                 if probe.ended_sources == len(probe.sources):
                     probe.ended.set()
             elif isinstance(event, Data):
+                self.static = "factor" in event.batch.to_pyarrow().column_names
                 assert self.ready.is_set(), "data arrived before source readiness"
                 advance("enqueue", 1_000_000)
             else:
                 advance("watermark", 2_000_000)
+                probe.watermark_micros = engine_stream.BASE_MICROS + (
+                    event.at - BASE
+                ) // engine_stream.timedelta(microseconds=1)
                 # A multi-binding stream pushes one watermark per source; the
                 # first delivers the workload, the rest find it complete.
-                if not probe.sink.rows:
+                if not self.static and not probe.sink.rows:
                     await probe.sink.write(output(probe.expected))
 
     return Source
@@ -65,6 +69,17 @@ def _sink_type(probe):
 
 def _runner_type(probe, advance):
     class Job:
+        def status(self):
+            advance("status", 99_000_000)
+            return {
+                "stream_joins": {
+                    "join": {
+                        "right": {"watermark_micros": probe.watermark_micros},
+                        "left": {"retained_rows": 0, "evicted_rows": 0},
+                    }
+                }
+            }
+
         async def wait_async(self):
             await probe.ended.wait()
             advance("wait", 4_000_000_000)
@@ -100,6 +115,7 @@ def _runner_type(probe, advance):
 def stream_probe(monkeypatch):
     probe = SimpleNamespace(
         clock=0,
+        watermark_micros=None,
         phases=[],
         sources=[],
         sink=None,
@@ -161,17 +177,19 @@ def test_stream_timer_supports_the_two_source_join_binding(tmp_path, stream_prob
     try:
         sample = runner.sample()
         assert sample["correctness"]["passed"]
-        assert sample["seconds"] == pytest.approx(0.013)
+        assert sample["seconds"] == pytest.approx(0.010)
         assert stream_probe.phases == [
             "construct",
             "start",
             "ready",
             "enqueue",
+            "watermark",
+            "status",
             "enqueue",
             "watermark",
             "to-arrow",
-            "watermark",
             "concat",
+            "status",
             "eof",
             "eof",
             "wait",
@@ -181,17 +199,16 @@ def test_stream_timer_supports_the_two_source_join_binding(tmp_path, stream_prob
         runner.close()
 
 
-def test_static_join_waits_for_committed_matches_and_eviction(monkeypatch):
-    states = iter(((0, 0), (64_000, 64_000), (64_000, 0)))
+def test_static_join_waits_for_dimension_watermark_before_quotes(monkeypatch):
+    states = iter((None, 99, 100))
     waits = []
 
     def status():
-        emitted, retained = next(states)
         return {
             "stream_joins": {
                 "join": {
-                    "emitted_match_rows": emitted,
-                    "left": {"retained_rows": retained},
+                    "right": {"watermark_micros": next(states)},
+                    "left": {"retained_rows": 0, "evicted_rows": 0},
                 }
             }
         }
@@ -201,9 +218,99 @@ def test_static_join_waits_for_committed_matches_and_eviction(monkeypatch):
 
     monkeypatch.setattr(engine_stream.asyncio, "sleep", sleep)
     asyncio.run(
-        engine_stream._wait_static_join_progress(SimpleNamespace(status=status), 64_000)
+        engine_stream._wait_static_dimension_progress(
+            SimpleNamespace(status=status), 100
+        )
     )
     assert waits == [0.001, 0.001]
+
+
+def test_static_join_seals_dimension_before_feeding_any_quote():
+    async def exercise():
+        sink = engine_stream._CollectSink(2)
+        await sink.open()
+        batch = Batch.from_pyarrow(engine_stream.pa.table({"value": [1, 2]}))
+        data = Data(batch, Cursor(b"rows", {}))
+        watermark = Watermark(BASE)
+        events = []
+        acknowledged = False
+        checks = 0
+
+        class Source:
+            opened = asyncio.Event()
+            ready = asyncio.Event()
+
+            def __init__(self, name):
+                self.name = name
+                self.opened.set()
+                self.ready.set()
+
+            async def push(self, event):
+                events.append((self.name, event))
+                if self.name == "left":
+                    assert acknowledged, (
+                        "quote arrived before dimension acknowledgement"
+                    )
+                    if isinstance(event, Data):
+                        await sink.write(batch)
+
+        def status():
+            nonlocal acknowledged, checks
+            checks += 1
+            assert events[:2] == [("right", data), ("right", watermark)]
+            acknowledged = checks >= 2
+            return {
+                "stream_joins": {
+                    "join": {
+                        "right": {
+                            "watermark_micros": engine_stream.BASE_MICROS
+                            if acknowledged
+                            else None
+                        },
+                        "left": {"retained_rows": 0, "evicted_rows": 0},
+                    }
+                }
+            }
+
+        output, _seconds = await engine_stream._measure_ready(
+            {name: Source(name) for name in ("left", "right")},
+            sink,
+            {name: (data, watermark) for name in ("left", "right")},
+            SimpleNamespace(status=status),
+            static_join=True,
+        )
+        assert output.equals(batch.to_pyarrow())
+        assert [name for name, _event in events] == ["right", "right", "left", "left"]
+
+    asyncio.run(exercise())
+
+
+def test_static_join_limits_allow_only_dimension_and_one_batch():
+    limits = engine_stream._join_limits(128)
+    assert limits.max_state_rows_per_side == 128 + engine_stream.BATCH_ROWS
+    assert limits.max_matches_per_input_batch == 128 + engine_stream.BATCH_ROWS
+
+
+@pytest.mark.parametrize("metric", ("retained_rows", "evicted_rows"))
+def test_static_dimension_gate_rejects_left_state(metric):
+    def status():
+        return {
+            "stream_joins": {
+                "join": {
+                    "right": {"watermark_micros": 100},
+                    "left": {"retained_rows": 0, "evicted_rows": 0, metric: 1},
+                }
+            }
+        }
+
+    with pytest.raises(
+        RuntimeError, match="static Join retained or evicted quote rows"
+    ):
+        asyncio.run(
+            engine_stream._wait_static_dimension_progress(
+                SimpleNamespace(status=status), 100
+            )
+        )
 
 
 def test_sink_waits_for_cumulative_delivery_across_output_chunks():

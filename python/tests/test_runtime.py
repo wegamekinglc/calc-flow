@@ -244,4 +244,7 @@ def test_stream_join_status_typeddict_matches_the_native_mapping_value() -> None
         "max_lateness_micros",
         "null_event_time_rows",
         "null_key_rows",
+        "watermark_micros",
+        "idle",
+        "ended",
     }

@@ -490,6 +490,9 @@ def test_join_metrics_reach_progress_events(
                             "max_lateness_micros": None,
                             "null_event_time_rows": 0,
                             "null_key_rows": 0,
+                            "watermark_micros": "-9223372036854775808",
+                            "idle": False,
+                            "ended": False,
                         },
                         "right": {
                             "retained_rows": 0,
@@ -500,6 +503,9 @@ def test_join_metrics_reach_progress_events(
                             "max_lateness_micros": None,
                             "null_event_time_rows": 0,
                             "null_key_rows": 0,
+                            "watermark_micros": None,
+                            "idle": True,
+                            "ended": False,
                         },
                         "emitted_match_rows": 1,
                         "state_limit_failures": 0,
@@ -536,3 +542,5 @@ def test_join_metrics_reach_progress_events(
     assert joins[0]["node_id"] == "match"
     assert joins[0]["left"]["retained_rows"] == 1
     assert joins[0]["emitted_match_rows"] == 1
+    assert joins[0]["left"]["watermark_micros"] == "-9223372036854775808"
+    assert joins[0]["right"]["watermark_micros"] is None

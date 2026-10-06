@@ -17,7 +17,7 @@ from pydantic import (
     model_validator,
 )
 
-from calc_flow_studio.asof_metrics import StreamAsofJoinMetrics
+from calc_flow_studio.asof_metrics import SignedDecimal, StreamAsofJoinMetrics
 
 type JSONValue = (
     None | bool | int | float | str | list[JSONValue] | dict[str, JSONValue]
@@ -460,6 +460,9 @@ class StreamJoinSideMetrics(StrictModel):
     max_lateness_micros: int | None = Field(default=None, ge=0)
     null_event_time_rows: int = Field(ge=0)
     null_key_rows: int = Field(ge=0)
+    watermark_micros: SignedDecimal | None
+    idle: StrictBool
+    ended: StrictBool
 
 
 class StreamJoinMetrics(StrictModel):

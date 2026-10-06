@@ -32,6 +32,9 @@ export interface StreamJoinSideMetrics {
   max_lateness_micros: number | null;
   null_event_time_rows: number;
   null_key_rows: number;
+  watermark_micros: string | null;
+  idle: boolean;
+  ended: boolean;
 }
 
 export interface StreamJoinMetrics {

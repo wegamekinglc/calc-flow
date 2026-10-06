@@ -8699,10 +8699,18 @@
       "StreamJoinSideMetrics": {
         "additionalProperties": false,
         "properties": {
+          "ended": {
+            "title": "Ended",
+            "type": "boolean"
+          },
           "evicted_rows": {
             "minimum": 0.0,
             "title": "Evicted Rows",
             "type": "integer"
+          },
+          "idle": {
+            "title": "Idle",
+            "type": "boolean"
           },
           "late_affected_batches": {
             "minimum": 0.0,
@@ -8745,6 +8753,16 @@
             "minimum": 0.0,
             "title": "Retained Rows",
             "type": "integer"
+          },
+          "watermark_micros": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SignedDecimal"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -8754,7 +8772,10 @@
           "late_rows",
           "late_affected_batches",
           "null_event_time_rows",
-          "null_key_rows"
+          "null_key_rows",
+          "watermark_micros",
+          "idle",
+          "ended"
         ],
         "title": "StreamJoinSideMetrics",
         "type": "object"

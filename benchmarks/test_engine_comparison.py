@@ -120,7 +120,7 @@ def test_polars_single_thread_reference_matches_oracles_in_a_fresh_process(
     result = _fresh_polars_samples(tmp_path, rows, site, source)
     assert result["pid"] != os.getpid()
     assert result["threads"] == 1
-    assert result["samples"] == [True] * 7
+    assert result["samples"] == [True] * 8
 
 
 def test_single_thread_reference_rejects_a_process_with_a_larger_pool(
@@ -191,6 +191,81 @@ def test_static_join_waits_for_delayed_dimension_progress(monkeypatch, tmp_path)
         runner.close()
 
 
+def _static_join_status_measurement(left_counter, monkeypatch):
+    from benchmarks import engine_stream
+    from calc_flow import Batch, Watermark
+
+    table = pa.table({"value": [1.0]})
+    sink = engine_stream._CollectSink(1)
+    sink.opened.set()
+    clock_reads = []
+
+    def clock():
+        clock_reads.append(len(clock_reads))
+        return clock_reads[-1] * 1_000_000
+
+    monkeypatch.setattr(engine_stream.time, "perf_counter_ns", clock)
+
+    class Source:
+        def __init__(self, name):
+            self.name = name
+            self.ready = asyncio.Event()
+            self.opened = asyncio.Event()
+            self.ready.set()
+            self.opened.set()
+
+        async def push(self, _event):
+            if self.name == "left":
+                await sink.write(Batch.from_pyarrow(table))
+
+    class Job:
+        reads = 0
+
+        def status(self):
+            self.reads += 1
+            quoted = self.reads >= 3
+            if self.reads > 1:
+                assert len(clock_reads) == 2, "status proof must follow timer stop"
+            left = {"retained_rows": 0, "evicted_rows": 0}
+            if quoted and left_counter:
+                left[left_counter] = 1
+            return {
+                "stream_joins": {
+                    "join": {
+                        "left": left,
+                        "right": {"watermark_micros": engine_stream.BASE_MICROS},
+                        "emitted_match_rows": int(quoted),
+                    }
+                }
+            }
+
+    job = Job()
+    sources = {name: Source(name) for name in ("left", "right")}
+    streams = {
+        "left": (object(),),
+        "right": (object(), Watermark(engine_stream.BASE)),
+    }
+    result = asyncio.run(
+        engine_stream._measure_ready(sources, sink, streams, job, static_join=True)
+    )
+    return result, job.reads
+
+
+@pytest.mark.parametrize("left_counter", ("retained_rows", "evicted_rows"))
+def test_static_join_rejects_post_quote_state_after_a_stale_snapshot(
+    left_counter, monkeypatch
+):
+    with pytest.raises(RuntimeError, match="retained or evicted quote rows"):
+        _static_join_status_measurement(left_counter, monkeypatch)
+
+
+def test_static_join_accepts_the_causal_post_quote_status_outside_timing(monkeypatch):
+    (table, seconds), reads = _static_join_status_measurement(None, monkeypatch)
+    assert table == pa.table({"value": [1.0]})
+    assert seconds == 0.001
+    assert reads == 3
+
+
 @pytest.mark.parametrize("binding", ("reference.input", "quotes.input"))
 def test_asof_waits_for_delayed_chunk_watermarks(binding, monkeypatch, tmp_path):
     from benchmarks import engine_stream
@@ -224,18 +299,19 @@ def test_asof_waits_for_delayed_chunk_watermarks(binding, monkeypatch, tmp_path)
 
 
 def test_asof_small_batches_complete_without_reading_job_status(monkeypatch, tmp_path):
-    from benchmarks import engine_stream
     from calc_flow import StreamingJob
 
     def status(_self):
         raise AssertionError("ASOF progress must await sink delivery")
 
-    monkeypatch.setattr(engine_stream, "BATCH_ROWS", 1_024)
     monkeypatch.setattr(StreamingJob, "status", status)
     case = next(
         case
         for case in engine_cases(4_097)
-        if case["backend"] == "calc-flow-stream" and case["scenario"] == "asof_join"
+        if case["backend"] == "calc-flow-stream"
+        and case["scenario"] == "asof_join"
+        and case.get("batch_rows") == 1024
+        and case.get("checkpoint_interval_millis") is None
     )
     runner = EngineCase(case, tmp_path)
     try:

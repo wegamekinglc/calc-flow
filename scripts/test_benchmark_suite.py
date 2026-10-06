@@ -231,6 +231,7 @@ class BenchmarkSuiteTests(unittest.TestCase):
                     for case in engine_cases()
                     if case["backend"] == "calc-flow-stream"
                     and case["scenario"] == scenario
+                    and not case.get("variant")
                 }
                 self.assertEqual(
                     actual,
@@ -253,17 +254,26 @@ class BenchmarkSuiteTests(unittest.TestCase):
         self.assertEqual(len(matrix), len({s["id"] for s in matrix}))
         self.assertEqual(len(matrix), 22)
 
-    def test_native_stream_matrix_excludes_runner_startup(self):
-        cases = [c for c in engine_cases() if c["backend"] == "calc-flow-stream"]
+    def test_native_throughput_matrix_excludes_runner_startup(self):
+        cases = [
+            c
+            for c in engine_cases()
+            if c["backend"] == "calc-flow-stream"
+            and c.get("workload") != "checkpoint-duration"
+        ]
         self.assertEqual(
             {c["scope"] for c in cases},
-            {"ready-enqueue-to-arrow/interleaved-inputs-v5"},
+            {catalog.STREAM_SCOPE, catalog.INTERVAL_SCOPE, catalog.SMALL_BATCH_SCOPE},
         )
 
     def test_changed_stream_scope_is_new_coverage_without_disabling_sql_pairs(self):
         source = Path(__file__).resolve().parents[1]
         original = (source / "scripts/benchmark_suite/catalog.py").read_text()
-        for scope in ("interleaved-inputs-v4", "interleaved-inputs-v5"):
+        for scope in (
+            "interleaved-inputs-v4",
+            "interleaved-inputs-v5",
+            "bounded-feeds-v6",
+        ):
             with self.subTest(scope=scope), TemporaryDirectory() as directory:
                 base = Path(directory)
                 path = base / "scripts/benchmark_suite/catalog.py"
@@ -276,7 +286,12 @@ class BenchmarkSuiteTests(unittest.TestCase):
                 ids = baseline_case_ids(base, {"family": "engines"})
                 for case in engine_cases(100):
                     if case["backend"] == "calc-flow-stream":
-                        expected = "new" if scope.endswith("v4") else "interleaved"
+                        expected = (
+                            "new"
+                            if case["scope"] == catalog.STREAM_SCOPE
+                            and not scope.endswith("v6")
+                            else "interleaved"
+                        )
                         self.assertEqual(catalog.comparison_kind(case, ids), expected)
                     elif case["backend"] == "calc-flow-sql":
                         self.assertEqual(

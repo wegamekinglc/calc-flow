@@ -1062,6 +1062,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn status_tracks_ingress_watermark_idle_reactivation_and_end() {
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        let initial = operator.status();
+        assert_eq!(initial.left.watermark_micros, None);
+        assert!(!initial.left.idle && !initial.left.ended);
+        let job_context = job();
+        let context = StreamOperatorContext::new(&job_context, "match", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data("right", right_batch(vec![0]), &context, &mut collector)
+            .await
+            .unwrap();
+        for (state, watermark) in [
+            (IngressState::Active, i64::MIN),
+            (IngressState::Idle, i64::MIN),
+            (IngressState::Active, i64::MAX),
+            (IngressState::Ended, i64::MAX),
+        ] {
+            let context = progress_context(
+                &job_context,
+                (IngressState::Active, None),
+                (state, Some(watermark)),
+            );
+            operator
+                .on_ingress_progress("right", &context)
+                .await
+                .unwrap();
+            let status = operator.status();
+            assert_eq!(
+                status.right.watermark_micros,
+                Some(EventTime::from_micros(watermark))
+            );
+            assert_eq!(status.right.idle, state == IngressState::Idle);
+            assert_eq!(status.right.ended, state == IngressState::Ended);
+            assert_eq!(status.left.watermark_micros, None);
+        }
+        let snapshot = operator.checkpoint(Epoch::INITIAL).unwrap();
+        assert_eq!(snapshot.inline_metadata["layout_version"], 1);
+        assert!(
+            snapshot.inline_metadata["metrics"]["right"]
+                .get("watermark_micros")
+                .is_none()
+        );
+        operator.restore(&snapshot).unwrap();
+        assert_eq!(operator.status().right.watermark_micros, None);
+        let context = StreamOperatorContext::new(&job_context, "match", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        operator.on_end(&context, &mut collector).await.unwrap();
+        assert!(operator.status().left.ended && operator.status().right.ended);
+        operator.reset().unwrap();
+        assert!(!operator.status().right.ended);
+        assert_eq!(operator.status().right.watermark_micros, None);
+    }
+
+    #[tokio::test]
     async fn late_rows_are_dropped_with_metrics_and_never_retained() {
         let mut operator =
             StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
@@ -1411,6 +1467,410 @@ mod tests {
             .unwrap();
         let outputs = collector.drain("output");
         assert_eq!(outputs.len(), 1, "restored left state must still match");
+    }
+
+    #[tokio::test]
+    async fn no_expiry_progress_visits_neither_retained_rows_nor_pending_ops() {
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        let job_context = job();
+        let context = StreamOperatorContext::new(&job_context, "match", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data(
+                "left",
+                left_batch((0..80).collect()),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+        reset_join_work();
+        let progress = progress_context(
+            &job_context,
+            (IngressState::Active, None),
+            (IngressState::Active, Some(60_000_000)),
+        );
+        operator
+            .on_ingress_progress("right", &progress)
+            .await
+            .unwrap();
+        let work = join_work();
+        assert_eq!(work.retained_visits, 0);
+        assert_eq!(work.pending_visits, 0);
+        assert_eq!(operator.status().left.retained_rows, 80);
+    }
+
+    #[tokio::test]
+    async fn sparse_out_of_order_eviction_visits_only_expired_identities() {
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        let job_context = job();
+        let context = StreamOperatorContext::new(&job_context, "match", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        let mut times = (2..80).rev().collect::<Vec<_>>();
+        times.splice(20..20, [0, 1]);
+        operator
+            .process_data("left", left_batch(times), &context, &mut collector)
+            .await
+            .unwrap();
+        reset_join_work();
+        let progress = progress_context(
+            &job_context,
+            (IngressState::Active, None),
+            (IngressState::Active, Some(60_000_002)),
+        );
+        operator
+            .on_ingress_progress("right", &progress)
+            .await
+            .unwrap();
+        let work = join_work();
+        assert_eq!(work.retained_visits, 2);
+        assert_eq!(work.pending_visits, 2);
+        assert_eq!(operator.status().left.retained_rows, 78);
+        assert_eq!(operator.status().left.evicted_rows, 2);
+        let snapshot = operator.checkpoint(Epoch::INITIAL).unwrap();
+        let mut restored =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        restored.restore(&snapshot).unwrap();
+        restored
+            .on_ingress_progress("right", &progress)
+            .await
+            .unwrap();
+        assert_eq!(restored.status(), operator.status());
+    }
+
+    #[tokio::test]
+    async fn retained_row_key_is_encoded_once_and_reused_for_its_charge() {
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        let job_context = job();
+        let context = StreamOperatorContext::new(&job_context, "match", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        reset_join_work();
+        operator
+            .process_data("left", left_batch(vec![0, 1, 2]), &context, &mut collector)
+            .await
+            .unwrap();
+        assert_eq!(join_work().key_encodings, 3);
+    }
+
+    #[tokio::test]
+    async fn dirty_log_coalescing_visits_only_the_evicted_upsert() {
+        for count in [3, 80] {
+            let mut operator =
+                StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+            let job_context = job();
+            let context = StreamOperatorContext::new(&job_context, "match", None);
+            let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+            operator
+                .process_data(
+                    "left",
+                    left_batch((0..count).collect()),
+                    &context,
+                    &mut collector,
+                )
+                .await
+                .unwrap();
+            reset_join_work();
+            let progress = progress_context(
+                &job_context,
+                (IngressState::Active, None),
+                (IngressState::Active, Some(60_000_001)),
+            );
+            operator
+                .on_ingress_progress("right", &progress)
+                .await
+                .unwrap();
+            assert_eq!(join_work().pending_visits, 1);
+            let snapshot = operator.checkpoint(Epoch::INITIAL).unwrap();
+            let mut restored =
+                StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+            restored.restore(&snapshot).unwrap();
+            assert_eq!(
+                restored.status().left.retained_rows,
+                u64::try_from(count - 1).unwrap()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_tombstones_preserve_stable_retention_order_after_sparse_eviction() {
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        let job_context = job();
+        let context = StreamOperatorContext::new(&job_context, "match", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data(
+                "left",
+                left_batch(vec![3, 0, 4, 1, 5, 2]),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+        operator.checkpoint(Epoch::new(1).unwrap()).unwrap();
+        for (epoch, watermark) in [(2, 60_000_001), (3, 60_000_003)] {
+            let progress = progress_context(
+                &job_context,
+                (IngressState::Active, None),
+                (IngressState::Active, Some(watermark)),
+            );
+            operator
+                .on_ingress_progress("right", &progress)
+                .await
+                .unwrap();
+            operator.checkpoint(Epoch::new(epoch).unwrap()).unwrap();
+        }
+        operator.on_end(&context, &mut collector).await.unwrap();
+        assert_eq!(
+            operator
+                .state
+                .deltas
+                .pending
+                .iter()
+                .map(PendingOp::identity)
+                .collect::<Vec<_>>(),
+            vec![
+                (JoinSide::Left, 0),
+                (JoinSide::Left, 2),
+                (JoinSide::Left, 4)
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn timestamp_type_is_decoded_once_per_input_record() {
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        let job_context = job();
+        let context = StreamOperatorContext::new(&job_context, "match", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        reset_join_work();
+        operator
+            .process_data("left", left_batch(vec![0, 1, 2]), &context, &mut collector)
+            .await
+            .unwrap();
+        assert_eq!(join_work().time_decoders, 1);
+    }
+
+    #[tokio::test]
+    async fn batch_timestamp_decoding_preserves_units_nulls_and_negative_floor() {
+        for timezone in [None, Some("UTC".into())] {
+            for (unit, values, expected) in [
+                (
+                    TimeUnit::Second,
+                    vec![Some(-1), None, Some(2)],
+                    vec![-1_000_000, 2_000_000],
+                ),
+                (
+                    TimeUnit::Millisecond,
+                    vec![Some(-1), None, Some(2)],
+                    vec![-1_000, 2_000],
+                ),
+                (
+                    TimeUnit::Microsecond,
+                    vec![Some(-1), None, Some(2)],
+                    vec![-1, 2],
+                ),
+                (
+                    TimeUnit::Nanosecond,
+                    vec![Some(-1), None, Some(1_999)],
+                    vec![-1, 1],
+                ),
+            ] {
+                let data_type = DataType::Timestamp(unit, timezone.clone());
+                let schema = Arc::new(Schema::new(vec![
+                    Field::new("account_id", DataType::Int64, false),
+                    Field::new("authorized_at", data_type.clone(), true),
+                    Field::new("amount", DataType::Int64, true),
+                ]));
+                let times = datafusion::arrow::compute::cast(&Int64Array::from(values), &data_type)
+                    .unwrap();
+                let record = RecordBatch::try_new(
+                    Arc::clone(&schema),
+                    vec![
+                        Arc::new(Int64Array::from(vec![7; 3])),
+                        times,
+                        Arc::new(Int64Array::from(vec![42; 3])),
+                    ],
+                )
+                .unwrap();
+                let mut operator =
+                    StreamJoinOperator::new("match", schema, right_schema(), spec()).unwrap();
+                let job_context = job();
+                let context = StreamOperatorContext::new(&job_context, "match", None);
+                let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+                operator
+                    .process_data(
+                        "left",
+                        Batch::table(vec![record], BatchMetadata::default()).unwrap(),
+                        &context,
+                        &mut collector,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    operator
+                        .state
+                        .left
+                        .iter()
+                        .map(|row| row.event_time.as_micros())
+                        .collect::<Vec<_>>(),
+                    expected
+                );
+                assert_eq!(operator.state.next_left_row_id, 3);
+                assert_eq!(operator.status().left.null_event_time_rows, 1);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_timestamp_overflow_keeps_the_failure_reason_and_drop_precedence() {
+        for unit in [TimeUnit::Second, TimeUnit::Millisecond] {
+            let data_type = DataType::Timestamp(unit, None);
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("account_id", DataType::Int64, true),
+                Field::new("authorized_at", data_type.clone(), true),
+                Field::new("amount", DataType::Int64, true),
+            ]));
+            let times = datafusion::arrow::compute::cast(
+                &Int64Array::from(vec![Some(0), Some(i64::MAX)]),
+                &data_type,
+            )
+            .unwrap();
+            let record = RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![
+                    Arc::new(Int64Array::from(vec![Some(7), None])),
+                    times,
+                    Arc::new(Int64Array::from(vec![42; 2])),
+                ],
+            )
+            .unwrap();
+            let mut operator =
+                StreamJoinOperator::new("match", schema, right_schema(), spec()).unwrap();
+            let job_context = job();
+            let context = StreamOperatorContext::new(&job_context, "match", None);
+            let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+            let error = operator
+                .process_data(
+                    "left",
+                    Batch::table(vec![record], BatchMetadata::default()).unwrap(),
+                    &context,
+                    &mut collector,
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                CalcFlowError::OperatorReason {
+                    reason_code: crate::StreamingFailureReason::JoinTimeConversionFailed,
+                    ..
+                }
+            ));
+            assert!(collector.drain("output").is_empty());
+            assert_eq!(operator.state.next_left_row_id, 0);
+            assert_eq!(operator.status().left.retained_rows, 0);
+        }
+    }
+
+    async fn v1_fixture_captures() -> Vec<OperatorStateSnapshot> {
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        let job_context = job();
+        let context = StreamOperatorContext::new(&job_context, "match", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data(
+                "left",
+                left_batch(vec![30, 0, 40, 1, 50, 2]),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+        let mut captures = vec![operator.checkpoint(Epoch::new(1).unwrap()).unwrap()];
+        let progress = progress_context(
+            &job_context,
+            (IngressState::Active, None),
+            (IngressState::Active, Some(60_000_001)),
+        );
+        operator
+            .on_ingress_progress("right", &progress)
+            .await
+            .unwrap();
+        captures.push(operator.checkpoint(Epoch::new(2).unwrap()).unwrap());
+        operator
+            .process_data("left", left_batch(vec![20]), &context, &mut collector)
+            .await
+            .unwrap();
+        captures.push(operator.checkpoint(Epoch::new(3).unwrap()).unwrap());
+        let progress = progress_context(
+            &job_context,
+            (IngressState::Active, None),
+            (IngressState::Active, Some(60_000_003)),
+        );
+        operator
+            .on_ingress_progress("right", &progress)
+            .await
+            .unwrap();
+        captures.push(operator.checkpoint(Epoch::new(4).unwrap()).unwrap());
+        operator.prepare_checkpoint_async(&context).await.unwrap();
+        operator
+            .process_data("left", left_batch(vec![]), &context, &mut collector)
+            .await
+            .unwrap();
+        captures.push(operator.checkpoint(Epoch::new(5).unwrap()).unwrap());
+        captures
+    }
+
+    #[tokio::test]
+    async fn frozen_v1_checkpoint_fixture_preserves_wire_bytes_and_continuation() {
+        let captures = v1_fixture_captures().await;
+        let wire = captures.iter().map(|snapshot| serde_json::json!({
+            "inline_metadata": snapshot.inline_metadata,
+            "segments": snapshot.segments.iter().map(|(name, segment)| (name.clone(), hex::encode(segment.bytes()))).collect::<BTreeMap<_, _>>(),
+        })).collect::<Vec<_>>();
+        let frozen: Vec<Value> =
+            serde_json::from_str(include_str!("join/fixtures/checkpoint-v1.json")).unwrap();
+        assert_eq!(wire, frozen);
+        let snapshot = frozen.last().unwrap();
+        let snapshot = OperatorStateSnapshot {
+            inline_metadata: serde_json::from_value(snapshot["inline_metadata"].clone()).unwrap(),
+            segments: snapshot["segments"]
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(name, bytes)| {
+                    (
+                        name.clone(),
+                        StateSegment::new(hex::decode(bytes.as_str().unwrap()).unwrap()),
+                    )
+                })
+                .collect(),
+        };
+        let mut restored =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        restored.restore(&snapshot).unwrap();
+        assert_eq!(restored.status().left.retained_rows, 4);
+        let job_context = job();
+        let context = StreamOperatorContext::new(&job_context, "match", None);
+        let mut collector = EdgeCollector::new(restored.output_ports().to_vec());
+        restored
+            .process_data("right", right_batch(vec![20]), &context, &mut collector)
+            .await
+            .unwrap();
+        assert_eq!(restored.status().emitted_match_rows, 4);
+        assert_eq!(
+            collector.drain("output")[0]
+                .as_data()
+                .unwrap()
+                .metadata()
+                .sequence(),
+            0
+        );
     }
 
     #[tokio::test]
@@ -1909,7 +2369,7 @@ mod tests {
     }
 }
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fmt,
     io::Cursor,
     mem::size_of,
@@ -1941,12 +2401,45 @@ use serde_json::Value;
 
 use crate::{
     Batch, BatchKind, BatchMetadata, CalcFlowError, DataFusionConfig, Epoch, EventTime,
-    IngressProgress, JsonMap, OperatorStateSnapshot, Port, Result, StateSegment, StreamCollector,
-    StreamOperator, StreamOperatorContext, UdfRegistrySnapshot,
+    IngressProgress, IngressProgressSnapshot, JsonMap, OperatorStateSnapshot, Port, Result,
+    StateSegment, StreamCollector, StreamOperator, StreamOperatorContext, UdfRegistrySnapshot,
     expression::{ValidatedQuery, parse_select_query},
 };
 
 use super::{OperatorMetadata, StreamRuntimeState, is_portable_identifier, validate_operator_name};
+
+#[cfg(test)]
+#[derive(Clone, Copy, Default)]
+struct JoinWork {
+    retained_visits: usize,
+    pending_visits: usize,
+    key_encodings: usize,
+    time_decoders: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    static JOIN_WORK: std::cell::Cell<JoinWork> = const { std::cell::Cell::new(JoinWork {
+        retained_visits: 0, pending_visits: 0, key_encodings: 0, time_decoders: 0,
+    }) };
+}
+
+#[cfg(test)]
+fn join_work() -> JoinWork {
+    JOIN_WORK.get()
+}
+
+#[cfg(test)]
+fn reset_join_work() {
+    JOIN_WORK.set(JoinWork::default());
+}
+
+#[cfg(test)]
+fn note_join_work(note: impl FnOnce(&mut JoinWork)) {
+    let mut work = join_work();
+    note(&mut work);
+    JOIN_WORK.set(work);
+}
 
 /// The fixed logical bookkeeping charge for one retained Join row.
 pub const STREAM_JOIN_STATE_ROW_OVERHEAD_BYTES_V1: u64 = 64;
@@ -2303,6 +2796,12 @@ pub struct StreamJoinSideStatus {
     pub null_event_time_rows: u64,
     /// Rows dropped because a key component was null.
     pub null_key_rows: u64,
+    /// Most recent accepted ingress watermark, if one has been established.
+    pub watermark_micros: Option<EventTime>,
+    /// Whether this input is currently idle; idle preserves its watermark.
+    pub idle: bool,
+    /// Whether this input has permanently ended.
+    pub ended: bool,
 }
 
 /// Payload-free Join status for one node (api note "Payload-free Join status").
@@ -2320,6 +2819,19 @@ pub struct StreamJoinStatus {
     pub match_limit_failures: u64,
 }
 
+impl StreamJoinStatus {
+    pub(crate) fn with_ingress_progress(mut self, progress: &IngressProgressSnapshot) -> Self {
+        for (name, side) in [("left", &mut self.left), ("right", &mut self.right)] {
+            if let Some(ingress) = progress.get(name) {
+                side.watermark_micros = ingress.watermark();
+                side.idle = ingress.state() == crate::IngressState::Idle;
+                side.ended = ingress.state() == crate::IngressState::Ended;
+            }
+        }
+        self
+    }
+}
+
 fn side_status(metrics: &SideMetrics) -> StreamJoinSideStatus {
     StreamJoinSideStatus {
         retained_rows: metrics.retained_rows,
@@ -2330,6 +2842,9 @@ fn side_status(metrics: &SideMetrics) -> StreamJoinSideStatus {
         max_lateness: metrics.max_lateness_micros.map(Duration::from_micros),
         null_event_time_rows: metrics.null_event_time_rows,
         null_key_rows: metrics.null_key_rows,
+        watermark_micros: None,
+        idle: false,
+        ended: false,
     }
 }
 
@@ -2343,6 +2858,7 @@ pub struct StreamJoinOperator {
     runtime: StreamRuntimeState,
     state: StreamJoinState,
     retained_key_cache: RetainedKeyCache,
+    ingress_progress: IngressProgressSnapshot,
 }
 
 const MAX_RETAINED_KEY_CACHE_BYTES_PER_SIDE: usize = 32 * 1024 * 1024;
@@ -2427,7 +2943,7 @@ struct StoredRow {
 }
 
 /// One side of the Join state, in durable-identity order.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 enum JoinSide {
     Left,
     Right,
@@ -2471,6 +2987,93 @@ impl PendingOp {
     }
 }
 
+#[derive(Default)]
+struct PendingLog {
+    slots: Vec<Option<PendingEntry>>,
+    free: Vec<usize>,
+    upserts: HashMap<(JoinSide, u64), usize>,
+    head: Option<usize>,
+    tail: Option<usize>,
+}
+
+struct PendingEntry {
+    op: PendingOp,
+    previous: Option<usize>,
+    next: Option<usize>,
+}
+
+impl PendingLog {
+    fn is_empty(&self) -> bool {
+        self.head.is_none()
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &PendingOp> {
+        let mut next = self.head;
+        std::iter::from_fn(move || {
+            let entry = self.slots[next?].as_ref().expect("live pending link");
+            next = entry.next;
+            Some(&entry.op)
+        })
+    }
+
+    fn push(&mut self, op: PendingOp) {
+        let slot = self.free.pop().unwrap_or(self.slots.len());
+        if matches!(&op, PendingOp::Upsert { .. }) {
+            let previous = self.upserts.insert(op.identity(), slot);
+            debug_assert!(previous.is_none(), "pending upsert identities are unique");
+        }
+        let entry = Some(PendingEntry {
+            op,
+            previous: self.tail,
+            next: None,
+        });
+        if slot == self.slots.len() {
+            self.slots.push(entry);
+        } else {
+            self.slots[slot] = entry;
+        }
+        if let Some(tail) = self.tail {
+            self.slots[tail].as_mut().expect("live pending tail").next = Some(slot);
+        } else {
+            self.head = Some(slot);
+        }
+        self.tail = Some(slot);
+    }
+
+    fn remove_upsert(&mut self, identity: (JoinSide, u64)) -> bool {
+        let Some(slot) = self.upserts.remove(&identity) else {
+            return false;
+        };
+        let entry = self.slots[slot].take().expect("indexed pending upsert");
+        if let Some(previous) = entry.previous {
+            self.slots[previous]
+                .as_mut()
+                .expect("live previous pending entry")
+                .next = entry.next;
+        } else {
+            self.head = entry.next;
+        }
+        if let Some(next) = entry.next {
+            self.slots[next]
+                .as_mut()
+                .expect("live next pending entry")
+                .previous = entry.previous;
+        } else {
+            self.tail = entry.previous;
+        }
+        self.free.push(slot);
+        true
+    }
+
+    fn clear(&mut self) {
+        self.slots.clear();
+        self.free.clear();
+        self.upserts.clear();
+        self.head = None;
+        self.tail = None;
+    }
+}
+
 /// Prepared checkpoint segments and the dirty log (spec FR45/FR47).
 ///
 /// Bulk encoding and compaction are prepared during data/progress handlers;
@@ -2480,7 +3083,7 @@ impl PendingOp {
 struct DeltaTracking {
     base: BTreeMap<&'static str, StateSegment>,
     segments: BTreeMap<(u64, &'static str), StateSegment>,
-    pending: Vec<PendingOp>,
+    pending: PendingLog,
     segments_since_base: u32,
     needs_compaction: bool,
 }
@@ -2510,6 +3113,8 @@ struct JoinMetrics {
 struct StreamJoinState {
     left: Vec<StoredRow>,
     right: Vec<StoredRow>,
+    left_expirations: ExpirationIndex,
+    right_expirations: ExpirationIndex,
     next_left_row_id: u64,
     next_right_row_id: u64,
     next_output_sequence: u64,
@@ -2517,6 +3122,47 @@ struct StreamJoinState {
     ended: bool,
     last_checkpoint_epoch: Option<Epoch>,
     deltas: DeltaTracking,
+}
+
+#[derive(Default)]
+struct ExpirationIndex {
+    entries: BTreeMap<(EventTime, u64), (usize, u128)>,
+    next_ordinal: u128,
+}
+
+impl ExpirationIndex {
+    fn restored(rows: &[StoredRow]) -> Self {
+        Self {
+            entries: rows
+                .iter()
+                .enumerate()
+                .map(|(index, row)| ((row.event_time, row.row_id), (index, index as u128)))
+                .collect(),
+            next_ordinal: rows.len() as u128,
+        }
+    }
+
+    fn append(&mut self, offset: usize, rows: &[StoredRow]) {
+        for (index, row) in rows.iter().enumerate() {
+            self.entries.insert(
+                (row.event_time, row.row_id),
+                (offset + index, self.next_ordinal + index as u128),
+            );
+        }
+        self.next_ordinal += rows.len() as u128;
+    }
+
+    fn identities(&self, rows: &[StoredRow]) -> Vec<(u64, EventTime, Arc<Vec<u8>>)> {
+        let mut ordered = self.entries.values().copied().collect::<Vec<_>>();
+        ordered.sort_by_key(|(_, ordinal)| *ordinal);
+        ordered
+            .into_iter()
+            .map(|(index, _)| {
+                let row = &rows[index];
+                (row.row_id, row.event_time, Arc::clone(&row.encoded_key))
+            })
+            .collect()
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -2581,6 +3227,7 @@ impl StreamJoinOperator {
             runtime: StreamRuntimeState::new(),
             state: StreamJoinState::default(),
             retained_key_cache: RetainedKeyCache::default(),
+            ingress_progress: IngressProgressSnapshot::default(),
         })
     }
 
@@ -2589,15 +3236,27 @@ impl StreamJoinOperator {
         &self.spec
     }
 
-    /// Returns a payload-free status snapshot of the retained Join state.
+    /// Returns a payload-free snapshot of retained state and observed ingress progress.
+    ///
+    /// Standalone restore has no ingress progress until a handler context supplies it.
+    /// Non-terminal managed restart publishes restored progress before the running
+    /// job's startup acknowledgement.
     pub fn status(&self) -> StreamJoinStatus {
-        StreamJoinStatus {
+        let mut status = StreamJoinStatus {
             left: side_status(&self.state.metrics.left),
             right: side_status(&self.state.metrics.right),
             emitted_match_rows: self.state.metrics.emitted_match_rows,
             state_limit_failures: self.state.metrics.state_limit_failures,
             match_limit_failures: self.state.metrics.match_limit_failures,
         }
+        .with_ingress_progress(&self.ingress_progress);
+        if self.state.ended {
+            status.left.ended = true;
+            status.right.ended = true;
+            status.left.idle = false;
+            status.right.idle = false;
+        }
+        status
     }
 
     pub(crate) fn set_stream_resources(
@@ -2614,7 +3273,7 @@ impl StreamJoinOperator {
 
     pub(crate) fn output_frontier_candidate(
         &self,
-        progress: &crate::IngressProgressSnapshot,
+        progress: &IngressProgressSnapshot,
     ) -> Result<Option<EventTime>> {
         let left = progress.get("left").ok_or_else(|| {
             operator_error(
@@ -2787,9 +3446,14 @@ impl StreamJoinOperator {
         } else {
             "left"
         });
+        let times = BatchEventTimes::new(
+            record.column(plan.event_time_index).as_ref(),
+            &self.name,
+            ingress,
+        )?;
         for row_index in 0..record.num_rows() {
             let row_id = bundle.reserve_row_id(&self.name)?;
-            match self.classify_row(record, plan, row_index, side_progress, ingress)? {
+            match self.classify_row(record, plan, &times, row_index, side_progress, ingress)? {
                 RowAdmission::Dropped(kind) => bundle.note_dropped(kind, &self.name)?,
                 RowAdmission::Admitted(event_time) => {
                     bundle.push_admitted(AdmittedRow {
@@ -2816,18 +3480,12 @@ impl StreamJoinOperator {
         &self,
         record: &RecordBatch,
         plan: &SidePlan,
+        times: &BatchEventTimes<'_>,
         row_index: usize,
         side_progress: Option<IngressProgress>,
         ingress: &str,
     ) -> Result<RowAdmission> {
-        let Some(event_time) = event_time_at(
-            record,
-            plan.event_time_index,
-            row_index,
-            &self.name,
-            ingress,
-        )?
-        else {
+        let Some(event_time) = times.at(row_index, &self.name, ingress)? else {
             return Ok(RowAdmission::Dropped(DropKind::NullEventTime));
         };
         if plan
@@ -2924,9 +3582,9 @@ impl StreamJoinOperator {
         retained: &[StoredRow],
     ) -> Result<()> {
         let current = if incoming_is_left {
-            &self.state.left
+            &self.state.metrics.left
         } else {
-            &self.state.right
+            &self.state.metrics.right
         };
         let (rows, bytes) = prospective_state_charge(current, retained, &self.name)?;
         if !super::StateBudget::new(
@@ -3034,7 +3692,9 @@ impl StreamJoinOperator {
     }
 
     fn commit_prepared(&mut self, ingress: &str, prepared: PreparedJoinBatch) -> Result<()> {
-        let metrics = prepared.metrics;
+        let mut metrics = prepared.metrics;
+        (metrics.retained_rows, metrics.retained_bytes) =
+            prospective_state_charge(&metrics, &prepared.retained, &self.name)?;
         let side = if ingress == "left" {
             JoinSide::Left
         } else {
@@ -3055,17 +3715,21 @@ impl StreamJoinOperator {
             if !prepared.retained.is_empty() {
                 self.retained_key_cache.left = None;
             }
+            self.state
+                .left_expirations
+                .append(self.state.left.len(), &prepared.retained);
             self.state.left.extend(prepared.retained);
             self.state.metrics.left = metrics;
-            refresh_retained_metrics(&mut self.state.metrics.left, &self.state.left, &self.name)?;
         } else {
             self.state.next_right_row_id = prepared.next_row_id;
             if !prepared.retained.is_empty() {
                 self.retained_key_cache.right = None;
             }
+            self.state
+                .right_expirations
+                .append(self.state.right.len(), &prepared.retained);
             self.state.right.extend(prepared.retained);
             self.state.metrics.right = metrics;
-            refresh_retained_metrics(&mut self.state.metrics.right, &self.state.right, &self.name)?;
         }
         Ok(())
     }
@@ -3174,6 +3838,7 @@ impl StreamOperator for StreamJoinOperator {
             "emitted_match_rows",
         )?;
         self.commit_prepared(ingress, prepared)?;
+        self.ingress_progress = context.ingress_progress().clone();
         Ok(())
     }
 
@@ -3196,12 +3861,15 @@ impl StreamOperator for StreamJoinOperator {
                 let before = self.state.right.len();
                 evict_opposite(
                     &mut self.state.right,
+                    &mut self.state.right_expirations,
                     progress,
-                    self.spec.bounds.before_micros,
                     &mut self.state.metrics.right,
-                    JoinSide::Right,
                     &mut self.state.deltas.pending,
-                    &self.name,
+                    EvictionPolicy {
+                        extension_micros: self.spec.bounds.before_micros,
+                        side: JoinSide::Right,
+                        operator_id: &self.name,
+                    },
                 )?;
                 if self.state.right.len() != before {
                     self.retained_key_cache.right = None;
@@ -3211,12 +3879,15 @@ impl StreamOperator for StreamJoinOperator {
                 let before = self.state.left.len();
                 evict_opposite(
                     &mut self.state.left,
+                    &mut self.state.left_expirations,
                     progress,
-                    self.spec.bounds.after_micros,
                     &mut self.state.metrics.left,
-                    JoinSide::Left,
                     &mut self.state.deltas.pending,
-                    &self.name,
+                    EvictionPolicy {
+                        extension_micros: self.spec.bounds.after_micros,
+                        side: JoinSide::Left,
+                        operator_id: &self.name,
+                    },
                 )?;
                 if self.state.left.len() != before {
                     self.retained_key_cache.left = None;
@@ -3229,6 +3900,7 @@ impl StreamOperator for StreamJoinOperator {
                 ));
             }
         }
+        self.ingress_progress = context.ingress_progress().clone();
         Ok(())
     }
 
@@ -3246,23 +3918,13 @@ impl StreamOperator for StreamJoinOperator {
         _context: &StreamOperatorContext<'_>,
         _output: &mut dyn StreamCollector,
     ) -> Result<()> {
-        let left_identities = self
-            .state
-            .left
-            .iter()
-            .map(|row| (row.row_id, row.event_time, Arc::clone(&row.encoded_key)))
-            .collect::<Vec<_>>();
+        let left_identities = self.state.left_expirations.identities(&self.state.left);
         record_tombstones(
             &mut self.state.deltas.pending,
             JoinSide::Left,
             left_identities,
         );
-        let right_identities = self
-            .state
-            .right
-            .iter()
-            .map(|row| (row.row_id, row.event_time, Arc::clone(&row.encoded_key)))
-            .collect::<Vec<_>>();
+        let right_identities = self.state.right_expirations.identities(&self.state.right);
         record_tombstones(
             &mut self.state.deltas.pending,
             JoinSide::Right,
@@ -3270,6 +3932,8 @@ impl StreamOperator for StreamJoinOperator {
         );
         self.state.left.clear();
         self.state.right.clear();
+        self.state.left_expirations = ExpirationIndex::default();
+        self.state.right_expirations = ExpirationIndex::default();
         self.retained_key_cache = RetainedKeyCache::default();
         self.state.metrics.left.retained_rows = 0;
         self.state.metrics.left.retained_bytes = 0;
@@ -3282,6 +3946,7 @@ impl StreamOperator for StreamJoinOperator {
     fn reset(&mut self) -> Result<()> {
         self.state = StreamJoinState::default();
         self.retained_key_cache = RetainedKeyCache::default();
+        self.ingress_progress = IngressProgressSnapshot::default();
         Ok(())
     }
 
@@ -3369,6 +4034,8 @@ impl StreamOperator for StreamJoinOperator {
         let segments_since_base =
             u32::try_from(carried.len()).map_err(|_| counter_overflow(&self.name, "segments"))?;
         self.state = StreamJoinState {
+            left_expirations: ExpirationIndex::restored(&left),
+            right_expirations: ExpirationIndex::restored(&right),
             left,
             right,
             next_left_row_id: metadata.next_left_row_id,
@@ -3385,6 +4052,7 @@ impl StreamOperator for StreamJoinOperator {
             },
         };
         self.retained_key_cache = RetainedKeyCache::default();
+        self.ingress_progress = IngressProgressSnapshot::default();
         Ok(())
     }
 }
@@ -3499,17 +4167,19 @@ fn side_retained_matches(recorded: &SideMetrics, recomputed: &SideMetrics) -> bo
 
 /// Prospective (rows, bytes) charge if `retained` were installed next to `current`.
 fn prospective_state_charge(
-    current: &[StoredRow],
+    current: &SideMetrics,
     retained: &[StoredRow],
     operator_id: &str,
 ) -> Result<(u64, u64)> {
-    let rows = state_row_count(current, operator_id)?
+    let rows = current
+        .retained_rows
         .checked_add(state_row_count(retained, operator_id)?)
         .ok_or_else(|| counter_overflow(operator_id, "state rows"))?;
-    let bytes = current
+    let bytes = retained
         .iter()
-        .chain(retained)
-        .try_fold(0_u64, |total, row| total.checked_add(row.charge))
+        .try_fold(current.retained_bytes, |total, row| {
+            total.checked_add(row.charge)
+        })
         .ok_or_else(|| counter_overflow(operator_id, "state bytes"))?;
     Ok((rows, bytes))
 }
@@ -3544,9 +4214,10 @@ fn retained_rows(
         .iter()
         .filter(|row| row.retain)
         .map(|row| {
-            let charge = state_row_charge(&row.record, 0, key_indices, operator_id)?;
+            let encoded_key = Arc::new(encode_join_key_v1(&row.record, 0, key_indices)?);
+            let charge = state_row_charge_with_key(&row.record, 0, encoded_key.len(), operator_id)?;
             Ok(StoredRow {
-                encoded_key: Arc::new(encode_join_key_v1(&row.record, 0, key_indices)?),
+                encoded_key,
                 record: row.record.clone(),
                 event_time: row.event_time,
                 row_id: row.row_id,
@@ -4759,62 +5430,94 @@ fn should_retain(
     i128::from(event_time.as_micros()) + i128::from(extension) >= i128::from(watermark.as_micros())
 }
 
+#[derive(Clone, Copy)]
+struct EvictionPolicy<'a> {
+    extension_micros: u64,
+    side: JoinSide,
+    operator_id: &'a str,
+}
+
 fn evict_opposite(
     rows: &mut Vec<StoredRow>,
+    expirations: &mut ExpirationIndex,
     progress: IngressProgress,
-    extension_micros: u64,
     metrics: &mut SideMetrics,
-    side: JoinSide,
-    pending: &mut Vec<PendingOp>,
-    operator_id: &str,
+    pending: &mut PendingLog,
+    policy: EvictionPolicy<'_>,
 ) -> Result<()> {
-    let before = rows.len();
-    let mut evicted_identities = Vec::new();
-    if progress.state() == crate::IngressState::Ended {
-        evicted_identities.extend(
-            rows.iter()
-                .map(|row| (row.row_id, row.event_time, Arc::clone(&row.encoded_key))),
-        );
-        rows.clear();
-    } else if let Some(watermark) = progress.watermark() {
-        rows.retain(|row| {
-            let expired = i128::from(row.event_time.as_micros()) + i128::from(extension_micros)
-                < i128::from(watermark.as_micros());
-            if expired {
-                evicted_identities.push((row.row_id, row.event_time, Arc::clone(&row.encoded_key)));
-            }
-            !expired
-        });
+    let EvictionPolicy {
+        extension_micros,
+        side,
+        operator_id,
+    } = policy;
+    let mut evicted = Vec::new();
+    let mut bytes = 0_u64;
+    while let Some((&(time, _), _)) = expirations.entries.first_key_value() {
+        let expired = progress.state() == crate::IngressState::Ended
+            || progress.watermark().is_some_and(|watermark| {
+                i128::from(time.as_micros()) + i128::from(extension_micros)
+                    < i128::from(watermark.as_micros())
+            });
+        if !expired {
+            break;
+        }
+        let (_, (index, ordinal)) = expirations
+            .entries
+            .pop_first()
+            .expect("expiration prefix exists");
+        #[cfg(test)]
+        note_join_work(|work| work.retained_visits += 1);
+        let row = rows.swap_remove(index);
+        if let Some(moved) = rows.get(index) {
+            expirations
+                .entries
+                .get_mut(&(moved.event_time, moved.row_id))
+                .expect("every live row has an expiration entry")
+                .0 = index;
+        }
+        bytes = bytes
+            .checked_add(row.charge)
+            .ok_or_else(|| counter_overflow(operator_id, "evicted bytes"))?;
+        evicted.push((ordinal, row));
     }
-    record_tombstones(pending, side, evicted_identities);
-    let evicted = u64::try_from(before - rows.len())
-        .map_err(|_| counter_overflow(operator_id, "evicted rows"))?;
+    if evicted.is_empty() {
+        return Ok(());
+    }
+    evicted.sort_by_key(|(ordinal, _)| *ordinal);
+    let count =
+        u64::try_from(evicted.len()).map_err(|_| counter_overflow(operator_id, "evicted rows"))?;
+    record_tombstones(
+        pending,
+        side,
+        evicted
+            .into_iter()
+            .map(|(_, row)| (row.row_id, row.event_time, row.encoded_key))
+            .collect(),
+    );
     metrics.evicted_rows =
-        checked_metric(metrics.evicted_rows, evicted, operator_id, "evicted_rows")?;
-    refresh_retained_metrics(metrics, rows, operator_id)
+        checked_metric(metrics.evicted_rows, count, operator_id, "evicted_rows")?;
+    metrics.retained_rows = metrics
+        .retained_rows
+        .checked_sub(count)
+        .ok_or_else(|| counter_overflow(operator_id, "retained rows"))?;
+    metrics.retained_bytes = metrics
+        .retained_bytes
+        .checked_sub(bytes)
+        .ok_or_else(|| counter_overflow(operator_id, "retained bytes"))?;
+    Ok(())
 }
 
 /// Records evictions in the dirty log: an upsert still waiting for its first
 /// checkpoint coalesces away; a captured row leaves a durable tombstone.
 fn record_tombstones(
-    pending: &mut Vec<PendingOp>,
+    pending: &mut PendingLog,
     side: JoinSide,
     evicted: Vec<(u64, EventTime, Arc<Vec<u8>>)>,
 ) {
-    // Pending identities are unique per side, so one indexed pass keeps the
-    // coalescing cost proportional to the dirty log, never quadratic.
-    let pending_identities: BTreeSet<(JoinSide, u64)> =
-        pending.iter().map(PendingOp::identity).collect();
-    let coalesced: BTreeSet<(JoinSide, u64)> = evicted
-        .iter()
-        .map(|(row_id, _, _)| (side, *row_id))
-        .filter(|identity| pending_identities.contains(identity))
-        .collect();
-    if !coalesced.is_empty() {
-        pending.retain(|op| !coalesced.contains(&op.identity()));
-    }
     for (row_id, event_time, encoded_key) in evicted {
-        if coalesced.contains(&(side, row_id)) {
+        #[cfg(test)]
+        note_join_work(|work| work.pending_visits += 1);
+        if pending.remove_upsert((side, row_id)) {
             continue;
         }
         pending.push(PendingOp::Tombstone {
@@ -4835,7 +5538,11 @@ fn refresh_retained_metrics(
         u64::try_from(rows.len()).map_err(|_| counter_overflow(operator_id, "retained rows"))?;
     metrics.retained_bytes = rows
         .iter()
-        .try_fold(0_u64, |total, row| total.checked_add(row.charge))
+        .try_fold(0_u64, |total, row| {
+            #[cfg(test)]
+            note_join_work(|work| work.retained_visits += 1);
+            total.checked_add(row.charge)
+        })
         .ok_or_else(|| counter_overflow(operator_id, "retained bytes"))?;
     Ok(())
 }
@@ -4847,6 +5554,8 @@ fn event_time_at(
     operator_id: &str,
     side: &str,
 ) -> Result<Option<EventTime>> {
+    #[cfg(test)]
+    note_join_work(|work| work.time_decoders += 1);
     let array = record.column(column_index).as_ref();
     if array.is_null(row_index) {
         return Ok(None);
@@ -4882,6 +5591,83 @@ fn event_time_at(
                 &format!("{side} event time cannot be represented"),
             )
         })
+}
+
+struct BatchEventTimes<'a> {
+    array: &'a dyn Array,
+    values: &'a [i64],
+    unit: TimeUnit,
+}
+
+impl<'a> BatchEventTimes<'a> {
+    fn new(array: &'a dyn Array, operator_id: &str, side: &str) -> Result<Self> {
+        #[cfg(test)]
+        note_join_work(|work| work.time_decoders += 1);
+        let DataType::Timestamp(unit, timezone) = array.data_type() else {
+            return Err(operator_reason(
+                operator_id,
+                crate::StreamingFailureReason::JoinTimeConversionFailed,
+                &format!("{side} event time is not a timestamp"),
+            ));
+        };
+        if timezone
+            .as_deref()
+            .is_some_and(|timezone| timezone != "UTC")
+        {
+            return Err(operator_reason(
+                operator_id,
+                crate::StreamingFailureReason::JoinTimeConversionFailed,
+                &format!("{side} event time cannot be represented"),
+            ));
+        }
+        macro_rules! values {
+            ($array:ty) => {
+                array
+                    .as_any()
+                    .downcast_ref::<$array>()
+                    .map(|typed| typed.values().as_ref())
+                    .ok_or_else(|| {
+                        operator_reason(
+                            operator_id,
+                            crate::StreamingFailureReason::JoinTimeConversionFailed,
+                            &format!("{side} timestamp array type mismatch"),
+                        )
+                    })?
+            };
+        }
+        let values = match unit {
+            TimeUnit::Second => values!(TimestampSecondArray),
+            TimeUnit::Millisecond => values!(TimestampMillisecondArray),
+            TimeUnit::Microsecond => values!(TimestampMicrosecondArray),
+            TimeUnit::Nanosecond => values!(TimestampNanosecondArray),
+        };
+        Ok(Self {
+            array,
+            values,
+            unit: *unit,
+        })
+    }
+
+    fn at(&self, row: usize, operator_id: &str, side: &str) -> Result<Option<EventTime>> {
+        if self.array.is_null(row) {
+            return Ok(None);
+        }
+        let value = self.values[row];
+        let micros = match self.unit {
+            TimeUnit::Second => value.checked_mul(1_000_000),
+            TimeUnit::Millisecond => value.checked_mul(1_000),
+            TimeUnit::Microsecond => Some(value),
+            TimeUnit::Nanosecond => Some(value.div_euclid(1_000)),
+        }
+        .ok_or_else(|| {
+            operator_reason(
+                operator_id,
+                crate::StreamingFailureReason::JoinTimeConversionFailed,
+                &format!("{side} event time cannot be represented"),
+            )
+        })?;
+        Ok(Some(EventTime::from_micros(micros)))
+    }
 }
 
 fn downcast_timestamp<T>(
@@ -4934,8 +5720,17 @@ fn state_row_charge(
     operator_id: &str,
 ) -> Result<u64> {
     let encoded_key = encode_join_key_v1(record, row_index, key_indices)?;
-    let key_bytes = u64::try_from(encoded_key.len())
-        .map_err(|_| counter_overflow(operator_id, "encoded key"))?;
+    state_row_charge_with_key(record, row_index, encoded_key.len(), operator_id)
+}
+
+fn state_row_charge_with_key(
+    record: &RecordBatch,
+    row_index: usize,
+    encoded_key_len: usize,
+    operator_id: &str,
+) -> Result<u64> {
+    let key_bytes =
+        u64::try_from(encoded_key_len).map_err(|_| counter_overflow(operator_id, "encoded key"))?;
     let payload = record.columns().iter().try_fold(0_u64, |total, column| {
         let charge = logical_cell_charge(column.as_ref(), row_index)?;
         total
@@ -5284,6 +6079,8 @@ fn encode_join_key_v1(
     row_index: usize,
     key_indices: &[usize],
 ) -> Result<Vec<u8>> {
+    #[cfg(test)]
+    note_join_work(|work| work.key_encodings += 1);
     let mut encoded = Vec::new();
     for &index in key_indices {
         append_key_block(&mut encoded, record.column(index).as_ref(), row_index)?;

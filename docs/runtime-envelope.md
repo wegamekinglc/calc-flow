@@ -624,6 +624,14 @@ category, and runtime-config mismatch flag. It has no cursor/pre-commit
 payload, state bytes, filesystem path, row, attribute, secret, or arbitrary
 metric label. Epoch values remain status fields rather than metric labels.
 
+Inner Join status includes each ingress's last accepted watermark, idle state,
+and permanent end state. These observations come from runtime-owned progress;
+non-terminal managed restore publishes them before entry acknowledgement.
+Terminal-manifest recovery completes before operator entry without restoring
+these per-Join observations. They add no
+operator checkpoint fields or layout version. A standalone restored Join
+operator has no ingress progress until a new handler context supplies it.
+
 Operator `processing_duration` includes successful Data and watermark handlers,
 including collector waits inside those handlers. The additional
 `watermark_processing_duration` is the watermark-handler subset, not an
