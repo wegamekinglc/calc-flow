@@ -84,10 +84,10 @@ no regression verdict.
 Unsupported operations are explicit cells, not silent dependency skips.
 Native streaming measures `join` through the bounded temporal join with the
 dimension side seeded at the stream origin and its watermark sealing the quote
-time range. Join, ASOF join and window sum all run through 10M rows. The current
-static Join fixture feeds the first quote batch alongside the dimension and
-waits for committed matches and quote eviction before continuing; the first
-batch can still be retained before the dimension watermark is processed.
+time range. Join, ASOF join and window sum all run through 10M rows. Static Join
+readiness includes loading the dimension and observing its sealing watermark
+before the timer starts or any quote is fed. Its limit permits the dimension
+plus one input batch, and the sample rejects retained or evicted quote rows.
 ASOF feeds one interleaved batch pair at a time and awaits delivery of every
 left row in that pair before feeding the next. Window sum uses ten-second
 tumbling windows. These cases retain bounded in-flight state
@@ -152,7 +152,10 @@ enqueueing preconstructed data and watermarks. It stops after every expected
 row reaches the sink and the Arrow tables are combined. EOF, job completion
 checks and cancellation/cleanup happen afterward, outside timing; unexpected
 extra output during completion still fails the sample. No dummy data or history
-is preloaded. Persistent warm append remains a separate workload.
+is preloaded for ordinary stream cases. Static Join preloads its dimension and
+waits for the Join's accepted right watermark before timing; the timed interval
+starts with the first quote enqueue. The left-state assertion happens after
+timing. Persistent warm append remains a separate workload.
 
 Cross-library columns are application-boundary references, not interchangeable
 kernel measurements. The native column is labeled `Native stream (ready)`.
@@ -160,12 +163,15 @@ Report contract v3 validates the ready-runner timing scope and complete
 sample statistics. Both revisions must be measured with the same scope;
 do not subtract a separately measured startup time from another report.
 The current native stream scope is
-`ready-enqueue-to-arrow/interleaved-inputs-v5`: ASOF lockstep waits use
+`ready-enqueue-to-arrow/bounded-feeds-v6`: ASOF lockstep waits use
 sink delivery events, with no `job.status()` polling in the timed ASOF path.
 Delivery of all accepted left rows proves finality for this workload, but
-does not wait for the operator's subsequent status update. The static Join
-fixture still polls status and is tracked separately in issue
-[#363](https://github.com/wegamekinglc/calc-flow/issues/363).
+does not wait for the operator's subsequent status update. Static Join polls
+right-side progress only during dimension setup, outside timing. Its post-timing
+status assertion rejects any quote retention or eviction. The native static
+Join boundary excludes dimension admission; reference-library measurements
+retain their own documented preparation boundaries. Removing this setup cost
+is a scope change, not evidence of a Join kernel speedup.
 A baseline declaring a different stream scope makes native stream cases
 `new-coverage`; SQL and warm-append comparisons retain their existing gates.
 No performance improvement is inferred across the scope change.

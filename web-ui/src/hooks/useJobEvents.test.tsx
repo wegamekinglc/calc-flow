@@ -3,7 +3,7 @@ import type { Dispatch } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { ApiContractError } from '../api/client';
-import type { JobResponse, StreamAsofJoinMetrics } from '../types';
+import type { JobResponse, StreamAsofJoinMetrics, StreamJoinMetrics } from '../types';
 import { useJobEvents } from './useJobEvents';
 import { at } from '../types';
 
@@ -73,7 +73,7 @@ describe('useJobEvents', () => {
     expect(onError).toHaveBeenCalledWith(expect.any(ApiContractError));
   });
 
-  it('preserves full ASOF integer strings and refreshes authoritative job state', async () => {
+  it('preserves full Join and ASOF progress strings and refreshes authoritative job state', async () => {
     const onUpdate = vi.fn();
     const onEvent = vi.fn();
     const onError = vi.fn();
@@ -103,6 +103,17 @@ describe('useJobEvents', () => {
       workspace_limit_failures: '0', output_limit_failures: '0',
       output_watermark_micros: null,
     };
+    const side = {
+      retained_rows: 0, retained_bytes: 0, evicted_rows: 0, late_rows: 0,
+      late_affected_batches: 0, max_lateness_micros: null,
+      null_event_time_rows: 0, null_key_rows: 0,
+      watermark_micros: '-9223372036854775808', idle: false, ended: false,
+    };
+    const join: StreamJoinMetrics = {
+      node_id: 'join', left: side,
+      right: { ...side, watermark_micros: null, idle: true },
+      emitted_match_rows: 1, state_limit_failures: 0, match_limit_failures: 0,
+    };
     const progress = {
       sequence: 2,
       timestamp: '2026-01-01T00:00:02Z',
@@ -111,6 +122,7 @@ describe('useJobEvents', () => {
       epoch: 7,
       throughput_rows: 42,
       stream_asof_joins: [asof],
+      stream_joins: [join],
     };
     act(() => {
       source.emit('progress', JSON.stringify(progress));

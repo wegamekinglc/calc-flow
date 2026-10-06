@@ -9,6 +9,14 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-06: Expose inner Join ingress watermark, idle, and end observations
+  through Rust, Python and Studio, including non-terminal managed restart at
+  startup.
+  Studio preserves watermark precision with decimal strings; existing Join
+  counters and checkpoint layout remain unchanged. Static Join benchmark
+  readiness now seals the dimension before quotes, requires zero retained and
+  evicted quote rows, and excludes this setup from stream scope v6 timing.
+
 - 2026-10-06: Await streaming ASOF payload retirement before reusing chunk
   workspace, preventing temporary budget failures while old owners are still
   being released. Managed job cleanup waits for those owners and reservations;

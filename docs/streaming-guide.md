@@ -922,11 +922,19 @@ windows reference these prefixed names.
 
 Each Join node also reports a payload-free status. The
 `job.status()["stream_joins"]` mapping keys are node IDs; each value carries
-per-side retained rows and bytes, evicted, late, and null drop counters,
+per-side `watermark_micros`, `idle`, and `ended`, retained rows and bytes,
+evicted, late, and null drop counters,
 `late_affected_batches`, `max_lateness_micros`, plus the node's
 `emitted_match_rows`, `state_limit_failures`, and `match_limit_failures`. Jobs
 without a Join node report an empty mapping. Studio progress events carry the
 same per-node rows as a `stream_joins` list on the run event.
+Watermarks are the last accepted ingress frontier, initially `None`; idle
+preserves that frontier and does not imply EOF. A non-terminal managed restart
+exposes restored progress before the running job's startup acknowledgement.
+Terminal-manifest recovery completes without restoring per-Join observations.
+Rust/Python retain exact integer microseconds. Studio transports the new
+watermarks as canonical signed
+decimal strings or JSON `null` and keeps existing counters as numbers.
 
 ### Join output materialization and recovery
 

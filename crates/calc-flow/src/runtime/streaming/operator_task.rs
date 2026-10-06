@@ -767,6 +767,7 @@ fn acknowledge_entry(
         Err(error) => (Err(error), None),
     };
     if let Some(progress) = &input_progress {
+        observe_join_status(inputs, progress)?;
         observe_asof_status(inputs, progress.output_frontier);
     }
     restore_ingress_completion(inputs, input_progress.is_some());
@@ -1236,11 +1237,21 @@ async fn dispatch_message(
         barrier_alignment,
     )
     .await;
-    if let Some(status) = inputs.operator.stream_join_status() {
-        inputs.progress.observe_stream_join(status);
-    }
+    observe_join_status(inputs, input_progress)?;
     observe_asof_status(inputs, input_progress.output_frontier);
     result
+}
+
+fn observe_join_status(
+    inputs: &OperatorTaskInputs,
+    progress: &OperatorInputProgress,
+) -> Result<()> {
+    if let Some(status) = inputs.operator.stream_join_status() {
+        inputs
+            .progress
+            .observe_stream_join(status.with_ingress_progress(&progress.snapshot()?));
+    }
+    Ok(())
 }
 
 fn observe_asof_status(inputs: &OperatorTaskInputs, output_frontier: Option<EventTime>) {
@@ -4086,6 +4097,111 @@ pub(super) mod tests {
         );
         assert!(checkpoint_rx.recv().await.is_none());
         assert!(harness.outputs[0].recv().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn join_status_publishes_fresh_and_restored_progress_before_entry_ack() {
+        use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+
+        for restored in [false, true] {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("key", DataType::Int64, false),
+                Field::new(
+                    "ts",
+                    DataType::Timestamp(TimeUnit::Microsecond, None),
+                    false,
+                ),
+            ]));
+            let spec = crate::StreamJoinSpec::inner(
+                ["key"],
+                ["key"],
+                "ts",
+                "ts",
+                crate::JoinTimeBounds::new(Duration::ZERO, Duration::ZERO).unwrap(),
+                crate::JoinStateLimits::new(100, 1_000_000, 100).unwrap(),
+            )
+            .unwrap();
+            let mut operator = crate::StreamJoinOperator::new(
+                "node",
+                Arc::clone(&schema),
+                Arc::clone(&schema),
+                spec,
+            )
+            .unwrap();
+            let job = StreamJobContext::new(
+                7,
+                "fingerprint",
+                JsonMap::new(),
+                None,
+                CancellationToken::new(),
+            );
+            let context = StreamOperatorContext::new(&job, "node", None);
+            let mut collector = crate::EdgeCollector::new(operator.output_ports().to_vec());
+            let retained = RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(Int64Array::from(vec![1])),
+                    Arc::new(datafusion::arrow::array::TimestampMicrosecondArray::from(
+                        vec![0_i64],
+                    )),
+                ],
+            )
+            .unwrap();
+            operator
+                .process_data(
+                    "right",
+                    Batch::table(vec![retained], BatchMetadata::default()).unwrap(),
+                    &context,
+                    &mut collector,
+                )
+                .await
+                .unwrap();
+            let snapshot = operator.checkpoint(crate::Epoch::INITIAL).unwrap();
+            let output_port = operator.output_ports()[0].clone();
+            let restore = restored.then(|| OperatorRestoreState {
+                snapshot,
+                progress: BTreeMap::from([
+                    (
+                        "left".into(),
+                        crate::OperatorIngressManifestEntry {
+                            state: ManifestIngressState::Idle,
+                            watermark: Some(EventTime::from_micros(i64::MIN)),
+                        },
+                    ),
+                    (
+                        "right".into(),
+                        crate::OperatorIngressManifestEntry {
+                            state: ManifestIngressState::Active,
+                            watermark: Some(EventTime::from_micros(i64::MAX)),
+                        },
+                    ),
+                ]),
+                output_frontier: None,
+                next_epoch: crate::Epoch::INITIAL.next().unwrap(),
+            });
+            let mut harness = harness_with_operator(
+                &["left", "right"],
+                1,
+                CompiledStreamOperator::StreamJoin(Box::new(operator)),
+                output_port,
+                None,
+                restore,
+            );
+            start(&mut harness).await;
+            let status = harness.progress.snapshot().stream_join.unwrap();
+            assert_eq!(
+                status.left.watermark_micros,
+                restored.then(|| EventTime::from_micros(i64::MIN))
+            );
+            assert_eq!(
+                status.right.watermark_micros,
+                restored.then(|| EventTime::from_micros(i64::MAX))
+            );
+            assert_eq!(status.left.idle, restored);
+            assert!(!status.left.ended && !status.right.ended);
+            harness.cancellation.cancel();
+            assert!(harness.supervisor.join_all().await.errors.is_empty());
+        }
     }
 
     #[tokio::test]

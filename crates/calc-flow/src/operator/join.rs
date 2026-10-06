@@ -1062,6 +1062,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn status_tracks_ingress_watermark_idle_reactivation_and_end() {
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        let initial = operator.status();
+        assert_eq!(initial.left.watermark_micros, None);
+        assert!(!initial.left.idle && !initial.left.ended);
+        let job_context = job();
+        let context = StreamOperatorContext::new(&job_context, "match", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data("right", right_batch(vec![0]), &context, &mut collector)
+            .await
+            .unwrap();
+        for (state, watermark) in [
+            (IngressState::Active, i64::MIN),
+            (IngressState::Idle, i64::MIN),
+            (IngressState::Active, i64::MAX),
+            (IngressState::Ended, i64::MAX),
+        ] {
+            let context = progress_context(
+                &job_context,
+                (IngressState::Active, None),
+                (state, Some(watermark)),
+            );
+            operator
+                .on_ingress_progress("right", &context)
+                .await
+                .unwrap();
+            let status = operator.status();
+            assert_eq!(
+                status.right.watermark_micros,
+                Some(EventTime::from_micros(watermark))
+            );
+            assert_eq!(status.right.idle, state == IngressState::Idle);
+            assert_eq!(status.right.ended, state == IngressState::Ended);
+            assert_eq!(status.left.watermark_micros, None);
+        }
+        let snapshot = operator.checkpoint(Epoch::INITIAL).unwrap();
+        assert_eq!(snapshot.inline_metadata["layout_version"], 1);
+        assert!(
+            snapshot.inline_metadata["metrics"]["right"]
+                .get("watermark_micros")
+                .is_none()
+        );
+        operator.restore(&snapshot).unwrap();
+        assert_eq!(operator.status().right.watermark_micros, None);
+        let context = StreamOperatorContext::new(&job_context, "match", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        operator.on_end(&context, &mut collector).await.unwrap();
+        assert!(operator.status().left.ended && operator.status().right.ended);
+        operator.reset().unwrap();
+        assert!(!operator.status().right.ended);
+        assert_eq!(operator.status().right.watermark_micros, None);
+    }
+
+    #[tokio::test]
     async fn late_rows_are_dropped_with_metrics_and_never_retained() {
         let mut operator =
             StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
@@ -1941,8 +1997,8 @@ use serde_json::Value;
 
 use crate::{
     Batch, BatchKind, BatchMetadata, CalcFlowError, DataFusionConfig, Epoch, EventTime,
-    IngressProgress, JsonMap, OperatorStateSnapshot, Port, Result, StateSegment, StreamCollector,
-    StreamOperator, StreamOperatorContext, UdfRegistrySnapshot,
+    IngressProgress, IngressProgressSnapshot, JsonMap, OperatorStateSnapshot, Port, Result,
+    StateSegment, StreamCollector, StreamOperator, StreamOperatorContext, UdfRegistrySnapshot,
     expression::{ValidatedQuery, parse_select_query},
 };
 
@@ -2303,6 +2359,12 @@ pub struct StreamJoinSideStatus {
     pub null_event_time_rows: u64,
     /// Rows dropped because a key component was null.
     pub null_key_rows: u64,
+    /// Most recent accepted ingress watermark, if one has been established.
+    pub watermark_micros: Option<EventTime>,
+    /// Whether this input is currently idle; idle preserves its watermark.
+    pub idle: bool,
+    /// Whether this input has permanently ended.
+    pub ended: bool,
 }
 
 /// Payload-free Join status for one node (api note "Payload-free Join status").
@@ -2320,6 +2382,19 @@ pub struct StreamJoinStatus {
     pub match_limit_failures: u64,
 }
 
+impl StreamJoinStatus {
+    pub(crate) fn with_ingress_progress(mut self, progress: &IngressProgressSnapshot) -> Self {
+        for (name, side) in [("left", &mut self.left), ("right", &mut self.right)] {
+            if let Some(ingress) = progress.get(name) {
+                side.watermark_micros = ingress.watermark();
+                side.idle = ingress.state() == crate::IngressState::Idle;
+                side.ended = ingress.state() == crate::IngressState::Ended;
+            }
+        }
+        self
+    }
+}
+
 fn side_status(metrics: &SideMetrics) -> StreamJoinSideStatus {
     StreamJoinSideStatus {
         retained_rows: metrics.retained_rows,
@@ -2330,6 +2405,9 @@ fn side_status(metrics: &SideMetrics) -> StreamJoinSideStatus {
         max_lateness: metrics.max_lateness_micros.map(Duration::from_micros),
         null_event_time_rows: metrics.null_event_time_rows,
         null_key_rows: metrics.null_key_rows,
+        watermark_micros: None,
+        idle: false,
+        ended: false,
     }
 }
 
@@ -2343,6 +2421,7 @@ pub struct StreamJoinOperator {
     runtime: StreamRuntimeState,
     state: StreamJoinState,
     retained_key_cache: RetainedKeyCache,
+    ingress_progress: IngressProgressSnapshot,
 }
 
 const MAX_RETAINED_KEY_CACHE_BYTES_PER_SIDE: usize = 32 * 1024 * 1024;
@@ -2581,6 +2660,7 @@ impl StreamJoinOperator {
             runtime: StreamRuntimeState::new(),
             state: StreamJoinState::default(),
             retained_key_cache: RetainedKeyCache::default(),
+            ingress_progress: IngressProgressSnapshot::default(),
         })
     }
 
@@ -2589,15 +2669,27 @@ impl StreamJoinOperator {
         &self.spec
     }
 
-    /// Returns a payload-free status snapshot of the retained Join state.
+    /// Returns a payload-free snapshot of retained state and observed ingress progress.
+    ///
+    /// Standalone restore has no ingress progress until a handler context supplies it.
+    /// Non-terminal managed restart publishes restored progress before the running
+    /// job's startup acknowledgement.
     pub fn status(&self) -> StreamJoinStatus {
-        StreamJoinStatus {
+        let mut status = StreamJoinStatus {
             left: side_status(&self.state.metrics.left),
             right: side_status(&self.state.metrics.right),
             emitted_match_rows: self.state.metrics.emitted_match_rows,
             state_limit_failures: self.state.metrics.state_limit_failures,
             match_limit_failures: self.state.metrics.match_limit_failures,
         }
+        .with_ingress_progress(&self.ingress_progress);
+        if self.state.ended {
+            status.left.ended = true;
+            status.right.ended = true;
+            status.left.idle = false;
+            status.right.idle = false;
+        }
+        status
     }
 
     pub(crate) fn set_stream_resources(
@@ -2614,7 +2706,7 @@ impl StreamJoinOperator {
 
     pub(crate) fn output_frontier_candidate(
         &self,
-        progress: &crate::IngressProgressSnapshot,
+        progress: &IngressProgressSnapshot,
     ) -> Result<Option<EventTime>> {
         let left = progress.get("left").ok_or_else(|| {
             operator_error(
@@ -3174,6 +3266,7 @@ impl StreamOperator for StreamJoinOperator {
             "emitted_match_rows",
         )?;
         self.commit_prepared(ingress, prepared)?;
+        self.ingress_progress = context.ingress_progress().clone();
         Ok(())
     }
 
@@ -3229,6 +3322,7 @@ impl StreamOperator for StreamJoinOperator {
                 ));
             }
         }
+        self.ingress_progress = context.ingress_progress().clone();
         Ok(())
     }
 
@@ -3282,6 +3376,7 @@ impl StreamOperator for StreamJoinOperator {
     fn reset(&mut self) -> Result<()> {
         self.state = StreamJoinState::default();
         self.retained_key_cache = RetainedKeyCache::default();
+        self.ingress_progress = IngressProgressSnapshot::default();
         Ok(())
     }
 
@@ -3385,6 +3480,7 @@ impl StreamOperator for StreamJoinOperator {
             },
         };
         self.retained_key_cache = RetainedKeyCache::default();
+        self.ingress_progress = IngressProgressSnapshot::default();
         Ok(())
     }
 }

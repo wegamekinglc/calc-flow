@@ -191,6 +191,79 @@ def test_static_join_waits_for_delayed_dimension_progress(monkeypatch, tmp_path)
         runner.close()
 
 
+def _static_join_status_measurement(left_counter, monkeypatch):
+    from benchmarks import engine_stream
+    from calc_flow import Batch, Watermark
+
+    table = pa.table({"value": [1.0]})
+    sink = engine_stream._CollectSink(1)
+    sink.opened.set()
+    clock_reads = []
+
+    def clock():
+        clock_reads.append(len(clock_reads))
+        return clock_reads[-1] * 1_000_000
+
+    monkeypatch.setattr(engine_stream.time, "perf_counter_ns", clock)
+
+    class Source:
+        def __init__(self, name):
+            self.name = name
+            self.ready = asyncio.Event()
+            self.opened = asyncio.Event()
+            self.ready.set()
+            self.opened.set()
+
+        async def push(self, _event):
+            if self.name == "left":
+                await sink.write(Batch.from_pyarrow(table))
+
+    class Job:
+        reads = 0
+
+        def status(self):
+            self.reads += 1
+            quoted = self.reads >= 3
+            if self.reads > 1:
+                assert len(clock_reads) == 2, "status proof must follow timer stop"
+            left = {"retained_rows": 0, "evicted_rows": 0}
+            if quoted and left_counter:
+                left[left_counter] = 1
+            return {
+                "stream_joins": {
+                    "join": {
+                        "left": left,
+                        "right": {"watermark_micros": engine_stream.BASE_MICROS},
+                        "emitted_match_rows": int(quoted),
+                    }
+                }
+            }
+
+    job = Job()
+    sources = {name: Source(name) for name in ("left", "right")}
+    streams = {
+        "left": (object(),),
+        "right": (object(), Watermark(engine_stream.BASE)),
+    }
+    result = asyncio.run(engine_stream._measure_ready(sources, sink, streams, job))
+    return result, job.reads
+
+
+@pytest.mark.parametrize("left_counter", ("retained_rows", "evicted_rows"))
+def test_static_join_rejects_post_quote_state_after_a_stale_snapshot(
+    left_counter, monkeypatch
+):
+    with pytest.raises(RuntimeError, match="retained or evicted quote rows"):
+        _static_join_status_measurement(left_counter, monkeypatch)
+
+
+def test_static_join_accepts_the_causal_post_quote_status_outside_timing(monkeypatch):
+    (table, seconds), reads = _static_join_status_measurement(None, monkeypatch)
+    assert table == pa.table({"value": [1.0]})
+    assert seconds == 0.001
+    assert reads == 3
+
+
 @pytest.mark.parametrize("binding", ("reference.input", "quotes.input"))
 def test_asof_waits_for_delayed_chunk_watermarks(binding, monkeypatch, tmp_path):
     from benchmarks import engine_stream
