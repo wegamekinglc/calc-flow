@@ -64,7 +64,7 @@ STREAM_WINDOW_MAX_ROWS = None
 THREADS = 32
 BATCH_ROWS = 64_000
 CONTRACT = "calc-flow-benchmark-suite-v3"
-STREAM_SCOPE = "ready-enqueue-to-arrow/interleaved-inputs-v5"
+STREAM_SCOPE = "ready-enqueue-to-arrow/bounded-feeds-v6"
 FINANCE_SCOPE = "pandas-transform-to-numpy"
 
 

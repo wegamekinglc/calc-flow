@@ -726,6 +726,9 @@ class StreamJoinSideStatus(TypedDict):
     max_lateness_micros: int | None
     null_event_time_rows: int
     null_key_rows: int
+    watermark_micros: int | None
+    idle: bool
+    ended: bool
 
 
 class StreamJoinStatus(TypedDict):

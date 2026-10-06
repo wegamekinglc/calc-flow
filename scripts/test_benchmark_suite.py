@@ -257,13 +257,17 @@ class BenchmarkSuiteTests(unittest.TestCase):
         cases = [c for c in engine_cases() if c["backend"] == "calc-flow-stream"]
         self.assertEqual(
             {c["scope"] for c in cases},
-            {"ready-enqueue-to-arrow/interleaved-inputs-v5"},
+            {"ready-enqueue-to-arrow/bounded-feeds-v6"},
         )
 
     def test_changed_stream_scope_is_new_coverage_without_disabling_sql_pairs(self):
         source = Path(__file__).resolve().parents[1]
         original = (source / "scripts/benchmark_suite/catalog.py").read_text()
-        for scope in ("interleaved-inputs-v4", "interleaved-inputs-v5"):
+        for scope in (
+            "interleaved-inputs-v4",
+            "interleaved-inputs-v5",
+            "bounded-feeds-v6",
+        ):
             with self.subTest(scope=scope), TemporaryDirectory() as directory:
                 base = Path(directory)
                 path = base / "scripts/benchmark_suite/catalog.py"
@@ -276,7 +280,7 @@ class BenchmarkSuiteTests(unittest.TestCase):
                 ids = baseline_case_ids(base, {"family": "engines"})
                 for case in engine_cases(100):
                     if case["backend"] == "calc-flow-stream":
-                        expected = "new" if scope.endswith("v4") else "interleaved"
+                        expected = "interleaved" if scope.endswith("v6") else "new"
                         self.assertEqual(catalog.comparison_kind(case, ids), expected)
                     elif case["backend"] == "calc-flow-sql":
                         self.assertEqual(
