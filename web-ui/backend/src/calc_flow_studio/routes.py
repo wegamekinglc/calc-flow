@@ -59,6 +59,10 @@ class _JobEventStreamResponse(StreamingResponse):
 
 def _job_event_json(event: RunEvent) -> str:
     payload = event.model_dump(mode="json", exclude_none=True)
+    if event.stream_joins is not None:
+        payload["stream_joins"] = [
+            metrics.model_dump(mode="json") for metrics in event.stream_joins
+        ]
     if event.stream_asof_joins is not None:
         payload["stream_asof_joins"] = [
             metrics.model_dump(mode="json") for metrics in event.stream_asof_joins

@@ -3827,8 +3827,12 @@ export interface components {
         };
         /** StreamJoinSideMetrics */
         StreamJoinSideMetrics: {
+            /** Ended */
+            ended: boolean;
             /** Evicted Rows */
             evicted_rows: number;
+            /** Idle */
+            idle: boolean;
             /** Late Affected Batches */
             late_affected_batches: number;
             /** Late Rows */
@@ -3843,6 +3847,7 @@ export interface components {
             retained_bytes: number;
             /** Retained Rows */
             retained_rows: number;
+            watermark_micros: components["schemas"]["SignedDecimal"] | null;
         };
         /** @enum {string} */
         StreamingFailureReasonCode: "join_state_limit_exceeded" | "join_match_limit_exceeded" | "join_counter_overflow" | "join_time_conversion_failed" | "asof_invalid_input" | "asof_duplicate_identity" | "asof_late_row" | "asof_state_limit_exceeded" | "asof_workspace_limit_exceeded" | "asof_output_limit_exceeded" | "asof_counter_overflow" | "asof_protocol_error";

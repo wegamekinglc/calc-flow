@@ -1067,6 +1067,10 @@ values, status, and outcomes cross the boundary as defensive copies. Status
 and outcomes are typed: `job.status()` returns a `JobStatus` mapping that
 includes `stream_joins`, a per-node mapping of `StreamJoinStatus` values with
 `StreamJoinSideStatus` per side (empty when the graph has no inner Join node).
+Each side includes its last accepted `watermark_micros: int | None`, `idle`,
+and `ended`. A non-terminal managed restart publishes restored progress at
+running startup; terminal-manifest recovery does not restore these observations.
+Idle preserves the watermark and is distinct from permanent end-of-input.
 The separate `stream_asof_joins` mapping contains `StreamAsofJoinStatus` with
 `StreamAsofJoinSideStatus` per side, retaining exact Python integer counters and
 watermark microseconds. See [ASOF status](asof-join-guide.md#recovery-status-and-delivery).

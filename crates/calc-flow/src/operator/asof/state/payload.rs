@@ -156,12 +156,15 @@ pub(in super::super) struct PreparedPayloadRemoval {
     inputs: Vec<(u32, Arc<PayloadBatch>, usize)>,
     workspace: Option<datafusion::execution::memory_pool::MemoryReservation>,
     retirement: Option<tokio::sync::oneshot::Sender<RetiredPool>>,
+    ticket: Option<super::super::retirement::Ticket>,
 }
 
 struct RetiredPool {
     _pool: Option<PayloadPool>,
     _inputs: Vec<(u32, Arc<PayloadBatch>, usize)>,
     _workspace: Option<datafusion::execution::memory_pool::MemoryReservation>,
+    // Struct fields drop in order: publish the refund after owners and credit.
+    _ticket: Option<super::super::retirement::Ticket>,
 }
 
 impl PreparedPayloadRemoval {
@@ -171,6 +174,7 @@ impl PreparedPayloadRemoval {
             inputs: Vec::new(),
             workspace: None,
             retirement: None,
+            ticket: None,
         }
     }
 
@@ -178,8 +182,20 @@ impl PreparedPayloadRemoval {
         pool: &PayloadPool,
         layout: &PayloadRemoval,
         workspace: datafusion::execution::memory_pool::MemoryReservation,
+        ticket: Option<super::super::retirement::Ticket>,
     ) -> Self {
         let (sender, receiver) = tokio::sync::oneshot::channel();
+        let prepared = Self {
+            replacement: Some(PayloadPool {
+                hasher: pool.hasher.clone(),
+                next_id: pool.next_id,
+                ..PayloadPool::default()
+            }),
+            inputs: Vec::with_capacity(layout.remaining),
+            workspace: Some(workspace),
+            retirement: Some(sender),
+            ticket,
+        };
         // Create the retirement task before delivery. Sending the old pool at
         // commit only transfers pointers; all table/batch destruction follows
         // on a blocking worker, with the same retained-input reservation.
@@ -190,16 +206,7 @@ impl PreparedPayloadRemoval {
                     .ok();
             }
         });
-        Self {
-            replacement: Some(PayloadPool {
-                hasher: pool.hasher.clone(),
-                next_id: pool.next_id,
-                ..PayloadPool::default()
-            }),
-            inputs: Vec::with_capacity(layout.remaining),
-            workspace: Some(workspace),
-            retirement: Some(sender),
-        }
+        prepared
     }
 
     pub fn retain(&mut self, id: u32, batch: &Arc<PayloadBatch>, references: usize) {
@@ -237,6 +244,7 @@ impl Drop for PreparedPayloadRemoval {
             _pool: self.replacement.take(),
             _inputs: std::mem::take(&mut self.inputs),
             _workspace: self.workspace.take(),
+            _ticket: self.ticket.take(),
         };
         if let Some(sender) = self.retirement.take() {
             sender.send(retired).ok();
@@ -451,6 +459,7 @@ impl PayloadPool {
             inputs: Vec::with_capacity(layout.remaining),
             workspace: None,
             retirement: None,
+            ticket: None,
         };
         for (id, batch, references) in self.compaction_entries(removals) {
             prepared.retain(id, batch, references);
@@ -675,7 +684,7 @@ mod tests {
             .compaction_entries(&removals)
             .map(|(_, batch, _)| Arc::downgrade(batch))
             .collect::<Vec<_>>();
-        let mut prepared = PreparedPayloadRemoval::capture(&pool, &layout, lease);
+        let mut prepared = PreparedPayloadRemoval::capture(&pool, &layout, lease, None);
         for (id, batch, count) in pool.compaction_entries(&removals) {
             prepared.retain(id, batch, count);
         }

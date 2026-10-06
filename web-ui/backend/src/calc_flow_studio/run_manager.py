@@ -56,6 +56,7 @@ from calc_flow_studio.models import (
     RunStatus,
     RuntimeCapabilitiesResponse,
     SerializedWorkerRegistration,
+    StreamJoinMetrics,
     UnavailableWorkerRegistration,
     WorkerRegistrationCapability,
 )
@@ -1126,13 +1127,30 @@ def _continuous_progress(status: dict[str, object]) -> dict[str, object]:
 
 def _stream_join_progress(raw: object) -> tuple[dict[str, object], ...] | None:
     if isinstance(raw, tuple | list):
-        return tuple(raw)
+        return tuple(
+            StreamJoinMetrics.model_validate(entry).model_dump(mode="json")
+            for entry in raw
+        )
     if not isinstance(raw, dict):
         return None
     entries = []
     for node_id, metrics in sorted(raw.items()):
         if isinstance(metrics, dict):
-            entries.append({"node_id": str(node_id), **metrics})
+            entry = {"node_id": str(node_id), **metrics}
+            for side in ("left", "right"):
+                value = metrics[side]["watermark_micros"]
+                if value is not None:
+                    if type(value) is not int:
+                        raise TypeError("Join watermark must be an exact integer")
+                    if not -(2**63) <= value <= 2**63 - 1:
+                        raise ValueError("Join watermark exceeds i64")
+                entry[side] = {
+                    **metrics[side],
+                    "watermark_micros": None if value is None else str(value),
+                }
+            entries.append(
+                StreamJoinMetrics.model_validate(entry).model_dump(mode="json")
+            )
     return tuple(entries)
 
 

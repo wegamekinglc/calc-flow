@@ -14,6 +14,20 @@ measurements. Use the current guides for supported behavior.
   interleaved-run lookup work. Canonical row order, typed sequence ownership,
   checkpoint encoding and workspace accounting retain their contracts.
 
+- 2026-10-06: Expose inner Join ingress watermark, idle, and end observations
+  through Rust, Python and Studio, including non-terminal managed restart at
+  startup.
+  Studio preserves watermark precision with decimal strings; existing Join
+  counters and checkpoint layout remain unchanged. Static Join benchmark
+  readiness now seals the dimension before quotes, requires zero retained and
+  evicted quote rows, and excludes this setup from stream scope v6 timing.
+
+- 2026-10-06: Await streaming ASOF payload retirement before reusing chunk
+  workspace, preventing temporary budget failures while old owners are still
+  being released. Managed job cleanup waits for those owners and reservations;
+  cancellation, reset, checkpoint encoding and configured budgets retain their
+  contracts.
+
 - 2026-10-06: Use sink delivery events for ready-stream ASOF benchmark
   lockstep, replacing timed status polling. Stream scope v5 treats declared
   older scopes as new coverage. Cross-library reports include independently

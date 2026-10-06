@@ -87,9 +87,9 @@ def _join_span(table: pa.Table) -> timedelta:
 
 
 def _join_limits(dimension_rows: int) -> JoinStateLimits:
-    """Bound the static dimension and two in-flight input batches."""
+    """Bound the sealed static dimension and one in-flight quote batch."""
 
-    capacity = dimension_rows + 2 * BATCH_ROWS
+    capacity = dimension_rows + BATCH_ROWS
     return JoinStateLimits(capacity, max(capacity << 10, 1 << 30), capacity)
 
 
@@ -345,34 +345,37 @@ async def _measure_ready(
         timeout=30,
     )
     _require_ready_sources(sources, sink)
-    started = time.perf_counter_ns()
     pending = streams
+    static_join = set(streams) == {"left", "right"} and len(streams["right"]) == 2
+    if static_join:
+        for event in streams["right"]:
+            await sources["right"].push(event)
+        delta = streams["right"][-1].at - BASE
+        watermark = BASE_MICROS + delta // timedelta(microseconds=1)
+        await asyncio.wait_for(
+            _wait_static_dimension_progress(job, watermark),
+            timeout=600,
+        )
+        pending = {"left": streams["left"]}
+    started = time.perf_counter_ns()
     if (
         set(streams) == {"reference.input", "quotes.input"}
         and len(streams["quotes.input"]) > 2
     ):
         await _feed_asof_chunks(sources, streams, sink)
         pending = {}
-    elif (
-        set(streams) == {"left", "right"}
-        and len(streams["right"]) == 2
-        and len(streams["left"]) > 2
-    ):
-        initial = {name: events[:2] for name, events in streams.items()}
-        for name, event in interleaved_events(initial):
-            await sources[name].push(event)
-        await asyncio.wait_for(
-            _wait_static_join_progress(job, streams["left"][0].batch.num_rows),
-            timeout=600,
-        )
-        pending = {"left": streams["left"][2:]}
     for name, event in interleaved_events(pending):
         await sources[name].push(event)
     await asyncio.wait_for(sink.complete.wait(), timeout=600)
     if sink.rows != sink.expected_rows:
         raise RuntimeError("stream output row count differs from the timed workload")
     table = pa.concat_tables(sink.tables)
-    return table, (time.perf_counter_ns() - started) / 1e9
+    seconds = (time.perf_counter_ns() - started) / 1e9
+    if static_join:
+        await asyncio.wait_for(
+            _wait_static_quote_progress(job, sink.expected_rows), timeout=600
+        )
+    return table, seconds
 
 
 async def _feed_asof_chunks(
@@ -387,14 +390,33 @@ async def _feed_asof_chunks(
         await asyncio.wait_for(sink.wait_for_rows(rows), timeout=600)
 
 
-async def _wait_static_join_progress(job, rows: int) -> None:
+def _static_join_status(job) -> dict:
+    statuses = tuple(job.status()["stream_joins"].values())
+    if len(statuses) != 1:
+        raise RuntimeError("static Join requires exactly one Join status")
+    return statuses[0]
+
+
+def _require_static_join_no_left_state(status: dict) -> None:
+    if status["left"]["retained_rows"] or status["left"]["evicted_rows"]:
+        raise RuntimeError("static Join retained or evicted quote rows")
+
+
+async def _wait_static_quote_progress(job, expected_rows: int) -> None:
     while True:
-        statuses = tuple(job.status()["stream_joins"].values())
-        if (
-            len(statuses) == 1
-            and statuses[0]["emitted_match_rows"] >= rows
-            and statuses[0]["left"]["retained_rows"] == 0
-        ):
+        status = _static_join_status(job)
+        if status["emitted_match_rows"] >= expected_rows:
+            _require_static_join_no_left_state(status)
+            return
+        await asyncio.sleep(0.001)
+
+
+async def _wait_static_dimension_progress(job, watermark: int) -> None:
+    while True:
+        status = _static_join_status(job)
+        _require_static_join_no_left_state(status)
+        accepted = status["right"]["watermark_micros"]
+        if accepted is not None and accepted >= watermark:
             return
         await asyncio.sleep(0.001)
 
