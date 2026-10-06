@@ -391,11 +391,11 @@ fn sample(
         previous_bytes = status.state_bytes;
     }
     assert!(output.output.is_empty());
-    let status = op.status();
     runtime
         .block_on(op.prepare_checkpoint_async(&input))
         .unwrap();
     let snapshot = op.checkpoint(Epoch::INITIAL).unwrap();
+    let status = op.status();
     let mut checkpoint_digest = Sha256::new();
     let mut checkpoint_bytes = 0;
     for (name, segment) in &snapshot.segments {
@@ -405,7 +405,7 @@ fn sample(
         checkpoint_digest.update(segment.bytes());
         checkpoint_bytes += segment.bytes().len();
     }
-    let mut result = json!({"seconds":tick_seconds.iter().sum::<f64>(),"tick_seconds":tick_seconds,"statuses":statuses,"before_state_bytes":before_state_bytes,"output_rows":0,"checkpoint_bytes":checkpoint_bytes,"checkpoint_sha256":hex::encode(checkpoint_digest.finalize()),"validated_status":true,"validated_recovery":recover});
+    let mut result = json!({"seconds":tick_seconds.iter().sum::<f64>(),"tick_seconds":tick_seconds,"statuses":statuses,"before_state_bytes":before_state_bytes,"output_rows":0,"checkpoint_bytes":checkpoint_bytes,"checkpoint_state_bytes":status.state_bytes,"checkpoint_sha256":hex::encode(checkpoint_digest.finalize()),"validated_status":true,"validated_recovery":recover});
     if recover {
         let mut restored = operator();
         restored.restore(&snapshot).unwrap();

@@ -133,11 +133,11 @@ class BenchmarkSuiteTests(unittest.TestCase):
             "engines/10000000/finance-python/argmax256",
             {case["id"] for case in cases},
         )
-        self.assertNotIn(
+        self.assertIn(
             "engines/10000000/calc-flow-stream/asof_join",
             {case["id"] for case in cases},
         )
-        self.assertNotIn(
+        self.assertIn(
             "engines/10000000/calc-flow-stream/window_sum",
             {case["id"] for case in cases},
         )
@@ -146,36 +146,42 @@ class BenchmarkSuiteTests(unittest.TestCase):
                 f"engines/10000/calc-flow-stream/{scenario}",
                 {case["id"] for case in cases},
             )
-            self.assertNotIn(
+            self.assertIn(
                 f"engines/100000/calc-flow-stream/{scenario}",
                 {case["id"] for case in cases},
             )
         self.assertEqual(len({c["id"] for c in cases}), len(cases))
         self.assertTrue(all(c["rows"] > 0 for c in cases))
 
-    def test_native_stream_join_measures_only_through_the_100k_tier(self):
-        stream_join = {
-            case["id"]
-            for case in engine_cases()
-            if case["backend"] == "calc-flow-stream" and case["scenario"] == "join"
-        }
-        self.assertEqual(
-            stream_join,
-            {f"engines/{size}/calc-flow-stream/join" for size in ROW_SCALES[:5]},
-        )
+    def test_reopened_stream_cases_cover_all_row_scales(self):
+        for scenario in ("join", "asof_join", "window_sum"):
+            with self.subTest(scenario=scenario):
+                actual = {
+                    case["id"]
+                    for case in engine_cases()
+                    if case["backend"] == "calc-flow-stream"
+                    and case["scenario"] == scenario
+                }
+                self.assertEqual(
+                    actual,
+                    {
+                        f"engines/{size}/calc-flow-stream/{scenario}"
+                        for size in ROW_SCALES
+                    },
+                )
 
-    def test_shards_exclude_slow_nightly_scale_and_keep_all_families(self):
+    def test_shards_include_nightly_scale_and_keep_all_families(self):
         matrix = shards()
         self.assertEqual(
             {s["scale"] for s in matrix if s["family"] == "python"},
-            {"overhead", "small", "standard"},
+            {"overhead", "small", "standard", "nightly"},
         )
         self.assertTrue(
             {"python", "engines", "warm", "rust", "studio", "frontend"}
             <= {s["family"] for s in matrix}
         )
         self.assertEqual(len(matrix), len({s["id"] for s in matrix}))
-        self.assertEqual(len(matrix), 21)
+        self.assertEqual(len(matrix), 22)
 
     def test_native_stream_matrix_excludes_runner_startup(self):
         cases = [c for c in engine_cases() if c["backend"] == "calc-flow-stream"]
@@ -208,6 +214,39 @@ class BenchmarkSuiteTests(unittest.TestCase):
             catalog_path.write_text("ROW_SCALES = computed_at_runtime()\n")
             self.assertIsNone(baseline_case_ids(base, {"family": "engines"}))
             self.assertIsNone(baseline_case_ids(None, {"family": "engines"}))
+
+    def test_historical_caps_preserve_pairing_and_reopened_coverage(self):
+        with TemporaryDirectory() as directory:
+            base = Path(directory)
+            path = base / "scripts/benchmark_suite/catalog.py"
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                "ROW_SCALES = ('10000', '100000', '1000000')\n"
+                "SQL_CASES = ('projection',)\n"
+                "ROLLING_CASES = ('sma20',)\n"
+                "STREAM_CASES = ('join', 'asof_join', 'window_sum')\n"
+                "STREAM_JOIN_MAX_ROWS = 100_000\n"
+                "STREAM_ASOF_MAX_ROWS = 10_000\n"
+                "STREAM_WINDOW_MAX_ROWS = 10_000\n"
+            )
+            ids = baseline_case_ids(base, {"family": "engines"})
+            self.assertIsNotNone(ids)
+            for scenario, limit in (
+                ("join", 100_000),
+                ("asof_join", 10_000),
+                ("window_sum", 10_000),
+            ):
+                with self.subTest(scenario=scenario):
+                    case = {
+                        "id": f"engines/{limit}/calc-flow-stream/{scenario}",
+                        "backend": "calc-flow-stream",
+                    }
+                    self.assertEqual(catalog.comparison_kind(case, ids), "interleaved")
+                    reopened = {
+                        **case,
+                        "id": f"engines/{limit * 10}/calc-flow-stream/{scenario}",
+                    }
+                    self.assertEqual(catalog.comparison_kind(reopened, ids), "new")
 
     def test_baseline_case_ids_fail_closed_on_malformed_required_constants(self):
         with TemporaryDirectory() as directory:
@@ -647,15 +686,35 @@ class BenchmarkSuiteTests(unittest.TestCase):
             native_cell, {"unsupported", "missing", "error", "invalid scope"}
         )
 
-    def test_cross_library_table_keeps_large_stream_join_tiers_unsupported(self):
-        for size in ROW_SCALES[5:]:
+    def test_cross_library_table_measures_reopened_stream_tiers(self):
+        for size in ROW_SCALES[4:]:
             with self.subTest(size=size):
                 report = render_report(
                     [measured_case(**case) for case in engine_cases(size)], []
                 )
                 table = report.split("## Cross-library comparison")[1]
-                join_row = next(line for line in table.splitlines() if "| join" in line)
-                self.assertEqual(join_row.split("|")[3].strip(), "unsupported")
+                for scenario in ("join", "asof_join", "window_sum"):
+                    row = next(
+                        line for line in table.splitlines() if f"| {scenario} " in line
+                    )
+                    self.assertNotIn(
+                        row.split("|")[3].strip(),
+                        {"unsupported", "missing", "error", "invalid scope"},
+                    )
+
+    def test_missing_reopened_measurements_remain_visible(self):
+        report = render_report(
+            [
+                measured_case(**case)
+                for case in engine_cases(1_000_000)
+                if case["backend"] == "polars"
+            ],
+            [],
+        )
+        table = report.split("## Cross-library comparison")[1]
+        for scenario in ("join", "asof_join", "window_sum"):
+            row = next(line for line in table.splitlines() if f"| {scenario} " in line)
+            self.assertEqual(row.split("|")[3].strip(), "missing")
 
     def test_cross_library_table_rejects_startup_inclusive_stream_samples(self):
         case = next(c for c in engine_cases(100) if c["backend"] == "calc-flow-stream")

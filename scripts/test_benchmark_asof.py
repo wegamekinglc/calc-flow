@@ -59,6 +59,30 @@ def report() -> dict:
 
 
 class AsofEvidenceTests(unittest.IsolatedAsyncioTestCase):
+    def test_dominance_retention_requires_one_candidate_per_key(self):
+        evidence = copy.deepcopy(report())
+        evidence["retention"] = "latest-per-key"
+        for case in evidence["cases"]:
+            for sample in (case["oracle"], *case["samples"]):
+                sample["after_status"]["retained_right_rows"] = 32
+                sample["after_status"]["evicted_right_rows"] = (
+                    case["config"]["retained"] - 32
+                )
+        with TemporaryDirectory() as raw:
+            path = Path(raw) / "result.json"
+            path.write_text(json.dumps(evidence))
+            self.assertEqual(len(asof_rows(path)), 8)
+            for field, value in (
+                ("retained_right_rows", 31),
+                ("retained_right_rows", 33),
+                ("evicted_right_rows", 0),
+            ):
+                invalid = copy.deepcopy(evidence)
+                invalid["cases"][0]["oracle"]["after_status"][field] = value
+                path.write_text(json.dumps(invalid))
+                with self.assertRaises(ValueError):
+                    asof_rows(path)
+
     def test_current_and_adaptive_output_chunks_cover_all_pending_rows(self):
         evidence = copy.deepcopy(report())
         for case in evidence["cases"]:

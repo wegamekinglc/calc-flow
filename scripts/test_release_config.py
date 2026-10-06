@@ -693,9 +693,8 @@ class ReleaseConfigTests(unittest.TestCase):
         from scripts.benchmark_suite.catalog import LEGACY_SCALES, ROW_SCALES, shards
 
         names = self._legacy_scale_names()
-        automated = tuple(name for name in names if name != "nightly")
-        self.assertEqual(automated, LEGACY_SCALES)
-        self.assertNotIn("nightly", LEGACY_SCALES)
+        self.assertEqual(names, LEGACY_SCALES)
+        self.assertIn("nightly", LEGACY_SCALES)
         self.assertEqual(ROW_SCALES, tuple(10**n for n in range(1, 8)))
         workflow = (ROOT / ".github/workflows/benchmark-suite.yml").read_text(
             encoding="utf-8"
@@ -703,7 +702,7 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIn("scripts.benchmark_suite catalog", workflow)
         self.assertEqual(
             {s["scale"] for s in shards() if s["family"] == "python"},
-            set(automated),
+            set(names),
         )
 
     def test_linux_ci_reports_parallel_coverage_to_coveralls(self) -> None:

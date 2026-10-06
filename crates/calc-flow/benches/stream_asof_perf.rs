@@ -303,7 +303,14 @@ fn sample(rt: &tokio::runtime::Runtime, config: &Config, check: bool) -> Value {
     );
     assert_eq!(after_status.pending_left_rows, 0);
     assert_eq!(after_status.matched_rows, pending as u64);
-    assert_eq!(after_status.retained_right_rows, retained as u64);
+    assert_eq!(
+        after_status.retained_right_rows,
+        collector.rights.len() as u64
+    );
+    assert_eq!(
+        after_status.evicted_right_rows,
+        (retained - collector.rights.len()) as u64
+    );
     assert_eq!(
         after_status.output_watermark_micros,
         Some(EventTime::from_micros(FRONTIER - 1))
@@ -474,7 +481,7 @@ fn main() {
             json!({"name": name, "config": config, "oracle": oracle, "samples": samples})
         })
         .collect::<Vec<_>>();
-    let report = json!({"schema": "calc-flow.asof-finalization.v1", "scope": "operator-watermark-settlement", "cases": cases});
+    let report = json!({"schema": "calc-flow.asof-finalization.v1", "scope": "operator-watermark-settlement", "retention": "latest-per-key", "cases": cases});
     let bytes = serde_json::to_vec_pretty(&report).unwrap();
     if let Some(index) = args.iter().position(|arg| arg == "--output") {
         let path = std::path::Path::new(args.get(index + 1).expect("--output needs a path"));

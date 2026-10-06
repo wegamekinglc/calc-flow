@@ -10,6 +10,66 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class BenchmarkWorkflowTests(unittest.TestCase):
+    def test_recovery_mode_does_not_start_standard_diagnostics(self):
+        workflow = (ROOT / ".github/workflows/benchmarks.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("options: [standard, dal301-groupby, suite-recovery]", workflow)
+        for job in ("sql-datafusion-paired", "sql-datafusion-matrix"):
+            definition = workflow.split(f"  {job}:\n", 1)[1].split("    steps:", 1)[0]
+            self.assertIn("if: inputs.mode == 'standard'", definition)
+        recovery = workflow.split("  suite-recovery:\n", 1)[1]
+        self.assertIn("if: inputs.mode == 'suite-recovery'", recovery)
+        self.assertIn("actions: read", workflow)
+
+    def test_recovery_preserves_sealed_wheels_and_full_shard_measurement(self):
+        workflow = (ROOT / ".github/workflows/benchmarks.yml").read_text(
+            encoding="utf-8"
+        )
+        recovery = workflow.split("  suite-recovery:\n", 1)[1]
+        for side in ("baseline", "candidate"):
+            self.assertIn(
+                f"name: benchmark-release-{side}-"
+                "${{ inputs.release_run_id }}-${{ inputs.release_run_attempt }}",
+                recovery,
+            )
+            self.assertIn(f"--{side} target/releases/{side}/release.json", recovery)
+        self.assertIn("ref: ${{ inputs.candidate_sha }}", recovery)
+        self.assertIn("ref: ${{ inputs.baseline_sha }}", recovery)
+        self.assertIn("--baseline-source target/base", recovery)
+        self.assertIn('--shard "$BENCHMARK_SHARD"', recovery)
+        self.assertIn("--require-hashes benchmarks/requirements.lock", recovery)
+        self.assertIn("trap stop_monitor EXIT", recovery)
+        self.assertIn("free -m", recovery)
+        self.assertIn("if: always()", recovery)
+        self.assertNotIn("--benchmark-disable", recovery)
+
+    def test_recovery_bounds_memory_and_preserves_resource_evidence(self):
+        workflow = (ROOT / ".github/workflows/benchmarks.yml").read_text(
+            encoding="utf-8"
+        )
+        recovery = workflow.split("  suite-recovery:\n", 1)[1]
+        measurement = recovery.split(
+            "- name: Run complete recovery shard with resource diagnostics\n", 1
+        )[1].split("        run:", 1)[0]
+        self.assertIn("shell: bash", measurement)
+        for required in (
+            "sudo systemd-run --wait --pipe --collect",
+            "--property=MemoryHigh=10G",
+            "--property=MemoryMax=12G",
+            "--property=MemorySwapMax=8G",
+            "--property=OOMPolicy=continue",
+            'sudo systemctl stop "$recovery_unit"',
+            'sudo swapoff "$recovery_swap"',
+            'sudo rm -f -- "$recovery_swap" || true',
+            "resource-profile/run.log",
+        ):
+            self.assertIn(required, recovery)
+        self.assertLess(
+            recovery.index("trap stop_monitor EXIT"),
+            recovery.index("sudo fallocate"),
+        )
+
     def test_dependency_lock_excludes_the_current_workspace_distribution(self):
         project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
             "project"

@@ -41,10 +41,13 @@ def asof_rows(path: Path) -> dict:
     ):
         raise ValueError("invalid ASOF benchmark contract")
     cases = report["cases"]
+    retention = report.get("retention", "tolerance-window")
+    if retention not in ("tolerance-window", "latest-per-key"):
+        raise ValueError("invalid ASOF retention contract")
     if sorted(case["name"] for case in cases) != sorted(CASES):
         raise ValueError("incomplete or duplicate ASOF inventory")
     for case in cases:
-        _validate_case(case)
+        _validate_case(case, retention)
     return {
         f"stream_asof_perf/{case['name']}": {
             "samples": [sample["seconds"] for sample in case["samples"]],
@@ -60,18 +63,18 @@ def asof_rows(path: Path) -> dict:
     }
 
 
-def _validate_case(case: dict) -> None:
+def _validate_case(case: dict, retention: str) -> None:
     config = CASES[case["name"]]
     if case["config"] != config or case["oracle"].get("validated_all_rows") is not True:
         raise ValueError("ASOF workload or row oracle mismatch")
     if len(case["samples"]) < 20:
         raise ValueError("incomplete ASOF observations")
     for sample in (case["oracle"], *case["samples"]):
-        if not _valid_sample(sample, config):
+        if not _valid_sample(sample, config, retention):
             raise ValueError("invalid ASOF observation")
 
 
-def _valid_sample(sample: dict, config: dict) -> bool:
+def _valid_sample(sample: dict, config: dict, retention: str) -> bool:
     return all(
         (
             sample.get("config") == config,
@@ -79,7 +82,7 @@ def _valid_sample(sample: dict, config: dict) -> bool:
             _valid_counts(sample),
             _valid_times(sample, config),
             _valid_chunks(sample, config),
-            _valid_status(sample, config),
+            _valid_status(sample, config, retention),
         )
     )
 
@@ -119,12 +122,15 @@ def _valid_chunks(sample: dict, config: dict) -> bool:
     return valid and sum(chunk[0] for chunk in chunks) == config["pending"]
 
 
-def _valid_status(sample: dict, config: dict) -> bool:
+def _valid_status(sample: dict, config: dict, retention: str) -> bool:
     status = sample.get("after_status", {})
-    return status.get("pending_left_rows") == 0 and all(
-        status.get(field) == config[dimension]
-        for field, dimension in (
-            ("matched_rows", "pending"),
-            ("retained_right_rows", "retained"),
+    retained = 32 if retention == "latest-per-key" else config["retained"]
+    return (
+        status.get("pending_left_rows") == 0
+        and status.get("matched_rows") == config["pending"]
+        and status.get("retained_right_rows") == retained
+        and (
+            retention != "latest-per-key"
+            or status.get("evicted_right_rows") == config["retained"] - retained
         )
     )

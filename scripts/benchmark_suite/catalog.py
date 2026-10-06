@@ -6,7 +6,7 @@ import ast
 from pathlib import Path
 
 ROW_SCALES = tuple(10**power for power in range(1, 8))
-LEGACY_SCALES = ("overhead", "small", "standard")
+LEGACY_SCALES = ("overhead", "small", "standard", "nightly")
 SQL_CASES = ("projection", "filter", "group_by", "join", "sma20", "dual_sma")
 POLARS_CASES = (
     "projection",
@@ -56,16 +56,9 @@ CAPABILITIES = {
     "ta-lib": ROLLING_CASES,
     "finance-python": FINANCE_CASES,
 }
-# The native-stream join column carries evidence only through the 100k tier
-# (user-directed pacing constraint, DAL-290, 2026-09-20): per-sample
-# performance above that scale (≈5 s at 1M and ≈200 s at 10M on the dev
-# machine, because the join retains one state row per matched input row for
-# the whole run) would slow the whole suite's cadence. Larger tiers stay
-# unsupported in the catalog rather than being measured to fill the column;
-# see docs/benchmark-suite.md.
-STREAM_JOIN_MAX_ROWS = 100_000
-STREAM_ASOF_MAX_ROWS = 10_000
-STREAM_WINDOW_MAX_ROWS = 10_000
+STREAM_JOIN_MAX_ROWS = None
+STREAM_ASOF_MAX_ROWS = None
+STREAM_WINDOW_MAX_ROWS = None
 THREADS = 32
 BATCH_ROWS = 64_000
 CONTRACT = "calc-flow-benchmark-suite-v3"
