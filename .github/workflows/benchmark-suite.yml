@@ -68,6 +68,7 @@ jobs:
           scripts.test_benchmark_asof
           scripts.test_benchmark_asof_eviction
           scripts.test_benchmark_engine_lifecycle
+          scripts.test_benchmark_measure
           scripts.test_benchmark_join_materialization
           scripts.test_benchmark_sql_decimal
           scripts.test_benchmark_sql_stream

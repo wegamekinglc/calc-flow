@@ -169,7 +169,10 @@ async def measure_shard(
     sites = {
         side: await install(release, root / side) for side, release in releases.items()
     }
-    workers_by_side = {side: (site, sources[side]) for side, site in sites.items()}
+    workers_by_side = {
+        side: (site, ROOT if shard["family"] == "engines" else sources[side])
+        for side, site in sites.items()
+    }
     baseline_ids = baseline_case_ids(baseline_source, shard)
     cases = shard_cases(shard)
     report = {
