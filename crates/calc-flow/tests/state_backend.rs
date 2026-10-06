@@ -80,6 +80,7 @@ fn manifest_fields(
         sources: BTreeMap::from([(
             "source".into(),
             SourceManifestEntry {
+                history: None,
                 cursor: None,
                 identity_hash: SHA256.into(),
                 sequence: 7,

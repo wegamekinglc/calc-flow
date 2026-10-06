@@ -313,10 +313,15 @@ def test_operator_state_layouts_fail_closed_on_hostile_values() -> None:
         return {**base, **overrides}
 
     TypeAdapter(OperatorCapabilityResponse).validate_python(operator_document({}))
+    for state_version, layouts in [(2, [3, 4]), (3, [10])]:
+        actual = TypeAdapter(OperatorCapabilityResponse).validate_python(
+            operator_document({"stateVersion": state_version, "stateLayouts": layouts})
+        )
+        assert actual.state_version == state_version
+        assert actual.state_layouts == tuple(layouts)
 
     for overrides, message in (
-        ({"stateLayouts": []}, "checkpointed_stateful stateLayouts"),
-        ({"stateLayouts": [2]}, "contain stateVersion"),
+        ({"stateLayouts": []}, "requires nonempty stateLayouts"),
         ({"stateLayouts": [2, 1]}, "strictly ascending"),
         ({"stateLayouts": [1, 1]}, "strictly ascending"),
         ({"stateLayouts": [0, 1]}, "positive integers"),

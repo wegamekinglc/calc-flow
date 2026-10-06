@@ -637,9 +637,22 @@ fn validate_uint_widths(dtype: &str, values: &[u64]) -> Result<()> {
 pub struct Batch {
     payload: BatchPayload,
     metadata: BatchMetadata,
+    source_cursor: Option<Arc<crate::Cursor>>,
 }
 
 impl Batch {
+    pub(crate) fn source_cursor(&self) -> Option<Arc<crate::Cursor>> {
+        self.source_cursor.clone()
+    }
+
+    pub(crate) fn with_source_cursor(&self, cursor: Option<Arc<crate::Cursor>>) -> Self {
+        Self {
+            payload: self.payload.clone(),
+            metadata: self.metadata.clone(),
+            source_cursor: cursor,
+        }
+    }
+
     /// Creates a table batch from one or more identically shaped Arrow batches.
     ///
     /// # Errors
@@ -650,6 +663,7 @@ impl Batch {
         Ok(Self {
             payload: BatchPayload::Table(TableBatch::new(batches)?),
             metadata,
+            source_cursor: None,
         })
     }
 
@@ -669,6 +683,7 @@ impl Batch {
         Ok(Self {
             payload: BatchPayload::External(payload),
             metadata,
+            source_cursor: None,
         })
     }
 
@@ -807,6 +822,7 @@ impl Batch {
         Self {
             payload: BatchPayload::External(Arc::new(payload)),
             metadata: BatchMetadata::default(),
+            source_cursor: None,
         }
     }
 
@@ -948,6 +964,7 @@ impl Batch {
         Self {
             payload: self.payload.clone(),
             metadata,
+            source_cursor: self.source_cursor.clone(),
         }
     }
 }

@@ -91,9 +91,9 @@ def _validate_lifecycle_invariants(
             raise ValueError(
                 "checkpointed_stateful requires a positive stateVersion",
             )
-        if not state_layouts or state_version not in state_layouts:
+        if not state_layouts:
             raise ValueError(
-                "checkpointed_stateful stateLayouts must contain stateVersion",
+                "checkpointed_stateful requires nonempty stateLayouts",
             )
     elif state_version is not None:
         raise ValueError("stateVersion must be null unless checkpointed_stateful")

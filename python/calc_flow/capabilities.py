@@ -220,9 +220,7 @@ def _require_checkpoint_support(
         raise ValueError(f"{owner} stateless capability must set stateful=False")
 
 
-def _require_state_layouts(
-    owner: str, support: str, state_version: int | None, state_layouts: object
-) -> None:
+def _require_state_layouts(owner: str, support: str, state_layouts: object) -> None:
     """Validate the durable layout inventory behind a state contract.
 
     ``state_layouts`` enumerates every checkpoint layout the operator
@@ -241,11 +239,11 @@ def _require_state_layouts(
                 f"{owner} state_layouts must be empty unless checkpointed_stateful"
             )
         return
-    _require_stateful_layout_inventory(owner, state_version, state_layouts)
+    _require_stateful_layout_inventory(owner, state_layouts)
 
 
 def _require_stateful_layout_inventory(
-    owner: str, state_version: int | None, state_layouts: tuple[int, ...]
+    owner: str, state_layouts: tuple[int, ...]
 ) -> None:
     if not state_layouts:
         raise ValueError(
@@ -260,8 +258,6 @@ def _require_stateful_layout_inventory(
         if layout <= 0:
             raise ValueError(f"{owner} state layouts must be positive integers")
     _require_ascending_layouts(owner, state_layouts)
-    if state_version not in state_layouts:
-        raise ValueError(f"{owner} state_layouts must contain state_version")
 
 
 def _require_ascending_layouts(owner: str, state_layouts: tuple[int, ...]) -> None:
@@ -386,7 +382,6 @@ class OperatorCapability:
         _require_state_layouts(
             "operator capability",
             self.checkpoint_support,
-            self.state_version,
             self.state_layouts,
         )
 
@@ -649,8 +644,8 @@ def runtime_capabilities(
                 microbatch_invariant=False,
                 requires_watermark=False,
                 checkpoint_support="checkpointed_stateful",
-                state_version=1,
-                state_layouts=(1,),
+                state_version=2,
+                state_layouts=(3, 4),
                 deterministic=True,
                 replay_safe=True,
             ),
@@ -670,7 +665,7 @@ def runtime_capabilities(
                 requires_watermark=True,
                 checkpoint_support="checkpointed_stateful",
                 state_version=3,
-                state_layouts=(3,),
+                state_layouts=(10,),
                 deterministic=True,
                 replay_safe=True,
             ),

@@ -92,6 +92,7 @@ impl TaskEnvironment {
         OperatorTaskInputs {
             late_output_ports: std::collections::BTreeSet::new(),
             entity_work: None,
+            sql_recovery: None,
             node_id: node_id.into(),
             output_ports: BTreeMap::from([("output".into(), operator.outputs[0].clone())]),
             operator: CompiledStreamOperator::External(Box::new(operator)),
@@ -100,7 +101,7 @@ impl TaskEnvironment {
                 "input".into(),
                 OperatorIngress::new(receiver.edge().into(), receiver),
             )]),
-            outputs: BTreeMap::from([("output".into(), vec![sender])]),
+            outputs: BTreeMap::from([("output".into(), vec![sender.into()])]),
             context: self.job.for_node(node_id).unwrap(),
             progress: OperatorProgress::default(),
             metrics: super::super::MetricsRecorder::default(),

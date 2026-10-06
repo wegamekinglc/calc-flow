@@ -192,7 +192,6 @@ const capabilityLifecycleAt = (
 const operatorStateLayoutsAt = (
   layouts: unknown,
   checkpointSupport: unknown,
-  stateVersion: unknown,
   path: string,
 ): void => {
   const items = arrayAt(layouts, `${path}.stateLayouts`);
@@ -220,9 +219,6 @@ const operatorStateLayoutsAt = (
     }
     previousLayout = layout;
   });
-  if (typeof stateVersion === 'number' && !items.includes(stateVersion)) {
-    fail(`${path}.stateLayouts`, 'must contain stateVersion');
-  }
 };
 
 const CLOSED_CAPABILITY_RULES: ReadonlySet<string> = new Set([
@@ -312,7 +308,6 @@ const runtimeCapabilitiesAt = (value: unknown, path: string): void => {
     operatorStateLayoutsAt(
       operator.stateLayouts,
       operator.checkpointSupport,
-      operator.stateVersion,
       itemPath,
     );
   });

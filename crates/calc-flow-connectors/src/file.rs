@@ -21,6 +21,9 @@ use calc_flow::{
 };
 use serde_json::Value;
 
+mod frozen;
+pub use frozen::FrozenFileSource;
+
 use crate::arrow_schema::{codec_connector_identity, schema_from_spec};
 use crate::csv::CsvCodec;
 use crate::json_lines::JsonLinesCodec;
@@ -166,8 +169,47 @@ pub struct FileSource {
     files: Vec<PathBuf>,
     file_index: usize,
     row_offset: u64,
-    line_cache: Option<Vec<Vec<u8>>>,
+    line_cache: Option<JsonLineCache>,
+    history: Option<calc_flow::SourceHistoryContext>,
     sequence: u64,
+}
+
+enum FileBytes {
+    Local(Vec<u8>),
+    History(calc_flow::SourceHistoryBytes),
+}
+
+impl FileBytes {
+    fn bytes(&self) -> &[u8] {
+        match self {
+            Self::Local(bytes) => bytes,
+            Self::History(bytes) => bytes.bytes(),
+        }
+    }
+}
+
+struct JsonLineCache {
+    bytes: FileBytes,
+    offset: usize,
+}
+
+impl JsonLineCache {
+    fn next_line(&self, offset: usize) -> Option<(usize, &[u8])> {
+        let bytes = self.bytes.bytes();
+        let mut offset = offset;
+        while offset < bytes.len() {
+            let end = bytes[offset..]
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map_or(bytes.len(), |end| offset + end);
+            let next = end.saturating_add(1).min(bytes.len());
+            if end > offset {
+                return Some((next, &bytes[offset..end]));
+            }
+            offset = next;
+        }
+        None
+    }
 }
 
 impl FileSource {
@@ -199,6 +241,7 @@ impl FileSource {
             file_index: 0,
             row_offset: 0,
             line_cache: None,
+            history: None,
             sequence: 0,
         })
     }
@@ -230,6 +273,10 @@ impl FileSource {
     }
 
     fn cursor_for(&self, file_index: usize, row: u64) -> Result<Cursor> {
+        let sequence = self
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| Self::fail("read", &self.config.path, "batch sequence exhausted"))?;
         let name = self
             .files
             .get(file_index)
@@ -243,11 +290,18 @@ impl FileSource {
         let payload = BTreeMap::from([
             ("file".to_string(), Value::String(name)),
             ("row".to_string(), Value::from(row)),
+            ("sequence".to_string(), Value::from(sequence)),
         ]);
         Cursor::unbound(order, payload)
     }
 
-    async fn read_file(&self, path: &Path) -> Result<Vec<u8>> {
+    async fn read_file(&self, path: &Path) -> Result<FileBytes> {
+        if let Some(history) = &self.history {
+            return history
+                .load(&frozen::segment_id(self.file_index))
+                .await
+                .map(FileBytes::History);
+        }
         let detail_path = path.to_path_buf();
         let ceiling = self.config.max_file_bytes;
         tokio::task::spawn_blocking(move || {
@@ -276,6 +330,7 @@ impl FileSource {
         })
         .await
         .map_err(|error| Self::fail("read", path, &error.to_string()))?
+        .map(FileBytes::Local)
     }
 
     async fn decode_current_file(&self, path: &Path) -> Result<Batch> {
@@ -284,11 +339,11 @@ impl FileSource {
         match &self.config.format {
             FileFormat::Csv { header } => {
                 let codec = CsvCodec::new(crate::csv::IDENTITY_VERSION, *header)?;
-                codec.decode(&bytes, &bounds, &self.config.schema)
+                codec.decode(bytes.bytes(), &bounds, &self.config.schema)
             }
             FileFormat::Parquet => {
                 let codec = crate::parquet::ParquetCodec::new(crate::parquet::IDENTITY_VERSION)?;
-                codec.decode(&bytes, &bounds, &self.config.schema)
+                codec.decode(bytes.bytes(), &bounds, &self.config.schema)
             }
             FileFormat::JsonLines => unreachable!("json advances through the line cache"),
         }
@@ -317,37 +372,38 @@ impl FileSource {
         }
     }
 
-    /// Loads the line cache for the current file, advancing past empty
-    /// files until one yields lines or the directory is exhausted.
     async fn ensure_json_lines(&mut self) -> Result<bool> {
         while self.line_cache.is_none() {
             let Some(path) = self.files.get(self.file_index).cloned() else {
                 return Ok(false);
             };
             let bytes = self.read_file(&path).await?;
-            let lines = split_lines(&bytes);
-            if lines.is_empty() {
+            let mut cache = JsonLineCache { bytes, offset: 0 };
+            if cache.next_line(0).is_none() {
                 self.file_index += 1;
                 self.row_offset = 0;
                 continue;
             }
-            self.line_cache = Some(lines);
+            for _ in 0..self.row_offset {
+                let Some((next, _)) = cache.next_line(cache.offset) else {
+                    break;
+                };
+                cache.offset = next;
+            }
+            self.line_cache = Some(cache);
         }
         Ok(true)
     }
 
-    /// Builds the next bounded chunk of remaining lines.
-    fn next_json_chunk(&self, bounds: &DecodeBounds) -> Result<(Vec<u8>, u64)> {
-        let lines = self
+    fn next_json_chunk(&self, bounds: &DecodeBounds) -> Result<(Vec<u8>, u64, usize)> {
+        let cache = self
             .line_cache
             .as_ref()
-            .expect("the caller ensured the line cache");
-        let mut chunk: Vec<u8> = Vec::new();
-        let mut taken = 0u64;
-        for line in lines
-            .iter()
-            .skip(usize::try_from(self.row_offset).unwrap_or(usize::MAX))
-        {
+            .expect("the caller loaded the file");
+        let mut offset = cache.offset;
+        let mut chunk = Vec::new();
+        let mut taken = 0;
+        while let Some((next, line)) = cache.next_line(offset) {
             if taken >= bounds.max_rows
                 || u64::try_from(chunk.len() + line.len() + 1).unwrap_or(u64::MAX)
                     > bounds.max_bytes
@@ -356,6 +412,7 @@ impl FileSource {
             }
             chunk.extend_from_slice(line);
             chunk.push(b'\n');
+            offset = next;
             taken += 1;
         }
         if chunk.is_empty() {
@@ -365,17 +422,15 @@ impl FileSource {
                 "a single line exceeds the batch byte limit",
             ));
         }
-        Ok((chunk, taken))
+        Ok((chunk, taken, offset))
     }
 
-    /// Detects a fully consumed line cache and advances to the next file.
     fn json_file_exhausted(&mut self) -> bool {
-        let total_lines = self
+        let cache = self
             .line_cache
             .as_ref()
-            .expect("the caller ensured the line cache")
-            .len();
-        if usize::try_from(self.row_offset).unwrap_or(usize::MAX) < total_lines {
+            .expect("the caller loaded the file");
+        if cache.next_line(cache.offset).is_some() {
             return false;
         }
         self.line_cache = None;
@@ -384,28 +439,22 @@ impl FileSource {
         true
     }
 
-    /// Decodes and emits one bounded chunk of the current line cache.
     fn emit_json_chunk(&mut self) -> Result<SourceEvent> {
-        let total_lines = self
-            .line_cache
-            .as_ref()
-            .expect("the caller ensured the line cache")
-            .len();
         let bounds = self.config.bounds()?;
-        let (chunk, taken) = self.next_json_chunk(&bounds)?;
+        let (chunk, taken, offset) = self.next_json_chunk(&bounds)?;
         let codec = JsonLinesCodec::new(crate::json_lines::IDENTITY_VERSION)?;
         let batch = codec.decode(&chunk, &bounds, &self.config.schema)?;
         let consumed = self.row_offset + taken;
         let cursor = self.cursor_for(self.file_index, consumed)?;
         self.row_offset = consumed;
         self.sequence += 1;
+        self.line_cache
+            .as_mut()
+            .expect("the caller loaded the file")
+            .offset = offset;
         let path = self.files.get(self.file_index).cloned().unwrap_or_default();
         let batch = batch.with_metadata(relabel(&path, self.sequence)?);
-        if usize::try_from(consumed).unwrap_or(usize::MAX) >= total_lines {
-            self.line_cache = None;
-            self.file_index += 1;
-            self.row_offset = 0;
-        }
+        self.json_file_exhausted();
         Ok(SourceEvent::Data { batch, cursor })
     }
 
@@ -499,14 +548,6 @@ fn discover_directory(directory: &Path, expected: &str) -> Result<Vec<PathBuf>> 
     Ok(names)
 }
 
-fn split_lines(bytes: &[u8]) -> Vec<Vec<u8>> {
-    bytes
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-        .map(<[u8]>::to_vec)
-        .collect()
-}
-
 #[async_trait]
 impl StreamSource for FileSource {
     fn capabilities(&self) -> SourceCapabilities {
@@ -514,21 +555,34 @@ impl StreamSource for FileSource {
     }
 
     async fn open(&mut self, cursor: Option<Cursor>) -> Result<()> {
-        self.discover().await?;
+        if self.history.is_none() {
+            self.discover().await?;
+        }
         self.file_index = 0;
         self.row_offset = 0;
         self.line_cache = None;
+        self.sequence = 0;
         if let Some(cursor) = cursor {
-            let file = cursor
-                .payload()
+            let invalid = |field| {
+                Self::fail(
+                    "open",
+                    &self.config.path,
+                    &format!("invalid cursor.{field}"),
+                )
+            };
+            let payload = cursor.payload();
+            let file = payload
                 .get("file")
                 .and_then(Value::as_str)
-                .unwrap_or_default();
-            let row = cursor
-                .payload()
+                .ok_or_else(|| invalid("file"))?;
+            let row = payload
                 .get("row")
                 .and_then(Value::as_u64)
-                .unwrap_or_default();
+                .ok_or_else(|| invalid("row"))?;
+            let sequence = payload
+                .get("sequence")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| invalid("sequence"))?;
             let index = self
                 .files
                 .iter()
@@ -540,8 +594,19 @@ impl StreamSource for FileSource {
                         &format!("cursor names unknown file {file:?}"),
                     )
                 })?;
+            let mut order = [0; 16];
+            order[..8].copy_from_slice(&(index as u64).to_be_bytes());
+            order[8..].copy_from_slice(&row.to_be_bytes());
+            if payload.len() != 3 || row == 0 || sequence == 0 || cursor.order() != order {
+                return Err(Self::fail(
+                    "open",
+                    &self.config.path,
+                    "invalid cursor position",
+                ));
+            }
             self.file_index = index;
             self.row_offset = row;
+            self.sequence = sequence;
         }
         Ok(())
     }

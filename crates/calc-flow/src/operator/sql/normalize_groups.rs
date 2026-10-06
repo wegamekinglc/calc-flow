@@ -1,0 +1,293 @@
+use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
+use datafusion::logical_expr::{Aggregate, Projection};
+use datafusion::optimizer::{
+    eliminate_group_by_constant::EliminateGroupByConstant,
+    optimize_projections::OptimizeProjections,
+    optimizer::{Optimizer, OptimizerContext},
+    push_down_filter::PushDownFilter,
+};
+
+use super::{
+    Arc, DataFusionRuntime, Expr, LogicalPlan, MemoryReservation, Result, SchemaRef,
+    ValidatedQuery, checked_bytes, df_error,
+};
+
+type InputChecks = Vec<(Expr, Arc<datafusion::common::DFSchema>)>;
+
+pub(super) struct Plans {
+    pub raw: LogicalPlan,
+    pub analyzed: LogicalPlan,
+    pub checks: InputChecks,
+    _reservation: MemoryReservation,
+}
+
+pub(super) fn plans(
+    runtime: &DataFusionRuntime,
+    query: &ValidatedQuery,
+    raw: &LogicalPlan,
+    analyzed: &LogicalPlan,
+    schema: &SchemaRef,
+    name: &str,
+) -> Result<Option<Plans>> {
+    let aliases = alias_chain(raw);
+    let computed_keys = super::shape(raw).is_some_and(|(_, aggregate)| {
+        aggregate
+            .group_expr
+            .iter()
+            .any(|expression| !matches!(expression, Expr::Column(_)))
+    });
+    if !aliases && !computed_keys {
+        return Ok(None);
+    }
+    let fields = super::super::ipc::schema_bytes(schema).map_err(|error| df_error(name, error))?;
+    let reservation = runtime.incremental_reservation(name);
+    reservation
+        .try_grow(checked_bytes(
+            8192,
+            [
+                (query.text().len(), 32),
+                (fields, 32),
+                (schema.fields().len(), 1024),
+            ],
+            name,
+        )?)
+        .map_err(|error| df_error(name, error))?;
+    let optimizer = Optimizer::with_rules(vec![
+        Arc::new(EliminateGroupByConstant::new()),
+        Arc::new(PushDownFilter::new()),
+        Arc::new(OptimizeProjections::new()),
+    ]);
+    let config = OptimizerContext::new()
+        .without_query_execution_start_time()
+        .with_skip_failing_rules(false)
+        .with_max_passes(3);
+    let (raw, _) = normalize_plan(raw, aliases, &optimizer, &config, &reservation, name)?;
+    let (analyzed, checks) =
+        normalize_plan(analyzed, aliases, &optimizer, &config, &reservation, name)?;
+    Ok(Some(Plans {
+        raw,
+        analyzed,
+        checks,
+        _reservation: reservation,
+    }))
+}
+
+fn normalize_plan(
+    plan: &LogicalPlan,
+    aliases: bool,
+    optimizer: &Optimizer,
+    config: &OptimizerContext,
+    reservation: &MemoryReservation,
+    name: &str,
+) -> Result<(LogicalPlan, InputChecks)> {
+    let plan = if aliases {
+        inline_aliases(plan.clone()).map_err(|error| df_error(name, error))?
+    } else {
+        plan.clone()
+    };
+    let normalized = optimizer
+        .optimize(plan, config, |_, _| {})
+        .map_err(|error| df_error(name, error))?;
+    if !aliases {
+        return Ok((normalized, Vec::new()));
+    }
+    let mut checks = Vec::new();
+    let normalized = inline_input_projection(normalized, reservation, name, &mut checks)
+        .map_err(|error| df_error(name, error))?;
+    optimizer
+        .optimize(normalized, config, |_, _| {})
+        .map(|plan| (plan, checks))
+        .map_err(|error| df_error(name, error))
+}
+
+fn inline_input_projection(
+    plan: LogicalPlan,
+    reservation: &MemoryReservation,
+    name: &str,
+    checks: &mut InputChecks,
+) -> datafusion::error::Result<LogicalPlan> {
+    plan.transform_up(|plan| {
+        let LogicalPlan::Aggregate(aggregate) = plan else {
+            return Ok(Transformed::no(plan));
+        };
+        let LogicalPlan::Projection(projection) = aggregate.input.as_ref() else {
+            return Ok(Transformed::no(LogicalPlan::Aggregate(aggregate)));
+        };
+        let inputs = projection
+            .expr
+            .iter()
+            .map(|expression| {
+                super::native_expression::input_expression_work(
+                    expression,
+                    projection.input.schema(),
+                )
+                .map(|_| super::unalias(expression).clone())
+            })
+            .collect::<Option<Vec<_>>>();
+        let Some(inputs) = inputs else {
+            return Ok(Transformed::no(LogicalPlan::Aggregate(aggregate)));
+        };
+        checks.extend(
+            inputs
+                .iter()
+                .filter(|expression| {
+                    !super::native_expression::infallible_projection(
+                        expression,
+                        projection.input.schema(),
+                    )
+                })
+                .map(|expression| (expression.clone(), Arc::clone(projection.input.schema()))),
+        );
+        let mapping = projection
+            .schema
+            .columns()
+            .into_iter()
+            .zip(inputs)
+            .collect::<Vec<_>>();
+        reserve_expansion(&aggregate, &mapping, reservation, name)?;
+        let replace = |expression: &Expr| {
+            expression
+                .clone()
+                .transform_up(|expression| {
+                    if let Expr::Column(column) = &expression
+                        && let Some((_, source)) =
+                            mapping.iter().find(|(output, _)| output == column)
+                    {
+                        return Ok(Transformed::yes(source.clone()));
+                    }
+                    Ok(Transformed::no(expression))
+                })
+                .map(|transformed| transformed.data)
+        };
+        let input = Arc::clone(&projection.input);
+        let grouped = Aggregate::try_new(
+            input,
+            aggregate
+                .group_expr
+                .iter()
+                .map(replace)
+                .collect::<datafusion::error::Result<_>>()?,
+            aggregate
+                .aggr_expr
+                .iter()
+                .map(replace)
+                .collect::<datafusion::error::Result<_>>()?,
+        )?;
+        let expressions = grouped
+            .schema
+            .columns()
+            .into_iter()
+            .enumerate()
+            .map(|(index, column)| {
+                let (qualifier, field) = aggregate.schema.qualified_field(index);
+                Expr::Column(column).alias_qualified(qualifier.cloned(), field.name())
+            })
+            .collect();
+        Projection::try_new_with_schema(
+            expressions,
+            Arc::new(LogicalPlan::Aggregate(grouped)),
+            aggregate.schema,
+        )
+        .map(LogicalPlan::Projection)
+        .map(Transformed::yes)
+    })
+    .map(|transformed| transformed.data)
+}
+
+fn alias_chain(plan: &LogicalPlan) -> bool {
+    let (mut aliases, mut aggregates, mut scans, mut nodes) = (0, 0, 0, 0);
+    let mut supported = true;
+    let visited = plan.apply(|plan| {
+        nodes += 1;
+        supported &= nodes <= 64;
+        match plan {
+            LogicalPlan::SubqueryAlias(_) => aliases += 1,
+            LogicalPlan::Aggregate(_) => aggregates += 1,
+            LogicalPlan::TableScan(_) => scans += 1,
+            LogicalPlan::Projection(_)
+            | LogicalPlan::Filter(_)
+            | LogicalPlan::Sort(_)
+            | LogicalPlan::Limit(_) => {}
+            _ => supported = false,
+        }
+        Ok(if supported {
+            TreeNodeRecursion::Continue
+        } else {
+            TreeNodeRecursion::Stop
+        })
+    });
+    visited.is_ok() && supported && aliases != 0 && aggregates == 1 && scans == 1
+}
+
+fn inline_aliases(plan: LogicalPlan) -> datafusion::error::Result<LogicalPlan> {
+    plan.transform_up(|plan| {
+        let LogicalPlan::SubqueryAlias(alias) = plan else {
+            return Ok(Transformed::no(plan));
+        };
+        let expressions = alias
+            .input
+            .schema()
+            .columns()
+            .into_iter()
+            .zip(alias.schema.fields())
+            .map(|(column, field)| {
+                Expr::Column(column).alias_qualified(Some(alias.alias.clone()), field.name())
+            })
+            .collect();
+        Projection::try_new_with_schema(expressions, alias.input, alias.schema)
+            .map(LogicalPlan::Projection)
+            .map(Transformed::yes)
+    })
+    .map(|transformed| transformed.data)
+}
+
+fn reserve_expansion(
+    aggregate: &Aggregate,
+    mapping: &[(datafusion::common::Column, Expr)],
+    reservation: &MemoryReservation,
+    name: &str,
+) -> datafusion::error::Result<()> {
+    let nodes = expanded_nodes(aggregate, mapping)?;
+    let charge = checked_bytes(4096, [(nodes, 1024), (mapping.len(), 512)], name)
+        .map_err(|error| datafusion::error::DataFusionError::External(Box::new(error)))?;
+    reservation.try_grow(charge)?;
+    Ok(())
+}
+
+fn expanded_nodes(
+    aggregate: &Aggregate,
+    mapping: &[(datafusion::common::Column, Expr)],
+) -> datafusion::error::Result<usize> {
+    let mut nodes = 0;
+    for expression in aggregate.group_expr.iter().chain(&aggregate.aggr_expr) {
+        expression.apply(|expression| expansion_node(expression, mapping, &mut nodes))?;
+    }
+    Ok(nodes)
+}
+
+fn expansion_node(
+    expression: &Expr,
+    mapping: &[(datafusion::common::Column, Expr)],
+    nodes: &mut usize,
+) -> datafusion::error::Result<TreeNodeRecursion> {
+    let source = match expression {
+        Expr::Column(column) => mapping
+            .iter()
+            .find(|(output, _)| output == column)
+            .map(|(_, source)| source),
+        _ => None,
+    };
+    if let Some(source) = source {
+        source.apply(|_| count_expansion_node(nodes))?;
+    } else {
+        count_expansion_node(nodes)?;
+    }
+    Ok(TreeNodeRecursion::Continue)
+}
+
+fn count_expansion_node(nodes: &mut usize) -> datafusion::error::Result<TreeNodeRecursion> {
+    *nodes = nodes.checked_add(1).ok_or_else(|| {
+        datafusion::error::DataFusionError::Plan("projection expansion overflowed".into())
+    })?;
+    Ok(TreeNodeRecursion::Continue)
+}

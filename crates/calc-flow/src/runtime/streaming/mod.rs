@@ -14,13 +14,16 @@ pub(crate) mod checkpoint;
 mod checkpoint_runtime;
 mod checkpoint_status;
 mod context;
+mod edge_queue;
 pub(crate) mod entity_work;
 pub(crate) mod failure;
+pub(crate) mod gather_work;
 #[allow(
     dead_code,
     reason = "runtime completion is owned behind the safe continuous facade"
 )]
 pub(crate) mod job;
+mod local_edge;
 mod message;
 #[allow(
     dead_code,
@@ -61,6 +64,7 @@ mod soak;
     reason = "source integration is exercised through public source bindings"
 )]
 pub(crate) mod source_task;
+mod sql_recovery_work;
 #[allow(
     dead_code,
     reason = "task supervision is an internal continuous-runtime detail"

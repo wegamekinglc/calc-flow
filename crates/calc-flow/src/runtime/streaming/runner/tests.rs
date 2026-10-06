@@ -1,4 +1,5 @@
 mod asof_tests;
+mod sql_recovery_tests;
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -142,6 +143,7 @@ async fn managed_checkpoint_identity_mismatch_is_redacted_before_lifecycle_work(
         sources: BTreeMap::from([(
             "input".into(),
             SourceManifestEntry {
+                history: None,
                 cursor: None,
                 identity_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
                     .into(),
@@ -252,6 +254,7 @@ async fn managed_checkpoint_missing_state_is_redacted_before_lifecycle_work() {
         sources: BTreeMap::from([(
             "input".into(),
             SourceManifestEntry {
+                history: None,
                 cursor: Some(CursorManifestEntry {
                     order: "09".into(),
                     payload: BTreeMap::from([(
@@ -9005,6 +9008,7 @@ async fn terminal_checkpoint_waits_until_the_periodic_epoch_completes() {
 #[test]
 fn periodic_cut_after_all_sources_end_is_terminal() {
     let cut = |ended| DurableSourceCut {
+        history: None,
         cursor: None,
         next_sequence: 1,
         ended,
@@ -9444,6 +9448,7 @@ async fn checkpointed_runner_restores_operator_source_and_sink_before_polling() 
         sources: BTreeMap::from([(
             "input".into(),
             SourceManifestEntry {
+                history: None,
                 cursor: Some(CursorManifestEntry {
                     order: "09".into(),
                     payload: BTreeMap::from([("offset".into(), serde_json::json!(9))]),
@@ -9672,6 +9677,7 @@ async fn restored_ended_source_participates_without_open_seek_poll_or_barrier() 
             (
                 "ended".into(),
                 SourceManifestEntry {
+                    history: None,
                     cursor: Some(CursorManifestEntry {
                         order: "01".into(),
                         payload: BTreeMap::new(),
@@ -9685,6 +9691,7 @@ async fn restored_ended_source_participates_without_open_seek_poll_or_barrier() 
             (
                 "live".into(),
                 SourceManifestEntry {
+                    history: None,
                     cursor: Some(CursorManifestEntry {
                         order: "09".into(),
                         payload: BTreeMap::new(),

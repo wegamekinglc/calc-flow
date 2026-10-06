@@ -10,6 +10,9 @@ use crate::{CalcFlowError, Result};
 
 pub type JsonMap = BTreeMap<String, Value>;
 
+mod owned_size;
+pub(crate) use owned_size::map_bytes as owned_json_bytes;
+
 /// Maximum JSON child depth accepted by canonical and persistence documents.
 ///
 /// The top-level value is depth zero, and this inclusive bound is checked

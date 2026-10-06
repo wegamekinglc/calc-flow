@@ -25,6 +25,8 @@ use crate::{
 
 use super::{NodeDefinition, TablePlanResources, compile_graph};
 
+mod projection;
+
 /// Per graph-output delivery requests recorded into the compiled stream plan
 /// (API note A1.2).
 #[derive(Clone, Debug, Default)]
@@ -170,6 +172,7 @@ pub(crate) enum CompiledStreamOperator {
     External(Box<dyn StreamOperator>),
     Expression(crate::ExpressionOperator),
     Sql(crate::SqlOperator),
+    CheckpointLoan,
     Union(UnionOperator),
     Window(crate::WindowAggregateOperator),
     Rolling(crate::RollingOperator),
@@ -388,6 +391,7 @@ impl CompiledStreamOperator {
         ingress_progress: &crate::IngressProgressSnapshot,
     ) -> Result<Option<crate::EventTime>> {
         match self {
+            Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::StreamJoin(operator) => operator.output_frontier_candidate(ingress_progress),
             Self::StreamAsofJoin(operator) => operator.output_frontier_candidate(ingress_progress),
             Self::External(_)
@@ -413,6 +417,7 @@ impl CompiledStreamOperator {
         match self {
             Self::External(operator) => operator.on_ingress_progress(ingress, context).await,
             Self::Expression(operator) => operator.on_ingress_progress(ingress, context).await,
+            Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::Sql(operator) => operator.on_ingress_progress(ingress, context).await,
             Self::Union(operator) => operator.on_ingress_progress(ingress, context).await,
             Self::Window(operator) => operator.on_ingress_progress(ingress, context).await,
@@ -479,6 +484,7 @@ impl CompiledStreamOperator {
         match self {
             Self::External(operator) => operator.reset(),
             Self::Expression(operator) => operator.reset(),
+            Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::Sql(operator) => operator.reset(),
             Self::Union(operator) => operator.reset(),
             Self::Window(operator) => operator.reset(),
@@ -496,6 +502,7 @@ impl CompiledStreamOperator {
         match self {
             Self::External(operator) => operator.prepare_checkpoint_async(context).await,
             Self::Expression(operator) => operator.prepare_checkpoint_async(context).await,
+            Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::Sql(operator) => operator.prepare_checkpoint_async(context).await,
             Self::Union(operator) => operator.prepare_checkpoint_async(context).await,
             Self::Window(operator) => operator.prepare_checkpoint_async(context).await,
@@ -517,6 +524,7 @@ impl CompiledStreamOperator {
         match self {
             Self::External(operator) => operator.checkpoint(epoch),
             Self::Expression(operator) => operator.checkpoint(epoch),
+            Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::Sql(operator) => operator.checkpoint(epoch),
             Self::Union(operator) => operator.checkpoint(epoch),
             Self::Window(operator) => operator.checkpoint(epoch),
@@ -535,6 +543,7 @@ impl CompiledStreamOperator {
         match self {
             Self::External(operator) => operator.restore(snapshot),
             Self::Expression(operator) => operator.restore(snapshot),
+            Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::Sql(operator) => operator.restore(snapshot),
             Self::Union(operator) => operator.restore(snapshot),
             Self::Window(operator) => operator.restore(snapshot),
@@ -573,6 +582,7 @@ impl CompiledStreamOperator {
             Self::Expression(operator) => {
                 operator.process_data(ingress, batch, context, output).await
             }
+            Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::Sql(operator) => operator.process_data(ingress, batch, context, output).await,
             Self::Union(operator) => operator.process_data(ingress, batch, context, output).await,
             Self::Window(operator) => operator.process_data(ingress, batch, context, output).await,
@@ -598,6 +608,7 @@ impl CompiledStreamOperator {
         match self {
             Self::External(operator) => operator.on_watermark(watermark, context, output).await,
             Self::Expression(operator) => operator.on_watermark(watermark, context, output).await,
+            Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::Sql(operator) => operator.on_watermark(watermark, context, output).await,
             Self::Union(operator) => operator.on_watermark(watermark, context, output).await,
             Self::Window(operator) => operator.on_watermark(watermark, context, output).await,
@@ -617,6 +628,7 @@ impl CompiledStreamOperator {
         match self {
             Self::External(operator) => operator.on_end(context, output).await,
             Self::Expression(operator) => operator.on_end(context, output).await,
+            Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::Sql(operator) => operator.on_end(context, output).await,
             Self::Union(operator) => operator.on_end(context, output).await,
             Self::Window(operator) => operator.on_end(context, output).await,
@@ -632,13 +644,20 @@ impl CompiledStreamOperator {
             Self::Expression(operator) => operator.stream_runtime_initialized(),
             Self::Sql(operator) => operator.stream_runtime_initialized(),
             Self::StreamJoin(operator) => operator.stream_runtime_initialized(),
-            Self::StreamAsofJoin(_)
+            Self::CheckpointLoan
+            | Self::StreamAsofJoin(_)
             | Self::External(_)
             | Self::Union(_)
             | Self::Window(_)
             | Self::Rolling(_)
             | Self::CrossSection(_) => false,
         }
+    }
+}
+
+fn checkpoint_loan_error() -> CalcFlowError {
+    CalcFlowError::Internal {
+        message: "SQL operator is owned by checkpoint work".into(),
     }
 }
 
@@ -688,7 +707,7 @@ impl PipelineBuilder {
     /// fails conversion; validation runs before conversion, so this is
     /// unreachable and guards the internal invariant only.
     pub fn compile_stream(
-        self,
+        mut self,
         udfs: &UdfRegistrySnapshot,
         requirements: &StreamRequirements,
     ) -> Result<StreamExecutionPlan> {
@@ -708,8 +727,7 @@ impl PipelineBuilder {
                 });
             }
         }
-        validate_deterministic_udfs(&self.nodes, requirements, udfs)?;
-        validate_external_provider_lifecycles(&self.nodes, requirements)?;
+        prepare_stream_operators(&mut self, requirements, udfs)?;
         let edges = self
             .edges
             .iter()
@@ -732,6 +750,16 @@ impl PipelineBuilder {
             static_inputs: BTreeMap::new(),
         })
     }
+}
+
+fn prepare_stream_operators(
+    builder: &mut PipelineBuilder,
+    requirements: &StreamRequirements,
+    udfs: &UdfRegistrySnapshot,
+) -> Result<()> {
+    validate_deterministic_udfs(&builder.nodes, requirements, udfs)?;
+    validate_external_provider_lifecycles(&builder.nodes, requirements)?;
+    projection::push_asof_output_projections(builder)
 }
 
 fn build_runtime_nodes(
@@ -1569,7 +1597,7 @@ mod runtime_projection_tests {
         );
         assert_eq!(
             only_capability(aggregate_sql),
-            OperatorCheckpointCapability::CheckpointedStateful { state_version: 1 }
+            OperatorCheckpointCapability::CheckpointedStateful { state_version: 2 }
         );
         assert_eq!(
             only_capability(union_builder),

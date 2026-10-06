@@ -6,7 +6,6 @@ use std::{panic::AssertUnwindSafe, sync::Arc};
 use async_trait::async_trait;
 use futures::FutureExt;
 use parking_lot::Mutex;
-use serde_json::Value;
 use tokio::sync::{Notify, mpsc, watch};
 
 use super::{
@@ -21,19 +20,29 @@ use super::{
     },
     supervisor::{TaskFailureSignal, TaskId, TaskSupervisor},
 };
-use crate::{
-    Batch, BatchMetadata, CalcFlowError, Epoch, EventTime, JsonMap, Result, canonical_json,
-};
+use crate::{Batch, BatchMetadata, CalcFlowError, Epoch, EventTime, JsonMap, Result};
 
 const MAX_CURSOR_ORDER_BYTES: usize = 16 * 1024;
 
 /// Source-defined position with a bytewise order key and opaque JSON payload.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub(crate) struct Cursor {
     source_id: Option<BindingIdentity>,
-    order: Vec<u8>,
-    payload: JsonMap,
+    order: Arc<[u8]>,
+    payload: Arc<JsonMap>,
+    owned_bytes: usize,
+    payload_bytes: usize,
 }
+
+impl PartialEq for Cursor {
+    fn eq(&self, other: &Self) -> bool {
+        self.source_id == other.source_id
+            && self.order == other.order
+            && self.payload == other.payload
+    }
+}
+
+impl Eq for Cursor {}
 
 impl Cursor {
     pub(crate) fn new(source_id: &str, order: Vec<u8>, payload: JsonMap) -> Result<Self> {
@@ -64,15 +73,32 @@ impl Cursor {
                 message: format!("must not exceed {MAX_CURSOR_ORDER_BYTES} bytes"),
             });
         }
-        let payload_value = Value::Object(payload.clone().into_iter().collect());
-        canonical_json(&payload_value).map_err(|error| CalcFlowError::InvalidArgument {
+        let invalid = |error: CalcFlowError| CalcFlowError::InvalidArgument {
             field: "cursor.payload".into(),
             message: error.to_string(),
-        })?;
+        };
+        for value in payload.values() {
+            crate::json::validate_json_depth_at(value, "cursor payload", 1).map_err(invalid)?;
+        }
+        let owned_bytes = crate::json::owned_json_bytes(&payload)
+            .and_then(|bytes| bytes.checked_add(order.len()))
+            .and_then(|bytes| bytes.checked_add(256))
+            .ok_or_else(|| CalcFlowError::InvalidArgument {
+                field: "cursor.payload".into(),
+                message: "owned byte count overflowed".into(),
+            })?;
+        let payload_bytes = serde_json::to_vec(&payload)
+            .map_err(|error| CalcFlowError::InvalidArgument {
+                field: "cursor.payload".into(),
+                message: error.to_string(),
+            })?
+            .len();
         Ok(Self {
             source_id,
-            order,
-            payload,
+            order: order.into(),
+            payload: Arc::new(payload),
+            owned_bytes,
+            payload_bytes,
         })
     }
 
@@ -88,14 +114,27 @@ impl Cursor {
         self.source_id.as_ref().map(BindingIdentity::as_str)
     }
 
-    pub(crate) const fn payload(&self) -> &JsonMap {
+    pub(crate) fn payload(&self) -> &JsonMap {
         &self.payload
+    }
+
+    pub(crate) fn retained_bytes(&self) -> Result<usize> {
+        self.owned_bytes
+            .checked_add(self.source_id().map_or(0, str::len))
+            .ok_or_else(|| CalcFlowError::InvalidArgument {
+                field: "cursor.payload".into(),
+                message: "owned byte count overflowed".into(),
+            })
+    }
+
+    pub(crate) const fn payload_bytes(&self) -> usize {
+        self.payload_bytes
     }
 
     pub(crate) fn manifest_entry(&self) -> crate::CursorManifestEntry {
         crate::CursorManifestEntry {
             order: hex::encode(&self.order),
-            payload: self.payload.clone(),
+            payload: self.payload.as_ref().clone(),
         }
     }
 
@@ -110,7 +149,7 @@ impl Cursor {
         )
     }
 
-    fn bind_to(mut self, source_id: &str) -> Result<Self> {
+    pub(crate) fn bind_to(mut self, source_id: &str) -> Result<Self> {
         let expected = BindingIdentity::new(source_id)?;
         if let Some(actual) = &self.source_id
             && actual != &expected
@@ -172,6 +211,24 @@ pub(crate) enum SourceDeliveryCapability {
 /// Internal source lifecycle contract for M2 runtime completion.
 #[async_trait]
 pub(crate) trait StreamSource: Send {
+    fn history_spec(&self) -> Option<crate::SourceHistorySpec> {
+        None
+    }
+    fn history_replay_factory(&self) -> Option<Arc<dyn crate::SourceHistoryReplayFactory>> {
+        None
+    }
+
+    fn validate_history(&self, _history: &crate::SourceHistoryManifestEntry) -> Result<()> {
+        Ok(())
+    }
+
+    async fn prepare_history(&mut self, _history: crate::SourceHistoryContext) -> Result<()> {
+        Err(CalcFlowError::InvalidArgument {
+            field: "source_history".into(),
+            message: "source does not implement managed history".into(),
+        })
+    }
+
     async fn open(&mut self, cursor: Option<Cursor>) -> Result<()>;
 
     /// May block indefinitely and need not be cancellation-safe for reuse.
@@ -247,6 +304,9 @@ impl AcceptedSequenceRecorder {
 
 /// One validated source binding. Binding identity is assigned by the job.
 pub(crate) struct SourceBinding {
+    history_spec: Option<crate::SourceHistorySpec>,
+    history_replay_factory: Option<Arc<dyn crate::SourceHistoryReplayFactory>>,
+    history: Option<crate::SourceHistoryContext>,
     source: Box<dyn StreamSource>,
     capabilities: Option<SourceCapabilities>,
     delivery: Option<SourceDeliveryCapability>,
@@ -274,6 +334,9 @@ impl SourceBinding {
     ) -> Self {
         Self {
             source,
+            history_spec: None,
+            history_replay_factory: None,
+            history: None,
             capabilities: None,
             delivery: None,
             declared_schema: None,
@@ -328,6 +391,8 @@ impl SourceBinding {
             return capabilities;
         }
         let capabilities = self.source.capabilities();
+        self.history_spec = self.source.history_spec();
+        self.history_replay_factory = self.source.history_replay_factory();
         self.capabilities = Some(capabilities);
         self.delivery = Some(self.source.delivery_capability());
         self.declared_schema = Some(self.source.declared_schema());
@@ -368,6 +433,23 @@ impl SourceBinding {
 
     pub(crate) fn progress_spec(&self, binding_id: &str) -> Result<SourceBindingSpec> {
         let identity = BindingIdentity::new(binding_id)?;
+        if self.history_replay_factory.is_some() && self.history_spec.is_none() {
+            return Err(CalcFlowError::InvalidArgument {
+                field: "source_history".into(),
+                message: "history replay requires immutable managed history".into(),
+            });
+        }
+        if let Some(spec) = &self.history_spec {
+            spec.validate()?;
+            if !self.sampled_capabilities().replayable
+                || self.sampled_delivery() != SourceDeliveryCapability::Lossless
+            {
+                return Err(CalcFlowError::InvalidArgument {
+                    field: "source_history".into(),
+                    message: "managed history requires lossless exact replay".into(),
+                });
+            }
+        }
         Ok(SourceBindingSpec {
             descriptor: SourceDescriptor::new(
                 identity,
@@ -406,8 +488,68 @@ impl SourceBinding {
         Ok(())
     }
 
+    pub(crate) fn history_context(&self) -> Option<crate::SourceHistoryContext> {
+        self.history.as_ref().map(crate::SourceHistoryContext::fork)
+    }
+
+    pub(crate) fn history_spec(&self) -> Option<&crate::SourceHistorySpec> {
+        self.history_spec.as_ref()
+    }
+    pub(crate) fn history_replay_factory(
+        &self,
+    ) -> Option<Arc<dyn crate::SourceHistoryReplayFactory>> {
+        self.history_replay_factory.clone()
+    }
+
+    pub(crate) fn validate_history(
+        &self,
+        source_id: &str,
+        saved: Option<&crate::SourceHistoryManifestEntry>,
+        recovering: bool,
+    ) -> Result<()> {
+        match (&self.history_spec, saved, recovering) {
+            (None, None, _) | (Some(_), None, false) => Ok(()),
+            (Some(spec), Some(history), _) if spec.contract == history.contract => {
+                self.source.validate_history(history)
+            }
+            _ => Err(CalcFlowError::CheckpointMismatch {
+                message: format!("source {source_id:?} history protocol changed"),
+            }),
+        }
+    }
+
+    pub(crate) async fn install_history(
+        &mut self,
+        source_id: &str,
+        transaction: Arc<crate::state::ManifestTransaction>,
+        epoch: Epoch,
+        restored: Option<crate::SourceHistoryManifestEntry>,
+    ) -> Result<()> {
+        if let Some(spec) = &self.history_spec {
+            self.history = Some(
+                crate::SourceHistoryContext::new(
+                    transaction,
+                    source_id,
+                    epoch,
+                    spec.clone(),
+                    restored,
+                )
+                .await?,
+            );
+        }
+        Ok(())
+    }
+
     pub(crate) async fn open(&mut self) -> Result<()> {
         self.open_began = true;
+        if let Some(history) = &self.history {
+            self.source.prepare_history(history.fork()).await?;
+            if history.manifest().is_none() {
+                return Err(CalcFlowError::CheckpointMismatch {
+                    message: "source did not seal its managed history".into(),
+                });
+            }
+        }
         self.source.open(self.resume_cursor.clone()).await
     }
 
@@ -421,7 +563,13 @@ impl SourceBinding {
     }
 
     pub(crate) async fn close(&mut self) -> Result<()> {
-        self.source.close().await
+        let result = self.source.close().await;
+        let history = if let Some(history) = &self.history {
+            history.drain().await.into_iter().next().map_or(Ok(()), Err)
+        } else {
+            Ok(())
+        };
+        result.and(history)
     }
 }
 
@@ -436,6 +584,7 @@ pub(crate) struct SourceProgressSnapshot {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SourceCheckpointCut {
+    pub(crate) history: Option<crate::SourceHistoryManifestEntry>,
     pub(crate) cursor: Option<Cursor>,
     pub(crate) next_sequence: Option<u64>,
     pub(crate) ended: bool,
@@ -444,6 +593,7 @@ pub(crate) struct SourceCheckpointCut {
 impl SourceCheckpointCut {
     pub(crate) fn durable(&self, binding_id: &str) -> Result<super::progress::DurableSourceCut> {
         Ok(super::progress::DurableSourceCut {
+            history: self.history.clone(),
             cursor: self.cursor.as_ref().map(Cursor::manifest_entry),
             next_sequence: self
                 .next_sequence
@@ -712,6 +862,7 @@ impl SourceAcceptance {
 
 #[derive(Clone)]
 pub(crate) struct SourceProgress {
+    history: Option<crate::SourceHistoryManifestEntry>,
     snapshot: Arc<Mutex<SourceProgressSnapshot>>,
     acceptance: Arc<SourceAcceptance>,
     binding_id: String,
@@ -729,6 +880,7 @@ impl std::fmt::Debug for SourceProgress {
         formatter
             .debug_struct("SourceProgress")
             .field("binding_id", &self.binding_id)
+            .field("history", &self.history.is_some())
             .field("snapshot", &*self.snapshot.lock())
             .field("acceptance", &*self.acceptance.state.lock())
             .field(
@@ -790,6 +942,7 @@ impl SourceProgress {
                 let snapshot = self.snapshot.lock().clone();
                 drop(processing);
                 return Ok(SourceCheckpointCut {
+                    history: self.history.clone(),
                     cursor: snapshot.latest_observed_cursor.or(snapshot.durable_cursor),
                     next_sequence: snapshot.next_sequence,
                     ended: snapshot.ended,
@@ -816,6 +969,7 @@ impl SourceProgress {
             let snapshot = self.snapshot.lock().clone();
             if snapshot.ended {
                 return Ok(SourceCheckpointCut {
+                    history: self.history.clone(),
                     cursor: snapshot.latest_observed_cursor.or(snapshot.durable_cursor),
                     next_sequence: snapshot.next_sequence,
                     ended: true,
@@ -907,6 +1061,7 @@ enum PumpSlotCommit {
 
 struct SourceTaskInputs {
     binding_id: String,
+    keep_source_cursor: bool,
     first_sequence: u64,
     resume_cursor: Option<Cursor>,
     outputs: Vec<EdgeSender>,
@@ -925,6 +1080,7 @@ struct LiveSourceProgress {
 }
 
 struct SourcePumpInputs {
+    history: Option<crate::SourceHistoryContext>,
     source: Box<dyn StreamSource>,
     resume_cursor: Option<Cursor>,
     open_began: bool,
@@ -1189,23 +1345,18 @@ fn spawn_validated_source_tasks(
 ) -> SourceProgress {
     let SourceBinding {
         source,
-        capabilities: _,
-        delivery: _,
-        declared_schema: _,
-        native_watermarks: _,
-        replay_positioning: _,
-        existing_toggle_route: _,
+        history,
         durable_cursor_acknowledger,
         checkpoint_gate,
         resume_cursor,
         next_sequence,
         restored_ended,
         open_began,
-        watermark_policy: _,
-        prepared_progress: _,
         #[cfg(test)]
         accepted_sequence_recorder,
+        ..
     } = binding;
+    let keep_source_cursor = history.is_some();
     #[cfg(test)]
     let source_acceptance = {
         let mut acceptance = SourceAcceptance::new();
@@ -1220,6 +1371,9 @@ fn spawn_validated_source_tasks(
     let source_acceptance = SourceAcceptance::new();
     let acceptance = Arc::new(source_acceptance);
     let progress = SourceProgress {
+        history: history
+            .as_ref()
+            .and_then(crate::SourceHistoryContext::manifest),
         snapshot: Arc::new(Mutex::new(SourceProgressSnapshot {
             replayable: capabilities.replayable,
             latest_observed_cursor: None,
@@ -1247,6 +1401,7 @@ fn spawn_validated_source_tasks(
             run_source_pump(
                 SourcePumpInputs {
                     source,
+                    history,
                     resume_cursor: pump_resume_cursor,
                     open_began,
                     slot: slot_tx,
@@ -1270,6 +1425,7 @@ fn spawn_validated_source_tasks(
             run_source_task(
                 SourceTaskInputs {
                     binding_id,
+                    keep_source_cursor,
                     first_sequence: next_sequence,
                     resume_cursor,
                     outputs,
@@ -1300,6 +1456,7 @@ async fn run_source_pump(
 ) -> Result<()> {
     let SourcePumpInputs {
         mut source,
+        history,
         resume_cursor,
         open_began,
         slot,
@@ -1329,7 +1486,7 @@ async fn run_source_pump(
         acceptance.mark_pump_operation_failed();
         on_error();
     }
-    let close_failed = match AssertUnwindSafe(source.close()).catch_unwind().await {
+    let mut close_failed = match AssertUnwindSafe(source.close()).catch_unwind().await {
         Ok(Ok(())) => false,
         Ok(Err(error)) => {
             acceptance.record_close_failure(error);
@@ -1343,6 +1500,12 @@ async fn run_source_pump(
             true
         }
     };
+    if let Some(history) = history {
+        for error in history.drain().await {
+            acceptance.record_close_failure(error);
+            close_failed = true;
+        }
+    }
     acceptance.mark_pump_closed();
     match operation {
         Ok(PumpCompletion::Cancelled | PumpCompletion::Draining) if close_failed => {
@@ -1689,8 +1852,12 @@ async fn process_source_data(
 ) -> Result<SourceLoopStep> {
     let cursor = cursor.bind_to(&inputs.binding_id)?;
     validate_source_cursor(&inputs.binding_id, order.last_cursor.as_ref(), &cursor)?;
-    let (sequence, message, cost) =
-        sequenced_source_message(&inputs.binding_id, order.next_sequence, &batch)?;
+    let (sequence, message, cost) = sequenced_source_message(
+        &inputs.binding_id,
+        order.next_sequence,
+        &batch,
+        inputs.keep_source_cursor.then_some(&cursor),
+    )?;
     if let Some(progress) = &inputs.live_progress {
         inputs
             .metrics
@@ -1724,12 +1891,16 @@ fn sequenced_source_message(
     binding_id: &str,
     next_sequence: Option<u64>,
     batch: &Batch,
+    cursor: Option<&Cursor>,
 ) -> Result<(u64, StreamMessage, EnvelopeCost)> {
     let sequence = next_sequence.ok_or_else(|| CalcFlowError::Internal {
         message: format!("source binding {binding_id:?} sequence is exhausted"),
     })?;
     let metadata = BatchMetadata::new(binding_id, sequence, batch.metadata().attributes().clone())?;
-    let message = StreamMessage::data(batch.with_metadata(metadata));
+    let batch = batch.with_metadata(metadata).with_source_cursor(
+        cursor.map(|cursor| Arc::new(crate::Cursor::from_internal(cursor.clone()))),
+    );
+    let message = StreamMessage::data(batch);
     let cost = EnvelopeCost::of_message(&message)?;
     Ok((sequence, message, cost))
 }
@@ -1940,8 +2111,8 @@ mod tests {
         AcceptedSequenceRecorder, Cursor, SourceAcceptState, SourceAcceptance, SourceBinding,
         SourceCapabilities, SourceDeliveryCapability, SourceEvent, SourceProgressSnapshot,
         SourcePumpInputs, StreamSource, data_upstream_position, end_upstream_position,
-        run_source_pump, spawn_source_tasks, spawn_source_tasks_gated_with_metrics,
-        take_live_progress_binding,
+        run_source_pump, sequenced_source_message, spawn_source_tasks,
+        spawn_source_tasks_gated_with_metrics, take_live_progress_binding,
     };
     use crate::{
         Batch, BatchMetadata, CalcFlowError, CancellationToken, EdgeBudget, EdgeReceiver, Epoch,
@@ -1969,6 +2140,30 @@ mod tests {
                     if message.contains("canonical lowercase even-length hexadecimal")
             ));
         }
+    }
+
+    #[test]
+    fn cursor_clones_share_position_and_compare_independently_of_capacity() {
+        let mut value = String::with_capacity(4096);
+        value.push_str("position");
+        let payload = JsonMap::from([("row".into(), serde_json::Value::String(value))]);
+        let cursor = Cursor::new("orders", vec![1, 2], payload).unwrap();
+        let cloned = cursor.clone();
+        assert!(Arc::ptr_eq(&cursor.order, &cloned.order));
+        assert!(Arc::ptr_eq(&cursor.payload, &cloned.payload));
+        let compact = Cursor::new(
+            "orders",
+            vec![1, 2],
+            JsonMap::from([("row".into(), serde_json::json!("position"))]),
+        )
+        .unwrap();
+        assert_eq!(cursor, compact);
+        assert!(cursor.retained_bytes().unwrap() > compact.retained_bytes().unwrap());
+        assert_eq!(
+            cursor.payload_bytes(),
+            serde_json::to_vec(cursor.payload()).unwrap().len()
+        );
+        assert_eq!(cursor.manifest_entry(), compact.manifest_entry());
     }
 
     struct DriftingDescriptorSource {
@@ -2514,6 +2709,30 @@ mod tests {
         ));
         assert_eq!(*opened_at.lock(), OpenObservation::NotOpened);
         assert_eq!(supervisor.task_count(), 0);
+    }
+
+    #[test]
+    fn sequenced_history_batch_carries_shared_exact_source_cursor() {
+        let input = batch(99);
+        let cursor = cursor_for("orders", 7);
+        let (sequence, message, cost) =
+            sequenced_source_message("orders", Some(5), &input, Some(&cursor)).unwrap();
+        let data = message.as_data().unwrap();
+        let expected = crate::Cursor::from_internal(cursor);
+        assert_eq!(sequence, 5);
+        assert_eq!(data.metadata().sequence(), 5);
+        assert_eq!(data.metadata().source(), "orders");
+        assert_eq!(data.metadata().attributes(), input.metadata().attributes());
+        assert_eq!(cost.bytes(), input.estimated_bytes().unwrap());
+        assert_eq!(data.source_cursor().as_deref(), Some(&expected));
+        let cloned = data.with_metadata(data.metadata().clone());
+        assert!(Arc::ptr_eq(
+            &data.source_cursor().unwrap(),
+            &cloned.source_cursor().unwrap()
+        ));
+        assert!(input.source_cursor().is_none());
+        let (_, ordinary, _) = sequenced_source_message("orders", Some(6), &input, None).unwrap();
+        assert!(ordinary.as_data().unwrap().source_cursor().is_none());
     }
 
     #[tokio::test]
@@ -3100,6 +3319,7 @@ mod tests {
         let (slot_tx, _slot_rx) = mpsc::channel(1);
         let mut pump = Box::pin(run_source_pump(
             SourcePumpInputs {
+                history: None,
                 source: Box::new(source),
                 resume_cursor: None,
                 open_began: false,

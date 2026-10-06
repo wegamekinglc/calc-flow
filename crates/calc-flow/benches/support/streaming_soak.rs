@@ -1571,6 +1571,7 @@ struct CheckpointMatrixSink {
     root: PathBuf,
     epoch: Option<Epoch>,
     pending: Vec<String>,
+    prepared_write: Option<tokio::task::JoinHandle<Result<()>>>,
     written_records: Arc<AtomicUsize>,
     closed: Arc<AtomicUsize>,
     write_delay: Duration,
@@ -1657,6 +1658,17 @@ impl PublicStreamSink for CheckpointMatrixOrdinarySink {
 }
 
 impl CheckpointMatrixSink {
+    async fn settle_prepared_write(&mut self) -> Result<()> {
+        let Some(write) = self.prepared_write.as_mut() else {
+            return Ok(());
+        };
+        let result = write.await;
+        self.prepared_write = None;
+        result.map_err(|error| CalcFlowError::Internal {
+            message: format!("checkpoint matrix prepared write task failed: {error}"),
+        })?
+    }
+
     fn prepared_path(&self, epoch: Epoch) -> PathBuf {
         self.root
             .join(format!("prepared-{:020}.json", epoch.as_u64()))
@@ -1812,11 +1824,16 @@ impl TransactionalStreamSink for CheckpointMatrixSink {
         let bytes = serde_json::to_vec(&state).map_err(|error| CalcFlowError::Internal {
             message: format!("checkpoint matrix prepared state encode failed: {error}"),
         })?;
-        tokio::fs::write(self.prepared_path(epoch), bytes)
-            .await
-            .map_err(|error| CalcFlowError::Internal {
-                message: format!("checkpoint matrix prepared state write failed: {error}"),
-            })?;
+        self.settle_prepared_write().await?;
+        let path = self.prepared_path(epoch);
+        self.prepared_write = Some(tokio::spawn(async move {
+            tokio::fs::write(path, bytes)
+                .await
+                .map_err(|error| CalcFlowError::Internal {
+                    message: format!("checkpoint matrix prepared state write failed: {error}"),
+                })
+        }));
+        self.settle_prepared_write().await?;
         Ok(BTreeMap::from([(
             "artifact_epoch".into(),
             json!(epoch.as_u64()),
@@ -1832,6 +1849,7 @@ impl TransactionalStreamSink for CheckpointMatrixSink {
     }
 
     async fn abort(&mut self, epoch: Epoch, _state: Option<&JsonMap>) -> Result<()> {
+        let write_result = self.settle_prepared_write().await;
         match tokio::fs::remove_file(self.prepared_path(epoch)).await {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -1846,7 +1864,7 @@ impl TransactionalStreamSink for CheckpointMatrixSink {
         self.lifecycle
             .transactional_aborts
             .fetch_add(1, Ordering::SeqCst);
-        Ok(())
+        write_result
     }
 
     async fn recover(&mut self, manifest: &crate::CheckpointManifest) -> Result<()> {
@@ -1865,6 +1883,7 @@ impl TransactionalStreamSink for CheckpointMatrixSink {
     }
 
     async fn close(&mut self) -> Result<()> {
+        self.settle_prepared_write().await?;
         self.closed.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -2032,6 +2051,7 @@ fn checkpoint_matrix_public_runner(
                             root: sink_root.join(sink_id),
                             epoch: None,
                             pending: Vec::new(),
+                            prepared_write: None,
                             written_records: Arc::clone(sink_writes),
                             closed: Arc::clone(sink_closed),
                             write_delay: Duration::ZERO,
@@ -2170,6 +2190,7 @@ fn checkpoint_matrix_spec(
                 root: sink_root.join(sink_id),
                 epoch: None,
                 pending: Vec::new(),
+                prepared_write: None,
                 written_records: Arc::clone(sink_writes),
                 closed: Arc::clone(sink_closed),
                 write_delay: Duration::ZERO,
@@ -2312,6 +2333,7 @@ fn checkpoint_restart_soak_public_runner(
                             root: sink_root.join(sink_id),
                             epoch: None,
                             pending: Vec::new(),
+                            prepared_write: None,
                             written_records: Arc::clone(&sink_writes),
                             closed: Arc::clone(sink_closed),
                             write_delay: sink_write_delay,
@@ -2342,6 +2364,7 @@ struct CheckpointFaultMatrixReport {
     manual_observation: CheckpointManualObservation,
     selected_before_restart: Option<Epoch>,
     prepared_artifacts_after_failure: usize,
+    prepared_output_preserved: bool,
     committed_sinks_before_restart: BTreeSet<String>,
     prepared_sinks_before_restart: BTreeSet<String>,
     restart_source_opens: Vec<(String, Option<Vec<u8>>)>,
@@ -3169,6 +3192,7 @@ fn prepare_private_barrier_cut_benchmark(
             (
                 BindingIdentity::new(*source_id).unwrap(),
                 DurableSourceCut {
+                    history: None,
                     cursor: Some(CursorManifestEntry {
                         order: format!("{:02x}", index + 1),
                         payload: BTreeMap::new(),
@@ -3636,6 +3660,7 @@ async fn prepare_private_sink_commit_benchmark(sink_count: usize) -> PrivateSink
             root: directory.path().join(sink_id),
             epoch: None,
             pending: Vec::new(),
+            prepared_write: None,
             written_records: Arc::new(AtomicUsize::new(0)),
             closed: Arc::new(AtomicUsize::new(0)),
             write_delay: Duration::ZERO,
@@ -4108,6 +4133,15 @@ async fn run_checkpoint_restart_fault_case(
                 && error.component_id() == component_id
         })
     };
+    let prepared_output_preserved = point == CheckpointFaultPoint::SinkPreCommit
+        && mode == CheckpointFaultMode::Panic
+        && exact_error(
+            PublicStreamingErrorCategory::Connector,
+            None,
+            None,
+            Some(PublicComponentKind::Sink),
+            Some("branch_a.output"),
+        );
     let expected_phase = checkpoint_fault_expected_phase(point);
     let checkpoint_status_matches = first_status.checkpoint.current_epoch == Some(Epoch::INITIAL)
         && first_status.checkpoint.phase == Some(expected_phase);
@@ -4155,14 +4189,23 @@ async fn run_checkpoint_restart_fault_case(
                 )
         }
         (CheckpointFaultPoint::SinkPreCommit, CheckpointFaultMode::Panic) => {
-            // A checkpoint-task panic can close the command channel before
-            // the prepared sink learns whether its epoch is abortable. That
-            // path must conservatively request recovery; an observed abort
-            // can still settle the epoch as an ordinary failure.
-            matches!(
-                first_outcome.state,
-                PublicJobState::Failed | PublicJobState::RecoveryRequired
-            ) && first_outcome.cause == PublicTerminalCause::Failure
+            let sink_settled = if prepared_output_preserved {
+                first_outcome.state == PublicJobState::RecoveryRequired
+                    && output_probe.transactional_aborts.load(Ordering::SeqCst) == 0
+            } else {
+                (first_outcome.state == PublicJobState::Failed
+                    || first_outcome.state == PublicJobState::RecoveryRequired
+                        && exact_error(
+                            PublicStreamingErrorCategory::Connector,
+                            None,
+                            None,
+                            Some(PublicComponentKind::Sink),
+                            Some("branch_b.output"),
+                        ))
+                    && output_probe.transactional_aborts.load(Ordering::SeqCst) == 2
+            };
+            sink_settled
+                && first_outcome.cause == PublicTerminalCause::Failure
                 && checkpoint_status_matches
                 && exact_error(
                     PublicStreamingErrorCategory::TaskPanicked,
@@ -4333,11 +4376,36 @@ async fn run_checkpoint_restart_fault_case(
         })
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
+    if prepared_output_preserved {
+        assert_eq!(
+            prepared_sinks_before_restart,
+            BTreeSet::from(["sink-a".into(), "sink-b".into()])
+        );
+        for sink_id in &prepared_sinks_before_restart {
+            let path = sink_root
+                .join(sink_id)
+                .join("prepared-00000000000000000001.json");
+            let state: JsonMap =
+                serde_json::from_slice(&tokio::fs::read(path).await.unwrap()).unwrap();
+            assert_eq!(
+                state["records"],
+                json!([
+                    format!("{sink_id}|0|1|left|1"),
+                    format!("{sink_id}|0|1|right|10")
+                ])
+            );
+        }
+    }
     let committed_sinks_before_restart = ["sink-a", "sink-b"]
         .into_iter()
         .filter(|sink_id| checkpoint_matrix_sink_has_visible(&sink_root.join(sink_id)))
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
+
+    if prepared_output_preserved {
+        assert!(committed_sinks_before_restart.is_empty());
+        assert!(selected_before_restart.is_none());
+    }
 
     let restart_source_opens = Arc::new(Mutex::new(Vec::new()));
     let restart_source_closed = Arc::new(AtomicUsize::new(0));
@@ -4459,6 +4527,7 @@ async fn run_checkpoint_restart_fault_case(
         manual_observation,
         selected_before_restart,
         prepared_artifacts_after_failure,
+        prepared_output_preserved,
         committed_sinks_before_restart,
         prepared_sinks_before_restart,
         restart_source_opens: restart_source_open_events,
@@ -9271,6 +9340,9 @@ async fn assert_named_checkpoint_fault_case(
             CheckpointFaultPoint::ManifestRename => 2,
             CheckpointFaultPoint::ManifestParentSync if mode == CheckpointFaultMode::Io => 2,
             CheckpointFaultPoint::PartialSinkCommit => 1,
+            CheckpointFaultPoint::SinkPreCommit
+                if mode == CheckpointFaultMode::Panic && report.prepared_output_preserved =>
+                2,
             _ => 0,
         },
         "{case_id}: prepared-artifact preservation mismatch"
@@ -9757,6 +9829,124 @@ fn temporary_artifact_oracle_covers_state_manifest_and_both_sinks() {
 }
 
 #[tokio::test]
+async fn checkpoint_matrix_sink_abort_cleans_partial_prepared_write_failure() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("sink-a");
+    let mut sink = CheckpointMatrixSink {
+        sink_id: "sink-a",
+        root,
+        epoch: Some(Epoch::INITIAL),
+        pending: vec!["pending".into()],
+        prepared_write: None,
+        written_records: Arc::new(AtomicUsize::new(0)),
+        closed: Arc::new(AtomicUsize::new(0)),
+        write_delay: Duration::ZERO,
+        lifecycle: Arc::new(CheckpointMatrixOutputProbe::default()),
+    };
+    TransactionalStreamSink::open(&mut sink).await.unwrap();
+    let prepared_path = sink.prepared_path(Epoch::INITIAL);
+    let write_path = prepared_path.clone();
+    sink.prepared_write = Some(tokio::spawn(async move {
+        tokio::fs::write(write_path, b"partial").await.unwrap();
+        Err(CalcFlowError::Internal {
+            message: "injected prepared write failure".into(),
+        })
+    }));
+    let error = TransactionalStreamSink::abort(&mut sink, Epoch::INITIAL, None)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        CalcFlowError::Internal { message } if message == "injected prepared write failure"
+    ));
+    assert!(!tokio::fs::try_exists(&prepared_path).await.unwrap());
+    assert!(sink.prepared_write.is_none());
+    assert!(sink.pending.is_empty());
+    assert_eq!(sink.epoch, None);
+    assert_eq!(
+        sink.lifecycle.transactional_aborts.load(Ordering::SeqCst),
+        1
+    );
+}
+
+#[tokio::test]
+async fn checkpoint_matrix_sink_abort_waits_for_cancelled_prepared_write() {
+    assert_checkpoint_matrix_prepared_write_settles(true).await;
+}
+
+#[tokio::test]
+async fn checkpoint_matrix_sink_close_waits_for_cancelled_prepared_write() {
+    assert_checkpoint_matrix_prepared_write_settles(false).await;
+}
+
+async fn assert_checkpoint_matrix_prepared_write_settles(abort: bool) {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("sink-a");
+    let mut sink = CheckpointMatrixSink {
+        sink_id: "sink-a",
+        root: root.clone(),
+        epoch: None,
+        pending: Vec::new(),
+        prepared_write: None,
+        written_records: Arc::new(AtomicUsize::new(0)),
+        closed: Arc::new(AtomicUsize::new(0)),
+        write_delay: Duration::ZERO,
+        lifecycle: Arc::new(CheckpointMatrixOutputProbe::default()),
+    };
+    TransactionalStreamSink::open(&mut sink).await.unwrap();
+    TransactionalStreamSink::begin_epoch(&mut sink, Epoch::INITIAL)
+        .await
+        .unwrap();
+    let prepared_path = sink.prepared_path(Epoch::INITIAL);
+    let write_path = prepared_path.clone();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let write_started = Arc::clone(&started);
+    let write_release = Arc::clone(&release);
+    sink.prepared_write = Some(tokio::spawn(async move {
+        write_started.notify_one();
+        write_release.notified().await;
+        tokio::fs::write(write_path, br#"{"records":["pending"]}"#)
+            .await
+            .unwrap();
+        Ok(())
+    }));
+    started.notified().await;
+    {
+        let pending_write = sink.prepared_write.as_mut().unwrap();
+        tokio::select! {
+            biased;
+            result = pending_write => panic!("prepared write completed before release: {result:?}"),
+            () = tokio::task::yield_now() => {}
+        }
+    }
+    let mut settle = Box::pin(async {
+        if abort {
+            TransactionalStreamSink::abort(&mut sink, Epoch::INITIAL, None).await
+        } else {
+            TransactionalStreamSink::close(&mut sink).await
+        }
+    });
+    tokio::select! {
+        biased;
+        result = &mut settle => panic!("sink settled before its prepared write: {result:?}"),
+        () = tokio::time::sleep(Duration::from_millis(20)) => {}
+    }
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(2), settle)
+        .await
+        .expect("sink did not settle its prepared write")
+        .unwrap();
+    assert!(sink.prepared_write.is_none());
+    assert_eq!(tokio::fs::try_exists(&prepared_path).await.unwrap(), !abort);
+    assert_eq!(
+        sink.lifecycle.transactional_aborts.load(Ordering::SeqCst),
+        usize::from(abort)
+    );
+    assert_eq!(sink.closed.load(Ordering::SeqCst), usize::from(!abort));
+}
+
+#[tokio::test]
 async fn checkpoint_matrix_sink_commits_bounded_epoch_files() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("sink-a");
@@ -9765,6 +9955,7 @@ async fn checkpoint_matrix_sink_commits_bounded_epoch_files() {
         root: root.clone(),
         epoch: None,
         pending: Vec::new(),
+        prepared_write: None,
         written_records: Arc::new(AtomicUsize::new(0)),
         closed: Arc::new(AtomicUsize::new(0)),
         write_delay: Duration::ZERO,

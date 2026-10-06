@@ -178,6 +178,22 @@ pub struct Cursor {
 }
 
 impl Cursor {
+    pub(crate) fn from_internal(inner: InternalCursor) -> Self {
+        Self { inner }
+    }
+
+    pub(crate) fn bind_to(self, source_id: &str) -> Result<Self> {
+        self.inner.bind_to(source_id).map(Self::from_internal)
+    }
+
+    pub(crate) fn retained_bytes(&self) -> Result<usize> {
+        self.inner.retained_bytes()
+    }
+
+    pub(crate) fn payload_bytes(&self) -> usize {
+        self.inner.payload_bytes()
+    }
+
     /// Constructs a cursor already owned by `source_id`.
     ///
     /// # Errors
@@ -334,6 +350,31 @@ impl Default for WatermarkPolicy {
 pub trait StreamSource: Send {
     /// Returns the descriptor that the runtime samples once before `open`.
     fn capabilities(&self) -> SourceCapabilities;
+    /// Declares optional immutable managed input history before any I/O.
+    fn history_spec(&self) -> Option<crate::SourceHistorySpec> {
+        None
+    }
+    /// Declares an independent reader for the original archived data events.
+    fn history_replay_factory(&self) -> Option<Arc<dyn SourceHistoryReplayFactory>> {
+        None
+    }
+    /// Validates saved connector metadata before opening or terminal recovery.
+    ///
+    /// # Errors
+    /// Returns a checkpoint mismatch for incompatible connector metadata.
+    fn validate_history(&self, _history: &crate::SourceHistoryManifestEntry) -> Result<()> {
+        Ok(())
+    }
+    /// Captures or attaches immutable history before `open`, then seals its descriptor.
+    ///
+    /// # Errors
+    /// Returns a connector, storage, or budget error without opening the source.
+    async fn prepare_history(&mut self, _history: crate::SourceHistoryContext) -> Result<()> {
+        Err(CalcFlowError::InvalidArgument {
+            field: "source_history".into(),
+            message: "source does not implement managed history".into(),
+        })
+    }
     /// Opens at the beginning or at an exact owned recovery cursor.
     async fn open(&mut self, cursor: Option<Cursor>) -> Result<()>;
     /// Produces the next event, or `None` when the source has ended.
@@ -357,6 +398,17 @@ pub trait StreamSource: Send {
     }
     /// Releases connector resources.
     async fn close(&mut self) -> Result<()>;
+}
+
+/// Recreates data boundaries and metadata from immutable managed history.
+///
+/// Readers own their resources independently of the live source lifecycle.
+pub trait SourceHistoryReplayFactory: Send + Sync {
+    /// Constructs a reader without I/O; the runtime opens and closes it.
+    ///
+    /// # Errors
+    /// Returns an error for incompatible history or decode configuration.
+    fn create(&self, history: crate::SourceHistoryContext) -> Result<Box<dyn StreamSource>>;
 }
 
 /// Advances a connector-owned durable cursor after manifest publication.
@@ -395,6 +447,20 @@ impl<S: StreamSource> SourceAdapter<S> {
 
 #[async_trait]
 impl<S: StreamSource> InternalStreamSource for SourceAdapter<S> {
+    fn history_spec(&self) -> Option<crate::SourceHistorySpec> {
+        self.source.history_spec()
+    }
+    fn history_replay_factory(&self) -> Option<Arc<dyn SourceHistoryReplayFactory>> {
+        self.source.history_replay_factory()
+    }
+
+    fn validate_history(&self, history: &crate::SourceHistoryManifestEntry) -> Result<()> {
+        self.source.validate_history(history)
+    }
+
+    async fn prepare_history(&mut self, history: crate::SourceHistoryContext) -> Result<()> {
+        self.source.prepare_history(history).await
+    }
     async fn open(&mut self, cursor: Option<InternalCursor>) -> Result<()> {
         self.source.open(cursor.map(|inner| Cursor { inner })).await
     }

@@ -1,6 +1,8 @@
 mod asof;
 mod checkpoint_task;
-mod operator_fusion;
+pub(super) mod operator_fusion;
+mod source_history;
+mod sql_recovery;
 mod supervision;
 
 #[cfg(test)]
@@ -55,11 +57,12 @@ use super::{
         ContinuousJobSpec, OrdinarySinkBinding, OwningContinuousJob, StableSinkId,
         ValidatedContinuousJob, ValidatedOrdinarySink, preflight_job,
     },
+    local_edge::{LocalEdgeOwner, OperatorEdgeReceiver, OperatorEdgeSender, local_edge},
     metrics::{M2MetricsSnapshot, MetricsRecorder, MetricsTimer, sink_metric_id},
     operator_task::{
         OperatorCheckpointAck, OperatorCheckpointCommand, OperatorCheckpointPort, OperatorIngress,
         OperatorProgress, OperatorProgressSnapshot, OperatorRestoreState, OperatorTaskInputs,
-        OperatorTerminalPort, spawn_operator_task, spawn_operator_task_pair,
+        OperatorTerminalPort, prepare_operator_task_group,
     },
     progress::{
         DurableProgressRestore, DurableSourceCut, LiveProgressCoordinator, LiveProgressEvidence,
@@ -75,6 +78,7 @@ use super::{
         SourceBinding, SourceProgress, SourceProgressSnapshot,
         spawn_source_tasks_gated_with_live_progress,
     },
+    sql_recovery_work::{JobSqlRecoveryOwner, SqlRecoveryClient},
     supervisor::{
         SupervisionReport, TaskFailure, TaskId, TaskRegistry, TaskStatus, TaskSupervisor,
         terminal::{TerminalArbiter, TerminalDecision},
@@ -153,6 +157,10 @@ pub(super) struct JobCore {
     manual_checkpoint: Mutex<Option<CheckpointCoordinatorHandle>>,
     operation_cancel_requested: AtomicBool,
     entity_work: JobEntityWorkOwner,
+    sql_recovery: JobSqlRecoveryOwner,
+    gather_work: super::gather_work::JobGatherOwner,
+    asof_loads: asof::LoadOwner,
+    source_histories: source_history::HistoryOwner,
     supervision: SupervisionHome,
     #[cfg(test)]
     owned_lane_launches: Arc<AtomicU64>,
@@ -223,6 +231,10 @@ impl JobCore {
                 #[cfg(test)]
                 owned_lane_launches.clone(),
             ),
+            sql_recovery: JobSqlRecoveryOwner::new(),
+            gather_work: super::gather_work::JobGatherOwner::new(job_id.to_string().into()),
+            asof_loads: asof::LoadOwner::default(),
+            source_histories: source_history::HistoryOwner::default(),
             supervision: SupervisionHome::default(),
             #[cfg(test)]
             owned_lane_launches,
@@ -1582,7 +1594,18 @@ struct DriverReportGate {
 }
 
 async fn settle_driver_report(core: &Arc<JobCore>, join_error: Option<&str>) -> DriverReport {
-    if let Some(mut loan) = core.supervision.take(core.entity_work.clone()) {
+    if let Some(error) = core.asof_loads.close_and_drain().await {
+        core.supervision
+            .append_cleanup(vec![Arc::new(RuntimeFailure {
+                origin: FailureOrigin::Preflight,
+                error,
+            })]);
+    }
+    if let Some(mut loan) = core.supervision.take(
+        core.entity_work.clone(),
+        core.sql_recovery.clone(),
+        core.gather_work.clone(),
+    ) {
         let report = loan.join_all().await;
         if !core.supervision.has_report() {
             core.supervision
@@ -1590,9 +1613,15 @@ async fn settle_driver_report(core: &Arc<JobCore>, join_error: Option<&str>) -> 
         }
         drop(loan);
     }
+    core.supervision
+        .append_cleanup(core.source_histories.drain().await);
+    core.sql_recovery.close_admission();
+    let sql_failures = core.sql_recovery.drain().await;
+    core.supervision.append_cleanup(sql_failures);
     if !core.supervision.has_report() {
         core.entity_work.close_admission();
-        let secondary = core.entity_work.drain().await;
+        let mut secondary = core.entity_work.drain().await;
+        secondary.extend(core.gather_work.close_and_drain().await);
         let mut failed = unprepared_driver_report(
             core,
             SupervisionReport {
@@ -1605,6 +1634,11 @@ async fn settle_driver_report(core: &Arc<JobCore>, join_error: Option<&str>) -> 
             .cleanup_failures
             .extend(secondary.into_iter().map(task_runtime_failure));
         core.supervision.prepare(failed);
+    }
+    core.gather_work.close_admission();
+    let gather_secondary = core.gather_work.close_and_drain().await;
+    if !gather_secondary.is_empty() {
+        core.supervision.append_secondary(gather_secondary);
     }
     #[cfg(test)]
     {
@@ -1946,6 +1980,20 @@ async fn run_job_driver(
         delivery_proofs: _,
         static_inputs: _,
     } = validated;
+    if let Err(error) = core.sql_recovery.configure(
+        plan.nodes
+            .iter()
+            .filter(|node| {
+                matches!(
+                    node.operator,
+                    crate::pipeline::CompiledStreamOperator::Sql(_)
+                )
+            })
+            .count(),
+    ) {
+        return core.prepare_driver_report(checkpoint_start_failure(launch_id, error));
+    }
+    let context = context.with_gather_owner(core.gather_work.clone());
     core.runtime_status.lock().rolling_metrics = plan
         .nodes
         .iter()
@@ -1994,6 +2042,16 @@ async fn run_job_driver(
     if let Some(checkpoint) = checkpoint.as_ref() {
         core.runtime_status.lock().checkpoint = Some(checkpoint.status.clone());
     }
+    if let Err(error) = source_history::configure(
+        checkpoint.as_ref(),
+        &mut sources,
+        &core.source_histories,
+        &mut plan,
+    )
+    .await
+    {
+        return core.prepare_driver_report(checkpoint_start_failure(launch_id, error));
+    }
     if let Some(checkpoint) = checkpoint.as_ref()
         && let Some(selected) = checkpoint.selected.as_ref()
     {
@@ -2002,11 +2060,32 @@ async fn run_job_driver(
         }
         match manifest_is_terminal(&selected.manifest, &plan) {
             Ok(true) => {
+                let mut sql_frames = sql_recovery::TerminalSqlFrames::default();
+                match sql_recovery::restore_terminal(
+                    &mut plan,
+                    &mut sql_frames,
+                    checkpoint,
+                    &context,
+                    &core.sql_recovery,
+                    &core.launch_cancel,
+                )
+                .await
+                {
+                    Ok(nodes) => core.runtime_status.lock().nodes.extend(nodes),
+                    Err(error) => {
+                        return core.prepare_driver_report(checkpoint_start_failure(
+                            launch_id,
+                            sanitize_managed_recovery_error(error, checkpoint.managed),
+                        ));
+                    }
+                }
                 let restored = asof::restore_terminal(
                     &mut plan,
                     checkpoint,
                     &prepared_progress,
+                    &core.asof_loads,
                     &cancellation,
+                    &context,
                 )
                 .await;
                 match restored {
@@ -2052,6 +2131,7 @@ async fn run_job_driver(
                 &plan,
                 &prepared_progress,
                 &mut sources,
+                &core.asof_loads,
                 &cancellation,
             )
             .await
@@ -2406,6 +2486,7 @@ async fn prepare_checkpoint_recovery(
     plan: &StreamRuntimePlanParts,
     prepared_progress: &super::progress::PreparedStreamJob,
     sources: &mut BTreeMap<String, SourceBinding>,
+    loads: &asof::LoadOwner,
     cancellation: &CancellationToken,
 ) -> crate::Result<(
     BTreeMap<String, OperatorRestoreState>,
@@ -2441,6 +2522,7 @@ async fn prepare_checkpoint_recovery(
             (
                 node.operator_id.as_str(),
                 (
+                    &node.operator,
                     node.checkpoint_capability,
                     node.operator.requires_output_frontier_state(),
                 ),
@@ -2449,17 +2531,22 @@ async fn prepare_checkpoint_recovery(
         .collect::<BTreeMap<_, _>>();
     let mut operators = BTreeMap::new();
     for (operator_id, entry) in selected.manifest.operators() {
-        let snapshot = checkpoint
-            .transaction
-            .load_operator_state_cancellable(operator_id, entry, cancellation)
-            .await?;
-        let &(checkpoint_capability, requires_output_frontier) = checkpoint_capabilities
+        let &(operator, checkpoint_capability, requires_output_frontier) = checkpoint_capabilities
             .get(operator_id.as_str())
             .ok_or_else(|| CalcFlowError::CheckpointMismatch {
                 message: format!(
                     "checkpoint operator {operator_id:?} is absent from the prepared plan"
                 ),
             })?;
+        let snapshot = asof::load_snapshot(
+            &checkpoint.transaction,
+            loads,
+            operator,
+            operator_id,
+            entry,
+            cancellation,
+        )
+        .await?;
         let mut snapshot = checkpoint_capability.decode_snapshot(operator_id, snapshot)?;
         let restored_output_frontier = snapshot
             .inline_metadata
@@ -2516,6 +2603,7 @@ fn restored_ended_source_cuts(
             Ok((
                 super::progress::BindingIdentity::new(source_id.as_str())?,
                 DurableSourceCut {
+                    history: entry.history.clone(),
                     cursor: entry.cursor.clone(),
                     next_sequence: entry.sequence,
                     ended: true,
@@ -2936,24 +3024,68 @@ impl LiveCheckpointChannels {
     }
 }
 
+#[cfg(test)]
+type OperatorEndpoints = (
+    BTreeMap<String, OperatorEdgeSender>,
+    BTreeMap<String, OperatorEdgeReceiver>,
+);
+
+#[cfg(test)]
 fn create_runtime_channels(
     plan: &StreamRuntimePlanParts,
     metrics: &MetricsRecorder,
-) -> crate::Result<(BTreeMap<String, EdgeSender>, BTreeMap<String, EdgeReceiver>)> {
-    let mut senders = BTreeMap::new();
-    let mut receivers = BTreeMap::new();
-    for edge in plan.edges.values() {
-        let (sender, receiver) =
-            edge_channel_with_metrics(edge.stable_id.clone(), edge.budget, metrics.clone())?;
-        senders.insert(edge.stable_id.clone(), sender);
-        receivers.insert(edge.stable_id.clone(), receiver);
+) -> crate::Result<OperatorEndpoints> {
+    let channels = create_runtime_edges(plan, &BTreeMap::new(), metrics)?;
+    Ok((channels.senders, channels.receivers))
+}
+
+struct RuntimeChannels {
+    senders: BTreeMap<String, OperatorEdgeSender>,
+    receivers: BTreeMap<String, OperatorEdgeReceiver>,
+    local_owners: BTreeMap<String, Vec<LocalEdgeOwner>>,
+}
+
+fn create_runtime_edges(
+    plan: &StreamRuntimePlanParts,
+    layout: &BTreeMap<String, operator_fusion::FusionProof>,
+    metrics: &MetricsRecorder,
+) -> crate::Result<RuntimeChannels> {
+    let local_edges: BTreeMap<_, _> = layout
+        .iter()
+        .flat_map(|(head, proof)| proof.edges().iter().map(move |edge| (edge.as_str(), head)))
+        .collect();
+    let mut channels = RuntimeChannels {
+        senders: BTreeMap::new(),
+        receivers: BTreeMap::new(),
+        local_owners: BTreeMap::new(),
+    };
+    for (edge_id, edge) in &plan.edges {
+        let (sender, receiver) = if let Some(head) = local_edges.get(edge_id.as_str()) {
+            let (sender, receiver, owner) =
+                local_edge(edge_id.clone(), edge.budget, metrics.clone())?;
+            channels
+                .local_owners
+                .entry((*head).clone())
+                .or_default()
+                .push(owner);
+            (
+                OperatorEdgeSender::Local(sender),
+                OperatorEdgeReceiver::Local(receiver),
+            )
+        } else {
+            let (sender, receiver) =
+                edge_channel_with_metrics(edge_id.clone(), edge.budget, metrics.clone())?;
+            (sender.into(), receiver.into())
+        };
+        channels.senders.insert(edge_id.clone(), sender);
+        channels.receivers.insert(edge_id.clone(), receiver);
     }
-    Ok((senders, receivers))
+    Ok(channels)
 }
 
 fn take_node_ingresses(
     node: &RuntimeStreamNode,
-    receivers: &mut BTreeMap<String, EdgeReceiver>,
+    receivers: &mut BTreeMap<String, OperatorEdgeReceiver>,
 ) -> crate::Result<BTreeMap<String, OperatorIngress>> {
     node.ingress_edges
         .iter()
@@ -2976,8 +3108,8 @@ fn take_node_ingresses(
 
 fn take_node_outputs(
     node: &RuntimeStreamNode,
-    senders: &mut BTreeMap<String, EdgeSender>,
-) -> crate::Result<BTreeMap<String, Vec<EdgeSender>>> {
+    senders: &mut BTreeMap<String, OperatorEdgeSender>,
+) -> crate::Result<BTreeMap<String, Vec<OperatorEdgeSender>>> {
     node.output_edges
         .iter()
         .map(|(port, edge_ids)| {
@@ -3011,17 +3143,25 @@ async fn run_operator_entry(
         cancellation.clone(),
         core.terminal_arbiter.clone(),
     );
-    let mut supervisor = core
-        .supervision
-        .install(supervisor, core.entity_work.clone());
+    let mut supervisor = core.supervision.install(
+        supervisor,
+        core.entity_work.clone(),
+        core.sql_recovery.clone(),
+        core.gather_work.clone(),
+    );
     core.runtime_status.lock().tasks = supervisor.registry();
     let (entry_tx, _) = watch::channel(false);
     let (data_tx, _) = watch::channel(false);
     let (ack_tx, mut ack_rx) = mpsc::unbounded_channel();
-    let (mut senders, mut receivers) =
-        create_runtime_channels(&plan, &core.metrics).map_err(preflight_entry_failure)?;
+    let layout = operator_fusion::plan_fusion(&plan);
+    let RuntimeChannels {
+        mut senders,
+        mut receivers,
+        mut local_owners,
+    } = create_runtime_edges(&plan, &layout, &core.metrics).map_err(preflight_entry_failure)?;
     let node_count = plan.nodes.len();
     let registration = &mut OperatorRegistration {
+        next_node_order: 0,
         context,
         core,
         entry_tx: &entry_tx,
@@ -3029,13 +3169,14 @@ async fn run_operator_entry(
         ack_tx: &ack_tx,
         senders: &mut senders,
         receivers: &mut receivers,
+        local_owners: &mut local_owners,
         supervisor: &mut supervisor,
         metrics: &core.metrics,
         runtime_status: &core.runtime_status,
         restores: &mut restores,
         checkpoint: checkpoint.as_ref(),
     };
-    if let Err(failure) = register_operator_nodes(plan.nodes, registration) {
+    if let Err(failure) = register_operator_nodes(plan.nodes, layout, registration) {
         supervisor.cancel();
         let _ = supervisor.join_all().await;
         return Err(failure);
@@ -3080,13 +3221,15 @@ async fn run_operator_entry(
 }
 
 struct OperatorRegistration<'a> {
+    next_node_order: usize,
     context: &'a super::StreamJobContext,
     core: &'a Arc<JobCore>,
     entry_tx: &'a watch::Sender<bool>,
     data_tx: &'a watch::Sender<bool>,
     ack_tx: &'a mpsc::UnboundedSender<super::operator_task::OperatorEntryAck>,
-    senders: &'a mut BTreeMap<String, EdgeSender>,
-    receivers: &'a mut BTreeMap<String, EdgeReceiver>,
+    senders: &'a mut BTreeMap<String, OperatorEdgeSender>,
+    receivers: &'a mut BTreeMap<String, OperatorEdgeReceiver>,
+    local_owners: &'a mut BTreeMap<String, Vec<LocalEdgeOwner>>,
     supervisor: &'a mut TaskSupervisor,
     metrics: &'a MetricsRecorder,
     runtime_status: &'a Mutex<RuntimeStatus>,
@@ -3096,30 +3239,66 @@ struct OperatorRegistration<'a> {
 
 fn register_operator_nodes(
     nodes: Vec<RuntimeStreamNode>,
+    mut layout: BTreeMap<String, operator_fusion::FusionProof>,
     registration: &mut OperatorRegistration<'_>,
 ) -> Result<(), EntryFailure> {
-    let mut nodes = nodes.into_iter().peekable();
-    while let Some(first) = nodes.next() {
-        let pair = nodes
-            .peek()
-            .is_some_and(|second| operator_fusion::eligible_pair(&first, second));
-        let first = prepare_operator_task(first, registration)?;
-        if pair {
-            // Scheduling invariant: `operator_fusion::eligible_pair` requires
-            // `is_exact_column_projection`, so `pair_cooperation` classifies
-            // this pair as `OperatorCooperation::BoundedData` and
-            // `prepare_operator_task_pair` always attaches `with_readiness()`
-            // here. The supervisor's non-readiness `tokio::join!` pair branch
-            // and `OperatorCooperation::EveryMessage` therefore run only in
-            // tests.
-            let second = prepare_operator_task(
-                nodes.next().expect("eligible adjacent node exists"),
-                registration,
-            )?;
-            spawn_operator_task_pair(registration.supervisor, first, second);
-        } else {
-            spawn_operator_task(registration.supervisor, first);
+    let mut prepared = BTreeMap::new();
+    let mut original_order = Vec::new();
+    for (ordinal, node) in nodes.into_iter().enumerate() {
+        let inputs = prepare_operator_task(node, registration)?;
+        let token = registration
+            .supervisor
+            .reserve_logical(format!("operator:{}", inputs.node_id));
+        original_order.push(inputs.node_id.clone());
+        prepared.insert(inputs.node_id.clone(), (ordinal, inputs, token));
+    }
+    let mut groups = Vec::new();
+    for node_id in original_order {
+        if !prepared.contains_key(&node_id) {
+            continue;
         }
+        let proof = layout.remove(&node_id);
+        let members = if let Some(proof) = &proof {
+            proof
+                .members()
+                .iter()
+                .map(|(id, ordinal)| {
+                    let (actual_ordinal, inputs, token) = prepared.remove(id).ok_or_else(|| {
+                        preflight_entry_failure(CalcFlowError::Internal {
+                            message: format!("fusion member {id:?} is missing or already claimed"),
+                        })
+                    })?;
+                    if *ordinal != actual_ordinal {
+                        return Err(preflight_entry_failure(CalcFlowError::Internal {
+                            message: format!(
+                                "fusion member {id:?} changed its original registration ordinal"
+                            ),
+                        }));
+                    }
+                    Ok((inputs, token))
+                })
+                .collect::<Result<Vec<_>, EntryFailure>>()?
+        } else {
+            let (_, inputs, token) = prepared
+                .remove(&node_id)
+                .expect("unclaimed original member exists");
+            vec![(inputs, token)]
+        };
+        let owners = registration
+            .local_owners
+            .remove(&node_id)
+            .unwrap_or_default();
+        groups.push(
+            prepare_operator_task_group(members, proof, owners).map_err(preflight_entry_failure)?,
+        );
+    }
+    if !prepared.is_empty() || !layout.is_empty() || !registration.local_owners.is_empty() {
+        return Err(preflight_entry_failure(CalcFlowError::Internal {
+            message: "fusion layout left unowned members or local edges".into(),
+        }));
+    }
+    for group in groups {
+        registration.supervisor.spawn_prepared_group(group);
     }
     Ok(())
 }
@@ -3146,7 +3325,18 @@ fn prepare_operator_task(
         .context
         .for_node(&node_id)
         .map_err(preflight_entry_failure)?;
+    let node_order = registration.next_node_order;
+    registration.next_node_order += 1;
     let inputs = OperatorTaskInputs {
+        sql_recovery: matches!(
+            &node.operator,
+            crate::pipeline::CompiledStreamOperator::Sql(_)
+        )
+        .then(|| SqlRecoveryClient {
+            owner: registration.core.sql_recovery.clone(),
+            node_order,
+            task_id: None,
+        }),
         late_output_ports: node.late_output_ports,
         entity_work: matches!(
             &node.operator,
@@ -3239,8 +3429,8 @@ type BoundaryEndpoints = (
 fn take_boundary_endpoints(
     source_routes: BTreeMap<String, RuntimeSourceRoute>,
     sink_routes: BTreeMap<String, RuntimeSinkRoute>,
-    senders: &mut BTreeMap<String, EdgeSender>,
-    receivers: &mut BTreeMap<String, EdgeReceiver>,
+    senders: &mut BTreeMap<String, OperatorEdgeSender>,
+    receivers: &mut BTreeMap<String, OperatorEdgeReceiver>,
 ) -> Result<BoundaryEndpoints, EntryFailure> {
     let source_outputs = source_routes
         .into_iter()
@@ -3256,7 +3446,10 @@ fn take_boundary_endpoints(
                     },
                 }))
             })?;
-            Ok((binding_id, vec![sender]))
+            Ok((
+                binding_id,
+                vec![sender.into_physical().map_err(preflight_entry_failure)?],
+            ))
         })
         .collect::<Result<BTreeMap<_, _>, EntryFailure>>()?;
     let sink_inputs = sink_routes
@@ -3273,7 +3466,10 @@ fn take_boundary_endpoints(
                     },
                 }))
             })?;
-            Ok((output_id, receiver))
+            Ok((
+                output_id,
+                receiver.into_physical().map_err(preflight_entry_failure)?,
+            ))
         })
         .collect::<Result<BTreeMap<_, _>, EntryFailure>>()?;
     Ok((source_outputs, sink_inputs))

@@ -1,9 +1,9 @@
 use super::*;
+mod source_replay;
 use crate::{
     BatchMetadata, CancellationToken, EdgeBudget, EdgeCollector, Epoch, IngressProgress,
     IngressState, StreamJobContext,
 };
-use checkpoint::PreparedSegment;
 use datafusion::arrow::{
     array::{Float64Array, Int64Array, StringArray, TimestampMicrosecondArray, UInt64Array},
     datatypes::{DataType, Field, Schema, TimeUnit},
@@ -12,6 +12,142 @@ use datafusion::arrow::{
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 struct LateMetrics;
+
+fn assert_log_funded(operator: &StreamAsofJoinOperator) {
+    let credit = operator
+        .checkpoint_log
+        .credit
+        .as_ref()
+        .map_or(0, |credit| credit.size());
+    assert!(operator.runtime.pool.reserved() >= operator.state.right.auxiliary_bytes() + credit);
+    assert!(
+        operator
+            .checkpoint_log
+            .segments
+            .values()
+            .all(crate::StateSegment::has_owner)
+    );
+    assert_eq!(
+        operator.status.state_bytes,
+        operator.current_inventory(None).unwrap().bytes
+    );
+}
+
+fn assert_shared_segments(
+    left: &crate::OperatorStateSnapshot,
+    right: &crate::OperatorStateSnapshot,
+) {
+    assert_eq!(left.segments, right.segments);
+    for (name, segment) in &left.segments {
+        assert!(Arc::ptr_eq(
+            &segment.bytes_arc(),
+            &right.segments[name].bytes_arc()
+        ));
+    }
+}
+
+fn indexed_input(schema: &SchemaRef, rows: &[(&str, i64, i64)]) -> RecordBatch {
+    RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from_iter_values(rows.iter().map(|row| row.0))),
+            Arc::new(
+                TimestampMicrosecondArray::from_iter_values(rows.iter().map(|row| row.1))
+                    .with_timezone("UTC"),
+            ),
+            Arc::new(Int64Array::from_iter_values(rows.iter().map(|row| row.2))),
+        ],
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn indexed_admission_preserves_compacted_multibatch_payloads_after_sort_and_restore() {
+    let (template, _) = fixture();
+    let schema = template.schemas[0].clone();
+    let spec = template.spec.with_late_policy(AsofLatePolicy::Drop);
+    let mut op =
+        StreamAsofJoinOperator::new("asof", schema.clone(), schema.clone(), spec.clone()).unwrap();
+    op.status.left.watermark_micros = Some(EventTime::from_micros(100));
+    op.status.right.watermark_micros = Some(EventTime::from_micros(100));
+    let right = Batch::table(
+        vec![
+            indexed_input(&schema, &[]),
+            indexed_input(&schema, &[("B", 103, 33), ("A", 100, 10), ("A", 102, 22)]),
+            indexed_input(&schema, &[("A", 99, 9), ("A", 101, 11)]),
+        ],
+        BatchMetadata::default(),
+    )
+    .unwrap();
+    let left = Batch::table(
+        vec![
+            indexed_input(&schema, &[]),
+            indexed_input(&schema, &[("A", 102, 202), ("B", 103, 303), ("A", 99, 199)]),
+            indexed_input(
+                &schema,
+                &[("A", 100, 100), ("A", 101, 101), ("A", 104, 104)],
+            ),
+        ],
+        BatchMetadata::default(),
+    )
+    .unwrap();
+    let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+    let cx = StreamOperatorContext::new(&job, "asof", None);
+    let mut preload = EdgeCollector::new(op.output_ports().to_vec());
+    op.process_data("right", right, &cx, &mut preload)
+        .await
+        .unwrap();
+    op.process_data("left", left, &cx, &mut preload)
+        .await
+        .unwrap();
+    assert_eq!(op.status.right.accepted_rows, 4);
+    assert_eq!(op.status.left.accepted_rows, 5);
+    assert_eq!(op.status.right.late_rows, 1);
+    assert_eq!(op.status.left.late_rows, 1);
+    let snapshot = op.capture(Epoch::INITIAL).unwrap();
+    let mut restored = StreamAsofJoinOperator::new("asof", schema.clone(), schema, spec).unwrap();
+    restored.restore(&snapshot).unwrap();
+    let mut expected_status = op.status.clone();
+    expected_status.left.watermark_micros = None;
+    expected_status.right.watermark_micros = None;
+    assert_eq!(restored.status, expected_status);
+    let repeated = restored.capture(Epoch::INITIAL).unwrap();
+    assert_eq!(repeated.inline_metadata, snapshot.inline_metadata);
+    assert_eq!(repeated.segments, snapshot.segments);
+    for candidate in [&mut op, &mut restored] {
+        let mut output = EdgeCollector::new(candidate.output_ports().to_vec());
+        candidate.on_end(&cx, &mut output).await.unwrap();
+        let rows = output.drain("output");
+        let right_sequences = rows
+            .iter()
+            .flat_map(|message| {
+                message
+                    .as_data()
+                    .unwrap()
+                    .table_payload()
+                    .unwrap()
+                    .batches()
+                    .iter()
+                    .flat_map(|record| {
+                        record
+                            .column_by_name("right__seq")
+                            .unwrap()
+                            .as_any()
+                            .downcast_ref::<Int64Array>()
+                            .unwrap()
+                            .iter()
+                    })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            right_sequences,
+            vec![Some(10), Some(11), Some(22), Some(33), None]
+        );
+        assert_eq!(candidate.status.matched_rows, 4);
+        assert_eq!(candidate.status.unmatched_rows, 1);
+        assert_eq!(candidate.status.state_bytes, 0);
+    }
+}
 impl crate::operator::stream::LateMetricSink for LateMetrics {
     fn record(&self, _delta: crate::operator::stream::LateMetricDelta) -> Result<()> {
         Ok(())
@@ -250,7 +386,7 @@ async fn assert_shared_right_copy_preparation(admission: bool) {
 }
 
 #[tokio::test]
-async fn new_checkpoint_uses_columnar_v3_and_restores_the_same_state_charge() {
+async fn new_checkpoint_uses_columnar_v6_and_restores_the_same_state_charge() {
     let (mut operator, left, right) = prefix_fixture();
     let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
     let context = StreamOperatorContext::new(&job, "asof", None);
@@ -264,14 +400,18 @@ async fn new_checkpoint_uses_columnar_v3_and_restores_the_same_state_charge() {
         .await
         .unwrap();
     let snapshot = operator.capture(Epoch::INITIAL).unwrap();
-    for field in ["state_version", "layout_version", "accounting_version"] {
-        assert_eq!(snapshot.inline_metadata[field], serde_json::json!(3));
+    assert_eq!(
+        snapshot.inline_metadata["state_version"],
+        serde_json::json!(3)
+    );
+    for field in ["layout_version", "accounting_version"] {
+        assert_eq!(snapshot.inline_metadata[field], serde_json::json!(10));
     }
     let index = snapshot
         .segments
-        .get("asof-index-v3")
-        .expect("columnar v3 index");
-    assert_eq!(&index.bytes()[..8], b"CFASOF03");
+        .get("asof-log-v10-1-0-1")
+        .expect("columnar v6 index");
+    assert_eq!(&index.bytes()[..8], b"CFASDL10");
     let (mut restored, _, _) = prefix_fixture();
     restored.restore(&snapshot).unwrap();
     assert_eq!(restored.status.state_bytes, operator.status.state_bytes);
@@ -431,8 +571,8 @@ async fn integer_v3_checkpoints_preserve_extremes_capacities_and_answers() {
                     .await
                     .unwrap();
             }
-            let before = op.status();
             let snapshot = op.capture(Epoch::INITIAL).unwrap();
+            let before = op.status();
             let mut restored = StreamAsofJoinOperator::new(
                 "asof",
                 op.schemas[0].clone(),
@@ -736,7 +876,7 @@ async fn later_admission_reuses_the_resident_right_key_bytes() {
         "each canonical key buffer must be owned once across batches"
     );
     drop(admission);
-    assert_eq!(op.runtime.pool.reserved(), 0);
+    assert_eq!(op.runtime.pool.reserved(), op.state.right.auxiliary_bytes());
 }
 
 #[tokio::test]
@@ -751,9 +891,10 @@ async fn admission_prepares_index_only_when_checkpoint_is_captured() {
     assert!(op.prepared.is_none(), "admission must defer index encoding");
     let charged = op.status.state_bytes;
     let snapshot = op.capture(Epoch::INITIAL).unwrap();
-    assert!(snapshot.segments.contains_key("asof-index-v3"));
-    assert_eq!(op.status.state_bytes, charged);
-    assert!(op.prepared.is_some());
+    assert!(snapshot.segments.contains_key("asof-log-v10-1-0-1"));
+    assert!(op.status.state_bytes > charged);
+    assert_log_funded(&op);
+    assert!(!op.checkpoint_log.frames.is_empty());
 }
 
 #[tokio::test]
@@ -796,7 +937,8 @@ async fn admitted_payload_is_encoded_only_for_a_checkpoint() {
             .keys()
             .any(|name| name.starts_with("asof-batch"))
     );
-    assert_eq!(op.status.state_bytes, charged);
+    assert!(op.status.state_bytes > charged);
+    assert_log_funded(&op);
 }
 
 #[tokio::test]
@@ -809,12 +951,22 @@ async fn async_checkpoint_preparation_keeps_capture_on_shared_bytes() {
         .await
         .unwrap();
     op.prepare_checkpoint_async(&cx).await.unwrap();
-    let prepared = op.prepared.as_ref().unwrap().canonical().bytes_arc();
+    assert!(op.checkpoint_log.pending.is_some());
+    let payloads = op
+        .state
+        .batches
+        .iter()
+        .map(|(key, (batch, _))| (*key, batch.encoded.get().unwrap().bytes_arc()))
+        .collect::<BTreeMap<_, _>>();
     let snapshot = op.checkpoint(Epoch::INITIAL).unwrap();
-    assert!(Arc::ptr_eq(
-        &prepared,
-        &snapshot.segments["asof-index-v3"].bytes_arc()
-    ));
+    for (key, bytes) in payloads {
+        assert!(Arc::ptr_eq(
+            &bytes,
+            &snapshot.segments[&format!("asof-batch-{}-{}", key.0, key.1)].bytes_arc()
+        ));
+    }
+    let repeated = op.checkpoint(Epoch::new(2).unwrap()).unwrap();
+    assert_shared_segments(&snapshot, &repeated);
 }
 
 #[tokio::test]
@@ -843,7 +995,10 @@ async fn cancelled_checkpoint_preparation_preserves_deferred_state_for_retry() {
     let snapshot = op.capture(Epoch::INITIAL).unwrap();
     let (mut restored, _) = fixture();
     restored.restore(&snapshot).unwrap();
-    assert_eq!(restored.status.state_bytes, charged);
+    let mut expected_status = op.status();
+    expected_status.output_watermark_micros = None;
+    assert_eq!(restored.status(), expected_status);
+    assert_log_funded(&restored);
     assert_eq!(restored.status.retained_right_rows, 1);
 }
 
@@ -882,7 +1037,9 @@ async fn deferred_index_length_tracks_existing_and_new_right_buckets() {
     assert!(op.prepared.is_none());
     let before = op.status.state_bytes;
     let snapshot = op.capture(Epoch::INITIAL).unwrap();
-    assert_eq!(op.status.state_bytes, before);
+    assert!(op.status.state_bytes > before);
+    let before = op.status.state_bytes;
+    assert_log_funded(&op);
     let (mut restored, _) = fixture();
     restored.restore(&snapshot).unwrap();
     assert_eq!(restored.status.state_bytes, before);
@@ -920,7 +1077,7 @@ async fn finalizable_prefix_can_use_full_edge_row_budget() {
     .unwrap();
     let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
     let cx = StreamOperatorContext::new(&job, "asof", None)
-        .with_test_output_budget(EdgeBudget::new(8_192, 64 << 20).unwrap());
+        .with_output_budget(EdgeBudget::new(8_192, 64 << 20).unwrap());
     let mut output = EdgeCollector::new(op.output_ports().to_vec());
     op.process_data("left", left, &cx, &mut output)
         .await
@@ -1045,7 +1202,7 @@ async fn finalization_without_eviction_does_not_clone_retained_state() {
     let (mut op, left, right) = prefix_fixture();
     let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
     let cx = StreamOperatorContext::new(&job, "asof", None)
-        .with_test_output_budget(EdgeBudget::new(1, 1 << 20).unwrap());
+        .with_output_budget(EdgeBudget::new(1, 1 << 20).unwrap());
     let mut preload = EdgeCollector::new(op.output_ports().to_vec());
     op.process_data("right", right, &cx, &mut preload)
         .await
@@ -1070,18 +1227,19 @@ async fn finalization_without_eviction_does_not_clone_retained_state() {
     assert_eq!(op.status.pending_left_rows, 0);
     let expected = op.prepare_checkpoint(&op.state, &cx).await.unwrap();
     let captured = op.capture(Epoch::INITIAL).unwrap();
-    assert_eq!(
-        captured.segments.get("asof-index-v3").cloned(),
-        expected.segment.map(|segment| segment.canonical()),
-        "checkpoint bytes stay canonical"
-    );
+    let frame = checkpoint::index_v3::log::chain::decode(
+        &captured.segments["asof-log-v10-1-0-1"],
+        &op.fingerprint,
+    )
+    .unwrap();
+    assert_eq!(frame.body, expected.segment.unwrap().canonical().bytes());
 }
 #[tokio::test]
 async fn finalized_prefixes_release_old_checkpoint_bytes_and_defer_new_encoding() {
     let (mut op, left, right) = prefix_fixture();
     let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
     let cx = StreamOperatorContext::new(&job, "asof", None)
-        .with_test_output_budget(EdgeBudget::new(1, 1 << 20).unwrap());
+        .with_output_budget(EdgeBudget::new(1, 1 << 20).unwrap());
     let mut collector = EdgeCollector::new(op.output_ports().to_vec());
     op.process_data("right", right, &cx, &mut collector)
         .await
@@ -1089,44 +1247,33 @@ async fn finalized_prefixes_release_old_checkpoint_bytes_and_defer_new_encoding(
     op.process_data("left", left, &cx, &mut collector)
         .await
         .unwrap();
-    let committed = op.capture(Epoch::INITIAL).unwrap().segments["asof-index-v3"].bytes_arc();
+    let committed = op.capture(Epoch::INITIAL).unwrap().segments["asof-log-v10-1-0-1"].bytes_arc();
     let owners = Arc::strong_count(&committed);
     op.on_watermark(EventTime::from_micros(103), &cx, &mut collector)
         .await
         .unwrap();
     assert_eq!(collector.drain("output").len(), 3);
-    assert_eq!(
-        Arc::strong_count(&committed),
-        owners - 1,
-        "committing a v3 prefix releases the obsolete index"
-    );
-    let expected = op
-        .prepare_checkpoint(&op.state, &cx)
-        .await
-        .unwrap()
-        .segment
-        .map(|segment| segment.canonical());
-    assert!(op.prepared.is_none());
-    let retained_index_bytes = op.status.state_bytes - op.current_inventory(None).unwrap().bytes;
-    assert_eq!(retained_index_bytes, op.deferred_index_len.unwrap() + 256);
+    assert_eq!(Arc::strong_count(&committed), owners);
+    assert!(op.checkpoint_log.pending.is_none());
+    assert!(!op.checkpoint_log.journal.is_empty());
     op.prepare_checkpoint_async(&cx).await.unwrap();
-    assert!(op.prepared.is_some());
+    let captured = op.capture(Epoch::new(2).unwrap()).unwrap();
+    let expected = op.prepare_checkpoint(&op.state, &cx).await.unwrap();
+    let (mut restored, _, _) = prefix_fixture();
+    restored.restore(&captured).unwrap();
+    let mut expected_status = op.status();
+    expected_status.output_watermark_micros = None;
+    assert_eq!(restored.status(), expected_status);
+    let actual = restored
+        .prepare_checkpoint(&restored.state, &cx)
+        .await
+        .unwrap();
     assert_eq!(
-        op.status.state_bytes,
-        op.current_inventory(op.prepared.as_ref()).unwrap().bytes
+        actual.segment.map(|segment| segment.canonical()),
+        expected.segment.map(|segment| segment.canonical())
     );
-    let captured = op.capture(Epoch::INITIAL).unwrap().segments["asof-index-v3"].clone();
-    assert_eq!(Some(captured.clone()), expected, "capture stays canonical");
-    assert_eq!(
-        Arc::strong_count(&committed),
-        1,
-        "obsolete checkpoint bytes stay unowned by the operator"
-    );
-    let repeated = op.capture(Epoch::INITIAL).unwrap().segments["asof-index-v3"].bytes_arc();
-    assert!(
-        Arc::ptr_eq(&captured.bytes_arc(), &repeated),
-        "later captures share the materialized bytes"
-    );
+    let repeated = op.capture(Epoch::new(2).unwrap()).unwrap();
+    assert_shared_segments(&captured, &repeated);
 }
 
 struct CancelPrefixCollector {
@@ -1153,7 +1300,7 @@ async fn cancelled_prefix_has_canonical_checkpoint_and_resumes_exactly() {
     let cancel = CancellationToken::new();
     let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, cancel.clone());
     let cx = StreamOperatorContext::new(&job, "asof", None)
-        .with_test_output_budget(EdgeBudget::new(1, 1 << 20).unwrap());
+        .with_output_budget(EdgeBudget::new(1, 1 << 20).unwrap());
     let mut preload = EdgeCollector::new(op.output_ports().to_vec());
     op.process_data("right", right, &cx, &mut preload)
         .await
@@ -1173,17 +1320,14 @@ async fn cancelled_prefix_has_canonical_checkpoint_and_resumes_exactly() {
     assert_eq!(op.status.pending_left_rows, 2);
     assert_eq!(op.status.matched_rows, 1);
     assert_eq!(op.next_output_sequence, 1);
-    assert_eq!(op.runtime.pool.reserved(), 0);
-    let snapshot = op.capture(Epoch::INITIAL).unwrap();
+    assert_log_funded(&op);
+    let snapshot = op.capture(Epoch::new(2).unwrap()).unwrap();
     let fresh_job =
         StreamJobContext::new(2, "asof", JsonMap::new(), None, CancellationToken::new());
     let resumed_cx = StreamOperatorContext::new(&fresh_job, "asof", None)
-        .with_test_output_budget(EdgeBudget::new(1, 1 << 20).unwrap());
+        .with_output_budget(EdgeBudget::new(1, 1 << 20).unwrap());
     let canonical = op.prepare_checkpoint(&op.state, &resumed_cx).await.unwrap();
-    assert_eq!(
-        op.prepared.as_ref().map(PreparedSegment::canonical),
-        canonical.segment.map(|segment| segment.canonical())
-    );
+    assert!(canonical.segment.is_some());
     let (mut restored, _, _) = prefix_fixture();
     restored.restore(&before).unwrap();
     assert_eq!(
@@ -1191,11 +1335,8 @@ async fn cancelled_prefix_has_canonical_checkpoint_and_resumes_exactly() {
         "older shared snapshot is unchanged"
     );
     restored.restore(&snapshot).unwrap();
-    let repeated = restored.capture(Epoch::INITIAL).unwrap();
-    assert!(Arc::ptr_eq(
-        &snapshot.segments["asof-index-v3"].bytes_arc(),
-        &repeated.segments["asof-index-v3"].bytes_arc()
-    ));
+    let repeated = restored.capture(Epoch::new(2).unwrap()).unwrap();
+    assert_shared_segments(&snapshot, &repeated);
     restored.restore(&repeated).unwrap();
     let mut remaining = EdgeCollector::new(restored.output_ports().to_vec());
     restored
@@ -1246,7 +1387,7 @@ async fn evictable_right_state_survives_a_cancelled_output_prefix() {
     let cancel = CancellationToken::new();
     let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, cancel.clone());
     let cx = StreamOperatorContext::new(&job, "asof", None)
-        .with_test_output_budget(EdgeBudget::new(1, 1 << 20).unwrap());
+        .with_output_budget(EdgeBudget::new(1, 1 << 20).unwrap());
     let mut preload = EdgeCollector::new(op.output_ports().to_vec());
     op.process_data("right", right, &cx, &mut preload)
         .await
@@ -1266,7 +1407,7 @@ async fn evictable_right_state_survives_a_cancelled_output_prefix() {
     ]));
     let tick_cx =
         StreamOperatorContext::with_ingress_progress(&job, "asof", None, progress.clone())
-            .with_test_output_budget(EdgeBudget::new(1, 1 << 20).unwrap());
+            .with_output_budget(EdgeBudget::new(1, 1 << 20).unwrap());
     let mut stopped = CancelPrefixCollector {
         cancel,
         accepted: Vec::new(),
@@ -1287,7 +1428,7 @@ async fn evictable_right_state_survives_a_cancelled_output_prefix() {
         StreamJobContext::new(2, "asof", JsonMap::new(), None, CancellationToken::new());
     let resumed_cx =
         StreamOperatorContext::with_ingress_progress(&resumed_job, "asof", None, progress)
-            .with_test_output_budget(EdgeBudget::new(1, 1 << 20).unwrap());
+            .with_output_budget(EdgeBudget::new(1, 1 << 20).unwrap());
     let mut remaining = EdgeCollector::new(restored.output_ports().to_vec());
     restored
         .on_watermark(EventTime::from_micros(103), &resumed_cx, &mut remaining)
@@ -1465,7 +1606,10 @@ async fn eviction_preview_workspace_covers_many_owned_keys_in_one_payload_batch(
     let mut ended = op.status();
     ended.left.ended = true;
     ended.right.ended = true;
-    let charge = op.state.eviction_workspace_bytes("asof").unwrap();
+    let charge = op
+        .state
+        .eviction_workspace_bytes(&ended, op.spec.tolerance_micros(), "asof")
+        .unwrap();
     let workspace = op.reserve_workspace(charge).unwrap();
     let mut preview = None;
     let allocation = allocation_counter::measure(|| {
@@ -1478,7 +1622,7 @@ async fn eviction_preview_workspace_covers_many_owned_keys_in_one_payload_batch(
         allocation.bytes_max
     );
     drop(workspace);
-    assert_eq!(op.runtime.pool.reserved(), 0);
+    assert_eq!(op.runtime.pool.reserved(), op.state.right.auxiliary_bytes());
 }
 
 #[tokio::test]
@@ -1522,7 +1666,7 @@ async fn finalized_prefix_keeps_index_deferred_until_capture() {
         Some(checkpoint::v3_encoded_length(&op.state, &op.name).unwrap())
     );
     let snapshot = op.capture(Epoch::INITIAL).unwrap();
-    assert!(snapshot.segments.contains_key("asof-index-v3"));
+    assert!(snapshot.segments.contains_key("asof-log-v10-1-0-1"));
 }
 
 #[tokio::test]
@@ -1557,7 +1701,7 @@ async fn finalizes_large_ready_prefix_in_one_bounded_batch() {
     .unwrap();
     let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
     let cx = StreamOperatorContext::new(&job, "asof", None)
-        .with_test_output_budget(EdgeBudget::new(512, 8 << 20).unwrap());
+        .with_output_budget(EdgeBudget::new(512, 8 << 20).unwrap());
     let mut collector = EdgeCollector::new(op.output_ports().to_vec());
     op.process_data("right", right, &cx, &mut collector)
         .await
@@ -1586,7 +1730,7 @@ async fn finalizes_large_ready_prefix_in_one_bounded_batch() {
     assert_eq!(op.status.pending_left_rows, 0);
 }
 
-fn fixture() -> (StreamAsofJoinOperator, Batch) {
+pub(super) fn fixture() -> (StreamAsofJoinOperator, Batch) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("key", DataType::Utf8, false),
         Field::new(
@@ -1652,7 +1796,8 @@ async fn one_row_output_byte_limit_preserves_pending_state_and_releases_workspac
         .await
         .unwrap();
     let before = op.capture(Epoch::INITIAL).unwrap();
-    assert_eq!(op.runtime.pool.reserved(), 0);
+    assert_log_funded(&op);
+    let reserved = op.runtime.pool.reserved();
     let error = op
         .on_watermark(EventTime::from_micros(101), &cx, &mut output)
         .await
@@ -1664,6 +1809,10 @@ async fn one_row_output_byte_limit_preserves_pending_state_and_releases_workspac
             ..
         }
     ));
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop(cx);
+    drop(job);
+    assert_eq!(op.runtime.pool.reserved(), reserved);
     assert_eq!(op.status.pending_left_rows, 1);
     assert_eq!(op.status.output_limit_failures, 1);
     assert_eq!(
@@ -1671,8 +1820,9 @@ async fn one_row_output_byte_limit_preserves_pending_state_and_releases_workspac
         before.segments
     );
     assert!(output.drain("output").is_empty());
-    assert_eq!(op.runtime.pool.reserved(), 0);
+    assert_log_funded(&op);
     op.reset().unwrap();
+    drop(before);
     assert_eq!(op.runtime.pool.reserved(), 0);
 }
 
@@ -1689,9 +1839,6 @@ async fn sixty_thousand_row_batch_admission_uses_columnar_workspace() {
 }
 
 async fn admit_repro_rows(rows: u64) -> StreamAsofJoinOperator {
-    // DAL-287 repro shape: four-column facts admitted under the limits
-    // docs/asof-join-guide.md recommends. Admission must charge close to the
-    // actual encoded bytes, not a per-row schema tax.
     let schema = Arc::new(Schema::new(vec![
         Field::new(
             "event_time",
@@ -1752,6 +1899,9 @@ async fn admit_repro_rows(rows: u64) -> StreamAsofJoinOperator {
 
     assert_eq!(operator.status.left.accepted_rows, rows);
     assert_eq!(operator.status.pending_left_rows, rows);
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop(cx);
+    drop(job);
     assert_eq!(operator.runtime.pool.reserved(), 0);
     operator
 }
@@ -1817,12 +1967,9 @@ async fn watermark_tick_without_eviction_reuses_the_prepared_segment() {
     op.on_watermark(EventTime::from_micros(150), &cx, &mut output)
         .await
         .unwrap();
-    let swept = op.capture(Epoch::INITIAL).unwrap();
+    let swept = op.capture(Epoch::new(2).unwrap()).unwrap();
     assert_eq!(op.status().evicted_right_rows, 1);
-    assert!(!Arc::ptr_eq(
-        &admitted.segments["asof-index-v3"].bytes_arc(),
-        &swept.segments["asof-index-v3"].bytes_arc()
-    ));
+    assert_ne!(admitted.segments, swept.segments);
 
     // An identical tick changes nothing: status is untouched and the prepared
     // segment allocation is reused instead of re-encoded.
@@ -1830,23 +1977,17 @@ async fn watermark_tick_without_eviction_reuses_the_prepared_segment() {
     op.on_watermark(EventTime::from_micros(150), &cx, &mut output)
         .await
         .unwrap();
-    let repeated = op.capture(Epoch::INITIAL).unwrap();
+    let repeated = op.capture(Epoch::new(2).unwrap()).unwrap();
     assert_eq!(op.status(), status);
-    assert!(Arc::ptr_eq(
-        &swept.segments["asof-index-v3"].bytes_arc(),
-        &repeated.segments["asof-index-v3"].bytes_arc()
-    ));
+    assert_shared_segments(&swept, &repeated);
 
     // Watermark progress below the next evictable row also reuses it.
     let cx = StreamOperatorContext::with_ingress_progress(&job, "asof", None, progress(199));
     op.on_watermark(EventTime::from_micros(199), &cx, &mut output)
         .await
         .unwrap();
-    let advanced = op.capture(Epoch::INITIAL).unwrap();
-    assert!(Arc::ptr_eq(
-        &swept.segments["asof-index-v3"].bytes_arc(),
-        &advanced.segments["asof-index-v3"].bytes_arc()
-    ));
+    let advanced = op.capture(Epoch::new(3).unwrap()).unwrap();
+    assert_shared_segments(&swept, &advanced);
     assert_eq!(
         op.status().output_watermark_micros,
         Some(EventTime::from_micros(198))
@@ -1880,3 +2021,67 @@ async fn restored_logical_counter_overflow_fails_before_admission_or_emit() {
     assert!(output.drain("output").is_empty());
     assert_eq!(op.runtime.pool.reserved(), 0);
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn output_plan_registers_each_side_source_once() {
+    let (mut op, batch) = fixture();
+    let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+    let cx = StreamOperatorContext::new(&job, "asof", None);
+    let mut collector = EdgeCollector::new(op.output_ports().to_vec());
+    op.process_data("right", batch.clone(), &cx, &mut collector)
+        .await
+        .unwrap();
+    op.process_data("left", batch, &cx, &mut collector)
+        .await
+        .unwrap();
+    workspace::take_output_source_registrations();
+    op.on_end(&cx, &mut collector).await.unwrap();
+    let output = collector.drain("output");
+    assert_eq!(output.len(), 1);
+    assert_eq!(op.status().matched_rows, 1);
+    assert_eq!(workspace::take_output_source_registrations(), 2);
+}
+
+#[tokio::test]
+async fn output_plan_zero_columns_preserve_operator_delivery_and_status() {
+    let (mut op, batch) = fixture();
+    op.set_output_projection(Vec::new()).unwrap();
+    let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+    let cx = StreamOperatorContext::new(&job, "asof", None);
+    let mut collector = EdgeCollector::new(op.output_ports().to_vec());
+    op.process_data("right", batch.clone(), &cx, &mut collector)
+        .await
+        .unwrap();
+    op.process_data("left", batch, &cx, &mut collector)
+        .await
+        .unwrap();
+    op.on_end(&cx, &mut collector).await.unwrap();
+    let output = collector.drain("output");
+    let batch = output[0].as_data().unwrap();
+    let record = &batch.table_payload().unwrap().batches()[0];
+    assert_eq!((record.num_columns(), record.num_rows()), (0, 1));
+    assert_eq!(op.status().emitted_left_rows, 1);
+    assert_eq!(op.status().matched_rows, 1);
+    assert_eq!(op.status().pending_left_rows, 0);
+}
+
+#[path = "tests/expiration_index.rs"]
+mod expiration_index;
+
+#[path = "tests/expiration_output_integration.rs"]
+mod expiration_output_integration;
+
+#[path = "tests/restored_workspace.rs"]
+mod restored_workspace;
+
+#[path = "tests/dominated_payloads.rs"]
+mod dominated_payloads;
+
+#[path = "tests/retained_projection.rs"]
+mod retained_projection;
+
+#[path = "tests/gather_admission.rs"]
+mod gather_admission;
+
+#[path = "tests/checkpoint_delta.rs"]
+mod checkpoint_delta;

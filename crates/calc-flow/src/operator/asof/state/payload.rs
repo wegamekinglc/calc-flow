@@ -1,7 +1,7 @@
 use super::{BatchKey, PayloadBatch, RowPayload};
 use ahash::RandomState;
 use hashbrown::HashTable;
-use std::{num::NonZeroU32, ops::Index, sync::Arc};
+use std::{collections::HashSet, num::NonZeroU32, ops::Index, sync::Arc};
 
 #[cfg(test)]
 thread_local! {
@@ -245,6 +245,12 @@ impl Drop for PreparedPayloadRemoval {
 }
 
 impl PayloadPool {
+    pub fn references(&self, key: &BatchKey) -> usize {
+        self.by_key
+            .find(self.hasher.hash_one(key), |entry| &entry.key == key)
+            .map_or(0, |entry| self.by_id_entry(entry.id).value.1)
+    }
+
     pub fn checkpoint_right_handles(&self) -> impl Iterator<Item = (u32, u64)> + '_ {
         self.by_id
             .iter()
@@ -330,6 +336,36 @@ impl PayloadPool {
             .reserve(batches, |entry| hasher.hash_one(entry.key));
         self.by_id
             .reserve(batches, |entry| u64::from(entry.id.get()));
+    }
+
+    pub fn admission_references(&self, batches: &[Arc<PayloadBatch>]) -> Vec<RowRef> {
+        let mut allocated = HashSet::with_capacity(batches.len());
+        let mut next_id = self.next_id;
+        batches
+            .iter()
+            .map(|batch| {
+                let existing = self.by_key.find(self.hasher.hash_one(batch.key), |entry| {
+                    entry.key == batch.key
+                });
+                let id = if let Some(entry) = existing {
+                    entry.id
+                } else {
+                    loop {
+                        next_id = next_id.wrapping_add(1).max(1);
+                        let id = NonZeroU32::new(next_id).expect("nonzero ASOF batch handle");
+                        if self
+                            .by_id
+                            .find(u64::from(id.get()), |entry| entry.id == id)
+                            .is_none()
+                            && allocated.insert(id)
+                        {
+                            break id;
+                        }
+                    }
+                };
+                RowRef { batch: id, row: 0 }
+            })
+            .collect()
     }
 
     pub fn project_remove(
@@ -690,6 +726,28 @@ mod tests {
         pool.detach(second);
         assert_eq!(pool.by_key.capacity(), 0);
         assert_eq!(pool.by_id.capacity(), 0);
+    }
+
+    #[test]
+    fn admission_references_preserve_live_handles_across_wrap() {
+        let mut pool = PayloadPool::default();
+        let first = row(10);
+        let retained = pool.attach(&first);
+        pool.next_id = u32::MAX;
+        let second = row(20);
+        let third = row(30);
+        let batches = vec![
+            first.batch.clone(),
+            second.batch.clone(),
+            third.batch.clone(),
+        ];
+        let predicted = pool.admission_references(&batches);
+        assert_eq!(predicted[0].batch, retained.batch);
+        assert_ne!(predicted[1].batch, retained.batch);
+        assert_ne!(predicted[2].batch, predicted[1].batch);
+        for (batch, expected) in batches.iter().zip(predicted) {
+            assert_eq!(pool.attach_batch(batch, 1), expected);
+        }
     }
 
     #[test]

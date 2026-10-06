@@ -194,6 +194,7 @@ async fn run_graph(
         let inputs = OperatorTaskInputs {
             late_output_ports: node.late_output_ports,
             entity_work: None,
+            sql_recovery: None,
             ingresses: node
                 .ingress_edges
                 .iter()
@@ -212,7 +213,7 @@ async fn run_graph(
                         name.clone(),
                         edges
                             .iter()
-                            .map(|edge| senders.remove(edge).unwrap())
+                            .map(|edge| senders.remove(edge).unwrap().into())
                             .collect(),
                     )
                 })
@@ -383,7 +384,7 @@ fn assert_observed_controls(kind: &str, path: &str, sequence: u64, observed: &Ob
 
 struct Collectors {
     ports: BTreeMap<String, Port>,
-    outputs: BTreeMap<String, Vec<EdgeSender>>,
+    outputs: BTreeMap<String, Vec<OperatorEdgeSender>>,
     receivers: Vec<EdgeReceiver>,
 }
 
@@ -402,7 +403,7 @@ fn collectors(ports: &[Port], budget: EdgeBudget, late_fanout: usize) -> Collect
                     let (sender, receiver) =
                         crate::edge_channel(format!("{}-{index}", port.name()), budget).unwrap();
                     receivers.push(receiver);
-                    sender
+                    sender.into()
                 })
                 .collect();
             (port.name().to_owned(), senders)
@@ -460,7 +461,7 @@ async fn test_late_runtime_collector_preflights_later_wide_chunk_without_state_o
             CancellationToken::new(),
         );
         let context = StreamOperatorContext::new(&job, "roll", Some(EventTime::from_micros(10)))
-            .with_test_output_budget(budget);
+            .with_output_budget(budget);
         let progress = OperatorProgress::default();
         let metrics = MetricsRecorder::default();
         let mut output = ChannelStreamCollector::new(

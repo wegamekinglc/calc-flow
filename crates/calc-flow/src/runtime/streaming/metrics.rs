@@ -735,6 +735,17 @@ impl MetricsRecorder {
     }
 
     #[cfg(test)]
+    pub(crate) fn preset_operator_outputs_for_test(&self, node: &str, value: u64) {
+        self.0
+            .snapshot
+            .lock()
+            .nodes
+            .get_mut(node)
+            .expect("registered operator metrics")
+            .fully_fanned_out_batches = value;
+    }
+
+    #[cfg(test)]
     pub(crate) fn preset_job_task_errors_for_test(&self, value: u64) {
         self.0.snapshot.lock().job.task_errors = value;
     }

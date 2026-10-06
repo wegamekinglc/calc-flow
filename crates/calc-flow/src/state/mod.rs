@@ -8,6 +8,7 @@ mod backend;
 mod local;
 mod manifest;
 mod segment;
+mod source_history;
 mod transaction;
 
 #[cfg(test)]
@@ -22,7 +23,7 @@ pub(crate) use transaction::{
 )]
 pub(crate) use transaction::{
     ManifestPublication, ManifestTransaction, PreparedEpochManifest, PreparedManifestIdentity,
-    SelectedManifest, StagedOperatorState,
+    SelectedManifest, StagedOperatorState, WorkingStatePins,
 };
 
 pub(crate) use segment::{
@@ -35,5 +36,9 @@ pub use manifest::{
     CheckpointManifest, CheckpointManifestFields, CursorManifestEntry, MANIFEST_FORMAT_VERSION,
     MAX_MANIFEST_DOCUMENT_BYTES, ManifestExpectation, ManifestIngressState,
     OperatorIngressManifestEntry, OperatorManifestEntry, RecoveryStatus, RetentionClass,
-    SinkDeliveryManifest, SinkManifestEntry, SourceManifestEntry, SourceWatermarkManifestState,
+    SOURCE_HISTORY_FORMAT_VERSION, SinkDeliveryManifest, SinkManifestEntry,
+    SourceHistoryManifestEntry, SourceManifestEntry, SourceWatermarkManifestState,
+};
+pub use source_history::{
+    SourceHistoryBytes, SourceHistoryContext, SourceHistoryLimits, SourceHistorySpec,
 };

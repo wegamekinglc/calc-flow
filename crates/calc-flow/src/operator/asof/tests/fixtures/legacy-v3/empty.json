@@ -1,0 +1,75 @@
+{
+  "metadata": {
+    "accounting_version": 3,
+    "epoch": 1,
+    "fingerprint": "2c63fd17ba6cfb2b7a4cbd46f44abf2a60179886f5348e1c8fae9be4ff70aa29",
+    "kind": "stream_asof_join",
+    "layout_version": 3,
+    "metrics": {
+      "emitted_left_rows": 0,
+      "evicted_right_rows": 0,
+      "identity_only_rows": 0,
+      "left": {
+        "accepted_rows": 0,
+        "duplicate_rows": 0,
+        "ended": false,
+        "idle": false,
+        "late_rows": 0,
+        "watermark_micros": null
+      },
+      "matched_rows": 0,
+      "output_limit_failures": 0,
+      "output_watermark_micros": null,
+      "pending_left_rows": 0,
+      "retained_right_rows": 0,
+      "right": {
+        "accepted_rows": 0,
+        "duplicate_rows": 0,
+        "ended": false,
+        "idle": false,
+        "late_rows": 0,
+        "watermark_micros": null
+      },
+      "state_bytes": 0,
+      "state_limit_failures": 0,
+      "state_rows": 0,
+      "unmatched_rows": 0,
+      "workspace_limit_failures": 0
+    },
+    "next_output_sequence": 0,
+    "row_encoding": "arrow-batch-58.3.0",
+    "state_version": 3,
+    "terminal": false
+  },
+  "name": "empty",
+  "schema_kind": "int64",
+  "segments": {},
+  "spec": {
+    "late_policy": "error",
+    "left": {
+      "event_time": "time",
+      "keys": [
+        "key"
+      ],
+      "prefix": "left",
+      "sequence_by": [
+        "seq"
+      ]
+    },
+    "limits": {
+      "max_state_bytes": 1048576,
+      "max_state_rows": 100
+    },
+    "right": {
+      "event_time": "time",
+      "keys": [
+        "key"
+      ],
+      "prefix": "right",
+      "sequence_by": [
+        "seq"
+      ]
+    },
+    "tolerance_micros": 0
+  }
+}

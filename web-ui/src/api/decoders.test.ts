@@ -172,6 +172,27 @@ describe('capabilities decoder', () => {
     });
   });
 
+  it.each([
+    ['sql', 2, [3, 4]],
+    ['stream_asof_join', 3, [10]],
+  ])('accepts independent checkpoint families and layouts for %s', (kind, stateVersion, stateLayouts) => {
+    const document = capabilitiesFixture();
+    const operator = {
+      ...operatorFixture(),
+      kind,
+      stateful: true,
+      checkpointSupport: 'checkpointed_stateful',
+      stateVersion,
+      stateLayouts,
+    };
+    const response = {
+      ...document,
+      runtime: { ...document.runtime, operators: [operator] },
+    };
+
+    expect(decodeCapabilitiesResponse(response)).toEqual(response);
+  });
+
   it('rejects hostile operator state layouts', () => {
     const stateful = {
       ...operatorFixture(),
@@ -193,8 +214,8 @@ describe('capabilities decoder', () => {
       withOperator({ ...stateful, stateLayouts: [] }),
     )).toThrowError(/requires at least one state layout/);
     expect(() => decodeCapabilitiesResponse(
-      withOperator({ ...stateful, stateLayouts: [2] }),
-    )).toThrowError(/must contain stateVersion/);
+      withOperator({ ...stateful, stateLayouts: [1, 1] }),
+    )).toThrowError(/strictly ascending/);
     expect(() => decodeCapabilitiesResponse(
       withOperator({ ...stateful, stateLayouts: [2, 1] }),
     )).toThrowError(/strictly ascending/);

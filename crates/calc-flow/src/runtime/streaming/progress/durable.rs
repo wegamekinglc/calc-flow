@@ -16,6 +16,7 @@ use crate::{
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DurableSourceCut {
+    pub(crate) history: Option<crate::SourceHistoryManifestEntry>,
     pub(crate) cursor: Option<CursorManifestEntry>,
     pub(crate) next_sequence: u64,
     pub(crate) ended: bool,
@@ -208,6 +209,7 @@ mod tests {
         let sources = BTreeMap::from([(
             "source".into(),
             SourceManifestEntry {
+                history: None,
                 cursor: None,
                 identity_hash,
                 sequence: 8,

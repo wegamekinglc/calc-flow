@@ -1,12 +1,3 @@
-//! RED (M1.1): stream operator contract and the validating collector.
-//!
-//! Every test in this file fails to compile until the v3 stream surface
-//! exists: `StreamOperator`, `StreamOperatorContext`, `StreamJobContext`,
-//! `StreamCollector`, the runtime-owned validating collector,
-//! `OperatorStateSnapshot`, and `UnionOperator` (plan task M1.1, API note
-//! A1/A2). The expected RED reason is an unresolved import of these names
-//! from `calc_flow`.
-
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
@@ -311,7 +302,7 @@ async fn sql_stream_group_by_emits_all_groups_each_batch() {
 }
 
 #[tokio::test]
-async fn sql_stream_aggregate_restores_cumulative_input() {
+async fn sql_stream_aggregate_restores_cumulative_state() {
     let new_operator = || {
         SqlOperator::new(
             "totals",
@@ -331,7 +322,15 @@ async fn sql_stream_aggregate_restores_cumulative_input() {
         .unwrap();
     collector.drain("output");
     let snapshot = original.checkpoint(Epoch::INITIAL).unwrap();
-    assert_eq!(snapshot.segments.len(), 1);
+    assert_eq!(snapshot.inline_metadata["state_layout"], json!(3));
+    assert_eq!(
+        snapshot
+            .segments
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["batch-metadata", "control", "group-state", "logical-schema"]
+    );
 
     let mut restored = new_operator();
     StreamOperator::restore(&mut restored, &snapshot).unwrap();

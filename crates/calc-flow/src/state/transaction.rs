@@ -23,6 +23,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use sha2::{Digest as _, Sha256};
 use tokio::sync::Mutex;
 
+mod working;
+pub(crate) use working::WorkingStatePins;
+
 use super::{
     CheckpointManifest, ManifestExpectation, StateHandle, StateLineageBackend, StateLineageKey,
 };
@@ -119,6 +122,7 @@ pub(crate) enum ManifestPublication {
 pub(crate) struct StagedOperatorState {
     pub(crate) inline_metadata: JsonMap,
     pub(crate) segments: Vec<StateHandle>,
+    pub(crate) working: Option<Arc<WorkingStatePins>>,
 }
 
 pub(crate) struct ManifestValidation {
@@ -143,7 +147,7 @@ pub(crate) struct ManifestTransaction {
     manifest_root: PathBuf,
     retained_epochs: usize,
     operation: Mutex<()>,
-    session_segments: parking_lot::Mutex<SessionSegments>,
+    session_segments: Arc<parking_lot::Mutex<SessionSegments>>,
     #[cfg(test)]
     fault_hook: Option<ManifestTransactionFaultHook>,
     #[cfg(test)]
@@ -168,6 +172,7 @@ struct SessionSegments {
     carried: BTreeMap<(String, String), StateHandle>,
     /// Handles whose committed bytes this session wrote or fully verified.
     verified: BTreeSet<StateHandle>,
+    working: BTreeMap<StateHandle, usize>,
 }
 
 impl ManifestTransaction {
@@ -260,7 +265,7 @@ impl ManifestTransaction {
             manifest_root,
             retained_epochs,
             operation: Mutex::new(()),
-            session_segments: parking_lot::Mutex::new(SessionSegments::default()),
+            session_segments: Arc::new(parking_lot::Mutex::new(SessionSegments::default())),
             #[cfg(test)]
             fault_hook: None,
             #[cfg(test)]
@@ -493,6 +498,11 @@ impl ManifestTransaction {
             self.inject_fault(ManifestTransactionFaultPoint::StateStage)?;
         }
         Ok(StagedOperatorState {
+            working: WorkingStatePins::acquire(
+                self.session_segments.clone(),
+                self.lineage.clone(),
+                &staged,
+            )?,
             inline_metadata: snapshot.inline_metadata,
             segments: staged,
         })
@@ -553,6 +563,7 @@ impl ManifestTransaction {
             }
             staged.push(handle);
         }
+        staged.sort_unstable();
         Ok((staged, unpublished))
     }
 
@@ -682,6 +693,22 @@ impl ManifestTransaction {
     ) -> Result<OperatorStateSnapshot> {
         self.load_operator_state_cancellable(operator_id, entry, &CancellationToken::new())
             .await
+    }
+
+    pub(crate) async fn pin_working_state(
+        &self,
+        owner_id: &str,
+        handles: &[StateHandle],
+    ) -> Result<Option<Arc<WorkingStatePins>>> {
+        let _guard = self.operation.lock().await;
+        for handle in handles {
+            handle.validate_owner(owner_id)?;
+        }
+        WorkingStatePins::acquire(self.session_segments.clone(), self.lineage.clone(), handles)
+    }
+
+    pub(crate) async fn load_source_history(&self, handle: &StateHandle) -> Result<Vec<u8>> {
+        self.lineage.load_segment(handle).await
     }
 
     pub(crate) async fn load_operator_state_cancellable(
@@ -848,9 +875,12 @@ impl ManifestTransaction {
         let RetentionPlan {
             retained_manifests,
             removed_manifests,
-            retained_handles,
+            mut retained_handles,
             removals,
         } = retention_plan(&manifests, self.retained_epochs, in_flight);
+        retained_handles.extend(self.session_segments.lock().working.keys().cloned());
+        retained_handles.sort_unstable();
+        retained_handles.dedup();
         let root = self.manifest_root.clone();
         owner_settled(
             cancellation,
@@ -860,6 +890,15 @@ impl ManifestTransaction {
         .await?;
         #[cfg(test)]
         self.inject_fault(ManifestTransactionFaultPoint::Compaction)?;
+        {
+            let mut session = self.session_segments.lock();
+            session
+                .carried
+                .retain(|_, handle| retained_handles.binary_search(handle).is_ok());
+            session
+                .verified
+                .retain(|handle| retained_handles.binary_search(handle).is_ok());
+        }
         let removed_orphan_segments = owner_settled(
             cancellation,
             "manifest-retain-orphans",
@@ -1056,19 +1095,22 @@ async fn validate_manifest_segments(
     let session_verified = |handle: &StateHandle| {
         session_segments.is_some_and(|session| session.lock().verified.contains(handle))
     };
-    for operator in manifest.operators().values() {
-        for handle in &operator.segments {
-            if session_verified(handle) {
-                continue;
+    for source in manifest.sources().values() {
+        if let Some(history) = &source.history {
+            for handle in &history.segments {
+                if !session_verified(handle) {
+                    lineage.verify_committed_segment(handle).await?;
+                }
             }
-            lineage.load_segment(handle).await?;
         }
     }
-    for sink in manifest.sinks().values() {
-        for handle in &sink.segments {
-            if session_verified(handle) {
-                continue;
-            }
+    for handle in manifest
+        .operators()
+        .values()
+        .flat_map(|entry| &entry.segments)
+        .chain(manifest.sinks().values().flat_map(|entry| &entry.segments))
+    {
+        if !session_verified(handle) {
             lineage.load_segment(handle).await?;
         }
     }
@@ -1076,12 +1118,22 @@ async fn validate_manifest_segments(
 }
 
 fn collect_manifest_handles(manifest: &CheckpointManifest, retained: &mut BTreeSet<StateHandle>) {
-    for operator in manifest.operators().values() {
-        retained.extend(operator.segments.iter().cloned());
-    }
-    for sink in manifest.sinks().values() {
-        retained.extend(sink.segments.iter().cloned());
-    }
+    retained.extend(manifest_handles(manifest).cloned());
+}
+
+fn manifest_handles(manifest: &CheckpointManifest) -> impl Iterator<Item = &StateHandle> {
+    manifest
+        .sources()
+        .values()
+        .filter_map(|source| source.history.as_ref())
+        .flat_map(|history| &history.segments)
+        .chain(
+            manifest
+                .operators()
+                .values()
+                .flat_map(|operator| &operator.segments),
+        )
+        .chain(manifest.sinks().values().flat_map(|sink| &sink.segments))
 }
 
 fn list_manifest_candidates(root: &Path) -> Result<Vec<ManifestCandidate>> {
@@ -1611,6 +1663,8 @@ fn io_error(path: &Path, source: std::io::Error) -> CalcFlowError {
 
 #[cfg(test)]
 mod tests {
+    mod source_history;
+
     use std::{
         collections::{BTreeMap, BTreeSet},
         path::Path,
@@ -2009,6 +2063,47 @@ mod tests {
                 ("left-delta-2".to_string(), b"second".to_vec()),
             ])
         );
+    }
+
+    #[tokio::test]
+    async fn staged_carries_are_canonical_when_new_ids_sort_before_old_ids() {
+        let directory = TempDir::new().unwrap();
+        let backend = LocalStateBackend::new(directory.path().join("state"))
+            .await
+            .unwrap();
+        let key = StateLineageKey::new("orders", PIPELINE_FINGERPRINT).unwrap();
+        let lineage: Arc<dyn StateLineageBackend> =
+            Arc::from(backend.open_lineage(&key).await.unwrap());
+        let transaction =
+            ManifestTransaction::open(lineage, &key, directory.path().join("manifests"), 2)
+                .await
+                .unwrap();
+        let first = transaction
+            .stage_operator_state(
+                "window",
+                Epoch::INITIAL,
+                snapshot_with_segments(&[("z-base", b"base")]),
+            )
+            .await
+            .unwrap();
+        let second_epoch = Epoch::INITIAL.next().unwrap();
+        let second = transaction
+            .stage_operator_state(
+                "window",
+                second_epoch,
+                snapshot_with_segments(&[("a-delta", b"delta"), ("z-base", b"base")]),
+            )
+            .await
+            .unwrap();
+        assert!(second.segments.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(second.segments[0], first.segments[0]);
+        transaction
+            .publish(PreparedEpochManifest {
+                manifest: manifest_with_operator_segments(second_epoch, second.segments),
+                staged_segments: BTreeMap::new(),
+            })
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

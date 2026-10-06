@@ -12,10 +12,15 @@ use crate::{
     json::{parse_json_value, validate_json_depth_at, validate_portable_identifier},
 };
 
+#[cfg(test)]
+mod source_history_tests;
+
 /// The final v3 checkpoint-manifest format version.
 pub const MANIFEST_FORMAT_VERSION: u32 = 3;
 /// Maximum accepted size of one v3 checkpoint-manifest document.
 pub const MAX_MANIFEST_DOCUMENT_BYTES: usize = 10 * 1024 * 1024;
+/// Current immutable source-history descriptor version.
+pub const SOURCE_HISTORY_FORMAT_VERSION: u32 = 1;
 
 /// Recovery state represented by an M4 manifest.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -73,6 +78,35 @@ pub struct SourceManifestEntry {
     pub ended: bool,
     /// Persisted watermark-generator state.
     pub watermark_policy: SourceWatermarkManifestState,
+    /// Immutable replay history; the nullable field must be present.
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub history: Option<SourceHistoryManifestEntry>,
+}
+
+/// Immutable source history retained by the managed checkpoint lineage.
+///
+/// ```
+/// use calc_flow::{JsonMap, SOURCE_HISTORY_FORMAT_VERSION, SourceHistoryManifestEntry};
+///
+/// let history = SourceHistoryManifestEntry {
+///     format_version: SOURCE_HISTORY_FORMAT_VERSION,
+///     contract: "file_snapshot_v1".into(),
+///     inline_metadata: JsonMap::new(),
+///     segments: Vec::new(),
+/// };
+/// assert!(history.segments.is_empty());
+/// ```
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceHistoryManifestEntry {
+    /// Current descriptor version.
+    pub format_version: u32,
+    /// Connector-defined replay contract identity.
+    pub contract: String,
+    /// Bounded connector metadata describing the history segments.
+    pub inline_metadata: JsonMap,
+    /// Canonically ordered immutable handles owned by the source binding.
+    pub segments: Vec<StateHandle>,
 }
 
 /// Persisted operator progress and immutable state handles.
@@ -497,7 +531,9 @@ impl CheckpointManifest {
         validate_portable_identifier("pipeline_name", &self.pipeline_name)?;
         validate_sha256("pipeline_fingerprint", &self.pipeline_fingerprint)?;
         validate_sha256("runtime_config_hash", &self.runtime_config_hash)?;
-        validate_sources(&self.sources)?;
+        let mut identities = BTreeSet::new();
+        let mut paths = BTreeSet::new();
+        validate_sources(&self.sources, self.epoch, &mut identities, &mut paths)?;
         if let Some(owner_id) = self
             .operators
             .keys()
@@ -507,8 +543,15 @@ impl CheckpointManifest {
                 "state owner ID {owner_id:?} is shared by an operator and sink"
             )));
         }
-        let mut identities = BTreeSet::new();
-        let mut paths = BTreeSet::new();
+        for (source_id, source) in &self.sources {
+            if source.history.is_some()
+                && (self.operators.contains_key(source_id) || self.sinks.contains_key(source_id))
+            {
+                return Err(format_error(format!(
+                    "state owner ID {source_id:?} is shared by a source history and another component"
+                )));
+            }
+        }
         validate_operators(&self.operators, self.epoch, &mut identities, &mut paths)?;
         validate_sinks(&self.sinks, self.epoch, &mut identities, &mut paths)?;
         for (name, digest) in &self.static_inputs {
@@ -557,15 +600,60 @@ fn validate_document_version(value: &Value) -> Result<()> {
     }
 }
 
-fn validate_sources(sources: &BTreeMap<String, SourceManifestEntry>) -> Result<()> {
+fn validate_sources(
+    sources: &BTreeMap<String, SourceManifestEntry>,
+    manifest_epoch: Epoch,
+    identities: &mut BTreeSet<(String, Epoch, String)>,
+    paths: &mut BTreeSet<String>,
+) -> Result<()> {
     for (source_id, source) in sources {
-        validate_portable_identifier("sources.id", source_id)?;
-        validate_sha256("sources.identity_hash", &source.identity_hash)?;
-        if let Some(cursor) = &source.cursor {
-            validate_portable_identifier("sources.cursor.order", &cursor.order)?;
-            validate_json_map(&cursor.payload, "source cursor payload")?;
+        validate_source_identity(source_id, source)?;
+        if let Some(history) = &source.history {
+            validate_source_history(source_id, history, manifest_epoch, identities, paths)?;
         }
     }
+    Ok(())
+}
+
+fn validate_source_identity(source_id: &str, source: &SourceManifestEntry) -> Result<()> {
+    validate_portable_identifier("sources.id", source_id)?;
+    validate_sha256("sources.identity_hash", &source.identity_hash)?;
+    if let Some(cursor) = &source.cursor {
+        validate_portable_identifier("sources.cursor.order", &cursor.order)?;
+        validate_json_map(&cursor.payload, "source cursor payload")?;
+    }
+    Ok(())
+}
+
+fn validate_source_history(
+    source_id: &str,
+    history: &SourceHistoryManifestEntry,
+    manifest_epoch: Epoch,
+    identities: &mut BTreeSet<(String, Epoch, String)>,
+    paths: &mut BTreeSet<String>,
+) -> Result<()> {
+    if history.format_version != SOURCE_HISTORY_FORMAT_VERSION {
+        return Err(format_error(format!(
+            "sources.{source_id}.history.format_version {} is unsupported (expected {SOURCE_HISTORY_FORMAT_VERSION})",
+            history.format_version
+        )));
+    }
+    validate_portable_identifier(
+        &format!("sources.{source_id}.history.contract"),
+        &history.contract,
+    )?;
+    validate_json_map(
+        &history.inline_metadata,
+        &format!("sources.{source_id}.history.inline_metadata"),
+    )?;
+    validate_handles(
+        "source",
+        source_id,
+        &history.segments,
+        manifest_epoch,
+        identities,
+        paths,
+    )?;
     Ok(())
 }
 
@@ -579,7 +667,14 @@ fn validate_operators(
         validate_portable_identifier("operators.id", operator_id)?;
         validate_json_map(&operator.inline_metadata, "operator inline metadata")?;
         validate_ingress_ids(operator)?;
-        validate_operator_handles(operator_id, operator, manifest_epoch, identities, paths)?;
+        validate_handles(
+            "operator",
+            operator_id,
+            &operator.segments,
+            manifest_epoch,
+            identities,
+            paths,
+        )?;
     }
     Ok(())
 }
@@ -591,16 +686,17 @@ fn validate_ingress_ids(operator: &OperatorManifestEntry) -> Result<()> {
     Ok(())
 }
 
-fn validate_operator_handles(
-    operator_id: &str,
-    operator: &OperatorManifestEntry,
+fn validate_handles(
+    owner_kind: &str,
+    owner_id: &str,
+    handles: &[StateHandle],
     manifest_epoch: Epoch,
     identities: &mut BTreeSet<(String, Epoch, String)>,
     paths: &mut BTreeSet<String>,
 ) -> Result<()> {
     let mut previous = None;
-    for handle in &operator.segments {
-        validate_state_handle("operator", operator_id, handle, manifest_epoch, previous)?;
+    for handle in handles {
+        validate_state_handle(owner_kind, owner_id, handle, manifest_epoch, previous)?;
         record_unique_handle(handle, identities, paths)?;
         previous = Some(handle);
     }
@@ -666,12 +762,14 @@ fn validate_sinks(
         if let Some(pre_commit) = &sink.pre_commit {
             validate_json_map(pre_commit, "sink pre-commit metadata")?;
         }
-        let mut previous = None;
-        for handle in &sink.segments {
-            validate_state_handle("sink", sink_id, handle, manifest_epoch, previous)?;
-            record_unique_handle(handle, identities, paths)?;
-            previous = Some(handle);
-        }
+        validate_handles(
+            "sink",
+            sink_id,
+            &sink.segments,
+            manifest_epoch,
+            identities,
+            paths,
+        )?;
     }
     Ok(())
 }

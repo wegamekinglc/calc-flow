@@ -21,8 +21,8 @@ pub(crate) use compile::{
 };
 pub(crate) use stream::{
     CompiledStreamOperator, OUTPUT_FRONTIER_METADATA_KEY_V1, OperatorCheckpointCapability,
-    RuntimeProducer, RuntimeSinkRoute, RuntimeSourceRoute, RuntimeStreamNode,
-    StreamRuntimePlanParts,
+    RuntimeConsumer, RuntimeEdgeKind, RuntimeProducer, RuntimeSinkRoute, RuntimeSourceRoute,
+    RuntimeStreamNode, StableOperatorId, StreamRuntimePlanParts,
 };
 
 use std::collections::BTreeMap;
@@ -179,7 +179,7 @@ impl PipelineBuilder {
                 OperatorCheckpointCapability::Stateless
             }
             NodeOperator::Sql(operator) if operator.has_stream_aggregate() => {
-                OperatorCheckpointCapability::CheckpointedStateful { state_version: 1 }
+                OperatorCheckpointCapability::CheckpointedStateful { state_version: 2 }
             }
             NodeOperator::Sql(_) => OperatorCheckpointCapability::Stateless,
             NodeOperator::Window(_) => OperatorCheckpointCapability::CheckpointedStateful {

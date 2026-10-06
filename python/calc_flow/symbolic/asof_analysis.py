@@ -10,6 +10,7 @@ from calc_flow.symbolic.types import Field
 
 if TYPE_CHECKING:
     from calc_flow.asof_join_spec import AsofJoinSide, AsofJoinSpec
+    from calc_flow.capabilities import RuntimeCapabilities
     from calc_flow.symbolic.analyzer import TableFacts, _Analyzer
     from calc_flow.symbolic.nodes import Node
 
@@ -32,6 +33,19 @@ _SEQUENCE_TYPES = frozenset(
 )
 _KEY_TYPES = _SEQUENCE_TYPES | {"bool", "date32", "date64"}
 _TIME_TYPE = "timestamp[us, UTC]"
+
+
+def default_state_layout(capabilities: RuntimeCapabilities) -> int:
+    return max(
+        (
+            layout
+            for operator in capabilities.operators
+            if operator.kind == "stream_asof_join"
+            for layout in operator.state_layouts
+            if layout == 10
+        ),
+        default=10,
+    )
 
 
 def _capability(analyzer: _Analyzer, path: str) -> None:
@@ -60,7 +74,6 @@ def _capability(analyzer: _Analyzer, path: str) -> None:
         "requires_watermark": True,
         "checkpoint_support": "checkpointed_stateful",
         "state_version": 3,
-        "state_layouts": (3,),
         "deterministic": True,
         "replay_safe": True,
         "input_ports": (
@@ -69,8 +82,10 @@ def _capability(analyzer: _Analyzer, path: str) -> None:
         ),
         "output_ports": (ProviderPort("output", "table", True),),
     }
-    if len(offered) == 1 and all(
-        getattr(offered[0], name) == value for name, value in expected.items()
+    if (
+        len(offered) == 1
+        and 10 in offered[0].state_layouts
+        and all(getattr(offered[0], name) == value for name, value in expected.items())
     ):
         return
     analyzer.issue(

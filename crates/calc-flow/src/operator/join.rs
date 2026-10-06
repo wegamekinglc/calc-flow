@@ -527,7 +527,7 @@ mod tests {
             CancellationToken::new(),
         );
         let context = StreamOperatorContext::new(&job, "match", None)
-            .with_test_output_budget(EdgeBudget::new(2, 8 << 20).unwrap());
+            .with_output_budget(EdgeBudget::new(2, 8 << 20).unwrap());
         let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
 
         operator
@@ -591,7 +591,7 @@ mod tests {
             StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
         let job = job();
         let context = StreamOperatorContext::new(&job, "match", None)
-            .with_test_output_budget(EdgeBudget::new(2, 8 << 20).unwrap());
+            .with_output_budget(EdgeBudget::new(2, 8 << 20).unwrap());
         let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
         operator
             .process_data("left", left_batch(vec![100; 4]), &context, &mut collector)
@@ -655,7 +655,7 @@ mod tests {
             StreamJoinOperator::new("match", Arc::clone(&schema), right_schema(), spec()).unwrap();
         let job = job();
         let context = StreamOperatorContext::new(&job, "match", None)
-            .with_test_output_budget(EdgeBudget::new(1, 64).unwrap());
+            .with_output_budget(EdgeBudget::new(1, 64).unwrap());
         let mut output = EdgeCollector::new(operator.output_ports().to_vec());
         for unused in ["a".repeat(512), "b".repeat(512)] {
             let record = RecordBatch::try_new(
@@ -705,7 +705,7 @@ mod tests {
             CancellationToken::new(),
         );
         let context = StreamOperatorContext::new(&job, "match", None)
-            .with_test_output_budget(EdgeBudget::new(10_000, 64).unwrap());
+            .with_output_budget(EdgeBudget::new(10_000, 64).unwrap());
         let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
 
         operator
@@ -772,8 +772,7 @@ mod tests {
         let cancel = CancellationToken::new();
         let run = StreamJobContext::new(1, "fingerprint", JsonMap::new(), None, cancel.clone());
         let budget = EdgeBudget::new(2, 8 << 20).unwrap();
-        let context =
-            StreamOperatorContext::new(&run, "match", None).with_test_output_budget(budget);
+        let context = StreamOperatorContext::new(&run, "match", None).with_output_budget(budget);
         let mut preload = EdgeCollector::new(operator.output_ports().to_vec());
         operator
             .process_data("left", left_batch(vec![100; 4]), &context, &mut preload)
@@ -802,7 +801,7 @@ mod tests {
         restored.restore(&checkpoint).unwrap();
         let resumed_job = job();
         let resumed =
-            StreamOperatorContext::new(&resumed_job, "match", None).with_test_output_budget(budget);
+            StreamOperatorContext::new(&resumed_job, "match", None).with_output_budget(budget);
         let mut output = EdgeCollector::new(restored.output_ports().to_vec());
         restored
             .process_data("right", right_batch(vec![100]), &resumed, &mut output)
@@ -835,8 +834,7 @@ mod tests {
         // max_rows alone would keep all four wide rows in one message; the
         // byte bound is what must drive the split.
         let budget = EdgeBudget::new(1_000, 800).unwrap();
-        let context =
-            StreamOperatorContext::new(&job, "match", None).with_test_output_budget(budget);
+        let context = StreamOperatorContext::new(&job, "match", None).with_output_budget(budget);
         let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
 
         operator
@@ -916,8 +914,7 @@ mod tests {
             StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
         let job = job();
         let budget = EdgeBudget::new(100, 433).unwrap();
-        let context =
-            StreamOperatorContext::new(&job, "match", None).with_test_output_budget(budget);
+        let context = StreamOperatorContext::new(&job, "match", None).with_output_budget(budget);
         let keys = (0..9).collect::<Vec<_>>();
         let record = RecordBatch::try_new(
             left_schema(),

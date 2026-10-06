@@ -120,18 +120,11 @@ impl StreamAsofJoinOperator {
 
     pub(super) async fn prepare_right_eviction_copies(
         &self,
+        selected: &[u32],
         context: &StreamOperatorContext<'_>,
     ) -> Result<PreparedRightCopies> {
-        let threshold = super::state::retention_threshold(&self.state, &self.status);
-        self.prepare_right_copies(
-            self.state.right.shared_eviction_buckets(
-                &self.status,
-                self.spec.tolerance_micros(),
-                threshold,
-            ),
-            context,
-        )
-        .await
+        self.prepare_right_copies(self.state.right.shared_eviction_buckets(selected), context)
+            .await
     }
 
     async fn prepare_right_copies<'a>(

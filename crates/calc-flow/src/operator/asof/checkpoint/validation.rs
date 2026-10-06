@@ -139,8 +139,10 @@ fn validate_identity_payloads(
 ) -> Result<()> {
     let threshold = retention_threshold(state, progress);
     if state.right.values().any(|bucket| {
-        bucket.iter().any(|((time, _), row)| {
-            row.is_none() && i128::from(*time) + i128::from(tolerance) >= threshold
+        bucket.iter().any(|(order, row)| {
+            row.is_none()
+                && i128::from(*order.0) + i128::from(tolerance) >= threshold
+                && !bucket.has_dominating_payload(&order, threshold)
         })
     }) {
         return Err(mismatch(

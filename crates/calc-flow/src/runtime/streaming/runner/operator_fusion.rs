@@ -1,16 +1,145 @@
 #[cfg(test)]
 mod allocation_evidence;
+#[cfg(test)]
+mod asof_chain_entry_tests;
+#[cfg(test)]
+mod asof_chain_tests;
+
+use std::collections::BTreeMap;
 
 use crate::{
     OperatorMetadata,
-    pipeline::{CompiledStreamOperator, RuntimeStreamNode},
+    pipeline::{
+        CompiledStreamOperator, RuntimeConsumer, RuntimeEdgeKind, RuntimeProducer,
+        RuntimeStreamNode, StreamRuntimePlanParts,
+    },
 };
 
+pub(crate) struct FusionProof {
+    members: Vec<(String, usize)>,
+    edges: Vec<String>,
+}
+
+impl FusionProof {
+    #[cfg(test)]
+    pub(crate) fn for_test(first: &RuntimeStreamNode, second: &RuntimeStreamNode) -> Option<Self> {
+        eligible_pair(first, second).then(|| Self {
+            members: vec![(first.node_id.clone(), 0), (second.node_id.clone(), 1)],
+            edges: vec![first.output_edges["output"][0].clone()],
+        })
+    }
+
+    pub(super) fn edges(&self) -> &[String] {
+        &self.edges
+    }
+    pub(super) fn members(&self) -> &[(String, usize)] {
+        &self.members
+    }
+
+    pub(crate) fn matches(&self, ids: &[&str]) -> bool {
+        self.members.len() == ids.len()
+            && self
+                .members
+                .iter()
+                .zip(ids)
+                .all(|((id, _), input)| id == input)
+    }
+}
+
+pub(super) fn plan_fusion(plan: &StreamRuntimePlanParts) -> BTreeMap<String, FusionProof> {
+    let node_ordinals: BTreeMap<_, _> = plan
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(ordinal, node)| (node.node_id.as_str(), ordinal))
+        .collect();
+    let mut claimed = std::collections::BTreeSet::new();
+    let mut groups = BTreeMap::new();
+    for (head_ordinal, head) in plan.nodes.iter().enumerate() {
+        if claimed.contains(&head_ordinal) {
+            continue;
+        }
+        let mut members = vec![(head.node_id.clone(), head_ordinal)];
+        let mut edges = Vec::new();
+        let mut first = head;
+        loop {
+            let Some([edge_id]) = first.output_edges.get("output").map(Vec::as_slice) else {
+                break;
+            };
+            let Some(edge) = plan.edges.get(edge_id) else {
+                break;
+            };
+            let RuntimeConsumer::Node { node_id, ingress } = &edge.consumer else {
+                break;
+            };
+            let Some(&ordinal) = node_ordinals.get(node_id.as_str()) else {
+                break;
+            };
+            let second = &plan.nodes[ordinal];
+            if claimed.contains(&ordinal)
+                || !eligible_link(first, second, edge.kind, ingress, &edge.producer)
+            {
+                break;
+            }
+            members.push((second.node_id.clone(), ordinal));
+            edges.push(edge_id.clone());
+            first = second;
+        }
+        if members.len() > 1 {
+            claimed.extend(members.iter().map(|(_, ordinal)| *ordinal));
+            groups.insert(head.node_id.clone(), FusionProof { members, edges });
+        }
+    }
+    groups
+}
+
+fn eligible_link(
+    first: &RuntimeStreamNode,
+    second: &RuntimeStreamNode,
+    kind: RuntimeEdgeKind,
+    ingress: &str,
+    producer: &RuntimeProducer,
+) -> bool {
+    kind == RuntimeEdgeKind::Internal
+        && ingress == "input"
+        && producer
+            == &(RuntimeProducer::Node {
+                node_id: first.node_id.clone(),
+                port: "output".into(),
+            })
+        && eligible_pair(first, second)
+}
+
 pub(super) fn eligible_pair(first: &RuntimeStreamNode, second: &RuntimeStreamNode) -> bool {
-    let (CompiledStreamOperator::Rolling(rolling), CompiledStreamOperator::Expression(expression)) =
-        (&first.operator, &second.operator)
-    else {
+    let CompiledStreamOperator::Expression(expression) = &second.operator else {
         return false;
+    };
+    let head_schema = match &first.operator {
+        CompiledStreamOperator::Rolling(operator) => operator.output_ports()[0].schema().cloned(),
+        CompiledStreamOperator::StreamAsofJoin(operator) => {
+            operator.output_ports()[0].schema().cloned()
+        }
+        CompiledStreamOperator::Expression(operator) => {
+            let Some(input) = first
+                .input_ports
+                .get("input")
+                .and_then(|port| port.schema())
+            else {
+                return false;
+            };
+            let Some(output) = first
+                .output_ports
+                .get("output")
+                .and_then(|port| port.schema())
+            else {
+                return false;
+            };
+            if !operator.is_exact_column_projection(input, Some(output)) {
+                return false;
+            }
+            Some(output.clone())
+        }
+        _ => return false,
     };
     if !directly_connected(first, second) {
         return false;
@@ -25,7 +154,7 @@ pub(super) fn eligible_pair(first: &RuntimeStreamNode, second: &RuntimeStreamNod
     let Some(output) = second.output_ports.get("output") else {
         return false;
     };
-    rolling.output_ports()[0].schema() == Some(input)
+    head_schema.as_ref() == Some(input)
         && second
             .input_ports
             .get("input")
@@ -34,18 +163,28 @@ pub(super) fn eligible_pair(first: &RuntimeStreamNode, second: &RuntimeStreamNod
         && expression.is_exact_column_projection(input, output.schema())
 }
 
-fn has_single_ports(node: &RuntimeStreamNode) -> bool {
-    node.input_ports.len() == 1 && node.ingress_edges.len() == 1 && node.output_ports.len() == 1
-}
-
 fn directly_connected(first: &RuntimeStreamNode, second: &RuntimeStreamNode) -> bool {
-    if !has_single_ports(first) || first.output_edges.len() != 1 || !has_single_ports(second) {
+    let head_inputs = if matches!(first.operator, CompiledStreamOperator::StreamAsofJoin(_)) {
+        2
+    } else {
+        1
+    };
+    if first.input_ports.len() != head_inputs
+        || first.ingress_edges.len() != head_inputs
+        || first.output_ports.len() != 1
+        || first.output_edges.len() != 1
+        || !single_projection_consumer(second)
+    {
         return false;
     }
     let Some([edge]) = first.output_edges.get("output").map(Vec::as_slice) else {
         return false;
     };
     second.ingress_edges.get("input") == Some(edge)
+}
+
+fn single_projection_consumer(node: &RuntimeStreamNode) -> bool {
+    node.input_ports.len() == 1 && node.ingress_edges.len() == 1 && node.output_ports.len() == 1
 }
 
 #[cfg(test)]
@@ -406,6 +545,7 @@ mod tests {
         OperatorTaskInputs {
             late_output_ports: std::collections::BTreeSet::new(),
             entity_work: None,
+            sql_recovery: None,
             node_id: name.into(),
             operator: crate::pipeline::CompiledStreamOperator::External(Box::new(CallbackProbe {
                 name,
@@ -418,7 +558,7 @@ mod tests {
                 "input".into(),
                 OperatorIngress::new(format!("to-{name}"), receiver),
             )]),
-            outputs: BTreeMap::from([("output".into(), vec![sender])]),
+            outputs: BTreeMap::from([("output".into(), vec![sender.into()])]),
             output_ports: BTreeMap::from([("output".into(), output)]),
             context: context.for_node(name).unwrap(),
             progress: OperatorProgress::default(),

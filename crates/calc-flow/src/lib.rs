@@ -72,9 +72,9 @@ pub use continuous::{
     NativeWatermarkCapability, OperatorStatus, OutputDeliveryStatus, ReplayPositioning,
     RollingCallbackMetrics, RollingMetrics, SinkBinding, SinkDelivery, SinkRecovery, SinkStatus,
     SourceBinding, SourceCapabilities, SourceCheckpointGate, SourceDeliveryCapability, SourceEvent,
-    SourceSchema, SourceStatus, StreamSink, StreamSource, StreamingError, StreamingErrorCategory,
-    StreamingFailureReason, StreamingJob, StreamingRunner, TerminalCause, TransactionalStreamSink,
-    WatermarkPolicy,
+    SourceHistoryReplayFactory, SourceSchema, SourceStatus, StreamSink, StreamSource,
+    StreamingError, StreamingErrorCategory, StreamingFailureReason, StreamingJob, StreamingRunner,
+    TerminalCause, TransactionalStreamSink, WatermarkPolicy,
 };
 pub use datafusion::{
     DATAFUSION_ACTIVE_ENTITIES_METADATA_KEY, DataFusionConfig, DataFusionParallelismMode,
@@ -118,8 +118,10 @@ pub use state::{
     CheckpointManifest, CheckpointManifestFields, CursorManifestEntry, LocalStateBackend,
     MANIFEST_FORMAT_VERSION, MAX_MANIFEST_DOCUMENT_BYTES, ManifestExpectation,
     ManifestIngressState, OperatorIngressManifestEntry, OperatorManifestEntry, RecoveryStatus,
-    RetentionClass, SinkDeliveryManifest, SinkManifestEntry, SourceManifestEntry,
-    SourceWatermarkManifestState, StateBackend, StateHandle, StateLineageBackend, StateLineageKey,
+    RetentionClass, SOURCE_HISTORY_FORMAT_VERSION, SinkDeliveryManifest, SinkManifestEntry,
+    SourceHistoryBytes, SourceHistoryContext, SourceHistoryLimits, SourceHistoryManifestEntry,
+    SourceHistorySpec, SourceManifestEntry, SourceWatermarkManifestState, StateBackend,
+    StateHandle, StateLineageBackend, StateLineageKey,
 };
 pub use static_input::{
     STATIC_INPUT_DIGEST_VERSION, StaticInputDigest, StaticInputSpec, StaticMutability,

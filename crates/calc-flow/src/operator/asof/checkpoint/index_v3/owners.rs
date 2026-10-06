@@ -12,13 +12,76 @@ use datafusion::arrow::{
 use std::{collections::BTreeMap, sync::Arc};
 
 #[derive(Default)]
-pub(super) struct OwnerWriter {
+pub(in crate::operator::asof) struct OwnerWriter {
     ids: BTreeMap<usize, u32>,
     owners: Vec<Encoding>,
     bytes: u64,
 }
 
+impl Clone for OwnerWriter {
+    fn clone(&self) -> Self {
+        let mut owners = Vec::with_capacity(self.owners.capacity());
+        owners.extend(self.owners.iter().cloned());
+        Self {
+            ids: self.ids.clone(),
+            owners,
+            bytes: self.bytes,
+        }
+    }
+}
+
 impl OwnerWriter {
+    pub fn copy_with_capacity(&self, capacity: usize) -> Result<Self> {
+        if capacity < self.owners.len() {
+            return Err(mismatch("ASOF log owner capacity is too small"));
+        }
+        let mut owners = Vec::with_capacity(capacity);
+        owners.extend(self.owners.iter().cloned());
+        Ok(Self {
+            ids: self.ids.clone(),
+            owners,
+            bytes: self.bytes,
+        })
+    }
+    pub fn allocations(&self) -> impl Iterator<Item = (usize, u64)> + '_ {
+        self.owners.iter().filter_map(Encoding::allocation)
+    }
+    pub fn count(&self) -> usize {
+        self.owners.len()
+    }
+    pub fn capacity(&self) -> usize {
+        self.owners.capacity()
+    }
+    pub fn metadata_bytes(&self) -> u64 {
+        if self.owners.is_empty() {
+            return 0;
+        }
+        384 + self.ids.len() as u64 * 128
+            + self.owners.capacity() as u64 * size_of::<Encoding>() as u64
+    }
+    pub fn contains_address(&self, address: usize) -> bool {
+        self.ids.contains_key(&address)
+    }
+    pub fn contains(&self, encoding: &Encoding) -> bool {
+        encoding
+            .allocation()
+            .is_none_or(|(address, _)| self.ids.contains_key(&address))
+    }
+    pub fn write_since_checked(
+        &self,
+        bytes: &mut Vec<u8>,
+        first: usize,
+        cancel: &dyn Fn() -> Result<()>,
+    ) -> Result<()> {
+        cancel()?;
+        put(bytes, (self.owners.len() - first) as u64);
+        for (ordinal, owner) in self.owners[first..].iter().enumerate() {
+            super::check_step(ordinal, cancel)?;
+            write_owner(bytes, owner);
+        }
+        cancel()
+    }
+
     pub fn register(&mut self, encoding: &Encoding) {
         let Some((address, _)) = encoding.allocation() else {
             return;
@@ -37,10 +100,23 @@ impl OwnerWriter {
     }
 
     pub fn write(&self, bytes: &mut Vec<u8>) {
-        put(bytes, self.owners.len() as u64);
-        for owner in &self.owners {
+        self.write_checked(bytes, 0, &|| Ok(()))
+            .expect("uncancelled owners");
+    }
+
+    pub fn write_checked(
+        &self,
+        bytes: &mut Vec<u8>,
+        first: usize,
+        cancel: &dyn Fn() -> Result<()>,
+    ) -> Result<()> {
+        cancel()?;
+        put(bytes, (self.owners.len() - first) as u64);
+        for (ordinal, owner) in self.owners[first..].iter().enumerate() {
+            super::check_step(ordinal, cancel)?;
             write_owner(bytes, owner);
         }
+        cancel()
     }
 
     pub fn reference(&self, bytes: &mut Vec<u8>, encoding: &Encoding) {
@@ -97,19 +173,27 @@ fn write_offsets(bytes: &mut Vec<u8>, rows: &EncodedBatch) {
     }
 }
 
+#[derive(Clone)]
 enum Owner {
     Shared(Arc<Vec<u8>>),
     Batch(Arc<EncodedBatch>),
 }
 
 pub(super) fn restore_charge(cursor: &mut Cursor<'_>) -> Result<u64> {
-    let count = cursor.address()?;
-    if count > cursor.bytes.len() / 34 || u32::try_from(count).is_err() {
-        return Err(mismatch("ASOF v3 owner count exceeds index size"));
-    }
+    restore_charge_checked(cursor, || Ok(()))
+}
+
+pub(super) fn restore_charge_checked(
+    cursor: &mut Cursor<'_>,
+    mut check_cancelled: impl FnMut() -> Result<()>,
+) -> Result<u64> {
+    let count = restore_owner_count(cursor)?;
     let mut charge = count as u64 * 256;
     let mut largest = 0;
-    for _ in 0..count {
+    for ordinal in 0..count {
+        if ordinal.is_multiple_of(128) {
+            check_cancelled()?;
+        }
         let (length, bytes) = scan_owner(cursor)?;
         largest = largest.max(length);
         charge = super::restore_add(charge, bytes)?;
@@ -118,14 +202,69 @@ pub(super) fn restore_charge(cursor: &mut Cursor<'_>) -> Result<u64> {
     super::restore_add(charge, largest)
 }
 
-pub(super) struct OwnerReader {
+fn restore_owner_count(cursor: &mut Cursor<'_>) -> Result<usize> {
+    let count = cursor.address()?;
+    if count > cursor.bytes.len() / 34 || u32::try_from(count).is_err() {
+        return Err(mismatch("ASOF v3 owner count exceeds index size"));
+    }
+    Ok(count)
+}
+
+#[derive(Clone)]
+pub(in crate::operator::asof) struct OwnerReader {
     owners: Vec<Owner>,
     used: Vec<bool>,
     next: usize,
 }
 
 impl OwnerReader {
-    pub fn read(cursor: &mut Cursor<'_>) -> Result<Self> {
+    pub fn count(&self) -> usize {
+        self.owners.len()
+    }
+    pub(super) fn append_checked(
+        &mut self,
+        cursor: &mut Cursor<'_>,
+        mut check_cancelled: impl FnMut() -> Result<()>,
+    ) -> Result<()> {
+        let count = cursor.address()?;
+        if count > cursor.bytes.len() / 34
+            || self
+                .owners
+                .len()
+                .checked_add(count)
+                .is_none_or(|count| u32::try_from(count).is_err())
+        {
+            return Err(mismatch("ASOF log owner count exceeds index size"));
+        }
+        self.owners.reserve_exact(count);
+        self.used.reserve_exact(count);
+        for ordinal in 0..count {
+            if ordinal.is_multiple_of(128) {
+                check_cancelled()?;
+            }
+            self.owners.push(read_owner(cursor)?);
+            self.used.push(false);
+        }
+        Ok(())
+    }
+    pub fn into_writer(self, capacity: usize) -> Result<OwnerWriter> {
+        if capacity < self.owners.len() || capacity > self.owners.len().saturating_mul(2).max(4) {
+            return Err(mismatch("ASOF log owner capacity differs"));
+        }
+        let mut writer = OwnerWriter {
+            owners: Vec::with_capacity(capacity),
+            ..OwnerWriter::default()
+        };
+        for owner in self.owners {
+            let encoding = match owner {
+                Owner::Shared(values) => Encoding::Shared(values),
+                Owner::Batch(rows) => Encoding::Batch { rows, row: 0 },
+            };
+            writer.register(&encoding);
+        }
+        Ok(writer)
+    }
+    pub(super) fn read(cursor: &mut Cursor<'_>) -> Result<Self> {
         let count = cursor.address()?;
         if u32::try_from(count).is_err() || count > cursor.bytes.len() / 34 {
             return Err(mismatch("ASOF v3 owner count exceeds index size"));
@@ -141,7 +280,7 @@ impl OwnerReader {
         })
     }
 
-    pub fn reference(&mut self, cursor: &mut Cursor<'_>) -> Result<Encoding> {
+    pub(super) fn reference(&mut self, cursor: &mut Cursor<'_>) -> Result<Encoding> {
         let bytes = cursor.take(16)?;
         if bytes[12..] != [0; 4] {
             return Err(mismatch("ASOF v3 reference padding differs"));
