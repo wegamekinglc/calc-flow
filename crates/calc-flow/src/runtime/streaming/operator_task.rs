@@ -959,6 +959,7 @@ async fn run_operator_loop(
     );
     let mut skipped_data = false;
     let mut handoff_due = false;
+    let mut last_ingress = None;
     loop {
         if inputs
             .ingresses
@@ -976,15 +977,17 @@ async fn run_operator_loop(
             receive_operator_message_observing_pending(
                 inputs,
                 &barrier_alignment,
+                last_ingress.as_deref(),
                 &mut receive_suspended,
             )
             .await?
         } else {
-            receive_operator_message(inputs, &barrier_alignment).await?
+            receive_operator_message(inputs, &barrier_alignment, last_ingress.as_deref()).await?
         };
         let Some((ingress_name, message)) = received else {
             return Ok(());
         };
+        last_ingress = Some(ingress_name.clone());
         if receive_suspended {
             skipped_data = false;
         } else if handoff_due {
@@ -1122,9 +1125,14 @@ async fn complete_terminal_checkpoint(
 async fn receive_operator_message_observing_pending(
     inputs: &mut OperatorTaskInputs,
     barrier_alignment: &OperatorBarrierAlignment,
+    last_ingress: Option<&str>,
     suspended: &mut bool,
 ) -> Result<Option<(String, StreamMessage)>> {
-    let mut receive = std::pin::pin!(receive_operator_message(inputs, barrier_alignment));
+    let mut receive = std::pin::pin!(receive_operator_message(
+        inputs,
+        barrier_alignment,
+        last_ingress
+    ));
     std::future::poll_fn(|context| {
         let result = receive.as_mut().poll(context);
         *suspended |= result.is_pending();
@@ -1136,11 +1144,12 @@ async fn receive_operator_message_observing_pending(
 async fn receive_operator_message(
     inputs: &mut OperatorTaskInputs,
     barrier_alignment: &OperatorBarrierAlignment,
+    last_ingress: Option<&str>,
 ) -> Result<Option<(String, StreamMessage)>> {
     let received = tokio::select! {
         biased;
         () = inputs.context.job().cancellation().cancelled() => return Ok(None),
-        received = receive_ready(&mut inputs.ingresses, barrier_alignment) => received?,
+        received = receive_ready(&mut inputs.ingresses, barrier_alignment, last_ingress) => received?,
     };
     let (ingress_name, message) = received;
     match message {
@@ -1185,8 +1194,19 @@ type ReceiveFuture<'a> =
 async fn receive_ready(
     ingresses: &mut BTreeMap<String, OperatorIngress>,
     barrier_alignment: &OperatorBarrierAlignment,
+    last_ingress: Option<&str>,
 ) -> Result<(String, Option<StreamMessage>)> {
-    let receives = ingresses
+    let start = last_ingress.map_or(0, |last| {
+        ingresses
+            .iter()
+            .filter(|(name, ingress)| {
+                name.as_str() <= last
+                    && !ingress.saw_explicit_eof
+                    && !barrier_alignment.is_blocked(name)
+            })
+            .count()
+    });
+    let mut receives = ingresses
         .iter_mut()
         .filter(|(name, ingress)| !ingress.saw_explicit_eof && !barrier_alignment.is_blocked(name))
         .map(|(name, ingress)| {
@@ -1194,6 +1214,9 @@ async fn receive_ready(
             Box::pin(async move { (name, ingress.receiver.recv().await) }) as ReceiveFuture<'_>
         })
         .collect::<Vec<_>>();
+    if start < receives.len() {
+        receives.rotate_left(start);
+    }
     let ((name, result), _, _) = select_all(receives).await;
     Ok((name, result?))
 }
@@ -3566,6 +3589,45 @@ pub(super) mod tests {
             panic!("ready handler failure must win over same-poll cancellation");
         };
         assert_eq!(message, "handler-ready-error");
+    }
+
+    #[tokio::test]
+    async fn ready_selection_does_not_starve_another_ingress_watermark() {
+        let (mut left, left_receiver) = crate::edge_channel("left", EdgeBudget::default()).unwrap();
+        let (mut right, right_receiver) =
+            crate::edge_channel("right", EdgeBudget::default()).unwrap();
+        for sequence in 0..3 {
+            left.send(StreamMessage::data(batch("L", sequence)))
+                .await
+                .unwrap();
+        }
+        right
+            .send(StreamMessage::watermark(EventTime::from_micros(10)))
+            .await
+            .unwrap();
+        let mut ingresses = BTreeMap::from([
+            (
+                "left".into(),
+                OperatorIngress::new("left".into(), left_receiver),
+            ),
+            (
+                "right".into(),
+                OperatorIngress::new("right".into(), right_receiver),
+            ),
+        ]);
+        let alignment = super::OperatorBarrierAlignment::default();
+        let first = super::receive_ready(&mut ingresses, &alignment, None)
+            .await
+            .unwrap();
+        assert_eq!(first.0, "left");
+        let second = super::receive_ready(&mut ingresses, &alignment, Some(&first.0))
+            .await
+            .unwrap();
+        assert_eq!(second.0, "right");
+        assert_eq!(
+            second.1.unwrap().as_watermark(),
+            Some(EventTime::from_micros(10))
+        );
     }
 
     #[tokio::test]
