@@ -11,8 +11,8 @@ These measurements compare the clean progress baseline
 `94383f5bb8ef9050113726fab39e8c379019af36` against the clean J1 stage
 `fb7b0157f8607a205ea38b95aa84cce8f5fa661b`. They are stage evidence for
 [PR #369](https://github.com/wegamekinglc/calc-flow/pull/369), rather than a
-measurement of its later integrated shutdown/runtime fixes. The final native
-wheel and final common-harness E2E comparisons remain pending. No A2, J1.6,
+measurement of its later integrated shutdown/runtime fixes. Final integrated
+release-wheel E2E evidence is recorded in Appendix E. No A2, J1.6,
 checkpoint/restore, full-state expiration, or whole-pipeline gain is inferred
 from these operator timings.
 
@@ -123,9 +123,8 @@ diagnostic and are not counted as streaming throughput.
   targets. The J1 source's focused instrumented tests record these properties;
   this release probe does not instrument visit counts. Timings alone do not
   prove a zero count.
-- Final static Join 1M and retained interval 100k/1024 E2E comparisons remain
-  pending the final sealed wheel, reviewed causal-status harness and quiet
-  window. Immediate timer-cutoff status is retained as a lag diagnostic;
+- Final static Join 1M and retained interval 100k/1024 E2E comparisons are
+  recorded in Appendix E with the reviewed causal-status harness. Immediate timer-cutoff status is retained as a lag diagnostic;
   causal verification must wait for emitted output and check the same snapshot.
 - J1.6 compaction latency, capture/restore cost, allocation counts, cold runs,
   and scheduled full-suite/lifecycle evidence remain unverified. The existing
@@ -186,7 +185,8 @@ python target/issue363-join-safety-perf/verify_native_progress.py
 ```
 
 Overall verdict for the sealed J1 stage's tested progress paths: confirmed
-improvement with increased RSS. Final integrated E2E verdict remains pending.
+improvement with increased RSS. Appendix E records the final integrated
+E2E observations and their inconclusive projection controls.
 
 ## Appendix A: exact paired arrays and machine metadata
 
@@ -1191,4 +1191,854 @@ fn main() {
         std::io::stdout().flush().unwrap();
     }
 }
+```
+
+## Appendix E: final integrated J1 E2E evidence
+
+The final static lookup Join median fell 6.04%, but its first-round interval
+does not establish a material improvement above 5%. Retained interval
+100k/1024 changed −0.78%, without a confirmed gain. These measured application
+boundary outcomes are much smaller than the retained-progress kernel effects
+reported above. Overall final E2E verdict: inconclusive projection control;
+no confirmed material improvement or regression on the Join cases.
+
+### Final compatible comparison and controls
+
+The clean release comparison is `c9eac4af9ea6a9d1b18854eb80294720a27235f9` →
+`f1ef46bbf52fc39dfb820b6c143f1c8b2fabea23`. Both incorporate the identical paid ASOF retirement repair,
+reviewed status helper, retained benchmark foundation and dependency versions.
+Only the native J1 stage differs. The common Python measuring
+harness is the candidate's immutable clean snapshot. Its SHA-256 is
+`6593983e766921f3c73bbdcef0c3aaad011f93d41463467481c9dc7b6d9ddff5`. The J1 candidate wheel is reused byte-for-byte
+as the A2 baseline; it is not rebuilt. The final source commits precede the
+later report-only PR update.
+
+All cases have two rounds of ten alternating AB/BA pairs, with separate workers
+per round. The exact paired order-statistic intervals and ±5% gates use the
+maintained suite policy, not minimum timings. Full payload oracles are outside
+the clock. Each sample starts a fresh ready job with empty state; planning,
+startup, EOF/retirement cleanup and verification are excluded. Ordinary ready
+batch size is explicitly named `fixture_batch_rows`; original input event
+attestations prove actual data batches. Replay variants retain `batch_rows`
+and every maintained seven-dimensional adapter evidence gate. No validator
+was weakened to accept malformed replay evidence.
+
+|  Case                                              |  Base p50 ms  |  Head p50 ms  |  Head p95 ms  |  p50 change  |  R1 paired interval %  |  R2 paired interval %  |  Verdict                  |
+|----------------------------------------------------|---------------|---------------|---------------|--------------|------------------------|------------------------|---------------------------|
+|  1000000/calc-flow-stream/join/batch-64000         |  696.054374   |  654.021147   |  671.757683   |  -6.039%     |  [-7.785, -4.706]      |  [-7.124, -5.736]      |  no-confirmed-regression  |
+|  1000000/calc-flow-stream/projection/batch-64000   |  6.457301     |  6.364517     |  7.397685     |  -1.437%     |  [-12.742, +13.223]    |  [-21.377, +10.809]    |  inconclusive             |
+|  100000/calc-flow-stream/interval_join/batch-1024  |  642.453426   |  637.460205   |  655.090583   |  -0.777%     |  [-2.499, +1.365]      |  [-3.863, +1.892]      |  no-confirmed-regression  |
+
+The point estimates describe this run. A confirmed material improvement
+requires both paired upper bounds below −5%; none of these final E2E cases
+meets that condition. Join/ASOF observations must not inherit the much larger
+bounded native-progress speedups. Projection controls have broad intervals
+whose upper bounds exceed +5%, so their verdict is **inconclusive**. No case
+has a confirmed regression, but the overall E2E absence of a regression is
+not established for those controls. There is no selective repeat or minimum
+selection to obtain a favorable result.
+
+### Final worker memory and host limits
+
+|  Case                                              |  Version    |  Final RSS median MiB  |  Round worker HWM MiB  |
+|----------------------------------------------------|-------------|------------------------|------------------------|
+|  1000000/calc-flow-stream/join/batch-64000         |  baseline   |  739.346               |  768.605, 770.703      |
+|  1000000/calc-flow-stream/join/batch-64000         |  candidate  |  665.176               |  672.562, 728.355      |
+|  1000000/calc-flow-stream/projection/batch-64000   |  baseline   |  481.180               |  513.191, 511.207      |
+|  1000000/calc-flow-stream/projection/batch-64000   |  candidate  |  470.422               |  497.273, 504.355      |
+|  100000/calc-flow-stream/interval_join/batch-1024  |  baseline   |  515.066               |  547.172, 560.969      |
+|  100000/calc-flow-stream/interval_join/batch-1024  |  candidate  |  461.973               |  562.953, 569.492      |
+
+The Python worker RSS includes NumPy/PyArrow/native imports, immutable input,
+retained owners, gathered Arrow outputs and full oracle sorting. Two worker
+HWMs per version are descriptive memory observations, not a statistically
+confirmed RSS change or per-index allocation count. Both version workers
+coexist for E2E alternating sampling; their peaks must not be confused with
+the sequential single-resident native retained-state probe.
+
+The team-coordinated quiet WSL2 run was 2026-10-06T14:30:58.313015+00:00 to
+2026-10-06T14:32:23.480478+00:00; one-minute load-average observations ranged
+0.536–1.132.
+CPU is i9-13900HX, 32 logical CPUs, affinity 0–31, 32 Tokio and Polars threads,
+and OMP/OpenBLAS/MKL limited to one. Actual loaded native module SHA and
+dependency/thread identities were checked on all workers. Windows-host power
+mode and background scheduling remain unobservable. The broad projection
+intervals bound the strength of the conclusion despite team quiet.
+
+### Raw evidence and independent verification
+
+The independent checker verified 120 exact timed values,
+12 excluded warmups, 12 unique
+worker PIDs, 156 raw IPC responses, all full payload
+oracles, actual source-event batch shapes, every causal/completed state gate,
+worker exit code zero, and both paired intervals. It rederived the statistics
+without importing the suite statistics implementation. It also confirmed the
+shared f1 wheel and matching final harness/machine/dependency fingerprints.
+
+Raw paths: `target/issue363-join-safety-perf/final/matrix-final`.
+Checker: J1 target `final/verify.py`. The combined archive lives in the J1
+target at `final/issue363-final-e2e-evidence.tar.gz`,
+SHA-256 `e78793b6ab41f0d638fde3440312fef307fdab1bb677484905764922521a9c0c`, 330,235 bytes. It contains both
+completed matrices, the failed warmup attempt, exact per-stage driver/worker
+copies, hello preflight, independent verification and three release/build
+manifests/logs. It excludes source snapshots, wheels, binaries, mutable Cargo
+cache and these subsequently written Markdown reports. The appendices embed
+the arrays, seals and worker proofs for review without ignored target paths.
+
+The first J1 attempt failed immediately after a valid warmup because the
+ordinary ready case incorrectly used the replay-reserved `batch_rows` field.
+The maintained gate correctly rejected missing replay adapter evidence.
+There were zero measured pairs. That attempt remains at J1 `final/matrix`,
+with its exact driver copy in `final/attempts/warmup-dimensions`; the corrected
+full run uses `matrix-final`. Ordinary actual 1024-row feeds were independently
+verified as 97×1024+672 rows for each 100k input, never a default 64k feed.
+The final A2 driver checks this attestation before the first measured pair.
+The J1 driver's previously loaded exact bytes are preserved separately;
+adding the A2 gate did not change a running J1 worker or its recorded hash.
+
+### Causal Join status proof and target boundaries
+
+All 44 static Join outputs, including four excluded warmups, contain a
+timer-cutoff status showing only 960,000 emitted rows. That snapshot is kept
+as a lag diagnostic and never used as the final proof. The untimed helper
+waits for 1,000,000 emitted rows, then validates left rows/bytes/evictions are
+zero in that exact returned snapshot. The EOF-completed snapshot also proves
+1,000,000 output rows and zero left counters. Both versions pass.
+
+The retained variant validates every one of 1,098,080 output rows and all
+seven replay dimensions for every warmup/sample. It has no checkpoint
+interval; no recovery/capture timing claim follows. Full retained-stream
+1M→4M scaling and J1.6 compaction, cold/full scheduled suites, allocations
+and restore costs remain unverified. The smaller 100k variant supplies
+state-churn coverage within a bounded local cost.
+
+### Exact final arrays, identities and release manifests
+
+```json
+{
+  "stage": "j1",
+  "started_utc": "2026-10-06T14:30:58.313015+00:00",
+  "finished_utc": "2026-10-06T14:32:23.480478+00:00",
+  "harness": {
+    "git_sha": "f1ef46bbf52fc39dfb820b6c143f1c8b2fabea23",
+    "git_clean": true,
+    "source_sha256": "75d2592fc33e0fb746b8f99bdd6a26122c6671ea1e22fd56c7a4ded34d26be54",
+    "cargo_lock_sha256": "84789d29f2cb7342b0297169caf03c8f14227645656d34956ed9bc9aaa0c4840"
+  },
+  "harness_sha256": "6593983e766921f3c73bbdcef0c3aaad011f93d41463467481c9dc7b6d9ddff5",
+  "driver_sha256": "dc5c0081ac5868aa639e1260f5e57bfc56cf7a7237adcf299ca96c7f8b90104b",
+  "worker_sha256": "2008f3653561450952ca62f095e9b66a9a440bdcffc61d57359d37b7c956f69f",
+  "environment": {
+    "python": "3.13.9",
+    "numpy": "2.5.2",
+    "pyarrow": "24.0.0",
+    "platform": "Linux-5.15.167.4-microsoft-standard-WSL2-x86_64-with-glibc2.43",
+    "logical_cpus": 32,
+    "cpu_affinity": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31
+    ],
+    "tokio_worker_threads": "32",
+    "packages": {
+      "datafusion": "54.0.0",
+      "polars": "1.44.2",
+      "TA-Lib": "0.7.1",
+      "jax": "0.11.1",
+      "jaxlib": "0.11.1"
+    },
+    "polars_threads": 32,
+    "thread_environment": {
+      "POLARS_MAX_THREADS": "32",
+      "OMP_NUM_THREADS": "1",
+      "OPENBLAS_NUM_THREADS": "1",
+      "MKL_NUM_THREADS": "1",
+      "XLA_FLAGS": null
+    }
+  },
+  "environment_sha256": "3ffec2325519909fc4073839832f785bfa76ef9990c286fa292e114d32c5a8c4",
+  "releases": {
+    "baseline": {
+      "contract": "benchmark-release-v1",
+      "source": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.worktrees/stream-join-safety/target/issue363-join-safety-perf/final/sources/j1-baseline",
+      "git_sha": "c9eac4af9ea6a9d1b18854eb80294720a27235f9",
+      "git_clean": true,
+      "source_sha256": "8d8c1ebbcf563af62622eab78e1b7fb4a7e2bf56bd48e83057e7e11498eb06f8",
+      "cargo_lock_sha256": "84789d29f2cb7342b0297169caf03c8f14227645656d34956ed9bc9aaa0c4840",
+      "wheel": "calc_flow_python-2026.9.25-cp313-abi3-linux_x86_64.whl",
+      "wheel_sha256": "ad39dd86fef5ca8aaf349f2b950b0c2992219a82d68a6d3137734ae8af738993",
+      "native_sha256": "1fd0d4bcc10a16eb5ef7762cd7b36c42ad74ed3ae84b16561c2fb51aa7cf5d8e",
+      "build_profile": "release",
+      "command": [
+        "python",
+        "-m",
+        "maturin",
+        "build",
+        "--release",
+        "--locked",
+        "--features",
+        "pyo3/abi3-py313",
+        "--out",
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.worktrees/stream-join-safety/target/issue363-join-safety-perf/final/releases/j1-baseline"
+      ],
+      "rustc": "rustc 1.88.0 (6b00bc388 2025-06-23)\nbinary: rustc\ncommit-hash: 6b00bc3880198600130e1cf62b8f8a93494488cc\ncommit-date: 2025-06-23\nhost: x86_64-unknown-linux-gnu\nrelease: 1.88.0\nLLVM version: 20.1.5",
+      "python": "3.13.9",
+      "python_executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.claude/worktrees/join-polars-analysis/target/benchmark-venv/bin/python",
+      "wheel_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.worktrees/stream-join-safety/target/issue363-join-safety-perf/final/releases/j1-baseline/calc_flow_python-2026.9.25-cp313-abi3-linux_x86_64.whl"
+    },
+    "candidate": {
+      "contract": "benchmark-release-v1",
+      "source": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.worktrees/stream-join-safety/target/issue363-join-safety-perf/final/sources/j1-candidate",
+      "git_sha": "f1ef46bbf52fc39dfb820b6c143f1c8b2fabea23",
+      "git_clean": true,
+      "source_sha256": "75d2592fc33e0fb746b8f99bdd6a26122c6671ea1e22fd56c7a4ded34d26be54",
+      "cargo_lock_sha256": "84789d29f2cb7342b0297169caf03c8f14227645656d34956ed9bc9aaa0c4840",
+      "wheel": "calc_flow_python-2026.9.25-cp313-abi3-linux_x86_64.whl",
+      "wheel_sha256": "8c2e520186d1403c5e15f0f8839287e433e185ae5e32b6233d139c0db6d8ae25",
+      "native_sha256": "4e9d884d26ff1931868019b4b400db16628fc2f2dfacee3f82b7e749cd8f16d2",
+      "build_profile": "release",
+      "command": [
+        "python",
+        "-m",
+        "maturin",
+        "build",
+        "--release",
+        "--locked",
+        "--features",
+        "pyo3/abi3-py313",
+        "--out",
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.worktrees/stream-join-safety/target/issue363-join-safety-perf/final/releases/j1-candidate"
+      ],
+      "rustc": "rustc 1.88.0 (6b00bc388 2025-06-23)\nbinary: rustc\ncommit-hash: 6b00bc3880198600130e1cf62b8f8a93494488cc\ncommit-date: 2025-06-23\nhost: x86_64-unknown-linux-gnu\nrelease: 1.88.0\nLLVM version: 20.1.5",
+      "python": "3.13.9",
+      "python_executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.claude/worktrees/join-polars-analysis/target/benchmark-venv/bin/python",
+      "wheel_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.worktrees/stream-join-safety/target/issue363-join-safety-perf/final/releases/j1-candidate/calc_flow_python-2026.9.25-cp313-abi3-linux_x86_64.whl"
+    }
+  },
+  "archive": {
+    "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.worktrees/stream-join-safety/target/issue363-join-safety-perf/final/issue363-final-e2e-evidence.tar.gz",
+    "sha256": "e78793b6ab41f0d638fde3440312fef307fdab1bb677484905764922521a9c0c",
+    "size_bytes": 330235,
+    "contents": "Both completed final matrices, failed warmup attempt, exact per-stage drivers, hello preflight, independent checker, verification and three build/release manifests/logs. Excludes source snapshots, wheels, binaries, mutable Cargo cache and subsequently written Markdown."
+  },
+  "cases": [
+    {
+      "id": "engines/1000000/calc-flow-stream/join/batch-64000/standard",
+      "family": "engines",
+      "backend": "calc-flow-stream",
+      "scenario": "join",
+      "rows": 1000000,
+      "fixture_batch_rows": 64000,
+      "diagnostic_variant": "standard",
+      "scope": "ready-enqueue-to-arrow/bounded-feeds-v6",
+      "status": "ok",
+      "correctness": true,
+      "comparison": "interleaved",
+      "baseline": [
+        [
+          0.690599195,
+          0.695560633,
+          0.70660291,
+          0.698351372,
+          0.692023818,
+          0.695660089,
+          0.703353534,
+          0.699174307,
+          0.704083805,
+          0.689382552
+        ],
+        [
+          0.700064585,
+          0.693547461,
+          0.693966348,
+          0.699355419,
+          0.707631669,
+          0.696448659,
+          0.687122396,
+          0.681722281,
+          0.685606706,
+          0.716203592
+        ]
+      ],
+      "candidate": [
+        [
+          0.661614289,
+          0.653964684,
+          0.673349204,
+          0.657495205,
+          0.635819034,
+          0.643563341,
+          0.656950486,
+          0.657800616,
+          0.649273987,
+          0.655343765
+        ],
+        [
+          0.65407761,
+          0.64751545,
+          0.644530654,
+          0.643995215,
+          0.659541542,
+          0.670021123,
+          0.638827269,
+          0.63596713,
+          0.646277403,
+          0.671673919
+        ]
+      ],
+      "result": {
+        "head_p50": 0.6540211469999999,
+        "head_p95": 0.67175768325,
+        "head_min": 0.635819034,
+        "head_max": 0.673349204,
+        "rows_per_second": 1529002.5476806182,
+        "samples": 20,
+        "base_p50": 0.696054374,
+        "change_percent": -6.038784981473322,
+        "round_changes": [
+          -5.948855976692135,
+          -6.674441026338812
+        ],
+        "round_min_changes": [
+          -7.769781501519645,
+          -6.7116995109625766
+        ],
+        "round_intervals": [
+          {
+            "median": -5.948855976692135,
+            "low": -7.784558828192322,
+            "high": -4.706137708943203,
+            "coverage": 0.978515625
+          },
+          {
+            "median": -6.674441026338812,
+            "low": -7.1236442721571365,
+            "high": -5.73642332489086,
+            "coverage": 0.978515625
+          }
+        ],
+        "verdict": "no-confirmed-regression"
+      }
+    },
+    {
+      "id": "engines/1000000/calc-flow-stream/projection/batch-64000/standard",
+      "family": "engines",
+      "backend": "calc-flow-stream",
+      "scenario": "projection",
+      "rows": 1000000,
+      "fixture_batch_rows": 64000,
+      "diagnostic_variant": "standard",
+      "scope": "ready-enqueue-to-arrow/bounded-feeds-v6",
+      "status": "ok",
+      "correctness": true,
+      "comparison": "interleaved",
+      "baseline": [
+        [
+          0.006546196,
+          0.005801114,
+          0.005819476,
+          0.007553176,
+          0.007257268,
+          0.006329759,
+          0.006021008,
+          0.006529769,
+          0.006458126,
+          0.006415466
+        ],
+        [
+          0.005957988,
+          0.010410653,
+          0.007029218,
+          0.007899007,
+          0.007818455,
+          0.00654763,
+          0.006456476,
+          0.005850325,
+          0.006180965,
+          0.00610689
+        ]
+      ],
+      "candidate": [
+        [
+          0.006312942,
+          0.006066913,
+          0.006038461,
+          0.005999413,
+          0.006332532,
+          0.006283147,
+          0.007035921,
+          0.007393176,
+          0.005912357,
+          0.005871427
+        ],
+        [
+          0.006414497,
+          0.006476307,
+          0.007483352,
+          0.006541635,
+          0.006147079,
+          0.006396501,
+          0.006499344,
+          0.006491064,
+          0.006849057,
+          0.006256898
+        ]
+      ],
+      "result": {
+        "head_p50": 0.0063645165,
+        "head_p95": 0.007397684799999999,
+        "head_min": 0.005871427,
+        "head_max": 0.007483352,
+        "rows_per_second": 157121126.16881424,
+        "samples": 20,
+        "base_p50": 0.006457301,
+        "change_percent": -1.4368929061847946,
+        "round_changes": [
+          -2.1497968458459193,
+          1.560163286302052
+        ],
+        "round_min_changes": [
+          1.2120603042794942,
+          5.072436146709802
+        ],
+        "round_intervals": [
+          {
+            "median": -2.1497968458459193,
+            "low": -12.742205469055289,
+            "high": 13.222627017892963,
+            "coverage": 0.978515625
+          },
+          {
+            "median": 1.560163286302052,
+            "low": -21.37731815301105,
+            "high": 10.808862370196248,
+            "coverage": 0.978515625
+          }
+        ],
+        "verdict": "inconclusive"
+      }
+    },
+    {
+      "id": "engines/100000/calc-flow-stream/interval_join/batch-1024",
+      "family": "engines",
+      "backend": "calc-flow-stream",
+      "scenario": "interval_join",
+      "rows": 100000,
+      "batch_rows": 1024,
+      "checkpoint_interval_millis": null,
+      "replay_mode": "exact-cursor",
+      "workload": "throughput",
+      "scope": "ready-enqueue-to-arrow/exact-cursor-batch-1024-v1",
+      "source_mode": "immutable-event-log-v1",
+      "source_bindings": [
+        "left",
+        "right"
+      ],
+      "status": "ok",
+      "correctness": true,
+      "comparison": "interleaved",
+      "baseline": [
+        [
+          0.649974525,
+          0.627318147,
+          0.651967978,
+          0.621610656,
+          0.639704292,
+          0.63104477,
+          0.650763498,
+          0.668430716,
+          0.648592325,
+          0.647027934
+        ],
+        [
+          0.642689993,
+          0.642109579,
+          0.641178648,
+          0.633753249,
+          0.64103204,
+          0.654051629,
+          0.642216859,
+          0.672458527,
+          0.643090468,
+          0.638631588
+        ]
+      ],
+      "candidate": [
+        [
+          0.639427047,
+          0.625914345,
+          0.638166745,
+          0.636614264,
+          0.648437992,
+          0.638165442,
+          0.650613731,
+          0.62835712,
+          0.632385116,
+          0.645863256
+        ],
+        [
+          0.654851454,
+          0.659634025,
+          0.627545639,
+          0.643369124,
+          0.624965817,
+          0.62878304,
+          0.631827027,
+          0.636754968,
+          0.638770728,
+          0.634845365
+        ]
+      ],
+      "result": {
+        "head_p50": 0.637460205,
+        "head_p95": 0.65509058255,
+        "head_min": 0.624965817,
+        "head_max": 0.659634025,
+        "rows_per_second": 156872.5376355062,
+        "samples": 20,
+        "base_p50": 0.642453426,
+        "change_percent": -0.777211358508656,
+        "round_changes": [
+          -0.20189130117966858,
+          -1.144761588289267
+        ],
+        "round_min_changes": [
+          0.6923447914638059,
+          -1.3865699329929537
+        ],
+        "round_intervals": [
+          {
+            "median": -0.20189130117966858,
+            "low": -2.498828366493533,
+            "high": 1.3652714401359622,
+            "coverage": 0.978515625
+          },
+          {
+            "median": -1.144761588289267,
+            "low": -3.8633936343273056,
+            "high": 1.8922748342839135,
+            "coverage": 0.978515625
+          }
+        ],
+        "verdict": "no-confirmed-regression"
+      }
+    }
+  ]
+}
+```
+
+### Every final worker's oracle, RSS and input attestation
+
+The two rounds have separate workers. Each worker contains one excluded
+warmup and ten validated measured outputs; HWM includes setup and full-output
+oracles outside the timer. Native stage RSS and these Python worker RSS values
+are different measurement boundaries.
+
+```json
+{
+  "status": "verified",
+  "workers": 12,
+  "timed_samples": 120,
+  "warmup_samples": 12,
+  "raw_responses": 156,
+  "raw_results_sha256": "1ba0693014ad74c604c5970693f584c0b32dc5b3661f1acdfb8f310e9aed68f1",
+  "load_average_range": [
+    0.5361328125,
+    1.13232421875
+  ],
+  "post_timer_emitted_counts": [
+    960000,
+    960000,
+    960000,
+    960000,
+    960000,
+    960000,
+    960000,
+    960000,
+    960000,
+    960000,
+    960000,
+    960000,
+    960000,
+    960000,
+    960000,
+    960000,
+    960000,
+    960000,
+    960000,
+    960000,
+    960000,
+    960000,
+    960000,
+    960000,
+    960000,
+    960000,
+    960000,
+    960000,
+    960000,
+    960000,
+    960000,
+    960000,
+    960000,
+    960000,
+    960000,
+    960000,
+    960000,
+    960000,
+    960000,
+    960000,
+    960000,
+    960000,
+    960000,
+    960000
+  ],
+  "fixtures": {
+    "engines/1000000/calc-flow-stream/join/batch-64000/standard": {"source_scope": "ready-enqueue-to-arrow/bounded-feeds-v6", "source_root": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.worktrees/stream-join-safety/target/issue363-join-safety-perf/final/sources/j1-candidate", "requested_batch_rows": 64000, "variant": "standard", "input_rows": 1000000, "entities": 64, "fixture_batch_rows": [64000, 64000, 64000, 64000, 64000, 64000, 64000, 64000, 64000, 64000, 64000, 64000, 64000, 64000, 64000, 40000], "stream_data_rows": {"right": [64], "left": [64000, 64000, 64000, 64000, 64000, 64000, 64000, 64000, 64000, 64000, 64000, 64000, 64000, 64000, 64000, 40000]}},
+    "engines/1000000/calc-flow-stream/projection/batch-64000/standard": {"source_scope": "ready-enqueue-to-arrow/bounded-feeds-v6", "source_root": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.worktrees/stream-join-safety/target/issue363-join-safety-perf/final/sources/j1-candidate", "requested_batch_rows": 64000, "variant": "standard", "input_rows": 1000000, "entities": 64, "fixture_batch_rows": [64000, 64000, 64000, 64000, 64000, 64000, 64000, 64000, 64000, 64000, 64000, 64000, 64000, 64000, 64000, 40000], "stream_data_rows": {"input": [64000, 64000, 64000, 64000, 64000, 64000, 64000, 64000, 64000, 64000, 64000, 64000, 64000, 64000, 64000, 40000]}}
+  },
+  "workers_evidence": [
+    {"case": "engines/1000000/calc-flow-stream/join/batch-64000/standard", "round": 0, "side": "baseline", "pid": 1173641, "measured_samples": 10, "warmups": 1, "oracle_rows": 1000000, "all_oracles_passed": true, "prepare_rss_bytes": 558862336, "final_rss_bytes": 774025216, "hwm_bytes": 805941248, "fixture_id": "engines/1000000/calc-flow-stream/join/batch-64000/standard"},
+    {"case": "engines/1000000/calc-flow-stream/join/batch-64000/standard", "round": 0, "side": "candidate", "pid": 1173643, "measured_samples": 10, "warmups": 1, "oracle_rows": 1000000, "all_oracles_passed": true, "prepare_rss_bytes": 548614144, "final_rss_bytes": 669200384, "hwm_bytes": 705232896, "fixture_id": "engines/1000000/calc-flow-stream/join/batch-64000/standard"},
+    {"case": "engines/1000000/calc-flow-stream/join/batch-64000/standard", "round": 1, "side": "baseline", "pid": 1174514, "measured_samples": 10, "warmups": 1, "oracle_rows": 1000000, "all_oracles_passed": true, "prepare_rss_bytes": 567402496, "final_rss_bytes": 776495104, "hwm_bytes": 808140800, "fixture_id": "engines/1000000/calc-flow-stream/join/batch-64000/standard"},
+    {"case": "engines/1000000/calc-flow-stream/join/batch-64000/standard", "round": 1, "side": "candidate", "pid": 1174516, "measured_samples": 10, "warmups": 1, "oracle_rows": 1000000, "all_oracles_passed": true, "prepare_rss_bytes": 564465664, "final_rss_bytes": 725774336, "hwm_bytes": 763736064, "fixture_id": "engines/1000000/calc-flow-stream/join/batch-64000/standard"},
+    {"case": "engines/1000000/calc-flow-stream/projection/batch-64000/standard", "round": 0, "side": "baseline", "pid": 1175374, "measured_samples": 10, "warmups": 1, "oracle_rows": 1000000, "all_oracles_passed": true, "prepare_rss_bytes": 502267904, "final_rss_bytes": 505012224, "hwm_bytes": 538120192, "fixture_id": "engines/1000000/calc-flow-stream/projection/batch-64000/standard"},
+    {"case": "engines/1000000/calc-flow-stream/projection/batch-64000/standard", "round": 0, "side": "candidate", "pid": 1175376, "measured_samples": 10, "warmups": 1, "oracle_rows": 1000000, "all_oracles_passed": true, "prepare_rss_bytes": 483307520, "final_rss_bytes": 489562112, "hwm_bytes": 521428992, "fixture_id": "engines/1000000/calc-flow-stream/projection/batch-64000/standard"},
+    {"case": "engines/1000000/calc-flow-stream/projection/batch-64000/standard", "round": 1, "side": "baseline", "pid": 1176227, "measured_samples": 10, "warmups": 1, "oracle_rows": 1000000, "all_oracles_passed": true, "prepare_rss_bytes": 502222848, "final_rss_bytes": 504094720, "hwm_bytes": 536039424, "fixture_id": "engines/1000000/calc-flow-stream/projection/batch-64000/standard"},
+    {"case": "engines/1000000/calc-flow-stream/projection/batch-64000/standard", "round": 1, "side": "candidate", "pid": 1176229, "measured_samples": 10, "warmups": 1, "oracle_rows": 1000000, "all_oracles_passed": true, "prepare_rss_bytes": 493199360, "final_rss_bytes": 496984064, "hwm_bytes": 528855040, "fixture_id": "engines/1000000/calc-flow-stream/projection/batch-64000/standard"},
+    {"case": "engines/100000/calc-flow-stream/interval_join/batch-1024", "round": 0, "side": "baseline", "pid": 1177079, "measured_samples": 10, "warmups": 1, "oracle_rows": 1098080, "all_oracles_passed": true, "prepare_rss_bytes": 520540160, "final_rss_bytes": 532787200, "hwm_bytes": 573751296, "fixture_id": null},
+    {"case": "engines/100000/calc-flow-stream/interval_join/batch-1024", "round": 0, "side": "candidate", "pid": 1177081, "measured_samples": 10, "warmups": 1, "oracle_rows": 1098080, "all_oracles_passed": true, "prepare_rss_bytes": 535543808, "final_rss_bytes": 480878592, "hwm_bytes": 590299136, "fixture_id": null},
+    {"case": "engines/100000/calc-flow-stream/interval_join/batch-1024", "round": 1, "side": "baseline", "pid": 1177934, "measured_samples": 10, "warmups": 1, "oracle_rows": 1098080, "all_oracles_passed": true, "prepare_rss_bytes": 529186816, "final_rss_bytes": 547385344, "hwm_bytes": 588218368, "fixture_id": null},
+    {"case": "engines/100000/calc-flow-stream/interval_join/batch-1024", "round": 1, "side": "candidate", "pid": 1177936, "measured_samples": 10, "warmups": 1, "oracle_rows": 1098080, "all_oracles_passed": true, "prepare_rss_bytes": 538640384, "final_rss_bytes": 487948288, "hwm_bytes": 597155840, "fixture_id": null}
+  ]
+}
+```
+
+### Exact final ready-worker source
+
+The original maintained replay worker runs the retained interval case;
+this wrapper runs ordinary ready and declared pipelined cases. Status capture
+and proof validation occur after the maintained timer stops.
+
+```python
+"""Owned source snapshots, explicit layout and untimed status evidence."""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import time
+from pathlib import Path
+
+import numpy as np
+import pyarrow as pa
+
+from benchmarks import engine_comparison, engine_stream
+from calc_flow import Batch, Cursor, Data
+from scripts.benchmark_suite import catalog, worker
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--root", type=Path, required=True)
+parser.add_argument("--batch-rows", type=int, required=True)
+parser.add_argument(
+    "--variant", choices=("standard", "overlap", "pipelined"), default="standard"
+)
+args = parser.parse_args()
+catalog.BATCH_ROWS = args.batch_rows
+engine_comparison.BATCH_ROWS = args.batch_rows
+engine_stream.BATCH_ROWS = args.batch_rows
+last_join_status = None
+causal_join_status = None
+last_job = None
+original_measure = engine_stream._measure_ready
+original_quote_progress = engine_stream._wait_static_quote_progress
+
+
+async def attested_quote_progress(job, expected_rows):
+    """Keep the pre-wait snapshot and verify one causally complete snapshot."""
+
+    global last_join_status, causal_join_status
+    last_join_status = engine_stream._static_join_status(job)
+    status = await original_quote_progress(job, expected_rows)
+    if status["emitted_match_rows"] < expected_rows or any(
+        status["left"][field]
+        for field in ("retained_rows", "retained_bytes", "evicted_rows")
+    ):
+        raise ValueError("causally complete static Join state proof differs")
+    causal_join_status = status
+    return status
+
+
+if not hasattr(engine_stream, "_wait_static_quote_progress"):
+    raise ValueError("J1 requires the sealed causal-status common harness")
+engine_stream._wait_static_quote_progress = attested_quote_progress
+
+
+async def diagnostic_measure(sources, sink, streams, job, *, static_join=False):
+    global last_join_status, causal_join_status, last_job
+    last_join_status = causal_join_status = None
+    last_job = job
+    if args.variant == "standard":
+        result = await original_measure(
+            sources, sink, streams, job, static_join=static_join
+        )
+    else:
+        await asyncio.wait_for(
+            asyncio.gather(*(source.ready.wait() for source in sources.values())),
+            timeout=30,
+        )
+        engine_stream._require_ready_sources(sources, sink)
+        started = time.perf_counter_ns()
+        for name in ("reference.input", "quotes.input"):
+            for event in streams[name]:
+                await sources[name].push(event)
+        await asyncio.wait_for(sink.complete.wait(), timeout=600)
+        if sink.rows != sink.expected_rows:
+            raise ValueError("pipelined diagnostic output count differs")
+        table = pa.concat_tables(sink.tables)
+        result = table, (time.perf_counter_ns() - started) / 1e9
+    if static_join and (last_join_status is None or causal_join_status is None):
+        raise ValueError("static Join lacks post-timer and causal status proof")
+    return result
+
+
+engine_stream._measure_ready = diagnostic_measure
+OriginalEngineCase = engine_comparison.EngineCase
+
+
+class DiagnosticEngineCase(OriginalEngineCase):
+    def __init__(self, case, root):
+        super().__init__(case, root)
+        if args.variant == "standard":
+            return
+        if case["scenario"] != "asof_join" or case["rows"] != 64_000:
+            raise ValueError("pipelined variants require the declared 64k ASOF fixture")
+        table = self.data.table
+        if args.variant == "overlap":
+            parts = tuple(
+                table.take(pa.array(np.arange(parity, table.num_rows, 2)))
+                for parity in (0, 1)
+            )
+        else:
+            parts = (table.slice(0, 32_000), table.slice(32_000))
+        reference = engine_stream.stream_events(table, self.data.entities)
+        left = tuple(
+            Data(
+                Batch.from_pyarrow(part),
+                Cursor((index + 1).to_bytes(8, "big"), {"rows": (index + 1) * 32_000}),
+            )
+            for index, part in enumerate(parts)
+        )
+        self.streams = {
+            "reference.input": reference,
+            "quotes.input": (*left, reference[-2], None),
+        }
+
+    def _stream(self):
+        # Extra dimensions are evidence metadata; use the ready runner rather
+        # than the maintained replay/checkpoint variant for these cases.
+        self.count += 1
+        plan = engine_stream.stream_plan(
+            self.case["scenario"],
+            self.data.table,
+            self.data.dimension,
+            batch_rows=args.batch_rows,
+        )
+        return self.loop.run_until_complete(
+            engine_stream.run_stream(
+                plan,
+                self.streams,
+                self.root / f"sample-{self.count}",
+                self.expected.num_rows,
+                static_join=self.case["scenario"] == "join",
+            )
+        )
+
+    def validate(self, result):
+        correctness = super().validate(result)
+        if args.variant != "standard" and not result["sequence"].cast(
+            self.expected["sequence"].type
+        ).equals(self.expected["sequence"]):
+            raise ValueError("pipelined ASOF output changed canonical row order")
+        return correctness
+
+    def sample(self):
+        sample = super().sample()
+        if self.case["scenario"] == "join":
+            statuses = tuple(last_job.status()["stream_joins"].values())
+            if len(statuses) != 1:
+                raise ValueError("completed static Join lacks one status")
+            final = statuses[0]
+            if final["emitted_match_rows"] != self.expected.num_rows:
+                raise ValueError("completed Join emitted count differs from output")
+            sample["completed_join_status"] = final
+        return sample
+
+
+engine_comparison.EngineCase = DiagnosticEngineCase
+dispatch = worker.dispatch
+
+
+def attested_dispatch(message, active, root):
+    response, active = dispatch(message, active, root)
+    if (
+        message["operation"] in ("prepare", "sample")
+        and active.case["scenario"] == "join"
+    ):
+        sample = response["warmup"] if message["operation"] == "prepare" else response
+        sample["post_timer_join_status"] = last_join_status
+        sample["causal_join_status"] = causal_join_status
+    if message["operation"] == "prepare":
+        attestation = {
+            "source_scope": catalog.STREAM_SCOPE,
+            "source_root": str(Path(catalog.__file__).resolve().parents[2]),
+            "requested_batch_rows": args.batch_rows,
+            "variant": args.variant,
+            "input_rows": active.data.table.num_rows,
+            "entities": active.data.entities,
+            "fixture_batch_rows": [
+                batch.num_rows for batch in active.data.table.to_batches()
+            ],
+            "stream_data_rows": {
+                name: [
+                    event.batch.num_rows for event in events if isinstance(event, Data)
+                ]
+                for name, events in getattr(active, "streams", {}).items()
+            },
+        }
+        (root / "workload.json").write_text(json.dumps(attestation, indent=2) + "\n")
+    return response, active
+
+
+worker.dispatch = attested_dispatch
+worker.main(args.root)
 ```
