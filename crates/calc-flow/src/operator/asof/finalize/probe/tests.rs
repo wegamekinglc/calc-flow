@@ -238,7 +238,7 @@ fn run_recovery(narrow: bool) {
         .enable_all()
         .build()
         .unwrap();
-    runtime.block_on(async {
+    let (pool, restored_pool) = runtime.block_on(async {
         let (mut operator, left, right) = fixture(narrow, ROWS);
         let pool = operator.runtime.pool.clone();
         let job =
@@ -282,11 +282,12 @@ fn run_recovery(narrow: bool) {
         assert!(job.gather_owner().close_and_drain().await.is_empty());
         drop((operator, restored, snapshot, output, resumed, context));
         drop(job);
-        assert_eq!(pool.reserved(), 0);
-        assert_eq!(restored_pool.reserved(), 0);
+        (pool, restored_pool)
     });
     drop(runtime);
     service.shutdown();
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(restored_pool.reserved(), 0);
 }
 
 #[derive(Default)]
@@ -315,6 +316,77 @@ impl Drop for Release {
     fn drop(&mut self) {
         self.0.release();
     }
+}
+
+#[test]
+fn payload_retirement_releases_owners_at_runtime_shutdown() {
+    use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryConsumer, MemoryPool};
+    use std::sync::OnceLock;
+
+    let service = TestService::new(1, 1).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
+        .unwrap();
+    let gate = Arc::new(Gate::default());
+    let release = Release(gate.clone());
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(8_192));
+    let (owner, blocked) = runtime.block_on(async {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let blocked = tokio::task::spawn_blocking(move || {
+            started_tx.send(()).unwrap();
+            gate.wait();
+        });
+        started_rx.await.unwrap();
+        let workspace = MemoryConsumer::new("retirement-boundary").register(&pool);
+        workspace.try_grow(4_096).unwrap();
+        let payload = Arc::new(state::PayloadBatch {
+            key: (0, 1),
+            record: Arc::new(
+                RecordBatch::try_new(
+                    Arc::new(Schema::new(vec![Field::new(
+                        "value",
+                        DataType::Int64,
+                        false,
+                    )])),
+                    vec![Arc::new(Int64Array::from(vec![7]))],
+                )
+                .unwrap(),
+            ),
+            encoded: OnceLock::new(),
+            encoded_charge_bytes: 0,
+            body_bytes: 8,
+        });
+        let owner = Arc::downgrade(&payload);
+        let payloads = state::PayloadPool::default();
+        let layout = payloads.project_remove(&BTreeMap::new(), "asof").unwrap();
+        let mut removal = state::PreparedPayloadRemoval::capture(&payloads, &layout, workspace);
+        removal.retain(1, &payload, 1);
+        drop(payload);
+        drop(removal);
+        tokio::task::yield_now().await;
+        let job = StreamJobContext::new(
+            905,
+            "retirement-boundary",
+            JsonMap::new(),
+            None,
+            CancellationToken::new(),
+        )
+        .with_gather_owner(service.owner("retirement-boundary".into()));
+        assert!(job.gather_owner().close_and_drain().await.is_empty());
+        // Payload retirement uses Tokio's blocking pool. Keep its input owner
+        // and reservation observable until that separate lifecycle completes.
+        assert_eq!(pool.reserved(), 4_096);
+        assert!(owner.upgrade().is_some());
+        (owner, blocked)
+    });
+    drop(release);
+    drop(runtime);
+    service.shutdown();
+    assert!(blocked.is_finished());
+    assert_eq!(pool.reserved(), 0);
+    assert!(owner.upgrade().is_none());
 }
 
 #[test]
