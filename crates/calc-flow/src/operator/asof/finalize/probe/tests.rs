@@ -361,7 +361,8 @@ fn payload_retirement_releases_owners_at_runtime_shutdown() {
         let owner = Arc::downgrade(&payload);
         let payloads = state::PayloadPool::default();
         let layout = payloads.project_remove(&BTreeMap::new(), "asof").unwrap();
-        let mut removal = state::PreparedPayloadRemoval::capture(&payloads, &layout, workspace);
+        let mut removal =
+            state::PreparedPayloadRemoval::capture(&payloads, &layout, workspace, None);
         removal.retain(1, &payload, 1);
         drop(payload);
         drop(removal);

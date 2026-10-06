@@ -443,6 +443,7 @@ struct GatherHome {
 
 struct HomeState {
     open: bool,
+    retiring_owners: usize,
     generation: u64,
     next_scope: u64,
     next_attempt: u64,
@@ -540,10 +541,31 @@ impl JobGatherOwner {
         self.0.home.close();
     }
 
+    pub(crate) fn retain_retirement(&self) -> Result<RetirementGuard> {
+        let mut state = self.0.home.state.lock();
+        if !state.open {
+            return Err(cancelled(&self.0.home.run_id));
+        }
+        state.retiring_owners = state
+            .retiring_owners
+            .checked_add(1)
+            .ok_or_else(|| internal("retired owner counter overflow"))?;
+        Ok(RetirementGuard(self.0.home.clone()))
+    }
+
     pub(crate) async fn close_and_drain(&self) -> Vec<TaskFailure> {
         self.close_admission();
         self.0.home.wait_closed().await;
         self.0.home.state.lock().take_failures()
+    }
+}
+
+pub(crate) struct RetirementGuard(Arc<GatherHome>);
+
+impl Drop for RetirementGuard {
+    fn drop(&mut self) {
+        self.0.state.lock().retiring_owners -= 1;
+        self.0.changed.notify_waiters();
     }
 }
 
@@ -692,6 +714,7 @@ impl GatherHome {
             run_id,
             state: Mutex::new(HomeState {
                 open: true,
+                retiring_owners: 0,
                 generation: 0,
                 next_scope: 0,
                 next_attempt: 0,
@@ -1019,7 +1042,10 @@ impl GatherHome {
             changed.as_mut().enable();
             {
                 let state = self.state.lock();
-                if state.phase == PoolPhase::Absent && matches!(state.slot, Slot::Empty) {
+                if state.phase == PoolPhase::Absent
+                    && matches!(state.slot, Slot::Empty)
+                    && state.retiring_owners == 0
+                {
                     return;
                 }
             }

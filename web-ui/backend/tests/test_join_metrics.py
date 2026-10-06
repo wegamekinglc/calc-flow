@@ -74,6 +74,15 @@ def test_join_event_rejects_noncanonical_or_out_of_range_watermarks(bad):
         _event(metrics)
 
 
+@pytest.mark.parametrize("bad", [str(-(2**63) - 1), str(2**63)])
+def test_join_watermark_range_error_uses_the_shared_integer_domain(bad):
+    metrics = run_manager._stream_join_progress({"match": _status()})
+    metrics[0]["left"]["watermark_micros"] = bad
+    with pytest.raises(ValidationError) as failure:
+        _event(metrics)
+    assert failure.value.errors()[0]["msg"] == "Value error, watermark exceeds i64"
+
+
 def test_join_openapi_describes_precise_progress_fields(tmp_path):
     from calc_flow_studio.app import create_app
 

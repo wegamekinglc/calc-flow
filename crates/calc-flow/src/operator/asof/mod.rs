@@ -13,6 +13,7 @@ mod output;
 mod output_plan;
 mod payload_projection;
 mod replay;
+mod retirement;
 mod schema;
 mod spec;
 mod state;
@@ -79,6 +80,7 @@ pub struct StreamAsofJoinOperator {
     next_output_sequence: u64,
     status: StreamAsofJoinStatus,
     runtime: output::OutputRuntime,
+    retirement: retirement::Owner,
     fingerprint: String,
     schema_digests: [[u8; 32]; 2],
     payload_header_bytes: [u64; 2],
@@ -188,7 +190,7 @@ impl StreamAsofJoinOperator {
             self.status.state_bytes
         );
         drop((admission, index_workspace, staging_workspace));
-        Ok(())
+        self.retirement.wait(context).await
     }
 
     fn reserve_admission_staging(
@@ -309,6 +311,7 @@ impl StreamAsofJoinOperator {
             next_output_sequence: 0,
             status: StreamAsofJoinStatus::default(),
             runtime,
+            retirement: retirement::Owner::default(),
         })
     }
     /// Returns the immutable declaration.
@@ -358,6 +361,7 @@ impl StreamAsofJoinOperator {
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
+        self.retirement.wait(context).await?;
         self.record_replay(replay::Callback::Progress, None, context)?;
         self.observe(context.ingress_progress());
         self.finalize_with_replay(
@@ -475,6 +479,7 @@ impl StreamOperator for StreamAsofJoinOperator {
         _output: &mut dyn StreamCollector,
     ) -> Result<()> {
         context.check_cancelled()?;
+        self.retirement.wait(context).await?;
         self.record_replay(
             replay::Callback::Data {
                 side: u8::from(ingress == "right"),
@@ -498,6 +503,7 @@ impl StreamOperator for StreamAsofJoinOperator {
         &mut self,
         context: &StreamOperatorContext<'_>,
     ) -> Result<()> {
+        self.retirement.wait(context).await?;
         if self.replay.is_some() {
             return self.prepare_replay_anchor(context).await;
         }
@@ -544,6 +550,7 @@ impl StreamOperator for StreamAsofJoinOperator {
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
+        self.retirement.wait(context).await?;
         self.record_replay(replay::Callback::End, None, context)?;
         self.status.left.ended = true;
         self.status.right.ended = true;

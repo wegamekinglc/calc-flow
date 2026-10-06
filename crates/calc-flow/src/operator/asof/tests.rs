@@ -263,11 +263,12 @@ async fn accepted_prefix_installs_pool_compaction_without_allocating() {
         allocation.count_total, 0,
         "post-delivery commit allocated: {allocation:?}"
     );
-    assert!(matches!(result.unwrap(), std::task::Poll::Ready(Ok(()))));
+    assert!(matches!(result.unwrap(), std::task::Poll::Pending));
     drop(operation);
     assert_eq!(op.status.emitted_left_rows, 800);
     assert_eq!(op.state.batches.len(), 224);
     assert_eq!(collector.batch.unwrap().num_rows(), 800);
+    op.retirement.wait(&cx).await.unwrap();
 }
 
 #[test]
@@ -1626,7 +1627,7 @@ async fn eviction_preview_workspace_covers_many_owned_keys_in_one_payload_batch(
 }
 
 #[tokio::test]
-async fn finalization_reads_a_ready_left_prefix_once() {
+async fn finalization_reads_a_ready_left_prefix_as_one_run() {
     let (mut op, left, _) = prefix_fixture();
     let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
     let cx = StreamOperatorContext::new(&job, "asof", None);
@@ -1638,8 +1639,8 @@ async fn finalization_reads_a_ready_left_prefix_once() {
     op.on_end(&cx, &mut output).await.unwrap();
     assert_eq!(
         state::take_left_visits(),
-        3,
-        "ready prefix was repeatedly scanned"
+        1,
+        "ready prefix required more than one heap run"
     );
     assert_eq!(op.status.emitted_left_rows, 3);
 }
