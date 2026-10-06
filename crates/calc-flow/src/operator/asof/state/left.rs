@@ -633,19 +633,14 @@ impl LeftState {
     /// Matching uses time/key and encoding owners. Integer sequence bytes
     /// remain in their owned column until a comparator actually needs them.
     pub fn output_iter(&self) -> impl Iterator<Item = (OutputIdentity<'_>, RowRef)> {
+        self.output_runs().flat_map(|run| run.rows(run.len()))
+    }
+
+    pub fn output_runs(&self) -> impl Iterator<Item = OutputRun<'_>> {
         self.legacy
             .iter()
-            .map(|(order, row)| ((&order.0, &order.1, Some(&order.2)), *row))
-            .chain(ChunkIter::new(&self.chunks).flat_map(|run| {
-                (run.start..run.end).map(move |ordinal| {
-                    (
-                        run.chunk.data.output_view(ordinal),
-                        run.chunk
-                            .reference
-                            .with_row(run.chunk.data.position(ordinal)),
-                    )
-                })
-            }))
+            .map(|(order, row)| OutputRun::Legacy((&order.0, &order.1, Some(&order.2)), *row))
+            .chain(ChunkIter::new(&self.chunks).map(OutputRun::Chunk))
     }
 
     pub fn unordered_iter(&self) -> impl Iterator<Item = (LeftView<'_>, RowRef)> {
@@ -1037,10 +1032,115 @@ struct ChunkIter<'a> {
     heap: BinaryHeap<Reverse<Cursor<'a>>>,
 }
 
-struct ChunkRun<'a> {
+#[derive(Clone, Copy)]
+pub(in super::super) struct ChunkRun<'a> {
     chunk: &'a LeftChunk,
     start: usize,
     end: usize,
+}
+
+#[derive(Clone, Copy)]
+pub(in super::super) enum OutputRun<'a> {
+    Legacy(OutputIdentity<'a>, RowRef),
+    Chunk(ChunkRun<'a>),
+}
+
+impl<'a> OutputRun<'a> {
+    pub fn len(self) -> usize {
+        match self {
+            Self::Legacy(_, _) => 1,
+            Self::Chunk(run) => run.end - run.start,
+        }
+    }
+
+    pub fn rows(self, count: usize) -> impl Iterator<Item = (OutputIdentity<'a>, RowRef)> {
+        debug_assert!(count <= self.len());
+        (0..count).map(move |offset| match self {
+            Self::Legacy(identity, row) => (identity, row),
+            Self::Chunk(run) => {
+                let ordinal = run.start + offset;
+                (
+                    run.chunk.data.output_view(ordinal),
+                    run.chunk
+                        .reference
+                        .with_row(run.chunk.data.position(ordinal)),
+                )
+            }
+        })
+    }
+
+    pub fn visit_prefix(
+        self,
+        count: usize,
+        prefix: &mut super::LeftPrefix,
+        pool: &PayloadPool,
+        name: &str,
+    ) -> Result<()> {
+        debug_assert!(count <= self.len());
+        if count == 0 {
+            return Ok(());
+        }
+        let run = match self {
+            Self::Chunk(run) => run,
+            Self::Legacy(identity, row) => {
+                return prefix.visit_owners(identity.1, identity.2, pool.key(row), name);
+            }
+        };
+        let batch = pool.key(run.chunk.reference);
+        prefix.visit_batch(batch, count, name)?;
+        run.visit_keys(count, prefix, batch);
+        run.visit_sequence_owners(count, prefix, batch);
+        Ok(())
+    }
+}
+
+impl ChunkRun<'_> {
+    fn visit_keys(self, count: usize, prefix: &mut super::LeftPrefix, batch: BatchKey) {
+        let data = &self.chunk.data;
+        let mut key_ids = data.key_ids[self.start..self.start + count].to_vec();
+        key_ids.sort_unstable();
+        let mut ids = key_ids.iter().copied().peekable();
+        while let Some(id) = ids.next() {
+            let mut amount = 1;
+            while ids.peek() == Some(&id) {
+                ids.next();
+                amount += 1;
+            }
+            let key = data.keys[id as usize].as_ref().expect("live ASOF key");
+            prefix.visit_key(key, batch, amount);
+        }
+    }
+
+    fn visit_sequence_owners(self, count: usize, prefix: &mut super::LeftPrefix, batch: BatchKey) {
+        let data = &self.chunk.data;
+        if data.sequences.kind() != SequenceKind::Canonical {
+            return;
+        }
+        // See .codex/artifacts/analysis/stream-asof-owner-runs.md for scratch funding.
+        let mut owners = Vec::new();
+        for ordinal in self.start..self.start + count {
+            if let Some((address, _)) = data
+                .sequences
+                .owner_encoding(ordinal)
+                .and_then(Encoding::allocation)
+            {
+                if owners.capacity() == 0 {
+                    owners.reserve_exact(count);
+                }
+                owners.push(address);
+            }
+        }
+        owners.sort_unstable();
+        let mut owners = owners.into_iter().peekable();
+        while let Some(address) = owners.next() {
+            let mut amount = 1;
+            while owners.peek() == Some(&address) {
+                owners.next();
+                amount += 1;
+            }
+            prefix.visit_sequence_owner(address, batch, amount);
+        }
+    }
 }
 impl<'a> ChunkIter<'a> {
     fn new(chunks: &'a [LeftChunk]) -> Self {

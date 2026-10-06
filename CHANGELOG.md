@@ -9,6 +9,10 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-06: Aggregate streaming ASOF left batch, key and sequence-owner
+  bookkeeping over ordered runs. Prefix matching, canonical encoding, capacity
+  charges and cancellation/resource decisions retain their contracts.
+
 - 2026-10-06: Maintain streaming Join retained-state gauges, expiration indexes
   and pending checkpoint operations incrementally. Decode timestamp units once
   per record and canonicalize incoming keys once. Preserve physical row IDs,
