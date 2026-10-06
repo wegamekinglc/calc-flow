@@ -50,3 +50,20 @@ The 1,024-to-four heap-visit reduction remains a complexity result. Corrected
 sealed paired throughput measurements must pass the same interleaved fixture
 before any general speedup claim. Full CI and workspace coverage remain
 unverified.
+
+## Corrected release measurement
+
+The sealed corrected revision `f81a9f87` is measured separately from its
+rejected predecessor. Ordinary ASOF P50 is 374.156→360.451 ms at 1M/64k
+(−3.66%) and 84.045→82.441 ms at 100k/1,024 (−1.91%); neither establishes a
+repeatable material gain. The overlapping diagnostic is 37.316→39.483 ms
+(+5.81%), with paired round intervals [+1.16%, +14.35%] and
+[+2.23%, +10.06%]. That verdict remains inconclusive; it does not establish
+zero regression. Full samples, seals, methodology and the rejected predecessor
+are recorded in [the performance report](stream-asof-runs-performance.md).
+
+The single corrected-head CI snapshot passed Windows Rust tests but failed
+the Linux lib cleanup assertion in
+`key_sharded_finalization_preserves_order_bits_and_cold_recovery`
+(`pool.reserved()` 39,552 versus zero). Diagnosis remains open. Passing local
+serial tests and performance oracles do not resolve this required failure.
