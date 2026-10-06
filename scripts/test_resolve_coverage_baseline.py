@@ -180,6 +180,102 @@ def _resolve_fixture(github: dict, reports: dict) -> dict:
         return resolver.resolve(REPOSITORY, BASE)
 
 
+def _complete_head_fixture() -> tuple[dict, dict]:
+    github, reports = _fixture()
+    github[PREFIX] = [{"full_name": REPOSITORY, "id": 500}]
+    github[f"{PREFIX}/commits/{BASE}/statuses?per_page=100"] = copy.deepcopy(
+        github[f"{PREFIX}/commits/{HEAD}/statuses?per_page=100"]
+    )
+    github[f"{PREFIX}/actions/runs/60"][0]["head_sha"] = BASE
+    for page in github[f"{PREFIX}/actions/runs/60/attempts/1/jobs?per_page=100"]:
+        for job in page["jobs"]:
+            job["head_sha"] = BASE
+    for page in github[f"{PREFIX}/actions/runs/60/artifacts?per_page=100"]:
+        for artifact in page["artifacts"]:
+            artifact["workflow_run"]["head_sha"] = BASE
+    return github, reports
+
+
+class CompleteHeadMeasurementTests(unittest.TestCase):
+    def test_complete_head_measurement_uses_verified_same_tree_pr_run(self) -> None:
+        github, reports = _complete_head_fixture()
+        result = _resolve_fixture(github, reports)
+        self.assertEqual(result["origin"], "same_tree_pull_request")
+        self.assertEqual(result["compare_sha"], MEASUREMENT)
+        self.assertEqual(result["source_tree"], TREE)
+        self.assertEqual(result["candidate"]["run"]["head_sha"], BASE)
+        self.assertEqual(set(result["candidate"]["jobs"]), resolver.FLAGS)
+        self.assertEqual(set(result["candidate"]["artifacts"]), resolver.FLAGS)
+
+    def test_synthetic_measurement_with_different_tree_is_rejected(self) -> None:
+        github, reports = _complete_head_fixture()
+        github[f"{PREFIX}/git/commits/{MEASUREMENT}"][0]["tree"]["sha"] = "e" * 40
+        with self.assertRaisesRegex(ValueError, "tree"):
+            _resolve_fixture(github, reports)
+
+    def test_successful_run_of_another_head_is_rejected(self) -> None:
+        github, reports = _complete_head_fixture()
+        github[f"{PREFIX}/actions/runs/60"][0]["head_sha"] = HEAD
+        with self.assertRaisesRegex(ValueError, "successful Linux CI run"):
+            _resolve_fixture(github, reports)
+
+    def test_failed_or_untrusted_run_cannot_supply_a_head_alias(self) -> None:
+        for field, value in (
+            ("conclusion", "failure"),
+            ("event", "push"),
+            ("path", ".github/workflows/untrusted.yml"),
+            ("run_attempt", 0),
+        ):
+            with self.subTest(field=field):
+                github, reports = _complete_head_fixture()
+                github[f"{PREFIX}/actions/runs/60"][0][field] = value
+                with self.assertRaisesRegex(ValueError, "Linux CI run"):
+                    _resolve_fixture(github, reports)
+
+    def test_head_alias_rejects_forks_and_repository_identity_mismatches(self) -> None:
+        for field, value in (("full_name", "other/repo"), ("id", 501)):
+            with self.subTest(field=field):
+                github, reports = _complete_head_fixture()
+                run = github[f"{PREFIX}/actions/runs/60"][0]
+                run["head_repository"][field] = value
+                with self.assertRaisesRegex(ValueError, "repository differs"):
+                    _resolve_fixture(github, reports)
+
+    def test_failed_status_cannot_be_replaced_by_a_successful_head_alias(self) -> None:
+        github, reports = _complete_head_fixture()
+        github[f"{PREFIX}/commits/{BASE}/statuses?per_page=100"][0][0]["state"] = (
+            "failure"
+        )
+        with self.assertRaisesRegex(ValueError, "statuses must be successful"):
+            _resolve_fixture(github, reports)
+
+    def test_partial_head_measurement_is_rejected(self) -> None:
+        github, reports = _complete_head_fixture()
+        github[f"{PREFIX}/commits/{BASE}/statuses?per_page=100"][1].pop()
+        with self.assertRaisesRegex(ValueError, "measured a different commit"):
+            _resolve_fixture(github, reports)
+
+    def test_head_alias_requires_successful_coverage_steps(self) -> None:
+        github, reports = _complete_head_fixture()
+        jobs = github[f"{PREFIX}/actions/runs/60/attempts/1/jobs?per_page=100"]
+        jobs[0]["jobs"][0]["steps"][0]["conclusion"] = "failure"
+        with self.assertRaisesRegex(ValueError, "required coverage step"):
+            _resolve_fixture(github, reports)
+
+    def test_head_alias_requires_current_nonexpired_coverage_artifacts(self) -> None:
+        for field, value in (
+            ("expired", True),
+            ("created_at", "2025-12-31T23:59:59Z"),
+            ("digest", None),
+        ):
+            with self.subTest(field=field):
+                github, reports = _complete_head_fixture()
+                artifacts = github[f"{PREFIX}/actions/runs/60/artifacts?per_page=100"]
+                artifacts[0]["artifacts"][0][field] = value
+                with self.assertRaisesRegex(ValueError, "coverage artifact"):
+                    _resolve_fixture(github, reports)
+
+
 class DefaultBaselineTests(unittest.TestCase):
     def test_new_branch_zero_sha_uses_default_without_any_api(self) -> None:
         with (
