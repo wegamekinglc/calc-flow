@@ -29,6 +29,12 @@ thread_local! {
     static KEY_INSTALL_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static ADMISSION_ACCOUNTING_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static ENCODING_HASHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PREFIX_UPDATES: std::cell::Cell<(usize, usize, usize)> = const { std::cell::Cell::new((0, 0, 0)) };
+}
+
+#[cfg(test)]
+pub(super) fn take_prefix_updates() -> (usize, usize, usize) {
+    PREFIX_UPDATES.with(|updates| updates.replace((0, 0, 0)))
 }
 
 #[cfg(test)]
@@ -995,8 +1001,7 @@ pub(super) struct Inventory {
     pub bytes: u64,
 }
 
-/// Matching visits each selected left identity once, accumulating all
-/// infallible post-delivery changes before the sink accepts the output.
+/// Accumulate all infallible post-delivery changes before sink acceptance.
 #[derive(Default)]
 pub(super) struct LeftPrefix {
     pub count: usize,
@@ -1007,6 +1012,48 @@ pub(super) struct LeftPrefix {
 }
 
 impl LeftPrefix {
+    pub fn visit_batch(&mut self, batch: BatchKey, count: usize, name: &str) -> Result<()> {
+        self.count = self.count.checked_add(count).ok_or_else(|| {
+            super::reason(
+                name,
+                crate::StreamingFailureReason::AsofCounterOverflow,
+                "ASOF prefix row count overflowed",
+            )
+        })?;
+        *self.batches.entry(batch).or_default() += count;
+        #[cfg(test)]
+        PREFIX_UPDATES.with(|updates| {
+            let (batches, keys, sequences) = updates.get();
+            updates.set((batches + 1, keys, sequences));
+        });
+        Ok(())
+    }
+
+    pub fn visit_key(&mut self, key: &Encoding, batch: BatchKey, count: usize) {
+        *self.keys.entry((batch, key.clone())).or_default() += count;
+        EncodingOwners::record_remove(&mut self.owners, key, count);
+        #[cfg(test)]
+        PREFIX_UPDATES.with(|updates| {
+            let (batches, keys, sequences) = updates.get();
+            updates.set((batches, keys + 1, sequences));
+        });
+    }
+
+    pub fn visit_sequence_owner(&mut self, address: usize, batch: BatchKey, count: usize) {
+        *self.owners.entry(address).or_default() += count;
+        *self
+            .sequence_owners
+            .entry(batch)
+            .or_default()
+            .entry(address)
+            .or_default() += count;
+        #[cfg(test)]
+        PREFIX_UPDATES.with(|updates| {
+            let (batches, keys, sequences) = updates.get();
+            updates.set((batches, keys, sequences + 1));
+        });
+    }
+
     #[cfg(test)]
     pub fn visit(
         &mut self,
@@ -1025,6 +1072,15 @@ impl LeftPrefix {
         batch: BatchKey,
         name: &str,
     ) -> Result<()> {
+        #[cfg(test)]
+        PREFIX_UPDATES.with(|updates| {
+            let (batches, keys, sequences) = updates.get();
+            updates.set((
+                batches + 1,
+                keys + 1,
+                sequences + usize::from(sequence.is_some_and(|value| value.allocation().is_some())),
+            ));
+        });
         self.count = self.count.checked_add(1).ok_or_else(|| {
             super::reason(
                 name,

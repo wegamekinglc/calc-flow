@@ -19,6 +19,8 @@ use datafusion::execution::memory_pool::MemoryReservation;
 use std::collections::BTreeMap;
 use std::{collections::HashMap, sync::Arc};
 
+#[cfg(test)]
+mod owner_runs;
 mod prefix;
 mod probe;
 
@@ -437,22 +439,24 @@ async fn parallel_candidate_rows(
 ) -> Result<LeftPrefix> {
     let state = &operator.state;
     let mut prefix = LeftPrefix::default();
-    for (index, ((key, left), right)) in state
-        .left
-        .output_iter()
-        .take(count)
-        .zip(matches)
-        .enumerate()
-    {
-        check_match_progress(index, context).await?;
-        let left = state.batches.view(left);
-        plan.push(
-            left,
-            right.map(|row| state.batches.view(row)),
-            workspace,
-            &operator.name,
-        )?;
-        prefix.visit_owners(key.1, key.2, left.batch.key, &operator.name)?;
+    let count = count.min(matches.len());
+    let mut index = 0;
+    for run in state.left.output_runs() {
+        let amount = run.len().min(count - index);
+        for (_, left) in run.rows(amount) {
+            check_match_progress(index, context).await?;
+            plan.push(
+                state.batches.view(left),
+                matches[index].map(|row| state.batches.view(row)),
+                workspace,
+                &operator.name,
+            )?;
+            index += 1;
+        }
+        run.visit_prefix(amount, &mut prefix, &state.batches, &operator.name)?;
+        if index == count {
+            break;
+        }
     }
     Ok(prefix)
 }
@@ -467,14 +471,22 @@ async fn binary_search_candidate_rows(
     let state = &operator.state;
     let tolerance = operator.spec.tolerance_micros();
     let mut prefix = LeftPrefix::default();
-    for (index, (key, left)) in state.left.output_iter().take(count).enumerate() {
-        check_match_progress(index, context).await?;
-        let left = state.batches.view(left);
-        let right = state
-            .candidate(key.1, *key.0, tolerance)
-            .map(|row| state.batches.view(*row));
-        plan.push(left, right, workspace, &operator.name)?;
-        prefix.visit_owners(key.1, key.2, left.batch.key, &operator.name)?;
+    let mut index = 0;
+    for run in state.left.output_runs() {
+        let amount = run.len().min(count - index);
+        for (key, left) in run.rows(amount) {
+            check_match_progress(index, context).await?;
+            let left = state.batches.view(left);
+            let right = state
+                .candidate(key.1, *key.0, tolerance)
+                .map(|row| state.batches.view(*row));
+            plan.push(left, right, workspace, &operator.name)?;
+            index += 1;
+        }
+        run.visit_prefix(amount, &mut prefix, &state.batches, &operator.name)?;
+        if index == count {
+            break;
+        }
     }
     Ok(prefix)
 }
@@ -498,19 +510,26 @@ async fn monotonic_candidate_rows(
         cursors.insert(key.clone(), (bucket, bucket.cursor_at(first_time)));
     }
     let mut prefix = LeftPrefix::default();
-    for (index, (key, left)) in state.left.output_iter().take(count).enumerate() {
-        check_match_progress(index, context).await?;
-        let right = cursors.get_mut(key.1).and_then(|(bucket, next)| {
-            bucket.candidate_monotonic(*key.0, operator.spec.tolerance_micros(), next)
-        });
-        let left = state.batches.view(left);
-        plan.push(
-            left,
-            right.map(|row| state.batches.view(*row)),
-            workspace,
-            &operator.name,
-        )?;
-        prefix.visit_owners(key.1, key.2, left.batch.key, &operator.name)?;
+    let mut index = 0;
+    for run in state.left.output_runs() {
+        let amount = run.len().min(count - index);
+        for (key, left) in run.rows(amount) {
+            check_match_progress(index, context).await?;
+            let right = cursors.get_mut(key.1).and_then(|(bucket, next)| {
+                bucket.candidate_monotonic(*key.0, operator.spec.tolerance_micros(), next)
+            });
+            plan.push(
+                state.batches.view(left),
+                right.map(|row| state.batches.view(*row)),
+                workspace,
+                &operator.name,
+            )?;
+            index += 1;
+        }
+        run.visit_prefix(amount, &mut prefix, &state.batches, &operator.name)?;
+        if index == count {
+            break;
+        }
     }
     Ok(prefix)
 }
