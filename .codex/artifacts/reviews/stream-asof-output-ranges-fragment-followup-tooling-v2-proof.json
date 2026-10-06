@@ -1,0 +1,149 @@
+{
+  "contract": "issue363-fixed50-v2-independent-focused-review-proof",
+  "implementation_seal_sha256": "01dd72c09662026a6675c4b7fd4aec9529dfa464a51378f2accd80d6cf2ba066",
+  "sampling_fingerprint": "dd2876a21f1f3958042062c86dfb4ec6614cff0d8cf23e272d5e220aa80dae7d",
+  "checks": [
+    {
+      "check": "valid synthetic fixture sanity",
+      "result": "Passed",
+      "counts": [
+        400,
+        8,
+        8,
+        408,
+        424
+      ],
+      "synthetic_only": true
+    },
+    {
+      "check": "old null-exit counterexample plus non-integer zero and nonzero rejection",
+      "result": "Passed",
+      "rejected": [
+        null,
+        false,
+        true,
+        0.0,
+        "0",
+        1,
+        -1
+      ]
+    },
+    {
+      "check": "old peer-HWM/global-minfree counterexample",
+      "result": "Passed",
+      "individual_guards_pass": true,
+      "predicted_peak_bytes": 1393377280,
+      "seventy_percent_min_available_bytes": 751619276,
+      "error": "whole-round paired worker RSS exceeded RAM gate"
+    },
+    {
+      "check": "peer-observed peak retained in passing report",
+      "result": "Passed",
+      "baseline_peak_bytes": 1073741824
+    },
+    {
+      "check": "independent startup owner: journal",
+      "result": "Passed",
+      "fake_processes_reaped": 1,
+      "logs_closed": 1,
+      "live_registry": 0,
+      "pending_tasks": 0
+    },
+    {
+      "check": "independent startup owner: constructor",
+      "result": "Passed",
+      "fake_processes_reaped": 1,
+      "logs_closed": 1,
+      "live_registry": 0,
+      "pending_tasks": 0
+    },
+    {
+      "check": "independent startup owner: registry-before",
+      "result": "Passed",
+      "fake_processes_reaped": 1,
+      "logs_closed": 1,
+      "live_registry": 0,
+      "pending_tasks": 0
+    },
+    {
+      "check": "independent startup owner: registry-after",
+      "result": "Passed",
+      "fake_processes_reaped": 1,
+      "logs_closed": 1,
+      "live_registry": 0,
+      "pending_tasks": 0
+    },
+    {
+      "check": "independent startup owner: second-journal",
+      "result": "Passed",
+      "fake_processes_reaped": 2,
+      "logs_closed": 2,
+      "live_registry": 0,
+      "pending_tasks": 0
+    },
+    {
+      "check": "independent startup owner: spawn-failure",
+      "result": "Passed",
+      "fake_processes_reaped": 1,
+      "logs_closed": 2,
+      "live_registry": 0,
+      "pending_tasks": 0
+    },
+    {
+      "check": "independent startup owner: late-cancel",
+      "result": "Passed",
+      "fake_processes_reaped": 2,
+      "logs_closed": 2,
+      "live_registry": 0,
+      "pending_tasks": 0
+    },
+    {
+      "check": "independent repeated cancellation during close and repeated close",
+      "result": "Passed",
+      "fake_processes_reaped": 1,
+      "live_registry": 0,
+      "pending_tasks": 0
+    }
+  ],
+  "checks_passed": 12,
+  "native_or_arrow_modules_loaded": [],
+  "actual_os_worker_spawns": 0,
+  "native_build_or_performance_execution": false,
+  "reviewer_owned_native_build_background_processes": 0,
+  "unchanged_27_author_checks_repeated": false,
+  "temporary_synthetic_fixture_removed": true,
+  "hash_scope": "Only tooling and small JSON/source evidence; no wheel/native/archive rehash.",
+  "static_seal_checks": {
+    "seal_entries_verified": 36,
+    "archived_v1_files_verified": 25,
+    "unchanged_original_inputs": 22,
+    "largest_rehashed_small_file_bytes": 4496420,
+    "actual_sampling_contract_and_fingerprint_match": true,
+    "unchanged_pure_function_ast": {
+      "fragment_followup_v1.py": [
+        "read",
+        "digest",
+        "fingerprint",
+        "sampling_contract",
+        "validate_seal",
+        "memory_fields",
+        "pair_resource_check"
+      ],
+      "verify_fragment_followup_v1.py": [
+        "utc",
+        "positive",
+        "functions",
+        "maintained",
+        "quantile",
+        "validate_memory",
+        "verify_sample"
+      ]
+    },
+    "original_timer_worker_and_wheel_metadata_unchanged": true,
+    "large_wheel_native_archive_content_rehashed": false,
+    "cli_defaults": "fragment-followup-tooling-seal-v2.json"
+  },
+  "verdict": "Approve",
+  "execution_grant": false,
+  "performance_verdict": null
+}
