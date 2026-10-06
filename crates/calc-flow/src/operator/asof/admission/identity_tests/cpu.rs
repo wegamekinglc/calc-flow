@@ -126,7 +126,9 @@ fn inline_preparation_bounds_rows_identity_bytes_and_order() {
         .collect::<Vec<_>>();
     assert!(can_prepare_inline(&rows));
     let mut too_many = rows.clone();
-    too_many.push(rows[0].clone());
+    let mut next = rows[0].clone();
+    next.0.0 = 4096;
+    too_many.push(next);
     assert!(!can_prepare_inline(&too_many));
     let mut unordered = rows.clone();
     unordered.swap(0, 1);

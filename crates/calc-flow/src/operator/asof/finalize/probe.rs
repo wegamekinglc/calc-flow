@@ -75,7 +75,7 @@ pub(super) async fn parallel_matches(
         .map_or(1, usize::from)
         .min(state::KEY_SHARDS)
         .min(operator.state.right.len())
-        .min(count / 4_096);
+        .min(count / 16_384);
     if workers < 2 {
         return Ok(None);
     }
