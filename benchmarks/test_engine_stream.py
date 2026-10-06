@@ -180,6 +180,31 @@ def test_stream_timer_supports_the_two_source_join_binding(tmp_path, stream_prob
         runner.close()
 
 
+def test_static_join_waits_for_committed_matches_and_eviction(monkeypatch):
+    states = iter(((0, 0), (64_000, 64_000), (64_000, 0)))
+    waits = []
+
+    def status():
+        emitted, retained = next(states)
+        return {
+            "stream_joins": {
+                "join": {
+                    "emitted_match_rows": emitted,
+                    "left": {"retained_rows": retained},
+                }
+            }
+        }
+
+    async def sleep(seconds):
+        waits.append(seconds)
+
+    monkeypatch.setattr(engine_stream.asyncio, "sleep", sleep)
+    asyncio.run(
+        engine_stream._wait_static_join_progress(SimpleNamespace(status=status), 64_000)
+    )
+    assert waits == [0.001, 0.001]
+
+
 def test_stream_timer_excludes_startup_and_cleanup_but_includes_arrow(
     tmp_path, stream_probe
 ):

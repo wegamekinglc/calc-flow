@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import numpy as np
@@ -77,6 +78,34 @@ def test_join_streams_complete_many_chunks_with_bounded_state(scenario, tmp_path
         case
         for case in engine_cases(320_000)
         if case["backend"] == "calc-flow-stream" and case["scenario"] == scenario
+    )
+    runner = EngineCase(case, tmp_path)
+    try:
+        assert runner.sample()["correctness"]["passed"]
+    finally:
+        runner.close()
+
+
+def test_static_join_waits_for_delayed_dimension_progress(monkeypatch, tmp_path):
+    from benchmarks import engine_stream
+    from calc_flow import Data, Watermark
+
+    class DelayedDimensionSource(engine_stream._ReadySource):
+        static = False
+
+        async def next(self):
+            event = await super().next()
+            if isinstance(event, Data):
+                self.static = "factor" in event.batch.to_pyarrow().column_names
+            elif self.static and isinstance(event, Watermark):
+                await asyncio.sleep(2)
+            return event
+
+    monkeypatch.setattr(engine_stream, "_ReadySource", DelayedDimensionSource)
+    case = next(
+        case
+        for case in engine_cases(320_000)
+        if case["backend"] == "calc-flow-stream" and case["scenario"] == "join"
     )
     runner = EngineCase(case, tmp_path)
     try:

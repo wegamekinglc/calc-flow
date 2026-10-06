@@ -331,7 +331,7 @@ def _require_ready_sources(
 
 
 async def _measure_ready(
-    sources: dict[str, _ReadySource], sink: _CollectSink, streams: dict[str, tuple]
+    sources: dict[str, _ReadySource], sink: _CollectSink, streams: dict[str, tuple], job
 ) -> tuple[pa.Table, float]:
     await asyncio.wait_for(
         asyncio.gather(*(source.ready.wait() for source in sources.values())),
@@ -339,13 +339,39 @@ async def _measure_ready(
     )
     _require_ready_sources(sources, sink)
     started = time.perf_counter_ns()
-    for name, event in interleaved_events(streams):
+    pending = streams
+    if (
+        set(streams) == {"left", "right"}
+        and len(streams["right"]) == 2
+        and len(streams["left"]) > 2
+    ):
+        initial = {name: events[:2] for name, events in streams.items()}
+        for name, event in interleaved_events(initial):
+            await sources[name].push(event)
+        await asyncio.wait_for(
+            _wait_static_join_progress(job, streams["left"][0].batch.num_rows),
+            timeout=600,
+        )
+        pending = {"left": streams["left"][2:]}
+    for name, event in interleaved_events(pending):
         await sources[name].push(event)
     await asyncio.wait_for(sink.complete.wait(), timeout=600)
     if sink.rows != sink.expected_rows:
         raise RuntimeError("stream output row count differs from the timed workload")
     table = pa.concat_tables(sink.tables)
     return table, (time.perf_counter_ns() - started) / 1e9
+
+
+async def _wait_static_join_progress(job, rows: int) -> None:
+    while True:
+        statuses = tuple(job.status()["stream_joins"].values())
+        if (
+            len(statuses) == 1
+            and statuses[0]["emitted_match_rows"] >= rows
+            and statuses[0]["left"]["retained_rows"] == 0
+        ):
+            return
+        await asyncio.sleep(0.001)
 
 
 async def run_stream(
@@ -369,7 +395,7 @@ async def run_stream(
     ).start_async()
 
     async def measure_and_end():
-        result = await _measure_ready(sources, sink, timed)
+        result = await _measure_ready(sources, sink, timed, job)
         for source in sources.values():
             await source.push(None)
         return result
