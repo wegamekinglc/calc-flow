@@ -37,6 +37,9 @@ def _source_type(probe, advance, output):
                 advance("eof", 3_000_000_000)
                 if probe.extra_output:
                     await probe.sink.write(output(probe.expected.slice(0, 1)))
+                probe.ended_sources += 1
+                if probe.ended_sources == len(probe.sources):
+                    probe.ended.set()
             elif isinstance(event, Data):
                 assert self.ready.is_set(), "data arrived before source readiness"
                 advance("enqueue", 1_000_000)
@@ -62,6 +65,7 @@ def _sink_type(probe):
 def _runner_type(probe, advance):
     class Job:
         async def wait_async(self):
+            await probe.ended.wait()
             advance("wait", 4_000_000_000)
             return SimpleNamespace(state=probe.outcome, errors=("injected",))
 
@@ -103,6 +107,8 @@ def stream_probe(monkeypatch):
         extra_output=False,
         fail_push=False,
         deferred_ready=False,
+        ended_sources=0,
+        ended=asyncio.Event(),
     )
 
     def advance(phase, elapsed):
@@ -135,6 +141,20 @@ def stream_case(tmp_path, probe, scenario="projection"):
     return runner
 
 
+def test_ready_source_applies_backpressure():
+    async def exercise():
+        source = engine_stream._ReadySource()
+        await source.push("first")
+        second = asyncio.create_task(source.push("second"))
+        await asyncio.sleep(0)
+        assert not second.done()
+        assert await source.next() == "first"
+        await asyncio.wait_for(second, 1)
+        assert await source.next() == "second"
+
+    asyncio.run(exercise())
+
+
 def test_stream_timer_supports_the_two_source_join_binding(tmp_path, stream_probe):
     runner = stream_case(tmp_path, stream_probe, scenario="join")
     try:
@@ -146,9 +166,9 @@ def test_stream_timer_supports_the_two_source_join_binding(tmp_path, stream_prob
             "start",
             "ready",
             "enqueue",
+            "enqueue",
             "watermark",
             "to-arrow",
-            "enqueue",
             "watermark",
             "concat",
             "eof",
@@ -158,6 +178,66 @@ def test_stream_timer_supports_the_two_source_join_binding(tmp_path, stream_prob
         ]
     finally:
         runner.close()
+
+
+def test_static_join_waits_for_committed_matches_and_eviction(monkeypatch):
+    states = iter(((0, 0), (64_000, 64_000), (64_000, 0)))
+    waits = []
+
+    def status():
+        emitted, retained = next(states)
+        return {
+            "stream_joins": {
+                "join": {
+                    "emitted_match_rows": emitted,
+                    "left": {"retained_rows": retained},
+                }
+            }
+        }
+
+    async def sleep(seconds):
+        waits.append(seconds)
+
+    monkeypatch.setattr(engine_stream.asyncio, "sleep", sleep)
+    asyncio.run(
+        engine_stream._wait_static_join_progress(SimpleNamespace(status=status), 64_000)
+    )
+    assert waits == [0.001, 0.001]
+
+
+def test_asof_waits_for_output_and_both_committed_watermarks(monkeypatch):
+    states = iter(
+        (
+            (0, 0, 100, 100),
+            (64_000, 64_000, 100, 100),
+            (64_000, 0, 100, None),
+            (64_000, 0, 99, 100),
+            (64_000, 0, 100, 100),
+        )
+    )
+    waits = []
+
+    def status():
+        emitted, pending, left, right = next(states)
+        return {
+            "stream_asof_joins": {
+                "asof": {
+                    "emitted_left_rows": emitted,
+                    "pending_left_rows": pending,
+                    "left": {"watermark_micros": left},
+                    "right": {"watermark_micros": right},
+                }
+            }
+        }
+
+    async def sleep(seconds):
+        waits.append(seconds)
+
+    monkeypatch.setattr(engine_stream.asyncio, "sleep", sleep)
+    asyncio.run(
+        engine_stream._wait_asof_progress(SimpleNamespace(status=status), 64_000, 100)
+    )
+    assert waits == [0.001] * 4
 
 
 def test_stream_timer_excludes_startup_and_cleanup_but_includes_arrow(

@@ -185,7 +185,10 @@ class BenchmarkSuiteTests(unittest.TestCase):
 
     def test_native_stream_matrix_excludes_runner_startup(self):
         cases = [c for c in engine_cases() if c["backend"] == "calc-flow-stream"]
-        self.assertEqual({c["scope"] for c in cases}, {"ready-enqueue-to-arrow"})
+        self.assertEqual(
+            {c["scope"] for c in cases},
+            {"ready-enqueue-to-arrow/interleaved-inputs-v4"},
+        )
 
     def test_finance_matrix_declares_its_pandas_output_boundary(self):
         cases = [c for c in engine_cases() if c["backend"] == "finance-python"]

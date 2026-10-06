@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pyarrow as pa
 
+from benchmarks.engine_lifecycle import interleaved_events, run_with_completion
 from benchmarks.warm_stream import BASE, BASE_MICROS, _InteractiveSource
 from calc_flow import (
     AsofStateLimits,
@@ -85,10 +86,10 @@ def _join_span(table: pa.Table) -> timedelta:
     return timedelta(microseconds=span)
 
 
-def _join_limits(rows: int) -> JoinStateLimits:
-    """Declare room for one fully retained side plus one input batch."""
+def _join_limits(dimension_rows: int) -> JoinStateLimits:
+    """Bound the static dimension and two in-flight input batches."""
 
-    capacity = rows + BATCH_ROWS
+    capacity = dimension_rows + 2 * BATCH_ROWS
     return JoinStateLimits(capacity, max(capacity << 10, 1 << 30), capacity)
 
 
@@ -109,10 +110,6 @@ def _join_stream_output(table: pa.Table, dimension: pa.Table, quotes):
         event_time="event_time",
         sequence_by=("sequence",),
     )
-    # The dimension side completes at the stream origin and the inclusive
-    # `before` bound spans the whole workload, so every quote row matches
-    # exactly its symbol's factor row — the stream equivalent of the
-    # suite's shared `join` query in engine_comparison.sql_query.
     joined = tables.stream_join(
         quotes,
         factors,
@@ -121,7 +118,7 @@ def _join_stream_output(table: pa.Table, dimension: pa.Table, quotes):
         left_event_time="event_time",
         right_event_time="event_time",
         bounds=JoinTimeBounds(_join_span(table), timedelta()),
-        limits=_join_limits(table.num_rows),
+        limits=_join_limits(dimension.num_rows),
         left_prefix="quote",
         right_prefix="dimension",
     )
@@ -211,7 +208,7 @@ def stream_plan(
             quotes,
             reference,
             tolerance=timedelta(),
-            limits=AsofStateLimits(2 * table.num_rows + BATCH_ROWS, 1 << 30),
+            limits=AsofStateLimits(2 * BATCH_ROWS + 128, 1 << 30),
         )
         output = joined.select(
             sequence=joined["left__sequence"], value=joined["right__price"]
@@ -262,8 +259,8 @@ def stream_events(
     return (*events, None)
 
 
-def dimension_events(dimension: pa.Table) -> tuple:
-    """Seed the dimension side at the origin, then advance and end it."""
+def dimension_events(dimension: pa.Table, quotes: pa.Table) -> tuple:
+    """Seed the static dimension and seal the quote time range."""
 
     rows = dimension.num_rows
     return (
@@ -271,7 +268,7 @@ def dimension_events(dimension: pa.Table) -> tuple:
             Batch.from_pyarrow(dimension),
             Cursor(rows.to_bytes(8, "big"), {"rows": rows}),
         ),
-        Watermark(BASE + timedelta(microseconds=1)),
+        Watermark(BASE + _join_span(quotes)),
         None,
     )
 
@@ -279,6 +276,7 @@ def dimension_events(dimension: pa.Table) -> tuple:
 class _ReadySource(_InteractiveSource):
     def __init__(self) -> None:
         super().__init__(max_batch_rows=BATCH_ROWS)
+        self._events = asyncio.Queue(maxsize=1)
         self.ready = asyncio.Event()
 
     async def next(self) -> Data | Watermark | None:
@@ -333,7 +331,7 @@ def _require_ready_sources(
 
 
 async def _measure_ready(
-    sources: dict[str, _ReadySource], sink: _CollectSink, streams: dict[str, tuple]
+    sources: dict[str, _ReadySource], sink: _CollectSink, streams: dict[str, tuple], job
 ) -> tuple[pa.Table, float]:
     await asyncio.wait_for(
         asyncio.gather(*(source.ready.wait() for source in sources.values())),
@@ -341,14 +339,75 @@ async def _measure_ready(
     )
     _require_ready_sources(sources, sink)
     started = time.perf_counter_ns()
-    for name, events in streams.items():
-        for event in events:
+    pending = streams
+    if (
+        set(streams) == {"reference.input", "quotes.input"}
+        and len(streams["quotes.input"]) > 2
+    ):
+        await _feed_asof_chunks(sources, streams, job)
+        pending = {}
+    elif (
+        set(streams) == {"left", "right"}
+        and len(streams["right"]) == 2
+        and len(streams["left"]) > 2
+    ):
+        initial = {name: events[:2] for name, events in streams.items()}
+        for name, event in interleaved_events(initial):
             await sources[name].push(event)
+        await asyncio.wait_for(
+            _wait_static_join_progress(job, streams["left"][0].batch.num_rows),
+            timeout=600,
+        )
+        pending = {"left": streams["left"][2:]}
+    for name, event in interleaved_events(pending):
+        await sources[name].push(event)
     await asyncio.wait_for(sink.complete.wait(), timeout=600)
     if sink.rows != sink.expected_rows:
         raise RuntimeError("stream output row count differs from the timed workload")
     table = pa.concat_tables(sink.tables)
     return table, (time.perf_counter_ns() - started) / 1e9
+
+
+async def _feed_asof_chunks(sources: dict, streams: dict[str, tuple], job) -> None:
+    rows = 0
+    for start in range(0, len(streams["quotes.input"]), 2):
+        chunk = {name: events[start : start + 2] for name, events in streams.items()}
+        for name, event in interleaved_events(chunk):
+            await sources[name].push(event)
+        rows += chunk["quotes.input"][0].batch.num_rows
+        frontier = int(BASE_MICROS) + (chunk["quotes.input"][1].at - BASE) // timedelta(
+            microseconds=1
+        )
+        await asyncio.wait_for(_wait_asof_progress(job, rows, frontier), timeout=600)
+
+
+async def _wait_asof_progress(job, rows: int, frontier: int) -> None:
+    while True:
+        statuses = tuple(job.status()["stream_asof_joins"].values())
+        if (
+            len(statuses) == 1
+            and statuses[0]["emitted_left_rows"] >= rows
+            and statuses[0]["pending_left_rows"] == 0
+            and all(
+                statuses[0][side]["watermark_micros"] is not None
+                and statuses[0][side]["watermark_micros"] >= frontier
+                for side in ("left", "right")
+            )
+        ):
+            return
+        await asyncio.sleep(0.001)
+
+
+async def _wait_static_join_progress(job, rows: int) -> None:
+    while True:
+        statuses = tuple(job.status()["stream_joins"].values())
+        if (
+            len(statuses) == 1
+            and statuses[0]["emitted_match_rows"] >= rows
+            and statuses[0]["left"]["retained_rows"] == 0
+        ):
+            return
+        await asyncio.sleep(0.001)
 
 
 async def run_stream(
@@ -370,14 +429,15 @@ async def run_stream(
             edge_budget=EdgeBudget(max_rows=BATCH_ROWS, max_bytes=64 << 20),
         ),
     ).start_async()
-    try:
-        table, seconds = await _measure_ready(sources, sink, timed)
-        # Complete and verify the job, but do not time EOF/shutdown bookkeeping.
+
+    async def measure_and_end():
+        result = await _measure_ready(sources, sink, timed, job)
         for source in sources.values():
             await source.push(None)
-        outcome = await asyncio.wait_for(job.wait_async(), timeout=600)
-        if outcome.state != "completed":
-            raise RuntimeError(f"stream failed: {outcome.errors}")
+        return result
+
+    try:
+        table, seconds = await run_with_completion(measure_and_end(), job.wait_async())
         if sink.rows != expected_rows:
             raise RuntimeError("stream output row count changed after the timed result")
         return table, seconds

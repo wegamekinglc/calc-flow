@@ -1,7 +1,7 @@
 //! Canonical key bytes owned once by the retained right dictionary. Hash table
 //! slots contain only u32 handles; arrival IDs never determine output order.
 
-use super::{Encoding, RightBucket, SequenceKind};
+use super::{Encoding, RightBucket, RightOrder, RowRef, SequenceKind};
 use crate::Result;
 use datafusion::common::hash_utils::RandomState;
 use hashbrown::HashTable;
@@ -368,10 +368,18 @@ impl RightState {
     }
 
     pub fn update_admitted(&mut self, id: u32, update: impl FnOnce(&mut RightBucket)) {
+        #[cfg(test)]
+        super::ADMISSION_ACCOUNTING_VISITS.with(|visits| visits.set(visits.get() + 1));
         let bucket = &mut self.entries[id as usize].bucket;
         let previous = bucket.metadata_bytes();
         update(Arc::make_mut(bucket));
         self.bucket_bytes = self.bucket_bytes - previous + bucket.metadata_bytes();
+    }
+
+    pub fn insert_reserved(&mut self, id: u32, order: RightOrder, row: RowRef) {
+        Arc::get_mut(&mut self.entries[id as usize].bucket)
+            .expect("reserved ASOF admission bucket")
+            .insert_admitted(order, row);
     }
 
     pub fn refresh_key(&mut self, key: &Encoding) {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import numpy as np
@@ -67,6 +68,80 @@ def test_ready_stream_repeated_samples_use_fresh_execution_plans(scenario, tmp_p
     try:
         for _ in range(3):
             assert runner.sample()["correctness"]["passed"]
+    finally:
+        runner.close()
+
+
+@pytest.mark.parametrize("scenario", ("join", "asof_join"))
+def test_join_streams_complete_many_chunks_with_bounded_state(scenario, tmp_path):
+    case = next(
+        case
+        for case in engine_cases(320_000)
+        if case["backend"] == "calc-flow-stream" and case["scenario"] == scenario
+    )
+    runner = EngineCase(case, tmp_path)
+    try:
+        assert runner.sample()["correctness"]["passed"]
+    finally:
+        runner.close()
+
+
+def test_static_join_waits_for_delayed_dimension_progress(monkeypatch, tmp_path):
+    from benchmarks import engine_stream
+    from calc_flow import Data, Watermark
+
+    class DelayedDimensionSource(engine_stream._ReadySource):
+        static = False
+
+        async def next(self):
+            event = await super().next()
+            if isinstance(event, Data):
+                self.static = "factor" in event.batch.to_pyarrow().column_names
+            elif self.static and isinstance(event, Watermark):
+                await asyncio.sleep(2)
+            return event
+
+    monkeypatch.setattr(engine_stream, "_ReadySource", DelayedDimensionSource)
+    case = next(
+        case
+        for case in engine_cases(320_000)
+        if case["backend"] == "calc-flow-stream" and case["scenario"] == "join"
+    )
+    runner = EngineCase(case, tmp_path)
+    try:
+        assert runner.sample()["correctness"]["passed"]
+    finally:
+        runner.close()
+
+
+@pytest.mark.parametrize("binding", ("reference.input", "quotes.input"))
+def test_asof_waits_for_delayed_chunk_watermarks(binding, monkeypatch, tmp_path):
+    from benchmarks import engine_stream
+    from calc_flow import Watermark
+
+    names = iter(("reference.input", "quotes.input"))
+
+    class DelayedWatermarkSource(engine_stream._ReadySource):
+        def __init__(self):
+            super().__init__()
+            self.delay = next(names) == binding
+
+        async def next(self):
+            event = await super().next()
+            if self.delay and isinstance(event, Watermark):
+                self.delay = False
+                await asyncio.sleep(2)
+            return event
+
+    monkeypatch.setattr(engine_stream, "_ReadySource", DelayedWatermarkSource)
+    case = next(
+        case
+        for case in engine_cases(320_000)
+        if case["backend"] == "calc-flow-stream" and case["scenario"] == "asof_join"
+    )
+    runner = EngineCase(case, tmp_path)
+    try:
+        assert runner.sample()["correctness"]["passed"]
     finally:
         runner.close()
 

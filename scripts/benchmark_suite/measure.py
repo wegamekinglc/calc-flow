@@ -153,11 +153,15 @@ def _measured_row(case: dict, evidence: list[dict], kind: str) -> dict:
     }
 
 
+def _case_order(count: int) -> list[int]:
+    import numpy as np
+
+    return np.random.default_rng(20260905).permutation(count).tolist()
+
+
 async def measure_shard(
     shard: dict, releases: dict, root: Path, baseline_source: Path | None
 ) -> dict:
-    import numpy as np
-
     from scripts.benchmark_suite.legacy import validate_sources
 
     if baseline_source is None:
@@ -169,7 +173,10 @@ async def measure_shard(
     sites = {
         side: await install(release, root / side) for side, release in releases.items()
     }
-    workers_by_side = {side: (site, sources[side]) for side, site in sites.items()}
+    workers_by_side = {
+        side: (site, ROOT if shard["family"] == "engines" else sources[side])
+        for side, site in sites.items()
+    }
     baseline_ids = baseline_case_ids(baseline_source, shard)
     cases = shard_cases(shard)
     report = {
@@ -181,7 +188,7 @@ async def measure_shard(
         "cases": [],
         "errors": [],
     }
-    order = np.random.default_rng(20260905).permutation(len(cases))
+    order = _case_order(len(cases))
     for index in order:
         case = cases[int(index)]
         print(f"Measuring {case['id']}", flush=True)

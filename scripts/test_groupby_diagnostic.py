@@ -113,7 +113,9 @@ class WorkflowTests(unittest.TestCase):
             Path(__file__).resolve().parents[1] / ".github/workflows/benchmarks.yml"
         ).read_text()
         self.assertIn("dal301-groupby", source)
-        self.assertEqual(source.count("inputs.mode != 'dal301-groupby'"), 2)
+        for job in ("sql-datafusion-paired", "sql-datafusion-matrix"):
+            header = source.split(f"  {job}:\n", 1)[1].split("    steps:\n", 1)[0]
+            self.assertIn("    if: inputs.mode == 'standard'\n", header)
         self.assertIn("artifact-ids: 10636839917", source)
         self.assertIn("artifact-ids: 10637665772", source)
         self.assertIn("run-id: 35596885420", source)

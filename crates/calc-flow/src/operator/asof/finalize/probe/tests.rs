@@ -15,8 +15,40 @@ use std::{
     time::Duration,
 };
 
-const ROWS: usize = 16_384;
+const ROWS: usize = 32_768;
 type Row = (String, i64, i64, u64);
+
+fn test_context(job: &StreamJobContext) -> StreamOperatorContext<'_> {
+    StreamOperatorContext::new(job, "asof", None)
+        .with_output_budget(crate::EdgeBudget::new(ROWS, 128 << 20).unwrap())
+}
+
+#[tokio::test]
+async fn small_finalization_uses_serial_probe() {
+    let (mut operator, left, right) = fixture(true, 10_000);
+    let pool = operator.runtime.pool.clone();
+    let job = StreamJobContext::new(904, "asof", JsonMap::new(), None, CancellationToken::new());
+    let context = test_context(&job);
+    let mut output = EdgeCollector::new(operator.output_ports().to_vec());
+    for (port, rows) in [("right", &right), ("left", &left)] {
+        operator
+            .process_data(port, input(&operator, rows), &context, &mut output)
+            .await
+            .unwrap();
+    }
+    assert!(
+        parallel_matches(&operator, left.len(), &context)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    operator.on_end(&context, &mut output).await.unwrap();
+    assert_output(&mut output, &oracle(&left, &right), true);
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop((operator, output, context));
+    drop(job);
+    assert_eq!(pool.reserved(), 0);
+}
 
 fn fixture(narrow: bool, count: usize) -> (StreamAsofJoinOperator, Vec<Row>, Vec<Row>) {
     let schema = Arc::new(Schema::new(vec![
@@ -212,7 +244,7 @@ fn run_recovery(narrow: bool) {
         let job =
             StreamJobContext::new(902, "asof", JsonMap::new(), None, CancellationToken::new())
                 .with_gather_owner(service.owner("key-shards".into()));
-        let context = StreamOperatorContext::new(&job, "asof", None);
+        let context = test_context(&job);
         let mut output = EdgeCollector::new(operator.output_ports().to_vec());
         for (port, rows) in [("right", &right), ("left", &left)] {
             operator
@@ -298,7 +330,7 @@ fn abandoned_matching_shards_keep_actual_buckets_funded_until_exit() {
         let job =
             StreamJobContext::new(903, "asof", JsonMap::new(), None, CancellationToken::new())
                 .with_gather_owner(service.owner("abandoned-matches".into()));
-        let context = StreamOperatorContext::new(&job, "asof", None);
+        let context = test_context(&job);
         let mut output = EdgeCollector::new(operator.output_ports().to_vec());
         for (port, rows) in [("right", &right), ("left", &left)] {
             operator
@@ -365,7 +397,7 @@ fn abandoned_matching_shards_keep_actual_buckets_funded_until_exit() {
 async fn key_shard_budget_rejection_refunds_and_preserves_input() {
     let (mut operator, left, right) = fixture(false, 128);
     let job = StreamJobContext::new(904, "asof", JsonMap::new(), None, CancellationToken::new());
-    let context = StreamOperatorContext::new(&job, "asof", None);
+    let context = test_context(&job);
     let mut output = EdgeCollector::new(operator.output_ports().to_vec());
     for (port, rows) in [("right", &right), ("left", &left)] {
         operator
@@ -416,7 +448,7 @@ impl crate::StreamCollector for Reject {
 async fn rejected_sharded_output_keeps_checkpoint_and_continues_exactly() {
     let (mut operator, left, right) = fixture(true, ROWS);
     let job = StreamJobContext::new(905, "asof", JsonMap::new(), None, CancellationToken::new());
-    let context = StreamOperatorContext::new(&job, "asof", None);
+    let context = test_context(&job);
     let mut output = EdgeCollector::new(operator.output_ports().to_vec());
     for (port, rows) in [("right", &right), ("left", &left)] {
         operator
@@ -429,7 +461,15 @@ async fn rejected_sharded_output_keeps_checkpoint_and_continues_exactly() {
     let before = operator.status.clone();
     let reserved = operator.runtime.pool.reserved();
     let headroom = operator.checkpoint_workspace().unwrap();
-    let prepared = operator.output_attempt(10_000, &context).await.unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = calls.clone();
+    operator.match_hook = Some(Arc::new(move |_| {
+        counter.fetch_add(1, Ordering::Relaxed);
+    }));
+    let prepared = operator.output_attempt(ROWS, &context).await.unwrap();
+    if std::thread::available_parallelism().map_or(1, usize::from) >= 2 {
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+    }
     let result = operator
         .commit_prefix_output(prepared, headroom, &context, &mut Reject)
         .await;
@@ -437,6 +477,13 @@ async fn rejected_sharded_output_keeps_checkpoint_and_continues_exactly() {
         matches!(result, Err(crate::CalcFlowError::Internal { message }) if message == "rejected matching prefix")
     );
     assert_eq!(operator.status, before);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while operator.runtime.pool.reserved() != reserved {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     assert_eq!(operator.runtime.pool.reserved(), reserved);
     let repeated = operator.checkpoint(Epoch::INITIAL).unwrap();
     assert_eq!(repeated.inline_metadata, snapshot.inline_metadata);
