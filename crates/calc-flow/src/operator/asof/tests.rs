@@ -1626,7 +1626,7 @@ async fn eviction_preview_workspace_covers_many_owned_keys_in_one_payload_batch(
 }
 
 #[tokio::test]
-async fn finalization_reads_a_ready_left_prefix_once() {
+async fn finalization_reads_a_ready_left_prefix_as_one_run() {
     let (mut op, left, _) = prefix_fixture();
     let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
     let cx = StreamOperatorContext::new(&job, "asof", None);
@@ -1638,8 +1638,8 @@ async fn finalization_reads_a_ready_left_prefix_once() {
     op.on_end(&cx, &mut output).await.unwrap();
     assert_eq!(
         state::take_left_visits(),
-        3,
-        "ready prefix was repeatedly scanned"
+        1,
+        "ready prefix required more than one heap run"
     );
     assert_eq!(op.status.emitted_left_rows, 3);
 }

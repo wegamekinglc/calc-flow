@@ -623,25 +623,28 @@ impl LeftState {
         self.legacy
             .iter()
             .map(|(order, row)| (borrowed(order), *row))
-            .chain(ChunkIter::new(&self.chunks))
+            .chain(
+                ChunkIter::new(&self.chunks).flat_map(|run| {
+                    (run.start..run.end).map(move |ordinal| run.chunk.row(ordinal))
+                }),
+            )
     }
 
     /// Matching uses time/key and encoding owners. Integer sequence bytes
     /// remain in their owned column until a comparator actually needs them.
     pub fn output_iter(&self) -> impl Iterator<Item = (OutputIdentity<'_>, RowRef)> {
-        let mut chunks = ChunkIter::new(&self.chunks);
         self.legacy
             .iter()
             .map(|(order, row)| ((&order.0, &order.1, Some(&order.2)), *row))
-            .chain(std::iter::from_fn(move || {
-                let cursor = chunks.next_cursor()?;
-                Some((
-                    cursor.chunk.data.output_view(cursor.ordinal),
-                    cursor
-                        .chunk
-                        .reference
-                        .with_row(cursor.chunk.data.position(cursor.ordinal)),
-                ))
+            .chain(ChunkIter::new(&self.chunks).flat_map(|run| {
+                (run.start..run.end).map(move |ordinal| {
+                    (
+                        run.chunk.data.output_view(ordinal),
+                        run.chunk
+                            .reference
+                            .with_row(run.chunk.data.position(ordinal)),
+                    )
+                })
             }))
     }
 
@@ -1026,6 +1029,12 @@ impl Ord for Cursor<'_> {
 struct ChunkIter<'a> {
     heap: BinaryHeap<Reverse<Cursor<'a>>>,
 }
+
+struct ChunkRun<'a> {
+    chunk: &'a LeftChunk,
+    start: usize,
+    end: usize,
+}
 impl<'a> ChunkIter<'a> {
     fn new(chunks: &'a [LeftChunk]) -> Self {
         let cursors = chunks
@@ -1042,23 +1051,46 @@ impl<'a> ChunkIter<'a> {
         }
     }
 
-    fn next_cursor(&mut self) -> Option<Cursor<'a>> {
-        let Reverse(mut cursor) = self.heap.pop()?;
-        let selected = cursor;
-        cursor.ordinal += 1;
-        if cursor.ordinal < cursor.chunk.data.sequences.len() {
-            self.heap.push(Reverse(cursor));
+    fn run_end(&self, cursor: Cursor<'a>) -> usize {
+        let len = cursor.chunk.data.sequences.len();
+        let Some(Reverse(next)) = self.heap.peek() else {
+            return len;
+        };
+        let at = |ordinal| Cursor { ordinal, ..cursor };
+        if at(len - 1) < *next {
+            return len;
         }
-        #[cfg(test)]
-        super::LEFT_VISITS.with(|visits| visits.set(visits.get() + 1));
-        Some(selected)
+        let mut start = cursor.ordinal + 1;
+        let mut end = len;
+        while start < end {
+            let middle = start + (end - start) / 2;
+            if at(middle) < *next {
+                start = middle + 1;
+            } else {
+                end = middle;
+            }
+        }
+        start
     }
 }
 impl<'a> Iterator for ChunkIter<'a> {
-    type Item = (LeftView<'a>, RowRef);
+    type Item = ChunkRun<'a>;
     fn next(&mut self) -> Option<Self::Item> {
-        let cursor = self.next_cursor()?;
-        Some(cursor.chunk.row(cursor.ordinal))
+        let Reverse(cursor) = self.heap.pop()?;
+        let end = self.run_end(cursor);
+        if end < cursor.chunk.data.sequences.len() {
+            self.heap.push(Reverse(Cursor {
+                ordinal: end,
+                ..cursor
+            }));
+        }
+        #[cfg(test)]
+        super::LEFT_VISITS.with(|visits| visits.set(visits.get() + 1));
+        Some(ChunkRun {
+            chunk: cursor.chunk,
+            start: cursor.ordinal,
+            end,
+        })
     }
 }
 
@@ -1188,6 +1220,62 @@ mod tests {
             })
             .collect();
         (owner, side, rows)
+    }
+
+    #[test]
+    fn chunk_iteration_visits_nonoverlapping_runs_in_canonical_order() {
+        let mut state = super::super::State::default();
+        let mut expected = Vec::new();
+        for start in [768_i64, 0, 512, 256] {
+            let key = Arc::new(StringArray::from(vec!["A"; 256])) as ArrayRef;
+            let sequence = Arc::new(Int64Array::from_iter_values(start..start + 256)) as ArrayRef;
+            let (_, side, rows) = fixture(key, sequence, u64::try_from(start).unwrap());
+            expected.extend(rows.iter().map(|(order, _)| order.clone()));
+            let chunks = prepare_owned(&rows, &side, "asof").unwrap();
+            state.left.install(chunks, &mut state.batches);
+        }
+        expected.sort_unstable();
+        super::super::take_left_visits();
+        let actual = state
+            .left
+            .iter()
+            .map(|(order, _)| (*order.0, order.1.clone(), order.2.into_owned()))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+        assert_eq!(super::super::take_left_visits(), 4);
+
+        let expected_rows = state.left.iter().map(|(_, row)| row).collect::<Vec<_>>();
+        super::super::take_left_visits();
+        let actual_rows = state
+            .left
+            .output_iter()
+            .map(|(_, row)| row)
+            .collect::<Vec<_>>();
+        assert_eq!(actual_rows, expected_rows);
+        assert_eq!(super::super::take_left_visits(), 4);
+    }
+
+    #[test]
+    fn overlapping_chunk_runs_preserve_canonical_sequence_order() {
+        let mut state = super::super::State::default();
+        let mut expected = Vec::new();
+        for parity in [1_i64, 0] {
+            let key = Arc::new(StringArray::from(vec!["A"; 128])) as ArrayRef;
+            let sequence = Arc::new(Int64Array::from_iter_values(
+                (0..128).map(|row| 2 * row + parity),
+            )) as ArrayRef;
+            let (_, side, rows) = fixture(key, sequence, u64::try_from(parity).unwrap());
+            expected.extend(rows.iter().map(|(order, _)| order.clone()));
+            let chunks = prepare_owned(&rows, &side, "asof").unwrap();
+            state.left.install(chunks, &mut state.batches);
+        }
+        expected.sort_unstable();
+        let actual = state
+            .left
+            .iter()
+            .map(|(order, _)| (*order.0, order.1.clone(), order.2.into_owned()))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
     }
 
     #[test]
