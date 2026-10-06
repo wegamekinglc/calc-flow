@@ -9,6 +9,11 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-06: Maintain streaming Join retained-state gauges, expiration indexes
+  and pending checkpoint operations incrementally. Decode timestamp units once
+  per record and canonicalize incoming keys once. Preserve physical row IDs,
+  ordered matches, logical resource limits and the frozen layout-1 captures.
+
 - 2026-10-06: Add 64-key inclusive five-second interval Join benchmark
   references through 1M input rows, explicit 1,024-row native variants, and
   separate 100 ms checkpoint/recovery lifecycle cases at 100k and 1M rows.

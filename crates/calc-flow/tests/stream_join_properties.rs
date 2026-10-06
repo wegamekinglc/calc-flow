@@ -7,12 +7,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use calc_flow::{
-    Batch, BatchMetadata, CancellationToken, EdgeCollector, EventTime, IngressProgress,
+    Batch, BatchMetadata, CancellationToken, EdgeCollector, Epoch, EventTime, IngressProgress,
     IngressProgressSnapshot, IngressState, JoinStateLimits, JoinTimeBounds, JsonMap,
-    OperatorMetadata, StreamJobContext, StreamJoinOperator, StreamJoinSpec, StreamOperator,
-    StreamOperatorContext,
+    OperatorMetadata, StreamJobContext, StreamJoinOperator, StreamJoinSpec, StreamJoinStatus,
+    StreamOperator, StreamOperatorContext,
 };
-use datafusion::arrow::array::{StringArray, TimestampMicrosecondArray};
+use datafusion::arrow::array::{StringArray, TimestampMicrosecondArray, UInt64Array};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
 use proptest::collection::vec;
@@ -140,7 +140,7 @@ fn join_schema() -> Arc<Schema> {
 
 /// One legal interleaving step: a data batch on one side followed by that
 /// side's watermark update.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Step {
     Left(Vec<SideRow>, i64),
     Right(Vec<SideRow>, i64),
@@ -315,6 +315,298 @@ fn sorted_log(rows: &[SideRow]) -> Vec<SideRow> {
     let mut sorted = rows.to_vec();
     sorted.sort_by_key(|row| row.ts);
     sorted
+}
+
+#[derive(Clone, Copy)]
+struct OrderedRow {
+    key: Option<char>,
+    ts: Option<i64>,
+    physical_id: u64,
+}
+
+fn ordered_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(vec![
+        Field::new("key", DataType::Utf8, true),
+        Field::new("ts", DataType::Timestamp(TimeUnit::Microsecond, None), true),
+        Field::new("physical_id", DataType::UInt64, false),
+    ]))
+}
+
+fn ordered_operator(bounds: (u64, u64)) -> StreamJoinOperator {
+    StreamJoinOperator::new(
+        "match",
+        ordered_schema(),
+        ordered_schema(),
+        StreamJoinSpec::inner(
+            ["key"],
+            ["key"],
+            "ts",
+            "ts",
+            JoinTimeBounds::new(Duration::from_secs(bounds.0), Duration::from_secs(bounds.1))
+                .unwrap(),
+            JoinStateLimits::new(100_000, 134_217_728, 1_000_000).unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap()
+}
+
+fn ordered_batch(rows: &[OrderedRow]) -> Batch {
+    let record = RecordBatch::try_new(
+        ordered_schema(),
+        vec![
+            Arc::new(StringArray::from(
+                rows.iter()
+                    .map(|row| row.key.map(|key| key.to_string()))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(TimestampMicrosecondArray::from(
+                rows.iter()
+                    .map(|row| row.ts.map(|ts| ts * SECOND))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(UInt64Array::from(
+                rows.iter().map(|row| row.physical_id).collect::<Vec<_>>(),
+            )),
+        ],
+    )
+    .unwrap();
+    Batch::table(vec![record], BatchMetadata::default()).unwrap()
+}
+
+/// Preserves physical identities even for rows dropped before matching.
+fn ordered_input(rows: &[SideRow], watermark: Option<i64>, next_id: &mut u64) -> Vec<OrderedRow> {
+    let mut physical = vec![(None, None), (None, Some(watermark.unwrap_or(0)))];
+    if let Some(watermark) = watermark {
+        physical.push((Some('a'), Some(watermark - 1)));
+    }
+    physical.extend(rows.iter().map(|row| (Some(row.key), Some(row.ts))));
+    physical
+        .into_iter()
+        .map(|(key, ts)| {
+            let row = OrderedRow {
+                key,
+                ts,
+                physical_id: *next_id,
+            };
+            *next_id += 1;
+            row
+        })
+        .collect()
+}
+
+fn reference_step(
+    incoming: &[OrderedRow],
+    opposite: &[OrderedRow],
+    incoming_left: bool,
+    own_watermark: Option<i64>,
+    bounds: (u64, u64),
+) -> Vec<(u64, u64)> {
+    let mut emitted = Vec::new();
+    for row in incoming {
+        let (Some(key), Some(ts)) = (row.key, row.ts) else {
+            continue;
+        };
+        if own_watermark.is_some_and(|watermark| ts < watermark) {
+            continue;
+        }
+        let mut matched = opposite
+            .iter()
+            .filter(|other| {
+                if other.key != Some(key) {
+                    return false;
+                }
+                let delta = if incoming_left {
+                    other.ts.unwrap() - ts
+                } else {
+                    ts - other.ts.unwrap()
+                };
+                delta >= -i64::try_from(bounds.0).unwrap()
+                    && delta <= i64::try_from(bounds.1).unwrap()
+            })
+            .collect::<Vec<_>>();
+        matched.sort_by_key(|other| (other.ts, other.physical_id));
+        emitted.extend(matched.into_iter().map(|other| {
+            if incoming_left {
+                (row.physical_id, other.physical_id)
+            } else {
+                (other.physical_id, row.physical_id)
+            }
+        }));
+    }
+    emitted
+}
+
+fn drain_ordered(collector: &mut EdgeCollector) -> (Vec<(u64, u64)>, Vec<u64>) {
+    let mut rows = Vec::new();
+    let mut sequences = Vec::new();
+    for message in collector.drain("output") {
+        let batch = message.as_data().unwrap();
+        sequences.push(batch.metadata().sequence());
+        for record in batch.table_payload().unwrap().batches() {
+            let ids = |name| {
+                record
+                    .column_by_name(name)
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
+                    .unwrap()
+            };
+            let left = ids("left__physical_id");
+            let right = ids("right__physical_id");
+            rows.extend(
+                (0..record.num_rows()).map(|index| (left.value(index), right.value(index))),
+            );
+        }
+    }
+    (rows, sequences)
+}
+
+async fn restore_ordered_checkpoint(
+    operator: &mut StreamJoinOperator,
+    bounds: (u64, u64),
+    epoch: Epoch,
+    next_ids: (u64, u64),
+    context: &StreamOperatorContext<'_>,
+) {
+    let snapshot = operator.checkpoint(epoch).unwrap();
+    assert_eq!(snapshot.inline_metadata["next_left_row_id"], next_ids.0);
+    assert_eq!(snapshot.inline_metadata["next_right_row_id"], next_ids.1);
+    let before = operator.status();
+    let mut restored = ordered_operator(bounds);
+    restored.restore(&snapshot).unwrap();
+    // Managed restore supplies accepted progress separately from V1 state.
+    restored.on_ingress_progress("left", context).await.unwrap();
+    restored
+        .on_ingress_progress("right", context)
+        .await
+        .unwrap();
+    assert_eq!(restored.status(), before);
+    *operator = restored;
+}
+
+fn ordered_job() -> StreamJobContext {
+    StreamJobContext::new(
+        1,
+        "fingerprint",
+        JsonMap::new(),
+        None,
+        CancellationToken::new(),
+    )
+}
+
+#[derive(Default)]
+struct OrderedSide {
+    rows: Vec<OrderedRow>,
+    watermark: Option<i64>,
+    next_id: u64,
+}
+
+fn retains_ordered_row(
+    row: &OrderedRow,
+    own: Option<i64>,
+    opposite: Option<i64>,
+    extension: i64,
+) -> bool {
+    row.key.is_some()
+        && row.ts.is_some_and(|ts| {
+            own.is_none_or(|watermark| ts >= watermark)
+                && opposite.is_none_or(|watermark| ts + extension >= watermark)
+        })
+}
+
+async fn ordered_schedule(
+    bounds: (u64, u64),
+    steps: &[Step],
+    checkpoint_cuts: &[bool],
+) -> (Vec<(u64, u64)>, Vec<u64>, StreamJoinStatus) {
+    let mut operator = ordered_operator(bounds);
+    let job = ordered_job();
+    let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+    let mut sides = [OrderedSide::default(), OrderedSide::default()];
+    let (mut emitted, mut sequences) = (Vec::new(), Vec::new());
+    for (index, step) in steps.iter().enumerate() {
+        let (ingress, input, watermark, incoming_left) = match step {
+            Step::Left(rows, watermark) => ("left", rows, watermark, true),
+            Step::Right(rows, watermark) => ("right", rows, watermark, false),
+        };
+        let side = usize::from(!incoming_left);
+        let own = sides[side].watermark;
+        let opposite_watermark = sides[1 - side].watermark;
+        let rows = ordered_input(input, own, &mut sides[side].next_id);
+        let expected = reference_step(&rows, &sides[1 - side].rows, incoming_left, own, bounds);
+        let context = StreamOperatorContext::with_ingress_progress(
+            &job,
+            "match",
+            None,
+            both_sides(sides[0].watermark, sides[1].watermark),
+        );
+        operator
+            .process_data(ingress, ordered_batch(&rows), &context, &mut collector)
+            .await
+            .unwrap();
+        let (actual, batch_sequences) = drain_ordered(&mut collector);
+        assert_eq!(actual, expected, "schedule step {index}: {steps:?}");
+        emitted.extend(actual);
+        sequences.extend(batch_sequences);
+        let retained = &mut sides[side].rows;
+        let extension = i64::try_from([bounds.1, bounds.0][side]).unwrap();
+        retained.extend(
+            rows.into_iter()
+                .filter(|row| retains_ordered_row(row, own, opposite_watermark, extension)),
+        );
+        sides[side].watermark = Some(*watermark);
+        let context = StreamOperatorContext::with_ingress_progress(
+            &job,
+            "match",
+            None,
+            both_sides(sides[0].watermark, sides[1].watermark),
+        );
+        operator
+            .on_ingress_progress(ingress, &context)
+            .await
+            .unwrap();
+        let expired = &mut sides[1 - side].rows;
+        let extension = i64::try_from([bounds.0, bounds.1][side]).unwrap();
+        expired.retain(|row| row.ts.unwrap() + extension >= *watermark);
+        if checkpoint_cuts.get(index).copied().unwrap_or(false) {
+            let epoch = Epoch::new(u64::try_from(index).unwrap() + 1).unwrap();
+            restore_ordered_checkpoint(
+                &mut operator,
+                bounds,
+                epoch,
+                (sides[0].next_id, sides[1].next_id),
+                &context,
+            )
+            .await;
+        }
+    }
+    assert_eq!(
+        sequences,
+        (0..u64::try_from(sequences.len()).unwrap()).collect::<Vec<_>>()
+    );
+    (emitted, sequences, operator.status())
+}
+
+proptest! {
+    #![proptest_config(property_config())]
+    #[test]
+    fn ordered_schedule_and_random_checkpoint_cuts_preserve_physical_ids_and_counters(
+        left_rows in side_rows(), right_rows in side_rows(), bounds in bounds_seconds(),
+        left_chunks in chunk_sizes(), right_chunks in chunk_sizes(),
+        left_permutations in permutations(), right_permutations in permutations(),
+        picks_left in picks(), checkpoint_cuts in picks(),
+    ) {
+        let steps = interleave(
+            partition_side(&sorted_log(&left_rows), &left_chunks, &left_permutations),
+            partition_side(&sorted_log(&right_rows), &right_chunks, &right_permutations),
+            &picks_left,
+        );
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let uninterrupted = runtime.block_on(ordered_schedule(bounds, &steps, &[]));
+        let restored = runtime.block_on(ordered_schedule(bounds, &steps, &checkpoint_cuts));
+        prop_assert_eq!(restored, uninterrupted);
+    }
 }
 
 proptest! {
