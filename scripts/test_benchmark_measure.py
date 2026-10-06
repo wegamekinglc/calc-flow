@@ -3,12 +3,48 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from scripts.benchmark_suite import measure
 
 
 class BenchmarkMeasureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_single_thread_reference_launches_and_validates_its_own_pool(self):
+        case = {"family": "engines", "backend": "polars-1t"}
+        release = {"native_sha256": "a" * 64}
+        environment = {
+            **release,
+            "polars_threads": 1,
+            "tokio_worker_threads": "32",
+        }
+        sample = {"seconds": 0.01, "correctness": {"passed": True}}
+
+        async def request(**message):
+            return {
+                "hello": environment,
+                "prepare": {"case": case, "warmup": sample},
+                "sample": sample,
+                "finish": {"state": "completed"},
+            }[message["operation"]]
+
+        worker = SimpleNamespace(request=request, close=AsyncMock())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(
+                measure.Worker, "start", AsyncMock(return_value=worker)
+            ) as start:
+                result = await measure._round(
+                    case,
+                    {"candidate": (root / "site", root / "source")},
+                    {"candidate": release},
+                    root / "runs",
+                )
+            self.assertEqual(start.await_args.kwargs["polars_threads"], 1)
+            self.assertEqual(result["environment"]["polars_threads"], 1)
+            self.assertEqual(len(result["samples"]["candidate"]), 10)
+            worker.close.assert_awaited_once()
+
     async def test_engine_versions_share_fixture_and_validate_release_sources(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

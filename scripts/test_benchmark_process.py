@@ -119,6 +119,12 @@ class BenchmarkProcessTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(environment["OPENBLAS_NUM_THREADS"], "1")
         self.assertTrue(environment["npm_config_cache"].endswith("target/npm-cache"))
 
+    def test_single_thread_polars_environment_preserves_other_pool_sizes(self):
+        environment = child_environment(polars_threads=1)
+        self.assertEqual(environment["POLARS_MAX_THREADS"], "1")
+        self.assertEqual(environment["TOKIO_WORKER_THREADS"], "32")
+        self.assertEqual(environment["OPENBLAS_NUM_THREADS"], "1")
+
 
 if __name__ == "__main__":
     unittest.main()

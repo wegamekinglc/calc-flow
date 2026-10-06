@@ -9,6 +9,7 @@ from scripts.benchmark_suite.catalog import (
     THREADS,
     comparison_kind,
     get_shard,
+    polars_thread_count,
     shard_cases,
 )
 from scripts.benchmark_suite.provenance import harness_sha256
@@ -101,7 +102,7 @@ def _validate_evidence(case: dict, releases: dict) -> None:
     if len(rounds) != 2 or rounds[0]["environment"] != rounds[1]["environment"]:
         raise ValueError("missing confirmation or changed environment")
     environment = rounds[0]["environment"]
-    if environment["polars_threads"] != THREADS or environment[
+    if environment["polars_threads"] != polars_thread_count(case) or environment[
         "tokio_worker_threads"
     ] != str(THREADS):
         raise ValueError("unexpected worker thread configuration")

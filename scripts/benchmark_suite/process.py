@@ -16,14 +16,14 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def child_environment(
-    site: Path | None = None, *, source: Path = ROOT
+    site: Path | None = None, *, source: Path = ROOT, polars_threads: int = THREADS
 ) -> dict[str, str]:
     return {
         **os.environ,
         "PYTHONPATH": os.pathsep.join(str(p) for p in (site, source) if p is not None),
         "PYTHONDONTWRITEBYTECODE": "1",
         "TOKIO_WORKER_THREADS": str(THREADS),
-        "POLARS_MAX_THREADS": str(THREADS),
+        "POLARS_MAX_THREADS": str(polars_threads),
         "OMP_NUM_THREADS": "1",
         "OPENBLAS_NUM_THREADS": "1",
         "MKL_NUM_THREADS": "1",
@@ -126,7 +126,9 @@ class Worker:
         self.process, self.log = process, log
 
     @classmethod
-    async def start(cls, site: Path, root: Path, *, source: Path):
+    async def start(
+        cls, site: Path, root: Path, *, source: Path, polars_threads: int = THREADS
+    ):
         root.mkdir(parents=True, exist_ok=True)
         log = (root / "stderr.log").open("wb")
         try:
@@ -138,7 +140,9 @@ class Worker:
                 "--root",
                 str(root),
                 cwd=source,
-                env=child_environment(site, source=source),
+                env=child_environment(
+                    site, source=source, polars_threads=polars_threads
+                ),
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=log,

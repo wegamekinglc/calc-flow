@@ -9,6 +9,12 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-06: Use sink delivery events for ready-stream ASOF benchmark
+  lockstep, replacing timed status polling. Stream scope v5 treats declared
+  older scopes as new coverage. Cross-library reports include independently
+  measured Polars 1-thread and 32-thread references with verified pool sizes.
+  The benchmark guide now reflects all reopened Join, ASOF and window tiers.
+
 - 2026-10-01: Use batch-table indices for temporary streaming ASOF admission
   rows, retaining each payload once per batch and resolving right payload
   references directly at install. Detached left preparation keeps its owner

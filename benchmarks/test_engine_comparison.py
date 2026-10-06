@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -15,6 +18,7 @@ from benchmarks.engine_comparison import (
     workload,
 )
 from scripts.benchmark_suite.catalog import STREAM_CASES, engine_cases
+from scripts.benchmark_suite.process import child_environment
 
 
 def test_sql_queries_reject_unknown_scenario_names():
@@ -55,6 +59,55 @@ def test_polars_asof_case_matches_the_shared_oracle(tmp_path):
         assert sample["correctness"]["rows"] == 101
     finally:
         runner.close()
+
+
+@pytest.mark.parametrize("rows", (10, 101))
+def test_polars_single_thread_reference_matches_oracles_in_a_fresh_process(
+    tmp_path, rows
+):
+    import calc_flow
+
+    source = Path(__file__).resolve().parents[1]
+    site = Path(calc_flow.__file__).resolve().parents[1]
+    script = """
+import json
+import sys
+from pathlib import Path
+import polars as pl
+from benchmarks.engine_comparison import EngineCase
+from scripts.benchmark_suite.catalog import engine_cases
+samples = []
+for case in engine_cases(int(sys.argv[2])):
+    if case['backend'] != 'polars-1t':
+        continue
+    runner = EngineCase(case, Path(sys.argv[1]))
+    try:
+        samples.append(runner.sample()['correctness']['passed'])
+    finally:
+        runner.close()
+print(json.dumps({'threads': pl.thread_pool_size(), 'samples': samples}))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path), str(rows)],
+        cwd=source,
+        env=child_environment(site, source=source, polars_threads=1),
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+    assert json.loads(result.stdout) == {"threads": 1, "samples": [True] * 7}
+
+
+def test_single_thread_reference_rejects_a_process_with_a_larger_pool(
+    monkeypatch, tmp_path
+):
+    import polars as pl
+
+    monkeypatch.setattr(pl, "thread_pool_size", lambda: 32)
+    case = next(case for case in engine_cases(101) if case["backend"] == "polars-1t")
+    with pytest.raises(ValueError, match="single-thread.*one thread"):
+        EngineCase(case, tmp_path)
 
 
 @pytest.mark.parametrize("scenario", STREAM_CASES)
@@ -137,6 +190,27 @@ def test_asof_waits_for_delayed_chunk_watermarks(binding, monkeypatch, tmp_path)
     case = next(
         case
         for case in engine_cases(320_000)
+        if case["backend"] == "calc-flow-stream" and case["scenario"] == "asof_join"
+    )
+    runner = EngineCase(case, tmp_path)
+    try:
+        assert runner.sample()["correctness"]["passed"]
+    finally:
+        runner.close()
+
+
+def test_asof_small_batches_complete_without_reading_job_status(monkeypatch, tmp_path):
+    from benchmarks import engine_stream
+    from calc_flow import StreamingJob
+
+    def status(_self):
+        raise AssertionError("ASOF progress must await sink delivery")
+
+    monkeypatch.setattr(engine_stream, "BATCH_ROWS", 1_024)
+    monkeypatch.setattr(StreamingJob, "status", status)
+    case = next(
+        case
+        for case in engine_cases(4_097)
         if case["backend"] == "calc-flow-stream" and case["scenario"] == "asof_join"
     )
     runner = EngineCase(case, tmp_path)
@@ -229,7 +303,14 @@ def test_new_stream_operators_match_independent_oracle(scenario, tmp_path):
 
 
 @pytest.mark.parametrize(
-    "case", [*engine_cases(10), *engine_cases(101)], ids=lambda case: case["id"]
+    "case",
+    [
+        case
+        for rows in (10, 101)
+        for case in engine_cases(rows)
+        if case["backend"] != "polars-1t"
+    ],
+    ids=lambda case: case["id"],
 )
 def test_engine_outputs_match_independent_oracle(case: dict, tmp_path: Path):
     runner = EngineCase(case, tmp_path)

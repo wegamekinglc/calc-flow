@@ -337,6 +337,11 @@ class EngineCase:
         backend, scenario = case["backend"], case["scenario"]
         if scenario not in CAPABILITIES[backend]:
             raise ValueError("unsupported engine/workload combination")
+        if backend == "polars-1t":
+            import polars as pl
+
+            if pl.thread_pool_size() != 1:
+                raise ValueError("Polars single-thread reference requires one thread")
         self.case, self.root, self.count = case, root, 0
         self.data = workload(case["rows"])
         self.expected = expected_output(self.data, scenario)
@@ -382,6 +387,7 @@ class EngineCase:
                 "calc-flow-sql": _calc_flow,
                 "datafusion": _datafusion,
                 "polars": _polars,
+                "polars-1t": _polars,
                 "ta-lib": _ta_lib,
             }[backend]
             self.calculate = factory(self.data, scenario)

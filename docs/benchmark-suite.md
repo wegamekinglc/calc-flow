@@ -32,16 +32,16 @@ On this page:
 ## Complete inventory
 
 The catalog is executable: `python -m scripts.benchmark_suite catalog` emits
-the same 21 shards consumed by the scheduled and manual suite. The slow Python
-`nightly` scale is excluded from this suite; overhead, small and standard
-remain. The separate engine and warm-state matrices still run every decade
+the same 22 shards consumed by the scheduled and manual suite. The Python
+matrix includes overhead, small, standard and nightly scales.
+The separate engine and warm-state matrices still run every decade
 through 10M rows. Dynamic pytest, Criterion and Vitest inventories preserve
 benchmark cases without a second hand-written case list.
 
 | Family          | Dimensions                                          | Cases per dimension                                       |
 |-----------------|-----------------------------------------------------|-----------------------------------------------------------|
-| Python          | overhead 1k, small 10k, standard 100k               | All collected non-lifecycle pytest benchmarks             |
-| Engines         | 10, 100, 1k, 10k, 100k, 1M, 10M rows                | 40 through 10k; 38 at 100k; 37 at 1M and 10M              |
+| Python          | overhead 1k, small 10k, standard 100k, nightly 1M   | All collected non-lifecycle pytest benchmarks             |
+| Engines         | 10, 100, 1k, 10k, 100k, 1M, 10M rows                | 48 at every tier, including Polars 1T and 32T             |
 | Warm streaming  | 10, 100, 1k, 10k, 100k, 1M, 10M history; append 64  | SMA(20), SMA(5) minus SMA(20)                             |
 | Warm append     | History 1M; append 1, 4, 16, 64, 640, 6,400, 64,000 | Both indicators; append 64 shared with history matrix     |
 | Rust            | Every `[[bench]]` target in the core crate          | Core, allocation, state/window, Join/ASOF, SQL/DataFusion |
@@ -53,7 +53,7 @@ scale and four selected `Program.execute` cases. The Rust `stream_union` target
 measures native Union forwarding. These cases extend the inventory without
 adding a new shard or changing the scheduled 06:00 and 18:00 runs.
 
-There are 272 engine cases and 26 warm cases, in addition to dynamically
+There are 336 engine cases and 26 warm cases, in addition to dynamically
 discovered cases. Warm cases use one entity to support one-row appends.
 Compare measurements only when entity count, history depth, append size,
 and timing boundaries match.
@@ -69,31 +69,30 @@ no regression verdict.
 |------------------|-------------|-------------|-------------|-------------|---------|----------|
 | Calc Flow SQL    | Yes         | Yes         | Yes         | Yes         | Yes     | Yes      |
 | Raw DataFusion   | Yes         | Yes         | Yes         | Yes         | Yes     | Yes      |
-| Polars           | Yes         | Yes         | Yes         | Yes         | Yes     | Yes      |
+| Polars 1T / 32T  | Yes         | Yes         | Yes         | Yes         | Yes     | Yes      |
 | Native streaming | Yes         | Yes         | Yes         | Yes         | Yes     | Yes      |
 | TA-Lib           | Unsupported | Unsupported | Unsupported | Unsupported | Yes     | Yes      |
 | Finance-Python   | Unsupported | Unsupported | Unsupported | Unsupported | Yes     | Yes      |
 
 | Backend          | Average     | Argmax 64   | Argmax 256  | Unique 64   | CS mean     | Window sum  | ASOF join   |
 |------------------|-------------|-------------|-------------|-------------|-------------|-------------|-------------|
-| Native streaming | Yes         | Yes         | Yes         | Yes         | Yes         | Through 10k | Through 10k |
+| Native streaming | Yes         | Yes         | Yes         | Yes         | Yes         | Yes         | Yes         |
 | Finance-Python   | Yes         | Yes         | Yes         | Yes         | Yes         | Unsupported | Unsupported |
-| Polars           | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported | Yes         |
+| Polars 1T / 32T  | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported | Yes         |
 | Other libraries  | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported |
 
 Unsupported operations are explicit cells, not silent dependency skips.
 Native streaming measures `join` through the bounded temporal join with the
-dimension side complete at the stream origin; its evidence stops at the
-100,000-row tier. ASOF join stops at 10,000 rows because it retains
-two full input streams in the benchmark fixture. The ten-second tumbling sum
-also stops at 10,000 rows because its ready-stream finalization becomes slow at
-the next tier. The 1M and 10M join tiers
-stay unsupported in the catalog for
-performance (user-directed pacing constraint, 2026-09-20): the join retains
-one state row per matched input row for the whole run, so a sample needs
-roughly 5 seconds at 1M and 200 seconds at 10M on the dev machine, which
-would slow the whole suite's cadence. Missing
-DataFusion, Polars, TA-Lib, or Finance-Python fails its shard. DataFusion Python 54 matches
+dimension side seeded at the stream origin and its watermark sealing the quote
+time range. Join, ASOF join and window sum all run through 10M rows. The current
+static Join fixture feeds the first quote batch alongside the dimension and
+waits for committed matches and quote eviction before continuing; the first
+batch can still be retained before the dimension watermark is processed.
+ASOF feeds one interleaved batch pair at a time and awaits delivery of every
+left row in that pair before feeding the next. Window sum uses ten-second
+tumbling windows. These cases retain bounded in-flight state
+rather than both complete input streams.
+Missing DataFusion, Polars, TA-Lib, or Finance-Python fails its shard. DataFusion Python 54 matches
 the core's DataFusion major; the shared requirements file pins all Python
 build/benchmark/Studio dependencies with hashes.
 
@@ -140,8 +139,11 @@ on both sides. Warm cases retain the existing decimal input fixture.
 | Ready native streaming | Input enqueue, sources/tasks/channels, rolling, watermarks, sink and combined Arrow output | Plans, input events, runner startup/readiness, EOF/shutdown |
 | Warm native streaming  | Preconstructed data enqueue, live source/task/channel, rolling/finalization, sink to Arrow | Compilation, runner start, historical preload, validation   |
 
-SQL/raw-DataFusion target partitions, Tokio workers and Polars threads
-are fixed to 32. BLAS helper pools use one thread. The Python benchmark fixtures retain
+SQL/raw-DataFusion target partitions and Tokio workers are fixed to 32.
+Polars references run in separate fresh processes with `POLARS_MAX_THREADS=32`
+or `1`, reported as `Polars (32T)` and `Polars (1T)`. Measurement and artifact
+validation check the actual Polars pool size against each case.
+BLAS helper pools use one thread. The Python benchmark fixtures retain
 their own query configuration and timing boundaries. Cross-library native
 streaming uses an already-started runner with **empty rolling state**. Each
 invocation compiles a fresh single-use plan, awaits runner startup and the
@@ -157,6 +159,16 @@ kernel measurements. The native column is labeled `Native stream (ready)`.
 Report contract v3 validates the ready-runner timing scope and complete
 sample statistics. Both revisions must be measured with the same scope;
 do not subtract a separately measured startup time from another report.
+The current native stream scope is
+`ready-enqueue-to-arrow/interleaved-inputs-v5`: ASOF lockstep waits use
+sink delivery events, with no `job.status()` polling in the timed ASOF path.
+Delivery of all accepted left rows proves finality for this workload, but
+does not wait for the operator's subsequent status update. The static Join
+fixture still polls status and is tracked separately in issue
+[#363](https://github.com/wegamekinglc/calc-flow/issues/363).
+A baseline declaring a different stream scope makes native stream cases
+`new-coverage`; SQL and warm-append comparisons retain their existing gates.
+No performance improvement is inferred across the scope change.
 These settings describe target/pool sizes, not measured CPU utilization;
 TA-Lib calls remain sequential per-series operations.
 
@@ -366,10 +378,10 @@ fallback to a different successful run or debug wheel.
 For every Calc Flow engine/warm case:
 
 1. Install both sealed wheels into separate import directories on one runner.
-2. Start each worker from the source checkout matching its sealed wheel, so it
-   loads that revision's benchmark adapters. Verify loaded native hashes,
-   dependencies, machine/thread identities and workload dimensions; warm up
-   outside timing.
+2. Engine workers use the common candidate harness for both sealed wheels;
+   warm workers load adapters from the source checkout matching their wheel.
+   Verify loaded native hashes, dependencies, machine/thread identities and
+   workload dimensions; warm up outside timing.
 3. Collect ten pairs in alternating AB/BA order. Warm workers advance through
    exactly the same input cursors. No forced GC is included in the interval.
 4. Repeat with a fresh worker pair. Retain every original pair; estimate each
