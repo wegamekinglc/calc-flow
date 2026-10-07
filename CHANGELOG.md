@@ -9,6 +9,16 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-07: Prepare ordered streaming ASOF left chunks directly from
+  validated admission ranges for scalar integer or UTF-8 keys and native-width
+  integer sequences. Legacy dictionary capacities, checkpoint bytes, owned
+  buffers, budgets and cancellation boundaries retain their contracts.
+
+- 2026-10-07: Coalesce streaming ASOF left output planning over canonical
+  sources and physical row ranges, removing unused left row-position storage.
+  Existing span gathering, backing charges, output budgets, prefix commits
+  and checkpoint encoding retain their contracts.
+
 - 2026-10-07: Prepare streaming Join checkpoint bases on bounded native workers.
   Data and progress handlers share retained vectors without cloning or encoding
   the base. Cancelled preparation retains paid ownership until cleanup and
