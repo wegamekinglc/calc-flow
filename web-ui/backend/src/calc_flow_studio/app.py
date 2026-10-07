@@ -114,7 +114,9 @@ async def _require_local_origin_and_launch_token(
         return JSONResponse(status_code=403, content={"detail": "Untrusted origin"})
     if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
         supplied = request.headers.get(_SESSION_HEADER, "")
-        if not secrets.compare_digest(supplied, request.app.state.launch_token):
+        if not supplied.isascii() or not secrets.compare_digest(
+            supplied, request.app.state.launch_token
+        ):
             return JSONResponse(
                 status_code=403, content={"detail": "Invalid launch token"}
             )
