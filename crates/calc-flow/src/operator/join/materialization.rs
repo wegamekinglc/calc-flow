@@ -10,7 +10,7 @@ use datafusion::arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
 use super::{AdmittedRow, MatchedPair, StoredRow, materialize_output_record};
 use crate::batch::checked_accumulate;
 use crate::operator::output_chunk::OutputChunkErrors;
-use crate::operator::row_cost::{fixed_width, variable_offsets};
+use crate::operator::row_cost::{Offsets, fixed_width, variable_offsets};
 use crate::{Batch, BatchMetadata, CalcFlowError, EdgeBudget, Result};
 
 pub(super) struct JoinOutput<'a> {
@@ -239,7 +239,7 @@ fn nested_range_is_full(
 fn flat_row<'a>(
     rows: &'a mut [Option<FlatRow>],
     index: usize,
-    record: &RecordBatch,
+    record: &super::columnar::RowPayload,
     column_offset: usize,
 ) -> Result<&'a FlatRow> {
     if rows[index].is_none() {
@@ -247,13 +247,14 @@ fn flat_row<'a>(
         tests::FLAT_VISITS.with(|count| count.set(count.get() + 1));
         let mut bytes = 0;
         let mut nulls = Vec::new();
+        let row = record.offset();
         for (column_index, column) in record.columns().iter().enumerate() {
             let width = fixed_width(column.data_type()).expect("flat schema was checked");
             bytes = checked_accumulate(bytes, width, "batch")?;
             if let Some(offsets) = variable_offsets(column.as_ref()) {
-                bytes = checked_accumulate(bytes, offsets.total_width(), "batch")?;
+                bytes = checked_accumulate(bytes, selected_width(&offsets, row), "batch")?;
             }
-            if column.nulls().is_some_and(|nulls| nulls.is_null(0)) {
+            if column.nulls().is_some_and(|nulls| nulls.is_null(row)) {
                 nulls.push(column_offset + column_index);
             }
         }
@@ -262,13 +263,22 @@ fn flat_row<'a>(
     Ok(rows[index].as_ref().expect("just populated"))
 }
 
+fn selected_width(offsets: &Offsets<'_>, row: usize) -> usize {
+    match offsets {
+        Offsets::Narrow(offsets) => usize::try_from(offsets[row + 1] - offsets[row])
+            .expect("validated Arrow offsets fit usize"),
+        Offsets::Wide(offsets) => usize::try_from(offsets[row + 1] - offsets[row])
+            .expect("validated Arrow offsets fit usize"),
+    }
+}
+
 fn estimated_rows<'a>(
-    records: impl Iterator<Item = (usize, &'a RecordBatch)>,
+    records: impl Iterator<Item = (usize, &'a super::columnar::RowPayload)>,
 ) -> Result<BTreeMap<usize, usize>> {
     let mut rows = BTreeMap::new();
     for (index, record) in records {
         if let Entry::Vacant(entry) = rows.entry(index) {
-            entry.insert(estimated(record)?);
+            entry.insert(estimated(&record.view())?);
         }
     }
     Ok(rows)
@@ -347,18 +357,18 @@ mod tests {
             RecordBatch::try_new(Arc::new(Schema::new(vec![field.clone()])), vec![column]).unwrap();
         let schema = Arc::new(Schema::new(vec![field.clone(), field.with_name("other")]));
         let admitted = vec![AdmittedRow {
-            record: record.clone(),
+            record: record.clone().into(),
             event_time: EventTime::from_micros(100),
             row_id: 0,
             retain: true,
         }];
         let opposite = vec![
             StoredRow {
-                record,
+                record: record.into(),
                 event_time: EventTime::from_micros(100),
                 row_id: 0,
                 charge: 0,
-                encoded_key: Arc::new(vec![]),
+                encoded_key: Arc::new(vec![].into()),
             };
             retained
         ];
@@ -437,7 +447,7 @@ mod tests {
         ]));
         let admitted = (0..1_000)
             .map(|_| AdmittedRow {
-                record: record.clone(),
+                record: record.clone().into(),
                 event_time: EventTime::from_micros(100),
                 row_id: 0,
                 retain: true,
@@ -445,11 +455,11 @@ mod tests {
             .collect::<Vec<_>>();
         let opposite = vec![
             StoredRow {
-                record,
+                record: record.into(),
                 event_time: EventTime::from_micros(100),
                 row_id: 0,
                 charge: 0,
-                encoded_key: Arc::new(vec![]),
+                encoded_key: Arc::new(vec![].into()),
             };
             1_000
         ];
@@ -498,7 +508,7 @@ mod tests {
         ]));
         let admitted: Vec<AdmittedRow> = (0..4)
             .map(|index| AdmittedRow {
-                record: record.slice(index, 1),
+                record: record.slice(index, 1).into(),
                 event_time: EventTime::from_micros(100),
                 row_id: index as u64,
                 retain: true,
@@ -506,11 +516,11 @@ mod tests {
             .collect();
         let opposite: Vec<StoredRow> = (0..4)
             .map(|index| StoredRow {
-                record: record.slice(index, 1),
+                record: record.slice(index, 1).into(),
                 event_time: EventTime::from_micros(100),
                 row_id: index as u64,
                 charge: 81,
-                encoded_key: Arc::new(vec![]),
+                encoded_key: Arc::new(vec![].into()),
             })
             .collect();
         let matched: Vec<MatchedPair> = (0..4)
@@ -551,7 +561,7 @@ mod tests {
         ]));
         let admitted: Vec<AdmittedRow> = (0..4)
             .map(|index| AdmittedRow {
-                record: record.slice(index, 1),
+                record: record.slice(index, 1).into(),
                 event_time: EventTime::from_micros(100),
                 row_id: index as u64,
                 retain: true,
@@ -559,11 +569,11 @@ mod tests {
             .collect();
         let opposite: Vec<StoredRow> = (0..4)
             .map(|index| StoredRow {
-                record: record.slice(index, 1),
+                record: record.slice(index, 1).into(),
                 event_time: EventTime::from_micros(100),
                 row_id: index as u64,
                 charge: 81,
-                encoded_key: Arc::new(vec![]),
+                encoded_key: Arc::new(vec![].into()),
             })
             .collect();
         let matched: Vec<MatchedPair> = (0..4)
