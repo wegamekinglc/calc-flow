@@ -9,6 +9,11 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-08: Prepay selected streaming Join checkpoint wire loads from
+  certified managed Local storage using the configured runtime budget. Owned
+  loading drains real I/O and keeps funding with surviving segment references;
+  layout-1 checkpoint encoding and legacy loader behavior remain unchanged.
+
 - 2026-10-07: Reject non-ASCII Studio session tokens with the existing
   `403 {"detail": "Invalid launch token"}` response instead of HTTP 500
   (DAL-321).

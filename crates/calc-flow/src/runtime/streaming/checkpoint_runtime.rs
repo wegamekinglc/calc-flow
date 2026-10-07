@@ -147,6 +147,7 @@ pub(super) struct ValidatedCheckpointRuntime {
 
 pub(super) struct OpenedCheckpointRuntime {
     pub(super) transaction: Arc<ManifestTransaction>,
+    pub(super) join_preload_reader: Option<Arc<crate::state::LocalStateLineageBackend>>,
     pub(super) _managed_storage: Option<OpenedManagedCheckpointRuntime>,
     pub(super) identity: PreparedManifestIdentity,
     pub(super) config: StreamRuntimeConfig,

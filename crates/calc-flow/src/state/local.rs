@@ -72,6 +72,17 @@ impl LocalStateBackend {
 #[async_trait]
 impl StateBackend for LocalStateBackend {
     async fn open_lineage(&self, key: &StateLineageKey) -> Result<Box<dyn StateLineageBackend>> {
+        Ok(Box::new(self.open_local_lineage(key).await?))
+    }
+}
+
+mod preload;
+
+impl LocalStateBackend {
+    pub(crate) async fn open_local_lineage(
+        &self,
+        key: &StateLineageKey,
+    ) -> Result<LocalStateLineageBackend> {
         let lineage_hash = lineage_hash(key);
         {
             let mut leases = self.root.process_leases.lock();
@@ -98,22 +109,26 @@ impl StateBackend for LocalStateBackend {
             self.root.process_leases.lock().remove(&lineage_hash);
             return Err(error);
         }
-        Ok(Box::new(LocalStateLineageBackend {
+        Ok(LocalStateLineageBackend {
             root: Arc::clone(&self.root),
             lineage_hash,
             lock_file,
             publication: Mutex::new(()),
             validated: SyncMutex::new(BTreeSet::new()),
-        }))
+            #[cfg(test)]
+            prepaid_read_hook: SyncMutex::new(None),
+        })
     }
 }
 
-struct LocalStateLineageBackend {
+pub(crate) struct LocalStateLineageBackend {
     root: Arc<ManagedStateRoot>,
     lineage_hash: String,
     lock_file: File,
     publication: Mutex<()>,
     validated: SyncMutex<BTreeSet<StateHandle>>,
+    #[cfg(test)]
+    prepaid_read_hook: SyncMutex<Option<preload::ReadHook>>,
 }
 
 impl Drop for LocalStateLineageBackend {
