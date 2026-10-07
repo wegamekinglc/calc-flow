@@ -50,10 +50,10 @@ increase samples, or repeat attempts to obtain a favorable result.
 
 Count each workload as a case; an atomic acceptance set is not one selection.
 For example, `plan_end_to_end` defines a six-case acceptance set. A focused
-subset may report per-case results, but must not report that set's aggregate
-or acceptance verdict. Do not automatically complete the set to satisfy its
-aggregate contract; complete-set measurements retain their scheduled or
-explicitly requested broad scope.
+subset reports per-case results; the set's aggregate and acceptance verdict
+apply to complete-set measurements. Do not automatically complete the set to
+satisfy its aggregate contract; complete-set measurements retain their scheduled
+or explicitly requested broad scope.
 
 An inconclusive comparison cannot establish a gain, equivalence, or a confirmed
 regression. Use the maintained regression rule rather than requiring every
