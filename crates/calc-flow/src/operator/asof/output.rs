@@ -491,7 +491,7 @@ impl<'a> GatherPlan<'a> {
 }
 
 #[cfg(test)]
-fn materialize_rows(
+pub(super) fn materialize_rows(
     rows: &[(PayloadView<'_>, Option<PayloadView<'_>>)],
     schema: &SchemaRef,
 ) -> Result<Batch> {

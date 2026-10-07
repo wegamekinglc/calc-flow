@@ -20,6 +20,8 @@ use std::collections::BTreeMap;
 use std::{collections::HashMap, sync::Arc};
 
 #[cfg(test)]
+mod output_ranges;
+#[cfg(test)]
 mod owner_runs;
 mod prefix;
 mod probe;
@@ -444,10 +446,13 @@ async fn parallel_candidate_rows(
     let mut index = 0;
     for run in state.left.output_runs() {
         let amount = run.len().min(count - index);
-        for (_, left) in run.rows(amount) {
+        let mut source = 0;
+        for (offset, (_, left)) in run.rows(amount).enumerate() {
             check_match_progress(index, context).await?;
-            plan.push(
-                state.batches.view(left),
+            source = left_run_source(source, offset, left, operator, plan, workspace)?;
+            plan.push_reference(
+                source,
+                left.row as usize,
                 matches[index].map(|row| state.batches.view(row)),
                 workspace,
                 &operator.name,
@@ -475,13 +480,14 @@ async fn binary_search_candidate_rows(
     let mut index = 0;
     for run in state.left.output_runs() {
         let amount = run.len().min(count - index);
-        for (key, left) in run.rows(amount) {
+        let mut source = 0;
+        for (offset, (key, left)) in run.rows(amount).enumerate() {
             check_match_progress(index, context).await?;
-            let left = state.batches.view(left);
+            source = left_run_source(source, offset, left, operator, plan, workspace)?;
             let right = state
                 .candidate(key.1, *key.0, tolerance)
                 .map(|row| state.batches.view(*row));
-            plan.push(left, right, workspace, &operator.name)?;
+            plan.push_reference(source, left.row as usize, right, workspace, &operator.name)?;
             index += 1;
         }
         run.visit_prefix(amount, &mut prefix, &state.batches, &operator.name)?;
@@ -507,20 +513,25 @@ async fn monotonic_candidate_rows(
         .0
         .0;
     let mut cursors = HashMap::with_capacity_and_hasher(state.right.len(), RandomState::new());
-    for (key, bucket) in &state.right {
-        cursors.insert(key.clone(), (bucket, bucket.cursor_at(first_time)));
-    }
+    cursors.extend(
+        (&state.right)
+            .into_iter()
+            .map(|(key, bucket)| (key.clone(), (bucket, bucket.cursor_at(first_time)))),
+    );
     let mut prefix = LeftPrefix::default();
     let mut index = 0;
     for run in state.left.output_runs() {
         let amount = run.len().min(count - index);
-        for (key, left) in run.rows(amount) {
+        let mut source = 0;
+        for (offset, (key, left)) in run.rows(amount).enumerate() {
             check_match_progress(index, context).await?;
+            source = left_run_source(source, offset, left, operator, plan, workspace)?;
             let right = cursors.get_mut(key.1).and_then(|(bucket, next)| {
                 bucket.candidate_monotonic(*key.0, operator.spec.tolerance_micros(), next)
             });
-            plan.push(
-                state.batches.view(left),
+            plan.push_reference(
+                source,
+                left.row as usize,
                 right.map(|row| state.batches.view(*row)),
                 workspace,
                 &operator.name,
@@ -533,6 +544,21 @@ async fn monotonic_candidate_rows(
         }
     }
     Ok(prefix)
+}
+
+fn left_run_source(
+    source: usize,
+    offset: usize,
+    row: state::RowRef,
+    operator: &StreamAsofJoinOperator,
+    plan: &mut OutputPlanBuilder<'_>,
+    workspace: &mut MemoryReservation,
+) -> Result<usize> {
+    if offset == 0 {
+        plan.left_source(operator.state.batches.view(row), workspace, &operator.name)
+    } else {
+        Ok(source)
+    }
 }
 
 async fn check_match_progress(index: usize, context: &StreamOperatorContext<'_>) -> Result<()> {

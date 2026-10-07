@@ -102,6 +102,28 @@ impl ColumnWorkspace {
 thread_local! {
     static RANGE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static OUTPUT_SOURCE_REGISTRATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static LEFT_OUTPUT_PLANNING: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+#[cfg(test)]
+pub(super) fn record_left_output_source_visit() {
+    LEFT_OUTPUT_PLANNING.with(|calls| {
+        let (sources, ranges) = calls.get();
+        calls.set((sources + 1, ranges));
+    });
+}
+
+#[cfg(test)]
+pub(super) fn record_left_output_range_visit() {
+    LEFT_OUTPUT_PLANNING.with(|calls| {
+        let (sources, ranges) = calls.get();
+        calls.set((sources, ranges + 1));
+    });
+}
+
+#[cfg(test)]
+pub(super) fn take_left_output_planning() -> (usize, usize) {
+    LEFT_OUTPUT_PLANNING.with(|calls| calls.replace((0, 0)))
 }
 
 #[cfg(test)]
