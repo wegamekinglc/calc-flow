@@ -2697,6 +2697,8 @@ async fn open_checkpoint_runtime(
         managed,
     )
     .await?;
+    #[cfg(test)]
+    configure_join_preload_read_hook(spec.join_preload_read_hook, join_preload_reader.as_ref());
     let transaction = ManifestTransaction::open_cancellable(
         lineage,
         &key,
@@ -2745,6 +2747,16 @@ async fn open_checkpoint_runtime(
         #[cfg(test)]
         started_gate: spec.started_gate,
     })
+}
+
+#[cfg(test)]
+fn configure_join_preload_read_hook(
+    hook: Option<super::checkpoint_runtime::CheckpointPrepaidReadHook>,
+    reader: Option<&Arc<crate::state::LocalStateLineageBackend>>,
+) {
+    if let (Some(hook), Some(reader)) = (hook, reader) {
+        reader.set_prepaid_read_hook(hook);
+    }
 }
 
 #[cfg(test)]

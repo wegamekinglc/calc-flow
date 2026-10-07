@@ -21,6 +21,18 @@ use super::runner::{
     CheckpointFaultInjector, CheckpointFaultMode, CheckpointFaultPoint, CheckpointStartedTestGate,
 };
 
+#[cfg(test)]
+pub(super) type CheckpointPrepaidReadHook = Arc<
+    dyn Fn(
+            &[u8],
+            usize,
+            &Arc<datafusion::execution::memory_pool::MemoryReservation>,
+            usize,
+        ) -> crate::Result<()>
+        + Send
+        + Sync,
+>;
+
 pub(crate) struct CheckpointRuntimeSpec {
     pub(super) storage: CheckpointRuntimeStorage,
     pub(super) config: StreamRuntimeConfig,
@@ -28,6 +40,8 @@ pub(crate) struct CheckpointRuntimeSpec {
     pub(super) faults: CheckpointFaultInjector,
     #[cfg(test)]
     pub(super) started_gate: Option<CheckpointStartedTestGate>,
+    #[cfg(test)]
+    pub(super) join_preload_read_hook: Option<CheckpointPrepaidReadHook>,
 }
 
 pub(super) enum CheckpointRuntimeStorage {
@@ -65,6 +79,8 @@ impl CheckpointRuntimeSpec {
             faults: CheckpointFaultInjector::default(),
             #[cfg(test)]
             started_gate: None,
+            #[cfg(test)]
+            join_preload_read_hook: None,
         })
     }
 
@@ -80,6 +96,8 @@ impl CheckpointRuntimeSpec {
             faults: CheckpointFaultInjector::default(),
             #[cfg(test)]
             started_gate: None,
+            #[cfg(test)]
+            join_preload_read_hook: None,
         })
     }
 
@@ -98,6 +116,7 @@ impl CheckpointRuntimeSpec {
             config,
             faults: CheckpointFaultInjector::default(),
             started_gate: None,
+            join_preload_read_hook: None,
         })
     }
 
@@ -108,6 +127,12 @@ impl CheckpointRuntimeSpec {
         mode: CheckpointFaultMode,
     ) -> Self {
         self.faults = CheckpointFaultInjector::armed(point, mode);
+        self
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_join_preload_read_hook(mut self, hook: CheckpointPrepaidReadHook) -> Self {
+        self.join_preload_read_hook = Some(hook);
         self
     }
 

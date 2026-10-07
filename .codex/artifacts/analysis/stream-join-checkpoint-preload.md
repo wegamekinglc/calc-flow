@@ -108,3 +108,30 @@ results, source hashes and necessary static checks.
 
 No benchmark, complete coverage/workspace run or local Windows test was run.
 Required cross-platform and coverage gates remain CI responsibilities.
+
+## PR review follow-up
+
+The revision worktree starts at PR #378 head
+`f5ed320f3410271a45c2ac391d24e887cf137006`. The previous source freeze and its
+logs are unchanged. The existing LegacyParts AC5 Join-to-Window checkpoint
+restart remains a separate test. A new ManagedCheckpointRuntime sibling uses
+the same replayable one-row-per-side scenario: both sides retain one row at
+epoch 1, cancellation settles the first job, and restart emits exactly one
+window result after restoring the source cursors.
+
+The test config installs the existing read hook on the same concrete Local
+reader opened by the managed factory. Only the actual paid Local read calls
+the hook. The new test observed both nonempty V1 delta reads, their complete
+preload credit and consumer identity, a shared reservation for the request,
+and final weak-owner destruction after job and runner shutdown. This is new
+production-path coverage, not a missing-behavior RED. Hook transport and its
+small factory helper are entirely `cfg(test)`; no backend trait, wire format,
+identity, resource charge or loader behavior changes.
+
+The shared LoadOwner busy and panic diagnostics now say "operator checkpoint
+load". Two focused tests first failed against the ASOF-specific text, then
+passed after changing only those two production strings. The panic retains its
+original message, and the busy case releases and drains its real initial load
+before checking the diagnostic. The revision's commands and results are in
+`target/issue363-j2b-preload-review-v2/receipt.json`; no benchmark or full
+coverage/workspace run accompanies these review corrections.
