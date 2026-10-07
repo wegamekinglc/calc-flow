@@ -542,8 +542,8 @@ async fn compaction_survives_restore_checkpoint_restore_cycles() {
     let (mut operator, job, mut collector) = state_operator(300);
     let context = StreamOperatorContext::new(&job, "match", None);
 
-    // Four epochs with dirty ops cross the compaction threshold, so the next
-    // data handler rebuilds one canonical base (spec FR45).
+    // Four dirty epochs make compaction due. Synchronous capture keeps the
+    // deltas until asynchronous checkpoint preparation rebuilds the base.
     for epoch in 1..=4_u64 {
         let stamp = 100_i64 + i64::try_from(epoch).unwrap() * SECOND;
         operator
@@ -555,8 +555,10 @@ async fn compaction_survives_restore_checkpoint_restore_cycles() {
             )
             .await
             .unwrap();
-        operator.checkpoint(Epoch::new(epoch).unwrap()).unwrap();
+        let pending = operator.checkpoint(Epoch::new(epoch).unwrap()).unwrap();
+        assert!(!pending.segments.contains_key("left-base"));
     }
+    operator.prepare_checkpoint_async(&context).await.unwrap();
     operator
         .process_data(
             "left",
