@@ -48,6 +48,35 @@ the dominant failure mode and refuse to cry wolf on single-run swings.
   Never compare across machines, dependency versions, power modes, or scales.
 - `AGENTS.md` — authoritative build/test commands and repository guidance
 
+## Feature measurement scope
+
+Follow `AGENTS.md` verification for feature measurements: at most five
+representative cases tied to directly changed paths, necessary controls, or
+known regressions, with a default ten-minute total measurement budget. Include
+fixture creation, restore, preflight, warmup, oracle checks, startup, and cleanup
+in that budget; estimate builds separately. Record the rationale, revisions,
+fixed samples, and budget before execution. Select the smallest relevant inputs
+rather than all scales or a size/type/mode/checkpoint Cartesian matrix.
+
+Reuse maintained harnesses and compatible build artifacts. Preserve the chosen
+contract's correctness, resource, statistics, and provenance requirements; do
+not build a general measurement framework for one feature. Stop at the budget
+or an unsuitable environment, settle owned processes, and report uncertainty
+and unmeasured paths. Do not automatically expand cases, increase samples, or
+retry for a favorable verdict. Inconclusive timing is not a confirmed regression
+and does not establish a speedup or equivalence. Apply the maintained gate,
+without adding an all-confidence-intervals-below-threshold requirement.
+
+Count each workload as a case; an atomic acceptance set is not one selection.
+For example, `plan_end_to_end` defines a six-case acceptance set. A focused
+subset reports per-case results; the set's aggregate and acceptance verdict
+apply to complete-set measurements. Do not automatically complete the set to
+satisfy its aggregate contract; complete-set measurements retain their scheduled
+or explicitly requested broad scope.
+
+Complete suites and broad matrices belong to the scheduled workflow or an
+explicitly requested broad measurement task, not ordinary feature development.
+
 ## Your Process
 
 **Worktree discipline.** Benchmarking reads source and builds artifacts but does not
@@ -83,10 +112,12 @@ a single run makes that diagnostic unreliable.
    diagnostic samples, phase durations/quantiles, checkpoint bytes, RSS, recovery
    correctness, and provenance. The unified shard uses `standard` scale. Preserve this
    evidence contract; do not apply the standalone minima verdict below to lifecycle.
-3. Pick scales: default to `overhead` and `standard` for local iteration. Run `nightly`
-   only when the user asks or the change targets large-input behavior — it is slow.
-   When evaluating the 100,000- and 1,000,000-element NumPy ownership thresholds, run
-   `batch_ownership` at both `standard` and `nightly` (per `benchmarks/README.md`).
+3. Pick one smallest relevant scale per selected case within the feature budget.
+   If a changed threshold requires two nearby sizes, count both in the case and
+   time limits. Do not add `nightly` or all scale tiers merely because the feature
+   can accept large inputs. The ownership threshold boundary checks in
+   `benchmarks/README.md` are relevant when those thresholds change; a broad
+   scale comparison requires an explicitly requested measurement task.
 
 ### Phase 2: Set up both refs
 
@@ -181,7 +212,7 @@ issue if the user wants.
 |--------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------|
 | Run command        | `CALC_FLOW_BENCHMARK_SCALE=<scale> JAX_PLATFORMS=cpu uv run pytest benchmarks --benchmark-only --benchmark-json=target/benchmark-results/<scale>.json` |
 | Scales             | `overhead` (1k/1k/16), `small` (10k/10k/64), `standard` (100k/100k/256), `nightly` (1M/1M/512)                                                         |
-| Local default      | `overhead` + `standard`; `nightly` on request                                                                                                          |
+| Local default      | ≤5 targeted cases; smallest relevant scale; ten-minute budget                                                                                          |
 | Compatibility      | classify only matching contract-v2 fingerprints (machine/deps/workload)                                                                                |
 | Repetitions        | ≥2 full interleaved runs per ref + one same-ref pair for the spread                                                                                    |
 | Reduction          | per-case **min**, never mean/median                                                                                                                    |
