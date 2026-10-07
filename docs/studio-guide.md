@@ -110,8 +110,11 @@ Studio binds to loopback and is a local single-user application. Jobs run in
 workers with concurrency, resident-memory, checkpoint-disk, and lifecycle
 limits. The API accepts only loopback Host headers. Mutating requests require
 the launch token from `GET /api/v3/session` in `X-Calc-Flow-Session`; the browser
-client obtains it automatically. The REST job API accepts connector-backed
-stream projects. A project
+client obtains it automatically. Token validation rejects missing or invalid
+values, including non-ASCII values, with `403` and
+`{"detail": "Invalid launch token"}` before a route handler runs.
+
+The REST job API accepts connector-backed stream projects. A project
 declaring static inputs can be inspected, but job creation returns `422`
 because the REST contract has no field for live static values. Run such a
 project through Python with explicit `static_inputs`, as in
