@@ -258,10 +258,13 @@ pub(super) async fn state_keys(
     };
     let mut quantum = Quantum::default();
     let schema = scratch_schema(rows, indices, context, &mut quantum).await?;
+    let Some(retirement) = scratch_retirement(context)? else {
+        return Ok(None);
+    };
     let funding = Arc::new(ScratchFunding {
         schema: Arc::clone(&schema),
         _credit: credit,
-        _retirement: context.job().gather_owner().retain_retirement()?,
+        _retirement: retirement,
     });
     let mut columns = Vec::with_capacity(indices.len() + 1);
     for &index in indices {
@@ -270,6 +273,17 @@ pub(super) async fn state_keys(
     finish_keys(rows, columns, funding, context, &mut quantum)
         .await
         .map(Some)
+}
+
+fn scratch_retirement(context: &StreamOperatorContext<'_>) -> Result<Option<RetirementGuard>> {
+    match context.job().gather_owner().retain_retirement() {
+        Ok(guard) => Ok(Some(guard)),
+        Err(crate::CalcFlowError::Cancelled { .. }) => {
+            context.check_cancelled()?;
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn reserve(runtime: &DataFusionRuntime, columns: usize, rows: usize) -> Option<MemoryReservation> {

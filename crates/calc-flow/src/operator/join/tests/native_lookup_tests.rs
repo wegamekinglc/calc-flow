@@ -55,6 +55,18 @@ pub(super) fn state_funding(operator: &StreamJoinOperator) -> usize {
     index_funding(operator) + payloads + keys.values().sum::<usize>()
 }
 
+pub(super) fn assert_resident_and_gather_funding(
+    pool: &dyn datafusion::execution::memory_pool::MemoryPool,
+    job: &StreamJobContext,
+    resident: usize,
+) -> usize {
+    let (home, generation, attempt) = job.gather_owner().funding();
+    assert_eq!(attempt, 0, "completed attempts must refund their workspace");
+    assert_eq!(pool.reserved(), resident + home + generation);
+    eprintln!("actual funding: resident={resident}, home={home}, generation={generation}");
+    pool.reserved()
+}
+
 fn key_cases() -> Vec<ArrayRef> {
     let mut arrays: Vec<ArrayRef> = vec![
         Arc::new(BooleanArray::from(vec![true, false, false, true])),
@@ -365,11 +377,17 @@ async fn test_native_index_updates_out_of_order_append_and_dense_eviction() {
     .await;
 }
 
-#[tokio::test]
-async fn test_native_index_budget_denial_keeps_state_and_refunds_append() {
+#[test]
+fn test_native_index_budget_denial_keeps_state_and_refunds_append() {
+    checkpoint_compaction_tests::isolated_checkpoint_test(|service, runtime| {
+        runtime.block_on(native_index_budget_denial(service));
+    });
+}
+
+async fn native_index_budget_denial(service: &crate::runtime::streaming::gather_work::TestService) {
     let mut operator =
         StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
-    let job = job();
+    let job = job().with_gather_owner(service.owner("native-index-refund".into()));
     let context = StreamOperatorContext::new(&job, "match", None);
     let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
     operator
@@ -396,27 +414,44 @@ async fn test_native_index_budget_denial_keeps_state_and_refunds_append() {
     assert_eq!(operator.status(), before);
     assert_eq!(pool.reserved(), 1 << 30);
     drop(pressure);
-    assert_eq!(pool.reserved(), admitted_paid);
+    assert_resident_and_gather_funding(pool.as_ref(), &job, admitted_paid);
     let native = operator.native_matches(&plan, &admitted).unwrap().unwrap();
     drop(native);
-    let paid = pool.reserved();
     assert_eq!(index_funding(&operator), 1_024 + 128 * 3);
-    assert_eq!(paid, state_funding(&operator) + admitted_paid);
+    let paid = assert_resident_and_gather_funding(
+        pool.as_ref(),
+        &job,
+        state_funding(&operator) + admitted_paid,
+    );
     let append = operator.reserve_native_append(true, 5).unwrap().unwrap();
     assert_eq!(pool.reserved(), paid + 128 * 5);
     drop(append);
     assert_eq!(pool.reserved(), paid);
     operator.reset().unwrap();
-    assert_eq!(pool.reserved(), admitted_paid);
+    assert_resident_and_gather_funding(pool.as_ref(), &job, admitted_paid);
     drop(admitted);
+    assert_resident_and_gather_funding(pool.as_ref(), &job, 0);
+    drop(context);
+    drop(operator);
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    let (home, generation, attempt) = job.gather_owner().funding();
+    assert_eq!((generation, attempt), (0, 0));
+    assert_eq!(pool.reserved(), home);
+    drop(job);
     assert_eq!(pool.reserved(), 0);
 }
 
-#[tokio::test]
-async fn test_empty_native_result_funds_key_vector_until_actual_drop() {
+#[test]
+fn test_empty_native_result_funds_key_vector_until_actual_drop() {
+    checkpoint_compaction_tests::isolated_checkpoint_test(|service, runtime| {
+        runtime.block_on(empty_native_result_credit(service));
+    });
+}
+
+async fn empty_native_result_credit(service: &crate::runtime::streaming::gather_work::TestService) {
     let mut operator =
         StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
-    let job = job();
+    let job = job().with_gather_owner(service.owner("native-key-vector-refund".into()));
     let context = StreamOperatorContext::new(&job, "match", None);
     let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
     operator
@@ -441,7 +476,9 @@ async fn test_empty_native_result_funds_key_vector_until_actual_drop() {
     let key_capacity = native.keys.keys.capacity();
     let admitted_paid = payload_funding(admitted.iter().map(|row| &row.record));
     let state_paid = state_funding(&operator);
-    assert!(paid > state_paid + admitted_paid);
+    let (home, generation, attempt) = job.gather_owner().funding();
+    assert_eq!(attempt, 0);
+    assert!(paid > state_paid + admitted_paid + home + generation);
     native.keys.keys.clear();
     assert_eq!(native.keys.keys.capacity(), key_capacity);
     assert_eq!(
@@ -450,9 +487,80 @@ async fn test_empty_native_result_funds_key_vector_until_actual_drop() {
         "live vector backing remains funded after its key owners drop"
     );
     drop(native);
-    assert_eq!(pool.reserved(), state_paid + admitted_paid);
+    assert_resident_and_gather_funding(pool.as_ref(), &job, state_paid + admitted_paid);
     operator.reset().unwrap();
-    assert_eq!(pool.reserved(), admitted_paid);
+    assert_resident_and_gather_funding(pool.as_ref(), &job, admitted_paid);
     drop(admitted);
+    assert_resident_and_gather_funding(pool.as_ref(), &job, 0);
+    drop(context);
+    drop(operator);
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    let (home, generation, attempt) = job.gather_owner().funding();
+    assert_eq!((generation, attempt), (0, 0));
+    assert_eq!(pool.reserved(), home);
+    drop(job);
+    assert_eq!(pool.reserved(), 0);
+}
+
+#[test]
+fn test_native_fallback_refunds_unused_index_before_legacy_sql() {
+    checkpoint_compaction_tests::isolated_checkpoint_test(|service, runtime| {
+        runtime.block_on(native_fallback_index_refund(service));
+    });
+}
+
+async fn native_fallback_index_refund(
+    service: &crate::runtime::streaming::gather_work::TestService,
+) {
+    let mut operator =
+        StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+    let job = job().with_gather_owner(service.owner("native-fallback-index".into()));
+    let context = StreamOperatorContext::new(&job, "match", None);
+    let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+    operator
+        .process_data("left", left_batch(vec![0, 1, 2]), &context, &mut collector)
+        .await
+        .unwrap();
+    let captured = operator.checkpoint(Epoch::INITIAL).unwrap();
+    operator.restore(&captured).unwrap();
+    let (plan, admitted) =
+        admitted_probe(&mut operator, "right", &right_batch(vec![1]), &context).await;
+    let before = operator.status();
+    let runtime = operator.runtime.runtime().unwrap();
+    let pool = runtime.incremental_memory_pool();
+    let headroom = 1_024 + 128 * operator.state.left.len();
+    let pressure = runtime.incremental_reservation("native-probe-refusal");
+    pressure
+        .try_grow((1 << 30) - pool.reserved() - headroom)
+        .unwrap();
+    reset_join_work();
+    let (reference, admitted) = operator.legacy_matches(&plan, admitted, &context).await;
+    let reference = reference.expect("original SQL must accept the identical pressure budget");
+    let reference_builds = join_work().sql_probe_table_builds;
+    assert!(reference_builds > 0);
+    operator.discard_paid_key_cache(&plan);
+    assert!(operator.state.left.1.is_none());
+    assert_eq!(pool.reserved(), (1 << 30) - headroom);
+    reset_join_work();
+    let (actual, admitted) = operator.evaluate_matches(&plan, admitted, &context).await;
+    let actual = actual.expect("declined native scratch must refund unused index before SQL");
+    let pairs = |rows: &[MatchedPair]| {
+        rows.iter()
+            .map(|pair| (pair.pos, pair.opposite_index))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(pairs(&actual.pairs), pairs(&reference));
+    assert_eq!(join_work().sql_probe_table_builds, reference_builds);
+    assert!(operator.state.left.1.is_none());
+    assert_eq!(operator.status(), before);
+    drop(actual);
+    operator.discard_paid_key_cache(&plan);
+    assert_eq!(pool.reserved(), (1 << 30) - headroom);
+    drop(pressure);
+    drop(admitted);
+    drop(context);
+    drop(operator);
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop(job);
     assert_eq!(pool.reserved(), 0);
 }

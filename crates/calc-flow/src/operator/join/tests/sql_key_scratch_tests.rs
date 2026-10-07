@@ -620,6 +620,93 @@ async fn test_paid_key_scratch_zero_headroom_preserves_legacy_sql_acceptance() {
     paid_key_pressure_case(0).await;
 }
 
+#[tokio::test]
+async fn test_closed_scratch_home_falls_back_without_spurious_cancel() {
+    let (mut operator, job) = scratch_fixture(3).await;
+    let context = StreamOperatorContext::new(&job, "match", None);
+    let captured = operator.checkpoint(Epoch::INITIAL).unwrap();
+    let before = operator.status();
+    let plan = operator.side_plan("right").unwrap();
+    let pool = operator
+        .runtime
+        .runtime()
+        .unwrap()
+        .incremental_memory_pool();
+    let paid = pool.reserved();
+    job.gather_owner().close_admission();
+    let keys = operator
+        .owned_state_keys(&plan, &context)
+        .await
+        .expect("closed optional scratch admission must preserve a healthy context");
+    assert!(keys.funding.is_none());
+    assert_eq!(pool.reserved(), paid);
+    drop(keys);
+    let record = right_batch(vec![0]).table_payload().unwrap().batches()[0].clone();
+    let admitted = vec![AdmittedRow {
+        record: record.into(),
+        event_time: EventTime::from_micros(0),
+        row_id: 0,
+        retain: true,
+    }];
+    let (matched, admitted) = operator.legacy_matches(&plan, admitted, &context).await;
+    assert_eq!(matched.unwrap().len(), 3);
+    assert_eq!(operator.status(), before);
+    assert_eq!(
+        operator
+            .checkpoint(Epoch::new(2).unwrap())
+            .unwrap()
+            .segments,
+        captured.segments
+    );
+    drop(admitted);
+    drop(operator);
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop(context);
+    drop(job);
+    assert_eq!(pool.reserved(), 0);
+}
+
+#[tokio::test]
+async fn test_closed_scratch_home_preserves_actual_cancel_and_deadline() {
+    let (mut operator, job) = scratch_fixture(1).await;
+    let plan = operator.side_plan("right").unwrap();
+    let before = operator.status();
+    let pool = operator
+        .runtime
+        .runtime()
+        .unwrap()
+        .incremental_memory_pool();
+    let paid = pool.reserved();
+    job.gather_owner().close_admission();
+    for deadline in [false, true] {
+        let cancellation = CancellationToken::new();
+        let stopped = StreamJobContext::new(
+            3,
+            "scratch-stop",
+            JsonMap::new(),
+            deadline.then(|| chrono::Utc::now() - chrono::Duration::seconds(1)),
+            cancellation.clone(),
+        )
+        .with_gather_owner(job.gather_owner().clone());
+        if !deadline {
+            cancellation.cancel();
+        }
+        let context = StreamOperatorContext::new(&stopped, "match", None);
+        let error = operator
+            .owned_state_keys(&plan, &context)
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(error, CalcFlowError::Cancelled { run_id } if run_id == "3"));
+        assert_eq!(operator.status(), before);
+        assert_eq!(pool.reserved(), paid);
+    }
+    drop(operator);
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop(job);
+    assert_eq!(pool.reserved(), 0);
+}
+
 async fn paid_key_pressure_case(headroom: usize) {
     let (mut operator, job) = scratch_fixture(64).await;
     let context = StreamOperatorContext::new(&job, "match", None);

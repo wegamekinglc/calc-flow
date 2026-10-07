@@ -116,21 +116,13 @@ fn measure_owned_metadata_history(entries: usize) {
         time: EventTime::from_micros(10),
         retain: true,
     }];
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    runtime.block_on(tokio::task::yield_now());
-    let mut chunk = None;
-    let measured = allocation_counter::measure(|| {
-        let mut quantum = columnar::Quantum::default();
-        chunk = runtime
-            .block_on(operator.owned_payload(&record, 0, &selected, &context, &mut quantum))
-            .unwrap();
-    });
-    let chunk = chunk.unwrap();
+    let mut quantum = columnar::Quantum::default();
+    let (chunk, measured) =
+        measure_copy_future(operator.owned_payload(&record, 0, &selected, &context, &mut quantum));
+    let chunk = chunk.unwrap().unwrap();
     let payload = columnar::RowPayload::at(&record, Some(&chunk), 0);
     let paid = payload.funded_owner().unwrap().1;
+    eprintln!("owned-copy poll allocations={measured:?}, actual guard={paid}");
     assert!(measured.bytes_current <= i64::try_from(paid).unwrap());
     assert!(
         measured.bytes_max <= paid as u64,
@@ -153,6 +145,24 @@ fn measure_owned_metadata_history(entries: usize) {
     let released = allocation_counter::measure(|| drop(chunk));
     assert_eq!(measured.bytes_current + released.bytes_current, 0);
     assert_eq!(pool.reserved(), 0);
+}
+
+fn measure_copy_future<F: Future>(future: F) -> (F::Output, allocation_counter::AllocationInfo) {
+    let mut future = std::pin::pin!(future);
+    let wake = Arc::new(CopyWake(AtomicUsize::new(0)));
+    let waker = Waker::from(Arc::clone(&wake));
+    let mut context = Context::from_waker(&waker);
+    let mut output = None;
+    let measured = allocation_counter::measure(|| {
+        loop {
+            if let std::task::Poll::Ready(value) = future.as_mut().poll(&mut context) {
+                output = Some(value);
+                break;
+            }
+        }
+    });
+    assert!(wake.0.load(Ordering::Relaxed) > 0);
+    (output.unwrap(), measured)
 }
 
 #[test]
@@ -329,12 +339,21 @@ async fn copied_test_chunk(
 ) -> Option<Arc<columnar::PayloadChunk>> {
     let job = job();
     let context = StreamOperatorContext::new(&job, "match", None);
+    copied_test_chunk_with_context(operator, record, port, &context).await
+}
+
+async fn copied_test_chunk_with_context(
+    operator: &mut StreamJoinOperator,
+    record: &RecordBatch,
+    port: usize,
+    context: &StreamOperatorContext<'_>,
+) -> Option<Arc<columnar::PayloadChunk>> {
     let mut quantum = columnar::Quantum::default();
     let plan = operator
         .side_plan(if port == 0 { "left" } else { "right" })
         .unwrap();
     if !operator
-        .can_copy_payload(record, &plan, &context, &mut quantum)
+        .can_copy_payload(record, &plan, context, &mut quantum)
         .await
         .unwrap()
     {
@@ -352,20 +371,25 @@ async fn copied_test_chunk(
             retain: true,
         }));
     operator
-        .owned_payload(record, port, &selected.rows, &context, &mut quantum)
+        .owned_payload(record, port, &selected.rows, context, &mut quantum)
         .await
         .unwrap()
 }
 
 async fn shared_preflight_fixture(
     operator: &mut StreamJoinOperator,
+    context: &StreamOperatorContext<'_>,
 ) -> (Vec<AdmittedRow>, Vec<StoredRow>) {
     let left = left_batch((0..1_000).collect());
     let right = right_batch((0..1_000).collect());
     let left = &left.table_payload().unwrap().batches()[0];
     let right = &right.table_payload().unwrap().batches()[0];
-    let left_chunk = copied_test_chunk(operator, left, 0).await.unwrap();
-    let right_chunk = copied_test_chunk(operator, right, 1).await.unwrap();
+    let left_chunk = copied_test_chunk_with_context(operator, left, 0, context)
+        .await
+        .unwrap();
+    let right_chunk = copied_test_chunk_with_context(operator, right, 1, context)
+        .await
+        .unwrap();
     let admitted = (0..1_000)
         .map(|row| AdmittedRow {
             record: columnar::RowPayload::at(left, Some(&left_chunk), row),
@@ -386,10 +410,20 @@ async fn shared_preflight_fixture(
     (admitted, opposite)
 }
 
-#[tokio::test]
-async fn test_shared_flat_preflight_reuses_scratch_under_fanout() {
+#[test]
+fn test_shared_flat_preflight_reuses_scratch_under_fanout() {
+    checkpoint_compaction_tests::isolated_checkpoint_test(|service, runtime| {
+        runtime.block_on(shared_flat_preflight_fanout(service));
+    });
+}
+
+async fn shared_flat_preflight_fanout(
+    service: &crate::runtime::streaming::gather_work::TestService,
+) {
+    let job = job().with_gather_owner(service.owner("shared-preflight-funding".into()));
+    let context = StreamOperatorContext::new(&job, "match", None);
     let mut operator = operator_fixture();
-    let (admitted, opposite) = shared_preflight_fixture(&mut operator).await;
+    let (admitted, opposite) = shared_preflight_fixture(&mut operator, &context).await;
     let schema = operator.output_ports()[0].schema().unwrap();
     let mut allocations = Vec::new();
     for fanout in [1, 10] {
@@ -435,18 +469,26 @@ async fn test_shared_flat_preflight_reuses_scratch_under_fanout() {
         .runtime()
         .unwrap()
         .incremental_memory_pool();
-    assert_eq!(
-        pool.reserved(),
+    native_lookup_tests::assert_resident_and_gather_funding(
+        pool.as_ref(),
+        &job,
         native_lookup_tests::payload_funding(
             admitted
                 .iter()
                 .map(|row| &row.record)
-                .chain(opposite.iter().map(|row| &row.record))
-        )
+                .chain(opposite.iter().map(|row| &row.record)),
+        ),
     );
     drop(admitted);
     drop(opposite);
     drop(operator);
+    native_lookup_tests::assert_resident_and_gather_funding(pool.as_ref(), &job, 0);
+    drop(context);
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    let (home, generation, attempt) = job.gather_owner().funding();
+    assert_eq!((generation, attempt), (0, 0));
+    assert_eq!(pool.reserved(), home);
+    drop(job);
     assert_eq!(pool.reserved(), 0);
 }
 

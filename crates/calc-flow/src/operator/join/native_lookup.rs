@@ -144,7 +144,16 @@ impl StreamJoinOperator {
         if !self.ensure_native_index(!plan.incoming_is_left)? {
             return Ok(None);
         }
-        self.probe_native_index(plan, admitted)
+        let matched = self.probe_native_index(plan, admitted)?;
+        if matched.is_none() {
+            let opposite = if plan.incoming_is_left {
+                &mut self.state.right
+            } else {
+                &mut self.state.left
+            };
+            opposite.1 = None;
+        }
+        Ok(matched)
     }
 
     fn probe_native_index(

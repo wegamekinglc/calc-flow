@@ -194,7 +194,7 @@ fn checkpoint_gate(failed: bool) -> CheckpointGateHarness {
     }
 }
 
-fn isolated_checkpoint_test(
+pub(super) fn isolated_checkpoint_test(
     check: impl FnOnce(&crate::runtime::streaming::gather_work::TestService, &tokio::runtime::Runtime),
 ) {
     let service = crate::runtime::streaming::gather_work::TestService::new(1, 1).unwrap();
@@ -557,7 +557,8 @@ async fn progress_cleanup_wait(
     );
     let (home, generation, attempt) = job.gather_owner().funding();
     assert!(attempt >= 4 * 124);
-    assert_eq!(pool.reserved(), home + generation + attempt);
+    let resident = native_lookup_tests::state_funding(&operator);
+    assert_eq!(pool.reserved(), resident + home + generation + attempt);
     let mut mutation = Box::pin(operator.on_ingress_progress("right", &progress));
     assert!(futures::poll!(mutation.as_mut()).is_pending());
     if stop == 0 {
@@ -565,7 +566,11 @@ async fn progress_cleanup_wait(
         assert_eq!(operator.status(), before);
         assert!(operator.compaction_cleanup.is_some());
         refund.send(()).unwrap();
-        assert!(job.gather_owner().close_and_drain().await.is_empty());
+        operator
+            .await_compaction_release(&StreamOperatorContext::new(&job, "match", None))
+            .await
+            .unwrap();
+        assert_live_state_credit(&operator, &job, pool.as_ref());
         operator
             .on_ingress_progress("right", &progress)
             .await
@@ -582,10 +587,19 @@ async fn progress_cleanup_wait(
         assert_eq!(operator.status(), before);
         assert!(operator.compaction_cleanup.is_some());
         assert_eq!(job.gather_owner().funding().2, attempt);
-        assert_eq!(pool.reserved(), home + generation + attempt);
+        assert_eq!(pool.reserved(), resident + home + generation + attempt);
         refund.send(()).unwrap();
-        assert!(job.gather_owner().close_and_drain().await.is_empty());
+        operator
+            .await_compaction_release(&StreamOperatorContext::new(&job, "match", None))
+            .await
+            .unwrap();
     }
+    assert_live_state_credit(&operator, &job, pool.as_ref());
+    drop(operator);
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    let (home, generation, attempt) = job.gather_owner().funding();
+    assert_eq!((generation, attempt), (0, 0));
+    assert_eq!(pool.reserved(), home);
     drop(job);
     assert_eq!(pool.reserved(), 0);
 }

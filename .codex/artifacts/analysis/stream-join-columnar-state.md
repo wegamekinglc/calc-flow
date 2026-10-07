@@ -1236,3 +1236,98 @@ format, lint and complexity receipts are recorded with the immutable corrective
 snapshot in `target/issue363-j2a-main-transplant-v1/sparse-slice-v2/`. Earlier
 Sparse-v1 and SQL/metadata snapshots and their raw evidence remain unchanged.
 No new performance, full suite, coverage, commit or push is part of this correction.
+
+## PR377 CI correction: actual allocation and credit attribution
+
+The first Windows, Linux parity and combined coverage jobs fail the same five
+tests with identical numbers. Windows reports 1,911 passes and five failures;
+Linux parity and coverage report 1,921 passes and five failures. Coverage stops
+at those test failures, so that run does not establish the line floor. Each of
+the five failures was also reproduced once, in its own focused Linux process;
+the raw CI and local failure evidence is preserved. This is a cross-platform
+fixture-path issue, not a claimed Windows allocator difference.
+
+The native refund assertions omit actual gather home/generation credit: both
+native cases observe an extra 32,768 bytes. The fanout fixture creates separate
+short-lived jobs for its two chunks and observes another 16,384 bytes from the
+string-copy generation. The corrected fixtures use the existing isolated test
+service and one explicit owned job. They read home/generation credit directly,
+require attempt credit zero, and compare exact pool totals with independently
+observed payload/key/index guards. The original key-vector clear assertion,
+append grow/drop equality, full-budget failure, SQL fallback count and unchanged
+operator status assertions remain intact. Dropping each actual resident owner
+is followed by the corresponding exact resident-credit decrease; whole-job drain
+then requires generation/attempt zero, and job drop requires final pool zero.
+Service shutdown follows runtime drop, outside Tokio, using the existing fixture.
+
+The cleanup-only fixture omits 14,056 bytes of still-live operator payload/key
+credit while checking a deliberately blocked compactor refund. It now includes
+that independently observed resident state without weakening the gated attempt
+credit, Pending, cancellation, deadline or unchanged-status assertions. After
+the gate opens, the existing compaction cleanup observer completes before the
+live-state pool equality is checked. The operator is dropped before whole-job
+drain, matching the managed lifecycle and preserving final pool zero.
+
+The metadata measurement previously wraps runtime driving and payload construction
+in one allocation interval, yielding a peak of 6,053 bytes against the 3,130-byte
+payload guard. Its corrected interval polls the complete primitive-copy future
+directly with an already constructed fixed waker/context and a stack-pinned
+future. Copy, fresh schema/fields/strings, buffer owners, inventory and reservation
+allocations remain inside the measurement; executor driving is excluded. Actual
+wakes are observed, without claiming an additional quantum counter proof. The
+owned-copy measurement reports 41 allocations, 1,941 live bytes and a 1,965-byte
+peak against the unchanged 3,130-byte guard. Real chunk destruction offsets the
+entire measured live allocation and refunds the pool to exactly zero; metadata
+and V1 IPC comparisons remain unchanged. No arbitrary allocation allowance or
+production funding increase is added.
+
+All five corrected focused tests pass locally, plus one directly affected flat
+offset/variable-value control. The first isolated-service adaptation passes all
+funding/cleanup assertions but then fails the service's existing prohibition on
+shutdown inside Tokio; that diagnostic is preserved separately from the CI RED.
+The final wrappers perform shutdown outside the runtime and pass. Metadata and
+cleanup-only passing checks were not repeated after unrelated wrapper extraction.
+Final commands and frozen evidence are under
+`target/issue363-j2a-windows-fix-v1/`. Only three cfg(test) modules and this analysis
+change; all twelve other Rust files in the approved nineteen-file scope are
+byte-identical, including all production funding and ownership code. No benchmark
+rerun, full local suite or coverage run is part of this correction. Windows and
+full CI acceptance remain pending the new PR head.
+
+## PR377 review correction: optional-admission fallbacks
+
+The test-only CI correction is preserved separately in its immutable v1 snapshot.
+Subsequent review identifies two production fallback issues, both confirmed by
+new focused behavior REDs before their fixes. A healthy context with a closed
+scratch home receives `Cancelled { run_id: "1" }` from optional admission. The
+actual-stop control also observes the home ID instead of the current context's
+ID. Scratch construction now classifies that admission refusal through a fresh
+context check: a healthy context gets optional `None` and the existing true
+Legacy path; actual cancellation/deadline retain their current-context failure.
+Schema/credit remain local until a real retirement guard is registered, and
+denied construction refunds its complete optional credit.
+
+The native refusal RED first demonstrates that original SQL accepts the same
+budget with 1,408 bytes available, exactly the three-row native-index charge.
+`evaluate_matches` then successfully builds that index, refuses native scratch
+and leaves zero bytes for SQL's HashJoinInput, which fails even a 16-byte growth.
+On optional native `None`, the opposite-side unused index is now dropped before
+SQL fallback. Its actual entry/key owners drop before its reservation; retained
+row IDs, encoded keys, payloads and logical state remain unchanged. Native
+success and non-budget errors keep their original paths. The counter check uses
+the original SQL's actual same-budget table-build count, including its existing
+owned-attempt/Legacy retry; an initial fixture assumption of one build instead
+of two is preserved as a diagnostic, not a new production behavior failure.
+
+All three new focused behavior tests pass. Direct controls also pass for all
+five frozen V1 captures with each restore/continuation, typed zero-headroom
+cleanup followed by one Legacy retry, and non-budget failure without retry.
+The earlier five CI-fixture corrections remain preserved as passing evidence
+and are not repeated here. Production changes are limited to native optional
+refusal cleanup and scratch optional-admission classification; their changed
+functions have complexity seven, seven and three. No fee, cap, schema, public
+API, checkpoint format or shared gather implementation changes are introduced.
+Final v2 source/proof records live under `target/issue363-j2a-windows-fix-v2/`.
+The previous performance acceptance belongs to head `88e817`; this additional
+production delta has no new timing claim. New independent SourceReview and
+cross-platform/full CI acceptance remain required.
