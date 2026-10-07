@@ -517,10 +517,30 @@ impl crate::StreamCollector for Reject {
     }
 }
 
-#[tokio::test]
-async fn rejected_sharded_output_keeps_checkpoint_and_continues_exactly() {
+#[test]
+fn rejected_sharded_output_keeps_checkpoint_and_continues_exactly() {
+    let service = TestService::new(2, 1).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (pool, restored_pool) = runtime.block_on(rejected_output_continuation(&service));
+    drop(runtime);
+    service.shutdown();
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(restored_pool.reserved(), 0);
+}
+
+async fn rejected_output_continuation(
+    service: &TestService,
+) -> (
+    Arc<dyn datafusion::execution::memory_pool::MemoryPool>,
+    Arc<dyn datafusion::execution::memory_pool::MemoryPool>,
+) {
     let (mut operator, left, right) = fixture(true, ROWS);
-    let job = StreamJobContext::new(905, "asof", JsonMap::new(), None, CancellationToken::new());
+    let pool = operator.runtime.pool.clone();
+    let job = StreamJobContext::new(905, "asof", JsonMap::new(), None, CancellationToken::new())
+        .with_gather_owner(service.owner("rejected-key-shards".into()));
     let context = test_context(&job);
     let mut output = EdgeCollector::new(operator.output_ports().to_vec());
     for (port, rows) in [("right", &right), ("left", &left)] {
@@ -530,9 +550,12 @@ async fn rejected_sharded_output_keeps_checkpoint_and_continues_exactly() {
             .unwrap();
     }
     operator.prepare_checkpoint_async(&context).await.unwrap();
+    operator.retirement.wait(&context).await.unwrap();
     let snapshot = operator.checkpoint(Epoch::INITIAL).unwrap();
     let before = operator.status.clone();
     let reserved = operator.runtime.pool.reserved();
+    let funding = job.gather_owner().funding();
+    assert_eq!(funding.2, 0);
     let headroom = operator.checkpoint_workspace().unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
     let counter = calls.clone();
@@ -550,20 +573,19 @@ async fn rejected_sharded_output_keeps_checkpoint_and_continues_exactly() {
         matches!(result, Err(crate::CalcFlowError::Internal { message }) if message == "rejected matching prefix")
     );
     assert_eq!(operator.status, before);
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while operator.runtime.pool.reserved() != reserved {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    operator.retirement.wait(&context).await.unwrap();
+    assert_eq!(job.gather_owner().funding(), funding);
     assert_eq!(operator.runtime.pool.reserved(), reserved);
     let repeated = operator.checkpoint(Epoch::INITIAL).unwrap();
     assert_eq!(repeated.inline_metadata, snapshot.inline_metadata);
     assert_eq!(repeated.segments, snapshot.segments);
     let (mut restored, _, _) = fixture(true, 0);
+    let restored_pool = restored.runtime.pool.clone();
     restored.restore(&snapshot).unwrap();
     restored.on_end(&context, &mut output).await.unwrap();
     assert_output(&mut output, &oracle(&left, &right), true);
     assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop((operator, restored, snapshot, repeated, output, context));
+    drop(job);
+    (pool, restored_pool)
 }

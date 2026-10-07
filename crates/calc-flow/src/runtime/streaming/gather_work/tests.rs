@@ -7,6 +7,7 @@ use datafusion::execution::memory_pool::{
 use super::{GatherOperatorId, GatherStop, TestService, WorkOutput};
 use crate::{CancellationToken, JsonMap, StreamJobContext};
 
+mod cleanup;
 mod parallel;
 
 #[test]

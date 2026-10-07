@@ -19,6 +19,11 @@ measurements. Use the current guides for supported behavior.
   Existing span gathering, backing charges, output budgets, prefix commits
   and checkpoint encoding retain their contracts.
 
+- 2026-10-07: Prepare streaming Join checkpoint bases on bounded native workers.
+  Data and progress handlers share retained vectors without cloning or encoding
+  the base. Cancelled preparation retains paid ownership until cleanup and
+  actual workspace refunds; layout-1 checkpoints and logical limits are preserved.
+
 - 2026-10-06: Aggregate streaming ASOF left batch, key and sequence-owner
   bookkeeping over ordered runs. Prefix matching, canonical encoding, capacity
   charges and cancellation/resource decisions retain their contracts.
