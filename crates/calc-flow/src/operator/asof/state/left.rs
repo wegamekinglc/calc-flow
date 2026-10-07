@@ -137,6 +137,77 @@ fn copied_chunk_sequences(
 }
 
 impl ChunkData {
+    fn prepare_admission_range(
+        rows: &[(LeftOrder, AdmissionRef)],
+        batch: &PayloadBatch,
+        side: &AsofJoinSide,
+        name: &str,
+        cancelled: &dyn Fn() -> Result<()>,
+        columnar: bool,
+    ) -> Result<Self> {
+        if columnar {
+            Self::prepare_admitted(rows, batch, side, name, cancelled)
+        } else {
+            let identities = rows
+                .iter()
+                .map(|(order, row)| (order, row.row))
+                .collect::<Vec<_>>();
+            Self::prepare(&identities, batch, side, name, cancelled)
+        }
+    }
+
+    fn prepare_admitted(
+        rows: &[(LeftOrder, AdmissionRef)],
+        batch: &PayloadBatch,
+        side: &AsofJoinSide,
+        name: &str,
+        cancelled: &dyn Fn() -> Result<()>,
+    ) -> Result<Self> {
+        cancelled()?;
+        let sequences = copied_chunk_sequences(
+            batch,
+            side,
+            rows.len(),
+            true,
+            true,
+            SequenceKind::for_side(&batch.record.schema(), side),
+        )
+        .expect("proven contiguous integer admission");
+        let mut keys = Vec::with_capacity(1);
+        let mut key_counts = Vec::with_capacity(1);
+        let mut key_ids = Vec::with_capacity(rows.len());
+        let mut times = Vec::with_capacity(rows.len());
+        let mut interned = HashMap::<Encoding, u32, ahash::RandomState>::default();
+        let mut owners = EncodingOwners::default();
+        for (ordinal, ((time, key, sequence), _)) in rows.iter().enumerate() {
+            if ordinal.is_multiple_of(128) {
+                cancelled()?;
+            }
+            times.push(*time);
+            let id = intern_chunk_key(
+                &mut interned,
+                &mut keys,
+                &mut key_counts,
+                &mut owners,
+                key,
+                name,
+            )?;
+            key_counts[id as usize] += 1;
+            key_ids.push(id);
+            owners.attach(sequence);
+        }
+        Ok(Self {
+            times: times.into(),
+            positions: None,
+            start: 0,
+            keys,
+            key_counts,
+            key_ids,
+            sequences,
+            owners,
+        })
+    }
+
     pub fn checkpoint_capacities(&self) -> [usize; 6] {
         [
             self.times.inner().capacity() / 8,
@@ -351,9 +422,23 @@ impl ChunkData {
 pub(in super::super) struct PreparedLeftChunk {
     owner: Arc<PayloadBatch>,
     data: ChunkData,
+    #[cfg(test)]
+    borrowed_identity_rows: usize,
+    #[cfg(test)]
+    preparation_allocation: Option<(std::thread::ThreadId, allocation_counter::AllocationInfo)>,
 }
 
 impl PreparedLeftChunk {
+    #[cfg(test)]
+    pub fn borrowed_identity_rows(&self) -> usize {
+        self.borrowed_identity_rows
+    }
+    #[cfg(test)]
+    pub fn preparation_allocation(
+        &self,
+    ) -> Option<(std::thread::ThreadId, allocation_counter::AllocationInfo)> {
+        self.preparation_allocation
+    }
     pub fn batch_key(&self) -> BatchKey {
         self.owner.key
     }
@@ -388,8 +473,16 @@ impl PreparedLeftChunk {
             + self.data.sequences.len() as u64 * (16 + kind.reference_bytes())
     }
     pub fn from_index(owner: Arc<PayloadBatch>, data: ChunkData) -> Self {
-        Self { owner, data }
+        Self {
+            owner,
+            data,
+            #[cfg(test)]
+            borrowed_identity_rows: 0,
+            #[cfg(test)]
+            preparation_allocation: None,
+        }
     }
+    #[cfg(test)]
     pub fn prepare(
         rows: &[(LeftOrder, AdmissionRef)],
         batches: &[Arc<PayloadBatch>],
@@ -399,12 +492,52 @@ impl PreparedLeftChunk {
         Self::prepare_checked(rows, batches, side, name, &|| Ok(()))
     }
 
+    #[cfg(test)]
     pub fn prepare_checked(
         rows: &[(LeftOrder, AdmissionRef)],
         batches: &[Arc<PayloadBatch>],
         side: &AsofJoinSide,
         name: &str,
         cancelled: &dyn Fn() -> Result<()>,
+    ) -> Result<Vec<Self>> {
+        Self::prepare_admission_checked(rows, batches, side, name, cancelled, false)
+    }
+
+    pub fn prepare_admission_checked(
+        rows: &[(LeftOrder, AdmissionRef)],
+        batches: &[Arc<PayloadBatch>],
+        side: &AsofJoinSide,
+        name: &str,
+        cancelled: &dyn Fn() -> Result<()>,
+        columnar: bool,
+    ) -> Result<Vec<Self>> {
+        #[cfg(not(test))]
+        {
+            Self::prepare_ranges(rows, batches, side, name, cancelled, columnar)
+        }
+        #[cfg(test)]
+        {
+            let mut result = None;
+            let allocation = allocation_counter::measure(|| {
+                result = Some(Self::prepare_ranges(
+                    rows, batches, side, name, cancelled, columnar,
+                ));
+            });
+            let mut chunks = result.expect("measured chunk construction")?;
+            if let Some(first) = chunks.first_mut() {
+                first.preparation_allocation = Some((std::thread::current().id(), allocation));
+            }
+            Ok(chunks)
+        }
+    }
+
+    fn prepare_ranges(
+        rows: &[(LeftOrder, AdmissionRef)],
+        batches: &[Arc<PayloadBatch>],
+        side: &AsofJoinSide,
+        name: &str,
+        cancelled: &dyn Fn() -> Result<()>,
+        columnar: bool,
     ) -> Result<Vec<Self>> {
         cancelled()?;
         let mut chunks = Vec::new();
@@ -425,14 +558,21 @@ impl PreparedLeftChunk {
                     "ASOF left chunk exceeds compact row range",
                 )
             })?;
-            let identities = rows[start..end]
-                .iter()
-                .map(|(order, row)| (order, row.row))
-                .collect::<Vec<_>>();
-            let data = ChunkData::prepare(&identities, owner, side, name, cancelled)?;
+            let data = ChunkData::prepare_admission_range(
+                &rows[start..end],
+                owner,
+                side,
+                name,
+                cancelled,
+                columnar,
+            )?;
             chunks.push(Self {
                 owner: owner.clone(),
                 data,
+                #[cfg(test)]
+                borrowed_identity_rows: usize::from(!columnar) * (end - start),
+                #[cfg(test)]
+                preparation_allocation: None,
             });
             start = end;
         }

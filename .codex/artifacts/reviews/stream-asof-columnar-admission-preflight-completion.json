@@ -1,0 +1,563 @@
+{
+  "contract": "issue363-a4-functional-preflight-completion-v1",
+  "cases": 26,
+  "native_workers": 52,
+  "strict_integer_zero_exit": true,
+  "distinct_native_pids_gone": true,
+  "coordinator_pids_gone": [
+    1416330,
+    1416370,
+    1416412,
+    1416454,
+    1416496,
+    1416538,
+    1416580,
+    1416622,
+    1416664,
+    1416706,
+    1416753,
+    1416822,
+    1416864,
+    1416906,
+    1416948,
+    1416990,
+    1417032,
+    1417074,
+    1417116,
+    1417158,
+    1417200,
+    1417266,
+    1417308,
+    1417314,
+    1417320,
+    1417326
+  ],
+  "observed_swap_zero": true,
+  "maximum_single_worker_HWM_bytes": 460083200,
+  "performance_samples": 0,
+  "scope": "functional-only; no throughput/FR16/durable managed restart claim",
+  "review": "independent functional evidence review active",
+  "parser_correction": "raw status is a list of lines, not a string; corrected initial stdlib parser before producing this proof",
+  "items": [
+    {
+      "case": 0,
+      "side": "baseline",
+      "pid": 1416332,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 12075008,
+      "VmSwap_bytes": 0,
+      "result_sha256": "0d03126c4557d12c033d0bef6b64af5856e833343c84be2deb84ea83a134df7c"
+    },
+    {
+      "case": 0,
+      "side": "candidate",
+      "pid": 1416351,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 12124160,
+      "VmSwap_bytes": 0,
+      "result_sha256": "0d03126c4557d12c033d0bef6b64af5856e833343c84be2deb84ea83a134df7c"
+    },
+    {
+      "case": 1,
+      "side": "baseline",
+      "pid": 1416372,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 12017664,
+      "VmSwap_bytes": 0,
+      "result_sha256": "2c60f7e1055f0116b8a378d0755e97c7387a4b7931d4119387b26100b64a3186"
+    },
+    {
+      "case": 1,
+      "side": "candidate",
+      "pid": 1416392,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 12115968,
+      "VmSwap_bytes": 0,
+      "result_sha256": "2c60f7e1055f0116b8a378d0755e97c7387a4b7931d4119387b26100b64a3186"
+    },
+    {
+      "case": 2,
+      "side": "baseline",
+      "pid": 1416414,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 12427264,
+      "VmSwap_bytes": 0,
+      "result_sha256": "eb889197b0a447766be6fdf00516b11551b95623b93d1996ae83efe4a13d1f3e"
+    },
+    {
+      "case": 2,
+      "side": "candidate",
+      "pid": 1416434,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 12570624,
+      "VmSwap_bytes": 0,
+      "result_sha256": "eb889197b0a447766be6fdf00516b11551b95623b93d1996ae83efe4a13d1f3e"
+    },
+    {
+      "case": 3,
+      "side": "baseline",
+      "pid": 1416456,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 12218368,
+      "VmSwap_bytes": 0,
+      "result_sha256": "393b1c814ec76808b6d738dd42959ad68408c5d34f09993f280c7987acfdffb2"
+    },
+    {
+      "case": 3,
+      "side": "candidate",
+      "pid": 1416476,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 12763136,
+      "VmSwap_bytes": 0,
+      "result_sha256": "393b1c814ec76808b6d738dd42959ad68408c5d34f09993f280c7987acfdffb2"
+    },
+    {
+      "case": 4,
+      "side": "baseline",
+      "pid": 1416498,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 13123584,
+      "VmSwap_bytes": 0,
+      "result_sha256": "a346798bf5fbb71b52cb4476971e460add6ad0cf10610de33440ecc6e844877a"
+    },
+    {
+      "case": 4,
+      "side": "candidate",
+      "pid": 1416518,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 13017088,
+      "VmSwap_bytes": 0,
+      "result_sha256": "a346798bf5fbb71b52cb4476971e460add6ad0cf10610de33440ecc6e844877a"
+    },
+    {
+      "case": 5,
+      "side": "baseline",
+      "pid": 1416540,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 14499840,
+      "VmSwap_bytes": 0,
+      "result_sha256": "6f1c01817b1bd20a69471d9e00ffe43758fd5e793f9d3f2df67d96e249a28714"
+    },
+    {
+      "case": 5,
+      "side": "candidate",
+      "pid": 1416560,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 15437824,
+      "VmSwap_bytes": 0,
+      "result_sha256": "6f1c01817b1bd20a69471d9e00ffe43758fd5e793f9d3f2df67d96e249a28714"
+    },
+    {
+      "case": 6,
+      "side": "baseline",
+      "pid": 1416582,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 15028224,
+      "VmSwap_bytes": 0,
+      "result_sha256": "22c1e6ec70af923665a2e3b323cca508e6e5f1d69e3ccd1bbeefbd8a41e90ea7"
+    },
+    {
+      "case": 6,
+      "side": "candidate",
+      "pid": 1416602,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 14921728,
+      "VmSwap_bytes": 0,
+      "result_sha256": "22c1e6ec70af923665a2e3b323cca508e6e5f1d69e3ccd1bbeefbd8a41e90ea7"
+    },
+    {
+      "case": 7,
+      "side": "baseline",
+      "pid": 1416624,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 47984640,
+      "VmSwap_bytes": 0,
+      "result_sha256": "40a6e482b27510fb57a7e86bb38a4850d5a67fb84228100fcbdd716efbc8242e"
+    },
+    {
+      "case": 7,
+      "side": "candidate",
+      "pid": 1416644,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 45518848,
+      "VmSwap_bytes": 0,
+      "result_sha256": "40a6e482b27510fb57a7e86bb38a4850d5a67fb84228100fcbdd716efbc8242e"
+    },
+    {
+      "case": 8,
+      "side": "baseline",
+      "pid": 1416666,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 19394560,
+      "VmSwap_bytes": 0,
+      "result_sha256": "62f1c977de4b5a7352552a7c8f39e5150372fdd4705a5768c8e8feeacba45d8f"
+    },
+    {
+      "case": 8,
+      "side": "candidate",
+      "pid": 1416686,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 19689472,
+      "VmSwap_bytes": 0,
+      "result_sha256": "62f1c977de4b5a7352552a7c8f39e5150372fdd4705a5768c8e8feeacba45d8f"
+    },
+    {
+      "case": 9,
+      "side": "baseline",
+      "pid": 1416708,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 64372736,
+      "VmSwap_bytes": 0,
+      "result_sha256": "fd6e71532677a8a4e0df954b96963676794d190916692b5734d8e6f002797812"
+    },
+    {
+      "case": 9,
+      "side": "candidate",
+      "pid": 1416730,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 65466368,
+      "VmSwap_bytes": 0,
+      "result_sha256": "fd6e71532677a8a4e0df954b96963676794d190916692b5734d8e6f002797812"
+    },
+    {
+      "case": 10,
+      "side": "baseline",
+      "pid": 1416755,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 458579968,
+      "VmSwap_bytes": 0,
+      "result_sha256": "4478bdc2c2ce84ceddd78da5958ac8cfbb816f5d12dd57c4a43e6e187674ccf4"
+    },
+    {
+      "case": 10,
+      "side": "candidate",
+      "pid": 1416777,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 460083200,
+      "VmSwap_bytes": 0,
+      "result_sha256": "4478bdc2c2ce84ceddd78da5958ac8cfbb816f5d12dd57c4a43e6e187674ccf4"
+    },
+    {
+      "case": 11,
+      "side": "baseline",
+      "pid": 1416824,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 14241792,
+      "VmSwap_bytes": 0,
+      "result_sha256": "e6716f180c1e5d5cf0857f7dd94935bb7616b92ef60ebefa0a0c3e4b071d85d2"
+    },
+    {
+      "case": 11,
+      "side": "candidate",
+      "pid": 1416844,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 13963264,
+      "VmSwap_bytes": 0,
+      "result_sha256": "e6716f180c1e5d5cf0857f7dd94935bb7616b92ef60ebefa0a0c3e4b071d85d2"
+    },
+    {
+      "case": 12,
+      "side": "baseline",
+      "pid": 1416866,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 14422016,
+      "VmSwap_bytes": 0,
+      "result_sha256": "0d4aefd4c2049ef7078930087a46f12c03b5371c3f2145f0d4a07f2e08af2ae0"
+    },
+    {
+      "case": 12,
+      "side": "candidate",
+      "pid": 1416886,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 14307328,
+      "VmSwap_bytes": 0,
+      "result_sha256": "0d4aefd4c2049ef7078930087a46f12c03b5371c3f2145f0d4a07f2e08af2ae0"
+    },
+    {
+      "case": 13,
+      "side": "baseline",
+      "pid": 1416908,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 14422016,
+      "VmSwap_bytes": 0,
+      "result_sha256": "90bea391b6c0202daa25d790f23fd166135250526537f67d4b74b3e0e7787564"
+    },
+    {
+      "case": 13,
+      "side": "candidate",
+      "pid": 1416928,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 14397440,
+      "VmSwap_bytes": 0,
+      "result_sha256": "90bea391b6c0202daa25d790f23fd166135250526537f67d4b74b3e0e7787564"
+    },
+    {
+      "case": 14,
+      "side": "baseline",
+      "pid": 1416950,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 14680064,
+      "VmSwap_bytes": 0,
+      "result_sha256": "40755a32ec0897dd6b0d188a558d39e8cf11cd5bbfaa5a6bf57bbab90a0d2bd5"
+    },
+    {
+      "case": 14,
+      "side": "candidate",
+      "pid": 1416970,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 14381056,
+      "VmSwap_bytes": 0,
+      "result_sha256": "40755a32ec0897dd6b0d188a558d39e8cf11cd5bbfaa5a6bf57bbab90a0d2bd5"
+    },
+    {
+      "case": 15,
+      "side": "baseline",
+      "pid": 1416992,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 14495744,
+      "VmSwap_bytes": 0,
+      "result_sha256": "83c77679af108b4108ef7c0f239584a7acc090e121c8bea8996d32cdd711dc9b"
+    },
+    {
+      "case": 15,
+      "side": "candidate",
+      "pid": 1417012,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 14254080,
+      "VmSwap_bytes": 0,
+      "result_sha256": "83c77679af108b4108ef7c0f239584a7acc090e121c8bea8996d32cdd711dc9b"
+    },
+    {
+      "case": 16,
+      "side": "baseline",
+      "pid": 1417034,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 14176256,
+      "VmSwap_bytes": 0,
+      "result_sha256": "6aeb3379f312d036e29da9038991d725a9832a098764d0a0f2449cbb0dd4fceb"
+    },
+    {
+      "case": 16,
+      "side": "candidate",
+      "pid": 1417054,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 14311424,
+      "VmSwap_bytes": 0,
+      "result_sha256": "6aeb3379f312d036e29da9038991d725a9832a098764d0a0f2449cbb0dd4fceb"
+    },
+    {
+      "case": 17,
+      "side": "baseline",
+      "pid": 1417076,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 14766080,
+      "VmSwap_bytes": 0,
+      "result_sha256": "05202a5b065e7f9bf054c430998976bfc911c1db3b72028f41beeba718186187"
+    },
+    {
+      "case": 17,
+      "side": "candidate",
+      "pid": 1417096,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 14024704,
+      "VmSwap_bytes": 0,
+      "result_sha256": "05202a5b065e7f9bf054c430998976bfc911c1db3b72028f41beeba718186187"
+    },
+    {
+      "case": 18,
+      "side": "baseline",
+      "pid": 1417118,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 14893056,
+      "VmSwap_bytes": 0,
+      "result_sha256": "b1530e2724aec6436d5ef09f7a4ca279ea5c7bebf3230d70b1898c6f95fa8d3b"
+    },
+    {
+      "case": 18,
+      "side": "candidate",
+      "pid": 1417138,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 14667776,
+      "VmSwap_bytes": 0,
+      "result_sha256": "b1530e2724aec6436d5ef09f7a4ca279ea5c7bebf3230d70b1898c6f95fa8d3b"
+    },
+    {
+      "case": 19,
+      "side": "baseline",
+      "pid": 1417160,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 15237120,
+      "VmSwap_bytes": 0,
+      "result_sha256": "9e61bb7b0f10a687dd1fc2ff0b588d7115381c9fb65c4dc7c55515485aa34eef"
+    },
+    {
+      "case": 19,
+      "side": "candidate",
+      "pid": 1417180,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 14917632,
+      "VmSwap_bytes": 0,
+      "result_sha256": "9e61bb7b0f10a687dd1fc2ff0b588d7115381c9fb65c4dc7c55515485aa34eef"
+    },
+    {
+      "case": 20,
+      "side": "baseline",
+      "pid": 1417202,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 20443136,
+      "VmSwap_bytes": 0,
+      "result_sha256": "4ce512afc41be438cad380b00b592fcd2c0914e0b03a150ee263aacd7fe5bb2f"
+    },
+    {
+      "case": 20,
+      "side": "candidate",
+      "pid": 1417224,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 20201472,
+      "VmSwap_bytes": 0,
+      "result_sha256": "4ce512afc41be438cad380b00b592fcd2c0914e0b03a150ee263aacd7fe5bb2f"
+    },
+    {
+      "case": 21,
+      "side": "baseline",
+      "pid": 1417268,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 15130624,
+      "VmSwap_bytes": 0,
+      "result_sha256": "f632434ffc8a8e72687b137144f3fa713910bc7040b1bd5d2e42afbfa91e1def"
+    },
+    {
+      "case": 21,
+      "side": "candidate",
+      "pid": 1417288,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 15302656,
+      "VmSwap_bytes": 0,
+      "result_sha256": "f632434ffc8a8e72687b137144f3fa713910bc7040b1bd5d2e42afbfa91e1def"
+    },
+    {
+      "case": 22,
+      "side": "baseline",
+      "pid": 1417310,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 9904128,
+      "VmSwap_bytes": 0,
+      "result_sha256": "bc95e5a846b3bcbf7829e6ee0e5b606d1f6cd269747235d5e8e07ea93325af8a"
+    },
+    {
+      "case": 22,
+      "side": "candidate",
+      "pid": 1417312,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 9834496,
+      "VmSwap_bytes": 0,
+      "result_sha256": "bc95e5a846b3bcbf7829e6ee0e5b606d1f6cd269747235d5e8e07ea93325af8a"
+    },
+    {
+      "case": 23,
+      "side": "baseline",
+      "pid": 1417316,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 11313152,
+      "VmSwap_bytes": 0,
+      "result_sha256": "7ca91b74a6dcc0e560587a32ed52e9b88e1fb70f13f2f8cf775f2b2bed43e5ac"
+    },
+    {
+      "case": 23,
+      "side": "candidate",
+      "pid": 1417318,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 11325440,
+      "VmSwap_bytes": 0,
+      "result_sha256": "7ca91b74a6dcc0e560587a32ed52e9b88e1fb70f13f2f8cf775f2b2bed43e5ac"
+    },
+    {
+      "case": 24,
+      "side": "baseline",
+      "pid": 1417322,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 10440704,
+      "VmSwap_bytes": 0,
+      "result_sha256": "2dc38da108c47f2ce1cac090cf557e014fbaf3d1f86773357ed9311e8ad24920"
+    },
+    {
+      "case": 24,
+      "side": "candidate",
+      "pid": 1417324,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 10227712,
+      "VmSwap_bytes": 0,
+      "result_sha256": "2dc38da108c47f2ce1cac090cf557e014fbaf3d1f86773357ed9311e8ad24920"
+    },
+    {
+      "case": 25,
+      "side": "baseline",
+      "pid": 1417328,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 12402688,
+      "VmSwap_bytes": 0,
+      "result_sha256": "faf573ee7c5fc483d71f169887f9bfe5a67eac9b3a9782fca6663b74ea50fada"
+    },
+    {
+      "case": 25,
+      "side": "candidate",
+      "pid": 1417332,
+      "exit_code": 0,
+      "gone": true,
+      "VmHWM_bytes": 12419072,
+      "VmSwap_bytes": 0,
+      "result_sha256": "faf573ee7c5fc483d71f169887f9bfe5a67eac9b3a9782fca6663b74ea50fada"
+    }
+  ]
+}

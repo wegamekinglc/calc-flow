@@ -158,7 +158,7 @@ impl OwnedCpuWork for GateWork {
     }
 }
 
-async fn abandoned_preparation(service: &TestService) {
+async fn abandoned_preparation(service: &TestService, columnar: bool) {
     let (operator, schema) = identity_fixture();
     let pool = operator.runtime.pool.clone();
     let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new())
@@ -191,6 +191,7 @@ async fn abandoned_preparation(service: &TestService) {
     };
     let work = LeftChunkWork {
         rows,
+        columnar,
         _descriptor: operator.reserve_left_work(batches.len()).unwrap(),
         batches,
         workspace,
@@ -229,7 +230,19 @@ fn abandoned_left_preparation_retains_owner_until_native_drain() {
         .enable_all()
         .build()
         .unwrap();
-    runtime.block_on(abandoned_preparation(&service));
+    runtime.block_on(abandoned_preparation(&service, false));
+    drop(runtime);
+    service.shutdown();
+}
+
+#[test]
+fn abandoned_columnar_preparation_retains_owner_until_native_drain() {
+    let service = TestService::new(1, 1).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(abandoned_preparation(&service, true));
     drop(runtime);
     service.shutdown();
 }

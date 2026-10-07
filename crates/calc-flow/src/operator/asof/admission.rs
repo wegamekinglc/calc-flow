@@ -56,6 +56,7 @@ struct LeftChunkWork {
     workspace: AdmissionWorkspace,
     side: AsofJoinSide,
     name: String,
+    columnar: bool,
     _descriptor: MemoryReservation,
 }
 
@@ -64,12 +65,13 @@ impl OwnedCpuWork for LeftChunkWork {
 
     fn run(self, stop: &GatherStop) -> Result<PreparedInput> {
         stop.check()?;
-        let chunks = state::PreparedLeftChunk::prepare_checked(
+        let chunks = state::PreparedLeftChunk::prepare_admission_checked(
             &self.rows,
             &self.batches,
             &self.side,
             &self.name,
             &|| stop.check(),
+            self.columnar,
         )?;
         stop.check()?;
         Ok((self.rows, Some(chunks), self.workspace))
@@ -283,6 +285,7 @@ struct InputIdentities<'a> {
     duplicates: u64,
     right_capacities: Vec<(state::Encoding, usize)>,
     key_workspace: Option<MemoryReservation>,
+    ordered_append: bool,
 }
 
 impl StreamAsofJoinOperator {
@@ -360,17 +363,15 @@ impl StreamAsofJoinOperator {
             duplicates,
             right_capacities,
             key_workspace,
+            ordered_append,
         } = self
             .validated_input_identities(batch, input, identity_workspace.rows, context)
             .await?;
         self.record_duplicates(input.index, duplicates)?;
         let accepted = self.check_admission_rows(input.index, rows.len() as u64)?;
+        let columnar = self.columnar_left_input(batch, input, rows.len(), ordered_append);
         let payload_workspace = self.input_workspace(batch, input)?;
-        let base = if input.index == 0 {
-            self.status.left.accepted_rows
-        } else {
-            self.status.right.accepted_rows
-        };
+        let base = self.admission_base(input.index);
         let (rows, batches) = encode_rows(
             rows,
             input.index,
@@ -388,7 +389,7 @@ impl StreamAsofJoinOperator {
             _keys: key_workspace,
         };
         let (rows, left_chunks, workspace) = self
-            .prepare_input_chunks(rows, &batches, workspace, input.index, context)
+            .prepare_input_chunks(rows, &batches, workspace, input.index, context, columnar)
             .await?;
         Ok(Admission {
             rows,
@@ -435,14 +436,21 @@ impl StreamAsofJoinOperator {
         workspace: AdmissionWorkspace,
         side: usize,
         context: &StreamOperatorContext<'_>,
+        columnar: bool,
     ) -> Result<PreparedInput> {
         if side != 0 {
             return Ok((rows, None, workspace));
         }
         context.check_cancelled()?;
         if can_prepare_inline(&rows) {
-            let chunks =
-                state::PreparedLeftChunk::prepare(&rows, batches, self.spec.left(), &self.name)?;
+            let chunks = state::PreparedLeftChunk::prepare_admission_checked(
+                &rows,
+                batches,
+                self.spec.left(),
+                &self.name,
+                &|| Ok(()),
+                columnar,
+            )?;
             context.check_cancelled()?;
             return Ok((rows, Some(chunks), workspace));
         }
@@ -453,9 +461,36 @@ impl StreamAsofJoinOperator {
             workspace,
             side: self.spec.left().clone(),
             name: self.name.clone(),
+            columnar,
             _descriptor: descriptor,
         };
         self.run_cpu_work(work, context).await
+    }
+
+    fn columnar_left_input(
+        &self,
+        batch: &Batch,
+        input: ValidatedInput,
+        rows: usize,
+        ordered_append: bool,
+    ) -> bool {
+        #[cfg(test)]
+        if identity_tests::columnar::legacy_requested() {
+            return false;
+        }
+        input.index == 0
+            && rows != 0
+            && rows == batch.num_rows()
+            && ordered_append
+            && columnar_side(&self.schemas[0], self.spec.left())
+    }
+
+    fn admission_base(&self, side: usize) -> u64 {
+        if side == 0 {
+            self.status.left.accepted_rows
+        } else {
+            self.status.right.accepted_rows
+        }
     }
 
     fn reserve_left_work(&self, batches: usize) -> Result<MemoryReservation> {
@@ -570,25 +605,19 @@ impl StreamAsofJoinOperator {
                 rows.push((identity, batch, row, key_index));
             }
         }
-        let duplicates = count_duplicate_identities(
+        let (duplicates, ordered_append) = inspect_duplicate_identities(
             &self.state,
             input.index,
             rows.iter().map(|(identity, _, _, _)| identity),
             context,
         )?;
-        let right_capacities = if input.index == 1 {
-            keys.values
-                .into_iter()
-                .map(|key| (key.encoding, key.rows))
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let right_capacities = admitted_right_capacities(keys.values, input.index);
         Ok(InputIdentities {
             rows,
             duplicates,
             right_capacities,
             key_workspace: keys.workspace,
+            ordered_append,
         })
     }
 }
@@ -600,13 +629,38 @@ fn check_input_cancellation(row: usize, context: &StreamOperatorContext<'_>) -> 
     Ok(())
 }
 
+fn admitted_right_capacities(keys: Vec<AdmittedKey>, side: usize) -> Vec<(state::Encoding, usize)> {
+    if side == 1 {
+        keys.into_iter()
+            .map(|key| (key.encoding, key.rows))
+            .collect()
+    } else {
+        Vec::new()
+    }
+}
+
+fn ordered_append_proof(skip_resident: bool, ordered: bool, duplicates: u64) -> bool {
+    skip_resident && ordered && duplicates == 0
+}
+
+#[cfg(test)]
 fn count_duplicate_identities<'a>(
     state: &state::State,
     side: usize,
     identities: impl ExactSizeIterator<Item = &'a LeftOrder> + Clone,
     context: &StreamOperatorContext<'_>,
 ) -> Result<u64> {
+    inspect_duplicate_identities(state, side, identities, context).map(|(duplicates, _)| duplicates)
+}
+
+fn inspect_duplicate_identities<'a>(
+    state: &state::State,
+    side: usize,
+    identities: impl ExactSizeIterator<Item = &'a LeftOrder> + Clone,
+    context: &StreamOperatorContext<'_>,
+) -> Result<(u64, bool)> {
     let (skip_resident, mut seen) = prepare_duplicate_probes(state, side, &identities, context)?;
+    let ordered = seen.is_none();
     let mut previous = None;
     let mut duplicates = 0;
     for (position, identity) in identities.enumerate() {
@@ -619,7 +673,31 @@ fn count_duplicate_identities<'a>(
         previous = Some(identity);
     }
     context.check_cancelled()?;
-    Ok(duplicates)
+    Ok((
+        duplicates,
+        ordered_append_proof(skip_resident, ordered, duplicates),
+    ))
+}
+
+fn columnar_side(schema: &datafusion::arrow::datatypes::Schema, side: &AsofJoinSide) -> bool {
+    use datafusion::arrow::datatypes::{DataType, TimeUnit};
+    let [key] = side.keys() else {
+        return false;
+    };
+    let key_type = schema
+        .field_with_name(key)
+        .expect("validated key column")
+        .data_type();
+    matches!(
+        schema
+            .field_with_name(side.event_time())
+            .expect("validated time column")
+            .data_type(),
+        DataType::Timestamp(TimeUnit::Microsecond, _)
+    ) && state::SequenceKind::for_side(schema, side)
+        .width()
+        .is_some()
+        && (key_type.is_integer() || matches!(key_type, DataType::Utf8 | DataType::LargeUtf8))
 }
 
 fn prepare_duplicate_probes<'a>(
@@ -1040,6 +1118,7 @@ fn can_share_batch(batch: &RecordBatch) -> Result<bool> {
 
 #[cfg(test)]
 mod identity_tests {
+    pub(super) mod columnar;
     mod cpu;
     mod parallel_cpu;
 
