@@ -18,6 +18,7 @@ own artifacts and do not read these historical files.
 
 On this page:
 
+- [Feature measurement scope](#feature-measurement-scope)
 - [Complete inventory](#complete-inventory)
 - [Inputs, correctness and timing boundaries](#inputs-correctness-and-timing-boundaries)
 - [Streaming operator examples](#streaming-operator-examples)
@@ -28,6 +29,29 @@ On this page:
 - [Reports and failure behavior](#reports-and-failure-behavior)
 - [Local reproduction](#local-reproduction)
 - [Performance-plan diagnostics](#performance-plan-diagnostics)
+
+## Feature measurement scope
+
+The complete inventory below belongs to scheduled or explicitly requested broad
+measurements. Feature development follows
+[AGENTS.md verification](../AGENTS.md#verification): select at most five
+representative cases tied to the changed code, necessary controls, or known
+regressions. Choose the smallest relevant inputs rather than a matrix of every
+size, type, mode, and checkpoint state.
+
+Record the case rationale, comparison revisions, fixed sample counts, and total
+wall-clock budget before execution. The default is ten minutes across the
+selected cases, including setup, restore, preflight, warmup, oracle checks, and
+process lifecycle costs; estimate builds separately. Reuse the existing harness
+and retain its correctness, resource, statistics, and provenance requirements.
+When the budget or environment prevents a valid conclusion, settle owned
+processes and report the limits. Do not automatically enlarge the test set,
+increase samples, or repeat attempts to obtain a favorable result.
+
+An inconclusive comparison cannot establish a gain, equivalence, or a confirmed
+regression. Use the maintained regression rule rather than requiring every
+interval to exclude the threshold. This scope policy does not change the
+scheduled inventory or its verdict calculation.
 
 ## Complete inventory
 

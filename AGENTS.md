@@ -360,6 +360,31 @@ State the specific reason and limited scope before using an exception. Local
 performance measurements require a dedicated performance task, regression
 diagnosis, or an explicit user request.
 
+Feature performance measurements cover only paths directly affected by the
+change and necessary controls or known regressions. Default to at most five
+representative cases, using the smallest input that exercises the changed
+behavior. Do not expand row counts, data types, modes, or checkpoint states into
+a Cartesian matrix, or run a complete benchmark suite for ordinary feature
+development. A broad measurement task requires an explicit user request.
+
+Before execution, record each case's connection to the code change, baseline
+and candidate, fixed sample count, and total wall-clock budget. The default
+measurement budget is ten minutes across all selected cases, including fixture
+creation, state restore, preflight, warmup, correctness checks, process startup,
+and cleanup. Estimate and report builds separately. Reuse maintained harnesses
+and compatible built artifacts; do not create a general measurement framework
+for an individual feature. Keep the selected harness's correctness, resource,
+paired-statistics, and provenance requirements.
+
+Stop when the budget is exhausted or the comparison environment is unsuitable;
+settle owned processes and report completed cases, unmeasured paths, and
+uncertainty. Do not automatically expand the case set, sample count, or retry
+until a favorable verdict appears. Inconclusive timings do not establish a
+speedup, equivalence, or a confirmed regression. Apply the maintained regression
+rule; do not invent a requirement that every confidence interval exclude the
+regression threshold. Scheduled broad benchmarks remain independent of feature
+development.
+
 Use the smallest focused tests for test-driven development red/green and changed
 refactors. Do not repeat an unchanged passing check; diagnose a recurring failure
 before rerunning and report a blocker when it cannot be resolved.
