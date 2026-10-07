@@ -41,6 +41,9 @@ use crate::{
 const MAX_SQL_RESULT_ROWS: usize = 100_000_000;
 const MAX_SQL_RESULT_BYTES: usize = 1 << 30;
 
+#[path = "datafusion_owned.rs"]
+pub(crate) mod owned;
+
 /// Selects the requested `DataFusion` partition policy.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -98,6 +101,11 @@ impl Default for DataFusionConfig {
 }
 
 impl DataFusionConfig {
+    pub(crate) const fn serial_owned_sql(self) -> bool {
+        matches!(self.parallelism_mode, DataFusionParallelismMode::Fixed)
+            && self.target_partitions == 1
+    }
+
     pub(crate) fn validate(&self) -> Result<()> {
         if self.batch_size == 0 {
             return Err(CalcFlowError::InvalidArgument {
@@ -214,6 +222,10 @@ pub struct DataFusionRuntime {
 }
 
 impl DataFusionRuntime {
+    pub(crate) const fn serial_owned_sql(&self) -> bool {
+        self.config.serial_owned_sql()
+    }
+
     /// Creates a run-scoped runtime that owns a lazily initialized `DataFusion` session.
     ///
     /// # Errors
@@ -487,6 +499,8 @@ impl DataFusionRuntime {
     ) -> Result<Batch> {
         self.ensure_open()?;
         require_tables(tables)?;
+        #[cfg(test)]
+        owned::note_legacy_inputs(tables);
         self.execute_query(query, 0, tables, node_id).await
     }
 

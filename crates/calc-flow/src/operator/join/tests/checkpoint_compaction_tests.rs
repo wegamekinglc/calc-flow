@@ -1,4 +1,21 @@
 use super::*;
+use datafusion::execution::memory_pool::MemoryPool;
+
+fn assert_live_state_credit(
+    operator: &StreamJoinOperator,
+    job: &StreamJobContext,
+    pool: &dyn MemoryPool,
+) {
+    let (home, generation, attempt) = job.gather_owner().funding();
+    assert_eq!(
+        attempt, 0,
+        "actual worker credit must be refunded before examining resident state"
+    );
+    assert_eq!(
+        pool.reserved(),
+        home + generation + native_lookup_tests::state_funding(operator)
+    );
+}
 
 #[tokio::test]
 async fn base_compaction_runs_only_in_checkpoint_preparation() {
@@ -252,11 +269,8 @@ async fn abandoned_checkpoint_replacement(
         .process_data("left", batch, &context, &mut collector)
         .await
         .unwrap();
-    assert!(job.gather_owner().close_and_drain().await.is_empty());
     assert!(weak.upgrade().is_none());
-    drop(context);
-    drop(job);
-    assert_eq!(pool.reserved(), 0);
+    assert_live_state_credit(&operator, &job, pool.as_ref());
     assert!(
         waited,
         "replacement mutation must await the old input retirement"
@@ -274,6 +288,11 @@ async fn abandoned_checkpoint_replacement(
     assert_eq!(restored.status().left.retained_rows, 1);
     restored.restore(&previous).unwrap();
     assert_eq!(restored.status().left.retained_rows, 4);
+    drop(operator);
+    drop(context);
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop(job);
+    assert_eq!(pool.reserved(), 0);
 }
 
 #[test]
@@ -345,8 +364,10 @@ async fn abandoned_checkpoint_mutation(
         StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
     restored.restore(&snapshot).unwrap();
     assert_eq!(restored.status().left.retained_rows, 5);
-    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    assert_live_state_credit(&operator, &job, pool.as_ref());
+    drop(operator);
     drop(context);
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
     drop(job);
     assert_eq!(pool.reserved(), 0);
 }
@@ -396,7 +417,7 @@ async fn stopped_compaction_wait(
     let after = operator.status();
     let (_, _, paid_attempt) = job.gather_owner().funding();
     release.send(()).unwrap();
-    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    operator.await_compaction_release(&context).await.unwrap();
     assert!(
         matches!(result, Ok(Err(CalcFlowError::Cancelled { .. }))),
         "retirement wait must observe stop/deadline: {result:?}"
@@ -405,6 +426,17 @@ async fn stopped_compaction_wait(
     assert_eq!(after, before);
     let direct = operator.checkpoint(Epoch::new(5).unwrap()).unwrap();
     assert_eq!(direct.segments, previous.segments);
+    let pool = operator
+        .runtime
+        .runtime()
+        .unwrap()
+        .incremental_memory_pool();
+    assert_live_state_credit(&operator, &job, pool.as_ref());
+    drop(operator);
+    drop(context);
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop(job);
+    assert_eq!(pool.reserved(), 0);
 }
 
 #[test]
@@ -453,7 +485,7 @@ struct ProgressRefundFixture {
     operator: StreamJoinOperator,
     job: StreamJobContext,
     refund: std::sync::mpsc::Sender<()>,
-    pool: Arc<dyn datafusion::execution::memory_pool::MemoryPool>,
+    pool: Arc<dyn MemoryPool>,
 }
 
 async fn progress_refund_fixture(
@@ -670,7 +702,10 @@ async fn failed_checkpoint_preparation(
     assert_eq!(operator.status(), before);
     let (home, generation, attempt) = job.gather_owner().funding();
     assert_eq!(attempt, 0);
-    assert_eq!(pool.reserved(), home + generation);
+    assert_eq!(
+        pool.reserved(),
+        home + generation + native_lookup_tests::state_funding(&operator)
+    );
     let snapshot = operator.checkpoint(Epoch::new(5).unwrap()).unwrap();
     let mut restored =
         StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
@@ -680,8 +715,10 @@ async fn failed_checkpoint_preparation(
     assert_eq!(restored.status(), before);
     operator.prepare_checkpoint_async(&context).await.unwrap();
     assert!(!operator.state.deltas.needs_compaction);
-    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    assert_live_state_credit(&operator, &job, pool.as_ref());
+    drop(operator);
     drop(context);
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
     drop(job);
     assert_eq!(pool.reserved(), 0);
 }
@@ -747,13 +784,16 @@ async fn checkpoint_credit_retirement(
     drop(retry);
     assert_eq!(pool.reserved(), 1 << 30);
     refund.send(()).unwrap();
-    job.gather_owner().close_and_drain().await;
+    operator.await_compaction_release(&context).await.unwrap();
     assert!(
         waited,
         "retry reused credit before native retirement: {first_poll:?}"
     );
     drop(pressure);
+    assert_live_state_credit(&operator, &job, pool.as_ref());
+    drop(operator);
     drop(context);
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
     drop(job);
     assert_eq!(pool.reserved(), 0);
 }
@@ -826,12 +866,18 @@ fn checkpoint_observer_is_published_before_native_capacity_wait() {
             drop(pressure);
             drop(active);
             release.send(()).unwrap();
+            first
+                .await_compaction_release(&first_context)
+                .await
+                .unwrap();
+            drop(first);
+            drop(first_context);
             assert!(first_job.gather_owner().close_and_drain().await.is_empty());
             second
                 .process_data("left", left_batch(vec![5]), &second_context, &mut collector)
                 .await
                 .unwrap();
-            assert!(second_job.gather_owner().close_and_drain().await.is_empty());
+            assert_live_state_credit(&second, &second_job, pool.as_ref());
             assert!(
                 waited,
                 "pre-ticket retry reused credit before native retirement: {first_poll:?}"
@@ -841,6 +887,11 @@ fn checkpoint_observer_is_published_before_native_capacity_wait() {
                 "paid preparation awaiting native capacity must publish its cleanup observer"
             );
             assert_eq!(second.status().left.retained_rows, 5);
+            drop(second);
+            drop(second_context);
+            assert!(second_job.gather_owner().close_and_drain().await.is_empty());
+            drop(second_job);
+            assert_eq!(pool.reserved(), 0);
         });
     });
 }
@@ -879,8 +930,10 @@ async fn checkpoint_credit_failure(spare: usize) {
     drop(pressure);
     operator.prepare_checkpoint_async(&context).await.unwrap();
     assert!(!operator.state.deltas.needs_compaction);
-    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    assert_live_state_credit(&operator, &job, pool.as_ref());
+    drop(operator);
     drop(context);
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
     drop(job);
     assert_eq!(pool.reserved(), 0);
 }
