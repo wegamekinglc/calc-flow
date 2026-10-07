@@ -72,6 +72,13 @@ retry for a favorable verdict. Inconclusive timing is not a confirmed regression
 and does not establish a speedup or equivalence. Apply the maintained gate,
 without adding an all-confidence-intervals-below-threshold requirement.
 
+Count each workload as a case; an atomic acceptance set is not one selection.
+For example, `plan_end_to_end` defines a six-case acceptance set. A focused
+subset may report per-case results, but must not report that set's aggregate
+or acceptance verdict. Do not automatically complete the set to satisfy its
+aggregate contract; complete-set measurements retain their scheduled or
+explicitly requested broad scope.
+
 Complete suites and broad matrices belong to the scheduled workflow or an
 explicitly requested broad measurement task, not ordinary feature development.
 

@@ -376,6 +376,13 @@ and compatible built artifacts; do not create a general measurement framework
 for an individual feature. Keep the selected harness's correctness, resource,
 paired-statistics, and provenance requirements.
 
+Count each workload as a case; an atomic acceptance set is not one selection.
+For example, `plan_end_to_end` defines a six-case acceptance set. A focused
+subset may report per-case results, but must not report that set's aggregate
+or acceptance verdict. Do not automatically complete the set to satisfy its
+aggregate contract; complete-set measurements retain their scheduled or
+explicitly requested broad scope.
+
 Stop when the budget is exhausted or the comparison environment is unsuitable;
 settle owned processes and report completed cases, unmeasured paths, and
 uncertainty. Do not automatically expand the case set, sample count, or retry
