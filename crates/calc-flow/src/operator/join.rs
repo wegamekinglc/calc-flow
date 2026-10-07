@@ -3396,6 +3396,39 @@ impl StreamJoinOperator {
         self.runtime.is_initialized()
     }
 
+    pub(crate) fn prepare_checkpoint_preload_runtime(&mut self) -> Result<()> {
+        self.runtime.runtime()?;
+        Ok(())
+    }
+
+    pub(crate) fn reserve_checkpoint_preload(
+        &self,
+        bytes: usize,
+    ) -> Result<datafusion::execution::memory_pool::MemoryReservation> {
+        let runtime = self
+            .runtime
+            .runtime
+            .as_ref()
+            .ok_or_else(|| CalcFlowError::Internal {
+                message: "Join checkpoint preload runtime was not prepared".into(),
+            })?;
+        let credit = runtime.incremental_reservation("stream-join-preload");
+        credit
+            .try_grow(bytes)
+            .map_err(|error| CalcFlowError::DataFusion {
+                node_id: Some(self.name.clone()),
+                message: error.to_string(),
+            })?;
+        Ok(credit)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn checkpoint_preload_test_pool(
+        &mut self,
+    ) -> Result<Arc<dyn datafusion::execution::memory_pool::MemoryPool>> {
+        Ok(self.runtime.runtime()?.incremental_memory_pool())
+    }
+
     pub(crate) fn output_frontier_candidate(
         &self,
         progress: &IngressProgressSnapshot,

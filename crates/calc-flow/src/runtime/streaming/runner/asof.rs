@@ -7,6 +7,7 @@ use std::{
 
 use datafusion::execution::memory_pool::MemoryReservation;
 
+mod join_preload;
 mod load_work;
 pub(super) use load_work::LoadOwner;
 
@@ -62,6 +63,65 @@ pub(super) async fn load_snapshot(
             Ok(snapshot)
         })
         .await
+}
+
+pub(super) async fn load_snapshot_with_join(
+    transaction: &Arc<ManifestTransaction>,
+    loads: &LoadOwner,
+    operator: &CompiledStreamOperator,
+    operator_id: &str,
+    entry: &OperatorManifestEntry,
+    cancellation: &CancellationToken,
+    reader: Option<&Arc<crate::state::LocalStateLineageBackend>>,
+) -> Result<OperatorStateSnapshot> {
+    if cancellation.is_cancelled() {
+        return Err(CalcFlowError::Cancelled {
+            run_id: "checkpoint:state-load-lock".into(),
+        });
+    }
+    if let (CompiledStreamOperator::StreamJoin(operator), Some(reader)) = (operator, reader) {
+        return join_preload::load_snapshot(
+            transaction,
+            loads,
+            operator,
+            operator_id,
+            entry,
+            cancellation,
+            reader,
+        )
+        .await;
+    }
+    load_snapshot(
+        transaction,
+        loads,
+        operator,
+        operator_id,
+        entry,
+        cancellation,
+    )
+    .await
+}
+
+pub(super) fn prepare_join_preloads(
+    plan: &mut StreamRuntimePlanParts,
+    entries: &BTreeMap<String, OperatorManifestEntry>,
+) -> Result<()> {
+    for node in &mut plan.nodes {
+        prepare_join_preload(&mut node.operator, entries.get(node.operator_id.as_str()))?;
+    }
+    Ok(())
+}
+
+fn prepare_join_preload(
+    operator: &mut CompiledStreamOperator,
+    entry: Option<&OperatorManifestEntry>,
+) -> Result<()> {
+    if entry.is_some_and(|entry| !entry.segments.is_empty())
+        && let CompiledStreamOperator::StreamJoin(operator) = operator
+    {
+        operator.prepare_checkpoint_preload_runtime()?;
+    }
+    Ok(())
 }
 
 fn preload_owner(
@@ -241,3 +301,6 @@ fn take_output_frontier(
 
 #[cfg(test)]
 mod preload_tests;
+
+#[cfg(test)]
+mod join_preload_tests;

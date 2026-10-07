@@ -42,7 +42,7 @@ impl LoadOwner {
             }
             if state.loaned || state.handle.is_some() {
                 return Err(CalcFlowError::Internal {
-                    message: "ASOF checkpoint load is already active".into(),
+                    message: "operator checkpoint load is already active".into(),
                 });
             }
             let handle = tokio::spawn(future);
@@ -95,7 +95,7 @@ impl Loan {
             if error.is_panic() {
                 CalcFlowError::Internal {
                     message: format!(
-                        "ASOF checkpoint load panicked: {}",
+                        "operator checkpoint load panicked: {}",
                         crate::runtime::streaming::failure::panic_message(
                             error.into_panic().as_ref(),
                         ),
@@ -117,5 +117,48 @@ impl Drop for Loan {
         state.handle = self.handle.take();
         state.loaned = false;
         self.owner.0.changed.notify_waiters();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_shared_operator_load_busy_diagnostic_has_no_asof_label() {
+        let owner = LoadOwner::default();
+        let (entered, entrance) = tokio::sync::oneshot::channel();
+        let (released, release) = tokio::sync::oneshot::channel();
+        let mut loading = Box::pin(owner.load(async move {
+            entered.send(()).unwrap();
+            let _ = release.await;
+            Ok(OperatorStateSnapshot::default())
+        }));
+        tokio::select! {
+            _ = entrance => {},
+            result = &mut loading => panic!("load missed the actual gate: {result:?}"),
+        }
+
+        let failure = owner
+            .load(std::future::ready(Ok(OperatorStateSnapshot::default())))
+            .await
+            .unwrap_err();
+        released.send(()).unwrap();
+        loading.await.unwrap();
+        assert!(owner.close_and_drain().await.is_none());
+        assert!(matches!(failure, CalcFlowError::Internal { message }
+            if message == "operator checkpoint load is already active"));
+    }
+
+    #[tokio::test]
+    async fn test_shared_operator_load_panic_diagnostic_preserves_original_message() {
+        let owner = LoadOwner::default();
+        let failure = owner
+            .load(async { panic!("Join loader panic sentinel") })
+            .await
+            .unwrap_err();
+        assert!(owner.close_and_drain().await.is_none());
+        assert!(matches!(failure, CalcFlowError::Internal { message }
+            if message == "operator checkpoint load panicked: Join loader panic sentinel"));
     }
 }

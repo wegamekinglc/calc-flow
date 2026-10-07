@@ -2128,7 +2128,7 @@ async fn run_job_driver(
         Some(checkpoint) => {
             match prepare_checkpoint_recovery(
                 checkpoint,
-                &plan,
+                &mut plan,
                 &prepared_progress,
                 &mut sources,
                 &core.asof_loads,
@@ -2483,7 +2483,7 @@ fn checkpoint_start_failure(launch_id: LaunchId, error: CalcFlowError) -> Driver
 
 async fn prepare_checkpoint_recovery(
     checkpoint: &OpenedCheckpointRuntime,
-    plan: &StreamRuntimePlanParts,
+    plan: &mut StreamRuntimePlanParts,
     prepared_progress: &super::progress::PreparedStreamJob,
     sources: &mut BTreeMap<String, SourceBinding>,
     loads: &asof::LoadOwner,
@@ -2515,6 +2515,9 @@ async fn prepare_checkpoint_recovery(
             .remove(source_id)
             .expect("restored ended source was validated before connector ownership");
     }
+    if checkpoint.join_preload_reader.is_some() {
+        asof::prepare_join_preloads(plan, selected.manifest.operators())?;
+    }
     let checkpoint_capabilities = plan
         .nodes
         .iter()
@@ -2538,45 +2541,25 @@ async fn prepare_checkpoint_recovery(
                     "checkpoint operator {operator_id:?} is absent from the prepared plan"
                 ),
             })?;
-        let snapshot = asof::load_snapshot(
+        let snapshot = asof::load_snapshot_with_join(
             &checkpoint.transaction,
             loads,
             operator,
             operator_id,
             entry,
             cancellation,
+            checkpoint.join_preload_reader.as_ref(),
         )
         .await?;
         let mut snapshot = checkpoint_capability.decode_snapshot(operator_id, snapshot)?;
         let restored_output_frontier = snapshot
             .inline_metadata
             .remove(crate::pipeline::OUTPUT_FRONTIER_METADATA_KEY_V1);
-        let output_frontier = match (requires_output_frontier, restored_output_frontier) {
-            (true, Some(serde_json::Value::Null)) | (false, None) => None,
-            (true, Some(value)) => {
-                Some(value.as_i64().map(EventTime::from_micros).ok_or_else(|| {
-                    CalcFlowError::CheckpointMismatch {
-                        message: format!(
-                            "checkpoint operator {operator_id:?} has an invalid output frontier"
-                        ),
-                    }
-                })?)
-            }
-            (true, None) => {
-                return Err(CalcFlowError::CheckpointMismatch {
-                    message: format!(
-                        "checkpoint operator {operator_id:?} is missing its output frontier"
-                    ),
-                });
-            }
-            (false, Some(_)) => {
-                return Err(CalcFlowError::CheckpointMismatch {
-                    message: format!(
-                        "checkpoint operator {operator_id:?} unexpectedly contains an output frontier"
-                    ),
-                });
-            }
-        };
+        let output_frontier = restored_output_frontier_value(
+            operator_id,
+            requires_output_frontier,
+            restored_output_frontier,
+        )?;
         operators.insert(
             operator_id.clone(),
             OperatorRestoreState {
@@ -2588,6 +2571,33 @@ async fn prepare_checkpoint_recovery(
         );
     }
     Ok((operators, Some(durable)))
+}
+
+fn restored_output_frontier_value(
+    operator_id: &str,
+    required: bool,
+    value: Option<serde_json::Value>,
+) -> crate::Result<Option<EventTime>> {
+    match (required, value) {
+        (true, Some(serde_json::Value::Null)) | (false, None) => Ok(None),
+        (true, Some(value)) => value
+            .as_i64()
+            .map(EventTime::from_micros)
+            .map(Some)
+            .ok_or_else(|| CalcFlowError::CheckpointMismatch {
+                message: format!(
+                    "checkpoint operator {operator_id:?} has an invalid output frontier"
+                ),
+            }),
+        (true, None) => Err(CalcFlowError::CheckpointMismatch {
+            message: format!("checkpoint operator {operator_id:?} is missing its output frontier"),
+        }),
+        (false, Some(_)) => Err(CalcFlowError::CheckpointMismatch {
+            message: format!(
+                "checkpoint operator {operator_id:?} unexpectedly contains an output frontier"
+            ),
+        }),
+    }
 }
 
 fn restored_ended_source_cuts(
@@ -2653,33 +2663,44 @@ async fn open_checkpoint_runtime(
     cancellation: &CancellationToken,
 ) -> crate::Result<OpenedCheckpointRuntime> {
     let ValidatedCheckpointRuntime { spec, identity } = checkpoint;
-    let (state_backend, manifest_root, managed_storage, managed) = match spec.storage {
+    let (state_backend, manifest_root, managed_storage, managed, local_backend) = match spec.storage
+    {
         CheckpointRuntimeStorage::LegacyParts {
             state_backend,
             manifest_root,
-        } => (state_backend, manifest_root, None, false),
+        } => (state_backend, manifest_root, None, false, None),
         CheckpointRuntimeStorage::Managed(storage) => {
             let opened = storage.open(cancellation).await?;
             let state_backend: Arc<dyn StateBackend> = opened.state_backend();
             let manifest_root = opened.manifest_root().to_owned();
-            (state_backend, manifest_root, Some(opened), true)
+            let local_backend = opened.state_backend();
+            (
+                state_backend,
+                manifest_root,
+                Some(opened),
+                true,
+                Some(local_backend),
+            )
         }
         #[cfg(test)]
         CheckpointRuntimeStorage::ManagedTestParts {
             state_backend,
             manifest_root,
-        } => (state_backend, manifest_root, None, true),
+        } => (state_backend, manifest_root, None, true, None),
     };
     let key = StateLineageKey::new(&identity.pipeline_name, &identity.pipeline_fingerprint)?;
-    let lineage = settle_checkpoint_operation(
+    let (lineage, join_preload_reader) = open_checkpoint_lineage(
+        &state_backend,
+        local_backend.as_ref(),
+        &key,
         cancellation,
-        "lineage-open",
-        state_backend.open_lineage(&key),
+        managed,
     )
-    .await
-    .map_err(|error| sanitize_managed_preflight_error(error, managed, false))?;
+    .await?;
+    #[cfg(test)]
+    configure_join_preload_read_hook(spec.join_preload_read_hook, join_preload_reader.as_ref());
     let transaction = ManifestTransaction::open_cancellable(
-        Arc::from(lineage),
+        lineage,
         &key,
         &manifest_root,
         spec.config.retained_epochs,
@@ -2703,30 +2724,8 @@ async fn open_checkpoint_runtime(
         .map_err(|error| sanitize_managed_preflight_error(error, managed, true))?
         .removed_orphan_segments;
     #[cfg(test)]
-    let transaction = {
-        let faults = spec.faults.clone();
-        let fault_cancellation = cancellation.clone();
-        transaction.with_fault_hook(Arc::new(move |point| {
-            let point = match point {
-                ManifestTransactionFaultPoint::StateStage => CheckpointFaultPoint::StateStage,
-                ManifestTransactionFaultPoint::ManifestWrite => CheckpointFaultPoint::ManifestWrite,
-                ManifestTransactionFaultPoint::ManifestRename => {
-                    CheckpointFaultPoint::ManifestRename
-                }
-                ManifestTransactionFaultPoint::ManifestParentSync => {
-                    CheckpointFaultPoint::ManifestParentSync
-                }
-                ManifestTransactionFaultPoint::Compaction => CheckpointFaultPoint::Compaction,
-            };
-            faults.trigger(point, &fault_cancellation)?;
-            if fault_cancellation.is_cancelled() {
-                return Err(CalcFlowError::Cancelled {
-                    run_id: format!("checkpoint:{point:?}"),
-                });
-            }
-            Ok(())
-        }))
-    };
+    let transaction =
+        checkpoint_transaction_faults(transaction, spec.faults.clone(), cancellation.clone());
     let transaction = Arc::new(transaction);
     let next_epoch = selected
         .as_ref()
@@ -2734,6 +2733,7 @@ async fn open_checkpoint_runtime(
     let status = CheckpointStatusHandle::new(&identity, selected.as_ref());
     Ok(OpenedCheckpointRuntime {
         transaction,
+        join_preload_reader,
         _managed_storage: managed_storage,
         identity,
         config: spec.config,
@@ -2747,6 +2747,76 @@ async fn open_checkpoint_runtime(
         #[cfg(test)]
         started_gate: spec.started_gate,
     })
+}
+
+#[cfg(test)]
+fn configure_join_preload_read_hook(
+    hook: Option<super::checkpoint_runtime::CheckpointPrepaidReadHook>,
+    reader: Option<&Arc<crate::state::LocalStateLineageBackend>>,
+) {
+    if let (Some(hook), Some(reader)) = (hook, reader) {
+        reader.set_prepaid_read_hook(hook);
+    }
+}
+
+#[cfg(test)]
+fn checkpoint_transaction_faults(
+    transaction: ManifestTransaction,
+    faults: CheckpointFaultInjector,
+    cancellation: CancellationToken,
+) -> ManifestTransaction {
+    transaction.with_fault_hook(Arc::new(move |point| {
+        let point = match point {
+            ManifestTransactionFaultPoint::StateStage => CheckpointFaultPoint::StateStage,
+            ManifestTransactionFaultPoint::ManifestWrite => CheckpointFaultPoint::ManifestWrite,
+            ManifestTransactionFaultPoint::ManifestRename => CheckpointFaultPoint::ManifestRename,
+            ManifestTransactionFaultPoint::ManifestParentSync => {
+                CheckpointFaultPoint::ManifestParentSync
+            }
+            ManifestTransactionFaultPoint::Compaction => CheckpointFaultPoint::Compaction,
+        };
+        faults.trigger(point, &cancellation)?;
+        if cancellation.is_cancelled() {
+            return Err(CalcFlowError::Cancelled {
+                run_id: format!("checkpoint:{point:?}"),
+            });
+        }
+        Ok(())
+    }))
+}
+
+async fn open_checkpoint_lineage(
+    state_backend: &Arc<dyn StateBackend>,
+    local_backend: Option<&Arc<crate::LocalStateBackend>>,
+    key: &StateLineageKey,
+    cancellation: &CancellationToken,
+    managed: bool,
+) -> crate::Result<(
+    Arc<dyn crate::StateLineageBackend>,
+    Option<Arc<crate::state::LocalStateLineageBackend>>,
+)> {
+    if let Some(backend) = local_backend {
+        let local = Arc::new(
+            settle_checkpoint_operation(
+                cancellation,
+                "lineage-open",
+                backend.open_local_lineage(key),
+            )
+            .await
+            .map_err(|error| sanitize_managed_preflight_error(error, managed, false))?,
+        );
+        let reader = local.supports_prepaid_load().then(|| local.clone());
+        Ok((local as Arc<dyn crate::StateLineageBackend>, reader))
+    } else {
+        let lineage = settle_checkpoint_operation(
+            cancellation,
+            "lineage-open",
+            state_backend.open_lineage(key),
+        )
+        .await
+        .map_err(|error| sanitize_managed_preflight_error(error, managed, false))?;
+        Ok((Arc::from(lineage), None))
+    }
 }
 
 fn sanitize_managed_preflight_error(

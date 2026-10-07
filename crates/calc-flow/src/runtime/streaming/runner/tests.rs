@@ -10250,10 +10250,6 @@ async fn ac5_idle_reactivation_keeps_retained_rows_matchable() {
 }
 
 #[tokio::test]
-#[allow(
-    clippy::too_many_lines,
-    reason = "the restore scenario is clearest as one end-to-end test"
-)]
 async fn ac5_checkpoint_restore_preserves_the_join_window_result() {
     // Durable cut after both data rows but before either watermark: the
     // restored job resumes its source cursors, restores Join state, and
@@ -10278,6 +10274,77 @@ async fn ac5_checkpoint_restore_preserves_the_join_window_result() {
         )
         .unwrap()
     };
+    assert_eq!(
+        checkpoint_restore_join_window_result(checkpoint).await,
+        vec![1]
+    );
+}
+
+struct ManagedJoinWireRead {
+    capacity: usize,
+    paid: usize,
+    credit: std::sync::Weak<datafusion::execution::memory_pool::MemoryReservation>,
+}
+
+#[tokio::test]
+async fn test_managed_join_restart_uses_paid_local_wire_and_continues() {
+    let directory = tempfile::tempdir().unwrap();
+    let managed_root = directory.path().join("managed");
+    let reads = Arc::new(Mutex::new(Vec::<ManagedJoinWireRead>::new()));
+    let observed = reads.clone();
+    let hook: super::super::checkpoint_runtime::CheckpointPrepaidReadHook =
+        Arc::new(move |bytes, capacity, credit, path_peak| {
+            assert!(bytes.starts_with(b"CFJDLT1\0"));
+            assert_eq!(bytes.len(), capacity);
+            assert!(credit.size() >= capacity + path_peak);
+            assert_eq!(
+                credit.consumer().name(),
+                "sql-incremental:stream-join-preload"
+            );
+            observed.lock().push(ManagedJoinWireRead {
+                capacity,
+                paid: credit.size(),
+                credit: Arc::downgrade(credit),
+            });
+            Ok(())
+        });
+    let checkpoint = || {
+        CheckpointRuntimeSpec::managed(
+            ManagedCheckpointRuntime::new(&managed_root).unwrap(),
+            StreamRuntimeConfig {
+                checkpoint_interval: StdDuration::from_secs(3_600),
+                checkpoint_timeout: StdDuration::from_secs(10),
+                ..StreamRuntimeConfig::default()
+            },
+        )
+        .unwrap()
+        .with_join_preload_read_hook(hook.clone())
+    };
+
+    assert_eq!(
+        checkpoint_restore_join_window_result(checkpoint).await,
+        vec![1]
+    );
+
+    let reads = reads.lock();
+    assert_eq!(
+        reads.len(),
+        2,
+        "both retained Join sides must use paid Local loading"
+    );
+    assert!(reads.iter().all(|read| read.capacity > 0));
+    assert!(reads.iter().all(|read| read.paid >= read.capacity));
+    assert!(reads[0].credit.ptr_eq(&reads[1].credit));
+    assert!(reads.iter().all(|read| read.credit.upgrade().is_none()));
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the restore scenario is clearest as one end-to-end test"
+)]
+async fn checkpoint_restore_join_window_result(
+    checkpoint: impl Fn() -> CheckpointRuntimeSpec,
+) -> Vec<i64> {
     let left_release = Arc::new(AtomicBool::new(false));
     let right_release = Arc::new(AtomicBool::new(false));
     let rows = Arc::new(Mutex::new(Vec::new()));
@@ -10339,6 +10406,9 @@ async fn ac5_checkpoint_restore_preserves_the_join_window_result() {
         .await
         .unwrap();
     wait_for_join_emission(&first_job, 1).await;
+    let retained = first_job.stream_join_status();
+    assert_eq!(retained["match"].left.retained_rows, 1);
+    assert_eq!(retained["match"].right.retained_rows, 1);
     let epoch = tokio::time::timeout(StdDuration::from_secs(30), first_job.trigger_checkpoint())
         .await
         .expect("ac5 restore checkpoint should not hang")
@@ -10366,7 +10436,7 @@ async fn ac5_checkpoint_restore_preserves_the_join_window_result() {
     restart_runner.shutdown().await.unwrap();
     // Exactly one window emission: restore resumed past the committed
     // cursors, so the retained pair is neither lost nor replayed.
-    assert_eq!(*rows.lock(), vec![1]);
+    rows.lock().clone()
 }
 
 /// Waits until the `match` Join of one running job has emitted `pairs`

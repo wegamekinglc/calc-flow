@@ -32,6 +32,7 @@ pub(crate) use segment::{
 
 pub use backend::{StateBackend, StateHandle, StateLineageBackend, StateLineageKey};
 pub use local::LocalStateBackend;
+pub(crate) use local::LocalStateLineageBackend;
 pub use manifest::{
     CheckpointManifest, CheckpointManifestFields, CursorManifestEntry, MANIFEST_FORMAT_VERSION,
     MAX_MANIFEST_DOCUMENT_BYTES, ManifestExpectation, ManifestIngressState,

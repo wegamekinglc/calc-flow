@@ -755,6 +755,51 @@ impl ManifestTransaction {
         })
     }
 
+    pub(crate) async fn load_operator_state_prepaid_local(
+        &self,
+        operator_id: &str,
+        entry: &OperatorManifestEntry,
+        cancellation: &CancellationToken,
+        reader: &super::LocalStateLineageBackend,
+        credit: Arc<datafusion::execution::memory_pool::MemoryReservation>,
+    ) -> Result<OperatorStateSnapshot> {
+        let _guard = owner_settled(cancellation, "state-load-lock", async {
+            Ok(self.operation.lock().await)
+        })
+        .await?;
+        #[cfg(test)]
+        self.settle_operation_hook(ManifestOperationPoint::Load, cancellation)
+            .await?;
+        let mut segments = BTreeMap::new();
+        for handle in &entry.segments {
+            handle.validate_owner(operator_id)?;
+            let bytes = owner_settled(
+                cancellation,
+                "state-load-segment",
+                reader.load_segment_prepaid(handle, credit.clone()),
+            )
+            .await?;
+            if segments
+                .insert(
+                    handle.segment_id().into(),
+                    bytes.into_segment(handle.sha256().into()),
+                )
+                .is_some()
+            {
+                return Err(CalcFlowError::CheckpointMismatch {
+                    message: format!(
+                        "operator {operator_id:?} repeats state segment {:?}",
+                        handle.segment_id()
+                    ),
+                });
+            }
+        }
+        Ok(OperatorStateSnapshot {
+            inline_metadata: entry.inline_metadata.clone(),
+            segments,
+        })
+    }
+
     pub(crate) async fn load_sink_segments_cancellable(
         &self,
         sink_id: &str,
