@@ -96,6 +96,29 @@ def test_local_api_rejects_rebound_hosts_origins_and_missing_launch_tokens() -> 
         )
 
 
+@pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE"])
+@pytest.mark.parametrize("token", [b"\xe9", b"\xc3\xa9"], ids=["latin1", "utf8"])
+def test_local_api_rejects_non_ascii_launch_tokens(
+    tmp_path: Path, method: str, token: bytes
+) -> None:
+    app = create_app(
+        project_directory=tmp_path / "projects",
+        checkpoint_directory=tmp_path / "checkpoints",
+        run_manager=FakeManager(),
+    )
+    with NativeTestClient(
+        app, base_url="http://127.0.0.1", raise_server_exceptions=False
+    ) as client:
+        response = client.request(
+            method,
+            "/api/v3/projects",
+            json={},
+            headers={b"X-Calc-Flow-Session": token},
+        )
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Invalid launch token"}
+
+
 def test_ipv6_loopback_host_remains_allowed() -> None:
     app = create_app(run_manager=FakeManager(), bind_host="::1")
     with NativeTestClient(app, base_url="http://127.0.0.1") as client:

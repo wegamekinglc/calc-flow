@@ -9,6 +9,10 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-07: Reject non-ASCII Studio session tokens with the existing
+  `403 {"detail": "Invalid launch token"}` response instead of HTTP 500
+  (DAL-321).
+
 - 2026-10-07: Prepare ordered streaming ASOF left chunks directly from
   validated admission ranges for scalar integer or UTF-8 keys and native-width
   integer sequences. Legacy dictionary capacities, checkpoint bytes, owned
