@@ -3772,6 +3772,54 @@ impl StreamJoinOperator {
         Ok(())
     }
 
+    fn evict_progress(&mut self, ingress: &str, progress: IngressProgress) -> Result<()> {
+        match ingress {
+            "left" => {
+                let before = self.state.right.len();
+                evict_opposite(
+                    &mut self.state.right,
+                    &mut self.state.right_expirations,
+                    progress,
+                    &mut self.state.metrics.right,
+                    &mut self.state.deltas.pending,
+                    EvictionPolicy {
+                        extension_micros: self.spec.bounds.before_micros,
+                        side: JoinSide::Right,
+                        operator_id: &self.name,
+                    },
+                )?;
+                if self.state.right.len() != before {
+                    self.retained_key_cache.right = None;
+                }
+            }
+            "right" => {
+                let before = self.state.left.len();
+                evict_opposite(
+                    &mut self.state.left,
+                    &mut self.state.left_expirations,
+                    progress,
+                    &mut self.state.metrics.left,
+                    &mut self.state.deltas.pending,
+                    EvictionPolicy {
+                        extension_micros: self.spec.bounds.after_micros,
+                        side: JoinSide::Left,
+                        operator_id: &self.name,
+                    },
+                )?;
+                if self.state.left.len() != before {
+                    self.retained_key_cache.left = None;
+                }
+            }
+            _ => {
+                return Err(operator_error(
+                    &self.name,
+                    &format!("unknown ingress progress {ingress:?}"),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn decode_restored_sides(
         &self,
         snapshot: &OperatorStateSnapshot,
@@ -3889,51 +3937,12 @@ impl StreamOperator for StreamJoinOperator {
                 &format!("missing progress for ingress {ingress:?}"),
             )
         })?;
-        self.await_compaction_release(context).await?;
-        match ingress {
-            "left" => {
-                let before = self.state.right.len();
-                evict_opposite(
-                    &mut self.state.right,
-                    &mut self.state.right_expirations,
-                    progress,
-                    &mut self.state.metrics.right,
-                    &mut self.state.deltas.pending,
-                    EvictionPolicy {
-                        extension_micros: self.spec.bounds.before_micros,
-                        side: JoinSide::Right,
-                        operator_id: &self.name,
-                    },
-                )?;
-                if self.state.right.len() != before {
-                    self.retained_key_cache.right = None;
-                }
-            }
-            "right" => {
-                let before = self.state.left.len();
-                evict_opposite(
-                    &mut self.state.left,
-                    &mut self.state.left_expirations,
-                    progress,
-                    &mut self.state.metrics.left,
-                    &mut self.state.deltas.pending,
-                    EvictionPolicy {
-                        extension_micros: self.spec.bounds.after_micros,
-                        side: JoinSide::Left,
-                        operator_id: &self.name,
-                    },
-                )?;
-                if self.state.left.len() != before {
-                    self.retained_key_cache.left = None;
-                }
-            }
-            _ => {
-                return Err(operator_error(
-                    &self.name,
-                    &format!("unknown ingress progress {ingress:?}"),
-                ));
-            }
+        if self.compaction_release.is_none() && self.compaction_cleanup.is_none() {
+            context.check_cancelled()?;
+        } else {
+            self.await_compaction_release(context).await?;
         }
+        self.evict_progress(ingress, progress)?;
         self.ingress_progress = context.ingress_progress().clone();
         Ok(())
     }

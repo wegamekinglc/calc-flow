@@ -417,6 +417,158 @@ fn compaction_retirement_wait_observes_cancellation_and_deadline() {
     });
 }
 
+#[tokio::test]
+async fn test_progress_without_retirement_preserves_cancel_and_deadline_checks() {
+    let healthy = job();
+    let (mut operator, _, _) = checkpoint_worker_fixture(&healthy).await;
+    let before = operator.status();
+    for expired in [false, true] {
+        let cancellation = CancellationToken::new();
+        let stopped = StreamJobContext::new(
+            3,
+            "progress-stop",
+            JsonMap::new(),
+            expired.then(|| chrono::Utc::now() - chrono::Duration::seconds(1)),
+            cancellation.clone(),
+        );
+        if !expired {
+            cancellation.cancel();
+        }
+        let progress = progress_context(
+            &stopped,
+            (IngressState::Active, None),
+            (IngressState::Active, Some(60_000_005)),
+        );
+        assert!(operator.compaction_release.is_none());
+        assert!(operator.compaction_cleanup.is_none());
+        assert!(matches!(
+            operator.on_ingress_progress("right", &progress).await,
+            Err(CalcFlowError::Cancelled { .. })
+        ));
+        assert_eq!(operator.status(), before);
+    }
+}
+
+struct ProgressRefundFixture {
+    operator: StreamJoinOperator,
+    job: StreamJobContext,
+    refund: std::sync::mpsc::Sender<()>,
+    pool: Arc<dyn datafusion::execution::memory_pool::MemoryPool>,
+}
+
+async fn progress_refund_fixture(
+    service: &crate::runtime::streaming::gather_work::TestService,
+) -> ProgressRefundFixture {
+    let job = job().with_gather_owner(service.owner("progress-credit-retirement".into()));
+    let context = StreamOperatorContext::new(&job, "match", None);
+    let (mut operator, _, _) = checkpoint_worker_fixture(&job).await;
+    let pool = operator
+        .runtime
+        .runtime()
+        .unwrap()
+        .incremental_memory_pool();
+    let CheckpointGateHarness {
+        gate,
+        started,
+        release,
+    } = checkpoint_gate(false);
+    let (retired, owners_gone) = tokio::sync::oneshot::channel();
+    let (refund, wait) = std::sync::mpsc::channel();
+    operator.checkpoint_gate = Some(std::sync::Mutex::new(gate));
+    operator.checkpoint_retirement_gate = Some(std::sync::Mutex::new(
+        checkpoint_compaction::TestRetirementGate {
+            entered: retired,
+            wait,
+        },
+    ));
+    let mut prepare = Box::pin(operator.prepare_checkpoint_async(&context));
+    assert!(futures::poll!(prepare.as_mut()).is_pending());
+    started.await.unwrap();
+    drop(prepare);
+    release.send(()).unwrap();
+    owners_gone.await.unwrap();
+    operator.compaction_release.take().unwrap().await.unwrap();
+    assert_eq!(Arc::strong_count(&operator.state.left.0), 1);
+    assert!(operator.compaction_release.is_none());
+    assert!(operator.compaction_cleanup.is_some());
+    ProgressRefundFixture {
+        operator,
+        job,
+        refund,
+        pool,
+    }
+}
+
+async fn progress_cleanup_wait(
+    service: &crate::runtime::streaming::gather_work::TestService,
+    stop: u8,
+) {
+    let ProgressRefundFixture {
+        mut operator,
+        job,
+        refund,
+        pool,
+    } = progress_refund_fixture(service).await;
+    let before = operator.status();
+    let cancellation = CancellationToken::new();
+    let waiting = StreamJobContext::new(
+        3,
+        "progress-refund-wait",
+        JsonMap::new(),
+        (stop == 2).then(|| chrono::Utc::now() + chrono::Duration::milliseconds(40)),
+        cancellation.clone(),
+    );
+    let progress = progress_context(
+        &waiting,
+        (IngressState::Active, None),
+        (IngressState::Active, Some(60_000_005)),
+    );
+    let (home, generation, attempt) = job.gather_owner().funding();
+    assert!(attempt >= 4 * 124);
+    assert_eq!(pool.reserved(), home + generation + attempt);
+    let mut mutation = Box::pin(operator.on_ingress_progress("right", &progress));
+    assert!(futures::poll!(mutation.as_mut()).is_pending());
+    if stop == 0 {
+        drop(mutation);
+        assert_eq!(operator.status(), before);
+        assert!(operator.compaction_cleanup.is_some());
+        refund.send(()).unwrap();
+        assert!(job.gather_owner().close_and_drain().await.is_empty());
+        operator
+            .on_ingress_progress("right", &progress)
+            .await
+            .unwrap();
+        assert_eq!(operator.status().left.retained_rows, 0);
+        assert!(operator.compaction_cleanup.is_none());
+    } else {
+        if stop == 1 {
+            cancellation.cancel();
+        }
+        let result = tokio::time::timeout(Duration::from_secs(2), mutation.as_mut()).await;
+        drop(mutation);
+        assert!(matches!(result, Ok(Err(CalcFlowError::Cancelled { .. }))));
+        assert_eq!(operator.status(), before);
+        assert!(operator.compaction_cleanup.is_some());
+        assert_eq!(job.gather_owner().funding().2, attempt);
+        assert_eq!(pool.reserved(), home + generation + attempt);
+        refund.send(()).unwrap();
+        assert!(job.gather_owner().close_and_drain().await.is_empty());
+    }
+    drop(job);
+    assert_eq!(pool.reserved(), 0);
+}
+
+#[test]
+fn test_progress_cleanup_only_waits_for_actual_refund_and_observes_stop() {
+    isolated_checkpoint_test(|service, runtime| {
+        runtime.block_on(async {
+            for stop in 0..=2 {
+                progress_cleanup_wait(service, stop).await;
+            }
+        });
+    });
+}
+
 #[test]
 fn managed_close_drains_abandoned_compaction_after_operator_drop() {
     isolated_checkpoint_test(|service, runtime| {
