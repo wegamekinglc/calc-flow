@@ -1,0 +1,91 @@
+{
+  "evidence_sha256": "189558af01f9376e5ce02f10d4b0e6d8d384ae77b8f0a78b69198bdea48da950",
+  "focused_cases": [
+    {
+      "error": "all existing Coveralls statuses must be successful",
+      "label": "latest complete-head flag pending overrides older success",
+      "result": "rejected"
+    },
+    {
+      "error": "requested repository identity differs",
+      "label": "requested repository id is boolean",
+      "result": "rejected"
+    },
+    {
+      "error": "Linux run repository differs",
+      "label": "run repository id differs from requested repository",
+      "result": "rejected"
+    },
+    {
+      "error": "coverage job did not succeed for this run/attempt/head",
+      "label": "successful coverage job belongs to another attempt",
+      "result": "rejected"
+    },
+    {
+      "error": "coverage job did not succeed for this run/attempt/head",
+      "label": "successful coverage job belongs to another run",
+      "result": "rejected"
+    },
+    {
+      "error": "coverage job did not succeed for this run/attempt/head",
+      "label": "successful coverage job belongs to another head",
+      "result": "rejected"
+    },
+    {
+      "error": "expected exactly one studio coverage job, found 0",
+      "label": "required coverage job absent",
+      "result": "rejected"
+    },
+    {
+      "error": "expected exactly one required coverage step, found 0",
+      "label": "required coverage step absent",
+      "result": "rejected"
+    },
+    {
+      "error": "coverage artifact belongs to another run/head/repository",
+      "label": "coverage artifact belongs to another head",
+      "result": "rejected"
+    },
+    {
+      "error": "coverage artifact belongs to another run/head/repository",
+      "label": "coverage artifact belongs to another repository id",
+      "result": "rejected"
+    },
+    {
+      "error": "coverage artifact is empty",
+      "label": "coverage artifact is empty",
+      "result": "rejected"
+    },
+    {
+      "error": "coverage artifact is empty",
+      "label": "boolean artifact size is not positive byte evidence",
+      "result": "rejected"
+    },
+    {
+      "error": "coverage artifact was not created during its successful job",
+      "label": "artifact created after successful job completion",
+      "result": "rejected"
+    },
+    {
+      "caller_inputs_unchanged": true,
+      "current_pull_reads": 0,
+      "label": "historical run accepted after current PR head moves",
+      "result": "accepted"
+    }
+  ],
+  "head": "92b3d87f8787b771ec24d51d5553b99e4d580f53",
+  "live_provenance_sha256": "00f40ecb734fc6bd5dd294f0c03bb58975b4c9f21439be76623bfbe17b80f003",
+  "native_import_build_execution": 0,
+  "network_requests": 0,
+  "owned_processes": 0,
+  "recorded_author_tests": 37,
+  "replay_tree_source": "saved provenance; synthetic measurement Git object absent locally",
+  "reviewer_focused_cases": 14,
+  "saved_real_provenance_replay": "exact match",
+  "source_files": {
+    ".codex/artifacts/analysis/stacked-coverage-measurement.md": "75de76a93ba9c20e24e2e129774f80252a7879ceba4f235ae1b4b8d72dd581b3",
+    "scripts/resolve_coverage_baseline.py": "74f6a995ba58fcce478cc364920cbbc3b28cf85f3e521b9ac6fea8307a9efc56",
+    "scripts/test_resolve_coverage_baseline.py": "c677631d0207685f0d1bdfe71817bd5ae152185f534ec180afd7f754835901b9"
+  },
+  "tree": "fe3ce6bedd71598c8bec2feb876619fb2beac079"
+}

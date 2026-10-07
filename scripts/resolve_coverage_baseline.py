@@ -1,4 +1,4 @@
-"""Resolve only a partial Coveralls baseline to its same-tree merged PR measurement."""
+"""Resolve coverage aliases only to complete, verified same-tree PR measurements."""
 
 from __future__ import annotations
 
@@ -230,11 +230,13 @@ def _check_merged_pull(pull: dict, repository: str, base_sha: str, number: int) 
             raise ValueError("merged PR belongs to a different repository")
 
 
-def _successful_run(repository: str, pull: dict, report: dict) -> dict:
+def _successful_run(
+    repository: str, head_sha: str, repository_id: int, report: dict
+) -> dict:
     run = _github_object(f"repos/{repository}/actions/runs/{report['run_id']}")
     expected = {
         "id": report["run_id"],
-        "head_sha": pull["head"]["sha"],
+        "head_sha": head_sha,
         "event": "pull_request",
         "path": ".github/workflows/ci-linux.yml",
         "status": "completed",
@@ -246,10 +248,7 @@ def _successful_run(repository: str, pull: dict, report: dict) -> dict:
     if type(run.get("run_attempt")) is not int or run["run_attempt"] < 1:
         raise ValueError("candidate Linux CI run has an invalid attempt number")
     for key in ("repository", "head_repository"):
-        if (
-            run[key]["full_name"] != repository
-            or run[key]["id"] != pull["base"]["repo"]["id"]
-        ):
+        if run[key]["full_name"] != repository or run[key]["id"] != repository_id:
             raise ValueError("Linux run repository differs")
     return run
 
@@ -352,7 +351,7 @@ def _equivalent_candidate(repository: str, base_sha: str, tree: str) -> dict:
     measurement = report["build"]["commit_sha"]
     if _tree(repository, measurement) != tree:
         raise ValueError("actual measurement full tree differs from the base")
-    run = _successful_run(repository, pull, report)
+    run = _successful_run(repository, head, pull["base"]["repo"]["id"], report)
     jobs = _coverage_jobs(repository, run)
     return {
         "pull_request": pull,
@@ -364,6 +363,49 @@ def _equivalent_candidate(repository: str, base_sha: str, tree: str) -> dict:
         "run": run,
         "jobs": jobs,
         "artifacts": _coverage_artifacts(repository, run, jobs),
+    }
+
+
+def _complete_head_candidate(repository: str, base_sha: str, report: dict) -> dict:
+    tree = _tree(repository, base_sha)
+    measurement = report["build"]["commit_sha"]
+    if _tree(repository, measurement) != tree:
+        raise ValueError("actual measurement full tree differs from the base")
+    repo = _github_object(f"repos/{repository}")
+    if (
+        repo["full_name"] != repository
+        or type(repo["id"]) is not int
+        or repo["id"] <= 0
+    ):
+        raise ValueError("requested repository identity differs")
+    run = _successful_run(repository, base_sha, repo["id"], report)
+    jobs = _coverage_jobs(repository, run)
+    return {
+        "head_sha": base_sha,
+        "head_tree": tree,
+        "measurement_sha": measurement,
+        "measurement_tree": tree,
+        "report": report,
+        "run": run,
+        "jobs": jobs,
+        "artifacts": _coverage_artifacts(repository, run, jobs),
+    }
+
+
+def _resolve_head_measurement(
+    repository: str, base_sha: str, result: dict, report: dict
+) -> dict:
+    if _flag_statuses(result["base_statuses"]).keys() != FLAGS:
+        raise ValueError("base Coveralls build measured a different commit")
+    _require_successful_statuses(result["base_statuses"])
+    candidate = _complete_head_candidate(repository, base_sha, report)
+    return {
+        **result,
+        "origin": "same_tree_pull_request",
+        "source_tree": candidate["head_tree"],
+        "base_report": report,
+        "candidate": candidate,
+        "compare_sha": candidate["measurement_sha"],
     }
 
 
@@ -394,7 +436,7 @@ def resolve(repository: str, base_sha: str) -> dict:
         _require_successful_statuses(statuses)
     report = _coverage_report(repository, statuses)
     if report["build"]["commit_sha"] != base_sha:
-        raise ValueError("base Coveralls build measured a different commit")
+        return _resolve_head_measurement(repository, base_sha, result, report)
     if flags.keys() == FLAGS:
         return {**result, "origin": "default_complete_flags", "base_report": report}
     tree = _tree(repository, base_sha)
