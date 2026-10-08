@@ -42,7 +42,7 @@ const BYTE_LIMIT: u64 = 4 * 1_024 * 1_024 * 1_024;
 const MATCH_LIMIT: u64 = 100_000_000;
 const BEFORE: Duration = Duration::from_secs(300);
 const AFTER: Duration = Duration::from_secs(60);
-/// Segment count that arms inline compaction on the next data handler.
+/// Segment count that arms compaction on the next checkpoint preparation.
 const COMPACTION_THRESHOLD: u64 = 4;
 
 fn schema() -> Arc<Schema> {
@@ -165,8 +165,8 @@ fn read_rss() -> (u64, u64) {
 }
 
 /// Operator with `total_rows` of retained state across both sides and exactly
-/// `COMPACTION_THRESHOLD` carried delta segments: the next data handler will
-/// compact inline. Returns the operator and the next unused epoch.
+/// `COMPACTION_THRESHOLD` carried delta segments: the next checkpoint
+/// preparation compacts them. Returns the operator and the next unused epoch.
 async fn armed_operator(total_rows: usize) -> (StreamJoinOperator, u64) {
     let mut operator = new_operator();
     let job = job();
@@ -224,7 +224,10 @@ async fn dirty_operator(total_rows: usize, dirty_rows: usize) -> (StreamJoinOper
     let (mut operator, next_epoch) = armed_operator(total_rows - dirty_rows).await;
     let job = job();
     let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
-    // This data handler performs the inline compaction into a canonical base.
+    operator
+        .prepare_checkpoint_async(&plain_ctx(&job))
+        .await
+        .unwrap();
     let dirty = unique_keys("D", dirty_rows);
     let (left_dirty, right_dirty) = dirty.split_at(dirty.len() / 2);
     let stamp = BASE_TS + 2 * SECOND;
@@ -376,9 +379,13 @@ fn run_probe(runtime: &tokio::runtime::Runtime, batches: &ScenarioBatches) {
             status.emitted_match_rows, status.left.retained_rows,
         );
 
-        // Fail-closed harness self-checks: the armed operator must compact on
-        // the next data handler, and dirty_operator must already carry a base.
+        // Fail-closed self-checks require checkpoint preparation to compact
+        // the armed operator; dirty_operator must already carry that base.
         let (mut armed, next_epoch) = armed_operator(20_000).await;
+        armed
+            .prepare_checkpoint_async(&plain_ctx(&job))
+            .await
+            .unwrap();
         let mut collector = EdgeCollector::new(armed.output_ports().to_vec());
         feed(
             &mut armed,
@@ -391,7 +398,7 @@ fn run_probe(runtime: &tokio::runtime::Runtime, batches: &ScenarioBatches) {
         let snapshot = armed.checkpoint(Epoch::new(next_epoch).unwrap()).unwrap();
         assert!(
             snapshot.segments.contains_key("left-base"),
-            "harness self-check failed: inline compaction did not trigger; segments: {:?}",
+            "harness self-check failed: checkpoint preparation did not compact; segments: {:?}",
             snapshot.segments.keys().collect::<Vec<_>>()
         );
         let (mut compacted, next_epoch) = dirty_operator(20_000, 1_250).await;
@@ -572,13 +579,13 @@ fn checkpoint_scenarios(
     }
 }
 
-/// Inline compaction — a 500-row data handler that compacts a 60k-row base
-/// inline vs the same handler on an already-compacted base.
+/// Checkpoint preparation plus a 500-row handler, with an armed 60k-row
+/// compaction or an already-compacted control. Both time the same lifecycle.
 fn compaction_scenarios(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
     runtime: &tokio::runtime::Runtime,
 ) {
-    group.bench_function("handler/left_500_inline_compact_60k", |b| {
+    group.bench_function("checkpoint/prepare_then_left_500_compact_60k", |b| {
         b.to_async(runtime).iter_custom(|iters| {
             Box::pin(async move {
                 let job = job();
@@ -588,6 +595,10 @@ fn compaction_scenarios(
                     let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
                     let batch = Arc::new(make_batch(&unique_keys("X", 500), BASE_TS + 3 * SECOND));
                     let start = Instant::now();
+                    operator
+                        .prepare_checkpoint_async(&plain_ctx(&job))
+                        .await
+                        .unwrap();
                     operator
                         .process_data("left", (*batch).clone(), &plain_ctx(&job), &mut collector)
                         .await
@@ -599,7 +610,7 @@ fn compaction_scenarios(
         });
     });
 
-    group.bench_function("handler/left_500_steady_60k_base", |b| {
+    group.bench_function("checkpoint/prepare_then_left_500_steady_60k", |b| {
         b.to_async(runtime).iter_custom(|iters| {
             Box::pin(async move {
                 let job = job();
@@ -609,6 +620,10 @@ fn compaction_scenarios(
                     let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
                     let batch = Arc::new(make_batch(&unique_keys("X", 500), BASE_TS + 3 * SECOND));
                     let start = Instant::now();
+                    operator
+                        .prepare_checkpoint_async(&plain_ctx(&job))
+                        .await
+                        .unwrap();
                     operator
                         .process_data("left", (*batch).clone(), &plain_ctx(&job), &mut collector)
                         .await

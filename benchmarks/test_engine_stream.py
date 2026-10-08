@@ -74,6 +74,7 @@ def _runner_type(probe, advance):
             return {
                 "stream_joins": {
                     "join": {
+                        "emitted_match_rows": probe.sink.rows,
                         "right": {"watermark_micros": probe.watermark_micros},
                         "left": {"retained_rows": 0, "evicted_rows": 0},
                     }
@@ -262,6 +263,7 @@ def test_static_join_seals_dimension_before_feeding_any_quote():
             return {
                 "stream_joins": {
                     "join": {
+                        "emitted_match_rows": sink.rows,
                         "right": {
                             "watermark_micros": engine_stream.BASE_MICROS
                             if acknowledged

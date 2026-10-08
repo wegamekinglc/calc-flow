@@ -25,6 +25,60 @@ def test_sql_queries_reject_unknown_scenario_names():
         sql_query("sma20; DROP TABLE input")
 
 
+def test_interval_sql_fits_one_bounded_hash_build():
+    from datafusion import RuntimeEnvBuilder, SessionConfig, SessionContext
+
+    data = workload(64_000, scenario="interval_join")
+    context = SessionContext(
+        SessionConfig().with_target_partitions(32).with_batch_size(8192),
+        RuntimeEnvBuilder().with_greedy_memory_pool(16 << 20),
+    )
+    batches = data.table.to_batches()
+    for name in ("input", "reference"):
+        context.register_record_batches(name, [batches])
+    result = pa.Table.from_batches(context.sql(sql_query("interval_join")).collect())
+    expected = expected_output(data, "interval_join")
+    order = [("sequence", "ascending"), ("right_sequence", "ascending")]
+    actual = result.sort_by(order)
+    expected = expected.sort_by(order)
+    assert actual.column_names == expected.column_names
+    assert all(actual[name].equals(expected[name]) for name in expected.column_names)
+
+
+@pytest.mark.parametrize("backend", ("calc-flow-sql", "datafusion"))
+def test_interval_sql_preserves_duplicate_keys_and_inclusive_boundaries(backend):
+    original = workload(4)
+    times = [0, 0, 5_000_000, 6_000_000]
+    prices = [2.0, 3.0, 5.0, 7.0]
+    table = pa.table(
+        {
+            "event_time": times,
+            "sequence": range(4),
+            "symbol": ["S000"] * 4,
+            "price": prices,
+        },
+        schema=original.table.schema,
+    )
+    data = engine_comparison.Workload(table, original.dimension, 1)
+    factory = {
+        "calc-flow-sql": engine_comparison._calc_flow,
+        "datafusion": engine_comparison._datafusion,
+    }[backend]
+    result = factory(data, "interval_join")()
+    expected = [
+        (left, right, prices[left] * prices[right])
+        for left in range(4)
+        for right in range(4)
+        if abs(times[left] - times[right]) <= 5_000_000
+    ]
+    actual = [
+        (row["sequence"], row["right_sequence"], row["value"])
+        for row in result.to_pylist()
+    ]
+    assert len(expected) == 12
+    assert sorted(actual) == expected
+
+
 def test_polars_samples_collect_through_the_streaming_engine(monkeypatch):
     recorded: dict[str, object] = {}
 

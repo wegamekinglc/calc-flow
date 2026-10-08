@@ -154,8 +154,10 @@ project `sequence`, `right_sequence`, and the price product. The oracle checks
 all pair identities and values, including boundary equality and duplicate-key
 multiplicity. Native execution retains both sides and exercises watermark
 eviction; an on-time out-of-order fixture covers arrival order separately.
-SQL/DataFusion and Polars use eleven equivalent integer-second offset equality
-probes for this one-tick-per-key grid. Their case identity records
+SQL/DataFusion expand input across eleven literal integer-second offsets and
+join the reference once, keeping one hash build within the runtime memory
+budget. Polars uses eleven equivalent offset equality probes for this
+one-tick-per-key grid. Their case identity records
 `integer-second-offset-equality-v1`; these references do not measure arbitrary
 non-grid interval SQL. Every interval backend has an explicit 1M-input-row
 cap: the 10M fixture would emit roughly 110M rows. Its native timing scope is
@@ -527,12 +529,21 @@ invalidating a core-only comparison. Changes to compiled dependencies still
 fail closed, as do incomplete build logs or unsupported dependency sources.
 The core package's source revision remains bound to the release identity.
 
+The `stream_join_perf` compaction and control cases are
+`checkpoint/prepare_then_left_500_{compact,steady}_60k`. Both time asynchronous
+checkpoint preparation followed by the 500-row handler; fixture construction,
+capture and restore stay outside timing. The adapter compiles the same declared
+lifecycle harness against both exact product revisions in owned build clones,
+leaving the supplied checkouts unchanged. Provenance retains the original bench
+digest, the effective measured harness digest, both product and harness revisions,
+and compiled dependencies. The former pure-handler case IDs are retired.
+
 Rust workload fingerprints are scoped per bench target: each case's
 `workload_fingerprint` covers only its own `crates/calc-flow/benches/<target>.rs`
 bytes, so editing one bench source removes timing classification from that
 target's cases alone. A bench source change that only affects the harness
-pipeline — not the measured workload — has one explicit, auditable path to a
-green comparison: declare it in `benchmarks/rust-workload-migrations.json`
+pipeline has one explicit, auditable path to a green comparison: declare it in
+`benchmarks/rust-workload-migrations.json`
 with the target name, the exact baseline and candidate source SHA-256 values,
 a reason, and a reviewing reference. A declaration applies only when both
 sides' observed source bytes match it exactly; the accepted cases then carry a
@@ -540,6 +551,10 @@ sides' observed source bytes match it exactly; the accepted cases then carry a
 documents keep their real differing workload identities, and the applied
 migrations are listed in the shard's JSON artifact. Undeclared or mismatched
 workload changes still fail closed, now scoped to the changed target.
+The common Join harness above also requires an exact migration declaration
+when replacing an older source. Its revised timing boundary uses new case IDs
+and is compiled on both products, so historical pure-handler timings are never
+compared against checkpoint-preparation timings.
 
 ## Standalone paired measurements
 

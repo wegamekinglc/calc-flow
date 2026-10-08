@@ -30,7 +30,16 @@ from scripts.benchmark_suite.release_pairs import (
     collect_case,
     evaluate_case,
 )
-from scripts.benchmark_suite.rust import allocation, build_binaries
+from scripts.benchmark_suite.rust import (
+    _require_common_harness,
+    allocation,
+    build_binaries,
+)
+from scripts.benchmark_suite.rust_harness import (
+    revalidate_measured_harness,
+    with_harness_migrations,
+    with_measured_harness,
+)
 from scripts.benchmark_suite.rust_provenance import with_compiled_dependencies
 from scripts.toolkit import FULL_SHA, fingerprint_json, sha256_file, write_json
 from scripts.verify_perf_gates import (
@@ -116,7 +125,7 @@ async def prepare(options: argparse.Namespace) -> dict:
         }
         write_json(destination / "binary-sha256.json", binary_sha256[side])
         if rust_targets:
-            provenance[side] = with_compiled_dependencies(
+            identity = with_measured_harness(
                 build_provenance(
                     source,
                     [
@@ -124,10 +133,18 @@ async def prepare(options: argparse.Namespace) -> dict:
                         for target in rust_targets
                     ],
                 ),
+                destination,
+            )
+            provenance[side] = with_compiled_dependencies(
+                identity,
                 source,
                 {
                     target: destination / f"build-{target}.jsonl"
                     for target in rust_targets
+                },
+                build_roots={
+                    target: Path(record["build_source"])
+                    for target, record in identity.get("measured_harnesses", {}).items()
                 },
             )
             if provenance[side]["git_sha"] != releases[side]["git_sha"]:
@@ -145,17 +162,31 @@ async def prepare(options: argparse.Namespace) -> dict:
 
 
 def rust_identities(context: dict, target: str) -> dict:
-    provenance = context["provenance"]
-    applied = declared_migrations(provenance, load_migrations(ROOT))
+    provenance = {
+        side: revalidate_measured_harness(identity)
+        for side, identity in context["provenance"].items()
+    }
+    _require_common_harness(provenance)
+    migrations = load_migrations(ROOT)
+    applied = with_harness_migrations(
+        declared_migrations(provenance, migrations), provenance, migrations
+    )
     path = f"crates/calc-flow/benches/{target}.rs"
     identities = {}
     for side in SIDES:
         raw = provenance[side]
         workload_source = provenance["candidate"] if target in applied else raw
+        measured = raw.get("measured_harnesses", {}).get(target)
         values = {
             "machine": raw["machine_identity"],
             "dependency": raw["compiled_dependency_identity"],
-            "workload": {path: workload_source["workload_identity"][path]},
+            "workload": {
+                path: (
+                    measured["measured_sha256"]
+                    if measured is not None
+                    else workload_source["workload_identity"][path]
+                )
+            },
         }
         identities[side] = {
             key: value
