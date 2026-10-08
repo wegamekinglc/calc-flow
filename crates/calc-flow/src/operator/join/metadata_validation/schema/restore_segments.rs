@@ -9,14 +9,15 @@ use crate::{Result, StateSegment};
 use datafusion::execution::memory_pool::MemoryReservation;
 use std::sync::Arc;
 
+mod frame;
 mod input;
-pub(super) mod inspector;
-pub(super) mod inventory;
+use super::restore_bases::inspector;
+mod inventory;
 
 #[cfg(test)]
 mod tests;
 
-struct RestoreBasesWork {
+struct RestoreSegmentsWork {
     schema: Option<SchemaWork>,
     input: input::OwnedInput,
     workspace: Option<MemoryReservation>,
@@ -26,7 +27,7 @@ struct RestoreBasesWork {
     schema_hook: Option<crate::operator::join::SchemaTestHook>,
 }
 
-enum RestoreBasesDecision {
+enum RestoreSegmentsDecision {
     UseLegacy,
     Original(SchemaSuccess),
     Prepared(PreparedSides),
@@ -41,37 +42,47 @@ struct PreparedSides {
     _workspace: MemoryReservation,
 }
 
-impl OwnedCpuWork for RestoreBasesWork {
-    type Output = RestoreBasesDecision;
+impl OwnedCpuWork for RestoreSegmentsWork {
+    type Output = RestoreSegmentsDecision;
 
     fn control_bytes(&self) -> Result<usize> {
         super::super::inventory::caller_controls(&self.input.name)
-            .and_then(|bytes| bytes.checked_add(cleanup_control_bytes::<RestoreBasesDecision>()))
+            .and_then(|bytes| bytes.checked_add(cleanup_control_bytes::<RestoreSegmentsDecision>()))
             .ok_or_else(|| crate::CalcFlowError::Internal {
-                message: "restore bases control overflow".into(),
+                message: "restore segments control overflow".into(),
             })
     }
 
-    fn run(mut self, stop: &GatherStop) -> Result<RestoreBasesDecision> {
+    fn run(mut self, stop: &GatherStop) -> Result<RestoreSegmentsDecision> {
         let Some(success) = self.schema.take().expect("owned schema input").run(stop)? else {
-            return Ok(RestoreBasesDecision::UseLegacy);
+            return Ok(RestoreSegmentsDecision::UseLegacy);
         };
-        if !self.inspect_bases(&success.schemas, stop)? {
-            return Ok(RestoreBasesDecision::Original(success));
+        if !self.inspect_segments(&success.schemas, stop)? {
+            return Ok(RestoreSegmentsDecision::Original(success));
         }
-        self.populate_snapshot();
+        self.populate_snapshot(stop)?;
+        self.prepare_rows(success, stop)
+    }
+}
+
+impl RestoreSegmentsWork {
+    fn prepare_rows(
+        &mut self,
+        success: SchemaSuccess,
+        stop: &GatherStop,
+    ) -> Result<RestoreSegmentsDecision> {
         let rows = self.restore_sides(&success.schemas, stop);
         let (left, right) = match rows {
             Ok(rows) => rows,
             Err(error) => {
                 drop(error);
                 stop.check()?;
-                return Ok(RestoreBasesDecision::Original(success));
+                return Ok(RestoreSegmentsDecision::Original(success));
             }
         };
         let left = self.copy_rows(left, &success.schemas, 0, stop)?;
         let right = self.copy_rows(right, &success.schemas, 1, stop)?;
-        Ok(RestoreBasesDecision::Prepared(PreparedSides {
+        Ok(RestoreSegmentsDecision::Prepared(PreparedSides {
             left,
             right,
             _schemas: success.schemas,
@@ -82,38 +93,49 @@ impl OwnedCpuWork for RestoreBasesWork {
                 .expect("complete paid installation workspace"),
         }))
     }
-}
-
-impl RestoreBasesWork {
-    fn inspect_bases(&self, schemas: &OwnedExpectedSchemas, stop: &GatherStop) -> Result<bool> {
-        for (side, bytes) in self.input.bases.iter().enumerate() {
-            let Some(count) = input::geometry_side(bytes) else {
+    fn inspect_segments(&self, schemas: &OwnedExpectedSchemas, stop: &GatherStop) -> Result<bool> {
+        for (id, bytes) in &self.input.segments {
+            stop.check()?;
+            let kind = frame::kind(id).expect("checked segment identity");
+            let Some(mut cursor) = frame::Cursor::new(bytes, kind.delta) else {
                 return Ok(false);
             };
-            let mut offset = 16;
-            for _ in 0..count {
-                stop.check()?;
-                let Some(range) = input::next_row(bytes, &mut offset) else {
-                    return Ok(false);
-                };
-                if inspector::inspect(&bytes[range], schemas.schema(side)).is_none() {
-                    return Ok(false);
-                }
-            }
-            if offset != bytes.len() {
+            if !Self::inspect_frames(&mut cursor, bytes, schemas.schema(kind.side), stop)? {
                 return Ok(false);
             }
         }
         Ok(true)
     }
 
-    fn populate_snapshot(&mut self) {
-        for (bytes, side) in self.input.bases.iter_mut().zip(["left-base", "right-base"]) {
+    fn inspect_frames(
+        cursor: &mut frame::Cursor<'_>,
+        bytes: &[u8],
+        expected: &datafusion::arrow::datatypes::Schema,
+        stop: &GatherStop,
+    ) -> Result<bool> {
+        for _ in 0..cursor.count {
+            stop.check()?;
+            let Some(frame) = cursor.next() else {
+                return Ok(false);
+            };
+            if let Some(range) = frame.ipc {
+                if inspector::inspect(&bytes[range], expected).is_none() {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(cursor.finished())
+    }
+
+    fn populate_snapshot(&mut self, stop: &GatherStop) -> Result<()> {
+        for (id, bytes) in self.input.segments.drain(..) {
+            stop.check()?;
             self.input
                 .snapshot
                 .segments
-                .insert(String::from(side), StateSegment::new(std::mem::take(bytes)));
+                .insert(id, StateSegment::new(bytes));
         }
+        stop.check()
     }
 
     fn restore_sides(
@@ -165,7 +187,7 @@ impl RestoreBasesWork {
                 row.event_time,
                 leases
                     .next()
-                    .expect("one independently prepaid lease per base row"),
+                    .expect("one independently prepaid lease per cumulative decoded row"),
             );
             drop(record);
             row.record = payload;
@@ -184,14 +206,16 @@ impl RestoreBasesWork {
     }
 }
 
-struct RestoreBasesConstruction {
-    schema: SchemaConstruction,
+// The original schema guards remain live until every new partial owner and credit is dropped.
+struct RestoreSegmentsConstruction {
     input: input::OwnedInput,
+    geometry: frame::Geometry,
     resident: Option<MemoryReservation>,
     workspace: Option<MemoryReservation>,
+    schema: SchemaConstruction,
 }
 
-impl RestoreBasesConstruction {
+impl RestoreSegmentsConstruction {
     fn schema_work(
         &mut self,
         #[cfg(test)] metadata_hook: Option<crate::operator::join::MetadataTestHook>,
@@ -225,9 +249,9 @@ impl RestoreBasesConstruction {
         #[cfg(test)] schema_hook: Option<crate::operator::join::SchemaTestHook>,
         #[cfg(test)] decoded_hook: Option<crate::operator::join::DecodedRowTestHook>,
     ) -> impl Future<
-        Output = std::result::Result<ObservedTicket<RestoreBasesDecision>, AdmissionFailure>,
+        Output = std::result::Result<ObservedTicket<RestoreSegmentsDecision>, AdmissionFailure>,
     > + 'a {
-        let work = RestoreBasesWork {
+        let work = RestoreSegmentsWork {
             schema: Some(self.schema_work(
                 #[cfg(test)]
                 metadata_hook,
@@ -272,18 +296,15 @@ impl RestoreBasesConstruction {
 
     fn new(
         operator: &crate::operator::join::StreamJoinOperator,
-        snapshot: &crate::OperatorStateSnapshot,
         metadata: super::super::Construction,
+        geometry: &frame::Geometry,
         job: &crate::StreamJobContext,
     ) -> Result<Option<Self>> {
-        let Some(geometry) = input::geometry(snapshot) else {
-            return Ok(None);
-        };
         let Some(schema) = SchemaConstruction::new(operator, metadata, job)? else {
             return Ok(None);
         };
         let Some(bounds) = inventory::required(
-            &geometry,
+            geometry,
             [operator.input_schema(0), operator.input_schema(1)],
             [
                 &operator.compiled.left_key_indices,
@@ -293,46 +314,56 @@ impl RestoreBasesConstruction {
         ) else {
             return Ok(None);
         };
-        Self::fund(schema, &geometry, bounds, job)
+        Self::fund(schema, geometry, bounds, job)
     }
 
     fn fund(
         schema: SchemaConstruction,
-        geometry: &input::Geometry,
+        geometry: &frame::Geometry,
         bounds: inventory::Bounds,
         job: &crate::StreamJobContext,
     ) -> Result<Option<Self>> {
+        let Some(total) = resident_total(geometry, bounds.resident) else {
+            return Ok(None);
+        };
         let original = schema
             .metadata
             .credit
             .as_ref()
             .expect("paid metadata input");
-        let input = original.new_empty();
-        let workspace = original.new_empty();
-        let resident = original.new_empty();
-        let Some(total) = geometry.rows[0]
-            .checked_mul(bounds.resident[0])
-            .and_then(|left| {
-                geometry.rows[1]
-                    .checked_mul(bounds.resident[1])
-                    .and_then(|right| left.checked_add(right))
-            })
-        else {
-            return Ok(None);
+        let construction = Self {
+            input: input::OwnedInput::new(original.new_empty()),
+            geometry: *geometry,
+            resident: Some(original.new_empty()),
+            workspace: Some(original.new_empty()),
+            schema,
         };
-        if input.try_grow(bounds.input).is_err()
-            || workspace.try_grow(bounds.workspace).is_err()
-            || resident.try_grow(total).is_err()
-        {
+        if !construction.fund_components(&bounds, total) {
             job.check_cancelled()?;
             return Ok(None);
         }
-        Ok(Some(Self {
-            schema,
-            input: input::OwnedInput::new(input),
-            resident: Some(resident),
-            workspace: Some(workspace),
-        }))
+        Ok(Some(construction))
+    }
+
+    fn fund_components(&self, bounds: &inventory::Bounds, resident: usize) -> bool {
+        self.input
+            .credit
+            .as_ref()
+            .expect("input credit")
+            .try_grow(bounds.input)
+            .is_ok()
+            && self
+                .workspace
+                .as_ref()
+                .expect("workspace credit")
+                .try_grow(bounds.workspace)
+                .is_ok()
+            && self
+                .resident
+                .as_ref()
+                .expect("resident credit")
+                .try_grow(resident)
+                .is_ok()
     }
 
     async fn copy(
@@ -345,8 +376,8 @@ impl RestoreBasesConstruction {
         super::super::copy_boundary(job).await?;
         self.input.name = String::from(operator.name.as_str());
         self.copy_indices(operator, job).await?;
-        self.input.copy_bases(snapshot, job).await?;
-        self.prepare_leases(operator, snapshot, job).await
+        self.input.copy_segments(snapshot, job).await?;
+        self.prepare_leases(operator, job).await
     }
 
     async fn copy_indices(
@@ -371,10 +402,9 @@ impl RestoreBasesConstruction {
     async fn prepare_leases(
         &mut self,
         operator: &crate::operator::join::StreamJoinOperator,
-        snapshot: &crate::OperatorStateSnapshot,
         job: &crate::StreamJobContext,
     ) -> Result<bool> {
-        let geometry = input::geometry(snapshot).expect("unchanged borrowed snapshot");
+        let geometry = &self.geometry;
         let registration = super::super::inventory::registration_controls()
             .expect("checked registration controls");
         for side in 0..2 {
@@ -403,14 +433,20 @@ impl RestoreBasesConstruction {
     }
 }
 
+fn resident_total(geometry: &frame::Geometry, resident: [usize; 2]) -> Option<usize> {
+    geometry.rows[0]
+        .checked_mul(resident[0])?
+        .checked_add(geometry.rows[1].checked_mul(resident[1])?)
+}
+
 impl crate::operator::join::StreamJoinOperator {
-    pub(in crate::operator::join) async fn try_restore_owned_bases(
+    pub(in crate::operator::join) async fn try_restore_owned_segments(
         &mut self,
         snapshot: &crate::OperatorStateSnapshot,
         job: &crate::StreamJobContext,
         task: Option<TaskId>,
     ) -> Result<bool> {
-        let Some(mut construction) = self.bases_construction(snapshot, job)? else {
+        let Some(mut construction) = self.segments_construction(snapshot, job).await? else {
             return Ok(false);
         };
         #[cfg(test)]
@@ -443,7 +479,7 @@ impl crate::operator::join::StreamJoinOperator {
                 self.decoded_row_test_hook.clone(),
             )
             .await;
-        self.finish_bases_admission(
+        self.finish_segments_admission(
             admission,
             snapshot,
             job,
@@ -458,29 +494,32 @@ impl crate::operator::join::StreamJoinOperator {
         .await
     }
 
-    fn bases_construction(
+    async fn segments_construction(
         &self,
         snapshot: &crate::OperatorStateSnapshot,
         job: &crate::StreamJobContext,
-    ) -> Result<Option<RestoreBasesConstruction>> {
-        if input::geometry(snapshot).is_none() {
+    ) -> Result<Option<RestoreSegmentsConstruction>> {
+        let Some(geometry) = frame::scan(snapshot, job).await? else {
             return Ok(None);
-        }
+        };
         let Some(metadata) = self.metadata_construction(snapshot, job)? else {
             return Ok(None);
         };
-        RestoreBasesConstruction::new(self, snapshot, metadata, job)
+        RestoreSegmentsConstruction::new(self, metadata, &geometry, job)
     }
 
-    async fn finish_bases_admission(
+    async fn finish_segments_admission(
         &mut self,
-        admission: std::result::Result<ObservedTicket<RestoreBasesDecision>, AdmissionFailure>,
+        admission: std::result::Result<ObservedTicket<RestoreSegmentsDecision>, AdmissionFailure>,
         snapshot: &crate::OperatorStateSnapshot,
         job: &crate::StreamJobContext,
         stop: &GatherStop,
     ) -> Result<bool> {
         match admission {
-            Ok(ticket) => self.finish_bases_ticket(ticket, snapshot, job, stop).await,
+            Ok(ticket) => {
+                self.finish_segments_ticket(ticket, snapshot, job, stop)
+                    .await
+            }
             Err(AdmissionFailure::Budget {
                 stage: "attempt", ..
             }) => {
@@ -495,34 +534,35 @@ impl crate::operator::join::StreamJoinOperator {
         }
     }
 
-    async fn finish_bases_ticket(
+    async fn finish_segments_ticket(
         &mut self,
-        ticket: ObservedTicket<RestoreBasesDecision>,
+        ticket: ObservedTicket<RestoreSegmentsDecision>,
         snapshot: &crate::OperatorStateSnapshot,
         job: &crate::StreamJobContext,
         stop: &GatherStop,
     ) -> Result<bool> {
         let output = ticket.finish().await?;
-        output.install(|decision| self.install_bases_decision(decision, snapshot, job))?;
+        output.install(|decision| self.install_segments_decision(decision, snapshot, job))?;
         self.wait_metadata_cleanup(stop, job).await?;
         Ok(true)
     }
 
-    fn install_bases_decision(
+    fn install_segments_decision(
         &mut self,
-        decision: RestoreBasesDecision,
+        decision: RestoreSegmentsDecision,
         snapshot: &crate::OperatorStateSnapshot,
         job: &crate::StreamJobContext,
     ) -> Result<()> {
         match decision {
-            RestoreBasesDecision::UseLegacy => self.restore_metadata_legacy(snapshot, job),
-            RestoreBasesDecision::Original(success) => self.install_restored_metadata_with_schemas(
-                snapshot,
-                success.metadata,
-                Some(&success.schemas),
-                &|| job.check_cancelled(),
-            ),
-            RestoreBasesDecision::Prepared(mut prepared) => self.install_restored_rows(
+            RestoreSegmentsDecision::UseLegacy => self.restore_metadata_legacy(snapshot, job),
+            RestoreSegmentsDecision::Original(success) => self
+                .install_restored_metadata_with_schemas(
+                    snapshot,
+                    success.metadata,
+                    Some(&success.schemas),
+                    &|| job.check_cancelled(),
+                ),
+            RestoreSegmentsDecision::Prepared(mut prepared) => self.install_restored_rows(
                 snapshot,
                 prepared.metadata,
                 std::mem::take(&mut prepared.left),

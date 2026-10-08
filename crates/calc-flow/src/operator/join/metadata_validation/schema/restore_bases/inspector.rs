@@ -6,13 +6,13 @@ use datafusion::arrow::{
 const VERIFIER_DEPTH: usize = 64;
 
 #[derive(Default)]
-pub(super) struct StreamFacts {
+pub(in crate::operator::join::metadata_validation::schema) struct StreamFacts {
     pub metadata_bytes: usize,
     pub body_bytes: usize,
     pub batches: usize,
 }
 
-pub(super) fn trace_bytes() -> Option<usize> {
+pub(in crate::operator::join::metadata_validation::schema) fn trace_bytes() -> Option<usize> {
     let count = VERIFIER_DEPTH.checked_mul(2)?;
     let detail = size_of::<flatbuffers::ErrorTraceDetail>();
     let capacity = count.checked_next_power_of_two()?;
@@ -77,7 +77,10 @@ fn next_message<'a>(bytes: &'a [u8], offset: &mut usize) -> Option<StreamItem<Me
     }))
 }
 
-pub(super) fn inspect(ipc: &[u8], expected: &Schema) -> Option<StreamFacts> {
+pub(in crate::operator::join::metadata_validation::schema) fn inspect(
+    ipc: &[u8],
+    expected: &Schema,
+) -> Option<StreamFacts> {
     let mut offset = 0;
     let StreamItem::Message(first) = next_message(ipc, &mut offset)? else {
         return None;

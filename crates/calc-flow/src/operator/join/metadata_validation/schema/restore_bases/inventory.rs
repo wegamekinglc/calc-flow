@@ -124,7 +124,9 @@ fn reader_schema_bytes(schema: &Schema) -> Option<usize> {
     ])
 }
 
-fn reader_row_bytes(schema: &Schema) -> Option<usize> {
+pub(in crate::operator::join::metadata_validation::schema) fn reader_row_bytes(
+    schema: &Schema,
+) -> Option<usize> {
     let fields = schema.fields().len();
     let arrays = fields.checked_mul(columnar::restored::column_controls()?)?;
     checked_sum(&[
@@ -134,7 +136,11 @@ fn reader_row_bytes(schema: &Schema) -> Option<usize> {
     ])
 }
 
-fn side_fold(rows: usize, schema: &Schema, indices: &[usize]) -> Option<usize> {
+pub(in crate::operator::join::metadata_validation::schema) fn side_fold(
+    rows: usize,
+    schema: &Schema,
+    indices: &[usize],
+) -> Option<usize> {
     let keys = folded_key_bytes(schema, indices)?;
     checked_sum(&[
         rows.checked_mul(keys)?,
@@ -151,7 +157,10 @@ fn folded_key_bytes(schema: &Schema, indices: &[usize]) -> Option<usize> {
     checked_sum(&[bulk_bytes_peak(key)?, key, arc::<FramedKey>()?])
 }
 
-fn key_bytes(schema: &Schema, indices: &[usize]) -> Option<usize> {
+pub(in crate::operator::join::metadata_validation::schema) fn key_bytes(
+    schema: &Schema,
+    indices: &[usize],
+) -> Option<usize> {
     indices.iter().try_fold(0_usize, |total, index| {
         let field = schema.fields().get(*index)?;
         let timezone = match field.data_type() {
@@ -165,7 +174,9 @@ fn key_bytes(schema: &Schema, indices: &[usize]) -> Option<usize> {
     })
 }
 
-fn bulk_bytes_peak(bytes: usize) -> Option<usize> {
+pub(in crate::operator::join::metadata_validation::schema) fn bulk_bytes_peak(
+    bytes: usize,
+) -> Option<usize> {
     if bytes == 0 {
         return Some(0);
     }
@@ -173,7 +184,10 @@ fn bulk_bytes_peak(bytes: usize) -> Option<usize> {
     bytes.checked_mul(3).map(|peak| peak.max(8))
 }
 
-fn installation_bytes(rows: usize, sides: [usize; 2]) -> Option<usize> {
+pub(in crate::operator::join::metadata_validation::schema) fn installation_bytes(
+    rows: usize,
+    sides: [usize; 2],
+) -> Option<usize> {
     let indexes = expiration_bytes(sides[0])?.checked_add(expiration_bytes(sides[1])?)?;
     checked_sum(&[
         indexes,
@@ -194,7 +208,9 @@ fn expiration_bytes(rows: usize) -> Option<usize> {
         .checked_add(rows.checked_mul(2 * size_of::<Entry>())?)
 }
 
-fn diagnostic_bytes(name: &str) -> Option<usize> {
+pub(in crate::operator::join::metadata_validation::schema) fn diagnostic_bytes(
+    name: &str,
+) -> Option<usize> {
     checked_sum(&[
         checkpoint_diagnostic(name)?,
         time_diagnostic()?,
@@ -242,7 +258,10 @@ fn reason_diagnostic(name: &str) -> Option<usize> {
     checked_sum(&[formatted_peak(message, message)?, message, name.len()])
 }
 
-fn formatted_peak(output: usize, literals: usize) -> Option<usize> {
+pub(in crate::operator::join::metadata_validation::schema) fn formatted_peak(
+    output: usize,
+    literals: usize,
+) -> Option<usize> {
     let initial = literals.checked_mul(2)?;
     output.checked_mul(3).map(|peak| peak.max(initial))
 }
@@ -253,7 +272,9 @@ pub(super) fn checked_sum(parts: &[usize]) -> Option<usize> {
         .try_fold(0_usize, |sum, part| sum.checked_add(*part))
 }
 
-fn vector_peak<T>(count: usize) -> Option<usize> {
+pub(in crate::operator::join::metadata_validation::schema) fn vector_peak<T>(
+    count: usize,
+) -> Option<usize> {
     if count == 0 || size_of::<T>() == 0 {
         return Some(0);
     }
@@ -268,7 +289,7 @@ fn vector_peak<T>(count: usize) -> Option<usize> {
         .checked_mul(size_of::<T>())
 }
 
-fn arc<T>() -> Option<usize> {
+pub(in crate::operator::join::metadata_validation::schema) fn arc<T>() -> Option<usize> {
     let header = align_up(2 * size_of::<usize>(), align_of::<T>())?;
     align_up(
         header.checked_add(size_of::<T>())?,
@@ -283,7 +304,9 @@ fn align_up(bytes: usize, alignment: usize) -> Option<usize> {
         .checked_mul(alignment)
 }
 
-fn tree<K, V>(count: usize) -> Option<usize> {
+pub(in crate::operator::join::metadata_validation::schema) fn tree<K, V>(
+    count: usize,
+) -> Option<usize> {
     let alignment = align_of::<K>()
         .max(align_of::<V>())
         .max(align_of::<usize>());

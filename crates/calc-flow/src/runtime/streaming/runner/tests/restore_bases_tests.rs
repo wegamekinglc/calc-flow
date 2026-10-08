@@ -4,6 +4,9 @@ use datafusion::arrow::{
     datatypes::{DataType, Field, Schema, TimeUnit},
 };
 
+#[path = "restore_segments_tests.rs"]
+mod restore_segments_tests;
+
 #[derive(Default)]
 struct RestoreObservations {
     readers: Vec<(Option<(usize, usize)>, bool)>,
