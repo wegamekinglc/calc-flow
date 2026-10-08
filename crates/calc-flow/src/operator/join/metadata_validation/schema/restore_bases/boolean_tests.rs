@@ -373,3 +373,238 @@ fn check_malformed_original(job: &StreamJobContext) {
     drop(target);
     assert_eq!(pool.reserved(), 0);
 }
+
+fn mixed_boolean_row(operator: &StreamJoinOperator, id: u64, time: i64, byte: u8) -> StoredRow {
+    let record = RecordBatch::try_new(
+        Arc::clone(operator.input_schema(0)),
+        vec![
+            Arc::new(Int64Array::from(vec![7])),
+            Arc::new(TimestampMicrosecondArray::from(vec![time])),
+            Arc::new(BooleanArray::new(
+                BooleanBuffer::new(Buffer::from(vec![byte]), 0, 1),
+                None,
+            )),
+        ],
+    )
+    .unwrap();
+    let mut row = row_from_record(record);
+    row.row_id = id;
+    row.event_time = crate::EventTime::from_micros(time);
+    row
+}
+
+fn mixed_boolean_snapshot() -> OperatorStateSnapshot {
+    use crate::operator::join::{JoinSide, PendingOp};
+    let mut source = boolean_operator(false, false);
+    source.state.left = vec![
+        mixed_boolean_row(&source, 0, 10, 0xfe),
+        mixed_boolean_row(&source, 1, 11, 0xff),
+        mixed_boolean_row(&source, 2, 12, 1),
+    ]
+    .into();
+    source.state.right = vec![mixed_boolean_row(&source, 0, 14, 0xff)].into();
+    source.state.metrics.left.retained_rows = 3;
+    source.state.metrics.left.retained_bytes = source.state.left.iter().map(|row| row.charge).sum();
+    source.state.metrics.right.retained_rows = 1;
+    source.state.metrics.right.retained_bytes = source.state.right[0].charge;
+    source.state.next_left_row_id = 3;
+    source.state.next_right_row_id = 1;
+    let mut base = source.checkpoint(Epoch::new(7).unwrap()).unwrap();
+    for (side, rows) in [("left", &source.state.left), ("right", &source.state.right)] {
+        base.segments.insert(
+            format!("{side}-base"),
+            StateSegment::new(encode_side(rows, "match", side, &|| Ok(())).unwrap()),
+        );
+    }
+    source.restore(&base).unwrap();
+    let added = mixed_boolean_row(&source, 3, 13, 0xfe);
+    let mut left = source.state.left.iter().cloned().collect::<Vec<_>>();
+    left.push(added.clone());
+    source.state.left = left.into();
+    source.state.next_left_row_id = 4;
+    source.state.metrics.left.retained_rows = 4;
+    source.state.metrics.left.retained_bytes = source.state.left.iter().map(|row| row.charge).sum();
+    source.state.deltas.pending.push(PendingOp::Upsert {
+        side: JoinSide::Left,
+        row_id: added.row_id,
+        event_time: added.event_time,
+        encoded_key: added.encoded_key,
+        record: added.record,
+        charge: added.charge,
+    });
+    let mixed = source.checkpoint(Epoch::new(8).unwrap()).unwrap();
+    assert_eq!(mixed.segments.len(), 3);
+    for side in ["left", "right"] {
+        let segment = &mixed.segments[&format!("{side}-base")];
+        assert!(segment.bytes().starts_with(b"CFJOIN1\0"));
+        assert_eq!(
+            segment.bytes(),
+            base.segments[&format!("{side}-base")].bytes()
+        );
+    }
+    let delta = mixed.segments["left-delta-8"].bytes();
+    assert!(delta.starts_with(b"CFJDLT1\0"));
+    assert_eq!(u64::from_le_bytes(delta[8..16].try_into().unwrap()), 1);
+    mixed
+}
+
+fn observe_mixed_boolean(target: &mut StreamJoinOperator) -> [Arc<AtomicUsize>; 3] {
+    let counts = std::array::from_fn(|_| Arc::new(AtomicUsize::new(0)));
+    let [readers, residents, parses] = counts.clone();
+    target.decoded_row_test_hook = Some(Arc::new(move |credit, owner, decoded, owned| {
+        assert_eq!(std::thread::current().name(), Some("calc-flow-gather"));
+        assert!(owned);
+        assert!(credit.unwrap().size() > 0);
+        if decoded {
+            assert!(owner.unwrap().1 > 0);
+            residents.fetch_add(1, Ordering::Relaxed);
+        } else {
+            readers.fetch_add(1, Ordering::Relaxed);
+        }
+    }));
+    target.metadata_test_hook = Some(Arc::new(move |_, parsing| {
+        if parsing {
+            assert_eq!(std::thread::current().name(), Some("calc-flow-gather"));
+            parses.fetch_add(1, Ordering::Relaxed);
+        }
+    }));
+    counts
+}
+
+fn assert_mixed_boolean_rows(target: &StreamJoinOperator) {
+    for (rows, expected) in [
+        (
+            &target.state.left,
+            vec![(0, 10, 0xfe), (1, 11, 0xff), (2, 12, 1), (3, 13, 0xfe)],
+        ),
+        (&target.state.right, vec![(0, 14, 0xff)]),
+    ] {
+        assert_eq!(rows.len(), expected.len());
+        for (id, time, byte) in expected {
+            let actual = rows.iter().find(|row| row.row_id == id).unwrap();
+            let expected = mixed_boolean_row(target, id, time, byte);
+            let record = actual.record.view();
+            let flag = record
+                .column(2)
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .unwrap();
+            assert_eq!(
+                record
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap()
+                    .value(0),
+                7
+            );
+            assert_eq!(
+                record
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<TimestampMicrosecondArray>()
+                    .unwrap()
+                    .value(0),
+                time
+            );
+            assert_eq!(flag.value(0), byte & 1 != 0);
+            assert_eq!(flag.values().values(), [byte]);
+            assert_eq!(actual.event_time, expected.event_time);
+            assert_eq!(actual.charge, expected.charge);
+            assert_eq!(
+                actual.encoded_key.as_slice(),
+                expected.encoded_key.as_slice()
+            );
+            assert_eq!(row_ipc(&record), row_ipc(&expected.record.view()));
+            assert!(actual.record.funded_owner().unwrap().1 > 0);
+        }
+    }
+    assert_eq!(
+        (
+            target.state.next_left_row_id,
+            target.state.next_right_row_id
+        ),
+        (4, 1)
+    );
+}
+
+#[test]
+fn test_boolean_mixed_bases_delta_preserve_native_rows_wire_and_last_buffer_credit() {
+    let service = TestService::new(1, 1).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(check_mixed_boolean(&service));
+    drop(runtime);
+    service.shutdown();
+}
+
+async fn check_mixed_boolean(service: &TestService) {
+    let snapshot = mixed_boolean_snapshot();
+    let unchanged = snapshot.clone();
+    let mut target = boolean_operator(false, false);
+    let job = job(service, CancellationToken::new());
+    let [readers, residents, parses] = observe_mixed_boolean(&mut target);
+    target
+        .restore_managed_metadata(&snapshot, &job, None)
+        .await
+        .unwrap();
+    assert_eq!(readers.load(Ordering::Relaxed), 5);
+    assert_eq!(residents.load(Ordering::Relaxed), 5);
+    assert_eq!(parses.load(Ordering::Relaxed), 1);
+    assert_mixed_boolean_rows(&target);
+    assert_eq!(target.state.last_checkpoint_epoch, Epoch::new(8));
+    let mut original = boolean_operator(false, false);
+    original.restore(&snapshot).unwrap();
+    assert_eq!(target.status(), original.status());
+    let next = target.checkpoint(Epoch::new(9).unwrap()).unwrap();
+    let expected = original.checkpoint(Epoch::new(9).unwrap()).unwrap();
+    assert_eq!(next.inline_metadata, expected.inline_metadata);
+    assert_eq!(next.segments.len(), expected.segments.len());
+    for (id, segment) in &next.segments {
+        assert_eq!(segment.bytes(), expected.segments[id].bytes());
+    }
+    assert_eq!(snapshot.inline_metadata, unchanged.inline_metadata);
+    for (id, segment) in &snapshot.segments {
+        assert_eq!(segment.bytes(), unchanged.segments[id].bytes());
+    }
+    drop(next);
+    drop(expected);
+    drop(original);
+    check_mixed_boolean_last_buffer(target, job).await;
+}
+
+async fn check_mixed_boolean_last_buffer(target: StreamJoinOperator, job: StreamJobContext) {
+    let pool = pool(&target);
+    let row = target
+        .state
+        .left
+        .iter()
+        .find(|row| row.row_id == 3)
+        .unwrap();
+    let paid = row.record.funded_owner().unwrap().1;
+    let weak = Arc::downgrade(row.record.schema_ref());
+    let view = row.record.view();
+    let values = view.column(2).to_data().buffers()[0].clone();
+    assert_eq!(values.as_slice(), [0xfe]);
+    drop(view);
+    drop(target);
+    let (home, generation, attempt) = job.gather_owner().funding();
+    assert_eq!(attempt, 0);
+    assert_eq!(pool.reserved(), home + generation + paid);
+    {
+        let mut drain = std::pin::pin!(job.gather_owner().close_and_drain());
+        assert!(std::future::poll_fn(|cx| Poll::Ready(drain.as_mut().poll(cx).is_pending())).await);
+        assert!(weak.upgrade().is_some());
+        assert_eq!(values.as_slice(), [0xfe]);
+        drop(values);
+        drain.await;
+    }
+    assert!(weak.upgrade().is_none());
+    let (home, generation, attempt) = job.gather_owner().funding();
+    assert_eq!((generation, attempt), (0, 0));
+    assert_eq!(pool.reserved(), home);
+    drop(job);
+    assert_eq!(pool.reserved(), 0);
+}

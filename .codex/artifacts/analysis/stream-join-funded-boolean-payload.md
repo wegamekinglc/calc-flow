@@ -41,6 +41,13 @@ V1 row recovery still requires one row. Exact execution results, current-source
 lint and frozen source/raw hashes belong to the handoff receipt. Requested
 allocation totals are not RSS or a measurement of the whole restore peak.
 
+A separate mixed-inventory control uses the original writer to capture two
+full bases plus one nonempty delta, then restores through the managed native
+dispatcher. Five reader entries and five post-copy owners accompany literal
+row values, IDs, timestamps, complete IPC padding and charge checks, next-ID
+and checkpoint parity, and the delta row's last-Buffer lifetime and refund.
+The existing Managed restart fixture covers delta-only recovery.
+
 Final source review gates publication; required CI, coverage, Codacy and
 review resolution gate merge for every published head. The maintained quote
 workload has no Boolean payload, so no timing gain is claimed. Generic/nested

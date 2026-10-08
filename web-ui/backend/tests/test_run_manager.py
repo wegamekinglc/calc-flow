@@ -2384,19 +2384,62 @@ def test_shutdown_during_preparation_never_starts_a_late_worker(
     assert manager._runs == {}
 
 
+def test_worker_teardown_kills_after_terminate_and_join_leave_it_alive() -> None:
+    calls: list[tuple[str, float | None]] = []
+
+    class StubbornWorker:
+        def __init__(self) -> None:
+            self.alive = True
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+        def terminate(self) -> None:
+            calls.append(("terminate", None))
+
+        def join(self, *, timeout: float) -> None:
+            calls.append(("join", timeout))
+
+        def kill(self) -> None:
+            calls.append(("kill", None))
+            self.alive = False
+
+    worker = StubbornWorker()
+
+    run_manager_module._teardown_worker(worker, terminate=True, join_timeout=0.25)
+
+    assert calls == [
+        ("terminate", None),
+        ("join", 0.25),
+        ("kill", None),
+        ("join", 1),
+    ]
+    assert worker.is_alive() is False
+
+
 def test_timeout_releases_worker_and_queue(monkeypatch: pytest.MonkeyPatch) -> None:
     def blocked_worker(*_: object) -> None:
         time.sleep(2)
 
     monkeypatch.setattr(run_manager_module, "_execute_worker", blocked_worker)
     manager = RunManager(use_processes=False)
-    run = manager.submit(_project(), RunRequest(options=RunOptions(timeout_seconds=1)))
+    with manager._lock:
+        run = manager.submit(
+            _project(), RunRequest(options=RunOptions(timeout_seconds=1))
+        )
+        monitor = manager._runs[run.id].monitor
 
-    assert _wait(manager, run.id, timeout=3) is RunStatus.TIMED_OUT
-    assert "timeout" in (manager.get(run.id).error or "")
-    assert manager._runs[run.id].worker is None
-    assert manager._runs[run.id].output_queue is None
-    manager.shutdown()
+    try:
+        assert monitor is not None
+        assert _wait(manager, run.id, timeout=3) is RunStatus.TIMED_OUT
+        monitor.join(timeout=3)
+        assert monitor.is_alive() is False
+        assert "timeout" in (manager.get(run.id).error or "")
+        assert manager._runs[run.id].worker is None
+        assert manager._runs[run.id].output_queue is None
+        assert manager._runs[run.id].monitor is None
+    finally:
+        manager.shutdown()
 
 
 def test_parent_rss_failure_terminates_worker_and_closes_queue(
