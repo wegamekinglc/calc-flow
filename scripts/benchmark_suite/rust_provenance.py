@@ -83,7 +83,9 @@ def _validate_artifacts(name: str, artifacts: list[dict]) -> None:
         raise ValueError(f"incomplete compiled dependency inventory: {name}")
 
 
-def compiled_dependencies(root: Path, logs: dict[str, Path]) -> dict:
+def compiled_dependencies(
+    root: Path, logs: dict[str, Path], *, build_roots: dict[str, Path] | None = None
+) -> dict:
     """Retain package checksums, enabled features and profiles per bench build.
 
     Cargo's compiler-artifact messages cover fresh and cached builds alike.
@@ -94,18 +96,24 @@ def compiled_dependencies(root: Path, logs: dict[str, Path]) -> dict:
         raise ValueError("missing Rust benchmark build logs")
     locked = _locked_packages(root)
     return {
-        name: _build_identity(root, name, log, locked)
+        name: _build_identity((build_roots or {}).get(name, root), name, log, locked)
         for name, log in sorted(logs.items())
     }
 
 
-def with_compiled_dependencies(identity: dict, root: Path, logs: dict) -> dict:
+def with_compiled_dependencies(
+    identity: dict,
+    root: Path,
+    logs: dict,
+    *,
+    build_roots: dict[str, Path] | None = None,
+) -> dict:
     """Preserve full-lock provenance and add the compiled comparison identity."""
     dependency_identity = {
         "schema": "calc-flow.compiled-benchmark-dependencies.v1",
         "rustc": identity["dependency_identity"]["rustc"],
         "cargo": identity["dependency_identity"]["cargo"],
-        "builds": compiled_dependencies(root, logs),
+        "builds": compiled_dependencies(root, logs, build_roots=build_roots),
     }
     return {
         **identity,

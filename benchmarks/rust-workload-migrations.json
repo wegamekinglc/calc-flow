@@ -42,6 +42,13 @@
       "candidate_sha256": "ea98e7b25ef25dda403cd50935d840ee5336996bbea41eb0d2234b9c722341d8",
       "reason": "harness oracle only: require one dominant right candidate per key after settlement and count released payloads; input rows, cancellation/recovery oracle and timed settlement boundary are unchanged",
       "reference": "PR #361 benchmark assertion repair"
+    },
+    {
+      "target": "stream_join_perf",
+      "baseline_sha256": "d4db82a43d3352ec87dbf2940931db0aa0e7a0ff771a1bef9b34e16c9879a15e",
+      "candidate_sha256": "f0cbd1dde848e7d24fff8e37aa5f0161ba25b10ba1ba688fa8b69053b337089d",
+      "reason": "Common harness on both product revisions: prepare checkpoint compaction before dirty capture/restore setup; rename the compaction/control cases and time preparation plus the 500-row handler in both. Preserves retained state, dirty cardinalities and fail-closed base assertions.",
+      "reference": "2026-10-08 benchmark followup"
     }
   ]
 }

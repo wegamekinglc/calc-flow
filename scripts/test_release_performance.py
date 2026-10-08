@@ -631,8 +631,12 @@ class ReleasePerformanceTests(unittest.IsolatedAsyncioTestCase):
                     return_value={"git_sha": "3" * 40},
                 ),
                 patch(
-                    "scripts.release_performance.with_compiled_dependencies",
+                    "scripts.release_performance.with_measured_harness",
                     side_effect=lambda identity, *args: identity,
+                ),
+                patch(
+                    "scripts.release_performance.with_compiled_dependencies",
+                    side_effect=lambda identity, *args, **kwargs: identity,
                 ),
                 self.assertRaisesRegex(ValueError, "sealed release"),
             ):
@@ -678,8 +682,12 @@ class ReleasePerformanceTests(unittest.IsolatedAsyncioTestCase):
                         ],
                     ),
                     patch(
-                        "scripts.release_performance.with_compiled_dependencies",
+                        "scripts.release_performance.with_measured_harness",
                         side_effect=lambda identity, *args: identity,
+                    ),
+                    patch(
+                        "scripts.release_performance.with_compiled_dependencies",
+                        side_effect=lambda identity, *args, **kwargs: identity,
                     ),
                 ):
                     await prepare(
@@ -697,3 +705,181 @@ class ReleasePerformanceTests(unittest.IsolatedAsyncioTestCase):
                 for side in ("baseline", "candidate"):
                     digest = root / "rust-builds" / side / "binary-sha256.json"
                     self.assertEqual(json.loads(digest.read_text()), {})
+
+
+class CommonJoinReleaseTests(unittest.IsolatedAsyncioTestCase):
+    async def test_prepare_binds_owned_join_artifacts_to_original_release_sources(self):
+        import sys
+        from types import ModuleType
+        from unittest.mock import Mock
+
+        from scripts.benchmark_suite.rust_harness import common_join_harness
+        from scripts.release_performance import prepare, rust_identities
+        from scripts.test_benchmark_rust_harness import (
+            BENCH,
+            TARGET,
+            checkout,
+            registry,
+        )
+        from scripts.test_benchmark_rust_provenance import REGISTRY, artifact
+
+        lock = (
+            'version = 4\n[[package]]\nname = "arrow"\nversion = "1.0.0"\n'
+            f'source = "{REGISTRY}"\nchecksum = "{"a" * 64}"\n'
+        )
+        with TemporaryDirectory() as raw:
+            root = Path(raw)
+            baseline, candidate = root / "baseline", root / "candidate"
+            revisions = [
+                checkout(baseline, b"old", lock),
+                checkout(candidate, b"current", lock),
+            ]
+            registry(candidate, b"old", b"current")
+            release_module = ModuleType("scripts.benchmark_suite.release")
+            release_module.load_release = Mock(
+                side_effect=[{"git_sha": sha} for sha in revisions]
+            )
+
+            async def build(source, output, _shared, *, targets):
+                self.assertEqual(targets, (TARGET,))
+                with common_join_harness(source, output, TARGET) as mirror:
+                    messages = [
+                        artifact(mirror, dependency=True),
+                        artifact(mirror, dependency=False),
+                    ]
+                    messages[1]["target"]["name"] = TARGET
+                    messages.append({"reason": "build-finished", "success": True})
+                    (output / f"build-{TARGET}.jsonl").write_text(
+                        "\n".join(json.dumps(row) for row in messages)
+                    )
+                    binary = output / TARGET
+                    binary.write_bytes(source.name.encode())
+                return {TARGET: binary}
+
+            with (
+                patch.dict(
+                    sys.modules, {"scripts.benchmark_suite.release": release_module}
+                ),
+                patch("scripts.release_performance.ROOT", candidate),
+                patch("scripts.benchmark_suite.rust_harness.ROOT", candidate),
+                patch("scripts.release_performance.command", new=AsyncMock()),
+                patch(
+                    "scripts.release_performance.install",
+                    new=AsyncMock(return_value=root),
+                ),
+                patch("scripts.release_performance.build_binaries", side_effect=build),
+            ):
+                context = await prepare(
+                    argparse.Namespace(
+                        suite=TARGET, output=root / "output", baseline_source=baseline
+                    )
+                )
+                identities = rust_identities(context, TARGET)
+            for side, sha in zip(("baseline", "candidate"), revisions, strict=True):
+                identity = context["provenance"][side]
+                self.assertEqual(identity["git_sha"], sha)
+                self.assertEqual(
+                    identity["measured_harnesses"][TARGET]["product_git_sha"], sha
+                )
+                self.assertEqual(
+                    identities[side]["workload_identity"],
+                    {BENCH.as_posix(): hashlib.sha256(b"current").hexdigest()},
+                )
+                self.assertEqual(
+                    identities[side]["workload_migration"]["reference"],
+                    "benchmark followup",
+                )
+
+    def test_persisted_join_provenance_rejects_equal_tampered_effective_hashes(self):
+        from scripts.benchmark_suite.rust_harness import (
+            common_join_harness,
+            with_measured_harness,
+        )
+        from scripts.release_performance import _verify_rust_provenance
+        from scripts.test_benchmark_rust_harness import (
+            BENCH,
+            TARGET,
+            checkout,
+            registry,
+        )
+        from scripts.write_criterion_provenance import build_provenance
+
+        with TemporaryDirectory() as raw:
+            root = Path(raw)
+            baseline, candidate = root / "baseline", root / "candidate"
+            revisions = {
+                "baseline": checkout(baseline, b"old"),
+                "candidate": checkout(candidate, b"current"),
+            }
+            registry(candidate, b"old", b"current")
+            provenance = {}
+            with (
+                patch("scripts.release_performance.ROOT", candidate),
+                patch("scripts.benchmark_suite.rust_harness.ROOT", candidate),
+            ):
+                for side, source in (("baseline", baseline), ("candidate", candidate)):
+                    output = root / "output" / "rust-builds" / side
+                    with common_join_harness(source, output, TARGET):
+                        pass
+                    identity = with_measured_harness(
+                        build_provenance(source, [BENCH]), output
+                    )
+                    provenance[side] = {
+                        **identity,
+                        "compiled_dependency_identity": {"schema": "same locked build"},
+                    }
+                path = root / "output" / "rust-provenance.json"
+                path.write_text(json.dumps(provenance))
+                _verify_rust_provenance(path.parent, TARGET, revisions)
+                for identity in provenance.values():
+                    identity["measured_harnesses"][TARGET]["measured_sha256"] = "a" * 64
+                path.write_text(json.dumps(provenance))
+                with self.assertRaisesRegex(ValueError, "harness.*attestation"):
+                    _verify_rust_provenance(path.parent, TARGET, revisions)
+
+    def test_same_old_products_use_effective_harness_bytes_and_migration(self):
+        from scripts.benchmark_suite.rust_harness import (
+            common_join_harness,
+            with_measured_harness,
+        )
+        from scripts.release_performance import rust_identities
+        from scripts.test_benchmark_rust_harness import (
+            BENCH,
+            TARGET,
+            checkout,
+            registry,
+        )
+        from scripts.write_criterion_provenance import build_provenance
+
+        with TemporaryDirectory() as raw:
+            root = Path(raw)
+            harness = root / "harness"
+            checkout(harness, b"current")
+            registry(harness, b"old", b"current")
+            provenance = {}
+            with (
+                patch("scripts.release_performance.ROOT", harness),
+                patch("scripts.benchmark_suite.rust_harness.ROOT", harness),
+            ):
+                for side in ("baseline", "candidate"):
+                    source = root / side
+                    checkout(source, b"old")
+                    output = root / "output" / side
+                    with common_join_harness(source, output, TARGET):
+                        pass
+                    identity = with_measured_harness(
+                        build_provenance(source, [BENCH]), output
+                    )
+                    provenance[side] = {
+                        **identity,
+                        "compiled_dependency_identity": {"schema": "same locked build"},
+                    }
+                identities = rust_identities({"provenance": provenance}, TARGET)
+            for identity in identities.values():
+                self.assertEqual(
+                    identity["workload_identity"],
+                    {BENCH.as_posix(): hashlib.sha256(b"current").hexdigest()},
+                )
+                self.assertEqual(
+                    identity["workload_migration"]["reference"], "benchmark followup"
+                )

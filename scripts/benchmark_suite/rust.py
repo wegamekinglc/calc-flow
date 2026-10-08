@@ -18,6 +18,14 @@ from scripts.benchmark_suite.migrations import declared_migrations, load_migrati
 from scripts.benchmark_suite.normalize import criterion_rows, read_json
 from scripts.benchmark_suite.process import ROOT, child_environment, command
 from scripts.benchmark_suite.provenance import harness_sha256
+from scripts.benchmark_suite.rust_harness import (
+    TARGET as JOIN_HARNESS_TARGET,
+)
+from scripts.benchmark_suite.rust_harness import (
+    common_join_harness,
+    with_harness_migrations,
+    with_measured_harness,
+)
 from scripts.benchmark_suite.rust_provenance import (
     target_dependency_fingerprint,
     with_compiled_dependencies,
@@ -105,12 +113,13 @@ async def build_binaries(
                 "--message-format=json",
             ]
         )
-        await command(
-            argv,
-            cwd=source,
-            log=log,
-            env=environment,
-        )
+        with common_join_harness(source, output, target) as build_source:
+            await command(
+                argv,
+                cwd=build_source,
+                log=log,
+                env=environment,
+            )
         destination = output / target
         shutil.copy2(_compiled_executable(log, target), destination)
         binaries[target] = destination
@@ -368,8 +377,9 @@ def allocation_rows(reports: dict) -> list[dict]:
 
 
 def _rust_provenance(roots: dict, output: Path) -> dict:
-    return {
-        side: with_compiled_dependencies(
+    identities = {}
+    for side, source in roots.items():
+        identity = with_measured_harness(
             build_provenance(
                 source,
                 [
@@ -377,14 +387,21 @@ def _rust_provenance(roots: dict, output: Path) -> dict:
                     for name in bench_targets(source)
                 ],
             ),
+            output / side,
+        )
+        identities[side] = with_compiled_dependencies(
+            identity,
             source,
             {
                 name: output / side / f"build-{name}.jsonl"
                 for name in bench_targets(source)
             },
+            build_roots={
+                target: Path(record["build_source"])
+                for target, record in identity.get("measured_harnesses", {}).items()
+            },
         )
-        for side, source in roots.items()
-    }
+    return identities
 
 
 async def measure_rust(shard: dict, releases: dict, roots: dict, output: Path) -> dict:
@@ -400,7 +417,10 @@ async def measure_rust(shard: dict, releases: dict, roots: dict, output: Path) -
         )
     blocks = {side: [] for side in roots}
     errors = []
-    applied = declared_migrations(provenance, load_migrations(ROOT))
+    migrations = load_migrations(ROOT)
+    applied = with_harness_migrations(
+        declared_migrations(provenance, migrations), provenance, migrations
+    )
     stamps = _stamp_fingerprints(provenance, applied)
     for index, side in enumerate(("baseline", "candidate", "candidate", "baseline")):
         block, failures = await _rust_block(
@@ -475,6 +495,7 @@ def _stamp_fingerprints(provenance: dict, applied: dict) -> dict:
     bench source invalidates only that target; a declared migration re-baselines
     the stamp to the candidate identity and records its reference instead.
     """
+    _require_common_harness(provenance)
     candidate_scoped = provenance["candidate"]["scoped_workload_fingerprints"]
     return {
         side: {
@@ -483,8 +504,10 @@ def _stamp_fingerprints(provenance: dict, applied: dict) -> dict:
                 "dependency_fingerprint": target_dependency_fingerprint(
                     identity, target
                 ),
-                "workload_fingerprint": (
-                    candidate_scoped[target] if target in applied else scoped
+                "workload_fingerprint": identity.get(
+                    "measured_workload_fingerprints", {}
+                ).get(
+                    target, candidate_scoped[target] if target in applied else scoped
                 ),
                 **_migration_marker(applied.get(target)),
             }
@@ -492,6 +515,38 @@ def _stamp_fingerprints(provenance: dict, applied: dict) -> dict:
         }
         for side, identity in provenance.items()
     }
+
+
+def _require_common_harness(provenance: dict) -> None:
+    baseline_identity = provenance.get("baseline", {})
+    candidate_identity = provenance["candidate"]
+    baseline = baseline_identity.get("measured_harnesses", {})
+    candidate = candidate_identity.get("measured_harnesses", {})
+    baseline_targets = baseline_identity.get("scoped_workload_fingerprints", {})
+    candidate_targets = candidate_identity["scoped_workload_fingerprints"]
+    shared = baseline_targets.keys() & candidate_targets.keys() & {JOIN_HARNESS_TARGET}
+    for target in baseline.keys() | candidate.keys() | shared:
+        if _candidate_only_harness(target, baseline_identity, candidate_identity):
+            continue
+        if (
+            target not in baseline
+            or target not in candidate
+            or any(
+                baseline[target][key] != candidate[target][key]
+                for key in ("measured_sha256", "harness_git_sha")
+            )
+        ):
+            raise ValueError(
+                f"Rust comparison requires a common measured harness: {target}"
+            )
+
+
+def _candidate_only_harness(target: str, baseline: dict, candidate: dict) -> bool:
+    return (
+        target not in baseline.get("scoped_workload_fingerprints", {})
+        and target in candidate["scoped_workload_fingerprints"]
+        and target not in baseline.get("measured_harnesses", {})
+    )
 
 
 async def _rust_block(

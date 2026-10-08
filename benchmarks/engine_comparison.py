@@ -215,53 +215,23 @@ def sql_query(scenario: str) -> str:
             "SELECT sequence, price * factor AS value "
             "FROM input JOIN dimension USING (symbol)"
         ),
-        "interval_join": " UNION ALL ".join(
-            (
-                "SELECT input.sequence, reference.sequence AS right_sequence, "
-                "input.price * reference.price AS value "
-                "FROM input JOIN reference ON input.symbol = reference.symbol "
-                "AND reference.event_time = input.event_time + INTERVAL '-5 seconds'",
-                "SELECT input.sequence, reference.sequence AS right_sequence, "
-                "input.price * reference.price AS value "
-                "FROM input JOIN reference ON input.symbol = reference.symbol "
-                "AND reference.event_time = input.event_time + INTERVAL '-4 seconds'",
-                "SELECT input.sequence, reference.sequence AS right_sequence, "
-                "input.price * reference.price AS value "
-                "FROM input JOIN reference ON input.symbol = reference.symbol "
-                "AND reference.event_time = input.event_time + INTERVAL '-3 seconds'",
-                "SELECT input.sequence, reference.sequence AS right_sequence, "
-                "input.price * reference.price AS value "
-                "FROM input JOIN reference ON input.symbol = reference.symbol "
-                "AND reference.event_time = input.event_time + INTERVAL '-2 seconds'",
-                "SELECT input.sequence, reference.sequence AS right_sequence, "
-                "input.price * reference.price AS value "
-                "FROM input JOIN reference ON input.symbol = reference.symbol "
-                "AND reference.event_time = input.event_time + INTERVAL '-1 seconds'",
-                "SELECT input.sequence, reference.sequence AS right_sequence, "
-                "input.price * reference.price AS value "
-                "FROM input JOIN reference ON input.symbol = reference.symbol "
-                "AND reference.event_time = input.event_time + INTERVAL '0 seconds'",
-                "SELECT input.sequence, reference.sequence AS right_sequence, "
-                "input.price * reference.price AS value "
-                "FROM input JOIN reference ON input.symbol = reference.symbol "
-                "AND reference.event_time = input.event_time + INTERVAL '1 seconds'",
-                "SELECT input.sequence, reference.sequence AS right_sequence, "
-                "input.price * reference.price AS value "
-                "FROM input JOIN reference ON input.symbol = reference.symbol "
-                "AND reference.event_time = input.event_time + INTERVAL '2 seconds'",
-                "SELECT input.sequence, reference.sequence AS right_sequence, "
-                "input.price * reference.price AS value "
-                "FROM input JOIN reference ON input.symbol = reference.symbol "
-                "AND reference.event_time = input.event_time + INTERVAL '3 seconds'",
-                "SELECT input.sequence, reference.sequence AS right_sequence, "
-                "input.price * reference.price AS value "
-                "FROM input JOIN reference ON input.symbol = reference.symbol "
-                "AND reference.event_time = input.event_time + INTERVAL '4 seconds'",
-                "SELECT input.sequence, reference.sequence AS right_sequence, "
-                "input.price * reference.price AS value "
-                "FROM input JOIN reference ON input.symbol = reference.symbol "
-                "AND reference.event_time = input.event_time + INTERVAL '5 seconds'",
-            )
+        "interval_join": (
+            "WITH offsets(event_offset) AS (VALUES "
+            "(INTERVAL '-5 seconds'), (INTERVAL '-4 seconds'), "
+            "(INTERVAL '-3 seconds'), (INTERVAL '-2 seconds'), "
+            "(INTERVAL '-1 seconds'), (INTERVAL '0 seconds'), "
+            "(INTERVAL '1 seconds'), (INTERVAL '2 seconds'), "
+            "(INTERVAL '3 seconds'), (INTERVAL '4 seconds'), "
+            "(INTERVAL '5 seconds')) "
+            "SELECT probes.left_sequence AS sequence, "
+            "reference.sequence AS right_sequence, "
+            "probes.left_price * reference.price AS value "
+            "FROM reference JOIN (SELECT input.sequence AS left_sequence, "
+            "input.symbol AS left_symbol, input.price AS left_price, "
+            "input.event_time + offsets.event_offset AS match_time "
+            "FROM input CROSS JOIN offsets) AS probes "
+            "ON probes.left_symbol = reference.symbol "
+            "AND probes.match_time = reference.event_time"
         ),
         "sma20": (
             "SELECT event_time, sequence, symbol, price, "
