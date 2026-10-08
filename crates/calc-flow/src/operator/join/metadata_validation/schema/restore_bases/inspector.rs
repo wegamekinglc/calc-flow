@@ -27,7 +27,7 @@ struct MessageView<'a> {
     body_bytes: usize,
 }
 
-enum StreamItem<T> {
+pub(in crate::operator::join::metadata_validation::schema) enum StreamItem<T> {
     End,
     Message(T),
 }
@@ -39,7 +39,10 @@ fn read_u32(bytes: &[u8], offset: &mut usize) -> Option<u32> {
     Some(value)
 }
 
-fn message_metadata<'a>(bytes: &'a [u8], offset: &mut usize) -> Option<StreamItem<&'a [u8]>> {
+pub(in crate::operator::join::metadata_validation::schema) fn message_metadata<'a>(
+    bytes: &'a [u8],
+    offset: &mut usize,
+) -> Option<StreamItem<&'a [u8]>> {
     let length = message_length(bytes, offset)?;
     if length == 0 {
         return (*offset == bytes.len()).then_some(StreamItem::End);
@@ -148,7 +151,10 @@ fn schema_fields(schema: &ipc::Schema<'_>, actual: usize, expected: usize) -> bo
             .is_none_or(|values| values.is_empty())
 }
 
-fn field_matches(actual: ipc::Field<'_>, expected: &Field) -> bool {
+pub(in crate::operator::join::metadata_validation::schema) fn field_matches(
+    actual: ipc::Field<'_>,
+    expected: &Field,
+) -> bool {
     if actual.name() != Some(expected.name().as_str())
         || actual.nullable() != expected.is_nullable()
     {
@@ -157,7 +163,9 @@ fn field_matches(actual: ipc::Field<'_>, expected: &Field) -> bool {
     field_structure(&actual) && type_matches(actual, expected.data_type())
 }
 
-fn field_structure(field: &ipc::Field<'_>) -> bool {
+pub(in crate::operator::join::metadata_validation::schema) fn field_structure(
+    field: &ipc::Field<'_>,
+) -> bool {
     field.dictionary().is_none()
         && field.children().is_none_or(|values| values.is_empty())
         && field

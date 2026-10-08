@@ -473,7 +473,7 @@ async fn check_attempt_refusal(service: &TestService) {
     use datafusion::execution::memory_pool::MemoryLimit;
     let original = operator();
     let mut fields = original.input_schema(0).fields().to_vec();
-    fields.push(Arc::new(Field::new("payload", DataType::Utf8, true)));
+    fields.push(Arc::new(Field::new("payload", DataType::LargeUtf8, true)));
     let schema = Arc::new(Schema::new(fields));
     let mut operator =
         StreamJoinOperator::new("match", Arc::clone(&schema), schema, original.spec.clone())
@@ -487,6 +487,12 @@ async fn check_attempt_refusal(service: &TestService) {
             super::super::inventory::registration_controls().unwrap(),
         )
         .is_none()
+    );
+    assert!(
+        !operator
+            .try_restore_owned_utf8(&snapshot, &job, None)
+            .await
+            .unwrap()
     );
     let pool = operator
         .runtime
