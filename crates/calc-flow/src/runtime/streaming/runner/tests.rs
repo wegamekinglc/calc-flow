@@ -10031,6 +10031,17 @@ fn ac5_job_spec(
 
 /// Builds the AC5 `Join`->Window graph on one prefixed event-time column.
 fn ac5_join_window_plan(bounds: JoinTimeBounds, window_column: &str) -> crate::StreamExecutionPlan {
+    ac5_join_window_plan_with_metadata_hook(bounds, window_column, None)
+}
+
+type JoinMetadataHook =
+    Arc<dyn Fn(Option<&datafusion::execution::memory_pool::MemoryReservation>, bool) + Send + Sync>;
+
+fn ac5_join_window_plan_with_metadata_hook(
+    bounds: JoinTimeBounds,
+    window_column: &str,
+    metadata_hook: Option<JoinMetadataHook>,
+) -> crate::StreamExecutionPlan {
     let schema = Arc::new(datafusion::arrow::datatypes::Schema::new(vec![
         datafusion::arrow::datatypes::Field::new(
             "key",
@@ -10046,7 +10057,7 @@ fn ac5_join_window_plan(bounds: JoinTimeBounds, window_column: &str) -> crate::S
             false,
         ),
     ]));
-    let join = StreamJoinOperator::new(
+    let mut join = StreamJoinOperator::new(
         "match",
         Arc::clone(&schema),
         schema,
@@ -10061,6 +10072,9 @@ fn ac5_join_window_plan(bounds: JoinTimeBounds, window_column: &str) -> crate::S
         .unwrap(),
     )
     .unwrap();
+    if let Some(hook) = metadata_hook {
+        join.set_checkpoint_metadata_test_hook(hook);
+    }
     let join_output = Arc::clone(join.output_ports()[0].schema().expect("derived schema"));
     let mut window_spec =
         WindowSpec::tumbling(window_column, StdDuration::from_micros(10)).unwrap();
@@ -10275,7 +10289,7 @@ async fn ac5_checkpoint_restore_preserves_the_join_window_result() {
         .unwrap()
     };
     assert_eq!(
-        checkpoint_restore_join_window_result(checkpoint).await,
+        checkpoint_restore_join_window_result(checkpoint, None).await,
         vec![1]
     );
 }
@@ -10322,7 +10336,7 @@ async fn test_managed_join_restart_uses_paid_local_wire_and_continues() {
     };
 
     assert_eq!(
-        checkpoint_restore_join_window_result(checkpoint).await,
+        checkpoint_restore_join_window_result(checkpoint, None).await,
         vec![1]
     );
 
@@ -10338,12 +10352,59 @@ async fn test_managed_join_restart_uses_paid_local_wire_and_continues() {
     assert!(reads.iter().all(|read| read.credit.upgrade().is_none()));
 }
 
+#[tokio::test]
+async fn test_managed_join_metadata_is_prepaid_and_parsed_once_on_native_worker() {
+    let directory = tempfile::tempdir().unwrap();
+    let managed_root = directory.path().join("managed");
+    let copies = Arc::new(AtomicUsize::new(0));
+    let parses = Arc::new(AtomicUsize::new(0));
+    let caller = std::thread::current().id();
+    let observed_copies = copies.clone();
+    let observed_parses = parses.clone();
+    let hook: JoinMetadataHook = Arc::new(move |credit, parsed| {
+        if parsed {
+            assert_ne!(
+                std::thread::current().id(),
+                caller,
+                "metadata parser must run on the native worker"
+            );
+            observed_parses.fetch_add(1, Ordering::SeqCst);
+        } else {
+            let credit = credit.expect("metadata copy needs its own prepaid reservation");
+            assert_eq!(
+                credit.consumer().name(),
+                "sql-incremental:stream-join-metadata"
+            );
+            assert!(credit.size() > 0);
+            observed_copies.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    let checkpoint = || {
+        CheckpointRuntimeSpec::managed(
+            ManagedCheckpointRuntime::new(&managed_root).unwrap(),
+            StreamRuntimeConfig {
+                checkpoint_interval: StdDuration::from_secs(3_600),
+                checkpoint_timeout: StdDuration::from_secs(10),
+                ..StreamRuntimeConfig::default()
+            },
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        checkpoint_restore_join_window_result(checkpoint, Some(hook)).await,
+        vec![1]
+    );
+    assert_eq!(copies.load(Ordering::SeqCst), 1);
+    assert_eq!(parses.load(Ordering::SeqCst), 1);
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "the restore scenario is clearest as one end-to-end test"
 )]
 async fn checkpoint_restore_join_window_result(
     checkpoint: impl Fn() -> CheckpointRuntimeSpec,
+    metadata_hook: Option<JoinMetadataHook>,
 ) -> Vec<i64> {
     let left_release = Arc::new(AtomicBool::new(false));
     let right_release = Arc::new(AtomicBool::new(false));
@@ -10351,10 +10412,11 @@ async fn checkpoint_restore_join_window_result(
     let spec =
         |left_release: Arc<AtomicBool>, right_release: Arc<AtomicBool>| -> ContinuousJobSpec {
             let mut spec = ac5_job_spec(
-                ac5_join_window_plan(
+                ac5_join_window_plan_with_metadata_hook(
                     JoinTimeBounds::new(StdDuration::from_micros(0), StdDuration::from_micros(10))
                         .unwrap(),
                     "left__ts",
+                    metadata_hook.clone(),
                 ),
                 &rows,
             );

@@ -2876,6 +2876,8 @@ pub struct StreamJoinOperator {
     checkpoint_gate: Option<std::sync::Mutex<checkpoint_compaction::TestGate>>,
     #[cfg(test)]
     checkpoint_retirement_gate: Option<std::sync::Mutex<checkpoint_compaction::TestRetirementGate>>,
+    #[cfg(test)]
+    metadata_test_hook: Option<MetadataTestHook>,
 }
 
 const MAX_RETAINED_KEY_CACHE_BYTES_PER_SIDE: usize = 32 * 1024 * 1024;
@@ -3268,9 +3270,14 @@ struct JoinCheckpointMetadata {
     epoch: u64,
 }
 
+#[cfg(test)]
+type MetadataTestHook =
+    Arc<dyn Fn(Option<&datafusion::execution::memory_pool::MemoryReservation>, bool) + Send + Sync>;
+
 mod checkpoint_compaction;
 mod columnar;
 mod materialization;
+mod metadata_validation;
 mod native_lookup;
 mod row_ipc;
 mod sql_key_scratch;
@@ -3353,7 +3360,14 @@ impl StreamJoinOperator {
             checkpoint_gate: None,
             #[cfg(test)]
             checkpoint_retirement_gate: None,
+            #[cfg(test)]
+            metadata_test_hook: None,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_checkpoint_metadata_test_hook(&mut self, hook: MetadataTestHook) {
+        self.metadata_test_hook = Some(hook);
     }
 
     /// Returns the immutable Join declaration.
@@ -4280,7 +4294,7 @@ impl StreamJoinOperator {
 
     fn validate_restored_join_rows(
         &self,
-        metadata: &JoinCheckpointMetadata,
+        metadata: &metadata_validation::ValidatedMetadata,
         left: &[StoredRow],
         right: &[StoredRow],
     ) -> Result<()> {
@@ -4499,7 +4513,25 @@ impl StreamOperator for StreamJoinOperator {
     }
 
     fn restore(&mut self, snapshot: &OperatorStateSnapshot) -> Result<()> {
+        let metadata = self.parse_restore_metadata(snapshot)?;
+        self.install_restored_metadata(snapshot, metadata, &|| Ok(()))
+    }
+}
+
+impl StreamJoinOperator {
+    fn parse_restore_metadata(
+        &self,
+        snapshot: &OperatorStateSnapshot,
+    ) -> Result<metadata_validation::ValidatedMetadata> {
+        #[cfg(test)]
+        if let Some(hook) = &self.metadata_test_hook {
+            hook(None, false);
+        }
         let metadata = decode_join_metadata(snapshot, &self.name)?;
+        #[cfg(test)]
+        if let Some(hook) = &self.metadata_test_hook {
+            hook(None, true);
+        }
         if !checkpoint_metadata_compatible(&metadata, &self.spec) {
             return Err(CalcFlowError::CheckpointMismatch {
                 message: format!(
@@ -4508,6 +4540,15 @@ impl StreamOperator for StreamJoinOperator {
                 ),
             });
         }
+        Ok(metadata_validation::ValidatedMetadata::from(metadata))
+    }
+
+    fn install_restored_metadata(
+        &mut self,
+        snapshot: &OperatorStateSnapshot,
+        metadata: metadata_validation::ValidatedMetadata,
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<()> {
         let (left, right) = self.decode_restored_sides(snapshot)?;
         self.validate_restored_join_rows(&metadata, &left, &right)?;
         restored_retained_metrics_match(&metadata.metrics, &left, &right, &self.name)?;
@@ -4516,7 +4557,7 @@ impl StreamOperator for StreamJoinOperator {
         let base = carried_base_segments(snapshot);
         let segments_since_base =
             u32::try_from(carried.len()).map_err(|_| counter_overflow(&self.name, "segments"))?;
-        self.state = StreamJoinState {
+        let state = StreamJoinState {
             left_expirations: ExpirationIndex::restored(&left),
             right_expirations: ExpirationIndex::restored(&right),
             left: left.into(),
@@ -4534,6 +4575,8 @@ impl StreamOperator for StreamJoinOperator {
                 ..DeltaTracking::default()
             },
         };
+        check()?;
+        self.state = state;
         self.retained_key_cache = RetainedKeyCache::default();
         self.ingress_progress = IngressProgressSnapshot::default();
         Ok(())
