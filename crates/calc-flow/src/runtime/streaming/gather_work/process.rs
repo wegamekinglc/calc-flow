@@ -14,7 +14,8 @@ use parking_lot::{Condvar, Mutex};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use super::{
-    AdmissionFailure, AdmissionResult, GatherHome, GatherStop, PoolPhase, Slot, increment, internal,
+    AdmissionFailure, AdmissionResult, GatherHome, GatherStop, PendingHomeOwner, PoolPhase, Slot,
+    increment, internal,
 };
 use crate::Result;
 
@@ -61,9 +62,10 @@ struct WorkerHandle {
 
 pub(super) struct NativePool {
     pub(super) generation: u64,
-    pub(super) home: Arc<GatherHome>,
-    service: Weak<ProcessService>,
+    // Refund generation credit before publishing the final Home release.
     _credit: MemoryReservation,
+    pub(super) home: PendingHomeOwner,
+    service: Weak<ProcessService>,
 }
 
 pub(super) struct Registration {
@@ -158,19 +160,19 @@ impl ProcessService {
         let registration = acquire(self, self.registrations.clone(), stop).await?;
         let permit = acquire(self, self.workers.clone(), stop).await?;
         stop.check()?;
-        let pool = Arc::new(self.prepare_pool(home)?);
-        let slot = {
+        let (pool, slot) = {
             let mut slots = self.slots.lock();
             let slot = slots
                 .iter()
                 .position(Option::is_none)
                 .ok_or_else(|| internal("paid registry exhausted"))?;
+            let pool = Arc::new(self.prepare_pool(home)?);
             slots[slot] = Some(PoolRecord {
                 pool: pool.clone(),
                 handles: std::array::from_fn(|_| None),
                 _registration: registration,
             });
-            slot
+            (pool, slot)
         };
         let generation = pool.generation;
         Ok(Registration {
@@ -229,7 +231,10 @@ impl ProcessService {
                     source,
                 })?;
             let credit = attempt.credit.split(16_384);
-            state.generation = increment(state.generation, "pool generation")?;
+            let generation = increment(state.generation, "pool generation")?;
+            // Track both the final NativePool owner and the joiner's Home reference.
+            home.retain_releases(2)?;
+            state.generation = generation;
             state.phase = PoolPhase::Initializing;
             state.service = Some(Arc::downgrade(self));
             state.queue = std::collections::VecDeque::with_capacity(8);
@@ -237,9 +242,9 @@ impl ProcessService {
         };
         Ok(NativePool {
             generation,
-            home,
-            service: Arc::downgrade(self),
             _credit: credit,
+            home: PendingHomeOwner(Some(home)),
+            service: Arc::downgrade(self),
         })
     }
 
@@ -558,14 +563,26 @@ impl GatherHome {
         drop(ring);
     }
 
-    fn finish_generation(&self, generation: u64) {
+    fn finish_generation(self: Arc<Self>, generation: u64) {
         let mut state = self.state.lock();
-        if state.generation != generation {
-            return;
+        let current = state.generation == generation;
+        if current {
+            state.pool = None;
+            state.phase = PoolPhase::Absent;
+            self.changed.notify_waiters();
         }
-        state.pool = None;
-        state.phase = PoolPhase::Absent;
-        self.changed.notify_waiters();
+        #[cfg(test)]
+        let release_probe = if current {
+            state.generation_release_probe.take()
+        } else {
+            None
+        };
+        drop(state);
+        #[cfg(test)]
+        if let Some(probe) = release_probe {
+            probe();
+        }
+        self.release_owner();
     }
 }
 

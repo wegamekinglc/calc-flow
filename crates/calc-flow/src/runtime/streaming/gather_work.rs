@@ -4,7 +4,7 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{
         Arc, Weak,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -37,6 +37,8 @@ const HOME_CONTROL_BYTES: usize = 16_384;
 
 const _: () = assert!(
     size_of::<GatherHome>()
+        + size_of::<Notify>()
+        + size_of::<AtomicUsize>()
         + DIAGNOSTIC_CAPACITY * size_of::<TaskFailure>()
         + DIAGNOSTIC_LIMIT
             * (DIAGNOSTIC_NAME_BYTES + DIAGNOSTIC_MESSAGE_BYTES + "ASOF gather: ".len())
@@ -439,8 +441,27 @@ struct WorkerIdentity {
 struct GatherHome {
     run_id: Arc<str>,
     state: Mutex<HomeState>,
-    changed: Notify,
+    changed: Arc<Notify>,
+    pending_releases: Arc<AtomicUsize>,
     native_changed: Condvar,
+}
+
+struct PendingHomeOwner(Option<Arc<GatherHome>>);
+
+impl std::ops::Deref for PendingHomeOwner {
+    type Target = Arc<GatherHome>;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref().expect("pending home owner")
+    }
+}
+
+impl Drop for PendingHomeOwner {
+    fn drop(&mut self) {
+        if let Some(home) = self.0.take() {
+            home.release_owner();
+        }
+    }
 }
 
 struct HomeState {
@@ -460,6 +481,10 @@ struct HomeState {
     service: Option<Weak<process::ProcessService>>,
     #[cfg(test)]
     admission_probe: Option<Arc<admission_probe::AdmissionProbe>>,
+    #[cfg(test)]
+    generation_release_probe: Option<Box<dyn FnOnce() + Send>>,
+    #[cfg(test)]
+    retirement_release_probe: Option<Box<dyn FnOnce() + Send>>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -548,11 +573,13 @@ impl JobGatherOwner {
         if !state.open {
             return Err(cancelled(&self.0.home.run_id));
         }
-        state.retiring_owners = state
+        let retiring_owners = state
             .retiring_owners
             .checked_add(1)
             .ok_or_else(|| internal("retired owner counter overflow"))?;
-        Ok(RetirementGuard(self.0.home.clone()))
+        self.0.home.retain_releases(1)?;
+        state.retiring_owners = retiring_owners;
+        Ok(RetirementGuard(PendingHomeOwner(Some(self.0.home.clone()))))
     }
 
     pub(crate) async fn close_and_drain(&self) -> Vec<TaskFailure> {
@@ -562,12 +589,19 @@ impl JobGatherOwner {
     }
 }
 
-pub(crate) struct RetirementGuard(Arc<GatherHome>);
+pub(crate) struct RetirementGuard(PendingHomeOwner);
 
 impl Drop for RetirementGuard {
     fn drop(&mut self) {
-        self.0.state.lock().retiring_owners -= 1;
-        self.0.changed.notify_waiters();
+        let mut state = self.0.state.lock();
+        state.retiring_owners -= 1;
+        #[cfg(test)]
+        let release_probe = state.retirement_release_probe.take();
+        drop(state);
+        #[cfg(test)]
+        if let Some(probe) = release_probe {
+            probe();
+        }
     }
 }
 
@@ -731,10 +765,33 @@ impl GatherHome {
                 service: None,
                 #[cfg(test)]
                 admission_probe: None,
+                #[cfg(test)]
+                generation_release_probe: None,
+                #[cfg(test)]
+                retirement_release_probe: None,
             }),
-            changed: Notify::new(),
+            changed: Arc::new(Notify::new()),
+            pending_releases: Arc::new(AtomicUsize::new(0)),
             native_changed: Condvar::new(),
         }
+    }
+
+    fn retain_releases(&self, count: usize) -> Result<()> {
+        self.pending_releases
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
+                pending.checked_add(count)
+            })
+            .map_err(|_| internal("pending owner counter overflow"))?;
+        Ok(())
+    }
+
+    fn release_owner(self: Arc<Self>) {
+        let pending = self.pending_releases.clone();
+        let changed = self.changed.clone();
+        // Publish completion only after releasing the charged Home reference.
+        drop(self);
+        pending.fetch_sub(1, Ordering::AcqRel);
+        changed.notify_waiters();
     }
 
     async fn install_attempt<W: WorkPackage>(
@@ -1047,6 +1104,7 @@ impl GatherHome {
                 if state.phase == PoolPhase::Absent
                     && matches!(state.slot, Slot::Empty)
                     && state.retiring_owners == 0
+                    && self.pending_releases.load(Ordering::Acquire) == 0
                 {
                     return;
                 }

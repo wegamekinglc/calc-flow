@@ -23,7 +23,7 @@ async def round_(case: dict, sites: dict, releases: dict, root: Path) -> dict:
         environment = await _prepare(workers, releases, case)
         if workers["baseline"].input_hashes != workers["candidate"].input_hashes:
             raise ValueError("paired input IPC bytes differ")
-        samples = await _samples(workers)
+        samples = await _samples(workers, case)
         completion = {
             side: await w.request(operation="finish") for side, w in workers.items()
         }
