@@ -9,6 +9,11 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-08: Prepay finite expected-schema copies for streaming Join managed
+  V1 recovery. Native workers construct independent schema controls for the
+  original IPC comparison; unsupported profiles and optional budget refusals
+  preserve the metadata-only recovery route and its existing fees.
+
 - 2026-10-08: Prepay bounded streaming Join checkpoint metadata validation
   during normal managed restart and parse it once on the existing owned native
   worker. Unsupported profiles and optional funding refusals use the original

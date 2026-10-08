@@ -2878,6 +2878,8 @@ pub struct StreamJoinOperator {
     checkpoint_retirement_gate: Option<std::sync::Mutex<checkpoint_compaction::TestRetirementGate>>,
     #[cfg(test)]
     metadata_test_hook: Option<MetadataTestHook>,
+    #[cfg(test)]
+    schema_test_hook: Option<SchemaTestHook>,
 }
 
 const MAX_RETAINED_KEY_CACHE_BYTES_PER_SIDE: usize = 32 * 1024 * 1024;
@@ -3274,6 +3276,18 @@ struct JoinCheckpointMetadata {
 type MetadataTestHook =
     Arc<dyn Fn(Option<&datafusion::execution::memory_pool::MemoryReservation>, bool) + Send + Sync>;
 
+#[cfg(test)]
+type SchemaTestHook = MetadataTestHook;
+
+#[derive(Clone, Copy)]
+struct RestoreSchema<'a> {
+    schema: &'a Schema,
+    #[cfg(test)]
+    hook: Option<&'a SchemaTestHook>,
+    #[cfg(test)]
+    credit: Option<&'a datafusion::execution::memory_pool::MemoryReservation>,
+}
+
 mod checkpoint_compaction;
 mod columnar;
 mod materialization;
@@ -3362,12 +3376,19 @@ impl StreamJoinOperator {
             checkpoint_retirement_gate: None,
             #[cfg(test)]
             metadata_test_hook: None,
+            #[cfg(test)]
+            schema_test_hook: None,
         })
     }
 
     #[cfg(test)]
     pub(crate) fn set_checkpoint_metadata_test_hook(&mut self, hook: MetadataTestHook) {
         self.metadata_test_hook = Some(hook);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_checkpoint_schema_test_hook(&mut self, hook: SchemaTestHook) {
+        self.schema_test_hook = Some(hook);
     }
 
     /// Returns the immutable Join declaration.
@@ -4275,15 +4296,33 @@ impl StreamJoinOperator {
     fn decode_restored_sides(
         &self,
         snapshot: &OperatorStateSnapshot,
+        schemas: Option<&metadata_validation::schema::OwnedExpectedSchemas>,
     ) -> Result<(Vec<StoredRow>, Vec<StoredRow>)> {
         restore_sides_from_segments(
             snapshot,
-            self.input_schema(0),
-            self.input_schema(1),
+            self.restore_schema(schemas, 0),
+            self.restore_schema(schemas, 1),
             &self.compiled.left_key_indices,
             &self.compiled.right_key_indices,
             &self.name,
         )
+    }
+
+    fn restore_schema<'a>(
+        &'a self,
+        schemas: Option<&'a metadata_validation::schema::OwnedExpectedSchemas>,
+        side: usize,
+    ) -> RestoreSchema<'a> {
+        RestoreSchema {
+            schema: schemas.map_or_else(
+                || self.input_schema(side).as_ref(),
+                |schemas| schemas.schema(side),
+            ),
+            #[cfg(test)]
+            hook: self.schema_test_hook.as_ref(),
+            #[cfg(test)]
+            credit: schemas.map(metadata_validation::schema::OwnedExpectedSchemas::credit),
+        }
     }
 
     fn input_schema(&self, port_index: usize) -> &SchemaRef {
@@ -4549,7 +4588,17 @@ impl StreamJoinOperator {
         metadata: metadata_validation::ValidatedMetadata,
         check: &dyn Fn() -> Result<()>,
     ) -> Result<()> {
-        let (left, right) = self.decode_restored_sides(snapshot)?;
+        self.install_restored_metadata_with_schemas(snapshot, metadata, None, check)
+    }
+
+    fn install_restored_metadata_with_schemas(
+        &mut self,
+        snapshot: &OperatorStateSnapshot,
+        metadata: metadata_validation::ValidatedMetadata,
+        schemas: Option<&metadata_validation::schema::OwnedExpectedSchemas>,
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<()> {
+        let (left, right) = self.decode_restored_sides(snapshot, schemas)?;
         self.validate_restored_join_rows(&metadata, &left, &right)?;
         restored_retained_metrics_match(&metadata.metrics, &left, &right, &self.name)?;
         self.validate_restored_limits(&left, &right)?;
@@ -5531,8 +5580,8 @@ impl PendingOp {
 /// ascending `(epoch, segment_id)` order; later operations win (spec FR45).
 fn restore_sides_from_segments(
     snapshot: &OperatorStateSnapshot,
-    left_schema: &SchemaRef,
-    right_schema: &SchemaRef,
+    left_schema: RestoreSchema<'_>,
+    right_schema: RestoreSchema<'_>,
     left_key_indices: &[usize],
     right_key_indices: &[usize],
     operator_id: &str,
@@ -5653,7 +5702,7 @@ fn fold_side(
     segments: &BTreeMap<String, StateSegment>,
     inventory: &[(&str, SegmentKind)],
     side: JoinSide,
-    schema: &SchemaRef,
+    schema: RestoreSchema<'_>,
     key_indices: &[usize],
     operator_id: &str,
 ) -> Result<Vec<StoredRow>> {
@@ -5702,7 +5751,7 @@ fn fold_side(
 /// Applies one delta segment's upserts and tombstones to the fold.
 fn decode_delta_segment(
     bytes: &[u8],
-    schema: &SchemaRef,
+    schema: RestoreSchema<'_>,
     key_indices: &[usize],
     operator_id: &str,
     side: &str,
@@ -5744,7 +5793,7 @@ fn decode_delta_segment(
 }
 
 struct DeltaDecoder<'a> {
-    schema: &'a SchemaRef,
+    schema: RestoreSchema<'a>,
     key_indices: &'a [usize],
     name: &'a str,
     side: &'a str,
@@ -5845,7 +5894,7 @@ fn decode_delta_upsert(
 fn read_ipc_record(
     bytes: &[u8],
     offset: &mut usize,
-    schema: &SchemaRef,
+    schema: RestoreSchema<'_>,
     name: &str,
     side: &str,
 ) -> Result<RecordBatch> {
@@ -5916,7 +5965,7 @@ fn append_stored_row(
 
 fn decode_side(
     bytes: &[u8],
-    expected_schema: &SchemaRef,
+    expected_schema: RestoreSchema<'_>,
     key_indices: &[usize],
     operator_id: &str,
     side: &str,
@@ -5963,7 +6012,7 @@ fn decode_side_rows(
     bytes: &[u8],
     offset: &mut usize,
     row_count: u64,
-    expected_schema: &SchemaRef,
+    expected_schema: RestoreSchema<'_>,
     key_indices: &[usize],
     operator_id: &str,
     side: &str,
@@ -5998,7 +6047,7 @@ fn decode_row_capacity(
 fn decode_stored_row(
     bytes: &[u8],
     offset: &mut usize,
-    expected_schema: &SchemaRef,
+    expected_schema: RestoreSchema<'_>,
     key_indices: &[usize],
     operator_id: &str,
     side: &str,
@@ -6019,7 +6068,7 @@ fn decode_stored_row(
 
 fn decode_ipc_row(
     ipc: &[u8],
-    expected_schema: &SchemaRef,
+    expected_schema: RestoreSchema<'_>,
     operator_id: &str,
     side: &str,
 ) -> Result<RecordBatch> {
@@ -6030,7 +6079,11 @@ fn decode_ipc_row(
             &format!("IPC header is invalid: {error}"),
         )
     })?;
-    if reader.schema().as_ref() != expected_schema.as_ref() {
+    #[cfg(test)]
+    if let Some(hook) = expected_schema.hook {
+        hook(expected_schema.credit, false);
+    }
+    if reader.schema().as_ref() != expected_schema.schema {
         return Err(checkpoint_error(
             operator_id,
             side,

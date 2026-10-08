@@ -10042,6 +10042,15 @@ fn ac5_join_window_plan_with_metadata_hook(
     window_column: &str,
     metadata_hook: Option<JoinMetadataHook>,
 ) -> crate::StreamExecutionPlan {
+    ac5_join_window_plan_with_restore_hooks(bounds, window_column, metadata_hook, None)
+}
+
+fn ac5_join_window_plan_with_restore_hooks(
+    bounds: JoinTimeBounds,
+    window_column: &str,
+    metadata_hook: Option<JoinMetadataHook>,
+    schema_hook: Option<JoinMetadataHook>,
+) -> crate::StreamExecutionPlan {
     let schema = Arc::new(datafusion::arrow::datatypes::Schema::new(vec![
         datafusion::arrow::datatypes::Field::new(
             "key",
@@ -10074,6 +10083,9 @@ fn ac5_join_window_plan_with_metadata_hook(
     .unwrap();
     if let Some(hook) = metadata_hook {
         join.set_checkpoint_metadata_test_hook(hook);
+    }
+    if let Some(hook) = schema_hook {
+        join.set_checkpoint_schema_test_hook(hook);
     }
     let join_output = Arc::clone(join.output_ports()[0].schema().expect("derived schema"));
     let mut window_spec =
@@ -10398,13 +10410,74 @@ async fn test_managed_join_metadata_is_prepaid_and_parsed_once_on_native_worker(
     assert_eq!(parses.load(Ordering::SeqCst), 1);
 }
 
+#[tokio::test]
+async fn test_managed_join_schema_comparison_is_prepaid_and_constructed_on_native_worker() {
+    let directory = tempfile::tempdir().unwrap();
+    let managed_root = directory.path().join("managed");
+    let parses = Arc::new(AtomicUsize::new(0));
+    let constructors = Arc::new(AtomicUsize::new(0));
+    let comparisons = Arc::new(AtomicUsize::new(0));
+    let caller = std::thread::current().id();
+    let native_counter = Arc::clone(&parses);
+    let metadata_hook: JoinMetadataHook = Arc::new(move |_, parsing| {
+        if parsing {
+            assert_ne!(std::thread::current().id(), caller);
+            native_counter.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    let constructed = Arc::clone(&constructors);
+    let compared = Arc::clone(&comparisons);
+    let schema_hook: JoinMetadataHook = Arc::new(move |credit, constructing| {
+        let credit =
+            credit.expect("expected-schema comparison needs independent descriptor funding");
+        assert!(credit.size() > 0);
+        if constructing {
+            assert_ne!(std::thread::current().id(), caller);
+            constructed.fetch_add(1, Ordering::SeqCst);
+        } else {
+            compared.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    let checkpoint = || {
+        CheckpointRuntimeSpec::managed(
+            ManagedCheckpointRuntime::new(&managed_root).unwrap(),
+            StreamRuntimeConfig {
+                checkpoint_interval: StdDuration::from_secs(3_600),
+                checkpoint_timeout: StdDuration::from_secs(10),
+                ..StreamRuntimeConfig::default()
+            },
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        checkpoint_restore_join_window_with_schema(
+            checkpoint,
+            Some(metadata_hook),
+            Some(schema_hook),
+        )
+        .await,
+        vec![1]
+    );
+    assert_eq!(parses.load(Ordering::SeqCst), 1);
+    assert_eq!(constructors.load(Ordering::SeqCst), 1);
+    assert_eq!(comparisons.load(Ordering::SeqCst), 2);
+}
+
+async fn checkpoint_restore_join_window_result(
+    checkpoint: impl Fn() -> CheckpointRuntimeSpec,
+    metadata_hook: Option<JoinMetadataHook>,
+) -> Vec<i64> {
+    checkpoint_restore_join_window_with_schema(checkpoint, metadata_hook, None).await
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "the restore scenario is clearest as one end-to-end test"
 )]
-async fn checkpoint_restore_join_window_result(
+async fn checkpoint_restore_join_window_with_schema(
     checkpoint: impl Fn() -> CheckpointRuntimeSpec,
     metadata_hook: Option<JoinMetadataHook>,
+    schema_hook: Option<JoinMetadataHook>,
 ) -> Vec<i64> {
     let left_release = Arc::new(AtomicBool::new(false));
     let right_release = Arc::new(AtomicBool::new(false));
@@ -10412,11 +10485,12 @@ async fn checkpoint_restore_join_window_result(
     let spec =
         |left_release: Arc<AtomicBool>, right_release: Arc<AtomicBool>| -> ContinuousJobSpec {
             let mut spec = ac5_job_spec(
-                ac5_join_window_plan_with_metadata_hook(
+                ac5_join_window_plan_with_restore_hooks(
                     JoinTimeBounds::new(StdDuration::from_micros(0), StdDuration::from_micros(10))
                         .unwrap(),
                     "left__ts",
                     metadata_hook.clone(),
+                    schema_hook.clone(),
                 ),
                 &rows,
             );

@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 mod inventory;
 mod profile;
+pub(super) mod schema;
 
 #[cfg(test)]
 mod tests;
@@ -154,6 +155,20 @@ async fn copy_boundary(job: &StreamJobContext) -> Result<()> {
 
 impl StreamJoinOperator {
     pub(crate) async fn restore_managed_metadata(
+        &mut self,
+        snapshot: &OperatorStateSnapshot,
+        job: &StreamJobContext,
+        task: Option<crate::runtime::streaming::gather_work::TaskId>,
+    ) -> Result<()> {
+        job.check_cancelled()?;
+        if self.try_restore_owned_schema(snapshot, job, task).await? {
+            return Ok(());
+        }
+        self.restore_managed_metadata_only(snapshot, job, task)
+            .await
+    }
+
+    async fn restore_managed_metadata_only(
         &mut self,
         snapshot: &OperatorStateSnapshot,
         job: &StreamJobContext,
