@@ -48,7 +48,7 @@ const _: () = assert!(
 pub(crate) mod admission_probe;
 mod cleanup;
 mod columns;
-pub(crate) use cleanup::{AttemptCleanup, cleanup_control_bytes};
+pub(crate) use cleanup::{AttemptCleanup, ObservedTicket, cleanup_control_bytes};
 mod parallel;
 pub(crate) use parallel::ParallelCpuWork;
 mod process;

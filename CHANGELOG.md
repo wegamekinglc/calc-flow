@@ -9,6 +9,11 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-08: Prepay bounded streaming Join checkpoint metadata validation
+  during normal managed restart and parse it once on the existing owned native
+  worker. Unsupported profiles and optional funding refusals use the original
+  V1 reader; cancellation checks guard the final restored-state assignment.
+
 - 2026-10-08: Prepay selected streaming Join checkpoint wire loads from
   certified managed Local storage using the configured runtime budget. Owned
   loading drains real I/O and keeps funding with surviving segment references;

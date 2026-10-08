@@ -6,7 +6,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use futures::{Future, future::select_all};
+use futures::{Future, FutureExt, future::select_all};
 use parking_lot::Mutex;
 use tokio::sync::{mpsc, watch};
 
@@ -785,37 +785,47 @@ fn acknowledge_entry(
 }
 
 async fn reset_operator(inputs: &mut OperatorTaskInputs, task_id: TaskId) -> Result<()> {
-    if matches!(inputs.operator, CompiledStreamOperator::StreamAsofJoin(_))
-        && inputs.restore.is_some()
-    {
-        inputs.context.bind_task_id(task_id);
-        match catch_unwind(AssertUnwindSafe(|| inputs.operator.reset())) {
-            Ok(result) => result?,
-            Err(payload) => {
-                return Err(CalcFlowError::TaskPanicked {
-                    task_id: task_id.as_u64(),
-                    message: panic_message(payload.as_ref()),
-                });
-            }
-        }
-        let restore = inputs.restore.as_mut().expect("restore presence checked");
-        let progress = OperatorInputProgress::restore(
-            inputs.ingresses.keys(),
-            &restore.progress,
-            restore.output_frontier,
-        )?
-        .snapshot()?;
-        let snapshot = std::mem::take(&mut restore.snapshot);
-        return restore_asof_managed(
-            &mut inputs.operator,
-            snapshot,
-            progress,
-            restore.output_frontier,
-            inputs.context.job(),
-            Some(task_id),
-        )
-        .await;
+    if inputs.restore.is_none() {
+        return reset_legacy_operator(inputs, task_id);
     }
+    match &inputs.operator {
+        CompiledStreamOperator::StreamJoin(_) => reset_join_metadata(inputs, task_id).await,
+        CompiledStreamOperator::StreamAsofJoin(_) => reset_managed_asof(inputs, task_id).await,
+        _ => reset_legacy_operator(inputs, task_id),
+    }
+}
+
+async fn reset_managed_asof(inputs: &mut OperatorTaskInputs, task_id: TaskId) -> Result<()> {
+    inputs.context.bind_task_id(task_id);
+    match catch_unwind(AssertUnwindSafe(|| inputs.operator.reset())) {
+        Ok(result) => result?,
+        Err(payload) => {
+            return Err(CalcFlowError::TaskPanicked {
+                task_id: task_id.as_u64(),
+                message: panic_message(payload.as_ref()),
+            });
+        }
+    }
+    let restore = inputs.restore.as_mut().expect("restore presence checked");
+    let progress = OperatorInputProgress::restore(
+        inputs.ingresses.keys(),
+        &restore.progress,
+        restore.output_frontier,
+    )?
+    .snapshot()?;
+    let snapshot = std::mem::take(&mut restore.snapshot);
+    restore_asof_managed(
+        &mut inputs.operator,
+        snapshot,
+        progress,
+        restore.output_frontier,
+        inputs.context.job(),
+        Some(task_id),
+    )
+    .await
+}
+
+fn reset_legacy_operator(inputs: &mut OperatorTaskInputs, task_id: TaskId) -> Result<()> {
     match catch_unwind(AssertUnwindSafe(|| {
         inputs.operator.reset()?;
         if let Some(restore) = &inputs.restore {
@@ -823,6 +833,28 @@ async fn reset_operator(inputs: &mut OperatorTaskInputs, task_id: TaskId) -> Res
         }
         Ok(())
     })) {
+        Ok(result) => result,
+        Err(payload) => Err(CalcFlowError::TaskPanicked {
+            task_id: task_id.as_u64(),
+            message: panic_message(payload.as_ref()),
+        }),
+    }
+}
+
+async fn reset_join_metadata(inputs: &mut OperatorTaskInputs, task_id: TaskId) -> Result<()> {
+    inputs.context.bind_task_id(task_id);
+    let restore = inputs.restore.as_ref().expect("restore presence checked");
+    let job = inputs.context.job();
+    let operation = async {
+        inputs.operator.reset()?;
+        let CompiledStreamOperator::StreamJoin(operator) = &mut inputs.operator else {
+            unreachable!("Join dispatch checked");
+        };
+        operator
+            .restore_managed_metadata(&restore.snapshot, job, Some(task_id))
+            .await
+    };
+    match AssertUnwindSafe(operation).catch_unwind().await {
         Ok(result) => result,
         Err(payload) => Err(CalcFlowError::TaskPanicked {
             task_id: task_id.as_u64(),
