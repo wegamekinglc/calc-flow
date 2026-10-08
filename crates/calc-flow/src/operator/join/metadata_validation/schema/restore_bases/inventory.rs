@@ -170,7 +170,7 @@ pub(in crate::operator::join::metadata_validation::schema) fn key_bytes(
         total
             .checked_add(9)?
             .checked_add(timezone)?
-            .checked_add(columnar::restored::width(field.data_type())?)
+            .checked_add(columnar::restored::key_width(field.data_type())?)
     })
 }
 

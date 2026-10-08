@@ -1,4 +1,7 @@
 use super::*;
+
+#[path = "float_tests.rs"]
+mod float_tests;
 use crate::{
     CancellationToken, Epoch, JsonMap, OperatorStateSnapshot, StreamJobContext, StreamOperator,
     operator::join::{
