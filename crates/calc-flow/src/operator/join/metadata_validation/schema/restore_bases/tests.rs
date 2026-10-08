@@ -2,6 +2,9 @@ use super::*;
 
 #[path = "float_tests.rs"]
 mod float_tests;
+
+#[path = "boolean_tests.rs"]
+mod boolean_tests;
 use crate::{
     CancellationToken, Epoch, JsonMap, OperatorStateSnapshot, StreamJobContext, StreamOperator,
     operator::join::{

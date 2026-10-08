@@ -187,6 +187,13 @@ fn integer_profile(data_type: &DataType) -> Option<(i32, bool)> {
 }
 
 fn type_matches(actual: ipc::Field<'_>, expected: &DataType) -> bool {
+    if expected == &DataType::Boolean {
+        return actual.type_as_bool().is_some();
+    }
+    scalar_type_matches(actual, expected)
+}
+
+fn scalar_type_matches(actual: ipc::Field<'_>, expected: &DataType) -> bool {
     if let Some((width, signed)) = integer_profile(expected) {
         return actual
             .type_as_int()
@@ -288,10 +295,18 @@ fn values_buffer(buffer: &ipc::Buffer, field: &Field, rows: usize, body_bytes: u
         return false;
     };
     offset.is_multiple_of(width)
-        && rows.checked_mul(width) == Some(length)
+        && values_length(field.data_type(), rows) == Some(length)
         && offset
             .checked_add(length)
             .is_some_and(|end| end <= body_bytes)
+}
+
+fn values_length(data_type: &DataType, rows: usize) -> Option<usize> {
+    if data_type == &DataType::Boolean {
+        Some(rows.div_ceil(8))
+    } else {
+        crate::operator::join::columnar::restored::width(data_type)?.checked_mul(rows)
+    }
 }
 
 fn record_layout(view: &MessageView<'_>, record: &ipc::RecordBatch<'_>) -> bool {

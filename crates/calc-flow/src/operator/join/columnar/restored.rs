@@ -2,7 +2,7 @@ use super::{PayloadChunk, PayloadFunding, RowPayload, metadata, owned_copy, spar
 use crate::runtime::streaming::gather_work::RetirementGuard;
 use crate::time::EventTime;
 use datafusion::arrow::{
-    array::{ArrayRef, make_array},
+    array::{ArrayRef, BooleanArray, make_array},
     buffer::{Buffer, MutableBuffer},
     datatypes::{DataType, Field, Schema, SchemaRef},
     record_batch::RecordBatch,
@@ -44,6 +44,7 @@ struct Construction {
 
 pub(in crate::operator::join) fn width(data_type: &DataType) -> Option<usize> {
     match data_type {
+        DataType::Boolean => Some(1),
         DataType::Float32 => Some(4),
         DataType::Float64 => Some(8),
         scalar => key_width(scalar),
@@ -128,7 +129,11 @@ fn copy_column(source: &ArrayRef, field: &Field, funding: &Arc<PayloadFunding>) 
     let width = width(field.data_type()).expect("certified fixed-width row");
     let start = source.offset() * width;
     let mut values = MutableBuffer::new(width);
-    values.extend_from_slice(&data.buffers()[0].as_slice()[start..start + width]);
+    if field.data_type() == &DataType::Boolean {
+        values.extend_from_slice(&[boolean_byte(source)]);
+    } else {
+        values.extend_from_slice(&data.buffers()[0].as_slice()[start..start + width]);
+    }
     let values: Buffer = values.into();
     let data = arrow_data::ArrayData::builder(field.data_type().clone())
         .len(1)
@@ -136,6 +141,19 @@ fn copy_column(source: &ArrayRef, field: &Field, funding: &Arc<PayloadFunding>) 
         .build()
         .expect("certified one-row aligned scalar buffer");
     make_array(data)
+}
+
+fn boolean_byte(source: &ArrayRef) -> u8 {
+    let array = source
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .expect("certified Boolean row");
+    let bits = array.values();
+    if bits.offset().is_multiple_of(8) {
+        bits.values()[bits.offset() / 8]
+    } else {
+        u8::from(bits.value(0))
+    }
 }
 
 pub(in crate::operator::join) fn copy_row(
