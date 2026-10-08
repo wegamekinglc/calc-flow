@@ -4,7 +4,8 @@ The optional normal-managed V1 restore route now prepays fresh base input, compl
 decode/installation workspace, and independently owned scalar row payloads. It uses
 the existing owned native worker and original parser/IPC/fold/checking functions.
 This is a finite full-base slice, not generic decoded-state funding or V2 support.
-No timing or RSS claim is made. Final independent Source Review and CI remain required.
+No timing or RSS claim is made. Independent source review and required CI gate
+every published head.
 
 The source baseline is merged main `3734eb86de32371f152e32fbfdea0899e42192e0`
 (tree `1c7b0aad40f407b088730b2016720f46f8cb9031`). The original observed RED was
@@ -204,3 +205,45 @@ whitespace, generated contracts and local complexity are separate static checks;
 a local Lizard result does not establish the remote Codacy gate. Full regression,
 coverage, cross-platform checks and final independent Source Review are CI/handoff
 gates, not local pass claims.
+
+## PR381 cancellation and refusal revision
+
+The remote cancellation finding was reproduced with an actual owned native
+ticket. Its first paid reader-entry hook cancels the same job; the original
+worker nevertheless entered four readers. The new test first reaches the
+Cancelled, unchanged-state and exact-refund assertions, then fails on four
+entries versus one. It is a direct ticket fixture, not another durable runner
+restart, and the entry hook does not prove the first reader completed.
+
+The checked restore route now borrows the original GatherStop check for each
+row reader and fold insertion, side/segment switches, and before/after sorts and
+collection. The original route supplies a no-op callback. A reader/fold error
+is dropped before a fresh stop check, so cancellation cannot select Original
+and synchronously decode again. Healthy codec failures retain the original
+diagnostic route. No Work/Decision fields, buffer ownership, construction or
+execution fee expressions change. Standard library sorts and a single Arrow
+reader remain synchronous operations; no whole-callback latency bound is claimed.
+
+The revised observer counts every reader entry before checking only the first
+entry's actual native context/workspace and cancelling. Its GREEN count is one;
+this includes potential later native or Legacy entries. The ticket never installs
+an Original decision dynamically; the no-replay error classification is also
+supported by the worker's stop-check branch.
+
+Windows CI's schema-refusal fixture failure was reproduced locally: the generic
+attempt probe first denied the newly eligible full-base Work, after which the
+original SchemaWork correctly constructed one descriptor. The fixture now has
+one valid Utf8 payload column: SchemaWork remains eligible while the certified
+scalar full-base constructor refuses that shape. All original copies=2,
+parses=1, constructed=0, actual attempt-fee, checkpoint and refund assertions
+remain intact; the production refusal route and its exact fees are unchanged.
+
+The targeted revision has six unique observed PASS: cancel-during-decode,
+schema refusal, the Managed consumer, both-side/second-next reader inventory,
+last Buffer/abandoned worker, and frozen V1 bytes/continuation. Pure helper
+extraction follows the initial GREEN to keep changed functions at local CCN<=8;
+only directly affected cases are checked again. Current-source lint and static
+checks are recorded separately with provenance. Prior raw failures and frozen
+source bundles remain unchanged under `review-fix-v2/`; no full suite, coverage
+or benchmark ran for this revision. Independent source review and CI gate the
+next published head.

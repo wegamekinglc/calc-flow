@@ -471,9 +471,23 @@ async fn check_credit_refusal(service: &TestService, output_denied: bool) {
 async fn check_attempt_refusal(service: &TestService) {
     use crate::runtime::streaming::gather_work::admission_probe::{AdmissionProbe, AdmissionStage};
     use datafusion::execution::memory_pool::MemoryLimit;
-    let mut operator = operator();
+    let original = operator();
+    let mut fields = original.input_schema(0).fields().to_vec();
+    fields.push(Arc::new(Field::new("payload", DataType::Utf8, true)));
+    let schema = Arc::new(Schema::new(fields));
+    let mut operator =
+        StreamJoinOperator::new("match", Arc::clone(&schema), schema, original.spec.clone())
+            .unwrap();
+    operator.prepare_checkpoint_preload_runtime().unwrap();
     let snapshot = snapshot(&mut operator);
     let job = job(service);
+    assert!(
+        crate::operator::join::columnar::restored::required(
+            operator.input_schema(0),
+            super::super::inventory::registration_controls().unwrap(),
+        )
+        .is_none()
+    );
     let pool = operator
         .runtime
         .runtime

@@ -309,6 +309,56 @@ fn assert_home_credit(job: &StreamJobContext, pool: &Arc<dyn MemoryPool>) {
 }
 
 #[test]
+fn test_restore_bases_cancellation_during_decode_stops_before_the_next_row() {
+    let service = TestService::new(1, 1).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let readers = runtime.block_on(check_cancel_during_decode(&service));
+    drop(runtime);
+    service.shutdown();
+    assert_eq!(readers, 1, "cancelled decode must not read later rows");
+}
+
+async fn check_cancel_during_decode(service: &TestService) -> usize {
+    let snapshot = snapshot(&mut operator());
+    let mut target = operator();
+    let cancellation = CancellationToken::new();
+    let job = job(service, cancellation.clone());
+    let pool = pool(&target);
+    let readers = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&readers);
+    target.decoded_row_test_hook = Some(Arc::new(move |credit, _, decoded, owned| {
+        if !decoded && observed.fetch_add(1, Ordering::Relaxed) == 0 {
+            assert_eq!(std::thread::current().name(), Some("calc-flow-gather"));
+            assert!(owned);
+            assert!(credit.unwrap().size() > 0);
+            cancellation.cancel();
+        }
+    }));
+    let mut construction = construction(&target, &snapshot, &job);
+    assert!(construction.copy(&target, &snapshot, &job).await.unwrap());
+    let ticket = submit(&mut target, &mut construction, &job).await;
+    let result = ticket.finish().await;
+    assert!(matches!(
+        result,
+        Err(crate::CalcFlowError::Cancelled { .. })
+    ));
+    assert_eq!(target.status().left.retained_rows, 0);
+    assert_eq!(target.state.last_checkpoint_epoch, None);
+    assert!(target.compaction_cleanup.is_some());
+    drop(result);
+    drop(construction);
+    drop(target);
+    job.gather_owner().close_and_drain().await;
+    assert_home_credit(&job, &pool);
+    drop(job);
+    assert_eq!(pool.reserved(), 0);
+    readers.load(Ordering::Relaxed)
+}
+
+#[test]
 fn test_restore_bases_last_buffer_and_abandoned_worker_keep_real_credit() {
     let service = TestService::new(1, 1).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread()

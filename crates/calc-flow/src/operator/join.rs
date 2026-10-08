@@ -5632,8 +5632,58 @@ fn restore_sides_from_segments(
     right_key_indices: &[usize],
     operator_id: &str,
 ) -> Result<(Vec<StoredRow>, Vec<StoredRow>)> {
-    let mut inventory: Vec<(&str, SegmentKind)> = Vec::new();
+    restore_sides_from_segments_checked(
+        snapshot,
+        left_schema,
+        right_schema,
+        left_key_indices,
+        right_key_indices,
+        operator_id,
+        &|| Ok(()),
+    )
+}
+
+fn restore_sides_from_segments_checked(
+    snapshot: &OperatorStateSnapshot,
+    left_schema: RestoreSchema<'_>,
+    right_schema: RestoreSchema<'_>,
+    left_key_indices: &[usize],
+    right_key_indices: &[usize],
+    operator_id: &str,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<(Vec<StoredRow>, Vec<StoredRow>)> {
+    let inventory = restore_segment_inventory(snapshot, operator_id, check)?;
+    check()?;
+    let left = fold_side(
+        &snapshot.segments,
+        &inventory,
+        JoinSide::Left,
+        left_schema,
+        left_key_indices,
+        operator_id,
+        check,
+    )?;
+    check()?;
+    let right = fold_side(
+        &snapshot.segments,
+        &inventory,
+        JoinSide::Right,
+        right_schema,
+        right_key_indices,
+        operator_id,
+        check,
+    )?;
+    sort_restored_sides(left, right, check)
+}
+
+fn restore_segment_inventory<'a>(
+    snapshot: &'a OperatorStateSnapshot,
+    operator_id: &str,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<Vec<(&'a str, SegmentKind)>> {
+    let mut inventory = Vec::new();
     for segment_id in snapshot.segments.keys() {
+        check()?;
         inventory.push((
             segment_id.as_str(),
             parse_segment_kind(segment_id, operator_id)?,
@@ -5644,24 +5694,19 @@ fn restore_sides_from_segments(
             message: format!("stream Join {operator_id:?} segment inventory is empty"),
         });
     }
-    let mut left = fold_side(
-        &snapshot.segments,
-        &inventory,
-        JoinSide::Left,
-        left_schema,
-        left_key_indices,
-        operator_id,
-    )?;
-    let mut right = fold_side(
-        &snapshot.segments,
-        &inventory,
-        JoinSide::Right,
-        right_schema,
-        right_key_indices,
-        operator_id,
-    )?;
+    Ok(inventory)
+}
+
+fn sort_restored_sides(
+    mut left: Vec<StoredRow>,
+    mut right: Vec<StoredRow>,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<(Vec<StoredRow>, Vec<StoredRow>)> {
+    check()?;
     left.sort_by(identity_order);
+    check()?;
     right.sort_by(identity_order);
+    check()?;
     Ok((left, right))
 }
 
@@ -5751,94 +5796,149 @@ fn fold_side(
     schema: RestoreSchema<'_>,
     key_indices: &[usize],
     operator_id: &str,
+    check: &dyn Fn() -> Result<()>,
 ) -> Result<Vec<StoredRow>> {
-    let mut folded: BTreeMap<(Vec<u8>, i64, u64), StoredRow> = BTreeMap::new();
+    let mut folded = BTreeMap::new();
     let side_str = side.as_str();
-    let mut ordered: Vec<(&str, &SegmentKind, &StateSegment)> = inventory
+    let ordered = ordered_restore_segments(segments, inventory, side_str, check)?;
+    let decoder = RestoreDecoder {
+        schema,
+        key_indices,
+        name: operator_id,
+        side: side_str,
+    };
+    for (_segment_id, kind, segment) in ordered {
+        check()?;
+        fold_restore_segment(segment.bytes(), kind, &decoder, &mut folded, check)?;
+    }
+    check()?;
+    let rows = folded.into_values().collect();
+    check()?;
+    Ok(rows)
+}
+
+type OrderedRestoreSegments<'a> = Vec<(&'a str, &'a SegmentKind, &'a StateSegment)>;
+type FoldedRestoreRows = BTreeMap<(Vec<u8>, i64, u64), StoredRow>;
+
+fn ordered_restore_segments<'a>(
+    segments: &'a BTreeMap<String, StateSegment>,
+    inventory: &'a [(&'a str, SegmentKind)],
+    side: &str,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<OrderedRestoreSegments<'a>> {
+    let mut ordered: OrderedRestoreSegments<'_> = inventory
         .iter()
-        .filter(|(segment_id, _)| segment_id.starts_with(side_str))
+        .filter(|(segment_id, _)| segment_id.starts_with(side))
         .map(|(segment_id, kind)| (*segment_id, kind, &segments[*segment_id]))
         .collect();
     // BTreeMap iteration gives ascending segment ids; the base folds first.
+    check()?;
     ordered.sort_by_key(|(segment_id, kind, _)| match kind {
         SegmentKind::Base => (u64::MIN, (*segment_id).to_owned()),
         SegmentKind::Delta(epoch) => (*epoch, (*segment_id).to_owned()),
     });
-    for (_segment_id, kind, segment) in ordered {
-        let bytes = segment.bytes();
-        match kind {
-            SegmentKind::Base => {
-                for row in decode_side(bytes, schema, key_indices, operator_id, side_str)? {
-                    folded.insert(
-                        (
-                            row.encoded_key.to_vec(),
-                            row.event_time.as_micros(),
-                            row.row_id,
-                        ),
-                        row,
-                    );
-                }
-            }
-            SegmentKind::Delta(_) => {
-                decode_delta_segment(
-                    bytes,
-                    schema,
-                    key_indices,
-                    operator_id,
-                    side_str,
-                    &mut folded,
-                )?;
-            }
-        }
+    check()?;
+    Ok(ordered)
+}
+
+fn fold_restore_segment(
+    bytes: &[u8],
+    kind: &SegmentKind,
+    decoder: &RestoreDecoder<'_>,
+    folded: &mut FoldedRestoreRows,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<()> {
+    match kind {
+        SegmentKind::Base => fold_base_rows(bytes, decoder, folded, check),
+        SegmentKind::Delta(_) => decode_delta_segment(bytes, decoder, folded, check),
     }
-    Ok(folded.into_values().collect())
+}
+
+fn fold_base_rows(
+    bytes: &[u8],
+    decoder: &RestoreDecoder<'_>,
+    folded: &mut FoldedRestoreRows,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<()> {
+    for row in decode_side(
+        bytes,
+        decoder.schema,
+        decoder.key_indices,
+        decoder.name,
+        decoder.side,
+        check,
+    )? {
+        check()?;
+        folded.insert(
+            (
+                row.encoded_key.to_vec(),
+                row.event_time.as_micros(),
+                row.row_id,
+            ),
+            row,
+        );
+    }
+    Ok(())
 }
 
 /// Applies one delta segment's upserts and tombstones to the fold.
 fn decode_delta_segment(
     bytes: &[u8],
-    schema: RestoreSchema<'_>,
-    key_indices: &[usize],
-    operator_id: &str,
-    side: &str,
-    folded: &mut BTreeMap<(Vec<u8>, i64, u64), StoredRow>,
+    decoder: &RestoreDecoder<'_>,
+    folded: &mut FoldedRestoreRows,
+    check: &dyn Fn() -> Result<()>,
 ) -> Result<()> {
     let mut offset = 0_usize;
-    let op_count = delta_op_count(bytes, &mut offset, operator_id, side)?;
-    let decoder = DeltaDecoder {
-        schema,
-        key_indices,
-        name: operator_id,
-        side,
-    };
+    let op_count = delta_op_count(bytes, &mut offset, decoder.name, decoder.side)?;
     let mut seen_identities = BTreeSet::new();
     for _ in 0..op_count {
-        let header = decode_delta_header(bytes, &mut offset, operator_id, side)?;
-        let identity = (
-            header.key.clone(),
-            header.event_time.as_micros(),
-            header.row_id,
-        );
-        if !seen_identities.insert(identity.clone()) {
-            return Err(checkpoint_error(
-                operator_id,
-                side,
-                "delta segment repeats one row identity",
-            ));
-        }
-        apply_delta_op(bytes, &mut offset, &decoder, header, identity, folded)?;
+        check()?;
+        apply_unique_delta_op(
+            bytes,
+            &mut offset,
+            decoder,
+            &mut seen_identities,
+            folded,
+            check,
+        )?;
     }
+    check()?;
     if offset != bytes.len() {
         return Err(checkpoint_error(
-            operator_id,
-            side,
+            decoder.name,
+            decoder.side,
             "delta segment has trailing bytes",
         ));
     }
     Ok(())
 }
 
-struct DeltaDecoder<'a> {
+fn apply_unique_delta_op(
+    bytes: &[u8],
+    offset: &mut usize,
+    decoder: &RestoreDecoder<'_>,
+    seen: &mut BTreeSet<(Vec<u8>, i64, u64)>,
+    folded: &mut FoldedRestoreRows,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<()> {
+    let header = decode_delta_header(bytes, offset, decoder.name, decoder.side)?;
+    let identity = (
+        header.key.clone(),
+        header.event_time.as_micros(),
+        header.row_id,
+    );
+    if !seen.insert(identity.clone()) {
+        return Err(checkpoint_error(
+            decoder.name,
+            decoder.side,
+            "delta segment repeats one row identity",
+        ));
+    }
+    check()?;
+    apply_delta_op(bytes, offset, decoder, header, identity, folded)
+}
+
+struct RestoreDecoder<'a> {
     schema: RestoreSchema<'a>,
     key_indices: &'a [usize],
     name: &'a str,
@@ -5883,7 +5983,7 @@ fn decode_delta_header(
 fn apply_delta_op(
     bytes: &[u8],
     offset: &mut usize,
-    decoder: &DeltaDecoder<'_>,
+    decoder: &RestoreDecoder<'_>,
     header: DeltaHeader,
     identity: (Vec<u8>, i64, u64),
     folded: &mut BTreeMap<(Vec<u8>, i64, u64), StoredRow>,
@@ -5910,10 +6010,10 @@ fn apply_delta_op(
 fn decode_delta_upsert(
     bytes: &[u8],
     offset: &mut usize,
-    decoder: &DeltaDecoder<'_>,
+    decoder: &RestoreDecoder<'_>,
     header: DeltaHeader,
 ) -> Result<StoredRow> {
-    let DeltaDecoder {
+    let RestoreDecoder {
         schema,
         key_indices,
         name,
@@ -6015,6 +6115,7 @@ fn decode_side(
     key_indices: &[usize],
     operator_id: &str,
     side: &str,
+    check: &dyn Fn() -> Result<()>,
 ) -> Result<Vec<StoredRow>> {
     let mut offset = 0_usize;
     let row_count = decode_side_header(bytes, &mut offset, operator_id, side)?;
@@ -6024,8 +6125,8 @@ fn decode_side(
         row_count,
         expected_schema,
         key_indices,
-        operator_id,
-        side,
+        (operator_id, side),
+        check,
     )?;
     if offset != bytes.len() {
         return Err(checkpoint_error(
@@ -6060,20 +6161,24 @@ fn decode_side_rows(
     row_count: u64,
     expected_schema: RestoreSchema<'_>,
     key_indices: &[usize],
-    operator_id: &str,
-    side: &str,
+    location: (&str, &str),
+    check: &dyn Fn() -> Result<()>,
 ) -> Result<Vec<StoredRow>> {
+    let (operator_id, side) = location;
     let row_capacity = decode_row_capacity(row_count, bytes.len(), operator_id, side)?;
     let mut rows = Vec::with_capacity(row_capacity);
     for _ in 0..row_count {
-        rows.push(decode_stored_row(
+        check()?;
+        let row = decode_stored_row(
             bytes,
             offset,
             expected_schema,
             key_indices,
             operator_id,
             side,
-        )?);
+        )?;
+        check()?;
+        rows.push(row);
     }
     Ok(rows)
 }

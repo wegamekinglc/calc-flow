@@ -60,11 +60,12 @@ impl OwnedCpuWork for RestoreBasesWork {
             return Ok(RestoreBasesDecision::Original(success));
         }
         self.populate_snapshot();
-        let rows = self.restore_sides(&success.schemas);
+        let rows = self.restore_sides(&success.schemas, stop);
         let (left, right) = match rows {
             Ok(rows) => rows,
             Err(error) => {
                 drop(error);
+                stop.check()?;
                 return Ok(RestoreBasesDecision::Original(success));
             }
         };
@@ -118,6 +119,7 @@ impl RestoreBasesWork {
     fn restore_sides(
         &self,
         schemas: &OwnedExpectedSchemas,
+        stop: &GatherStop,
     ) -> Result<(Vec<StoredRow>, Vec<StoredRow>)> {
         let schema = |side| RestoreSchema {
             schema: schemas.schema(side),
@@ -132,13 +134,14 @@ impl RestoreBasesWork {
             #[cfg(test)]
             decoded_owned_work: true,
         };
-        crate::operator::join::restore_sides_from_segments(
+        crate::operator::join::restore_sides_from_segments_checked(
             &self.input.snapshot,
             schema(0),
             schema(1),
             &self.input.key_indices[0],
             &self.input.key_indices[1],
             &self.input.name,
+            &|| stop.check(),
         )
     }
 
