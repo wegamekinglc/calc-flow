@@ -2880,6 +2880,8 @@ pub struct StreamJoinOperator {
     metadata_test_hook: Option<MetadataTestHook>,
     #[cfg(test)]
     schema_test_hook: Option<SchemaTestHook>,
+    #[cfg(test)]
+    decoded_row_test_hook: Option<DecodedRowTestHook>,
 }
 
 const MAX_RETAINED_KEY_CACHE_BYTES_PER_SIDE: usize = 32 * 1024 * 1024;
@@ -3279,6 +3281,17 @@ type MetadataTestHook =
 #[cfg(test)]
 type SchemaTestHook = MetadataTestHook;
 
+#[cfg(test)]
+type DecodedRowTestHook = Arc<
+    dyn Fn(
+            Option<&datafusion::execution::memory_pool::MemoryReservation>,
+            Option<(usize, usize)>,
+            bool,
+            bool,
+        ) + Send
+        + Sync,
+>;
+
 #[derive(Clone, Copy)]
 struct RestoreSchema<'a> {
     schema: &'a Schema,
@@ -3286,6 +3299,12 @@ struct RestoreSchema<'a> {
     hook: Option<&'a SchemaTestHook>,
     #[cfg(test)]
     credit: Option<&'a datafusion::execution::memory_pool::MemoryReservation>,
+    #[cfg(test)]
+    decoded_row_hook: Option<&'a DecodedRowTestHook>,
+    #[cfg(test)]
+    decoded_row_credit: Option<&'a datafusion::execution::memory_pool::MemoryReservation>,
+    #[cfg(test)]
+    decoded_owned_work: bool,
 }
 
 mod checkpoint_compaction;
@@ -3378,6 +3397,8 @@ impl StreamJoinOperator {
             metadata_test_hook: None,
             #[cfg(test)]
             schema_test_hook: None,
+            #[cfg(test)]
+            decoded_row_test_hook: None,
         })
     }
 
@@ -3389,6 +3410,11 @@ impl StreamJoinOperator {
     #[cfg(test)]
     pub(crate) fn set_checkpoint_schema_test_hook(&mut self, hook: SchemaTestHook) {
         self.schema_test_hook = Some(hook);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_checkpoint_decoded_row_test_hook(&mut self, hook: DecodedRowTestHook) {
+        self.decoded_row_test_hook = Some(hook);
     }
 
     /// Returns the immutable Join declaration.
@@ -4322,6 +4348,12 @@ impl StreamJoinOperator {
             hook: self.schema_test_hook.as_ref(),
             #[cfg(test)]
             credit: schemas.map(metadata_validation::schema::OwnedExpectedSchemas::credit),
+            #[cfg(test)]
+            decoded_row_hook: self.decoded_row_test_hook.as_ref(),
+            #[cfg(test)]
+            decoded_row_credit: None,
+            #[cfg(test)]
+            decoded_owned_work: false,
         }
     }
 
@@ -4599,6 +4631,17 @@ impl StreamJoinOperator {
         check: &dyn Fn() -> Result<()>,
     ) -> Result<()> {
         let (left, right) = self.decode_restored_sides(snapshot, schemas)?;
+        self.install_restored_rows(snapshot, metadata, left, right, check)
+    }
+
+    fn install_restored_rows(
+        &mut self,
+        snapshot: &OperatorStateSnapshot,
+        metadata: metadata_validation::ValidatedMetadata,
+        left: Vec<StoredRow>,
+        right: Vec<StoredRow>,
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<()> {
         self.validate_restored_join_rows(&metadata, &left, &right)?;
         restored_retained_metrics_match(&metadata.metrics, &left, &right, &self.name)?;
         self.validate_restored_limits(&left, &right)?;
@@ -4624,6 +4667,9 @@ impl StreamJoinOperator {
                 ..DeltaTracking::default()
             },
         };
+        for row in state.left.iter().chain(state.right.iter()) {
+            row.record.mark_live();
+        }
         check()?;
         self.state = state;
         self.retained_key_cache = RetainedKeyCache::default();
@@ -6057,8 +6103,15 @@ fn decode_stored_row(
     let charge = read_segment_u64(bytes, offset)?;
     let record = read_ipc_record(bytes, offset, expected_schema, operator_id, side)?;
     let encoded_key = Arc::new(encode_join_key_v1(&record, 0, key_indices)?.into());
+    let record: columnar::RowPayload = record.into();
+    #[cfg(test)]
+    if let Some(hook) = expected_schema.decoded_row_hook
+        && expected_schema.decoded_row_credit.is_none()
+    {
+        hook(None, record.funded_owner(), true, false);
+    }
     Ok(StoredRow {
-        record: record.into(),
+        record,
         event_time,
         row_id,
         charge,
@@ -6072,6 +6125,15 @@ fn decode_ipc_row(
     operator_id: &str,
     side: &str,
 ) -> Result<RecordBatch> {
+    #[cfg(test)]
+    if let Some(hook) = expected_schema.decoded_row_hook {
+        hook(
+            expected_schema.decoded_row_credit,
+            None,
+            false,
+            expected_schema.decoded_owned_work,
+        );
+    }
     let mut reader = StreamReader::try_new(Cursor::new(ipc), None).map_err(|error| {
         checkpoint_error(
             operator_id,

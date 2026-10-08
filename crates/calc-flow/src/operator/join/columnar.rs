@@ -7,6 +7,7 @@ use std::{ops::Deref, sync::Arc};
 
 mod metadata;
 mod owned_copy;
+pub(super) mod restored;
 mod sparse;
 pub(super) use metadata::schema_inventory;
 pub(super) use owned_copy::{CopySelection, Quantum, SelectedRow};

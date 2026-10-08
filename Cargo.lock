@@ -564,6 +564,7 @@ dependencies = [
  "criterion",
  "datafusion",
  "fs2",
+ "flatbuffers",
  "futures",
  "hashbrown 0.17.1",
  "hex",

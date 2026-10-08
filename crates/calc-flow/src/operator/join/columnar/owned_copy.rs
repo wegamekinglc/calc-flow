@@ -216,7 +216,7 @@ impl AsRef<[u8]> for FundedBuffer {
     }
 }
 
-fn wrap_buffer(buffer: Buffer, funding: &Arc<PayloadFunding>) -> Buffer {
+pub(super) fn wrap_buffer(buffer: Buffer, funding: &Arc<PayloadFunding>) -> Buffer {
     Buffer::from(Bytes::from_owner(FundedBuffer {
         buffer,
         _funding: Arc::clone(funding),
@@ -244,7 +244,7 @@ fn reservation_control() -> Option<usize> {
     )
 }
 
-fn column_controls() -> Option<usize> {
+pub(super) fn column_controls() -> Option<usize> {
     let array = size_of::<PrimitiveArray<Int64Type>>().max(size_of::<GenericStringArray<i64>>());
     let owners = 2 * (BUFFER_OWNER + buffer_lease_control());
     // ArrayDataBuilder's buffer Vec grows to four entries; finish resets string offsets to capacity four.
@@ -268,7 +268,7 @@ fn controls(columns: usize, metadata: usize, rows: usize) -> Option<usize> {
     )
 }
 
-fn fixed_width(data_type: &DataType) -> Option<usize> {
+pub(super) fn fixed_width(data_type: &DataType) -> Option<usize> {
     match data_type {
         DataType::Int16 | DataType::UInt16 => Some(2),
         DataType::Int32 | DataType::UInt32 => Some(4),

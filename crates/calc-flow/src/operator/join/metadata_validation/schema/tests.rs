@@ -678,6 +678,7 @@ async fn check_v1_reader(service: &TestService, unsupported_metadata: bool) {
         .as_ref()
         .unwrap()
         .incremental_memory_pool();
+    drop(actual);
     job.gather_owner().close_and_drain().await;
     drop(job);
     assert_eq!(pool.reserved(), 0);
