@@ -64,7 +64,7 @@ All sum/product/Layout calculations are checked. No surviving-row count or
 schema key width substitutes for these input-dependent terms.
 
 | Partition | Concrete constructor terms                                                                                                                 |
-|-----------|--------------------------------------------------------------------------------------------------------------------------------------------|
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | Input     | All S exact-capacity wire/ID Vecs, Q leases, key indices, name, fresh map, Arc<Vec>, 64-byte checksums and actual carrier sizes.           |
 | Reader    | Reused paid verifier trace and reader/schema/body terms for every Q row; unknown IPC selects the original reader before StreamReader.      |
 | Fold      | Both cumulative Q row/key/fold inventories, raw header+identity+seen key overlap, per-segment seen tree and operation counts.              |
