@@ -9,8 +9,8 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
-- 2026-10-08: Prepay streaming Join managed V1 full-base decoding and checked
-  installation on the existing owned native worker. Certified scalar rows
+- 2026-10-08: Prepay streaming Join managed V1 full-base decoding on the existing
+  owned native worker and the checked installation tail. Certified scalar rows
   retain independent funding through surviving Arrow buffers; unsupported
   histories and optional budget refusals preserve the original recovery routes.
 
