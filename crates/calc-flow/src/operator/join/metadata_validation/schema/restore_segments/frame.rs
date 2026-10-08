@@ -2,7 +2,7 @@ use crate::{OperatorStateSnapshot, Result, StreamJobContext};
 use std::ops::Range;
 
 #[derive(Default, Clone, Copy)]
-pub(super) struct Geometry {
+pub(in crate::operator::join::metadata_validation::schema) struct Geometry {
     pub rows: [usize; 2],
     pub wire: [usize; 2],
     pub segments: usize,
@@ -15,12 +15,14 @@ pub(super) struct Geometry {
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct SegmentKind {
+pub(in crate::operator::join::metadata_validation::schema) struct SegmentKind {
     pub side: usize,
     pub delta: bool,
 }
 
-pub(super) fn kind(id: &str) -> Option<SegmentKind> {
+pub(in crate::operator::join::metadata_validation::schema) fn kind(
+    id: &str,
+) -> Option<SegmentKind> {
     for (side, name) in ["left", "right"].into_iter().enumerate() {
         if id.strip_suffix("-base") == Some(name) {
             return Some(SegmentKind { side, delta: false });
@@ -36,12 +38,12 @@ pub(super) fn kind(id: &str) -> Option<SegmentKind> {
     None
 }
 
-pub(super) struct Frame {
+pub(in crate::operator::join::metadata_validation::schema) struct Frame {
     pub key_bytes: usize,
     pub ipc: Option<Range<usize>>,
 }
 
-pub(super) struct Cursor<'a> {
+pub(in crate::operator::join::metadata_validation::schema) struct Cursor<'a> {
     bytes: &'a [u8],
     offset: usize,
     pub count: usize,
@@ -49,7 +51,10 @@ pub(super) struct Cursor<'a> {
 }
 
 impl<'a> Cursor<'a> {
-    pub(super) fn new(bytes: &'a [u8], delta: bool) -> Option<Self> {
+    pub(in crate::operator::join::metadata_validation::schema) fn new(
+        bytes: &'a [u8],
+        delta: bool,
+    ) -> Option<Self> {
         Some(Self {
             bytes,
             offset: 16,
@@ -58,7 +63,7 @@ impl<'a> Cursor<'a> {
         })
     }
 
-    pub(super) fn next(&mut self) -> Option<Frame> {
+    pub(in crate::operator::join::metadata_validation::schema) fn next(&mut self) -> Option<Frame> {
         if self.delta {
             self.delta_frame()
         } else {
@@ -93,18 +98,37 @@ impl<'a> Cursor<'a> {
         Some(start..self.offset)
     }
 
-    pub(super) fn finished(&self) -> bool {
+    pub(in crate::operator::join::metadata_validation::schema) fn finished(&self) -> bool {
         self.offset == self.bytes.len()
     }
 }
 
-pub(super) async fn scan(
+pub(in crate::operator::join::metadata_validation::schema) async fn scan(
     snapshot: &OperatorStateSnapshot,
     job: &StreamJobContext,
 ) -> Result<Option<Geometry>> {
     if !eligible_inventory(snapshot) {
         return Ok(None);
     }
+    scan_entries(snapshot, job).await
+}
+
+pub(in crate::operator::join::metadata_validation::schema) async fn scan_all(
+    snapshot: &OperatorStateSnapshot,
+    job: &StreamJobContext,
+) -> Result<Option<Geometry>> {
+    let complete_bases =
+        snapshot.segments.contains_key("left-base") && snapshot.segments.contains_key("right-base");
+    if !complete_bases && !eligible_inventory(snapshot) {
+        return Ok(None);
+    }
+    scan_entries(snapshot, job).await
+}
+
+async fn scan_entries(
+    snapshot: &OperatorStateSnapshot,
+    job: &StreamJobContext,
+) -> Result<Option<Geometry>> {
     let mut geometry = Geometry::default();
     for (id, segment) in &snapshot.segments {
         let Some((kind, count, rows, keys, longest)) =
@@ -142,7 +166,10 @@ fn eligible_inventory(snapshot: &OperatorStateSnapshot) -> bool {
     }
 }
 
-pub(super) fn delta_count(snapshot: &OperatorStateSnapshot, geometry: &Geometry) -> Option<usize> {
+pub(in crate::operator::join::metadata_validation::schema) fn delta_count(
+    snapshot: &OperatorStateSnapshot,
+    geometry: &Geometry,
+) -> Option<usize> {
     let bases = usize::from(snapshot.segments.contains_key("left-base"))
         + usize::from(snapshot.segments.contains_key("right-base"));
     geometry.segments.checked_sub(bases)

@@ -12,6 +12,7 @@ mod inventory;
 mod plan;
 mod restore_bases;
 mod restore_segments;
+mod restore_utf8;
 
 #[cfg(test)]
 mod tests;

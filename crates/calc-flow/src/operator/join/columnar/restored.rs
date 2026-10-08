@@ -13,6 +13,8 @@ use std::sync::{
     atomic::{AtomicBool, AtomicUsize},
 };
 
+pub(in crate::operator::join) mod utf8;
+
 pub(in crate::operator::join) struct ResidentLease {
     credit: MemoryReservation,
     retirement: RetirementGuard,
@@ -24,6 +26,10 @@ impl ResidentLease {
         retirement: RetirementGuard,
     ) -> Self {
         Self { credit, retirement }
+    }
+
+    pub(in crate::operator::join) fn try_fund(&self, bytes: usize) -> bool {
+        self.credit.try_grow(bytes).is_ok()
     }
 }
 

@@ -9,6 +9,12 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-08: Prepay certified non-null Utf8 payload and key recovery for
+  streaming Join managed V1 checkpoints. Native verification and decoding
+  retain independent workspace, while fresh offsets and values keep their
+  resident credit through the last Arrow buffer owner. Preserve checkpoint
+  bytes, logical charges and original reader fallback behavior.
+
 - 2026-10-08: Include Float32 and Float64 non-key payloads in certified,
   funded streaming Join managed V1 recovery. Preserve IEEE value bits,
   existing key support, null fallback, checkpoint bytes and logical fees.

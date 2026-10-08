@@ -10,6 +10,9 @@ mod restore_segments_tests;
 #[path = "restore_float_tests.rs"]
 mod restore_float_tests;
 
+#[path = "restore_utf8_tests.rs"]
+mod restore_utf8_tests;
+
 #[derive(Default)]
 struct RestoreObservations {
     readers: Vec<(Option<(usize, usize)>, bool)>,

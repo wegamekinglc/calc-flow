@@ -161,6 +161,18 @@ impl StreamJoinOperator {
         task: Option<crate::runtime::streaming::gather_work::TaskId>,
     ) -> Result<()> {
         job.check_cancelled()?;
+        if self.try_restore_owned_utf8(snapshot, job, task).await? {
+            return Ok(());
+        }
+        self.restore_managed_non_utf8(snapshot, job, task).await
+    }
+
+    async fn restore_managed_non_utf8(
+        &mut self,
+        snapshot: &OperatorStateSnapshot,
+        job: &StreamJobContext,
+        task: Option<crate::runtime::streaming::gather_work::TaskId>,
+    ) -> Result<()> {
         if self.try_restore_owned_segments(snapshot, job, task).await? {
             return Ok(());
         }

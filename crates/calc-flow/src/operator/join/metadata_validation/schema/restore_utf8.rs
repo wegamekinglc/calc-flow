@@ -9,25 +9,26 @@ use crate::{Result, StateSegment};
 use datafusion::execution::memory_pool::MemoryReservation;
 use std::sync::Arc;
 
-pub(super) mod frame;
+use super::restore_segments::frame;
 mod input;
-use super::restore_bases::inspector;
+mod inspector;
 mod inventory;
 
 #[cfg(test)]
 mod tests;
 
-struct RestoreSegmentsWork {
+struct RestoreUtf8Work {
     schema: Option<SchemaWork>,
     input: input::OwnedInput,
     workspace: Option<MemoryReservation>,
+    geometry: frame::Geometry,
     #[cfg(test)]
     hook: Option<crate::operator::join::DecodedRowTestHook>,
     #[cfg(test)]
     schema_hook: Option<crate::operator::join::SchemaTestHook>,
 }
 
-enum RestoreSegmentsDecision {
+enum RestoreUtf8Decision {
     UseLegacy,
     Original(SchemaSuccess),
     Prepared(PreparedSides),
@@ -42,47 +43,58 @@ struct PreparedSides {
     _workspace: MemoryReservation,
 }
 
-impl OwnedCpuWork for RestoreSegmentsWork {
-    type Output = RestoreSegmentsDecision;
+impl OwnedCpuWork for RestoreUtf8Work {
+    type Output = RestoreUtf8Decision;
 
     fn control_bytes(&self) -> Result<usize> {
         super::super::inventory::caller_controls(&self.input.name)
-            .and_then(|bytes| bytes.checked_add(cleanup_control_bytes::<RestoreSegmentsDecision>()))
+            .and_then(|bytes| bytes.checked_add(cleanup_control_bytes::<RestoreUtf8Decision>()))
             .ok_or_else(|| crate::CalcFlowError::Internal {
-                message: "restore segments control overflow".into(),
+                message: "restore Utf8 control overflow".into(),
             })
     }
 
-    fn run(mut self, stop: &GatherStop) -> Result<RestoreSegmentsDecision> {
+    fn run(mut self, stop: &GatherStop) -> Result<RestoreUtf8Decision> {
         let Some(success) = self.schema.take().expect("owned schema input").run(stop)? else {
-            return Ok(RestoreSegmentsDecision::UseLegacy);
+            return Ok(RestoreUtf8Decision::UseLegacy);
         };
-        if !self.inspect_segments(&success.schemas, stop)? {
-            return Ok(RestoreSegmentsDecision::Original(success));
+        let Some(facts) = self.inspect_segments(&success.schemas, stop)? else {
+            return Ok(RestoreUtf8Decision::Original(success));
+        };
+        if !self.grow_workspace(&facts, stop)? {
+            return Ok(RestoreUtf8Decision::Original(success));
         }
         self.populate_snapshot(stop)?;
         self.prepare_rows(success, stop)
     }
 }
 
-impl RestoreSegmentsWork {
+impl RestoreUtf8Work {
     fn prepare_rows(
         &mut self,
         success: SchemaSuccess,
         stop: &GatherStop,
-    ) -> Result<RestoreSegmentsDecision> {
+    ) -> Result<RestoreUtf8Decision> {
         let rows = self.restore_sides(&success.schemas, stop);
         let (left, right) = match rows {
             Ok(rows) => rows,
             Err(error) => {
                 drop(error);
                 stop.check()?;
-                return Ok(RestoreSegmentsDecision::Original(success));
+                return Ok(RestoreUtf8Decision::Original(success));
             }
         };
-        let left = self.copy_rows(left, &success.schemas, 0, stop)?;
-        let right = self.copy_rows(right, &success.schemas, 1, stop)?;
-        Ok(RestoreSegmentsDecision::Prepared(PreparedSides {
+        let Some(left) = self.copy_rows(left, &success.schemas, 0, stop)? else {
+            drop(right);
+            stop.check()?;
+            return Ok(RestoreUtf8Decision::Original(success));
+        };
+        let Some(right) = self.copy_rows(right, &success.schemas, 1, stop)? else {
+            drop(left);
+            stop.check()?;
+            return Ok(RestoreUtf8Decision::Original(success));
+        };
+        Ok(RestoreUtf8Decision::Prepared(PreparedSides {
             left,
             right,
             _schemas: success.schemas,
@@ -93,24 +105,53 @@ impl RestoreSegmentsWork {
                 .expect("complete paid installation workspace"),
         }))
     }
-    fn inspect_segments(&self, schemas: &OwnedExpectedSchemas, stop: &GatherStop) -> Result<bool> {
+    fn grow_workspace(&self, facts: &[inspector::Facts; 2], stop: &GatherStop) -> Result<bool> {
+        let Some(bytes) = inventory::dynamic_workspace(&self.geometry, facts) else {
+            stop.check()?;
+            return Ok(false);
+        };
+        let paid = self
+            .workspace
+            .as_ref()
+            .expect("initial paid workspace")
+            .try_grow(bytes)
+            .is_ok();
+        stop.check()?;
+        Ok(paid)
+    }
+
+    fn inspect_segments(
+        &self,
+        schemas: &OwnedExpectedSchemas,
+        stop: &GatherStop,
+    ) -> Result<Option<[inspector::Facts; 2]>> {
+        let mut facts = [inspector::Facts::default(); 2];
         for (id, bytes) in &self.input.segments {
             stop.check()?;
             let kind = frame::kind(id).expect("checked segment identity");
             let Some(mut cursor) = frame::Cursor::new(bytes, kind.delta) else {
-                return Ok(false);
+                return Ok(None);
             };
-            if !Self::inspect_frames(&mut cursor, bytes, schemas.schema(kind.side), stop)? {
-                return Ok(false);
+            if !Self::inspect_frames(
+                &mut cursor,
+                bytes,
+                schemas.schema(kind.side),
+                &self.input.key_indices[kind.side],
+                &mut facts[kind.side],
+                stop,
+            )? {
+                return Ok(None);
             }
         }
-        Ok(true)
+        Ok(Some(facts))
     }
 
     fn inspect_frames(
         cursor: &mut frame::Cursor<'_>,
         bytes: &[u8],
         expected: &datafusion::arrow::datatypes::Schema,
+        keys: &[usize],
+        facts: &mut inspector::Facts,
         stop: &GatherStop,
     ) -> Result<bool> {
         for _ in 0..cursor.count {
@@ -119,7 +160,10 @@ impl RestoreSegmentsWork {
                 return Ok(false);
             };
             if let Some(range) = frame.ipc {
-                if inspector::inspect(&bytes[range], expected).is_none() {
+                let Some(row) = inspector::inspect(&bytes[range], expected, keys, stop)? else {
+                    return Ok(false);
+                };
+                if facts.add(row).is_none() {
                     return Ok(false);
                 }
             }
@@ -173,21 +217,36 @@ impl RestoreSegmentsWork {
         schemas: &OwnedExpectedSchemas,
         side: usize,
         stop: &GatherStop,
-    ) -> Result<Vec<StoredRow>> {
+    ) -> Result<Option<Vec<StoredRow>>> {
         let leases = std::mem::take(&mut self.input.leases[side]);
         let mut leases = leases.into_iter();
         let mut output = Vec::with_capacity(rows.len());
         for mut row in rows {
             stop.check()?;
             let record = row.record.view();
-            let payload = columnar::restored::copy_row(
+            let lease = leases
+                .next()
+                .expect("one prepared guard per cumulative row");
+            let registration = super::super::inventory::registration_controls()
+                .expect("checked registration controls");
+            let Some(bytes) =
+                columnar::restored::utf8::required(&record, schemas.schema(side), registration)
+            else {
+                drop(record);
+                stop.check()?;
+                return Ok(None);
+            };
+            if !lease.try_fund(bytes) {
+                drop(record);
+                stop.check()?;
+                return Ok(None);
+            }
+            let payload = columnar::restored::utf8::copy_row(
                 &record,
                 schemas.schema(side),
                 row.row_id,
                 row.event_time,
-                leases
-                    .next()
-                    .expect("one independently prepaid lease per cumulative decoded row"),
+                lease,
             );
             drop(record);
             row.record = payload;
@@ -202,20 +261,19 @@ impl RestoreSegmentsWork {
             }
             output.push(row);
         }
-        Ok(output)
+        Ok(Some(output))
     }
 }
 
 // The original schema guards remain live until every new partial owner and credit is dropped.
-struct RestoreSegmentsConstruction {
+struct RestoreUtf8Construction {
     input: input::OwnedInput,
     geometry: frame::Geometry,
-    resident: Option<MemoryReservation>,
     workspace: Option<MemoryReservation>,
     schema: SchemaConstruction,
 }
 
-impl RestoreSegmentsConstruction {
+impl RestoreUtf8Construction {
     fn schema_work(
         &mut self,
         #[cfg(test)] metadata_hook: Option<crate::operator::join::MetadataTestHook>,
@@ -249,9 +307,9 @@ impl RestoreSegmentsConstruction {
         #[cfg(test)] schema_hook: Option<crate::operator::join::SchemaTestHook>,
         #[cfg(test)] decoded_hook: Option<crate::operator::join::DecodedRowTestHook>,
     ) -> impl Future<
-        Output = std::result::Result<ObservedTicket<RestoreSegmentsDecision>, AdmissionFailure>,
+        Output = std::result::Result<ObservedTicket<RestoreUtf8Decision>, AdmissionFailure>,
     > + 'a {
-        let work = RestoreSegmentsWork {
+        let work = RestoreUtf8Work {
             schema: Some(self.schema_work(
                 #[cfg(test)]
                 metadata_hook,
@@ -260,6 +318,7 @@ impl RestoreSegmentsConstruction {
             )),
             input: self.input.take(),
             workspace: self.workspace.take(),
+            geometry: self.geometry,
             #[cfg(test)]
             hook: decoded_hook,
             #[cfg(test)]
@@ -325,9 +384,6 @@ impl RestoreSegmentsConstruction {
         bounds: inventory::Bounds,
         job: &crate::StreamJobContext,
     ) -> Result<Option<Self>> {
-        let Some(total) = resident_total(geometry, bounds.resident) else {
-            return Ok(None);
-        };
         let original = schema
             .metadata
             .credit
@@ -336,18 +392,17 @@ impl RestoreSegmentsConstruction {
         let construction = Self {
             input: input::OwnedInput::new(original.new_empty()),
             geometry: *geometry,
-            resident: Some(original.new_empty()),
             workspace: Some(original.new_empty()),
             schema,
         };
-        if !construction.fund_components(&bounds, total) {
+        if !construction.fund_components(&bounds) {
             job.check_cancelled()?;
             return Ok(None);
         }
         Ok(Some(construction))
     }
 
-    fn fund_components(&self, bounds: &inventory::Bounds, resident: usize) -> bool {
+    fn fund_components(&self, bounds: &inventory::Bounds) -> bool {
         self.input
             .credit
             .as_ref()
@@ -359,12 +414,6 @@ impl RestoreSegmentsConstruction {
                 .as_ref()
                 .expect("workspace credit")
                 .try_grow(bounds.workspace)
-                .is_ok()
-            && self
-                .resident
-                .as_ref()
-                .expect("resident credit")
-                .try_grow(resident)
                 .is_ok()
     }
 
@@ -403,15 +452,11 @@ impl RestoreSegmentsConstruction {
 
     async fn prepare_leases(
         &mut self,
-        operator: &crate::operator::join::StreamJoinOperator,
+        _operator: &crate::operator::join::StreamJoinOperator,
         job: &crate::StreamJobContext,
     ) -> Result<bool> {
         let geometry = &self.geometry;
-        let registration = super::super::inventory::registration_controls()
-            .expect("checked registration controls");
         for side in 0..2 {
-            let bytes = columnar::restored::required(operator.input_schema(side), registration)
-                .expect("checked resident constructor");
             self.input.leases[side] = Vec::with_capacity(geometry.rows[side]);
             for _ in 0..geometry.rows[side] {
                 super::super::copy_boundary(job).await?;
@@ -424,10 +469,11 @@ impl RestoreSegmentsConstruction {
                     Err(error) => return Err(error),
                 };
                 let credit = self
-                    .resident
+                    .input
+                    .credit
                     .as_ref()
-                    .expect("prepaid resident group")
-                    .split(bytes);
+                    .expect("paid input controls")
+                    .new_empty();
                 self.input.leases[side].push(columnar::restored::ResidentLease::new(credit, guard));
             }
         }
@@ -435,20 +481,14 @@ impl RestoreSegmentsConstruction {
     }
 }
 
-fn resident_total(geometry: &frame::Geometry, resident: [usize; 2]) -> Option<usize> {
-    geometry.rows[0]
-        .checked_mul(resident[0])?
-        .checked_add(geometry.rows[1].checked_mul(resident[1])?)
-}
-
 impl crate::operator::join::StreamJoinOperator {
-    pub(in crate::operator::join) async fn try_restore_owned_segments(
+    pub(in crate::operator::join) async fn try_restore_owned_utf8(
         &mut self,
         snapshot: &crate::OperatorStateSnapshot,
         job: &crate::StreamJobContext,
         task: Option<TaskId>,
     ) -> Result<bool> {
-        let Some(mut construction) = self.segments_construction(snapshot, job).await? else {
+        let Some(mut construction) = self.utf8_construction(snapshot, job).await? else {
             return Ok(false);
         };
         #[cfg(test)]
@@ -481,7 +521,7 @@ impl crate::operator::join::StreamJoinOperator {
                 self.decoded_row_test_hook.clone(),
             )
             .await;
-        self.finish_segments_admission(
+        self.finish_utf8_admission(
             admission,
             snapshot,
             job,
@@ -496,12 +536,15 @@ impl crate::operator::join::StreamJoinOperator {
         .await
     }
 
-    async fn segments_construction(
+    async fn utf8_construction(
         &self,
         snapshot: &crate::OperatorStateSnapshot,
         job: &crate::StreamJobContext,
-    ) -> Result<Option<RestoreSegmentsConstruction>> {
-        let Some(geometry) = frame::scan(snapshot, job).await? else {
+    ) -> Result<Option<RestoreUtf8Construction>> {
+        if !inventory::eligible(self) {
+            return Ok(None);
+        }
+        let Some(geometry) = frame::scan_all(snapshot, job).await? else {
             return Ok(None);
         };
         let Some(deltas) = frame::delta_count(snapshot, &geometry) else {
@@ -510,21 +553,18 @@ impl crate::operator::join::StreamJoinOperator {
         let Some(metadata) = self.metadata_construction(snapshot, job)? else {
             return Ok(None);
         };
-        RestoreSegmentsConstruction::new(self, metadata, &geometry, deltas, job)
+        RestoreUtf8Construction::new(self, metadata, &geometry, deltas, job)
     }
 
-    async fn finish_segments_admission(
+    async fn finish_utf8_admission(
         &mut self,
-        admission: std::result::Result<ObservedTicket<RestoreSegmentsDecision>, AdmissionFailure>,
+        admission: std::result::Result<ObservedTicket<RestoreUtf8Decision>, AdmissionFailure>,
         snapshot: &crate::OperatorStateSnapshot,
         job: &crate::StreamJobContext,
         stop: &GatherStop,
     ) -> Result<bool> {
         match admission {
-            Ok(ticket) => {
-                self.finish_segments_ticket(ticket, snapshot, job, stop)
-                    .await
-            }
+            Ok(ticket) => self.finish_utf8_ticket(ticket, snapshot, job, stop).await,
             Err(AdmissionFailure::Budget {
                 stage: "attempt", ..
             }) => {
@@ -539,41 +579,64 @@ impl crate::operator::join::StreamJoinOperator {
         }
     }
 
-    async fn finish_segments_ticket(
+    async fn finish_utf8_ticket(
         &mut self,
-        ticket: ObservedTicket<RestoreSegmentsDecision>,
+        ticket: ObservedTicket<RestoreUtf8Decision>,
         snapshot: &crate::OperatorStateSnapshot,
         job: &crate::StreamJobContext,
         stop: &GatherStop,
     ) -> Result<bool> {
         let output = ticket.finish().await?;
-        output.install(|decision| self.install_segments_decision(decision, snapshot, job))?;
+        let mut fallback = None;
+        output.install(|decision| {
+            fallback = self.install_utf8_decision(decision, snapshot, job)?;
+            Ok(())
+        })?;
         self.wait_metadata_cleanup(stop, job).await?;
+        if let Some(decision) = fallback {
+            self.install_utf8_fallback(decision, snapshot, job)?;
+        }
         Ok(true)
     }
 
-    fn install_segments_decision(
+    fn install_utf8_decision(
         &mut self,
-        decision: RestoreSegmentsDecision,
+        decision: RestoreUtf8Decision,
+        snapshot: &crate::OperatorStateSnapshot,
+        job: &crate::StreamJobContext,
+    ) -> Result<Option<RestoreUtf8Decision>> {
+        match decision {
+            RestoreUtf8Decision::UseLegacy | RestoreUtf8Decision::Original(_) => Ok(Some(decision)),
+            RestoreUtf8Decision::Prepared(mut prepared) => self
+                .install_restored_rows(
+                    snapshot,
+                    prepared.metadata,
+                    std::mem::take(&mut prepared.left),
+                    std::mem::take(&mut prepared.right),
+                    &|| job.check_cancelled(),
+                )
+                .map(|()| None),
+        }
+    }
+
+    fn install_utf8_fallback(
+        &mut self,
+        decision: RestoreUtf8Decision,
         snapshot: &crate::OperatorStateSnapshot,
         job: &crate::StreamJobContext,
     ) -> Result<()> {
+        job.check_cancelled()?;
         match decision {
-            RestoreSegmentsDecision::UseLegacy => self.restore_metadata_legacy(snapshot, job),
-            RestoreSegmentsDecision::Original(success) => self
-                .install_restored_metadata_with_schemas(
-                    snapshot,
-                    success.metadata,
-                    Some(&success.schemas),
-                    &|| job.check_cancelled(),
-                ),
-            RestoreSegmentsDecision::Prepared(mut prepared) => self.install_restored_rows(
+            RestoreUtf8Decision::UseLegacy => self.restore_metadata_legacy(snapshot, job),
+            RestoreUtf8Decision::Original(success) => self.install_restored_metadata_with_schemas(
                 snapshot,
-                prepared.metadata,
-                std::mem::take(&mut prepared.left),
-                std::mem::take(&mut prepared.right),
+                success.metadata,
+                Some(&success.schemas),
                 &|| job.check_cancelled(),
             ),
+            RestoreUtf8Decision::Prepared(_) => {
+                unreachable!("prepared output installs with its workspace")
+            }
         }
     }
 }
