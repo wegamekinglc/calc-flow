@@ -224,8 +224,15 @@ class BenchmarkWorkflowTests(unittest.TestCase):
         expected = {
             f"scripts.{path.stem}" for path in (ROOT / "scripts").glob("test_*.py")
         }
+        # Shared build collectors must fail PR CI before scheduled preflight.
+        shared = {"scripts.test_release_collectors"}
+        for workflow in (linux, suite):
+            for module in shared:
+                self.assertEqual(workflow.count(module), 1)
         counts = Counter(re.findall(r"scripts\.test_[a-z0-9_]+", linux + suite))
-        self.assertEqual(counts, dict.fromkeys(expected, 1))
+        self.assertEqual(
+            counts, {module: 2 if module in shared else 1 for module in expected}
+        )
 
     def test_retained_script_checks_are_collected_by_unittest(self):
         checks = unittest.defaultTestLoader.loadTestsFromName(
