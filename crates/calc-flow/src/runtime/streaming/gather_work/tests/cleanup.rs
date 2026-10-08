@@ -1,5 +1,241 @@
 use super::*;
 
+#[test]
+fn test_close_and_drain_waits_for_retained_native_pool() {
+    let service = TestService::new(1, 1).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (context, pool, retained) = runtime.block_on(async {
+        let context = job(26, &service);
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1_048_576));
+        let scope = context
+            .gather_owner()
+            .client(GatherOperatorId::new("operator:checkpoint".into()))
+            .scope()
+            .unwrap();
+        let ticket = scope
+            .submit_work(
+                numeric_work(26, &pool),
+                credit(&pool),
+                GatherStop::from_job(&context),
+            )
+            .await
+            .unwrap();
+        drop(ticket.finish().await.unwrap());
+        drop(scope);
+        let retained = context
+            .gather_owner()
+            .0
+            .home
+            .state
+            .lock()
+            .pool
+            .as_ref()
+            .unwrap()
+            .upgrade()
+            .unwrap();
+        (context, pool, retained)
+    });
+    context.gather_owner().close_admission();
+    service.shutdown();
+    let (early, held, reserved, failures) = runtime.block_on(async {
+        let mut drain = Box::pin(context.gather_owner().close_and_drain());
+        let observed = futures::poll!(drain.as_mut());
+        let early = observed.is_ready();
+        let held = pool.reserved();
+        let expected = super::super::HOME_CONTROL_BYTES + retained.credit_size();
+        drop(retained);
+        let failures = match observed {
+            std::task::Poll::Ready(failures) => failures,
+            std::task::Poll::Pending => {
+                tokio::time::timeout(Duration::from_secs(2), drain.as_mut())
+                    .await
+                    .unwrap()
+            }
+        };
+        drop(drain);
+        drop(context);
+        (early, (held, expected), pool.reserved(), failures)
+    });
+    assert!(!early, "drain returned before the native pool was released");
+    assert_eq!(held.0, held.1);
+    assert_eq!(reserved, 0);
+    assert!(failures.is_empty());
+}
+
+#[test]
+fn test_close_and_drain_waits_for_retirement_owner_release() {
+    let service = TestService::new(1, 1).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (early, held, reserved, failures) = runtime.block_on(async {
+        let context = job(27, &service);
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1_048_576));
+        context.gather_owner().0.home.state.lock().control =
+            Some(credit(&pool).split(super::super::HOME_CONTROL_BYTES));
+        let guard = context.gather_owner().retain_retirement().unwrap();
+        let (entered, at_release) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        context
+            .gather_owner()
+            .0
+            .home
+            .state
+            .lock()
+            .retirement_release_probe = Some(Box::new(move || {
+            let _ = entered.send(());
+            let _ = released.recv();
+        }));
+        let dropper = std::thread::spawn(move || drop(guard));
+        tokio::time::timeout(Duration::from_secs(2), at_release)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut drain = Box::pin(context.gather_owner().close_and_drain());
+        let observed = futures::poll!(drain.as_mut());
+        let early = observed.is_ready();
+        let held = pool.reserved();
+        release.send(()).unwrap();
+        let failures = match observed {
+            std::task::Poll::Ready(failures) => failures,
+            std::task::Poll::Pending => {
+                tokio::time::timeout(Duration::from_secs(2), drain.as_mut())
+                    .await
+                    .unwrap()
+            }
+        };
+        drop(drain);
+        dropper.join().unwrap();
+        drop(context);
+        (early, held, pool.reserved(), failures)
+    });
+    drop(runtime);
+    service.shutdown();
+    assert!(
+        !early,
+        "drain returned before the retirement owner was released"
+    );
+    assert_eq!(held, super::super::HOME_CONTROL_BYTES);
+    assert_eq!(reserved, 0);
+    assert!(failures.is_empty());
+}
+
+#[test]
+fn test_close_and_drain_waits_for_generation_owner_release() {
+    for restart_generation in [false, true] {
+        generation_release_case(restart_generation);
+    }
+}
+
+fn generation_release_gate(
+    owner: &super::super::JobGatherOwner,
+) -> (
+    tokio::sync::oneshot::Receiver<()>,
+    std::sync::mpsc::Sender<()>,
+) {
+    let (entered, at_release) = tokio::sync::oneshot::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    owner.0.home.state.lock().generation_release_probe = Some(Box::new(move || {
+        let _ = entered.send(());
+        let _ = released.recv();
+    }));
+    (at_release, release)
+}
+
+fn generation_release_case(restart_generation: bool) {
+    let service = TestService::new(1, 1).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (early, held, reserved, failures) = runtime.block_on(async {
+        let context = job(28, &service);
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1_048_576));
+        let scope = context
+            .gather_owner()
+            .client(GatherOperatorId::new("operator:checkpoint".into()))
+            .scope()
+            .unwrap();
+        let ticket = scope
+            .submit_work(
+                numeric_work(28, &pool),
+                credit(&pool),
+                GatherStop::from_job(&context),
+            )
+            .await
+            .unwrap();
+        drop(ticket.finish().await.unwrap());
+        drop(scope);
+        let owner = context.gather_owner();
+        let (at_release, release) = generation_release_gate(owner);
+        if restart_generation {
+            owner.0.home.state.lock().phase = super::super::PoolPhase::Retiring;
+            owner.0.home.native_changed.notify_all();
+        } else {
+            owner.close_admission();
+        }
+        tokio::time::timeout(Duration::from_secs(2), at_release)
+            .await
+            .unwrap()
+            .unwrap();
+        let release = if restart_generation {
+            let scope = owner
+                .client(GatherOperatorId::new("operator:checkpoint".into()))
+                .scope()
+                .unwrap();
+            let ticket = scope
+                .submit_work(
+                    numeric_work(29, &pool),
+                    credit(&pool),
+                    GatherStop::from_job(&context),
+                )
+                .await
+                .unwrap();
+            drop(ticket.finish().await.unwrap());
+            drop(scope);
+            let (at_release, next_release) = generation_release_gate(owner);
+            owner.close_admission();
+            release.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(2), at_release)
+                .await
+                .unwrap()
+                .unwrap();
+            next_release
+        } else {
+            release
+        };
+        let mut drain = Box::pin(owner.close_and_drain());
+        let observed = futures::poll!(drain.as_mut());
+        let early = observed.is_ready();
+        let held = pool.reserved();
+        release.send(()).unwrap();
+        let failures = match observed {
+            std::task::Poll::Ready(failures) => failures,
+            std::task::Poll::Pending => {
+                tokio::time::timeout(Duration::from_secs(2), drain.as_mut())
+                    .await
+                    .unwrap()
+            }
+        };
+        drop(drain);
+        drop(context);
+        (early, held, pool.reserved(), failures)
+    });
+    drop(runtime);
+    service.shutdown();
+    assert!(
+        !early,
+        "drain returned before the generation owner was released"
+    );
+    assert_eq!(held, super::super::HOME_CONTROL_BYTES);
+    assert_eq!(reserved, 0);
+    assert!(failures.is_empty());
+}
+
 struct GatedCleanupInput {
     input: Option<Arc<FundedInput>>,
     home: std::sync::Weak<super::super::GatherHome>,
