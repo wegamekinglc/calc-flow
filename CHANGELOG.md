@@ -9,6 +9,10 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-08: Include Float32 and Float64 non-key payloads in certified,
+  funded streaming Join managed V1 recovery. Preserve IEEE value bits,
+  existing key support, null fallback, checkpoint bytes and logical fees.
+
 - 2026-10-08: Prepay certified streaming Join managed V1 delta-only recovery,
   including the first dirty checkpoint. Derive carried-delta workspace from
   the actual segment inventory while preserving existing decoding, ownership,

@@ -37,6 +37,14 @@ struct Construction {
 }
 
 pub(in crate::operator::join) fn width(data_type: &DataType) -> Option<usize> {
+    match data_type {
+        DataType::Float32 => Some(4),
+        DataType::Float64 => Some(8),
+        scalar => key_width(scalar),
+    }
+}
+
+pub(in crate::operator::join) fn key_width(data_type: &DataType) -> Option<usize> {
     owned_copy::fixed_width(data_type)
 }
 

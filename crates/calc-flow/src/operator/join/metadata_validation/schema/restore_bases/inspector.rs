@@ -184,6 +184,11 @@ fn type_matches(actual: ipc::Field<'_>, expected: &DataType) -> bool {
             .type_as_int()
             .is_some_and(|integer| integer.bitWidth() == width && integer.is_signed() == signed);
     }
+    if let Some(precision) = float_precision(expected) {
+        return actual
+            .type_as_floating_point()
+            .is_some_and(|float| float.precision() == precision);
+    }
     let DataType::Timestamp(unit, timezone) = expected else {
         return false;
     };
@@ -193,6 +198,14 @@ fn type_matches(actual: ipc::Field<'_>, expected: &DataType) -> bool {
     actual.type_as_timestamp().is_some_and(|timestamp| {
         timestamp.unit() == ipc_unit(*unit) && timestamp.timezone() == timezone.as_deref()
     })
+}
+
+fn float_precision(data_type: &DataType) -> Option<ipc::Precision> {
+    match data_type {
+        DataType::Float32 => Some(ipc::Precision::SINGLE),
+        DataType::Float64 => Some(ipc::Precision::DOUBLE),
+        _ => None,
+    }
 }
 
 fn ipc_unit(unit: TimeUnit) -> ipc::TimeUnit {
@@ -279,4 +292,76 @@ fn record_layout(view: &MessageView<'_>, record: &ipc::RecordBatch<'_>) -> bool 
         && record
             .variadicBufferCounts()
             .is_none_or(|values| values.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::operator::join::{
+        JoinStateLimits, JoinTimeBounds, StreamJoinOperator, StreamJoinSpec,
+    };
+    use std::{sync::Arc, time::Duration};
+
+    fn float_field(builder: &mut flatbuffers::FlatBufferBuilder<'_>, precision: ipc::Precision) {
+        let float = ipc::FloatingPoint::create(builder, &ipc::FloatingPointArgs { precision });
+        let field = ipc::Field::create(
+            builder,
+            &ipc::FieldArgs {
+                type_type: ipc::Type::FloatingPoint,
+                type_: Some(float.as_union_value()),
+                ..Default::default()
+            },
+        );
+        builder.finish(field, None);
+    }
+
+    #[test]
+    fn test_float_precision_and_key_boundaries_remain_exact() {
+        for (precision, expected) in [
+            (ipc::Precision::SINGLE, Some(DataType::Float32)),
+            (ipc::Precision::DOUBLE, Some(DataType::Float64)),
+            (ipc::Precision::HALF, None),
+        ] {
+            let mut builder = flatbuffers::FlatBufferBuilder::new();
+            float_field(&mut builder, precision);
+            let field = flatbuffers::root::<ipc::Field<'_>>(builder.finished_data()).unwrap();
+            for data_type in [DataType::Float32, DataType::Float64] {
+                assert_eq!(
+                    type_matches(field, &data_type),
+                    expected.as_ref() == Some(&data_type)
+                );
+                assert_float_key_rejected(&data_type);
+            }
+        }
+    }
+
+    fn assert_float_key_rejected(data_type: &DataType) {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("key", data_type.clone(), false),
+            Field::new(
+                "time",
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                false,
+            ),
+        ]));
+        assert!(super::super::inventory::key_bytes(&schema, &[0]).is_none());
+        assert!(crate::operator::join::columnar::restored::key_width(data_type).is_none());
+        let spec = StreamJoinSpec::inner(
+            ["key"],
+            ["key"],
+            "time",
+            "time",
+            JoinTimeBounds::new(Duration::ZERO, Duration::ZERO).unwrap(),
+            JoinStateLimits::new(10, 10_000, 10).unwrap(),
+        )
+        .unwrap();
+        let error = StreamJoinOperator::new("match", Arc::clone(&schema), schema, spec)
+            .expect_err("float Join keys remain unsupported");
+        assert!(matches!(&error, crate::CalcFlowError::Compile { .. }));
+        assert!(
+            error
+                .to_string()
+                .contains("key pair 0 requires identical supported Arrow types")
+        );
+    }
 }
