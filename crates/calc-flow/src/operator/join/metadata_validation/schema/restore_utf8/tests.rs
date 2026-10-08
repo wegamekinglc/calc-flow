@@ -144,6 +144,231 @@ fn row_ipc(record: &RecordBatch) -> Vec<u8> {
     writer.into_inner().unwrap()
 }
 
+fn mixed_snapshot() -> OperatorStateSnapshot {
+    use crate::operator::join::{JoinSide, PendingOp};
+    let base = snapshot(&mut operator());
+    let mut source = operator();
+    source.restore(&base).unwrap();
+    let added = row(&source, 3, "猫🙃🙂");
+    let mut left = source.state.left.iter().cloned().collect::<Vec<_>>();
+    left.push(added.clone());
+    source.state.left = left.into();
+    source.state.next_left_row_id = 4;
+    source.state.metrics.left.retained_rows = 4;
+    source.state.metrics.left.retained_bytes = source.state.left.iter().map(|row| row.charge).sum();
+    source.state.deltas.pending.push(PendingOp::Upsert {
+        side: JoinSide::Left,
+        row_id: added.row_id,
+        event_time: added.event_time,
+        encoded_key: added.encoded_key,
+        record: added.record,
+        charge: added.charge,
+    });
+    let mixed = source.checkpoint(Epoch::new(8).unwrap()).unwrap();
+    assert_eq!(mixed.segments.len(), 3);
+    for side in ["left", "right"] {
+        let segment = &mixed.segments[&format!("{side}-base")];
+        assert!(segment.bytes().starts_with(b"CFJOIN1\0"));
+        assert_eq!(
+            segment.bytes(),
+            base.segments[&format!("{side}-base")].bytes()
+        );
+    }
+    let delta = mixed.segments["left-delta-8"].bytes();
+    assert!(delta.starts_with(b"CFJDLT1\0"));
+    assert_eq!(u64::from_le_bytes(delta[8..16].try_into().unwrap()), 1);
+    mixed
+}
+
+fn assert_mixed_rows(target: &StreamJoinOperator) {
+    let long = "猫🙂".repeat(256);
+    for (rows, symbols) in [
+        (
+            &target.state.left,
+            vec!["", "猫🙂", long.as_str(), "猫🙃🙂"],
+        ),
+        (&target.state.right, vec!["猫🙂"]),
+    ] {
+        assert_eq!(rows.len(), symbols.len());
+        for (id, symbol) in symbols.into_iter().enumerate() {
+            let id = u64::try_from(id).unwrap();
+            let actual = rows.iter().find(|row| row.row_id == id).unwrap();
+            let expected = row(target, id, symbol);
+            let view = actual.record.view();
+            assert_eq!(
+                view.column(0)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap()
+                    .value(0),
+                symbol
+            );
+            assert_eq!(
+                view.column(1)
+                    .as_any()
+                    .downcast_ref::<TimestampMicrosecondArray>()
+                    .unwrap()
+                    .value(0),
+                10
+            );
+            assert_eq!(
+                view.column(2)
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap()
+                    .value(0)
+                    .to_bits(),
+                (-0.0_f64).to_bits()
+            );
+            assert_eq!(actual.event_time, expected.event_time);
+            assert_eq!(actual.charge, expected.charge);
+            assert_eq!(
+                actual.encoded_key.as_slice(),
+                expected.encoded_key.as_slice()
+            );
+            assert!(actual.record.funded_owner().unwrap().1 > 0);
+        }
+    }
+    assert_eq!(
+        (
+            target.state.next_left_row_id,
+            target.state.next_right_row_id
+        ),
+        (4, 1)
+    );
+}
+
+fn mixed_work(
+    construction: &mut RestoreUtf8Construction,
+) -> (
+    RestoreUtf8Work,
+    Arc<std::sync::atomic::AtomicUsize>,
+    Arc<std::sync::atomic::AtomicUsize>,
+) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let readers = Arc::new(AtomicUsize::new(0));
+    let residents = Arc::new(AtomicUsize::new(0));
+    let observed_readers = Arc::clone(&readers);
+    let observed_residents = Arc::clone(&residents);
+    let mut work = work(construction);
+    work.hook = Some(Arc::new(move |credit, owner, copied, owned_work| {
+        assert!(owned_work);
+        assert!(credit.unwrap().size() > 0);
+        if copied {
+            assert!(owner.unwrap().1 > 0);
+            observed_residents.fetch_add(1, Ordering::Relaxed);
+        } else {
+            observed_readers.fetch_add(1, Ordering::Relaxed);
+        }
+    }));
+    (work, readers, residents)
+}
+
+#[test]
+fn test_utf8_mixed_bases_delta_preserve_rows_installation_and_last_buffer_credit() {
+    let service = TestService::new(1, 1).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(check_mixed_restore(&service));
+    drop(runtime);
+    service.shutdown();
+}
+
+async fn check_mixed_restore(service: &TestService) {
+    use std::sync::atomic::Ordering;
+    let snapshot = mixed_snapshot();
+    let unchanged = snapshot.clone();
+    let mut target = operator();
+    let job = job(service, CancellationToken::new());
+    let pool = pool(&target);
+    let mut construction = construction(&target, &snapshot, &job);
+    assert!(construction.copy(&target, &snapshot, &job).await.unwrap());
+    let (work, readers, residents) = mixed_work(&mut construction);
+    let mut decision = None;
+    let measured = allocation_counter::measure(|| {
+        decision = Some(
+            work.run(construction.schema.metadata.control.stop.as_ref().unwrap())
+                .unwrap(),
+        );
+    });
+    let paid = pool.reserved();
+    assert!(matches!(decision, Some(RestoreUtf8Decision::Prepared(_))));
+    assert_eq!(readers.load(Ordering::Relaxed), 5);
+    assert_eq!(residents.load(Ordering::Relaxed), 5);
+    let tail = allocation_counter::measure(|| {
+        target
+            .install_utf8_decision(decision.take().unwrap(), &snapshot, &job)
+            .unwrap();
+    });
+    assert!(
+        measured.bytes_total + tail.bytes_total <= paid as u64,
+        "{measured:?}/{tail:?}; paid={paid}"
+    );
+    println!("mixed Utf8 reader/key/fold/install requests {measured:?}/{tail:?}; paid={paid}");
+    assert_mixed_rows(&target);
+    assert_eq!(target.state.last_checkpoint_epoch, Epoch::new(8));
+    assert_eq!(snapshot.inline_metadata, unchanged.inline_metadata);
+    for (id, segment) in &snapshot.segments {
+        assert_eq!(segment.bytes(), unchanged.segments[id].bytes());
+    }
+    let mut original = operator();
+    original.restore(&snapshot).unwrap();
+    assert_eq!(target.status(), original.status());
+    let next = target.checkpoint(Epoch::new(9).unwrap()).unwrap();
+    let expected = original.checkpoint(Epoch::new(9).unwrap()).unwrap();
+    assert_eq!(next.inline_metadata, expected.inline_metadata);
+    assert_eq!(next.segments.len(), expected.segments.len());
+    for (id, segment) in &next.segments {
+        assert_eq!(segment.bytes(), expected.segments[id].bytes());
+    }
+    drop(next);
+    drop(expected);
+    drop(original);
+    drop(construction);
+    check_mixed_last_buffers(target, job).await;
+}
+
+async fn check_mixed_last_buffers(target: StreamJoinOperator, job: StreamJobContext) {
+    let pool = pool(&target);
+    let row = target
+        .state
+        .left
+        .iter()
+        .find(|row| row.row_id == 3)
+        .unwrap();
+    let paid = row.record.funded_owner().unwrap().1;
+    let weak = Arc::downgrade(row.record.schema_ref());
+    let view = row.record.view();
+    let data = view.column(0).to_data();
+    let offsets = data.buffers()[0].clone();
+    let values = data.buffers()[1].clone();
+    assert_eq!(offsets.len(), 8);
+    assert_eq!(
+        i32::from_ne_bytes(offsets.as_slice()[4..8].try_into().unwrap()),
+        i32::try_from("猫🙃🙂".len()).unwrap()
+    );
+    assert_eq!(values.as_slice(), "猫🙃🙂".as_bytes());
+    drop(data);
+    drop(view);
+    drop(target);
+    assert_eq!(pool.reserved(), paid);
+    {
+        let mut drain = std::pin::pin!(job.gather_owner().close_and_drain());
+        assert!(std::future::poll_fn(|cx| Poll::Ready(drain.as_mut().poll(cx).is_pending())).await);
+        drop(offsets);
+        assert_eq!(pool.reserved(), paid);
+        assert!(weak.upgrade().is_some());
+        assert_eq!(values.as_slice(), "猫🙃🙂".as_bytes());
+        drop(values);
+        drain.await;
+    }
+    assert!(weak.upgrade().is_none());
+    drop(job);
+    assert_eq!(pool.reserved(), 0);
+}
+
 #[test]
 fn test_utf8_full_bases_fund_variable_keys_and_complete_installation() {
     let service = TestService::new(1, 1).unwrap();

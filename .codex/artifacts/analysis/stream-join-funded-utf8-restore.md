@@ -48,7 +48,13 @@ own resident lease. Four direct controls cover original-reader compatibility,
 variable allocation/install overlap, last offset/value owners and refusal/stop
 cleanup. Allocation totals are requested bytes for these controls, not RSS.
 
+A mixed-inventory control uses the original checkpoint encoder to create two
+bases and one Utf8 upsert delta. It checks all five rows, reader/copy counts,
+complete installation requests, subsequent V1 capture parity and the delta row's
+last offset/value Buffer refund. Its direct Work invocation does not establish
+native-thread dispatch; the Managed consumer supplies that separate evidence.
+
 No performance measurement has run. The maintained interval recovery recipe is
 only a proposed later direct-path measurement; its admission still needs actual
-confirmation. Generic/nested, nullable, LargeUtf8/Utf8View, V2 and terminal scopes
-remain separate implementation and source gates.
+confirmation. Generic/nested, arrays with null values, LargeUtf8/Utf8View, V2 and
+terminal scopes remain separate implementation and source gates.
