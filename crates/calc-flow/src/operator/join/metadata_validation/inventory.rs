@@ -63,7 +63,7 @@ fn stop_controls() -> Option<usize> {
     checked_sum(&[80, arc_bytes(20)?, arc_bytes(size_of::<bool>())?])
 }
 
-fn registration_controls() -> Option<usize> {
+pub(super) fn registration_controls() -> Option<usize> {
     let registration = size_of::<MemoryConsumer>() + size_of::<Arc<dyn MemoryPool>>() + ARC_HEADER;
     let label = "sql-incremental:stream-join-metadata".len();
     registration.checked_add(3 * label)
