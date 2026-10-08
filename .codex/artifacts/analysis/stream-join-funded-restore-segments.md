@@ -4,7 +4,8 @@ Normal managed Join recovery optionally prepays certified scalar CFJOIN1 bases
 and CFJDLT1 history on the existing owned native worker. The original metadata
 parser, checked IPC decoder, fold order and installation tail remain authoritative.
 Fresh payload owners retain independent credit through surviving Arrow buffers.
-Independent source review and required CI gate every published head. This slice
+Final connected source review gates publication. Required CI, coverage,
+Codacy and review resolution gate merge for every published head. This slice
 makes no timing, RSS, generic decoded-state, V2 or terminal-recovery claim.
 
 The baseline is merged main `a4c14e65ebcc6cd04015274b7fd30cdfe5c2be9a`, tree
@@ -150,8 +151,9 @@ The affected Managed exact test passed after the observer extraction (runtime
 case passed using that same just-built binary, with unchanged requested totals.
 The other three unchanged controls were not rerun. Five unique cases are green.
 Local Lizard reports 84 new functions, maximum CCN 8; this is not a remote
-Codacy verdict. Format, contracts and whitespace checks pass. Full CI and
-final connected specialist review remain the publication gates.
+Codacy verdict. Format, contracts and whitespace checks pass. Final connected
+source review gates publication; required CI, coverage, Codacy and review
+resolution gate merge for every published head.
 
 No full workspace, full coverage, benchmark, V2 writer, migration, generic IPC
 expansion or terminal dispatcher is part of this change.
