@@ -9,6 +9,10 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-09: Include non-null Boolean non-key payloads in funded streaming
+  Join managed V1 recovery. Preserve packed value bytes and valid padding,
+  original key support, null fallback, checkpoint bytes and logical charges.
+
 - 2026-10-08: Prepay certified non-null Utf8 payload and key recovery for
   streaming Join managed V1 checkpoints. Native verification and decoding
   retain independent workspace, while fresh offsets and values keep their
