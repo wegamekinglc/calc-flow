@@ -400,6 +400,154 @@ fn test_healthy_closed_metadata_admission_uses_original_restore() {
     service.shutdown();
 }
 
+struct RegistrationBlocker {
+    entered: tokio::sync::oneshot::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+}
+
+impl OwnedCpuWork for RegistrationBlocker {
+    type Output = ();
+
+    fn run(self, _: &GatherStop) -> Result<()> {
+        self.entered.send(()).unwrap();
+        self.release.recv_timeout(Duration::from_secs(10)).unwrap();
+        Ok(())
+    }
+}
+
+fn post_install_refund_probe(
+    operator: &mut StreamJoinOperator,
+    job: &StreamJobContext,
+) -> (Arc<AtomicUsize>, Arc<AtomicUsize>) {
+    let copies = Arc::new(AtomicUsize::new(0));
+    let parses = Arc::new(AtomicUsize::new(0));
+    let observed_copies = Arc::clone(&copies);
+    let observed_parses = Arc::clone(&parses);
+    let pool = operator
+        .runtime
+        .runtime
+        .as_ref()
+        .unwrap()
+        .incremental_memory_pool();
+    let owner = job.gather_owner().clone();
+    operator.metadata_test_hook = Some(Arc::new(move |credit, parsing| {
+        if parsing {
+            let (home, generation, attempt) = owner.funding();
+            assert_eq!((generation, attempt), (0, 0));
+            assert_eq!(
+                pool.reserved(),
+                home + inventory::caller_controls("match").unwrap()
+            );
+            observed_parses.fetch_add(1, Ordering::Relaxed);
+        } else if let Some(credit) = credit {
+            assert!(credit.size() > 0);
+            observed_copies.fetch_add(1, Ordering::Relaxed);
+        }
+    }));
+    (copies, parses)
+}
+
+#[test]
+fn test_healthy_home_close_after_metadata_attempt_install_refunds_then_restores() {
+    use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryConsumer, MemoryPool};
+    let service = TestService::new(1, 1).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let blocker_pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1_048_576));
+    let mut operator = initialized_operator();
+    let snapshot = valid_snapshot(&mut operator);
+    operator.state.last_checkpoint_epoch = None;
+    let original = snapshot.inline_metadata.clone();
+    let blocker_job = job(&service);
+    let job = job(&service);
+    let pool = operator
+        .runtime
+        .runtime
+        .as_ref()
+        .unwrap()
+        .incremental_memory_pool();
+    let (copies, parses) = post_install_refund_probe(&mut operator, &job);
+    let result = runtime.block_on(async {
+        let blocker_scope = blocker_job
+            .gather_owner()
+            .client(GatherOperatorId::new("blocker".into()))
+            .scope()
+            .unwrap();
+        let credit = MemoryConsumer::new("metadata-registration-blocker").register(&blocker_pool);
+        credit.try_grow(4_096).unwrap();
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let blocker = blocker_scope
+            .submit_work(
+                RegistrationBlocker {
+                    entered,
+                    release: wait,
+                },
+                credit,
+                GatherStop::from_job(&blocker_job),
+            )
+            .await
+            .unwrap();
+        started.await.unwrap();
+        let mut restore = Box::pin(operator.restore_managed_metadata(&snapshot, &job, None));
+        for _ in 0..24 {
+            assert!(futures::poll!(restore.as_mut()).is_pending());
+            if service.waiting_requests() == 1 {
+                break;
+            }
+        }
+        let (home, generation, attempt) = job.gather_owner().funding();
+        assert!(
+            attempt > 0,
+            "metadata attempt must be installed before closing its home"
+        );
+        assert_eq!(
+            generation, 0,
+            "metadata must still await native registration"
+        );
+        assert_eq!(service.waiting_requests(), 1);
+        assert!(pool.reserved() > home + attempt);
+        job.check_cancelled().unwrap();
+        job.gather_owner().close_admission();
+        release.send(()).unwrap();
+        drop(blocker.finish().await.unwrap());
+        assert!(
+            blocker_job
+                .gather_owner()
+                .close_and_drain()
+                .await
+                .is_empty()
+        );
+        let result = restore.await;
+        job.check_cancelled().unwrap();
+        assert!(job.gather_owner().close_and_drain().await.is_empty());
+        result
+    });
+    eprintln!(
+        "post-install healthy close restore={result:?}, copy={}, parse={}",
+        copies.load(Ordering::Relaxed),
+        parses.load(Ordering::Relaxed)
+    );
+    result.unwrap();
+    assert!(operator.compaction_cleanup.is_none());
+    assert_eq!(operator.state.last_checkpoint_epoch, Epoch::new(7));
+    assert_eq!(copies.load(Ordering::Relaxed), 1);
+    assert_eq!(parses.load(Ordering::Relaxed), 1);
+    assert_eq!(snapshot.inline_metadata, original);
+    let (home, generation, attempt) = blocker_job.gather_owner().funding();
+    assert_eq!(attempt, 0);
+    assert_eq!(blocker_pool.reserved(), home + generation);
+    drop(operator);
+    drop(job);
+    drop(blocker_job);
+    drop(runtime);
+    service.shutdown();
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(blocker_pool.reserved(), 0);
+}
+
 #[test]
 fn test_last_stop_check_prevents_restore_assignment() {
     let service = TestService::new(1, 1).unwrap();
@@ -471,7 +619,7 @@ fn test_metadata_output_refund_keeps_late_caller_controls_funded() {
             })
             .unwrap();
         operator
-            .wait_metadata_cleanup(construction.control.stop.as_ref().unwrap())
+            .wait_metadata_cleanup(construction.control.stop.as_ref().unwrap(), &job)
             .await
             .unwrap();
         let (home, generation, attempt) = job.gather_owner().funding();

@@ -262,23 +262,27 @@ impl StreamJoinOperator {
                         .install_restored_metadata(snapshot, metadata, &|| job.check_cancelled()),
                     None => self.restore_metadata_legacy(snapshot, job),
                 })?;
-                self.wait_metadata_cleanup(stop).await
+                self.wait_metadata_cleanup(stop, job).await
             }
             Err(
                 AdmissionFailure::Budget { .. }
                 | AdmissionFailure::Runtime(crate::CalcFlowError::Cancelled { .. }),
             ) => {
                 job.check_cancelled()?;
-                self.wait_metadata_cleanup(stop).await?;
+                self.wait_metadata_cleanup(stop, job).await?;
                 self.restore_metadata_legacy(snapshot, job)
             }
             Err(AdmissionFailure::Runtime(error)) => Err(error),
         }
     }
 
-    async fn wait_metadata_cleanup(&mut self, stop: &GatherStop) -> Result<()> {
+    async fn wait_metadata_cleanup(
+        &mut self,
+        stop: &GatherStop,
+        job: &StreamJobContext,
+    ) -> Result<()> {
         if let Some(cleanup) = &self.compaction_cleanup {
-            cleanup.wait(stop).await?;
+            cleanup.wait_job(stop, job).await?;
         }
         self.compaction_cleanup = None;
         Ok(())

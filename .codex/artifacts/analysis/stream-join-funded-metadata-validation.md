@@ -90,8 +90,9 @@ work credit and retirement. Every partial copy across a yield stays inside this
 owned carrier. Complete work moves into the existing ObservedSubmission before
 its first admission await. The existing observed path stores AttemptCleanup in
 the operator immediately after successful attempt installation and before
-`ensure_pool` can await. The private Gather change only re-exports ObservedTicket;
-it does not change the cleanup protocol or native execution structures.
+`ensure_pool` can await. The private Gather changes re-export ObservedTicket and
+add a job-only cleanup check over the existing release loop. Ordinary attempt
+cleanup and native execution structures retain their existing behavior.
 
 The worker invokes the original parser/compatibility function once. Its input,
 specification and any temporary parser diagnostics die while work credit remains
@@ -113,6 +114,16 @@ stop check. New work is really destroyed/refunded before the original reader is
 used. Actual cancellation/deadline and non-budget runtime errors propagate.
 There is no sleep, timeout increase, constant subtraction or silent second
 metadata parse on the successful path.
+
+After an attempt is installed, healthy home closure marks that attempt's shared
+stop as abandoned. This is not actual job cancellation. Metadata cleanup now
+borrows the already prepaid stop for cancellation/deadline notification and
+checks the actual job context before and during the original slot/refund wait.
+It still requires the attempt to leave Active/Parked/Dropping and the actual
+credit-release marker before clearing the observer or starting Legacy restore.
+The ordinary cleanup method continues to check attempt abandonment. No new stop,
+Arc, credit component, execution fee or heap allocation is added by this checker;
+the check closure and wait remain concrete borrowed async values.
 
 ## Local evidence and limitations
 
@@ -186,3 +197,31 @@ is intentionally finite. Other key counts, error grammars and shapes keep the
 existing reader, so this is not a full metadata/IPC optimization certificate.
 Full CI, coverage and cross-platform acceptance are not claimed by local checks.
 No performance case was run for this safety tranche.
+
+## Post-install admission-close correction
+
+Remote review identified a gap after attempt installation and before native
+registration. The earlier healthy-close control only closed admission before
+installation. A new exact test occupies the private native service's sole
+registration with an actually running work item, observes metadata attempt
+funding with generation zero and a queued registration, then closes only the
+healthy metadata home. Before the fix, one test fails with `Cancelled`, one copy
+and zero Legacy parser calls. The actual job remains healthy. This is a behavior
+RED, unlike the preserved fixture qualification compile errors.
+
+The corrected path must refund the installed attempt before the Legacy parser:
+the parser hook checks attempt/generation zero and the pool's exact remaining
+home plus prepaid caller-control funding. Original metadata, restored epoch,
+one parser call and final pool zero after true service teardown remain asserted.
+Direct cleanup controls also retain an actual 4,096-byte escaping output while
+the job-only wait is Pending or returns actual cancellation/deadline, and preserve
+the ordinary abandoned-attempt rejection. Revision checks and provenance are
+recorded separately under `target/issue363-join-metadata-validation-v4`; historical
+V1/V2/V3 evidence is unchanged. This correction adds no performance claim.
+
+The post-install regression and eight directly related exact controls pass
+(nine unique tests). They cover actual refund, ordinary abandonment rejection,
+job cancellation/deadline, gated worker cancellation, budget refusal,
+pre-install healthy closure, last-stop nonassignment, late caller funding and
+the real Managed restart. Unchanged copy/parser allocation, nested-metrics and
+V1/Legacy/entry-ack/status checks retain their earlier recorded scope.

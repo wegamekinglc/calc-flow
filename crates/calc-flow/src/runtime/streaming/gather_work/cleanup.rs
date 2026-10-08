@@ -13,7 +13,7 @@ use super::{
     AdmissionResult, GatherHome, GatherScope, GatherStop, OwnedCpuWork, RetirementGuard, Slot,
     WorkAdapter, WorkTicket, cancelled,
 };
-use crate::Result;
+use crate::{Result, StreamJobContext};
 
 pub(crate) struct AttemptCleanup {
     home: Weak<GatherHome>,
@@ -180,7 +180,15 @@ impl<T: Send + 'static> ObservedTicket<T> {
 
 impl AttemptCleanup {
     pub(crate) async fn wait(&self, stop: &GatherStop) -> Result<()> {
-        stop.check()?;
+        self.wait_checked(stop, || stop.check()).await
+    }
+
+    pub(crate) async fn wait_job(&self, stop: &GatherStop, job: &StreamJobContext) -> Result<()> {
+        self.wait_checked(stop, || job.check_cancelled()).await
+    }
+
+    async fn wait_checked(&self, stop: &GatherStop, check: impl Fn() -> Result<()>) -> Result<()> {
+        check()?;
         let home = self.home.upgrade();
         loop {
             let refunded = self.released.changed.notified();
@@ -191,14 +199,8 @@ impl AttemptCleanup {
             if let Some(notification) = notification.as_mut().as_pin_mut() {
                 notification.enable();
             }
-            stop.check()?;
-            let active = home
-                .as_ref()
-                .is_some_and(|home| match &home.state.lock().slot {
-                    Slot::Active(record) | Slot::Parked(record) => record.id == self.attempt,
-                    Slot::Dropping(id) => *id == self.attempt,
-                    Slot::Empty => false,
-                });
+            check()?;
+            let active = self.is_active(home.as_ref());
             if !active && self.released.refunded.load(Ordering::Acquire) {
                 return Ok(());
             }
@@ -214,6 +216,14 @@ impl AttemptCleanup {
                 () = stop.wait() => {},
             }
         }
+    }
+
+    fn is_active(&self, home: Option<&Arc<GatherHome>>) -> bool {
+        home.is_some_and(|home| match &home.state.lock().slot {
+            Slot::Active(record) | Slot::Parked(record) => record.id == self.attempt,
+            Slot::Dropping(id) => *id == self.attempt,
+            Slot::Empty => false,
+        })
     }
 }
 
@@ -243,7 +253,7 @@ mod tests {
             attempt: 1,
             released: released.clone(),
         };
-        let job = crate::StreamJobContext::new(
+        let job = StreamJobContext::new(
             1,
             "expired-home",
             crate::JsonMap::new(),
@@ -281,5 +291,67 @@ mod tests {
             Future::poll(wait.as_mut(), &mut context),
             std::task::Poll::Ready(Ok(()))
         ));
+    }
+
+    #[test]
+    fn job_only_wait_preserves_credit_and_actual_cancel_or_deadline() {
+        for deadline in [
+            None,
+            Some(chrono::Utc::now() - chrono::Duration::seconds(1)),
+        ] {
+            let job = StreamJobContext::new(
+                2,
+                "job-only-cleanup",
+                crate::JsonMap::new(),
+                deadline,
+                CancellationToken::new(),
+            );
+            let stop = GatherStop::from_job(&job);
+            stop.abandon();
+            let released = Arc::new(ReleaseSignal {
+                refunded: AtomicBool::new(false),
+                changed: Notify::new(),
+            });
+            let observer = AttemptCleanup {
+                home: Weak::new(),
+                attempt: 2,
+                released: released.clone(),
+            };
+            let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(4_096));
+            let credit = MemoryConsumer::new("job-only-cleanup-output").register(&pool);
+            credit.try_grow(4_096).unwrap();
+            let funded = TrackedCredit {
+                _credit: credit,
+                _release: CreditRelease {
+                    home: Weak::new(),
+                    released,
+                    _retirement: job.gather_owner().retain_retirement().unwrap(),
+                },
+            };
+            let waker = std::task::Waker::from(Arc::new(WakeCount::default()));
+            let mut context = std::task::Context::from_waker(&waker);
+            let mut ordinary = Box::pin(observer.wait(&stop));
+            assert!(matches!(
+                ordinary.as_mut().poll(&mut context),
+                std::task::Poll::Ready(Err(crate::CalcFlowError::Cancelled { .. }))
+            ));
+            let mut wait = Box::pin(observer.wait_job(&stop, &job));
+            if deadline.is_none() {
+                assert!(wait.as_mut().poll(&mut context).is_pending());
+                assert_eq!(pool.reserved(), 4_096);
+                job.cancellation().cancel();
+            }
+            assert!(matches!(
+                wait.as_mut().poll(&mut context),
+                std::task::Poll::Ready(Err(crate::CalcFlowError::Cancelled { run_id })) if run_id == "2"
+            ));
+            assert_eq!(
+                pool.reserved(),
+                4_096,
+                "stop must not release an escaping output"
+            );
+            drop(funded);
+            assert_eq!(pool.reserved(), 0);
+        }
     }
 }
