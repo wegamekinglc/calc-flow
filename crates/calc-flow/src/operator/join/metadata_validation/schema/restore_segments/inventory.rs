@@ -17,6 +17,7 @@ pub(super) struct Bounds {
 
 pub(super) fn required(
     geometry: &frame::Geometry,
+    deltas: usize,
     schemas: [&Schema; 2],
     keys: [&[usize]; 2],
     name: &str,
@@ -27,7 +28,7 @@ pub(super) fn required(
         columnar::restored::required(schemas[1], registration)?,
     ];
     let input = input_bytes(geometry, keys, name)?;
-    let workspace = workspace_bytes(geometry, schemas, keys, name)?;
+    let workspace = workspace_bytes(geometry, deltas, schemas, keys, name)?;
     std::alloc::Layout::from_size_align(input, align_of::<usize>()).ok()?;
     std::alloc::Layout::from_size_align(workspace, align_of::<usize>()).ok()?;
     Some(Bounds {
@@ -61,6 +62,7 @@ fn input_bytes(geometry: &frame::Geometry, keys: [&[usize]; 2], name: &str) -> O
 
 fn workspace_bytes(
     geometry: &frame::Geometry,
+    deltas: usize,
     schemas: [&Schema; 2],
     keys: [&[usize]; 2],
     name: &str,
@@ -70,7 +72,7 @@ fn workspace_bytes(
         base::side_fold(geometry.rows[0], schemas[0], keys[0]),
         base::side_fold(geometry.rows[1], schemas[1], keys[1]),
         delta_workspace(geometry),
-        tail_workspace(geometry, schemas, keys),
+        tail_workspace(geometry, deltas, schemas, keys),
         base::diagnostic_bytes(name),
         delta_diagnostics(name),
         Some(size_of::<RestoreSegmentsWork>()),
@@ -114,6 +116,7 @@ fn delta_workspace(geometry: &frame::Geometry) -> Option<usize> {
 
 fn tail_workspace(
     geometry: &frame::Geometry,
+    deltas: usize,
     schemas: [&Schema; 2],
     keys: [&[usize]; 2],
 ) -> Option<usize> {
@@ -124,14 +127,8 @@ fn tail_workspace(
     sum(&[
         base::installation_bytes(rows, geometry.rows),
         Some(key),
-        geometry
-            .segments
-            .checked_sub(2)
-            .and_then(base::tree::<(u64, &'static str), StateSegment>),
-        geometry
-            .segments
-            .checked_sub(2)
-            .and_then(|count| count.checked_mul(64)),
+        base::tree::<(u64, &'static str), StateSegment>(deltas),
+        deltas.checked_mul(64),
         base::vector_peak::<(&str, crate::operator::join::SegmentKind)>(geometry.segments),
         base::vector_peak::<(&str, &crate::operator::join::SegmentKind, &StateSegment)>(
             geometry.segments,

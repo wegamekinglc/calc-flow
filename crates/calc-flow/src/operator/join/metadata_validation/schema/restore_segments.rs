@@ -298,6 +298,7 @@ impl RestoreSegmentsConstruction {
         operator: &crate::operator::join::StreamJoinOperator,
         metadata: super::super::Construction,
         geometry: &frame::Geometry,
+        deltas: usize,
         job: &crate::StreamJobContext,
     ) -> Result<Option<Self>> {
         let Some(schema) = SchemaConstruction::new(operator, metadata, job)? else {
@@ -305,6 +306,7 @@ impl RestoreSegmentsConstruction {
         };
         let Some(bounds) = inventory::required(
             geometry,
+            deltas,
             [operator.input_schema(0), operator.input_schema(1)],
             [
                 &operator.compiled.left_key_indices,
@@ -502,10 +504,13 @@ impl crate::operator::join::StreamJoinOperator {
         let Some(geometry) = frame::scan(snapshot, job).await? else {
             return Ok(None);
         };
+        let Some(deltas) = frame::delta_count(snapshot, &geometry) else {
+            return Ok(None);
+        };
         let Some(metadata) = self.metadata_construction(snapshot, job)? else {
             return Ok(None);
         };
-        RestoreSegmentsConstruction::new(self, metadata, &geometry, job)
+        RestoreSegmentsConstruction::new(self, metadata, &geometry, deltas, job)
     }
 
     async fn finish_segments_admission(

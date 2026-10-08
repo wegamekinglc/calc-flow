@@ -423,8 +423,10 @@ async fn check_resident_refusal(service: &TestService) {
         super::super::inventory::required([target.input_schema(0), target.input_schema(1)])
             .unwrap();
     let job = job(service, CancellationToken::new());
+    let geometry = poll_copy(frame::scan(&snapshot, &job)).unwrap().unwrap();
     let bounds = inventory::required(
-        &poll_copy(frame::scan(&snapshot, &job)).unwrap().unwrap(),
+        &geometry,
+        frame::delta_count(&snapshot, &geometry).unwrap(),
         [target.input_schema(0), target.input_schema(1)],
         [
             &target.compiled.left_key_indices,

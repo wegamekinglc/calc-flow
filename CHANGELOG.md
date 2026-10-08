@@ -9,6 +9,11 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-08: Prepay certified streaming Join managed V1 delta-only recovery,
+  including the first dirty checkpoint. Derive carried-delta workspace from
+  the actual segment inventory while preserving existing decoding, ownership,
+  checkpoint bytes and optional refusal routes.
+
 - 2026-10-08: Prepay streaming Join managed V1 base-plus-delta decoding and
   the checked installation tail. Certified scalar payloads keep independent
   funding after fold and through surviving Arrow buffers; original segment
