@@ -1,4 +1,5 @@
 mod asof_tests;
+mod restore_bases_tests;
 mod sql_recovery_tests;
 
 use std::{

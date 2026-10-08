@@ -2880,6 +2880,8 @@ pub struct StreamJoinOperator {
     metadata_test_hook: Option<MetadataTestHook>,
     #[cfg(test)]
     schema_test_hook: Option<SchemaTestHook>,
+    #[cfg(test)]
+    decoded_row_test_hook: Option<DecodedRowTestHook>,
 }
 
 const MAX_RETAINED_KEY_CACHE_BYTES_PER_SIDE: usize = 32 * 1024 * 1024;
@@ -3279,6 +3281,17 @@ type MetadataTestHook =
 #[cfg(test)]
 type SchemaTestHook = MetadataTestHook;
 
+#[cfg(test)]
+type DecodedRowTestHook = Arc<
+    dyn Fn(
+            Option<&datafusion::execution::memory_pool::MemoryReservation>,
+            Option<(usize, usize)>,
+            bool,
+            bool,
+        ) + Send
+        + Sync,
+>;
+
 #[derive(Clone, Copy)]
 struct RestoreSchema<'a> {
     schema: &'a Schema,
@@ -3286,6 +3299,12 @@ struct RestoreSchema<'a> {
     hook: Option<&'a SchemaTestHook>,
     #[cfg(test)]
     credit: Option<&'a datafusion::execution::memory_pool::MemoryReservation>,
+    #[cfg(test)]
+    decoded_row_hook: Option<&'a DecodedRowTestHook>,
+    #[cfg(test)]
+    decoded_row_credit: Option<&'a datafusion::execution::memory_pool::MemoryReservation>,
+    #[cfg(test)]
+    decoded_owned_work: bool,
 }
 
 mod checkpoint_compaction;
@@ -3378,6 +3397,8 @@ impl StreamJoinOperator {
             metadata_test_hook: None,
             #[cfg(test)]
             schema_test_hook: None,
+            #[cfg(test)]
+            decoded_row_test_hook: None,
         })
     }
 
@@ -3389,6 +3410,11 @@ impl StreamJoinOperator {
     #[cfg(test)]
     pub(crate) fn set_checkpoint_schema_test_hook(&mut self, hook: SchemaTestHook) {
         self.schema_test_hook = Some(hook);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_checkpoint_decoded_row_test_hook(&mut self, hook: DecodedRowTestHook) {
+        self.decoded_row_test_hook = Some(hook);
     }
 
     /// Returns the immutable Join declaration.
@@ -4322,6 +4348,12 @@ impl StreamJoinOperator {
             hook: self.schema_test_hook.as_ref(),
             #[cfg(test)]
             credit: schemas.map(metadata_validation::schema::OwnedExpectedSchemas::credit),
+            #[cfg(test)]
+            decoded_row_hook: self.decoded_row_test_hook.as_ref(),
+            #[cfg(test)]
+            decoded_row_credit: None,
+            #[cfg(test)]
+            decoded_owned_work: false,
         }
     }
 
@@ -4599,6 +4631,17 @@ impl StreamJoinOperator {
         check: &dyn Fn() -> Result<()>,
     ) -> Result<()> {
         let (left, right) = self.decode_restored_sides(snapshot, schemas)?;
+        self.install_restored_rows(snapshot, metadata, left, right, check)
+    }
+
+    fn install_restored_rows(
+        &mut self,
+        snapshot: &OperatorStateSnapshot,
+        metadata: metadata_validation::ValidatedMetadata,
+        left: Vec<StoredRow>,
+        right: Vec<StoredRow>,
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<()> {
         self.validate_restored_join_rows(&metadata, &left, &right)?;
         restored_retained_metrics_match(&metadata.metrics, &left, &right, &self.name)?;
         self.validate_restored_limits(&left, &right)?;
@@ -4624,6 +4667,9 @@ impl StreamJoinOperator {
                 ..DeltaTracking::default()
             },
         };
+        for row in state.left.iter().chain(state.right.iter()) {
+            row.record.mark_live();
+        }
         check()?;
         self.state = state;
         self.retained_key_cache = RetainedKeyCache::default();
@@ -5586,8 +5632,58 @@ fn restore_sides_from_segments(
     right_key_indices: &[usize],
     operator_id: &str,
 ) -> Result<(Vec<StoredRow>, Vec<StoredRow>)> {
-    let mut inventory: Vec<(&str, SegmentKind)> = Vec::new();
+    restore_sides_from_segments_checked(
+        snapshot,
+        left_schema,
+        right_schema,
+        left_key_indices,
+        right_key_indices,
+        operator_id,
+        &|| Ok(()),
+    )
+}
+
+fn restore_sides_from_segments_checked(
+    snapshot: &OperatorStateSnapshot,
+    left_schema: RestoreSchema<'_>,
+    right_schema: RestoreSchema<'_>,
+    left_key_indices: &[usize],
+    right_key_indices: &[usize],
+    operator_id: &str,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<(Vec<StoredRow>, Vec<StoredRow>)> {
+    let inventory = restore_segment_inventory(snapshot, operator_id, check)?;
+    check()?;
+    let left = fold_side(
+        &snapshot.segments,
+        &inventory,
+        JoinSide::Left,
+        left_schema,
+        left_key_indices,
+        operator_id,
+        check,
+    )?;
+    check()?;
+    let right = fold_side(
+        &snapshot.segments,
+        &inventory,
+        JoinSide::Right,
+        right_schema,
+        right_key_indices,
+        operator_id,
+        check,
+    )?;
+    sort_restored_sides(left, right, check)
+}
+
+fn restore_segment_inventory<'a>(
+    snapshot: &'a OperatorStateSnapshot,
+    operator_id: &str,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<Vec<(&'a str, SegmentKind)>> {
+    let mut inventory = Vec::new();
     for segment_id in snapshot.segments.keys() {
+        check()?;
         inventory.push((
             segment_id.as_str(),
             parse_segment_kind(segment_id, operator_id)?,
@@ -5598,24 +5694,19 @@ fn restore_sides_from_segments(
             message: format!("stream Join {operator_id:?} segment inventory is empty"),
         });
     }
-    let mut left = fold_side(
-        &snapshot.segments,
-        &inventory,
-        JoinSide::Left,
-        left_schema,
-        left_key_indices,
-        operator_id,
-    )?;
-    let mut right = fold_side(
-        &snapshot.segments,
-        &inventory,
-        JoinSide::Right,
-        right_schema,
-        right_key_indices,
-        operator_id,
-    )?;
+    Ok(inventory)
+}
+
+fn sort_restored_sides(
+    mut left: Vec<StoredRow>,
+    mut right: Vec<StoredRow>,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<(Vec<StoredRow>, Vec<StoredRow>)> {
+    check()?;
     left.sort_by(identity_order);
+    check()?;
     right.sort_by(identity_order);
+    check()?;
     Ok((left, right))
 }
 
@@ -5705,94 +5796,149 @@ fn fold_side(
     schema: RestoreSchema<'_>,
     key_indices: &[usize],
     operator_id: &str,
+    check: &dyn Fn() -> Result<()>,
 ) -> Result<Vec<StoredRow>> {
-    let mut folded: BTreeMap<(Vec<u8>, i64, u64), StoredRow> = BTreeMap::new();
+    let mut folded = BTreeMap::new();
     let side_str = side.as_str();
-    let mut ordered: Vec<(&str, &SegmentKind, &StateSegment)> = inventory
+    let ordered = ordered_restore_segments(segments, inventory, side_str, check)?;
+    let decoder = RestoreDecoder {
+        schema,
+        key_indices,
+        name: operator_id,
+        side: side_str,
+    };
+    for (_segment_id, kind, segment) in ordered {
+        check()?;
+        fold_restore_segment(segment.bytes(), kind, &decoder, &mut folded, check)?;
+    }
+    check()?;
+    let rows = folded.into_values().collect();
+    check()?;
+    Ok(rows)
+}
+
+type OrderedRestoreSegments<'a> = Vec<(&'a str, &'a SegmentKind, &'a StateSegment)>;
+type FoldedRestoreRows = BTreeMap<(Vec<u8>, i64, u64), StoredRow>;
+
+fn ordered_restore_segments<'a>(
+    segments: &'a BTreeMap<String, StateSegment>,
+    inventory: &'a [(&'a str, SegmentKind)],
+    side: &str,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<OrderedRestoreSegments<'a>> {
+    let mut ordered: OrderedRestoreSegments<'_> = inventory
         .iter()
-        .filter(|(segment_id, _)| segment_id.starts_with(side_str))
+        .filter(|(segment_id, _)| segment_id.starts_with(side))
         .map(|(segment_id, kind)| (*segment_id, kind, &segments[*segment_id]))
         .collect();
     // BTreeMap iteration gives ascending segment ids; the base folds first.
+    check()?;
     ordered.sort_by_key(|(segment_id, kind, _)| match kind {
         SegmentKind::Base => (u64::MIN, (*segment_id).to_owned()),
         SegmentKind::Delta(epoch) => (*epoch, (*segment_id).to_owned()),
     });
-    for (_segment_id, kind, segment) in ordered {
-        let bytes = segment.bytes();
-        match kind {
-            SegmentKind::Base => {
-                for row in decode_side(bytes, schema, key_indices, operator_id, side_str)? {
-                    folded.insert(
-                        (
-                            row.encoded_key.to_vec(),
-                            row.event_time.as_micros(),
-                            row.row_id,
-                        ),
-                        row,
-                    );
-                }
-            }
-            SegmentKind::Delta(_) => {
-                decode_delta_segment(
-                    bytes,
-                    schema,
-                    key_indices,
-                    operator_id,
-                    side_str,
-                    &mut folded,
-                )?;
-            }
-        }
+    check()?;
+    Ok(ordered)
+}
+
+fn fold_restore_segment(
+    bytes: &[u8],
+    kind: &SegmentKind,
+    decoder: &RestoreDecoder<'_>,
+    folded: &mut FoldedRestoreRows,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<()> {
+    match kind {
+        SegmentKind::Base => fold_base_rows(bytes, decoder, folded, check),
+        SegmentKind::Delta(_) => decode_delta_segment(bytes, decoder, folded, check),
     }
-    Ok(folded.into_values().collect())
+}
+
+fn fold_base_rows(
+    bytes: &[u8],
+    decoder: &RestoreDecoder<'_>,
+    folded: &mut FoldedRestoreRows,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<()> {
+    for row in decode_side(
+        bytes,
+        decoder.schema,
+        decoder.key_indices,
+        decoder.name,
+        decoder.side,
+        check,
+    )? {
+        check()?;
+        folded.insert(
+            (
+                row.encoded_key.to_vec(),
+                row.event_time.as_micros(),
+                row.row_id,
+            ),
+            row,
+        );
+    }
+    Ok(())
 }
 
 /// Applies one delta segment's upserts and tombstones to the fold.
 fn decode_delta_segment(
     bytes: &[u8],
-    schema: RestoreSchema<'_>,
-    key_indices: &[usize],
-    operator_id: &str,
-    side: &str,
-    folded: &mut BTreeMap<(Vec<u8>, i64, u64), StoredRow>,
+    decoder: &RestoreDecoder<'_>,
+    folded: &mut FoldedRestoreRows,
+    check: &dyn Fn() -> Result<()>,
 ) -> Result<()> {
     let mut offset = 0_usize;
-    let op_count = delta_op_count(bytes, &mut offset, operator_id, side)?;
-    let decoder = DeltaDecoder {
-        schema,
-        key_indices,
-        name: operator_id,
-        side,
-    };
+    let op_count = delta_op_count(bytes, &mut offset, decoder.name, decoder.side)?;
     let mut seen_identities = BTreeSet::new();
     for _ in 0..op_count {
-        let header = decode_delta_header(bytes, &mut offset, operator_id, side)?;
-        let identity = (
-            header.key.clone(),
-            header.event_time.as_micros(),
-            header.row_id,
-        );
-        if !seen_identities.insert(identity.clone()) {
-            return Err(checkpoint_error(
-                operator_id,
-                side,
-                "delta segment repeats one row identity",
-            ));
-        }
-        apply_delta_op(bytes, &mut offset, &decoder, header, identity, folded)?;
+        check()?;
+        apply_unique_delta_op(
+            bytes,
+            &mut offset,
+            decoder,
+            &mut seen_identities,
+            folded,
+            check,
+        )?;
     }
+    check()?;
     if offset != bytes.len() {
         return Err(checkpoint_error(
-            operator_id,
-            side,
+            decoder.name,
+            decoder.side,
             "delta segment has trailing bytes",
         ));
     }
     Ok(())
 }
 
-struct DeltaDecoder<'a> {
+fn apply_unique_delta_op(
+    bytes: &[u8],
+    offset: &mut usize,
+    decoder: &RestoreDecoder<'_>,
+    seen: &mut BTreeSet<(Vec<u8>, i64, u64)>,
+    folded: &mut FoldedRestoreRows,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<()> {
+    let header = decode_delta_header(bytes, offset, decoder.name, decoder.side)?;
+    let identity = (
+        header.key.clone(),
+        header.event_time.as_micros(),
+        header.row_id,
+    );
+    if !seen.insert(identity.clone()) {
+        return Err(checkpoint_error(
+            decoder.name,
+            decoder.side,
+            "delta segment repeats one row identity",
+        ));
+    }
+    check()?;
+    apply_delta_op(bytes, offset, decoder, header, identity, folded)
+}
+
+struct RestoreDecoder<'a> {
     schema: RestoreSchema<'a>,
     key_indices: &'a [usize],
     name: &'a str,
@@ -5837,7 +5983,7 @@ fn decode_delta_header(
 fn apply_delta_op(
     bytes: &[u8],
     offset: &mut usize,
-    decoder: &DeltaDecoder<'_>,
+    decoder: &RestoreDecoder<'_>,
     header: DeltaHeader,
     identity: (Vec<u8>, i64, u64),
     folded: &mut BTreeMap<(Vec<u8>, i64, u64), StoredRow>,
@@ -5864,10 +6010,10 @@ fn apply_delta_op(
 fn decode_delta_upsert(
     bytes: &[u8],
     offset: &mut usize,
-    decoder: &DeltaDecoder<'_>,
+    decoder: &RestoreDecoder<'_>,
     header: DeltaHeader,
 ) -> Result<StoredRow> {
-    let DeltaDecoder {
+    let RestoreDecoder {
         schema,
         key_indices,
         name,
@@ -5969,6 +6115,7 @@ fn decode_side(
     key_indices: &[usize],
     operator_id: &str,
     side: &str,
+    check: &dyn Fn() -> Result<()>,
 ) -> Result<Vec<StoredRow>> {
     let mut offset = 0_usize;
     let row_count = decode_side_header(bytes, &mut offset, operator_id, side)?;
@@ -5978,8 +6125,8 @@ fn decode_side(
         row_count,
         expected_schema,
         key_indices,
-        operator_id,
-        side,
+        (operator_id, side),
+        check,
     )?;
     if offset != bytes.len() {
         return Err(checkpoint_error(
@@ -6014,20 +6161,24 @@ fn decode_side_rows(
     row_count: u64,
     expected_schema: RestoreSchema<'_>,
     key_indices: &[usize],
-    operator_id: &str,
-    side: &str,
+    location: (&str, &str),
+    check: &dyn Fn() -> Result<()>,
 ) -> Result<Vec<StoredRow>> {
+    let (operator_id, side) = location;
     let row_capacity = decode_row_capacity(row_count, bytes.len(), operator_id, side)?;
     let mut rows = Vec::with_capacity(row_capacity);
     for _ in 0..row_count {
-        rows.push(decode_stored_row(
+        check()?;
+        let row = decode_stored_row(
             bytes,
             offset,
             expected_schema,
             key_indices,
             operator_id,
             side,
-        )?);
+        )?;
+        check()?;
+        rows.push(row);
     }
     Ok(rows)
 }
@@ -6057,8 +6208,15 @@ fn decode_stored_row(
     let charge = read_segment_u64(bytes, offset)?;
     let record = read_ipc_record(bytes, offset, expected_schema, operator_id, side)?;
     let encoded_key = Arc::new(encode_join_key_v1(&record, 0, key_indices)?.into());
+    let record: columnar::RowPayload = record.into();
+    #[cfg(test)]
+    if let Some(hook) = expected_schema.decoded_row_hook
+        && expected_schema.decoded_row_credit.is_none()
+    {
+        hook(None, record.funded_owner(), true, false);
+    }
     Ok(StoredRow {
-        record: record.into(),
+        record,
         event_time,
         row_id,
         charge,
@@ -6072,6 +6230,15 @@ fn decode_ipc_row(
     operator_id: &str,
     side: &str,
 ) -> Result<RecordBatch> {
+    #[cfg(test)]
+    if let Some(hook) = expected_schema.decoded_row_hook {
+        hook(
+            expected_schema.decoded_row_credit,
+            None,
+            false,
+            expected_schema.decoded_owned_work,
+        );
+    }
     let mut reader = StreamReader::try_new(Cursor::new(ipc), None).map_err(|error| {
         checkpoint_error(
             operator_id,

@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 mod inventory;
 mod plan;
+mod restore_bases;
 
 #[cfg(test)]
 mod tests;

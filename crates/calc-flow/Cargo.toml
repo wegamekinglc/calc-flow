@@ -16,6 +16,7 @@ chrono.workspace = true
 datafusion.workspace = true
 futures.workspace = true
 fs2.workspace = true
+flatbuffers = "=25.12.19"
 hex.workspace = true
 hashbrown.workspace = true
 parking_lot.workspace = true
