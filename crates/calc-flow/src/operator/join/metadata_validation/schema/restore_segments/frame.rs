@@ -132,9 +132,20 @@ pub(super) async fn scan(
 }
 
 fn eligible_inventory(snapshot: &OperatorStateSnapshot) -> bool {
-    snapshot.segments.len() > 2
-        && snapshot.segments.contains_key("left-base")
-        && snapshot.segments.contains_key("right-base")
+    match (
+        snapshot.segments.contains_key("left-base"),
+        snapshot.segments.contains_key("right-base"),
+    ) {
+        (false, false) => !snapshot.segments.is_empty(),
+        (true, true) => snapshot.segments.len() > 2,
+        _ => false,
+    }
+}
+
+pub(super) fn delta_count(snapshot: &OperatorStateSnapshot, geometry: &Geometry) -> Option<usize> {
+    let bases = usize::from(snapshot.segments.contains_key("left-base"))
+        + usize::from(snapshot.segments.contains_key("right-base"));
+    geometry.segments.checked_sub(bases)
 }
 
 async fn scan_segment(
