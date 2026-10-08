@@ -48,11 +48,21 @@ Locked Arrow panics on empty or out-of-body bitmap slices; the malformed
 control catches and compares that exact existing panic separately from returned
 errors. It does not convert production panics into structured errors.
 
-The local handoff contains three unique passing checks (Managed recovery and
-the two direct controls) and strict current-source core lib/tests Clippy. The
+The initial local handoff contains three unique passing checks (Managed recovery
+and the two direct controls) and strict current-source core lib/tests Clippy. The
 earlier zero-test/cache-only runs, malformed-fixture expectation failure and
 test-only qualification compile failure are retained separately; they do not
 establish additional passes.
+
+A review follow-up adds one scalar-key, two-full-base control through the real
+managed metadata dispatcher. It checks actual NULL certification by the scalar
+inspector, paid native readers and post-copy rows, literal key/time/validity/raw
+Float64 bytes, full Original IPC and logical-charge parity, unchanged snapshot
+bytes, and escaped last-buffer funding through final refund. This focused
+coverage check passed with two paid native row readers, two paid post-copy
+rows and one metadata parse, including its later last-buffer refund assertions.
+It complements the existing Utf8-key Managed consumer and brings the handoff
+to four unique passing checks; it adds no production behavior or public hook.
 
 Final independent source review gates publication. Required CI, coverage,
 Codacy and review resolution gate merge for every published head. No timing
