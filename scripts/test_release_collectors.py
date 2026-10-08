@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 import sys
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import ModuleType
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from scripts.toolkit import fingerprint_json, sha256_file
 
@@ -144,6 +145,7 @@ class ReleaseRustBuildTests(unittest.IsolatedAsyncioTestCase):
             called = []
 
             async def run(argv, *, cwd, log, **kwargs):
+                self.assertEqual(cwd, root)
                 target = argv[argv.index("--bench") + 1]
                 called.append((target, argv))
                 log.parent.mkdir(parents=True, exist_ok=True)
@@ -157,7 +159,13 @@ class ReleaseRustBuildTests(unittest.IsolatedAsyncioTestCase):
                     )
                 )
 
-            with patch("scripts.benchmark_suite.rust.command", side_effect=run):
+            with (
+                patch("scripts.benchmark_suite.rust.command", side_effect=run),
+                patch(
+                    "scripts.benchmark_suite.rust.common_join_harness",
+                    side_effect=lambda source, *_args: nullcontext(source),
+                ) as harness,
+            ):
                 result = await build_binaries(
                     root,
                     root / "out",
@@ -168,6 +176,16 @@ class ReleaseRustBuildTests(unittest.IsolatedAsyncioTestCase):
                 [target for target, _ in called], ["core", "stream_join_perf"]
             )
             self.assertEqual(set(result), {target for target, _ in called})
+            self.assertEqual(
+                harness.call_args_list,
+                [
+                    call(root, root / "out", "core"),
+                    call(root, root / "out", "stream_join_perf"),
+                ],
+            )
+            for target, copied in result.items():
+                self.assertEqual(copied, root / "out" / target)
+                self.assertEqual(copied.read_bytes(), binary.read_bytes())
             self.assertEqual(
                 called[0][1],
                 [
