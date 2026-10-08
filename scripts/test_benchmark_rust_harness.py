@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import subprocess
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -18,7 +17,7 @@ from scripts.benchmark_suite.rust_harness import (
 )
 from scripts.benchmark_suite.rust_provenance import compiled_dependencies
 from scripts.test_benchmark_rust_provenance import write_inputs
-from scripts.toolkit import fingerprint_json
+from scripts.toolkit import command_output, fingerprint_json
 
 TARGET = "stream_join_perf"
 BENCH = Path(f"crates/calc-flow/benches/{TARGET}.rs")
@@ -47,10 +46,8 @@ def checkout(root: Path, contents: bytes, lock: str = "product lock") -> str:
             "Initial product",
         ],
     ):
-        subprocess.run(argv, cwd=root, check=True, capture_output=True)
-    return subprocess.check_output(
-        ["git", "rev-parse", "HEAD"], cwd=root, text=True
-    ).strip()
+        command_output(argv, cwd=root)
+    return command_output(["git", "rev-parse", "HEAD"], cwd=root)
 
 
 def registry(root: Path, baseline: bytes, candidate: bytes) -> None:

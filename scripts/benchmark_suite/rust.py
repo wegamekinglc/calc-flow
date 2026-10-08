@@ -526,11 +526,7 @@ def _require_common_harness(provenance: dict) -> None:
     candidate_targets = candidate_identity["scoped_workload_fingerprints"]
     shared = baseline_targets.keys() & candidate_targets.keys() & {JOIN_HARNESS_TARGET}
     for target in baseline.keys() | candidate.keys() | shared:
-        if (
-            target not in baseline_targets
-            and target in candidate_targets
-            and target not in baseline
-        ):
+        if _candidate_only_harness(target, baseline_identity, candidate_identity):
             continue
         if (
             target not in baseline
@@ -543,6 +539,14 @@ def _require_common_harness(provenance: dict) -> None:
             raise ValueError(
                 f"Rust comparison requires a common measured harness: {target}"
             )
+
+
+def _candidate_only_harness(target: str, baseline: dict, candidate: dict) -> bool:
+    return (
+        target not in baseline.get("scoped_workload_fingerprints", {})
+        and target in candidate["scoped_workload_fingerprints"]
+        and target not in baseline.get("measured_harnesses", {})
+    )
 
 
 async def _rust_block(

@@ -152,11 +152,7 @@ def _with_validated_harness(identity: dict, record: object, output: Path) -> dic
     }
     if any(record.get(key) != value for key, value in expected.items()):
         raise ValueError("invalid common Rust harness attestation")
-    if (
-        record.get("harness_git_sha") != _clean_revision(ROOT)
-        or record.get("measured_sha256") != sha256_file(ROOT / BENCH)
-        or not _owned_build_path(record.get("build_source"), output)
-    ):
+    if not _matches_current_harness(record, output):
         raise ValueError("invalid common Rust harness attestation")
     declaration = _declaration(record["original_sha256"], record["measured_sha256"])
     reference = None if declaration is None else declaration["reference"]
@@ -169,6 +165,14 @@ def _with_validated_harness(identity: dict, record: object, output: Path) -> dic
             TARGET: fingerprint_json({BENCH.as_posix(): record["measured_sha256"]})
         },
     }
+
+
+def _matches_current_harness(record: dict, output: Path) -> bool:
+    return (
+        record.get("harness_git_sha") == _clean_revision(ROOT)
+        and record.get("measured_sha256") == sha256_file(ROOT / BENCH)
+        and _owned_build_path(record.get("build_source"), output)
+    )
 
 
 def _owned_build_path(raw: object, output: Path) -> bool:
