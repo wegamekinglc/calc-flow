@@ -161,6 +161,9 @@ impl StreamJoinOperator {
         task: Option<crate::runtime::streaming::gather_work::TaskId>,
     ) -> Result<()> {
         job.check_cancelled()?;
+        if self.try_restore_owned_segments(snapshot, job, task).await? {
+            return Ok(());
+        }
         if self.try_restore_owned_bases(snapshot, job, task).await? {
             return Ok(());
         }

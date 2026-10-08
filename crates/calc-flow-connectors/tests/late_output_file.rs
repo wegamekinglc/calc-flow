@@ -87,6 +87,7 @@ enum LateSinkMode {
 struct Probe {
     fanout: bool,
     cross_section: bool,
+    prepare_initial_epoch: bool,
     late_sink_mode: LateSinkMode,
     ordinary_rows: Mutex<Vec<(i64, u64)>>,
     ordinary_received: Notify,
@@ -174,6 +175,8 @@ impl StreamSource for ScriptedSource {
 
 struct ObservedSink {
     writes: usize,
+    preparing_epoch: Option<Epoch>,
+    prepared_epoch: Option<Epoch>,
     sink: TransactionalParquetSink,
     name: &'static str,
     probe: Arc<Probe>,
@@ -208,10 +211,27 @@ impl Drop for ObservedSink {
 impl TransactionalStreamSink for ObservedSink {
     async fn open(&mut self) -> Result<()> {
         self.record("open", 0);
-        self.sink.open().await
+        self.sink.open().await?;
+        if self.probe.prepare_initial_epoch {
+            // Keep filesystem setup outside this fixture's short barrier deadline.
+            self.preparing_epoch = Some(Epoch::INITIAL);
+            self.sink.begin_epoch(Epoch::INITIAL).await?;
+            self.prepared_epoch = self.preparing_epoch.take();
+            self.record("prepared", Epoch::INITIAL.as_u64());
+        }
+        Ok(())
     }
     async fn begin_epoch(&mut self, epoch: Epoch) -> Result<()> {
         self.record("begin", epoch.as_u64());
+        if let Some(prepared) = self.prepared_epoch {
+            if prepared != epoch {
+                return Err(calc_flow::CalcFlowError::CheckpointMismatch {
+                    message: "prepared file sink epoch differs from the initial epoch".into(),
+                });
+            }
+            self.prepared_epoch = None;
+            return Ok(());
+        }
         self.sink.begin_epoch(epoch).await
     }
     async fn write(&mut self, batch: &Batch) -> Result<()> {
@@ -247,7 +267,12 @@ impl TransactionalStreamSink for ObservedSink {
     }
     async fn close(&mut self) -> Result<()> {
         self.record("close", 0);
-        self.sink.close().await
+        let cleanup = match self.prepared_epoch.take().or(self.preparing_epoch.take()) {
+            Some(epoch) => self.sink.abort(epoch, None).await,
+            None => Ok(()),
+        };
+        let closed = self.sink.close().await;
+        cleanup.and(closed)
     }
 }
 
@@ -406,6 +431,8 @@ fn runner_events(
             }
             let sink = ObservedSink {
                 writes: 0,
+                preparing_epoch: None,
+                prepared_epoch: None,
                 sink: TransactionalParquetSink::new(FileSinkConfig {
                     root: root.join("outputs"),
                     output: name.into(),
@@ -771,7 +798,10 @@ async fn test_late_files_slow_sink_blocks_checkpoint_and_cancellation_settles() 
 #[tokio::test]
 async fn test_late_files_blocked_barrier_times_out_without_confirming_partial_epoch() {
     let root = tempfile::tempdir().unwrap();
-    let probe = Arc::new(Probe::default());
+    let probe = Arc::new(Probe {
+        prepare_initial_epoch: true,
+        ..Probe::default()
+    });
     *probe.block_sink.lock().unwrap() = Some("late");
     let job = runner_events(
         root.path(),
@@ -790,9 +820,28 @@ async fn test_late_files_blocked_barrier_times_out_without_confirming_partial_ep
     .start()
     .await
     .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), probe.blocked.notified())
-        .await
-        .unwrap();
+    tokio::select! {
+        biased;
+        () = probe.blocked.notified() => {}
+        outcome = job.wait() => panic!(
+            "job ended before the blocked write: {outcome:?}; sink events: {:?}",
+            probe.sink_events.lock().unwrap(),
+        ),
+        () = tokio::time::sleep(Duration::from_secs(5)) => panic!(
+            "blocked write was not reached: {:?}; sink events: {:?}",
+            job.status(),
+            probe.sink_events.lock().unwrap(),
+        ),
+    }
+    for name in ["normal", "late"] {
+        let events = probe.sink_events.lock().unwrap();
+        assert!(events.contains(&(name, "prepared", Epoch::INITIAL.as_u64())));
+    }
+    assert!(probe.sink_events.lock().unwrap().contains(&(
+        "late",
+        "begin",
+        Epoch::INITIAL.as_u64(),
+    )));
     assert!(
         tokio::time::timeout(Duration::from_secs(5), job.trigger_checkpoint())
             .await

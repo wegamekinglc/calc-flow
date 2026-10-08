@@ -11,6 +11,7 @@ use std::sync::Arc;
 mod inventory;
 mod plan;
 mod restore_bases;
+mod restore_segments;
 
 #[cfg(test)]
 mod tests;

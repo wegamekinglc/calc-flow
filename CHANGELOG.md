@@ -9,6 +9,11 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-08: Prepay streaming Join managed V1 base-plus-delta decoding and
+  the checked installation tail. Certified scalar payloads keep independent
+  funding after fold and through surviving Arrow buffers; original segment
+  order, checkpoint bytes, diagnostics and optional refusal routes remain.
+
 - 2026-10-08: Prepay streaming Join managed V1 full-base decoding on the existing
   owned native worker and the checked installation tail. Certified scalar rows
   retain independent funding through surviving Arrow buffers; unsupported
