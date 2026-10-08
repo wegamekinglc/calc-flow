@@ -330,12 +330,12 @@ mod tests {
                     type_matches(field, &data_type),
                     expected.as_ref() == Some(&data_type)
                 );
-                assert_float_key_rejected(data_type);
+                assert_float_key_rejected(&data_type);
             }
         }
     }
 
-    fn assert_float_key_rejected(data_type: DataType) {
+    fn assert_float_key_rejected(data_type: &DataType) {
         let schema = Arc::new(Schema::new(vec![
             Field::new("key", data_type.clone(), false),
             Field::new(
@@ -345,7 +345,7 @@ mod tests {
             ),
         ]));
         assert!(super::super::inventory::key_bytes(&schema, &[0]).is_none());
-        assert!(crate::operator::join::columnar::restored::key_width(&data_type).is_none());
+        assert!(crate::operator::join::columnar::restored::key_width(data_type).is_none());
         let spec = StreamJoinSpec::inner(
             ["key"],
             ["key"],
@@ -356,8 +356,7 @@ mod tests {
         )
         .unwrap();
         let error = StreamJoinOperator::new("match", Arc::clone(&schema), schema, spec)
-            .err()
-            .expect("float Join keys remain unsupported");
+            .expect_err("float Join keys remain unsupported");
         assert!(matches!(&error, crate::CalcFlowError::Compile { .. }));
         assert!(
             error
