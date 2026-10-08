@@ -154,10 +154,30 @@ Final local checks:
 - The frozen V1 oracle passes: all five captured byte inventories match, and the
   final compacted capture restores and continues correctly. It is not a claim
   that each of the five captures was independently restarted by that test.
-- Core `cargo clippy --locked -p calc-flow --lib --tests -- -D warnings` passes;
-  its log identifies this current isolated worktree (6.98 s).
-- Final formatting, whitespace/contracts, changed-function complexity and source
-  provenance are recorded alongside the frozen source receipt.
+- The original Clippy report did not establish that the new metadata modules
+  were checked. A subsequent cached return's dep-info still referenced another
+  worktree. Invalidating only the two calc-flow check fingerprints exposed five
+  current-source diagnostics.
+- Final formatting, whitespace/contracts and source provenance are recorded
+  alongside the frozen source receipt. The original Lizard maximum of 8 did not
+  establish that Codacy's gate passed; their counting differs.
+
+Codacy reported three profile functions over its limit: `expected_spec` (16),
+`metrics` (9) and `value_shape` (10). The revision extracts their existing checks
+and shape accumulation into helpers, preserving check order, default prefixes,
+nullable lateness, bounded text inspection and the original fallback behavior.
+The local complexity ledger includes `?` early returns and decision branches;
+the required Codacy result remains a CI gate.
+
+The current-source Clippy revision uses `map_or` for missing prefix defaults,
+an `Option<ValidatedMetadata>` fixed-size result, a fresh `String::from(&str)`
+name copy and the original-position caller `_credit` field. Tests borrow that
+field into a named local reservation for their actual funding checks. It adds no
+boxed payload or allocation. Fresh name construction preserves exact-length copying;
+`clone_from` on an empty String could instead use amortized vector growth.
+The fee inventory still uses actual `size_of` values and the caller credit stays
+after its scope and stop fields. The changed eight controls and Managed restart
+are rerun; unchanged V1, Legacy and entry-ack checks retain their previous scope.
 
 Logs are under `target/issue363-join-metadata-validation-v1` in the isolated
 worktree. Raw RED, compile errors and incorrect initial fixture results are kept;

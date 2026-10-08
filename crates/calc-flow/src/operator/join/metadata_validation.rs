@@ -38,10 +38,7 @@ impl From<JoinCheckpointMetadata> for ValidatedMetadata {
     }
 }
 
-enum Decision {
-    Valid(ValidatedMetadata),
-    UseLegacy,
-}
+type Decision = Option<ValidatedMetadata>;
 
 struct MetadataWork {
     snapshot: OperatorStateSnapshot,
@@ -72,9 +69,9 @@ impl OwnedCpuWork for MetadataWork {
         stop.check()?;
         Ok(match metadata {
             Ok(metadata) if checkpoint_metadata_compatible(&metadata, &self.expected) => {
-                Decision::Valid(metadata.into())
+                Some(metadata.into())
             }
-            _ => Decision::UseLegacy,
+            _ => None,
         })
     }
 }
@@ -103,7 +100,7 @@ impl Construction {
         job: &StreamJobContext,
     ) -> Result<()> {
         copy_boundary(job).await?;
-        self.name = operator.name.clone();
+        self.name = String::from(operator.name.as_str());
         copy_boundary(job).await?;
         self.expected = Some(operator.spec.clone());
         for (key, value) in &snapshot.inline_metadata {
@@ -261,12 +258,9 @@ impl StreamJoinOperator {
             Ok(ticket) => {
                 let output = ticket.finish().await?;
                 output.install(|decision| match decision {
-                    Decision::Valid(metadata) => {
-                        self.install_restored_metadata(snapshot, metadata, &|| {
-                            job.check_cancelled()
-                        })
-                    }
-                    Decision::UseLegacy => self.restore_metadata_legacy(snapshot, job),
+                    Some(metadata) => self
+                        .install_restored_metadata(snapshot, metadata, &|| job.check_cancelled()),
+                    None => self.restore_metadata_legacy(snapshot, job),
                 })?;
                 self.wait_metadata_cleanup(stop).await
             }

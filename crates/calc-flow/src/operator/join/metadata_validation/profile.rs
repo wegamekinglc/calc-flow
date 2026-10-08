@@ -109,20 +109,38 @@ fn object<'a>(value: &'a Value, allowed: &[&str]) -> Option<&'a serde_json::Map<
 
 fn expected_spec(value: &Value, expected: &StreamJoinSpec) -> Option<()> {
     let fields = object(value, SPEC)?;
-    (fields.get("join_type")?.as_str()? == "inner").then_some(())?;
+    join_type(fields)?;
+    spec_keys(fields, expected)?;
+    spec_times(fields, expected)?;
+    prefixes(fields, expected)?;
+    spec_policy(fields, expected)
+}
+
+fn join_type(fields: &serde_json::Map<String, Value>) -> Option<()> {
+    (fields.get("join_type")?.as_str()? == "inner").then_some(())
+}
+
+fn spec_keys(fields: &serde_json::Map<String, Value>, expected: &StreamJoinSpec) -> Option<()> {
     for (field, keys) in [
         ("left_keys", &expected.left_keys),
         ("right_keys", &expected.right_keys),
     ] {
         key_list(fields.get(field)?, keys)?;
     }
+    Some(())
+}
+
+fn spec_times(fields: &serde_json::Map<String, Value>, expected: &StreamJoinSpec) -> Option<()> {
     for (field, name) in [
         ("left_event_time", &expected.left_event_time),
         ("right_event_time", &expected.right_event_time),
     ] {
         (fields.get(field)?.as_str()? == name).then_some(())?;
     }
-    prefixes(fields, expected)?;
+    Some(())
+}
+
+fn spec_policy(fields: &serde_json::Map<String, Value>, expected: &StreamJoinSpec) -> Option<()> {
     scalar_pair(
         fields.get("bounds")?,
         BOUNDS,
@@ -154,10 +172,7 @@ fn prefixes(fields: &serde_json::Map<String, Value>, expected: &StreamJoinSpec) 
         ("left_prefix", &expected.left_prefix, "left"),
         ("right_prefix", &expected.right_prefix, "right"),
     ] {
-        let selected = fields
-            .get(field)
-            .map(Value::as_str)
-            .unwrap_or(Some(default))?;
+        let selected = fields.get(field).map_or(Some(default), Value::as_str)?;
         (selected == name).then_some(())?;
     }
     Some(())
@@ -176,6 +191,11 @@ fn scalar_pair(value: &Value, fields: &[&str], expected: &[u64]) -> Option<()> {
 fn metrics(value: &Value) -> Option<()> {
     let values = object(value, METRICS)?;
     (values.len() == METRICS.len()).then_some(())?;
+    metric_counters(values)?;
+    metric_sides(values)
+}
+
+fn metric_counters(values: &serde_json::Map<String, Value>) -> Option<()> {
     for key in [
         "emitted_match_rows",
         "state_limit_failures",
@@ -183,6 +203,10 @@ fn metrics(value: &Value) -> Option<()> {
     ] {
         values.get(key)?.as_u64()?;
     }
+    Some(())
+}
+
+fn metric_sides(values: &serde_json::Map<String, Value>) -> Option<()> {
     for side in ["left", "right"] {
         side_metrics(values.get(side)?)?;
     }
@@ -214,25 +238,37 @@ pub(super) fn copy_unit(key: &str, value: &Value) -> Option<()> {
 fn value_shape(value: &Value) -> Option<(usize, usize)> {
     match value {
         Value::String(text) => Some((1, text.len())),
-        Value::Array(values) => {
-            values
-                .iter()
-                .try_fold((1usize, 0usize), |(headers, bytes), value| {
-                    let (next, copied) = value_shape(value)?;
-                    Some((headers.checked_add(next)?, bytes.checked_add(copied)?))
-                })
-        }
-        Value::Object(values) => {
-            values
-                .iter()
-                .try_fold((1usize, 0usize), |(headers, bytes), (key, value)| {
-                    let (next, copied) = value_shape(value)?;
-                    Some((
-                        headers.checked_add(next)?.checked_add(1)?,
-                        bytes.checked_add(copied)?.checked_add(key.len())?,
-                    ))
-                })
-        }
+        Value::Array(values) => array_shape(values),
+        Value::Object(values) => object_shape(values),
         _ => Some((1, 0)),
     }
+}
+
+fn array_shape(values: &[Value]) -> Option<(usize, usize)> {
+    values.iter().try_fold((1usize, 0usize), add_value_shape)
+}
+
+fn object_shape(values: &serde_json::Map<String, Value>) -> Option<(usize, usize)> {
+    values
+        .iter()
+        .try_fold((1usize, 0usize), |shape, (key, value)| {
+            add_field_shape(shape, key, value)
+        })
+}
+
+fn add_value_shape((headers, bytes): (usize, usize), value: &Value) -> Option<(usize, usize)> {
+    let (next, copied) = value_shape(value)?;
+    Some((headers.checked_add(next)?, bytes.checked_add(copied)?))
+}
+
+fn add_field_shape(
+    (headers, bytes): (usize, usize),
+    key: &str,
+    value: &Value,
+) -> Option<(usize, usize)> {
+    let (next, copied) = value_shape(value)?;
+    Some((
+        headers.checked_add(next)?.checked_add(1)?,
+        bytes.checked_add(copied)?.checked_add(key.len())?,
+    ))
 }

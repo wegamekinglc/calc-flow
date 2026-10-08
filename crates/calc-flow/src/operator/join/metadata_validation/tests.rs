@@ -123,7 +123,11 @@ fn test_metadata_copy_and_original_parser_peak_are_actually_funded() {
         .metadata_construction(&snapshot, &job)
         .unwrap()
         .unwrap();
-    let paid = construction.credit.as_ref().unwrap().size() + construction.control._credit.size();
+    let SubmissionControl {
+        _credit: caller_credit,
+        ..
+    } = &construction.control;
+    let paid = construction.credit.as_ref().unwrap().size() + caller_credit.size();
     assert_eq!(pool.reserved(), paid);
     let (copied, copy) = measure_copy(construction.copy(&operator, &snapshot, &job));
     copied.unwrap();
@@ -144,7 +148,7 @@ fn test_metadata_copy_and_original_parser_peak_are_actually_funded() {
     eprintln!("metadata copy={copy:?}, original parser={parsed:?}, paid={paid}");
     assert!(u64::try_from(copy.bytes_current).unwrap() + parsed.bytes_max <= paid as u64);
     assert_eq!(copy.bytes_current + parsed.bytes_current, 0);
-    assert!(matches!(result.unwrap(), Decision::Valid(_)));
+    assert!(result.unwrap().is_some());
     assert_eq!(snapshot.inline_metadata, original);
     drop(construction);
     assert_eq!(pool.reserved(), 0);
@@ -444,7 +448,11 @@ fn test_metadata_output_refund_keeps_late_caller_controls_funded() {
                 .scope()
                 .unwrap(),
         );
-        let caller_paid = construction.control._credit.size();
+        let SubmissionControl {
+            _credit: caller_credit,
+            ..
+        } = &construction.control;
+        let caller_paid = caller_credit.size();
         assert_eq!(
             caller_paid,
             inventory::caller_controls(&operator.name).unwrap()
@@ -456,7 +464,7 @@ fn test_metadata_output_refund_keeps_late_caller_controls_funded() {
         let output = ticket.finish().await.unwrap();
         output
             .install(|decision| {
-                let Decision::Valid(metadata) = decision else {
+                let Some(metadata) = decision else {
                     panic!("certified metadata");
                 };
                 operator.install_restored_metadata(&snapshot, metadata, &|| job.check_cancelled())
