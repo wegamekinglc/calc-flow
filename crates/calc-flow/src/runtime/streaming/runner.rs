@@ -1,5 +1,6 @@
 mod asof;
 mod checkpoint_task;
+mod join_terminal;
 pub(super) mod operator_fusion;
 mod source_history;
 mod sql_recovery;
@@ -2097,6 +2098,24 @@ async fn run_job_driver(
                         ));
                     }
                 }
+                match restore_terminal_joins_cancellable(
+                    &mut plan,
+                    checkpoint,
+                    &prepared_progress,
+                    &core.asof_loads,
+                    &core.launch_cancel,
+                    &context,
+                )
+                .await
+                {
+                    Ok(nodes) => core.runtime_status.lock().nodes.extend(nodes),
+                    Err(error) => {
+                        return core.prepare_driver_report(checkpoint_start_failure(
+                            launch_id,
+                            sanitize_managed_recovery_error(error, checkpoint.managed),
+                        ));
+                    }
+                }
                 drop(sources);
                 return core.prepare_driver_report(
                     recover_terminal_manifest(
@@ -2340,6 +2359,33 @@ fn manifest_is_terminal(
         });
     }
     Ok(sources_terminal)
+}
+
+async fn restore_terminal_joins_cancellable(
+    plan: &mut StreamRuntimePlanParts,
+    checkpoint: &OpenedCheckpointRuntime,
+    prepared: &super::progress::PreparedStreamJob,
+    loads: &asof::LoadOwner,
+    launch_cancel: &CancellationToken,
+    job: &super::StreamJobContext,
+) -> crate::Result<BTreeMap<String, OperatorProgress>> {
+    job.check_cancelled()?;
+    let restore =
+        join_terminal::restore_terminal(plan, checkpoint, prepared, loads, job.cancellation(), job);
+    tokio::pin!(restore);
+    let result = tokio::select! {
+        biased;
+        () = launch_cancel.cancelled() => {
+            job.cancellation().cancel();
+            restore.await
+        }
+        result = &mut restore => result,
+    };
+    if launch_cancel.is_cancelled() {
+        job.cancellation().cancel();
+    }
+    job.check_cancelled()?;
+    result
 }
 
 async fn recover_terminal_manifest(

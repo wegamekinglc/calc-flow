@@ -1080,7 +1080,10 @@ class StreamingRunner:
         """Consume this runner and asynchronously launch one owning job."""
         try:
             try:
-                return StreamingJob(await self._inner.start_async())
+                native = await self._inner.start_async()
+                job = StreamingJob(native)
+                self._inner._ack_start_result(native)
+                return job
             except asyncio.CancelledError as cancellation:
                 await _raise_after_cancellation_cleanup(
                     self._inner._wait_start_cleanup_async(), cancellation

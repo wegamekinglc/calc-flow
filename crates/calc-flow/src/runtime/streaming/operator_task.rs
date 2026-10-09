@@ -944,6 +944,42 @@ pub(super) async fn restore_terminal_asof<'a>(
     Ok(progress)
 }
 
+pub(super) async fn restore_terminal_join<'a>(
+    operator: &mut CompiledStreamOperator,
+    ingresses: impl IntoIterator<Item = &'a String>,
+    restore: &OperatorRestoreState,
+    job: &crate::StreamJobContext,
+) -> Result<OperatorProgress> {
+    let inputs =
+        OperatorInputProgress::restore(ingresses, &restore.progress, restore.output_frontier)?;
+    let restored_progress = inputs.snapshot()?;
+    if restored_progress
+        .by_ingress()
+        .values()
+        .any(|input| input.state() != IngressState::Ended)
+    {
+        return Err(CalcFlowError::CheckpointMismatch {
+            message: "terminal Join recovery requires ended ingresses".into(),
+        });
+    }
+    operator.reset()?;
+    let CompiledStreamOperator::StreamJoin(operator) = operator else {
+        return Err(CalcFlowError::Internal {
+            message: "terminal Join recovery requires a Join operator".into(),
+        });
+    };
+    operator
+        .restore_managed_metadata(&restore.snapshot, job, None)
+        .await?;
+    operator.validate_terminal_recovery_state()?;
+    job.check_cancelled()?;
+    let status = operator.status().with_ingress_progress(&restored_progress);
+    let progress = OperatorProgress::default();
+    progress.observe_stream_join(status);
+    progress.mark_ended();
+    Ok(progress)
+}
+
 fn restore_ingress_completion(inputs: &mut OperatorTaskInputs, succeeded: bool) {
     let Some(restore) = inputs.restore.as_ref().filter(|_| succeeded) else {
         return;
