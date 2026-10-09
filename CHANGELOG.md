@@ -12,8 +12,8 @@ measurements. Use the current guides for supported behavior.
 - 2026-10-10: Resolve each distinct streaming Join probe key once for both
   matching passes and keep one canonical key owner per distinct probe key.
   Typed key columns reuse one funded row buffer and immediately intern each
-  frame, preserving checkpoint bytes without a full-batch key arena. Vectorized admission removes redundant
-  scalar scans and charges the remaining work within bounded cancellation
+  frame, preserving checkpoint bytes without a full-batch key arena. Vectorized
+  admission removes redundant scalar scans and charges the remaining work within bounded cancellation
   grants, preserving error order and resource limits. Tokio cooperative budget
   replaces a forced scheduler yield at every work boundary; cancellation and
   deadline checks retain their existing granularity.
@@ -24,6 +24,12 @@ measurements. Use the current guides for supported behavior.
   funded state, output ordering, and V1 checkpoint bytes. Generic admission
   shares parent batches and gathers flat output columns without per-row
   record wrappers, retaining concatenation for mixed and nested payloads.
+
+- 2026-10-09: Write columnar V2 streaming Join checkpoints with immutable
+  payload batches and incremental row indexes. Preserve prepared-cut anchors
+  and restored V2 history across captures; migrate V1 state through funded
+  asynchronous preparation before writing V2. Keep logical row charges and
+  public operator identity unchanged.
 
 - 2026-10-09: Read columnar V2 streaming Join checkpoints with strict
   inventory, schema and historical-row validation before atomic restoration.

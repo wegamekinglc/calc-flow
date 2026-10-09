@@ -10054,6 +10054,22 @@ fn ac5_join_window_plan_with_restore_hooks(
     metadata_hook: Option<JoinMetadataHook>,
     schema_hook: Option<JoinMetadataHook>,
 ) -> crate::StreamExecutionPlan {
+    ac5_join_window_plan_with_checkpoint_producer(
+        bounds,
+        window_column,
+        metadata_hook,
+        schema_hook,
+        false,
+    )
+}
+
+fn ac5_join_window_plan_with_checkpoint_producer(
+    bounds: JoinTimeBounds,
+    window_column: &str,
+    metadata_hook: Option<JoinMetadataHook>,
+    schema_hook: Option<JoinMetadataHook>,
+    v1_producer: bool,
+) -> crate::StreamExecutionPlan {
     let schema = Arc::new(datafusion::arrow::datatypes::Schema::new(vec![
         datafusion::arrow::datatypes::Field::new(
             "key",
@@ -10084,6 +10100,9 @@ fn ac5_join_window_plan_with_restore_hooks(
         .unwrap(),
     )
     .unwrap();
+    if v1_producer {
+        join.set_checkpoint_v1_test_producer();
+    }
     if let Some(hook) = metadata_hook {
         join.set_checkpoint_metadata_test_hook(hook);
     }
@@ -10285,16 +10304,9 @@ async fn ac5_checkpoint_restore_preserves_the_join_window_result() {
     // still delivers every legal pair to the Window exactly once instead
     // of re-forwarding or losing it (spec AC5/AC12).
     let directory = tempfile::tempdir().unwrap();
-    let backend = Arc::new(
-        LocalStateBackend::new(directory.path().join("state"))
-            .await
-            .unwrap(),
-    );
-    let manifest_root = directory.path().join("manifests");
     let checkpoint = || {
-        CheckpointRuntimeSpec::new(
-            backend.clone(),
-            &manifest_root,
+        CheckpointRuntimeSpec::managed(
+            ManagedCheckpointRuntime::new(directory.path()).unwrap(),
             StreamRuntimeConfig {
                 checkpoint_interval: StdDuration::from_secs(3_600),
                 checkpoint_timeout: StdDuration::from_secs(10),
@@ -10351,7 +10363,7 @@ async fn test_managed_join_restart_uses_paid_local_wire_and_continues() {
     };
 
     assert_eq!(
-        checkpoint_restore_join_window_result(checkpoint, None).await,
+        checkpoint_restore_v1_join_window_with_schema(checkpoint, None, None).await,
         vec![1]
     );
 
@@ -10406,7 +10418,7 @@ async fn test_managed_join_metadata_is_prepaid_and_parsed_once_on_native_worker(
         .unwrap()
     };
     assert_eq!(
-        checkpoint_restore_join_window_result(checkpoint, Some(hook)).await,
+        checkpoint_restore_v1_join_window_with_schema(checkpoint, Some(hook), None).await,
         vec![1]
     );
     assert_eq!(copies.load(Ordering::SeqCst), 1);
@@ -10453,7 +10465,7 @@ async fn test_managed_join_schema_comparison_is_prepaid_and_constructed_on_nativ
         .unwrap()
     };
     assert_eq!(
-        checkpoint_restore_join_window_with_schema(
+        checkpoint_restore_v1_join_window_with_schema(
             checkpoint,
             Some(metadata_hook),
             Some(schema_hook),
@@ -10473,14 +10485,32 @@ async fn checkpoint_restore_join_window_result(
     checkpoint_restore_join_window_with_schema(checkpoint, metadata_hook, None).await
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "the restore scenario is clearest as one end-to-end test"
-)]
 async fn checkpoint_restore_join_window_with_schema(
     checkpoint: impl Fn() -> CheckpointRuntimeSpec,
     metadata_hook: Option<JoinMetadataHook>,
     schema_hook: Option<JoinMetadataHook>,
+) -> Vec<i64> {
+    checkpoint_restore_join_window_with_producer(checkpoint, metadata_hook, schema_hook, false)
+        .await
+}
+
+async fn checkpoint_restore_v1_join_window_with_schema(
+    checkpoint: impl Fn() -> CheckpointRuntimeSpec,
+    metadata_hook: Option<JoinMetadataHook>,
+    schema_hook: Option<JoinMetadataHook>,
+) -> Vec<i64> {
+    checkpoint_restore_join_window_with_producer(checkpoint, metadata_hook, schema_hook, true).await
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the restore scenario is clearest as one end-to-end test"
+)]
+async fn checkpoint_restore_join_window_with_producer(
+    checkpoint: impl Fn() -> CheckpointRuntimeSpec,
+    metadata_hook: Option<JoinMetadataHook>,
+    schema_hook: Option<JoinMetadataHook>,
+    v1_producer: bool,
 ) -> Vec<i64> {
     let left_release = Arc::new(AtomicBool::new(false));
     let right_release = Arc::new(AtomicBool::new(false));
@@ -10488,12 +10518,13 @@ async fn checkpoint_restore_join_window_with_schema(
     let spec =
         |left_release: Arc<AtomicBool>, right_release: Arc<AtomicBool>| -> ContinuousJobSpec {
             let mut spec = ac5_job_spec(
-                ac5_join_window_plan_with_restore_hooks(
+                ac5_join_window_plan_with_checkpoint_producer(
                     JoinTimeBounds::new(StdDuration::from_micros(0), StdDuration::from_micros(10))
                         .unwrap(),
                     "left__ts",
                     metadata_hook.clone(),
                     schema_hook.clone(),
+                    v1_producer,
                 ),
                 &rows,
             );
@@ -11064,17 +11095,10 @@ fn ac14_job_spec(
 /// starts and exactly-restored output sequences (spec AC14).
 async fn ac14_run_one_fault_point(point: super::CheckpointFaultPoint) {
     let directory = tempfile::tempdir().unwrap();
-    let backend = Arc::new(
-        LocalStateBackend::new(directory.path().join("state"))
-            .await
-            .unwrap(),
-    );
-    let manifest_root = directory.path().join("manifests");
     let state = Arc::new(Mutex::new(Ac14TransactionalState::default()));
     let checkpoint = |faulted: bool| {
-        let spec = CheckpointRuntimeSpec::new(
-            backend.clone(),
-            &manifest_root,
+        let spec = CheckpointRuntimeSpec::managed(
+            ManagedCheckpointRuntime::new(directory.path()).unwrap(),
             StreamRuntimeConfig {
                 checkpoint_interval: StdDuration::from_secs(3_600),
                 checkpoint_timeout: StdDuration::from_secs(10),
@@ -11267,18 +11291,11 @@ async fn ac14_join_window_fault_matrix_recovers_exactly_once() {
 #[tokio::test]
 async fn ac14_partial_sink_commit_between_two_transactional_sinks_recovers() {
     let directory = tempfile::tempdir().unwrap();
-    let backend = Arc::new(
-        LocalStateBackend::new(directory.path().join("state"))
-            .await
-            .unwrap(),
-    );
-    let manifest_root = directory.path().join("manifests");
     let window_state = Arc::new(Mutex::new(Ac14TransactionalState::default()));
     let tap_state = Arc::new(Mutex::new(Ac14TapState::default()));
     let checkpoint = |faulted: bool| {
-        let spec = CheckpointRuntimeSpec::new(
-            backend.clone(),
-            &manifest_root,
+        let spec = CheckpointRuntimeSpec::managed(
+            ManagedCheckpointRuntime::new(directory.path()).unwrap(),
             StreamRuntimeConfig {
                 checkpoint_interval: StdDuration::from_secs(3_600),
                 checkpoint_timeout: StdDuration::from_secs(10),

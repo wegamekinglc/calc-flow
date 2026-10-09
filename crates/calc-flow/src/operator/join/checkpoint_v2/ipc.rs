@@ -1,5 +1,5 @@
 pub(super) mod accounting;
-mod concat;
+pub(super) mod concat;
 mod framing;
 mod nodes;
 mod reader;

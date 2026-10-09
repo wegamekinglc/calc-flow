@@ -53,8 +53,8 @@ async fn test_join_v2_restore_prepares_v1_capture_and_restores_rows() {
 
     let job = job();
     let context = StreamOperatorContext::new(&job, "v2-match", None);
-    restored.prepare_checkpoint_async(&context).await.unwrap();
-    let captured = restored.checkpoint(Epoch::new(3).unwrap()).unwrap();
+    restored.prepare_compaction(&context).await.unwrap();
+    let captured = restored.checkpoint_v1(Epoch::new(3).unwrap()).unwrap();
     assert_eq!(captured.inline_metadata["layout_version"], 1);
     assert_eq!(captured.inline_metadata["epoch"], 3);
     assert!(!captured.inline_metadata.contains_key("v2_inventory"));

@@ -110,8 +110,7 @@ fn allocated_index(pool: &Arc<dyn MemoryPool>) -> (NativeIndex, i64) {
     (index.unwrap(), allocation.bytes_current)
 }
 
-#[test]
-fn test_native_index_bulk_construction_peak_and_resident_allocations_remain_funded() {
+fn assert_native_index_bulk_construction_peak_and_resident_allocations_remain_funded() {
     for (count, distinct_keys) in [(1, 1), (129, 1), (129, 17), (4_096, 4_096)] {
         let rows = rows(count, distinct_keys);
         let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
@@ -146,6 +145,12 @@ fn test_native_index_bulk_construction_peak_and_resident_allocations_remain_fund
 
 #[test]
 fn test_native_index_live_allocations_remain_funded_through_insert_and_eviction() {
+    assert_native_index_bulk_construction_peak_and_resident_allocations_remain_funded();
+    assert_native_index_live_allocations_remain_funded_through_insert_and_eviction();
+    assert_native_index_retained_capacities_remain_funded_during_empty_run_reuse();
+}
+
+fn assert_native_index_live_allocations_remain_funded_through_insert_and_eviction() {
     for distinct_keys in [1, 17, 4_096] {
         let rows = rows(4_096, distinct_keys);
         for disordered in [false, true] {
@@ -164,8 +169,7 @@ fn test_native_index_live_allocations_remain_funded_through_insert_and_eviction(
     }
 }
 
-#[test]
-fn test_native_index_retained_capacities_remain_funded_during_empty_run_reuse() {
+fn assert_native_index_retained_capacities_remain_funded_during_empty_run_reuse() {
     let rows = rows(64, 17);
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
     let (mut index, controls) = allocated_index(&pool);

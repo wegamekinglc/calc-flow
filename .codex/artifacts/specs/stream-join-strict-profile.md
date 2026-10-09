@@ -260,3 +260,29 @@ protocol and exact-window 1+2 CPU profile. The previous phases consumed
 at 250 seconds. Reject identical runtime/native seals to any failed source
 or to the no-op diagnostic. Neither prior no-op speedup nor profiles alone
 can establish this corrected implementation's performance.
+
+## Mandatory main integration
+
+The final published head passed all CI, Codacy, coverage and review gates,
+but main advanced to `5999eee330daf738d19a1c1344945cd0852b9f94` during CI.
+Integrate its V2 checkpoint writer without changing the Join optimization.
+Resolve only the overlapping module declaration and changelog; preserve both
+production output_gather and test-only row_ipc. Use focused integration tests
+and compile/lint checks rather than a new full local suite.
+
+Main adds constant-time writer tracking to process_data/on_ingress_progress,
+so freeze the integrated production source and perform the same three cases
+once (2x10 pairs each, 120 timed oracles) plus one fixed 1M CPU profile.
+Prior supervised measurement is 366.655847/600 seconds; cap this phase at
+220 seconds including cleanup. Builds remain separate. Reject identical
+source/native seals, preserve earlier results, and do not expand checkpoints.
+
+The maintained harness also gains process.py child cancellation cleanup.
+Seal its complete old/new harness file manifests and the exact patch; require
+this to be the only changed harness file. Worker, child_environment, install
+and stop ASTs, timer, oracle, fixture and pairing implementations remain the
+same. Both paired sides use the new common harness. Cross-phase guards must
+validate this explicit narrow migration rather than silently accepting any
+hash change. Reused #394 CPU evidence remains labelled with its old harness;
+collect a fresh integrated-candidate profile. Required final CI and review
+must pass after resolving the merge, before main is updated and #394 closed.

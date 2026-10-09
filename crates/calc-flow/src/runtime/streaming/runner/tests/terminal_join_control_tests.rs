@@ -74,6 +74,7 @@ fn plain_job() -> StreamJobContext {
 
 async fn terminal_snapshot() -> OperatorStateSnapshot {
     let mut source = join();
+    source.set_checkpoint_v1_test_producer();
     let job = plain_job();
     let context = StreamOperatorContext::new(&job, "match", None);
     let mut output = EdgeCollector::new(source.output_ports().to_vec());

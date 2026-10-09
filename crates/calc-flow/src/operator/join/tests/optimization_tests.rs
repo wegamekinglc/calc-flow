@@ -10,6 +10,15 @@ fn with_keys(batch: &Batch, keys: Vec<i64>) -> Batch {
 
 #[tokio::test]
 async fn test_native_probe_resolves_each_distinct_key_once_before_both_window_passes() {
+    tokio::spawn(assert_native_probe_resolves_each_distinct_key_once_before_both_window_passes())
+        .await
+        .unwrap();
+    tokio::spawn(assert_repeated_probe_keeps_only_one_canonical_owner_per_distinct_key())
+        .await
+        .unwrap();
+}
+
+async fn assert_native_probe_resolves_each_distinct_key_once_before_both_window_passes() {
     let mut operator =
         StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
     let job = job();
@@ -39,8 +48,7 @@ async fn test_native_probe_resolves_each_distinct_key_once_before_both_window_pa
     assert_eq!(join_work().native_key_lookups, 3);
 }
 
-#[tokio::test]
-async fn test_repeated_probe_keeps_only_one_canonical_owner_per_distinct_key() {
+async fn assert_repeated_probe_keeps_only_one_canonical_owner_per_distinct_key() {
     let mut operator =
         StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
     let job = job();
@@ -136,6 +144,15 @@ fn generic_records() -> Vec<RecordBatch> {
 
 #[tokio::test]
 async fn test_all_admitted_generic_blocks_charge_only_remaining_metadata_work() {
+    tokio::spawn(assert_all_admitted_generic_blocks_charge_only_remaining_metadata_work())
+        .await
+        .unwrap();
+    tokio::spawn(assert_generic_id_range_overflow_keeps_scalar_row_precedence())
+        .await
+        .unwrap();
+}
+
+async fn assert_all_admitted_generic_blocks_charge_only_remaining_metadata_work() {
     let mut operator =
         StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
     operator.set_stream_resources(
@@ -381,8 +398,7 @@ async fn assert_quantum_checks_deadline_before_and_after_cooperation() {
     .unwrap();
 }
 
-#[tokio::test]
-async fn test_generic_id_range_overflow_keeps_scalar_row_precedence() {
+async fn assert_generic_id_range_overflow_keeps_scalar_row_precedence() {
     let mut operator =
         StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
     operator.set_stream_resources(

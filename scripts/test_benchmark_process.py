@@ -6,9 +6,234 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from scripts.benchmark_suite.process import Worker, child_environment, command
+
+
+class CommandOwnershipTests(unittest.IsolatedAsyncioTestCase):
+    async def test_spawn_and_stop_complete_before_repeated_cancel_propagates(self):
+        created, return_handle = asyncio.Event(), asyncio.Event()
+        stopping, finish_stop = asyncio.Event(), asyncio.Event()
+        child = SimpleNamespace(returncode=None)
+        outputs = []
+
+        async def spawn(*args, **kwargs):
+            outputs.append(kwargs["stdout"])
+            created.set()
+            await return_handle.wait()
+            self.assertFalse(outputs[0].closed)
+            return child
+
+        async def settle(owned):
+            self.assertIs(owned, child)
+            stopping.set()
+            await finish_stop.wait()
+            self.assertFalse(outputs[0].closed)
+            child.returncode = -15
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with (
+                patch(
+                    "scripts.benchmark_suite.process.shutil.which",
+                    return_value="/fake/bench",
+                ),
+                patch(
+                    "scripts.benchmark_suite.process.asyncio.create_subprocess_exec",
+                    side_effect=spawn,
+                ),
+                patch(
+                    "scripts.benchmark_suite.process.stop", side_effect=settle
+                ) as stop,
+            ):
+                task = asyncio.create_task(
+                    command(["bench"], cwd=root, log=root / "run.log")
+                )
+                try:
+                    await created.wait()
+                    task.cancel()
+                    await asyncio.sleep(0)
+                    task.cancel()
+                    await asyncio.sleep(0)
+                    self.assertFalse(
+                        task.done(),
+                        "creation must retain ownership until handle return",
+                    )
+                    return_handle.set()
+                    await asyncio.wait_for(stopping.wait(), 1)
+                    task.cancel()
+                    await asyncio.sleep(0)
+                    self.assertFalse(
+                        task.done(), "repeated cancellation must not interrupt stop"
+                    )
+                    finish_stop.set()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await task
+                    stop.assert_awaited_once_with(child)
+                    self.assertEqual(child.returncode, -15)
+                    self.assertTrue(outputs[0].closed)
+                    record = json.loads((root / "run.command.json").read_text())
+                    self.assertIsNone(record["exit_code"])
+                    self.assertTrue(record["error"].startswith("CancelledError:"))
+                finally:
+                    return_handle.set()
+                    finish_stop.set()
+                    if not task.done():
+                        task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+
+    async def test_timeout_remains_primary_when_owned_stop_fails(self):
+        async def wait():
+            raise TimeoutError("primary wait deadline")
+
+        child = SimpleNamespace(returncode=None, wait=wait)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with (
+                patch(
+                    "scripts.benchmark_suite.process.shutil.which",
+                    return_value="/fake/bench",
+                ),
+                patch(
+                    "scripts.benchmark_suite.process.asyncio.create_subprocess_exec",
+                    return_value=child,
+                ),
+                patch(
+                    "scripts.benchmark_suite.process.stop",
+                    side_effect=OSError("cleanup failed"),
+                ),
+                self.assertRaisesRegex(TimeoutError, "primary wait deadline") as raised,
+            ):
+                await command(["bench"], cwd=root, log=root / "run.log")
+            self.assertIsInstance(raised.exception.__cause__, OSError)
+            record = json.loads((root / "run.command.json").read_text())
+            self.assertIn("cleanup failed", record["cleanup_error"])
+            self.assertIsNone(record["exit_code"])
+
+    async def test_spawn_failure_preserves_primary_without_self_cause(self):
+        primary = OSError("spawn failed")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with (
+                patch(
+                    "scripts.benchmark_suite.process.shutil.which",
+                    return_value="/fake/bench",
+                ),
+                patch(
+                    "scripts.benchmark_suite.process.asyncio.create_subprocess_exec",
+                    side_effect=primary,
+                ),
+                patch("scripts.benchmark_suite.process.stop") as stop,
+            ):
+                with self.assertRaises(OSError) as raised:
+                    await command(["bench"], cwd=root, log=root / "run.log")
+                stop.assert_not_called()
+            self.assertIs(raised.exception, primary)
+            self.assertIsNot(raised.exception.__cause__, primary)
+            record = json.loads((root / "run.command.json").read_text())
+            self.assertIsNone(record["exit_code"])
+            self.assertTrue(record["ownership_unsettled"])
+
+    async def test_private_creation_cancellation_does_not_claim_zero_children(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with (
+                patch(
+                    "scripts.benchmark_suite.process.shutil.which",
+                    return_value="/fake/bench",
+                ),
+                patch(
+                    "scripts.benchmark_suite.process.asyncio.create_subprocess_exec",
+                    side_effect=asyncio.CancelledError,
+                ),
+                patch("scripts.benchmark_suite.process.stop") as stop,
+            ):
+                with self.assertRaises(asyncio.CancelledError):
+                    await command(["bench"], cwd=root, log=root / "run.log")
+                stop.assert_not_called()
+            record = json.loads((root / "run.command.json").read_text())
+            self.assertIs(record["ownership_unsettled"], True)
+            self.assertIsNone(record["exit_code"])
+
+    async def test_cancel_remains_primary_when_final_journal_fails(self):
+        from scripts.benchmark_suite import process
+
+        write_json = process.write_json
+        writes = 0
+
+        def journal(path, value):
+            nonlocal writes
+            writes += 1
+            if writes == 2:
+                raise OSError("journal failed")
+            write_json(path, value)
+
+        async def wait():
+            raise asyncio.CancelledError("primary cancellation")
+
+        child = SimpleNamespace(returncode=None, wait=wait)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with (
+                patch(
+                    "scripts.benchmark_suite.process.shutil.which",
+                    return_value="/fake/bench",
+                ),
+                patch(
+                    "scripts.benchmark_suite.process.asyncio.create_subprocess_exec",
+                    return_value=child,
+                ),
+                patch("scripts.benchmark_suite.process.stop") as stop,
+                patch(
+                    "scripts.benchmark_suite.process.write_json", side_effect=journal
+                ),
+            ):
+                with self.assertRaises(asyncio.CancelledError) as raised:
+                    await command(["bench"], cwd=root, log=root / "run.log")
+                stop.assert_awaited_once_with(child)
+            self.assertIsInstance(raised.exception.__cause__, OSError)
+            self.assertIn("journal failed", str(raised.exception.__cause__))
+
+    async def test_normal_command_keeps_argv_stdio_exit_and_journal(self):
+        async def wait():
+            return 0
+
+        child = SimpleNamespace(returncode=0, wait=wait)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env = {"TOKIO_WORKER_THREADS": "32"}
+            with (
+                patch(
+                    "scripts.benchmark_suite.process.shutil.which",
+                    return_value="/fake/bench",
+                ),
+                patch(
+                    "scripts.benchmark_suite.process.asyncio.create_subprocess_exec",
+                    return_value=child,
+                ) as spawn,
+                patch("scripts.benchmark_suite.process.stop") as stop,
+            ):
+                await command(
+                    ["bench", "case", "--bench"],
+                    cwd=root,
+                    log=root / "run.log",
+                    env=env,
+                    timeout=0.5,
+                )
+                stop.assert_not_called()
+            self.assertEqual(spawn.call_args.args, ("/fake/bench", "case", "--bench"))
+            self.assertEqual(spawn.call_args.kwargs["env"], env)
+            self.assertIs(spawn.call_args.kwargs["shell"], False)
+            self.assertEqual(
+                spawn.call_args.kwargs["stderr"], asyncio.subprocess.STDOUT
+            )
+            self.assertTrue(spawn.call_args.kwargs["stdout"].closed)
+            record = json.loads((root / "run.command.json").read_text())
+            self.assertEqual(record["exit_code"], 0)
+            self.assertEqual(record["argv"], ["bench", "case", "--bench"])
+            self.assertNotIn("error", record)
 
 
 class BenchmarkProcessTests(unittest.IsolatedAsyncioTestCase):

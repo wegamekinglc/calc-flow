@@ -72,7 +72,15 @@ impl Fixture {
     }
 
     fn spec(&self) -> ContinuousJobSpec {
-        let mut spec = ac5_job_spec(restore_plan(&self.observations, &self.parses), &self.rows);
+        self.spec_with_plan(restore_plan(&self.observations, &self.parses))
+    }
+
+    fn seed_spec(&self) -> ContinuousJobSpec {
+        self.spec_with_plan(v1_restore_plan(&self.observations, &self.parses))
+    }
+
+    fn spec_with_plan(&self, plan: crate::StreamExecutionPlan) -> ContinuousJobSpec {
+        let mut spec = ac5_job_spec(plan, &self.rows);
         spec.sources = vec![
             NamedSourceBinding {
                 binding_id: "left".into(),
@@ -124,7 +132,7 @@ fn wire_kind(bytes: &[u8]) -> usize {
 async fn seed_cut(fixture: &Fixture, root: &Path) {
     let mut runner = ContinuousRunner::new();
     let job = runner
-        .start_checkpointed(fixture.spec(), fixture.checkpoint(root))
+        .start_checkpointed(fixture.seed_spec(), fixture.checkpoint(root))
         .await
         .unwrap();
     fixture.left.store(1, Ordering::SeqCst);

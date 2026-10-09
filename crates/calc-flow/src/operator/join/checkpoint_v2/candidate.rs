@@ -36,6 +36,7 @@ pub(super) struct Config<'a> {
 // The candidate data is destroyed before either resident or temporary credit.
 pub(super) struct Prepared {
     pub(super) state: StreamJoinState,
+    pub(super) writer: super::WriterState,
     pub(super) containers: Arc<ContainerFunding>,
     pub(super) workspace: MemoryReservation,
 }
@@ -99,7 +100,7 @@ impl<'a, 'c> Decoder<'a, 'c> {
         let rows = self.validate_histories(&histories, &payloads)?;
         drop(histories);
         drop(payloads);
-        self.prepare(metadata, rows)
+        self.prepare(metadata, rows, &inventory)
     }
 
     fn decode_metadata(&self) -> Result<ValidatedMetadata> {
@@ -251,8 +252,11 @@ impl<'a, 'c> Decoder<'a, 'c> {
         self,
         metadata: ValidatedMetadata,
         [left, right]: [Vec<StoredRow>; 2],
+        inventory: &Inventory<'_>,
     ) -> Result<Prepared> {
         self.validate_retained_metrics(&metadata, [&left, &right])?;
+        let writer =
+            super::WriterState::restored(self.snapshot, inventory, &self.workspace, self.check)?;
         let state = StreamJoinState {
             left_expirations: expirations(&left, self.check)?,
             right_expirations: expirations(&right, self.check)?,
@@ -276,6 +280,7 @@ impl<'a, 'c> Decoder<'a, 'c> {
         (self.check)()?;
         Ok(Prepared {
             state,
+            writer,
             containers: self.containers,
             workspace: self.workspace,
         })

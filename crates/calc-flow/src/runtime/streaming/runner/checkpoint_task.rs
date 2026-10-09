@@ -93,6 +93,8 @@ struct EpochManifestAssembly {
     sources: BTreeMap<String, SourceManifestEntry>,
     operators: BTreeMap<String, OperatorManifestEntry>,
     working_states: BTreeMap<String, Arc<crate::state::WorkingStatePins>>,
+    operator_checkpoint_credits:
+        BTreeMap<String, super::super::operator_task::OperatorCheckpointCredit>,
     sink_outputs: BTreeMap<String, BTreeMap<String, SinkManifestEntry>>,
     finalized_sink_outputs: BTreeSet<String>,
     timed_phase: Option<CheckpointPhase>,
@@ -115,6 +117,7 @@ impl EpochManifestAssembly {
         self.sources.clear();
         self.operators.clear();
         self.working_states.clear();
+        self.operator_checkpoint_credits.clear();
         self.sink_outputs.clear();
         self.finalized_sink_outputs.clear();
         self.terminal = terminal;
@@ -1107,6 +1110,17 @@ fn abort_checkpoint_sources(sources: &BTreeMap<String, SourceProgress>, epoch: E
     }
 }
 
+fn admit_operator_ack(ack: &OperatorCheckpointAck) -> crate::Result<()> {
+    if let Some(credit) = &ack.capture_credit {
+        super::super::operator_task::join_checkpoint_credit::admit_ack_clone(
+            credit,
+            &ack.node_id,
+            &ack.state,
+        )?;
+    }
+    Ok(())
+}
+
 async fn accept_operator_ack(
     ack: OperatorCheckpointAck,
     coordinator: &CheckpointCoordinatorHandle,
@@ -1116,6 +1130,7 @@ async fn accept_operator_ack(
     assembly.expect_epoch(ack.epoch)?;
     #[cfg(test)]
     super::super::soak::diagnostics::operator_ack_received(&ack.node_id, ack.epoch);
+    admit_operator_ack(&ack)?;
     insert_identical(
         &mut assembly.operators,
         &ack.node_id,
@@ -1123,6 +1138,11 @@ async fn accept_operator_ack(
         ack.epoch,
         "operator",
     )?;
+    if let Some(credit) = &ack.capture_credit {
+        assembly
+            .operator_checkpoint_credits
+            .insert(ack.node_id.clone(), Arc::clone(credit));
+    }
     if let Some(working) = ack.working {
         assembly
             .working_states

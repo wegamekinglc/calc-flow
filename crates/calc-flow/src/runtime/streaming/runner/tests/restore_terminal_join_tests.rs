@@ -145,6 +145,7 @@ fn terminal_plan(fixture: &Fixture) -> crate::StreamExecutionPlan {
         .unwrap(),
     )
     .unwrap();
+    join.set_checkpoint_v1_test_producer();
     let parses = Arc::clone(&fixture.parses);
     join.set_checkpoint_metadata_test_hook(Arc::new(move |_, parsing| {
         if parsing {

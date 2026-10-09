@@ -44,20 +44,24 @@ impl StreamJoinOperator {
 
     pub(super) fn install_v2(
         &mut self,
-        prepared: Prepared,
+        mut prepared: Prepared,
         check: &dyn Fn() -> Result<()>,
     ) -> Result<()> {
         check()?;
+        prepared.writer.bind_owner(&self.v2_writer)?;
         let Prepared {
             state,
+            writer,
             containers,
             workspace,
         } = prepared;
         let old_state = std::mem::replace(&mut self.state, state);
         let old_containers = self.v2_containers.replace(containers);
+        let old_writer = std::mem::replace(&mut self.v2_writer, writer);
         self.retained_key_cache = RetainedKeyCache::default();
         self.ingress_progress = IngressProgressSnapshot::default();
         drop(old_state);
+        drop(old_writer);
         drop(old_containers);
         drop(workspace);
         Ok(())

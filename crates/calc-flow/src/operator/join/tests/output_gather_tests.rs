@@ -442,6 +442,12 @@ fn materialize_parent_column(column: ArrayRef, offsets: &[usize]) -> RecordBatch
 
 #[test]
 fn test_flat_nullable_gather_matches_old_concat_for_each_supported_shape() {
+    assert_flat_nullable_gather_matches_old_concat_for_each_supported_shape();
+    #[cfg(target_pointer_width = "64")]
+    assert_gather_offsets_above_u32_remain_lossless_without_large_allocation();
+}
+
+fn assert_flat_nullable_gather_matches_old_concat_for_each_supported_shape() {
     let columns: Vec<ArrayRef> = vec![
         Arc::new(BooleanArray::from(vec![Some(true), None, Some(false)])),
         Arc::new(StringArray::from(vec![Some("猫"), None, Some("x")])),
@@ -477,8 +483,7 @@ fn test_flat_nullable_gather_matches_old_concat_for_each_supported_shape() {
 }
 
 #[cfg(target_pointer_width = "64")]
-#[test]
-fn test_gather_offsets_above_u32_remain_lossless_without_large_allocation() {
+fn assert_gather_offsets_above_u32_remain_lossless_without_large_allocation() {
     let offset = usize::try_from(u64::from(u32::MAX) + 1).unwrap();
     reset_join_work();
     let output = materialize_parent_column(Arc::new(NullArray::new(offset + 1)), &[offset]);

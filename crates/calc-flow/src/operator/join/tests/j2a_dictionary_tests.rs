@@ -120,6 +120,14 @@ async fn test_batched_masks_drive_owned_and_generic_admission() {
 
 #[test]
 fn test_dictionary_collision_runs_and_reused_ids_preserve_sorted_dense_rows() {
+    assert_dictionary_collision_runs_and_reused_ids_preserve_sorted_dense_rows();
+    assert_hot_run_expiry_and_refill_move_only_linear_entries();
+    assert_borrowed_hash_and_collision_equality_use_exact_canonical_v1_bytes();
+    assert_probe_interner_disambiguates_colliding_composite_v1_keys();
+    assert_dictionary_owner_follows_live_rows_when_either_batch_expires_first();
+}
+
+fn assert_dictionary_collision_runs_and_reused_ids_preserve_sorted_dense_rows() {
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
     let credit = MemoryConsumer::new("collision-index").register(&pool);
     credit
@@ -187,8 +195,7 @@ fn remove_identity(
     index.remove(row, moved, |position| &dense[position].encoded_key);
 }
 
-#[test]
-fn test_hot_run_expiry_and_refill_move_only_linear_entries() {
+fn assert_hot_run_expiry_and_refill_move_only_linear_entries() {
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
     let credit = MemoryConsumer::new("hot-run-index").register(&pool);
     credit
@@ -236,8 +243,7 @@ fn test_hot_run_expiry_and_refill_move_only_linear_entries() {
     assert_eq!(pool.reserved(), 0);
 }
 
-#[test]
-fn test_borrowed_hash_and_collision_equality_use_exact_canonical_v1_bytes() {
+fn assert_borrowed_hash_and_collision_equality_use_exact_canonical_v1_bytes() {
     let mut types = vec![
         DataType::Boolean,
         DataType::Int16,
@@ -351,8 +357,7 @@ async fn test_wide_composite_masks_keep_quantum_work_bounded_in_both_paths() {
     }
 }
 
-#[test]
-fn test_probe_interner_disambiguates_colliding_composite_v1_keys() {
+fn assert_probe_interner_disambiguates_colliding_composite_v1_keys() {
     let schema = Arc::new(Schema::new(vec![
         Field::new("first", DataType::Utf8, false),
         Field::new("second", DataType::Utf8, false),
@@ -402,8 +407,7 @@ fn test_probe_interner_disambiguates_colliding_composite_v1_keys() {
     assert_eq!(pool.reserved(), 0);
 }
 
-#[test]
-fn test_dictionary_owner_follows_live_rows_when_either_batch_expires_first() {
+fn assert_dictionary_owner_follows_live_rows_when_either_batch_expires_first() {
     for times in [[0, 10], [10, 0]] {
         let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
         let columns = [Arc::new(Int64Array::from(vec![7])) as ArrayRef];

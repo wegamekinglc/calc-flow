@@ -621,7 +621,7 @@ async fn test_paid_key_scratch_zero_headroom_preserves_legacy_sql_acceptance() {
 async fn test_closed_scratch_home_falls_back_without_spurious_cancel() {
     let (mut operator, job) = scratch_fixture(3).await;
     let context = StreamOperatorContext::new(&job, "match", None);
-    let captured = operator.checkpoint(Epoch::INITIAL).unwrap();
+    let captured = operator.checkpoint_v1(Epoch::INITIAL).unwrap();
     let before = operator.status();
     let plan = operator.side_plan("right").unwrap();
     let pool = operator
@@ -650,7 +650,7 @@ async fn test_closed_scratch_home_falls_back_without_spurious_cancel() {
     assert_eq!(operator.status(), before);
     assert_eq!(
         operator
-            .checkpoint(Epoch::new(2).unwrap())
+            .checkpoint_v1(Epoch::new(2).unwrap())
             .unwrap()
             .segments,
         captured.segments
