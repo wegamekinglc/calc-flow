@@ -12,7 +12,14 @@ measurements. Use the current guides for supported behavior.
 - 2026-10-09: Intern repeated streaming Join keys and probe per-key ordered
   time lists through a native hash dictionary. Batch admission masks and
   binary window boundaries reduce row-level probe work while preserving
-  funded state, output ordering, and V1 checkpoint bytes.
+  funded state, output ordering, and V1 checkpoint bytes. Generic admission
+  shares parent batches and gathers flat output columns without per-row
+  record wrappers, retaining concatenation for mixed and nested payloads.
+
+- 2026-10-09: Read columnar V2 streaming Join checkpoints with strict
+  inventory, schema and historical-row validation before atomic restoration.
+  Managed recovery uses funded native work; checkpoint capture continues to
+  write V1 and rebuilds its base after restoring V2 state.
 
 - 2026-10-09: Cancel successfully started native stream jobs when Python
   startup is abandoned before ownership handoff. Await source shutdown and

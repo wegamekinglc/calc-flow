@@ -8,7 +8,7 @@ use crate::{
     CancellationToken, Result, StreamJobContext,
     pipeline::{CompiledStreamOperator, RuntimeStreamNode, StreamRuntimePlanParts},
     runtime::streaming::{
-        operator_task::restore_terminal_join,
+        operator_task::restore_terminal_owned_join,
         progress::{PreparedStreamJob, restore_durable_progress, types::LogicalInstant},
     },
 };
@@ -44,8 +44,14 @@ async fn restore_node(
     job: &StreamJobContext,
 ) -> Result<OperatorProgress> {
     job.check_cancelled()?;
-    let restore = load_restore(node, checkpoint, loads, cancellation).await?;
-    restore_terminal_join(&mut node.operator, node.ingress_edges.keys(), &restore, job).await
+    let mut restore = load_restore(node, checkpoint, loads, cancellation).await?;
+    restore_terminal_owned_join(
+        &mut node.operator,
+        node.ingress_edges.keys(),
+        &mut restore,
+        job,
+    )
+    .await
 }
 
 fn prepare_terminal(

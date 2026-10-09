@@ -10,7 +10,7 @@ use crate::{OperatorStateSnapshot, Result, runtime::streaming::StreamJobContext}
 use datafusion::execution::memory_pool::MemoryReservation;
 use std::sync::Arc;
 
-mod inventory;
+pub(in crate::operator::join) mod inventory;
 mod profile;
 pub(super) mod schema;
 

@@ -1559,7 +1559,7 @@ async fn assert_legacy_copy_adversary(payload: ArrayRef) {
             .state
             .left
             .iter()
-            .all(|row| matches!(row.record, columnar::RowPayload::Legacy(_))),
+            .all(|row| row.record.is_unfunded_legacy()),
         "Boolean/null-buffer payload must keep its physical V1 representation on Legacy"
     );
     for (row, ipc) in operator.state.left.iter().zip(expected) {
@@ -2300,7 +2300,7 @@ async fn test_owned_copy_denied_funding_keeps_legacy_admission_and_pool_zero() {
             .state
             .left
             .iter()
-            .all(|row| matches!(row.record, columnar::RowPayload::Legacy(_)))
+            .all(|row| row.record.is_unfunded_legacy())
     );
     assert_eq!(operator.state.next_left_row_id, 2);
     assert_eq!(pool.reserved(), pressure.size());

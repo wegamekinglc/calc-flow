@@ -234,6 +234,11 @@ fn binary_children(plan: &Arc<dyn ExecutionPlan>) -> Option<[Option<&Arc<dyn Exe
 
 impl DataFusionRuntime {
     #[cfg(test)]
+    pub(crate) fn owned_test_query_lock(&self) -> Arc<tokio::sync::Mutex<()>> {
+        Arc::clone(&self.query_lock)
+    }
+
+    #[cfg(test)]
     pub(crate) async fn lock_owned_test_query(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.query_lock.lock().await
     }

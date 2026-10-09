@@ -1797,10 +1797,12 @@ mod tests {
     }
 
     mod checkpoint_compaction_tests;
+    mod checkpoint_v2_tests;
     mod columnar_state_tests;
     mod empty_checkpoint_tests;
     mod j2a_dictionary_tests;
     mod native_lookup_tests;
+    mod output_gather_tests;
     mod sql_key_scratch_tests;
 
     async fn v1_fixture_captures() -> Vec<OperatorStateSnapshot> {
@@ -2449,6 +2451,8 @@ struct JoinWork {
     native_boundary_visits: usize,
     admission_mask_blocks: usize,
     native_shifted_entries: usize,
+    output_column_views: usize,
+    output_column_takes: usize,
 }
 
 #[cfg(test)]
@@ -2457,6 +2461,7 @@ thread_local! {
         retained_visits: 0, pending_visits: 0, key_encodings: 0, time_decoders: 0,
         sql_probe_table_builds: 0, native_range_visits: 0, native_boundary_visits: 0,
         admission_mask_blocks: 0, native_shifted_entries: 0,
+        output_column_views: 0, output_column_takes: 0,
     }) };
 }
 
@@ -2899,6 +2904,7 @@ pub struct StreamJoinOperator {
     ingress_progress: IngressProgressSnapshot,
     compaction_release: Option<tokio::sync::oneshot::Receiver<()>>,
     compaction_cleanup: Option<crate::runtime::streaming::gather_work::AttemptCleanup>,
+    v2_containers: Option<Arc<checkpoint_v2::ContainerFunding>>,
     #[cfg(test)]
     checkpoint_gate: Option<std::sync::Mutex<checkpoint_compaction::TestGate>>,
     #[cfg(test)]
@@ -3339,11 +3345,13 @@ struct RestoreSchema<'a> {
 mod admission_masks;
 mod borrowed_key;
 mod checkpoint_compaction;
+mod checkpoint_v2;
 mod columnar;
 mod materialization;
 mod metadata_validation;
 mod native_dictionary;
 mod native_lookup;
+mod output_gather;
 mod row_ipc;
 mod sql_key_scratch;
 
@@ -3421,6 +3429,7 @@ impl StreamJoinOperator {
             ingress_progress: IngressProgressSnapshot::default(),
             compaction_release: None,
             compaction_cleanup: None,
+            v2_containers: None,
             #[cfg(test)]
             checkpoint_gate: None,
             #[cfg(test)]
@@ -3849,12 +3858,13 @@ impl StreamJoinOperator {
         bundle: &mut AdmissionBundle,
         quantum: &mut columnar::Quantum,
     ) -> Result<()> {
-        let (record, plan, ingress, _) = source;
+        let (record, plan, ingress, source_row_base) = source;
         let times = BatchEventTimes::new(
             record.column(plan.event_time_index).as_ref(),
             &self.name,
             ingress,
         )?;
+        let parent = Arc::new(record.clone());
         let config = self.admission_mask_context((record, plan, ingress), context);
         for start in (0..record.num_rows()).step_by(64) {
             quantum.step(context, 64, 512).await?;
@@ -3863,21 +3873,27 @@ impl StreamJoinOperator {
                 &config, &times, start, length, context, quantum,
             )
             .await?;
-            self.append_masked_rows(source, (start, length, &masks), context, bundle, quantum)
-                .await?;
+            self.append_masked_rows(
+                (&parent, plan, ingress, source_row_base),
+                (start, length, &masks),
+                context,
+                bundle,
+                quantum,
+            )
+            .await?;
         }
         Ok(())
     }
 
     async fn append_masked_rows(
         &self,
-        source: (&RecordBatch, &SidePlan, &str, usize),
+        source: (&Arc<RecordBatch>, &SidePlan, &str, usize),
         block: (usize, usize, &admission_masks::AdmissionMasks),
         context: &StreamOperatorContext<'_>,
         bundle: &mut AdmissionBundle,
         quantum: &mut columnar::Quantum,
     ) -> Result<()> {
-        let (record, _, ingress, source_row_base) = source;
+        let (parent, _, ingress, source_row_base) = source;
         let (start, length, masks) = block;
         for offset in 0..length {
             quantum.step(context, 4, 16).await?;
@@ -3886,7 +3902,10 @@ impl StreamJoinOperator {
                 RowAdmission::Dropped(kind) => bundle.note_dropped(kind, &self.name)?,
                 RowAdmission::Admitted(event_time) => {
                     bundle.push_admitted(AdmittedRow {
-                        record: columnar::RowPayload::at(record, None, start + offset),
+                        record: columnar::RowPayload::Rowed {
+                            parent: Arc::clone(parent),
+                            row: start + offset,
+                        },
                         event_time,
                         row_id,
                         retain: masks.retain(offset),
@@ -4031,8 +4050,14 @@ impl StreamJoinOperator {
             Ok(tables) => tables,
             Err(error) => return (Err(error), owner.finish()),
         };
-        self.run_owned_key_query(plan, crate::datafusion::owned::Input::new(tables, owner))
-            .await
+        if let Some(containers) = &self.v2_containers {
+            let owner = checkpoint_v2::V2SqlOwners::new(owner, Arc::clone(containers));
+            self.run_v2_owned_key_query(plan, crate::datafusion::owned::Input::new(tables, owner))
+                .await
+        } else {
+            self.run_owned_key_query(plan, crate::datafusion::owned::Input::new(tables, owner))
+                .await
+        }
     }
 
     async fn run_owned_key_query(
@@ -4606,6 +4631,7 @@ impl StreamOperator for StreamJoinOperator {
         self.state = StreamJoinState::default();
         self.retained_key_cache = RetainedKeyCache::default();
         self.ingress_progress = IngressProgressSnapshot::default();
+        self.v2_containers = None;
         Ok(())
     }
 
@@ -4682,6 +4708,14 @@ impl StreamOperator for StreamJoinOperator {
     }
 
     fn restore(&mut self, snapshot: &OperatorStateSnapshot) -> Result<()> {
+        if snapshot
+            .inline_metadata
+            .get("layout_version")
+            .and_then(Value::as_u64)
+            == Some(2)
+        {
+            return self.restore_v2_snapshot(snapshot);
+        }
         let metadata = self.parse_restore_metadata(snapshot)?;
         self.install_restored_metadata(snapshot, metadata, &|| Ok(()))
     }
@@ -4777,6 +4811,7 @@ impl StreamJoinOperator {
         self.state = state;
         self.retained_key_cache = RetainedKeyCache::default();
         self.ingress_progress = IngressProgressSnapshot::default();
+        self.v2_containers = None;
         Ok(())
     }
 }
@@ -5204,9 +5239,7 @@ fn index_by_row_id(opposite: &[StoredRow]) -> BTreeMap<u64, usize> {
 
 /// Materializes one validated chunk of matched pairs into an independent record.
 ///
-/// Each output column concatenates the per-pair single-row column slices in
-/// matched-pair order, so row order is exactly the emission order the
-/// per-row path produced.
+/// Shared flat columns gather in matched-pair order; other columns concatenate row views.
 fn materialize_output_record(
     output_schema: &SchemaRef,
     admitted: &[AdmittedRow],
@@ -5230,24 +5263,31 @@ fn materialize_output_record(
     let (first_left, first_right) = pair_records(&matched[0]);
     let left_width = first_left.num_columns();
     let right_width = first_right.num_columns();
+    let left_gather =
+        output_gather::SideGather::new(matched.iter().map(|pair| pair_records(pair).0));
+    let right_gather =
+        output_gather::SideGather::new(matched.iter().map(|pair| pair_records(pair).1));
     let mut columns = Vec::with_capacity(left_width + right_width);
     for column_index in 0..left_width + right_width {
-        let slices = matched
-            .iter()
-            .map(|pair| {
-                let (left, right) = pair_records(pair);
-                if column_index < left_width {
-                    left.column_view(column_index)
-                } else {
-                    right.column_view(column_index - left_width)
-                }
-            })
-            .collect::<Vec<_>>();
-        let references = slices.iter().map(AsRef::as_ref).collect::<Vec<_>>();
-        columns.push(canonical_column(
-            concat_output_column(&references)?,
+        let (gather, payload_index) = if column_index < left_width {
+            (left_gather.as_ref(), column_index)
+        } else {
+            (right_gather.as_ref(), column_index - left_width)
+        };
+        let payloads = matched.iter().map(|pair| {
+            let (left, right) = pair_records(pair);
+            if column_index < left_width {
+                left
+            } else {
+                right
+            }
+        });
+        columns.push(output_gather::column(
+            gather,
+            payload_index,
             output_schema.field(column_index).data_type(),
-        ));
+            payloads,
+        )?);
     }
     RecordBatch::try_new(Arc::clone(output_schema), columns)
         .map_err(|error| operator_error(operator_id, &format!("output projection failed: {error}")))

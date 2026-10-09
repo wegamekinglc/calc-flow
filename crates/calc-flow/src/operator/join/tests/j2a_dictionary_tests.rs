@@ -111,7 +111,7 @@ async fn test_batched_masks_drive_owned_and_generic_admission() {
         assert_eq!(prepared.admitted.len(), 65);
         assert_eq!(join_work().admission_mask_blocks, 2);
         assert_eq!(prepared.next_row_id, 65);
-        assert_eq!(prepared.admitted[1].record.offset(), usize::from(owned));
+        assert_eq!(prepared.admitted[1].record.offset(), 1);
     }
 }
 
