@@ -56,9 +56,15 @@ The original reservation remains P = 1024 + 12*N + 4*sum(logical_cell_charge + t
 
 #394's synchronous generic admission is not copied: it omits bounded Quantum cancellation and reserves all row IDs before timestamp validation, reintroducing documented correctness bugs. This candidate retains bounded grants and first-error order. Checks remain at 64 visits / 4096 bytes; actual suspension now follows the shared Tokio cooperative budget, up to about 128 quanta in a normal task poll, and other Tokio operations may exhaust it earlier. It does not promise every-Quantum suspension or a wall-time/peer realtime deadline. The [single-file no-op diagnostic](stream-join-strict-profile-quantum.md) attributes a joint effect to deleting the complete Quantum mechanism, not a pure yield/cancellation cost, and is deliberately unshippable.
 
+## Test-only CI follow-up
+
+[Windows Rust CI on the initial published head](https://github.com/wegamekinglc/calc-flow/actions/runs/37974396930/job/113968941964) found one remaining old scheduling assumption in `test_empty_metadata_history_allocations_are_actually_funded`: its synchronous manual-poll helper required a wake outside a budgeted Tokio task. Cooperative budget is unconstrained there. The follow-up expects zero forced wakes and preserves every actual allocation, peak funding, refund, schema and legacy IPC assertion. Real suspension under a budgeted task remains covered by the existing large-work controls.
+
+This correction changes only a `cfg(test)` fixture and this report, leaving the measured production implementation unchanged. It does not add performance observations or change the frozen archive. The maintained full source fingerprint includes test files, so the final CI follow-up has a different full source fingerprint; it is not represented as the original measured Git tree. The corrected fixture passed its focused test (1 passed, 2,047 filtered); actual peak 1,965 bytes and retained 1,941 bytes were covered by a 3,130-byte guard, with complete refund and exact schema/IPC assertions. Formatting and whitespace checks passed. Corrected full source fingerprint: `2c33300d12f1dd850b9019d52cfe8e5a0eb5783945154b72509686564e6455ce`. Final required CI applies to the corrected published head.
+
 ## Build and resource provenance
 
-Frozen measured source: `13a2578acaa3a0c07aa150422458e0950d11f27c`. The lossless package records its exact Git tree. A later report/evidence commit must preserve the same runtime source hash.
+Frozen measured source: `13a2578acaa3a0c07aa150422458e0950d11f27c`. The lossless package records its exact Git tree. The initial report/evidence commit preserved the measured source hash; the subsequent test-only CI correction is described above.
 
 Source-equivalent GitHub commit: `12915453eea2a93300194fab0edf408515791267`, with the same measured Git tree. Failed runtime-source patches relative to published base `0596258984d6c6650a82e579b3959f22ca9f62cf` are recoverable from the evidence package.
 

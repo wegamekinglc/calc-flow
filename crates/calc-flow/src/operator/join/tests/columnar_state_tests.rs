@@ -161,7 +161,8 @@ fn measure_copy_future<F: Future>(future: F) -> (F::Output, allocation_counter::
             }
         }
     });
-    assert!(wake.0.load(Ordering::Relaxed) > 0);
+    // Synchronous polling outside a Tokio task has an unconstrained cooperative budget.
+    assert_eq!(wake.0.load(Ordering::Relaxed), 0);
     (output.unwrap(), measured)
 }
 
