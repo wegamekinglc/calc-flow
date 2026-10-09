@@ -1,13 +1,14 @@
-use super::{StoredRow, borrowed_key::framed_hash, columnar::FramedKey};
+use super::{
+    StoredRow,
+    borrowed_key::{KeyHashState, framed_hash},
+    columnar::FramedKey,
+};
 use crate::EventTime;
 use datafusion::execution::memory_pool::MemoryReservation;
 use hashbrown::HashTable;
-use std::{
-    collections::hash_map::RandomState,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
 };
 
 pub(super) const BASE_BYTES: usize = 1_024;
@@ -100,7 +101,7 @@ pub(super) struct NativeIndex {
     entries: HashTable<u32>,
     slots: Vec<Option<KeyRun>>,
     free: Vec<u32>,
-    hasher: RandomState,
+    hasher: KeyHashState,
     rows: usize,
     run_backing_bytes: usize,
     funding: Arc<Funding>,
@@ -114,7 +115,7 @@ impl NativeIndex {
             entries: HashTable::new(),
             slots: Vec::new(),
             free: Vec::new(),
-            hasher: RandomState::new(),
+            hasher: KeyHashState::default(),
             rows: 0,
             run_backing_bytes: 0,
             funding: Arc::new(Funding {
@@ -325,6 +326,8 @@ impl NativeIndex {
     }
 
     fn find(&self, hash: u64, key: &FramedKey) -> Option<u32> {
+        #[cfg(test)]
+        super::note_join_work(|work| work.native_key_lookups += 1);
         self.entries
             .find(hash, |id| {
                 self.slots[*id as usize]
@@ -337,10 +340,11 @@ impl NativeIndex {
             .copied()
     }
 
-    fn window(&self, key: &FramedKey, range: (EventTime, EventTime)) -> &[RunEntry] {
-        let Some(id) = self.find(self.hash(key), key) else {
-            return &[];
-        };
+    pub(super) fn key_id(&self, key: &FramedKey) -> Option<u32> {
+        self.find(self.hash(key), key)
+    }
+
+    fn window_by_id(&self, id: u32, range: (EventTime, EventTime)) -> &[RunEntry] {
         let run = self.slots[id as usize]
             .as_ref()
             .expect("live key ID")
@@ -350,20 +354,31 @@ impl NativeIndex {
         &run[lower..upper]
     }
 
-    pub(super) fn count_window(&self, key: &FramedKey, range: (EventTime, EventTime)) -> usize {
-        self.window(key, range).len()
+    pub(super) fn count_window_by_id(&self, id: u32, range: (EventTime, EventTime)) -> usize {
+        self.window_by_id(id, range).len()
     }
 
+    pub(super) fn range_by_id(
+        &self,
+        id: u32,
+        range: (EventTime, EventTime),
+    ) -> impl Iterator<Item = usize> + '_ {
+        self.window_by_id(id, range).iter().map(|entry| {
+            #[cfg(test)]
+            super::note_join_work(|work| work.native_range_visits += 1);
+            entry.dense
+        })
+    }
+
+    #[cfg(test)]
     pub(super) fn range<'a>(
         &'a self,
         key: &FramedKey,
         range: (EventTime, EventTime),
     ) -> impl Iterator<Item = usize> + 'a {
-        self.window(key, range).iter().map(|entry| {
-            #[cfg(test)]
-            super::note_join_work(|work| work.native_range_visits += 1);
-            entry.dense
-        })
+        self.key_id(key)
+            .into_iter()
+            .flat_map(move |id| self.range_by_id(id, range))
     }
 
     pub(super) fn resident_bytes(&self) -> usize {

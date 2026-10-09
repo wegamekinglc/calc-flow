@@ -75,8 +75,12 @@ impl Quantum {
         visits: usize,
         bytes: usize,
     ) -> Result<()> {
+        #[cfg(test)]
+        super::super::note_join_work(|work| work.quantum_steps += 1);
         debug_assert!(visits <= COPY_VISITS && bytes <= COPY_BYTES);
         if self.visits + visits > COPY_VISITS || self.bytes + bytes > COPY_BYTES {
+            #[cfg(test)]
+            super::super::note_join_work(|work| work.quantum_yields += 1);
             context.check_cancelled()?;
             tokio::task::yield_now().await;
             context.check_cancelled()?;
@@ -86,6 +90,27 @@ impl Quantum {
         self.visits += visits;
         self.bytes += bytes;
         Ok(())
+    }
+    pub(in crate::operator::join) async fn grant_admission(
+        &mut self,
+        context: &StreamOperatorContext<'_>,
+        maximum: usize,
+    ) -> Result<usize> {
+        debug_assert!(maximum > 0);
+        let available = self.admission_capacity().min(maximum);
+        if available > 0 {
+            self.step(context, available, available * 16).await?;
+            return Ok(available);
+        }
+        self.step(context, 1, 16).await?;
+        let additional = self.admission_capacity().min(maximum - 1);
+        self.visits += additional;
+        self.bytes += additional * 16;
+        Ok(additional + 1)
+    }
+
+    fn admission_capacity(&self) -> usize {
+        (COPY_VISITS - self.visits).min((COPY_BYTES - self.bytes) / 16)
     }
 }
 

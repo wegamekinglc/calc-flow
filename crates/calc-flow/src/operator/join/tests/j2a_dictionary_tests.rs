@@ -97,6 +97,9 @@ fn source_batch(owned: bool) -> (SchemaRef, Batch) {
 
 #[tokio::test]
 async fn test_batched_masks_drive_owned_and_generic_admission() {
+    admission_masks::tests::assert_microsecond_copy_skips_scalar_normalization();
+    admission_masks::tests::assert_constant_temporal_masks_skip_scalar_rows();
+    admission_masks::tests::assert_vectorized_masks_equal_scalar_units_and_finite_boundaries();
     for owned in [false, true] {
         let (schema, batch) = source_batch(owned);
         let mut operator =
@@ -257,7 +260,7 @@ fn test_borrowed_hash_and_collision_equality_use_exact_canonical_v1_bytes() {
             types.push(DataType::Timestamp(unit, timezone.map(Into::into)));
         }
     }
-    let hasher = std::collections::hash_map::RandomState::new();
+    let hasher = borrowed_key::KeyHashState::default();
     for data_type in types {
         let columns = [
             datafusion::arrow::array::new_null_array(&data_type, 1),
@@ -384,12 +387,12 @@ fn test_probe_interner_disambiguates_colliding_composite_v1_keys() {
     reset_join_work();
     let keys = native_lookup::colliding_probe_keys(&admitted, &[0, 1], credit).unwrap();
     assert_eq!(join_work().key_encodings, 3);
-    assert!(Arc::ptr_eq(&keys.keys[0], &keys.keys[2]));
-    assert!(Arc::ptr_eq(&keys.keys[1], &keys.keys[4]));
+    assert!(Arc::ptr_eq(keys.key(0), keys.key(2)));
+    assert!(Arc::ptr_eq(keys.key(1), keys.key(4)));
     for (first, second) in [(0, 1), (0, 3), (1, 3)] {
-        assert!(!Arc::ptr_eq(&keys.keys[first], &keys.keys[second]));
+        assert!(!Arc::ptr_eq(keys.key(first), keys.key(second)));
     }
-    for (row, key) in admitted.iter().zip(&keys.keys) {
+    for (row, key) in admitted.iter().zip(keys.row_keys()) {
         assert_eq!(
             key.as_slice(),
             encode_join_key_columns_v1(row.record.columns(), row.record.offset(), &[0, 1]).unwrap()

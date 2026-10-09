@@ -1,6 +1,9 @@
 #[cfg(test)]
 use super::StoredRow;
+use super::borrowed_key::KeyHashState;
+use super::borrowed_key::framed_hash;
 use super::columnar::FramedKey;
+use super::key_arena::{ArenaLayout, visit_key_frames};
 use super::native_dictionary::BASE_BYTES;
 pub(super) use super::native_dictionary::{AppendCredit, NativeIndex};
 use super::{
@@ -11,7 +14,7 @@ use crate::{CalcFlowError, EventTime, Result};
 use datafusion::arrow::datatypes::{DataType, Schema};
 use datafusion::execution::memory_pool::MemoryReservation;
 use hashbrown::HashTable;
-use std::{collections::hash_map::RandomState, sync::Arc};
+use std::sync::Arc;
 
 #[cfg(test)]
 #[path = "tests/native_index_allocation_tests.rs"]
@@ -45,23 +48,66 @@ pub(super) struct NativeMatches {
 
 pub(super) struct NativeKeys {
     pub(super) keys: Vec<Arc<FramedKey>>,
+    ids: Vec<u32>,
     _credit: Arc<MemoryReservation>,
+}
+
+impl NativeKeys {
+    pub(super) fn key(&self, position: usize) -> &Arc<FramedKey> {
+        &self.keys[self.ids[position] as usize]
+    }
+
+    #[cfg(test)]
+    pub(super) fn row_keys(&self) -> impl Iterator<Item = &Arc<FramedKey>> {
+        self.ids.iter().map(|&id| &self.keys[id as usize])
+    }
+}
+
+// Opposite IDs cannot outlive the immutable index used by both window passes.
+struct ProbeWindows<'a> {
+    index: &'a NativeIndex,
+    ids: &'a [u32],
+    slots: Vec<Option<u32>>,
+}
+
+impl<'a> ProbeWindows<'a> {
+    fn new(index: &'a NativeIndex, keys: &'a NativeKeys) -> Self {
+        let mut slots = Vec::with_capacity(keys.keys.len());
+        slots.extend(keys.keys.iter().map(|key| index.key_id(key)));
+        Self {
+            index,
+            ids: &keys.ids,
+            slots,
+        }
+    }
+
+    fn count(&self, pos: usize, range: (EventTime, EventTime)) -> usize {
+        self.slots[self.ids[pos] as usize].map_or(0, |id| self.index.count_window_by_id(id, range))
+    }
+
+    fn range(&self, pos: usize, range: (EventTime, EventTime)) -> impl Iterator<Item = usize> + '_ {
+        self.slots[self.ids[pos] as usize]
+            .into_iter()
+            .flat_map(move |id| self.index.range_by_id(id, range))
+    }
 }
 
 struct ProbeKeyInterner {
     keys: Vec<Arc<FramedKey>>,
-    distinct: Vec<(u64, usize)>,
+    ids: Vec<u32>,
+    hashes: Vec<u64>,
     dictionary: HashTable<u32>,
-    hasher: RandomState,
+    hasher: KeyHashState,
 }
 
 impl ProbeKeyInterner {
     fn new(rows: usize) -> Self {
         Self {
-            keys: Vec::with_capacity(rows),
-            distinct: Vec::new(),
+            keys: Vec::new(),
+            ids: Vec::with_capacity(rows),
+            hashes: Vec::new(),
             dictionary: HashTable::new(),
-            hasher: RandomState::new(),
+            hasher: KeyHashState::default(),
         }
     }
 
@@ -82,23 +128,102 @@ impl ProbeKeyInterner {
         credit: &Arc<MemoryReservation>,
         name: &str,
     ) -> Result<()> {
-        let previous = self.dictionary.find(hash, |id| {
-            key.equals(&self.keys[self.distinct[*id as usize].1])
-        });
-        let encoded = if let Some(id) = previous {
-            Arc::clone(&self.keys[self.distinct[*id as usize].1])
+        self.push_with(
+            hash,
+            |stored| key.equals(stored),
+            || super::columnar::funded_key(key.columns, key.row, key.indices, Arc::clone(credit)),
+            name,
+        )
+    }
+
+    fn push_bytes(
+        &mut self,
+        bytes: &[u8],
+        credit: &Arc<MemoryReservation>,
+        name: &str,
+    ) -> Result<()> {
+        self.push_bytes_hashed(bytes, framed_hash(&self.hasher, bytes), credit, name)
+    }
+
+    fn push_bytes_hashed(
+        &mut self,
+        bytes: &[u8],
+        hash: u64,
+        credit: &Arc<MemoryReservation>,
+        name: &str,
+    ) -> Result<()> {
+        self.push_with(
+            hash,
+            |stored| stored.as_slice() == bytes,
+            || {
+                #[cfg(test)]
+                super::note_join_work(|work| work.key_encodings += 1);
+                Ok(super::columnar::funded_encoded_key(
+                    bytes.to_vec(),
+                    Arc::clone(credit),
+                ))
+            },
+            name,
+        )
+    }
+
+    fn push_with(
+        &mut self,
+        hash: u64,
+        equals: impl Fn(&FramedKey) -> bool,
+        encode: impl FnOnce() -> Result<Arc<FramedKey>>,
+        name: &str,
+    ) -> Result<()> {
+        let previous = self
+            .dictionary
+            .find(hash, |id| equals(&self.keys[*id as usize]));
+        let id = if let Some(id) = previous {
+            *id
         } else {
-            let id = u32::try_from(self.distinct.len()).map_err(|_| scratch_error(name))?;
-            let encoded =
-                super::columnar::funded_key(key.columns, key.row, key.indices, Arc::clone(credit))?;
-            self.distinct.push((hash, self.keys.len()));
+            let id = u32::try_from(self.keys.len()).map_err(|_| scratch_error(name))?;
+            let encoded = encode()?;
+            self.keys.push(encoded);
+            self.hashes.push(hash);
             self.dictionary
-                .insert_unique(hash, id, |id| self.distinct[*id as usize].0);
-            encoded
+                .insert_unique(hash, id, |id| self.hashes[*id as usize]);
+            id
         };
-        self.keys.push(encoded);
+        self.ids.push(id);
         Ok(())
     }
+
+    fn finish(self, credit: Arc<MemoryReservation>) -> NativeKeys {
+        NativeKeys {
+            keys: self.keys,
+            ids: self.ids,
+            _credit: credit,
+        }
+    }
+}
+
+fn intern_probe_keys(
+    admitted: &[AdmittedRow],
+    indices: &[usize],
+    credit: Arc<MemoryReservation>,
+    name: &str,
+    layout: Option<ArenaLayout>,
+) -> Result<NativeKeys> {
+    let mut interner = ProbeKeyInterner::new(admitted.len());
+    if let Some(layout) = layout.filter(|layout| layout.fits(admitted.len(), indices.len())) {
+        visit_key_frames(admitted, indices, layout, |bytes| {
+            interner.push_bytes(bytes, &credit, name)
+        })?;
+    } else {
+        for row in admitted {
+            let key = super::borrowed_key::BorrowedKey {
+                columns: row.record.columns(),
+                row: row.record.offset(),
+                indices,
+            };
+            interner.push(key, &credit, name)?;
+        }
+    }
+    Ok(interner.finish(credit))
 }
 
 #[cfg(test)]
@@ -109,19 +234,12 @@ pub(super) fn colliding_probe_keys(
 ) -> Result<NativeKeys> {
     let shared = Arc::new(credit);
     let mut interner = ProbeKeyInterner::new(admitted.len());
-    for row in admitted {
-        let key = super::borrowed_key::BorrowedKey {
-            columns: row.record.columns(),
-            row: row.record.offset(),
-            indices,
-        };
-        key.hash(&interner.hasher)?;
-        interner.push_hashed(key, 0, &shared, "collision-test")?;
-    }
-    Ok(NativeKeys {
-        keys: interner.keys,
-        _credit: shared,
-    })
+    let layout = ArenaLayout::measure(admitted, indices)?.expect("eligible collision fixture");
+    assert!(layout.fits(admitted.len(), indices.len()));
+    visit_key_frames(admitted, indices, layout, |bytes| {
+        interner.push_bytes_hashed(bytes, 0, &shared, "collision-test")
+    })?;
+    Ok(interner.finish(shared))
 }
 
 impl StreamJoinOperator {
@@ -175,24 +293,16 @@ impl StreamJoinOperator {
         if !eligible(&self.compiled, self.input_schema(0)) {
             return Ok(None);
         }
-        let bytes = probe_key_charge(admitted, &plan.key_indices)?;
+        let layout = ArenaLayout::measure(admitted, &plan.key_indices)?;
+        let bytes = match layout {
+            Some(layout) => layout.charge,
+            None => probe_key_charge(admitted, &plan.key_indices)?,
+        };
         let Some(credit) = self.optional_credit(bytes)? else {
             return Ok(None);
         };
         let shared = Arc::new(credit);
-        let mut interner = ProbeKeyInterner::new(admitted.len());
-        for row in admitted {
-            let key = super::borrowed_key::BorrowedKey {
-                columns: row.record.columns(),
-                row: row.record.offset(),
-                indices: &plan.key_indices,
-            };
-            interner.push(key, &shared, &self.name)?;
-        }
-        Ok(Some(NativeKeys {
-            keys: interner.keys,
-            _credit: shared,
-        }))
+        intern_probe_keys(admitted, &plan.key_indices, shared, &self.name, layout).map(Some)
     }
 
     fn collect_native_pairs(
@@ -201,15 +311,19 @@ impl StreamJoinOperator {
         admitted: &[AdmittedRow],
         keys: NativeKeys,
     ) -> Result<Option<NativeMatches>> {
-        let opposite = opposite_rows(self, plan);
+        let opposite = if plan.incoming_is_left {
+            &self.state.right
+        } else {
+            &self.state.left
+        };
         let index = opposite
             .1
             .as_ref()
             .expect("native index built before probing");
+        let windows = ProbeWindows::new(index, &keys);
         let count = count_pairs(
-            index,
+            &windows,
             admitted,
-            &keys.keys,
             self.spec.bounds,
             plan,
             self.spec.limits.max_matches_per_input_batch,
@@ -223,26 +337,27 @@ impl StreamJoinOperator {
         let bytes = count
             .checked_mul(size_of::<MatchedPair>() + 256)
             .ok_or_else(|| scratch_error(&self.name))?;
-        let Some(credit) = self.optional_credit(bytes)? else {
-            return Ok(None);
-        };
-        let opposite = opposite_rows(self, plan);
-        let index = opposite
-            .1
+        let credit = self
+            .runtime
+            .runtime
             .as_ref()
-            .expect("native index built before probing");
+            .expect("native probe initialized runtime")
+            .incremental_reservation("stream-join-native");
+        if credit.try_grow(bytes).is_err() {
+            return Ok(None);
+        }
         let mut pairs = Vec::with_capacity(count);
         for (pos, row) in admitted.iter().enumerate() {
-            let key = &keys.keys[pos];
             pairs.extend(
-                index
-                    .range(key, time_range(self.spec.bounds, plan, row.event_time))
+                windows
+                    .range(pos, time_range(self.spec.bounds, plan, row.event_time))
                     .map(|opposite_index| MatchedPair {
                         pos,
                         opposite_index,
                     }),
             );
         }
+        drop(windows);
         Ok(Some(NativeMatches {
             pairs,
             keys,
@@ -316,8 +431,13 @@ fn time_range(bounds: JoinTimeBounds, plan: &SidePlan, time: EventTime) -> (Even
     )
 }
 
-fn probe_key_charge(admitted: &[AdmittedRow], indices: &[usize]) -> Result<usize> {
-    admitted.iter().try_fold(BASE_BYTES, |total, row| {
+pub(super) fn probe_key_charge(admitted: &[AdmittedRow], indices: &[usize]) -> Result<usize> {
+    let extra = admitted
+        .len()
+        .checked_mul(size_of::<u32>() + size_of::<Option<u32>>())
+        .and_then(|bytes| bytes.checked_add(BASE_BYTES))
+        .ok_or_else(|| scratch_error("join"))?;
+    admitted.iter().try_fold(extra, |total, row| {
         indices.iter().try_fold(total, |bytes, &index| {
             let array = row.record.column(index);
             let value = usize::try_from(super::logical_cell_charge(
@@ -339,37 +459,28 @@ fn probe_key_charge(admitted: &[AdmittedRow], indices: &[usize]) -> Result<usize
     })
 }
 
-fn scratch_error(name: &str) -> CalcFlowError {
+pub(super) fn scratch_error(name: &str) -> CalcFlowError {
     CalcFlowError::DataFusion {
         node_id: Some(name.to_owned()),
         message: "native Join scratch size overflow".to_owned(),
     }
 }
 
-fn opposite_rows<'a>(operator: &'a StreamJoinOperator, plan: &SidePlan) -> &'a super::RetainedRows {
-    if plan.incoming_is_left {
-        &operator.state.right
-    } else {
-        &operator.state.left
-    }
-}
-
 fn count_pairs(
-    index: &NativeIndex,
+    windows: &ProbeWindows<'_>,
     admitted: &[AdmittedRow],
-    keys: &[Arc<FramedKey>],
     bounds: JoinTimeBounds,
     plan: &SidePlan,
     limit: u64,
 ) -> Result<usize> {
     let limit = usize::try_from(limit).unwrap_or(usize::MAX);
     let mut count = 0_usize;
-    for (row, key) in admitted.iter().zip(keys) {
+    for (pos, row) in admitted.iter().enumerate() {
         let remaining = limit.saturating_sub(count).saturating_add(1);
         count = count
             .checked_add(
-                index
-                    .count_window(key, time_range(bounds, plan, row.event_time))
+                windows
+                    .count(pos, time_range(bounds, plan, row.event_time))
                     .min(remaining),
             )
             .ok_or_else(|| scratch_error("join"))?;

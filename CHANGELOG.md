@@ -9,6 +9,13 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-10: Resolve each distinct streaming Join probe key once for both
+  matching passes and keep one canonical key owner per distinct probe key.
+  Typed key columns reuse one funded row buffer and immediately intern each
+  frame, preserving checkpoint bytes without a full-batch key arena. Vectorized admission removes redundant
+  scalar scans and charges the remaining work within bounded cancellation
+  grants, preserving error order and resource limits.
+
 - 2026-10-09: Intern repeated streaming Join keys and probe per-key ordered
   time lists through a native hash dictionary. Batch admission masks and
   binary window boundaries reduce row-level probe work while preserving

@@ -8,10 +8,13 @@ use datafusion::arrow::{
         UInt16Type, UInt32Type, UInt64Type,
     },
 };
-use std::{
-    collections::hash_map::RandomState,
-    hash::{BuildHasher, Hasher},
-};
+use std::hash::{BuildHasher, Hasher};
+
+pub(super) type KeyHashState = hashbrown::DefaultHashBuilder;
+
+#[cfg(test)]
+#[path = "tests/hash_stream_tests.rs"]
+mod tests;
 
 #[derive(Clone, Copy)]
 pub(super) struct BorrowedKey<'a> {
@@ -21,13 +24,22 @@ pub(super) struct BorrowedKey<'a> {
 }
 
 impl BorrowedKey<'_> {
-    pub(super) fn hash(&self, state: &RandomState) -> Result<u64> {
+    pub(super) fn hash(&self, state: &KeyHashState) -> Result<u64> {
+        #[cfg(test)]
+        super::note_join_work(|work| work.borrowed_key_hashes += 1);
         let mut hasher = state.build_hasher();
-        self.visit(|bytes| hasher.write(bytes))?;
+        let mut length = 0_u64;
+        self.visit_hash_blocks(|bytes| {
+            hasher.write(bytes);
+            length = length.wrapping_add(bytes.len() as u64);
+        })?;
+        hasher.write_u64(length);
         Ok(hasher.finish())
     }
 
     pub(super) fn equals(&self, bytes: &[u8]) -> bool {
+        #[cfg(test)]
+        super::note_join_work(|work| work.borrowed_key_equalities += 1);
         let mut remaining = bytes;
         let mut equal = true;
         self.visit(|part| {
@@ -41,8 +53,17 @@ impl BorrowedKey<'_> {
         equal && remaining.is_empty()
     }
 
+    fn visit_hash_blocks(&self, visitor: impl FnMut(&[u8])) -> Result<()> {
+        let mut stream = CanonicalStream::new(visitor);
+        self.visit(|part| stream.write(part))?;
+        stream.finish();
+        Ok(())
+    }
+
     fn visit(&self, mut visitor: impl FnMut(&[u8])) -> Result<()> {
         for &index in self.indices {
+            #[cfg(test)]
+            super::note_join_work(|work| work.key_type_resolutions += 1);
             let array = self.columns[index].as_ref();
             let tag = key_type_tag(array.data_type())?;
             let timezone = timezone(array.data_type());
@@ -60,9 +81,47 @@ impl BorrowedKey<'_> {
     }
 }
 
-pub(super) fn framed_hash(state: &RandomState, bytes: &[u8]) -> u64 {
+struct CanonicalStream<F> {
+    block: [u8; 64],
+    used: usize,
+    visitor: F,
+}
+
+impl<F: FnMut(&[u8])> CanonicalStream<F> {
+    fn new(visitor: F) -> Self {
+        Self {
+            block: [0; 64],
+            used: 0,
+            visitor,
+        }
+    }
+
+    fn write(&mut self, mut bytes: &[u8]) {
+        while !bytes.is_empty() {
+            let length = bytes.len().min(self.block.len() - self.used);
+            self.block[self.used..self.used + length].copy_from_slice(&bytes[..length]);
+            self.used += length;
+            bytes = &bytes[length..];
+            if self.used == self.block.len() {
+                (self.visitor)(&self.block);
+                self.used = 0;
+            }
+        }
+    }
+
+    fn finish(mut self) {
+        if self.used != 0 {
+            (self.visitor)(&self.block[..self.used]);
+        }
+    }
+}
+
+pub(super) fn framed_hash(state: &KeyHashState, bytes: &[u8]) -> u64 {
     let mut hasher = state.build_hasher();
-    hasher.write(bytes);
+    for block in bytes.chunks(64) {
+        hasher.write(block);
+    }
+    hasher.write_u64(bytes.len() as u64);
     hasher.finish()
 }
 

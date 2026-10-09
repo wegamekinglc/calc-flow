@@ -1802,6 +1802,7 @@ mod tests {
     mod empty_checkpoint_tests;
     mod j2a_dictionary_tests;
     mod native_lookup_tests;
+    mod optimization_tests;
     mod output_gather_tests;
     mod sql_key_scratch_tests;
 
@@ -2453,6 +2454,18 @@ struct JoinWork {
     native_shifted_entries: usize,
     output_column_views: usize,
     output_column_takes: usize,
+    native_key_lookups: usize,
+    scalar_admissions: usize,
+    generic_fast_rows: usize,
+    admission_grants: usize,
+    quantum_steps: usize,
+    quantum_yields: usize,
+    borrowed_key_hashes: usize,
+    borrowed_key_equalities: usize,
+    key_type_resolutions: usize,
+    arena_frames: usize,
+    normalized_time_visits: usize,
+    temporal_mask_visits: usize,
 }
 
 #[cfg(test)]
@@ -2462,6 +2475,12 @@ thread_local! {
         sql_probe_table_builds: 0, native_range_visits: 0, native_boundary_visits: 0,
         admission_mask_blocks: 0, native_shifted_entries: 0,
         output_column_views: 0, output_column_takes: 0,
+        native_key_lookups: 0,
+        scalar_admissions: 0, generic_fast_rows: 0, admission_grants: 0,
+        quantum_steps: 0, quantum_yields: 0,
+        borrowed_key_hashes: 0, borrowed_key_equalities: 0,
+        key_type_resolutions: 0, arena_frames: 0,
+        normalized_time_visits: 0, temporal_mask_visits: 0,
     }) };
 }
 
@@ -2980,6 +2999,7 @@ struct AdmittedRow {
 
 /// Scratch accumulator for one input batch's admission pass.
 struct AdmissionBundle {
+    quantum: columnar::Quantum,
     next_row_id: u64,
     metrics: SideMetrics,
     admitted: Vec<AdmittedRow>,
@@ -3347,6 +3367,7 @@ mod borrowed_key;
 mod checkpoint_compaction;
 mod checkpoint_v2;
 mod columnar;
+mod key_arena;
 mod materialization;
 mod metadata_validation;
 mod native_dictionary;
@@ -3641,7 +3662,7 @@ impl StreamJoinOperator {
             &bundle.admitted,
             &plan.key_indices,
             &self.name,
-            matches.keys.as_ref().map(|keys| keys.keys.as_slice()),
+            matches.keys.as_ref(),
         )?;
         self.validate_state_admission(plan.incoming_is_left, &retained)?;
         let native_append = self.reserve_native_append(plan.incoming_is_left, retained.len())?;
@@ -3702,6 +3723,7 @@ impl StreamJoinOperator {
             )
         };
         AdmissionBundle {
+            quantum: columnar::Quantum::default(),
             next_row_id,
             metrics,
             admitted: Vec::new(),
@@ -3719,9 +3741,29 @@ impl StreamJoinOperator {
         bundle: &mut AdmissionBundle,
         source_row_base: usize,
     ) -> Result<()> {
-        let mut quantum = columnar::Quantum::default();
+        let mut quantum = std::mem::take(&mut bundle.quantum);
+        let result = self
+            .admit_record_with_quantum(
+                (record, plan, ingress, source_row_base),
+                context,
+                bundle,
+                &mut quantum,
+            )
+            .await;
+        bundle.quantum = quantum;
+        result
+    }
+
+    async fn admit_record_with_quantum(
+        &mut self,
+        source: (&RecordBatch, &SidePlan, &str, usize),
+        context: &StreamOperatorContext<'_>,
+        bundle: &mut AdmissionBundle,
+        quantum: &mut columnar::Quantum,
+    ) -> Result<()> {
+        let (record, plan, ingress, source_row_base) = source;
         if self
-            .can_copy_payload(record, plan, context, &mut quantum)
+            .can_copy_payload(record, plan, context, quantum)
             .await?
             && let Some(mut selection) = columnar::CopySelection::reserve(self, record.num_rows())?
         {
@@ -3730,17 +3772,11 @@ impl StreamJoinOperator {
                 context,
                 bundle,
                 &mut selection,
-                &mut quantum,
+                quantum,
             )
             .await?;
             let shared = self
-                .owned_payload(
-                    record,
-                    plan.port_index,
-                    &selection.rows,
-                    context,
-                    &mut quantum,
-                )
+                .owned_payload(record, plan.port_index, &selection.rows, context, quantum)
                 .await?;
             bundle
                 .append_copy_rows(
@@ -3749,7 +3785,7 @@ impl StreamJoinOperator {
                     &selection.rows,
                     context,
                     source_row_base,
-                    &mut quantum,
+                    quantum,
                 )
                 .await?;
             return Ok(());
@@ -3758,7 +3794,7 @@ impl StreamJoinOperator {
             (record, plan, ingress, source_row_base),
             context,
             bundle,
-            &mut quantum,
+            quantum,
         )
         .await
     }
@@ -3794,7 +3830,6 @@ impl StreamJoinOperator {
         )?;
         let config = self.admission_mask_context(source, context);
         for start in (0..record.num_rows()).step_by(64) {
-            quantum.step(context, 64, 512).await?;
             let length = (record.num_rows() - start).min(64);
             let masks = admission_masks::AdmissionMasks::new(
                 &config, &times, start, length, context, quantum,
@@ -3820,6 +3855,8 @@ impl StreamJoinOperator {
         ingress: &str,
         bundle: &mut AdmissionBundle,
     ) -> Result<(u64, RowAdmission)> {
+        #[cfg(test)]
+        note_join_work(|work| work.scalar_admissions += 1);
         let row_id = bundle.reserve_row_id(&self.name)?;
         Ok((row_id, masks.at(offset, &self.name, ingress)?))
     }
@@ -3867,7 +3904,6 @@ impl StreamJoinOperator {
         let parent = Arc::new(record.clone());
         let config = self.admission_mask_context((record, plan, ingress), context);
         for start in (0..record.num_rows()).step_by(64) {
-            quantum.step(context, 64, 512).await?;
             let length = (record.num_rows() - start).min(64);
             let masks = admission_masks::AdmissionMasks::new(
                 &config, &times, start, length, context, quantum,
@@ -3895,6 +3931,16 @@ impl StreamJoinOperator {
     ) -> Result<()> {
         let (parent, _, ingress, source_row_base) = source;
         let (start, length, masks) = block;
+        if masks.all_admitted(length) && bundle.next_row_id.checked_add(length as u64).is_some() {
+            return Self::append_proven_rows(
+                (parent, source_row_base),
+                block,
+                context,
+                bundle,
+                quantum,
+            )
+            .await;
+        }
         for offset in 0..length {
             quantum.step(context, 4, 16).await?;
             let (row_id, admission) = self.masked_row(masks, offset, ingress, bundle)?;
@@ -3915,6 +3961,26 @@ impl StreamJoinOperator {
                         .push(source_row_base + start + offset);
                 }
             }
+        }
+        Ok(())
+    }
+
+    async fn append_proven_rows(
+        source: (&Arc<RecordBatch>, usize),
+        block: (usize, usize, &admission_masks::AdmissionMasks),
+        context: &StreamOperatorContext<'_>,
+        bundle: &mut AdmissionBundle,
+        quantum: &mut columnar::Quantum,
+    ) -> Result<()> {
+        let (start, length, masks) = block;
+        let mut offset = 0;
+        while offset < length {
+            let grant = quantum.grant_admission(context, length - offset).await?;
+            let first_id = bundle.next_row_id;
+            // The immutable whole-block check proves every chunk's ID range fits.
+            bundle.next_row_id += grant as u64;
+            bundle.append_granted_rows(source, (start, offset..offset + grant, masks), first_id);
+            offset += grant;
         }
         Ok(())
     }
@@ -4861,6 +4927,39 @@ impl AdmissionBundle {
         Ok(())
     }
 
+    fn append_granted_rows(
+        &mut self,
+        source: (&Arc<RecordBatch>, usize),
+        block: (
+            usize,
+            std::ops::Range<usize>,
+            &admission_masks::AdmissionMasks,
+        ),
+        first_id: u64,
+    ) {
+        let (parent, source_row_base) = source;
+        let (start, offsets, masks) = block;
+        let first_offset = offsets.start;
+        #[cfg(test)]
+        note_join_work(|work| {
+            work.admission_grants += 1;
+            work.generic_fast_rows += offsets.len();
+        });
+        for offset in offsets {
+            self.push_admitted(AdmittedRow {
+                record: columnar::RowPayload::Rowed {
+                    parent: Arc::clone(parent),
+                    row: start + offset,
+                },
+                event_time: masks.admitted_time(offset),
+                row_id: first_id + (offset - first_offset) as u64,
+                retain: masks.retain(offset),
+            });
+            self.admitted_source_rows
+                .push(source_row_base + start + offset);
+        }
+    }
+
     fn reserve_row_id(&mut self, operator_id: &str) -> Result<u64> {
         let row_id = self.next_row_id;
         self.next_row_id = self
@@ -4993,7 +5092,7 @@ fn retained_rows(
     admitted: &[AdmittedRow],
     key_indices: &[usize],
     operator_id: &str,
-    native_keys: Option<&[Arc<columnar::FramedKey>]>,
+    native_keys: Option<&native_lookup::NativeKeys>,
 ) -> Result<Vec<StoredRow>> {
     admitted
         .iter()
@@ -5001,7 +5100,7 @@ fn retained_rows(
         .filter(|(_, row)| row.retain)
         .map(|(index, row)| {
             let encoded_key = match native_keys {
-                Some(keys) => Arc::clone(&keys[index]),
+                Some(keys) => Arc::clone(keys.key(index)),
                 None => Arc::new(
                     encode_join_key_columns_v1(
                         row.record.columns(),

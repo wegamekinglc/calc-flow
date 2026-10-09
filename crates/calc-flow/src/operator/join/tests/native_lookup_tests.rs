@@ -243,6 +243,7 @@ async fn test_native_key_types_match_sql_order_in_both_directions() {
             compare_key_case(&key, incoming_is_left).await;
         }
     }
+    assert_native_arena_all_key_types_preserve_exact_v1_frames().await;
 }
 
 fn composite_batch(schema: &SchemaRef, first: &[&str], second: &[&str]) -> Batch {
@@ -356,13 +357,10 @@ async fn test_native_probe_interns_each_distinct_repeated_key_once() {
     assert_eq!(join_work().key_encodings, 2);
     assert_eq!(native.pairs.len(), 8);
     for position in [2, 3, 5] {
-        assert!(Arc::ptr_eq(
-            &native.keys.keys[0],
-            &native.keys.keys[position]
-        ));
+        assert!(Arc::ptr_eq(native.keys.key(0), native.keys.key(position)));
     }
-    assert!(Arc::ptr_eq(&native.keys.keys[1], &native.keys.keys[4]));
-    assert!(!Arc::ptr_eq(&native.keys.keys[0], &native.keys.keys[1]));
+    assert!(Arc::ptr_eq(native.keys.key(1), native.keys.key(4)));
+    assert!(!Arc::ptr_eq(native.keys.key(0), native.keys.key(1)));
     let pool = operator
         .runtime
         .runtime()
@@ -377,7 +375,8 @@ async fn test_native_probe_interns_each_distinct_repeated_key_once() {
 
 #[tokio::test]
 async fn test_native_probe_key_allocations_and_aliases_remain_funded() {
-    let cases: Vec<ArrayRef> = vec![
+    key_arena::tests::assert_empty_arena_sizing_for_wide_schema_allocates_nothing();
+    let mut cases: Vec<ArrayRef> = vec![
         Arc::new(UInt8Array::from(vec![0])),
         Arc::new(StringArray::from(vec![""])),
         Arc::new(UInt8Array::from(vec![7; 129])),
@@ -387,10 +386,164 @@ async fn test_native_probe_key_allocations_and_aliases_remain_funded() {
             (0..129).map(|row| format!("key-{row}")).collect::<Vec<_>>(),
         )),
         Arc::new(StringArray::from(vec!["", "a", "", "b", "a"])),
+        Arc::new(StringArray::from(
+            (0..8)
+                .map(|row| format!("{row}{}", "é\0".repeat(1366)))
+                .collect::<Vec<_>>(),
+        )),
     ];
+    for rows in [2, 3, 4, 8, 9, 17, 33, 65] {
+        cases.push(Arc::new(UInt8Array::from((0..rows).collect::<Vec<u8>>())));
+    }
+    cases.extend(key_cases());
     for values in cases {
         assert_native_probe_key_funding(values).await;
     }
+    assert_native_arena_composite_frames_use_shared_rowed_and_legacy_offsets().await;
+}
+
+async fn assert_native_arena_all_key_types_preserve_exact_v1_frames() {
+    for values in key_cases() {
+        let left = typed_schema(&left_schema(), values.data_type());
+        let right = typed_schema(&right_schema(), values.data_type());
+        let source = typed_batch(&right_batch(vec![0; values.len()]), &right, &values);
+        let mut operator = StreamJoinOperator::new("match", left, right, spec()).unwrap();
+        let job = job();
+        let context = StreamOperatorContext::new(&job, "match", None);
+        let (plan, admitted) = admitted_probe(&mut operator, "right", &source, &context).await;
+        let expected = admitted
+            .iter()
+            .map(|row| {
+                encode_join_key_columns_v1(
+                    row.record.columns(),
+                    row.record.offset(),
+                    &plan.key_indices,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            key_arena::ArenaLayout::measure(&admitted, &plan.key_indices)
+                .unwrap()
+                .unwrap()
+                .charge,
+            native_lookup::probe_key_charge(&admitted, &plan.key_indices).unwrap(),
+        );
+        reset_join_work();
+        let keys = operator
+            .native_probe_keys(&plan, &admitted)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            keys.row_keys().map(|key| key.to_vec()).collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(
+            join_work().arena_frames,
+            values.len(),
+            "{}",
+            values.data_type()
+        );
+        assert_eq!(join_work().borrowed_key_hashes, 0);
+        assert_eq!(join_work().borrowed_key_equalities, 0);
+        assert!(join_work().key_type_resolutions <= 2);
+        let pool = operator
+            .runtime
+            .runtime()
+            .unwrap()
+            .incremental_memory_pool();
+        drop((keys, admitted, operator));
+        drop(context);
+        assert!(job.gather_owner().close_and_drain().await.is_empty());
+        drop(job);
+        assert_eq!(pool.reserved(), 0);
+    }
+}
+
+async fn assert_native_arena_composite_frames_use_shared_rowed_and_legacy_offsets() {
+    let left = typed_schema(&left_schema(), &DataType::Utf8);
+    let right = typed_schema(&right_schema(), &DataType::Utf8);
+    let record = RecordBatch::try_new(
+        Arc::clone(&right),
+        vec![
+            Arc::new(StringArray::from(vec![
+                "unused", "a", "ab", "a", "\0", "unused",
+            ])),
+            Arc::new(TimestampMicrosecondArray::from(vec![0; 6]).with_timezone("UTC")),
+            Arc::new(StringArray::from(vec![
+                "unused", "bc", "c", "bc", "é", "unused",
+            ])),
+        ],
+    )
+    .unwrap()
+    .slice(1, 4);
+    let source = Batch::table(vec![record.clone()], BatchMetadata::default()).unwrap();
+    let mut operator = StreamJoinOperator::new("match", left, right, spec()).unwrap();
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "match", None);
+    let (mut plan, mut admitted) = admitted_probe(&mut operator, "right", &source, &context).await;
+    assert!(
+        admitted
+            .iter()
+            .all(|row| matches!(row.record, columnar::RowPayload::Shared { .. }))
+    );
+    plan.key_indices = vec![0, 2];
+    admitted.push(AdmittedRow {
+        record: columnar::RowPayload::Rowed {
+            parent: Arc::new(record.slice(1, 2)),
+            row: 1,
+        },
+        event_time: EventTime::from_micros(0),
+        row_id: 4,
+        retain: false,
+    });
+    admitted.push(AdmittedRow {
+        record: record.slice(3, 1).into(),
+        event_time: EventTime::from_micros(0),
+        row_id: 5,
+        retain: false,
+    });
+    let expected = admitted
+        .iter()
+        .map(|row| {
+            encode_join_key_columns_v1(row.record.columns(), row.record.offset(), &plan.key_indices)
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    reset_join_work();
+    let layout = key_arena::ArenaLayout::measure(&admitted, &plan.key_indices)
+        .unwrap()
+        .unwrap();
+    assert!(layout.fits(admitted.len(), plan.key_indices.len()));
+    let mut keys = None;
+    let measured = allocation_counter::measure(|| {
+        keys = operator.native_probe_keys(&plan, &admitted).unwrap();
+    });
+    let keys = keys.unwrap();
+    assert!(
+        measured.bytes_max
+            <= u64::try_from(layout.peak(admitted.len(), plan.key_indices.len()).unwrap()).unwrap()
+    );
+    assert_eq!(
+        keys.row_keys().map(|key| key.to_vec()).collect::<Vec<_>>(),
+        expected
+    );
+    assert_eq!(keys.keys.len(), 3);
+    assert!(Arc::ptr_eq(keys.key(0), keys.key(2)));
+    assert!(Arc::ptr_eq(keys.key(0), keys.key(4)));
+    assert!(Arc::ptr_eq(keys.key(3), keys.key(5)));
+    assert_eq!(join_work().arena_frames, admitted.len());
+    assert_eq!(join_work().borrowed_key_hashes, 0);
+    let pool = operator
+        .runtime
+        .runtime()
+        .unwrap()
+        .incremental_memory_pool();
+    drop((keys, admitted, operator));
+    drop(context);
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop(job);
+    assert_eq!(pool.reserved(), 0);
 }
 
 async fn assert_native_probe_key_funding(values: ArrayRef) {
@@ -407,12 +560,36 @@ async fn assert_native_probe_key_funding(values: ArrayRef) {
         .unwrap()
         .incremental_memory_pool();
     let baseline = pool.reserved();
+    let mut layout = None;
+    let sizing = allocation_counter::measure(|| {
+        layout = key_arena::ArenaLayout::measure(&admitted, &plan.key_indices).unwrap();
+    });
+    assert_eq!(
+        sizing.bytes_max, 0,
+        "sizing precedes optional credit admission"
+    );
+    let layout = layout.unwrap();
+    assert_eq!(
+        layout.charge,
+        native_lookup::probe_key_charge(&admitted, &plan.key_indices).unwrap()
+    );
     let mut keys = None;
     let measured = allocation_counter::measure(|| {
         keys = operator.native_probe_keys(&plan, &admitted).unwrap();
     });
     let keys = keys.expect("eligible key fixtures must take the native path");
     let paid = pool.reserved() - baseline;
+    assert_eq!(
+        paid, layout.charge,
+        "native admission keeps the exact previous P threshold"
+    );
+    if layout.fits(admitted.len(), plan.key_indices.len()) {
+        assert!(
+            measured.bytes_max
+                <= u64::try_from(layout.peak(admitted.len(), plan.key_indices.len()).unwrap())
+                    .unwrap()
+        );
+    }
     let mut live = measured.bytes_current;
     assert!(live > 0);
     assert!(
@@ -423,8 +600,8 @@ async fn assert_native_probe_key_funding(values: ArrayRef) {
         measured.bytes_max
     );
     assert!(usize::try_from(live).unwrap() <= paid);
-    let first_alias = Arc::clone(keys.keys.first().unwrap());
-    let last_alias = Arc::clone(keys.keys.last().unwrap());
+    let first_alias = Arc::clone(keys.key(0));
+    let last_alias = Arc::clone(keys.key(admitted.len() - 1));
     assert_eq!(first_alias.funded_owner().unwrap().1, paid);
     assert_eq!(last_alias.funded_owner().unwrap().1, paid);
     let released = allocation_counter::measure(|| drop(keys));
@@ -579,9 +756,9 @@ async fn empty_native_result_credit(service: &crate::runtime::streaming::gather_
     assert!(native.pairs.is_empty());
     assert_eq!(join_work().key_encodings, 2);
     assert_eq!(join_work().sql_probe_table_builds, 0);
-    assert!(Arc::ptr_eq(&native.keys.keys[0], &native.keys.keys[1]));
-    assert!(Arc::ptr_eq(&native.keys.keys[0], &native.keys.keys[3]));
-    assert!(!Arc::ptr_eq(&native.keys.keys[0], &native.keys.keys[2]));
+    assert!(Arc::ptr_eq(native.keys.key(0), native.keys.key(1)));
+    assert!(Arc::ptr_eq(native.keys.key(0), native.keys.key(3)));
+    assert!(!Arc::ptr_eq(native.keys.key(0), native.keys.key(2)));
     let pool = operator
         .runtime
         .runtime()
