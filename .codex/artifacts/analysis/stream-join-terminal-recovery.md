@@ -15,6 +15,23 @@ was unchanged after authoritative restore. Existing driver settlement drains
 load and gather ownership before reporting completion. Sources remain unopened
 on this terminal path, and no synthetic EOF, eviction or counter rewrite occurs.
 
+Launch cancellation is observed across the complete Terminal Join stage. A
+borrowed wrapper forwards StartObserver/shutdown cancellation to the existing
+job token, which both paid Local loading and native gather already observe,
+and awaits the same recovery future. Fresh launch/job checks reject completion
+before publishing Join statuses or recovering sinks. No watcher task, token,
+Work field or fee is added. Awaiting the helper is not a refund claim; existing
+driver settlement still awaits actual LoadOwner and gather drain. A cancelled
+unstarted plan can be discarded after private restore has already run.
+
+A new control drops the real StartObserver during paid Local loading and during
+the first accepted native reader. Its original run failed because launch
+cancellation was not forwarded to the job token. The unchanged control now
+passes: Local cancellation reaches no reader; native cancellation reaches one
+paid reader. Both stages observe pending drain before release, then actual
+shutdown and zero pool accounting, with no Join status or sink recovery.
+These are two positions in one focused test, not two restart test cases.
+
 The single Managed consumer keeps one literal matched row, captures the dirty
 cut, then releases real WM/EOF. Its actual terminal checkpoint is epoch 2 with
 frontier 110, both ingress watermarks 120 and four delta segments: two historical
@@ -34,6 +51,19 @@ priority, plus real attempt refusal, first-reader cancellation and drained
 accounting. These are three unique focused checks; unchanged checks were not
 repeated. Public status alone is not independent evidence of native ended state.
 Observed reservation sizes and pointers are not allocation peaks or credit nonces.
+
+The Windows AC14 recovery regressions exposed a real V1 writer/reader mismatch.
+When all uncaptured upserts are evicted before the first checkpoint, the existing
+writer produces metadata-only state with no segments. Restore now accepts that
+state only after metadata validation and only when both sides' retained row and
+byte gauges are zero, then performs the original complete installation checks.
+Next row IDs, output sequence, cumulative metrics and native ended state retain
+their original values. Missing segments with any nonzero retained gauge still
+produce the original empty-inventory error; nonempty histories and V2 framing
+are not relaxed. The original CI failures are the RED evidence. The new natural writer/restore
+control and both unchanged AC14 recovery regressions each passed locally.
+Together with the launch-cancellation control, these are four additional unique
+checks. The original three focused checks were not repeated.
 
 Final connected source review gates publication. Required CI, coverage, Codacy
 and review resolution gate merge for every published head. This change makes

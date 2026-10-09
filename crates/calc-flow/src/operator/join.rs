@@ -1778,6 +1778,7 @@ mod tests {
 
     mod checkpoint_compaction_tests;
     mod columnar_state_tests;
+    mod empty_checkpoint_tests;
     mod native_lookup_tests;
     mod sql_key_scratch_tests;
 
@@ -4649,7 +4650,12 @@ impl StreamJoinOperator {
         schemas: Option<&metadata_validation::schema::OwnedExpectedSchemas>,
         check: &dyn Fn() -> Result<()>,
     ) -> Result<()> {
-        let (left, right) = self.decode_restored_sides(snapshot, schemas)?;
+        let (left, right) =
+            if snapshot.segments.is_empty() && empty_retained_metrics(&metadata.metrics) {
+                (Vec::new(), Vec::new())
+            } else {
+                self.decode_restored_sides(snapshot, schemas)?
+            };
         self.install_restored_rows(snapshot, metadata, left, right, check)
     }
 
@@ -4839,6 +4845,12 @@ fn restored_retained_metrics_match(
 fn side_retained_matches(recorded: &SideMetrics, recomputed: &SideMetrics) -> bool {
     recorded.retained_rows == recomputed.retained_rows
         && recorded.retained_bytes == recomputed.retained_bytes
+}
+
+fn empty_retained_metrics(metrics: &JoinMetrics) -> bool {
+    [&metrics.left, &metrics.right]
+        .iter()
+        .all(|side| side.retained_rows == 0 && side.retained_bytes == 0)
 }
 
 /// Prospective (rows, bytes) charge if `retained` were installed next to `current`.
