@@ -19,6 +19,9 @@ mod restore_utf8_tests;
 #[path = "restore_nullable_float_tests.rs"]
 mod restore_nullable_float_tests;
 
+#[path = "restore_terminal_join_tests.rs"]
+mod restore_terminal_join_tests;
+
 #[derive(Default)]
 struct RestoreObservations {
     readers: Vec<(Option<(usize, usize)>, bool)>,

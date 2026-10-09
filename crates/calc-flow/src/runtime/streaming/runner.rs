@@ -1,5 +1,6 @@
 mod asof;
 mod checkpoint_task;
+mod join_terminal;
 pub(super) mod operator_fusion;
 mod source_history;
 mod sql_recovery;
@@ -2089,6 +2090,24 @@ async fn run_job_driver(
                 )
                 .await;
                 match restored {
+                    Ok(nodes) => core.runtime_status.lock().nodes.extend(nodes),
+                    Err(error) => {
+                        return core.prepare_driver_report(checkpoint_start_failure(
+                            launch_id,
+                            sanitize_managed_recovery_error(error, checkpoint.managed),
+                        ));
+                    }
+                }
+                match join_terminal::restore_terminal(
+                    &mut plan,
+                    checkpoint,
+                    &prepared_progress,
+                    &core.asof_loads,
+                    &cancellation,
+                    &context,
+                )
+                .await
+                {
                     Ok(nodes) => core.runtime_status.lock().nodes.extend(nodes),
                     Err(error) => {
                         return core.prepare_driver_report(checkpoint_start_failure(

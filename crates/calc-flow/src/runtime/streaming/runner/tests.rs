@@ -1,6 +1,7 @@
 mod asof_tests;
 mod restore_bases_tests;
 mod sql_recovery_tests;
+mod terminal_join_control_tests;
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},

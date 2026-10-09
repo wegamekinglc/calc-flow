@@ -3445,6 +3445,25 @@ impl StreamJoinOperator {
         status
     }
 
+    pub(crate) fn validate_terminal_recovery_state(&self) -> Result<()> {
+        if self.state.ended
+            && self.state.left.is_empty()
+            && self.state.right.is_empty()
+            && self.state.metrics.left.retained_rows == 0
+            && self.state.metrics.right.retained_rows == 0
+            && self.state.metrics.left.retained_bytes == 0
+            && self.state.metrics.right.retained_bytes == 0
+        {
+            return Ok(());
+        }
+        Err(CalcFlowError::CheckpointMismatch {
+            message: format!(
+                "stream Join {:?} terminal checkpoint contains non-ended or retained native state",
+                self.name
+            ),
+        })
+    }
+
     pub(crate) fn set_stream_resources(
         &mut self,
         config: DataFusionConfig,

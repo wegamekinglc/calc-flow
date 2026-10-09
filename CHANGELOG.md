@@ -9,6 +9,10 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-09: Restore streaming Join state before terminal managed sink
+  recovery. Reuse funded V1 loading and decoding, validate native ended and
+  empty state before publishing ingress status, and leave sources unopened.
+
 - 2026-10-09: Fund nullable Float64 non-key payloads during streaming Join
   managed V1 recovery. Retain raw value bytes and validity padding with the
   existing row lease through the last surviving values or validity buffer.
