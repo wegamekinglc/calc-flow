@@ -183,6 +183,26 @@ struct ObservedSink {
 }
 
 impl ObservedSink {
+    async fn await_write_fault_boundary(&self) {
+        if *self.probe.fault.lock().unwrap() != Some((self.name, "write", self.writes)) {
+            return;
+        }
+        self.probe.paused.notified().await;
+        let peer = if self.name == "normal" {
+            "late"
+        } else {
+            "normal"
+        };
+        loop {
+            let completed = self.probe.write_completed.notified();
+            if sink_write_count(&self.probe, peer) == 2 {
+                break;
+            }
+            completed.await;
+        }
+        self.record("write_fault_ready", u64::try_from(self.writes).unwrap());
+    }
+
     fn check_fault(&self, phase: &'static str, occurrence: usize) -> Result<()> {
         if *self.probe.fault.lock().unwrap() == Some((self.name, phase, occurrence)) {
             return Err(calc_flow::CalcFlowError::CheckpointMismatch {
@@ -240,6 +260,7 @@ impl TransactionalStreamSink for ObservedSink {
             self.probe.blocked.notify_one();
             self.probe.release.notified().await;
         }
+        self.await_write_fault_boundary().await;
         self.check_fault("write", self.writes)?;
         self.writes += 1;
         self.sink.write(batch).await?;
@@ -532,6 +553,28 @@ fn assert_settled(job: &StreamingJob) {
         && edge.current_bytes == 0));
 }
 
+fn assert_no_final_manifests(root: &Path, name: &str) {
+    for epoch in std::fs::read_dir(root.join("outputs").join(name)).unwrap() {
+        let epoch = epoch.unwrap();
+        if epoch.file_name().to_string_lossy().starts_with("epoch=") {
+            assert!(
+                !epoch.path().join("manifest.json").exists(),
+                "{name} published a final epoch manifest before the injected failure"
+            );
+        }
+    }
+}
+
+fn assert_write_fault_ready(probe: &Probe, name: &str, phase: &str, occurrence: usize) {
+    if phase == "write" {
+        assert!(probe.sink_events.lock().unwrap().contains(&(
+            name,
+            "write_fault_ready",
+            u64::try_from(occurrence).unwrap()
+        )));
+    }
+}
+
 #[tokio::test]
 async fn test_late_files_empty_mixed_and_all_late_epochs_recover_and_restart_terminal() {
     tokio::time::timeout(Duration::from_secs(30), async {
@@ -630,7 +673,10 @@ async fn test_late_files_each_sink_write_prepare_and_commit_failure_settles_and_
                 let root = tempfile::tempdir().unwrap();
                 let probe = Arc::new(Probe::default());
                 *probe.fault.lock().unwrap() = Some((name, phase, occurrence));
-                let first = runner(root.path(), &[5, 20], None, probe.clone())
+                // Hold EOF and finish the peer's two real writes before injecting
+                // a write fault, so this rollback case has no unrelated in-flight I/O.
+                let pause_at = (phase == "write").then_some(5);
+                let first = runner(root.path(), &[5, 20], pause_at, probe.clone())
                     .start()
                     .await
                     .unwrap();
@@ -644,13 +690,21 @@ async fn test_late_files_each_sink_write_prepare_and_commit_failure_settles_and_
                     },
                     "{name}/{phase}/{occurrence}: {failed:?}"
                 );
+                assert_eq!(
+                    failed.cause,
+                    calc_flow::TerminalCause::Failure,
+                    "{failed:?}"
+                );
                 assert_eq!(failed.errors[0].component_id(), Some(name), "{failed:?}");
                 assert_settled(&first);
                 assert_eq!(probe.sink_drops.load(Ordering::SeqCst), 2);
+                assert_write_fault_ready(&probe, name, phase, occurrence);
                 if phase != "commit" {
                     assert!(failed.completed_epoch.is_none());
                     assert!(rows(root.path(), "late").is_empty());
                     assert!(rows(root.path(), "normal").is_empty());
+                    assert_no_final_manifests(root.path(), "late");
+                    assert_no_final_manifests(root.path(), "normal");
                 }
                 *probe.fault.lock().unwrap() = None;
                 let recovered = runner(root.path(), &[5, 20], None, probe.clone())
@@ -1019,14 +1073,18 @@ async fn wait_for_ordinary_rows(probe: &Probe, count: usize) {
     }
 }
 
-fn normal_write_count(probe: &Probe) -> usize {
+fn sink_write_count(probe: &Probe, sink: &str) -> usize {
     probe
         .sink_events
         .lock()
         .unwrap()
         .iter()
-        .filter(|(name, event, _)| *name == "normal" && *event == "write_completed")
+        .filter(|(name, event, _)| *name == sink && *event == "write_completed")
         .count()
+}
+
+fn normal_write_count(probe: &Probe) -> usize {
+    sink_write_count(probe, "normal")
 }
 
 async fn wait_for_normal_write(probe: &Probe, previous: usize) {

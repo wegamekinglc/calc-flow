@@ -18,6 +18,9 @@ use std::collections::HashMap;
 
 const CHARGES: [u64; 2] = [220, 223];
 
+#[path = "checkpoint_v2_map_behavior_tests.rs"]
+mod map_tests;
+
 fn tagged_field(name: &str, data_type: DataType) -> Arc<Field> {
     let nullable = data_type == DataType::Null;
     Arc::new(
@@ -179,6 +182,14 @@ fn dictionary_batches() -> (RecordBatch, RecordBatch) {
 }
 
 fn delta_ipc(initial: &RecordBatch, final_batch: &RecordBatch) -> Vec<u8> {
+    delta_ipc_with_charges(initial, final_batch, CHARGES)
+}
+
+fn delta_ipc_with_charges(
+    initial: &RecordBatch,
+    final_batch: &RecordBatch,
+    charges: [u64; 2],
+) -> Vec<u8> {
     let options = IpcWriteOptions::try_new(8, false, MetadataVersion::V5)
         .unwrap()
         .with_dictionary_handling(DictionaryHandling::Delta);
@@ -218,7 +229,7 @@ fn delta_ipc(initial: &RecordBatch, final_batch: &RecordBatch) -> Vec<u8> {
     let mut reader = StreamReader::try_new(Cursor::new(&bytes), None).unwrap();
     let decoded = reader.next().unwrap().unwrap();
     assert_eq!(decoded.num_rows(), 2);
-    for (row, charge) in CHARGES.into_iter().enumerate() {
+    for (row, charge) in charges.into_iter().enumerate() {
         let actual = state_row_charge(&decoded, row, &[0], "v2-match").unwrap();
         assert_eq!(actual, charge, "upstream decoded row {row}: {decoded:?}");
     }
@@ -230,6 +241,14 @@ fn delta_ipc(initial: &RecordBatch, final_batch: &RecordBatch) -> Vec<u8> {
 }
 
 fn composite_snapshot(operator: &StreamJoinOperator, ipc: &[u8]) -> OperatorStateSnapshot {
+    composite_snapshot_with_charges(operator, ipc, CHARGES)
+}
+
+fn composite_snapshot_with_charges(
+    operator: &StreamJoinOperator,
+    ipc: &[u8],
+    charges: [u64; 2],
+) -> OperatorStateSnapshot {
     let mut bytes = header(*b"CFJPAY2\0", 0);
     bytes.extend_from_slice(&2_u64.to_le_bytes());
     bytes.extend_from_slice(&u64::try_from(ipc.len()).unwrap().to_le_bytes());
@@ -257,7 +276,7 @@ fn composite_snapshot(operator: &StreamJoinOperator, ipc: &[u8]) -> OperatorStat
         metrics: JoinMetrics {
             left: SideMetrics {
                 retained_rows: 2,
-                retained_bytes: 443,
+                retained_bytes: charges.into_iter().sum(),
                 ..SideMetrics::default()
             },
             ..JoinMetrics::default()
@@ -273,7 +292,7 @@ fn composite_snapshot(operator: &StreamJoinOperator, ipc: &[u8]) -> OperatorStat
     OperatorStateSnapshot {
         inline_metadata: metadata.into_iter().collect(),
         segments: BTreeMap::from([
-            ("left-base".into(), base(&payload, &[95, 96], &CHARGES)),
+            ("left-base".into(), base(&payload, &[95, 96], &charges)),
             ("right-base".into(), StateSegment::new(right)),
             (format!("left-payload-{sha256}"), payload.segment),
         ]),
