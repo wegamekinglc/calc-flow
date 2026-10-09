@@ -39,19 +39,25 @@ fn check_allocation_cut(
 ) {
     assert!(
         *live + i64::try_from(allocation.bytes_max).unwrap()
-            <= i64::try_from(funded_before).unwrap()
+            <= i64::try_from(funded_before).unwrap(),
+        "live={} bytes_max={} funded_before={} current={}",
+        live,
+        allocation.bytes_max,
+        funded_before,
+        allocation.bytes_current
     );
     *live += allocation.bytes_current;
     assert!(*live >= 0);
     assert!(
         usize::try_from(*live).unwrap() <= index.funded_bytes(),
-        "live nodes={live}, funding={}, entries={}",
+        "live nodes={live}, funding={}, entries={} footprint={:?}",
         index.funded_bytes(),
-        index.entries.len()
+        index.entries_len(),
+        index.footprint_debug()
     );
     assert_eq!(
         index.funded_bytes(),
-        BASE_BYTES + ENTRY_BYTES * index.entries.len()
+        BASE_BYTES + ENTRY_BYTES * index.entries_len()
     );
 }
 

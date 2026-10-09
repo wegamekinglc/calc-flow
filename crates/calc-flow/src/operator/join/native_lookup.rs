@@ -5,18 +5,143 @@ use super::{
 };
 use crate::{CalcFlowError, EventTime, Result};
 use datafusion::arrow::datatypes::{DataType, Schema};
+use datafusion::common::hash_utils::RandomState;
 use datafusion::execution::memory_pool::MemoryReservation;
-use std::{collections::BTreeMap, sync::Arc};
+use hashbrown::HashTable;
+use std::{hash::BuildHasher, sync::Arc};
 
-const ENTRY_BYTES: usize = 128;
+/// Funding per indexed row. The dictionary (hash table, key ids, per-key
+/// entry lists) stays under this per row at every fill ratio, leaving
+/// headroom for the table's amortized growth and shrink reallocations.
+const ENTRY_BYTES: usize = 192;
 const BASE_BYTES: usize = 1_024;
 
 #[cfg(test)]
 #[path = "tests/native_index_allocation_tests.rs"]
 mod allocation_tests;
 
+#[cfg(test)]
+#[path = "tests/native_index_dictionary_tests.rs"]
+mod dictionary_tests;
+
+/// One retained row inside its key's entry list, which is sorted by
+/// `(time, row_id)` so inclusive windows are contiguous ranges.
+struct KeyEntry {
+    time: EventTime,
+    row_id: u64,
+    row_index: u32,
+}
+
+const _: () = assert!(size_of::<KeyEntry>() == 24);
+
+/// Distinct-key dictionary: hash slots hold `u32` key ids whose canonical V1
+/// bytes stay owned by one `Arc<FramedKey>` per distinct key.
+struct KeyDictionary {
+    table: HashTable<u32>,
+    keys: Vec<Arc<FramedKey>>,
+    hasher: RandomState,
+}
+
+impl Default for KeyDictionary {
+    fn default() -> Self {
+        Self {
+            table: HashTable::new(),
+            keys: Vec::new(),
+            hasher: RandomState::default(),
+        }
+    }
+}
+
+impl KeyDictionary {
+    fn hash(&self, bytes: &[u8]) -> u64 {
+        self.hasher.hash_one(bytes)
+    }
+
+    fn lookup(&self, bytes: &[u8]) -> Option<u32> {
+        let hash = self.hash(bytes);
+        self.table
+            .find(hash, |&id| self.keys[id as usize].as_slice() == bytes)
+            .copied()
+    }
+
+    /// Inserts `key`, which must not currently be present in byte equality.
+    fn insert(&mut self, key: Arc<FramedKey>) -> u32 {
+        let id = u32::try_from(self.keys.len()).expect("distinct Join keys fit u32");
+        let hash = self.hash(key.as_slice());
+        self.keys.push(key);
+        let KeyDictionary {
+            table,
+            keys,
+            hasher,
+            ..
+        } = self;
+        table.insert_unique(hash, id, |&id| {
+            hasher.hash_one(keys[id as usize].as_slice())
+        });
+        id
+    }
+
+    fn intern(&mut self, key: Arc<FramedKey>) -> u32 {
+        match self.lookup(key.as_slice()) {
+            Some(id) => id,
+            None => self.insert(key),
+        }
+    }
+
+    /// Swaps `id` with the last key and pops it, keeping ids dense so the
+    /// per-key entry lists stay aligned with the dictionary.
+    fn remove(&mut self, id: u32) {
+        let last = u32::try_from(self.keys.len() - 1).expect("distinct Join keys fit u32");
+        {
+            let KeyDictionary {
+                table,
+                keys,
+                hasher,
+                ..
+            } = self;
+            // Remove the deleted key's own slot.
+            let hash = hasher.hash_one(keys[id as usize].as_slice());
+            table
+                .find_entry(hash, |&slot| slot == id)
+                .expect("removed key interned")
+                .remove();
+            if id != last {
+                // Relocate the last key into the freed id.
+                let last_hash = hasher.hash_one(keys[last as usize].as_slice());
+                table
+                    .find_entry(last_hash, |&slot| slot == last)
+                    .expect("last key interned")
+                    .remove();
+                table.insert_unique(last_hash, id, |&id| {
+                    hasher.hash_one(keys[id as usize].as_slice())
+                });
+                keys.swap(id as usize, last as usize);
+            }
+        }
+        self.keys.pop();
+        if self.keys.is_empty() {
+            // Drop the peak-sized table once every key left the index so its
+            // capacity is not held against a shrunken funding reservation.
+            self.table = HashTable::new();
+        } else if self.keys.len() * 2 <= self.keys.capacity() {
+            self.keys.shrink_to_fit();
+            let KeyDictionary {
+                table,
+                keys,
+                hasher,
+                ..
+            } = self;
+            table.shrink_to_fit(|&id| hasher.hash_one(keys[id as usize].as_slice()));
+        }
+    }
+}
+
 pub(super) struct NativeIndex {
-    entries: BTreeMap<(Arc<FramedKey>, EventTime, u64), usize>,
+    dictionary: KeyDictionary,
+    /// Per-key entries sorted by `(time, row_id)`, aligned with the
+    /// dictionary's key ids.
+    entries: Vec<Vec<KeyEntry>>,
+    entry_count: usize,
     credit: Arc<MemoryReservation>,
 }
 
@@ -26,9 +151,26 @@ impl NativeIndex {
         self.credit.size()
     }
 
+    #[cfg(test)]
+    pub(super) fn entries_len(&self) -> usize {
+        self.entry_count
+    }
+
+    #[cfg(test)]
+    pub(super) fn footprint_debug(&self) -> (usize, usize, usize, usize) {
+        (
+            self.dictionary.table.capacity(),
+            self.dictionary.keys.capacity(),
+            self.entries.capacity(),
+            self.entries.iter().map(Vec::capacity).sum::<usize>(),
+        )
+    }
+
     pub(super) fn new(rows: &[StoredRow], credit: MemoryReservation) -> Self {
         let mut index = Self {
-            entries: BTreeMap::new(),
+            dictionary: KeyDictionary::default(),
+            entries: Vec::new(),
+            entry_count: 0,
             credit: Arc::new(credit),
         };
         index.append(0, rows);
@@ -46,33 +188,77 @@ impl NativeIndex {
 
     pub(super) fn append(&mut self, offset: usize, rows: &[StoredRow]) {
         for (index, row) in rows.iter().enumerate() {
-            self.entries.insert(
-                (Arc::clone(&row.encoded_key), row.event_time, row.row_id),
-                offset + index,
-            );
+            let id = self.dictionary.intern(Arc::clone(&row.encoded_key)) as usize;
+            if id == self.entries.len() {
+                self.entries.push(Vec::with_capacity(1));
+            }
+            let list = &mut self.entries[id];
+            let entry = KeyEntry {
+                time: row.event_time,
+                row_id: row.row_id,
+                row_index: u32::try_from(offset + index).expect("retained rows fit u32"),
+            };
+            let position = list.partition_point(|existing| {
+                (existing.time, existing.row_id) < (entry.time, entry.row_id)
+            });
+            list.insert(position, entry);
+            self.entry_count += 1;
         }
     }
 
     pub(super) fn remove(&mut self, row: &StoredRow, moved: Option<(&StoredRow, usize)>) {
-        self.entries
-            .remove(&(Arc::clone(&row.encoded_key), row.event_time, row.row_id));
+        let id = self
+            .dictionary
+            .lookup(row.encoded_key.as_slice())
+            .expect("evicted key interned") as usize;
+        let list = &mut self.entries[id];
+        let position = list.partition_point(|existing| {
+            (existing.time, existing.row_id) < (row.event_time, row.row_id)
+        });
+        debug_assert_eq!(
+            (list[position].time, list[position].row_id),
+            (row.event_time, row.row_id),
+            "evicted entry found by its identity"
+        );
+        list.remove(position);
+        self.entry_count -= 1;
         self.credit.shrink(ENTRY_BYTES);
+        if list.is_empty() {
+            // Release the empty list and its dictionary slot in lockstep with
+            // the funding shrink so eviction keeps the reservation covering
+            // the live allocations.
+            std::mem::take(list);
+            self.dictionary
+                .remove(u32::try_from(id).expect("key ids fit u32"));
+            self.entries.swap_remove(id);
+            if self.entries.len() * 2 <= self.entries.capacity() {
+                self.entries.shrink_to_fit();
+            }
+        }
         if let Some((row, index)) = moved {
-            *self
-                .entries
-                .get_mut(&(Arc::clone(&row.encoded_key), row.event_time, row.row_id))
-                .expect("moved retained identity") = index;
+            let id = self
+                .dictionary
+                .lookup(row.encoded_key.as_slice())
+                .expect("moved key interned") as usize;
+            let list = &mut self.entries[id];
+            let position = list.partition_point(|existing| {
+                (existing.time, existing.row_id) < (row.event_time, row.row_id)
+            });
+            list[position].row_index = u32::try_from(index).expect("retained rows fit u32");
         }
     }
 
-    fn range<'a>(
-        &'a self,
-        key: &Arc<FramedKey>,
-        range: (EventTime, EventTime),
-    ) -> impl Iterator<Item = usize> + 'a {
-        self.entries
-            .range((Arc::clone(key), range.0, 0)..=(Arc::clone(key), range.1, u64::MAX))
-            .map(|(_, &index)| index)
+    fn key_id(&self, key: &[u8]) -> Option<u32> {
+        self.dictionary.lookup(key)
+    }
+
+    /// Entries of one key inside the inclusive time window, already ordered
+    /// by `(time, row_id)` — the opposite-side emission order.
+    fn window_by_id(&self, id: u32, range: (EventTime, EventTime)) -> &[KeyEntry] {
+        let list = &self.entries[id as usize];
+        let lo = list.partition_point(|entry| entry.time < range.0);
+        let hi = list.partition_point(|entry| entry.time <= range.1);
+        &list[lo..hi]
     }
 }
 
@@ -104,7 +290,17 @@ pub(super) struct NativeMatches {
 
 pub(super) struct NativeKeys {
     pub(super) keys: Vec<Arc<FramedKey>>,
+    /// Opposite-index key id per distinct probe key; `None` keys never match.
+    slots: Vec<Option<u32>>,
+    /// Distinct-key id per admitted row.
+    ids: Vec<u32>,
     _credit: Arc<MemoryReservation>,
+}
+
+impl NativeKeys {
+    fn slot(&self, pos: usize) -> Option<u32> {
+        self.slots[self.ids[pos] as usize]
+    }
 }
 
 pub(super) struct AppendCredit {
@@ -166,25 +362,48 @@ impl StreamJoinOperator {
             return Ok(None);
         };
         let shared = Arc::new(credit);
-        let keys = admitted
+        let mut dictionary = KeyDictionary::default();
+        let mut ids = Vec::with_capacity(admitted.len());
+        let mut buffer: Vec<u8> = Vec::new();
+        for row in admitted {
+            #[cfg(test)]
+            super::note_join_work(|work| work.key_encodings += 1);
+            buffer.clear();
+            super::append_join_key_columns(
+                &mut buffer,
+                row.record.columns(),
+                row.record.offset(),
+                &plan.key_indices,
+            )?;
+            if let Some(id) = dictionary.lookup(&buffer) {
+                ids.push(id);
+            } else {
+                #[cfg(test)]
+                super::note_join_work(|work| work.probe_key_allocations += 1);
+                let key = Arc::new(FramedKey::funded(buffer.clone(), Arc::clone(&shared)));
+                ids.push(dictionary.insert(key));
+            }
+        }
+        let opposite = opposite_rows(self, plan);
+        let index = opposite
+            .1
+            .as_ref()
+            .expect("native index built before probing");
+        let slots: Vec<Option<u32>> = dictionary
+            .keys
             .iter()
-            .map(|row| {
-                super::columnar::funded_key(
-                    row.record.columns(),
-                    row.record.offset(),
-                    &plan.key_indices,
-                    Arc::clone(&shared),
-                )
-            })
-            .collect::<Result<Vec<_>>>()?;
-        self.collect_native_pairs(
-            plan,
-            admitted,
-            NativeKeys {
-                keys,
-                _credit: shared,
-            },
-        )
+            .map(|key| index.key_id(key.as_slice()))
+            .collect();
+        let keys = NativeKeys {
+            keys: ids
+                .iter()
+                .map(|&id| Arc::clone(&dictionary.keys[id as usize]))
+                .collect(),
+            slots,
+            ids,
+            _credit: shared,
+        };
+        self.collect_native_pairs(plan, admitted, keys)
     }
 
     fn collect_native_pairs(
@@ -201,7 +420,7 @@ impl StreamJoinOperator {
         let count = count_pairs(
             index,
             admitted,
-            &keys.keys,
+            &keys,
             self.spec.bounds,
             plan,
             self.spec.limits.max_matches_per_input_batch,
@@ -225,13 +444,16 @@ impl StreamJoinOperator {
             .expect("native index built before probing");
         let mut pairs = Vec::with_capacity(count);
         for (pos, row) in admitted.iter().enumerate() {
-            let key = &keys.keys[pos];
+            let Some(slot) = keys.slot(pos) else {
+                continue;
+            };
             pairs.extend(
                 index
-                    .range(key, time_range(self.spec.bounds, plan, row.event_time))
-                    .map(|opposite_index| MatchedPair {
+                    .window_by_id(slot, time_range(self.spec.bounds, plan, row.event_time))
+                    .iter()
+                    .map(|entry| MatchedPair {
                         pos,
-                        opposite_index,
+                        opposite_index: entry.row_index as usize,
                     }),
             );
         }
@@ -353,22 +575,21 @@ fn opposite_rows<'a>(operator: &'a StreamJoinOperator, plan: &SidePlan) -> &'a s
 fn count_pairs(
     index: &NativeIndex,
     admitted: &[AdmittedRow],
-    keys: &[Arc<FramedKey>],
+    keys: &NativeKeys,
     bounds: JoinTimeBounds,
     plan: &SidePlan,
     limit: u64,
 ) -> Result<usize> {
     let limit = usize::try_from(limit).unwrap_or(usize::MAX);
     let mut count = 0_usize;
-    for (row, key) in admitted.iter().zip(keys) {
+    for (pos, row) in admitted.iter().enumerate() {
+        let Some(slot) = keys.slot(pos) else {
+            continue;
+        };
         let remaining = limit.saturating_sub(count).saturating_add(1);
+        let window = index.window_by_id(slot, time_range(bounds, plan, row.event_time));
         count = count
-            .checked_add(
-                index
-                    .range(key, time_range(bounds, plan, row.event_time))
-                    .take(remaining)
-                    .count(),
-            )
+            .checked_add(window.len().min(remaining))
             .ok_or_else(|| scratch_error("join"))?;
         if count > limit {
             break;

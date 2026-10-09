@@ -8,7 +8,7 @@ pub(super) fn index_funding(operator: &StreamJoinOperator) -> usize {
         .into_iter()
         .map(|rows| {
             rows.1.as_ref().map_or(0, |index| {
-                let expected = 1_024 + 128 * rows.len();
+                let expected = 1_024 + 192 * rows.len();
                 assert_eq!(
                     index.funded_bytes(),
                     expected,
@@ -330,7 +330,7 @@ async fn test_native_index_is_ready_before_the_first_probe() {
         .runtime()
         .unwrap()
         .incremental_memory_pool();
-    assert_eq!(index_funding(&operator), 1_024 + 128 * 4);
+    assert_eq!(index_funding(&operator), 1_024 + 192 * 4);
     assert_eq!(pool.reserved(), state_funding(&operator));
     drop(operator);
     assert_eq!(pool.reserved(), 0);
@@ -417,14 +417,14 @@ async fn native_index_budget_denial(service: &crate::runtime::streaming::gather_
     assert_resident_and_gather_funding(pool.as_ref(), &job, admitted_paid);
     let native = operator.native_matches(&plan, &admitted).unwrap().unwrap();
     drop(native);
-    assert_eq!(index_funding(&operator), 1_024 + 128 * 3);
+    assert_eq!(index_funding(&operator), 1_024 + 192 * 3);
     let paid = assert_resident_and_gather_funding(
         pool.as_ref(),
         &job,
         state_funding(&operator) + admitted_paid,
     );
     let append = operator.reserve_native_append(true, 5).unwrap().unwrap();
-    assert_eq!(pool.reserved(), paid + 128 * 5);
+    assert_eq!(pool.reserved(), paid + 192 * 5);
     drop(append);
     assert_eq!(pool.reserved(), paid);
     operator.reset().unwrap();
@@ -528,7 +528,7 @@ async fn native_fallback_index_refund(
     let before = operator.status();
     let runtime = operator.runtime.runtime().unwrap();
     let pool = runtime.incremental_memory_pool();
-    let headroom = 1_024 + 128 * operator.state.left.len();
+    let headroom = 1_024 + 192 * operator.state.left.len();
     let pressure = runtime.incremental_reservation("native-probe-refusal");
     pressure
         .try_grow((1 << 30) - pool.reserved() - headroom)

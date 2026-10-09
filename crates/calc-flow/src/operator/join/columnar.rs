@@ -1,5 +1,3 @@
-use super::encode_join_key_columns_v1;
-use crate::Result;
 use crate::runtime::streaming::gather_work::RetirementGuard;
 use datafusion::arrow::{array::ArrayRef, datatypes::SchemaRef, record_batch::RecordBatch};
 use datafusion::execution::memory_pool::MemoryReservation;
@@ -124,6 +122,7 @@ impl RowPayload {
         &self.columns()[index]
     }
 
+    #[cfg(test)]
     pub(super) fn column_view(&self, index: usize) -> ArrayRef {
         match self {
             Self::Legacy(record) => Arc::clone(record.column(index)),
@@ -171,6 +170,16 @@ impl FramedKey {
     }
 }
 
+impl FramedKey {
+    /// Attaches the batch-level funding reservation that owns these bytes.
+    pub(super) fn funded(bytes: Vec<u8>, credit: Arc<MemoryReservation>) -> Self {
+        Self {
+            bytes,
+            _credit: Some(credit),
+        }
+    }
+}
+
 impl From<Vec<u8>> for FramedKey {
     fn from(bytes: Vec<u8>) -> Self {
         Self {
@@ -206,16 +215,4 @@ impl Ord for FramedKey {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.bytes.cmp(&other.bytes)
     }
-}
-
-pub(super) fn funded_key(
-    columns: &[ArrayRef],
-    row: usize,
-    indices: &[usize],
-    credit: Arc<MemoryReservation>,
-) -> Result<Arc<FramedKey>> {
-    Ok(Arc::new(FramedKey {
-        bytes: encode_join_key_columns_v1(columns, row, indices)?,
-        _credit: Some(credit),
-    }))
 }
