@@ -1777,6 +1777,7 @@ mod tests {
     }
 
     mod checkpoint_compaction_tests;
+    mod checkpoint_v2_tests;
     mod columnar_state_tests;
     mod empty_checkpoint_tests;
     mod native_lookup_tests;
@@ -2873,6 +2874,7 @@ pub struct StreamJoinOperator {
     ingress_progress: IngressProgressSnapshot,
     compaction_release: Option<tokio::sync::oneshot::Receiver<()>>,
     compaction_cleanup: Option<crate::runtime::streaming::gather_work::AttemptCleanup>,
+    v2_containers: Option<Arc<checkpoint_v2::ContainerFunding>>,
     #[cfg(test)]
     checkpoint_gate: Option<std::sync::Mutex<checkpoint_compaction::TestGate>>,
     #[cfg(test)]
@@ -3309,6 +3311,7 @@ struct RestoreSchema<'a> {
 }
 
 mod checkpoint_compaction;
+mod checkpoint_v2;
 mod columnar;
 mod materialization;
 mod metadata_validation;
@@ -3390,6 +3393,7 @@ impl StreamJoinOperator {
             ingress_progress: IngressProgressSnapshot::default(),
             compaction_release: None,
             compaction_cleanup: None,
+            v2_containers: None,
             #[cfg(test)]
             checkpoint_gate: None,
             #[cfg(test)]
@@ -3953,8 +3957,14 @@ impl StreamJoinOperator {
             Ok(tables) => tables,
             Err(error) => return (Err(error), owner.finish()),
         };
-        self.run_owned_key_query(plan, crate::datafusion::owned::Input::new(tables, owner))
-            .await
+        if let Some(containers) = &self.v2_containers {
+            let owner = checkpoint_v2::V2SqlOwners::new(owner, Arc::clone(containers));
+            self.run_v2_owned_key_query(plan, crate::datafusion::owned::Input::new(tables, owner))
+                .await
+        } else {
+            self.run_owned_key_query(plan, crate::datafusion::owned::Input::new(tables, owner))
+                .await
+        }
     }
 
     async fn run_owned_key_query(
@@ -4528,6 +4538,7 @@ impl StreamOperator for StreamJoinOperator {
         self.state = StreamJoinState::default();
         self.retained_key_cache = RetainedKeyCache::default();
         self.ingress_progress = IngressProgressSnapshot::default();
+        self.v2_containers = None;
         Ok(())
     }
 
@@ -4604,6 +4615,14 @@ impl StreamOperator for StreamJoinOperator {
     }
 
     fn restore(&mut self, snapshot: &OperatorStateSnapshot) -> Result<()> {
+        if snapshot
+            .inline_metadata
+            .get("layout_version")
+            .and_then(Value::as_u64)
+            == Some(2)
+        {
+            return self.restore_v2_snapshot(snapshot);
+        }
         let metadata = self.parse_restore_metadata(snapshot)?;
         self.install_restored_metadata(snapshot, metadata, &|| Ok(()))
     }
@@ -4699,6 +4718,7 @@ impl StreamJoinOperator {
         self.state = state;
         self.retained_key_cache = RetainedKeyCache::default();
         self.ingress_progress = IngressProgressSnapshot::default();
+        self.v2_containers = None;
         Ok(())
     }
 }

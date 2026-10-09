@@ -843,7 +843,7 @@ fn reset_legacy_operator(inputs: &mut OperatorTaskInputs, task_id: TaskId) -> Re
 
 async fn reset_join_metadata(inputs: &mut OperatorTaskInputs, task_id: TaskId) -> Result<()> {
     inputs.context.bind_task_id(task_id);
-    let restore = inputs.restore.as_ref().expect("restore presence checked");
+    let restore = inputs.restore.as_mut().expect("restore presence checked");
     let job = inputs.context.job();
     let operation = async {
         inputs.operator.reset()?;
@@ -851,7 +851,7 @@ async fn reset_join_metadata(inputs: &mut OperatorTaskInputs, task_id: TaskId) -
             unreachable!("Join dispatch checked");
         };
         operator
-            .restore_managed_metadata(&restore.snapshot, job, Some(task_id))
+            .restore_managed_snapshot(&mut restore.snapshot, job, Some(task_id))
             .await
     };
     match AssertUnwindSafe(operation).catch_unwind().await {
@@ -944,10 +944,10 @@ pub(super) async fn restore_terminal_asof<'a>(
     Ok(progress)
 }
 
-pub(super) async fn restore_terminal_join<'a>(
+pub(super) async fn restore_terminal_owned_join<'a>(
     operator: &mut CompiledStreamOperator,
     ingresses: impl IntoIterator<Item = &'a String>,
-    restore: &OperatorRestoreState,
+    restore: &mut OperatorRestoreState,
     job: &crate::StreamJobContext,
 ) -> Result<OperatorProgress> {
     let inputs =
@@ -969,7 +969,7 @@ pub(super) async fn restore_terminal_join<'a>(
         });
     };
     operator
-        .restore_managed_metadata(&restore.snapshot, job, None)
+        .restore_managed_snapshot(&mut restore.snapshot, job, None)
         .await?;
     operator.validate_terminal_recovery_state()?;
     job.check_cancelled()?;
@@ -978,6 +978,22 @@ pub(super) async fn restore_terminal_join<'a>(
     progress.observe_stream_join(status);
     progress.mark_ended();
     Ok(progress)
+}
+
+#[cfg(test)]
+pub(super) async fn restore_terminal_join<'a>(
+    operator: &mut CompiledStreamOperator,
+    ingresses: impl IntoIterator<Item = &'a String>,
+    restore: &OperatorRestoreState,
+    job: &crate::StreamJobContext,
+) -> Result<OperatorProgress> {
+    let mut owned = OperatorRestoreState {
+        snapshot: restore.snapshot.clone(),
+        progress: restore.progress.clone(),
+        output_frontier: restore.output_frontier,
+        next_epoch: restore.next_epoch,
+    };
+    restore_terminal_owned_join(operator, ingresses, &mut owned, job).await
 }
 
 fn restore_ingress_completion(inputs: &mut OperatorTaskInputs, succeeded: bool) {

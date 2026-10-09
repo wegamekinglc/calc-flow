@@ -208,7 +208,10 @@ pub struct DataFusionRuntime {
     runtime_env: Arc<RuntimeEnv>,
     context: OnceLock<SessionContext>,
     selected_udfs: Vec<(UdfReference, Arc<ScalarUDF>)>,
+    #[cfg(not(test))]
     query_lock: AsyncMutex<()>,
+    #[cfg(test)]
+    query_lock: Arc<AsyncMutex<()>>,
     metrics: Mutex<Vec<DataFusionQueryMetric>>,
     next_query: AtomicU64,
     #[cfg(test)]
@@ -245,7 +248,10 @@ impl DataFusionRuntime {
             runtime_env,
             context: OnceLock::new(),
             selected_udfs: Vec::new(),
+            #[cfg(not(test))]
             query_lock: AsyncMutex::new(()),
+            #[cfg(test)]
+            query_lock: Arc::new(AsyncMutex::new(())),
             metrics: Mutex::new(Vec::new()),
             next_query: AtomicU64::new(1),
             #[cfg(test)]

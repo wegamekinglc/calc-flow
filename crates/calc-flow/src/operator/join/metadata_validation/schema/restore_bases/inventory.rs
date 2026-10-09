@@ -208,9 +208,7 @@ fn expiration_bytes(rows: usize) -> Option<usize> {
         .checked_add(rows.checked_mul(2 * size_of::<Entry>())?)
 }
 
-pub(in crate::operator::join::metadata_validation::schema) fn diagnostic_bytes(
-    name: &str,
-) -> Option<usize> {
+pub(in crate::operator::join) fn diagnostic_bytes(name: &str) -> Option<usize> {
     checked_sum(&[
         checkpoint_diagnostic(name)?,
         time_diagnostic()?,
