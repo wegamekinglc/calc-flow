@@ -9,6 +9,11 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-09: Read columnar V2 streaming Join checkpoints with strict
+  inventory, schema and historical-row validation before atomic restoration.
+  Managed recovery uses funded native work; checkpoint capture continues to
+  write V1 and rebuilds its base after restoring V2 state.
+
 - 2026-10-09: Cancel successfully started native stream jobs when Python
   startup is abandoned before ownership handoff. Await source shutdown and
   managed state release even while the startup result remains referenced.

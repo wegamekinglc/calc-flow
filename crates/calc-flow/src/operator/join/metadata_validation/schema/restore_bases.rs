@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 mod input;
 pub(super) mod inspector;
-pub(super) mod inventory;
+pub(in crate::operator::join) mod inventory;
 
 #[cfg(test)]
 mod tests;
