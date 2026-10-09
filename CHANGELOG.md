@@ -9,6 +9,13 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-09: Replace the streaming Join native probe index with a
+  distinct-key hash dictionary whose per-key entry lists stay sorted by
+  `(time, row_id)`, intern each distinct probe key once per admitted
+  batch, and release evicted key slots in lockstep with the index
+  funding shrink. Suite Join throughput improves about 19% at one million
+  rows with identical outputs, charges and checkpoints.
+
 - 2026-10-09: Cancel successfully started native stream jobs when Python
   startup is abandoned before ownership handoff. Await source shutdown and
   managed state release even while the startup result remains referenced.

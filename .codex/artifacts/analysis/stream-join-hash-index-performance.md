@@ -1,0 +1,81 @@
+# Stream Join hash-native index performance evidence
+
+Branch `feature/stream-join-hash-index-j2a` (commits `b7cdddba`,
+`d3bad343`) against `main` at `9db4cd25`. This executes the J2a index
+redesign from issue #363: the native probe index becomes a distinct-key
+hash dictionary of `u32` ids whose per-key entry lists stay sorted by
+`(time, row_id)`, inclusive windows resolve through `partition_point`,
+admission probes encode each distinct key once per batch into a reused
+buffer, and index eviction releases empty key slots in lockstep with its
+funding shrink (per-entry reservation 192 bytes). The gathered output
+column path from commit `b7cdddba` was reverted in `d3bad343` after the
+paired suite measurement showed a regression; the baseline per-row slice
+concatenation stays on Arrow's contiguous-slice fast path.
+
+## Measurement contract
+
+- Machine: i9-13900HX, WSL2, 32 logical CPUs, 31 GB RAM, shared and
+  noticeably time-varying load during collection.
+- Both sides built as release wheels with the suite recipe
+  (`maturin build --release --locked --features pyo3/abi3-py313`) from
+  clean worktrees: baseline wheel SHA-256
+  `a819b28d66fe03d2a2dc294dc7e14e2517bae9ed5a378d5f1b6c80b682a15687`,
+  candidate wheel SHA-256
+  `89f6400f0e1f6b557edaaf29cafa2ceea939b519ed5e1d086839609d1c089cd5`.
+- Suite numbers use the engine-case adapters, workload, oracle and
+  ready-enqueue-to-Arrow timer from `benchmarks/engine_comparison.py`,
+  one fresh worker process per sample, alternating AB/BA order.
+- These are investigation numbers on a shared host, not sealed
+  two-round quiet-room verdicts; every reported sample passed the full
+  output oracle.
+
+## Suite results (paired, fresh worker per sample)
+
+`calc-flow-stream join`, candidate `d3bad343`:
+
+| Case      | Rounds | Baseline p50 | Candidate p50 | Median change (pooled) | 95% CI (exact order-statistic) |
+|-----------|--------|--------------|---------------|------------------------|--------------------------------|
+| 1,000,000 | 2 × 10 | 1,037.8 / 1,065.7 ms | 861.6 / 857.2 ms | −18.67% | [−19.59%, −16.25%] |
+| 100,000   | 8 pairs | 114.5 ms | 97.5 ms | −13.59% | — |
+
+The earlier three-way interleaved experiment with the gathered output
+path (commit `b7cdddba`) measured +26.07% pooled
+(CI [+23.35%, +28.12%]) at 1M and +24.5% at 100k, which motivated the
+revert. Stage timing attributed that regression to output column
+materialization (materialize ≈ the whole emit stage), while the
+operator-level Rust benches had shown the same build faster; the
+gathered path loses to Arrow's contiguous-slice concat fast path on this
+workload's shape.
+
+## Operator-level Rust benches (`stream_join_perf --quick`)
+
+| Bench                          | main      | candidate | Change |
+|--------------------------------|-----------|-----------|--------|
+| handler/right_10k_no_match     | 8.78 ms   | 6.45 ms   | −27%   |
+| handler/right_10k_one_to_one   | 16.76 ms  | 12.20 ms  | −27%   |
+| handler/right_10k_fanout10     | 63.89 ms  | 58.83 ms  | −8%    |
+| handler/watermark_evict_10k    | 2.77 ms   | 2.75 ms   | ≈      |
+| checkpoint/capture_dirty_20k   | 42.96 ms  | 46.11 ms  | ≈ noise |
+| steady_60k                     | 678 µs    | 465 µs    | −31%   |
+| restore/full_20000             | 44.5 ms   | 52.3 ms   | ≈ noise |
+| restore/full_60000             | 140.6 ms  | 149.7 ms  | ≈ noise |
+
+The pre-revert build additionally measured one_to_one 6.70 ms (−60%) and
+fanout10 10.20 ms (−84%) — the gathered output path is a large win at
+operator level — but the suite-level regression above wins the decision.
+
+## Verdict against the issue #363 targets
+
+- Stream join 1M single-thread ≤ 60 ms: **not met**. Candidate p50 is
+  858 ms on this host (baseline 1,038–1,066 ms under the same
+  conditions); the improvement is −18.7% with a confirmed interval, not
+  the ~11× required. The remaining cost sits in per-row admission
+  (`quantum` stepping, per-row classification), per-row probe encoding,
+  and output materialization; none of these are addressed yet.
+- The index change is directionally correct and statistically confirmed;
+  the gathered output experiment is documented as rejected evidence for
+  the next iteration, which needs a take/zero-copy output design that
+  preserves the concat fast path for contiguous incoming runs.
+
+Raw sample JSON files are under `target/j2a-perf/engines-1000000-join/`
+and `target/j2a-perf/engines-100000-join/` in the worktree.
