@@ -31,8 +31,10 @@ No aggregate acceptance verdict is inferred from this selected set.
 | Restore full 20k                | 53.086      | 54.129           | +1.96%  | inconclusive       |
 
 The per-round statistic is the median of paired percentage changes, rather
-than the pooled P50 ratio. Reported interval coverage is 0.978515625 for these
-ten-pair rounds; no new statistic or threshold was substituted.
+than the pooled P50 ratio. Nominal interval coverage under the iid assumption
+is 0.978515625 for these ten-pair rounds. The shared-host measurements do not
+verify that assumption or guarantee realized coverage. No new statistic or
+threshold was substituted.
 
 | Case                            | Round 1 median [interval] % | Round 2 median [interval] % |
 |---------------------------------|-----------------------------|-----------------------------|
@@ -166,10 +168,12 @@ A4 or J1.6 before/after gains, or establish the complete issue's original gates.
 
 ## Resource observations
 
-These ranges are process-lifetime RSS high-water marks, including fixtures,
-warmup, probes, native worker threads and cleanup. They are not timed-window
-live bytes. ASOF has only two resource observations per side; Rust has twenty.
-No equivalence or memory-growth verdict is inferred from these ranges.
+These ranges are process RSS high-water marks. Rust records them through the
+final report point, including setup, probes, warmup, native worker threads and
+iteration cleanup, before group.finish and runtime/process exit. ASOF records
+them through atexit. They are neither timed-window live bytes nor, for Rust,
+peaks through process-exit cleanup. ASOF has only two resource observations
+per side; Rust has twenty. No equivalence or memory-growth verdict is inferred.
 Resource measurements were not added retrospectively to the four reused cases.
 
 | Case                            | Workers / side | Main HWM MiB range | Candidate HWM MiB range |
