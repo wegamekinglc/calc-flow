@@ -164,3 +164,23 @@ Rejected in this iteration, with reasons:
   was per-row wrapper allocation, removed by the Rowed representation.
 - Enabling the funded copy path for non-serial runtimes: explicitly
   outside the proven serial subset; specialist review required.
+
+## Iteration 4: batch-mask legacy admission
+
+`admit_legacy_record` now classifies the whole record with batch-level
+masks (event-time null mask, key-null mask with a no-null fast path per
+column) and one block row-id reservation per record, instead of one
+`classify_row` call per row. The frozen precedence is preserved and now
+pinned by tests: null event time drops first, a non-null row's timestamp
+conversion failure still errors before a null-key drop, lateness last.
+The copy path (serial runtimes only) keeps per-row classification.
+
+Paired 1M (2 × 10 pairs): −88.28% pooled, CI95 [−88.76%, −87.50%],
+candidate p50 144.0 ms on a noisier evening host where main itself
+measured 1,108–1,318 ms; the standalone contribution of this iteration
+over iteration 3 is about half a percentage point — the structural value
+is the range-local admission shape that J3 shards directly. A zero-copy
+contiguous output slice was evaluated and deferred: Arrow sliced arrays
+report their full parent buffers in memory accounting, so an unfunded
+shared-output path would over-count against the edge byte budget until
+a shared-output accounting story exists.

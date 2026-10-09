@@ -9,6 +9,11 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-09: Classify streaming Join legacy admission with batch-level
+  null masks and one block row-id reservation per record, preserving the
+  frozen drop precedence including timestamp-conversion failures over
+  null-key drops.
+
 - 2026-10-09: Keep streaming Join rows admitted through the legacy path on
   their immutable parent record instead of one wrapped single-row batch
   per row. Suite Join throughput improves about 88% at one million rows
