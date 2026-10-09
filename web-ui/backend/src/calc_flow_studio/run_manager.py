@@ -1241,7 +1241,10 @@ def _directory_size(path: Path) -> int:
             if entry.is_dir(follow_symlinks=False):
                 pending.append(Path(entry.path))
             elif entry.is_file(follow_symlinks=False):
-                total += entry.stat(follow_symlinks=False).st_size
+                try:
+                    total += entry.stat(follow_symlinks=False).st_size
+                except FileNotFoundError:
+                    continue
     return total
 
 
