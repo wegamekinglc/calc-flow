@@ -16,6 +16,12 @@ pub(super) use sparse::SparseQueue;
 #[derive(Clone)]
 pub(super) enum RowPayload {
     Legacy(RecordBatch),
+    /// One row of an immutable parent record, kept without slicing the
+    /// parent into per-row wrappers. `columns` and `offset` address the row.
+    Rowed {
+        parent: Arc<RecordBatch>,
+        row: usize,
+    },
     Shared {
         chunk: Arc<PayloadChunk>,
         row: usize,
@@ -45,7 +51,7 @@ pub(super) enum RowView<'a> {
     Borrowed(&'a RecordBatch),
     Owned {
         record: RecordBatch,
-        _owner: Arc<PayloadChunk>,
+        _owner: Option<Arc<PayloadChunk>>,
     },
 }
 
@@ -69,7 +75,7 @@ impl RowPayload {
     #[cfg(test)]
     pub(super) fn funded_owner(&self) -> Option<(usize, usize)> {
         match self {
-            Self::Legacy(_) => None,
+            Self::Legacy(_) | Self::Rowed { .. } => None,
             Self::Shared { chunk, .. } => {
                 let PayloadChunk {
                     _funding: funding, ..
@@ -82,6 +88,7 @@ impl RowPayload {
     pub(super) fn schema_ref(&self) -> &SchemaRef {
         match self {
             Self::Legacy(record) => record.schema_ref(),
+            Self::Rowed { parent, .. } => parent.schema_ref(),
             Self::Shared { chunk, .. } => &chunk.schema,
         }
     }
@@ -89,6 +96,7 @@ impl RowPayload {
     pub(super) fn columns(&self) -> &[ArrayRef] {
         match self {
             Self::Legacy(record) => record.columns(),
+            Self::Rowed { parent, .. } => parent.columns(),
             Self::Shared { chunk, .. } => &chunk.columns,
         }
     }
@@ -96,13 +104,17 @@ impl RowPayload {
     pub(super) fn offset(&self) -> usize {
         match self {
             Self::Legacy(_) => 0,
-            Self::Shared { row, .. } => *row,
+            Self::Rowed { row, .. } | Self::Shared { row, .. } => *row,
         }
     }
 
     pub(super) fn view(&self) -> RowView<'_> {
         match self {
             Self::Legacy(record) => RowView::Borrowed(record),
+            Self::Rowed { parent, row } => RowView::Owned {
+                record: parent.slice(*row, 1),
+                _owner: None,
+            },
             Self::Shared { chunk, row } => {
                 let columns = chunk
                     .columns
@@ -112,7 +124,7 @@ impl RowPayload {
                 RowView::Owned {
                     record: RecordBatch::try_new(Arc::clone(&chunk.schema), columns)
                         .expect("private owned-copy constructors preserve canonical types"),
-                    _owner: Arc::clone(chunk),
+                    _owner: Some(Arc::clone(chunk)),
                 }
             }
         }
@@ -122,11 +134,13 @@ impl RowPayload {
         &self.columns()[index]
     }
 
-    /// Identity of the shared backing chunk, so callers can group rows that
-    /// can be gathered from one column set; legacy rows have no identity.
+    /// Identity of the backing column set shared by every row of a source
+    /// record or chunk, so callers can group rows that can be gathered with
+    /// one take; legacy single-row records have no shared identity.
     pub(super) fn shared_chunk_id(&self) -> Option<usize> {
         match self {
             Self::Legacy(_) => None,
+            Self::Rowed { parent, .. } => Some(std::ptr::from_ref(parent.columns()).addr()),
             Self::Shared { chunk, .. } => Some(Arc::as_ptr(chunk) as usize),
         }
     }
@@ -134,6 +148,7 @@ impl RowPayload {
     pub(super) fn column_view(&self, index: usize) -> ArrayRef {
         match self {
             Self::Legacy(record) => Arc::clone(record.column(index)),
+            Self::Rowed { parent, row } => parent.column(index).slice(*row, 1),
             Self::Shared { chunk, row } => chunk.columns[index].slice(*row, 1),
         }
     }

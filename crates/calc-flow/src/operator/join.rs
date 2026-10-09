@@ -1556,6 +1556,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn legacy_admitted_rows_gather_output_without_row_slices() {
+        // A null-bearing column keeps the funded copy path away, so admission
+        // takes the legacy path; matched output must still gather by take.
+        let nullable = |times: Vec<i64>| {
+            let rows = times.len();
+            Batch::table(
+                vec![
+                    RecordBatch::try_new(
+                        left_schema(),
+                        vec![
+                            Arc::new(Int64Array::from(vec![7; rows])),
+                            Arc::new(TimestampMicrosecondArray::from(times).with_timezone("UTC")),
+                            Arc::new(Int64Array::from(
+                                (0..rows)
+                                    .map(|index| if index == 0 { None } else { Some(42) })
+                                    .collect::<Vec<_>>(),
+                            )),
+                        ],
+                    )
+                    .unwrap(),
+                ],
+                BatchMetadata::default(),
+            )
+            .unwrap()
+        };
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        let job_context = job();
+        let context = StreamOperatorContext::new(&job_context, "match", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data(
+                "right",
+                right_batch(vec![0, 1, 2]),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+        reset_join_work();
+        operator
+            .process_data("left", nullable(vec![0, 1, 2]), &context, &mut collector)
+            .await
+            .unwrap();
+        let output_rows = collector
+            .drain("output")
+            .iter()
+            .filter_map(|message| message.as_data())
+            .map(|batch| batch.num_rows())
+            .sum::<usize>();
+        assert!(output_rows > 0, "expected matched output rows");
+        assert_eq!(join_work().output_column_slices, 0);
+    }
+
+    #[tokio::test]
     async fn native_output_columns_gather_by_take_without_row_slices() {
         let mut operator =
             StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
@@ -3833,6 +3888,7 @@ impl StreamJoinOperator {
         } else {
             "left"
         });
+        let parent = Arc::new(record.clone());
         for row_index in 0..record.num_rows() {
             let row_id = bundle.reserve_row_id(&self.name)?;
             match self.classify_row(
@@ -3846,7 +3902,10 @@ impl StreamJoinOperator {
                 RowAdmission::Dropped(kind) => bundle.note_dropped(kind, &self.name)?,
                 RowAdmission::Admitted(event_time) => {
                     bundle.push_admitted(AdmittedRow {
-                        record: columnar::RowPayload::at(record, None, row_index),
+                        record: columnar::RowPayload::Rowed {
+                            parent: Arc::clone(&parent),
+                            row: row_index,
+                        },
                         event_time,
                         row_id,
                         retain: should_retain(

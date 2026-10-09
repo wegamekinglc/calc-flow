@@ -501,7 +501,7 @@ async fn test_background_sql_configuration_keeps_payload_and_scratch_legacy() {
     assert!(
         matches!(
             operator.state.left[0].record,
-            columnar::RowPayload::Legacy(_)
+            columnar::RowPayload::Legacy(_) | columnar::RowPayload::Rowed { .. }
         ),
         "unproved background SQL must not retain a paid Shared schema whose consumers cannot carry its lease"
     );
