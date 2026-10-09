@@ -1556,6 +1556,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_output_columns_gather_by_take_without_row_slices() {
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        let job_context = job();
+        let context = StreamOperatorContext::new(&job_context, "match", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data(
+                "right",
+                right_batch(vec![0, 1, 2]),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+        reset_join_work();
+        operator
+            .process_data("left", left_batch(vec![0, 1, 2]), &context, &mut collector)
+            .await
+            .unwrap();
+        let output_rows = collector
+            .drain("output")
+            .iter()
+            .filter_map(|message| message.as_data())
+            .map(|batch| batch.num_rows())
+            .sum::<usize>();
+        assert!(output_rows > 0, "expected matched output rows");
+        assert_eq!(join_work().output_column_slices, 0);
+    }
+
+    #[tokio::test]
     async fn native_probe_allocates_each_distinct_key_once() {
         let mut operator =
             StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
@@ -2414,8 +2445,8 @@ use datafusion::arrow::{
         DictionaryArray, FixedSizeListArray, LargeBinaryArray, LargeListArray, LargeListViewArray,
         LargeStringArray, ListArray, ListViewArray, MapArray, PrimitiveArray, RunArray,
         StringArray, StringViewArray, StructArray, TimestampMicrosecondArray,
-        TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray, UInt64Array,
-        UnionArray, new_empty_array,
+        TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray, UInt32Array,
+        UInt64Array, UnionArray, new_empty_array,
     },
     compute::concat,
     datatypes::{
@@ -2449,13 +2480,14 @@ struct JoinWork {
     time_decoders: usize,
     sql_probe_table_builds: usize,
     probe_key_allocations: usize,
+    output_column_slices: usize,
 }
 
 #[cfg(test)]
 thread_local! {
     static JOIN_WORK: std::cell::Cell<JoinWork> = const { std::cell::Cell::new(JoinWork {
         retained_visits: 0, pending_visits: 0, key_encodings: 0, time_decoders: 0,
-        sql_probe_table_builds: 0, probe_key_allocations: 0,
+        sql_probe_table_builds: 0, probe_key_allocations: 0, output_column_slices: 0,
     }) };
 }
 
@@ -5194,27 +5226,133 @@ fn materialize_output_record(
     let (first_left, first_right) = pair_records(&matched[0]);
     let left_width = first_left.num_columns();
     let right_width = first_right.num_columns();
+    let left_gather = gather_output_side(matched.iter().map(|pair| {
+        let (left, _) = pair_records(pair);
+        left
+    }));
+    let right_gather = gather_output_side(matched.iter().map(|pair| {
+        let (_, right) = pair_records(pair);
+        right
+    }));
     let mut columns = Vec::with_capacity(left_width + right_width);
     for column_index in 0..left_width + right_width {
-        let slices = matched
-            .iter()
-            .map(|pair| {
-                let (left, right) = pair_records(pair);
-                if column_index < left_width {
-                    left.column_view(column_index)
-                } else {
-                    right.column_view(column_index - left_width)
-                }
-            })
-            .collect::<Vec<_>>();
-        let references = slices.iter().map(AsRef::as_ref).collect::<Vec<_>>();
-        columns.push(canonical_column(
-            concat_output_column(&references)?,
+        let (gather, payload_index) = if column_index < left_width {
+            (&left_gather, column_index)
+        } else {
+            (&right_gather, column_index - left_width)
+        };
+        columns.push(materialize_output_column(
+            gather,
+            payload_index,
             output_schema.field(column_index).data_type(),
-        ));
+            &OutputColumnContext {
+                admitted,
+                opposite,
+                matched,
+                incoming_is_left,
+                left_width,
+            },
+            column_index,
+        )?);
     }
     RecordBatch::try_new(Arc::clone(output_schema), columns)
         .map_err(|error| operator_error(operator_id, &format!("output projection failed: {error}")))
+}
+
+/// One output side's gather plan: either every pair reads rows of one shared
+/// payload chunk, or the pairs need per-row payloads.
+enum OutputSideGather<'a> {
+    SharedChunk {
+        columns: &'a [ArrayRef],
+        rows: UInt32Array,
+    },
+    PerPair,
+}
+
+fn gather_output_side<'a>(
+    payloads: impl Iterator<Item = &'a columnar::RowPayload>,
+) -> OutputSideGather<'a> {
+    let mut columns: Option<&'a [ArrayRef]> = None;
+    let mut rows = Vec::new();
+    for payload in payloads {
+        let Some(chunk) = payload.shared_chunk_id() else {
+            return OutputSideGather::PerPair;
+        };
+        let payload_columns = payload.columns();
+        match columns {
+            None => columns = Some(payload_columns),
+            Some(existing) if std::ptr::eq(existing.as_ptr(), payload_columns.as_ptr()) => {}
+            Some(_) => return OutputSideGather::PerPair,
+        }
+        let _ = chunk;
+        rows.push(u32::try_from(payload.offset()).expect("payload rows fit u32"));
+    }
+    match columns {
+        Some(columns) => OutputSideGather::SharedChunk {
+            columns,
+            rows: UInt32Array::from(rows),
+        },
+        None => OutputSideGather::PerPair,
+    }
+}
+
+/// Shared row context for one output materialization pass.
+struct OutputColumnContext<'a> {
+    admitted: &'a [AdmittedRow],
+    opposite: &'a [StoredRow],
+    matched: &'a [MatchedPair],
+    incoming_is_left: bool,
+    left_width: usize,
+}
+
+fn materialize_output_column(
+    gather: &OutputSideGather<'_>,
+    payload_index: usize,
+    output_type: &DataType,
+    context: &OutputColumnContext<'_>,
+    column_index: usize,
+) -> Result<ArrayRef> {
+    if let OutputSideGather::SharedChunk { columns, rows } = gather
+        && !matches!(columns[payload_index].data_type(), DataType::Dictionary(..))
+        && let Ok(taken) =
+            datafusion::arrow::compute::take(columns[payload_index].as_ref(), rows, None)
+    {
+        return Ok(canonical_column(taken, output_type));
+    }
+    let OutputColumnContext {
+        admitted,
+        opposite,
+        matched,
+        incoming_is_left,
+        left_width,
+    } = context;
+    let pair_records = |pair: &MatchedPair| {
+        let incoming = &admitted[pair.pos];
+        let candidate = &opposite[pair.opposite_index];
+        if *incoming_is_left {
+            (&incoming.record, &candidate.record)
+        } else {
+            (&candidate.record, &incoming.record)
+        }
+    };
+    let slices = matched
+        .iter()
+        .map(|pair| {
+            #[cfg(test)]
+            note_join_work(|work| work.output_column_slices += 1);
+            let (left, right) = pair_records(pair);
+            if column_index < *left_width {
+                left.column_view(column_index)
+            } else {
+                right.column_view(column_index - left_width)
+            }
+        })
+        .collect::<Vec<_>>();
+    let references = slices.iter().map(AsRef::as_ref).collect::<Vec<_>>();
+    Ok(canonical_column(
+        concat_output_column(&references)?,
+        output_type,
+    ))
 }
 
 fn concat_output_column(slices: &[&dyn Array]) -> Result<ArrayRef> {

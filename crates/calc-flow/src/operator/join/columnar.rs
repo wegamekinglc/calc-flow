@@ -122,6 +122,15 @@ impl RowPayload {
         &self.columns()[index]
     }
 
+    /// Identity of the shared backing chunk, so callers can group rows that
+    /// can be gathered from one column set; legacy rows have no identity.
+    pub(super) fn shared_chunk_id(&self) -> Option<usize> {
+        match self {
+            Self::Legacy(_) => None,
+            Self::Shared { chunk, .. } => Some(Arc::as_ptr(chunk) as usize),
+        }
+    }
+
     pub(super) fn column_view(&self, index: usize) -> ArrayRef {
         match self {
             Self::Legacy(record) => Arc::clone(record.column(index)),
