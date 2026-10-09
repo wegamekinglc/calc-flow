@@ -26,7 +26,31 @@ pub(super) enum RowPayload {
         chunk: Arc<PayloadChunk>,
         row: usize,
     },
+    RestoredV2 {
+        chunk: Arc<super::checkpoint_v2::payload::OwnedPayload>,
+        row: usize,
+    },
 }
+
+#[cfg(test)]
+const _: () = {
+    enum V1RowPayload {
+        Legacy(RecordBatch),
+        Shared {
+            chunk: Arc<PayloadChunk>,
+            row: usize,
+        },
+    }
+    let _: fn(RecordBatch) -> V1RowPayload = V1RowPayload::Legacy;
+    let _: fn(Arc<PayloadChunk>, usize) -> V1RowPayload =
+        |chunk, row| V1RowPayload::Shared { chunk, row };
+    let _: fn(V1RowPayload) = |payload| match payload {
+        V1RowPayload::Legacy(record) => drop(record),
+        V1RowPayload::Shared { chunk, row } => drop((chunk, row)),
+    };
+    assert!(size_of::<RowPayload>() == size_of::<V1RowPayload>());
+    assert!(align_of::<RowPayload>() == align_of::<V1RowPayload>());
+};
 
 pub(super) struct PayloadChunk {
     columns: Vec<ArrayRef>,
@@ -53,6 +77,10 @@ pub(super) enum RowView<'a> {
         record: RecordBatch,
         _owner: Option<Arc<PayloadChunk>>,
     },
+    RestoredV2 {
+        record: RecordBatch,
+        _owner: Arc<super::checkpoint_v2::payload::OwnedPayload>,
+    },
 }
 
 impl Deref for RowView<'_> {
@@ -60,7 +88,7 @@ impl Deref for RowView<'_> {
     fn deref(&self) -> &Self::Target {
         match self {
             Self::Borrowed(record) => record,
-            Self::Owned { record, .. } => record,
+            Self::Owned { record, .. } | Self::RestoredV2 { record, .. } => record,
         }
     }
 }
@@ -82,6 +110,7 @@ impl RowPayload {
                 } = chunk.as_ref();
                 Some((Arc::as_ptr(chunk) as usize, funding.credit.size()))
             }
+            Self::RestoredV2 { chunk, .. } => Some(chunk.funded_owner()),
         }
     }
 
@@ -90,6 +119,7 @@ impl RowPayload {
             Self::Legacy(record) => record.schema_ref(),
             Self::Rowed { parent, .. } => parent.schema_ref(),
             Self::Shared { chunk, .. } => &chunk.schema,
+            Self::RestoredV2 { chunk, .. } => chunk.record().schema_ref(),
         }
     }
 
@@ -98,13 +128,16 @@ impl RowPayload {
             Self::Legacy(record) => record.columns(),
             Self::Rowed { parent, .. } => parent.columns(),
             Self::Shared { chunk, .. } => &chunk.columns,
+            Self::RestoredV2 { chunk, .. } => chunk.record().columns(),
         }
     }
 
     pub(super) fn offset(&self) -> usize {
         match self {
             Self::Legacy(_) => 0,
-            Self::Rowed { row, .. } | Self::Shared { row, .. } => *row,
+            Self::Rowed { row, .. } | Self::Shared { row, .. } | Self::RestoredV2 { row, .. } => {
+                *row
+            }
         }
     }
 
@@ -127,6 +160,10 @@ impl RowPayload {
                     _owner: Some(Arc::clone(chunk)),
                 }
             }
+            Self::RestoredV2 { chunk, row } => RowView::RestoredV2 {
+                record: chunk.record().slice(*row, 1),
+                _owner: Arc::clone(chunk),
+            },
         }
     }
 
@@ -142,6 +179,9 @@ impl RowPayload {
             Self::Legacy(_) => None,
             Self::Rowed { parent, .. } => Some(std::ptr::from_ref(parent.columns()).addr()),
             Self::Shared { chunk, .. } => Some(Arc::as_ptr(chunk) as usize),
+            Self::RestoredV2 { chunk, .. } => {
+                Some(std::ptr::from_ref(chunk.record().columns()).addr())
+            }
         }
     }
 
@@ -150,6 +190,7 @@ impl RowPayload {
             Self::Legacy(record) => Arc::clone(record.column(index)),
             Self::Rowed { parent, row } => parent.column(index).slice(*row, 1),
             Self::Shared { chunk, row } => chunk.columns[index].slice(*row, 1),
+            Self::RestoredV2 { chunk, row } => chunk.record().column(index).slice(*row, 1),
         }
     }
 
@@ -238,4 +279,11 @@ impl Ord for FramedKey {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.bytes.cmp(&other.bytes)
     }
+}
+
+pub(super) fn funded_encoded_key(bytes: Vec<u8>, credit: Arc<MemoryReservation>) -> Arc<FramedKey> {
+    Arc::new(FramedKey {
+        bytes,
+        _credit: Some(credit),
+    })
 }

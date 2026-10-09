@@ -10,6 +10,7 @@ pub(super) struct TestRetirementGate {
     pub entered: tokio::sync::oneshot::Sender<()>,
     pub wait: std::sync::mpsc::Receiver<()>,
 }
+use super::checkpoint_v2::ContainerFunding;
 use super::{StoredRow, StreamJoinOperator, encode_side};
 use crate::runtime::streaming::gather_work::{
     AdmissionFailure, GatherOperatorId, GatherStop, OwnedCpuWork, cleanup_control_bytes,
@@ -65,6 +66,32 @@ struct BaseWork {
     name: String,
     #[cfg(test)]
     gate: Option<TestGate>,
+}
+
+struct V2BaseWork {
+    inner: BaseWork,
+    _containers: Arc<ContainerFunding>,
+}
+
+impl OwnedCpuWork for V2BaseWork {
+    type Output = BTreeMap<&'static str, StateSegment>;
+
+    fn control_bytes(&self) -> Result<usize> {
+        self.inner
+            .control_bytes()?
+            .checked_add(size_of::<Self>() - size_of::<BaseWork>())
+            .ok_or_else(|| memory_error(&self.inner.name, "checkpoint control size overflow"))
+    }
+
+    fn run(self, stop: &GatherStop) -> Result<Self::Output> {
+        let Self {
+            inner,
+            _containers: containers,
+        } = self;
+        let result = inner.run(stop);
+        drop(containers);
+        result
+    }
 }
 
 #[cfg(test)]
@@ -168,12 +195,53 @@ impl StreamJoinOperator {
     }
 
     async fn rebuild_compaction_base(&mut self, context: &StreamOperatorContext<'_>) -> Result<()> {
+        if let Some(containers) = self.v2_containers.clone() {
+            return self.rebuild_v2_compaction_base(context, containers).await;
+        }
+        self.rebuild_v1_compaction_base(context).await
+    }
+
+    async fn rebuild_v1_compaction_base(
+        &mut self,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<()> {
         let credit = self.reserve_compaction_workspace()?;
         let scope = context
             .gather_client(GatherOperatorId::new(Arc::from(self.name.as_str())))
             .scope()?;
         let retirement = context.job().gather_owner().retain_retirement()?;
         let work = self.compaction_work();
+        let ticket = scope
+            .submit_observed_work(
+                work,
+                credit,
+                GatherStop::from_job(context.job()),
+                retirement,
+                &mut self.compaction_cleanup,
+            )
+            .await
+            .map_err(|failure| admission_error(&self.name, failure))?;
+        let prepared = ticket.finish().await?;
+        self.await_snapshot_release(context).await?;
+        prepared.install(|base| self.install_compaction_base(base, context))?;
+        self.compaction_cleanup = None;
+        Ok(())
+    }
+
+    async fn rebuild_v2_compaction_base(
+        &mut self,
+        context: &StreamOperatorContext<'_>,
+        containers: Arc<ContainerFunding>,
+    ) -> Result<()> {
+        let credit = self.reserve_compaction_workspace()?;
+        let scope = context
+            .gather_client(GatherOperatorId::new(Arc::from(self.name.as_str())))
+            .scope()?;
+        let retirement = context.job().gather_owner().retain_retirement()?;
+        let work = V2BaseWork {
+            inner: self.compaction_work(),
+            _containers: containers,
+        };
         let ticket = scope
             .submit_observed_work(
                 work,

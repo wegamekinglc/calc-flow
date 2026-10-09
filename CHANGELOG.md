@@ -32,6 +32,10 @@ measurements. Use the current guides for supported behavior.
   batch, and release evicted key slots in lockstep with the index
   funding shrink. Suite Join throughput improves about 19% at one million
   rows with identical outputs, charges and checkpoints.
+- 2026-10-09: Read columnar V2 streaming Join checkpoints with strict
+  inventory, schema and historical-row validation before atomic restoration.
+  Managed recovery uses funded native work; checkpoint capture continues to
+  write V1 and rebuilds its base after restoring V2 state.
 
 - 2026-10-09: Cancel successfully started native stream jobs when Python
   startup is abandoned before ownership handoff. Await source shutdown and

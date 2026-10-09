@@ -222,6 +222,16 @@ segment paths, lengths, and checksums during staging, reusing the
 already-committed handle for segment content that is unchanged since the
 current session committed it.
 
+Streaming Join writes physical V1 checkpoints and accepts physical V1 and
+columnar V2 state on restore. V2 validation checks the complete segment
+inventory, payload schemas, historical row identities, keys, event times and
+logical charges before replacing either side. Managed V2 recovery performs
+validation and decoding on owned native workers under the configured memory
+budget; invalid V2 state fails recovery. After restoring V2, checkpoint
+preparation rebuilds a complete V1 base for the next capture. These physical
+formats are distinct from the runtime capability envelope described under
+[checkpoint coordination](#checkpoint-coordination).
+
 The built-in window operator prepares immutable Arrow IPC deltas through a
 blocking worker while processing data and control events. Its synchronous
 checkpoint only assigns deterministic segment IDs, moves prepared buffers,

@@ -48,7 +48,7 @@ fn typed_spec(spec: &StreamJoinSpec) -> Option<usize> {
         .checked_add(10 * size_of::<String>())
 }
 
-pub(super) fn caller_controls(name: &str) -> Option<usize> {
+pub(in crate::operator::join) fn caller_controls(name: &str) -> Option<usize> {
     checked_sum(&[
         registration_controls()?,
         arc_bytes(name.len())?,
@@ -63,7 +63,7 @@ fn stop_controls() -> Option<usize> {
     checked_sum(&[80, arc_bytes(20)?, arc_bytes(size_of::<bool>())?])
 }
 
-pub(super) fn registration_controls() -> Option<usize> {
+pub(in crate::operator::join) fn registration_controls() -> Option<usize> {
     let registration = size_of::<MemoryConsumer>() + size_of::<Arc<dyn MemoryPool>>() + ARC_HEADER;
     let label = "sql-incremental:stream-join-metadata".len();
     registration.checked_add(3 * label)

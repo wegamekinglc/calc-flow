@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 mod inventory;
 mod plan;
-mod restore_bases;
+pub(in crate::operator::join) mod restore_bases;
 mod restore_segments;
 mod restore_utf8;
 
