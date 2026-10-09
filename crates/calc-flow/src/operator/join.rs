@@ -4718,6 +4718,7 @@ impl StreamJoinOperator {
         self.state = state;
         self.retained_key_cache = RetainedKeyCache::default();
         self.ingress_progress = IngressProgressSnapshot::default();
+        self.v2_containers = None;
         Ok(())
     }
 }

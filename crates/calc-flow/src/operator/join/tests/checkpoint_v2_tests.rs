@@ -19,6 +19,9 @@ mod capture_tests;
 #[path = "checkpoint_v2_overlap_tests.rs"]
 mod overlap_tests;
 
+#[path = "checkpoint_v2_v1_reuse_tests.rs"]
+mod v1_reuse_tests;
+
 const KEY: [u8; 17] = [5, 0, 0, 0, 0, 8, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0];
 
 fn schema() -> Arc<Schema> {
