@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import queue
 import time
+from os import DirEntry
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from calc_flow import ProjectDocument
@@ -341,6 +343,54 @@ def test_concurrency_limit_is_enforced_before_starting_another_job(
 
     manager.cancel_job(first.id)
     _wait_for_status(manager, first.id, RunStatus.CANCELLED)
+
+
+def test_checkpoint_directory_size_skips_file_removed_after_enumeration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "stable").write_bytes(b"stable")
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    (nested / "stable").write_bytes(b"nested")
+    temporary = tmp_path / ".tmp-manifest"
+    temporary.write_bytes(b"pending publication")
+    observed = []
+    real_scandir = run_manager_module.os.scandir
+
+    def disappearing_entry(entry: DirEntry[str]) -> SimpleNamespace:
+        def is_file(*, follow_symlinks: bool) -> bool:
+            result = entry.is_file(follow_symlinks=follow_symlinks)
+            assert result is True
+            observed.append("classified")
+            return result
+
+        def stat(*, follow_symlinks: bool) -> object:
+            assert observed == ["classified"]
+            temporary.unlink()
+            observed.append("removed")
+            return Path(entry.path).stat(follow_symlinks=follow_symlinks)
+
+        return SimpleNamespace(
+            path=entry.path,
+            is_symlink=entry.is_symlink,
+            is_dir=entry.is_dir,
+            is_file=is_file,
+            stat=stat,
+        )
+
+    def scan_directory(path: Path) -> tuple[object, ...]:
+        with real_scandir(path) as entries:
+            return tuple(
+                disappearing_entry(entry) if Path(entry.path) == temporary else entry
+                for entry in entries
+            )
+
+    monkeypatch.setattr(run_manager_module.os, "scandir", scan_directory)
+
+    assert run_manager_module._directory_size(tmp_path) == 12
+    assert observed == ["classified", "removed"]
+    assert not temporary.exists()
 
 
 def test_checkpoint_disk_limit_becomes_a_typed_terminal_failure(
