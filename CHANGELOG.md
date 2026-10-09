@@ -9,7 +9,7 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
-- 2026-10-10: Fund nullable Float64 non-key payloads during streaming Join
+- 2026-10-09: Fund nullable Float64 non-key payloads during streaming Join
   managed V1 recovery. Retain raw value bytes and validity padding with the
   existing row lease through the last surviving values or validity buffer.
   Preserve checkpoint bytes, logical charges and original reader fallback.
