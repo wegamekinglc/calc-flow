@@ -222,15 +222,28 @@ segment paths, lengths, and checksums during staging, reusing the
 already-committed handle for segment content that is unchanged since the
 current session committed it.
 
-Streaming Join writes physical V1 checkpoints and accepts physical V1 and
-columnar V2 state on restore. V2 validation checks the complete segment
-inventory, payload schemas, historical row identities, keys, event times and
-logical charges before replacing either side. Managed V2 recovery performs
-validation and decoding on owned native workers under the configured memory
-budget; invalid V2 state fails recovery. After restoring V2, checkpoint
-preparation rebuilds a complete V1 base for the next capture. These physical
-formats are distinct from the runtime capability envelope described under
-[checkpoint coordination](#checkpoint-coordination).
+Streaming Join writes columnar physical V2 checkpoints and accepts physical
+V1 and V2 state on restore. V2 separates immutable payload batches from row
+indexes. Checkpoint preparation builds a replacement base on owned native
+workers under the configured memory budget. Capture carries that base and
+historical segments, adding only later dirty operations. Clean captures share
+unchanged segment allocations. Four dirty checkpoint epochs arm base
+compaction; payloads referenced by carried history remain reachable until
+that history is replaced.
+
+Preparation installs only a candidate for the exact state cut it observed.
+If a fresh operator changes before its first capture, capture records its
+pending operations against empty bases. Restoring V1 requires successful
+asynchronous preparation before a V2 capture; failure preserves the old state
+and pending operations. Restoring V2 preserves its validated base, deltas and
+shared payloads for subsequent captures.
+
+V2 validation checks the complete segment inventory, payload schemas,
+historical row identities, keys, event times and logical charges before
+replacing either side. Managed recovery validates and decodes on owned native
+workers under the configured memory budget; invalid V2 state fails recovery.
+These physical formats are distinct from the runtime capability envelope
+under [checkpoint coordination](#checkpoint-coordination).
 
 The built-in window operator prepares immutable Arrow IPC deltas through a
 blocking worker while processing data and control events. Its synchronous

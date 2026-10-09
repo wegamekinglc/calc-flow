@@ -154,7 +154,10 @@ impl StreamJoinOperator {
         context.check_cancelled()
     }
 
-    async fn await_snapshot_release(&mut self, context: &StreamOperatorContext<'_>) -> Result<()> {
+    pub(super) async fn await_snapshot_release(
+        &mut self,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<()> {
         let Some(released) = self.compaction_release.as_mut() else {
             return Ok(());
         };

@@ -2875,6 +2875,7 @@ pub struct StreamJoinOperator {
     compaction_release: Option<tokio::sync::oneshot::Receiver<()>>,
     compaction_cleanup: Option<crate::runtime::streaming::gather_work::AttemptCleanup>,
     v2_containers: Option<Arc<checkpoint_v2::ContainerFunding>>,
+    v2_writer: checkpoint_v2::WriterState,
     #[cfg(test)]
     checkpoint_gate: Option<std::sync::Mutex<checkpoint_compaction::TestGate>>,
     #[cfg(test)]
@@ -2885,6 +2886,10 @@ pub struct StreamJoinOperator {
     schema_test_hook: Option<SchemaTestHook>,
     #[cfg(test)]
     decoded_row_test_hook: Option<DecodedRowTestHook>,
+    #[cfg(test)]
+    checkpoint_writer_test_hook: Option<checkpoint_v2::WriterTestHook>,
+    #[cfg(test)]
+    checkpoint_writer_base_test_hook: Option<checkpoint_v2::WriterTestHook>,
 }
 
 const MAX_RETAINED_KEY_CACHE_BYTES_PER_SIDE: usize = 32 * 1024 * 1024;
@@ -3394,6 +3399,7 @@ impl StreamJoinOperator {
             compaction_release: None,
             compaction_cleanup: None,
             v2_containers: None,
+            v2_writer: checkpoint_v2::WriterState::default(),
             #[cfg(test)]
             checkpoint_gate: None,
             #[cfg(test)]
@@ -3404,6 +3410,10 @@ impl StreamJoinOperator {
             schema_test_hook: None,
             #[cfg(test)]
             decoded_row_test_hook: None,
+            #[cfg(test)]
+            checkpoint_writer_test_hook: None,
+            #[cfg(test)]
+            checkpoint_writer_base_test_hook: None,
         })
     }
 
@@ -3420,6 +3430,19 @@ impl StreamJoinOperator {
     #[cfg(test)]
     pub(crate) fn set_checkpoint_decoded_row_test_hook(&mut self, hook: DecodedRowTestHook) {
         self.decoded_row_test_hook = Some(hook);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_checkpoint_writer_test_hook(&mut self, hook: checkpoint_v2::WriterTestHook) {
+        self.checkpoint_writer_test_hook = Some(hook);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_checkpoint_writer_base_test_hook(
+        &mut self,
+        hook: checkpoint_v2::WriterTestHook,
+    ) {
+        self.checkpoint_writer_base_test_hook = Some(hook);
     }
 
     /// Returns the immutable Join declaration.
@@ -4465,6 +4488,7 @@ impl StreamOperator for StreamJoinOperator {
         context.check_cancelled()?;
         self.await_compaction_release(context).await?;
         let prepared = self.prepare_batch(ingress, &batch, context).await?;
+        self.v2_writer.changed(true)?;
         self.emit_prepared(&prepared, context, output).await?;
         self.record_prepared_emitted(prepared.output.len())?;
         self.commit_prepared(ingress, prepared)?;
@@ -4486,6 +4510,7 @@ impl StreamOperator for StreamJoinOperator {
         } else {
             self.await_compaction_release(context).await?;
         }
+        self.v2_writer.changed(true)?;
         self.evict_progress(ingress, progress)?;
         if self.has_sparse_candidates() {
             return self.repair_sparse_chunks(context).await;
@@ -4509,6 +4534,7 @@ impl StreamOperator for StreamJoinOperator {
         _output: &mut dyn StreamCollector,
     ) -> Result<()> {
         self.await_compaction_release(context).await?;
+        self.v2_writer.changed(true)?;
         let left_identities = self.state.left_expirations.identities(&self.state.left);
         record_tombstones(
             &mut self.state.deltas.pending,
@@ -4535,10 +4561,12 @@ impl StreamOperator for StreamJoinOperator {
     }
 
     fn reset(&mut self) -> Result<()> {
+        let writer = self.v2_writer.next_owner(false)?;
         self.state = StreamJoinState::default();
         self.retained_key_cache = RetainedKeyCache::default();
         self.ingress_progress = IngressProgressSnapshot::default();
         self.v2_containers = None;
+        self.v2_writer = writer;
         Ok(())
     }
 
@@ -4546,10 +4574,29 @@ impl StreamOperator for StreamJoinOperator {
         &mut self,
         context: &StreamOperatorContext<'_>,
     ) -> Result<()> {
-        self.prepare_compaction(context).await
+        self.prepare_v2_checkpoint_automatic(context).await
     }
 
     fn checkpoint(&mut self, epoch: Epoch) -> Result<OperatorStateSnapshot> {
+        self.capture_v2_checkpoint(epoch)
+    }
+
+    fn restore(&mut self, snapshot: &OperatorStateSnapshot) -> Result<()> {
+        if snapshot
+            .inline_metadata
+            .get("layout_version")
+            .and_then(Value::as_u64)
+            == Some(2)
+        {
+            return self.restore_v2_snapshot(snapshot);
+        }
+        let metadata = self.parse_restore_metadata(snapshot)?;
+        self.install_restored_metadata(snapshot, metadata, &|| Ok(()))
+    }
+}
+
+impl StreamJoinOperator {
+    fn checkpoint_v1(&mut self, epoch: Epoch) -> Result<OperatorStateSnapshot> {
         if self
             .state
             .last_checkpoint_epoch
@@ -4614,21 +4661,6 @@ impl StreamOperator for StreamJoinOperator {
         })
     }
 
-    fn restore(&mut self, snapshot: &OperatorStateSnapshot) -> Result<()> {
-        if snapshot
-            .inline_metadata
-            .get("layout_version")
-            .and_then(Value::as_u64)
-            == Some(2)
-        {
-            return self.restore_v2_snapshot(snapshot);
-        }
-        let metadata = self.parse_restore_metadata(snapshot)?;
-        self.install_restored_metadata(snapshot, metadata, &|| Ok(()))
-    }
-}
-
-impl StreamJoinOperator {
     fn parse_restore_metadata(
         &self,
         snapshot: &OperatorStateSnapshot,
@@ -4715,10 +4747,12 @@ impl StreamJoinOperator {
             row.record.mark_live();
         }
         check()?;
+        let writer = self.v2_writer.next_owner(true)?;
         self.state = state;
         self.retained_key_cache = RetainedKeyCache::default();
         self.ingress_progress = IngressProgressSnapshot::default();
         self.v2_containers = None;
+        self.v2_writer = writer;
         Ok(())
     }
 }

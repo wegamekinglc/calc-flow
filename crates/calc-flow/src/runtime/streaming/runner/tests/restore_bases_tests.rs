@@ -10,6 +10,9 @@ mod restore_segments_tests;
 #[path = "restore_v2_tests.rs"]
 mod restore_v2_tests;
 
+#[path = "restore_writer_v2_tests.rs"]
+mod restore_writer_v2_tests;
+
 #[path = "restore_float_tests.rs"]
 mod restore_float_tests;
 
