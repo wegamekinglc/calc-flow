@@ -118,4 +118,28 @@ which probe path executed.
   native SHA-256
   `8a1d4f9caf96b26a7bd9bf5878d13a9498b1ed0c61841c305549dbbf7dc59840`.
   Build took 12 minutes 46 seconds with Rust 1.88.0, CPython 3.13 and four
-  Cargo build jobs. Measurement has not started.
+  Cargo build jobs.
+- Sealed measurements and CPU profiles are complete in the
+  [measurement report](../analysis/stream-join-j2a-dictionary-measurements.md)
+  and its linked lossless evidence package. The user explicitly expanded the
+  measurement budget to 60 minutes, with builds separate, to add ASOF,
+  compaction/steady, capture and restore. The four initial cases were retained
+  without resampling; all nine cases have two rounds of ten adjacent AB/BA
+  pairs. Actual measurement/profile supervision totals 1,957.469 seconds;
+  including the 90-second reserve totals 2,047.469 seconds, within that budget.
+- The maintained rule confirms Lookup regressions of +19.85% at 1M rows and
+  +37.81% at 100k rows. Steady improves by 18.54%; retained Join, projection,
+  ASOF, compaction, capture and restore remain inconclusive. These comparisons
+  do not establish historical A4/J1.6 gains or the original compaction
+  single-handler tail gate. Required performance acceptance remains blocked,
+  so PR #393 remains draft and must not merge in this state.
+- Current CPU evidence prioritizes generic admission/yield scheduling and
+  remaining row slices/output materialization. Native probe sample shares
+  decrease, while baseline checkpoint profiles identify row IPC/checksum and
+  restore parsing work separately. Shared-host interference, retained lost
+  events, process-median timer scope and unmeasured allocations are explicit
+  limitations in the report; CPU shares are not causal wall-time fractions.
+- Independent raw evidence review passes: fixed samples, output/probe checks,
+  source and binary seals, maintained statistics, resource scope, budget and
+  owned-process cleanup. Production source stayed frozen throughout this
+  measurement-only phase; earlier source tests were not rerun.
