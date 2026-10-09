@@ -166,6 +166,7 @@ impl StreamJoinOperator {
             cleanup.wait(&GatherStop::from_job(context.job())).await?;
         }
         self.compaction_cleanup = None;
+        self.probe_control = None;
         context.check_cancelled()
     }
 

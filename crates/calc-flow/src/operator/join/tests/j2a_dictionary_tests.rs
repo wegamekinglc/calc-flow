@@ -434,7 +434,7 @@ fn assert_dictionary_owner_follows_live_rows_when_either_batch_expires_first() {
         let index = native_lookup::NativeIndex::new(&stored, credit);
         let mut rows = RetainedRows(
             Arc::new(stored),
-            Some(index),
+            Some(Arc::new(index)),
             columnar::SparseQueue::default(),
         );
         let expired = usize::from(times[1] < times[0]);

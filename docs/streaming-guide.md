@@ -976,6 +976,14 @@ bound each inclusive time window before match materialization. Batch admission
 masks preserve null and late-drop rules. Native index capacity remains funded
 until its storage is released, including capacity retained after eviction.
 
+Large admitted native probes run a funded count work unit, then the operator
+checks the batch match limit before a second work unit builds ordered pairs.
+Both passes share the same immutable native index and retained input owners.
+Cancellation or an abandoned handler retains those owners until cleanup;
+subsequent state changes wait for their release. Small batches run inline.
+If worker admission is refused, matching resumes through the existing serial
+native and DataFusion paths after the attempted work has been released.
+
 When native matching is unavailable, the existing DataFusion equality path
 reuses an unchanged opposite side's assembled key batch. This cache retains
 a side only when its estimated key-array and row-ID storage is at most

@@ -9,6 +9,12 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-10: Run large native streaming Join probes as funded count and fill
+  work units, with the actor checking the match limit between them. Share
+  immutable input and index owners through cancellation cleanup, and await
+  their release before later state changes. Keep small inputs synchronous
+  and preserve serial matching after worker admission refusal.
+
 - 2026-10-10: Recover authentic prior-release V1 Join checkpoints, publish V2
   state, and resume it in a fresh process with unchanged rows, logical charges,
   and source cursors. Preserve original checksums when bounded manifest loading
