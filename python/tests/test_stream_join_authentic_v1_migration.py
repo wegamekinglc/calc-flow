@@ -11,7 +11,7 @@ import struct
 import subprocess
 import sys
 import traceback
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pyarrow as pa
@@ -73,13 +73,25 @@ def _input(side: str) -> pa.Table:
         return reader.read_all()
 
 
-def _documents(table: pa.Table) -> list[dict[str, object]]:
+def _document_values(column: pa.ChunkedArray) -> list[object]:
+    if pa.types.is_timestamp(column.type) and column.type.tz == "UTC":
+        return [
+            value.replace(tzinfo=timezone.utc).isoformat()
+            if value is not None
+            else None
+            for value in column.cast(pa.timestamp(column.type.unit)).to_pylist()
+        ]
     return [
-        {
-            name: value.isoformat() if isinstance(value, datetime) else value
-            for name, value in row.items()
-        }
-        for row in table.to_pylist()
+        value.isoformat() if isinstance(value, datetime) else value
+        for value in column.to_pylist()
+    ]
+
+
+def _documents(table: pa.Table) -> list[dict[str, object]]:
+    columns = [_document_values(column) for column in table.columns]
+    return [
+        {name: column[index] for name, column in zip(table.column_names, columns)}
+        for index in range(table.num_rows)
     ]
 
 
