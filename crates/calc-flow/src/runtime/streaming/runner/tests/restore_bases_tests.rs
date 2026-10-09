@@ -123,6 +123,21 @@ fn restore_plan(
     observations: &Arc<Mutex<RestoreObservations>>,
     parses: &Arc<AtomicUsize>,
 ) -> crate::StreamExecutionPlan {
+    restore_plan_with_producer(observations, parses, false)
+}
+
+fn v1_restore_plan(
+    observations: &Arc<Mutex<RestoreObservations>>,
+    parses: &Arc<AtomicUsize>,
+) -> crate::StreamExecutionPlan {
+    restore_plan_with_producer(observations, parses, true)
+}
+
+fn restore_plan_with_producer(
+    observations: &Arc<Mutex<RestoreObservations>>,
+    parses: &Arc<AtomicUsize>,
+    v1_producer: bool,
+) -> crate::StreamExecutionPlan {
     let schema = fixed_schema();
     let mut join = StreamJoinOperator::new(
         "match",
@@ -139,6 +154,9 @@ fn restore_plan(
         .unwrap(),
     )
     .unwrap();
+    if v1_producer {
+        join.set_checkpoint_v1_test_producer();
+    }
     let observed_parses = parses.clone();
     join.set_checkpoint_metadata_test_hook(Arc::new(move |_, parsing| {
         if parsing {
@@ -264,7 +282,7 @@ async fn test_managed_join_decoded_arrow_rows_have_independent_credit() {
         .with_join_preload_read_hook(wire_hook.clone())
     };
     let spec = || {
-        let mut spec = ac5_job_spec(restore_plan(&observations, &parses), &rows);
+        let mut spec = ac5_job_spec(v1_restore_plan(&observations, &parses), &rows);
         spec.sources = vec![
             NamedSourceBinding {
                 binding_id: "left".into(),

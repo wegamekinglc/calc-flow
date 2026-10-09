@@ -1640,6 +1640,11 @@ async fn capture_prepared_asof(
     Option<OperatorCheckpointCredit>,
 )> {
     if let CompiledStreamOperator::StreamJoin(join) = operator {
+        #[cfg(test)]
+        if join.checkpoint_v1_test_producer() {
+            return crate::StreamOperator::checkpoint(join.as_mut(), epoch)
+                .map(|snapshot| (snapshot, None));
+        }
         return join
             .capture_v2_checkpoint_owned(epoch)
             .map(|(snapshot, credit)| (snapshot, Some(credit)));

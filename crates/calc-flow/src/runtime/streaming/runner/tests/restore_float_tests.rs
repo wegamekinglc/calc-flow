@@ -138,6 +138,7 @@ fn float_plan(
         .unwrap(),
     )
     .unwrap();
+    join.set_checkpoint_v1_test_producer();
     let observed_parses = parses.clone();
     join.set_checkpoint_metadata_test_hook(Arc::new(move |_, parsing| {
         if parsing {

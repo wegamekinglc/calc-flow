@@ -13,7 +13,7 @@ use super::super::{
     budget,
     ipc::{
         accounting::{self, add, product, sum},
-        concat::bulk::admit,
+        concat::{bulk::admit, slice_controls},
     },
     payload::Funding,
 };
@@ -56,6 +56,17 @@ fn compact_column(
     funding: &Arc<Funding>,
     check: &dyn Fn() -> Result<()>,
 ) -> Result<ArrayRef> {
+    let scratch = workspace.new_empty();
+    concatenate_column(rows, index, &scratch, funding, check)
+}
+
+fn concatenate_column(
+    rows: &[&StoredRow],
+    index: usize,
+    workspace: &MemoryReservation,
+    funding: &Arc<Funding>,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<ArrayRef> {
     let count = admit_selections(rows.len(), workspace)?;
     let mut selected = Vec::with_capacity(count);
     for row in rows {
@@ -63,7 +74,7 @@ fn compact_column(
     }
     if rows.len() == 1 {
         let first = &selected[0];
-        admit_selection(first.as_ref(), workspace)?;
+        admit_selection(first.as_ref(), workspace, check)?;
         selected.push(first.slice(0, 0));
     }
     let arrays = selected.iter().map(Arc::as_ref).collect::<Vec<_>>();
@@ -89,19 +100,32 @@ fn selected_column(
     check: &dyn Fn() -> Result<()>,
 ) -> Result<ArrayRef> {
     check()?;
-    admit_selection(row.record.column(index).as_ref(), workspace)?;
+    admit_selection(row.record.column(index).as_ref(), workspace, check)?;
     Ok(row.record.column_view(index))
 }
 
-fn admit_selection(source: &dyn Array, workspace: &MemoryReservation) -> Result<()> {
+fn admit_selection(
+    source: &dyn Array,
+    workspace: &MemoryReservation,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<()> {
     let nodes = accounting::shape_nodes(source.data_type())?;
+    let controls = source_controls(source)?;
     accounting::reserve(
         workspace,
         sum(&[
             accounting::array_controls(nodes, product(nodes, 3)?)?,
-            product(source.get_array_memory_size(), 3)?,
+            product(controls, 3)?,
+            slice_controls(source, check)?,
         ])?,
     )
+}
+
+fn source_controls(source: &dyn Array) -> Result<usize> {
+    source
+        .get_array_memory_size()
+        .checked_sub(source.get_buffer_memory_size())
+        .ok_or_else(|| error("V2 checkpoint slice control size differs"))
 }
 
 fn concatenate(
@@ -116,3 +140,7 @@ fn concatenate(
     check()?;
     Ok(result)
 }
+
+#[cfg(test)]
+#[path = "compact_tests.rs"]
+mod tests;

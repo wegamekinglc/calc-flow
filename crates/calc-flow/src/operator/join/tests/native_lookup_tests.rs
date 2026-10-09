@@ -394,7 +394,7 @@ async fn native_index_budget_denial(service: &crate::runtime::streaming::gather_
         .process_data("left", left_batch(vec![0, 1, 2]), &context, &mut collector)
         .await
         .unwrap();
-    let captured = operator.checkpoint(Epoch::INITIAL).unwrap();
+    let captured = operator.checkpoint_v1(Epoch::INITIAL).unwrap();
     operator.restore(&captured).unwrap();
     let (plan, admitted) =
         admitted_probe(&mut operator, "right", &right_batch(vec![1]), &context).await;
@@ -521,7 +521,7 @@ async fn native_fallback_index_refund(
         .process_data("left", left_batch(vec![0, 1, 2]), &context, &mut collector)
         .await
         .unwrap();
-    let captured = operator.checkpoint(Epoch::INITIAL).unwrap();
+    let captured = operator.checkpoint_v1(Epoch::INITIAL).unwrap();
     operator.restore(&captured).unwrap();
     let (plan, admitted) =
         admitted_probe(&mut operator, "right", &right_batch(vec![1]), &context).await;

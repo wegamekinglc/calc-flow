@@ -2879,6 +2879,8 @@ pub struct StreamJoinOperator {
     v2_containers: Option<Arc<checkpoint_v2::ContainerFunding>>,
     v2_writer: checkpoint_v2::WriterState,
     #[cfg(test)]
+    checkpoint_v1_test_producer: bool,
+    #[cfg(test)]
     checkpoint_gate: Option<std::sync::Mutex<checkpoint_compaction::TestGate>>,
     #[cfg(test)]
     checkpoint_retirement_gate: Option<std::sync::Mutex<checkpoint_compaction::TestRetirementGate>>,
@@ -3416,6 +3418,8 @@ impl StreamJoinOperator {
             #[cfg(test)]
             checkpoint_writer_test_hook: None,
             #[cfg(test)]
+            checkpoint_v1_test_producer: false,
+            #[cfg(test)]
             checkpoint_writer_base_test_hook: None,
         })
     }
@@ -3433,6 +3437,16 @@ impl StreamJoinOperator {
     #[cfg(test)]
     pub(crate) fn set_checkpoint_decoded_row_test_hook(&mut self, hook: DecodedRowTestHook) {
         self.decoded_row_test_hook = Some(hook);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_checkpoint_v1_test_producer(&mut self) {
+        self.checkpoint_v1_test_producer = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn checkpoint_v1_test_producer(&self) -> bool {
+        self.checkpoint_v1_test_producer
     }
 
     #[cfg(test)]
@@ -4577,10 +4591,18 @@ impl StreamOperator for StreamJoinOperator {
         &mut self,
         context: &StreamOperatorContext<'_>,
     ) -> Result<()> {
+        #[cfg(test)]
+        if self.checkpoint_v1_test_producer {
+            return self.prepare_compaction(context).await;
+        }
         self.prepare_v2_checkpoint_automatic(context).await
     }
 
     fn checkpoint(&mut self, epoch: Epoch) -> Result<OperatorStateSnapshot> {
+        #[cfg(test)]
+        if self.checkpoint_v1_test_producer {
+            return self.checkpoint_v1(epoch);
+        }
         self.capture_v2_checkpoint(epoch)
     }
 

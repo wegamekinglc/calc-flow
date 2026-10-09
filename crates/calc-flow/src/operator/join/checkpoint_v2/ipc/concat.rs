@@ -10,6 +10,13 @@ use crate::Result;
 
 mod snapshot;
 
+pub(in crate::operator::join::checkpoint_v2) fn slice_controls(
+    array: &dyn Array,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<usize> {
+    snapshot::bytes(array, check)
+}
+
 #[derive(Default)]
 struct Requests {
     workspace: usize,
