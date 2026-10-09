@@ -2,7 +2,7 @@ use super::*;
 use datafusion::arrow::{datatypes::Schema, record_batch::RecordBatch};
 use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryConsumer, MemoryPool};
 
-fn rows(count: usize) -> Vec<StoredRow> {
+fn rows(count: usize, distinct_keys: usize) -> Vec<StoredRow> {
     let record = RecordBatch::new_empty(Arc::new(Schema::empty()));
     (0..count)
         .map(|index| StoredRow {
@@ -10,7 +10,12 @@ fn rows(count: usize) -> Vec<StoredRow> {
             event_time: EventTime::from_micros(i64::try_from(index).unwrap()),
             row_id: index as u64,
             charge: 0,
-            encoded_key: Arc::new((index as u64).to_be_bytes().to_vec().into()),
+            encoded_key: Arc::new(
+                ((index % distinct_keys) as u64)
+                    .to_be_bytes()
+                    .to_vec()
+                    .into(),
+            ),
         })
         .collect()
 }
@@ -45,14 +50,11 @@ fn check_allocation_cut(
     assert!(*live >= 0);
     assert!(
         usize::try_from(*live).unwrap() <= index.funded_bytes(),
-        "live nodes={live}, funding={}, entries={}",
+        "live bytes={live}, funding={}, rows={}",
         index.funded_bytes(),
-        index.entries.len()
+        index.row_count()
     );
-    assert_eq!(
-        index.funded_bytes(),
-        BASE_BYTES + ENTRY_BYTES * index.entries.len()
-    );
+    assert_eq!(index.funded_bytes(), index.resident_bytes());
 }
 
 fn insert_rows(index: &mut NativeIndex, rows: &[StoredRow], order: &[usize], mut live: i64) -> i64 {
@@ -87,7 +89,11 @@ fn remove_rows(
         let identity = dense.swap_remove(position);
         let moved = dense.get(position).map(|&id| (&rows[id], position));
         let funded = index.funded_bytes();
-        let allocation = allocation_counter::measure(|| index.remove(&rows[identity], moved));
+        let allocation = allocation_counter::measure(|| {
+            index.remove(&rows[identity], moved, |position| {
+                &rows[dense[position]].encoded_key
+            });
+        });
         check_allocation_cut(allocation, &mut live, funded, index);
     }
     live
@@ -105,19 +111,93 @@ fn allocated_index(pool: &Arc<dyn MemoryPool>) -> (NativeIndex, i64) {
 }
 
 #[test]
+fn test_native_index_bulk_construction_peak_and_resident_allocations_remain_funded() {
+    for (count, distinct_keys) in [(1, 1), (129, 1), (129, 17), (4_096, 4_096)] {
+        let rows = rows(count, distinct_keys);
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+        let prepaid = NativeIndex::build_charge(count).unwrap();
+        let mut index = None;
+        let allocated = allocation_counter::measure(|| {
+            let credit = MemoryConsumer::new("stream-join-native").register(&pool);
+            credit.try_grow(prepaid).unwrap();
+            index = Some(NativeIndex::new(&rows, credit));
+        });
+        let index = index.unwrap();
+        assert!(
+            allocated.bytes_max <= u64::try_from(prepaid).unwrap(),
+            "rows={count}, distinct_keys={distinct_keys}, peak={}, prepaid={prepaid}",
+            allocated.bytes_max
+        );
+        assert!(allocated.bytes_current > 0);
+        assert!(
+            usize::try_from(allocated.bytes_current).unwrap() <= index.funded_bytes(),
+            "rows={count}, distinct_keys={distinct_keys}, live={}, funding={}",
+            allocated.bytes_current,
+            index.funded_bytes()
+        );
+        assert_eq!(index.row_count(), count);
+        assert_eq!(index.funded_bytes(), index.resident_bytes());
+        assert_eq!(pool.reserved(), index.resident_bytes());
+        let released = allocation_counter::measure(|| drop(index));
+        assert_eq!(allocated.bytes_current + released.bytes_current, 0);
+        assert_eq!(pool.reserved(), 0);
+    }
+}
+
+#[test]
 fn test_native_index_live_allocations_remain_funded_through_insert_and_eviction() {
-    let rows = rows(4_096);
-    for disordered in [false, true] {
-        for random in [false, true] {
-            let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
-            let (mut index, controls) = allocated_index(&pool);
-            let order = order(rows.len(), disordered);
-            let live = insert_rows(&mut index, &rows, &order, controls);
-            let live = remove_rows(&mut index, &rows, &order, random, live);
-            assert_eq!(pool.reserved(), BASE_BYTES);
-            let released = allocation_counter::measure(|| drop(index));
-            assert_eq!(live + released.bytes_current, 0);
-            assert_eq!(pool.reserved(), 0);
+    for distinct_keys in [1, 17, 4_096] {
+        let rows = rows(4_096, distinct_keys);
+        for disordered in [false, true] {
+            for random in [false, true] {
+                let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+                let (mut index, controls) = allocated_index(&pool);
+                let order = order(rows.len(), disordered);
+                let live = insert_rows(&mut index, &rows, &order, controls);
+                let live = remove_rows(&mut index, &rows, &order, random, live);
+                assert_eq!(pool.reserved(), BASE_BYTES);
+                let released = allocation_counter::measure(|| drop(index));
+                assert_eq!(live + released.bytes_current, 0);
+                assert_eq!(pool.reserved(), 0);
+            }
         }
     }
+}
+
+#[test]
+fn test_native_index_retained_capacities_remain_funded_during_empty_run_reuse() {
+    let rows = rows(64, 17);
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let (mut index, controls) = allocated_index(&pool);
+    let mut dense = order(rows.len(), true);
+    let mut live = insert_rows(&mut index, &rows, &dense, controls);
+    let removed = (0..rows.len()).step_by(17).collect::<Vec<_>>();
+    for &identity in &removed {
+        let position = dense.iter().position(|&id| id == identity).unwrap();
+        dense.swap_remove(position);
+        let moved = dense.get(position).map(|&id| (&rows[id], position));
+        let funded = index.funded_bytes();
+        let allocation = allocation_counter::measure(|| {
+            index.remove(&rows[identity], moved, |position| {
+                &rows[dense[position]].encoded_key
+            });
+        });
+        check_allocation_cut(allocation, &mut live, funded, &index);
+        assert_eq!(index.row_count(), dense.len());
+    }
+    assert!(index.funded_bytes() > BASE_BYTES);
+    for identity in removed {
+        let append = index.reserve(1).unwrap();
+        let funded = index.funded_bytes();
+        let allocation = allocation_counter::measure(|| {
+            index.append(dense.len(), &rows[identity..=identity]);
+        });
+        append.commit();
+        dense.push(identity);
+        check_allocation_cut(allocation, &mut live, funded, &index);
+        assert_eq!(index.row_count(), dense.len());
+    }
+    let released = allocation_counter::measure(|| drop(index));
+    assert_eq!(live + released.bytes_current, 0);
+    assert_eq!(pool.reserved(), 0);
 }

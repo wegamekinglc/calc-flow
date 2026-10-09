@@ -1552,7 +1552,27 @@ mod tests {
             .process_data("left", left_batch(vec![0, 1, 2]), &context, &mut collector)
             .await
             .unwrap();
-        assert_eq!(join_work().key_encodings, 3);
+        assert_eq!(join_work().key_encodings, 1);
+        assert_eq!(operator.state.left.len(), 3);
+        let key = &operator.state.left[0].encoded_key;
+        for row in operator.state.left.iter() {
+            assert!(Arc::ptr_eq(&row.encoded_key, key));
+            assert_eq!(
+                row.charge,
+                state_columns_charge_with_key(
+                    row.record.columns(),
+                    row.record.offset(),
+                    key.len(),
+                    "match",
+                )
+                .unwrap()
+            );
+        }
+        assert_eq!(operator.state.deltas.pending.iter().count(), 3);
+        assert!(operator.state.deltas.pending.iter().all(|op| match op {
+            PendingOp::Upsert { encoded_key, .. } => Arc::ptr_eq(encoded_key, key),
+            PendingOp::Tombstone { .. } => false,
+        }));
     }
 
     #[tokio::test]
@@ -1779,6 +1799,7 @@ mod tests {
     mod checkpoint_compaction_tests;
     mod columnar_state_tests;
     mod empty_checkpoint_tests;
+    mod j2a_dictionary_tests;
     mod native_lookup_tests;
     mod sql_key_scratch_tests;
 
@@ -2424,13 +2445,18 @@ struct JoinWork {
     key_encodings: usize,
     time_decoders: usize,
     sql_probe_table_builds: usize,
+    native_range_visits: usize,
+    native_boundary_visits: usize,
+    admission_mask_blocks: usize,
+    native_shifted_entries: usize,
 }
 
 #[cfg(test)]
 thread_local! {
     static JOIN_WORK: std::cell::Cell<JoinWork> = const { std::cell::Cell::new(JoinWork {
         retained_visits: 0, pending_visits: 0, key_encodings: 0, time_decoders: 0,
-        sql_probe_table_builds: 0,
+        sql_probe_table_builds: 0, native_range_visits: 0, native_boundary_visits: 0,
+        admission_mask_blocks: 0, native_shifted_entries: 0,
     }) };
 }
 
@@ -3195,7 +3221,9 @@ impl RetainedRows {
     fn swap_remove(&mut self, index: usize) -> StoredRow {
         let row = std::ops::DerefMut::deref_mut(self).swap_remove(index);
         if let Some(native) = &mut self.1 {
-            native.remove(&row, self.0.get(index).map(|row| (row, index)));
+            native.remove(&row, self.0.get(index).map(|row| (row, index)), |dense| {
+                &self.0[dense].encoded_key
+            });
         }
         row
     }
@@ -3308,10 +3336,13 @@ struct RestoreSchema<'a> {
     decoded_owned_work: bool,
 }
 
+mod admission_masks;
+mod borrowed_key;
 mod checkpoint_compaction;
 mod columnar;
 mod materialization;
 mod metadata_validation;
+mod native_dictionary;
 mod native_lookup;
 mod row_ipc;
 mod sql_key_scratch;
@@ -3714,123 +3745,159 @@ impl StreamJoinOperator {
                 .await?;
             return Ok(());
         }
-        self.admit_legacy_record(record, plan, ingress, context, bundle, source_row_base)
+        self.admit_legacy_record(
+            (record, plan, ingress, source_row_base),
+            context,
+            bundle,
+            &mut quantum,
+        )
+        .await
+    }
+
+    fn admission_mask_context<'a>(
+        &self,
+        source: (&'a RecordBatch, &'a SidePlan, &str),
+        context: &StreamOperatorContext<'_>,
+    ) -> admission_masks::AdmissionMaskContext<'a> {
+        let (record, plan, ingress) = source;
+        admission_masks::AdmissionMaskContext {
+            record,
+            plan,
+            side_progress: context.ingress_progress().get(ingress),
+            opposite: context.ingress_progress().get(plan.opposite_ingress()),
+            bounds: self.spec.bounds,
+        }
     }
 
     async fn select_copy_rows(
         &self,
-        source_record: (&RecordBatch, &SidePlan, &str),
+        source: (&RecordBatch, &SidePlan, &str),
         context: &StreamOperatorContext<'_>,
         bundle: &mut AdmissionBundle,
         selection: &mut columnar::CopySelection,
         quantum: &mut columnar::Quantum,
     ) -> Result<()> {
-        let (record, plan, ingress) = source_record;
+        let (record, plan, ingress) = source;
         let times = BatchEventTimes::new(
             record.column(plan.event_time_index).as_ref(),
             &self.name,
             ingress,
         )?;
-        let opposite = context.ingress_progress().get(plan.opposite_ingress());
-        for source in 0..record.num_rows() {
-            quantum
-                .step(context, plan.key_indices.len() + 4, 16)
-                .await?;
-            let row_id = bundle.reserve_row_id(&self.name)?;
-            match self.classify_row(
-                record,
-                plan,
-                &times,
-                source,
-                context.ingress_progress().get(ingress),
-                ingress,
-            )? {
+        let config = self.admission_mask_context(source, context);
+        for start in (0..record.num_rows()).step_by(64) {
+            quantum.step(context, 64, 512).await?;
+            let length = (record.num_rows() - start).min(64);
+            let masks = admission_masks::AdmissionMasks::new(
+                &config, &times, start, length, context, quantum,
+            )
+            .await?;
+            self.select_masked_rows(
+                (plan, ingress),
+                (start, length, &masks),
+                context,
+                bundle,
+                selection,
+                quantum,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    fn masked_row(
+        &self,
+        masks: &admission_masks::AdmissionMasks,
+        offset: usize,
+        ingress: &str,
+        bundle: &mut AdmissionBundle,
+    ) -> Result<(u64, RowAdmission)> {
+        let row_id = bundle.reserve_row_id(&self.name)?;
+        Ok((row_id, masks.at(offset, &self.name, ingress)?))
+    }
+
+    async fn select_masked_rows(
+        &self,
+        source: (&SidePlan, &str),
+        block: (usize, usize, &admission_masks::AdmissionMasks),
+        context: &StreamOperatorContext<'_>,
+        bundle: &mut AdmissionBundle,
+        selection: &mut columnar::CopySelection,
+        quantum: &mut columnar::Quantum,
+    ) -> Result<()> {
+        let (_, ingress) = source;
+        let (start, length, masks) = block;
+        for offset in 0..length {
+            quantum.step(context, 4, 16).await?;
+            let (row_id, admission) = self.masked_row(masks, offset, ingress, bundle)?;
+            match admission {
                 RowAdmission::Dropped(kind) => bundle.note_dropped(kind, &self.name)?,
                 RowAdmission::Admitted(time) => selection.rows.push(columnar::SelectedRow {
-                    source,
+                    source: start + offset,
                     row_id,
                     time,
-                    retain: should_retain(plan.incoming_is_left, time, opposite, self.spec.bounds),
+                    retain: masks.retain(offset),
                 }),
             }
         }
         Ok(())
     }
 
-    fn admit_legacy_record(
+    async fn admit_legacy_record(
         &self,
-        record: &RecordBatch,
-        plan: &SidePlan,
-        ingress: &str,
+        source: (&RecordBatch, &SidePlan, &str, usize),
         context: &StreamOperatorContext<'_>,
         bundle: &mut AdmissionBundle,
-        source_row_base: usize,
+        quantum: &mut columnar::Quantum,
     ) -> Result<()> {
+        let (record, plan, ingress, _) = source;
         let times = BatchEventTimes::new(
             record.column(plan.event_time_index).as_ref(),
             &self.name,
             ingress,
         )?;
-        let opposite = context.ingress_progress().get(if plan.incoming_is_left {
-            "right"
-        } else {
-            "left"
-        });
-        for row_index in 0..record.num_rows() {
-            let row_id = bundle.reserve_row_id(&self.name)?;
-            match self.classify_row(
-                record,
-                plan,
-                &times,
-                row_index,
-                context.ingress_progress().get(ingress),
-                ingress,
-            )? {
-                RowAdmission::Dropped(kind) => bundle.note_dropped(kind, &self.name)?,
-                RowAdmission::Admitted(event_time) => {
-                    bundle.push_admitted(AdmittedRow {
-                        record: columnar::RowPayload::at(record, None, row_index),
-                        event_time,
-                        row_id,
-                        retain: should_retain(
-                            plan.incoming_is_left,
-                            event_time,
-                            opposite,
-                            self.spec.bounds,
-                        ),
-                    });
-                    bundle
-                        .admitted_source_rows
-                        .push(source_row_base + row_index);
-                }
-            }
+        let config = self.admission_mask_context((record, plan, ingress), context);
+        for start in (0..record.num_rows()).step_by(64) {
+            quantum.step(context, 64, 512).await?;
+            let length = (record.num_rows() - start).min(64);
+            let masks = admission_masks::AdmissionMasks::new(
+                &config, &times, start, length, context, quantum,
+            )
+            .await?;
+            self.append_masked_rows(source, (start, length, &masks), context, bundle, quantum)
+                .await?;
         }
         Ok(())
     }
 
-    fn classify_row(
+    async fn append_masked_rows(
         &self,
-        record: &RecordBatch,
-        plan: &SidePlan,
-        times: &BatchEventTimes<'_>,
-        row_index: usize,
-        side_progress: Option<IngressProgress>,
-        ingress: &str,
-    ) -> Result<RowAdmission> {
-        let Some(event_time) = times.at(row_index, &self.name, ingress)? else {
-            return Ok(RowAdmission::Dropped(DropKind::NullEventTime));
-        };
-        if plan
-            .key_indices
-            .iter()
-            .any(|&index| record.column(index).is_null(row_index))
-        {
-            return Ok(RowAdmission::Dropped(DropKind::NullKey));
+        source: (&RecordBatch, &SidePlan, &str, usize),
+        block: (usize, usize, &admission_masks::AdmissionMasks),
+        context: &StreamOperatorContext<'_>,
+        bundle: &mut AdmissionBundle,
+        quantum: &mut columnar::Quantum,
+    ) -> Result<()> {
+        let (record, _, ingress, source_row_base) = source;
+        let (start, length, masks) = block;
+        for offset in 0..length {
+            quantum.step(context, 4, 16).await?;
+            let (row_id, admission) = self.masked_row(masks, offset, ingress, bundle)?;
+            match admission {
+                RowAdmission::Dropped(kind) => bundle.note_dropped(kind, &self.name)?,
+                RowAdmission::Admitted(event_time) => {
+                    bundle.push_admitted(AdmittedRow {
+                        record: columnar::RowPayload::at(record, None, start + offset),
+                        event_time,
+                        row_id,
+                        retain: masks.retain(offset),
+                    });
+                    bundle
+                        .admitted_source_rows
+                        .push(source_row_base + start + offset);
+                }
+            }
         }
-        match late_lateness(event_time, side_progress, &self.name)? {
-            Some(lateness) => Ok(RowAdmission::Dropped(DropKind::Late(lateness))),
-            None => Ok(RowAdmission::Admitted(event_time)),
-        }
+        Ok(())
     }
 
     async fn evaluate_matches(
@@ -3844,8 +3911,19 @@ impl StreamJoinOperator {
         } else {
             &self.state.left
         };
-        if admitted.is_empty() || opposite.is_empty() {
+        if admitted.is_empty() {
             return (Ok(PreparedMatches::legacy(Vec::new())), admitted);
+        }
+        if opposite.is_empty() {
+            let keys = self.native_probe_keys(plan, &admitted);
+            return (
+                keys.map(|keys| PreparedMatches {
+                    pairs: Vec::new(),
+                    keys,
+                    credit: None,
+                }),
+                admitted,
+            );
         }
         match self.native_matches(plan, &admitted) {
             Ok(Some(native)) => {
@@ -4874,23 +4952,6 @@ fn prospective_state_charge(
 
 fn state_row_count(rows: &[StoredRow], operator_id: &str) -> Result<u64> {
     u64::try_from(rows.len()).map_err(|_| counter_overflow(operator_id, "state rows"))
-}
-
-fn late_lateness(
-    event_time: EventTime,
-    progress: Option<IngressProgress>,
-    operator_id: &str,
-) -> Result<Option<u64>> {
-    let Some(watermark) = progress.and_then(IngressProgress::watermark) else {
-        return Ok(None);
-    };
-    if event_time >= watermark {
-        return Ok(None);
-    }
-    let lateness =
-        u64::try_from(i128::from(watermark.as_micros()) - i128::from(event_time.as_micros()))
-            .map_err(|_| counter_overflow(operator_id, "lateness"))?;
-    Ok(Some(lateness))
 }
 
 fn retained_rows(
@@ -6395,29 +6456,6 @@ fn checkpoint_error(operator_id: &str, side: &str, message: &str) -> CalcFlowErr
     }
 }
 
-fn should_retain(
-    incoming_is_left: bool,
-    event_time: EventTime,
-    opposite: Option<IngressProgress>,
-    bounds: JoinTimeBounds,
-) -> bool {
-    let Some(opposite) = opposite else {
-        return true;
-    };
-    if opposite.state() == crate::IngressState::Ended {
-        return false;
-    }
-    let Some(watermark) = opposite.watermark() else {
-        return true;
-    };
-    let extension = if incoming_is_left {
-        bounds.after_micros
-    } else {
-        bounds.before_micros
-    };
-    i128::from(event_time.as_micros()) + i128::from(extension) >= i128::from(watermark.as_micros())
-}
-
 #[derive(Clone, Copy)]
 struct EvictionPolicy<'a> {
     extension_micros: u64,
@@ -6652,27 +6690,6 @@ impl<'a> BatchEventTimes<'a> {
             values,
             unit: *unit,
         })
-    }
-
-    fn at(&self, row: usize, operator_id: &str, side: &str) -> Result<Option<EventTime>> {
-        if self.array.is_null(row) {
-            return Ok(None);
-        }
-        let value = self.values[row];
-        let micros = match self.unit {
-            TimeUnit::Second => value.checked_mul(1_000_000),
-            TimeUnit::Millisecond => value.checked_mul(1_000),
-            TimeUnit::Microsecond => Some(value),
-            TimeUnit::Nanosecond => Some(value.div_euclid(1_000)),
-        }
-        .ok_or_else(|| {
-            operator_reason(
-                operator_id,
-                crate::StreamingFailureReason::JoinTimeConversionFailed,
-                &format!("{side} event time cannot be represented"),
-            )
-        })?;
-        Ok(Some(EventTime::from_micros(micros)))
     }
 }
 

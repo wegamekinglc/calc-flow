@@ -970,10 +970,17 @@ checkpoint formats are unchanged.
 The working set includes retained state, admitted input references,
 `O(matches)` pair descriptors, equality-probe scratch space, preflight
 allocations, the current output chunk, and chunks held by edges or sinks.
-An unchanged opposite side reuses its assembled equality-key batch across
-input batches. The cache retains a side only when its estimated key-array and
-row-ID storage is at most 32 MiB. It is released when that side gains or loses
-retained rows, or when the operator ends or restores.
+Funded native matching interns repeated keys in each admitted batch and uses
+a hash dictionary to find each key's time-ordered state. Two binary searches
+bound each inclusive time window before match materialization. Batch admission
+masks preserve null and late-drop rules. Native index capacity remains funded
+until its storage is released, including capacity retained after eviction.
+
+When native matching is unavailable, the existing DataFusion equality path
+reuses an unchanged opposite side's assembled key batch. This cache retains
+a side only when its estimated key-array and row-ID storage is at most
+32 MiB. It is released when that side gains or loses retained rows, or when
+the operator ends or restores.
 Per-side state limits and `max_matches_per_input_batch` remain separate from
 the edge's logical row/byte limits. Chunking removes the need to hold one
 complete materialized output, but neither bounds total process RSS by

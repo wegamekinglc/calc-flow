@@ -1,80 +1,21 @@
+#[cfg(test)]
+use super::StoredRow;
 use super::columnar::FramedKey;
+use super::native_dictionary::BASE_BYTES;
+pub(super) use super::native_dictionary::{AppendCredit, NativeIndex};
 use super::{
-    AdmittedRow, CompiledJoin, JoinTimeBounds, MatchedPair, SidePlan, StoredRow,
-    StreamJoinOperator, enforce_match_limit,
+    AdmittedRow, CompiledJoin, JoinTimeBounds, MatchedPair, SidePlan, StreamJoinOperator,
+    enforce_match_limit,
 };
 use crate::{CalcFlowError, EventTime, Result};
 use datafusion::arrow::datatypes::{DataType, Schema};
 use datafusion::execution::memory_pool::MemoryReservation;
-use std::{collections::BTreeMap, sync::Arc};
-
-const ENTRY_BYTES: usize = 128;
-const BASE_BYTES: usize = 1_024;
+use hashbrown::HashTable;
+use std::{collections::hash_map::RandomState, sync::Arc};
 
 #[cfg(test)]
 #[path = "tests/native_index_allocation_tests.rs"]
 mod allocation_tests;
-
-pub(super) struct NativeIndex {
-    entries: BTreeMap<(Arc<FramedKey>, EventTime, u64), usize>,
-    credit: Arc<MemoryReservation>,
-}
-
-impl NativeIndex {
-    #[cfg(test)]
-    pub(super) fn funded_bytes(&self) -> usize {
-        self.credit.size()
-    }
-
-    pub(super) fn new(rows: &[StoredRow], credit: MemoryReservation) -> Self {
-        let mut index = Self {
-            entries: BTreeMap::new(),
-            credit: Arc::new(credit),
-        };
-        index.append(0, rows);
-        index
-    }
-
-    pub(super) fn reserve(&self, rows: usize) -> Option<AppendCredit> {
-        let bytes = rows.checked_mul(ENTRY_BYTES)?;
-        self.credit.try_grow(bytes).ok()?;
-        Some(AppendCredit {
-            credit: Arc::clone(&self.credit),
-            bytes,
-        })
-    }
-
-    pub(super) fn append(&mut self, offset: usize, rows: &[StoredRow]) {
-        for (index, row) in rows.iter().enumerate() {
-            self.entries.insert(
-                (Arc::clone(&row.encoded_key), row.event_time, row.row_id),
-                offset + index,
-            );
-        }
-    }
-
-    pub(super) fn remove(&mut self, row: &StoredRow, moved: Option<(&StoredRow, usize)>) {
-        self.entries
-            .remove(&(Arc::clone(&row.encoded_key), row.event_time, row.row_id));
-        self.credit.shrink(ENTRY_BYTES);
-        if let Some((row, index)) = moved {
-            *self
-                .entries
-                .get_mut(&(Arc::clone(&row.encoded_key), row.event_time, row.row_id))
-                .expect("moved retained identity") = index;
-        }
-    }
-
-    fn range<'a>(
-        &'a self,
-        key: &Arc<FramedKey>,
-        range: (EventTime, EventTime),
-    ) -> impl Iterator<Item = usize> + 'a {
-        self.entries
-            .range((Arc::clone(key), range.0, 0)..=(Arc::clone(key), range.1, u64::MAX))
-            .map(|(_, &index)| index)
-    }
-}
 
 pub(super) fn eligible(compiled: &CompiledJoin, left: &Schema) -> bool {
     compiled
@@ -107,21 +48,80 @@ pub(super) struct NativeKeys {
     _credit: Arc<MemoryReservation>,
 }
 
-pub(super) struct AppendCredit {
-    credit: Arc<MemoryReservation>,
-    bytes: usize,
+struct ProbeKeyInterner {
+    keys: Vec<Arc<FramedKey>>,
+    distinct: Vec<(u64, usize)>,
+    dictionary: HashTable<u32>,
+    hasher: RandomState,
 }
 
-impl AppendCredit {
-    pub(super) fn commit(mut self) {
-        self.bytes = 0;
+impl ProbeKeyInterner {
+    fn new(rows: usize) -> Self {
+        Self {
+            keys: Vec::with_capacity(rows),
+            distinct: Vec::new(),
+            dictionary: HashTable::new(),
+            hasher: RandomState::new(),
+        }
+    }
+
+    fn push(
+        &mut self,
+        key: super::borrowed_key::BorrowedKey<'_>,
+        credit: &Arc<MemoryReservation>,
+        name: &str,
+    ) -> Result<()> {
+        let hash = key.hash(&self.hasher)?;
+        self.push_hashed(key, hash, credit, name)
+    }
+
+    fn push_hashed(
+        &mut self,
+        key: super::borrowed_key::BorrowedKey<'_>,
+        hash: u64,
+        credit: &Arc<MemoryReservation>,
+        name: &str,
+    ) -> Result<()> {
+        let previous = self.dictionary.find(hash, |id| {
+            key.equals(&self.keys[self.distinct[*id as usize].1])
+        });
+        let encoded = if let Some(id) = previous {
+            Arc::clone(&self.keys[self.distinct[*id as usize].1])
+        } else {
+            let id = u32::try_from(self.distinct.len()).map_err(|_| scratch_error(name))?;
+            let encoded =
+                super::columnar::funded_key(key.columns, key.row, key.indices, Arc::clone(credit))?;
+            self.distinct.push((hash, self.keys.len()));
+            self.dictionary
+                .insert_unique(hash, id, |id| self.distinct[*id as usize].0);
+            encoded
+        };
+        self.keys.push(encoded);
+        Ok(())
     }
 }
 
-impl Drop for AppendCredit {
-    fn drop(&mut self) {
-        self.credit.shrink(self.bytes);
+#[cfg(test)]
+pub(super) fn colliding_probe_keys(
+    admitted: &[AdmittedRow],
+    indices: &[usize],
+    credit: MemoryReservation,
+) -> Result<NativeKeys> {
+    let shared = Arc::new(credit);
+    let mut interner = ProbeKeyInterner::new(admitted.len());
+    for row in admitted {
+        let key = super::borrowed_key::BorrowedKey {
+            columns: row.record.columns(),
+            row: row.record.offset(),
+            indices,
+        };
+        key.hash(&interner.hasher)?;
+        interner.push_hashed(key, 0, &shared, "collision-test")?;
     }
+    Ok(NativeKeys {
+        keys: interner.keys,
+        _credit: shared,
+    })
 }
 
 impl StreamJoinOperator {
@@ -161,30 +161,38 @@ impl StreamJoinOperator {
         plan: &SidePlan,
         admitted: &[AdmittedRow],
     ) -> Result<Option<NativeMatches>> {
-        let key_bytes = probe_key_charge(admitted, &plan.key_indices)?;
-        let Some(credit) = self.optional_credit(key_bytes)? else {
+        let Some(keys) = self.native_probe_keys(plan, admitted)? else {
+            return Ok(None);
+        };
+        self.collect_native_pairs(plan, admitted, keys)
+    }
+
+    pub(super) fn native_probe_keys(
+        &mut self,
+        plan: &SidePlan,
+        admitted: &[AdmittedRow],
+    ) -> Result<Option<NativeKeys>> {
+        if !eligible(&self.compiled, self.input_schema(0)) {
+            return Ok(None);
+        }
+        let bytes = probe_key_charge(admitted, &plan.key_indices)?;
+        let Some(credit) = self.optional_credit(bytes)? else {
             return Ok(None);
         };
         let shared = Arc::new(credit);
-        let keys = admitted
-            .iter()
-            .map(|row| {
-                super::columnar::funded_key(
-                    row.record.columns(),
-                    row.record.offset(),
-                    &plan.key_indices,
-                    Arc::clone(&shared),
-                )
-            })
-            .collect::<Result<Vec<_>>>()?;
-        self.collect_native_pairs(
-            plan,
-            admitted,
-            NativeKeys {
-                keys,
-                _credit: shared,
-            },
-        )
+        let mut interner = ProbeKeyInterner::new(admitted.len());
+        for row in admitted {
+            let key = super::borrowed_key::BorrowedKey {
+                columns: row.record.columns(),
+                row: row.record.offset(),
+                indices: &plan.key_indices,
+            };
+            interner.push(key, &shared, &self.name)?;
+        }
+        Ok(Some(NativeKeys {
+            keys: interner.keys,
+            _credit: shared,
+        }))
     }
 
     fn collect_native_pairs(
@@ -278,11 +286,7 @@ impl StreamJoinOperator {
         if rows.1.is_some() {
             return Ok(true);
         }
-        let Some(bytes) = rows
-            .len()
-            .checked_mul(ENTRY_BYTES)
-            .and_then(|bytes| bytes.checked_add(BASE_BYTES))
-        else {
+        let Some(bytes) = NativeIndex::build_charge(rows.len()) else {
             return Ok(false);
         };
         let Some(credit) = self.optional_credit(bytes)? else {
@@ -313,7 +317,7 @@ fn time_range(bounds: JoinTimeBounds, plan: &SidePlan, time: EventTime) -> (Even
 }
 
 fn probe_key_charge(admitted: &[AdmittedRow], indices: &[usize]) -> Result<usize> {
-    admitted.iter().try_fold(0_usize, |total, row| {
+    admitted.iter().try_fold(BASE_BYTES, |total, row| {
         indices.iter().try_fold(total, |bytes, &index| {
             let array = row.record.column(index);
             let value = usize::try_from(super::logical_cell_charge(
@@ -365,9 +369,8 @@ fn count_pairs(
         count = count
             .checked_add(
                 index
-                    .range(key, time_range(bounds, plan, row.event_time))
-                    .take(remaining)
-                    .count(),
+                    .count_window(key, time_range(bounds, plan, row.event_time))
+                    .min(remaining),
             )
             .ok_or_else(|| scratch_error("join"))?;
         if count > limit {

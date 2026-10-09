@@ -9,6 +9,11 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-09: Intern repeated streaming Join keys and probe per-key ordered
+  time lists through a native hash dictionary. Batch admission masks and
+  binary window boundaries reduce row-level probe work while preserving
+  funded state, output ordering, and V1 checkpoint bytes.
+
 - 2026-10-09: Cancel successfully started native stream jobs when Python
   startup is abandoned before ownership handoff. Await source shutdown and
   managed state release even while the startup result remains referenced.
