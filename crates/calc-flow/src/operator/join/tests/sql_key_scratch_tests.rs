@@ -499,10 +499,7 @@ async fn test_background_sql_configuration_keeps_payload_and_scratch_legacy() {
         .await
         .unwrap();
     assert!(
-        matches!(
-            operator.state.left[0].record,
-            columnar::RowPayload::Legacy(_)
-        ),
+        operator.state.left[0].record.is_unfunded_legacy(),
         "unproved background SQL must not retain a paid Shared schema whose consumers cannot carry its lease"
     );
     let plan = operator.side_plan("right").unwrap();

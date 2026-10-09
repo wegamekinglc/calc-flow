@@ -18,6 +18,10 @@ pub(super) use sparse::SparseQueue;
 #[derive(Clone)]
 pub(super) enum RowPayload {
     Legacy(RecordBatch),
+    Rowed {
+        parent: Arc<RecordBatch>,
+        row: usize,
+    },
     Shared {
         chunk: Arc<PayloadChunk>,
         row: usize,
@@ -69,6 +73,10 @@ struct PayloadFunding {
 
 pub(super) enum RowView<'a> {
     Borrowed(&'a RecordBatch),
+    Parent {
+        record: RecordBatch,
+        _owner: Arc<RecordBatch>,
+    },
     Owned {
         record: RecordBatch,
         _owner: Arc<PayloadChunk>,
@@ -84,7 +92,9 @@ impl Deref for RowView<'_> {
     fn deref(&self) -> &Self::Target {
         match self {
             Self::Borrowed(record) => record,
-            Self::Owned { record, .. } | Self::RestoredV2 { record, .. } => record,
+            Self::Parent { record, .. }
+            | Self::Owned { record, .. }
+            | Self::RestoredV2 { record, .. } => record,
         }
     }
 }
@@ -97,9 +107,14 @@ impl From<RecordBatch> for RowPayload {
 
 impl RowPayload {
     #[cfg(test)]
+    pub(super) fn is_unfunded_legacy(&self) -> bool {
+        matches!(self, Self::Legacy(_) | Self::Rowed { .. })
+    }
+
+    #[cfg(test)]
     pub(super) fn funded_owner(&self) -> Option<(usize, usize)> {
         match self {
-            Self::Legacy(_) => None,
+            Self::Legacy(_) | Self::Rowed { .. } => None,
             Self::Shared { chunk, .. } => {
                 let PayloadChunk {
                     _funding: funding, ..
@@ -113,6 +128,7 @@ impl RowPayload {
     pub(super) fn schema_ref(&self) -> &SchemaRef {
         match self {
             Self::Legacy(record) => record.schema_ref(),
+            Self::Rowed { parent, .. } => parent.schema_ref(),
             Self::Shared { chunk, .. } => &chunk.schema,
             Self::RestoredV2 { chunk, .. } => chunk.record().schema_ref(),
         }
@@ -121,21 +137,35 @@ impl RowPayload {
     pub(super) fn columns(&self) -> &[ArrayRef] {
         match self {
             Self::Legacy(record) => record.columns(),
+            Self::Rowed { parent, .. } => parent.columns(),
             Self::Shared { chunk, .. } => &chunk.columns,
             Self::RestoredV2 { chunk, .. } => chunk.record().columns(),
+        }
+    }
+
+    pub(super) fn shared_columns(&self) -> Option<&[ArrayRef]> {
+        match self {
+            Self::Legacy(_) => None,
+            _ => Some(self.columns()),
         }
     }
 
     pub(super) fn offset(&self) -> usize {
         match self {
             Self::Legacy(_) => 0,
-            Self::Shared { row, .. } | Self::RestoredV2 { row, .. } => *row,
+            Self::Rowed { row, .. } | Self::Shared { row, .. } | Self::RestoredV2 { row, .. } => {
+                *row
+            }
         }
     }
 
     pub(super) fn view(&self) -> RowView<'_> {
         match self {
             Self::Legacy(record) => RowView::Borrowed(record),
+            Self::Rowed { parent, row } => RowView::Parent {
+                record: parent.slice(*row, 1),
+                _owner: Arc::clone(parent),
+            },
             Self::Shared { chunk, row } => {
                 let columns = chunk
                     .columns
@@ -160,8 +190,11 @@ impl RowPayload {
     }
 
     pub(super) fn column_view(&self, index: usize) -> ArrayRef {
+        #[cfg(test)]
+        super::note_join_work(|work| work.output_column_views += 1);
         match self {
             Self::Legacy(record) => Arc::clone(record.column(index)),
+            Self::Rowed { parent, row } => parent.column(index).slice(*row, 1),
             Self::Shared { chunk, row } => chunk.columns[index].slice(*row, 1),
             Self::RestoredV2 { chunk, row } => chunk.record().column(index).slice(*row, 1),
         }

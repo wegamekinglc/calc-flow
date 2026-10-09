@@ -161,7 +161,8 @@ fn measure_copy_future<F: Future>(future: F) -> (F::Output, allocation_counter::
             }
         }
     });
-    assert!(wake.0.load(Ordering::Relaxed) > 0);
+    // Synchronous polling outside a Tokio task has an unconstrained cooperative budget.
+    assert_eq!(wake.0.load(Ordering::Relaxed), 0);
     (output.unwrap(), measured)
 }
 
@@ -1559,7 +1560,7 @@ async fn assert_legacy_copy_adversary(payload: ArrayRef) {
             .state
             .left
             .iter()
-            .all(|row| matches!(row.record, columnar::RowPayload::Legacy(_))),
+            .all(|row| row.record.is_unfunded_legacy()),
         "Boolean/null-buffer payload must keep its physical V1 representation on Legacy"
     );
     for (row, ipc) in operator.state.left.iter().zip(expected) {
@@ -1593,13 +1594,13 @@ async fn test_owned_ingress_boolean_and_all_valid_masks_use_byte_exact_legacy() 
 }
 
 #[tokio::test]
-async fn test_owned_ingress_long_string_yields_and_cancels_before_commit() {
+async fn test_owned_ingress_long_string_cooperates_and_cancels_before_commit() {
     let record = RecordBatch::try_new(
         right_schema(),
         vec![
             Arc::new(Int64Array::from(vec![7])),
             Arc::new(TimestampMicrosecondArray::from(vec![0]).with_timezone("UTC")),
-            Arc::new(StringArray::from(vec!["é".repeat(16_384)])),
+            Arc::new(StringArray::from(vec!["é".repeat(262_144)])),
         ],
     )
     .unwrap();
@@ -1623,16 +1624,16 @@ async fn test_owned_ingress_long_string_yields_and_cancels_before_commit() {
         let measured = allocation_counter::measure(|| {
             assert!(
                 future.as_mut().poll(&mut cx).is_pending(),
-                "32KiB string must yield within the bounded copy quantum"
+                "512KiB string must exhaust Tokio's cooperative budget during funded copying"
             );
         });
         owned_allocation += measured.bytes_current;
-        if owned_allocation >= 32_768 {
+        if owned_allocation >= 524_288 {
             break;
         }
     }
     assert!(
-        owned_allocation >= 32_768,
+        owned_allocation >= 524_288,
         "gate must reach actual prepaid StringBuilder buffers, not only planning credit"
     );
     tokio::task::yield_now().await;
@@ -1655,7 +1656,7 @@ async fn close_home_during_string_copy(cancelled: bool) {
         vec![
             Arc::new(Int64Array::from(vec![7])),
             Arc::new(TimestampMicrosecondArray::from(vec![0]).with_timezone("UTC")),
-            Arc::new(StringArray::from(vec!["é".repeat(16_384)])),
+            Arc::new(StringArray::from(vec!["é".repeat(262_144)])),
         ],
     )
     .unwrap();
@@ -1682,12 +1683,12 @@ async fn close_home_during_string_copy(cancelled: bool) {
             assert!(future.as_mut().poll(&mut cx).is_pending());
         });
         resident += measured.bytes_current;
-        if resident >= 32_768 {
+        if resident >= 524_288 {
             break;
         }
     }
     assert!(
-        resident >= 32_768,
+        resident >= 524_288,
         "closure must follow actual paid StringBuilder allocation"
     );
     assert!(pool.reserved() >= usize::try_from(resident).unwrap());
@@ -1775,15 +1776,423 @@ async fn test_owned_copy_selected_identity_gaps_and_dirty_only_funding() {
         .unwrap()
         .incremental_memory_pool();
     let chunk = operator.state.left[0].record.funded_owner().unwrap().1;
+    let keys = operator
+        .state
+        .deltas
+        .pending
+        .iter()
+        .filter_map(|op| match op {
+            PendingOp::Upsert { encoded_key, .. } | PendingOp::Tombstone { encoded_key, .. } => {
+                encoded_key.funded_owner()
+            }
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(keys.len(), 1);
+    let key_credit = keys.values().sum::<usize>();
+    assert!(key_credit > 0);
     operator.state.left.1 = None;
     operator.state.left.clear();
     assert_eq!(
         pool.reserved(),
-        chunk,
-        "dirty locators must keep the only chunk credit after live rows disappear"
+        chunk + key_credit,
+        "dirty locators must keep payload and shared key credits after live rows disappear"
     );
     operator.state.deltas.pending.clear();
     assert_eq!(pool.reserved(), 0);
+}
+
+fn nullable_admission_schema(unit: TimeUnit) -> SchemaRef {
+    Arc::new(Schema::new(vec![
+        Field::new("account_id", DataType::Int64, true),
+        Field::new(
+            "authorized_at",
+            DataType::Timestamp(unit, Some("UTC".into())),
+            true,
+        ),
+        Field::new("amount", DataType::Int64, true),
+    ]))
+}
+
+fn nullable_admission_record(
+    schema: &SchemaRef,
+    keys: Vec<Option<i64>>,
+    times: Vec<Option<i64>>,
+) -> RecordBatch {
+    let rows = times.len();
+    let times =
+        datafusion::arrow::compute::cast(&Int64Array::from(times), schema.field(1).data_type())
+            .unwrap();
+    RecordBatch::try_new(
+        Arc::clone(schema),
+        vec![
+            Arc::new(Int64Array::from(keys)),
+            times,
+            Arc::new(Int64Array::from(vec![42; rows])),
+        ],
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn test_batch_admission_masks_keep_drop_precedence_and_cross_record_identity_gaps() {
+    let schema = nullable_admission_schema(TimeUnit::Microsecond);
+    let records = vec![
+        nullable_admission_record(
+            &schema,
+            vec![None, None, Some(7), Some(7), None, Some(7)],
+            vec![None, Some(9), Some(9), Some(10), None, Some(12)],
+        ),
+        nullable_admission_record(
+            &schema,
+            vec![Some(7), None, Some(7)],
+            vec![Some(-5), Some(5), Some(11)],
+        ),
+    ];
+    let source = Batch::table(records.clone(), BatchMetadata::default()).unwrap();
+    let mut operator = StreamJoinOperator::new("match", schema, right_schema(), spec()).unwrap();
+    let job = job();
+    let context = progress_context(
+        &job,
+        (IngressState::Active, Some(10)),
+        (IngressState::Active, None),
+    );
+    let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+    operator
+        .process_data("left", source.clone(), &context, &mut collector)
+        .await
+        .unwrap();
+    assert_eq!(operator.state.next_left_row_id, 9);
+    assert_eq!(
+        operator
+            .state
+            .left
+            .iter()
+            .map(|row| (row.row_id, row.event_time.as_micros()))
+            .collect::<Vec<_>>(),
+        [(3, 10), (5, 12), (8, 11)]
+    );
+    let metrics = &operator.state.metrics.left;
+    assert_eq!(metrics.null_event_time_rows, 2);
+    assert_eq!(metrics.null_key_rows, 2);
+    assert_eq!(metrics.late_rows, 2);
+    assert_eq!(metrics.late_affected_batches, 1);
+    assert_eq!(metrics.max_lateness_micros, Some(15));
+    assert_eq!(source.table_payload().unwrap().batches(), records);
+    assert!(collector.drain("output").is_empty());
+    let pool = operator
+        .runtime
+        .runtime()
+        .unwrap()
+        .incremental_memory_pool();
+    drop(context);
+    drop(operator);
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop(job);
+    assert_eq!(pool.reserved(), 0);
+}
+
+#[tokio::test]
+async fn test_batch_admission_masks_cross_word_boundaries_without_reclassifying_drops() {
+    let schema = nullable_admission_schema(TimeUnit::Microsecond);
+    let mut keys = vec![Some(7); 130];
+    let mut times = vec![Some(9); 130];
+    for row in [0, 63, 128] {
+        keys[row] = None;
+        times[row] = None;
+    }
+    keys[64] = None;
+    times[64] = Some(-5);
+    for (row, time) in [(65, 10), (127, 11), (129, 12)] {
+        times[row] = Some(time);
+    }
+    let mut backing_keys = vec![Some(99); 5];
+    backing_keys.extend(keys);
+    let mut backing_times = vec![Some(i64::MAX); 5];
+    backing_times.extend(times);
+    let record = nullable_admission_record(&schema, backing_keys, backing_times).slice(5, 130);
+    let source = Batch::table(vec![record], BatchMetadata::default()).unwrap();
+    let mut operator = StreamJoinOperator::new("match", schema, right_schema(), spec()).unwrap();
+    let job = job();
+    let context = progress_context(
+        &job,
+        (IngressState::Active, Some(10)),
+        (IngressState::Active, None),
+    );
+    let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+    operator
+        .process_data("left", source, &context, &mut collector)
+        .await
+        .unwrap();
+    assert_eq!(operator.state.next_left_row_id, 130);
+    assert_eq!(
+        operator
+            .state
+            .left
+            .iter()
+            .map(|row| row.row_id)
+            .collect::<Vec<_>>(),
+        [65, 127, 129]
+    );
+    let metrics = &operator.state.metrics.left;
+    assert_eq!(metrics.null_event_time_rows, 3);
+    assert_eq!(metrics.null_key_rows, 1);
+    assert_eq!(metrics.late_rows, 123);
+    assert_eq!(metrics.late_affected_batches, 1);
+    assert_eq!(metrics.max_lateness_micros, Some(1));
+    assert!(collector.drain("output").is_empty());
+    let pool = operator
+        .runtime
+        .runtime()
+        .unwrap()
+        .incremental_memory_pool();
+    drop(context);
+    drop(operator);
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop(job);
+    assert_eq!(pool.reserved(), 0);
+}
+
+#[tokio::test]
+async fn test_batch_admission_null_timestamps_skip_masked_overflow_values() {
+    use datafusion::arrow::array::TimestampSecondArray;
+    use datafusion::arrow::buffer::{NullBuffer, ScalarBuffer};
+
+    let rows = 129;
+    let schema = nullable_admission_schema(TimeUnit::Second);
+    let times = TimestampSecondArray::new(
+        ScalarBuffer::from(vec![i64::MAX; rows]),
+        Some(NullBuffer::new_null(rows)),
+    )
+    .with_timezone("UTC");
+    let record = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(Int64Array::from(vec![None; rows])),
+            Arc::new(times),
+            Arc::new(Int64Array::from(vec![42; rows])),
+        ],
+    )
+    .unwrap();
+    let mut operator = StreamJoinOperator::new("match", schema, right_schema(), spec()).unwrap();
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "match", None);
+    let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+    operator
+        .process_data(
+            "left",
+            Batch::table(vec![record], BatchMetadata::default()).unwrap(),
+            &context,
+            &mut collector,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        operator.state.next_left_row_id,
+        u64::try_from(rows).unwrap()
+    );
+    let metrics = &operator.state.metrics.left;
+    assert_eq!(metrics.null_event_time_rows, u64::try_from(rows).unwrap());
+    assert_eq!(metrics.null_key_rows, 0);
+    assert_eq!(metrics.late_rows, 0);
+    assert_eq!(metrics.late_affected_batches, 0);
+    assert!(operator.state.left.is_empty());
+    assert!(collector.drain("output").is_empty());
+    drop(context);
+    drop(operator);
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+}
+
+#[tokio::test]
+async fn test_batch_admission_row_id_overflow_precedes_timestamp_conversion_and_null_key() {
+    for preceding in [0, 1, 64, 128] {
+        let next_id = u64::MAX - preceding;
+        let schema = nullable_admission_schema(TimeUnit::Second);
+        let mut times = vec![None; usize::try_from(preceding).unwrap()];
+        times.push(Some(i64::MAX));
+        let source = Batch::table(
+            vec![nullable_admission_record(
+                &schema,
+                vec![None; times.len()],
+                times,
+            )],
+            BatchMetadata::default(),
+        )
+        .unwrap();
+        let mut operator =
+            StreamJoinOperator::new("match", schema, right_schema(), spec()).unwrap();
+        operator.state.next_left_row_id = next_id;
+        let before = operator.status();
+        let job = job();
+        let context = StreamOperatorContext::new(&job, "match", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        let error = operator
+            .process_data("left", source, &context, &mut collector)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            reason_of(&error),
+            Some(crate::StreamingFailureReason::JoinCounterOverflow)
+        );
+        assert!(error.to_string().contains("row_id"));
+        assert_eq!(operator.state.next_left_row_id, next_id);
+        assert_eq!(operator.status(), before);
+        assert!(collector.drain("output").is_empty());
+    }
+}
+
+#[tokio::test]
+async fn test_owned_and_generic_batch_masks_keep_late_and_retention_boundaries() {
+    for owned_copy in [true, false] {
+        let schema = Arc::new(Schema::new(vec![
+            left_schema().field(0).clone(),
+            left_schema().field(1).clone(),
+            Field::new(
+                "amount",
+                if owned_copy {
+                    DataType::Int64
+                } else {
+                    DataType::Boolean
+                },
+                false,
+            ),
+        ]));
+        let records = [vec![0, 9, 10], vec![11, 12]]
+            .into_iter()
+            .map(|times| {
+                let rows = times.len();
+                let payload: ArrayRef = if owned_copy {
+                    Arc::new(Int64Array::from(vec![42; rows]))
+                } else {
+                    Arc::new(BooleanArray::from(vec![true; rows]))
+                };
+                RecordBatch::try_new(
+                    Arc::clone(&schema),
+                    vec![
+                        Arc::new(Int64Array::from(vec![7; rows])),
+                        Arc::new(TimestampMicrosecondArray::from(times).with_timezone("UTC")),
+                        payload,
+                    ],
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let source = Batch::table(records.clone(), BatchMetadata::default()).unwrap();
+        let mut operator =
+            StreamJoinOperator::new("match", schema, right_schema(), spec()).unwrap();
+        let job = job();
+        let context = progress_context(
+            &job,
+            (IngressState::Active, Some(10)),
+            (IngressState::Active, Some(60_000_011)),
+        );
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data("left", source.clone(), &context, &mut collector)
+            .await
+            .unwrap();
+        assert_eq!(operator.state.next_left_row_id, 5);
+        assert_eq!(
+            operator
+                .state
+                .left
+                .iter()
+                .map(|row| (row.row_id, row.event_time.as_micros()))
+                .collect::<Vec<_>>(),
+            [(3, 11), (4, 12)]
+        );
+        assert!(
+            operator
+                .state
+                .left
+                .iter()
+                .all(|row| row.record.funded_owner().is_some() == owned_copy)
+        );
+        let metrics = &operator.state.metrics.left;
+        assert_eq!(metrics.late_rows, 2);
+        assert_eq!(metrics.late_affected_batches, 1);
+        assert_eq!(metrics.max_lateness_micros, Some(10));
+        assert_eq!(metrics.null_event_time_rows, 0);
+        assert_eq!(metrics.null_key_rows, 0);
+        assert_eq!(source.table_payload().unwrap().batches(), records);
+        assert!(collector.drain("output").is_empty());
+        let pool = operator
+            .runtime
+            .runtime()
+            .unwrap()
+            .incremental_memory_pool();
+        drop(context);
+        drop(operator);
+        assert!(job.gather_owner().close_and_drain().await.is_empty());
+        drop(job);
+        assert_eq!(pool.reserved(), 0);
+    }
+}
+
+#[tokio::test]
+async fn test_batch_admission_counter_overflow_refunds_masks_and_keeps_state_uncommitted() {
+    for counter in [
+        "null_event_time_rows",
+        "null_key_rows",
+        "late_rows",
+        "late_affected_batches",
+    ] {
+        let schema = nullable_admission_schema(TimeUnit::Microsecond);
+        let source = Batch::table(
+            vec![nullable_admission_record(
+                &schema,
+                vec![Some(7), Some(7), None, Some(7)],
+                vec![Some(11), None, Some(10), Some(9)],
+            )],
+            BatchMetadata::default(),
+        )
+        .unwrap();
+        let mut operator =
+            StreamJoinOperator::new("match", schema, right_schema(), spec()).unwrap();
+        let job = job();
+        let context = progress_context(
+            &job,
+            (IngressState::Active, Some(10)),
+            (IngressState::Active, None),
+        );
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data("right", right_batch(vec![11]), &context, &mut collector)
+            .await
+            .unwrap();
+        let metrics = &mut operator.state.metrics.left;
+        match counter {
+            "null_event_time_rows" => metrics.null_event_time_rows = u64::MAX,
+            "null_key_rows" => metrics.null_key_rows = u64::MAX,
+            "late_rows" => metrics.late_rows = u64::MAX,
+            "late_affected_batches" => metrics.late_affected_batches = u64::MAX,
+            _ => unreachable!(),
+        }
+        let before = operator.status();
+        let pool = operator
+            .runtime
+            .runtime()
+            .unwrap()
+            .incremental_memory_pool();
+        let funding = pool.reserved();
+        let error = operator
+            .process_data("left", source, &context, &mut collector)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            reason_of(&error),
+            Some(crate::StreamingFailureReason::JoinCounterOverflow)
+        );
+        assert!(error.to_string().contains(counter));
+        assert_eq!(operator.state.next_left_row_id, 0);
+        assert_eq!(operator.status(), before);
+        assert_eq!(pool.reserved(), funding);
+        assert!(collector.drain("output").is_empty());
+        drop(context);
+        drop(operator);
+        assert!(job.gather_owner().close_and_drain().await.is_empty());
+        drop(job);
+        assert_eq!(pool.reserved(), 0);
+    }
 }
 
 #[tokio::test]
@@ -1845,8 +2254,8 @@ async fn test_owned_copy_private_schema_remains_funded_when_payload_outlives_ope
 }
 
 #[tokio::test]
-async fn test_owned_copy_128_headers_yield_before_native_retention() {
-    let schema = owner_proof_schema(128);
+async fn test_owned_copy_headers_exhaust_cooperative_budget_before_native_retention() {
+    let schema = owner_proof_schema(1_032);
     let columns = schema
         .fields()
         .iter()
@@ -1892,7 +2301,7 @@ async fn test_owned_copy_denied_funding_keeps_legacy_admission_and_pool_zero() {
             .state
             .left
             .iter()
-            .all(|row| matches!(row.record, columnar::RowPayload::Legacy(_)))
+            .all(|row| row.record.is_unfunded_legacy())
     );
     assert_eq!(operator.state.next_left_row_id, 2);
     assert_eq!(pool.reserved(), pressure.size());

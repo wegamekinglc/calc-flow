@@ -1552,7 +1552,27 @@ mod tests {
             .process_data("left", left_batch(vec![0, 1, 2]), &context, &mut collector)
             .await
             .unwrap();
-        assert_eq!(join_work().key_encodings, 3);
+        assert_eq!(join_work().key_encodings, 1);
+        assert_eq!(operator.state.left.len(), 3);
+        let key = &operator.state.left[0].encoded_key;
+        for row in operator.state.left.iter() {
+            assert!(Arc::ptr_eq(&row.encoded_key, key));
+            assert_eq!(
+                row.charge,
+                state_columns_charge_with_key(
+                    row.record.columns(),
+                    row.record.offset(),
+                    key.len(),
+                    "match",
+                )
+                .unwrap()
+            );
+        }
+        assert_eq!(operator.state.deltas.pending.iter().count(), 3);
+        assert!(operator.state.deltas.pending.iter().all(|op| match op {
+            PendingOp::Upsert { encoded_key, .. } => Arc::ptr_eq(encoded_key, key),
+            PendingOp::Tombstone { .. } => false,
+        }));
     }
 
     #[tokio::test]
@@ -1780,7 +1800,10 @@ mod tests {
     mod checkpoint_v2_tests;
     mod columnar_state_tests;
     mod empty_checkpoint_tests;
+    mod j2a_dictionary_tests;
     mod native_lookup_tests;
+    mod optimization_tests;
+    mod output_gather_tests;
     mod sql_key_scratch_tests;
 
     async fn v1_fixture_captures() -> Vec<OperatorStateSnapshot> {
@@ -2427,13 +2450,39 @@ struct JoinWork {
     key_encodings: usize,
     time_decoders: usize,
     sql_probe_table_builds: usize,
+    native_range_visits: usize,
+    native_boundary_visits: usize,
+    admission_mask_blocks: usize,
+    native_shifted_entries: usize,
+    output_column_views: usize,
+    output_column_takes: usize,
+    native_key_lookups: usize,
+    scalar_admissions: usize,
+    generic_fast_rows: usize,
+    admission_grants: usize,
+    quantum_steps: usize,
+    quantum_boundaries: usize,
+    borrowed_key_hashes: usize,
+    borrowed_key_equalities: usize,
+    key_type_resolutions: usize,
+    arena_frames: usize,
+    normalized_time_visits: usize,
+    temporal_mask_visits: usize,
 }
 
 #[cfg(test)]
 thread_local! {
     static JOIN_WORK: std::cell::Cell<JoinWork> = const { std::cell::Cell::new(JoinWork {
         retained_visits: 0, pending_visits: 0, key_encodings: 0, time_decoders: 0,
-        sql_probe_table_builds: 0,
+        sql_probe_table_builds: 0, native_range_visits: 0, native_boundary_visits: 0,
+        admission_mask_blocks: 0, native_shifted_entries: 0,
+        output_column_views: 0, output_column_takes: 0,
+        native_key_lookups: 0,
+        scalar_admissions: 0, generic_fast_rows: 0, admission_grants: 0,
+        quantum_steps: 0, quantum_boundaries: 0,
+        borrowed_key_hashes: 0, borrowed_key_equalities: 0,
+        key_type_resolutions: 0, arena_frames: 0,
+        normalized_time_visits: 0, temporal_mask_visits: 0,
     }) };
 }
 
@@ -2959,6 +3008,7 @@ struct AdmittedRow {
 
 /// Scratch accumulator for one input batch's admission pass.
 struct AdmissionBundle {
+    quantum: columnar::Quantum,
     next_row_id: u64,
     metrics: SideMetrics,
     admitted: Vec<AdmittedRow>,
@@ -3206,7 +3256,9 @@ impl RetainedRows {
     fn swap_remove(&mut self, index: usize) -> StoredRow {
         let row = std::ops::DerefMut::deref_mut(self).swap_remove(index);
         if let Some(native) = &mut self.1 {
-            native.remove(&row, self.0.get(index).map(|row| (row, index)));
+            native.remove(&row, self.0.get(index).map(|row| (row, index)), |dense| {
+                &self.0[dense].encoded_key
+            });
         }
         row
     }
@@ -3319,12 +3371,17 @@ struct RestoreSchema<'a> {
     decoded_owned_work: bool,
 }
 
+mod admission_masks;
+mod borrowed_key;
 mod checkpoint_compaction;
 mod checkpoint_v2;
 mod columnar;
+mod key_arena;
 mod materialization;
 mod metadata_validation;
+mod native_dictionary;
 mod native_lookup;
+mod output_gather;
 #[cfg(test)]
 mod row_ipc;
 mod sql_key_scratch;
@@ -3645,7 +3702,7 @@ impl StreamJoinOperator {
             &bundle.admitted,
             &plan.key_indices,
             &self.name,
-            matches.keys.as_ref().map(|keys| keys.keys.as_slice()),
+            matches.keys.as_ref(),
         )?;
         self.validate_state_admission(plan.incoming_is_left, &retained)?;
         let native_append = self.reserve_native_append(plan.incoming_is_left, retained.len())?;
@@ -3706,6 +3763,7 @@ impl StreamJoinOperator {
             )
         };
         AdmissionBundle {
+            quantum: columnar::Quantum::default(),
             next_row_id,
             metrics,
             admitted: Vec::new(),
@@ -3723,9 +3781,29 @@ impl StreamJoinOperator {
         bundle: &mut AdmissionBundle,
         source_row_base: usize,
     ) -> Result<()> {
-        let mut quantum = columnar::Quantum::default();
+        let mut quantum = std::mem::take(&mut bundle.quantum);
+        let result = self
+            .admit_record_with_quantum(
+                (record, plan, ingress, source_row_base),
+                context,
+                bundle,
+                &mut quantum,
+            )
+            .await;
+        bundle.quantum = quantum;
+        result
+    }
+
+    async fn admit_record_with_quantum(
+        &mut self,
+        source: (&RecordBatch, &SidePlan, &str, usize),
+        context: &StreamOperatorContext<'_>,
+        bundle: &mut AdmissionBundle,
+        quantum: &mut columnar::Quantum,
+    ) -> Result<()> {
+        let (record, plan, ingress, source_row_base) = source;
         if self
-            .can_copy_payload(record, plan, context, &mut quantum)
+            .can_copy_payload(record, plan, context, quantum)
             .await?
             && let Some(mut selection) = columnar::CopySelection::reserve(self, record.num_rows())?
         {
@@ -3734,17 +3812,11 @@ impl StreamJoinOperator {
                 context,
                 bundle,
                 &mut selection,
-                &mut quantum,
+                quantum,
             )
             .await?;
             let shared = self
-                .owned_payload(
-                    record,
-                    plan.port_index,
-                    &selection.rows,
-                    context,
-                    &mut quantum,
-                )
+                .owned_payload(record, plan.port_index, &selection.rows, context, quantum)
                 .await?;
             bundle
                 .append_copy_rows(
@@ -3753,128 +3825,204 @@ impl StreamJoinOperator {
                     &selection.rows,
                     context,
                     source_row_base,
-                    &mut quantum,
+                    quantum,
                 )
                 .await?;
             return Ok(());
         }
-        self.admit_legacy_record(record, plan, ingress, context, bundle, source_row_base)
+        self.admit_legacy_record(
+            (record, plan, ingress, source_row_base),
+            context,
+            bundle,
+            quantum,
+        )
+        .await
+    }
+
+    fn admission_mask_context<'a>(
+        &self,
+        source: (&'a RecordBatch, &'a SidePlan, &str),
+        context: &StreamOperatorContext<'_>,
+    ) -> admission_masks::AdmissionMaskContext<'a> {
+        let (record, plan, ingress) = source;
+        admission_masks::AdmissionMaskContext {
+            record,
+            plan,
+            side_progress: context.ingress_progress().get(ingress),
+            opposite: context.ingress_progress().get(plan.opposite_ingress()),
+            bounds: self.spec.bounds,
+        }
     }
 
     async fn select_copy_rows(
         &self,
-        source_record: (&RecordBatch, &SidePlan, &str),
+        source: (&RecordBatch, &SidePlan, &str),
         context: &StreamOperatorContext<'_>,
         bundle: &mut AdmissionBundle,
         selection: &mut columnar::CopySelection,
         quantum: &mut columnar::Quantum,
     ) -> Result<()> {
-        let (record, plan, ingress) = source_record;
+        let (record, plan, ingress) = source;
         let times = BatchEventTimes::new(
             record.column(plan.event_time_index).as_ref(),
             &self.name,
             ingress,
         )?;
-        let opposite = context.ingress_progress().get(plan.opposite_ingress());
-        for source in 0..record.num_rows() {
-            quantum
-                .step(context, plan.key_indices.len() + 4, 16)
-                .await?;
-            let row_id = bundle.reserve_row_id(&self.name)?;
-            match self.classify_row(
-                record,
-                plan,
-                &times,
-                source,
-                context.ingress_progress().get(ingress),
-                ingress,
-            )? {
+        let config = self.admission_mask_context(source, context);
+        for start in (0..record.num_rows()).step_by(64) {
+            let length = (record.num_rows() - start).min(64);
+            let masks = admission_masks::AdmissionMasks::new(
+                &config, &times, start, length, context, quantum,
+            )
+            .await?;
+            self.select_masked_rows(
+                (plan, ingress),
+                (start, length, &masks),
+                context,
+                bundle,
+                selection,
+                quantum,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    fn masked_row(
+        &self,
+        masks: &admission_masks::AdmissionMasks,
+        offset: usize,
+        ingress: &str,
+        bundle: &mut AdmissionBundle,
+    ) -> Result<(u64, RowAdmission)> {
+        #[cfg(test)]
+        note_join_work(|work| work.scalar_admissions += 1);
+        let row_id = bundle.reserve_row_id(&self.name)?;
+        Ok((row_id, masks.at(offset, &self.name, ingress)?))
+    }
+
+    async fn select_masked_rows(
+        &self,
+        source: (&SidePlan, &str),
+        block: (usize, usize, &admission_masks::AdmissionMasks),
+        context: &StreamOperatorContext<'_>,
+        bundle: &mut AdmissionBundle,
+        selection: &mut columnar::CopySelection,
+        quantum: &mut columnar::Quantum,
+    ) -> Result<()> {
+        let (_, ingress) = source;
+        let (start, length, masks) = block;
+        for offset in 0..length {
+            quantum.step(context, 4, 16).await?;
+            let (row_id, admission) = self.masked_row(masks, offset, ingress, bundle)?;
+            match admission {
                 RowAdmission::Dropped(kind) => bundle.note_dropped(kind, &self.name)?,
                 RowAdmission::Admitted(time) => selection.rows.push(columnar::SelectedRow {
-                    source,
+                    source: start + offset,
                     row_id,
                     time,
-                    retain: should_retain(plan.incoming_is_left, time, opposite, self.spec.bounds),
+                    retain: masks.retain(offset),
                 }),
             }
         }
         Ok(())
     }
 
-    fn admit_legacy_record(
+    async fn admit_legacy_record(
         &self,
-        record: &RecordBatch,
-        plan: &SidePlan,
-        ingress: &str,
+        source: (&RecordBatch, &SidePlan, &str, usize),
         context: &StreamOperatorContext<'_>,
         bundle: &mut AdmissionBundle,
-        source_row_base: usize,
+        quantum: &mut columnar::Quantum,
     ) -> Result<()> {
+        let (record, plan, ingress, source_row_base) = source;
         let times = BatchEventTimes::new(
             record.column(plan.event_time_index).as_ref(),
             &self.name,
             ingress,
         )?;
-        let opposite = context.ingress_progress().get(if plan.incoming_is_left {
-            "right"
-        } else {
-            "left"
-        });
-        for row_index in 0..record.num_rows() {
-            let row_id = bundle.reserve_row_id(&self.name)?;
-            match self.classify_row(
-                record,
-                plan,
-                &times,
-                row_index,
-                context.ingress_progress().get(ingress),
-                ingress,
-            )? {
+        let parent = Arc::new(record.clone());
+        let config = self.admission_mask_context((record, plan, ingress), context);
+        for start in (0..record.num_rows()).step_by(64) {
+            let length = (record.num_rows() - start).min(64);
+            let masks = admission_masks::AdmissionMasks::new(
+                &config, &times, start, length, context, quantum,
+            )
+            .await?;
+            self.append_masked_rows(
+                (&parent, plan, ingress, source_row_base),
+                (start, length, &masks),
+                context,
+                bundle,
+                quantum,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn append_masked_rows(
+        &self,
+        source: (&Arc<RecordBatch>, &SidePlan, &str, usize),
+        block: (usize, usize, &admission_masks::AdmissionMasks),
+        context: &StreamOperatorContext<'_>,
+        bundle: &mut AdmissionBundle,
+        quantum: &mut columnar::Quantum,
+    ) -> Result<()> {
+        let (parent, _, ingress, source_row_base) = source;
+        let (start, length, masks) = block;
+        if masks.all_admitted(length) && bundle.next_row_id.checked_add(length as u64).is_some() {
+            return Self::append_proven_rows(
+                (parent, source_row_base),
+                block,
+                context,
+                bundle,
+                quantum,
+            )
+            .await;
+        }
+        for offset in 0..length {
+            quantum.step(context, 4, 16).await?;
+            let (row_id, admission) = self.masked_row(masks, offset, ingress, bundle)?;
+            match admission {
                 RowAdmission::Dropped(kind) => bundle.note_dropped(kind, &self.name)?,
                 RowAdmission::Admitted(event_time) => {
                     bundle.push_admitted(AdmittedRow {
-                        record: columnar::RowPayload::at(record, None, row_index),
+                        record: columnar::RowPayload::Rowed {
+                            parent: Arc::clone(parent),
+                            row: start + offset,
+                        },
                         event_time,
                         row_id,
-                        retain: should_retain(
-                            plan.incoming_is_left,
-                            event_time,
-                            opposite,
-                            self.spec.bounds,
-                        ),
+                        retain: masks.retain(offset),
                     });
                     bundle
                         .admitted_source_rows
-                        .push(source_row_base + row_index);
+                        .push(source_row_base + start + offset);
                 }
             }
         }
         Ok(())
     }
 
-    fn classify_row(
-        &self,
-        record: &RecordBatch,
-        plan: &SidePlan,
-        times: &BatchEventTimes<'_>,
-        row_index: usize,
-        side_progress: Option<IngressProgress>,
-        ingress: &str,
-    ) -> Result<RowAdmission> {
-        let Some(event_time) = times.at(row_index, &self.name, ingress)? else {
-            return Ok(RowAdmission::Dropped(DropKind::NullEventTime));
-        };
-        if plan
-            .key_indices
-            .iter()
-            .any(|&index| record.column(index).is_null(row_index))
-        {
-            return Ok(RowAdmission::Dropped(DropKind::NullKey));
+    async fn append_proven_rows(
+        source: (&Arc<RecordBatch>, usize),
+        block: (usize, usize, &admission_masks::AdmissionMasks),
+        context: &StreamOperatorContext<'_>,
+        bundle: &mut AdmissionBundle,
+        quantum: &mut columnar::Quantum,
+    ) -> Result<()> {
+        let (start, length, masks) = block;
+        let mut offset = 0;
+        while offset < length {
+            let grant = quantum.grant_admission(context, length - offset).await?;
+            let first_id = bundle.next_row_id;
+            // The immutable whole-block check proves every chunk's ID range fits.
+            bundle.next_row_id += grant as u64;
+            bundle.append_granted_rows(source, (start, offset..offset + grant, masks), first_id);
+            offset += grant;
         }
-        match late_lateness(event_time, side_progress, &self.name)? {
-            Some(lateness) => Ok(RowAdmission::Dropped(DropKind::Late(lateness))),
-            None => Ok(RowAdmission::Admitted(event_time)),
-        }
+        Ok(())
     }
 
     async fn evaluate_matches(
@@ -3888,8 +4036,19 @@ impl StreamJoinOperator {
         } else {
             &self.state.left
         };
-        if admitted.is_empty() || opposite.is_empty() {
+        if admitted.is_empty() {
             return (Ok(PreparedMatches::legacy(Vec::new())), admitted);
+        }
+        if opposite.is_empty() {
+            let keys = self.native_probe_keys(plan, &admitted);
+            return (
+                keys.map(|keys| PreparedMatches {
+                    pairs: Vec::new(),
+                    keys,
+                    credit: None,
+                }),
+                admitted,
+            );
         }
         match self.native_matches(plan, &admitted) {
             Ok(Some(native)) => {
@@ -4828,6 +4987,39 @@ impl AdmissionBundle {
         Ok(())
     }
 
+    fn append_granted_rows(
+        &mut self,
+        source: (&Arc<RecordBatch>, usize),
+        block: (
+            usize,
+            std::ops::Range<usize>,
+            &admission_masks::AdmissionMasks,
+        ),
+        first_id: u64,
+    ) {
+        let (parent, source_row_base) = source;
+        let (start, offsets, masks) = block;
+        let first_offset = offsets.start;
+        #[cfg(test)]
+        note_join_work(|work| {
+            work.admission_grants += 1;
+            work.generic_fast_rows += offsets.len();
+        });
+        for offset in offsets {
+            self.push_admitted(AdmittedRow {
+                record: columnar::RowPayload::Rowed {
+                    parent: Arc::clone(parent),
+                    row: start + offset,
+                },
+                event_time: masks.admitted_time(offset),
+                row_id: first_id + (offset - first_offset) as u64,
+                retain: masks.retain(offset),
+            });
+            self.admitted_source_rows
+                .push(source_row_base + start + offset);
+        }
+    }
+
     fn reserve_row_id(&mut self, operator_id: &str) -> Result<u64> {
         let row_id = self.next_row_id;
         self.next_row_id = self
@@ -4956,28 +5148,11 @@ fn state_row_count(rows: &[StoredRow], operator_id: &str) -> Result<u64> {
     u64::try_from(rows.len()).map_err(|_| counter_overflow(operator_id, "state rows"))
 }
 
-fn late_lateness(
-    event_time: EventTime,
-    progress: Option<IngressProgress>,
-    operator_id: &str,
-) -> Result<Option<u64>> {
-    let Some(watermark) = progress.and_then(IngressProgress::watermark) else {
-        return Ok(None);
-    };
-    if event_time >= watermark {
-        return Ok(None);
-    }
-    let lateness =
-        u64::try_from(i128::from(watermark.as_micros()) - i128::from(event_time.as_micros()))
-            .map_err(|_| counter_overflow(operator_id, "lateness"))?;
-    Ok(Some(lateness))
-}
-
 fn retained_rows(
     admitted: &[AdmittedRow],
     key_indices: &[usize],
     operator_id: &str,
-    native_keys: Option<&[Arc<columnar::FramedKey>]>,
+    native_keys: Option<&native_lookup::NativeKeys>,
 ) -> Result<Vec<StoredRow>> {
     admitted
         .iter()
@@ -4985,7 +5160,7 @@ fn retained_rows(
         .filter(|(_, row)| row.retain)
         .map(|(index, row)| {
             let encoded_key = match native_keys {
-                Some(keys) => Arc::clone(&keys[index]),
+                Some(keys) => Arc::clone(keys.key(index)),
                 None => Arc::new(
                     encode_join_key_columns_v1(
                         row.record.columns(),
@@ -5223,9 +5398,7 @@ fn index_by_row_id(opposite: &[StoredRow]) -> BTreeMap<u64, usize> {
 
 /// Materializes one validated chunk of matched pairs into an independent record.
 ///
-/// Each output column concatenates the per-pair single-row column slices in
-/// matched-pair order, so row order is exactly the emission order the
-/// per-row path produced.
+/// Shared flat columns gather in matched-pair order; other columns concatenate row views.
 fn materialize_output_record(
     output_schema: &SchemaRef,
     admitted: &[AdmittedRow],
@@ -5249,24 +5422,31 @@ fn materialize_output_record(
     let (first_left, first_right) = pair_records(&matched[0]);
     let left_width = first_left.num_columns();
     let right_width = first_right.num_columns();
+    let left_gather =
+        output_gather::SideGather::new(matched.iter().map(|pair| pair_records(pair).0));
+    let right_gather =
+        output_gather::SideGather::new(matched.iter().map(|pair| pair_records(pair).1));
     let mut columns = Vec::with_capacity(left_width + right_width);
     for column_index in 0..left_width + right_width {
-        let slices = matched
-            .iter()
-            .map(|pair| {
-                let (left, right) = pair_records(pair);
-                if column_index < left_width {
-                    left.column_view(column_index)
-                } else {
-                    right.column_view(column_index - left_width)
-                }
-            })
-            .collect::<Vec<_>>();
-        let references = slices.iter().map(AsRef::as_ref).collect::<Vec<_>>();
-        columns.push(canonical_column(
-            concat_output_column(&references)?,
+        let (gather, payload_index) = if column_index < left_width {
+            (left_gather.as_ref(), column_index)
+        } else {
+            (right_gather.as_ref(), column_index - left_width)
+        };
+        let payloads = matched.iter().map(|pair| {
+            let (left, right) = pair_records(pair);
+            if column_index < left_width {
+                left
+            } else {
+                right
+            }
+        });
+        columns.push(output_gather::column(
+            gather,
+            payload_index,
             output_schema.field(column_index).data_type(),
-        ));
+            payloads,
+        )?);
     }
     RecordBatch::try_new(Arc::clone(output_schema), columns)
         .map_err(|error| operator_error(operator_id, &format!("output projection failed: {error}")))
@@ -6482,29 +6662,6 @@ fn checkpoint_error(operator_id: &str, side: &str, message: &str) -> CalcFlowErr
     }
 }
 
-fn should_retain(
-    incoming_is_left: bool,
-    event_time: EventTime,
-    opposite: Option<IngressProgress>,
-    bounds: JoinTimeBounds,
-) -> bool {
-    let Some(opposite) = opposite else {
-        return true;
-    };
-    if opposite.state() == crate::IngressState::Ended {
-        return false;
-    }
-    let Some(watermark) = opposite.watermark() else {
-        return true;
-    };
-    let extension = if incoming_is_left {
-        bounds.after_micros
-    } else {
-        bounds.before_micros
-    };
-    i128::from(event_time.as_micros()) + i128::from(extension) >= i128::from(watermark.as_micros())
-}
-
 #[derive(Clone, Copy)]
 struct EvictionPolicy<'a> {
     extension_micros: u64,
@@ -6739,27 +6896,6 @@ impl<'a> BatchEventTimes<'a> {
             values,
             unit: *unit,
         })
-    }
-
-    fn at(&self, row: usize, operator_id: &str, side: &str) -> Result<Option<EventTime>> {
-        if self.array.is_null(row) {
-            return Ok(None);
-        }
-        let value = self.values[row];
-        let micros = match self.unit {
-            TimeUnit::Second => value.checked_mul(1_000_000),
-            TimeUnit::Millisecond => value.checked_mul(1_000),
-            TimeUnit::Microsecond => Some(value),
-            TimeUnit::Nanosecond => Some(value.div_euclid(1_000)),
-        }
-        .ok_or_else(|| {
-            operator_reason(
-                operator_id,
-                crate::StreamingFailureReason::JoinTimeConversionFailed,
-                &format!("{side} event time cannot be represented"),
-            )
-        })?;
-        Ok(Some(EventTime::from_micros(micros)))
     }
 }
 
