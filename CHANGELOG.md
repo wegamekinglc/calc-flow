@@ -9,6 +9,12 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-09: Gather streaming Join output columns with one Arrow take
+  per column when every matched pair of a side reads one shared payload
+  chunk, instead of one single-row slice per pair. Fanout materialization
+  drops 84-95% in operator benches; dictionary and mixed payloads keep
+  the concatenated path and its unreferenced-value contract.
+
 - 2026-10-09: Replace the streaming Join native probe index with a
   distinct-key hash dictionary whose per-key entry lists stay sorted by
   `(time, row_id)`, intern each distinct probe key once per admitted

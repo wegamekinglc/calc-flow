@@ -79,3 +79,39 @@ operator level — but the suite-level regression above wins the decision.
 
 Raw sample JSON files are under `target/j2a-perf/engines-1000000-join/`
 and `target/j2a-perf/engines-100000-join/` in the worktree.
+
+## Iteration 2: take-based output gather (commit `ad3edbd6` range)
+
+`materialize_output_record` now gathers each output side once per
+materialization call: when every matched pair reads rows of one shared
+payload chunk, that side's columns are built with one Arrow `take` per
+column over the chunk's row offsets; dictionary columns and mixed or
+legacy payloads keep the concatenated per-row-slice path (which retains
+the unreferenced-dictionary-value contract). A failing test first
+recorded 54 per-row slices for a 3x3 native match and passes at zero
+after the change.
+
+- Materialization bench (best-of runs): narrow_f100_fast 99.3 → 4.9 ms
+  (−95%), wide_f10_fast 14.4 → 3.1 ms, wide_f100_fast 125.0 → 19.9 ms
+  (−84%), wide_f100_slow 140.2 → 118.0 ms. The earlier per-pair
+  `interleave` build measured 10.5/6.8/45.5/126.3 on the same cases, so
+  the take gather also beats the rejected interleave shape.
+- Suite `interval_join` 100k paired (6 pairs): baseline 797.4 ms p50 →
+  candidate 701.7 ms p50 (−12.87%, all oracles passed).
+- Suite `join` 100k paired (8 pairs): −14.63% (110.5 → 95.2 ms).
+- Suite `join` 1M paired (2 × 10 pairs): −18.50% pooled,
+  CI95 [−20.42%, −16.70%]; candidate p50 906.6 ms — statistically level
+  with the index-only build (−18.67%), confirming the 1:1 static case's
+  output share is small; fanout shapes collect the gather win.
+- Stage attribution on the take build (quiet in-process): per 100k —
+  prepare ≈ 40–48 ms (probe ≈ 12 ms; the rest is admission plus the
+  owned payload-chunk copy that state-ownership accounting requires),
+  emit ≈ 40 ms (take gather is a small share; the remainder awaits the
+  edge/sink inside the suite's timed window), commit timer ≈ 18 ms but
+  `commit_prepared` is O(1) with empty retention — wall-clock stage
+  timers on a busy runtime absorb scheduler preemption and are no
+  longer trustworthy at this granularity. The next attribution step
+  needs a native sampler profile, and the next operator-local lever is
+  vectorized admission (null/late/retain masks, batched row-id
+  reservation); the emit-side remainder belongs to the runtime/sink
+  path, not the operator.
