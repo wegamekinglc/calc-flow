@@ -223,8 +223,9 @@ already-committed handle for segment content that is unchanged since the
 current session committed it.
 
 Streaming Join writes columnar physical V2 checkpoints and accepts physical
-V1 and V2 state on restore. V2 separates immutable payload batches from row
-indexes. Checkpoint preparation builds a replacement base on owned native
+V1 and V2 state on restore. Its Python capability inventory lists layouts
+`(1, 2)` with semantic state version `1`. V2 separates immutable payload batches
+from row indexes. Checkpoint preparation builds a replacement base on owned native
 workers under the configured memory budget. Capture carries that base and
 historical segments, adding only later dirty operations. Clean captures share
 unchanged segment allocations. Four dirty checkpoint epochs arm base
@@ -533,6 +534,13 @@ checksum. Corrupt higher candidates, links, unexpected entry types, and paths
 outside the managed roots fail closed. Regular abandoned `.tmp*` manifest
 files are removed during a serialized scan; links and directories are never
 followed or removed as temporary files.
+
+Bounded manifest loading also accepts legacy v3 source entries that omitted
+`history`. It retains that omission through serialization and checksum
+validation; new manifests emit the current field explicitly. Direct serde
+deserialization keeps its current required-field rules. This compatibility
+does not alter graph identity, source cursors, segment checksums, or delivery
+guarantees.
 
 The managed filesystem durability guarantee applies on Unix platforms. On
 non-Unix platforms, including Windows, file contents are synced but parent

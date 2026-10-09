@@ -1,0 +1,94 @@
+{
+  "source": "Authentic PyPI2026.9.25 managed Join V1 capture attempt-005; immutable selected bytes copied without runtime opening or regeneration.",
+  "archive": {
+    "name": "authentic-managed-join-v1-fixture-v1.tar.gz",
+    "size": 57723,
+    "sha256": "6c6840800376f2231e361f44c27400166a201549c119c1a41611847e3a27c997"
+  },
+  "seal_sha256": "4b07dc93de9a6e355f8f223c167b2a5410140656173770a5d76a7105cc4db36f",
+  "independent_review_sha256": "de471984cbf9bf3ec72616ca658de3459ee71d6555d7f8efaef08c17331686c8",
+  "old_package": {
+    "version": "2026.9.25",
+    "origin": "PyPI published wheel",
+    "wheel_sha256": "7484cdc61884ce86395de70be52f47cae93cb4e2767d667dbb6ad56aedea1cae",
+    "native_sha256": "40ec8f66d33dc0f8f6066efc6cffac199dafdd6e9c34e35dca049a21140db512",
+    "git_tag_association": "not independently established"
+  },
+  "members": [
+    {
+      "path": "capture/inputs.json",
+      "archive_member": "attempt-005/capture/inputs.json",
+      "size": 820,
+      "sha256": "9a64caf8046248d1d7053901415b5d0e762094f3323dfe232506ff80d1f244e5"
+    },
+    {
+      "path": "capture/left-all-inputs.arrow",
+      "archive_member": "attempt-005/capture/left-all-inputs.arrow",
+      "size": 1402,
+      "sha256": "2582b51e07eddfeeb4e18177e1be640efe8ee4774656a20cd00007fe7333af59"
+    },
+    {
+      "path": "capture/managed-root/manifests/manifest-00000000000000000001.json",
+      "archive_member": "attempt-005/capture/managed-root/manifests/manifest-00000000000000000001.json",
+      "size": 3587,
+      "sha256": "fc1c342ffe48619d8d4bb4db00513daf2c2c9bc6d61eb705e2c4f8e1f7017614"
+    },
+    {
+      "path": "capture/managed-root/state/committed/16d2e7cc812492ebbb43964ab14f7dfe62f7a2e621b1d58ca610b9524a63c6fe/58393216032be6257784ac0c6a73efb2a084e27b4cfff1e6acee7b7e6ab93b10/1-35727d3a7b2dd964fc82e1f2f04db1b00877bf0adfc089b5294990e5fb14a70b.segment",
+      "archive_member": "attempt-005/capture/managed-root/state/committed/16d2e7cc812492ebbb43964ab14f7dfe62f7a2e621b1d58ca610b9524a63c6fe/58393216032be6257784ac0c6a73efb2a084e27b4cfff1e6acee7b7e6ab93b10/1-35727d3a7b2dd964fc82e1f2f04db1b00877bf0adfc089b5294990e5fb14a70b.segment",
+      "size": 4566,
+      "sha256": "eb694a33b3a4ea29f066000bb785622f6a3b51c8a22fe39038e8f3dd00843084"
+    },
+    {
+      "path": "capture/managed-root/state/committed/16d2e7cc812492ebbb43964ab14f7dfe62f7a2e621b1d58ca610b9524a63c6fe/58393216032be6257784ac0c6a73efb2a084e27b4cfff1e6acee7b7e6ab93b10/1-a97c717ba1ef7395c3b6f48cc784675bc6eaff365b91a9d933666b3712b7b4c2.segment",
+      "archive_member": "attempt-005/capture/managed-root/state/committed/16d2e7cc812492ebbb43964ab14f7dfe62f7a2e621b1d58ca610b9524a63c6fe/58393216032be6257784ac0c6a73efb2a084e27b4cfff1e6acee7b7e6ab93b10/1-a97c717ba1ef7395c3b6f48cc784675bc6eaff365b91a9d933666b3712b7b4c2.segment",
+      "size": 4566,
+      "sha256": "8455bbd70bfab7739368d9fe3a6dd8d305609f58e62194dca23a1d8874be56f7"
+    },
+    {
+      "path": "capture/managed-root/state/locks/16d2e7cc812492ebbb43964ab14f7dfe62f7a2e621b1d58ca610b9524a63c6fe.lock",
+      "archive_member": "attempt-005/capture/managed-root/state/locks/16d2e7cc812492ebbb43964ab14f7dfe62f7a2e621b1d58ca610b9524a63c6fe.lock",
+      "size": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "capture/project.json",
+      "archive_member": "attempt-005/capture/project.json",
+      "size": 3591,
+      "sha256": "db27c05a734108b0fcab4ab88cc4b77e80603b70426aab7732f2f352c303065c"
+    },
+    {
+      "path": "capture/right-all-inputs.arrow",
+      "archive_member": "attempt-005/capture/right-all-inputs.arrow",
+      "size": 1402,
+      "sha256": "c8ee51f9afe926bb9f94d06c40cae921828bf8bf5da8b1185bb53840a87f8dce"
+    },
+    {
+      "path": "capture/udf-catalog.json",
+      "archive_member": "attempt-005/capture/udf-catalog.json",
+      "size": 270,
+      "sha256": "a01e769d0847bb65a14bbc30d2b5d43846bc7a0dc18920ddedd356a16741bb2d"
+    },
+    {
+      "path": "reference/observations.json",
+      "archive_member": "attempt-005/reference/observations.json",
+      "size": 13419,
+      "sha256": "94ad4b1841b94589453936f34430c38649115968f1d0c1a65bb783de463e5b7f"
+    },
+    {
+      "path": "reference/sink-proof.json",
+      "archive_member": "attempt-005/reference/sink-proof.json",
+      "size": 5428,
+      "sha256": "a75ab3a184593c397e955cac7274bf5655cc4e7b08b5854398a15761e3aa7cbb"
+    },
+    {
+      "path": "reference/udf-output/sink-proof.json",
+      "archive_member": "attempt-005/reference/udf-output/sink-proof.json",
+      "size": 603,
+      "sha256": "52b1839a71bba8d335c6dae1f806bcce374e39ab81b822028589e90dfc052973"
+    }
+  ],
+  "selected_member_count": 12,
+  "selected_member_bytes": 39654,
+  "proof_scope": "Sealed literal rows/schema used; omitted old output Arrow files are neither opened nor compared for byte parity. Reference observations do not supply final continuation metrics."
+}

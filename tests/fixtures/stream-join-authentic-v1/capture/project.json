@@ -1,0 +1,149 @@
+{
+  "data_sources": [
+    {
+      "data": [],
+      "format": "inline_json",
+      "id": "source_1",
+      "input": "input"
+    },
+    {
+      "data": [],
+      "format": "inline_json",
+      "id": "source_2",
+      "input": "left"
+    },
+    {
+      "data": [],
+      "format": "inline_json",
+      "id": "source_3",
+      "input": "right"
+    }
+  ],
+  "format_version": 3,
+  "graph": {
+    "edges": [],
+    "name": "authentic-join-v1-release-fixture",
+    "nodes": [
+      {
+        "id": "join",
+        "input_ports": [
+          {
+            "kind": "table",
+            "name": "left",
+            "required": true,
+            "schema": [
+              {
+                "data_type": "int64",
+                "name": "key",
+                "nullable": true
+              },
+              {
+                "data_type": "timestamp[us, UTC]",
+                "name": "at",
+                "nullable": false
+              },
+              {
+                "data_type": "uint64",
+                "name": "sequence",
+                "nullable": false
+              },
+              {
+                "data_type": "int64",
+                "name": "value",
+                "nullable": false
+              },
+              {
+                "data_type": "string",
+                "name": "note",
+                "nullable": true
+              }
+            ]
+          },
+          {
+            "kind": "table",
+            "name": "right",
+            "required": true,
+            "schema": [
+              {
+                "data_type": "int64",
+                "name": "key",
+                "nullable": true
+              },
+              {
+                "data_type": "timestamp[us, UTC]",
+                "name": "at",
+                "nullable": false
+              },
+              {
+                "data_type": "uint64",
+                "name": "sequence",
+                "nullable": false
+              },
+              {
+                "data_type": "int64",
+                "name": "value",
+                "nullable": false
+              },
+              {
+                "data_type": "string",
+                "name": "note",
+                "nullable": true
+              }
+            ]
+          }
+        ],
+        "operator": {
+          "kind": "stream_join",
+          "spec": {
+            "bounds": {
+              "after_micros": 5000000,
+              "before_micros": 5000000
+            },
+            "join_type": "inner",
+            "left_event_time": "at",
+            "left_keys": [
+              "key"
+            ],
+            "left_prefix": "left",
+            "limits": {
+              "max_matches_per_input_batch": 1000,
+              "max_state_bytes_per_side": 1048576,
+              "max_state_rows_per_side": 100
+            },
+            "right_event_time": "at",
+            "right_keys": [
+              "key"
+            ],
+            "right_prefix": "right"
+          }
+        },
+        "output_ports": []
+      },
+      {
+        "id": "proof",
+        "operator": {
+          "expression": "",
+          "filter": null,
+          "kind": "expression",
+          "select": [
+            "fixture_identity(value) AS checked"
+          ],
+          "udfs": [
+            {
+              "kind": "data_fusion_scalar",
+              "name": "fixture_identity",
+              "provider": "fixture",
+              "version": "1"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "id": "authentic-join-v1-release-fixture",
+  "name": "authentic-join-v1-release-fixture",
+  "runtime": {
+    "mode": "batch",
+    "options": {}
+  }
+}

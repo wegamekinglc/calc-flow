@@ -9,6 +9,13 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-10: Recover authentic prior-release V1 Join checkpoints, publish V2
+  state, and resume it in a fresh process with unchanged rows, logical charges,
+  and source cursors. Preserve original checksums when bounded manifest loading
+  reads legacy sources without a history field; current manifests still write
+  that field explicitly. Advertise Join physical layouts 1 and 2 with semantic
+  state version 1.
+
 - 2026-10-10: Resolve each distinct streaming Join probe key once for both
   matching passes and keep one canonical key owner per distinct probe key.
   Typed key columns reuse one funded row buffer and immediately intern each
