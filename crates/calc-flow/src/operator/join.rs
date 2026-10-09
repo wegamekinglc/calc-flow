@@ -1580,37 +1580,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_output_columns_gather_without_row_slices() {
-        let mut operator =
-            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
-        let job_context = job();
-        let context = StreamOperatorContext::new(&job_context, "match", None);
-        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
-        operator
-            .process_data(
-                "right",
-                right_batch(vec![0, 1, 2]),
-                &context,
-                &mut collector,
-            )
-            .await
-            .unwrap();
-        reset_join_work();
-        operator
-            .process_data("left", left_batch(vec![0, 1, 2]), &context, &mut collector)
-            .await
-            .unwrap();
-        let output_rows = collector
-            .drain("output")
-            .iter()
-            .filter_map(|message| message.as_data())
-            .map(|batch| batch.num_rows())
-            .sum::<usize>();
-        assert!(output_rows > 0, "expected matched output rows");
-        assert_eq!(join_work().output_column_slices, 0);
-    }
-
-    #[tokio::test]
     async fn dirty_log_coalescing_visits_only_the_evicted_upsert() {
         for count in [3, 80] {
             let mut operator =
@@ -2480,14 +2449,13 @@ struct JoinWork {
     time_decoders: usize,
     sql_probe_table_builds: usize,
     probe_key_allocations: usize,
-    output_column_slices: usize,
 }
 
 #[cfg(test)]
 thread_local! {
     static JOIN_WORK: std::cell::Cell<JoinWork> = const { std::cell::Cell::new(JoinWork {
         retained_visits: 0, pending_visits: 0, key_encodings: 0, time_decoders: 0,
-        sql_probe_table_builds: 0, probe_key_allocations: 0, output_column_slices: 0,
+        sql_probe_table_builds: 0, probe_key_allocations: 0,
     }) };
 }
 
@@ -5228,152 +5196,25 @@ fn materialize_output_record(
     let right_width = first_right.num_columns();
     let mut columns = Vec::with_capacity(left_width + right_width);
     for column_index in 0..left_width + right_width {
-        columns.push(materialize_output_column(
+        let slices = matched
+            .iter()
+            .map(|pair| {
+                let (left, right) = pair_records(pair);
+                if column_index < left_width {
+                    left.column_view(column_index)
+                } else {
+                    right.column_view(column_index - left_width)
+                }
+            })
+            .collect::<Vec<_>>();
+        let references = slices.iter().map(AsRef::as_ref).collect::<Vec<_>>();
+        columns.push(canonical_column(
+            concat_output_column(&references)?,
             output_schema.field(column_index).data_type(),
-            admitted,
-            opposite,
-            matched,
-            incoming_is_left,
-            column_index,
-            left_width,
-        )?);
+        ));
     }
     RecordBatch::try_new(Arc::clone(output_schema), columns)
         .map_err(|error| operator_error(operator_id, &format!("output projection failed: {error}")))
-}
-
-/// Above this many distinct source arrays per column, gathering degenerates
-/// to one array per row and the concatenated path is cheaper than indexing.
-const MAX_INTERLEAVE_SOURCES: usize = 32;
-
-/// The source array and row offset one output column derives from for one
-/// matched pair.
-fn output_column_source<'a>(
-    admitted: &'a [AdmittedRow],
-    opposite: &'a [StoredRow],
-    pair: &MatchedPair,
-    incoming_is_left: bool,
-    column_index: usize,
-    left_width: usize,
-) -> (&'a ArrayRef, usize) {
-    let incoming = &admitted[pair.pos];
-    let candidate = &opposite[pair.opposite_index];
-    let (left, right) = if incoming_is_left {
-        (&incoming.record, &candidate.record)
-    } else {
-        (&candidate.record, &incoming.record)
-    };
-    if column_index < left_width {
-        (&left.columns()[column_index], left.offset())
-    } else {
-        (&right.columns()[column_index - left_width], right.offset())
-    }
-}
-
-fn materialize_output_column(
-    output_type: &DataType,
-    admitted: &[AdmittedRow],
-    opposite: &[StoredRow],
-    matched: &[MatchedPair],
-    incoming_is_left: bool,
-    column_index: usize,
-    left_width: usize,
-) -> Result<ArrayRef> {
-    let first = output_column_source(
-        admitted,
-        opposite,
-        &matched[0],
-        incoming_is_left,
-        column_index,
-        left_width,
-    );
-    if matches!(first.0.data_type(), DataType::Dictionary(..)) {
-        return materialize_output_column_by_concat(
-            output_type,
-            admitted,
-            opposite,
-            matched,
-            incoming_is_left,
-            column_index,
-            left_width,
-        );
-    }
-    let mut sources: Vec<&ArrayRef> = Vec::new();
-    let mut indices: Vec<(usize, usize)> = Vec::with_capacity(matched.len());
-    for pair in matched {
-        let (array, row) = output_column_source(
-            admitted,
-            opposite,
-            pair,
-            incoming_is_left,
-            column_index,
-            left_width,
-        );
-        let source = sources
-            .iter()
-            .position(|existing| Arc::ptr_eq(existing, array));
-        let source = match source {
-            Some(source) => source,
-            None if sources.len() < MAX_INTERLEAVE_SOURCES => {
-                sources.push(array);
-                sources.len() - 1
-            }
-            None => {
-                return materialize_output_column_by_concat(
-                    output_type,
-                    admitted,
-                    opposite,
-                    matched,
-                    incoming_is_left,
-                    column_index,
-                    left_width,
-                );
-            }
-        };
-        indices.push((source, row));
-    }
-    let references: Vec<&dyn Array> = sources.iter().map(AsRef::as_ref).collect();
-    let column =
-        datafusion::arrow::compute::interleave(&references, &indices).map_err(|error| {
-            CalcFlowError::Internal {
-                message: format!("stream Join output column gather failed: {error}"),
-            }
-        })?;
-    Ok(canonical_column(column, output_type))
-}
-
-/// Per-row slice concatenation, kept for dictionary columns (it drops
-/// unreferenced dictionary values) and for unindexed legacy payloads.
-fn materialize_output_column_by_concat(
-    output_type: &DataType,
-    admitted: &[AdmittedRow],
-    opposite: &[StoredRow],
-    matched: &[MatchedPair],
-    incoming_is_left: bool,
-    column_index: usize,
-    left_width: usize,
-) -> Result<ArrayRef> {
-    let slices = matched
-        .iter()
-        .map(|pair| {
-            #[cfg(test)]
-            note_join_work(|work| work.output_column_slices += 1);
-            let (array, row) = output_column_source(
-                admitted,
-                opposite,
-                pair,
-                incoming_is_left,
-                column_index,
-                left_width,
-            );
-            array.slice(row, 1)
-        })
-        .collect::<Vec<_>>();
-    let references = slices.iter().map(AsRef::as_ref).collect::<Vec<_>>();
-    Ok(canonical_column(
-        concat_output_column(&references)?,
-        output_type,
-    ))
 }
 
 fn concat_output_column(slices: &[&dyn Array]) -> Result<ArrayRef> {

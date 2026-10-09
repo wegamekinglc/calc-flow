@@ -122,7 +122,6 @@ impl RowPayload {
         &self.columns()[index]
     }
 
-    #[cfg(test)]
     pub(super) fn column_view(&self, index: usize) -> ArrayRef {
         match self {
             Self::Legacy(record) => Arc::clone(record.column(index)),
