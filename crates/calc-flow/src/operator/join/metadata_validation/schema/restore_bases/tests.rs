@@ -5,6 +5,9 @@ mod float_tests;
 
 #[path = "boolean_tests.rs"]
 mod boolean_tests;
+
+#[path = "nullable_float_tests.rs"]
+mod nullable_float_tests;
 use crate::{
     CancellationToken, Epoch, JsonMap, OperatorStateSnapshot, StreamJobContext, StreamOperator,
     operator::join::{

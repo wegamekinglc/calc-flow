@@ -163,11 +163,14 @@ fn inspect_column(
     cursor: &mut usize,
     body: &[u8],
 ) -> Option<usize> {
-    if !node_matches(node) {
+    if node.length() != 1 {
         return None;
     }
-    buffer_range(buffers.get(*cursor), body)?;
+    let bitmap = buffer_range(buffers.get(*cursor), body)?;
     *cursor += 1;
+    if !restored::validity::certified(field, 1, node.null_count(), &body[bitmap]) {
+        return None;
+    }
     column_length(field, buffers, cursor, body)
 }
 
@@ -175,10 +178,6 @@ fn columns_layout(nodes: usize, buffers: usize, expected: &Schema) -> Option<boo
     let fields_match = nodes == expected.fields().len();
     let buffers_match = buffers == buffer_count(expected)?;
     Some(fields_match && buffers_match)
-}
-
-fn node_matches(node: &ipc::FieldNode) -> bool {
-    node.length() == 1 && node.null_count() == 0
 }
 
 fn record_layout(view: &MessageView<'_>, record: &ipc::RecordBatch<'_>) -> bool {

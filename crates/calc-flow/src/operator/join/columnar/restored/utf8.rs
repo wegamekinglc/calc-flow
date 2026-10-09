@@ -45,7 +45,7 @@ fn column_backing(array: &ArrayRef, field: &Field) -> Option<usize> {
         rounded(values.value(0).len())?.checked_add(64)
     } else {
         super::width(field.data_type())?;
-        Some(64)
+        64_usize.checked_add(super::validity::backing(field))
     }
 }
 
@@ -141,8 +141,9 @@ fn copy_columns(construction: &mut Construction, record: &RecordBatch) -> (usize
             terminal += size_of::<i32>();
             length + size_of::<i32>()
         } else {
-            backing += 64;
-            super::width(field.data_type()).expect("certified scalar column")
+            let bitmap = super::validity::visible_bytes(source);
+            backing += 64 * (1 + bitmap);
+            super::width(field.data_type()).expect("certified scalar column") + bitmap
         };
         construction
             .columns

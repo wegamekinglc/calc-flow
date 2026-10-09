@@ -14,6 +14,7 @@ use std::sync::{
 };
 
 pub(in crate::operator::join) mod utf8;
+pub(in crate::operator::join) mod validity;
 
 pub(in crate::operator::join) struct ResidentLease {
     credit: MemoryReservation,
@@ -74,7 +75,7 @@ pub(in crate::operator::join) fn required(schema: &Schema, registration: usize) 
 fn backing_bytes(schema: &Schema) -> Option<usize> {
     schema.fields().iter().try_fold(0_usize, |bytes, field| {
         width(field.data_type())?;
-        bytes.checked_add(64)
+        bytes.checked_add(64)?.checked_add(validity::backing(field))
     })
 }
 
@@ -138,6 +139,7 @@ fn copy_column(source: &ArrayRef, field: &Field, funding: &Arc<PayloadFunding>) 
     let data = arrow_data::ArrayData::builder(field.data_type().clone())
         .len(1)
         .add_buffer(owned_copy::wrap_buffer(values, funding))
+        .nulls(validity::copy(source, funding))
         .build()
         .expect("certified one-row aligned scalar buffer");
     make_array(data)
@@ -181,12 +183,14 @@ pub(in crate::operator::join) fn copy_row(
         _retirement: lease.retirement,
     }));
     copy_columns(&mut construction, record);
-    let backing_bytes = construction.columns.len() * 64;
+    let bitmap_bytes: usize = record.columns().iter().map(validity::visible_bytes).sum();
+    let backing_bytes = (construction.columns.len() + bitmap_bytes) * 64;
     let live_bytes = expected
         .fields()
         .iter()
         .map(|field| width(field.data_type()).expect("certified scalar type"))
-        .sum();
+        .sum::<usize>()
+        + bitmap_bytes;
     construction.inventory = Vec::with_capacity(1);
     construction.inventory.push(ChunkRow {
         row_id,

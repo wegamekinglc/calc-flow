@@ -16,6 +16,9 @@ mod restore_boolean_tests;
 #[path = "restore_utf8_tests.rs"]
 mod restore_utf8_tests;
 
+#[path = "restore_nullable_float_tests.rs"]
+mod restore_nullable_float_tests;
+
 #[derive(Default)]
 struct RestoreObservations {
     readers: Vec<(Option<(usize, usize)>, bool)>,

@@ -20,6 +20,9 @@ use std::{
     time::Duration,
 };
 
+#[path = "nullable_tests.rs"]
+mod nullable_tests;
+
 fn operator() -> StreamJoinOperator {
     let schema = Arc::new(Schema::new(vec![
         Field::new("symbol", DataType::Utf8, false),

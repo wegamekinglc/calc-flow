@@ -24,7 +24,7 @@ pub(in crate::operator::join::metadata_validation::schema) fn trace_bytes() -> O
 struct MessageView<'a> {
     message: Message<'a>,
     metadata_bytes: usize,
-    body_bytes: usize,
+    body: &'a [u8],
 }
 
 pub(in crate::operator::join::metadata_validation::schema) enum StreamItem<T> {
@@ -72,11 +72,11 @@ fn next_message<'a>(bytes: &'a [u8], offset: &mut usize) -> Option<StreamItem<Me
     let body_bytes = usize::try_from(message.bodyLength()).ok()?;
     let metadata_end = *offset;
     *offset = offset.checked_add(body_bytes)?;
-    bytes.get(metadata_end..*offset)?;
+    let body = bytes.get(metadata_end..*offset)?;
     Some(StreamItem::Message(MessageView {
         message,
         metadata_bytes: metadata.len(),
-        body_bytes,
+        body,
     }))
 }
 
@@ -109,7 +109,7 @@ fn record_facts(
             return None;
         }
         facts.metadata_bytes = facts.metadata_bytes.max(view.metadata_bytes);
-        facts.body_bytes = facts.body_bytes.checked_add(view.body_bytes)?;
+        facts.body_bytes = facts.body_bytes.checked_add(view.body.len())?;
         facts.batches = facts.batches.checked_add(1)?;
         if facts.batches > 2 {
             return None;
@@ -139,7 +139,7 @@ fn schema_message(view: &MessageView<'_>, expected: &Schema) -> bool {
 
 fn schema_header(view: &MessageView<'_>) -> bool {
     cfg!(target_endian = "little")
-        && view.body_bytes == 0
+        && view.body.is_empty()
         && view.message.version() == ipc::MetadataVersion::V5
 }
 
@@ -248,7 +248,7 @@ fn record_message(view: &MessageView<'_>, expected: &Schema) -> bool {
     let Ok(rows) = usize::try_from(record.length()) else {
         return false;
     };
-    columns_match(nodes, buffers, expected, rows, view.body_bytes)
+    columns_match(nodes, buffers, expected, rows, view.body)
 }
 
 fn columns_match(
@@ -256,32 +256,49 @@ fn columns_match(
     buffers: flatbuffers::Vector<'_, ipc::Buffer>,
     expected: &Schema,
     rows: usize,
-    body_bytes: usize,
+    body: &[u8],
 ) -> bool {
     if nodes.len() != expected.fields().len() || buffers.len() != 2 * nodes.len() {
         return false;
     }
     expected.fields().iter().enumerate().all(|(index, field)| {
-        node_matches(nodes.get(index), rows)
-            && null_buffer(buffers.get(2 * index), body_bytes)
-            && values_buffer(buffers.get(2 * index + 1), field, rows, body_bytes)
+        column_matches(
+            nodes.get(index),
+            field,
+            rows,
+            buffers.get(2 * index),
+            buffers.get(2 * index + 1),
+            body,
+        )
     })
 }
 
-fn node_matches(node: &ipc::FieldNode, rows: usize) -> bool {
-    usize::try_from(node.length()) == Ok(rows) && node.null_count() == 0
+fn column_matches(
+    node: &ipc::FieldNode,
+    field: &Field,
+    rows: usize,
+    validity: &ipc::Buffer,
+    values: &ipc::Buffer,
+    body: &[u8],
+) -> bool {
+    if usize::try_from(node.length()) != Ok(rows) {
+        return false;
+    }
+    let Some(bitmap) = null_buffer(validity, body) else {
+        return false;
+    };
+    crate::operator::join::columnar::restored::validity::certified(
+        field,
+        rows,
+        node.null_count(),
+        bitmap,
+    ) && values_buffer(values, field, rows, body.len())
 }
 
-fn null_buffer(buffer: &ipc::Buffer, body_bytes: usize) -> bool {
-    let Ok(offset) = usize::try_from(buffer.offset()) else {
-        return false;
-    };
-    let Ok(length) = usize::try_from(buffer.length()) else {
-        return false;
-    };
-    offset
-        .checked_add(length)
-        .is_some_and(|end| end <= body_bytes)
+fn null_buffer<'a>(buffer: &ipc::Buffer, body: &'a [u8]) -> Option<&'a [u8]> {
+    let offset = usize::try_from(buffer.offset()).ok()?;
+    let length = usize::try_from(buffer.length()).ok()?;
+    body.get(offset..offset.checked_add(length)?)
 }
 
 fn values_buffer(buffer: &ipc::Buffer, field: &Field, rows: usize, body_bytes: usize) -> bool {
