@@ -3321,6 +3321,7 @@ mod columnar;
 mod materialization;
 mod metadata_validation;
 mod native_lookup;
+#[cfg(test)]
 mod row_ipc;
 mod sql_key_scratch;
 
@@ -4596,6 +4597,7 @@ impl StreamOperator for StreamJoinOperator {
 }
 
 impl StreamJoinOperator {
+    #[cfg(test)]
     fn checkpoint_v1(&mut self, epoch: Epoch) -> Result<OperatorStateSnapshot> {
         if self
             .state
@@ -5614,6 +5616,7 @@ const JOIN_STATE_MAGIC: &[u8; 8] = b"CFJOIN1\0";
 
 /// Number of carried delta segments that triggers compaction on the next
 /// asynchronous checkpoint preparation (spec FR10).
+#[cfg(test)]
 const JOIN_DELTA_COMPACTION_SEGMENTS: u32 = 4;
 
 const JOIN_DELTA_MAGIC: &[u8; 8] = b"CFJDLT1\0";
@@ -5624,6 +5627,7 @@ const JOIN_DELTA_TOMBSTONE_TAG: u8 = 2;
 ///
 /// Upserts encode the records they carry from admission, so the encode cost is
 /// proportional to the dirty set, never to the full state (spec FR47).
+#[cfg(test)]
 fn encode_pending_delta(
     state: &StreamJoinState,
     epoch: Epoch,
@@ -5654,6 +5658,7 @@ fn encode_pending_delta(
 }
 
 /// Appends one dirty op's tag, identity and (for upserts) carried row IPC.
+#[cfg(test)]
 fn encode_delta_op(
     segment: &mut Vec<u8>,
     op: &PendingOp,
@@ -5700,6 +5705,7 @@ fn encode_delta_op(
 }
 
 impl PendingOp {
+    #[cfg(test)]
     const fn side(&self) -> JoinSide {
         match self {
             PendingOp::Upsert { side, .. } | PendingOp::Tombstone { side, .. } => *side,
@@ -6139,6 +6145,7 @@ fn read_ipc_record(
     )
 }
 
+#[cfg(test)]
 fn encode_side(
     rows: &[StoredRow],
     operator_id: &str,
@@ -6162,6 +6169,7 @@ fn encode_side(
     Ok(output)
 }
 
+#[cfg(test)]
 fn ordered_checkpoint_rows<'a>(
     rows: &'a [StoredRow],
     check: &impl Fn() -> Result<()>,
@@ -6174,6 +6182,7 @@ fn ordered_checkpoint_rows<'a>(
     Ok(ordered)
 }
 
+#[cfg(test)]
 fn append_stored_row(
     output: &mut Vec<u8>,
     row: &StoredRow,

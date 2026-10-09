@@ -41,13 +41,13 @@ pub(super) struct PayloadEntry {
 pub(super) struct Base {
     pub(super) segments: BTreeMap<String, StateSegment>,
     pub(super) payloads: Vec<PayloadEntry>,
-    _owners: Vec<Arc<MemoryReservation>>,
-    _funding: Arc<MemoryReservation>,
+    owners: Vec<Arc<MemoryReservation>>,
+    funding: Arc<MemoryReservation>,
 }
 
 impl Base {
     pub(super) fn credit(&self) -> &MemoryReservation {
-        &self._funding
+        &self.funding
     }
 
     pub(super) fn merge(&mut self, mut incoming: Self) -> Result<()> {
@@ -55,16 +55,16 @@ impl Base {
         self.segments.append(&mut incoming.segments);
         self.payloads.append(&mut incoming.payloads);
         canonical_payloads(&mut self.payloads);
-        self._owners.append(&mut incoming._owners);
-        self._owners.push(incoming._funding);
+        self.owners.append(&mut incoming.owners);
+        self.owners.push(incoming.funding);
         Ok(())
     }
     fn admit_merge(&self, incoming: &Self) -> Result<()> {
         let segments = add(self.segments.len(), incoming.segments.len())?;
         let payloads = add(self.payloads.len(), incoming.payloads.len())?;
-        let owners = sum(&[self._owners.len(), incoming._owners.len(), 1])?;
+        let owners = sum(&[self.owners.len(), incoming.owners.len(), 1])?;
         accounting::reserve(
-            &self._funding,
+            &self.funding,
             sum(&[
                 budget::tree::<String, StateSegment>(segments)?,
                 bulk_bytes::<PayloadEntry>(payloads)?,
@@ -114,12 +114,19 @@ pub(super) fn copy_pending(
     let mut owned = Vec::with_capacity(count);
     for op in pending.iter() {
         check()?;
-        if let super::super::super::PendingOp::Upsert { record, .. } = op {
-            admit_payload_clone(record, workspace)?;
-        }
-        owned.push(op.clone());
+        owned.push(clone_pending_op(op, workspace)?);
     }
     Ok(owned)
+}
+
+fn clone_pending_op(
+    op: &super::super::super::PendingOp,
+    workspace: &MemoryReservation,
+) -> Result<super::super::super::PendingOp> {
+    if let super::super::super::PendingOp::Upsert { record, .. } = op {
+        admit_payload_clone(record, workspace)?;
+    }
+    Ok(op.clone())
 }
 
 pub(super) fn admit_payload_clone(
@@ -186,8 +193,8 @@ impl Encoder {
             output: Base {
                 segments: BTreeMap::new(),
                 payloads: Vec::new(),
-                _owners: Vec::new(),
-                _funding: Arc::clone(&funding),
+                owners: Vec::new(),
+                funding: Arc::clone(&funding),
             },
             funding,
             retained: seed,
@@ -282,9 +289,9 @@ impl Encoder {
     }
 }
 
-fn header(magic: &[u8; 8], side: JoinSide) -> [u8; 16] {
+fn header(magic: [u8; 8], side: JoinSide) -> [u8; 16] {
     let mut header = [0; 16];
-    header[..8].copy_from_slice(magic);
+    header[..8].copy_from_slice(&magic);
     header[8..12].copy_from_slice(&2_u32.to_le_bytes());
     header[12] = u8::from(side == JoinSide::Right);
     header
@@ -336,7 +343,7 @@ fn encode_index(
 ) -> Result<Vec<u8>> {
     let mut index = PaidBuffer::new(credit, retained);
     let mut fixed = [0; 32];
-    fixed[..16].copy_from_slice(&header(BASE_MAGIC, side));
+    fixed[..16].copy_from_slice(&header(*BASE_MAGIC, side));
     fixed[16..24].copy_from_slice(&integer(rows.len())?);
     index.append(&fixed)?;
     for (position, row) in rows.iter().enumerate() {
@@ -373,7 +380,7 @@ fn append_payload(
     check: &dyn Fn() -> Result<()>,
 ) -> Result<()> {
     let mut fixed = [0; 32];
-    fixed[..16].copy_from_slice(&header(PAYLOAD_MAGIC, side));
+    fixed[..16].copy_from_slice(&header(*PAYLOAD_MAGIC, side));
     fixed[16..24].copy_from_slice(&integer(rows.len())?);
     fixed[24..32].copy_from_slice(&integer(ipc.len())?);
     bytes.append(&fixed)?;

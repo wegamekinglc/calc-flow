@@ -1,5 +1,9 @@
 use super::super::super::super::PendingOp;
-use super::*;
+use super::{
+    Arc, Base, Encoder, JoinSide, MemoryReservation, PaidBuffer, Result, SchemaRef, StoredRow,
+    accounting, add, admit_payload_clone, bulk_bytes, ensure, header, integer, ordered_rows,
+    upsert,
+};
 
 const DELTA_MAGIC: &[u8; 8] = b"CFJDIX2\0";
 
@@ -81,31 +85,43 @@ fn upserts(
     let count = count_ops(pending, side, true, check)?;
     accounting::reserve(workspace, bulk_bytes::<StoredRow>(count)?)?;
     let mut rows = Vec::with_capacity(count);
-    for op in pending.iter() {
+    for op in pending {
         check()?;
-        if let PendingOp::Upsert {
-            side: actual,
-            row_id,
-            event_time,
-            encoded_key,
-            record,
-            charge,
-        } = op
-        {
-            if *actual == side {
-                admit_payload_clone(record, workspace)?;
-                rows.push(StoredRow {
-                    record: record.clone(),
-                    event_time: *event_time,
-                    row_id: *row_id,
-                    charge: *charge,
-                    encoded_key: Arc::clone(encoded_key),
-                });
-            }
+        if let Some(row) = clone_upsert(op, side, workspace)? {
+            rows.push(row);
         }
     }
     rows.sort_unstable_by_key(|row| row.row_id);
     Ok(rows)
+}
+
+fn clone_upsert(
+    op: &PendingOp,
+    side: JoinSide,
+    workspace: &MemoryReservation,
+) -> Result<Option<StoredRow>> {
+    let PendingOp::Upsert {
+        side: actual,
+        row_id,
+        event_time,
+        encoded_key,
+        record,
+        charge,
+    } = op
+    else {
+        return Ok(None);
+    };
+    if *actual != side {
+        return Ok(None);
+    }
+    admit_payload_clone(record, workspace)?;
+    Ok(Some(StoredRow {
+        record: record.clone(),
+        event_time: *event_time,
+        row_id: *row_id,
+        charge: *charge,
+        encoded_key: Arc::clone(encoded_key),
+    }))
 }
 
 fn removals<'a>(
@@ -117,7 +133,7 @@ fn removals<'a>(
     let count = count_ops(pending, side, false, check)?;
     accounting::reserve(workspace, bulk_bytes::<&PendingOp>(count)?)?;
     let mut rows = Vec::with_capacity(count);
-    for op in pending.iter() {
+    for op in pending {
         check()?;
         if matches!(op, PendingOp::Tombstone { side: actual, .. } if *actual == side) {
             rows.push(op);
@@ -178,7 +194,7 @@ fn index_header(
     removals: usize,
 ) -> Result<[u8; 40]> {
     let mut fixed = [0; 40];
-    fixed[..16].copy_from_slice(&header(DELTA_MAGIC, side));
+    fixed[..16].copy_from_slice(&header(*DELTA_MAGIC, side));
     fixed[16..24].copy_from_slice(&epoch.as_u64().to_le_bytes());
     fixed[24..32].copy_from_slice(&integer(upserts)?);
     fixed[32..40].copy_from_slice(&integer(removals)?);

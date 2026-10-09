@@ -125,7 +125,9 @@ fn config() -> StreamRuntimeConfig {
     }
 }
 
-fn writer_plan(writers: &Arc<Mutex<Vec<(usize, usize, bool)>>>) -> crate::StreamExecutionPlan {
+type WriterObservations = Arc<Mutex<Vec<(usize, usize, bool)>>>;
+
+fn writer_plan(writers: &WriterObservations) -> crate::StreamExecutionPlan {
     let schema = fixed_schema();
     let mut join = StreamJoinOperator::new(
         "match",

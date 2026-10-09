@@ -1,8 +1,11 @@
-use std::any::Any;
+use std::{any::Any, sync::Arc};
 
 use super::super::super::{geometry, inventory};
 use super::super::metadata::DeltaEntry;
-use super::*;
+use super::{
+    Base, Encoder, MemoryReservation, PayloadEntry, Result, StateSegment, accounting, add, budget,
+    ensure, error, product, sum,
+};
 use crate::OperatorStateSnapshot;
 
 type Owner = Arc<dyn Any + Send + Sync>;
@@ -30,13 +33,13 @@ pub(in crate::operator::join::checkpoint_v2::writer) fn decode(
     let encoder = Encoder::new(workspace)?;
     let counts = required(snapshot, inventory, check)?;
     ensure(&encoder.funding, add(encoder.retained, counts.bytes)?)?;
-    copy_history(snapshot, inventory, counts, encoder, check)
+    copy_history(snapshot, inventory, &counts, encoder, check)
 }
 
 fn copy_history(
     snapshot: &OperatorStateSnapshot,
     inventory: &inventory::Inventory<'_>,
-    counts: Counts,
+    counts: &Counts,
     mut encoder: Encoder,
     check: &dyn Fn() -> Result<()>,
 ) -> Result<RestoredHistory> {

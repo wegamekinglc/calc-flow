@@ -382,3 +382,6 @@ fn test_join_restore_accepts_v2_payload_locator_history_atomically() {
 
 #[path = "checkpoint_v2_writer_cancel_tests.rs"]
 mod writer_cancel_tests;
+
+#[path = "checkpoint_v2_writer_migration_tests.rs"]
+mod writer_migration_tests;

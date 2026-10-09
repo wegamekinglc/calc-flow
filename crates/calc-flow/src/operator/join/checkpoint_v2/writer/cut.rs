@@ -7,14 +7,14 @@ pub(super) struct Cut {
     pub(super) generation: u64,
     pub(super) captured_epoch: Option<Epoch>,
     pub(super) revision: u64,
-    pub(super) dirty_cut: u64,
+    pub(super) dirty_revision: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct Tracker {
     pub(super) generation: u64,
     pub(super) revision: u64,
-    pub(super) dirty_cut: u64,
+    pub(super) dirty_revision: u64,
 }
 
 impl Tracker {
@@ -23,17 +23,17 @@ impl Tracker {
             generation: self.generation,
             captured_epoch,
             revision: self.revision,
-            dirty_cut: self.dirty_cut,
+            dirty_revision: self.dirty_revision,
         }
     }
 
     pub(super) fn advanced(self, dirty: bool) -> Result<Self> {
         Ok(Self {
             revision: increment(self.revision)?,
-            dirty_cut: if dirty {
-                increment(self.dirty_cut)?
+            dirty_revision: if dirty {
+                increment(self.dirty_revision)?
             } else {
-                self.dirty_cut
+                self.dirty_revision
             },
             ..self
         })
@@ -43,7 +43,7 @@ impl Tracker {
         Ok(Self {
             generation: increment(self.generation)?,
             revision: 0,
-            dirty_cut: 0,
+            dirty_revision: 0,
         })
     }
 }

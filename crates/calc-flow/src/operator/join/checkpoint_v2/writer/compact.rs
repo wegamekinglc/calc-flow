@@ -66,10 +66,7 @@ fn compact_column(
         admit_selection(first.as_ref(), workspace)?;
         selected.push(first.slice(0, 0));
     }
-    let arrays = selected
-        .iter()
-        .map(|array| array.as_ref())
-        .collect::<Vec<_>>();
+    let arrays = selected.iter().map(Arc::as_ref).collect::<Vec<_>>();
     concatenate(&arrays, workspace, funding, check)
 }
 

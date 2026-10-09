@@ -332,9 +332,218 @@ impl ScenarioBatches {
     }
 }
 
+const FOCUSED_CHECKPOINT_ENV: &str = "CALC_FLOW_JOIN_PERF_FOCUSED";
+const FOCUSED_CAPTURE: &str = "join/checkpoint/capture_dirty_1250_base_17500";
+const FOCUSED_PREPARE: &str = "join/checkpoint/prepare_then_left_500_compact_60k";
+
+#[derive(Clone, Copy)]
+enum FocusedCheckpoint {
+    Capture,
+    Prepare,
+}
+
+fn focused_checkpoint_mode() -> bool {
+    match std::env::var(FOCUSED_CHECKPOINT_ENV) {
+        Err(std::env::VarError::NotPresent) => return false,
+        Ok(mode) => assert_eq!(mode, "checkpoint-writer-v1", "invalid focused mode"),
+        Err(error) => panic!("invalid focused mode: {error}"),
+    }
+    true
+}
+
+fn focused_checkpoint_case(name: &str) -> FocusedCheckpoint {
+    match name {
+        FOCUSED_CAPTURE => FocusedCheckpoint::Capture,
+        FOCUSED_PREPARE => FocusedCheckpoint::Prepare,
+        _ => panic!("focused mode requires one exact approved case"),
+    }
+}
+
+fn focused_checkpoint_selection() -> Option<Option<FocusedCheckpoint>> {
+    if !focused_checkpoint_mode() {
+        return None;
+    }
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    let selected = match args.as_slice() {
+        [flag] if flag == "--list" => None,
+        [name, exact, bench] if exact == "--exact" && bench == "--bench" => {
+            Some(focused_checkpoint_case(name))
+        }
+        _ => panic!("focused mode accepts --list or <approved-case> --exact --bench"),
+    };
+    Some(selected)
+}
+
+fn focused_checkpoint(
+    c: &mut Criterion,
+    runtime: &tokio::runtime::Runtime,
+    selected: Option<FocusedCheckpoint>,
+) {
+    if let Some(selected) = selected {
+        runtime.block_on(focused_checkpoint_probe(selected));
+    }
+    let mut group = c.benchmark_group("join");
+    group.sample_size(30);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(2));
+    capture_dirty_scenario(&mut group, runtime, 17_500);
+    prepare_compact_scenario(&mut group, runtime);
+    let (rss, hwm) = read_rss();
+    println!("JOIN_PERF_RSS rss_kib={rss} hwm_kib={hwm}");
+    group.finish();
+}
+
+async fn focused_checkpoint_probe(selected: FocusedCheckpoint) {
+    match selected {
+        FocusedCheckpoint::Capture => {
+            let (mut operator, next_epoch) = dirty_operator(17_500, 1_250).await;
+            let status = operator.status();
+            assert_eq!(status.left.retained_rows, 8_753);
+            assert_eq!(status.right.retained_rows, 8_753);
+            assert_eq!(status.emitted_match_rows, 0);
+            let snapshot = operator
+                .checkpoint(Epoch::new(next_epoch).unwrap())
+                .unwrap();
+            verify_checkpoint_probe(
+                FOCUSED_CAPTURE,
+                &snapshot,
+                [8_128, 8_128],
+                [8_753, 8_753],
+                &["left", "right"],
+            );
+        }
+        FocusedCheckpoint::Prepare => focused_prepare_probe().await,
+    }
+}
+
+async fn focused_prepare_probe() {
+    let (mut operator, next_epoch) = armed_operator(60_000).await;
+    let job = job();
+    let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+    let batch = make_batch(&unique_keys("X", 500), BASE_TS + 3 * SECOND);
+    operator
+        .prepare_checkpoint_async(&plain_ctx(&job))
+        .await
+        .unwrap();
+    feed(&mut operator, &job, &mut collector, "left", &batch).await;
+    let status = operator.status();
+    assert_eq!(status.left.retained_rows, 30_503);
+    assert_eq!(status.right.retained_rows, 30_003);
+    assert_eq!(status.emitted_match_rows, 0);
+    let snapshot = operator
+        .checkpoint(Epoch::new(next_epoch).unwrap())
+        .unwrap();
+    verify_checkpoint_probe(
+        FOCUSED_PREPARE,
+        &snapshot,
+        [30_003, 30_003],
+        [30_503, 30_003],
+        &["left"],
+    );
+}
+
+fn verify_checkpoint_probe(
+    case: &str,
+    snapshot: &OperatorStateSnapshot,
+    base_rows: [u64; 2],
+    retained_rows: [u64; 2],
+    delta_sides: &[&str],
+) {
+    let metadata = &snapshot.inline_metadata;
+    let layout = metadata["layout_version"].as_u64().expect("integer layout");
+    assert_eq!(metadata["epoch"].as_u64(), Some(5));
+    assert_eq!(metadata["ended"].as_bool(), Some(false));
+    assert_eq!(metadata["metrics"]["emitted_match_rows"].as_u64(), Some(0));
+    for (side, name) in ["left", "right"].into_iter().enumerate() {
+        assert_eq!(
+            metadata["metrics"][name]["retained_rows"].as_u64(),
+            Some(retained_rows[side]),
+        );
+        let bytes = snapshot.segments[&format!("{name}-base")].bytes();
+        verify_populated_base(bytes, layout, u8::try_from(side).unwrap(), base_rows[side]);
+    }
+    if layout == 2 {
+        let inventory = &metadata["v2_inventory"];
+        assert_eq!(inventory["codec_version"].as_u64(), Some(2));
+        assert_eq!(inventory["base_epoch"].as_u64(), Some(4));
+        assert_eq!(
+            inventory["deltas"],
+            serde_json::json!([{"epoch": 5, "sides": delta_sides}]),
+        );
+    }
+    verify_delta_names(snapshot, delta_sides);
+    let base_epoch = metadata
+        .get("v2_inventory")
+        .map(|inventory| &inventory["base_epoch"]);
+    println!(
+        "JOIN_PERF_FOCUSED_PROBE {}",
+        serde_json::json!({
+            "case": case,
+            "layout_version": layout,
+            "capture_epoch": 5,
+            "base_epoch": base_epoch,
+            "base_rows": base_rows,
+            "retained_rows": retained_rows,
+            "delta_sides": delta_sides,
+            "emitted_match_rows": 0,
+            "populated_base_verified": true,
+        }),
+    );
+}
+
+fn verify_populated_base(bytes: &[u8], layout: u64, side: u8, expected_rows: u64) {
+    assert!(
+        expected_rows > 0,
+        "focused workload must have populated bases"
+    );
+    match layout {
+        1 => {
+            assert_eq!(bytes.get(..8), Some(&b"CFJOIN1\0"[..]));
+            assert_eq!(frame_u64(bytes, 8), expected_rows);
+        }
+        2 => {
+            assert_eq!(bytes.get(..8), Some(&b"CFJIDX2\0"[..]));
+            assert_eq!(bytes.get(8..12), Some(&2_u32.to_le_bytes()[..]));
+            assert_eq!(bytes.get(12..16), Some(&[side, 0, 0, 0][..]));
+            assert_eq!(frame_u64(bytes, 16), expected_rows);
+            assert_eq!(frame_u64(bytes, 24), 0);
+        }
+        _ => panic!("unsupported focused checkpoint layout {layout}"),
+    }
+}
+
+fn frame_u64(bytes: &[u8], offset: usize) -> u64 {
+    let encoded = bytes
+        .get(offset..offset + 8)
+        .expect("truncated base header");
+    u64::from_le_bytes(encoded.try_into().expect("eight-byte integer"))
+}
+
+fn verify_delta_names(snapshot: &OperatorStateSnapshot, sides: &[&str]) {
+    let actual = snapshot
+        .segments
+        .keys()
+        .filter(|name| name.contains("-delta-"))
+        .cloned()
+        .collect::<Vec<_>>();
+    let expected = sides
+        .iter()
+        .map(|side| format!("{side}-delta-5"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual, expected,
+        "prepared cut must carry only the new dirty epoch"
+    );
+}
+
 fn baseline(c: &mut Criterion) {
+    let focused = focused_checkpoint_selection();
     println!("JOIN_PERF_PROVENANCE {}", provenance());
     let runtime = tokio::runtime::Runtime::new().unwrap();
+    if let Some(selected) = focused {
+        focused_checkpoint(c, &runtime, selected);
+        return;
+    }
     let batches = ScenarioBatches::new();
     run_probe(&runtime, &batches);
 
@@ -559,29 +768,35 @@ fn checkpoint_scenarios(
     // rows) at two retained state scales. The capture cost must track the
     // dirty set — before the FR47 fix it grew linearly with total state.
     for total_rows in [17_500_usize, 62_500] {
-        let name = format!("checkpoint/capture_dirty_1250_base_{total_rows}");
-        group.bench_function(name, |b| {
-            b.to_async(runtime).iter_custom(|iters| {
-                Box::pin(async move {
-                    let mut total = Duration::ZERO;
-                    for _ in 0..iters {
-                        let (mut operator, next_epoch) = dirty_operator(total_rows, 1_250).await;
-                        let start = Instant::now();
-                        operator
-                            .checkpoint(Epoch::new(next_epoch).unwrap())
-                            .unwrap();
-                        total += start.elapsed();
-                    }
-                    total
-                })
-            });
-        });
+        capture_dirty_scenario(group, runtime, total_rows);
     }
 }
 
-/// Checkpoint preparation plus a 500-row handler, with an armed 60k-row
-/// compaction or an already-compacted control. Both time the same lifecycle.
-fn compaction_scenarios(
+fn capture_dirty_scenario(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    runtime: &tokio::runtime::Runtime,
+    total_rows: usize,
+) {
+    let name = format!("checkpoint/capture_dirty_1250_base_{total_rows}");
+    group.bench_function(name, |b| {
+        b.to_async(runtime).iter_custom(|iters| {
+            Box::pin(async move {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    let (mut operator, next_epoch) = dirty_operator(total_rows, 1_250).await;
+                    let start = Instant::now();
+                    operator
+                        .checkpoint(Epoch::new(next_epoch).unwrap())
+                        .unwrap();
+                    total += start.elapsed();
+                }
+                total
+            })
+        });
+    });
+}
+
+fn prepare_compact_scenario(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
     runtime: &tokio::runtime::Runtime,
 ) {
@@ -609,6 +824,15 @@ fn compaction_scenarios(
             })
         });
     });
+}
+
+/// Checkpoint preparation plus a 500-row handler, with an armed 60k-row
+/// compaction or an already-compacted control. Both time the same lifecycle.
+fn compaction_scenarios(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    runtime: &tokio::runtime::Runtime,
+) {
+    prepare_compact_scenario(group, runtime);
 
     group.bench_function("checkpoint/prepare_then_left_500_steady_60k", |b| {
         b.to_async(runtime).iter_custom(|iters| {

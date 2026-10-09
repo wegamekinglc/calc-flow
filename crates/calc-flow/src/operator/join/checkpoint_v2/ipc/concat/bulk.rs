@@ -1,4 +1,12 @@
-use super::*;
+use std::sync::Arc;
+
+use arrow_data::ArrayData;
+use datafusion::{arrow::array::Array, execution::memory_pool::MemoryReservation};
+
+use super::{
+    Requests, accounting, add, array_requests, nested_merges, product, snapshot_requests, sum,
+};
+use crate::Result;
 
 pub(in crate::operator::join::checkpoint_v2) fn admit(
     arrays: &[&dyn Array],
@@ -36,10 +44,10 @@ fn requests(sources: &[ArrayData], check: &dyn Fn() -> Result<()>) -> Result<Req
         check()?;
         requests.include(&single_requests(source, check)?)?;
     }
-    finish_requests(requests, sources)
+    finish_requests(&requests, sources)
 }
 
-fn finish_requests(requests: Requests, sources: &[ArrayData]) -> Result<Requests> {
+fn finish_requests(requests: &Requests, sources: &[ArrayData]) -> Result<Requests> {
     // Global dictionary buckets and grown Vecs can round above summed local capacities.
     Ok(Requests {
         workspace: add(product(requests.workspace, 2)?, bulk_controls(sources)?)?,

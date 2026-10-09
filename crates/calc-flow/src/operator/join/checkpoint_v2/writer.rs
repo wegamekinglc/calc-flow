@@ -79,7 +79,7 @@ impl WriterState {
 struct Inputs {
     rows: [Option<Arc<Vec<StoredRow>>>; 2],
     pending: Option<Vec<PendingOp>>,
-    _containers: Option<Arc<super::ContainerFunding>>,
+    containers: Option<Arc<super::ContainerFunding>>,
     released: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
@@ -88,7 +88,7 @@ impl Drop for Inputs {
         drop(self.rows[0].take());
         drop(self.rows[1].take());
         drop(self.pending.take());
-        self._containers = None;
+        self.containers = None;
         if let Some(released) = self.released.take() {
             let _ = released.send(());
         }
@@ -171,6 +171,7 @@ impl WriterWork {
 }
 
 impl StreamJoinOperator {
+    #[cfg(test)]
     pub(in crate::operator::join) async fn prepare_v2_checkpoint(
         &mut self,
         context: &StreamOperatorContext<'_>,
@@ -270,11 +271,26 @@ impl StreamJoinOperator {
             self.v2_writer.prepared_delta = None;
             self.v2_writer.migration_required = false;
             self.state.deltas.pending.clear();
+            self.retire_v1_checkpoint_history();
             self.v2_writer.tracker = tracker;
         } else {
             self.v2_writer.prepared = Some(PreparedBase { cut, base });
         }
         Ok(())
+    }
+
+    fn retire_v1_checkpoint_history(&mut self) {
+        let deltas = &mut self.state.deltas;
+        if !deltas.base.is_empty()
+            || !deltas.segments.is_empty()
+            || deltas.segments_since_base != 0
+            || deltas.needs_compaction
+        {
+            deltas.base.clear();
+            deltas.segments.clear();
+            deltas.segments_since_base = 0;
+            deltas.needs_compaction = false;
+        }
     }
 
     async fn submit_v2_writer(
@@ -375,7 +391,7 @@ impl StreamJoinOperator {
         let mut inputs = Inputs {
             rows: [None, None],
             pending: None,
-            _containers: self.v2_containers.clone(),
+            containers: self.v2_containers.clone(),
             released: None,
         };
         match kind {
@@ -400,22 +416,45 @@ impl StreamJoinOperator {
         &mut self,
         epoch: Epoch,
     ) -> Result<OperatorStateSnapshot> {
+        self.capture_v2_checkpoint_owned(epoch)
+            .map(|(snapshot, _credit)| snapshot)
+    }
+
+    pub(crate) fn capture_v2_checkpoint_owned(
+        &mut self,
+        epoch: Epoch,
+    ) -> Result<(OperatorStateSnapshot, Arc<MemoryReservation>)> {
+        let credit = self.v2_capture_credit()?;
         self.check_v2_capture_epoch(epoch)?;
         let tracker = self
             .v2_writer
             .tracker
             .advanced(!self.state.deltas.pending.is_empty())?;
         let snapshot = if self.fresh_v2_preparation_matches() {
-            self.capture_initial_prepared(epoch)?
+            self.capture_initial_prepared(epoch, &credit)?
         } else {
-            self.capture_v2_dirty(epoch)?
+            self.capture_v2_dirty(epoch, &credit)?
         };
         self.state.deltas.pending.clear();
         self.state.last_checkpoint_epoch = Some(epoch);
         self.v2_writer.tracker = tracker;
         self.v2_writer.prepared = None;
         self.v2_writer.prepared_delta = None;
-        Ok(snapshot)
+        Ok((snapshot, credit))
+    }
+
+    fn v2_capture_credit(&mut self) -> Result<Arc<MemoryReservation>> {
+        if let Some(base) = self
+            .v2_writer
+            .prepared
+            .as_ref()
+            .map(|prepared| &prepared.base)
+            .or(self.v2_writer.base.as_ref())
+        {
+            return capture_credit(base.credit());
+        }
+        let workspace = self.v2_writer_workspace()?;
+        capture_credit(&workspace)
     }
 
     fn check_v2_capture_epoch(&self, epoch: Epoch) -> Result<()> {
@@ -445,7 +484,11 @@ impl StreamJoinOperator {
                 .is_some_and(|prepared| prepared.cut == self.v2_writer.tracker.snapshot(None))
     }
 
-    fn capture_initial_prepared(&mut self, epoch: Epoch) -> Result<OperatorStateSnapshot> {
+    fn capture_initial_prepared(
+        &mut self,
+        epoch: Epoch,
+        credit: &Arc<MemoryReservation>,
+    ) -> Result<OperatorStateSnapshot> {
         let prepared = self
             .v2_writer
             .prepared
@@ -456,17 +499,10 @@ impl StreamJoinOperator {
         } else {
             epoch.as_u64()
         };
-        let snapshot = metadata::encode(
-            self,
-            epoch,
-            anchor,
-            &[],
-            &prepared.base.payloads,
-            prepared.base.credit(),
-        )?;
+        let snapshot = metadata::encode(self, epoch, anchor, &[], &prepared.base.payloads, credit)?;
         let snapshot = OperatorStateSnapshot {
             inline_metadata: snapshot,
-            segments: clone_segments(&prepared.base, None, prepared.base.credit())?,
+            segments: clone_segments(&prepared.base, None, credit)?,
         };
         let prepared = self
             .v2_writer
@@ -478,7 +514,11 @@ impl StreamJoinOperator {
         Ok(snapshot)
     }
 
-    fn capture_v2_dirty(&mut self, epoch: Epoch) -> Result<OperatorStateSnapshot> {
+    fn capture_v2_dirty(
+        &mut self,
+        epoch: Epoch,
+        credit: &Arc<MemoryReservation>,
+    ) -> Result<OperatorStateSnapshot> {
         let workspace = self.v2_writer_workspace()?;
         let schemas = [
             Arc::clone(self.input_schema(0)),
@@ -486,9 +526,9 @@ impl StreamJoinOperator {
         ];
         let empty = self.v2_empty_base(&schemas, &workspace)?;
         if self.state.deltas.pending.is_empty() {
-            self.capture_v2_clean(epoch, empty)
+            self.capture_v2_clean(epoch, empty, credit)
         } else {
-            self.capture_v2_pending(epoch, &schemas, &workspace, empty)
+            self.capture_v2_pending(epoch, &schemas, &workspace, empty, credit)
         }
     }
 
@@ -506,11 +546,11 @@ impl StreamJoinOperator {
         }
     }
 
-    fn current_v2_base<'a>(&'a self, empty: &'a Option<encode::Base>) -> &'a encode::Base {
+    fn current_v2_base<'a>(&'a self, empty: Option<&'a encode::Base>) -> &'a encode::Base {
         self.v2_writer
             .base
             .as_ref()
-            .or(empty.as_ref())
+            .or(empty)
             .expect("one current base")
     }
 
@@ -518,19 +558,20 @@ impl StreamJoinOperator {
         &mut self,
         epoch: Epoch,
         empty: Option<encode::Base>,
+        credit: &Arc<MemoryReservation>,
     ) -> Result<OperatorStateSnapshot> {
-        let base = self.current_v2_base(&empty);
+        let base = self.current_v2_base(empty.as_ref());
         let inline_metadata = metadata::encode(
             self,
             epoch,
             self.v2_writer.base_epoch,
             &self.v2_writer.deltas,
             &base.payloads,
-            base.credit(),
+            credit,
         )?;
         let snapshot = OperatorStateSnapshot {
             inline_metadata,
-            segments: clone_segments(base, None, base.credit())?,
+            segments: clone_segments(base, None, credit)?,
         };
         if let Some(empty) = empty {
             self.v2_writer.base = Some(empty);
@@ -544,12 +585,18 @@ impl StreamJoinOperator {
         schemas: &[SchemaRef; 2],
         workspace: &MemoryReservation,
         empty: Option<encode::Base>,
+        credit: &Arc<MemoryReservation>,
     ) -> Result<OperatorStateSnapshot> {
         let dirty_epochs = self.next_v2_dirty_epoch()?;
         let delta = self.v2_pending_encoding(schemas, epoch, workspace)?;
         let deltas = self.v2_delta_entries(epoch, &delta)?;
-        let snapshot =
-            self.snapshot_with_v2_delta(epoch, self.current_v2_base(&empty), &delta, &deltas)?;
+        let snapshot = self.snapshot_with_v2_delta(
+            epoch,
+            self.current_v2_base(empty.as_ref()),
+            &delta,
+            &deltas,
+            credit,
+        )?;
         self.install_v2_delta(empty, delta)?;
         self.v2_writer.deltas = deltas;
         self.v2_writer.dirty_epochs = dirty_epochs;
@@ -654,6 +701,7 @@ impl StreamJoinOperator {
         base: &encode::Base,
         delta: &encode::Base,
         deltas: &[metadata::DeltaEntry],
+        credit: &Arc<MemoryReservation>,
     ) -> Result<OperatorStateSnapshot> {
         let count = accounting::add(base.payloads.len(), delta.payloads.len())?;
         let text = base
@@ -662,7 +710,7 @@ impl StreamJoinOperator {
             .chain(&delta.payloads)
             .try_fold(0, |bytes, entry| accounting::add(bytes, entry.sha256.len()))?;
         accounting::reserve(
-            delta.credit(),
+            credit,
             sum(&[bulk_control_bytes::<encode::PayloadEntry>(count)?, text])?,
         )?;
         let mut payloads = base
@@ -678,9 +726,9 @@ impl StreamJoinOperator {
             self.v2_writer.base_epoch,
             deltas,
             &payloads,
-            delta.credit(),
+            credit,
         )?;
-        let segments = clone_segments(base, Some(delta), delta.credit())?;
+        let segments = clone_segments(base, Some(delta), credit)?;
         Ok(OperatorStateSnapshot {
             inline_metadata,
             segments,
@@ -692,33 +740,56 @@ fn bulk_control_bytes<T>(count: usize) -> Result<usize> {
     accounting::product(accounting::product(count, 3)?.max(4), size_of::<T>())
 }
 
-fn clone_segments(
-    base: &encode::Base,
-    delta: Option<&encode::Base>,
-    credit: &MemoryReservation,
-) -> Result<std::collections::BTreeMap<String, crate::StateSegment>> {
+fn capture_credit(parent: &MemoryReservation) -> Result<Arc<MemoryReservation>> {
+    let credit = parent.new_empty();
+    accounting::reserve(
+        &credit,
+        sum(&[
+            accounting::arc::<MemoryReservation>()?,
+            budget::diagnostic_bytes(),
+            restore_budget::registration_bytes()?,
+        ])?,
+    )?;
+    Ok(Arc::new(credit))
+}
+
+fn segment_copy_bytes(base: &encode::Base, delta: Option<&encode::Base>) -> Result<usize> {
     let count = accounting::add(
         base.segments.len(),
         delta.map_or(0, |delta| delta.segments.len()),
     )?;
-    let entries = || {
-        base.segments
-            .iter()
-            .chain(delta.into_iter().flat_map(|delta| delta.segments.iter()))
-    };
-    let strings = entries().try_fold(0, |bytes, (name, segment)| {
-        sum(&[bytes, name.len(), segment.sha256().len()])
-    })?;
-    accounting::reserve(
-        credit,
-        sum(&[
-            restore_budget::tree::<String, crate::StateSegment>(count)?,
-            strings,
-        ])?,
-    )?;
+    let strings = base
+        .segments
+        .iter()
+        .chain(delta.into_iter().flat_map(|delta| delta.segments.iter()))
+        .try_fold(0, |bytes, (name, segment)| {
+            sum(&[bytes, name.len(), segment.sha256().len()])
+        })?;
+    sum(&[
+        restore_budget::tree::<String, crate::StateSegment>(count)?,
+        accounting::product(count, capture_owner_bytes()?)?,
+        strings,
+    ])
+}
+
+fn capture_owner_bytes() -> Result<usize> {
+    type Owner = Arc<dyn std::any::Any + Send + Sync>;
+    accounting::arc::<(Owner, Owner)>()
+}
+
+fn clone_segments(
+    base: &encode::Base,
+    delta: Option<&encode::Base>,
+    credit: &Arc<MemoryReservation>,
+) -> Result<std::collections::BTreeMap<String, crate::StateSegment>> {
+    accounting::reserve(credit, segment_copy_bytes(base, delta)?)?;
     let mut segments = std::collections::BTreeMap::new();
-    for (name, segment) in entries() {
-        segments.insert(name.clone(), segment.clone());
+    for (name, segment) in base
+        .segments
+        .iter()
+        .chain(delta.into_iter().flat_map(|delta| delta.segments.iter()))
+    {
+        segments.insert(name.clone(), segment.clone().with_owner(credit.clone()));
     }
     Ok(segments)
 }

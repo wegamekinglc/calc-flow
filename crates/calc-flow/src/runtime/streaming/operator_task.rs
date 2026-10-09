@@ -49,6 +49,8 @@ use super::{
     supervisor::{PreparedPair, TaskSupervisor},
 };
 
+pub(in crate::runtime::streaming) mod join_checkpoint_credit;
+
 #[cfg(test)]
 mod performance_evidence;
 
@@ -63,11 +65,15 @@ pub(crate) struct OperatorEntryAck {
     pub(crate) result: Result<()>,
 }
 
+pub(crate) type OperatorCheckpointCredit =
+    Arc<datafusion::execution::memory_pool::MemoryReservation>;
+
 pub(crate) struct OperatorCheckpointAck {
     pub(crate) node_id: String,
     pub(crate) epoch: Epoch,
     pub(crate) state: crate::OperatorManifestEntry,
     pub(crate) working: Option<Arc<crate::state::WorkingStatePins>>,
+    pub(crate) capture_credit: Option<OperatorCheckpointCredit>,
 }
 
 pub(crate) struct OperatorCheckpointPort {
@@ -1629,9 +1635,17 @@ async fn capture_prepared_asof(
     epoch: Epoch,
     job: &crate::StreamJobContext,
     task: Option<TaskId>,
-) -> Result<crate::OperatorStateSnapshot> {
+) -> Result<(
+    crate::OperatorStateSnapshot,
+    Option<OperatorCheckpointCredit>,
+)> {
+    if let CompiledStreamOperator::StreamJoin(join) = operator {
+        return join
+            .capture_v2_checkpoint_owned(epoch)
+            .map(|(snapshot, credit)| (snapshot, Some(credit)));
+    }
     if !matches!(operator, CompiledStreamOperator::StreamAsofJoin(_)) {
-        return operator.checkpoint(epoch);
+        return operator.checkpoint(epoch).map(|snapshot| (snapshot, None));
     }
     let owned = std::mem::replace(operator, CompiledStreamOperator::CheckpointLoan);
     let CompiledStreamOperator::StreamAsofJoin(owned) = owned else {
@@ -1639,7 +1653,7 @@ async fn capture_prepared_asof(
     };
     let (restored, snapshot) = owned.capture_managed(epoch, job, task).await?;
     *operator = CompiledStreamOperator::StreamAsofJoin(restored);
-    Ok(snapshot)
+    Ok((snapshot, None))
 }
 
 async fn capture_operator_checkpoint(
@@ -1647,9 +1661,39 @@ async fn capture_operator_checkpoint(
     input_progress: &OperatorInputProgress,
     epoch: Epoch,
 ) -> Result<OperatorCheckpointAck> {
+    let (snapshot, capture_credit) =
+        prepare_operator_snapshot(inputs, input_progress, epoch).await?;
+    let transaction = inputs
+        .checkpoint
+        .as_ref()
+        .and_then(|checkpoint| checkpoint.transaction.clone());
+    let snapshot =
+        encode_operator_snapshot(inputs, input_progress, snapshot, capture_credit.as_ref())?;
+    let staged = stage_operator_snapshot(inputs, epoch, snapshot, transaction).await?;
+    Ok(OperatorCheckpointAck {
+        node_id: inputs.node_id.clone(),
+        epoch,
+        working: staged.working,
+        state: crate::OperatorManifestEntry {
+            progress: input_progress.manifest_entries()?,
+            inline_metadata: staged.inline_metadata,
+            segments: staged.segments,
+        },
+        capture_credit,
+    })
+}
+
+async fn prepare_operator_snapshot(
+    inputs: &mut OperatorTaskInputs,
+    input_progress: &OperatorInputProgress,
+    epoch: Epoch,
+) -> Result<(
+    crate::OperatorStateSnapshot,
+    Option<OperatorCheckpointCredit>,
+)> {
     let prepared = prepare_sql_checkpoint(inputs).await?;
-    let snapshot = if let Some(snapshot) = prepared {
-        snapshot
+    if let Some(snapshot) = prepared {
+        Ok((snapshot, None))
     } else {
         let context = StreamOperatorContext::for_task(
             inputs.context.job(),
@@ -1667,12 +1711,24 @@ async fn capture_operator_checkpoint(
             inputs.context.job(),
             inputs.context.task_id(),
         )
-        .await?
-    };
-    let transaction = inputs
-        .checkpoint
-        .as_ref()
-        .and_then(|checkpoint| checkpoint.transaction.clone());
+        .await
+    }
+}
+
+fn encode_operator_snapshot(
+    inputs: &OperatorTaskInputs,
+    input_progress: &OperatorInputProgress,
+    snapshot: crate::OperatorStateSnapshot,
+    capture_credit: Option<&OperatorCheckpointCredit>,
+) -> Result<crate::OperatorStateSnapshot> {
+    if let Some(credit) = capture_credit {
+        join_checkpoint_credit::admit_envelope(
+            credit,
+            &inputs.node_id,
+            &snapshot,
+            &input_progress.ordinal_by_ingress,
+        )?;
+    }
     let mut snapshot = inputs
         .checkpoint_capability
         .encode_snapshot(&inputs.node_id, snapshot)?;
@@ -1698,7 +1754,16 @@ async fn capture_operator_checkpoint(
             });
         }
     }
-    let staged = match transaction {
+    Ok(snapshot)
+}
+
+async fn stage_operator_snapshot(
+    inputs: &OperatorTaskInputs,
+    epoch: Epoch,
+    snapshot: crate::OperatorStateSnapshot,
+    transaction: Option<Arc<crate::state::ManifestTransaction>>,
+) -> Result<crate::state::StagedOperatorState> {
+    match transaction {
         Some(transaction) => {
             transaction
                 .stage_operator_state_cancellable(
@@ -1707,32 +1772,20 @@ async fn capture_operator_checkpoint(
                     snapshot,
                     inputs.context.job().cancellation(),
                 )
-                .await?
+                .await
         }
-        None if snapshot.segments.is_empty() => crate::state::StagedOperatorState {
+        None if snapshot.segments.is_empty() => Ok(crate::state::StagedOperatorState {
             inline_metadata: snapshot.inline_metadata,
             segments: Vec::new(),
             working: None,
-        },
-        None => {
-            return Err(CalcFlowError::Internal {
-                message: format!(
-                    "operator {:?} produced state segments without a state transaction",
-                    inputs.node_id
-                ),
-            });
-        }
-    };
-    Ok(OperatorCheckpointAck {
-        node_id: inputs.node_id.clone(),
-        epoch,
-        working: staged.working,
-        state: crate::OperatorManifestEntry {
-            progress: input_progress.manifest_entries()?,
-            inline_metadata: staged.inline_metadata,
-            segments: staged.segments,
-        },
-    })
+        }),
+        None => Err(CalcFlowError::Internal {
+            message: format!(
+                "operator {:?} produced state segments without a state transaction",
+                inputs.node_id
+            ),
+        }),
+    }
 }
 
 async fn send_operator_checkpoint_ack(
@@ -2431,6 +2484,7 @@ fn runtime_routes_error(node_id: &str, port: &str) -> CalcFlowError {
 pub(super) mod tests {
     mod asof_tests;
     mod error_propagation_tests;
+    mod join_checkpoint_owner_tests;
 
     use std::{
         any::Any,
@@ -3283,6 +3337,7 @@ pub(super) mod tests {
 
     struct Harness {
         supervisor: TaskSupervisor,
+        gather: crate::runtime::streaming::gather_work::JobGatherOwner,
         cancellation: CancellationToken,
         inputs: BTreeMap<String, crate::EdgeSender>,
         outputs: Vec<crate::EdgeReceiver>,
@@ -3567,6 +3622,7 @@ pub(super) mod tests {
         );
         Harness {
             supervisor,
+            gather: context.gather_owner().clone(),
             cancellation,
             inputs,
             outputs,

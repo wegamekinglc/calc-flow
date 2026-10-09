@@ -10,13 +10,21 @@ pub(super) struct TestRetirementGate {
     pub entered: tokio::sync::oneshot::Sender<()>,
     pub wait: std::sync::mpsc::Receiver<()>,
 }
-use super::checkpoint_v2::ContainerFunding;
-use super::{StoredRow, StreamJoinOperator, encode_side};
+use super::StreamJoinOperator;
+use crate::runtime::streaming::gather_work::GatherStop;
+use crate::{Result, StreamOperatorContext};
+
+#[cfg(test)]
+use super::{StoredRow, checkpoint_v2::ContainerFunding, encode_side};
+#[cfg(test)]
 use crate::runtime::streaming::gather_work::{
-    AdmissionFailure, GatherOperatorId, GatherStop, OwnedCpuWork, cleanup_control_bytes,
+    AdmissionFailure, GatherOperatorId, OwnedCpuWork, cleanup_control_bytes,
 };
-use crate::{CalcFlowError, Result, StateSegment, StreamOperatorContext};
+#[cfg(test)]
+use crate::{CalcFlowError, StateSegment};
+#[cfg(test)]
 use datafusion::execution::memory_pool::MemoryReservation;
+#[cfg(test)]
 use std::{collections::BTreeMap, sync::Arc};
 
 #[cfg(test)]
@@ -36,6 +44,7 @@ impl TestGate {
     }
 }
 
+#[cfg(test)]
 struct InputOwners {
     left: Option<Arc<Vec<StoredRow>>>,
     right: Option<Arc<Vec<StoredRow>>>,
@@ -44,6 +53,7 @@ struct InputOwners {
     retirement_gate: Option<TestRetirementGate>,
 }
 
+#[cfg(test)]
 impl Drop for InputOwners {
     fn drop(&mut self) {
         drop(self.left.take());
@@ -61,6 +71,7 @@ impl Drop for InputOwners {
     }
 }
 
+#[cfg(test)]
 struct BaseWork {
     inputs: InputOwners,
     name: String,
@@ -68,11 +79,13 @@ struct BaseWork {
     gate: Option<TestGate>,
 }
 
+#[cfg(test)]
 struct V2BaseWork {
     inner: BaseWork,
     _containers: Arc<ContainerFunding>,
 }
 
+#[cfg(test)]
 impl OwnedCpuWork for V2BaseWork {
     type Output = BTreeMap<&'static str, StateSegment>;
 
@@ -105,6 +118,7 @@ pub(super) fn expected_attempt_control_bytes(name: &str) -> usize {
         + 64
 }
 
+#[cfg(test)]
 impl OwnedCpuWork for BaseWork {
     type Output = BTreeMap<&'static str, StateSegment>;
 
@@ -129,6 +143,7 @@ impl OwnedCpuWork for BaseWork {
     }
 }
 
+#[cfg(test)]
 fn encode_base_side(
     rows: &[StoredRow],
     name: &str,
@@ -185,6 +200,7 @@ impl StreamJoinOperator {
         context.check_cancelled()
     }
 
+    #[cfg(test)]
     pub(super) async fn prepare_compaction(
         &mut self,
         context: &StreamOperatorContext<'_>,
@@ -197,6 +213,7 @@ impl StreamJoinOperator {
         self.rebuild_compaction_base(context).await
     }
 
+    #[cfg(test)]
     async fn rebuild_compaction_base(&mut self, context: &StreamOperatorContext<'_>) -> Result<()> {
         if let Some(containers) = self.v2_containers.clone() {
             return self.rebuild_v2_compaction_base(context, containers).await;
@@ -204,6 +221,7 @@ impl StreamJoinOperator {
         self.rebuild_v1_compaction_base(context).await
     }
 
+    #[cfg(test)]
     async fn rebuild_v1_compaction_base(
         &mut self,
         context: &StreamOperatorContext<'_>,
@@ -231,6 +249,7 @@ impl StreamJoinOperator {
         Ok(())
     }
 
+    #[cfg(test)]
     async fn rebuild_v2_compaction_base(
         &mut self,
         context: &StreamOperatorContext<'_>,
@@ -262,6 +281,7 @@ impl StreamJoinOperator {
         Ok(())
     }
 
+    #[cfg(test)]
     fn reserve_compaction_workspace(&mut self) -> Result<MemoryReservation> {
         let workspace = self.compaction_workspace()?;
         let credit = self.runtime.runtime()?.incremental_reservation(&self.name);
@@ -271,6 +291,7 @@ impl StreamJoinOperator {
         Ok(credit)
     }
 
+    #[cfg(test)]
     fn compaction_work(&mut self) -> BaseWork {
         let (released, receiver) = tokio::sync::oneshot::channel();
         self.compaction_release = Some(receiver);
@@ -294,6 +315,7 @@ impl StreamJoinOperator {
         }
     }
 
+    #[cfg(test)]
     fn install_compaction_base(
         &mut self,
         base: BTreeMap<&'static str, StateSegment>,
@@ -308,6 +330,7 @@ impl StreamJoinOperator {
         Ok(())
     }
 
+    #[cfg(test)]
     fn compaction_workspace(&self) -> Result<usize> {
         let logical = self
             .state
@@ -329,6 +352,7 @@ impl StreamJoinOperator {
     }
 }
 
+#[cfg(test)]
 fn admission_error(name: &str, failure: AdmissionFailure) -> CalcFlowError {
     match failure {
         AdmissionFailure::Budget { stage, source } => {
@@ -338,6 +362,7 @@ fn admission_error(name: &str, failure: AdmissionFailure) -> CalcFlowError {
     }
 }
 
+#[cfg(test)]
 fn memory_error(name: &str, message: &str) -> CalcFlowError {
     CalcFlowError::DataFusion {
         node_id: Some(name.to_owned()),

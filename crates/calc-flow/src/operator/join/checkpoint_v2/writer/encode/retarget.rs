@@ -34,7 +34,7 @@ fn rebind(
     let name = format!("{side}-delta-{}", epoch.as_u64());
     let mut bytes = original.bytes().to_vec();
     write_epoch(&mut bytes, epoch)?;
-    let replacement = StateSegment::new(bytes).with_owner(encoded._funding.clone());
+    let replacement = StateSegment::new(bytes).with_owner(encoded.funding.clone());
     Ok((name, replacement))
 }
 
