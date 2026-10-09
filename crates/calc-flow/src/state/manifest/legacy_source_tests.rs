@@ -3,8 +3,7 @@ use super::*;
 const LEGACY: &str = r#"{"created_at":"2026-10-10T00:00:00Z","epoch":1,"format_version":3,"operators":{},"pipeline_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","pipeline_name":"legacy-history","recovery_status":"final","runtime_config_hash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","sinks":{},"sources":{"prices":{"cursor":null,"ended":false,"identity_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sequence":0,"watermark_policy":{"idle":false,"kind":"disabled"}}},"state_checksum":"26c10529ff0dea3f3d5a214434ce4eec4b34baaad6705a5d2f0561e9c54abf00"}"#;
 const CHECKSUM: &str = "26c10529ff0dea3f3d5a214434ce4eec4b34baaad6705a5d2f0561e9c54abf00";
 
-#[test]
-fn test_legacy_source_history_omission_preserves_checksum_and_roundtrips() {
+pub(super) fn assert_legacy_source_history_roundtrip() {
     let restored = CheckpointManifest::from_bytes(LEGACY.as_bytes())
         .expect("an authentic pre-history source entry remains readable");
     assert!(restored.sources()["prices"].history.is_none());

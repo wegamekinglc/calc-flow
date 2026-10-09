@@ -45,6 +45,7 @@ fn fields(source: SourceManifestEntry) -> CheckpointManifestFields {
 
 #[test]
 fn source_history_roundtrips_terminal_carried_state_and_checksum() {
+    legacy_source_tests::assert_legacy_source_history_roundtrip();
     let stored = handle(
         "prices",
         Epoch::INITIAL,

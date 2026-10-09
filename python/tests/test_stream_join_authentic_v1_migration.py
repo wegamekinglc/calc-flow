@@ -24,7 +24,7 @@ FIXTURE = (
 )
 FINGERPRINT = "adf19867ed435dd9e58505a1876ea397b9edf2ce588ff1f82b11312f9f4fdb88"
 WATERMARK = 1767225610000000
-PROVENANCE_SHA = "d9db9cd2792040dff76db34ca863f6184f4fce3d838d72fa26be069b9bf57d50"
+PROVENANCE_SHA = "9170131030c9c4e0c215b7c877f7ed8714a95f8d858f4786cf212e05fd9c32c7"
 
 
 def _json(path: Path):
@@ -53,6 +53,15 @@ def _verify_fixture() -> dict[str, object]:
         path = FIXTURE / member["path"]
         assert (path.stat().st_size, _sha(path)) == (member["size"], member["sha256"])
     return provenance
+
+
+def _copy_fixture_root(root: Path) -> None:
+    prefix = "attempt-005/capture/managed-root/"
+    for member in _verify_fixture()["members"]:
+        if member["archive_member"].startswith(prefix):
+            destination = root / member["archive_member"][len(prefix) :]
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(FIXTURE / member["path"], destination)
 
 
 def _manifest(root: Path, epoch: int) -> dict[str, object]:
@@ -426,7 +435,11 @@ def _launch(mode: str, root: Path, output: Path) -> dict[str, object]:
         (output / "stdout.log").open("wb") as stdout,
         (output / "stderr.log").open("wb") as stderr,
     ):
-        process = subprocess.Popen(command, stdout=stdout, stderr=stderr)
+        # The interpreter, worker script, and modes are trusted test inputs.
+        # Paths use repr in the fixed Python bootstrap; argv invokes no shell.
+        process = subprocess.Popen(  # noqa: E501  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit.dangerous-subprocess-use-audit
+            command, stdout=stdout, stderr=stderr
+        )
         _write(output / "command.json", {"argv": command, "pid": process.pid})
         try:
             code = process.wait(timeout=120)
@@ -549,7 +562,7 @@ def migrated_root(tmp_path_factory):
     _verify_fixture()
     output = tmp_path_factory.mktemp("authentic-v1-migration")
     root = output / "process-a-root"
-    shutil.copytree(FIXTURE / "capture/managed-root", root)
+    _copy_fixture_root(root)
     before = {
         path.relative_to(root): _sha(path) for path in root.rglob("*") if path.is_file()
     }

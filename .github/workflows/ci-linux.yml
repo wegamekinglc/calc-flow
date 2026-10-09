@@ -104,7 +104,8 @@ jobs:
       kafka:
         # Official KRaft image; its default listener advertises
         # localhost:9092, which is exactly what the job connects to.
-        image: apache/kafka:3.9.0
+        # Public Docker Hub cache; cached tags can be evicted.
+        image: mirror.gcr.io/apache/kafka:3.9.0
         ports:
           - 9092:9092
     env:
@@ -160,7 +161,8 @@ jobs:
     timeout-minutes: 30
     services:
       postgres:
-        image: postgres:16
+        # Docker Official Images are also published to ECR Public.
+        image: public.ecr.aws/docker/library/postgres:16
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -212,7 +214,7 @@ jobs:
     timeout-minutes: 30
     services:
       mysql:
-        image: mysql:8.4
+        image: public.ecr.aws/docker/library/mysql:8.4
         env:
           MYSQL_ROOT_PASSWORD: calcflow-test
           MYSQL_DATABASE: calcflow
@@ -243,7 +245,7 @@ jobs:
     timeout-minutes: 30
     services:
       clickhouse:
-        image: clickhouse/clickhouse-server:24.12
+        image: mirror.gcr.io/clickhouse/clickhouse-server:24.12
         env:
           CLICKHOUSE_USER: default
           CLICKHOUSE_PASSWORD: ""
@@ -815,7 +817,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       mysql:
-        image: mysql:8.4
+        image: public.ecr.aws/docker/library/mysql:8.4
         env:
           MYSQL_ROOT_PASSWORD: calcflow-test
           MYSQL_DATABASE: calcflow
@@ -827,11 +829,11 @@ jobs:
           --health-timeout 5s
           --health-retries 10
       kafka:
-        image: apache/kafka:3.9.0
+        image: mirror.gcr.io/apache/kafka:3.9.0
         ports:
           - 9092:9092
       postgres:
-        image: postgres:16
+        image: public.ecr.aws/docker/library/postgres:16
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -844,7 +846,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
       clickhouse:
-        image: clickhouse/clickhouse-server:24.12
+        image: mirror.gcr.io/clickhouse/clickhouse-server:24.12
         env:
           CLICKHOUSE_USER: default
           CLICKHOUSE_PASSWORD: ""
