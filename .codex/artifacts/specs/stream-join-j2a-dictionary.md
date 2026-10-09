@@ -143,3 +143,41 @@ which probe path executed.
   source and binary seals, maintained statistics, resource scope, budget and
   owned-process cleanup. Production source stayed frozen throughout this
   measurement-only phase; earlier source tests were not rerun.
+
+## PR #394 selective integration follow-up
+
+The review and integration use main
+`25435770d41d3ab8e5cbc1367ed8c791400ed6fa` with its V2 checkpoint reader.
+Keep this work item's dictionary, borrowed interner, capacity/peak funding,
+key-owner refresh, head-cursor expiry, admission masks and physical-row error
+order. Add parent-backed generic rows and one gather plan per output side.
+Use UInt64 offsets and independently compact flat types; nested Dictionary,
+view/run-end and mixed-parent outputs retain the existing fallback. Owned-copy
+construction refusal keeps its original Legacy representation.
+
+Focused RED observes parent column length one instead of three, then 36 output
+column views instead of zero. Final GREEN: 203 serial Join tests and four
+property tests. Scoped Clippy, formatting, whitespace and generated-contract
+checks pass; actual changed-function maximum CCN is eight. Independent source
+review approves local candidate `eff2fcad17b8922de6aa83955cc14ef602611a0b`
+and source-equivalent published commit
+`bfbe6fbf68e8715e5b0e5c800396fc80e24dfd6e`, both at tree
+`ba005b744e10c3bf183aa64f646390f6b07fc1da`.
+
+The fixed four-case measurement uses two rounds of ten adjacent AB/BA pairs
+per case and a separate 600-second budget. All reference checks pass; three
+Join cases improve under the maintained paired rule: Lookup 1M -72.51%,
+Lookup 100k/batch 1024 -32.68%, retained interval Join 100k -62.97%.
+Projection is inconclusive. Supervised elapsed time is 143.774 seconds,
+including setup and cleanup; the final owned process group is empty.
+Independent raw evidence review passes. Builds are separate, including a
+rejected shared-cache candidate and its correctly rebuilt replacement.
+
+The earlier confirmed regressions above describe the previous frozen
+candidate. The new comparison measures cumulative #393 against current main;
+it does not isolate individual changes or compare PR #394's head. It does
+not establish the complete six-case acceptance aggregate, absolute J2 targets,
+projection equivalence or this integration's checkpoint performance. Required
+CI and coverage remain separate merge gates. The original evidence is retained
+unchanged; see the [integration review and sealed results](../analysis/stream-join-pr394-integration.md)
+for findings, source/binary seals, resource scope, cache rejection and limits.
