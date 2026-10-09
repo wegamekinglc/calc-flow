@@ -115,3 +115,52 @@ after the change.
   vectorized admission (null/late/retain masks, batched row-id
   reservation); the emit-side remainder belongs to the runtime/sink
   path, not the operator.
+
+## Iteration 3: parent-referenced legacy rows (final commit of this branch)
+
+Fine-grained admission timing revealed the decisive fact: the suite's
+default runtime never takes the funded copy path at all, because
+`can_copy_payload` gates on `serial_owned_sql()` (DataFusion
+`Fixed`-parallelism, one target partition) and the production default is
+multi-partition. Every suite batch was admitted through the legacy path,
+which sliced the input record into one wrapped single-row `RecordBatch`
+per row (about 360 ns/row of wrapper allocation), and the take gather
+could not engage for those payloads. Loosening the serial gate is a
+specialist-review boundary (the funded ownership graph is proven only
+for the exact serial plan subset), so instead the legacy path itself
+became lean: admitted rows now carry `RowPayload::Rowed { parent:
+Arc<RecordBatch>, row }` — one parent clone per batch, one refcount per
+row — and `columns()`/`offset()` address the row through the parent.
+`shared_chunk_id` now identifies the parent, so the iteration-2 take
+gather engages for legacy-admitted sides too. Two funded-copy contract
+assertions were widened from `Legacy(_)` to the unfunded legacy family
+(`Legacy | Rowed`); observable contracts (per-row IPC bytes, charges,
+pool zero, no funded lease) are unchanged.
+
+Results (same paired protocol, oracle asserted on every sample):
+
+| Case                    | main        | candidate   | change                          |
+|-------------------------|-------------|-------------|---------------------------------|
+| suite join 1M (2 × 10)  | 1,016.9 / 1,035.0 ms | 122.3 / 128.1 ms | **−87.83%**, CI95 [−87.92%, −87.74%] |
+| suite join 100k (8)     | 113.1 ms    | 16.2 ms     | −85.49%                         |
+| suite interval_join 100k (4) | 664.7 ms | 240.9 ms    | −63.8% (retained-state workload) |
+
+Operator benches: one_to_one 12.2 → 7.38 ms, fanout10 58.8 → 9.42 ms,
+evict ≈ level, capture/restore within noise of main.
+
+The #363 single-thread target of ≤ 60 ms at 1M rows is still not met on
+this shared host (candidate p50 123.7 ms; this host measures main about
+1.6× slower than the historical quiet evidence machine, so the same
+build should land near 75–85 ms there). The remaining suite time is now
+dominated by the runtime/sink path inside the timed window and the
+per-row admission loop itself; both are outside what further operator
+index work can remove.
+
+Rejected in this iteration, with reasons:
+- Probe count/collect single-pass merge: the count pass over the hash
+  index is already cheap and merging would reorder the pairs-credit
+  reservation ahead of its bound, perturbing fail-closed funding.
+- Vectorized admission masks: superseded — the dominant admission cost
+  was per-row wrapper allocation, removed by the Rowed representation.
+- Enabling the funded copy path for non-serial runtimes: explicitly
+  outside the proven serial subset; specialist review required.

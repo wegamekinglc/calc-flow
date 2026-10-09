@@ -9,6 +9,12 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-09: Keep streaming Join rows admitted through the legacy path on
+  their immutable parent record instead of one wrapped single-row batch
+  per row. Suite Join throughput improves about 88% at one million rows
+  with identical outputs, per-row checkpoint bytes, charges and pool
+  accounting; matched output columns also gather those rows by take.
+
 - 2026-10-09: Gather streaming Join output columns with one Arrow take
   per column when every matched pair of a side reads one shared payload
   chunk, instead of one single-row slice per pair. Fanout materialization
