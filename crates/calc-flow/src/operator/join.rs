@@ -1604,10 +1604,48 @@ mod tests {
             .drain("output")
             .iter()
             .filter_map(|message| message.as_data())
-            .map(|batch| batch.num_rows())
+            .map(Batch::num_rows)
             .sum::<usize>();
         assert!(output_rows > 0, "expected matched output rows");
         assert_eq!(join_work().output_column_slices, 0);
+    }
+
+    #[tokio::test]
+    async fn legacy_admission_classifies_the_batch_without_per_row_calls() {
+        let nullable = |times: Vec<i64>| {
+            let rows = times.len();
+            Batch::table(
+                vec![
+                    RecordBatch::try_new(
+                        left_schema(),
+                        vec![
+                            Arc::new(Int64Array::from(vec![7; rows])),
+                            Arc::new(TimestampMicrosecondArray::from(times).with_timezone("UTC")),
+                            Arc::new(Int64Array::from(
+                                (0..rows)
+                                    .map(|index| if index == 0 { None } else { Some(42) })
+                                    .collect::<Vec<_>>(),
+                            )),
+                        ],
+                    )
+                    .unwrap(),
+                ],
+                BatchMetadata::default(),
+            )
+            .unwrap()
+        };
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        let job_context = job();
+        let context = StreamOperatorContext::new(&job_context, "match", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        reset_join_work();
+        operator
+            .process_data("left", nullable(vec![0, 1, 2]), &context, &mut collector)
+            .await
+            .unwrap();
+        assert_eq!(join_work().classify_row_calls, 0);
+        assert_eq!(operator.status().left.retained_rows, 3);
     }
 
     #[tokio::test]
@@ -1635,7 +1673,7 @@ mod tests {
             .drain("output")
             .iter()
             .filter_map(|message| message.as_data())
-            .map(|batch| batch.num_rows())
+            .map(Batch::num_rows)
             .sum::<usize>();
         assert!(output_rows > 0, "expected matched output rows");
         assert_eq!(join_work().output_column_slices, 0);
@@ -2536,6 +2574,7 @@ struct JoinWork {
     sql_probe_table_builds: usize,
     probe_key_allocations: usize,
     output_column_slices: usize,
+    classify_row_calls: usize,
 }
 
 #[cfg(test)]
@@ -2543,6 +2582,7 @@ thread_local! {
     static JOIN_WORK: std::cell::Cell<JoinWork> = const { std::cell::Cell::new(JoinWork {
         retained_visits: 0, pending_visits: 0, key_encodings: 0, time_decoders: 0,
         sql_probe_table_builds: 0, probe_key_allocations: 0, output_column_slices: 0,
+        classify_row_calls: 0,
     }) };
 }
 
@@ -3889,37 +3929,48 @@ impl StreamJoinOperator {
             "left"
         });
         let parent = Arc::new(record.clone());
-        for row_index in 0..record.num_rows() {
-            let row_id = bundle.reserve_row_id(&self.name)?;
-            match self.classify_row(
-                record,
-                plan,
-                &times,
-                row_index,
-                context.ingress_progress().get(ingress),
-                ingress,
-            )? {
-                RowAdmission::Dropped(kind) => bundle.note_dropped(kind, &self.name)?,
-                RowAdmission::Admitted(event_time) => {
-                    bundle.push_admitted(AdmittedRow {
-                        record: columnar::RowPayload::Rowed {
-                            parent: Arc::clone(&parent),
-                            row: row_index,
-                        },
-                        event_time,
-                        row_id,
-                        retain: should_retain(
-                            plan.incoming_is_left,
-                            event_time,
-                            opposite,
-                            self.spec.bounds,
-                        ),
-                    });
-                    bundle
-                        .admitted_source_rows
-                        .push(source_row_base + row_index);
-                }
+        let rows = record.num_rows();
+        let row_id_base = bundle.reserve_row_ids(rows, &self.name)?;
+        let side_progress = context.ingress_progress().get(ingress);
+        // Batch disposition masks: null event time first, then null key, then
+        // lateness, matching the per-row classification order exactly.
+        let null_event_time = times.null_mask();
+        let null_key = null_key_mask(record, &plan.key_indices, rows);
+        for row_index in 0..rows {
+            if null_event_time.as_ref().is_some_and(|mask| mask[row_index]) {
+                bundle.note_dropped(DropKind::NullEventTime, &self.name)?;
+                continue;
             }
+            // Non-null rows decode before the key check: a conversion failure
+            // keeps precedence over a null-key drop.
+            let event_time = times
+                .at(row_index, &self.name, ingress)?
+                .expect("non-null event time rows decode");
+            if null_key[row_index] {
+                bundle.note_dropped(DropKind::NullKey, &self.name)?;
+                continue;
+            }
+            if let Some(lateness) = late_lateness(event_time, side_progress, &self.name)? {
+                bundle.note_dropped(DropKind::Late(lateness), &self.name)?;
+                continue;
+            }
+            bundle.push_admitted(AdmittedRow {
+                record: columnar::RowPayload::Rowed {
+                    parent: Arc::clone(&parent),
+                    row: row_index,
+                },
+                event_time,
+                row_id: row_id_base + row_index as u64,
+                retain: should_retain(
+                    plan.incoming_is_left,
+                    event_time,
+                    opposite,
+                    self.spec.bounds,
+                ),
+            });
+            bundle
+                .admitted_source_rows
+                .push(source_row_base + row_index);
         }
         Ok(())
     }
@@ -3933,6 +3984,8 @@ impl StreamJoinOperator {
         side_progress: Option<IngressProgress>,
         ingress: &str,
     ) -> Result<RowAdmission> {
+        #[cfg(test)]
+        note_join_work(|work| work.classify_row_calls += 1);
         let Some(event_time) = times.at(row_index, &self.name, ingress)? else {
             return Ok(RowAdmission::Dropped(DropKind::NullEventTime));
         };
@@ -4871,6 +4924,18 @@ impl AdmissionBundle {
             .checked_add(1)
             .ok_or_else(|| counter_overflow(operator_id, "row_id"))?;
         Ok(row_id)
+    }
+
+    /// Reserves a contiguous id block so every physical row of one record,
+    /// dropped rows included, consumes exactly one id.
+    fn reserve_row_ids(&mut self, count: usize, operator_id: &str) -> Result<u64> {
+        let base = self.next_row_id;
+        self.next_row_id = base
+            .checked_add(
+                u64::try_from(count).map_err(|_| counter_overflow(operator_id, "row_count"))?,
+            )
+            .ok_or_else(|| counter_overflow(operator_id, "row_id"))?;
+        Ok(base)
     }
 
     fn note_dropped(&mut self, kind: DropKind, operator_id: &str) -> Result<()> {
@@ -6617,6 +6682,21 @@ fn checkpoint_error(operator_id: &str, side: &str, message: &str) -> CalcFlowErr
     }
 }
 
+/// Per-row key-null mask; columns without nulls contribute no per-row work.
+fn null_key_mask(record: &RecordBatch, key_indices: &[usize], rows: usize) -> Vec<bool> {
+    let mut mask = vec![false; rows];
+    for &index in key_indices {
+        let column = record.column(index);
+        if column.null_count() == 0 {
+            continue;
+        }
+        for (row, cell) in mask.iter_mut().enumerate() {
+            *cell |= column.is_null(row);
+        }
+    }
+    mask
+}
+
 fn should_retain(
     incoming_is_left: bool,
     event_time: EventTime,
@@ -6873,6 +6953,16 @@ impl<'a> BatchEventTimes<'a> {
             array,
             values,
             unit: *unit,
+        })
+    }
+
+    /// Per-row null mask of the event-time column, or `None` when the column
+    /// carries no nulls at all.
+    fn null_mask(&self) -> Option<Vec<bool>> {
+        (self.array.null_count() > 0).then(|| {
+            (0..self.array.len())
+                .map(|row| self.array.is_null(row))
+                .collect()
         })
     }
 
