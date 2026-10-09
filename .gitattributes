@@ -3,4 +3,5 @@ web-ui/openapi.json text eol=lf
 web-ui/src/api/schema.d.ts text eol=lf
 tests/fixtures/asof-inner-compat-v1/*.json text eol=lf
 tests/fixtures/asof-inner-compat-v1/*.bin -text
+tests/fixtures/stream-join-authentic-v1/** -text
 benchmarks/rolling/*.json filter=lfs diff=lfs merge=lfs -text

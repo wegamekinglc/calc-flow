@@ -1,0 +1,480 @@
+{
+  "started": {
+    "job_id": 1,
+    "state": "running",
+    "terminal_cause": null,
+    "delivery": {
+      "join.output": {
+        "requested": "at_least_once",
+        "effective": "at_least_once"
+      },
+      "proof.output": {
+        "requested": "at_least_once",
+        "effective": "at_least_once"
+      }
+    },
+    "task_count": 12,
+    "task_errors": 0,
+    "metrics_overflowed": false,
+    "watermark_micros": null,
+    "edges": {
+      "sink/6a6f696e/6f7574707574/6a6f696e2e6f7574707574": {
+        "current_envelopes": 0,
+        "current_rows": 0,
+        "current_bytes": 0,
+        "high_water_envelopes": 0,
+        "high_water_rows": 0,
+        "high_water_bytes": 0,
+        "blocked_sends": 0,
+        "blocked_duration_micros": 0,
+        "envelope_limit": 10000,
+        "row_limit": 10000,
+        "byte_limit": 67108864
+      },
+      "sink/70726f6f66/6f7574707574/70726f6f662e6f7574707574": {
+        "current_envelopes": 0,
+        "current_rows": 0,
+        "current_bytes": 0,
+        "high_water_envelopes": 0,
+        "high_water_rows": 0,
+        "high_water_bytes": 0,
+        "blocked_sends": 0,
+        "blocked_duration_micros": 0,
+        "envelope_limit": 10000,
+        "row_limit": 10000,
+        "byte_limit": 67108864
+      },
+      "source/696e707574/70726f6f66/696e707574": {
+        "current_envelopes": 0,
+        "current_rows": 0,
+        "current_bytes": 0,
+        "high_water_envelopes": 0,
+        "high_water_rows": 0,
+        "high_water_bytes": 0,
+        "blocked_sends": 0,
+        "blocked_duration_micros": 0,
+        "envelope_limit": 10000,
+        "row_limit": 10000,
+        "byte_limit": 67108864
+      },
+      "source/6c656674/6a6f696e/6c656674": {
+        "current_envelopes": 0,
+        "current_rows": 0,
+        "current_bytes": 0,
+        "high_water_envelopes": 0,
+        "high_water_rows": 0,
+        "high_water_bytes": 0,
+        "blocked_sends": 0,
+        "blocked_duration_micros": 0,
+        "envelope_limit": 10000,
+        "row_limit": 10000,
+        "byte_limit": 67108864
+      },
+      "source/7269676874/6a6f696e/7269676874": {
+        "current_envelopes": 0,
+        "current_rows": 0,
+        "current_bytes": 0,
+        "high_water_envelopes": 0,
+        "high_water_rows": 0,
+        "high_water_bytes": 0,
+        "blocked_sends": 0,
+        "blocked_duration_micros": 0,
+        "envelope_limit": 10000,
+        "row_limit": 10000,
+        "byte_limit": 67108864
+      }
+    },
+    "sources": {
+      "input": {
+        "replay_positioning": "exact_pause_report_and_seek",
+        "delivery": "lossless",
+        "max_batch_rows": 4,
+        "max_batch_bytes": 1048576,
+        "next_sequence": 0,
+        "ended": false,
+        "polls": 1,
+        "data_batches": 0,
+        "data_rows": 0,
+        "data_bytes": 0,
+        "fanned_out_batches": 0,
+        "fanned_out_rows": 0,
+        "fanned_out_bytes": 0,
+        "errors": 0
+      },
+      "left": {
+        "replay_positioning": "exact_pause_report_and_seek",
+        "delivery": "lossless",
+        "max_batch_rows": 4,
+        "max_batch_bytes": 1048576,
+        "next_sequence": 0,
+        "ended": false,
+        "polls": 1,
+        "data_batches": 0,
+        "data_rows": 0,
+        "data_bytes": 0,
+        "fanned_out_batches": 0,
+        "fanned_out_rows": 0,
+        "fanned_out_bytes": 0,
+        "errors": 0
+      },
+      "right": {
+        "replay_positioning": "exact_pause_report_and_seek",
+        "delivery": "lossless",
+        "max_batch_rows": 4,
+        "max_batch_bytes": 1048576,
+        "next_sequence": 0,
+        "ended": false,
+        "polls": 1,
+        "data_batches": 0,
+        "data_rows": 0,
+        "data_bytes": 0,
+        "fanned_out_batches": 0,
+        "fanned_out_rows": 0,
+        "fanned_out_bytes": 0,
+        "errors": 0
+      }
+    },
+    "operators": {
+      "join": {
+        "input_batches": 0,
+        "input_rows": 0,
+        "input_bytes": 0,
+        "fanned_out_batches": 0,
+        "fanned_out_rows": 0,
+        "fanned_out_bytes": 0,
+        "processing_duration_micros": 0,
+        "watermark_processing_duration_micros": 0,
+        "errors": 0,
+        "ended": false,
+        "late_rows": 0,
+        "late_affected_batches": 0,
+        "max_lateness_micros": null,
+        "null_event_time_rows": 0,
+        "null_event_time_batches": 0,
+        "datafusion_runtime_created": false
+      },
+      "proof": {
+        "input_batches": 0,
+        "input_rows": 0,
+        "input_bytes": 0,
+        "fanned_out_batches": 0,
+        "fanned_out_rows": 0,
+        "fanned_out_bytes": 0,
+        "processing_duration_micros": 0,
+        "watermark_processing_duration_micros": 0,
+        "errors": 0,
+        "ended": false,
+        "late_rows": 0,
+        "late_affected_batches": 0,
+        "max_lateness_micros": null,
+        "null_event_time_rows": 0,
+        "null_event_time_batches": 0,
+        "datafusion_runtime_created": false
+      }
+    },
+    "sinks": {
+      "fixture-archive": {
+        "output_id": "join.output",
+        "effective_delivery": {
+          "kind": "ordinary"
+        },
+        "delivered_batches": 0,
+        "delivered_rows": 0,
+        "delivered_bytes": 0,
+        "write_duration_micros": 0,
+        "errors": 0,
+        "ended": false
+      },
+      "fixture-udf-archive": {
+        "output_id": "proof.output",
+        "effective_delivery": {
+          "kind": "ordinary"
+        },
+        "delivered_batches": 0,
+        "delivered_rows": 0,
+        "delivered_bytes": 0,
+        "write_duration_micros": 0,
+        "errors": 0,
+        "ended": false
+      }
+    },
+    "checkpoint": {
+      "current_epoch": null,
+      "phase": null,
+      "terminal": false,
+      "source_acks": 0,
+      "expected_sources": 3,
+      "operator_acks": 0,
+      "expected_operators": 2,
+      "sink_precommit_acks": 0,
+      "expected_sink_precommits": 2,
+      "sink_commit_acks": 0,
+      "expected_sink_commits": 2,
+      "elapsed_micros": null,
+      "last_completed_epoch": null,
+      "installed_unknown_epoch": null,
+      "failure_category": null,
+      "runtime_config_changed": false
+    },
+    "stream_joins": {},
+    "stream_asof_joins": {},
+    "rolling_metrics": {}
+  },
+  "cut_before_checkpoint": {
+    "job_id": 1,
+    "state": "running",
+    "terminal_cause": null,
+    "delivery": {
+      "join.output": {
+        "requested": "at_least_once",
+        "effective": "at_least_once"
+      },
+      "proof.output": {
+        "requested": "at_least_once",
+        "effective": "at_least_once"
+      }
+    },
+    "task_count": 12,
+    "task_errors": 0,
+    "metrics_overflowed": false,
+    "watermark_micros": 1767225610000000,
+    "edges": {
+      "sink/6a6f696e/6f7574707574/6a6f696e2e6f7574707574": {
+        "current_envelopes": 0,
+        "current_rows": 0,
+        "current_bytes": 0,
+        "high_water_envelopes": 1,
+        "high_water_rows": 5,
+        "high_water_bytes": 374,
+        "blocked_sends": 0,
+        "blocked_duration_micros": 0,
+        "envelope_limit": 10000,
+        "row_limit": 10000,
+        "byte_limit": 67108864
+      },
+      "sink/70726f6f66/6f7574707574/70726f6f662e6f7574707574": {
+        "current_envelopes": 0,
+        "current_rows": 0,
+        "current_bytes": 0,
+        "high_water_envelopes": 1,
+        "high_water_rows": 4,
+        "high_water_bytes": 32,
+        "blocked_sends": 0,
+        "blocked_duration_micros": 0,
+        "envelope_limit": 10000,
+        "row_limit": 10000,
+        "byte_limit": 67108864
+      },
+      "source/696e707574/70726f6f66/696e707574": {
+        "current_envelopes": 0,
+        "current_rows": 0,
+        "current_bytes": 0,
+        "high_water_envelopes": 1,
+        "high_water_rows": 4,
+        "high_water_bytes": 157,
+        "blocked_sends": 0,
+        "blocked_duration_micros": 0,
+        "envelope_limit": 10000,
+        "row_limit": 10000,
+        "byte_limit": 67108864
+      },
+      "source/6c656674/6a6f696e/6c656674": {
+        "current_envelopes": 0,
+        "current_rows": 0,
+        "current_bytes": 0,
+        "high_water_envelopes": 1,
+        "high_water_rows": 4,
+        "high_water_bytes": 157,
+        "blocked_sends": 0,
+        "blocked_duration_micros": 0,
+        "envelope_limit": 10000,
+        "row_limit": 10000,
+        "byte_limit": 67108864
+      },
+      "source/7269676874/6a6f696e/7269676874": {
+        "current_envelopes": 0,
+        "current_rows": 0,
+        "current_bytes": 0,
+        "high_water_envelopes": 1,
+        "high_water_rows": 4,
+        "high_water_bytes": 157,
+        "blocked_sends": 0,
+        "blocked_duration_micros": 0,
+        "envelope_limit": 10000,
+        "row_limit": 10000,
+        "byte_limit": 67108864
+      }
+    },
+    "sources": {
+      "input": {
+        "replay_positioning": "exact_pause_report_and_seek",
+        "delivery": "lossless",
+        "max_batch_rows": 4,
+        "max_batch_bytes": 1048576,
+        "next_sequence": 1,
+        "ended": false,
+        "polls": 31,
+        "data_batches": 1,
+        "data_rows": 4,
+        "data_bytes": 157,
+        "fanned_out_batches": 1,
+        "fanned_out_rows": 4,
+        "fanned_out_bytes": 157,
+        "errors": 0
+      },
+      "left": {
+        "replay_positioning": "exact_pause_report_and_seek",
+        "delivery": "lossless",
+        "max_batch_rows": 4,
+        "max_batch_bytes": 1048576,
+        "next_sequence": 1,
+        "ended": false,
+        "polls": 31,
+        "data_batches": 1,
+        "data_rows": 4,
+        "data_bytes": 157,
+        "fanned_out_batches": 1,
+        "fanned_out_rows": 4,
+        "fanned_out_bytes": 157,
+        "errors": 0
+      },
+      "right": {
+        "replay_positioning": "exact_pause_report_and_seek",
+        "delivery": "lossless",
+        "max_batch_rows": 4,
+        "max_batch_bytes": 1048576,
+        "next_sequence": 1,
+        "ended": false,
+        "polls": 31,
+        "data_batches": 1,
+        "data_rows": 4,
+        "data_bytes": 157,
+        "fanned_out_batches": 1,
+        "fanned_out_rows": 4,
+        "fanned_out_bytes": 157,
+        "errors": 0
+      }
+    },
+    "operators": {
+      "join": {
+        "input_batches": 2,
+        "input_rows": 8,
+        "input_bytes": 314,
+        "fanned_out_batches": 1,
+        "fanned_out_rows": 5,
+        "fanned_out_bytes": 374,
+        "processing_duration_micros": 1840,
+        "watermark_processing_duration_micros": 0,
+        "errors": 0,
+        "ended": false,
+        "late_rows": 0,
+        "late_affected_batches": 0,
+        "max_lateness_micros": null,
+        "null_event_time_rows": 0,
+        "null_event_time_batches": 0,
+        "datafusion_runtime_created": true
+      },
+      "proof": {
+        "input_batches": 1,
+        "input_rows": 4,
+        "input_bytes": 157,
+        "fanned_out_batches": 1,
+        "fanned_out_rows": 4,
+        "fanned_out_bytes": 32,
+        "processing_duration_micros": 770,
+        "watermark_processing_duration_micros": 0,
+        "errors": 0,
+        "ended": false,
+        "late_rows": 0,
+        "late_affected_batches": 0,
+        "max_lateness_micros": null,
+        "null_event_time_rows": 0,
+        "null_event_time_batches": 0,
+        "datafusion_runtime_created": true
+      }
+    },
+    "sinks": {
+      "fixture-archive": {
+        "output_id": "join.output",
+        "effective_delivery": {
+          "kind": "ordinary"
+        },
+        "delivered_batches": 1,
+        "delivered_rows": 5,
+        "delivered_bytes": 374,
+        "write_duration_micros": 2188,
+        "errors": 0,
+        "ended": false
+      },
+      "fixture-udf-archive": {
+        "output_id": "proof.output",
+        "effective_delivery": {
+          "kind": "ordinary"
+        },
+        "delivered_batches": 1,
+        "delivered_rows": 4,
+        "delivered_bytes": 32,
+        "write_duration_micros": 427,
+        "errors": 0,
+        "ended": false
+      }
+    },
+    "checkpoint": {
+      "current_epoch": null,
+      "phase": null,
+      "terminal": false,
+      "source_acks": 0,
+      "expected_sources": 3,
+      "operator_acks": 0,
+      "expected_operators": 2,
+      "sink_precommit_acks": 0,
+      "expected_sink_precommits": 2,
+      "sink_commit_acks": 0,
+      "expected_sink_commits": 2,
+      "elapsed_micros": null,
+      "last_completed_epoch": null,
+      "installed_unknown_epoch": null,
+      "failure_category": null,
+      "runtime_config_changed": false
+    },
+    "stream_joins": {
+      "join": {
+        "left": {
+          "retained_rows": 3,
+          "retained_bytes": 414,
+          "evicted_rows": 0,
+          "late_rows": 0,
+          "late_affected_batches": 0,
+          "max_lateness_micros": null,
+          "null_event_time_rows": 0,
+          "null_key_rows": 1
+        },
+        "right": {
+          "retained_rows": 3,
+          "retained_bytes": 414,
+          "evicted_rows": 0,
+          "late_rows": 0,
+          "late_affected_batches": 0,
+          "max_lateness_micros": null,
+          "null_event_time_rows": 0,
+          "null_key_rows": 1
+        },
+        "emitted_match_rows": 5,
+        "state_limit_failures": 0,
+        "match_limit_failures": 0
+      }
+    },
+    "stream_asof_joins": {},
+    "rolling_metrics": {}
+  },
+  "outcome": {
+    "state": "completed",
+    "cause": "natural_end",
+    "completed_epoch": 1
+  },
+  "cleanup_outcome": {
+    "state": "completed",
+    "cause": "natural_end",
+    "completed_epoch": 1
+  }
+}

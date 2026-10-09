@@ -12,6 +12,11 @@ use crate::{
     json::{parse_json_value, validate_json_depth_at, validate_portable_identifier},
 };
 
+mod source_entries;
+use source_entries::{SourceEntries, normalize_legacy_sources};
+
+#[cfg(test)]
+mod legacy_source_tests;
 #[cfg(test)]
 mod source_history_tests;
 
@@ -246,7 +251,7 @@ pub struct CheckpointManifest {
     epoch: Epoch,
     created_at: DateTime<Utc>,
     recovery_status: RecoveryStatus,
-    sources: BTreeMap<String, SourceManifestEntry>,
+    sources: SourceEntries,
     operators: BTreeMap<String, OperatorManifestEntry>,
     sinks: BTreeMap<String, SinkManifestEntry>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -272,8 +277,8 @@ struct SerializedManifest {
     state_checksum: String,
 }
 
-impl From<SerializedManifest> for CheckpointManifest {
-    fn from(fields: SerializedManifest) -> Self {
+impl CheckpointManifest {
+    fn from_serialized(fields: SerializedManifest, omitted_history: BTreeSet<String>) -> Self {
         Self {
             format_version: fields.format_version,
             pipeline_name: fields.pipeline_name,
@@ -282,7 +287,7 @@ impl From<SerializedManifest> for CheckpointManifest {
             epoch: fields.epoch,
             created_at: fields.created_at,
             recovery_status: fields.recovery_status,
-            sources: fields.sources,
+            sources: SourceEntries::new(fields.sources, omitted_history),
             operators: fields.operators,
             sinks: fields.sinks,
             static_inputs: fields.static_inputs,
@@ -307,7 +312,7 @@ impl CheckpointManifest {
             epoch: fields.epoch,
             created_at: fields.created_at,
             recovery_status: fields.recovery_status,
-            sources: fields.sources,
+            sources: SourceEntries::new(fields.sources, BTreeSet::new()),
             operators: fields.operators,
             sinks: fields.sinks,
             static_inputs: fields.static_inputs,
@@ -322,17 +327,20 @@ impl CheckpointManifest {
 
     /// Parses one bounded, duplicate-key-free, strict manifest document.
     ///
+    /// Legacy v3 sources retain an originally omitted history field when serialized.
+    ///
     /// # Errors
     ///
     /// Fails before exposing a value when the byte bound, JSON depth, version,
     /// typed fields, handle ownership, or state checksum is invalid.
     pub fn from_bytes(document: &[u8]) -> Result<Self> {
         validate_document_size(document)?;
-        let value = parse_json_value(document, "checkpoint manifest")?;
+        let mut value = parse_json_value(document, "checkpoint manifest")?;
         validate_document_version(&value)?;
+        let omitted_history = normalize_legacy_sources(&mut value);
         let fields: SerializedManifest =
             serde_json::from_value(value).map_err(|error| format_error(error.to_string()))?;
-        let manifest = Self::from(fields);
+        let manifest = Self::from_serialized(fields, omitted_history);
         manifest.validate_internal()?;
         Ok(manifest)
     }
@@ -349,7 +357,7 @@ impl CheckpointManifest {
         self.validate_identity(expected)?;
         self.validate_static_inputs(expected)?;
         self.validate_epoch(expected.epoch)?;
-        validate_id_set("source", self.sources.keys(), expected.source_ids)?;
+        validate_id_set("source", self.sources.entries().keys(), expected.source_ids)?;
         validate_id_set("operator", self.operators.keys(), expected.operator_ids)?;
         validate_id_set("sink", self.sinks.keys(), expected.sink_ids)?;
         Ok(())
@@ -459,7 +467,7 @@ impl CheckpointManifest {
 
     /// Returns source entries in stable ID order.
     pub const fn sources(&self) -> &BTreeMap<String, SourceManifestEntry> {
-        &self.sources
+        self.sources.entries()
     }
 
     /// Returns operator entries in stable ID order.
@@ -533,7 +541,12 @@ impl CheckpointManifest {
         validate_sha256("runtime_config_hash", &self.runtime_config_hash)?;
         let mut identities = BTreeSet::new();
         let mut paths = BTreeSet::new();
-        validate_sources(&self.sources, self.epoch, &mut identities, &mut paths)?;
+        validate_sources(
+            self.sources.entries(),
+            self.epoch,
+            &mut identities,
+            &mut paths,
+        )?;
         if let Some(owner_id) = self
             .operators
             .keys()
@@ -543,7 +556,7 @@ impl CheckpointManifest {
                 "state owner ID {owner_id:?} is shared by an operator and sink"
             )));
         }
-        for (source_id, source) in &self.sources {
+        for (source_id, source) in self.sources.entries() {
             if source.history.is_some()
                 && (self.operators.contains_key(source_id) || self.sinks.contains_key(source_id))
             {
@@ -779,7 +792,10 @@ impl<'de> Deserialize<'de> for CheckpointManifest {
     where
         D: Deserializer<'de>,
     {
-        let manifest = Self::from(SerializedManifest::deserialize(deserializer)?);
+        let manifest = Self::from_serialized(
+            SerializedManifest::deserialize(deserializer)?,
+            BTreeSet::new(),
+        );
         manifest.validate_internal().map_err(D::Error::custom)?;
         Ok(manifest)
     }

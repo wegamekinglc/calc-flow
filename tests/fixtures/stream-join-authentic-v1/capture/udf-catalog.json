@@ -1,0 +1,14 @@
+[
+  {
+    "provider": "fixture",
+    "name": "fixture_identity",
+    "version": "1",
+    "input_types": [
+      "int64"
+    ],
+    "return_type": "int64",
+    "volatility": "immutable",
+    "selected": true,
+    "implementation": "Arrow identity; input immutable"
+  }
+]

@@ -1,0 +1,42 @@
+{
+  "identity": "fixture-udf-archive",
+  "delivery": "ordinary at_least_once",
+  "rows": [
+    {
+      "checked": 100
+    },
+    {
+      "checked": 101
+    },
+    {
+      "checked": 102
+    },
+    {
+      "checked": 103
+    },
+    {
+      "checked": 104
+    },
+    {
+      "checked": 105
+    }
+  ],
+  "batches": [
+    {
+      "file": "output-000.arrow",
+      "rows": 4,
+      "metadata": {},
+      "schema": "checked: int64"
+    },
+    {
+      "file": "output-001.arrow",
+      "rows": 2,
+      "metadata": {},
+      "schema": "checked: int64"
+    }
+  ],
+  "lifecycle": [
+    "open",
+    "close"
+  ]
+}

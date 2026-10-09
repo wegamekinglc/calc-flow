@@ -1,0 +1,186 @@
+{
+  "identity": "fixture-archive",
+  "delivery": "ordinary at_least_once",
+  "rows": [
+    {
+      "left__key": 1,
+      "left__at": "2026-01-01T00:00:18+00:00",
+      "left__sequence": 13,
+      "left__value": 103,
+      "left__note": null,
+      "right__key": 1,
+      "right__at": "2026-01-01T00:00:19+00:00",
+      "right__sequence": 20,
+      "right__value": 200,
+      "right__note": "R0"
+    },
+    {
+      "left__key": 1,
+      "left__at": "2026-01-01T00:00:20+00:00",
+      "left__sequence": 10,
+      "left__value": 100,
+      "left__note": "L0",
+      "right__key": 1,
+      "right__at": "2026-01-01T00:00:19+00:00",
+      "right__sequence": 20,
+      "right__value": 200,
+      "right__note": "R0"
+    },
+    {
+      "left__key": 2,
+      "left__at": "2026-01-01T00:00:25+00:00",
+      "left__sequence": 12,
+      "left__value": 102,
+      "left__note": "L2",
+      "right__key": 2,
+      "right__at": "2026-01-01T00:00:26+00:00",
+      "right__sequence": 22,
+      "right__value": 202,
+      "right__note": "R2"
+    },
+    {
+      "left__key": 1,
+      "left__at": "2026-01-01T00:00:18+00:00",
+      "left__sequence": 13,
+      "left__value": 103,
+      "left__note": null,
+      "right__key": 1,
+      "right__at": "2026-01-01T00:00:18+00:00",
+      "right__sequence": 23,
+      "right__value": 203,
+      "right__note": null
+    },
+    {
+      "left__key": 1,
+      "left__at": "2026-01-01T00:00:20+00:00",
+      "left__sequence": 10,
+      "left__value": 100,
+      "left__note": "L0",
+      "right__key": 1,
+      "right__at": "2026-01-01T00:00:18+00:00",
+      "right__sequence": 23,
+      "right__value": 203,
+      "right__note": null
+    },
+    {
+      "left__key": 1,
+      "left__at": "2026-01-01T00:00:22+00:00",
+      "left__sequence": 14,
+      "left__value": 104,
+      "left__note": "L4",
+      "right__key": 1,
+      "right__at": "2026-01-01T00:00:18+00:00",
+      "right__sequence": 23,
+      "right__value": 203,
+      "right__note": null
+    },
+    {
+      "left__key": 1,
+      "left__at": "2026-01-01T00:00:22+00:00",
+      "left__sequence": 14,
+      "left__value": 104,
+      "left__note": "L4",
+      "right__key": 1,
+      "right__at": "2026-01-01T00:00:19+00:00",
+      "right__sequence": 20,
+      "right__value": 200,
+      "right__note": "R0"
+    },
+    {
+      "left__key": 2,
+      "left__at": "2026-01-01T00:00:28+00:00",
+      "left__sequence": 15,
+      "left__value": 105,
+      "left__note": "L5",
+      "right__key": 2,
+      "right__at": "2026-01-01T00:00:26+00:00",
+      "right__sequence": 22,
+      "right__value": 202,
+      "right__note": "R2"
+    },
+    {
+      "left__key": 1,
+      "left__at": "2026-01-01T00:00:18+00:00",
+      "left__sequence": 13,
+      "left__value": 103,
+      "left__note": null,
+      "right__key": 1,
+      "right__at": "2026-01-01T00:00:23+00:00",
+      "right__sequence": 24,
+      "right__value": 204,
+      "right__note": "R4"
+    },
+    {
+      "left__key": 1,
+      "left__at": "2026-01-01T00:00:20+00:00",
+      "left__sequence": 10,
+      "left__value": 100,
+      "left__note": "L0",
+      "right__key": 1,
+      "right__at": "2026-01-01T00:00:23+00:00",
+      "right__sequence": 24,
+      "right__value": 204,
+      "right__note": "R4"
+    },
+    {
+      "left__key": 1,
+      "left__at": "2026-01-01T00:00:22+00:00",
+      "left__sequence": 14,
+      "left__value": 104,
+      "left__note": "L4",
+      "right__key": 1,
+      "right__at": "2026-01-01T00:00:23+00:00",
+      "right__sequence": 24,
+      "right__value": 204,
+      "right__note": "R4"
+    },
+    {
+      "left__key": 2,
+      "left__at": "2026-01-01T00:00:25+00:00",
+      "left__sequence": 12,
+      "left__value": 102,
+      "left__note": "L2",
+      "right__key": 2,
+      "right__at": "2026-01-01T00:00:29+00:00",
+      "right__sequence": 25,
+      "right__value": 205,
+      "right__note": "R5"
+    },
+    {
+      "left__key": 2,
+      "left__at": "2026-01-01T00:00:28+00:00",
+      "left__sequence": 15,
+      "left__value": 105,
+      "left__note": "L5",
+      "right__key": 2,
+      "right__at": "2026-01-01T00:00:29+00:00",
+      "right__sequence": 25,
+      "right__value": 205,
+      "right__note": "R5"
+    }
+  ],
+  "batches": [
+    {
+      "file": "output-000.arrow",
+      "rows": 5,
+      "metadata": {},
+      "schema": "left__key: int64\nleft__at: timestamp[us, tz=UTC] not null\nleft__sequence: uint64 not null\nleft__value: int64 not null\nleft__note: string\nright__key: int64\nright__at: timestamp[us, tz=UTC] not null\nright__sequence: uint64 not null\nright__value: int64 not null\nright__note: string"
+    },
+    {
+      "file": "output-001.arrow",
+      "rows": 3,
+      "metadata": {},
+      "schema": "left__key: int64\nleft__at: timestamp[us, tz=UTC] not null\nleft__sequence: uint64 not null\nleft__value: int64 not null\nleft__note: string\nright__key: int64\nright__at: timestamp[us, tz=UTC] not null\nright__sequence: uint64 not null\nright__value: int64 not null\nright__note: string"
+    },
+    {
+      "file": "output-002.arrow",
+      "rows": 5,
+      "metadata": {},
+      "schema": "left__key: int64\nleft__at: timestamp[us, tz=UTC] not null\nleft__sequence: uint64 not null\nleft__value: int64 not null\nleft__note: string\nright__key: int64\nright__at: timestamp[us, tz=UTC] not null\nright__sequence: uint64 not null\nright__value: int64 not null\nright__note: string"
+    }
+  ],
+  "lifecycle": [
+    "open",
+    "close"
+  ]
+}
