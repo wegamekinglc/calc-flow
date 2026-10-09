@@ -94,7 +94,7 @@ fn snapshot(operator: &mut StreamJoinOperator) -> OperatorStateSnapshot {
     operator.state.right = right.into();
     operator.state.next_left_row_id = 4;
     operator.state.next_right_row_id = 1;
-    let mut snapshot = operator.checkpoint(Epoch::new(7).unwrap()).unwrap();
+    let mut snapshot = operator.checkpoint_v1(Epoch::new(7).unwrap()).unwrap();
     for (side, rows) in [
         ("left", &operator.state.left),
         ("right", &operator.state.right),
@@ -544,7 +544,7 @@ fn ordered_snapshot() -> OperatorStateSnapshot {
             encoded_key: Arc::new(vec![42; 2_048].into()),
         },
     ];
-    let mut snapshot = source.checkpoint(Epoch::new(11).unwrap()).unwrap();
+    let mut snapshot = source.checkpoint_v1(Epoch::new(11).unwrap()).unwrap();
     snapshot.segments = previous.segments;
     snapshot
         .segments
@@ -593,8 +593,8 @@ async fn check_order_and_wire(service: &TestService) {
     assert_eq!(target.status().right.retained_rows, 1);
     let mut original = operator();
     original.restore(&snapshot).unwrap();
-    let actual = target.checkpoint(Epoch::new(12).unwrap()).unwrap();
-    let expected = original.checkpoint(Epoch::new(12).unwrap()).unwrap();
+    let actual = target.checkpoint_v1(Epoch::new(12).unwrap()).unwrap();
+    let expected = original.checkpoint_v1(Epoch::new(12).unwrap()).unwrap();
     assert_eq!(actual.inline_metadata, expected.inline_metadata);
     assert_eq!(actual.segments, expected.segments);
     assert_eq!(snapshot.inline_metadata, original_metadata);

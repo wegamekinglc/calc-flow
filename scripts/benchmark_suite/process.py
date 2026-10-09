@@ -65,28 +65,72 @@ async def command(
         if executable is None:
             raise ValueError(f"benchmark executable is unavailable: {argv[0]}")
         with log.open("wb") as output:
-            process = await asyncio.create_subprocess_exec(  # nosemgrep
-                str(Path(executable).absolute()),
-                *argv[1:],
-                cwd=cwd,
-                env=env,
-                shell=False,
-                stdout=output,
-                stderr=asyncio.subprocess.STDOUT,
+            creation = asyncio.create_task(
+                asyncio.create_subprocess_exec(  # nosemgrep
+                    str(Path(executable).absolute()),
+                    *argv[1:],
+                    cwd=cwd,
+                    env=env,
+                    shell=False,
+                    stdout=output,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
             )
+            process = None
             try:
+                process = await asyncio.shield(creation)
                 code = await asyncio.wait_for(process.wait(), timeout=timeout)
-            except BaseException:
-                await stop(process)
+            except BaseException as error:
+                try:
+                    await _stop_command(creation, process)
+                except BaseException as cleanup_error:
+                    record = {
+                        **record,
+                        "ownership_unsettled": True,
+                        "cleanup_error": (
+                            f"{type(cleanup_error).__name__}: {cleanup_error}"
+                        ),
+                    }
+                    _raise_command_error(error, cleanup_error)
                 raise
         record = {**record, "exit_code": code}
         if code:
             raise RuntimeError(f"command exited {code}; see {log}")
     except BaseException as error:
         record = {**record, "error": f"{type(error).__name__}: {error}"}
+        _write_command_failure(manifest, record, error)
         raise
-    finally:
+    write_json(manifest, record)
+
+
+async def _complete_owned(task: asyncio.Task):
+    """Finish a privately owned task before propagating its caller's failure."""
+    while True:
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.done():
+                return task.result()
+
+
+async def _stop_command(creation: asyncio.Task, process) -> None:
+    if process is None:
+        process = await _complete_owned(creation)
+    await _complete_owned(asyncio.create_task(stop(process)))
+
+
+def _raise_command_error(error: BaseException, cleanup_error: BaseException) -> None:
+    if cleanup_error is error:
+        raise error
+    raise error from cleanup_error
+
+
+def _write_command_failure(manifest: Path, record: dict, error: BaseException) -> None:
+    try:
         write_json(manifest, record)
+    except Exception as journal_error:
+        journal_error.__cause__ = error.__cause__
+        raise error from journal_error
 
 
 async def stop(process: asyncio.subprocess.Process) -> None:

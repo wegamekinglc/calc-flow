@@ -51,7 +51,7 @@ fn initialized_operator() -> StreamJoinOperator {
 }
 
 fn valid_snapshot(operator: &mut StreamJoinOperator) -> OperatorStateSnapshot {
-    let mut snapshot = operator.checkpoint(Epoch::new(7).unwrap()).unwrap();
+    let mut snapshot = operator.checkpoint_v1(Epoch::new(7).unwrap()).unwrap();
     for side in ["left", "right"] {
         snapshot.segments.insert(
             format!("{side}-base"),

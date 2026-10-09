@@ -54,7 +54,14 @@ struct TerminalFixture {
 
 impl TerminalFixture {
     fn spec(&self) -> ContinuousJobSpec {
-        let mut spec = self.inner.spec();
+        self.spec_with_inner(self.inner.spec())
+    }
+
+    fn seed_spec(&self) -> ContinuousJobSpec {
+        self.spec_with_inner(self.inner.seed_spec())
+    }
+
+    fn spec_with_inner(&self, mut spec: ContinuousJobSpec) -> ContinuousJobSpec {
         spec.sources = vec![
             NamedSourceBinding {
                 binding_id: "left".into(),
@@ -82,7 +89,7 @@ async fn seed_terminal(root: &Path) -> CheckpointManifest {
     let fixture = TerminalFixture::default();
     let mut runner = ContinuousRunner::new();
     let job = runner
-        .start_checkpointed(fixture.spec(), fixture.inner.checkpoint(root))
+        .start_checkpointed(fixture.seed_spec(), fixture.inner.checkpoint(root))
         .await
         .unwrap();
     fixture.inner.left.store(1, Ordering::SeqCst);

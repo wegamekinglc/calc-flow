@@ -63,7 +63,7 @@ fn float_snapshot(source: &mut StreamJoinOperator, null: bool) -> OperatorStateS
     source.state.right = vec![right].into();
     source.state.next_left_row_id = 1;
     source.state.next_right_row_id = 1;
-    let mut snapshot = source.checkpoint(Epoch::new(7).unwrap()).unwrap();
+    let mut snapshot = source.checkpoint_v1(Epoch::new(7).unwrap()).unwrap();
     for (side, rows) in [("left", &source.state.left), ("right", &source.state.right)] {
         snapshot.segments.insert(
             format!("{side}-base"),

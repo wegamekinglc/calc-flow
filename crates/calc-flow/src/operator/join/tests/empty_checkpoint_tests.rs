@@ -24,7 +24,7 @@ async fn test_restore_accepts_empty_v1_history_after_uncaptured_eviction() {
     source.on_ingress_progress("left", &ended).await.unwrap();
     source.on_ingress_progress("right", &ended).await.unwrap();
     source.on_end(&ended, &mut collector).await.unwrap();
-    let snapshot = source.checkpoint(Epoch::new(7).unwrap()).unwrap();
+    let snapshot = source.checkpoint_v1(Epoch::new(7).unwrap()).unwrap();
     assert!(snapshot.segments.is_empty());
     assert_empty_history(&source);
 
@@ -32,7 +32,7 @@ async fn test_restore_accepts_empty_v1_history_after_uncaptured_eviction() {
         StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
     restored.restore(&snapshot).unwrap();
     assert_empty_history(&restored);
-    let round_trip = restored.checkpoint(Epoch::new(8).unwrap()).unwrap();
+    let round_trip = restored.checkpoint_v1(Epoch::new(8).unwrap()).unwrap();
     let mut expected = snapshot.inline_metadata.clone();
     expected.insert("epoch".into(), 8.into());
     assert_eq!(round_trip.inline_metadata, expected);

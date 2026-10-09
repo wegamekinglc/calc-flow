@@ -466,15 +466,26 @@ def test_one_join_digest_owns_one_physical_checkpoint_entry(tmp_path: Path) -> N
     join_id = join_nodes[0]
     assert join_id in operators
     join_entry = operators[join_id]
-    assert join_entry["inline_metadata"]["layout_version"] == 1
+    assert join_entry["inline_metadata"]["layout_version"] == 2
+    inventory = join_entry["inline_metadata"]["v2_inventory"]
+    assert inventory["codec_version"] == 2
+    assert inventory["base_epoch"] == 1
+    assert inventory["deltas"] == []
+    payloads = inventory["payloads"]
+    assert [(payload["side"], payload["rows"]) for payload in payloads] == [
+        ("left", 1),
+        ("right", 1),
+    ]
     segment_owners = {
         operator_id: len(entry["segments"])
         for operator_id, entry in operators.items()
         if entry["segments"]
     }
-    assert segment_owners == {join_id: 2}
+    assert segment_owners == {join_id: 4}
     segment_ids = {segment["segment_id"] for segment in join_entry["segments"]}
-    assert segment_ids == {"left-delta-1", "right-delta-1"}
+    assert segment_ids == {"left-base", "right-base"} | {
+        f"{payload['side']}-payload-{payload['sha256']}" for payload in payloads
+    }
     # Fan-out branches and the join's output frontier record no durable
     # segment of their own.
     assert all(

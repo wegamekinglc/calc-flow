@@ -1,14 +1,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use calc_flow::OperatorMetadata;
 use calc_flow::{
     Batch, BatchMetadata, CalcFlowError, CancellationToken, EdgeCollector, Epoch, EventTime,
     IngressProgress, IngressProgressSnapshot, IngressState, JoinStateLimits, JoinTimeBounds,
-    JsonMap, StreamJobContext, StreamJoinOperator, StreamJoinSpec, StreamOperator,
-    StreamOperatorContext, StreamingFailureReason,
+    JsonMap, OperatorStateSnapshot, StreamJobContext, StreamJoinOperator, StreamJoinSpec,
+    StreamOperator, StreamOperatorContext, StreamingFailureReason,
 };
 use datafusion::arrow::array::Array as _;
 use datafusion::arrow::array::{
@@ -293,6 +293,94 @@ fn keyed_batch(values: &[(&str, i64)]) -> Batch {
 
 const SECOND: i64 = 1_000_000;
 
+fn wire_count(bytes: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
+}
+
+fn assert_v2_base(snapshot: &OperatorStateSnapshot, side: &str, rows: u64) {
+    let bytes = snapshot.segments[&format!("{side}-base")].bytes();
+    assert_eq!(&bytes[..8], b"CFJIDX2\0");
+    assert_eq!(wire_count(bytes, 16), rows);
+    assert_eq!(wire_count(bytes, 24), 0);
+    if rows == 0 {
+        assert_eq!(bytes.len(), 32);
+    }
+}
+
+fn assert_v2_delta(snapshot: &OperatorStateSnapshot, epoch: u64, side: &str) {
+    let bytes = snapshot.segments[&format!("{side}-delta-{epoch}")].bytes();
+    assert_eq!(&bytes[..8], b"CFJDIX2\0");
+    assert_eq!(wire_count(bytes, 16), epoch);
+    assert_eq!(wire_count(bytes, 24), 1);
+    assert_eq!(wire_count(bytes, 32), 0);
+}
+
+fn assert_v2_history(
+    snapshot: &OperatorStateSnapshot,
+    anchor: u64,
+    base_rows: [u64; 2],
+    deltas: &[(u64, &str)],
+    payload_rows: &[(&str, u64)],
+) {
+    let metadata = &snapshot.inline_metadata;
+    assert_eq!(metadata["layout_version"], 2);
+    let inventory = &metadata["v2_inventory"];
+    assert_eq!(inventory["codec_version"], 2);
+    assert_eq!(inventory["base_epoch"], anchor);
+    let expected_deltas = deltas
+        .iter()
+        .map(|(epoch, side)| serde_json::json!({"epoch": epoch, "sides": [side]}))
+        .collect::<Vec<_>>();
+    assert_eq!(inventory["deltas"], serde_json::json!(expected_deltas));
+    assert_v2_base(snapshot, "left", base_rows[0]);
+    assert_v2_base(snapshot, "right", base_rows[1]);
+    let mut names = BTreeSet::from(["left-base".to_owned(), "right-base".to_owned()]);
+    for &(epoch, side) in deltas {
+        assert_v2_delta(snapshot, epoch, side);
+        names.insert(format!("{side}-delta-{epoch}"));
+    }
+    let mut actual_payload_rows = Vec::new();
+    for entry in inventory["payloads"].as_array().unwrap() {
+        let side = entry["side"].as_str().unwrap();
+        let digest = entry["sha256"].as_str().unwrap();
+        let name = format!("{side}-payload-{digest}");
+        let segment = &snapshot.segments[&name];
+        assert_eq!(segment.sha256(), digest);
+        assert_eq!(
+            entry["bytes"].as_u64().unwrap(),
+            u64::try_from(segment.bytes().len()).unwrap()
+        );
+        assert_eq!(&segment.bytes()[..8], b"CFJPAY2\0");
+        assert_eq!(
+            entry["rows"].as_u64().unwrap(),
+            wire_count(segment.bytes(), 16)
+        );
+        actual_payload_rows.push((side.to_owned(), wire_count(segment.bytes(), 16)));
+        names.insert(name);
+    }
+    let mut expected_payload_rows = payload_rows
+        .iter()
+        .map(|(side, rows)| ((*side).to_owned(), *rows))
+        .collect::<Vec<_>>();
+    actual_payload_rows.sort_unstable();
+    expected_payload_rows.sort_unstable();
+    assert_eq!(actual_payload_rows, expected_payload_rows);
+    assert_eq!(
+        snapshot.segments.keys().cloned().collect::<BTreeSet<_>>(),
+        names
+    );
+}
+
+fn assert_shared_segments(previous: &OperatorStateSnapshot, current: &OperatorStateSnapshot) {
+    for (name, segment) in &previous.segments {
+        assert_eq!(&current.segments[name], segment);
+        assert!(Arc::ptr_eq(
+            &segment.bytes_arc(),
+            &current.segments[name].bytes_arc()
+        ));
+    }
+}
+
 #[tokio::test]
 async fn checkpoints_capture_only_dirty_deltas_and_restore_folds_them() {
     let (mut operator, job, mut collector) = state_operator(300);
@@ -308,7 +396,7 @@ async fn checkpoints_capture_only_dirty_deltas_and_restore_folds_them() {
         .await
         .unwrap();
     let first = operator.checkpoint(Epoch::INITIAL).unwrap();
-    assert_eq!(first.segments.keys().collect::<Vec<_>>(), ["left-delta-1"]);
+    assert_v2_history(&first, 0, [0, 0], &[(1, "left")], &[("left", 1)]);
 
     operator
         .process_data(
@@ -322,15 +410,22 @@ async fn checkpoints_capture_only_dirty_deltas_and_restore_folds_them() {
     let second = operator.checkpoint(Epoch::new(2).unwrap()).unwrap();
     // The epoch-2 snapshot carries the prepared epoch-1 delta plus the new
     // dirty right delta; no full-state re-encode happens at either epoch.
-    assert_eq!(
-        second.segments.keys().collect::<Vec<_>>(),
-        ["left-delta-1", "right-delta-2"]
+    assert_v2_history(
+        &second,
+        0,
+        [0, 0],
+        &[(1, "left"), (2, "right")],
+        &[("left", 1), ("right", 1)],
     );
+    assert_shared_segments(&first, &second);
+    assert_eq!(operator.status().left.retained_bytes, 105);
+    assert_eq!(operator.status().right.retained_bytes, 105);
 
     let (mut restored, job, collector_two) = state_operator(300);
     let context_two = StreamOperatorContext::new(&job, "match", None);
     let mut collector_two = collector_two;
     restored.restore(&second).unwrap();
+    assert_eq!(restored.status(), operator.status());
     // The restored left row still matches a newly processed right row.
     restored
         .process_data(
@@ -343,6 +438,9 @@ async fn checkpoints_capture_only_dirty_deltas_and_restore_folds_them() {
         .unwrap();
     let outputs = collector_two.drain("output");
     assert_eq!(outputs.len(), 1);
+    assert_eq!(outputs[0].as_data().unwrap().num_rows(), 1);
+    assert_eq!(restored.status().left.retained_bytes, 105);
+    assert_eq!(restored.status().right.retained_bytes, 210);
 }
 
 #[tokio::test]
@@ -537,13 +635,23 @@ async fn watermark_equality_is_on_time_and_eviction_is_strict() {
     assert_eq!(operator.status().left.evicted_rows, 1);
 }
 
+fn assert_compacted_v2_history(snapshot: &OperatorStateSnapshot) {
+    assert_v2_history(
+        snapshot,
+        4,
+        [4, 0],
+        &[(5, "left")],
+        &[("left", 4), ("left", 1)],
+    );
+}
+
 #[tokio::test]
 async fn compaction_survives_restore_checkpoint_restore_cycles() {
     let (mut operator, job, mut collector) = state_operator(300);
     let context = StreamOperatorContext::new(&job, "match", None);
 
-    // Four dirty epochs make compaction due. Synchronous capture keeps the
-    // deltas until asynchronous checkpoint preparation rebuilds the base.
+    // Empty V2 bases anchor four dirty deltas until async preparation compacts them.
+    let mut previous = None;
     for epoch in 1..=4_u64 {
         let stamp = 100_i64 + i64::try_from(epoch).unwrap() * SECOND;
         operator
@@ -556,7 +664,13 @@ async fn compaction_survives_restore_checkpoint_restore_cycles() {
             .await
             .unwrap();
         let pending = operator.checkpoint(Epoch::new(epoch).unwrap()).unwrap();
-        assert!(!pending.segments.contains_key("left-base"));
+        let deltas = (1..=epoch).map(|epoch| (epoch, "left")).collect::<Vec<_>>();
+        let payloads = vec![("left", 1); usize::try_from(epoch).unwrap()];
+        assert_v2_history(&pending, 0, [0, 0], &deltas, &payloads);
+        if let Some(previous) = &previous {
+            assert_shared_segments(previous, &pending);
+        }
+        previous = Some(pending);
     }
     operator.prepare_checkpoint_async(&context).await.unwrap();
     operator
@@ -581,11 +695,16 @@ async fn compaction_survives_restore_checkpoint_restore_cycles() {
         compacted.segments.keys().collect::<Vec<_>>()
     );
 
+    assert_compacted_v2_history(&compacted);
+    assert_eq!(operator.status().left.retained_rows, 5);
+    assert_eq!(operator.status().left.retained_bytes, 525);
+
     // Restore from the compacted snapshot; the next checkpoint must still
     // carry the base plus any new deltas instead of an empty inventory.
     let (mut restored, job_two, _) = state_operator(300);
     let _ = &job_two;
     restored.restore(&compacted).unwrap();
+    assert_eq!(restored.status(), operator.status());
     let after_restore = restored.checkpoint(Epoch::new(6).unwrap()).unwrap();
     assert!(
         after_restore.segments.contains_key("left-base"),
@@ -593,12 +712,20 @@ async fn compaction_survives_restore_checkpoint_restore_cycles() {
         after_restore.segments.keys().collect::<Vec<_>>()
     );
 
+    assert_compacted_v2_history(&after_restore);
+    assert_eq!(after_restore.segments, compacted.segments);
+    assert_shared_segments(&compacted, &after_restore);
+
     // The chain restores again from the carried checkpoint.
     let (mut restored_again, job_three, collector_three) = state_operator(300);
     let _ = (&job_three, collector_three);
     restored_again.restore(&after_restore).unwrap();
     let final_snapshot = restored_again.checkpoint(Epoch::new(7).unwrap()).unwrap();
     assert!(final_snapshot.segments.contains_key("left-base"));
+    assert_compacted_v2_history(&final_snapshot);
+    assert_eq!(restored_again.status(), operator.status());
+    assert_eq!(final_snapshot.segments, compacted.segments);
+    assert_shared_segments(&after_restore, &final_snapshot);
 
     // The compacted state still matches newly processed right rows.
     let (mut matcher, job_four, _) = state_operator(300);
@@ -615,8 +742,8 @@ async fn compaction_survives_restore_checkpoint_restore_cycles() {
         )
         .await
         .unwrap();
-    // Retained left rows at 101..104 seconds are all inside the interval of
-    // the 100-second right row; the 500-second row is outside.
+    // Original stamps are 1..4 seconds plus 100 microseconds; all four match
+    // the 100-second right row, while the 500-second row is outside.
     let matched_rows = matcher_collector
         .drain("output")
         .iter()

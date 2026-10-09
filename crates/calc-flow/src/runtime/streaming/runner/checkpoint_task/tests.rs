@@ -26,6 +26,7 @@ async fn stage_ack(transaction: &ManifestTransaction, epoch: Epoch) -> OperatorC
         .await
         .unwrap();
     OperatorCheckpointAck {
+        capture_credit: None,
         node_id: "operator".into(),
         epoch,
         state: OperatorManifestEntry {

@@ -1,3 +1,5 @@
+pub(in crate::operator::join::checkpoint_v2) mod bulk;
+
 use arrow_data::ArrayData;
 use datafusion::arrow::{array::Array, buffer::Buffer, datatypes::DataType};
 use datafusion::execution::memory_pool::MemoryReservation;
@@ -7,6 +9,13 @@ use super::accounting::{self, add, product, sum};
 use crate::Result;
 
 mod snapshot;
+
+pub(in crate::operator::join::checkpoint_v2) fn slice_controls(
+    array: &dyn Array,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<usize> {
+    snapshot::bytes(array, check)
+}
 
 #[derive(Default)]
 struct Requests {
@@ -22,7 +31,7 @@ impl Requests {
     }
 }
 
-pub(super) fn admit(
+pub(in crate::operator::join::checkpoint_v2) fn admit(
     previous: &dyn Array,
     incoming: &dyn Array,
     workspace: &MemoryReservation,

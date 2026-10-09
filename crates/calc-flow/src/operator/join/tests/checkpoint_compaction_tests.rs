@@ -30,7 +30,7 @@ async fn base_compaction_runs_only_in_checkpoint_preparation() {
             .await
             .unwrap();
         operator
-            .checkpoint(Epoch::new(u64::try_from(epoch).unwrap()).unwrap())
+            .checkpoint_v1(Epoch::new(u64::try_from(epoch).unwrap()).unwrap())
             .unwrap();
     }
     assert!(operator.state.deltas.needs_compaction);
@@ -55,9 +55,9 @@ async fn base_compaction_runs_only_in_checkpoint_preparation() {
         operator.state.deltas.needs_compaction,
         "progress handler must not compact the base"
     );
-    operator.prepare_checkpoint_async(&context).await.unwrap();
+    operator.prepare_compaction(&context).await.unwrap();
     assert!(!operator.state.deltas.needs_compaction);
-    let snapshot = operator.checkpoint(Epoch::new(5).unwrap()).unwrap();
+    let snapshot = operator.checkpoint_v1(Epoch::new(5).unwrap()).unwrap();
     assert!(snapshot.segments.contains_key("left-base"));
     assert_eq!(snapshot.segments.len(), 2);
     let mut restored =
@@ -80,17 +80,17 @@ async fn checkpoint_without_an_intervening_handler_keeps_v1_restore_and_continua
             .await
             .unwrap();
         previous = operator
-            .checkpoint(Epoch::new(u64::try_from(epoch).unwrap()).unwrap())
+            .checkpoint_v1(Epoch::new(u64::try_from(epoch).unwrap()).unwrap())
             .unwrap();
     }
-    let direct = operator.checkpoint(Epoch::new(5).unwrap()).unwrap();
+    let direct = operator.checkpoint_v1(Epoch::new(5).unwrap()).unwrap();
     assert_eq!(
         direct.segments, previous.segments,
         "direct capture carries prepared V1 deltas"
     );
     let before = operator.status();
-    operator.prepare_checkpoint_async(&context).await.unwrap();
-    let prepared = operator.checkpoint(Epoch::new(6).unwrap()).unwrap();
+    operator.prepare_compaction(&context).await.unwrap();
+    let prepared = operator.checkpoint_v1(Epoch::new(6).unwrap()).unwrap();
     assert_eq!(prepared.inline_metadata["layout_version"], 1);
     assert_eq!(prepared.segments.len(), 2);
     for segment in prepared.segments.values() {
@@ -129,7 +129,7 @@ async fn cancelled_checkpoint_preparation_leaves_dirty_changes_and_previous_capt
             .await
             .unwrap();
         previous = operator
-            .checkpoint(Epoch::new(u64::try_from(epoch).unwrap()).unwrap())
+            .checkpoint_v1(Epoch::new(u64::try_from(epoch).unwrap()).unwrap())
             .unwrap();
     }
     operator
@@ -140,7 +140,7 @@ async fn cancelled_checkpoint_preparation_leaves_dirty_changes_and_previous_capt
     cancelled.cancellation().cancel();
     assert!(
         operator
-            .prepare_checkpoint_async(&StreamOperatorContext::new(&cancelled, "match", None))
+            .prepare_compaction(&StreamOperatorContext::new(&cancelled, "match", None))
             .await
             .is_err()
     );
@@ -148,8 +148,8 @@ async fn cancelled_checkpoint_preparation_leaves_dirty_changes_and_previous_capt
         StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
     restored.restore(&previous).unwrap();
     assert_eq!(restored.status().left.retained_rows, 4);
-    operator.prepare_checkpoint_async(&context).await.unwrap();
-    let snapshot = operator.checkpoint(Epoch::new(5).unwrap()).unwrap();
+    operator.prepare_compaction(&context).await.unwrap();
+    let snapshot = operator.checkpoint_v1(Epoch::new(5).unwrap()).unwrap();
     restored.restore(&snapshot).unwrap();
     assert_eq!(restored.status().left.retained_rows, 5);
 }
@@ -168,7 +168,7 @@ async fn checkpoint_worker_fixture(
             .await
             .unwrap();
         previous = operator
-            .checkpoint(Epoch::new(u64::try_from(epoch).unwrap()).unwrap())
+            .checkpoint_v1(Epoch::new(u64::try_from(epoch).unwrap()).unwrap())
             .unwrap();
     }
     (operator, previous, collector)
@@ -227,7 +227,7 @@ async fn abandoned_checkpoint_replacement(
         release,
     } = checkpoint_gate(false);
     operator.checkpoint_gate = Some(std::sync::Mutex::new(gate));
-    let mut prepare = Box::pin(operator.prepare_checkpoint_async(&context));
+    let mut prepare = Box::pin(operator.prepare_compaction(&context));
     assert!(
         futures::poll!(prepare.as_mut()).is_pending(),
         "preparation must use the owned worker"
@@ -246,7 +246,7 @@ async fn abandoned_checkpoint_replacement(
             .process_data("left", left_batch(vec![90]), &context, &mut collector)
             .await
             .unwrap();
-        let snapshot = replacement.checkpoint(Epoch::INITIAL).unwrap();
+        let snapshot = replacement.checkpoint_v1(Epoch::INITIAL).unwrap();
         operator.restore(&snapshot).unwrap();
     } else {
         operator.reset().unwrap();
@@ -281,7 +281,7 @@ async fn abandoned_checkpoint_replacement(
         "old worker must not install stale state"
     );
     let epoch = if restore { 2 } else { 1 };
-    let snapshot = operator.checkpoint(Epoch::new(epoch).unwrap()).unwrap();
+    let snapshot = operator.checkpoint_v1(Epoch::new(epoch).unwrap()).unwrap();
     let mut restored =
         StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
     restored.restore(&snapshot).unwrap();
@@ -326,11 +326,11 @@ async fn abandoned_checkpoint_mutation(
         release,
     } = checkpoint_gate(false);
     operator.checkpoint_gate = Some(std::sync::Mutex::new(gate));
-    let mut prepare = Box::pin(operator.prepare_checkpoint_async(&context));
+    let mut prepare = Box::pin(operator.prepare_compaction(&context));
     assert!(futures::poll!(prepare.as_mut()).is_pending());
     started.await.unwrap();
     drop(prepare);
-    let direct = operator.checkpoint(Epoch::new(5).unwrap()).unwrap();
+    let direct = operator.checkpoint_v1(Epoch::new(5).unwrap()).unwrap();
     assert_eq!(direct.segments, previous.segments);
     let mut directly_restored =
         StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
@@ -359,7 +359,7 @@ async fn abandoned_checkpoint_mutation(
         operator.state.deltas.needs_compaction,
         "handler must not replace the abandoned preparation"
     );
-    let snapshot = operator.checkpoint(Epoch::new(6).unwrap()).unwrap();
+    let snapshot = operator.checkpoint_v1(Epoch::new(6).unwrap()).unwrap();
     let mut restored =
         StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
     restored.restore(&snapshot).unwrap();
@@ -392,7 +392,7 @@ async fn stopped_compaction_wait(
         release,
     } = checkpoint_gate(false);
     operator.checkpoint_gate = Some(std::sync::Mutex::new(gate));
-    let mut prepare = Box::pin(operator.prepare_checkpoint_async(&context));
+    let mut prepare = Box::pin(operator.prepare_compaction(&context));
     assert!(futures::poll!(prepare.as_mut()).is_pending());
     started.await.unwrap();
     drop(prepare);
@@ -424,7 +424,7 @@ async fn stopped_compaction_wait(
     );
     assert!(paid_attempt >= 4 * 124);
     assert_eq!(after, before);
-    let direct = operator.checkpoint(Epoch::new(5).unwrap()).unwrap();
+    let direct = operator.checkpoint_v1(Epoch::new(5).unwrap()).unwrap();
     assert_eq!(direct.segments, previous.segments);
     let pool = operator
         .runtime
@@ -513,7 +513,7 @@ async fn progress_refund_fixture(
             wait,
         },
     ));
-    let mut prepare = Box::pin(operator.prepare_checkpoint_async(&context));
+    let mut prepare = Box::pin(operator.prepare_compaction(&context));
     assert!(futures::poll!(prepare.as_mut()).is_pending());
     started.await.unwrap();
     drop(prepare);
@@ -634,7 +634,7 @@ fn managed_close_drains_abandoned_compaction_after_operator_drop() {
                 release,
             } = checkpoint_gate(false);
             operator.checkpoint_gate = Some(std::sync::Mutex::new(gate));
-            let mut prepare = Box::pin(operator.prepare_checkpoint_async(&context));
+            let mut prepare = Box::pin(operator.prepare_compaction(&context));
             assert!(futures::poll!(prepare.as_mut()).is_pending());
             started.await.unwrap();
             drop(prepare);
@@ -674,10 +674,10 @@ async fn unpolled_compaction_preparation_preserves_dirty_state_and_funding() {
         .unwrap()
         .incremental_memory_pool();
     let reserved = pool.reserved();
-    drop(Box::pin(operator.prepare_checkpoint_async(&context)));
+    drop(Box::pin(operator.prepare_compaction(&context)));
     assert_eq!(pool.reserved(), reserved);
     assert_eq!(operator.status(), before);
-    let snapshot = operator.checkpoint(Epoch::new(5).unwrap()).unwrap();
+    let snapshot = operator.checkpoint_v1(Epoch::new(5).unwrap()).unwrap();
     let mut restored =
         StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
     restored.restore(&previous).unwrap();
@@ -708,7 +708,7 @@ async fn failed_checkpoint_preparation(
         release,
     } = checkpoint_gate(true);
     operator.checkpoint_gate = Some(std::sync::Mutex::new(gate));
-    let mut prepare = Box::pin(operator.prepare_checkpoint_async(&context));
+    let mut prepare = Box::pin(operator.prepare_compaction(&context));
     assert!(futures::poll!(prepare.as_mut()).is_pending());
     started.await.unwrap();
     release.send(()).unwrap();
@@ -720,14 +720,14 @@ async fn failed_checkpoint_preparation(
         pool.reserved(),
         home + generation + native_lookup_tests::state_funding(&operator)
     );
-    let snapshot = operator.checkpoint(Epoch::new(5).unwrap()).unwrap();
+    let snapshot = operator.checkpoint_v1(Epoch::new(5).unwrap()).unwrap();
     let mut restored =
         StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
     restored.restore(&previous).unwrap();
     assert_eq!(restored.status().left.retained_rows, 4);
     restored.restore(&snapshot).unwrap();
     assert_eq!(restored.status(), before);
-    operator.prepare_checkpoint_async(&context).await.unwrap();
+    operator.prepare_compaction(&context).await.unwrap();
     assert!(!operator.state.deltas.needs_compaction);
     assert_live_state_credit(&operator, &job, pool.as_ref());
     drop(operator);
@@ -779,7 +779,7 @@ async fn checkpoint_credit_retirement(
             wait,
         },
     ));
-    let mut prepare = Box::pin(operator.prepare_checkpoint_async(&context));
+    let mut prepare = Box::pin(operator.prepare_compaction(&context));
     assert!(futures::poll!(prepare.as_mut()).is_pending());
     started.await.unwrap();
     if ticket_observed {
@@ -792,7 +792,7 @@ async fn checkpoint_credit_retirement(
     let (_, _, attempt) = job.gather_owner().funding();
     assert!(attempt >= 4 * 124);
     pressure.try_grow((1 << 30) - pool.reserved()).unwrap();
-    let mut retry = Box::pin(operator.prepare_checkpoint_async(&context));
+    let mut retry = Box::pin(operator.prepare_compaction(&context));
     let first_poll = futures::poll!(retry.as_mut());
     let waited = first_poll.is_pending();
     drop(retry);
@@ -852,10 +852,10 @@ fn checkpoint_observer_is_published_before_native_capacity_wait() {
                 release,
             } = checkpoint_gate(false);
             first.checkpoint_gate = Some(std::sync::Mutex::new(gate));
-            let mut active = Box::pin(first.prepare_checkpoint_async(&first_context));
+            let mut active = Box::pin(first.prepare_compaction(&first_context));
             assert!(futures::poll!(active.as_mut()).is_pending());
             started.await.unwrap();
-            let mut queued = Box::pin(second.prepare_checkpoint_async(&second_context));
+            let mut queued = Box::pin(second.prepare_compaction(&second_context));
             assert!(futures::poll!(queued.as_mut()).is_pending());
             assert_eq!(
                 second_job.gather_owner().funding().2,
@@ -870,7 +870,7 @@ fn checkpoint_observer_is_published_before_native_capacity_wait() {
             drop(queued);
             let tracked = second.compaction_cleanup.is_some();
             pressure.try_grow((1 << 30) - pool.reserved()).unwrap();
-            let mut retry = Box::pin(second.prepare_checkpoint_async(&second_context));
+            let mut retry = Box::pin(second.prepare_compaction(&second_context));
             let first_poll = futures::poll!(retry.as_mut());
             let waited = first_poll.is_pending();
             drop(retry);
@@ -926,7 +926,7 @@ async fn checkpoint_credit_failure(spare: usize) {
         .try_grow((1 << 30) - pool.reserved() - spare)
         .unwrap();
     assert!(matches!(
-        operator.prepare_checkpoint_async(&context).await,
+        operator.prepare_compaction(&context).await,
         Err(CalcFlowError::DataFusion { .. })
     ));
     assert_eq!(operator.status(), before);
@@ -934,7 +934,7 @@ async fn checkpoint_credit_failure(spare: usize) {
         .process_data("left", left_batch(vec![]), &context, &mut collector)
         .await
         .unwrap();
-    let snapshot = operator.checkpoint(Epoch::new(5).unwrap()).unwrap();
+    let snapshot = operator.checkpoint_v1(Epoch::new(5).unwrap()).unwrap();
     let mut restored =
         StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
     restored.restore(&previous).unwrap();
@@ -942,7 +942,7 @@ async fn checkpoint_credit_failure(spare: usize) {
     restored.restore(&snapshot).unwrap();
     assert_eq!(restored.status(), before);
     drop(pressure);
-    operator.prepare_checkpoint_async(&context).await.unwrap();
+    operator.prepare_compaction(&context).await.unwrap();
     assert!(!operator.state.deltas.needs_compaction);
     assert_live_state_credit(&operator, &job, pool.as_ref());
     drop(operator);
@@ -973,12 +973,12 @@ async fn checkpoint_encoding_preserves_v1_logical_limits_without_an_encoded_segm
             .await
             .unwrap();
         operator
-            .checkpoint(Epoch::new(u64::try_from(epoch).unwrap()).unwrap())
+            .checkpoint_v1(Epoch::new(u64::try_from(epoch).unwrap()).unwrap())
             .unwrap();
     }
     assert_eq!(operator.status().left.retained_bytes, 496);
-    operator.prepare_checkpoint_async(&context).await.unwrap();
-    let snapshot = operator.checkpoint(Epoch::new(5).unwrap()).unwrap();
+    operator.prepare_compaction(&context).await.unwrap();
+    let snapshot = operator.checkpoint_v1(Epoch::new(5).unwrap()).unwrap();
     assert_eq!(snapshot.segments.len(), 2);
     assert!(snapshot.segments["left-base"].bytes().len() > 496);
     let mut restored =

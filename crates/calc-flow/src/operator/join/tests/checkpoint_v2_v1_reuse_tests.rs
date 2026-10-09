@@ -6,8 +6,8 @@ async fn v1_snapshot() -> OperatorStateSnapshot {
     source.restore(&original).unwrap();
     let job = job();
     let context = StreamOperatorContext::new(&job, "v2-match", None);
-    source.prepare_checkpoint_async(&context).await.unwrap();
-    let captured = source.checkpoint(Epoch::new(3).unwrap()).unwrap();
+    source.prepare_compaction(&context).await.unwrap();
+    let captured = source.checkpoint_v1(Epoch::new(3).unwrap()).unwrap();
     assert_eq!(captured.inline_metadata["layout_version"], 1);
     assert_eq!(
         captured

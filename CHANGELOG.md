@@ -9,6 +9,12 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-09: Write columnar V2 streaming Join checkpoints with immutable
+  payload batches and incremental row indexes. Preserve prepared-cut anchors
+  and restored V2 history across captures; migrate V1 state through funded
+  asynchronous preparation before writing V2. Keep logical row charges and
+  public operator identity unchanged.
+
 - 2026-10-09: Read columnar V2 streaming Join checkpoints with strict
   inventory, schema and historical-row validation before atomic restoration.
   Managed recovery uses funded native work; checkpoint capture continues to

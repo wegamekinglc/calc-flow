@@ -103,7 +103,7 @@ fn snapshot(operator: &mut StreamJoinOperator) -> OperatorStateSnapshot {
     operator.state.right = right.into();
     operator.state.next_left_row_id = 3;
     operator.state.next_right_row_id = 1;
-    let mut snapshot = operator.checkpoint(Epoch::new(7).unwrap()).unwrap();
+    let mut snapshot = operator.checkpoint_v1(Epoch::new(7).unwrap()).unwrap();
     for (side, rows) in [
         ("left", &operator.state.left),
         ("right", &operator.state.right),

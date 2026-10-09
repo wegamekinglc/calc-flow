@@ -93,7 +93,7 @@ async fn test_managed_join_delta_rows_have_independent_credit() {
         .with_join_preload_read_hook(wire_hook.clone())
     };
     let spec = || {
-        let mut spec = ac5_job_spec(restore_plan(&observations, &parses), &rows);
+        let mut spec = ac5_job_spec(v1_restore_plan(&observations, &parses), &rows);
         spec.sources = vec![
             NamedSourceBinding {
                 binding_id: "left".into(),
@@ -218,7 +218,7 @@ async fn test_managed_join_delta_only_rows_have_independent_credit() {
         .with_join_preload_read_hook(wire_hook.clone())
     };
     let spec = || {
-        let mut spec = ac5_job_spec(restore_plan(&observations, &parses), &rows);
+        let mut spec = ac5_job_spec(v1_restore_plan(&observations, &parses), &rows);
         spec.sources = vec![
             NamedSourceBinding {
                 binding_id: "left".into(),

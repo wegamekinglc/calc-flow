@@ -28,6 +28,18 @@ mod behavior_tests;
 #[path = "checkpoint_v2_loan_tests.rs"]
 mod loan_tests;
 
+#[path = "checkpoint_v2_writer_tests.rs"]
+mod writer_tests;
+
+#[path = "checkpoint_v2_writer_cut_tests.rs"]
+mod writer_cut_tests;
+
+#[path = "checkpoint_v2_writer_restore_tests.rs"]
+mod writer_restore_tests;
+
+#[path = "checkpoint_v2_writer_lifecycle_tests.rs"]
+mod writer_lifecycle_tests;
+
 const KEY: [u8; 17] = [5, 0, 0, 0, 0, 8, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0];
 
 fn schema() -> Arc<Schema> {
@@ -367,3 +379,9 @@ fn test_join_restore_accepts_v2_payload_locator_history_atomically() {
     assert!(operator.restore(&invalid).is_err());
     assert_restored(&operator);
 }
+
+#[path = "checkpoint_v2_writer_cancel_tests.rs"]
+mod writer_cancel_tests;
+
+#[path = "checkpoint_v2_writer_migration_tests.rs"]
+mod writer_migration_tests;

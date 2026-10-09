@@ -214,6 +214,17 @@ fn row(timestamp: i64) -> Batch {
 }
 
 fn plan(probe: Option<&Arc<Probe>>) -> (crate::StreamExecutionPlan, Arc<dyn MemoryPool>) {
+    plan_with_producer(probe, false)
+}
+
+fn v1_plan() -> (crate::StreamExecutionPlan, Arc<dyn MemoryPool>) {
+    plan_with_producer(None, true)
+}
+
+fn plan_with_producer(
+    probe: Option<&Arc<Probe>>,
+    v1_producer: bool,
+) -> (crate::StreamExecutionPlan, Arc<dyn MemoryPool>) {
     let mut join = StreamJoinOperator::new(
         "match",
         schema(),
@@ -229,6 +240,9 @@ fn plan(probe: Option<&Arc<Probe>>) -> (crate::StreamExecutionPlan, Arc<dyn Memo
         .unwrap(),
     )
     .unwrap();
+    if v1_producer {
+        join.set_checkpoint_v1_test_producer();
+    }
     let pool = join.checkpoint_preload_test_pool().unwrap();
     if let Some(probe) = probe {
         let probe = Arc::clone(probe);
@@ -327,7 +341,7 @@ fn checkpoint(root: &Path, probe: Option<&Arc<Probe>>) -> CheckpointRuntimeSpec 
 async fn natural_terminal_history(root: &Path) {
     let fixture = Fixture::default();
     let released = Arc::new(AtomicBool::new(false));
-    let (plan, pool) = plan(None);
+    let (plan, pool) = v1_plan();
     let mut runner = ContinuousRunner::new();
     let job = runner
         .start_checkpointed(spec(plan, &fixture, &released), checkpoint(root, None))
