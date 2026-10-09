@@ -1100,7 +1100,7 @@ mod tests {
             assert_eq!(status.left.watermark_micros, None);
         }
         let snapshot = operator.checkpoint(Epoch::INITIAL).unwrap();
-        assert_eq!(snapshot.inline_metadata["layout_version"], 1);
+        assert_eq!(snapshot.inline_metadata["layout_version"], 2);
         assert!(
             snapshot.inline_metadata["metrics"]["right"]
                 .get("watermark_micros")
@@ -1798,7 +1798,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let mut captures = vec![operator.checkpoint(Epoch::new(1).unwrap()).unwrap()];
+        let mut captures = vec![operator.checkpoint_v1(Epoch::new(1).unwrap()).unwrap()];
         let progress = progress_context(
             &job_context,
             (IngressState::Active, None),
@@ -1808,12 +1808,12 @@ mod tests {
             .on_ingress_progress("right", &progress)
             .await
             .unwrap();
-        captures.push(operator.checkpoint(Epoch::new(2).unwrap()).unwrap());
+        captures.push(operator.checkpoint_v1(Epoch::new(2).unwrap()).unwrap());
         operator
             .process_data("left", left_batch(vec![20]), &context, &mut collector)
             .await
             .unwrap();
-        captures.push(operator.checkpoint(Epoch::new(3).unwrap()).unwrap());
+        captures.push(operator.checkpoint_v1(Epoch::new(3).unwrap()).unwrap());
         let progress = progress_context(
             &job_context,
             (IngressState::Active, None),
@@ -1823,13 +1823,13 @@ mod tests {
             .on_ingress_progress("right", &progress)
             .await
             .unwrap();
-        captures.push(operator.checkpoint(Epoch::new(4).unwrap()).unwrap());
-        operator.prepare_checkpoint_async(&context).await.unwrap();
+        captures.push(operator.checkpoint_v1(Epoch::new(4).unwrap()).unwrap());
+        operator.prepare_compaction(&context).await.unwrap();
         operator
             .process_data("left", left_batch(vec![]), &context, &mut collector)
             .await
             .unwrap();
-        captures.push(operator.checkpoint(Epoch::new(5).unwrap()).unwrap());
+        captures.push(operator.checkpoint_v1(Epoch::new(5).unwrap()).unwrap());
         captures
     }
 
@@ -1914,12 +1914,14 @@ mod tests {
             .process_data("left", left_batch(vec![0]), &context, &mut collector)
             .await
             .unwrap();
-        let first = operator.checkpoint(Epoch::INITIAL).unwrap();
+        let first = operator.checkpoint_v1(Epoch::INITIAL).unwrap();
         operator
             .process_data("left", left_batch(vec![1]), &context, &mut collector)
             .await
             .unwrap();
-        let second = operator.checkpoint(Epoch::INITIAL.next().unwrap()).unwrap();
+        let second = operator
+            .checkpoint_v1(Epoch::INITIAL.next().unwrap())
+            .unwrap();
 
         // Capture cost must stay proportional to the dirty set (spec FR47): a
         // segment the operator already encoded is carried into the next
@@ -1952,7 +1954,7 @@ mod tests {
             .process_data("left", left_batch(vec![0]), &context, &mut collector)
             .await
             .unwrap();
-        let snapshot = operator.checkpoint(Epoch::new(1).unwrap()).unwrap();
+        let snapshot = operator.checkpoint_v1(Epoch::new(1).unwrap()).unwrap();
 
         let fresh = |snapshot: &OperatorStateSnapshot| {
             StreamJoinOperator::new("match", left_schema(), right_schema(), spec())

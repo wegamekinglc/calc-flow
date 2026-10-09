@@ -98,7 +98,7 @@ fn snapshot(source: &mut StreamJoinOperator) -> OperatorStateSnapshot {
     source.state.right = right.into();
     source.state.next_left_row_id = 3;
     source.state.next_right_row_id = 1;
-    let mut snapshot = source.checkpoint(Epoch::new(7).unwrap()).unwrap();
+    let mut snapshot = source.checkpoint_v1(Epoch::new(7).unwrap()).unwrap();
     for (side, rows) in [("left", &source.state.left), ("right", &source.state.right)] {
         snapshot.segments.insert(
             format!("{side}-base"),
@@ -167,7 +167,7 @@ fn mixed_snapshot() -> OperatorStateSnapshot {
         record: added.record,
         charge: added.charge,
     });
-    let mixed = source.checkpoint(Epoch::new(8).unwrap()).unwrap();
+    let mixed = source.checkpoint_v1(Epoch::new(8).unwrap()).unwrap();
     assert_eq!(mixed.segments.len(), 3);
     for side in ["left", "right"] {
         let segment = &mixed.segments[&format!("{side}-base")];
@@ -319,8 +319,8 @@ async fn check_mixed_restore(service: &TestService) {
     let mut original = operator();
     original.restore(&snapshot).unwrap();
     assert_eq!(target.status(), original.status());
-    let next = target.checkpoint(Epoch::new(9).unwrap()).unwrap();
-    let expected = original.checkpoint(Epoch::new(9).unwrap()).unwrap();
+    let next = target.checkpoint_v1(Epoch::new(9).unwrap()).unwrap();
+    let expected = original.checkpoint_v1(Epoch::new(9).unwrap()).unwrap();
     assert_eq!(next.inline_metadata, expected.inline_metadata);
     assert_eq!(next.segments.len(), expected.segments.len());
     for (id, segment) in &next.segments {

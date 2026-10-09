@@ -61,7 +61,7 @@ fn job(service: &TestService) -> StreamJobContext {
 }
 
 fn snapshot(operator: &mut StreamJoinOperator) -> OperatorStateSnapshot {
-    let mut snapshot = operator.checkpoint(Epoch::new(7).unwrap()).unwrap();
+    let mut snapshot = operator.checkpoint_v1(Epoch::new(7).unwrap()).unwrap();
     for side in ["left", "right"] {
         snapshot.segments.insert(
             format!("{side}-base"),
@@ -605,7 +605,7 @@ fn retained_snapshot(operator: &mut StreamJoinOperator) -> OperatorStateSnapshot
         metrics.retained_rows = 1;
         metrics.retained_bytes = charge;
     }
-    let mut snapshot = operator.checkpoint(Epoch::new(7).unwrap()).unwrap();
+    let mut snapshot = operator.checkpoint_v1(Epoch::new(7).unwrap()).unwrap();
     for (side, rows) in [
         ("left", &operator.state.left),
         ("right", &operator.state.right),
@@ -665,8 +665,8 @@ async fn check_v1_reader(service: &TestService, unsupported_metadata: bool) {
     let mut original = declared_operator(Arc::clone(&schema), &prototype.spec);
     original.restore(&snapshot).unwrap();
     let epoch = Epoch::new(8).unwrap();
-    let expected = original.checkpoint(epoch).unwrap();
-    let checkpoint = actual.checkpoint(epoch).unwrap();
+    let expected = original.checkpoint_v1(epoch).unwrap();
+    let checkpoint = actual.checkpoint_v1(epoch).unwrap();
     assert_eq!(checkpoint.inline_metadata, expected.inline_metadata);
     assert_eq!(
         checkpoint.segments.keys().collect::<Vec<_>>(),

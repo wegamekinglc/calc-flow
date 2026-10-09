@@ -285,7 +285,7 @@ async fn test_shared_payload_releases_equal_caller_schema_and_type_owners() {
     assert!(payload.funded_owner().unwrap().1 < (1 << 20));
     assert_eq!(payload.schema_ref().clone(), caller);
     assert_eq!(operator.status().left.retained_bytes, charge);
-    let captured = operator.checkpoint(Epoch::INITIAL).unwrap();
+    let captured = operator.checkpoint_v1(Epoch::INITIAL).unwrap();
     assert!(
         captured.segments["left-delta-1"]
             .bytes()
@@ -948,7 +948,7 @@ async fn resume_capture(snapshot: &OperatorStateSnapshot, left_times: &[i64]) ->
     assert_eq!(operator.status().left.retained_bytes, bytes);
     assert_eq!(operator.state.next_right_row_id, 1);
     let epoch = snapshot.inline_metadata["epoch"].as_u64().unwrap() + 1;
-    let resumed = operator.checkpoint(Epoch::new(epoch).unwrap()).unwrap();
+    let resumed = operator.checkpoint_v1(Epoch::new(epoch).unwrap()).unwrap();
     assert_eq!(resumed.inline_metadata["layout_version"], 1);
     let mut again = operator_fixture();
     again.restore(&resumed).unwrap();
@@ -1011,7 +1011,7 @@ async fn test_known_large_slice_bounds_backing_and_keeps_v1_row_ipc() {
         .process_data("left", batch, &context, &mut collector)
         .await
         .unwrap();
-    let capture = operator.checkpoint(Epoch::new(1).unwrap()).unwrap();
+    let capture = operator.checkpoint_v1(Epoch::new(1).unwrap()).unwrap();
     assert!(
         capture.segments["left-delta-1"]
             .bytes()
@@ -1066,7 +1066,7 @@ async fn test_progress_sparse_chunk_bounds_backing_and_keeps_v1_row_ipc() {
     assert_eq!(operator.status().left.retained_rows, 1);
     assert_eq!(operator.status().left.evicted_rows, 8_191);
     assert_eq!(operator.state.next_left_row_id, 8_192);
-    let captured = operator.checkpoint(Epoch::new(1).unwrap()).unwrap();
+    let captured = operator.checkpoint_v1(Epoch::new(1).unwrap()).unwrap();
     assert!(
         captured.segments["left-delta-1"]
             .bytes()
@@ -1111,7 +1111,7 @@ async fn test_sparse_chunk_refusal_retries_after_actual_credit_release() {
     let original = operator.state.left[0].record.clone();
     let owner = original.funded_owner().unwrap();
     let status = operator.status();
-    let captured = operator.checkpoint(Epoch::new(1).unwrap()).unwrap();
+    let captured = operator.checkpoint_v1(Epoch::new(1).unwrap()).unwrap();
     let runtime = operator.runtime.runtime().unwrap();
     let pool = runtime.incremental_memory_pool();
     let pressure = runtime.incremental_reservation("sparse-refusal");
@@ -1136,7 +1136,7 @@ async fn test_sparse_chunk_refusal_retries_after_actual_credit_release() {
     assert_eq!(operator.status().left, status.left);
     assert_eq!(
         operator
-            .checkpoint(Epoch::new(2).unwrap())
+            .checkpoint_v1(Epoch::new(2).unwrap())
             .unwrap()
             .segments,
         captured.segments
@@ -1504,7 +1504,7 @@ async fn test_owned_ingress_copy_releases_opaque_caller_owner() {
     assert_eq!(operator.status().left.retained_bytes, charge);
     assert_eq!(operator.state.next_left_row_id, 1);
     assert!(
-        operator.checkpoint(Epoch::INITIAL).unwrap().segments["left-delta-1"]
+        operator.checkpoint_v1(Epoch::INITIAL).unwrap().segments["left-delta-1"]
             .bytes()
             .ends_with(&ipc)
     );

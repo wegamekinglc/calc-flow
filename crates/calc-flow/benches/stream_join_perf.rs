@@ -363,7 +363,18 @@ fn focused_checkpoint_selection() -> Option<Option<FocusedCheckpoint>> {
     if !focused_checkpoint_mode() {
         return None;
     }
-    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    // Only closed benchmark selectors use these arguments; argv[0] is not an identity.
+    // Validate every argument before skipping argv[0], matching env::args on invalid UTF-8.
+    let args = std::env::args_os() // nosemgrep: args-os
+        .map(|argument| {
+            argument
+                .into_string()
+                .expect("benchmark arguments must be UTF-8")
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .skip(1)
+        .collect::<Vec<_>>();
     let selected = match args.as_slice() {
         [flag] if flag == "--list" => None,
         [name, exact, bench] if exact == "--exact" && bench == "--bench" => {

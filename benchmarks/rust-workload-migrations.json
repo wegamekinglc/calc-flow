@@ -56,6 +56,13 @@
       "candidate_sha256": "de0e7ad026cc98858ca86b071679e75ec76d3929ca9402442a1b6cf6125e8b5b",
       "reason": "Common focused checkpoint harness on both unchanged products: opt-in exact two-case registration, selected-case populated V1/V2 base and cut proof, and pure extraction of the original timed closures. Default scenarios, fixture inputs, timing boundaries and Criterion samples are unchanged.",
       "reference": "Issue #363 / PR #395; bounded source review SHA256 88ebc81286b76eac9a90bbb77899697e428dd307dc6cd079d8a9ac4d6b4ed1a2"
+    },
+    {
+      "target": "stream_join_perf",
+      "baseline_sha256": "f0cbd1dde848e7d24fff8e37aa5f0161ba25b10ba1ba688fa8b69053b337089d",
+      "candidate_sha256": "d50cb1560aa3be6bb1184d0902c43c65152aad49c2cf4fc26c1187472192a16f",
+      "reason": "Common focused checkpoint harness on both unchanged products: exact two-case selection and populated V1/V2 cut proof, unchanged extracted timed closures, fixtures and Criterion samples. Selector uses explicit UTF-8 decoding before skipping argv0; one precise args-os audit false positive is documented because only closed benchmark case selection uses arguments, never security identity.",
+      "reference": "Issue #363 / PR #395; bounded source review SHA256 88ebc81286b76eac9a90bbb77899697e428dd307dc6cd079d8a9ac4d6b4ed1a2; local selector audit disposition"
     }
   ]
 }
