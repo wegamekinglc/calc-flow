@@ -9,6 +9,10 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-09: Cancel successfully started native stream jobs when Python
+  startup is abandoned before ownership handoff. Await source shutdown and
+  managed state release even while the startup result remains referenced.
+
 - 2026-10-09: Restore streaming Join state before terminal managed sink
   recovery. Reuse funded V1 loading and decoding, validate native ended and
   empty state before publishing ingress status, and leave sources unopened.

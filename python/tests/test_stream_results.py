@@ -749,6 +749,7 @@ class _StartCancellation:
         self.native_result = asyncio.Event()
         self.milestones: list[tuple[str, float]] = []
         self.cancellation_args: tuple[object, ...] | None = None
+        self.result_observer: asyncio.Future | None = None
 
     def mark(self, name: str) -> None:
         self.milestones.append((name, time.monotonic()))
@@ -760,6 +761,8 @@ class _StartCancellation:
         if not observer.result()[0]:
             self.mark("native-start-failed")
             return
+        # A completed delivery may survive in a callback or cancellation traceback.
+        self.result_observer = observer
         self.mark("native-result")
         self.native_result.set()
         assert owner.cancel("native-start-result")
@@ -873,6 +876,7 @@ def test_stream_cancellation_at_native_start_result_releases_job(
         deadline = asyncio.get_running_loop().time() + 5
         task = asyncio.create_task(results.__aenter__())
         native_result = asyncio.create_task(probe.native_result.wait())
+        done = set()
         try:
             await asyncio.wait(
                 (native_result, task), timeout=5, return_when=asyncio.FIRST_COMPLETED
@@ -881,10 +885,15 @@ def test_stream_cancellation_at_native_start_result_releases_job(
             done, _ = await asyncio.wait(
                 (task,), timeout=max(0, deadline - asyncio.get_running_loop().time())
             )
-            assert task in done, probe.diagnostic(feed, tmp_path)
         finally:
             native_result.cancel()
             await asyncio.gather(native_result, return_exceptions=True)
+            if task not in done and probe.result_observer is not None:
+                # Settle the failed baseline without making rescue count as success.
+                native_job = probe.result_observer.result()[1]
+                await asyncio.wait_for(native_job.cancel_async(), 5)
+                await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 5)
+        assert task in done, probe.diagnostic(feed, tmp_path)
         with pytest.raises(asyncio.CancelledError):
             await task
         assert probe.cancellation_args == ("native-start-result",)
@@ -899,6 +908,8 @@ def test_stream_cancellation_at_native_start_result_releases_job(
             "root-removed",
         ]
         assert results._job is None
+        assert probe.result_observer is not None
+        assert probe.result_observer.result()[1].status()["task_count"] == 0
         assert feed.opened == feed.closed == 1
         assert asyncio.all_tasks() == before
 

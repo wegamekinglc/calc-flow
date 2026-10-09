@@ -3,7 +3,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{
-        Arc,
+        Arc, Weak,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
@@ -122,9 +122,63 @@ struct RunnerStartState {
     context: Arc<Mutex<Option<Arc<PythonAsyncContext>>>>,
     ownership: Arc<ConnectorOwnership>,
     cleanup: tokio::sync::Mutex<Option<StartCleanup>>,
+    handoff: StartResultHandoff,
 }
 
 type StartCleanup = Pin<Box<dyn Future<Output = calc_flow::Result<()>> + Send>>;
+
+enum StartResultDelivery {
+    Pending,
+    Offered(Weak<calc_flow::StreamingJob>),
+    Acknowledged,
+    Cancelled,
+}
+
+struct StartResultHandoff(Mutex<StartResultDelivery>);
+
+impl StartResultHandoff {
+    fn new() -> Self {
+        Self(Mutex::new(StartResultDelivery::Pending))
+    }
+
+    fn offer(&self, job: &Arc<calc_flow::StreamingJob>) -> PyResult<bool> {
+        let mut delivery = self.0.lock();
+        match &*delivery {
+            StartResultDelivery::Pending => {
+                *delivery = StartResultDelivery::Offered(Arc::downgrade(job));
+                Ok(true)
+            }
+            StartResultDelivery::Cancelled => Ok(false),
+            _ => Err(PyRuntimeError::new_err(
+                "streaming start result has already been offered",
+            )),
+        }
+    }
+
+    fn cancel(&self) -> Option<Arc<calc_flow::StreamingJob>> {
+        let mut delivery = self.0.lock();
+        if matches!(*delivery, StartResultDelivery::Acknowledged) {
+            return None;
+        }
+        match std::mem::replace(&mut *delivery, StartResultDelivery::Cancelled) {
+            StartResultDelivery::Offered(job) => job.upgrade(),
+            _ => None,
+        }
+    }
+
+    fn acknowledge(&self, job: &Arc<calc_flow::StreamingJob>) -> PyResult<()> {
+        let mut delivery = self.0.lock();
+        if let StartResultDelivery::Offered(offered) = &*delivery
+            && offered.as_ptr() == Arc::as_ptr(job)
+        {
+            *delivery = StartResultDelivery::Acknowledged;
+            return Ok(());
+        }
+        Err(PyRuntimeError::new_err(
+            "streaming start result does not match an offered job",
+        ))
+    }
+}
 
 fn retain_start_ownership<F: Future>(
     ownership: &Arc<ConnectorOwnership>,
@@ -732,6 +786,7 @@ impl PyContinuousStreamingRunner {
                 context: Arc::new(Mutex::new(None)),
                 ownership: Arc::new(ConnectorOwnership::new()),
                 cleanup: tokio::sync::Mutex::new(None),
+                handoff: StartResultHandoff::new(),
             }),
         }
     }
@@ -1154,6 +1209,7 @@ impl PyContinuousStreamingRunner {
                 context,
                 ownership,
                 cleanup: tokio::sync::Mutex::new(None),
+                handoff: StartResultHandoff::new(),
             }),
         })
     }
@@ -1204,10 +1260,18 @@ impl PyContinuousStreamingRunner {
     fn _wait_start_cleanup_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let state = Arc::clone(&self.inner);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            if let Some(job) = state.handoff.cancel() {
+                let _ = job.cancel().await;
+            }
             wait_start_cleanup(&state.ownership, &state.cleanup)
                 .await
                 .map_err(streaming_py_err)
         })
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn _ack_start_result(&self, job: PyRef<'_, PyStreamingJob>) -> PyResult<()> {
+        self.inner.handoff.acknowledge(&job.job()?)
     }
 }
 
@@ -1228,7 +1292,11 @@ impl PyStreamingStartAwaitable {
             retain_start_ownership(&self.inner.ownership, async move {
                 let (start, cleanup) = runner.start_with_cleanup();
                 *state.cleanup.lock().await = Some(Box::pin(cleanup));
-                let job = start.await.map_err(streaming_py_err)?;
+                let job = Arc::new(start.await.map_err(streaming_py_err)?);
+                if !state.handoff.offer(&job)? {
+                    let _ = job.cancel().await;
+                    return Err(PyRuntimeError::new_err("streaming start was cancelled"));
+                }
                 let roots = state.roots.lock().clone();
                 let awaits = Arc::clone(&state.awaits);
                 let context = Arc::clone(&state.context);
@@ -1246,13 +1314,13 @@ impl PyStreamingStartAwaitable {
 
 impl PyStreamingJob {
     fn from_inner_with_roots(
-        inner: calc_flow::StreamingJob,
+        inner: Arc<calc_flow::StreamingJob>,
         roots: Vec<Arc<PythonRoot>>,
         awaits: Arc<PythonAwaitRegistry>,
         context: Arc<Mutex<Option<Arc<PythonAsyncContext>>>>,
     ) -> Self {
         Self {
-            inner: Mutex::new(Some(Arc::new(inner))),
+            inner: Mutex::new(Some(inner)),
             roots: Arc::new(Mutex::new(roots)),
             awaits,
             context,
