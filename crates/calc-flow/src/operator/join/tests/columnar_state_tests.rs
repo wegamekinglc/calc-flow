@@ -1593,13 +1593,13 @@ async fn test_owned_ingress_boolean_and_all_valid_masks_use_byte_exact_legacy() 
 }
 
 #[tokio::test]
-async fn test_owned_ingress_long_string_yields_and_cancels_before_commit() {
+async fn test_owned_ingress_long_string_cooperates_and_cancels_before_commit() {
     let record = RecordBatch::try_new(
         right_schema(),
         vec![
             Arc::new(Int64Array::from(vec![7])),
             Arc::new(TimestampMicrosecondArray::from(vec![0]).with_timezone("UTC")),
-            Arc::new(StringArray::from(vec!["é".repeat(16_384)])),
+            Arc::new(StringArray::from(vec!["é".repeat(262_144)])),
         ],
     )
     .unwrap();
@@ -1623,16 +1623,16 @@ async fn test_owned_ingress_long_string_yields_and_cancels_before_commit() {
         let measured = allocation_counter::measure(|| {
             assert!(
                 future.as_mut().poll(&mut cx).is_pending(),
-                "32KiB string must yield within the bounded copy quantum"
+                "512KiB string must exhaust Tokio's cooperative budget during funded copying"
             );
         });
         owned_allocation += measured.bytes_current;
-        if owned_allocation >= 32_768 {
+        if owned_allocation >= 524_288 {
             break;
         }
     }
     assert!(
-        owned_allocation >= 32_768,
+        owned_allocation >= 524_288,
         "gate must reach actual prepaid StringBuilder buffers, not only planning credit"
     );
     tokio::task::yield_now().await;
@@ -1655,7 +1655,7 @@ async fn close_home_during_string_copy(cancelled: bool) {
         vec![
             Arc::new(Int64Array::from(vec![7])),
             Arc::new(TimestampMicrosecondArray::from(vec![0]).with_timezone("UTC")),
-            Arc::new(StringArray::from(vec!["é".repeat(16_384)])),
+            Arc::new(StringArray::from(vec!["é".repeat(262_144)])),
         ],
     )
     .unwrap();
@@ -1682,12 +1682,12 @@ async fn close_home_during_string_copy(cancelled: bool) {
             assert!(future.as_mut().poll(&mut cx).is_pending());
         });
         resident += measured.bytes_current;
-        if resident >= 32_768 {
+        if resident >= 524_288 {
             break;
         }
     }
     assert!(
-        resident >= 32_768,
+        resident >= 524_288,
         "closure must follow actual paid StringBuilder allocation"
     );
     assert!(pool.reserved() >= usize::try_from(resident).unwrap());
@@ -2253,8 +2253,8 @@ async fn test_owned_copy_private_schema_remains_funded_when_payload_outlives_ope
 }
 
 #[tokio::test]
-async fn test_owned_copy_128_headers_yield_before_native_retention() {
-    let schema = owner_proof_schema(128);
+async fn test_owned_copy_headers_exhaust_cooperative_budget_before_native_retention() {
+    let schema = owner_proof_schema(1_032);
     let columns = schema
         .fields()
         .iter()

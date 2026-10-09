@@ -80,9 +80,9 @@ impl Quantum {
         debug_assert!(visits <= COPY_VISITS && bytes <= COPY_BYTES);
         if self.visits + visits > COPY_VISITS || self.bytes + bytes > COPY_BYTES {
             #[cfg(test)]
-            super::super::note_join_work(|work| work.quantum_yields += 1);
+            super::super::note_join_work(|work| work.quantum_boundaries += 1);
             context.check_cancelled()?;
-            tokio::task::yield_now().await;
+            tokio::task::consume_budget().await;
             context.check_cancelled()?;
             self.visits = 0;
             self.bytes = 0;

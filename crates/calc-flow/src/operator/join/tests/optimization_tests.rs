@@ -169,7 +169,7 @@ async fn test_all_admitted_generic_blocks_charge_only_remaining_metadata_work() 
     }
     let work = join_work();
     assert_eq!(
-        work.quantum_yields, 2,
+        work.quantum_boundaries, 2,
         "bulk time copy, constant temporal mask and one metadata append visit"
     );
     assert_eq!(
@@ -186,6 +186,20 @@ async fn test_all_admitted_generic_blocks_charge_only_remaining_metadata_work() 
 
 #[tokio::test]
 async fn test_generic_grant_manual_poll_cancellation_never_commits() {
+    assert_quantum_does_not_force_peer_before_budget_exhaustion().await;
+    assert_generic_peer_cancellation_never_commits().await;
+    assert_generic_small_records_share_one_bounded_admission_quantum().await;
+    assert_quantum_checks_cancel_before_and_after_cooperation().await;
+    assert_quantum_checks_deadline_before_and_after_cooperation().await;
+}
+
+async fn assert_generic_peer_cancellation_never_commits() {
+    tokio::spawn(generic_peer_cancellation_never_commits())
+        .await
+        .unwrap();
+}
+
+async fn generic_peer_cancellation_never_commits() {
     let mut operator =
         StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
     operator.set_stream_resources(
@@ -197,25 +211,59 @@ async fn test_generic_grant_manual_poll_cancellation_never_commits() {
     );
     let job = job();
     let context = StreamOperatorContext::new(&job, "match", None);
-    let source = Batch::table(generic_records(), BatchMetadata::default()).unwrap();
+    let records = vec![generic_records()[0].clone(); 512];
+    let source = Batch::table(records, BatchMetadata::default()).unwrap();
     let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
     reset_join_work();
-    let mut process = Box::pin(operator.process_data("left", source, &context, &mut collector));
-    assert!(futures::poll!(process.as_mut()).is_pending());
-    assert!(futures::poll!(process.as_mut()).is_pending());
-    assert_eq!(join_work().generic_fast_rows, 122);
-    job.cancellation().cancel();
+    let cancel = job.cancellation().clone();
+    let peer = tokio::spawn(async move { cancel.cancel() });
     assert!(matches!(
-        process.await,
+        operator
+            .process_data("left", source, &context, &mut collector)
+            .await,
         Err(CalcFlowError::Cancelled { .. })
     ));
+    peer.await.unwrap();
+    let work = join_work();
+    assert!(work.generic_fast_rows > 0);
+    assert!(work.generic_fast_rows <= 128 * 64);
+    assert!(work.quantum_boundaries > 0);
     assert_eq!(operator.state.next_left_row_id, 0);
     assert!(operator.state.left.is_empty());
     assert!(collector.drain("output").is_empty());
-    assert_generic_small_records_share_one_bounded_admission_quantum().await;
+}
+
+async fn assert_quantum_does_not_force_peer_before_budget_exhaustion() {
+    tokio::spawn(async {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let job = job();
+        let context = StreamOperatorContext::new(&job, "match", None);
+        let ran = Arc::new(AtomicBool::new(false));
+        let seen = Arc::clone(&ran);
+        let peer = tokio::spawn(async move { seen.store(true, Ordering::Release) });
+        let mut quantum = columnar::Quantum::default();
+        quantum.step(&context, 64, 0).await.unwrap();
+        quantum.step(&context, 1, 0).await.unwrap();
+        assert!(
+            !ran.load(Ordering::Acquire),
+            "one work boundary must not force a ready peer before Tokio's cooperative budget is exhausted"
+        );
+        peer.await.unwrap();
+    })
+    .await
+    .unwrap();
 }
 
 async fn assert_generic_small_records_share_one_bounded_admission_quantum() {
+    tokio::spawn(generic_small_records_share_one_bounded_admission_quantum())
+        .await
+        .unwrap();
+}
+
+async fn generic_small_records_share_one_bounded_admission_quantum() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     let mut operator =
         StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
     operator.set_stream_resources(
@@ -225,31 +273,112 @@ async fn assert_generic_small_records_share_one_bounded_admission_quantum() {
         },
         UdfRegistrySnapshot::default(),
     );
-    let records = (0..130).map(|_| generic_records()[0].slice(0, 1)).collect();
-    let source = Batch::table(records, BatchMetadata::default()).unwrap();
+    let record = generic_records()[0].slice(0, 1);
     let job = job();
     let context = StreamOperatorContext::new(&job, "match", None);
-    let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+    let source = Batch::table(vec![record.clone(); 130], BatchMetadata::default()).unwrap();
+    let plan = operator.begin_batch("left", &source).unwrap();
+    let mut bundle = operator.admission_bundle(&plan);
+    let ran = Arc::new(AtomicBool::new(false));
+    let seen = Arc::clone(&ran);
+    let peer = tokio::spawn(async move { seen.store(true, Ordering::Release) });
     reset_join_work();
-    let mut process = Box::pin(operator.process_data("left", source, &context, &mut collector));
-    assert!(futures::poll!(process.as_mut()).is_pending());
+    for source_base in 0..130 {
+        operator
+            .admit_record(&record, &plan, "left", &context, &mut bundle, source_base)
+            .await
+            .unwrap();
+    }
     let work = join_work();
-    assert_eq!(work.generic_fast_rows, 7);
-    assert_eq!(work.quantum_yields, 1);
-    let consumed = work.generic_fast_rows * (512 + 16);
+    assert_eq!(work.generic_fast_rows, 130);
+    assert_eq!(work.quantum_boundaries, (130 - 1) / 7);
+    let rows_per_quantum = work.generic_fast_rows.div_ceil(work.quantum_boundaries + 1);
+    let consumed = rows_per_quantum * (512 + 16);
     assert!(consumed <= 4096);
-    assert!(
-        consumed + 512 > 4096,
-        "next record's time-copy charge must yield"
-    );
-    job.cancellation().cancel();
-    assert!(matches!(
-        process.await,
-        Err(CalcFlowError::Cancelled { .. })
-    ));
+    assert!(consumed + 512 > 4096);
+    assert_eq!(bundle.next_row_id, 130);
+    assert_eq!(bundle.admitted_source_rows, (0..130).collect::<Vec<_>>());
+    assert!(!ran.load(Ordering::Acquire));
+    peer.await.unwrap();
     assert_eq!(operator.state.next_left_row_id, 0);
     assert!(operator.state.left.is_empty());
-    assert!(collector.drain("output").is_empty());
+}
+
+async fn exhaust_cooperative_budget() {
+    while tokio::task::coop::has_budget_remaining() {
+        tokio::task::consume_budget().await;
+    }
+}
+
+async fn assert_quantum_checks_cancel_before_and_after_cooperation() {
+    tokio::spawn(async {
+        for cancelled_before in [true, false] {
+            let job = job();
+            let context = StreamOperatorContext::new(&job, "match", None);
+            let mut quantum = columnar::Quantum::default();
+            quantum.step(&context, 64, 4096).await.unwrap();
+            exhaust_cooperative_budget().await;
+            let mut boundary = Box::pin(quantum.step(&context, 1, 1));
+            if cancelled_before {
+                job.cancellation().cancel();
+                assert!(matches!(
+                    futures::poll!(boundary.as_mut()),
+                    std::task::Poll::Ready(Err(CalcFlowError::Cancelled { .. }))
+                ));
+            } else {
+                assert!(futures::poll!(boundary.as_mut()).is_pending());
+                job.cancellation().cancel();
+                assert!(matches!(
+                    boundary.await,
+                    Err(CalcFlowError::Cancelled { .. })
+                ));
+            }
+        }
+    })
+    .await
+    .unwrap();
+}
+
+async fn assert_quantum_checks_deadline_before_and_after_cooperation() {
+    tokio::spawn(async {
+        let deadline = chrono::Utc::now() - chrono::Duration::seconds(1);
+        let job = StreamJobContext::new(
+            1,
+            "expired",
+            JsonMap::new(),
+            Some(deadline),
+            CancellationToken::new(),
+        );
+        let context = StreamOperatorContext::new(&job, "match", None);
+        let mut quantum = columnar::Quantum::default();
+        quantum.step(&context, 64, 4096).await.unwrap();
+        exhaust_cooperative_budget().await;
+        assert!(matches!(
+            futures::poll!(Box::pin(quantum.step(&context, 1, 1))),
+            std::task::Poll::Ready(Err(CalcFlowError::Cancelled { .. }))
+        ));
+
+        let deadline = chrono::Utc::now() + chrono::Duration::seconds(1);
+        let job = StreamJobContext::new(
+            1,
+            "expires-while-cooperating",
+            JsonMap::new(),
+            Some(deadline),
+            CancellationToken::new(),
+        );
+        let context = StreamOperatorContext::new(&job, "match", None);
+        let mut quantum = columnar::Quantum::default();
+        quantum.step(&context, 64, 4096).await.unwrap();
+        let mut boundary = Box::pin(quantum.step(&context, 1, 1));
+        assert!(futures::poll!(boundary.as_mut()).is_pending());
+        tokio::time::sleep(Duration::from_millis(1010)).await;
+        assert!(matches!(
+            boundary.await,
+            Err(CalcFlowError::Cancelled { .. })
+        ));
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test]

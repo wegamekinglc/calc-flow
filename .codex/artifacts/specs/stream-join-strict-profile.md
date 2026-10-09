@@ -220,3 +220,43 @@ Reject identical source/native seals to either failed candidate. Preserve
 all outcomes without resampling. Final acceptance still requires performance
 matching #394 except necessary bug fixes, PR #393's green required CI, Codacy
 and resolved review, a verified merge into main, then closing PR #394.
+
+## Evidence-based cooperative scheduling correction
+
+The direct row-buffer candidate also failed to match #394. An isolated,
+deliberately incorrect one-file Quantum::step no-op diagnostic then compared
+exactly one 1M workload in two fixed paired comparisons: production control
+166.201ms to no-op 91.552ms (-44.91%, improved); #394 111.209ms to no-op
+89.990ms (-19.08%, improved). This jointly deletes work accounting, checks and
+yields and can change grant subdivision/optimizer behavior. It is evidence
+about the whole mechanism, not pure cancellation/yield cost, and must never
+ship. See [the diagnostic report](../analysis/stream-join-strict-profile-quantum.md).
+
+Make one production correction based on the pinned Tokio 1.52.3 primitive for
+long CPU computations: replace forced yield_now with consume_budget. Preserve
+all 64-visit/4096-byte accounting and boundary checks before and after the
+await, row-ID/error priority, transaction rollback and original funding.
+Normal budgeted Tokio tasks begin a poll with 128 cooperative units; each
+Quantum consumes one. Actual suspension may therefore wait up to about 128
+quanta, with other Tokio work exhausting the shared budget sooner. Preserve
+the existing checking granularity but explicitly supersede the earlier
+every-Quantum-suspends policy. No wall-time or peer realtime deadline is
+promised. Streaming actors are normal budgeted Tokio tasks, not unconstrained.
+
+Rename test-only quantum_yields to quantum_boundaries; a coop boundary does
+not prove suspension. Observe focused RED for a fresh child Tokio task's
+small computation forcing a peer to run too soon. Verify GREEN that small
+work stays within budget, sufficiently large work yields for peer cancellation,
+pre/post cancellation/deadline checks remain, and failed admission commits
+no state or metrics. Adapt old small-input/manual-first-Pending assumptions
+to the documented scheduling policy without weakening their error/rollback
+purpose. Keep all test assertions in existing entrypoints and check only
+affected cancellation/fairness plus necessary row-ID/copy controls.
+
+Freeze this corrected production source, obtain specialist approval, and
+measure the same three #394 cases once with the unchanged 2x10 paired
+protocol and exact-window 1+2 CPU profile. The previous phases consumed
+314.096475 seconds of the 600-second cumulative budget; cap this final phase
+at 250 seconds. Reject identical runtime/native seals to any failed source
+or to the no-op diagnostic. Neither prior no-op speedup nor profiles alone
+can establish this corrected implementation's performance.

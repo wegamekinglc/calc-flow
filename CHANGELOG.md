@@ -14,7 +14,9 @@ measurements. Use the current guides for supported behavior.
   Typed key columns reuse one funded row buffer and immediately intern each
   frame, preserving checkpoint bytes without a full-batch key arena. Vectorized admission removes redundant
   scalar scans and charges the remaining work within bounded cancellation
-  grants, preserving error order and resource limits.
+  grants, preserving error order and resource limits. Tokio cooperative budget
+  replaces a forced scheduler yield at every work boundary; cancellation and
+  deadline checks retain their existing granularity.
 
 - 2026-10-09: Intern repeated streaming Join keys and probe per-key ordered
   time lists through a native hash dictionary. Batch admission masks and
