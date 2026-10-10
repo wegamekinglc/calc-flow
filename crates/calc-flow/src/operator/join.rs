@@ -516,6 +516,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_probe_measures_key_frames_without_per_cell_walks() {
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        let job_context = job();
+        let context = StreamOperatorContext::new(&job_context, "match", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data(
+                "right",
+                right_batch(vec![0, 1, 2]),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+        reset_join_work();
+        operator
+            .process_data("left", left_batch(vec![0, 1, 2]), &context, &mut collector)
+            .await
+            .unwrap();
+        assert!(
+            join_work().arena_frames >= 3,
+            "probe still frames every row"
+        );
+        assert_eq!(join_work().arena_measure_cells, 0);
+    }
+
+    #[tokio::test]
     async fn thin_native_probes_stay_on_the_actor_thread() {
         let mut declaration = spec();
         declaration.limits = JoinStateLimits::new(20_000, 10_000_000, 8_192).unwrap();
@@ -2513,6 +2541,7 @@ struct JoinWork {
     borrowed_key_equalities: usize,
     key_type_resolutions: usize,
     arena_frames: usize,
+    arena_measure_cells: usize,
     normalized_time_visits: usize,
     temporal_mask_visits: usize,
 }
@@ -2528,7 +2557,7 @@ thread_local! {
         scalar_admissions: 0, generic_fast_rows: 0, admission_grants: 0,
         quantum_steps: 0, quantum_boundaries: 0,
         borrowed_key_hashes: 0, borrowed_key_equalities: 0,
-        key_type_resolutions: 0, arena_frames: 0,
+        key_type_resolutions: 0, arena_frames: 0, arena_measure_cells: 0,
         normalized_time_visits: 0, temporal_mask_visits: 0,
     }) };
 }
