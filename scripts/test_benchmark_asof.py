@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import AsyncMock, patch
 
-from scripts.benchmark_suite.asof import CASES, asof_rows
+from scripts.benchmark_suite.asof import CASES, _valid_sample, asof_rows
 from scripts.benchmark_suite.rust import (
     bench_targets,
     build_binaries,
@@ -98,6 +99,18 @@ class AsofEvidenceTests(unittest.IsolatedAsyncioTestCase):
             path = Path(raw) / "result.json"
             path.write_text(json.dumps(evidence))
             rows = asof_rows(path)
+            for right_fixture in (0.0, 0.1 + 4 * math.ulp(0.1)):
+                timed = copy.deepcopy(evidence)
+                for case in timed["cases"]:
+                    for sample in (case["oracle"], *case["samples"]):
+                        sample.update(
+                            right_fixture_seconds_untimed=right_fixture,
+                            right_admission_seconds_untimed=0.0,
+                            left_fixture_seconds_untimed=0.0,
+                            left_admission_seconds_untimed=0.0,
+                        )
+                path.write_text(json.dumps(timed))
+                self.assertEqual(len(asof_rows(path)), 8)
         self.assertEqual(len(rows), 8)
 
     def test_invalid_output_chunk_coverage_is_rejected(self):
@@ -124,6 +137,14 @@ class AsofEvidenceTests(unittest.IsolatedAsyncioTestCase):
     async def test_maintained_native_target_keeps_eight_cases_and_raw_diagnostics(self):
         self.assertIn("stream_asof_perf", bench_targets(Path.cwd()))
         evidence = report()
+        for case in evidence["cases"]:
+            for sample in (case["oracle"], *case["samples"]):
+                sample.update(
+                    right_fixture_seconds_untimed=0.01,
+                    right_admission_seconds_untimed=0.04,
+                    left_fixture_seconds_untimed=0.01,
+                    left_admission_seconds_untimed=0.04,
+                )
         with TemporaryDirectory() as raw:
             root = Path(raw)
 
@@ -171,6 +192,34 @@ class AsofEvidenceTests(unittest.IsolatedAsyncioTestCase):
         item = report()
         item["cases"][0]["oracle"]["validated_all_rows"] = False
         invalid.append(item)
+        phases = dict(
+            right_fixture_seconds_untimed=0.0,
+            right_admission_seconds_untimed=0.0,
+            left_fixture_seconds_untimed=0.0,
+            left_admission_seconds_untimed=0.0,
+        )
+        invalid_phases = [
+            {"right_fixture_seconds_untimed": 0.01},
+            dict.fromkeys(phases, 1e308),
+            dict.fromkeys(phases, 0.1),
+            {**phases, "right_fixture_seconds_untimed": 0.1 + 16 * math.ulp(0.1)},
+        ]
+        invalid_phases.extend(
+            {**phases, "left_admission_seconds_untimed": value}
+            for value in (
+                -0.01,
+                float("nan"),
+                float("inf"),
+                10**400,
+                None,
+                True,
+                "0.01",
+            )
+        )
+        for breakdown in invalid_phases:
+            item = copy.deepcopy(report())
+            item["cases"][0]["oracle"].update(breakdown)
+            invalid.append(item)
         with TemporaryDirectory() as raw:
             path = Path(raw) / "result.json"
             for index, item in enumerate(invalid):
@@ -178,6 +227,14 @@ class AsofEvidenceTests(unittest.IsolatedAsyncioTestCase):
                     path.write_text(json.dumps(item))
                     with self.assertRaises(ValueError):
                         asof_rows(path)
+        for value in (float("nan"), float("inf")):
+            sample = copy.deepcopy(report()["cases"][0]["oracle"])
+            sample.update(phases)
+            sample["right_fixture_seconds_untimed"] = value
+            with self.subTest(nonfinite_phase=value):
+                self.assertFalse(
+                    _valid_sample(sample, sample["config"], "tolerance-window")
+                )
 
 
 class AsofInventoryTests(unittest.IsolatedAsyncioTestCase):

@@ -9,6 +9,11 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-10: Split ASOF benchmark setup diagnostics into right fixture,
+  right admission, left fixture, and left admission durations. Preserve the
+  watermark timing boundary and accept historical reports without the new
+  fields; validate complete phase timings against the original setup total.
+
 - 2026-10-10: Split large native streaming Join probes into at most eight
   contiguous count and fill work units. Check the global match limit before
   filling, fund fragments alongside the combined pair buffer, and preserve

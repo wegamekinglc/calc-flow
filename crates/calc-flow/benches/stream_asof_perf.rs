@@ -140,22 +140,45 @@ fn progress(job: &StreamJobContext, left: i64, right: i64) -> StreamOperatorCont
     )
 }
 
+struct AdmissionPhases {
+    right_fixture: f64,
+    right_admission: f64,
+    left_fixture: f64,
+    left_admission: f64,
+}
+
 async fn seed(
     op: &mut StreamAsofJoinOperator,
     job: &StreamJobContext,
     pending: usize,
     retained: usize,
     skew: bool,
-) {
+) -> AdmissionPhases {
     let cx = StreamOperatorContext::new(job, "asof", None);
     let mut collector = EdgeCollector::new(op.output_ports().to_vec());
-    op.process_data("right", batch(retained, skew, false), &cx, &mut collector)
+    let started = Instant::now();
+    let right = batch(retained, skew, false);
+    let right_fixture = started.elapsed().as_secs_f64();
+    let started = Instant::now();
+    op.process_data("right", right, &cx, &mut collector)
         .await
         .unwrap();
-    op.process_data("left", batch(pending, skew, true), &cx, &mut collector)
+    let right_admission = started.elapsed().as_secs_f64();
+    let started = Instant::now();
+    let left = batch(pending, skew, true);
+    let left_fixture = started.elapsed().as_secs_f64();
+    let started = Instant::now();
+    op.process_data("left", left, &cx, &mut collector)
         .await
         .unwrap();
+    let left_admission = started.elapsed().as_secs_f64();
     assert!(collector.drain("output").is_empty());
+    AdmissionPhases {
+        right_fixture,
+        right_admission,
+        left_fixture,
+        left_admission,
+    }
 }
 
 fn validate(data: &Batch, start: usize, rights: &BTreeMap<i64, i64>, skew: bool) -> usize {
@@ -245,7 +268,7 @@ fn sample(rt: &tokio::runtime::Runtime, config: &Config, check: bool) -> Value {
     let job = job(CancellationToken::new());
     let mut op = operator();
     let setup_start = Instant::now();
-    rt.block_on(seed(&mut op, &job, pending, retained, skew));
+    let admission_phases = rt.block_on(seed(&mut op, &job, pending, retained, skew));
     let admission_seconds = setup_start.elapsed().as_secs_f64();
     let snapshot = op.checkpoint(Epoch::INITIAL).unwrap();
     let checkpoint_before = snapshot
@@ -323,7 +346,7 @@ fn sample(rt: &tokio::runtime::Runtime, config: &Config, check: bool) -> Value {
         .values()
         .map(|s| s.bytes().len())
         .sum::<usize>();
-    json!({"config":config,"seconds":seconds,"output_rows":collector.rows,"chunks":collector.chunks,"max_chunk_bytes":collector.max_bytes,"rss_available":before > 0,"rss_before_bytes":before,"rss_peak_bytes":peak.load(Ordering::Relaxed),"allocation_peak_bytes":allocation.bytes_max,"allocation_total_bytes":allocation.bytes_total,"allocation_count":allocation.count_total,"before_status":before_status,"after_status":after_status,"checkpoint_before_bytes":checkpoint_before,"checkpoint_after_bytes":checkpoint_after,"admission_seconds_untimed":admission_seconds,"restore_seconds_untimed":restore_seconds,"capture_seconds_untimed":capture_seconds,"validated_all_rows":check})
+    json!({"config":config,"seconds":seconds,"output_rows":collector.rows,"chunks":collector.chunks,"max_chunk_bytes":collector.max_bytes,"rss_available":before > 0,"rss_before_bytes":before,"rss_peak_bytes":peak.load(Ordering::Relaxed),"allocation_peak_bytes":allocation.bytes_max,"allocation_total_bytes":allocation.bytes_total,"allocation_count":allocation.count_total,"before_status":before_status,"after_status":after_status,"checkpoint_before_bytes":checkpoint_before,"checkpoint_after_bytes":checkpoint_after,"admission_seconds_untimed":admission_seconds,"right_fixture_seconds_untimed":admission_phases.right_fixture,"right_admission_seconds_untimed":admission_phases.right_admission,"left_fixture_seconds_untimed":admission_phases.left_fixture,"left_admission_seconds_untimed":admission_phases.left_admission,"restore_seconds_untimed":restore_seconds,"capture_seconds_untimed":capture_seconds,"validated_all_rows":check})
 }
 
 struct CancelCollector {
