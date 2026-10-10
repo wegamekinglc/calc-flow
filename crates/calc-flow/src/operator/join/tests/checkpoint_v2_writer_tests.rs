@@ -157,6 +157,7 @@ fn assert_same_segments(left: &OperatorStateSnapshot, right: &OperatorStateSnaps
 
 #[tokio::test]
 async fn test_join_prepared_capture_writes_v2_payload_locators_deterministically() {
+    assert_bulk_capture_fits_default_runtime_credit().await;
     let left = record(
         &[95, 96],
         &[None, Some("猫")],
@@ -176,4 +177,79 @@ async fn test_join_prepared_capture_writes_v2_payload_locators_deterministically
 
     let repeated = prepared_capture(&left, &right).await;
     assert_same_segments(&captured, &repeated);
+}
+
+async fn assert_bulk_capture_fits_default_runtime_credit() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("account_id", DataType::Utf8, false),
+        Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            false,
+        ),
+        Field::new("amount", DataType::Int64, false),
+    ]));
+    let spec = StreamJoinSpec::inner(
+        ["account_id"],
+        ["account_id"],
+        "ts",
+        "ts",
+        JoinTimeBounds::new(Duration::from_secs(300), Duration::from_secs(60)).unwrap(),
+        JoinStateLimits::new(4_000_000, 4 << 30, 100_000_000).unwrap(),
+    )
+    .unwrap();
+    let mut operator = StreamJoinOperator::new(
+        "bulk-credit",
+        Arc::clone(&schema),
+        Arc::clone(&schema),
+        spec,
+    )
+    .unwrap();
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "bulk-credit", None);
+    let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+    for (side, prefix) in [("left", "L"), ("right", "R")] {
+        let keys = (0..30_625)
+            .map(|row| format!("{prefix}{row:07}"))
+            .collect::<Vec<_>>();
+        let record = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(StringArray::from(keys)),
+                Arc::new(TimestampMicrosecondArray::from(vec![100_000_000; 30_625])),
+                Arc::new(Int64Array::from(vec![7; 30_625])),
+            ],
+        )
+        .unwrap();
+        operator
+            .process_data(
+                side,
+                Batch::table(vec![record], BatchMetadata::default()).unwrap(),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        (operator.state.left.len(), operator.state.right.len()),
+        (30_625, 30_625)
+    );
+    assert!(collector.drain("output").is_empty());
+    let pool = operator
+        .runtime
+        .runtime()
+        .unwrap()
+        .incremental_memory_pool();
+    eprintln!("bulk checkpoint pre-capture credit={}", pool.reserved());
+    let captured = operator
+        .checkpoint(Epoch::INITIAL)
+        .expect("61,250 flat rows must checkpoint within the unchanged default runtime pool");
+    assert_eq!(captured.inline_metadata["layout_version"], 2);
+    assert_eq!(operator.state.last_checkpoint_epoch, Some(Epoch::INITIAL));
+    drop((captured, operator));
+    drop(context);
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop(job);
+    assert_eq!(pool.reserved(), 0);
 }

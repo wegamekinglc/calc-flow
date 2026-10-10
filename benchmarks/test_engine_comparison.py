@@ -30,7 +30,8 @@ def test_interval_sql_fits_one_bounded_hash_build():
 
     data = workload(64_000, scenario="interval_join")
     context = SessionContext(
-        SessionConfig().with_target_partitions(32).with_batch_size(8192),
+        # Isolate build memory from shared-slice and repartition queue accounting.
+        SessionConfig().with_target_partitions(1).with_batch_size(data.table.num_rows),
         RuntimeEnvBuilder().with_greedy_memory_pool(16 << 20),
     )
     batches = data.table.to_batches()
@@ -43,6 +44,30 @@ def test_interval_sql_fits_one_bounded_hash_build():
     expected = expected.sort_by(order)
     assert actual.column_names == expected.column_names
     assert all(actual[name].equals(expected[name]) for name in expected.column_names)
+
+
+def test_interval_sql_parallel_plan_builds_reference_once():
+    from datafusion import SessionConfig, SessionContext
+
+    data = workload(64_000, scenario="interval_join")
+    context = SessionContext(
+        SessionConfig().with_target_partitions(32).with_batch_size(8192)
+    )
+    for name in ("input", "reference"):
+        context.register_record_batches(name, [data.table.to_batches()])
+    plan = context.sql(sql_query("interval_join")).execution_plan()
+
+    def nodes(node):
+        yield node
+        for child in node.children():
+            yield from nodes(child)
+
+    joins = [node for node in nodes(plan) if node.display().startswith("HashJoinExec:")]
+    assert len(joins) == 1
+    build, probe = joins[0].children()
+    assert not any(node.display().startswith("CrossJoinExec") for node in nodes(build))
+    assert any(node.display().startswith("CrossJoinExec") for node in nodes(probe))
+    assert plan.partition_count == 32
 
 
 @pytest.mark.parametrize("backend", ("calc-flow-sql", "datafusion"))

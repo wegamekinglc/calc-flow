@@ -128,6 +128,10 @@ fn appends_after_state(
     admission: &Admission,
     context: &StreamOperatorContext<'_>,
 ) -> Result<bool> {
+    if operator.state.right.is_empty() {
+        context.check_cancelled()?;
+        return Ok(false);
+    }
     let mut earliest = i64::MAX;
     for (ordinal, (identity, _)) in admission.rows.iter().enumerate() {
         if ordinal.is_multiple_of(1_024) {

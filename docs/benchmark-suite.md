@@ -335,7 +335,17 @@ the remaining rows without gaps or duplicates.
 The report schema is `calc-flow.asof-finalization.v1`. Raw observations retain
 elapsed seconds, output rows, chunk row counts and cumulative emission times,
 maximum logical chunk bytes, before/after status and checkpoint sizes, and
-untimed admission/restore/capture durations. Allocation totals and peaks count
+untimed admission/restore/capture durations. New observations split
+`admission_seconds_untimed` into four diagnostics:
+`right_fixture_seconds_untimed`, `right_admission_seconds_untimed`,
+`left_fixture_seconds_untimed`, and `left_admission_seconds_untimed`. These
+measure fixture construction and awaited admission in their existing order;
+the original admission total still covers the entire seed, and the primary
+watermark timer is unchanged. Historical observations may omit all four.
+If any is present, all four must be finite, nonnegative numbers, and their
+finite sum must not exceed the admission total, allowing eight ULPs for
+floating-point rounding. These diagnostics do not establish optimization gains.
+Allocation totals and peaks count
 only the measured thread; they exclude allocations on spawned output workers.
 Process RSS is sampled separately at 1 ms intervals
 through Linux `/proc` and may miss shorter peaks; `rss_available=false`

@@ -9,6 +9,16 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-10: Fund flat numeric, string and binary Join checkpoint payload
+  concatenation from the typed Arrow builder allocation bounds. Large captures
+  and captures after recovery no longer exhaust resident credit through
+  per-slice generic-constructor over-reservation; runtime limits and funding
+  ownership remain enforced.
+
+- 2026-10-10: Split ASOF benchmark setup diagnostics into right fixture,
+  right admission, left fixture, and left admission durations. Preserve the
+  watermark timing boundary and accept historical reports without the new
+  fields; validate complete phase timings against the original setup total.
 - 2026-10-10: Gate the owned parallel Join probe on estimated key-run
   visits so thin one-to-one shapes stay on the actor thread, restoring
   suite Join throughput that the two-submission dispatch overhead had

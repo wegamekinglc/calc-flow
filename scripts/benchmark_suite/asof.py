@@ -31,6 +31,12 @@ COUNTS = (
     "checkpoint_after_bytes",
     "max_chunk_bytes",
 )
+ADMISSION_PHASES = (
+    "right_fixture_seconds_untimed",
+    "right_admission_seconds_untimed",
+    "left_fixture_seconds_untimed",
+    "left_admission_seconds_untimed",
+)
 
 
 def asof_rows(path: Path) -> dict:
@@ -96,7 +102,10 @@ def _valid_counts(sample: dict) -> bool:
 
 
 def _nonnegative(value: object) -> bool:
-    return type(value) in (int, float) and math.isfinite(value) and value >= 0
+    try:
+        return type(value) in (int, float) and math.isfinite(value) and value >= 0
+    except OverflowError:
+        return False
 
 
 def _valid_times(sample: dict, config: dict) -> bool:
@@ -104,7 +113,23 @@ def _valid_times(sample: dict, config: dict) -> bool:
     timings = all(_nonnegative(sample.get(field)) for field in fields)
     restore = sample.get("restore_seconds_untimed")
     restored = _nonnegative(restore) if config["restored"] else restore is None
-    return timings and sample["seconds"] > 0 and restored
+    return (
+        timings
+        and sample["seconds"] > 0
+        and restored
+        and _valid_admission_phases(sample)
+    )
+
+
+def _valid_admission_phases(sample: dict) -> bool:
+    if not any(field in sample for field in ADMISSION_PHASES):
+        return True
+    values = [sample.get(field) for field in ADMISSION_PHASES]
+    if not all(_nonnegative(value) for value in values):
+        return False
+    elapsed = sum(float(value) for value in values)
+    total = sample["admission_seconds_untimed"]
+    return math.isfinite(elapsed) and elapsed - total <= 8 * math.ulp(total)
 
 
 def _valid_chunks(sample: dict, config: dict) -> bool:

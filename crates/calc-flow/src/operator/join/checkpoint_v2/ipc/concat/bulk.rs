@@ -11,12 +11,17 @@ use super::{
 };
 use crate::Result;
 
+mod flat;
+
 pub(in crate::operator::join::checkpoint_v2) fn admit(
     arrays: &[&dyn Array],
     workspace: &MemoryReservation,
     resident: &Arc<super::super::super::payload::Funding>,
     check: &dyn Fn() -> Result<()>,
 ) -> Result<()> {
+    if flat::admit(arrays, workspace, resident, check)? {
+        return Ok(());
+    }
     accounting::reserve(workspace, snapshots(arrays, check)?)?;
     check()?;
     let sources = arrays
