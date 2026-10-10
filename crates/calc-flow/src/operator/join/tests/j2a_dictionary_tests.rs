@@ -238,7 +238,10 @@ fn assert_hot_run_expiry_and_refill_move_only_linear_entries() {
         "prefix expiry and geometric compaction must be linear; moved={}",
         join_work().native_shifted_entries
     );
-    assert_eq!(pool.reserved(), 1_024);
+    assert_eq!(
+        pool.reserved(),
+        native_lookup::NativeIndex::build_charge(0).unwrap()
+    );
     drop(index);
     assert_eq!(pool.reserved(), 0);
 }

@@ -100,10 +100,11 @@ fn remove_rows(
 }
 
 fn allocated_index(pool: &Arc<dyn MemoryPool>) -> (NativeIndex, i64) {
+    let prepaid = NativeIndex::build_charge(0).unwrap();
     let mut index = None;
     let allocation = allocation_counter::measure(|| {
         let credit = MemoryConsumer::new("stream-join-native").register(pool);
-        credit.try_grow(BASE_BYTES).unwrap();
+        credit.try_grow(prepaid).unwrap();
         index = Some(NativeIndex::new(&[], credit));
     });
     assert!(allocation.bytes_max <= BASE_BYTES as u64);
@@ -160,7 +161,7 @@ fn assert_native_index_live_allocations_remain_funded_through_insert_and_evictio
                 let order = order(rows.len(), disordered);
                 let live = insert_rows(&mut index, &rows, &order, controls);
                 let live = remove_rows(&mut index, &rows, &order, random, live);
-                assert_eq!(pool.reserved(), BASE_BYTES);
+                assert_eq!(pool.reserved(), NativeIndex::build_charge(0).unwrap());
                 let released = allocation_counter::measure(|| drop(index));
                 assert_eq!(live + released.bytes_current, 0);
                 assert_eq!(pool.reserved(), 0);
@@ -189,7 +190,7 @@ fn assert_native_index_retained_capacities_remain_funded_during_empty_run_reuse(
         check_allocation_cut(allocation, &mut live, funded, &index);
         assert_eq!(index.row_count(), dense.len());
     }
-    assert!(index.funded_bytes() > BASE_BYTES);
+    assert!(index.funded_bytes() > NativeIndex::build_charge(0).unwrap());
     for identity in removed {
         let append = index.reserve(1).unwrap();
         let funded = index.funded_bytes();
