@@ -86,6 +86,13 @@ pub struct TransactionalParquetSink {
     part: u32,
     parts: Vec<String>,
     rows: u64,
+    pending: Option<PendingFileOperation>,
+}
+
+struct PendingFileOperation {
+    task: tokio::task::JoinHandle<Result<()>>,
+    path: PathBuf,
+    operation: &'static str,
 }
 
 impl TransactionalParquetSink {
@@ -102,6 +109,7 @@ impl TransactionalParquetSink {
             part: 0,
             parts: Vec::new(),
             rows: 0,
+            pending: None,
         })
     }
 
@@ -125,14 +133,31 @@ impl TransactionalParquetSink {
         ))
     }
 
-    async fn blocking<T, F>(&self, path: PathBuf, operation: &'static str, work: F) -> Result<T>
+    async fn settle_pending(&mut self) -> Result<()> {
+        let Some(pending) = self.pending.as_mut() else {
+            return Ok(());
+        };
+        // Keep ownership in the sink when its caller cancels this wait.
+        let result = (&mut pending.task).await;
+        let completed = self
+            .pending
+            .take()
+            .expect("completed file operation is owned");
+        result
+            .map_err(|error| Self::fail(completed.operation, &completed.path, &error.to_string()))?
+    }
+
+    async fn blocking<F>(&mut self, path: PathBuf, operation: &'static str, work: F) -> Result<()>
     where
-        T: Send + 'static,
-        F: FnOnce() -> std::result::Result<T, calc_flow::CalcFlowError> + Send + 'static,
+        F: FnOnce() -> Result<()> + Send + 'static,
     {
-        tokio::task::spawn_blocking(work)
-            .await
-            .map_err(|error| Self::fail(operation, &path, &error.to_string()))?
+        self.settle_pending().await?;
+        self.pending = Some(PendingFileOperation {
+            task: tokio::task::spawn_blocking(work),
+            path,
+            operation,
+        });
+        self.settle_pending().await
     }
 
     fn manifest_evidence(&self, epoch: Epoch, parts: &[String], rows: u64) -> JsonMap {
@@ -373,7 +398,12 @@ impl TransactionalStreamSink for TransactionalParquetSink {
         .await
     }
 
+    async fn settle_open(&mut self) -> Result<()> {
+        self.settle_pending().await
+    }
+
     async fn begin_epoch(&mut self, epoch: Epoch) -> Result<()> {
+        self.settle_pending().await?;
         let staging = self.config.staging_dir(epoch);
         let staging_root = self.config.staging_root();
         self.epoch = Some(epoch);
@@ -392,6 +422,7 @@ impl TransactionalStreamSink for TransactionalParquetSink {
     }
 
     async fn write(&mut self, batch: &Batch) -> Result<()> {
+        self.settle_pending().await?;
         let Some(epoch) = self.epoch else {
             return Err(Self::fail(
                 "write",
@@ -434,8 +465,8 @@ impl TransactionalStreamSink for TransactionalParquetSink {
             ));
         }
         let staging = self.config.staging_dir(epoch);
-        for part in &self.parts {
-            let path = staging.join(part);
+        for part in 0..self.parts.len() {
+            let path = staging.join(&self.parts[part]);
             self.blocking(path.clone(), "pre_commit", move || sync_file(&path))
                 .await?;
         }
@@ -459,19 +490,22 @@ impl TransactionalStreamSink for TransactionalParquetSink {
     }
 
     async fn abort(&mut self, epoch: Epoch, _pre_commit: Option<&JsonMap>) -> Result<()> {
+        let pending = self.settle_pending().await;
         let staging = self.config.staging_dir(epoch);
         self.epoch = None;
         self.parts.clear();
         self.rows = 0;
-        self.blocking(staging.clone(), "abort", move || {
-            if staging.exists() {
-                std::fs::remove_dir_all(&staging).map_err(|error| {
-                    TransactionalParquetSink::fail("abort", &staging, &error.to_string())
-                })?;
-            }
-            Ok(())
-        })
-        .await
+        let aborted = self
+            .blocking(staging.clone(), "abort", move || {
+                if staging.exists() {
+                    std::fs::remove_dir_all(&staging).map_err(|error| {
+                        TransactionalParquetSink::fail("abort", &staging, &error.to_string())
+                    })?;
+                }
+                Ok(())
+            })
+            .await;
+        pending.and(aborted)
     }
 
     async fn recover(&mut self, recovery: &SinkRecovery) -> Result<()> {
@@ -497,6 +531,74 @@ impl TransactionalStreamSink for TransactionalParquetSink {
     }
 
     async fn close(&mut self) -> Result<()> {
-        Ok(())
+        self.settle_pending().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{sync::mpsc, time::Duration};
+
+    use super::*;
+
+    struct ReleaseBlockingWork(Option<mpsc::Sender<()>>);
+
+    impl Drop for ReleaseBlockingWork {
+        fn drop(&mut self) {
+            if let Some(release) = self.0.take() {
+                let _ = release.send(());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cancelled_file_work_settles_before_epoch_abort() {
+        let root = tempfile::tempdir().unwrap();
+        let mut sink = TransactionalParquetSink::new(FileSinkConfig {
+            root: root.path().to_path_buf(),
+            output: "cancelled".into(),
+        })
+        .unwrap();
+        sink.open().await.unwrap();
+        let staging = sink.config.staging_dir(Epoch::INITIAL);
+        let worker_staging = staging.clone();
+        let (release, released) = mpsc::channel();
+        let release = ReleaseBlockingWork(Some(release));
+        let (started, start) = tokio::sync::oneshot::channel();
+        let (finished, finish) = tokio::sync::oneshot::channel();
+        let mut beginning = Box::pin(sink.blocking(staging.clone(), "begin_epoch", move || {
+            started.send(()).unwrap();
+            released.recv_timeout(Duration::from_secs(5)).unwrap();
+            let result = std::fs::create_dir_all(&worker_staging).map_err(
+                TransactionalParquetSink::map_io("begin_epoch", worker_staging),
+            );
+            let _ = finished.send(());
+            result
+        }));
+        tokio::select! {
+            result = &mut beginning => panic!("gated file work returned early: {result:?}"),
+            result = start => result.unwrap(),
+        }
+        drop(beginning);
+        let mut abort = Box::pin(sink.abort(Epoch::INITIAL, None));
+        let early = tokio::time::timeout(Duration::from_millis(100), &mut abort).await;
+        drop(release);
+        let overtook_work = early.is_ok();
+        match early {
+            Ok(result) => result.unwrap(),
+            Err(_) => abort.await.unwrap(),
+        }
+        tokio::time::timeout(Duration::from_secs(5), finish)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !overtook_work,
+            "epoch abort overtook cancelled blocking work"
+        );
+        assert!(
+            !staging.exists(),
+            "cancelled work recreated aborted staging"
+        );
     }
 }
