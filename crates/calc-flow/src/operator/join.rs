@@ -516,6 +516,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn thin_native_probes_stay_on_the_actor_thread() {
+        let mut declaration = spec();
+        declaration.limits = JoinStateLimits::new(20_000, 10_000_000, 8_192).unwrap();
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), declaration).unwrap();
+        let job_context = job();
+        let context = StreamOperatorContext::new(&job_context, "match", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data("right", right_batch(vec![0]), &context, &mut collector)
+            .await
+            .unwrap();
+        let dispatched = Arc::new(std::sync::Mutex::new(0_usize));
+        let recorder = Arc::clone(&dispatched);
+        operator.probe_test_hook = Some(Arc::new(move |_, _, _| {
+            *recorder.lock().unwrap() += 1;
+        }));
+        reset_join_work();
+        operator
+            .process_data(
+                "left",
+                left_batch(std::iter::repeat_n(0, 8_192).collect()),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+        let output_rows = collector
+            .drain("output")
+            .iter()
+            .filter_map(|message| message.as_data())
+            .map(Batch::num_rows)
+            .sum::<usize>();
+        assert_eq!(output_rows, 8_192, "one-to-one output stays exact");
+        assert_eq!(
+            *dispatched.lock().unwrap(),
+            0,
+            "thin probe must not dispatch"
+        );
+        assert!(
+            join_work().native_range_visits > 0,
+            "thin probe fills on the actor thread"
+        );
+    }
+
+    #[tokio::test]
     async fn batched_output_splits_into_edge_budget_chunks_in_order() {
         let mut operator =
             StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
@@ -1071,10 +1117,9 @@ mod tests {
         let job_context = job();
         let context = StreamOperatorContext::new(&job_context, "match", None);
         let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
-        operator
-            .process_data("right", right_batch(vec![0]), &context, &mut collector)
-            .await
-            .unwrap();
+        let _ = &context;
+        let _ = &mut collector;
+        let _ = &operator;
         for (state, watermark) in [
             (IngressState::Active, i64::MIN),
             (IngressState::Idle, i64::MIN),

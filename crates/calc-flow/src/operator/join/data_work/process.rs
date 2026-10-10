@@ -71,7 +71,19 @@ impl StreamJoinOperator {
             &self.state.left
         };
         let index = opposite.1.as_ref().expect("captured native index");
-        let slots = keys.keys.iter().map(|key| index.key_id(key)).collect();
+        let slots = keys
+            .keys
+            .iter()
+            .map(|key| index.key_id(key))
+            .collect::<Vec<_>>();
+        let estimated_visits: usize = slots
+            .iter()
+            .flatten()
+            .map(|&id| index.run_len_by_id(id))
+            .sum();
+        if estimated_visits < super::probe_min_visits() {
+            return Ok(Capture::Declined(admitted));
+        }
         let (released, receiver) = tokio::sync::oneshot::channel();
         self.compaction_release = Some(receiver);
         self.probe_control = Some(Arc::clone(&control));
