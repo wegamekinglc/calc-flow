@@ -1803,6 +1803,7 @@ mod tests {
     mod j2a_dictionary_tests;
     mod native_lookup_tests;
     mod optimization_tests;
+    mod ordered_probe_tests;
     mod output_gather_tests;
     mod owned_probe_tests;
     mod sql_key_scratch_tests;
@@ -2929,6 +2930,8 @@ pub struct StreamJoinOperator {
     probe_control: Option<Arc<datafusion::execution::memory_pool::MemoryReservation>>,
     #[cfg(test)]
     probe_test_hook: Option<data_work::TestHook>,
+    #[cfg(test)]
+    probe_unit_test_hook: Option<data_work::UnitTestHook>,
     v2_containers: Option<Arc<checkpoint_v2::ContainerFunding>>,
     v2_writer: checkpoint_v2::WriterState,
     #[cfg(test)]
@@ -3471,6 +3474,8 @@ impl StreamJoinOperator {
             probe_control: None,
             #[cfg(test)]
             probe_test_hook: None,
+            #[cfg(test)]
+            probe_unit_test_hook: None,
             v2_containers: None,
             v2_writer: checkpoint_v2::WriterState::default(),
             #[cfg(test)]

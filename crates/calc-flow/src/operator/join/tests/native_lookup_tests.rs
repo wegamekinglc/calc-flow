@@ -619,8 +619,22 @@ async fn assert_native_probe_key_funding(values: ArrayRef) {
     assert_eq!(pool.reserved(), 0);
 }
 
-#[tokio::test]
-async fn test_native_index_updates_out_of_order_append_and_dense_eviction() {
+#[test]
+fn test_native_index_updates_out_of_order_append_and_dense_eviction() {
+    let service = crate::runtime::streaming::gather_work::TestService::new(2, 1).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(assert_native_index_updates_out_of_order_append_and_dense_eviction());
+    runtime.block_on(ordered_probe_tests::assert_bounded_order_and_global_limit(
+        &service,
+    ));
+    drop(runtime);
+    service.shutdown();
+}
+
+async fn assert_native_index_updates_out_of_order_append_and_dense_eviction() {
     let mut operator =
         StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
     let job = job();

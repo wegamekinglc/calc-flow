@@ -976,9 +976,13 @@ bound each inclusive time window before match materialization. Batch admission
 masks preserve null and late-drop rules. Native index capacity remains funded
 until its storage is released, including capacity retained after eviction.
 
-Large admitted native probes run a funded count work unit, then the operator
-checks the batch match limit before a second work unit builds ordered pairs.
+Large admitted native probes divide contiguous input positions among up to eight
+funded count work units, with at least 8,192 admitted rows per unit. The operator
+checks the global batch match limit once before fill work builds any pairs.
 Both passes share the same immutable native index and retained input owners.
+Fill fragments and their combined pair buffer remain funded together until the
+fragments are released. Combining fragments by input range preserves row order
+regardless of worker completion order; output materialization remains serial.
 Cancellation or an abandoned handler retains those owners until cleanup;
 subsequent state changes wait for their release. Small batches run inline.
 If worker admission is refused, matching resumes through the existing serial
