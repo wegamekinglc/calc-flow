@@ -377,6 +377,65 @@ async fn test_native_probe_interns_each_distinct_repeated_key_once() {
 }
 
 #[tokio::test]
+async fn test_retained_probe_keys_release_batch_scratch_before_next_admission() {
+    let rows = 16_384;
+    let mut operator =
+        StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "match", None);
+    let source = right_batch(vec![0; rows]);
+    let (plan, admitted) = admitted_probe(&mut operator, "right", &source, &context).await;
+    let runtime = operator.runtime.runtime().unwrap();
+    let pool = runtime.incremental_memory_pool();
+    let original = native_lookup::probe_key_charge(&admitted, &plan.key_indices).unwrap();
+    let pressure = runtime.incremental_reservation("native-key-lifetime-pressure");
+    pressure
+        .try_grow((1 << 30) - pool.reserved() - (original - 1))
+        .unwrap();
+    let full = pool.reserved();
+    assert!(
+        operator
+            .native_probe_keys(&plan, &admitted)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(pool.reserved(), full);
+    pressure.shrink(original);
+    let baseline = pool.reserved();
+    let mut first = None;
+    let allocated = allocation_counter::measure(|| {
+        first = operator.native_probe_keys(&plan, &admitted).unwrap();
+    });
+    let first = first.expect("first full construction reservation fits");
+    assert!(allocated.bytes_max <= u64::try_from(original).unwrap());
+    let retained = Arc::clone(first.key(0));
+    assert!(Arc::ptr_eq(&retained, first.key(rows - 1)));
+    let released = allocation_counter::measure(|| drop(first));
+    let live = allocated.bytes_current + released.bytes_current;
+    assert!(live > 0);
+    assert!(usize::try_from(live).unwrap() <= pool.reserved() - baseline);
+    let second = operator.native_probe_keys(&plan, &admitted).unwrap();
+    assert!(
+        second.is_some(),
+        "retained key aliases must not keep the first batch's construction scratch"
+    );
+    drop(second);
+    assert!(
+        pool.reserved() - baseline <= 4_096,
+        "one repeated key must retain only its funded owner, not 16,384 row descriptors"
+    );
+    let released = allocation_counter::measure(|| drop(retained));
+    assert_eq!(live + released.bytes_current, 0);
+    assert_eq!(pool.reserved(), baseline);
+    drop(pressure);
+    drop((admitted, operator));
+    drop(context);
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop(job);
+    assert_eq!(pool.reserved(), 0);
+}
+
+#[tokio::test]
 async fn test_native_probe_key_allocations_and_aliases_remain_funded() {
     key_arena::tests::assert_empty_arena_sizing_for_wide_schema_allocates_nothing();
     let mut cases: Vec<ArrayRef> = vec![
@@ -582,10 +641,7 @@ async fn assert_native_probe_key_funding(values: ArrayRef) {
     });
     let keys = keys.expect("eligible key fixtures must take the native path");
     let paid = pool.reserved() - baseline;
-    assert_eq!(
-        paid, layout.charge,
-        "native admission keeps the exact previous P threshold"
-    );
+    assert!(paid <= layout.charge);
     if layout.fits(admitted.len(), plan.key_indices.len()) {
         assert!(
             measured.bytes_max
@@ -596,22 +652,24 @@ async fn assert_native_probe_key_funding(values: ArrayRef) {
     let mut live = measured.bytes_current;
     assert!(live > 0);
     assert!(
-        measured.bytes_max <= u64::try_from(paid).unwrap(),
-        "type={}, rows={}, peak={}, funding={paid}",
+        measured.bytes_max <= u64::try_from(layout.charge).unwrap(),
+        "type={}, rows={}, peak={}, admission={}",
         values.data_type(),
         values.len(),
-        measured.bytes_max
+        measured.bytes_max,
+        layout.charge
     );
     assert!(usize::try_from(live).unwrap() <= paid);
     let first_alias = Arc::clone(keys.key(0));
     let last_alias = Arc::clone(keys.key(admitted.len() - 1));
-    assert_eq!(first_alias.funded_owner().unwrap().1, paid);
-    assert_eq!(last_alias.funded_owner().unwrap().1, paid);
+    let retained_paid = first_alias.funded_owner().unwrap().1;
+    assert!(retained_paid < paid);
+    assert_eq!(last_alias.funded_owner().unwrap().1, retained_paid);
     let released = allocation_counter::measure(|| drop(keys));
     live += released.bytes_current;
     assert!(live > 0);
-    assert!(usize::try_from(live).unwrap() <= paid);
-    assert_eq!(pool.reserved(), baseline + paid);
+    assert!(usize::try_from(live).unwrap() <= retained_paid);
+    assert_eq!(pool.reserved(), baseline + retained_paid);
     let released = allocation_counter::measure(|| drop((first_alias, last_alias)));
     assert_eq!(live + released.bytes_current, 0);
     assert_eq!(pool.reserved(), baseline);

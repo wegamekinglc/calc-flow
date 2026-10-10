@@ -50,6 +50,7 @@ pub(super) struct NativeKeys {
     pub(super) keys: Vec<Arc<FramedKey>>,
     ids: Vec<u32>,
     _credit: Arc<MemoryReservation>,
+    _scratch: MemoryReservation,
 }
 
 impl NativeKeys {
@@ -196,12 +197,50 @@ impl ProbeKeyInterner {
         Ok(())
     }
 
-    fn finish(self, credit: Arc<MemoryReservation>) -> NativeKeys {
-        NativeKeys {
-            keys: self.keys,
-            ids: self.ids,
+    fn finish(self, credit: Arc<MemoryReservation>, name: &str) -> Result<NativeKeys> {
+        let owner = std::alloc::Layout::new::<[std::sync::atomic::AtomicUsize; 2]>()
+            .extend(std::alloc::Layout::new::<FramedKey>())
+            .map_err(|_| scratch_error(name))?
+            .0
+            .pad_to_align()
+            .size();
+        let retained = self.keys.iter().try_fold(BASE_BYTES, |bytes, key| {
+            bytes.checked_add(owner)?.checked_add(key.capacity())
+        });
+        let scratch = self
+            .keys
+            .capacity()
+            .checked_mul(size_of::<Arc<FramedKey>>())
+            .and_then(|bytes| bytes.checked_add(self.ids.capacity().checked_mul(size_of::<u32>())?))
+            // Serial ProbeWindows allocates these slots while it borrows the IDs.
+            .and_then(|bytes| {
+                bytes.checked_add(self.keys.len().checked_mul(size_of::<Option<u32>>())?)
+            });
+        let (retained, scratch) = retained
+            .zip(scratch)
+            .filter(|(retained, scratch)| {
+                retained
+                    .checked_add(*scratch)
+                    .is_some_and(|total| total <= credit.size())
+            })
+            .ok_or_else(|| scratch_error(name))?;
+        let Self {
+            keys,
+            ids,
+            hashes,
+            dictionary,
+            ..
+        } = self;
+        drop((hashes, dictionary));
+        // Key aliases may outlive this batch's IDs and lookup vectors.
+        let scratch = credit.split(scratch);
+        credit.shrink(credit.size() - retained);
+        Ok(NativeKeys {
+            keys,
+            ids,
             _credit: credit,
-        }
+            _scratch: scratch,
+        })
     }
 }
 
@@ -227,7 +266,7 @@ fn intern_probe_keys(
             interner.push(key, &credit, name)?;
         }
     }
-    Ok(interner.finish(credit))
+    interner.finish(credit, name)
 }
 
 #[cfg(test)]
@@ -243,7 +282,7 @@ pub(super) fn colliding_probe_keys(
     visit_key_frames(admitted, indices, layout, |bytes| {
         interner.push_bytes_hashed(bytes, 0, &shared, "collision-test")
     })?;
-    Ok(interner.finish(shared))
+    interner.finish(shared, "collision-test")
 }
 
 impl StreamJoinOperator {
