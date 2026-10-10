@@ -65,7 +65,9 @@ with `Internal { message: "V2 IPC constructor credit admission failed" }`.
 Restore cannot be measured without a captured snapshot. This shared limitation
 must not be reported as an equivalent or noise-level result. Source inspection
 proves per-row constructor reservations exceed the fixed 1 GiB pool at 448,000
-retained rows for this four-column fixture; this is not a universal row limit. A separate 4M wire-buffer growth limit remains to be addressed.
+retained rows for this four-column fixture; this is not a universal row limit.
+The measured runtime also has a separate wire-buffer growth problem; its source
+correction below has not yet established 4M capacity.
 
 The fixed 4,500-second measurement budget was satisfied at 3,161.762 seconds,
 including earlier failed preparation, both continuation corrections, reviews,
@@ -145,7 +147,7 @@ constructor error. The reviewed fix in `a9fe388c` coalesces contiguous selection
 only when they share the exact array owner and consecutive offsets, and bounds
 fallback concatenation by run count. It must retain cancellation, detached
 output buffers, mixed-array ownership, deterministic equivalent recovery and prepaid
-allocation. A separate large wire-buffer growth problem remains. This diagnosis
+allocation. The separate wire-buffer growth correction is described below. This diagnosis
 does not certify a later runtime revision or complete the development plan.
 
 Constructor validation now passes all four new regressions, the existing
@@ -183,3 +185,30 @@ RED/GREEN logs are under `target/issue406-native-key-credit/`. Performance after
 this correction has not been measured; the tables above still describe runtime
 `e8a28d99`. Avoiding the expensive fallback seen in the profile remains a
 measurement hypothesis, not an asserted speedup.
+
+## Exact checkpoint wire-buffer capacity
+
+Commit `988a5972` computes checked sizes before allocating base and delta indices
+and payload frames. Base indices use `32 + sum(72 + key_length)` bytes; delta
+indices use `40 + sum_upserts(72 + key_length) + sum_tombstones(24 + key_length)`;
+payload frames use `32 + 8 * row_count + IPC_length`. Each allocation is fallible
+and prepaid. Underfill and overfill fail closed; cancellation remains observable.
+Arrow IPC construction retains its existing geometric buffer policy.
+
+The RED tests reproduced an 816-byte frame growing to 1,024 bytes and a 297-byte
+delta growing to 512 bytes, plus tight-budget base growth and cancellation
+admission failures. Nineteen focused tests now pass, including comparisons with
+the previous geometric builder using identical prepared rows and IPC bytes.
+Library Clippy, scoped formatting, contract and whitespace checks pass.
+Test-target Clippy still has the recorded generated-libtest failure.
+
+This correction does not refund encoder funding highwater or change global pool
+limits. Existing state, held history and replacement snapshots can coexist, so
+exact output sizes alone do not prove capacity at 4M retained rows. The planned
+fixed diagnostic must observe simultaneous reservations through fresh/repeated
+preparation, four dirty epochs, base replacement, serial full-state restores and
+final alias release. Its source and restore pools must remain distinct, and
+reservation peaks must not be presented as heap or RSS measurements. Validation
+logs are under the feature worktree's
+`target/issue406-complete-acceptance/wire-validation.json`. The eight-row timing
+tables still describe `e8a28d99`; no speedup is attributed to this unmeasured fix.
