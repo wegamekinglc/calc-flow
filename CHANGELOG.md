@@ -9,6 +9,12 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-10: Materialize eligible large streaming Join output chunks with
+  funded pair-range workers and merge their fragments in canonical order.
+  Fund selection, merge and output buffers before construction; retained
+  Arrow arrays and buffers keep their credit after worker shutdown. Preserve
+  current-chunk serial fallback, output sequences and accepted prefixes.
+
 - 2026-10-10: Split large native streaming Join probes into at most eight
   contiguous count and fill work units. Check the global match limit before
   filling, fund fragments alongside the combined pair buffer, and preserve

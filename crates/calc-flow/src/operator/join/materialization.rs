@@ -81,6 +81,19 @@ impl FlatChunk {
 }
 
 impl JoinOutput<'_> {
+    pub(super) fn payloads(
+        &self,
+        pair: &MatchedPair,
+    ) -> (&super::columnar::RowPayload, &super::columnar::RowPayload) {
+        let incoming = &self.admitted[pair.pos].record;
+        let opposite = &self.opposite[pair.opposite_index].record;
+        if self.incoming_is_left {
+            (incoming, opposite)
+        } else {
+            (opposite, incoming)
+        }
+    }
+
     pub(super) fn materialize(&self, range: Range<usize>) -> Result<RecordBatch> {
         materialize_output_record(
             self.schema,

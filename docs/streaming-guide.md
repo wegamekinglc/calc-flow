@@ -982,11 +982,30 @@ checks the global batch match limit once before fill work builds any pairs.
 Both passes share the same immutable native index and retained input owners.
 Fill fragments and their combined pair buffer remain funded together until the
 fragments are released. Combining fragments by input range preserves row order
-regardless of worker completion order; output materialization remains serial.
+regardless of worker completion order.
 Cancellation or an abandoned handler retains those owners until cleanup;
 subsequent state changes wait for their release. Small batches run inline.
 If worker admission is refused, matching resumes through the existing serial
 native and DataFusion paths after the attempted work has been released.
+
+Each validated output chunk can separately use up to eight materialization
+workers, with at least 4,096 ordered pairs per unit and at least two units.
+Their balanced consecutive pair ranges are independent of probe input ranges;
+even one incoming row with 8,192 matches can use two units. Only the current
+canonical chunk is constructed, merged in range order, and emitted before
+starting another chunk. Selection buffers, fragments, merge scratch and the
+final output remain funded through their actual lifetimes. Published Array
+and Buffer clones retain output credit after worker shutdown and release it
+when their last owners are dropped.
+
+This path supports nonempty Boolean, positive-width primitive (including
+timestamp and decimal), Utf8/LargeUtf8 and Binary/LargeBinary columns when
+each side selects from one shared parent. Other shapes, including Null,
+nested, dictionary and fixed-size binary columns, use the existing serial
+materializer. A materialization admission refusal releases attempted work,
+checks cancellation again, and materializes only the current chunk serially.
+Kernel errors and cancellation abort the operation. Chunk boundaries,
+metadata, output ordering and accepted-prefix behavior remain unchanged.
 
 When native matching is unavailable, the existing DataFusion equality path
 reuses an unchanged opposite side's assembled key batch. This cache retains

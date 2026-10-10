@@ -765,8 +765,12 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn blocked_chunk_cancellation_restores_the_last_committed_checkpoint() {
+    #[test]
+    fn blocked_chunk_cancellation_restores_the_last_committed_checkpoint() {
+        chunk_materialization_tests::run_lifetime_subject();
+    }
+
+    async fn assert_blocked_chunk_cancellation_restores_the_last_committed_checkpoint() {
         let mut operator =
             StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
         let cancel = CancellationToken::new();
@@ -1798,6 +1802,7 @@ mod tests {
 
     mod checkpoint_compaction_tests;
     mod checkpoint_v2_tests;
+    mod chunk_materialization_tests;
     mod columnar_state_tests;
     mod empty_checkpoint_tests;
     mod j2a_dictionary_tests;
@@ -2932,6 +2937,8 @@ pub struct StreamJoinOperator {
     probe_test_hook: Option<data_work::TestHook>,
     #[cfg(test)]
     probe_unit_test_hook: Option<data_work::UnitTestHook>,
+    #[cfg(test)]
+    materialize_unit_test_hook: Option<Arc<dyn Fn(usize, bool) + Send + Sync>>,
     v2_containers: Option<Arc<checkpoint_v2::ContainerFunding>>,
     v2_writer: checkpoint_v2::WriterState,
     #[cfg(test)]
@@ -3393,6 +3400,7 @@ mod metadata_validation;
 mod native_dictionary;
 mod native_lookup;
 mod output_gather;
+mod output_work;
 #[cfg(test)]
 mod row_ipc;
 mod sql_key_scratch;
@@ -3476,6 +3484,8 @@ impl StreamJoinOperator {
             probe_test_hook: None,
             #[cfg(test)]
             probe_unit_test_hook: None,
+            #[cfg(test)]
+            materialize_unit_test_hook: None,
             v2_containers: None,
             v2_writer: checkpoint_v2::WriterState::default(),
             #[cfg(test)]
@@ -4409,7 +4419,65 @@ impl StreamJoinOperator {
         if prepared.output.is_empty() {
             return Ok(());
         }
-        let materializer = materialization::JoinOutput {
+        let ranges = self
+            .output_materializer(prepared)
+            .ranges(context.output_budget())?;
+        super::output_chunk::validate_output_sequence_range(
+            &self.name,
+            self.state.next_output_sequence,
+            ranges.len(),
+        )?;
+        for range in ranges {
+            let record = self
+                .materialize_prepared_chunk(prepared, range, context)
+                .await?;
+            self.emit_output_record(record, context, output).await?;
+        }
+        Ok(())
+    }
+
+    async fn materialize_prepared_chunk(
+        &mut self,
+        prepared: &PreparedJoinBatch,
+        range: std::ops::Range<usize>,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<RecordBatch> {
+        context.check_cancelled()?;
+        if let Some(record) = self
+            .owned_output_chunk(prepared, range.clone(), context)
+            .await?
+        {
+            return Ok(record);
+        }
+        context.check_cancelled()?;
+        self.output_materializer(prepared).materialize(range)
+    }
+
+    async fn emit_output_record(
+        &mut self,
+        record: RecordBatch,
+        context: &StreamOperatorContext<'_>,
+        output: &mut dyn StreamCollector,
+    ) -> Result<()> {
+        let metadata =
+            BatchMetadata::new(&self.name, self.state.next_output_sequence, BTreeMap::new())?;
+        let message = Batch::table(vec![record], metadata)?;
+        if message.estimated_bytes()? > context.output_budget().max_bytes {
+            return Err(operator_error(
+                &self.name,
+                "validated Join chunk exceeded its byte budget",
+            ));
+        }
+        output.emit("output", message).await?;
+        self.state.next_output_sequence += 1;
+        Ok(())
+    }
+
+    fn output_materializer<'a>(
+        &'a self,
+        prepared: &'a PreparedJoinBatch,
+    ) -> materialization::JoinOutput<'a> {
+        materialization::JoinOutput {
             schema: self.output_ports[0]
                 .schema()
                 .expect("compiled Join output schema"),
@@ -4423,29 +4491,7 @@ impl StreamJoinOperator {
             incoming_is_left: prepared.incoming_is_left,
             operator_id: &self.name,
             admitted_charges: prepared.admitted_charges.as_deref(),
-        };
-        let ranges = materializer.ranges(context.output_budget())?;
-        super::output_chunk::validate_output_sequence_range(
-            &self.name,
-            self.state.next_output_sequence,
-            ranges.len(),
-        )?;
-        for range in ranges {
-            context.check_cancelled()?;
-            let record = materializer.materialize(range)?;
-            let metadata =
-                BatchMetadata::new(&self.name, self.state.next_output_sequence, BTreeMap::new())?;
-            let message = Batch::table(vec![record], metadata)?;
-            if message.estimated_bytes()? > context.output_budget().max_bytes {
-                return Err(operator_error(
-                    &self.name,
-                    "validated Join chunk exceeded its byte budget",
-                ));
-            }
-            output.emit("output", message).await?;
-            self.state.next_output_sequence += 1;
         }
-        Ok(())
     }
 
     fn record_prepared_emitted(&mut self, rows: usize) -> Result<()> {

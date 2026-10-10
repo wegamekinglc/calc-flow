@@ -97,8 +97,12 @@ fn amounts(record: &RecordBatch) -> Vec<Option<i64>> {
         .collect()
 }
 
-#[tokio::test]
-async fn test_same_parent_output_takes_each_column_once_in_both_directions() {
+#[test]
+fn test_same_parent_output_takes_each_column_once_in_both_directions() {
+    chunk_materialization_tests::run_refusal_subject();
+}
+
+pub(super) async fn assert_same_parent_output_takes_each_column_once_in_both_directions() {
     for incoming_left in [false, true] {
         let mut operator =
             StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
