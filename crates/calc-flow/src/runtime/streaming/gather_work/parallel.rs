@@ -71,6 +71,13 @@ pub(super) struct Units {
 }
 
 impl Units {
+    #[cfg(test)]
+    pub(super) fn unit_completed(&self, ordinal: usize) -> bool {
+        self.cells
+            .get(ordinal)
+            .is_some_and(|cell| cell.outcome.is_some())
+    }
+
     pub(super) fn count(&self) -> usize {
         self.cells.len()
     }

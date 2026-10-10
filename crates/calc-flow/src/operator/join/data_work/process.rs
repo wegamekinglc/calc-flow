@@ -5,7 +5,9 @@ use super::super::{
 use super::{
     MIN_PROBE_ROWS, control,
     inputs::ProbeInputs,
-    worker::{CountWork, FillWork, PairOutput},
+    pairs::{self, FillFunding, PairOutput},
+    partition::Counts,
+    worker::{CountWork, FillWork},
 };
 use crate::runtime::streaming::gather_work::{
     AdmissionFailure, GatherOperatorId, GatherStop, ObservedTicket, ParallelCpuWork,
@@ -58,7 +60,7 @@ impl StreamJoinOperator {
         let Some(keys) = self.native_probe_keys(plan, &admitted)? else {
             return Ok(Capture::Declined(admitted));
         };
-        let bytes = control::input_bytes(keys.keys.len(), &self.name)?;
+        let bytes = control::input_bytes(keys.keys.len(), admitted.len(), &self.name)?;
         let Some(credit) = self.optional_credit(bytes)? else {
             return Ok(Capture::Declined(admitted));
         };
@@ -86,6 +88,8 @@ impl StreamJoinOperator {
             released: Some(released),
             #[cfg(test)]
             hook: self.probe_test_hook.take(),
+            #[cfg(test)]
+            unit_hook: self.probe_unit_test_hook.take(),
         })))
     }
 
@@ -101,41 +105,76 @@ impl StreamJoinOperator {
         inputs: &Arc<ProbeInputs>,
         context: &StreamOperatorContext<'_>,
     ) -> Result<Option<PairOutput>> {
+        let limit = self.spec.limits.max_matches_per_input_batch;
         let work = Arc::new(CountWork {
             inputs: Arc::clone(inputs),
-            limit: self.spec.limits.max_matches_per_input_batch,
+            limit,
         });
-        let Some(count) = self.run_probe_unit(work, context).await? else {
+        let Some(counts) = self
+            .run_probe_units(work, context, move |values| Counts::ordered(values, limit))
+            .await?
+        else {
             return Ok(None);
         };
         enforce_match_limit(
-            count,
+            counts.total,
             &mut self.state.metrics.match_limit_failures,
             self.spec.limits.max_matches_per_input_batch,
             &self.name,
         )?;
-        let bytes = count
+        let Some((funding, credit)) = self.admit_fill(counts)? else {
+            return Ok(None);
+        };
+        self.run_probe_units(
+            Arc::new(FillWork {
+                inputs: Arc::clone(inputs),
+                counts,
+                funding,
+            }),
+            context,
+            move |fragments| pairs::ordered_output(fragments, credit, counts.total),
+        )
+        .await
+    }
+
+    fn admit_fill(
+        &mut self,
+        counts: Counts,
+    ) -> Result<
+        Option<(
+            FillFunding,
+            Option<datafusion::execution::memory_pool::MemoryReservation>,
+        )>,
+    > {
+        let bytes = counts
+            .total
             .checked_mul(size_of::<MatchedPair>() + 256)
             .ok_or_else(|| scratch_error(&self.name))?;
         let Some(credit) = self.optional_credit(bytes)? else {
             return Ok(None);
         };
-        self.run_probe_unit(
-            Arc::new(FillWork {
-                inputs: Arc::clone(inputs),
-                count,
-                credit: Mutex::new(Some(credit)),
-            }),
-            context,
-        )
-        .await
+        if counts.units == 1 {
+            return Ok(Some((FillFunding::Single(Mutex::new(Some(credit))), None)));
+        }
+        let bytes = counts
+            .total
+            .checked_mul(size_of::<MatchedPair>())
+            .ok_or_else(|| scratch_error(&self.name))?;
+        let Some(fragments) = self.optional_credit(bytes)? else {
+            return Ok(None);
+        };
+        Ok(Some((
+            FillFunding::Fragments(Arc::new(fragments)),
+            Some(credit),
+        )))
     }
 
-    async fn run_probe_unit<W: ParallelCpuWork>(
+    async fn run_probe_units<W: ParallelCpuWork, T>(
         &mut self,
         work: Arc<W>,
         context: &StreamOperatorContext<'_>,
-    ) -> Result<Option<W::Output>> {
+        install: impl FnOnce(Vec<W::Output>) -> Result<T>,
+    ) -> Result<Option<T>> {
         let scope = context
             .gather_client(GatherOperatorId::new(Arc::from(self.name.as_str())))
             .scope()?;
@@ -155,7 +194,9 @@ impl StreamJoinOperator {
             )
             .await;
         let result = match ticket {
-            Ok(ticket) => finish_probe_ticket(ticket, context).await.map(Some),
+            Ok(ticket) => finish_probe_ticket(ticket, context, install)
+                .await
+                .map(Some),
             Err(AdmissionFailure::Budget { .. }) => Ok(None),
             Err(AdmissionFailure::Runtime(error)) => Err(error),
         };
@@ -189,10 +230,11 @@ impl StreamJoinOperator {
     }
 }
 
-async fn finish_probe_ticket<T: Send + 'static>(
+async fn finish_probe_ticket<T: Send + 'static, U>(
     ticket: ObservedTicket<Vec<T>>,
     context: &StreamOperatorContext<'_>,
-) -> Result<T> {
+    install: impl FnOnce(Vec<T>) -> Result<U>,
+) -> Result<U> {
     let output = tokio::select! {
         biased;
         () = probe_stop(context.job()) => {
@@ -203,12 +245,11 @@ async fn finish_probe_ticket<T: Send + 'static>(
     };
     context.check_cancelled()?;
     let mut value = None;
-    output?.install(|mut values| {
-        debug_assert_eq!(values.len(), 1);
-        value = values.pop();
+    output?.install(|values| {
+        value = Some(install(values)?);
         Ok(())
     })?;
-    Ok(value.expect("one native probe unit"))
+    Ok(value.expect("installed native probe units"))
 }
 
 async fn probe_stop(job: &StreamJobContext) {

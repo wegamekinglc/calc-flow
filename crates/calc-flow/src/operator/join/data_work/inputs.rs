@@ -19,6 +19,8 @@ pub(super) struct ProbeInputs {
     pub(super) released: Option<tokio::sync::oneshot::Sender<()>>,
     #[cfg(test)]
     pub(super) hook: Option<super::TestHook>,
+    #[cfg(test)]
+    pub(super) unit_hook: Option<super::UnitTestHook>,
 }
 
 impl ProbeInputs {

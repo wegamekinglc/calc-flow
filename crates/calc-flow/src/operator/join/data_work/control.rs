@@ -1,6 +1,8 @@
 use super::{
     inputs::ProbeInputs,
-    worker::{CountWork, FillWork, PairOutput},
+    pairs::PairFragment,
+    partition,
+    worker::{CountWork, FillWork},
 };
 use crate::Result;
 use crate::runtime::streaming::gather_work::cleanup_control_bytes;
@@ -48,11 +50,22 @@ fn work_bytes() -> Result<usize> {
         arc::<CountWork>()?,
         arc::<FillWork>()?,
         cleanup_control_bytes::<Vec<usize>>(),
-        cleanup_control_bytes::<Vec<PairOutput>>(),
+        cleanup_control_bytes::<Vec<PairFragment>>(),
     ])
 }
 
-pub(super) fn input_bytes(keys: usize, name: &str) -> Result<usize> {
+fn fragment_controls(rows: usize) -> Result<usize> {
+    if partition::units(rows) < 2 {
+        return Ok(0);
+    }
+    sum(&[
+        arc::<MemoryReservation>()?,
+        super::super::metadata_validation::inventory::registration_controls()
+            .ok_or_else(|| super::super::native_lookup::scratch_error("join"))?,
+    ])
+}
+
+pub(super) fn input_bytes(keys: usize, rows: usize, name: &str) -> Result<usize> {
     let caller = super::super::metadata_validation::inventory::caller_controls(name)
         .ok_or_else(|| super::super::native_lookup::scratch_error(name))?;
     let registration = super::super::metadata_validation::inventory::registration_controls()
@@ -60,6 +73,7 @@ pub(super) fn input_bytes(keys: usize, name: &str) -> Result<usize> {
     sum(&[
         snapshot_bytes(keys, name)?,
         work_bytes()?,
+        fragment_controls(rows)?,
         caller,
         caller,
         registration,

@@ -3,6 +3,8 @@ use std::sync::Arc;
 
 mod control;
 mod inputs;
+mod pairs;
+mod partition;
 mod process;
 mod worker;
 
@@ -19,7 +21,16 @@ pub(super) enum ProbePhase {
 pub(super) type TestHook = Arc<dyn Fn(ProbePhase, usize, usize) + Send + Sync>;
 
 #[cfg(test)]
+pub(super) type UnitTestHook = Arc<dyn Fn(ProbePhase, usize, bool) + Send + Sync>;
+
+#[cfg(test)]
 impl inputs::ProbeInputs {
+    fn observe_unit(&self, phase: ProbePhase, ordinal: usize, completed: bool) {
+        if let Some(hook) = &self.unit_hook {
+            hook(phase, ordinal, completed);
+        }
+    }
+
     fn observe(&self, phase: ProbePhase) {
         if let Some(hook) = &self.hook {
             hook(

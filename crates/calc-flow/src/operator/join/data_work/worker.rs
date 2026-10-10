@@ -1,17 +1,14 @@
-use super::super::{MatchedPair, native_lookup::scratch_error};
+use super::super::MatchedPair;
 use super::inputs::ProbeInputs;
+use super::{
+    pairs::{FillFunding, PairFragment},
+    partition::{self, Counts},
+};
 use crate::{
     Result,
     runtime::streaming::gather_work::{GatherStop, ParallelCpuWork},
 };
-use datafusion::execution::memory_pool::MemoryReservation;
-use parking_lot::Mutex;
 use std::sync::Arc;
-
-pub(super) struct PairOutput {
-    pub(super) pairs: Vec<MatchedPair>,
-    pub(super) credit: MemoryReservation,
-}
 
 pub(super) struct CountWork {
     pub(super) inputs: Arc<ProbeInputs>,
@@ -22,22 +19,32 @@ impl ParallelCpuWork for CountWork {
     type Output = usize;
 
     fn unit_count(&self) -> usize {
-        1
+        partition::units(self.inputs.admitted.len())
     }
 
     fn run(&self, ordinal: usize, stop: &GatherStop) -> Result<usize> {
-        debug_assert_eq!(ordinal, 0);
         #[cfg(test)]
         self.inputs.observe(super::ProbePhase::Count);
-        let limit = usize::try_from(self.limit).unwrap_or(usize::MAX);
+        #[cfg(test)]
+        self.inputs
+            .observe_unit(super::ProbePhase::Count, ordinal, false);
+        let count = self.count_range(ordinal, stop);
+        stop.check()?;
+        #[cfg(test)]
+        self.inputs
+            .observe_unit(super::ProbePhase::Count, ordinal, true);
+        count
+    }
+}
+
+impl CountWork {
+    fn count_range(&self, ordinal: usize, stop: &GatherStop) -> Result<usize> {
         let mut count = 0usize;
-        for position in 0..self.inputs.admitted.len() {
+        let sentinel = partition::sentinel(self.limit);
+        for position in partition::range(self.inputs.admitted.len(), ordinal) {
             stop.check()?;
-            let remaining = limit.saturating_sub(count).saturating_add(1);
-            count = count
-                .checked_add(self.inputs.count(position).min(remaining))
-                .ok_or_else(|| scratch_error("join"))?;
-            if count > limit {
+            count = partition::add_count(count, self.inputs.count(position), self.limit)?;
+            if Some(count) == sentinel {
                 break;
             }
         }
@@ -47,29 +54,27 @@ impl ParallelCpuWork for CountWork {
 
 pub(super) struct FillWork {
     pub(super) inputs: Arc<ProbeInputs>,
-    pub(super) count: usize,
-    pub(super) credit: Mutex<Option<MemoryReservation>>,
+    pub(super) counts: Counts,
+    pub(super) funding: FillFunding,
 }
 
 impl ParallelCpuWork for FillWork {
-    type Output = PairOutput;
+    type Output = PairFragment;
 
     fn unit_count(&self) -> usize {
-        1
+        self.counts.units
     }
 
-    fn run(&self, ordinal: usize, stop: &GatherStop) -> Result<PairOutput> {
-        debug_assert_eq!(ordinal, 0);
+    fn run(&self, ordinal: usize, stop: &GatherStop) -> Result<PairFragment> {
         #[cfg(test)]
         self.inputs.observe(super::ProbePhase::Fill);
+        #[cfg(test)]
+        self.inputs
+            .observe_unit(super::ProbePhase::Fill, ordinal, false);
         stop.check()?;
-        let credit = self
-            .credit
-            .lock()
-            .take()
-            .expect("single fill unit owns pair funding");
-        let mut pairs = Vec::with_capacity(self.count);
-        for position in 0..self.inputs.admitted.len() {
+        let credit = self.funding.unit();
+        let mut pairs = Vec::with_capacity(self.counts.rows[ordinal]);
+        for position in partition::range(self.inputs.admitted.len(), ordinal) {
             stop.check()?;
             for (ordinal, opposite_index) in self.inputs.matches(position).enumerate() {
                 if ordinal.is_multiple_of(256) {
@@ -81,7 +86,11 @@ impl ParallelCpuWork for FillWork {
                 });
             }
         }
-        debug_assert_eq!(pairs.len(), self.count);
-        Ok(PairOutput { pairs, credit })
+        debug_assert_eq!(pairs.len(), self.counts.rows[ordinal]);
+        stop.check()?;
+        #[cfg(test)]
+        self.inputs
+            .observe_unit(super::ProbePhase::Fill, ordinal, true);
+        Ok(PairFragment { pairs, credit })
     }
 }

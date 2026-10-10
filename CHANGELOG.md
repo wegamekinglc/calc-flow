@@ -9,6 +9,11 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-10: Split large native streaming Join probes into at most eight
+  contiguous count and fill work units. Check the global match limit before
+  filling, fund fragments alongside the combined pair buffer, and preserve
+  input and opposite-row order when workers complete in a different order.
+
 - 2026-10-10: Run large native streaming Join probes as funded count and fill
   work units, with the actor checking the match limit between them. Share
   immutable input and index owners through cancellation cleanup, and await

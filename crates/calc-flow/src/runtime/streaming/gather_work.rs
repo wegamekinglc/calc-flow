@@ -1158,6 +1158,31 @@ impl JobGatherOwner {
         };
         (home, generation, attempt)
     }
+
+    pub(crate) fn wait_parallel_unit(&self, ordinal: usize, timeout: Duration) -> bool {
+        let home = &self.0.home;
+        let mut state = home.state.lock();
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let completed = match &state.slot {
+                Slot::Active(record) => match &record.work {
+                    Some(ReadyWork::Parallel(units)) => units.unit_completed(ordinal),
+                    _ => false,
+                },
+                _ => false,
+            };
+            if completed {
+                return true;
+            }
+            if home
+                .native_changed
+                .wait_until(&mut state, deadline)
+                .timed_out()
+            {
+                return false;
+            }
+        }
+    }
 }
 
 struct FundedWork {
