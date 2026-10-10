@@ -543,6 +543,40 @@ mod tests {
         assert_eq!(join_work().arena_measure_cells, 0);
     }
 
+    #[test]
+    fn borrowed_key_boolean_framing_matches_canonical() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("flag", DataType::Boolean, false),
+            Field::new(
+                "authorized_at",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                false,
+            ),
+            Field::new("amount", DataType::Int64, true),
+        ]));
+        let record = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(BooleanArray::from(vec![true, false, false, true])),
+                Arc::new(TimestampMicrosecondArray::from(vec![0, 1, 2, 3]).with_timezone("UTC")),
+                Arc::new(Int64Array::from(vec![42; 4])),
+            ],
+        )
+        .unwrap();
+        for row in 0..4 {
+            let canonical = encode_join_key_columns_v1(record.columns(), row, &[0]).unwrap();
+            let mut borrowed = Vec::new();
+            borrowed_key::BorrowedKey {
+                columns: record.columns(),
+                row,
+                indices: &[0],
+            }
+            .visit(|part| borrowed.extend_from_slice(part))
+            .unwrap();
+            assert_eq!(canonical, borrowed, "row {row} framing diverges");
+        }
+    }
+
     #[tokio::test]
     async fn thin_native_probes_stay_on_the_actor_thread() {
         let mut declaration = spec();
