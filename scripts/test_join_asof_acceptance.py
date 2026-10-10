@@ -596,6 +596,89 @@ class AcceptanceLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(evidence["processing_settled"])
 
 
+class AcceptancePlanOwnershipTests(unittest.IsolatedAsyncioTestCase):
+    async def exercise(self, trace_fingerprint):
+        from types import ModuleType
+
+        from benchmarks.join_asof_acceptance_runtime import AcceptanceEngineCase
+
+        class ConsumedPlan:
+            def __init__(self):
+                self.consumed = False
+                self.fingerprint_reads = 0
+
+            @property
+            def fingerprint(self):
+                if self.consumed:
+                    raise RuntimeError("StreamExecutionPlan has been consumed")
+                self.fingerprint_reads += 1
+                return "a" * 64
+
+        plan = ConsumedPlan()
+        job, table = object(), object()
+        engine = ModuleType("benchmarks.engine_stream")
+        engine.Runtime = Mock()
+        engine._validated_timed_streams = Mock(return_value={})
+        engine._ReplaySource = Mock()
+        engine._CollectSink = Mock()
+        engine.StreamRuntimeConfig = Mock()
+        engine.EdgeBudget = Mock()
+        engine.SourceBinding = Mock()
+        engine.SourceProvidedWatermarks = Mock()
+        engine.SinkBinding = SimpleNamespace(ordinary=Mock())
+
+        def runner(consumed, *_args, **_kwargs):
+            self.assertIs(consumed, plan)
+            plan.consumed = True
+            return SimpleNamespace(start_async=AsyncMock(return_value=job))
+
+        engine.StreamingRunner = Mock(side_effect=runner)
+        owner = object.__new__(AcceptanceEngineCase)
+        owner.program = SimpleNamespace(compile_stream=Mock(return_value=plan))
+        owner.streams = {"quotes.input": ()}
+        owner.expected = SimpleNamespace(num_rows=1)
+        owner.case = {"mode": "off", "batch_rows": 1024}
+        owner.output_node_id = "result"
+        owner.fixture = {}
+        owner.scenario = "asof_join"
+        evidence = {
+            "dispatch_trace": {"compiled_plan_fingerprint": trace_fingerprint},
+            "after_eof": {"checkpoint": {}},
+            "completed_processing_epochs": [],
+            "lifecycle": "completed",
+        }
+        with (
+            patch.dict("sys.modules", {engine.__name__: engine}),
+            patch(
+                "benchmarks.join_asof_acceptance_runtime.measure_acceptance_job",
+                new=AsyncMock(return_value=(table, evidence)),
+            ),
+            patch(
+                "benchmarks.join_asof_acceptance_runtime.asyncio.to_thread",
+                new=AsyncMock(return_value={"manifests": []}),
+            ),
+        ):
+            result = await owner._sample(Path("unused-state"))
+        self.assertTrue(plan.consumed)
+        self.assertEqual(plan.fingerprint_reads, 1)
+        self.assertIs(result[0], table)
+        return result[1]
+
+    async def test_trace_identity_survives_runner_consuming_the_plan(self):
+        evidence = await self.exercise("a" * 64)
+        self.assertEqual(evidence["advancing_processing_epochs"], [])
+
+    async def test_captured_identity_still_rejects_a_different_trace_plan(self):
+        from benchmarks.checkpoint_cycles import CycleValidationError
+
+        with self.assertRaisesRegex(CycleValidationError, "different plan") as raised:
+            await self.exercise("b" * 64)
+        self.assertEqual(
+            raised.exception.evidence["dispatch_trace"]["compiled_plan_fingerprint"],
+            "b" * 64,
+        )
+
+
 class AcceptanceSignalTests(unittest.IsolatedAsyncioTestCase):
     async def test_signal_cancels_active_sample_cooperatively(self):
         import asyncio

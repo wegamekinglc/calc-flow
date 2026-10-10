@@ -54,6 +54,63 @@ def fixtures(root: Path) -> tuple[Path, Path]:
 
 
 class AcceptanceHarnessTests(unittest.TestCase):
+    def test_python_correction_reuses_only_unchanged_historical_native_overlay(self):
+        with TemporaryDirectory() as raw:
+            root = Path(raw)
+            baseline, candidate = fixtures(root)
+            recipe = candidate / "scripts/benchmark_suite/issue406_harness.py"
+            recipe.parent.mkdir(parents=True, exist_ok=True)
+            recipe.write_text(Path(harness.__file__).read_text())
+            commit(candidate)
+            output = root / "output"
+            with patch.object(harness, "ROOT", candidate):
+                with harness.common_acceptance_harness(
+                    baseline, output, "stream_asof_e2e"
+                ):
+                    pass
+                original = harness.validate_acceptance_harness(
+                    output, "stream_asof_e2e"
+                )
+                (candidate / "python_driver.py").write_text(
+                    "fingerprint_before_run = True\n"
+                )
+                commit(candidate)
+                reused = harness.validate_acceptance_harness(output, "stream_asof_e2e")
+                self.assertEqual(reused, original)
+                copied = candidate / harness.COPIED_FILES[0]
+                copied.write_text(copied.read_text() + "// changed native work\n")
+                commit(candidate)
+                with self.assertRaisesRegex(ValueError, "attestation"):
+                    harness.validate_acceptance_harness(output, "stream_asof_e2e")
+
+    def test_historical_reuse_rejects_recipe_drift_and_missing_history(self):
+        with TemporaryDirectory() as raw:
+            root = Path(raw)
+            baseline, candidate = fixtures(root)
+            recipe = candidate / "scripts/benchmark_suite/issue406_harness.py"
+            recipe.parent.mkdir(parents=True, exist_ok=True)
+            recipe.write_text(Path(harness.__file__).read_text())
+            commit(candidate)
+            output = root / "output"
+            with patch.object(harness, "ROOT", candidate):
+                with harness.common_acceptance_harness(
+                    baseline, output, "stream_asof_e2e"
+                ):
+                    pass
+                record = harness.validate_acceptance_harness(output, "stream_asof_e2e")
+                recipe.write_text(
+                    recipe.read_text().replace(
+                        "Closed, benchmark-only", "Changed, benchmark-only", 1
+                    )
+                )
+                commit(candidate)
+                with self.assertRaisesRegex(ValueError, "attestation"):
+                    harness.validate_acceptance_harness(output, "stream_asof_e2e")
+                evidence = output / "build-stream_asof_e2e.acceptance-harness.json"
+                evidence.write_text(json.dumps({**record, "harness_git_sha": "0" * 40}))
+                with self.assertRaisesRegex(ValueError, "attestation"):
+                    harness.validate_acceptance_harness(output, "stream_asof_e2e")
+
     def test_traced_wheel_requires_both_actual_release_compiler_invocations(self):
         def invocation(crate, features):
             flags = " ".join(f"--cfg 'feature=\"{name}\"'" for name in features)

@@ -375,12 +375,14 @@ def validate_acceptance_harness(output: Path, target: str) -> dict:
         mirror = Path(record["build_source"])
         original = _files(source)
         overlay = _effective(source)
+        if record["harness_git_sha"] != _clean_revision(ROOT):
+            native_harness_reuse(record["harness_git_sha"])
         expected = {
             "schema": SCHEMA,
             "target": target,
             "targets": list(TARGETS),
             "product_git_sha": _clean_revision(source),
-            "harness_git_sha": _clean_revision(ROOT),
+            "harness_git_sha": record["harness_git_sha"],
             "build_output": str(output.resolve()),
             "original_files_fingerprint": fingerprint_json(original),
             "original_overlay": {path: original.get(path) for path in overlay},
@@ -401,6 +403,37 @@ def validate_acceptance_harness(output: Path, target: str) -> dict:
         return record
     except (OSError, KeyError, TypeError, ValueError) as error:
         raise ValueError("invalid issue406 native harness attestation") from error
+
+
+def native_harness_reuse(build_revision: str) -> dict:
+    """Prove a Python-only correction leaves the historical native overlay intact."""
+    current = _clean_revision(ROOT)
+    history = command_output(["git", "rev-list", current], cwd=ROOT).splitlines()
+    if build_revision not in history:
+        raise ValueError("native build harness is missing from execution history")
+    recipe_path = "scripts/benchmark_suite/issue406_harness.py"
+    boundary = "\ndef validate_acceptance_harness("
+    historical = command_output(
+        ["git", "show", f"{build_revision}:{recipe_path}"], cwd=ROOT
+    ).split(boundary)[0]
+    active = (ROOT / recipe_path).read_text().split(boundary)[0]
+    if historical != active:
+        raise ValueError("historical native overlay recipe changed")
+    blobs = {}
+    for revision in (build_revision, current):
+        values = command_output(
+            ["git", "rev-parse", *(f"{revision}:{path}" for path in COPIED_FILES)],
+            cwd=ROOT,
+        ).splitlines()
+        blobs[revision] = dict(zip(COPIED_FILES, values, strict=True))
+    if blobs[build_revision] != blobs[current]:
+        raise ValueError("historical copied native sources changed")
+    return {
+        "original_build_harness_git_sha": build_revision,
+        "execution_harness_git_sha": current,
+        "recipe_prefix_sha256": hashlib.sha256(active.encode()).hexdigest(),
+        "copied_file_git_blobs": blobs[current],
+    }
 
 
 def validate_native_profile(artifacts: list[dict], *, checkpoint_off: bool) -> None:

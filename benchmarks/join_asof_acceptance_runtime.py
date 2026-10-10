@@ -389,6 +389,7 @@ class AcceptanceEngineCase:
         from benchmarks import engine_stream as stream
 
         plan = self.program.compile_stream(stream.Runtime())
+        plan_fingerprint = plan.fingerprint
         timed = stream._validated_timed_streams(plan, self.streams)
         sources = {
             name: stream._ReplaySource(events, batch_rows=self.case["batch_rows"])
@@ -425,7 +426,7 @@ class AcceptanceEngineCase:
             case={**self.case, "dispatch_output_node_id": self.output_node_id},
         )
         if self.fixture is not None and (
-            evidence["dispatch_trace"]["compiled_plan_fingerprint"] != plan.fingerprint
+            evidence["dispatch_trace"]["compiled_plan_fingerprint"] != plan_fingerprint
         ):
             raise CycleValidationError(
                 "dispatch trace belongs to a different plan", evidence

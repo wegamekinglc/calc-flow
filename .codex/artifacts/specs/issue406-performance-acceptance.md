@@ -1,8 +1,10 @@
 # Issue 406: complete performance acceptance protocol
 
-Status: the matched native harness and Python driver have passed source review
-and focused validation. Sealed release builds and their real-job correctness
-preflight are pending. No measurements under this protocol have started.
+Status: all five sealed release builds passed independent provenance review.
+The first real-job correctness preparation exposed a Python harness ownership
+error and stopped before acceptance sampling. The focused correction and one
+corrected fixed preparation are tracked below. No performance measurements under
+this protocol have started.
 This replaces the never-executed seven-workload final protocol. Earlier sustained
 measurements remain historical evidence in
 `../analysis/issue406-sustained-performance.md`.
@@ -60,6 +62,14 @@ selected.
   checkpoint semantics, thread configuration, and timing boundary match. Main
   checkpoint-off is unsupported; candidate-off absolute observations therefore
   have no invented exact-main off comparator.
+
+The original build harness is `a2f31da023dccb00518d2e043aa628d663aa93fb`.
+A later Python-only ownership correction captures the plan fingerprint before
+the runner consumes that plan. Reuse retains the original build SHA and a
+separate execution-helper SHA. It requires identical historical overlay-producing
+source, identical copied native files, and reproduction of every sealed effective
+source hash; historical Python is never executed. The frozen plan carries this
+explicit reuse witness.
 
 Builds are outside the measurement budget, with duration and artifact reuse
 reported separately. The three native harness variants and two instrumented
@@ -274,8 +284,19 @@ separately. These three jobs and three native replays are correctness evidence
 only and never enter performance statistics. Retain the three 36-schedule
 auxiliary proofs too; all preparation time, startup, validation and cleanup is
 precharged against the same 4500-second budget. The fixed correctness execution
-timeout remains 60 seconds with no retries; artifact validation and final sealing
-are also charged to the total budget.
+timeout remains 60 seconds with no unchanged retries; artifact validation and
+final sealing are also charged to the total budget.
+
+The first preparation failed after its baseline/low job because the Python
+driver read the compiled plan fingerprint after transferring plan ownership.
+It yielded no accepted observations or verified replay. All owned processes
+settled without forced kills. Preserve that attempt and charge its full
+7.572431079 seconds plus a conservative 5-second failure-sealing allowance to
+the same 4500-second budget. After the focused regression test and ownership
+correction pass, run one corrected preparation with the original three real
+3073-row jobs/replays and three auxiliary proofs. The performance case inventory,
+sample counts and total budget are unchanged; this correction cannot discard or
+replace an unfavorable performance sample.
 
 A fresh main low-mode residual is permitted as a separately labeled diagnostic
 when both arms genuinely enable checkpoint bookkeeping and prove zero

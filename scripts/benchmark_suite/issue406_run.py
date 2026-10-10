@@ -221,11 +221,16 @@ def validate_plan(plan: dict) -> None:
             raise ValueError(f"sealed execution input changed: {path}")
     from scripts.benchmark_suite.issue406_harness import (
         WHEEL_TARGET,
+        native_harness_reuse,
         validate_acceptance_harness,
         validate_native_profile,
         validate_traced_wheel_invocations,
     )
 
+    reuse = plan["native_harness_reuse"]
+    build_harness = reuse["original_build_harness_git_sha"]
+    if reuse != native_harness_reuse(build_harness):
+        raise ValueError("native build reuse witness changed")
     if competing_work(set()):
         raise ValueError("another controlled build or measurement is active")
     enabled_builds = {}
@@ -268,6 +273,8 @@ def validate_plan(plan: dict) -> None:
         wheel_build = json.loads(Path(traced["build_metadata"]).read_text())
         if (
             wheel_build["failure"] is not None
+            or wheel_build["harness_git_sha"] != build_harness
+            or traced_attestation["harness_git_sha"] != build_harness
             or wheel_build["revision"] != release["product_commit"]
             or traced_attestation["product_git_sha"] != release["product_commit"]
             or wheel_build["flags"] != plan["expected_native_flags"]
@@ -308,6 +315,7 @@ def validate_plan(plan: dict) -> None:
                 raise ValueError("native source attestation is not sealed")
             if (
                 target not in record["targets"]
+                or record["harness_git_sha"] != build_harness
                 or record["product_git_sha"] != release["product_commit"]
             ):
                 raise ValueError("native and wheel product revisions differ")
