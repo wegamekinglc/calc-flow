@@ -21,6 +21,8 @@ pub struct StreamJobContext {
     checkpointing: bool,
     static_inputs: Arc<BTreeMap<String, Batch>>,
     gather: super::gather_work::JobGatherOwner,
+    #[cfg(feature = "benchmark-internals")]
+    dispatch_trace: crate::benchmark_internals::DispatchTraceOwner,
 }
 
 impl fmt::Debug for StreamJobContext {
@@ -55,6 +57,8 @@ impl StreamJobContext {
             checkpointing: true,
             static_inputs: Arc::new(BTreeMap::new()),
             gather: super::gather_work::JobGatherOwner::new(job_id.to_string().into()),
+            #[cfg(feature = "benchmark-internals")]
+            dispatch_trace: crate::benchmark_internals::DispatchTraceOwner::default(),
         }
     }
 
@@ -67,6 +71,11 @@ impl StreamJobContext {
 
     pub(crate) fn gather_owner(&self) -> &super::gather_work::JobGatherOwner {
         &self.gather
+    }
+
+    #[cfg(feature = "benchmark-internals")]
+    pub(crate) fn dispatch_trace(&self) -> &crate::benchmark_internals::DispatchTraceOwner {
+        &self.dispatch_trace
     }
 
     pub(crate) fn with_gather_owner(mut self, gather: super::gather_work::JobGatherOwner) -> Self {

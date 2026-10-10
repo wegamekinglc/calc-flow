@@ -1363,6 +1363,29 @@ impl PyStreamingJob {
         self.awaits.enable_profiling();
     }
 
+    #[cfg(feature = "benchmark-internals")]
+    #[pyo3(signature = (allow_barriers=false))]
+    fn _benchmark_start_dispatch_trace(&self, allow_barriers: bool) -> PyResult<()> {
+        self.job()?
+            .benchmark_start_dispatch_trace(allow_barriers)
+            .map_err(streaming_py_err)
+    }
+
+    #[cfg(feature = "benchmark-internals")]
+    fn _benchmark_take_dispatch_trace(&self) -> PyResult<String> {
+        let trace = self
+            .job()?
+            .benchmark_take_dispatch_trace()
+            .map_err(streaming_py_err)?;
+        let encoded = serde_json::to_string(&trace);
+        encoded.map_err(|error| PyRuntimeError::new_err(error.to_string()))
+    }
+
+    #[cfg(feature = "benchmark-internals")]
+    fn _benchmark_dispatch_frontier(&self, node_id: &str) -> PyResult<Option<i64>> {
+        Ok(self.job()?.benchmark_dispatch_frontier(node_id))
+    }
+
     fn _take_callback_profile(&self) -> PyResult<String> {
         self.awaits
             .take_profile()
@@ -2345,6 +2368,53 @@ mod tests {
         PyContinuousStreamingRunner, PyManagedCheckpointRuntime, checked_static_array_shape,
     };
     use crate::{batch::PyBatch, pipeline::PyStreamExecutionPlan};
+
+    #[test]
+    fn benchmark_dispatch_trace_methods_follow_feature_gate() {
+        Python::initialize();
+        Python::attach(|py| {
+            let class = py.get_type::<super::PyStreamingJob>();
+            for name in [
+                "_benchmark_start_dispatch_trace",
+                "_benchmark_take_dispatch_trace",
+                "_benchmark_dispatch_frontier",
+            ] {
+                assert_eq!(
+                    class.hasattr(name).unwrap(),
+                    cfg!(feature = "benchmark-internals"),
+                    "unexpected visibility for {name}",
+                );
+            }
+            #[cfg(feature = "benchmark-internals")]
+            {
+                let cleared = Py::new(
+                    py,
+                    super::PyStreamingJob {
+                        inner: parking_lot::Mutex::new(None),
+                        roots: Arc::new(parking_lot::Mutex::new(Vec::new())),
+                        awaits: Arc::new(crate::runtime::PythonAwaitRegistry::new()),
+                        context: Arc::new(parking_lot::Mutex::new(None)),
+                    },
+                )
+                .unwrap();
+                let instance = cleared.bind(py);
+                for error in [
+                    instance
+                        .call_method0("_benchmark_start_dispatch_trace")
+                        .unwrap_err(),
+                    instance
+                        .call_method0("_benchmark_take_dispatch_trace")
+                        .unwrap_err(),
+                    instance
+                        .call_method1("_benchmark_dispatch_frontier", ("result",))
+                        .unwrap_err(),
+                ] {
+                    assert!(error.is_instance_of::<pyo3::exceptions::PyRuntimeError>(py));
+                    assert!(error.to_string().contains("StreamingJob has been cleared"));
+                }
+            }
+        });
+    }
 
     #[test]
     fn rolling_status_preserves_nanoseconds_full_integer_range_and_snapshots() {

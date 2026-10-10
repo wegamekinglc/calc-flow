@@ -27,11 +27,15 @@ use calc_flow::{
     OperatorMetadata, OperatorStateSnapshot, StreamJobContext, StreamJoinOperator, StreamJoinSpec,
     StreamOperator, StreamOperatorContext,
 };
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group};
 use datafusion::arrow::array::{Int64Array, StringArray, TimestampMicrosecondArray};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
 use sha2::{Digest, Sha256};
+
+#[path = "support/native_join_components.rs"]
+#[cfg(feature = "benchmark-internals")]
+mod native_join_components;
 
 const SECOND: i64 = 1_000_000;
 const BASE_TS: i64 = 100 * SECOND;
@@ -897,4 +901,61 @@ fn restore_scenarios(
 }
 
 criterion_group!(benches, baseline);
-criterion_main!(benches);
+
+fn main() {
+    let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    if arguments.first().map(String::as_str) == Some("--matched-fixture") {
+        run_matched(&arguments);
+    } else if arguments.first().map(String::as_str) == Some("--native-component") {
+        run_native_component(&arguments);
+    } else {
+        benches();
+        Criterion::default().configure_from_args().final_summary();
+    }
+}
+
+#[cfg(feature = "benchmark-internals")]
+fn run_matched(arguments: &[String]) {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let report = runtime
+        .block_on(calc_flow::benchmark_internals::run_fixture_cli(arguments))
+        .unwrap();
+    println!("{report}");
+}
+
+#[cfg(not(feature = "benchmark-internals"))]
+fn run_matched(_arguments: &[String]) {
+    panic!("matched fixture mode requires the benchmark-internals feature");
+}
+
+#[cfg(not(feature = "benchmark-internals"))]
+fn run_native_component(_arguments: &[String]) {
+    panic!("native component mode requires the benchmark-internals feature");
+}
+
+#[cfg(feature = "benchmark-internals")]
+fn run_native_component(arguments: &[String]) {
+    if let Some((component, check)) = native_join_components::parse_arguments(arguments).unwrap() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let rows = if check { 24 } else { 1_000_000 };
+        let mut observation = runtime.block_on(async {
+            match component {
+                native_join_components::Component::CaptureRestore => {
+                    native_join_components::capture_restore(rows).await
+                }
+                native_join_components::Component::Compaction => {
+                    native_join_components::compaction(rows, if check { 4 } else { 500 }).await
+                }
+            }
+        });
+        observation["check_only"] = check.into();
+        observation.as_object_mut().unwrap().extend(
+            calc_flow::benchmark_internals::process_observations()
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+        println!("{observation}");
+    }
+}

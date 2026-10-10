@@ -1331,6 +1331,8 @@ async fn dispatch_message(
     input_progress: &mut OperatorInputProgress,
     barrier_alignment: &mut OperatorBarrierAlignment,
 ) -> Result<()> {
+    #[cfg(feature = "benchmark-internals")]
+    let benchmark_watermark = message.as_watermark();
     let result = dispatch_message_inner(
         inputs,
         ingress_name,
@@ -1339,6 +1341,16 @@ async fn dispatch_message(
         barrier_alignment,
     )
     .await;
+    #[cfg(feature = "benchmark-internals")]
+    if result.is_ok() {
+        if let Some(watermark) = benchmark_watermark {
+            inputs
+                .context
+                .job()
+                .dispatch_trace()
+                .complete_watermark(&inputs.node_id, watermark.as_micros());
+        }
+    }
     observe_join_status(inputs, input_progress)?;
     observe_asof_status(inputs, input_progress.output_frontier);
     result
@@ -1391,6 +1403,14 @@ async fn dispatch_message_inner(
     input_progress: &mut OperatorInputProgress,
     barrier_alignment: &mut OperatorBarrierAlignment,
 ) -> Result<()> {
+    #[cfg(feature = "benchmark-internals")]
+    if matches!(inputs.operator, CompiledStreamOperator::StreamAsofJoin(_)) {
+        inputs
+            .context
+            .job()
+            .dispatch_trace()
+            .record(&inputs.node_id, ingress_name, &message)?;
+    }
     match message.kind() {
         StreamMessageKind::Data => {
             let watermark = input_progress.input_watermark();
@@ -1909,6 +1929,14 @@ async fn dispatch_data(
         .progress
         .observe_datafusion_runtime(inputs.operator.datafusion_runtime_initialized());
     result?;
+    #[cfg(feature = "benchmark-internals")]
+    if matches!(inputs.operator, CompiledStreamOperator::StreamAsofJoin(_)) {
+        inputs
+            .context
+            .job()
+            .dispatch_trace()
+            .callback(&inputs.node_id, "data")?;
+    }
     inputs
         .metrics
         .observe_operator_window_metrics(&inputs.node_id, &inputs.progress.snapshot())?;
@@ -1960,6 +1988,14 @@ async fn dispatch_watermark_handler(
         callback.complete(&result);
     }
     result?;
+    #[cfg(feature = "benchmark-internals")]
+    if matches!(inputs.operator, CompiledStreamOperator::StreamAsofJoin(_)) {
+        inputs
+            .context
+            .job()
+            .dispatch_trace()
+            .callback(&inputs.node_id, "watermark")?;
+    }
     inputs
         .metrics
         .record_operator_watermark(&inputs.node_id, &processing_timer)
@@ -2048,6 +2084,14 @@ async fn dispatch_progress_transition(
         .progress
         .observe_datafusion_runtime(inputs.operator.datafusion_runtime_initialized());
     progress_result?;
+    #[cfg(feature = "benchmark-internals")]
+    if matches!(inputs.operator, CompiledStreamOperator::StreamAsofJoin(_)) {
+        inputs
+            .context
+            .job()
+            .dispatch_trace()
+            .callback(&inputs.node_id, "ingress_progress")?;
+    }
     let emit_idle = apply_progress_emissions(
         inputs,
         ingress_name,
@@ -2498,6 +2542,8 @@ fn runtime_routes_error(node_id: &str, port: &str) -> CalcFlowError {
 #[cfg(test)]
 pub(super) mod tests {
     mod asof_tests;
+    #[cfg(feature = "benchmark-internals")]
+    mod dispatch_trace_tests;
     mod error_propagation_tests;
     mod join_checkpoint_owner_tests;
     mod segment_publication_tests;
@@ -2947,6 +2993,8 @@ pub(super) mod tests {
     enum HandlerResolution {
         Pending,
         ErrorWhen(Arc<AtomicBool>),
+        #[cfg(feature = "benchmark-internals")]
+        Release(Arc<tokio::sync::Notify>),
     }
 
     struct PendingHandlerOperator {
@@ -2988,7 +3036,14 @@ pub(super) mod tests {
         async fn remain_pending(&self) -> Result<()> {
             self.entered.store(true, Ordering::SeqCst);
             let _guard = PollDrop(Arc::clone(&self.poll_dropped));
+            #[cfg(feature = "benchmark-internals")]
+            if let HandlerResolution::Release(release) = &self.resolution {
+                release.notified().await;
+                return Ok(());
+            }
             std::future::poll_fn(|_| match &self.resolution {
+                #[cfg(feature = "benchmark-internals")]
+                HandlerResolution::Release(_) => unreachable!("handled release"),
                 HandlerResolution::Pending => Poll::Pending,
                 HandlerResolution::ErrorWhen(ready) if !ready.load(Ordering::SeqCst) => {
                     Poll::Pending
@@ -3373,6 +3428,8 @@ pub(super) mod tests {
     }
 
     struct Harness {
+        #[cfg(feature = "benchmark-internals")]
+        dispatch_trace: crate::benchmark_internals::DispatchTraceOwner,
         supervisor: TaskSupervisor,
         gather: crate::runtime::streaming::gather_work::JobGatherOwner,
         cancellation: CancellationToken,
@@ -3658,6 +3715,8 @@ pub(super) mod tests {
             },
         );
         Harness {
+            #[cfg(feature = "benchmark-internals")]
+            dispatch_trace: context.dispatch_trace().clone(),
             supervisor,
             gather: context.gather_owner().clone(),
             cancellation,
@@ -4970,3 +5029,6 @@ pub(super) mod tests {
         assert!(!harness.progress.snapshot().datafusion_runtime_created);
     }
 }
+#[cfg(feature = "benchmark-internals")]
+#[path = "operator_task/benchmark_replay.rs"]
+pub(crate) mod benchmark_replay;

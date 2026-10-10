@@ -1150,6 +1150,8 @@ impl StreamingRunner {
                 })
             })
             .collect();
+        #[cfg(feature = "benchmark-internals")]
+        let benchmark_context = context.clone();
         let spec = ContinuousJobSpec {
             context,
             plan,
@@ -1189,6 +1191,8 @@ impl StreamingRunner {
             .await
             .map(|inner| StreamingJob {
                 inner,
+                #[cfg(feature = "benchmark-internals")]
+                benchmark_context,
                 #[cfg(test)]
                 fault_probe,
             })
@@ -1199,6 +1203,8 @@ impl StreamingRunner {
 /// Sole owning handle for one running continuous job.
 pub struct StreamingJob {
     inner: OwningContinuousJob,
+    #[cfg(feature = "benchmark-internals")]
+    benchmark_context: StreamJobContext,
     #[cfg(test)]
     fault_probe: Option<crate::runtime::streaming::runner::CheckpointFaultInjector>,
 }
@@ -2283,3 +2289,6 @@ mod static_input_runner_tests {
         );
     }
 }
+
+#[cfg(feature = "benchmark-internals")]
+mod benchmark_trace;

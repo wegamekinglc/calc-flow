@@ -73,6 +73,65 @@ def registry(root: Path, baseline: bytes, candidate: bytes) -> None:
 
 
 class CommonJoinHarnessTests(unittest.TestCase):
+    def test_common_join_copies_and_attests_its_component_support(self):
+        support = Path("crates/calc-flow/benches/support/native_join_components.rs")
+        with TemporaryDirectory() as raw:
+            root = Path(raw)
+            baseline, candidate = root / "baseline", root / "candidate"
+            original = b"old harness"
+            measured = b"mod native_join_components;"
+            product_sha = checkout(baseline, original)
+            checkout(candidate, measured)
+            (candidate / support).parent.mkdir(parents=True)
+            (candidate / support).write_bytes(b"reviewed component implementation")
+            command_output(["git", "add", str(support)], cwd=candidate)
+            command_output(
+                [
+                    "git",
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "commit",
+                    "-qm",
+                    "Add component harness",
+                ],
+                cwd=candidate,
+            )
+            registry(candidate, original, measured)
+            output = root / "output"
+            with patch("scripts.benchmark_suite.rust_harness.ROOT", candidate):
+                with common_join_harness(baseline, output, TARGET) as mirror:
+                    self.assertTrue((mirror / support).is_file())
+                    self.assertEqual(
+                        (mirror / support).read_bytes(),
+                        (candidate / support).read_bytes(),
+                    )
+                    self.assertFalse((baseline / support).exists())
+                identity = {
+                    "git_sha": product_sha,
+                    "workload_identity": {BENCH.as_posix(): digest(original)},
+                    "scoped_workload_fingerprints": {TARGET: "original"},
+                }
+                record = with_measured_harness(identity, output)
+                self.assertEqual(
+                    record["measured_workload_fingerprints"][TARGET],
+                    fingerprint_json(
+                        {
+                            BENCH.as_posix(): digest(measured),
+                            support.as_posix(): digest(
+                                (candidate / support).read_bytes()
+                            ),
+                        }
+                    ),
+                )
+                evidence = output / f"build-{TARGET}.harness.json"
+                invalid = json.loads(evidence.read_text())
+                invalid["support_files"][support.as_posix()] = "0" * 64
+                evidence.write_text(json.dumps(invalid))
+                with self.assertRaisesRegex(ValueError, "attestation"):
+                    with_measured_harness(identity, output)
+
     def test_same_old_harness_versions_keep_overlay_migration_markers(self):
         declaration = {
             "target": TARGET,

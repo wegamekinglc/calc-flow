@@ -8,6 +8,10 @@ repository.workspace = true
 description = "Rust core for stateful DataFusion calculation pipelines"
 exclude = ["tests/**"]
 
+[features]
+benchmark-internals = []
+benchmark-checkpoint-off = ["benchmark-internals"]
+
 [dependencies]
 ahash.workspace = true
 arrow-data = "=58.3.0"

@@ -13,6 +13,7 @@ name = "calc_flow_python"
 crate-type = ["cdylib"]
 
 [features]
+benchmark-internals = ["calc-flow/benchmark-internals"]
 default = ["connector-file"]
 legacy-python = ["pyo3/abi3-py39"]
 connector-file = ["dep:calc-flow-connectors", "calc-flow-connectors/file"]

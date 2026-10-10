@@ -134,3 +134,6 @@ pub use udf::{
 
 /// The crate version used by project and package diagnostics.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+#[cfg(feature = "benchmark-internals")]
+#[doc(hidden)]
+pub mod benchmark_internals;
