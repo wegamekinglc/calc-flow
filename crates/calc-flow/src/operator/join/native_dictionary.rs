@@ -65,11 +65,21 @@ impl KeyRun {
     }
 
     fn remove(&mut self, identity: (EventTime, u64)) -> bool {
-        let position = self.start
-            + self
-                .active()
-                .binary_search_by_key(&identity, |entry| entry.identity())
-                .expect("retained identity");
+        #[cfg(test)]
+        super::note_join_work(|work| work.native_eviction_comparisons += 1);
+        let position = if self.rows[self.start].identity() == identity {
+            self.start
+        } else {
+            self.start
+                + self
+                    .active()
+                    .binary_search_by_key(&identity, |entry| {
+                        #[cfg(test)]
+                        super::note_join_work(|work| work.native_eviction_comparisons += 1);
+                        entry.identity()
+                    })
+                    .expect("retained identity")
+        };
         if position == self.start {
             self.start += 1;
         } else {
@@ -276,7 +286,8 @@ impl NativeIndex {
         let hash = self.hash(&row.encoded_key);
         let id = self.find(hash, &row.encoded_key).expect("retained key ID");
         let run = self.slots[id as usize].as_mut().expect("live key ID");
-        if run.remove((row.event_time, row.row_id)) {
+        let removed_key = run.remove((row.event_time, row.row_id));
+        if removed_key {
             self.remove_key(hash, id);
         }
         if let Some((row, dense)) = moved {
@@ -284,6 +295,10 @@ impl NativeIndex {
         }
         self.refresh_key_owner(id, key_at);
         self.rows -= 1;
+        if !removed_key {
+            // A live run retains all index backing capacity.
+            return;
+        }
         if self.rows == 0 {
             self.entries = HashTable::new();
             self.slots = Vec::new();
@@ -418,6 +433,8 @@ impl NativeIndex {
     }
 
     fn refund(&self) {
+        #[cfg(test)]
+        super::note_join_work(|work| work.native_funding_refunds += 1);
         self.funding
             .credit
             .shrink(self.funding.credit.size() - self.resident_bytes());

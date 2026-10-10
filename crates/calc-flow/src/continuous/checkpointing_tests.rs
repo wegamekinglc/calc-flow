@@ -455,8 +455,7 @@ async fn test_checkpointing_off_rejects_history_before_lifecycle() {
             .start_with_cleanup();
     let error = start
         .await
-        .err()
-        .expect("history requires checkpoint storage");
+        .expect_err("history requires checkpoint storage");
     cleanup.await.unwrap();
     assert!(
         matches!(error, CalcFlowError::Streaming(error) if error.category() == StreamingErrorCategory::Validation)

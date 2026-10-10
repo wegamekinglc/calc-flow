@@ -4280,6 +4280,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_checkpoint_disabled_window_releases_only_accepted_output() {
+        struct RejectOutput;
+        #[async_trait]
+        impl StreamCollector for RejectOutput {
+            async fn emit(&mut self, _port: &str, _batch: Batch) -> Result<()> {
+                Err(operator_error("window", "output rejected"))
+            }
+        }
+
         let mut operator = checkpoint_segment_operator();
         operator
             .set_state_budget(StateBudget::new(1, 1_048_576).unwrap())
@@ -4295,13 +4303,6 @@ mod tests {
         assert!(operator.state.accumulator_bytes > 0);
         assert!(operator.state.prepared_segments.is_empty());
         assert!(operator.state.dirty.is_empty());
-        struct RejectOutput;
-        #[async_trait]
-        impl StreamCollector for RejectOutput {
-            async fn emit(&mut self, _port: &str, _batch: Batch) -> Result<()> {
-                Err(operator_error("window", "output rejected"))
-            }
-        }
         let before_bytes = operator.state.accumulator_bytes;
         let error = operator
             .on_watermark(

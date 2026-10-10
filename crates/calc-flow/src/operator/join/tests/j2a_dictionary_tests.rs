@@ -218,6 +218,19 @@ fn assert_hot_run_expiry_and_refill_move_only_linear_entries() {
     for identity in 0..512 {
         remove_identity(&mut index, &mut dense, identity);
     }
+    assert_eq!(
+        (
+            join_work().native_eviction_comparisons,
+            join_work().native_funding_refunds,
+        ),
+        (512, 0),
+        "prefix expiry must inspect only the head and retain unchanged capacity funding"
+    );
+    assert_eq!(index.funded_bytes(), index.resident_bytes());
+    let aborted = index.reserve(512).unwrap();
+    assert!(index.funded_bytes() > index.resident_bytes());
+    drop(aborted);
+    assert_eq!(index.funded_bytes(), index.resident_bytes());
     let append = index.reserve(512).unwrap();
     index.append(dense.len(), &rows[1_024..]);
     dense.extend(&rows[1_024..]);
@@ -233,6 +246,8 @@ fn assert_hot_run_expiry_and_refill_move_only_linear_entries() {
     for identity in 512..1_536 {
         remove_identity(&mut index, &mut dense, identity);
     }
+    assert_eq!(join_work().native_eviction_comparisons, rows.len());
+    assert_eq!(join_work().native_funding_refunds, 1);
     assert!(
         join_work().native_shifted_entries <= rows.len(),
         "prefix expiry and geometric compaction must be linear; moved={}",

@@ -172,9 +172,10 @@ round's exact 97.85% median confidence interval, not P95 latency bounds.
 | 100ms | +1.21% [-3.25%, +5.54%]   | -1.19% [-12.29%, +1.83%]  | inconclusive |
 
 Neither comparison triggers the maintained regression gate, which requires both
-rounds' lower bounds to exceed +5%. Both remain **inconclusive** because one
-round's upper bound exceeds +5%; these observations establish neither an enabled
-mode speedup nor equivalence. There is no disabled historical baseline.
+rounds' lower bounds to exceed +5%. Every reported interval includes zero, so
+these observations establish neither an enabled-mode speedup nor equivalence;
+the timing evidence remains **inconclusive**. An upper bound above +5% is not an
+additional regression gate. There is no disabled historical baseline.
 
 Within the candidate, disabled P50 is 34.86% lower than 24h and 70.10% lower than
 100ms. These are descriptive configuration differences. Equivalently, finite-job
@@ -236,3 +237,19 @@ documentation, or measurement-methodology defects. It independently audited all
 coverage, and process settlement. Its verdict is comment-only: this increment
 is suitable for commit and PR handoff, while required CI and the unresolved
 test-target Clippy gate still prevent a merge-ready claim.
+
+## Follow-up: test-target Clippy
+
+The next increment reproduced the generated libtest `large_stack_arrays` failure
+and three test-only lint findings on `311b75d7`. It moves 31 public RollingSpec
+declaration/validation tests to `crates/calc-flow/tests/rolling_spec.rs`, preserving
+every test body and local helper. The private fingerprint test remains a unit
+test. The core unit harness decreases from 2,066 to 2,035 tests; the existing
+`--tests` runner and coverage harness automatically include the new integration
+target. No tests, lint requirements, or toolchain constraints are removed.
+
+Core `cargo clippy -p calc-flow --lib --tests --locked --offline -- -D warnings`
+now passes. The 31 moved tests and three directly affected unit controls also
+pass. Evidence is under `target/issue406-next/test-layout-migration.json` and its
+RED/GREEN logs. This resolves the local test-target Clippy blocker; required CI
+and coverage results remain separate merge gates.

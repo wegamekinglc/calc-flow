@@ -9,6 +9,11 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-10: Avoid repeated binary searches when streaming Join expires the
+  first row of a key's ordered index. Refresh index capacity funding only when
+  an emptied key releases storage, preserving dense-row mappings, key ownership,
+  and exact memory accounting.
+
 - 2026-10-10: Add explicit checkpoint-disabled streaming with
   `StreamRuntimeConfig(checkpointing=False)` in Python and
   `StreamingRunner::without_checkpoints` in Rust. Preserve live state and
