@@ -548,6 +548,25 @@ outside the managed roots fail closed. Regular abandoned `.tmp*` manifest
 files are removed during a serialized scan; links and directories are never
 followed or removed as temporary files.
 
+Each managed snapshot publishes its new or not-yet-confirmed state segments
+before the operator acknowledges the checkpoint. The local backend renames the
+segments in order, then syncs each affected committed directory once. Segment
+file syncs, staging-directory syncs, and managed-directory creation syncs retain
+their separate boundaries. A failed batch can leave complete, visible orphan
+files; it does not advance the session's verified handles or working pins.
+Retrying such files verifies their bytes and repeats directory confirmation
+before reporting success. Already-established session carries retain their
+original epochs and avoid publication work.
+
+`StateLineageBackend::publish_segments` provides a compatible sequential default
+for other backends: it preflights conflicting handles and exact duplicates,
+accepts successfully verified committed handles, and calls `publish_segment`
+only for missing handles. Its success retains that backend's existing
+committed-read and publication guarantees. Managed cancellation waits for the
+entire admitted batch, including a wait for the publication lock, to settle
+before releasing lineage ownership; cancelled publication supplies no new
+working pins or checkpoint acknowledgement.
+
 Bounded manifest loading also accepts legacy v3 source entries that omitted
 `history`. It retains that omission through serialization and checksum
 validation; new manifests emit the current field explicitly. Direct serde

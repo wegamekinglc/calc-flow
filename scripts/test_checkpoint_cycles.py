@@ -11,6 +11,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from benchmarks.checkpoint_cycles import (
+    CycleCallbacks,
+    CycleOptions,
     CycleValidationError,
     checkpoint_evidence,
     measure_cycle,
@@ -179,9 +181,7 @@ def owned_fixture():
         sink,
         {"input": ("data",)},
         job,
-        concat=tuple,
-        clock=clock,
-        cpu_clock=clock,
+        callbacks=CycleCallbacks(concat=tuple, clock=clock, cpu_clock=clock),
     )
     return source, job, operation
 
@@ -263,9 +263,7 @@ class CheckpointCycleTests(unittest.IsolatedAsyncioTestCase):
             sink,
             {"input": ("data",)},
             job,
-            concat=concat,
-            clock=clock,
-            cpu_clock=clock,
+            callbacks=CycleCallbacks(concat=concat, clock=clock, cpu_clock=clock),
         )
 
         self.assertEqual(table, ("batch",))
@@ -293,9 +291,9 @@ class CheckpointCycleTests(unittest.IsolatedAsyncioTestCase):
                         sink,
                         {"input": ("data",)},
                         job,
-                        concat=concat,
-                        clock=clock,
-                        cpu_clock=clock,
+                        callbacks=CycleCallbacks(
+                            concat=concat, clock=clock, cpu_clock=clock
+                        ),
                     )
                 self.assertTrue(job.cancelled)
                 self.assertIn("after_eof", error.exception.evidence)
@@ -310,9 +308,7 @@ class CheckpointCycleTests(unittest.IsolatedAsyncioTestCase):
                 sink,
                 {"input": ("data",)},
                 job,
-                concat=concat,
-                clock=clock,
-                cpu_clock=clock,
+                callbacks=CycleCallbacks(concat=concat, clock=clock, cpu_clock=clock),
             )
         self.assertTrue(job.cancelled)
 
@@ -327,9 +323,9 @@ class CheckpointCycleTests(unittest.IsolatedAsyncioTestCase):
                     sink,
                     {"input": ()},
                     job,
-                    concat=concat,
-                    clock=clock,
-                    cpu_clock=clock,
+                    callbacks=CycleCallbacks(
+                        concat=concat, clock=clock, cpu_clock=clock
+                    ),
                 ),
                 1,
             )
@@ -482,8 +478,7 @@ class CycleAdapterTests(unittest.IsolatedAsyncioTestCase):
                     {"input": ("data", None)},
                     Path("unused"),
                     1,
-                    mode="on",
-                    batch_rows=8192,
+                    options=CycleOptions(mode="on", batch_rows=8192),
                 )
             )
             await entered.wait()
@@ -513,8 +508,7 @@ class CycleAdapterTests(unittest.IsolatedAsyncioTestCase):
                 {"input": ("data", None)},
                 Path("unused"),
                 1,
-                mode="on",
-                batch_rows=8192,
+                options=CycleOptions(mode="on", batch_rows=8192),
             )
         self.assertGreater(error.exception.evidence["seconds"], 0)
         self.assertEqual(error.exception.evidence["after_eof"]["state"], "completed")
@@ -543,8 +537,7 @@ class CycleAdapterTests(unittest.IsolatedAsyncioTestCase):
                         {"input": ("data", None)},
                         Path("unused"),
                         1,
-                        mode=mode,
-                        batch_rows=8192,
+                        options=CycleOptions(mode=mode, batch_rows=8192),
                     )
                 self.assertEqual(table, ("batch",))
                 self.assertEqual(calls["config"]["checkpoint_interval"], interval)

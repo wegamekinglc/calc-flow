@@ -11,10 +11,29 @@ import asyncio
 import hashlib
 import json
 import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 
 from benchmarks.engine_lifecycle import interleaved_events, run_with_completion
+
+
+@dataclass(frozen=True)
+class CycleCallbacks:
+    """Output assembly and clocks used by the measurement window."""
+
+    concat: Callable[[list], object]
+    clock: Callable[[], int] = time.perf_counter_ns
+    cpu_clock: Callable[[], int] = time.process_time_ns
+
+
+@dataclass(frozen=True)
+class CycleOptions:
+    """Checkpoint policy and input sizing for one finite stream run."""
+
+    mode: str
+    batch_rows: int
 
 
 class CycleValidationError(RuntimeError):
@@ -25,11 +44,15 @@ class CycleValidationError(RuntimeError):
         self.evidence = evidence
 
 
-def _require_terminal(outcome, status: dict, rows: int, expected_rows: int) -> None:
+def _require_natural_end(outcome) -> None:
     if outcome.state != "completed" or outcome.cause != "natural_end":
         raise RuntimeError("stream must complete with natural_end")
     if outcome.errors:
         raise RuntimeError(f"stream completed with errors: {outcome.errors}")
+
+
+def _require_terminal(outcome, status: dict, rows: int, expected_rows: int) -> None:
+    _require_natural_end(outcome)
     if status["state"] != "completed" or status["terminal_cause"] != "natural_end":
         raise RuntimeError("terminal status must be completed/natural_end")
     if status["task_errors"]:
@@ -67,15 +90,39 @@ async def _cancel_owned_job(job, evidence: dict):
     return cancellation, failure
 
 
+async def _wait_ready(sources: dict, sink) -> None:
+    await asyncio.wait_for(
+        asyncio.gather(*(source.ready.wait() for source in sources.values())),
+        30,
+    )
+    if (
+        any(not source.opened.is_set() for source in sources.values())
+        or not sink.opened.is_set()
+        or sink.rows
+    ):
+        raise RuntimeError("stream must be ready with empty state before timing")
+
+
+def _elapsed_seconds(started, stopped):
+    return None if started is None else (stopped - started) / 1e9
+
+
+def _raise_cycle_error(error, evidence: dict) -> None:
+    if error is None:
+        return
+    if isinstance(error, asyncio.CancelledError):
+        error.evidence = evidence
+        raise error
+    raise CycleValidationError(str(error), evidence) from error
+
+
 async def measure_cycle(
     sources: dict,
     sink,
     streams: dict[str, tuple],
     job,
     *,
-    concat,
-    clock=time.perf_counter_ns,
-    cpu_clock=time.process_time_ns,
+    callbacks: CycleCallbacks,
 ) -> tuple[object, float, dict]:
     """Time ready-to-final-Arrow delivery, including EOF and job settlement.
 
@@ -84,6 +131,7 @@ async def measure_cycle(
     Cancellation still propagates after the owned cleanup settles.
     """
 
+    concat, clock, cpu_clock = callbacks.concat, callbacks.clock, callbacks.cpu_clock
     evidence = {}
     started = None
     cpu_started = None
@@ -91,16 +139,7 @@ async def measure_cycle(
 
     async def feed_and_end():
         nonlocal started, cpu_started
-        await asyncio.wait_for(
-            asyncio.gather(*(source.ready.wait() for source in sources.values())),
-            30,
-        )
-        if (
-            any(not source.opened.is_set() for source in sources.values())
-            or not sink.opened.is_set()
-            or sink.rows
-        ):
-            raise RuntimeError("stream must be ready with empty state before timing")
+        await _wait_ready(sources, sink)
         evidence["before_data"] = job.status()
         cpu_started = cpu_clock()
         started = clock()
@@ -133,64 +172,61 @@ async def measure_cycle(
         cancellation, cleanup_error = await _cancel_owned_job(job, evidence)
         stopped = clock()
         cpu_stopped = cpu_clock()
-    evidence["seconds"] = None if started is None else (stopped - started) / 1e9
-    evidence["cpu_seconds"] = (
-        None if cpu_started is None else (cpu_stopped - cpu_started) / 1e9
-    )
+    evidence["seconds"] = _elapsed_seconds(started, stopped)
+    evidence["cpu_seconds"] = _elapsed_seconds(cpu_started, cpu_stopped)
     evidence["after_cleanup"] = job.status()
     if error is not None:
         evidence["operation_error"] = str(error) or type(error).__name__
     error = cancellation or error or cleanup_error
     if error is not None:
         evidence.setdefault("after_eof", evidence["after_cleanup"])
-        if isinstance(error, asyncio.CancelledError):
-            error.evidence = evidence
-            raise error
-        raise CycleValidationError(str(error), evidence) from error
+        _raise_cycle_error(error, evidence)
     return table, evidence["seconds"], evidence
 
 
-def checkpoint_evidence(root: Path, status: dict, *, checkpointing: bool) -> dict:
-    """Read retained, committed manifests after settlement, outside the timer.
+def _join_retained_rows(operators: dict) -> int:
+    retained_rows = 0
+    for operator in operators.values():
+        metadata = operator["inline_metadata"]
+        spec = metadata.get("spec", {})
+        if "left_keys" in spec and "right_keys" in spec:
+            retained_rows += sum(
+                metadata["metrics"][side]["retained_rows"] for side in ("left", "right")
+            )
+    return retained_rows
 
-    Retention can remove earlier epochs. These lists prove observed coverage;
-    neither their lengths nor the last epoch are a total nonterminal count.
-    """
 
-    files = sorted(path for path in root.rglob("*") if path.is_file())
-    last_completed = status["last_completed_epoch"]
-    if not checkpointing and (files or last_completed is not None):
-        raise ValueError("disabled checkpoints produced state files or an epoch")
+def _committed_manifest(path: Path, root: Path, last_completed: int | None):
+    if not path.name.startswith("manifest-") or path.suffix != ".json":
+        return None
+    document = path.read_bytes()
+    manifest = json.loads(document)
+    epoch = manifest["epoch"]
+    if last_completed is None or epoch > last_completed:
+        return None
+    if manifest["format_version"] != 3 or not manifest["sources"]:
+        raise ValueError("checkpoint evidence requires a v3 source manifest")
+    terminal = all(source["ended"] for source in manifest["sources"].values())
+    retained_rows = _join_retained_rows(manifest["operators"])
+    return {
+        "path": str(path.relative_to(root)),
+        "sha256": hashlib.sha256(document).hexdigest(),
+        "epoch": epoch,
+        "terminal": terminal,
+        "join_retained_rows": retained_rows,
+    }
+
+
+def _committed_manifests(files: list[Path], root: Path, last_completed: int | None):
     manifests = []
     for path in files:
-        if not path.name.startswith("manifest-") or path.suffix != ".json":
-            continue
-        document = path.read_bytes()
-        manifest = json.loads(document)
-        epoch = manifest["epoch"]
-        if last_completed is None or epoch > last_completed:
-            continue
-        if manifest["format_version"] != 3 or not manifest["sources"]:
-            raise ValueError("checkpoint evidence requires a v3 source manifest")
-        terminal = all(source["ended"] for source in manifest["sources"].values())
-        retained_rows = 0
-        for operator in manifest["operators"].values():
-            metadata = operator["inline_metadata"]
-            spec = metadata.get("spec", {})
-            if "left_keys" in spec and "right_keys" in spec:
-                retained_rows += sum(
-                    metadata["metrics"][side]["retained_rows"]
-                    for side in ("left", "right")
-                )
-        manifests.append(
-            {
-                "path": str(path.relative_to(root)),
-                "sha256": hashlib.sha256(document).hexdigest(),
-                "epoch": epoch,
-                "terminal": terminal,
-                "join_retained_rows": retained_rows,
-            }
-        )
+        manifest = _committed_manifest(path, root, last_completed)
+        if manifest is not None:
+            manifests.append(manifest)
+    return manifests
+
+
+def _manifest_epochs(manifests: list[dict]):
     nonterminal = [item["epoch"] for item in manifests if not item["terminal"]]
     nonempty = [
         item["epoch"]
@@ -198,6 +234,11 @@ def checkpoint_evidence(root: Path, status: dict, *, checkpointing: bool) -> dic
         if not item["terminal"] and item["join_retained_rows"] > 0
     ]
     terminal = [item["epoch"] for item in manifests if item["terminal"]]
+    return nonterminal, nonempty, terminal
+
+
+def _checkpoint_summary(manifests: list[dict], last_completed, checkpointing: bool):
+    nonterminal, nonempty, terminal = _manifest_epochs(manifests)
     if checkpointing and last_completed not in terminal:
         raise ValueError("completed enabled stream lacks its terminal manifest")
     return {
@@ -211,9 +252,46 @@ def checkpoint_evidence(root: Path, status: dict, *, checkpointing: bool) -> dic
         if nonempty
         else "insufficient_nonterminal_coverage",
         "manifests": manifests,
+    }
+
+
+def checkpoint_evidence(root: Path, status: dict, *, checkpointing: bool) -> dict:
+    """Read retained, committed manifests after settlement, outside the timer.
+
+    Retention can remove earlier epochs. These lists prove observed coverage;
+    neither their lengths nor the last epoch are a total nonterminal count.
+    """
+
+    files = sorted(path for path in root.rglob("*") if path.is_file())
+    last_completed = status["last_completed_epoch"]
+    if not checkpointing and (files or last_completed is not None):
+        raise ValueError("disabled checkpoints produced state files or an epoch")
+    manifests = _committed_manifests(files, root, last_completed)
+    return {
+        **_checkpoint_summary(manifests, last_completed, checkpointing),
         "state_file_count": len(files),
         "state_bytes": sum(path.stat().st_size for path in files),
     }
+
+
+async def _inspect_checkpoints(root: Path, evidence: dict, *, checkpointing: bool):
+    inspection = asyncio.create_task(
+        asyncio.to_thread(
+            checkpoint_evidence,
+            root,
+            evidence["after_eof"]["checkpoint"],
+            checkpointing=checkpointing,
+        )
+    )
+    cancellation = await _settle_owned(inspection)
+    failure = None
+    try:
+        manifest_evidence = inspection.result()
+    except (Exception, asyncio.CancelledError) as error:
+        failure = error
+        evidence = {**evidence, "manifest_error": str(error) or type(error).__name__}
+    _raise_cycle_error(cancellation or failure, evidence)
+    return {**evidence, "checkpoint_evidence": manifest_evidence}
 
 
 async def run_cycle(
@@ -222,8 +300,7 @@ async def run_cycle(
     root: Path,
     expected_rows: int,
     *,
-    mode: str,
-    batch_rows: int,
+    options: CycleOptions,
 ) -> tuple[object, float, dict]:
     """Run one interval-Join sample with enabled, low-frequency or no checkpoints.
 
@@ -235,6 +312,7 @@ async def run_cycle(
 
     from benchmarks import engine_stream as stream
 
+    mode, batch_rows = options.mode, options.batch_rows
     if mode not in ("low", "on", "off"):
         raise ValueError("checkpoint mode must be low, on or off")
     timed = stream._validated_timed_streams(plan, streams)
@@ -263,27 +341,7 @@ async def run_cycle(
         config=config,
     ).start_async()
     table, seconds, evidence = await measure_cycle(
-        sources, sink, timed, job, concat=stream.pa.concat_tables
+        sources, sink, timed, job, callbacks=CycleCallbacks(stream.pa.concat_tables)
     )
-    inspection = asyncio.create_task(
-        asyncio.to_thread(
-            checkpoint_evidence,
-            root,
-            evidence["after_eof"]["checkpoint"],
-            checkpointing=mode != "off",
-        )
-    )
-    cancellation = await _settle_owned(inspection)
-    failure = None
-    try:
-        manifest_evidence = inspection.result()
-    except (Exception, asyncio.CancelledError) as error:
-        failure = error
-        evidence["manifest_error"] = str(error) or type(error).__name__
-    error = cancellation or failure
-    if isinstance(error, asyncio.CancelledError):
-        error.evidence = evidence
-        raise error
-    if error is not None:
-        raise CycleValidationError(str(error), evidence) from error
-    return table, seconds, {**evidence, "checkpoint_evidence": manifest_evidence}
+    evidence = await _inspect_checkpoints(root, evidence, checkpointing=mode != "off")
+    return table, seconds, evidence

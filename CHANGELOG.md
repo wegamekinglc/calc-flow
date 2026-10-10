@@ -9,6 +9,13 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-11: Batch local checkpoint segment publication so each affected
+  committed directory is synced once per snapshot. Preserve file, staging,
+  creation, and manifest durability boundaries; reconfirm visible files after
+  failed publication and settle admitted batches before cancellation completes.
+  Add a provided `StateLineageBackend::publish_segments` method that preserves
+  existing backends' committed-read and staged-publication contracts.
+
 - 2026-10-10: Avoid repeated binary searches when streaming Join expires the
   first row of a key's ordered index. Refresh index capacity funding only when
   an emptied key releases storage, preserving dense-row mappings, key ownership,
