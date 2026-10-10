@@ -9,6 +9,10 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-11: Reuse source identifiers while streaming Join gathers consecutive
+  output rows from the same input batch. Avoid repeated source-map lookups while
+  preserving row order, independent output buffers, and bounded gather storage.
+
 - 2026-10-11: Batch local checkpoint segment publication so each affected
   committed directory is synced once per snapshot. Preserve file, staging,
   creation, and manifest durability boundaries; reconfirm visible files after

@@ -42,21 +42,26 @@ impl<'a> SideGather<'a> {
         payloads: impl Iterator<Item = &'a RowPayload>,
     ) -> Option<Self> {
         let mut columns = vec![first_columns];
-        let mut sources = BTreeMap::from([((first_columns.as_ptr(), first_columns.len()), 0)]);
+        let mut previous = ((first_columns.as_ptr(), first_columns.len()), 0);
+        let mut sources = BTreeMap::from([previous]);
         let mut rows = Vec::with_capacity(first_rows.len() + payloads.size_hint().0);
         for row in first_rows {
             rows.push((0, usize::try_from(row).ok()?));
         }
         for payload in payloads {
             let source = payload.shared_columns()?;
-            let index = *sources
-                .entry((source.as_ptr(), source.len()))
-                .or_insert_with(|| {
+            let identity = (source.as_ptr(), source.len());
+            if identity != previous.0 {
+                #[cfg(test)]
+                super::note_join_work(|work| work.output_source_lookups += 1);
+                let index = *sources.entry(identity).or_insert_with(|| {
                     let index = columns.len();
                     columns.push(source);
                     index
                 });
-            rows.push((index, payload.offset()));
+                previous = (identity, index);
+            }
+            rows.push((previous.1, payload.offset()));
         }
         Some(Self::Multiple { columns, rows })
     }

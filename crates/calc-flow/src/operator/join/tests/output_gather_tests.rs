@@ -150,6 +150,7 @@ async fn test_same_parent_output_takes_each_column_once_in_both_directions() {
         );
         assert_eq!(join_work().output_column_views, 0);
         assert_eq!(join_work().output_column_takes, 6);
+        assert_eq!(join_work().output_source_lookups, 0);
     }
 }
 
@@ -323,6 +324,7 @@ async fn test_mixed_parent_output_interleaves_columns_in_pair_order() {
     assert_eq!(join_work().output_column_views, 0);
     assert_eq!(join_work().output_column_takes, 3);
     assert_eq!(join_work().output_column_interleaves, 3);
+    assert_eq!(join_work().output_source_lookups, 3);
 }
 
 fn two_record_batch(left: bool, first: Vec<i64>, second: Vec<i64>) -> Batch {
@@ -425,6 +427,11 @@ async fn test_multiple_input_and_retained_chunks_interleave_in_both_directions()
         assert_eq!(join_work().output_column_views, 0);
         assert_eq!(join_work().output_column_takes, 0);
         assert_eq!(join_work().output_column_interleaves, 6);
+        assert_eq!(
+            join_work().output_source_lookups,
+            32,
+            "one incoming source switch and 31 alternating retained-source switches"
+        );
     }
 }
 
@@ -609,21 +616,31 @@ fn flat_nullable_columns() -> Vec<ArrayRef> {
 
 #[test]
 fn test_multi_parent_flat_nullable_gather_matches_concat_with_one_interleave() {
-    let selections = [(1, 2), (0, 0), (1, 1), (0, 2), (1, 0)];
-    for column in flat_nullable_columns() {
-        let slices = selections.map(|(_, row)| column.slice(row, 1));
-        let refs = slices.iter().map(AsRef::as_ref).collect::<Vec<_>>();
-        let expected = concat_output_column(&refs).unwrap();
-        reset_join_work();
-        let output = materialize_parent_columns(vec![Arc::clone(&column), column], &selections);
-        assert_eq!(output.column(0).to_data(), expected.to_data());
-        assert_eq!(join_work().output_column_takes, 0);
-        assert_eq!(join_work().output_column_interleaves, 1);
-        assert_eq!(
-            join_work().output_column_views,
-            selections.len(),
-            "only legacy right payloads use row views"
-        );
+    let alternating = vec![(1, 2), (0, 0), (1, 1), (0, 2), (1, 0)];
+    let runs = std::iter::repeat_n((0, 2), 32)
+        .chain(std::iter::repeat_n((1, 0), 64))
+        .chain(std::iter::repeat_n((0, 1), 32))
+        .collect::<Vec<_>>();
+    for (selections, source_lookups) in [(alternating, 4), (runs, 2)] {
+        for column in flat_nullable_columns() {
+            let slices = selections
+                .iter()
+                .map(|&(_, row)| column.slice(row, 1))
+                .collect::<Vec<_>>();
+            let refs = slices.iter().map(AsRef::as_ref).collect::<Vec<_>>();
+            let expected = concat_output_column(&refs).unwrap();
+            reset_join_work();
+            let output = materialize_parent_columns(vec![Arc::clone(&column), column], &selections);
+            assert_eq!(output.column(0).to_data(), expected.to_data());
+            assert_eq!(join_work().output_column_takes, 0);
+            assert_eq!(join_work().output_column_interleaves, 1);
+            assert_eq!(join_work().output_source_lookups, source_lookups);
+            assert_eq!(
+                join_work().output_column_views,
+                selections.len(),
+                "only legacy right payloads use row views"
+            );
+        }
     }
 }
 
