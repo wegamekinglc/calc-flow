@@ -198,3 +198,48 @@ async fn collection_stops_on_a_symbolic_link_without_deleting_valid_state() {
     assert!(lineage.collect_orphans(&[retained.clone()]).await.is_err());
     assert_eq!(lineage.load_segment(&retained).await.unwrap(), b"retained");
 }
+
+#[tokio::test]
+async fn local_batch_rejects_all_conflicts_and_unmanaged_paths_before_publication() {
+    let directory = TempDir::new().unwrap();
+    let backend = LocalStateBackend::new(directory.path()).await.unwrap();
+    let key = lineage_key("orders");
+    let lineage = backend.open_lineage(&key).await.unwrap();
+    let first = handle(&key, "window", Epoch::INITIAL, "first", b"valid");
+    lineage.stage_segment(&first, b"valid").await.unwrap();
+    lineage.validate_segment(&first).await.unwrap();
+    let conflict = StateHandle::new(
+        first.operator_id(),
+        first.epoch(),
+        first.segment_id(),
+        first.relative_path(),
+        5,
+        &digest("other"),
+    )
+    .unwrap();
+    let unmanaged = StateHandle::new(
+        "window",
+        Epoch::INITIAL,
+        "other",
+        "committed/unmanaged",
+        5,
+        &digest("other"),
+    )
+    .unwrap();
+    for invalid in [conflict, unmanaged] {
+        assert!(matches!(
+            lineage.publish_segments(&[first.clone(), invalid]).await,
+            Err(CalcFlowError::InvalidArgument { .. })
+        ));
+        assert!(matches!(
+            lineage.load_segment(&first).await,
+            Err(CalcFlowError::NotFound { .. })
+        ));
+    }
+    lineage.publish_segments(&[]).await.unwrap();
+    lineage
+        .publish_segments(&[first.clone(), first.clone()])
+        .await
+        .unwrap();
+    assert_eq!(lineage.load_segment(&first).await.unwrap(), b"valid");
+}

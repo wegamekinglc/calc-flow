@@ -16,7 +16,9 @@ use pyo3::{
     intern,
     prelude::*,
     sync::PyOnceLock,
-    types::{PyAny, PyCFunction, PyCapsule, PyDict, PyDictMethods, PyList, PyTuple, PyType},
+    types::{
+        PyAny, PyBool, PyCFunction, PyCapsule, PyDict, PyDictMethods, PyList, PyTuple, PyType,
+    },
 };
 
 use crate::{
@@ -1143,6 +1145,11 @@ fn build_static_inputs(
 }
 
 fn runtime_config(config: &Bound<'_, PyDict>) -> PyResult<calc_flow::StreamRuntimeConfig> {
+    let checkpointing = match config.get_item("checkpointing")? {
+        Some(value) if value.is_instance_of::<PyBool>() => value.extract()?,
+        Some(_) => return Err(PyTypeError::new_err("checkpointing must be a bool")),
+        None => true,
+    };
     let sql_state_max_rows = config
         .get_item("sql_state_max_rows")?
         .map(|value| value.extract::<u64>())
@@ -1163,6 +1170,7 @@ fn runtime_config(config: &Bound<'_, PyDict>) -> PyResult<calc_flow::StreamRunti
         }
     };
     Ok(calc_flow::StreamRuntimeConfig {
+        checkpointing,
         checkpoint_interval: duration_config(config, "checkpoint_interval_micros")?,
         checkpoint_timeout: duration_config(config, "checkpoint_timeout_micros")?,
         edge_budget: edge_budget_config(config)?,
@@ -1174,6 +1182,7 @@ fn runtime_config(config: &Bound<'_, PyDict>) -> PyResult<calc_flow::StreamRunti
 #[pymethods]
 impl PyContinuousStreamingRunner {
     #[new]
+    #[pyo3(signature = (plan, sources, sinks, checkpoints, config, static_inputs))]
     #[allow(
         clippy::needless_pass_by_value,
         reason = "PyO3 constructor extraction owns its PyRef boundary values"
@@ -1182,25 +1191,33 @@ impl PyContinuousStreamingRunner {
         plan: PyRef<'_, PyStreamExecutionPlan>,
         sources: &Bound<'_, PyDict>,
         sinks: &Bound<'_, PyDict>,
-        checkpoints: PyRef<'_, PyManagedCheckpointRuntime>,
+        checkpoints: Option<PyRef<'_, PyManagedCheckpointRuntime>>,
         config: &Bound<'_, PyDict>,
         static_inputs: &Bound<'_, PyDict>,
     ) -> PyResult<Self> {
+        let config = runtime_config(config)?;
+        if config.checkpointing != checkpoints.is_some() {
+            return Err(PyValueError::new_err(
+                "checkpointing must match the presence of managed checkpoint storage",
+            ));
+        }
         let awaits = Arc::new(PythonAwaitRegistry::new());
         let context = Arc::new(Mutex::new(None));
         let ownership = Arc::new(ConnectorOwnership::new());
         let (sources, mut roots) = build_sources(sources, &awaits, &context, &ownership)?;
         let (sinks, sink_roots) = build_sinks(sinks, &awaits, &context, &ownership)?;
         roots.extend(sink_roots);
-        let config = runtime_config(config)?;
         let (plan, plan_owner) = plan.take()?;
         roots.push(Arc::new(PythonRoot::new(plan_owner)));
-        let checkpoints = checkpoints.take()?;
+        let checkpoints = checkpoints.map(|value| value.take()).transpose()?;
         let static_inputs = build_static_inputs(static_inputs)?;
-        let runner = calc_flow::StreamingRunner::new(plan, sources, sinks, checkpoints)
-            .and_then(|runner| runner.with_runtime_config(config))
-            .and_then(|runner| runner.with_static_inputs(static_inputs))
-            .map_err(streaming_py_err)?;
+        let runner = match checkpoints {
+            Some(checkpoints) => calc_flow::StreamingRunner::new(plan, sources, sinks, checkpoints),
+            None => calc_flow::StreamingRunner::without_checkpoints(plan, sources, sinks),
+        }
+        .and_then(|runner| runner.with_runtime_config(config))
+        .and_then(|runner| runner.with_static_inputs(static_inputs))
+        .map_err(streaming_py_err)?;
         Ok(Self {
             inner: Arc::new(RunnerStartState {
                 runner: Mutex::new(Some(runner)),
@@ -3325,7 +3342,7 @@ mod tests {
                 plan.borrow(py),
                 &sources,
                 &sinks,
-                checkpoints.borrow(py),
+                Some(checkpoints.borrow(py)),
                 &config,
                 &static_inputs,
             )

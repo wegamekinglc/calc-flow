@@ -9,6 +9,36 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-11: Reuse source identifiers while streaming Join gathers consecutive
+  output rows from the same input batch. Avoid repeated source-map lookups while
+  preserving row order, independent output buffers, and bounded gather storage.
+
+- 2026-10-11: Batch local checkpoint segment publication so each affected
+  committed directory is synced once per snapshot. Preserve file, staging,
+  creation, and manifest durability boundaries; reconfirm visible files after
+  failed publication and settle admitted batches before cancellation completes.
+  Add a provided `StateLineageBackend::publish_segments` method that preserves
+  existing backends' committed-read and staged-publication contracts.
+
+- 2026-10-10: Avoid repeated binary searches when streaming Join expires the
+  first row of a key's ordered index. Refresh index capacity funding only when
+  an emptied key releases storage, preserving dense-row mappings, key ownership,
+  and exact memory accounting.
+
+- 2026-10-10: Add explicit checkpoint-disabled streaming with
+  `StreamRuntimeConfig(checkpointing=False)` in Python and
+  `StreamingRunner::without_checkpoints` in Rust. Preserve live state and
+  budgets while skipping checkpoint storage, snapshots, and recovery journals;
+  require ordinary sinks and expose best-effort delivery. Keep checkpointing
+  enabled by default and preserve natural EOF and cancellation cleanup. Successful
+  checkpoint-enabled EOF no longer reports an internal checkpoint failure.
+
+- 2026-10-10: Reuse funded streaming Join probe keys when parallel work
+  declines, avoiding a second key-construction pass during serial fallback.
+  Gather flat output columns across multiple input and retained batches with
+  column-wise interleave while preserving match order and independent output
+  buffers; nested and dictionary payloads retain their compacting path.
+
 - 2026-10-10: Fund flat numeric, string and binary Join checkpoint payload
   concatenation from the typed Arrow builder allocation bounds. Large captures
   and captures after recovery no longer exhaust resident credit through
@@ -19,6 +49,13 @@ measurements. Use the current guides for supported behavior.
   right admission, left fixture, and left admission durations. Preserve the
   watermark timing boundary and accept historical reports without the new
   fields; validate complete phase timings against the original setup total.
+- 2026-10-10: Gate the owned parallel Join probe on estimated key-run
+  visits so thin one-to-one shapes stay on the actor thread and avoid
+  two-submission dispatch overhead.
+
+- 2026-10-10: Size the Join probe key arena algebraically from column
+  extents instead of a per-cell walk; charges stay byte-identical and
+  fixed-width key columns size in constant time.
 
 - 2026-10-10: Split large native streaming Join probes into at most eight
   contiguous count and fill work units. Check the global match limit before

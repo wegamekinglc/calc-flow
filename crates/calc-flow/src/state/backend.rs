@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use async_trait::async_trait;
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
@@ -222,6 +224,56 @@ pub trait StateLineageBackend: Send + Sync {
     /// Atomically publishes one previously validated segment.
     async fn publish_segment(&self, handle: &StateHandle) -> Result<()>;
 
+    /// Publishes a finite batch of validated or already committed segments.
+    ///
+    /// Exact duplicates are processed once, in first-appearance order. The
+    /// whole input is checked for conflicting handles at the same path before
+    /// publication. The provided implementation accepts successful committed
+    /// verification under the backend's existing read contract, and calls
+    /// [`Self::publish_segment`] only when verification returns `NotFound`.
+    /// New segments must first pass [`Self::validate_segment`].
+    ///
+    /// [`super::LocalStateBackend`] also confirms directory durability for
+    /// visible retry files and syncs each committed directory once per batch.
+    /// Local crash durability requires Unix directory synchronization; other
+    /// platforms retain synced file contents and visibility guarantees only.
+    /// A failure may leave earlier segments visible; this is not a multi-file
+    /// rollback operation. The default adds no filesystem durability guarantee
+    /// to third-party backends beyond their existing operations.
+    ///
+    /// Managed cancellation settles the entire admitted batch, including lock
+    /// waits, before releasing lineage ownership. Arbitrarily dropping this
+    /// public future does not provide that managed settlement guarantee.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CalcFlowError::InvalidArgument`] for conflicting same-path
+    /// handles. Verification errors other than `NotFound`, validation conflicts,
+    /// and publication errors propagate with their original path and cause.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use calc_flow::{Result, StateHandle, StateLineageBackend};
+    ///
+    /// async fn publish_validated(
+    ///     lineage: &dyn StateLineageBackend,
+    ///     handles: &[StateHandle],
+    /// ) -> Result<()> {
+    ///     lineage.publish_segments(handles).await
+    /// }
+    /// ```
+    async fn publish_segments(&self, handles: &[StateHandle]) -> Result<()> {
+        for handle in publication_handles(handles)? {
+            match self.verify_committed_segment(handle).await {
+                Ok(()) => {}
+                Err(CalcFlowError::NotFound { .. }) => self.publish_segment(handle).await?,
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+
     /// Loads committed bytes after validating length and checksum.
     async fn load_segment(&self, handle: &StateHandle) -> Result<Vec<u8>>;
 
@@ -233,6 +285,27 @@ pub trait StateLineageBackend: Send + Sync {
 
     /// Collects committed segments unreachable from the retained handles.
     async fn collect_orphans(&self, retained: &[StateHandle]) -> Result<usize>;
+}
+
+pub(super) fn publication_handles(handles: &[StateHandle]) -> Result<Vec<&StateHandle>> {
+    let mut paths = BTreeMap::new();
+    let mut unique = Vec::with_capacity(handles.len());
+    for handle in handles {
+        match paths.get(handle.relative_path()) {
+            Some(previous) if *previous != handle => {
+                return Err(CalcFlowError::InvalidArgument {
+                    field: "state_handles".into(),
+                    message: format!("conflicting state handles at {:?}", handle.relative_path()),
+                });
+            }
+            Some(_) => {}
+            None => {
+                paths.insert(handle.relative_path(), handle);
+                unique.push(handle);
+            }
+        }
+    }
+    Ok(unique)
 }
 
 pub(crate) fn validate_sha256(field: &str, value: &str) -> Result<()> {

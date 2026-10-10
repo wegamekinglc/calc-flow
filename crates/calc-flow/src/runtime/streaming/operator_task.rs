@@ -2490,6 +2490,7 @@ pub(super) mod tests {
     mod asof_tests;
     mod error_propagation_tests;
     mod join_checkpoint_owner_tests;
+    mod segment_publication_tests;
 
     use std::{
         any::Any,
@@ -2695,6 +2696,7 @@ pub(super) mod tests {
     enum Behavior {
         Forward,
         Stateful,
+        StatefulMany,
         PrepareError,
         BadPort,
         BadKind,
@@ -2796,7 +2798,7 @@ pub(super) mod tests {
                     message: "checkpoint preparation failed".into(),
                 });
             }
-            if matches!(self.behavior, Behavior::Stateful) {
+            if matches!(self.behavior, Behavior::Stateful | Behavior::StatefulMany) {
                 self.observed
                     .lock()
                     .push(("checkpoint-prepared".into(), String::new(), 0));
@@ -2805,7 +2807,7 @@ pub(super) mod tests {
         }
 
         fn checkpoint(&mut self, _epoch: crate::Epoch) -> Result<crate::OperatorStateSnapshot> {
-            if matches!(self.behavior, Behavior::Stateful) {
+            if matches!(self.behavior, Behavior::Stateful | Behavior::StatefulMany) {
                 if !self
                     .observed
                     .lock()
@@ -2818,10 +2820,23 @@ pub(super) mod tests {
                 }
                 Ok(crate::OperatorStateSnapshot {
                     inline_metadata: BTreeMap::from([("layout".into(), serde_json::json!(1))]),
-                    segments: BTreeMap::from([(
-                        "delta-0001".into(),
-                        crate::StateSegment::new(b"state".to_vec()),
-                    )]),
+                    segments: if matches!(self.behavior, Behavior::StatefulMany) {
+                        BTreeMap::from([
+                            (
+                                "delta-0001".into(),
+                                crate::StateSegment::new(b"first".to_vec()),
+                            ),
+                            (
+                                "delta-0002".into(),
+                                crate::StateSegment::new(b"second".to_vec()),
+                            ),
+                        ])
+                    } else {
+                        BTreeMap::from([(
+                            "delta-0001".into(),
+                            crate::StateSegment::new(b"state".to_vec()),
+                        )])
+                    },
                 })
             } else {
                 Ok(crate::OperatorStateSnapshot::default())

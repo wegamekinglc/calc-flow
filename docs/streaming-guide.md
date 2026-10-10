@@ -502,8 +502,8 @@ row-local expressions after it. A SQL result cannot currently feed a symbolic
 event window or execute as a standalone array Program output; see
 [SQL composition](symbolic-api.md#sql-composition).
 
-Convenience streams use a temporary managed checkpoint root and ordinary
-output sinks. Async iterable inputs provide best-effort delivery and no replay;
+By default, convenience streams use a temporary managed checkpoint root and
+ordinary output sinks. Async iterable inputs provide best-effort delivery and no replay;
 a generated counter is not a recoverable source cursor. Even a supplied
 replayable `SourceBinding` does not make the temporary output iterator durable
 or provide exactly-once application delivery. Use explicit sinks and a stable
@@ -511,6 +511,13 @@ checkpoint root for those guarantees. Temporary state is removed only after
 native cleanup finishes. Arrow results omit the `Batch` envelope; use an
 explicit sink when application processing needs its metadata or delivery
 acknowledgement.
+
+For a job that does not need checkpoint recovery, pass
+`StreamRuntimeConfig(checkpointing=False)` to `TableExpr.stream`,
+`Program.stream`, or streaming `Program.execute`. This skips temporary state
+storage, snapshots (including at EOF), and recovery-only journals. State needed
+for computation, watermarks, edge/state budgets, output delivery, and awaited
+cleanup still apply. See [checkpoint modes](#checkpoints-and-recovery).
 
 ## Explicit connectors and recovery
 
@@ -1024,6 +1031,36 @@ retain the delivery boundaries described in this guide.
 
 ## Checkpoints and recovery
 
+Checkpointing is enabled by default. Select the mode once when creating the job:
+
+```python
+config = cf.StreamRuntimeConfig(checkpointing=False)
+async with output.stream(source, config=config) as results:
+    async for table in results:
+        consume(table)
+```
+
+For an explicit Python runner, disabled mode requires `checkpoints=None` with
+the same config. Enabled mode requires a `ManagedCheckpointRuntime`. Conflicting
+mode/storage arguments fail before startup. Rust callers use
+`StreamingRunner::without_checkpoints(plan, sources, sinks)`; when supplying a
+custom `StreamRuntimeConfig`, set its `checkpointing` field to `false` as well.
+The existing Rust `StreamingRunner::new` keeps checkpointing enabled.
+
+Disabled jobs provide best-effort delivery and accept ordinary sinks. They
+reject exactly-once requests, transactional or epoch-idempotent sinks, and
+immutable source history before connector lifecycle calls. They do not restore
+or publish state, and manual checkpoint requests fail explicitly. Natural EOF
+still emits final results and closes resources; its `completed_epoch` is `None`.
+Explicit cancellation keeps its existing no-drain contract. Python runners
+created from connector-backed project plans continue to use their project
+runtime configuration and storage; that entrypoint rejects config overrides.
+
+A very long checkpoint interval remains enabled mode: it retains recovery
+bookkeeping and the terminal checkpoint. Zero completed epochs in status does
+not identify disabled mode. Compare performance with the chosen mode recorded,
+and include checkpoint completion and final cleanup in lifecycle measurements.
+
 `ManagedCheckpointRuntime(root)` owns local manifest and state storage. Keep
 one stable root per pipeline lineage. Do not edit, copy partially, or expose
 its internal files through an API.
@@ -1047,8 +1084,8 @@ state versions, and delivery evidence before opening the data gate. A
 runtime-tuning change is visible through the runtime-config hash but does not
 invalidate semantically compatible state.
 
-Finite jobs publish a terminal checkpoint after final operator output. A
-restart from that manifest returns the same terminal epoch without reopening
+Checkpoint-enabled finite jobs publish a terminal checkpoint after final operator
+output. A restart from that manifest returns the same terminal epoch without reopening
 ended sources or writing final output twice. Run the proof:
 
 ```bash

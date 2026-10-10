@@ -5459,6 +5459,7 @@ async fn run_checkpoint_soak_child(
     let source_closed = Arc::new(AtomicUsize::new(0));
     let sink_closed = Arc::new(AtomicUsize::new(0));
     let config = StreamRuntimeConfig {
+        checkpointing: true,
         checkpoint_interval: Duration::from_millis(plan.checkpoint_interval_millis),
         checkpoint_timeout: Duration::from_millis(plan.checkpoint_timeout_millis),
         retained_epochs: plan.retained_epochs,
@@ -7694,6 +7695,7 @@ async fn checkpoint_soak_cancel_window_preserves_clean_terminal_metrics() {
     let source_closed = Arc::new(AtomicUsize::new(0));
     let sink_closed = Arc::new(AtomicUsize::new(0));
     let config = StreamRuntimeConfig {
+        checkpointing: true,
         checkpoint_interval: Duration::from_secs(2),
         checkpoint_timeout: Duration::from_secs(10),
         retained_epochs: CHECKPOINT_SOAK_RETAINED_EPOCHS,

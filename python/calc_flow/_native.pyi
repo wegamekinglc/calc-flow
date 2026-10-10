@@ -269,8 +269,8 @@ class _StreamingRunner:
         plan: StreamExecutionPlan,
         sources: Mapping[str, object],
         sinks: Mapping[str, Sequence[object]],
-        checkpoints: _ManagedCheckpointRuntime,
-        config: Mapping[str, int],
+        checkpoints: _ManagedCheckpointRuntime | None,
+        config: Mapping[str, int | bool],
         static_inputs: Mapping[str, object],
     ) -> None: ...
     def start_async(self) -> Awaitable[_StreamingJob]: ...

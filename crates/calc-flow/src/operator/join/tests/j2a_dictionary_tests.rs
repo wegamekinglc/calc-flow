@@ -21,7 +21,7 @@ async fn test_first_retained_batch_interns_keys_and_shares_dirty_owners() {
             &prepared.retained[0].encoded_key
         ));
     }
-    operator.commit_prepared("left", prepared).unwrap();
+    operator.commit_prepared("left", prepared, true).unwrap();
     let retained = &operator.state.left[0].encoded_key;
     for op in operator.state.deltas.pending.iter() {
         let PendingOp::Upsert { encoded_key, .. } = op else {
@@ -51,7 +51,7 @@ async fn test_native_count_does_not_visit_materialized_pairs() {
         .prepare_batch("left", &left_batch((0..100).collect()), &context)
         .await
         .unwrap();
-    operator.commit_prepared("left", prepared).unwrap();
+    operator.commit_prepared("left", prepared, true).unwrap();
     reset_join_work();
     let prepared = operator
         .prepare_batch("right", &right_batch(vec![0]), &context)
@@ -218,6 +218,19 @@ fn assert_hot_run_expiry_and_refill_move_only_linear_entries() {
     for identity in 0..512 {
         remove_identity(&mut index, &mut dense, identity);
     }
+    assert_eq!(
+        (
+            join_work().native_eviction_comparisons,
+            join_work().native_funding_refunds,
+        ),
+        (512, 0),
+        "prefix expiry must inspect only the head and retain unchanged capacity funding"
+    );
+    assert_eq!(index.funded_bytes(), index.resident_bytes());
+    let aborted = index.reserve(512).unwrap();
+    assert!(index.funded_bytes() > index.resident_bytes());
+    drop(aborted);
+    assert_eq!(index.funded_bytes(), index.resident_bytes());
     let append = index.reserve(512).unwrap();
     index.append(dense.len(), &rows[1_024..]);
     dense.extend(&rows[1_024..]);
@@ -233,6 +246,8 @@ fn assert_hot_run_expiry_and_refill_move_only_linear_entries() {
     for identity in 512..1_536 {
         remove_identity(&mut index, &mut dense, identity);
     }
+    assert_eq!(join_work().native_eviction_comparisons, rows.len());
+    assert_eq!(join_work().native_funding_refunds, 1);
     assert!(
         join_work().native_shifted_entries <= rows.len(),
         "prefix expiry and geometric compaction must be linear; moved={}",

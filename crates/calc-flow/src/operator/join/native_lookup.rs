@@ -259,6 +259,7 @@ impl StreamJoinOperator {
         &mut self,
         plan: &SidePlan,
         admitted: &[AdmittedRow],
+        keys: Option<NativeKeys>,
     ) -> Result<Option<NativeMatches>> {
         if !eligible(&self.compiled, self.input_schema(0)) {
             return Ok(None);
@@ -266,7 +267,7 @@ impl StreamJoinOperator {
         if !self.ensure_native_index(!plan.incoming_is_left)? {
             return Ok(None);
         }
-        let matched = self.probe_native_index(plan, admitted)?;
+        let matched = self.probe_native_index(plan, admitted, keys)?;
         if matched.is_none() {
             let opposite = if plan.incoming_is_left {
                 &mut self.state.right
@@ -282,8 +283,13 @@ impl StreamJoinOperator {
         &mut self,
         plan: &SidePlan,
         admitted: &[AdmittedRow],
+        keys: Option<NativeKeys>,
     ) -> Result<Option<NativeMatches>> {
-        let Some(keys) = self.native_probe_keys(plan, admitted)? else {
+        let keys = match keys {
+            Some(keys) => Some(keys),
+            None => self.native_probe_keys(plan, admitted)?,
+        };
+        let Some(keys) = keys else {
             return Ok(None);
         };
         self.collect_native_pairs(plan, admitted, keys)

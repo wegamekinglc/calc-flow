@@ -9,7 +9,10 @@ const PROBE_ROWS: usize = 8_192;
 fn probe_operator() -> StreamJoinOperator {
     let mut declaration = spec();
     declaration.limits = JoinStateLimits::new(20_000, 10_000_000, 8_192).unwrap();
-    StreamJoinOperator::new("match", left_schema(), right_schema(), declaration).unwrap()
+    let operator =
+        StreamJoinOperator::new("match", left_schema(), right_schema(), declaration).unwrap();
+    data_work::relax_probe_cost_gate_for_test();
+    operator
 }
 
 fn assert_literal_output(collector: &mut EdgeCollector, rows: usize, sequence: u64) {
@@ -294,6 +297,11 @@ pub(super) async fn assert_refused_process_data(service: &TestService) {
     assert_eq!(event.available + 1, event.fee);
     assert_literal_output(&mut collector, PROBE_ROWS, 1);
     assert_eq!(join_work().sql_probe_table_builds, 0);
+    assert_eq!(
+        join_work().arena_frames,
+        PROBE_ROWS,
+        "refused worker admission must reuse recovered probe keys"
+    );
     assert_eq!(operator.state.next_left_row_id, 8_193);
     assert_eq!(operator.state.metrics.emitted_match_rows, 8_193);
     assert_eq!(operator.state.deltas.pending.iter().count(), 8_194);

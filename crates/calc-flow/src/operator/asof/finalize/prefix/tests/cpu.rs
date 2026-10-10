@@ -93,7 +93,7 @@ async fn prefix_retirement_is_awaited(service: &TestService) -> bool {
             .await
             .unwrap();
     }
-    let headroom = operator.checkpoint_workspace().unwrap();
+    let headroom = operator.checkpoint_workspace(true).unwrap();
     let (_, prefix_workspace) = operator.finalizable_rows(None, true, &context).unwrap();
     let mut count = 50;
     let output = operator
