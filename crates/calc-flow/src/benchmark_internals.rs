@@ -133,6 +133,18 @@ pub async fn settle_job(job: &crate::StreamJobContext) -> Result<()> {
     }
 }
 
+/// Checks the fixed retained Join checkpoint lifecycle with four million quotes.
+///
+/// This correctness-only diagnostic observes reservations in the unchanged
+/// one-GiB runtime pool. It does not report performance measurements.
+///
+/// # Errors
+/// Returns an error if the diagnostic fixture cannot be constructed. Lifecycle
+/// failures are retained in the returned data together with cleanup evidence.
+pub async fn join_checkpoint_history_4m() -> Result<Value> {
+    crate::operator::run_checkpoint_history_diagnostic().await
+}
+
 /// Reads a sealed fixture and verifies its project before native compilation.
 ///
 /// # Errors

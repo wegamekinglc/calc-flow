@@ -24,6 +24,15 @@ fn test_native_component_arguments_are_closed_before_execution() {
         .unwrap(),
         Some((Component::Compaction, true))
     );
+    assert_eq!(
+        parse_arguments(&[
+            "--native-component".into(),
+            "join_checkpoint_history_4m".into(),
+            "--check".into(),
+        ])
+        .unwrap(),
+        Some((Component::CheckpointHistory, true))
+    );
     for arguments in [
         vec!["--native-component"],
         vec!["--native-component", "unknown"],
@@ -32,6 +41,20 @@ fn test_native_component_arguments_are_closed_before_execution() {
             "join_compaction_1m",
             "--rows",
             "2000000",
+        ],
+        vec!["--native-component", "join_checkpoint_history_4m"],
+        vec![
+            "--native-component",
+            "join_checkpoint_history_4m",
+            "--rows",
+            "24",
+        ],
+        vec![
+            "--native-component",
+            "join_checkpoint_history_4m",
+            "--check",
+            "--rows",
+            "24",
         ],
     ] {
         assert!(

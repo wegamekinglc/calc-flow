@@ -31,6 +31,8 @@ pub use cross_section::{
     CrossSectionValuePolicy, NullPlacement, RankTieMethod, SortDirection,
 };
 pub use expression::ExpressionOperator;
+#[cfg(feature = "benchmark-internals")]
+pub(crate) use join::run_checkpoint_history_diagnostic;
 pub(crate) use join::supported_key_type;
 pub use join::{
     JoinStateLimits, JoinTimeBounds, STREAM_JOIN_MAX_SAFE_JSON_INTEGER,
@@ -121,6 +123,30 @@ impl StreamRuntimeState {
 
     const fn is_initialized(&self) -> bool {
         self.runtime.is_some()
+    }
+
+    #[cfg(feature = "benchmark-internals")]
+    fn initialize_benchmark_pool(
+        &mut self,
+        pool: Arc<dyn datafusion::execution::memory_pool::MemoryPool>,
+    ) -> Result<()> {
+        if self.is_initialized() {
+            return Err(CalcFlowError::InvalidArgument {
+                field: "benchmark.memory_pool".into(),
+                message: "observer must be installed before runtime initialization".into(),
+            });
+        }
+        let (config, udfs, selected) = self.resources.clone().unwrap_or_else(|| {
+            (
+                DataFusionConfig::default(),
+                UdfRegistrySnapshot::default(),
+                Vec::new(),
+            )
+        });
+        let mut runtime = DataFusionRuntime::with_benchmark_pool(config, pool)?;
+        runtime.register_udfs(&udfs, &selected)?;
+        self.runtime = Some(runtime);
+        Ok(())
     }
 }
 

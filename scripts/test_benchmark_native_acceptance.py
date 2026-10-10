@@ -315,5 +315,290 @@ class MatchedNativeTests(unittest.TestCase):
                 validate_native_component(bad)
 
 
+def history_observation():
+    from scripts.benchmark_suite.native_components import HISTORY_PHASES
+
+    def pool(name, current=0):
+        return {
+            "pool_id": name,
+            "limit_bytes": 1 << 30,
+            "reserved_bytes": current,
+            "peak_reserved_bytes": 900_000_000,
+            "phase_peak_reserved_bytes": 800_000_000,
+            "successful_grows": 20,
+            "successful_shrinks": 20,
+            "failed_grows": 0,
+            "last_rejection": None,
+        }
+
+    def snapshot(epoch, left_rows, replacement=False):
+        suffix = "b" if replacement else "a"
+        segments = [
+            {"name": "left-base", "bytes": 1, "sha256": suffix * 64},
+            {"name": "right-base", "bytes": 1, "sha256": "c" * 64},
+            {"name": "left-payload-" + "e" * 64, "bytes": 1, "sha256": "e" * 64},
+        ]
+        names = (
+            []
+            if replacement
+            else sorted(
+                [f"left-delta-{i}" for i in range(1, epoch + 1)] + ["right-delta-1"]
+            )
+        )
+        segments.extend(
+            {"name": name, "bytes": 1, "sha256": "d" * 64} for name in names
+        )
+        return {
+            "epoch": epoch,
+            "left_rows": left_rows,
+            "right_rows": 64,
+            "left_watermark_micros": 1_767_288_099_000_000 + (left_rows == 4_000_000),
+            "right_watermark_micros": None,
+            "native_index_present": {"left": True, "right": False},
+            "base_epoch": 4 if replacement else 0,
+            "base_sha256": {
+                s["name"]: s["sha256"] for s in segments if s["name"].endswith("-base")
+            },
+            "delta_names": names,
+            "segments": segments,
+            "segment_bytes": len(segments),
+        }
+
+    oracle = {
+        "validated_all_rows": True,
+        "left_rows": 4_000_000,
+        "right_rows": 64,
+        "left_sha256": "1" * 64,
+        "right_sha256": "2" * 64,
+    }
+    checkpoints = [snapshot(i + 1, 3_999_997 + i) for i in range(4)]
+    before = checkpoints[-1]
+    after = snapshot(5, 4_000_000, True)
+    phases = [
+        {
+            "phase": phase,
+            **pool(
+                name,
+                123
+                if phase in ("history_source_released", "history_snapshots_released")
+                else 0,
+            ),
+        }
+        for phase, name in HISTORY_PHASES
+    ]
+    return {
+        "schema": "calc-flow.join-checkpoint-history.v1",
+        "case": "join_checkpoint_history_4m",
+        "outcome": "complete",
+        "check_only": True,
+        "checkpoint_enabled": True,
+        "left_rows": 4_000_000,
+        "dimension_rows": 64,
+        "resident_rows": 4_000_064,
+        "batch_rows": 64_000,
+        "pool_limit_bytes": 1 << 30,
+        "join_spec": {
+            "join_type": "inner",
+            "left_keys": ["symbol"],
+            "right_keys": ["symbol"],
+            "left_event_time": "event_time",
+            "right_event_time": "event_time",
+            "bounds": {"before_micros": 62_499_000_001, "after_micros": 0},
+            "limits": {
+                "max_state_rows_per_side": 4_000_064,
+                "max_state_bytes_per_side": 4_096_065_536,
+                "max_matches_per_input_batch": 64_064,
+            },
+            "left_prefix": "quote",
+            "right_prefix": "dimension",
+        },
+        "fixture": {
+            "entities": 64,
+            "base_micros": 1_767_225_600_000_000,
+            "left_schema": [
+                ["event_time", "timestamp_us_utc", False],
+                ["sequence", "uint64", False],
+                ["symbol", "string", False],
+                ["price", "float64", False],
+            ],
+            "right_schema": [
+                ["symbol", "string", False],
+                ["factor", "float64", False],
+                ["sequence", "uint64", False],
+                ["event_time", "timestamp_us_utc", False],
+            ],
+        },
+        "fresh": {
+            "oracle": oracle,
+            "repeated_capture_segments_equal": True,
+            "output_rows": 4_000_000,
+        },
+        "history": {
+            "dirty_epochs": 4,
+            "checkpoints": checkpoints,
+            "before": before,
+            "after": after,
+            "old_segments_after": deepcopy(before["segments"]),
+            "old_segments_unchanged": True,
+            "alias_ownership": {
+                "kind": "StateSegment",
+                "pool_id": "history",
+                "snapshot_epoch": 4,
+                "name": "left-payload-" + "e" * 64,
+                "bytes": 1,
+                "sha256": "e" * 64,
+                "has_owner": True,
+                "credit_scope": "shared_encoder_owner",
+            },
+            "oracle": oracle,
+            "output_rows": 4_000_000,
+        },
+        "restores": [
+            {"name": name, "oracle": oracle} for name in ("old_history", "replacement")
+        ],
+        "reservation_phases": phases,
+        "pools": [
+            pool(name) for name in ("fresh", "history", "restore_old", "restore_new")
+        ],
+        "owned_cleanup_complete": True,
+    }
+
+
+class JoinCheckpointHistoryTests(unittest.TestCase):
+    def validate(self, observation):
+        from scripts.benchmark_suite.native_components import (
+            validate_join_checkpoint_history,
+        )
+
+        return validate_join_checkpoint_history(observation)
+
+    def test_history_pool_requires_consistent_bounded_rejection_evidence(self):
+        from scripts.benchmark_suite.native_components import _history_pool
+
+        sample = history_observation()["pools"][0]
+        sample["failed_grows"] = 1
+        with self.assertRaises(ValueError):
+            _history_pool(sample)
+        sample["last_rejection"] = {
+            "additional_bytes": 1 << 30,
+            "reserved_bytes": 123,
+            "limit_bytes": 1 << 30,
+            "consumer_name": "join-checkpoint",
+        }
+        _history_pool(sample)
+        for field, value in (
+            ("additional_bytes", 0),
+            ("reserved_bytes", -1),
+            ("limit_bytes", 123),
+            ("consumer_name", "x" * 257),
+        ):
+            invalid = deepcopy(sample)
+            invalid["last_rejection"][field] = value
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                _history_pool(invalid)
+
+    def test_history_accepts_complete_fixed_evidence_without_mutating_it(self):
+        observation = history_observation()
+        original = deepcopy(observation)
+        self.assertEqual(self.validate(observation), observation)
+        self.assertEqual(observation, original)
+
+    def test_history_requires_explicit_boolean_native_index_observations(self):
+        for value in (
+            None,
+            {"left": True},
+            {"left": 1, "right": False},
+            {"left": False, "right": False, "other": False},
+        ):
+            invalid = history_observation()
+            invalid["history"]["checkpoints"][0]["native_index_present"] = value
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.validate(invalid)
+
+    def test_history_requires_snapshot_refund_before_the_final_segment_alias(self):
+        invalid = history_observation()
+        sample = next(
+            item
+            for item in invalid["reservation_phases"]
+            if item["phase"] == "history_snapshots_released"
+        )
+        sample["phase_peak_reserved_bytes"] = sample["reserved_bytes"]
+        with self.assertRaises(ValueError):
+            self.validate(invalid)
+
+    def test_history_requires_a_real_owned_e4_segment_alias(self):
+        for field, value in (
+            ("name", "missing"),
+            ("sha256", "f" * 64),
+            ("bytes", 2),
+            ("has_owner", False),
+            ("pool_id", "restore_new"),
+            ("credit_scope", "segment_bytes"),
+            ("snapshot_epoch", 5),
+        ):
+            invalid = history_observation()
+            invalid["history"]["alias_ownership"][field] = value
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                self.validate(invalid)
+
+    def test_history_rejects_reduced_fixture_changed_limits_and_false_completion(self):
+        for field, value in (
+            ("left_rows", 3072),
+            ("resident_rows", 4_000_000),
+            ("outcome", "failed"),
+            ("check_only", False),
+            ("checkpoint_enabled", False),
+            ("owned_cleanup_complete", False),
+        ):
+            invalid = history_observation()
+            invalid[field] = value
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                self.validate(invalid)
+        invalid = history_observation()
+        invalid["join_spec"]["limits"]["max_state_bytes_per_side"] += 1
+        with self.assertRaises(ValueError):
+            self.validate(invalid)
+
+    def test_history_rejects_wrong_progress_state_restore_and_old_segment_witness(self):
+        mutations = (
+            lambda d: d["history"]["checkpoints"][0].update(
+                left_watermark_micros=1_767_288_099_000_001
+            ),
+            lambda d: d["history"]["before"].update(right_watermark_micros=1),
+            lambda d: d["history"].update(dirty_epochs=3),
+            lambda d: d["history"].update(after=deepcopy(d["history"]["before"])),
+            lambda d: d["history"]["old_segments_after"][0].update(sha256="e" * 64),
+            lambda d: d["restores"][0].update(
+                oracle={**d["fresh"]["oracle"], "left_sha256": "f" * 64}
+            ),
+            lambda d: d["history"]["oracle"].update(validated_all_rows=False),
+        )
+        for index, mutate in enumerate(mutations):
+            invalid = history_observation()
+            mutate(invalid)
+            with self.subTest(index=index), self.assertRaises(ValueError):
+                self.validate(invalid)
+
+    def test_history_rejects_missing_peaks_shared_pool_recount_and_incomplete_refunds(
+        self,
+    ):
+        mutations = (
+            lambda d: d["pools"][0].pop("peak_reserved_bytes"),
+            lambda d: d["pools"][0].update(reserved_bytes=1),
+            lambda d: d["pools"][0].update(peak_reserved_bytes=(1 << 30) + 1),
+            lambda d: d["pools"][1].update(pool_id="fresh"),
+            lambda d: d["reservation_phases"].pop(),
+            lambda d: d["reservation_phases"][0].update(
+                phase_peak_reserved_bytes=950_000_000
+            ),
+            lambda d: d["pools"][0].update(failed_grows=-1),
+        )
+        for index, mutate in enumerate(mutations):
+            invalid = history_observation()
+            mutate(invalid)
+            with self.subTest(index=index), self.assertRaises(ValueError):
+                self.validate(invalid)
+
+
 if __name__ == "__main__":
     unittest.main()

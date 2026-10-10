@@ -237,9 +237,25 @@ impl DataFusionRuntime {
     /// value is zero.
     pub fn new(config: DataFusionConfig) -> Result<Self> {
         let started = Instant::now();
+        Self::new_with_pool(config, Arc::new(GreedyMemoryPool::new(1 << 30)), started)
+    }
+
+    #[cfg(feature = "benchmark-internals")]
+    pub(crate) fn with_benchmark_pool(
+        config: DataFusionConfig,
+        pool: Arc<dyn datafusion::execution::memory_pool::MemoryPool>,
+    ) -> Result<Self> {
+        Self::new_with_pool(config, pool, Instant::now())
+    }
+
+    fn new_with_pool(
+        config: DataFusionConfig,
+        pool: Arc<dyn datafusion::execution::memory_pool::MemoryPool>,
+        started: Instant,
+    ) -> Result<Self> {
         config.validate()?;
         let runtime_env = RuntimeEnvBuilder::new()
-            .with_memory_pool(Arc::new(GreedyMemoryPool::new(1 << 30)))
+            .with_memory_pool(pool)
             .build_arc()
             .map_err(|error| datafusion_error(None, error))?;
         let runtime_acquire_ns = nanos(started.elapsed());

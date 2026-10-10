@@ -3444,6 +3444,11 @@ struct RestoreSchema<'a> {
     decoded_owned_work: bool,
 }
 
+#[cfg(feature = "benchmark-internals")]
+mod benchmark_checkpoint;
+#[cfg(feature = "benchmark-internals")]
+pub(crate) use benchmark_checkpoint::run_checkpoint_history_diagnostic;
+
 mod admission_masks;
 mod borrowed_key;
 mod checkpoint_compaction;
