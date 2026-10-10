@@ -1,8 +1,8 @@
 use super::super::super::super::PendingOp;
 use super::{
     Arc, Base, Encoder, JoinSide, MemoryReservation, PaidBuffer, Result, SchemaRef, StoredRow,
-    accounting, add, admit_payload_clone, bulk_bytes, ensure, header, integer, ordered_rows,
-    upsert,
+    accounting, add, admit_payload_clone, bulk_bytes, ensure, header, integer, ordered_rows, sum,
+    upsert, upsert_bytes,
 };
 
 const DELTA_MAGIC: &[u8; 8] = b"CFJDIX2\0";
@@ -165,14 +165,25 @@ fn index(
     encoder: &Encoder,
     check: &dyn Fn() -> Result<()>,
 ) -> Result<Vec<u8>> {
-    let mut bytes = PaidBuffer::new(&encoder.funding, encoder.retained);
+    let capacity =
+        tombstones
+            .iter()
+            .try_fold(add(40, upsert_bytes(rows, check)?)?, |bytes, op| {
+                check()?;
+                let PendingOp::Tombstone { encoded_key, .. } = op else {
+                    unreachable!("delta removal selection contains tombstones")
+                };
+                sum(&[bytes, 24, encoded_key.len()])
+            })?;
+    check()?;
+    let mut bytes = PaidBuffer::exact(&encoder.funding, encoder.retained, capacity)?;
     bytes.append(&index_header(side, epoch, rows.len(), tombstones.len())?)?;
     for (position, row) in rows.iter().enumerate() {
         check()?;
         upsert(&mut bytes, row, digest, position)?;
     }
     append_tombstones(&mut bytes, tombstones, check)?;
-    Ok(bytes.into_bytes())
+    bytes.into_bytes()
 }
 
 fn append_tombstones(

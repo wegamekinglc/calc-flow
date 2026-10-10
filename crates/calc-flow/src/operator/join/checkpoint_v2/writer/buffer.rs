@@ -9,6 +9,7 @@ pub(super) struct PaidBuffer<'a> {
     bytes: Vec<u8>,
     credit: &'a MemoryReservation,
     scratch: usize,
+    exact_length: Option<usize>,
 }
 
 impl<'a> PaidBuffer<'a> {
@@ -17,7 +18,31 @@ impl<'a> PaidBuffer<'a> {
             bytes: Vec::new(),
             credit,
             scratch,
+            exact_length: None,
         }
+    }
+
+    pub(super) fn exact(
+        credit: &'a MemoryReservation,
+        scratch: usize,
+        capacity: usize,
+    ) -> Result<Self> {
+        let charge = add(scratch, capacity)?;
+        isize::try_from(capacity).map_err(|_| error("V2 checkpoint output capacity overflow"))?;
+        ensure(credit, charge)?;
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(capacity)
+            .map_err(|_| error("V2 checkpoint output allocation failed"))?;
+        if bytes.capacity() > capacity {
+            return Err(error("V2 checkpoint output exceeded paid capacity"));
+        }
+        Ok(Self {
+            bytes,
+            credit,
+            scratch,
+            exact_length: Some(capacity),
+        })
     }
 
     pub(super) fn append(&mut self, input: &[u8]) -> Result<()> {
@@ -25,8 +50,14 @@ impl<'a> PaidBuffer<'a> {
             .map_err(|_| error("V2 checkpoint output growth failed"))
     }
 
-    pub(super) fn into_bytes(self) -> Vec<u8> {
-        self.bytes
+    pub(super) fn into_bytes(self) -> Result<Vec<u8>> {
+        if self
+            .exact_length
+            .is_some_and(|length| self.bytes.len() != length)
+        {
+            return Err(error("V2 checkpoint output length differs"));
+        }
+        Ok(self.bytes)
     }
 
     fn grow(&mut self, required: usize) -> std::io::Result<()> {
@@ -52,6 +83,11 @@ impl<'a> PaidBuffer<'a> {
 impl Write for PaidBuffer<'_> {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         let required = add(self.bytes.len(), bytes.len()).map_err(std::io::Error::other)?;
+        if self.exact_length.is_some_and(|length| required > length) {
+            return Err(std::io::Error::other(
+                "V2 checkpoint output exceeds exact length",
+            ));
+        }
         if required > self.bytes.capacity() {
             self.grow(required)?;
         }
@@ -78,3 +114,7 @@ pub(super) fn error(message: &str) -> CalcFlowError {
         message: message.into(),
     }
 }
+
+#[cfg(test)]
+#[path = "buffer_tests.rs"]
+mod tests;

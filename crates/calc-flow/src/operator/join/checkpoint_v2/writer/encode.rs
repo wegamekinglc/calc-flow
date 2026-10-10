@@ -233,7 +233,7 @@ impl Encoder {
         ensure(&self.funding, add(self.retained, scratch)?)?;
         let mut ipc = PaidBuffer::new(&self.funding, add(self.retained, scratch)?);
         write_stream(&mut ipc, &compacted.record, check)?;
-        let ipc = ipc.into_bytes();
+        let ipc = ipc.into_bytes()?;
         drop(compacted);
         self.frame_payload(rows, side, ipc, check)
     }
@@ -245,9 +245,12 @@ impl Encoder {
         ipc: Vec<u8>,
         check: &dyn Fn() -> Result<()>,
     ) -> Result<[u8; 32]> {
-        let mut bytes = PaidBuffer::new(&self.funding, add(self.retained, ipc.capacity())?);
+        check()?;
+        let capacity = payload_frame_bytes(rows.len(), ipc.len())?;
+        let mut bytes =
+            PaidBuffer::exact(&self.funding, add(self.retained, ipc.capacity())?, capacity)?;
         append_payload(&mut bytes, rows, side, &ipc, check)?;
-        let bytes = bytes.into_bytes();
+        let bytes = bytes.into_bytes()?;
         drop(ipc);
         check()?;
         self.admit_payload_entry(bytes.capacity())?;
@@ -341,7 +344,9 @@ fn encode_index(
     retained: usize,
     check: &dyn Fn() -> Result<()>,
 ) -> Result<Vec<u8>> {
-    let mut index = PaidBuffer::new(credit, retained);
+    let capacity = add(32, upsert_bytes(rows, check)?)?;
+    check()?;
+    let mut index = PaidBuffer::exact(credit, retained, capacity)?;
     let mut fixed = [0; 32];
     fixed[..16].copy_from_slice(&header(*BASE_MAGIC, side));
     fixed[16..24].copy_from_slice(&integer(rows.len())?);
@@ -350,7 +355,19 @@ fn encode_index(
         check()?;
         upsert(&mut index, row, digest, position)?;
     }
-    Ok(index.into_bytes())
+    index.into_bytes()
+}
+
+fn upsert_bytes(rows: &[&StoredRow], check: &dyn Fn() -> Result<()>) -> Result<usize> {
+    check()?;
+    rows.iter().try_fold(0, |bytes, row| {
+        check()?;
+        sum(&[bytes, 72, row.encoded_key.len()])
+    })
+}
+
+fn payload_frame_bytes(rows: usize, ipc: usize) -> Result<usize> {
+    sum(&[32, product(rows, 8)?, ipc])
 }
 
 fn write_stream(
@@ -399,3 +416,7 @@ fn payload_entry(side: JoinSide, sha256: &str, rows: usize, bytes: usize) -> Res
         bytes: u64::try_from(bytes).map_err(|_| error("V2 payload length overflow"))?,
     })
 }
+
+#[cfg(test)]
+#[path = "wire_tests.rs"]
+mod tests;
