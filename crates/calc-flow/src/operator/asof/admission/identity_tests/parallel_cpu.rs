@@ -537,6 +537,16 @@ async fn right_admission_budget_refusal_preserves_state_and_refunds() {
             .is_none()
     );
     assert_eq!(operator.runtime.pool.reserved(), reserved);
+    if std::thread::available_parallelism().map_or(1, usize::from) >= 2 {
+        job.cancellation().cancel();
+        assert!(matches!(
+            parallel::prepare(&operator, &admission, &context).await,
+            Err(crate::CalcFlowError::Cancelled { .. })
+        ));
+        assert!(operator.state.right.is_empty());
+        assert_eq!(operator.status, before);
+        assert_eq!(operator.runtime.pool.reserved(), reserved);
+    }
     drop((occupied, admission));
     assert_eq!(operator.runtime.pool.reserved(), 0);
 }
