@@ -9,6 +9,22 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-10: Gate the owned parallel Join probe on estimated key-run
+  visits so thin one-to-one shapes stay on the actor thread, restoring
+  suite Join throughput that the two-submission dispatch overhead had
+  regressed by 3.3x at one million rows.
+
+- 2026-10-10: Size the Join probe key arena algebraically from column
+  extents instead of a per-cell walk; charges stay byte-identical and
+  fixed-width key columns size in constant time.
+
+- 2026-10-10: Keep the framed key arena as the Join probe's primary
+  route after measuring the typed borrowed-key alternative end to end:
+  its streaming hash and equality kernel costs 33% more at suite scale
+  with identical frames, pairs and funding. A row-by-row framing test
+  now pins both routes to the canonical V1 encoder.
+
+
 - 2026-10-10: Split large native streaming Join probes into at most eight
   contiguous count and fill work units. Check the global match limit before
   filling, fund fragments alongside the combined pair buffer, and preserve
