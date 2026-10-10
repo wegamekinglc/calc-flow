@@ -129,9 +129,7 @@ def _valid_admission_phases(sample: dict) -> bool:
         return False
     elapsed = sum(float(value) for value in values)
     total = sample["admission_seconds_untimed"]
-    return math.isfinite(elapsed) and (
-        elapsed <= total or elapsed - total <= 8 * math.ulp(total)
-    )
+    return math.isfinite(elapsed) and elapsed - total <= 8 * math.ulp(total)
 
 
 def _valid_chunks(sample: dict, config: dict) -> bool:
