@@ -1168,9 +1168,23 @@ impl WindowAggregateOperator {
                 .checked_add(1)
                 .expect("all output sequences were prevalidated");
         }
-        self.state
-            .emitted_pending_snapshot
-            .extend(keys.iter().cloned());
+        if context.job().checkpointing() {
+            self.state
+                .emitted_pending_snapshot
+                .extend(keys.iter().cloned());
+        } else {
+            for key in keys {
+                if let Some(entry) = self.state.accumulators.remove(key) {
+                    self.state.accumulator_bytes =
+                        self.state
+                            .accumulator_bytes
+                            .saturating_sub(window_entry_bytes(
+                                logical_length(key.stable_group_key.len()),
+                                &entry,
+                            ));
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -1223,9 +1237,12 @@ impl StreamOperator for WindowAggregateOperator {
         self.compact_prepared_if_needed(context).await?;
         let update = self.prepare_input_batch(&batch, context)?;
         let next_metrics = accumulate_late_metrics(self.state.metrics, update.metrics)?;
-        let encoded = self
-            .encode_operations(Self::upsert_operations(&update), context)
-            .await?;
+        let encoded = if context.job().checkpointing() {
+            self.encode_operations(Self::upsert_operations(&update), context)
+                .await?
+        } else {
+            None
+        };
         context.record_window_metrics(
             update.metrics.late_rows,
             update.metrics.max_lateness_micros,
@@ -1262,9 +1279,12 @@ impl StreamOperator for WindowAggregateOperator {
             })
             .cloned()
             .collect::<Vec<_>>();
-        let tombstones = self
-            .encode_operations(self.tombstone_operations(&keys), context)
-            .await?;
+        let tombstones = if context.job().checkpointing() {
+            self.encode_operations(self.tombstone_operations(&keys), context)
+                .await?
+        } else {
+            None
+        };
         self.emit_keys(&keys, context, output).await?;
         if let Some(tombstones) = tombstones {
             self.state.prepared_segments.push(PreparedStateSegment {
@@ -1294,9 +1314,12 @@ impl StreamOperator for WindowAggregateOperator {
             .filter(|key| !self.state.emitted_pending_snapshot.contains(*key))
             .cloned()
             .collect::<Vec<_>>();
-        let tombstones = self
-            .encode_operations(self.tombstone_operations(&keys), context)
-            .await?;
+        let tombstones = if context.job().checkpointing() {
+            self.encode_operations(self.tombstone_operations(&keys), context)
+                .await?
+        } else {
+            None
+        };
         self.emit_keys(&keys, context, output).await?;
         if let Some(tombstones) = tombstones {
             self.state.prepared_segments.push(PreparedStateSegment {
@@ -1536,7 +1559,9 @@ impl WindowAggregateOperator {
         self.state.metrics = next_metrics;
         self.state.accumulator_bytes = update.usage.bytes;
         for (key, accumulator) in update.accumulators {
-            self.state.dirty.insert(key.clone());
+            if context.job().checkpointing() {
+                self.state.dirty.insert(key.clone());
+            }
             self.state.accumulators.insert(key, accumulator);
         }
         if let Some(encoded) = encoded {
@@ -4251,6 +4276,71 @@ mod tests {
             None,
             crate::CancellationToken::new(),
         )
+    }
+
+    #[tokio::test]
+    async fn test_checkpoint_disabled_window_releases_only_accepted_output() {
+        let mut operator = checkpoint_segment_operator();
+        operator
+            .set_state_budget(StateBudget::new(1, 1_048_576).unwrap())
+            .unwrap();
+        let job = budget_test_job().with_checkpointing(false);
+        let context = StreamOperatorContext::new(&job, "window", None);
+        let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data("input", budget_test_batch(&[0, 1]), &context, &mut output)
+            .await
+            .unwrap();
+        assert_eq!(operator.state.accumulators.len(), 1);
+        assert!(operator.state.accumulator_bytes > 0);
+        assert!(operator.state.prepared_segments.is_empty());
+        assert!(operator.state.dirty.is_empty());
+        struct RejectOutput;
+        #[async_trait]
+        impl StreamCollector for RejectOutput {
+            async fn emit(&mut self, _port: &str, _batch: Batch) -> Result<()> {
+                Err(operator_error("window", "output rejected"))
+            }
+        }
+        let before_bytes = operator.state.accumulator_bytes;
+        let error = operator
+            .on_watermark(
+                EventTime::from_micros(60_000_000),
+                &context,
+                &mut RejectOutput,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("output rejected"));
+        assert_eq!(operator.state.accumulators.len(), 1);
+        assert_eq!(operator.state.accumulator_bytes, before_bytes);
+        assert!(operator.state.last_input_watermark.is_none());
+        assert!(operator.state.emitted_pending_snapshot.is_empty());
+        operator
+            .on_watermark(EventTime::from_micros(60_000_000), &context, &mut output)
+            .await
+            .unwrap();
+        let emitted = output.drain("output");
+        assert_eq!(emitted[0].as_data().unwrap().num_rows(), 1);
+        assert!(operator.state.accumulators.is_empty());
+        assert_eq!(operator.state.accumulator_bytes, 0);
+        assert!(operator.state.emitted_pending_snapshot.is_empty());
+        assert!(operator.state.prepared_segments.is_empty());
+        operator
+            .process_data(
+                "input",
+                budget_test_batch(&[60_000_000]),
+                &context,
+                &mut output,
+            )
+            .await
+            .unwrap();
+        operator.on_end(&context, &mut output).await.unwrap();
+        assert_eq!(output.drain("output")[0].as_data().unwrap().num_rows(), 1);
+        assert!(operator.state.accumulators.is_empty());
+        assert_eq!(operator.state.accumulator_bytes, 0);
+        assert!(operator.state.emitted_pending_snapshot.is_empty());
+        assert!(operator.state.prepared_segments.is_empty());
     }
 
     #[tokio::test]

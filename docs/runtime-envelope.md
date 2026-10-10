@@ -336,31 +336,44 @@ of the plan. Compilation applies the deterministic-UDF rule above. Before a
 checkpointed job starts, whole-job preflight proves every reachable
 source, operator, bounded edge, and bound sink for each exactly-once output.
 It reports the output and first incompatible stable component before connector
-lifecycle work. An internal job path without checkpoint wiring rejects every
-exactly-once request. The frozen requested/effective proof is kept for every
-output. A best-effort request is never upgraded; an at-least-once request is
+lifecycle work. A job with `StreamRuntimeConfig.checkpointing=false` rejects
+every exactly-once request and every sink requiring an epoch commit protocol.
+It also rejects immutable source history before connector lifecycle work.
+The frozen requested/effective proof is kept for every output. A best-effort request is never upgraded; an at-least-once request is
 downgraded explicitly when a reachable source is lossy or unreplayable; and no
-request is silently upgraded.
+request is silently upgraded. Every runnable checkpoint-disabled output has
+effective `BestEffort` delivery, even when its sources are replayable.
 
 Two hashes describe the plan:
 
 - the semantic fingerprint covers execution mode, graph structure, operator
   configurations, and the UDF catalog; it decides checkpoint compatibility;
-- the runtime-config hash covers `StreamRuntimeConfig` — checkpoint interval
+- the runtime-config hash covers `StreamRuntimeConfig` — checkpoint mode, interval
   and timeout, the per-edge envelope/row/byte budget, and retained epochs —
   and feeds observability and diagnostics only, so retuning it never invalidates
   checkpoints. Durations must be exact multiples of one microsecond, and
-  both budget fields must be positive. The defaults are a 60-second checkpoint
+  both budget fields must be positive. Checkpointing defaults to enabled. Other defaults
+  are a 60-second checkpoint
   interval, a 600-second checkpoint timeout, 10,000 envelopes, 10,000 rows and
   64 MiB per edge, and two retained epochs.
 
 ## Job preflight
 
 The crate-root `StreamingRunner` runs a bounded
-source-to-operator-to-sink job with managed epoch checkpoints and returns an
-owning `StreamingJob`. Its public connector and lifecycle types project the
+source-to-operator-to-sink job with optional managed epoch checkpoints and
+returns an owning `StreamingJob`. Its public connector and lifecycle types project the
 internal task/coordinator machinery without exposing control-message
 constructors or connector payloads.
+
+`StreamingRunner::new` requires managed storage and defaults to checkpointing.
+`StreamingRunner::without_checkpoints` owns no storage and sets
+`checkpointing=false`; a supplied runtime config must agree with that choice.
+The immutable job context exposes the selected mode to operators. Disabled
+jobs retain live state and all runtime budgets, but omit recovery-only Join,
+ASOF, SQL, and Window bookkeeping, checkpoint coordination, restore, and
+terminal snapshots. EOF still drains final output and awaits cleanup. The
+checkpoint status retains its existing empty projection; configuration, rather
+than a zero epoch count, identifies disabled mode.
 
 One pure whole-job preflight consumes the plan and validates the context
 fingerprint, runtime topology, every source and sink route, duplicate or

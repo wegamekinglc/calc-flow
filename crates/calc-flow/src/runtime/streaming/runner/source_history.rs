@@ -8,6 +8,9 @@ pub(super) async fn configure(
     owner: &HistoryOwner,
     plan: &mut StreamRuntimePlanParts,
 ) -> crate::Result<()> {
+    if checkpoint.is_none() {
+        return Ok(());
+    }
     configure_sources(checkpoint, sources, owner).await?;
     configure_replay_nodes(checkpoint, sources, plan);
     Ok(())

@@ -574,15 +574,22 @@ class StateBudget:
 
 @dataclass(frozen=True, slots=True)
 class StreamRuntimeConfig:
-    """Immutable runtime tuning excluded from the plan fingerprint."""
+    """Immutable runtime tuning excluded from the plan fingerprint.
+
+    Set ``checkpointing=False`` to omit snapshots and recovery bookkeeping.
+    Disabled jobs require ordinary sinks and provide best-effort delivery.
+    """
 
     checkpoint_interval: timedelta = timedelta(seconds=60)
     checkpoint_timeout: timedelta = timedelta(minutes=10)
     edge_budget: EdgeBudget = EdgeBudget()
     retained_epochs: int = 2
     sql_state_budget: StateBudget | None = None
+    checkpointing: bool = True
 
-    def _native(self) -> dict[str, int]:
+    def _native(self) -> dict[str, int | bool]:
+        if type(self.checkpointing) is not bool:
+            raise TypeError("checkpointing must be a bool")
         if not isinstance(self.edge_budget, EdgeBudget):
             raise TypeError("edge_budget must be a calc_flow.EdgeBudget")
         if type(self.retained_epochs) is not int or self.retained_epochs <= 0:
@@ -592,6 +599,7 @@ class StreamRuntimeConfig:
         ):
             raise TypeError("sql_state_budget must be a calc_flow.StateBudget or None")
         values = {
+            "checkpointing": self.checkpointing,
             "checkpoint_interval_micros": _duration_micros(
                 self.checkpoint_interval, "checkpoint_interval"
             ),
@@ -1022,7 +1030,11 @@ def _runner_config(config: StreamRuntimeConfig | None) -> StreamRuntimeConfig:
 
 
 class StreamingRunner:
-    """One-shot source-driven continuous runner owning all bindings."""
+    """One-shot source-driven continuous runner owning all bindings.
+
+    A disabled runtime config requires ``checkpoints=None``; enabled jobs
+    require managed checkpoint storage. Mode is fixed for the job's lifetime.
+    """
 
     __slots__ = ("_inner", "__weakref__")
 
@@ -1065,14 +1077,20 @@ class StreamingRunner:
             raise TypeError("sources must be a mapping of source bindings")
         if not isinstance(sinks, Mapping):
             raise TypeError("sinks must be a mapping of sink bindings")
-        if not isinstance(checkpoints, ManagedCheckpointRuntime):
+        selected_config = _runner_config(config)
+        native_config = selected_config._native()
+        if selected_config.checkpointing and not isinstance(
+            checkpoints, ManagedCheckpointRuntime
+        ):
             raise TypeError("checkpoints must be a calc_flow.ManagedCheckpointRuntime")
+        if not selected_config.checkpointing and checkpoints is not None:
+            raise ValueError("checkpoints must be None when checkpointing is disabled")
         self._inner = _native._StreamingRunner(
             plan._inner,
             _runner_sources(sources),
             _runner_sinks(sinks),
-            checkpoints._inner,
-            _runner_config(config)._native(),
+            None if checkpoints is None else checkpoints._inner,
+            native_config,
             _runner_static_inputs(static_inputs),
         )
 

@@ -62,3 +62,77 @@ impl DirtyGroups {
         self.slots.clear();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        Batch, BatchMetadata, CancellationToken, EdgeCollector, JsonMap, OperatorMetadata,
+        SqlOperator, StreamJobContext, StreamOperator, StreamOperatorContext,
+    };
+    use datafusion::arrow::{
+        array::{ArrayRef, Int64Array},
+        record_batch::RecordBatch,
+    };
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn test_checkpoint_disabled_sql_aggregates_without_allocating_dirty_groups() {
+        let mut operator = SqlOperator::new(
+            "totals",
+            "SELECT value, COUNT(*) AS n FROM events GROUP BY value",
+            vec!["events".into()],
+            vec![],
+        )
+        .unwrap();
+        let job = StreamJobContext::new(1, "sql", JsonMap::new(), None, CancellationToken::new())
+            .with_checkpointing(false);
+        let context = StreamOperatorContext::new(&job, "totals", None);
+        let mut output = EdgeCollector::new(operator.output_ports().to_vec());
+        for values in [vec![1, 2], vec![1, 3]] {
+            let record = RecordBatch::try_from_iter(vec![(
+                "value",
+                Arc::new(Int64Array::from(values)) as ArrayRef,
+            )])
+            .unwrap();
+            operator
+                .process_data(
+                    "events",
+                    Batch::table(vec![record], BatchMetadata::default()).unwrap(),
+                    &context,
+                    &mut output,
+                )
+                .await
+                .unwrap();
+            let state = operator.incremental.as_ref().unwrap();
+            assert!(state.dirty.slots.is_empty());
+            assert_eq!(state.dirty.slots.capacity(), 0);
+            assert_eq!(state.dirty.bits.capacity(), 0);
+            assert_eq!(state.dirty.reservation.size(), 0);
+        }
+        let emitted = output.drain("output");
+        let batches = emitted
+            .last()
+            .unwrap()
+            .as_data()
+            .unwrap()
+            .table_payload()
+            .unwrap()
+            .batches();
+        let total = batches
+            .iter()
+            .map(|batch| {
+                batch
+                    .column_by_name("n")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap()
+                    .values()
+                    .iter()
+                    .sum::<i64>()
+            })
+            .sum::<i64>();
+        assert_eq!(total, 4);
+        assert_eq!(operator.incremental.as_ref().unwrap().groups.len(), 3);
+    }
+}

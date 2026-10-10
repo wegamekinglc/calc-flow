@@ -959,7 +959,7 @@ pub struct StreamingRunner {
     plan: StreamExecutionPlan,
     sources: BTreeMap<String, SourceBinding>,
     sinks: BTreeMap<String, Vec<SinkBinding>>,
-    checkpoints: ManagedCheckpointRuntime,
+    checkpoints: Option<ManagedCheckpointRuntime>,
     config: StreamRuntimeConfig,
     static_inputs: BTreeMap<String, Batch>,
 }
@@ -971,10 +971,45 @@ impl StreamingRunner {
     ///
     /// Returns a safe validation error when source or sink bindings do not exactly cover the plan.
     pub fn new(
+        plan: StreamExecutionPlan,
+        sources: BTreeMap<String, SourceBinding>,
+        sinks: BTreeMap<String, Vec<SinkBinding>>,
+        checkpoints: ManagedCheckpointRuntime,
+    ) -> Result<Self> {
+        Self::with_checkpoint_backend(plan, sources, sinks, Some(checkpoints))
+    }
+
+    /// Creates a runner without checkpoint storage or durable recovery.
+    ///
+    /// The job still owns source, operator, and ordinary sink cleanup. It does
+    /// not capture periodic or terminal snapshots, or accept epoch-based sinks.
+    /// Output delivery is best effort. The checkpoint mode is fixed at startup.
+    ///
+    /// ```no_run
+    /// # use std::collections::BTreeMap;
+    /// # use calc_flow::{Result, SinkBinding, SourceBinding, StreamExecutionPlan, StreamingRunner};
+    /// # fn build(plan: StreamExecutionPlan, sources: BTreeMap<String, SourceBinding>,
+    /// #     sinks: BTreeMap<String, Vec<SinkBinding>>) -> Result<StreamingRunner> {
+    /// StreamingRunner::without_checkpoints(plan, sources, sinks)
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe validation error when source or sink bindings do not exactly cover the plan.
+    pub fn without_checkpoints(
+        plan: StreamExecutionPlan,
+        sources: BTreeMap<String, SourceBinding>,
+        sinks: BTreeMap<String, Vec<SinkBinding>>,
+    ) -> Result<Self> {
+        Self::with_checkpoint_backend(plan, sources, sinks, None)
+    }
+
+    fn with_checkpoint_backend(
         mut plan: StreamExecutionPlan,
         mut sources: BTreeMap<String, SourceBinding>,
         mut sinks: BTreeMap<String, Vec<SinkBinding>>,
-        checkpoints: ManagedCheckpointRuntime,
+        checkpoints: Option<ManagedCheckpointRuntime>,
     ) -> Result<Self> {
         if let Some((project_sources, project_sinks)) = plan.take_project_bindings() {
             if !sources.is_empty() || !sinks.is_empty() {
@@ -992,8 +1027,11 @@ impl StreamingRunner {
             plan,
             sources,
             sinks,
+            config: StreamRuntimeConfig {
+                checkpointing: checkpoints.is_some(),
+                ..StreamRuntimeConfig::default()
+            },
             checkpoints,
-            config: StreamRuntimeConfig::default(),
             static_inputs: BTreeMap::new(),
         })
     }
@@ -1018,10 +1056,17 @@ impl StreamingRunner {
     ///
     /// # Errors
     ///
-    /// Returns a safe validation error when a duration, edge limit, or retention count is invalid.
+    /// Returns a safe validation error when tuning is invalid or the checkpoint
+    /// mode differs from the storage mode selected at construction.
     #[must_use = "the validated runner contains the supplied runtime configuration"]
     pub fn with_runtime_config(mut self, config: StreamRuntimeConfig) -> Result<Self> {
         config.validate().map_err(safe_error)?;
+        if config.checkpointing != self.checkpoints.is_some() {
+            return Err(safe_error(CalcFlowError::InvalidArgument {
+                field: "checkpointing".into(),
+                message: "must match the runner's checkpoint storage mode".into(),
+            }));
+        }
         if config.retained_epochs == 0 {
             return Err(safe_error(CalcFlowError::InvalidArgument {
                 field: "retained_epochs".into(),
@@ -1086,6 +1131,7 @@ impl StreamingRunner {
             None,
             CancellationToken::new(),
         )
+        .with_checkpointing(config.checkpointing)
         .with_static_inputs(prepared_static_inputs.latched.clone());
         let sources = sources
             .into_iter()
@@ -1114,8 +1160,9 @@ impl StreamingRunner {
             static_inputs: prepared_static_inputs,
         };
         #[cfg(test)]
-        let (start, fault_probe) = match checkpoints.fault {
-            Some((point, mode)) => {
+        let (start, fault_probe) = match checkpoints {
+            Some(checkpoints) if checkpoints.fault.is_some() => {
+                let (point, mode) = checkpoints.fault.expect("fault presence checked");
                 let (start, probe) = runner.start_checkpointed_with_config_and_fault_probe(
                     spec,
                     checkpoints.inner,
@@ -1125,13 +1172,19 @@ impl StreamingRunner {
                 );
                 (start, Some(probe))
             }
-            None => (
+            Some(checkpoints) => (
                 runner.start_checkpointed_with_config(spec, checkpoints.inner, config),
                 None,
             ),
+            None => (runner.start_with_config(spec, config), None),
         };
         #[cfg(not(test))]
-        let start = runner.start_checkpointed_with_config(spec, checkpoints.inner, config);
+        let start = match checkpoints {
+            Some(checkpoints) => {
+                runner.start_checkpointed_with_config(spec, checkpoints.inner, config)
+            }
+            None => runner.start_with_config(spec, config),
+        };
         start
             .await
             .map(|inner| StreamingJob {
@@ -1446,6 +1499,9 @@ fn safe_error(error: CalcFlowError) -> CalcFlowError {
 fn start_error(job_id: u64, failure: &StartFailure) -> CalcFlowError {
     CalcFlowError::Streaming(projection::project_start_failure(job_id, failure))
 }
+
+#[cfg(test)]
+mod checkpointing_tests;
 
 #[cfg(test)]
 mod tests {

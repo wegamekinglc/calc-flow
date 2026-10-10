@@ -556,7 +556,7 @@ async fn rejected_output_continuation(
     let reserved = operator.runtime.pool.reserved();
     let funding = job.gather_owner().funding();
     assert_eq!(funding.2, 0);
-    let headroom = operator.checkpoint_workspace().unwrap();
+    let headroom = operator.checkpoint_workspace(true).unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
     let counter = calls.clone();
     operator.match_hook = Some(Arc::new(move |_| {

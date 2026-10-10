@@ -36,7 +36,7 @@ struct PreparedPrefix {
     inventory: Inventory,
     pool: PreparedPayloadRemoval,
     journal: crate::operator::asof::checkpoint::index_v3::log::journal::Journal,
-    credit: std::sync::Arc<MemoryReservation>,
+    credit: Option<std::sync::Arc<MemoryReservation>>,
     retention_bytes: u64,
     _workspace: MemoryReservation,
     _drain_workspace: MemoryReservation,
@@ -86,7 +86,7 @@ impl StreamAsofJoinOperator {
         self.swept = None;
         self.status = status;
         self.checkpoint_log.install_journal(prepared.journal);
-        self.checkpoint_log.credit = Some(prepared.credit);
+        self.checkpoint_log.credit = prepared.credit;
         self.checkpoint_log.retention_bytes = prepared.retention_bytes;
         self.checkpoint_log.pending = None;
         self.checkpoint_log.dirty_cut = self.checkpoint_log.keeps_delta();
@@ -119,10 +119,17 @@ impl StreamAsofJoinOperator {
             &self.name,
         )?;
         let journal = self.prepare_log_prefix(prefix, &drain)?;
-        let (credit, retention_bytes) =
-            self.prepare_log_retention(&prefix.owners, &prefix.batches)?;
+        let (credit, retention_bytes) = self.prepare_log_retention(
+            &prefix.owners,
+            &prefix.batches,
+            context.job().checkpointing(),
+        )?;
         let inventory = self.log_projection(inventory, length, &journal, retention_bytes)?;
-        let workspace = self.reserve_workspace(length)?;
+        let workspace = self.reserve_workspace(if context.job().checkpointing() {
+            length
+        } else {
+            0
+        })?;
         let pool = self
             .prepare_pool_compaction(&prefix.batches, context)
             .await?;

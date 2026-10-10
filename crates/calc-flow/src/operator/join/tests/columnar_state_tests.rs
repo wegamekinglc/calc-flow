@@ -1107,7 +1107,11 @@ async fn test_sparse_chunk_refusal_retries_after_actual_credit_release() {
         (IngressState::Active, Some(60_008_191)),
     );
     operator
-        .evict_progress("right", progress.ingress_progress().get("right").unwrap())
+        .evict_progress(
+            "right",
+            progress.ingress_progress().get("right").unwrap(),
+            true,
+        )
         .unwrap();
     let original = operator.state.left[0].record.clone();
     let owner = original.funded_owner().unwrap();
@@ -1314,7 +1318,11 @@ async fn sparse_interrupted_copy(cancelled: bool) {
         (IngressState::Active, Some(60_008_191)),
     );
     operator
-        .evict_progress("right", progress.ingress_progress().get("right").unwrap())
+        .evict_progress(
+            "right",
+            progress.ingress_progress().get("right").unwrap(),
+            true,
+        )
         .unwrap();
     let original = operator.state.left[0].record.funded_owner();
     let status = operator.status();

@@ -547,7 +547,7 @@ pub(super) async fn run_live_checkpoint_task(
         }
     };
     match &manual_failure {
-        ManualCheckpointFailure::Failed { category, .. } => {
+        ManualCheckpointFailure::Failed { category, .. } if result.is_err() => {
             let category = match category {
                 ManualCheckpointFailureCategory::Timeout => CheckpointFailureCategory::Timeout,
                 ManualCheckpointFailureCategory::Protocol => CheckpointFailureCategory::Protocol,
@@ -566,7 +566,9 @@ pub(super) async fn run_live_checkpoint_task(
                 .status
                 .fail_if_unset(CheckpointFailureCategory::Runtime);
         }
-        ManualCheckpointFailure::RecoveryRequired { .. }
+        // Natural completion still rejects unfinished manual requests below.
+        ManualCheckpointFailure::Failed { .. }
+        | ManualCheckpointFailure::RecoveryRequired { .. }
         | ManualCheckpointFailure::SinkCommit { .. } => {}
     }
     coordinator.terminate(manual_failure);

@@ -110,11 +110,14 @@ impl Default for EdgeBudget {
 
 /// Runtime-tunable stream configuration (API note A6).
 ///
-/// Every value here is runtime-tunable (spec NFR-5): it feeds the
-/// runtime-config hash for observability and diagnostics, never the semantic
-/// fingerprint, so tuning it cannot invalidate checkpoints.
+/// These settings feed the runtime-config hash for observability and diagnostics,
+/// never the semantic fingerprint. Checkpoint mode is fixed before job startup;
+/// tuning the other settings does not invalidate existing checkpoints.
 #[derive(Clone, Copy, Debug)]
 pub struct StreamRuntimeConfig {
+    /// Enables managed checkpoints and their recovery journal for this job.
+    /// Defaults to `true`; `false` requires a runner without checkpoint storage.
+    pub checkpointing: bool,
     pub checkpoint_interval: Duration,
     pub checkpoint_timeout: Duration,
     pub edge_budget: EdgeBudget,
@@ -126,6 +129,7 @@ pub struct StreamRuntimeConfig {
 impl Default for StreamRuntimeConfig {
     fn default() -> Self {
         Self {
+            checkpointing: true,
             checkpoint_interval: Duration::from_secs(60),
             checkpoint_timeout: Duration::from_secs(600),
             edge_budget: EdgeBudget::default(),
@@ -1078,12 +1082,16 @@ impl StreamExecutionPlan {
             },
             "retained_epochs": config.retained_epochs,
         });
+        let fields = value
+            .as_object_mut()
+            .ok_or_else(|| CalcFlowError::Internal {
+                message: "runtime configuration hash value is not an object".into(),
+            })?;
+        // Preserve the existing hash for the default checkpoint-enabled mode.
+        if !config.checkpointing {
+            fields.insert("checkpointing".into(), json!(false));
+        }
         if let Some(budget) = config.sql_state_budget {
-            let fields = value
-                .as_object_mut()
-                .ok_or_else(|| CalcFlowError::Internal {
-                    message: "runtime configuration hash value is not an object".into(),
-                })?;
             fields.insert("sql_state_budget".into(), json!(budget));
         }
         let canonical = canonical_json(&value)?;

@@ -1428,6 +1428,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_checkpoint_disabled_join_preserves_matches_without_pending_rows() {
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        let job = job().with_checkpointing(false);
+        let context = StreamOperatorContext::new(&job, "match", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data("left", left_batch(vec![0, 1]), &context, &mut collector)
+            .await
+            .unwrap();
+        assert_eq!(operator.status().left.retained_rows, 2);
+        assert!(operator.status().left.retained_bytes > 0);
+        let mut enabled =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        let enabled_job = self::job();
+        let enabled_context = StreamOperatorContext::new(&enabled_job, "match", None);
+        enabled
+            .process_data(
+                "left",
+                left_batch(vec![0, 1]),
+                &enabled_context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            operator.status().left.retained_bytes,
+            enabled.status().left.retained_bytes
+        );
+        assert!(operator.state.deltas.pending.is_empty());
+        operator
+            .process_data("right", right_batch(vec![0]), &context, &mut collector)
+            .await
+            .unwrap();
+        assert_eq!(operator.status().emitted_match_rows, 2);
+        assert_eq!(
+            collector.drain("output")[0].as_data().unwrap().num_rows(),
+            2
+        );
+        let progress = progress_context(
+            &job,
+            (IngressState::Active, None),
+            (IngressState::Active, Some(60_000_002)),
+        );
+        operator
+            .on_ingress_progress("right", &progress)
+            .await
+            .unwrap();
+        assert_eq!(operator.status().left.retained_rows, 0);
+        assert_eq!(operator.status().left.retained_bytes, 0);
+        assert!(operator.state.deltas.pending.is_empty());
+        operator.on_end(&context, &mut collector).await.unwrap();
+        assert!(operator.state.deltas.pending.is_empty());
+        assert_eq!(operator.status().right.retained_rows, 0);
+    }
+
+    #[tokio::test]
     async fn checkpoint_and_restore_round_trip_preserves_state_and_counters() {
         let mut operator =
             StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
@@ -4462,7 +4519,12 @@ impl StreamJoinOperator {
         Ok(())
     }
 
-    fn commit_prepared(&mut self, ingress: &str, prepared: PreparedJoinBatch) -> Result<()> {
+    fn commit_prepared(
+        &mut self,
+        ingress: &str,
+        prepared: PreparedJoinBatch,
+        checkpointing: bool,
+    ) -> Result<()> {
         let mut metrics = prepared.metrics;
         (metrics.retained_rows, metrics.retained_bytes) =
             prospective_state_charge(&metrics, &prepared.retained, &self.name)?;
@@ -4473,14 +4535,16 @@ impl StreamJoinOperator {
         };
         for row in &prepared.retained {
             row.record.mark_live();
-            self.state.deltas.pending.push(PendingOp::Upsert {
-                side,
-                row_id: row.row_id,
-                event_time: row.event_time,
-                encoded_key: Arc::clone(&row.encoded_key),
-                record: row.record.clone(),
-                charge: row.charge,
-            });
+            if checkpointing {
+                self.state.deltas.pending.push(PendingOp::Upsert {
+                    side,
+                    row_id: row.row_id,
+                    event_time: row.event_time,
+                    encoded_key: Arc::clone(&row.encoded_key),
+                    record: row.record.clone(),
+                    charge: row.charge,
+                });
+            }
         }
         if side == JoinSide::Left {
             self.state.next_left_row_id = prepared.next_row_id;
@@ -4509,7 +4573,12 @@ impl StreamJoinOperator {
         Ok(())
     }
 
-    fn evict_progress(&mut self, ingress: &str, progress: IngressProgress) -> Result<()> {
+    fn evict_progress(
+        &mut self,
+        ingress: &str,
+        progress: IngressProgress,
+        checkpointing: bool,
+    ) -> Result<()> {
         match ingress {
             "left" => {
                 let before = self.state.right.len();
@@ -4518,7 +4587,7 @@ impl StreamJoinOperator {
                     &mut self.state.right_expirations,
                     progress,
                     &mut self.state.metrics.right,
-                    &mut self.state.deltas.pending,
+                    checkpointing.then_some(&mut self.state.deltas.pending),
                     EvictionPolicy {
                         extension_micros: self.spec.bounds.before_micros,
                         side: JoinSide::Right,
@@ -4536,7 +4605,7 @@ impl StreamJoinOperator {
                     &mut self.state.left_expirations,
                     progress,
                     &mut self.state.metrics.left,
-                    &mut self.state.deltas.pending,
+                    checkpointing.then_some(&mut self.state.deltas.pending),
                     EvictionPolicy {
                         extension_micros: self.spec.bounds.after_micros,
                         side: JoinSide::Left,
@@ -4686,10 +4755,12 @@ impl StreamOperator for StreamJoinOperator {
         context.check_cancelled()?;
         self.await_compaction_release(context).await?;
         let prepared = self.prepare_batch(ingress, &batch, context).await?;
-        self.v2_writer.changed(true)?;
+        if context.job().checkpointing() {
+            self.v2_writer.changed(true)?;
+        }
         self.emit_prepared(&prepared, context, output).await?;
         self.record_prepared_emitted(prepared.output.len())?;
-        self.commit_prepared(ingress, prepared)?;
+        self.commit_prepared(ingress, prepared, context.job().checkpointing())?;
         if self.has_sparse_candidates() {
             return self.repair_sparse_chunks(context).await;
         }
@@ -4708,8 +4779,10 @@ impl StreamOperator for StreamJoinOperator {
         } else {
             self.await_compaction_release(context).await?;
         }
-        self.v2_writer.changed(true)?;
-        self.evict_progress(ingress, progress)?;
+        if context.job().checkpointing() {
+            self.v2_writer.changed(true)?;
+        }
+        self.evict_progress(ingress, progress, context.job().checkpointing())?;
         if self.has_sparse_candidates() {
             return self.repair_sparse_chunks(context).await;
         }
@@ -4732,19 +4805,21 @@ impl StreamOperator for StreamJoinOperator {
         _output: &mut dyn StreamCollector,
     ) -> Result<()> {
         self.await_compaction_release(context).await?;
-        self.v2_writer.changed(true)?;
-        let left_identities = self.state.left_expirations.identities(&self.state.left);
-        record_tombstones(
-            &mut self.state.deltas.pending,
-            JoinSide::Left,
-            left_identities,
-        );
-        let right_identities = self.state.right_expirations.identities(&self.state.right);
-        record_tombstones(
-            &mut self.state.deltas.pending,
-            JoinSide::Right,
-            right_identities,
-        );
+        if context.job().checkpointing() {
+            self.v2_writer.changed(true)?;
+            let left_identities = self.state.left_expirations.identities(&self.state.left);
+            record_tombstones(
+                &mut self.state.deltas.pending,
+                JoinSide::Left,
+                left_identities,
+            );
+            let right_identities = self.state.right_expirations.identities(&self.state.right);
+            record_tombstones(
+                &mut self.state.deltas.pending,
+                JoinSide::Right,
+                right_identities,
+            );
+        }
         self.state.left.clear();
         self.state.right.clear();
         self.state.left_expirations = ExpirationIndex::default();
@@ -6696,7 +6771,7 @@ fn evict_opposite(
     expirations: &mut ExpirationIndex,
     progress: IngressProgress,
     metrics: &mut SideMetrics,
-    pending: &mut PendingLog,
+    pending: Option<&mut PendingLog>,
     policy: EvictionPolicy<'_>,
 ) -> Result<()> {
     let EvictionPolicy {
@@ -6705,28 +6780,34 @@ fn evict_opposite(
         operator_id,
     } = policy;
     let mut evicted = Vec::new();
+    let mut count = 0_u64;
     let mut bytes = 0_u64;
     while let Some((ordinal, row)) = take_expired(rows, expirations, progress, extension_micros) {
         rows.2.remove(&row.record);
         bytes = bytes
             .checked_add(row.charge)
             .ok_or_else(|| counter_overflow(operator_id, "evicted bytes"))?;
-        evicted.push((ordinal, row));
+        count = count
+            .checked_add(1)
+            .ok_or_else(|| counter_overflow(operator_id, "evicted rows"))?;
+        if pending.is_some() {
+            evicted.push((ordinal, row));
+        }
     }
-    if evicted.is_empty() {
+    if count == 0 {
         return Ok(());
     }
-    evicted.sort_by_key(|(ordinal, _)| *ordinal);
-    let count =
-        u64::try_from(evicted.len()).map_err(|_| counter_overflow(operator_id, "evicted rows"))?;
-    record_tombstones(
-        pending,
-        side,
-        evicted
-            .into_iter()
-            .map(|(_, row)| (row.row_id, row.event_time, row.encoded_key))
-            .collect(),
-    );
+    if let Some(pending) = pending {
+        evicted.sort_by_key(|(ordinal, _)| *ordinal);
+        record_tombstones(
+            pending,
+            side,
+            evicted
+                .into_iter()
+                .map(|(_, row)| (row.row_id, row.event_time, row.encoded_key))
+                .collect(),
+        );
+    }
     update_evicted_metrics(metrics, count, bytes, operator_id)
 }
 

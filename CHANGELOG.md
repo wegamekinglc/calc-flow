@@ -9,6 +9,14 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-10: Add explicit checkpoint-disabled streaming with
+  `StreamRuntimeConfig(checkpointing=False)` in Python and
+  `StreamingRunner::without_checkpoints` in Rust. Preserve live state and
+  budgets while skipping checkpoint storage, snapshots, and recovery journals;
+  require ordinary sinks and expose best-effort delivery. Keep checkpointing
+  enabled by default and preserve natural EOF and cancellation cleanup. Successful
+  checkpoint-enabled EOF no longer reports an internal checkpoint failure.
+
 - 2026-10-10: Reuse funded streaming Join probe keys when parallel work
   declines, avoiding a second key-construction pass during serial fallback.
   Gather flat output columns across multiple input and retained batches with

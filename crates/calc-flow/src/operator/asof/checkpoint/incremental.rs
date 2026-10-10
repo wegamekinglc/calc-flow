@@ -418,7 +418,11 @@ impl StreamAsofJoinOperator {
         &self,
         removals: &super::super::state::OwnerRemovals,
         batches: &BTreeMap<BatchKey, usize>,
-    ) -> Result<(Arc<MemoryReservation>, u64)> {
+        checkpointing: bool,
+    ) -> Result<(Option<Arc<MemoryReservation>>, u64)> {
+        if !checkpointing {
+            return Ok((None, 0));
+        }
         let owns = |address| self.state.keeps_encoding(address, removals);
         let live = |key: &BatchKey| {
             self.state.batches.references(key) > batches.get(key).copied().unwrap_or(0)
@@ -442,7 +446,7 @@ impl StreamAsofJoinOperator {
             owns,
             live,
         )?;
-        Ok((Arc::new(self.reserve_workspace(paid)?), gauge))
+        Ok((Some(Arc::new(self.reserve_workspace(paid)?)), gauge))
     }
 
     pub(in crate::operator::asof) fn prepare_log_admission(
