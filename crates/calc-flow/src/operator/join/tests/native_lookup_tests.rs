@@ -184,7 +184,7 @@ async fn assert_reference(
     let reference = reference.unwrap();
     reset_join_work();
     let native = operator
-        .native_matches(&plan, &admitted)
+        .native_matches(&plan, &admitted, None)
         .unwrap()
         .expect("eligible native key");
     assert_eq!(join_work().sql_probe_table_builds, 0);
@@ -298,7 +298,7 @@ async fn test_composite_native_framing_distinguishes_equal_concatenations() {
     let (plan, admitted) = admitted_probe(&mut operator, "right", &probe, &context).await;
     assert_eq!(
         operator
-            .native_matches(&plan, &admitted)
+            .native_matches(&plan, &admitted, None)
             .unwrap()
             .unwrap()
             .pairs
@@ -352,7 +352,10 @@ async fn test_native_probe_interns_each_distinct_repeated_key_once() {
     let source = keyed_right_batch(&[7, 8, 7, 7, 8, 7], &[2, 2, 1, 0, 1, 2]);
     let (plan, admitted) = admitted_probe(&mut operator, "right", &source, &context).await;
     reset_join_work();
-    let native = operator.native_matches(&plan, &admitted).unwrap().unwrap();
+    let native = operator
+        .native_matches(&plan, &admitted, None)
+        .unwrap()
+        .unwrap();
     assert_eq!(join_work().sql_probe_table_builds, 0);
     assert_eq!(join_work().key_encodings, 2);
     assert_eq!(native.pairs.len(), 8);
@@ -701,7 +704,12 @@ async fn native_index_budget_denial(service: &crate::runtime::streaming::gather_
     let pool = runtime.incremental_memory_pool();
     let pressure = runtime.incremental_reservation("native-index-pressure");
     pressure.try_grow((1 << 30) - pool.reserved()).unwrap();
-    assert!(operator.native_matches(&plan, &admitted).unwrap().is_none());
+    assert!(
+        operator
+            .native_matches(&plan, &admitted, None)
+            .unwrap()
+            .is_none()
+    );
     reset_join_work();
     let (matches, admitted) = operator.evaluate_matches(&plan, admitted, &context).await;
     let failure = matches.err().unwrap();
@@ -712,7 +720,10 @@ async fn native_index_budget_denial(service: &crate::runtime::streaming::gather_
     assert_eq!(pool.reserved(), 1 << 30);
     drop(pressure);
     assert_resident_and_gather_funding(pool.as_ref(), &job, admitted_paid);
-    let native = operator.native_matches(&plan, &admitted).unwrap().unwrap();
+    let native = operator
+        .native_matches(&plan, &admitted, None)
+        .unwrap()
+        .unwrap();
     drop(native);
     assert!(index_funding(&operator) > 1_024);
     let paid = assert_resident_and_gather_funding(
@@ -767,7 +778,10 @@ async fn empty_native_result_credit(service: &crate::runtime::streaming::gather_
     )
     .await;
     reset_join_work();
-    let mut native = operator.native_matches(&plan, &admitted).unwrap().unwrap();
+    let mut native = operator
+        .native_matches(&plan, &admitted, None)
+        .unwrap()
+        .unwrap();
     assert!(native.pairs.is_empty());
     assert_eq!(join_work().key_encodings, 2);
     assert_eq!(join_work().sql_probe_table_builds, 0);

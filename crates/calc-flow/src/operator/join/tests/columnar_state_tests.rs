@@ -2365,3 +2365,79 @@ async fn test_owned_copy_key_scratch_does_not_borrow_whole_chunk_backing() {
     drop(keys);
     assert_eq!(pool.reserved(), 0);
 }
+
+#[tokio::test]
+async fn slim_probes_without_dispatch_stay_serial() {
+    for incoming_left in [false, true] {
+        assert_slim_probe_reuses_keys(incoming_left).await;
+    }
+}
+
+async fn assert_slim_probe_reuses_keys(incoming_left: bool) {
+    let mut declaration = spec();
+    declaration.limits = JoinStateLimits::new(20_000, 10_000_000, 8_192).unwrap();
+    let mut operator =
+        StreamJoinOperator::new("match", left_schema(), right_schema(), declaration).unwrap();
+    let job_context = job();
+    let context = StreamOperatorContext::new(&job_context, "match", None);
+    let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+    let (seed_side, seed, probe_side, probe) = if incoming_left {
+        (
+            "right",
+            right_batch(vec![0]),
+            "left",
+            left_batch(vec![0; 8_192]),
+        )
+    } else {
+        (
+            "left",
+            left_batch(vec![0]),
+            "right",
+            right_batch(vec![0; 8_192]),
+        )
+    };
+    operator
+        .process_data(seed_side, seed, &context, &mut collector)
+        .await
+        .unwrap();
+    let dispatched = Arc::new(std::sync::Mutex::new(0_usize));
+    let recorder = Arc::clone(&dispatched);
+    operator.probe_test_hook = Some(Arc::new(move |_, _, _| {
+        *recorder.lock().unwrap() += 1;
+    }));
+    reset_join_work();
+    operator
+        .process_data(probe_side, probe, &context, &mut collector)
+        .await
+        .unwrap();
+    let output = collector.drain("output");
+    let output_rows: usize = output
+        .iter()
+        .filter_map(|message| message.as_data())
+        .map(Batch::num_rows)
+        .sum();
+    assert_eq!(output_rows, 8_192);
+    assert_eq!(*dispatched.lock().unwrap(), 0);
+    assert!(join_work().native_range_visits > 0);
+    assert_eq!(
+        join_work().arena_frames,
+        8_192,
+        "cost-gated serial fallback must reuse captured probe keys"
+    );
+    let pool = operator
+        .runtime
+        .runtime()
+        .unwrap()
+        .incremental_memory_pool();
+    drop(operator);
+    drop(context);
+    assert!(
+        job_context
+            .gather_owner()
+            .close_and_drain()
+            .await
+            .is_empty()
+    );
+    drop(job_context);
+    assert_eq!(pool.reserved(), 0);
+}

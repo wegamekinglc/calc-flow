@@ -284,7 +284,7 @@ async fn test_earlier_timestamp_error_precedes_later_row_id_overflow() {
 }
 
 #[tokio::test]
-async fn test_mixed_parent_output_keeps_concat_fallback_and_pair_order() {
+async fn test_mixed_parent_output_interleaves_columns_in_pair_order() {
     let mut operator =
         StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
     let job = job();
@@ -320,8 +320,112 @@ async fn test_mixed_parent_output_keeps_concat_fallback_and_pair_order() {
     assert_eq!(times(output, 1), [1, 3, 1, 3]);
     assert_eq!(times(output, 4), [4, 4, 0, 0]);
     assert_eq!(amounts(output), [Some(42); 4]);
-    assert_eq!(join_work().output_column_views, 12);
+    assert_eq!(join_work().output_column_views, 0);
     assert_eq!(join_work().output_column_takes, 3);
+    assert_eq!(join_work().output_column_interleaves, 3);
+}
+
+fn two_record_batch(left: bool, first: Vec<i64>, second: Vec<i64>) -> Batch {
+    let batch = if left { left_batch } else { right_batch };
+    let records = [batch(first), batch(second)]
+        .into_iter()
+        .map(|batch| batch.table_payload().unwrap().batches()[0].clone())
+        .collect();
+    Batch::table(records, BatchMetadata::default()).unwrap()
+}
+
+#[tokio::test]
+async fn test_multiple_input_and_retained_chunks_interleave_in_both_directions() {
+    for incoming_left in [false, true] {
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        let job = job();
+        let context = StreamOperatorContext::new(&job, "match", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        let retained_side = if incoming_left { "right" } else { "left" };
+        for (first, second) in [(vec![3, 1], vec![2, 0]), (vec![7, 5], vec![6, 4])] {
+            operator
+                .process_data(
+                    retained_side,
+                    two_record_batch(!incoming_left, first, second),
+                    &context,
+                    &mut collector,
+                )
+                .await
+                .unwrap();
+        }
+        let retained = if incoming_left {
+            &operator.state.right
+        } else {
+            &operator.state.left
+        };
+        let owners = retained
+            .iter()
+            .map(|row| row.record.funded_owner().unwrap().0)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(owners.len(), 4);
+        reset_join_work();
+        operator
+            .process_data(
+                if incoming_left { "left" } else { "right" },
+                two_record_batch(incoming_left, vec![2, 0], vec![3, 1]),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+        let messages = collector.drain("output");
+        assert_eq!(messages.len(), 1);
+        let output = &messages[0]
+            .as_data()
+            .unwrap()
+            .table_payload()
+            .unwrap()
+            .batches()[0];
+        let incoming_times = [
+            2, 2, 2, 2, 2, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 3, 3, 3, 3, 3, 3, 3, 3, 1, 1, 1, 1, 1,
+            1, 1, 1,
+        ];
+        let retained_times = [
+            0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4,
+            5, 6, 7,
+        ];
+        assert_eq!(output.num_rows(), 32);
+        assert_eq!(
+            times(output, 1),
+            if incoming_left {
+                incoming_times
+            } else {
+                retained_times
+            }
+        );
+        assert_eq!(
+            times(output, 4),
+            if incoming_left {
+                retained_times
+            } else {
+                incoming_times
+            }
+        );
+        assert_eq!(amounts(output), [Some(42); 32]);
+        assert_eq!(
+            output
+                .column(5)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .iter()
+                .collect::<Vec<_>>(),
+            [Some("paid"); 32]
+        );
+        assert_eq!(
+            output.schema_ref(),
+            operator.output_ports[0].schema().unwrap()
+        );
+        assert_eq!(join_work().output_column_views, 0);
+        assert_eq!(join_work().output_column_takes, 0);
+        assert_eq!(join_work().output_column_interleaves, 6);
+    }
 }
 
 #[tokio::test]
@@ -383,12 +487,25 @@ async fn test_empty_and_singleton_outputs_keep_independent_selected_values() {
 }
 
 fn materialize_parent_column(column: ArrayRef, offsets: &[usize]) -> RecordBatch {
+    let selections = offsets.iter().map(|&row| (0, row)).collect::<Vec<_>>();
+    materialize_parent_columns(vec![column], &selections)
+}
+
+fn materialize_parent_columns(
+    columns: Vec<ArrayRef>,
+    selections: &[(usize, usize)],
+) -> RecordBatch {
     let left_schema = Arc::new(Schema::new(vec![Field::new(
         "left",
-        column.data_type().clone(),
+        columns[0].data_type().clone(),
         true,
     )]));
-    let parent = Arc::new(RecordBatch::try_new(Arc::clone(&left_schema), vec![column]).unwrap());
+    let parents = columns
+        .into_iter()
+        .map(|column| {
+            Arc::new(RecordBatch::try_new(Arc::clone(&left_schema), vec![column]).unwrap())
+        })
+        .collect::<Vec<_>>();
     let right_schema = Arc::new(Schema::new(vec![Field::new(
         "right",
         DataType::Int64,
@@ -399,12 +516,12 @@ fn materialize_parent_column(column: ArrayRef, offsets: &[usize]) -> RecordBatch
         vec![Arc::new(Int64Array::from(vec![8]))],
     )
     .unwrap();
-    let admitted = offsets
+    let admitted = selections
         .iter()
         .enumerate()
-        .map(|(row_id, &row)| AdmittedRow {
+        .map(|(row_id, &(parent, row))| AdmittedRow {
             record: columnar::RowPayload::Rowed {
-                parent: Arc::clone(&parent),
+                parent: Arc::clone(&parents[parent]),
                 row,
             },
             event_time: EventTime::from_micros(0),
@@ -419,7 +536,7 @@ fn materialize_parent_column(column: ArrayRef, offsets: &[usize]) -> RecordBatch
         charge: 0,
         encoded_key: Arc::new(Vec::new().into()),
     }];
-    let matched = (0..offsets.len())
+    let matched = (0..selections.len())
         .map(|pos| MatchedPair {
             pos,
             opposite_index: 0,
@@ -448,7 +565,25 @@ fn test_flat_nullable_gather_matches_old_concat_for_each_supported_shape() {
 }
 
 fn assert_flat_nullable_gather_matches_old_concat_for_each_supported_shape() {
-    let columns: Vec<ArrayRef> = vec![
+    for column in flat_nullable_columns() {
+        let slices = [2, 0, 1, 2].map(|row| column.slice(row, 1));
+        let refs = slices.iter().map(AsRef::as_ref).collect::<Vec<_>>();
+        let expected = concat_output_column(&refs).unwrap();
+        reset_join_work();
+        let output = materialize_parent_column(column, &[2, 0, 1, 2]);
+        assert_eq!(output.column(0).to_data(), expected.to_data());
+        assert_eq!(join_work().output_column_takes, 1);
+        assert_eq!(join_work().output_column_views, 4);
+    }
+}
+
+fn flat_nullable_columns() -> Vec<ArrayRef> {
+    vec![
+        Arc::new(NullArray::new(3)),
+        Arc::new(Int64Array::from(vec![Some(9), None, Some(-7)])),
+        Arc::new(
+            TimestampMicrosecondArray::from(vec![Some(3), None, Some(1)]).with_timezone("UTC"),
+        ),
         Arc::new(BooleanArray::from(vec![Some(true), None, Some(false)])),
         Arc::new(StringArray::from(vec![Some("猫"), None, Some("x")])),
         Arc::new(LargeStringArray::from(vec![Some("猫"), None, Some("x")])),
@@ -469,15 +604,82 @@ fn assert_flat_nullable_gather_matches_old_concat_for_each_supported_shape() {
             )
             .unwrap(),
         ),
-    ];
-    for column in columns {
-        let slices = [2, 0, 1, 2].map(|row| column.slice(row, 1));
+    ]
+}
+
+#[test]
+fn test_multi_parent_flat_nullable_gather_matches_concat_with_one_interleave() {
+    let selections = [(1, 2), (0, 0), (1, 1), (0, 2), (1, 0)];
+    for column in flat_nullable_columns() {
+        let slices = selections.map(|(_, row)| column.slice(row, 1));
         let refs = slices.iter().map(AsRef::as_ref).collect::<Vec<_>>();
         let expected = concat_output_column(&refs).unwrap();
         reset_join_work();
-        let output = materialize_parent_column(column, &[2, 0, 1, 2]);
+        let output = materialize_parent_columns(vec![Arc::clone(&column), column], &selections);
         assert_eq!(output.column(0).to_data(), expected.to_data());
-        assert_eq!(join_work().output_column_takes, 1);
+        assert_eq!(join_work().output_column_takes, 0);
+        assert_eq!(join_work().output_column_interleaves, 1);
+        assert_eq!(
+            join_work().output_column_views,
+            selections.len(),
+            "only legacy right payloads use row views"
+        );
+    }
+}
+
+#[test]
+fn test_multi_parent_gather_discards_unselected_string_backing() {
+    let unused = "unused".repeat(4_096);
+    let first: ArrayRef = Arc::new(StringArray::from(vec![unused.as_str(), "first"]));
+    let second: ArrayRef = Arc::new(StringArray::from(vec!["second", unused.as_str()]));
+    reset_join_work();
+    let output = materialize_parent_columns(vec![first, second], &[(1, 0), (0, 1), (1, 0)]);
+    let strings = output
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(
+        strings.iter().collect::<Vec<_>>(),
+        [Some("second"), Some("first"), Some("second")]
+    );
+    assert_eq!(strings.value_data().len(), 17);
+    assert!(output.column(0).get_array_memory_size() < 512);
+    assert_eq!(join_work().output_column_interleaves, 1);
+    assert_eq!(join_work().output_column_views, 3);
+}
+
+#[test]
+fn test_multi_parent_nested_dictionary_fallback_discards_unused_values() {
+    for list in [false, true] {
+        reset_join_work();
+        let output = materialize_parent_columns(
+            vec![nested_dictionary(list), nested_dictionary(list)],
+            &[(1, 0), (0, 0)],
+        );
+        let nested = output.column(0);
+        let dictionary = if list {
+            nested
+                .as_any()
+                .downcast_ref::<ListArray>()
+                .unwrap()
+                .values()
+        } else {
+            nested
+                .as_any()
+                .downcast_ref::<StructArray>()
+                .unwrap()
+                .column(0)
+        };
+        let values = dictionary
+            .as_any()
+            .downcast_ref::<DictionaryArray<Int32Type>>()
+            .unwrap()
+            .values();
+        let values = values.as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(values.iter().collect::<Vec<_>>(), [Some("paid")]);
+        assert_eq!(values.value_data().len(), 4);
+        assert_eq!(join_work().output_column_interleaves, 0);
         assert_eq!(join_work().output_column_views, 4);
     }
 }
@@ -491,4 +693,22 @@ fn assert_gather_offsets_above_u32_remain_lossless_without_large_allocation() {
     assert_eq!(output.column(0).logical_null_count(), 1);
     assert_eq!(join_work().output_column_takes, 1);
     assert_eq!(join_work().output_column_views, 1);
+}
+
+#[test]
+#[cfg(target_pointer_width = "64")]
+fn test_multi_parent_gather_offsets_above_u32_remain_lossless() {
+    let offset = usize::try_from(u64::from(u32::MAX) + 1).unwrap();
+    reset_join_work();
+    let output = materialize_parent_columns(
+        vec![
+            Arc::new(NullArray::new(offset + 1)),
+            Arc::new(NullArray::new(1)),
+        ],
+        &[(0, offset), (1, 0)],
+    );
+    assert_eq!(output.num_rows(), 2);
+    assert_eq!(output.column(0).logical_null_count(), 2);
+    assert_eq!(join_work().output_column_interleaves, 1);
+    assert_eq!(join_work().output_column_views, 2);
 }

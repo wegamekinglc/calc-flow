@@ -2458,6 +2458,7 @@ struct JoinWork {
     native_shifted_entries: usize,
     output_column_views: usize,
     output_column_takes: usize,
+    output_column_interleaves: usize,
     native_key_lookups: usize,
     scalar_admissions: usize,
     generic_fast_rows: usize,
@@ -2478,7 +2479,7 @@ thread_local! {
         retained_visits: 0, pending_visits: 0, key_encodings: 0, time_decoders: 0,
         sql_probe_table_builds: 0, native_range_visits: 0, native_boundary_visits: 0,
         admission_mask_blocks: 0, native_shifted_entries: 0,
-        output_column_views: 0, output_column_takes: 0,
+        output_column_views: 0, output_column_takes: 0, output_column_interleaves: 0,
         native_key_lookups: 0,
         scalar_admissions: 0, generic_fast_rows: 0, admission_grants: 0,
         quantum_steps: 0, quantum_boundaries: 0,
@@ -4067,10 +4068,11 @@ impl StreamJoinOperator {
             );
         }
         let (owned, admitted) = self.owned_native_matches(plan, admitted, context).await;
-        if let Some(result) = owned {
-            return (result, admitted);
-        }
-        match self.native_matches(plan, &admitted) {
+        let keys = match owned {
+            data_work::ProbeAttempt::Complete(result) => return (result, admitted),
+            data_work::ProbeAttempt::Serial(keys) => keys,
+        };
+        match self.native_matches(plan, &admitted, keys) {
             Ok(Some(native)) => {
                 return (
                     Ok(PreparedMatches {
