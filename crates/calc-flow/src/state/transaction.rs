@@ -561,9 +561,10 @@ impl ManifestTransaction {
         let mut staged = Vec::with_capacity(segments.len());
         let mut validation = Vec::with_capacity(segments.len());
         let mut publication = Vec::with_capacity(segments.len());
+        let mut new_segments = Vec::with_capacity(segments.len());
         for (segment_id, segment) in segments {
             let (handle, status) = self
-                .stage_state_segment(
+                .classify_state_segment(
                     owner_id,
                     epoch,
                     &owner_hash,
@@ -574,12 +575,18 @@ impl ManifestTransaction {
                 .await?;
             if status == SegmentPublication::Staged {
                 validation.push(handle.clone());
+                new_segments.push((handle.clone(), segment.bytes()));
             }
             if status != SegmentPublication::Carried {
                 publication.push(handle.clone());
             }
             staged.push(handle);
         }
+        let entries = new_segments
+            .iter()
+            .map(|(handle, bytes)| (handle, *bytes))
+            .collect::<Vec<_>>();
+        self.stage_new_segments(&entries, cancellation).await?;
         staged.sort_unstable();
         Ok(StagedStateSegments {
             handles: staged,
@@ -588,7 +595,7 @@ impl ManifestTransaction {
         })
     }
 
-    async fn stage_state_segment(
+    async fn classify_state_segment(
         &self,
         owner_id: &str,
         epoch: Epoch,
@@ -647,17 +654,25 @@ impl ManifestTransaction {
                     "state owner {owner_id:?} committed segment {segment_id:?} changed bytes"
                 ),
             }),
-            Err(CalcFlowError::NotFound { .. }) => {
-                owner_settled(
-                    cancellation,
-                    "state-stage-write",
-                    self.lineage.stage_segment(&handle, segment.bytes()),
-                )
-                .await?;
-                Ok((handle, SegmentPublication::Staged))
-            }
+            Err(CalcFlowError::NotFound { .. }) => Ok((handle, SegmentPublication::Staged)),
             Err(error) => Err(error),
         }
+    }
+
+    async fn stage_new_segments(
+        &self,
+        segments: &[(&StateHandle, &[u8])],
+        cancellation: &CancellationToken,
+    ) -> Result<()> {
+        if segments.is_empty() {
+            return Ok(());
+        }
+        owner_settled(
+            cancellation,
+            "state-stage-write",
+            self.lineage.stage_segments(segments),
+        )
+        .await
     }
 
     async fn validate_staged_segments(
@@ -2036,7 +2051,7 @@ mod tests {
         let bytes = b"unpublished-state";
         let segment = StateSegment::new(bytes.to_vec());
         let (handle, needs_publication) = transaction
-            .stage_state_segment(
+            .classify_state_segment(
                 "window",
                 Epoch::INITIAL,
                 &super::digest("window"),
@@ -2047,6 +2062,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(needs_publication, super::SegmentPublication::Staged);
+        transaction
+            .stage_new_segments(
+                &[(&handle, segment.bytes())],
+                &crate::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
         assert!(matches!(
             lineage.load_segment(&handle).await,
             Err(CalcFlowError::NotFound { .. })

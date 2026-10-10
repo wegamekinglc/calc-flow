@@ -201,6 +201,7 @@ async fn collection_stops_on_a_symbolic_link_without_deleting_valid_state() {
 
 #[tokio::test]
 async fn local_batch_rejects_all_conflicts_and_unmanaged_paths_before_publication() {
+    assert_staging_preflight_precedes_all_writes().await;
     let directory = TempDir::new().unwrap();
     let backend = LocalStateBackend::new(directory.path()).await.unwrap();
     let key = lineage_key("orders");
@@ -241,5 +242,89 @@ async fn local_batch_rejects_all_conflicts_and_unmanaged_paths_before_publicatio
         .publish_segments(&[first.clone(), first.clone()])
         .await
         .unwrap();
+    assert_eq!(lineage.load_segment(&first).await.unwrap(), b"valid");
+}
+
+async fn assert_staging_preflight_precedes_all_writes() {
+    let directory = TempDir::new().unwrap();
+    let backend = LocalStateBackend::new(directory.path()).await.unwrap();
+    let key = lineage_key("staging");
+    let lineage = backend.open_lineage(&key).await.unwrap();
+    let first = handle(&key, "window", Epoch::INITIAL, "first", b"valid");
+    let alias = StateHandle::new(
+        first.operator_id(),
+        first.epoch(),
+        first.segment_id(),
+        &first.relative_path().replace(".arrow", ".segment"),
+        first.byte_len(),
+        first.sha256(),
+    )
+    .unwrap();
+    let unmanaged = StateHandle::new(
+        "window",
+        Epoch::INITIAL,
+        "other",
+        "committed/unmanaged",
+        5,
+        &digest("valid"),
+    )
+    .unwrap();
+    let conflict = StateHandle::new(
+        first.operator_id(),
+        first.epoch(),
+        first.segment_id(),
+        first.relative_path(),
+        first.byte_len(),
+        &digest("other"),
+    )
+    .unwrap();
+    for invalid in [&alias, &unmanaged, &conflict] {
+        assert!(matches!(
+            lineage
+                .stage_segments(&[(&first, b"valid"), (invalid, b"valid")])
+                .await,
+            Err(CalcFlowError::InvalidArgument { .. })
+        ));
+        assert!(
+            !directory
+                .path()
+                .join("staging")
+                .join(lineage_hash(&key))
+                .exists()
+        );
+    }
+    assert!(matches!(
+        lineage
+            .stage_segments(&[(&first, b"valid"), (&first, b"other")])
+            .await,
+        Err(CalcFlowError::InvalidArgument { .. })
+    ));
+    assert!(
+        !directory
+            .path()
+            .join("staging")
+            .join(lineage_hash(&key))
+            .exists()
+    );
+    lineage.stage_segments(&[]).await.unwrap();
+    for bytes in [b"shorter".as_slice(), b"other"] {
+        assert!(matches!(
+            lineage.stage_segments(&[(&first, bytes)]).await,
+            Err(CalcFlowError::CheckpointMismatch { .. })
+        ));
+    }
+    assert!(
+        !directory
+            .path()
+            .join("staging")
+            .join(lineage_hash(&key))
+            .exists()
+    );
+    lineage
+        .stage_segments(&[(&first, b"valid"), (&first, b"valid")])
+        .await
+        .unwrap();
+    lineage.validate_segment(&first).await.unwrap();
+    lineage.publish_segment(&first).await.unwrap();
     assert_eq!(lineage.load_segment(&first).await.unwrap(), b"valid");
 }

@@ -79,6 +79,7 @@ jobs:
           scripts.test_groupby_diagnostic_imports
           scripts.test_groupby_diagnostic_rustc
           scripts.test_checkpoint_benchmark
+          scripts.test_checkpoint_cycles
           scripts.test_native_memory_profile
           scripts.test_native_slow_sink_diagnostics
           scripts.test_release_collectors
@@ -222,6 +223,7 @@ jobs:
           git diff --exit-code -- benchmarks/requirements.lock \
             benchmarks/finance-python-requirements.lock
           target/benchmark-venv/bin/python -m unittest scripts.test_benchmark_release
+          target/benchmark-venv/bin/python -m unittest scripts.test_sustained_join
           uv pip install --python target/benchmark-venv/bin/python --no-deps \
             --target target/adapter-site target/releases/candidate/*.whl
           PYTHONPATH=target/adapter-site:. POLARS_MAX_THREADS=32 \

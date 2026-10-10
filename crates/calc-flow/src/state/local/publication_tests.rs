@@ -32,6 +32,22 @@ async fn single_publication_retry_must_repeat_failed_directory_sync() {
     let key = StateLineageKey::new("publication", &digest("pipeline")).unwrap();
     let lineage = backend.open_local_lineage(&key).await.unwrap();
     let handle = tests::state_handle(&key, Epoch::INITIAL, "one", b"payload");
+    set_hook(
+        &lineage,
+        Some(Arc::new(|operation, _| {
+            if operation == Operation::StagingSync {
+                Err(std::io::Error::other("injected staging sync failure"))
+            } else {
+                Ok(())
+            }
+        })),
+    );
+    assert!(lineage.stage_segment(&handle, b"payload").await.is_err());
+    assert!(
+        lineage.stage_segment(&handle, b"payload").await.is_err(),
+        "matching staged bytes do not prove directory durability"
+    );
+    set_hook(&lineage, None);
     lineage.stage_segment(&handle, b"payload").await.unwrap();
     lineage.validate_segment(&handle).await.unwrap();
     *lineage.publication_hook.lock() = Some(Arc::new(|operation, _| {
@@ -57,12 +73,18 @@ pub(crate) fn set_hook(lineage: &LocalStateLineageBackend, hook: Option<Publicat
 
 #[tokio::test]
 async fn failed_segment_directory_creation_sync_is_retried() {
+    for subtree in ["staging", "committed"] {
+        assert_creation_sync_retry(subtree).await;
+    }
+}
+
+async fn assert_creation_sync_retry(subtree: &str) {
     let directory = tempfile::tempdir().unwrap();
     let backend = LocalStateBackend::new(directory.path()).await.unwrap();
     let key = StateLineageKey::new("publication", &digest("pipeline")).unwrap();
     let lineage = backend.open_local_lineage(&key).await.unwrap();
     let handle = tests::state_handle(&key, Epoch::INITIAL, "one", b"payload");
-    let failed_parent = directory.path().join("committed");
+    let failed_parent = directory.path().join(subtree);
     set_hook(
         &lineage,
         Some(Arc::new(move |operation, path| {
@@ -84,7 +106,7 @@ async fn failed_segment_directory_creation_sync_is_retried() {
     set_hook(&lineage, hook);
     assert!(
         lineage.stage_segment(&handle, b"payload").await.is_err(),
-        "fresh sessions must confirm committed ancestors too"
+        "fresh sessions must confirm managed ancestors too"
     );
     set_hook(&lineage, None);
     lineage.stage_segment(&handle, b"payload").await.unwrap();
@@ -135,8 +157,16 @@ async fn batch_syncs_each_directory_once_after_file_syncs_and_renames() {
             Ok(())
         })),
     );
+    lineage
+        .stage_segments(&[
+            (&handles[0], b"payload"),
+            (&handles[1], b"payload"),
+            (&handles[0], b"payload"),
+            (&handles[2], b"payload"),
+        ])
+        .await
+        .unwrap();
     for handle in &handles {
-        lineage.stage_segment(handle, b"payload").await.unwrap();
         lineage.validate_segment(handle).await.unwrap();
     }
     let staged = operations.lock().clone();
@@ -150,9 +180,25 @@ async fn batch_syncs_each_directory_once_after_file_syncs_and_renames() {
     assert_eq!(
         staged
             .iter()
+            .filter_map(|(operation, _)| match operation {
+                Operation::FileSync | Operation::StagingSync => Some(*operation),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        [
+            Operation::FileSync,
+            Operation::FileSync,
+            Operation::FileSync,
+            Operation::StagingSync,
+            Operation::StagingSync,
+        ]
+    );
+    assert_eq!(
+        staged
+            .iter()
             .filter(|(op, _)| *op == Operation::StagingSync)
             .count(),
-        3
+        2
     );
     operations.lock().clear();
     let input = [
@@ -192,6 +238,9 @@ async fn batch_syncs_each_directory_once_after_file_syncs_and_renames() {
 
 #[tokio::test]
 async fn batch_partial_rename_and_persistent_sync_failure_retries() {
+    assert_staging_file_failure().await;
+    assert_staging_directory_failure(["left", "left"]).await;
+    assert_staging_directory_failure(["left", "right"]).await;
     let directory = tempfile::tempdir().unwrap();
     let backend = LocalStateBackend::new(directory.path()).await.unwrap();
     let key = StateLineageKey::new("publication", &digest("pipeline")).unwrap();
@@ -242,6 +291,113 @@ async fn batch_partial_rename_and_persistent_sync_failure_retries() {
         assert_eq!(lineage.load_segment(handle).await.unwrap(), b"payload");
     }
     set_hook(&lineage, None);
+    lineage.publish_segments(&handles).await.unwrap();
+}
+
+async fn assert_staging_file_failure() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = LocalStateBackend::new(directory.path()).await.unwrap();
+    let key = StateLineageKey::new("staging-file", &digest("pipeline")).unwrap();
+    let lineage = backend.open_local_lineage(&key).await.unwrap();
+    let handles = [
+        owner_handle(&key, "left", "a"),
+        owner_handle(&key, "left", "b"),
+    ];
+    let entries = [
+        (&handles[0], b"payload".as_slice()),
+        (&handles[1], b"payload"),
+    ];
+    let operations = Arc::new(SyncMutex::new(Vec::new()));
+    let observed = operations.clone();
+    set_hook(
+        &lineage,
+        Some(Arc::new(move |operation, _| {
+            let mut operations = observed.lock();
+            operations.push(operation);
+            if operation == Operation::FileSync
+                && operations
+                    .iter()
+                    .filter(|op| **op == Operation::FileSync)
+                    .count()
+                    == 2
+            {
+                return Err(std::io::Error::other("second staging file sync failed"));
+            }
+            Ok(())
+        })),
+    );
+    assert!(lineage.stage_segments(&entries).await.is_err());
+    assert_eq!(
+        std::fs::read(lineage.managed_paths(&handles[0]).unwrap().staging).unwrap(),
+        b"payload"
+    );
+    assert!(!lineage.managed_paths(&handles[1]).unwrap().staging.exists());
+    assert!(!operations.lock().contains(&Operation::StagingSync));
+    set_hook(&lineage, None);
+    lineage.stage_segments(&entries).await.unwrap();
+    for handle in &handles {
+        lineage.validate_segment(handle).await.unwrap();
+    }
+    lineage.publish_segments(&handles).await.unwrap();
+    drop(lineage);
+    let reopened = backend.open_local_lineage(&key).await.unwrap();
+    for handle in &handles {
+        assert_eq!(reopened.load_segment(handle).await.unwrap(), b"payload");
+    }
+}
+
+async fn assert_staging_directory_failure(owners: [&str; 2]) {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = LocalStateBackend::new(directory.path()).await.unwrap();
+    let key = StateLineageKey::new("staging-directory", &digest("pipeline")).unwrap();
+    let lineage = backend.open_local_lineage(&key).await.unwrap();
+    let handles = [
+        owner_handle(&key, owners[0], "a"),
+        owner_handle(&key, owners[1], "b"),
+    ];
+    let entries = [
+        (&handles[0], b"payload".as_slice()),
+        (&handles[1], b"payload"),
+    ];
+    let failed_parent = lineage.managed_paths(&handles[1]).unwrap().staging_parent;
+    let attempts = Arc::new(SyncMutex::new(Vec::new()));
+    let observed = attempts.clone();
+    set_hook(
+        &lineage,
+        Some(Arc::new(move |operation, path| {
+            if operation == Operation::StagingSync {
+                observed.lock().push(path.to_owned());
+                if path == failed_parent {
+                    return Err(std::io::Error::other(
+                        "persistent staging directory sync failure",
+                    ));
+                }
+            }
+            Ok(())
+        })),
+    );
+    for _ in 0..2 {
+        assert!(lineage.stage_segments(&entries).await.is_err());
+        for handle in &handles {
+            assert_eq!(
+                std::fs::read(lineage.managed_paths(handle).unwrap().staging).unwrap(),
+                b"payload"
+            );
+            assert!(matches!(
+                lineage.load_segment(handle).await,
+                Err(CalcFlowError::NotFound { .. })
+            ));
+        }
+    }
+    let attempts = attempts.lock().clone();
+    let directories = if owners[0] == owners[1] { 1 } else { 2 };
+    assert_eq!(attempts.len(), 2 * directories);
+    assert_eq!(attempts[..directories], attempts[directories..]);
+    set_hook(&lineage, None);
+    lineage.stage_segments(&entries).await.unwrap();
+    for handle in &handles {
+        lineage.validate_segment(handle).await.unwrap();
+    }
     lineage.publish_segments(&handles).await.unwrap();
 }
 

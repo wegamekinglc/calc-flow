@@ -23,6 +23,8 @@ struct Store {
     calls: Vec<Call>,
     published: Vec<StateHandle>,
     failure: Option<(Call, CalcFlowError)>,
+    staged_calls: Vec<String>,
+    staging_failure: Option<String>,
 }
 
 impl Store {
@@ -64,7 +66,15 @@ impl StateLineageBackend for StrictLegacyBackend {
     }
 
     async fn stage_segment(&self, handle: &StateHandle, bytes: &[u8]) -> Result<()> {
-        self.store.lock().staged.insert(
+        let mut store = self.store.lock();
+        store.staged_calls.push(handle.segment_id().into());
+        if store.staging_failure.as_deref() == Some(handle.segment_id()) {
+            return Err(CalcFlowError::Conflict {
+                resource: "legacy staging".into(),
+                key: handle.segment_id().into(),
+            });
+        }
+        store.staged.insert(
             handle.clone(),
             StagedSegment {
                 bytes: bytes.to_vec(),
@@ -166,10 +176,12 @@ async fn test_empty_publication_calls_no_backend_operations() {
     let lineage: &dyn StateLineageBackend = &backend;
 
     lineage.publish_segments(&[]).await.unwrap();
+    lineage.stage_segments(&[]).await.unwrap();
 
     let store = backend.store.lock();
     assert!(store.calls.is_empty());
     assert!(store.published.is_empty());
+    assert!(store.staged_calls.is_empty());
 }
 
 #[tokio::test]
@@ -208,6 +220,7 @@ async fn test_single_publication_preserves_validation_and_strict_repeat_contract
 
 #[tokio::test]
 async fn test_duplicates_publish_once_in_first_appearance_order_without_mutating_inputs() {
+    assert_legacy_staging_contract().await;
     let backend = StrictLegacyBackend::default();
     let last = handle("z-last", b"");
     let first = handle("a-first", b"a");
@@ -233,6 +246,71 @@ async fn test_duplicates_publish_once_in_first_appearance_order_without_mutating
     assert_eq!(store.committed[last.relative_path()], b"");
     assert_eq!(store.committed[first.relative_path()], b"a");
     assert!(store.staged.is_empty());
+}
+
+async fn assert_legacy_staging_contract() {
+    assert_large_duplicate_comparison_yields().await;
+    let backend = StrictLegacyBackend::default();
+    let last = handle("z-last", b"");
+    let first = handle("a-first", b"first");
+    let inputs = [(&last, b"".as_slice()), (&first, b"first"), (&last, b"")];
+    let original = inputs;
+    backend.stage_segments(&inputs).await.unwrap();
+    assert_eq!(inputs, original);
+    assert_eq!(backend.store.lock().staged_calls, ["z-last", "a-first"]);
+    assert_eq!(backend.store.lock().staged[&first].bytes, b"first");
+
+    let conflict = handle("a-first", b"other");
+    for invalid in [(&conflict, b"other".as_slice()), (&first, b"other")] {
+        let backend = StrictLegacyBackend::default();
+        assert!(matches!(
+            backend
+                .stage_segments(&[(&last, b"".as_slice()), (&first, b"first"), invalid])
+                .await,
+            Err(CalcFlowError::InvalidArgument { .. })
+        ));
+        assert!(backend.store.lock().staged_calls.is_empty());
+    }
+
+    let backend = StrictLegacyBackend::default();
+    backend.store.lock().staging_failure = Some("a-first".into());
+    let later = handle("later", b"later");
+    assert!(matches!(
+        backend
+            .stage_segments(&[
+                (&last, b"".as_slice()),
+                (&first, b"first"),
+                (&later, b"later"),
+            ])
+            .await,
+        Err(CalcFlowError::Conflict { resource, key })
+            if resource == "legacy staging" && key == "a-first"
+    ));
+    assert_eq!(backend.store.lock().staged_calls, ["z-last", "a-first"]);
+    assert_eq!(backend.store.lock().staged.len(), 1);
+}
+
+async fn assert_large_duplicate_comparison_yields() {
+    use std::{future::Future, task::Poll};
+
+    let backend = StrictLegacyBackend::default();
+    let bytes = vec![7_u8; 1024 * 1024];
+    let duplicate = bytes.clone();
+    let segment = handle("large", &bytes);
+    let entries = [
+        (&segment, bytes.as_slice()),
+        (&segment, duplicate.as_slice()),
+    ];
+    let operation = backend.stage_segments(&entries);
+    tokio::pin!(operation);
+    std::future::poll_fn(|context| {
+        assert!(operation.as_mut().poll(context).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    assert!(backend.store.lock().staged_calls.is_empty());
+    operation.await.unwrap();
+    assert_eq!(backend.store.lock().staged_calls, ["large"]);
 }
 
 #[tokio::test]

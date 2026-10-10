@@ -152,6 +152,18 @@ impl TaskFixture {
             }
             messages.push(message);
         }
+        assert_eq!(
+            self.harness
+                .progress
+                .snapshot()
+                .stream_asof_join
+                .map(|status| status.state_bytes),
+            ack.state
+                .inline_metadata
+                .get("metrics")
+                .and_then(|metrics| metrics["state_bytes"].as_u64()),
+            "task status must include checkpoint-owned state before the next message"
+        );
         self.epoch = self.epoch.next().unwrap();
         messages
     }

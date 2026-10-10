@@ -548,24 +548,51 @@ outside the managed roots fail closed. Regular abandoned `.tmp*` manifest
 files are removed during a serialized scan; links and directories are never
 followed or removed as temporary files.
 
-Each managed snapshot publishes its new or not-yet-confirmed state segments
-before the operator acknowledges the checkpoint. The local backend renames the
-segments in order, then syncs each affected committed directory once. Segment
-file syncs, staging-directory syncs, and managed-directory creation syncs retain
-their separate boundaries. A failed batch can leave complete, visible orphan
-files; it does not advance the session's verified handles or working pins.
-Retrying such files verifies their bytes and repeats directory confirmation
-before reporting success. Already-established session carries retain their
-original epochs and avoid publication work.
+Each managed operator or sink snapshot first classifies all its segments.
+Already-established session carries retain their original handles and avoid
+staging, validation, publication, and payload reloads. New segments stage in one
+batch, pass staged validation, and publish alongside any matching committed
+segments whose publication is not yet confirmed. These operations complete
+before the participant acknowledges the checkpoint.
+
+`StateLineageBackend::stage_segments` accepts borrowed handle/byte-slice pairs
+as `&[(&StateHandle, &[u8])]`. Its provided implementation preflights conflicting
+identities at the same path, processes exact duplicate pairs once, and delegates
+to `stage_segment` sequentially in first-appearance order. A duplicate handle
+with different bytes is rejected. Existing backend implementations retain
+their single-operation guarantees without implementing another method. Local
+also rejects distinct handles that resolve to the same staging target. Empty
+input succeeds without staging I/O.
+
+The local backend holds publication serialization for the complete staging
+batch. Each new file is written, flushed, synced, and persisted without
+overwriting an existing file. After all requested files pass integrity checks,
+each affected staging owner directory is synced once. Single `stage_segment`
+calls retain a complete staging durability boundary before returning success.
+Visible staged bytes from a failed attempt must be verified and their directory
+synced again on retry; matching bytes alone do not establish durability.
+Directory creation retains separate ancestor synchronization, including retries
+through a fresh lineage session. Subsequent publication renames segments in
+order and syncs each affected committed directory once; manifest publication
+retains its separate durability boundary.
 
 `StateLineageBackend::publish_segments` provides a compatible sequential default
 for other backends: it preflights conflicting handles and exact duplicates,
 accepts successfully verified committed handles, and calls `publish_segment`
 only for missing handles. Its success retains that backend's existing
-committed-read and publication guarantees. Managed cancellation waits for the
-entire admitted batch, including a wait for the publication lock, to settle
-before releasing lineage ownership; cancelled publication supplies no new
-working pins or checkpoint acknowledgement.
+committed-read and publication guarantees. Retrying visible committed files
+with the local backend verifies their bytes and repeats directory confirmation
+before reporting success.
+
+A failed staging or publication batch can leave complete, visible orphan files;
+it does not advance the session's carried or verified handles or working pins.
+Classification or staging failure starts no publication and produces no
+manifest or checkpoint acknowledgement. Managed cancellation starts no batch
+when already requested; once admitted, the entire batch, including its backend
+lock wait and remaining segments, settles while lineage ownership is retained.
+Cancellation during staging then returns without validation, publication, or
+new session entries, pins, or acknowledgement. Arbitrarily dropping a public
+backend future does not provide this managed settlement guarantee.
 
 Bounded manifest loading also accepts legacy v3 source entries that omitted
 `history`. It retains that omission through serialization and checksum

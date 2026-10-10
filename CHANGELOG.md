@@ -9,6 +9,13 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-11: Add `StateLineageBackend::stage_segments` for borrowed snapshot
+  segments, with a sequential default for existing backends. Local staging
+  syncs each owner directory once per batch while retaining every file,
+  ancestor, publication, and manifest durability boundary. Retries reconfirm
+  visible staged files; managed cancellation settles the admitted batch before
+  releasing lineage ownership, without acknowledging the checkpoint.
+
 - 2026-10-11: Reuse source identifiers while streaming Join gathers consecutive
   output rows from the same input batch. Avoid repeated source-map lookups while
   preserving row order, independent output buffers, and bounded gather storage.

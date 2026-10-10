@@ -80,6 +80,7 @@ mod preload;
 mod publication;
 #[cfg(test)]
 pub(super) mod publication_tests;
+mod staging;
 
 impl LocalStateBackend {
     pub(crate) async fn open_local_lineage(
@@ -154,27 +155,11 @@ impl StateLineageBackend for LocalStateLineageBackend {
     }
 
     async fn stage_segment(&self, handle: &StateHandle, bytes: &[u8]) -> Result<()> {
-        let paths = self.managed_paths(handle)?;
-        let handle = handle.clone();
-        let bytes = bytes.to_vec();
-        let _guard = self.publication.lock().await;
-        let staged_handle = handle.clone();
-        let directories = self.segment_directories.clone();
-        #[cfg(test)]
-        let hook = self.publication_hook.lock().clone();
-        worker(move || {
-            stage_file(
-                &paths,
-                &staged_handle,
-                &bytes,
-                &directories,
-                #[cfg(test)]
-                hook.as_ref(),
-            )
-        })
-        .await?;
-        self.validated.lock().remove(&handle);
-        Ok(())
+        self.stage_segments(&[(handle, bytes)]).await
+    }
+
+    async fn stage_segments(&self, segments: &[(&StateHandle, &[u8])]) -> Result<()> {
+        staging::stage_segments(self, segments).await
     }
 
     async fn validate_segment(&self, handle: &StateHandle) -> Result<()> {
@@ -639,13 +624,16 @@ fn write_staged_file(
     temporary
         .persist_noclobber(&paths.staging)
         .map_err(|error| io_error(&paths.staging, error.error))?;
+    Ok(())
+}
+
+fn sync_staging_directory(
+    directory: &Path,
+    #[cfg(test)] hook: Option<&publication_tests::PublicationHook>,
+) -> Result<()> {
     #[cfg(test)]
-    publication_tests::observe(
-        hook,
-        publication_tests::Operation::StagingSync,
-        &paths.staging_parent,
-    )?;
-    sync_directory(&paths.staging_parent)
+    publication_tests::observe(hook, publication_tests::Operation::StagingSync, directory)?;
+    sync_directory(directory)
 }
 
 fn prepare_segment_directories(

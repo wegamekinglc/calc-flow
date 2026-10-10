@@ -218,6 +218,52 @@ pub trait StateLineageBackend: Send + Sync {
     /// Writes bytes to the managed staging subtree.
     async fn stage_segment(&self, handle: &StateHandle, bytes: &[u8]) -> Result<()>;
 
+    /// Stages a finite collection of borrowed immutable segments.
+    ///
+    /// Exact duplicate handle/payload pairs are processed once in first-appearance
+    /// order. Conflicting handles at one path or differing duplicate payloads
+    /// fail before staging starts. The default then calls [`Self::stage_segment`]
+    /// sequentially, preserving existing backend guarantees and error order.
+    /// Ordinary payload validation remains each backend's responsibility.
+    ///
+    /// [`super::LocalStateBackend`] also rejects aliases of one staging path,
+    /// syncs every new file, and confirms each staging directory once per batch.
+    /// Its single-segment operation retains a complete per-call boundary.
+    /// Crash durability requires Unix directory synchronization; other platforms
+    /// retain synced file contents and visibility guarantees only. Failure may
+    /// leave earlier staged files; this operation does not roll them back.
+    ///
+    /// Managed cancellation settles the complete admitted batch, including lock
+    /// waits, before releasing lineage ownership. Arbitrarily dropping this
+    /// public future does not provide that managed settlement guarantee.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CalcFlowError::InvalidArgument`] for input conflicts. Existing
+    /// staging errors retain their path and source, and stop later operations.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use calc_flow::{Result, StateHandle, StateLineageBackend};
+    ///
+    /// async fn stage_snapshot(
+    ///     lineage: &dyn StateLineageBackend,
+    ///     first: &StateHandle,
+    ///     second: &StateHandle,
+    ///     first_bytes: &[u8],
+    ///     second_bytes: &[u8],
+    /// ) -> Result<()> {
+    ///     lineage.stage_segments(&[(first, first_bytes), (second, second_bytes)]).await
+    /// }
+    /// ```
+    async fn stage_segments(&self, segments: &[(&StateHandle, &[u8])]) -> Result<()> {
+        for (handle, bytes) in staging_segments(segments).await? {
+            self.stage_segment(handle, bytes).await?;
+        }
+        Ok(())
+    }
+
     /// Re-reads and validates a staged segment's length and checksum.
     async fn validate_segment(&self, handle: &StateHandle) -> Result<()>;
 
@@ -285,6 +331,40 @@ pub trait StateLineageBackend: Send + Sync {
 
     /// Collects committed segments unreachable from the retained handles.
     async fn collect_orphans(&self, retained: &[StateHandle]) -> Result<usize>;
+}
+
+pub(super) async fn staging_segments<'a>(
+    segments: &[(&'a StateHandle, &'a [u8])],
+) -> Result<Vec<(&'a StateHandle, &'a [u8])>> {
+    let mut paths: BTreeMap<&str, (&StateHandle, &[u8])> = BTreeMap::new();
+    let mut unique = Vec::with_capacity(segments.len());
+    for &(handle, bytes) in segments {
+        if let Some(&(previous, previous_bytes)) = paths.get(handle.relative_path()) {
+            if previous != handle || !equal_payloads(previous_bytes, bytes).await {
+                return Err(CalcFlowError::InvalidArgument {
+                    field: "state_segments".into(),
+                    message: format!("conflicting state segments at {:?}", handle.relative_path()),
+                });
+            }
+        } else {
+            paths.insert(handle.relative_path(), (handle, bytes));
+            unique.push((handle, bytes));
+        }
+    }
+    Ok(unique)
+}
+
+async fn equal_payloads(first: &[u8], second: &[u8]) -> bool {
+    if first.len() != second.len() {
+        return false;
+    }
+    for (left, right) in first.chunks(64 * 1024).zip(second.chunks(64 * 1024)) {
+        if left != right {
+            return false;
+        }
+        tokio::task::yield_now().await;
+    }
+    true
 }
 
 pub(super) fn publication_handles(handles: &[StateHandle]) -> Result<Vec<&StateHandle>> {
