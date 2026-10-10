@@ -353,6 +353,15 @@ impl NativeIndex {
         self.find(self.hash(key), key)
     }
 
+    /// Length of one key's active run, as a probe-cost estimate input.
+    pub(super) fn run_len_by_id(&self, id: u32) -> usize {
+        self.slots[id as usize]
+            .as_ref()
+            .expect("live key ID")
+            .active()
+            .len()
+    }
+
     fn window_by_id(&self, id: u32, range: (EventTime, EventTime)) -> &[RunEntry] {
         let run = self.slots[id as usize]
             .as_ref()

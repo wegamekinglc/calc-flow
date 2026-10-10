@@ -16,6 +16,10 @@ pub(super) struct ArenaLayout {
     row_bytes: usize,
 }
 
+fn err() -> crate::CalcFlowError {
+    super::native_lookup::scratch_error("join")
+}
+
 impl ArenaLayout {
     pub(super) fn measure(rows: &[AdmittedRow], indices: &[usize]) -> Result<Option<Self>> {
         let Some(extra) = rows
@@ -44,40 +48,50 @@ impl ArenaLayout {
             let Some(column) = KeyColumn::bind(rows[0].record.column(index).as_ref()) else {
                 return Ok(false);
             };
-            let mut maximum_cell = 0;
-            for row in rows {
-                if !column.frame_supported(row.record.offset()) {
-                    return Ok(false);
-                }
-                maximum_cell = maximum_cell.max(self.add(&column, row.record.offset())?);
+            if column.array.null_count() > 0 {
+                // A null key cell keeps the exact per-row framing path away.
+                return Ok(false);
             }
-            maximum = maximum
-                .checked_add(maximum_cell)
+            if u32::try_from(column.timezone.len()).is_err() {
+                return Ok(false);
+            }
+            let Some((sum_len, max_len)) = column.values.extent(rows) else {
+                return Ok(false);
+            };
+            if u32::try_from(max_len).is_err() {
+                return Ok(false);
+            }
+            let row_count = rows.len();
+            // One frame per cell: tag+timezone+length prefix (9 bytes) plus the
+            // value; one charge unit: 4 * (value + value length prefix + 1 +
+            // timezone + 64), exactly as the per-cell walk computed.
+            let frame_const = column
+                .timezone
+                .len()
+                .checked_add(9)
                 .ok_or_else(|| super::native_lookup::scratch_error("join"))?;
+            self.bytes = sum_len
+                .checked_add(row_count.checked_mul(frame_const).ok_or_else(err)?)
+                .and_then(|bytes| self.bytes.checked_add(bytes))
+                .ok_or_else(err)?;
+            let charge_per_row = column
+                .timezone
+                .len()
+                .checked_add(column.values.prefix())
+                .and_then(|n| n.checked_add(65))
+                .ok_or_else(err)?;
+            self.charge = row_count
+                .checked_mul(charge_per_row)
+                .and_then(|n| n.checked_add(sum_len))
+                .and_then(|n| n.checked_mul(4))
+                .and_then(|n| self.charge.checked_add(n))
+                .ok_or_else(err)?;
+            maximum = maximum
+                .checked_add(max_len.checked_add(frame_const).ok_or_else(err)?)
+                .ok_or_else(err)?;
         }
         self.row_bytes = self.row_bytes.max(maximum);
         Ok(true)
-    }
-
-    fn add(&mut self, column: &KeyColumn<'_>, row: usize) -> Result<usize> {
-        let value = column.values.len(row);
-        let logical = value.checked_add(column.values.prefix() + 1);
-        let fee = logical
-            .and_then(|n| n.checked_add(column.timezone.len()))
-            .and_then(|n| n.checked_add(64))
-            .and_then(|n| n.checked_mul(4));
-        self.charge = fee
-            .and_then(|n| self.charge.checked_add(n))
-            .ok_or_else(|| super::native_lookup::scratch_error("join"))?;
-        let frame = value
-            .checked_add(column.timezone.len())
-            .and_then(|n| n.checked_add(9))
-            .ok_or_else(|| super::native_lookup::scratch_error("join"))?;
-        self.bytes = self
-            .bytes
-            .checked_add(frame)
-            .ok_or_else(|| super::native_lookup::scratch_error("join"))?;
-        Ok(frame)
     }
 
     pub(super) fn fits(self, rows: usize, columns: usize) -> bool {
@@ -168,12 +182,6 @@ struct KeyColumn<'a> {
 }
 
 impl<'a> KeyColumn<'a> {
-    fn frame_supported(&self, row: usize) -> bool {
-        !self.array.is_null(row)
-            && u32::try_from(self.timezone.len()).is_ok()
-            && u32::try_from(self.values.len(row)).is_ok()
-    }
-
     fn bind(array: &'a dyn Array) -> Option<Self> {
         let values = KeyValues::bind(array)?;
         let tag = key_type_tag(array.data_type()).ok()?;
@@ -260,6 +268,28 @@ impl<'a> KeyValues<'a> {
             Self::Unsigned(values) => values.width(),
             Self::Utf8(values) => values.value(row).len(),
             Self::LargeUtf8(values) => values.value(row).len(),
+        }
+    }
+
+    /// Summed and largest value length over the group's rows; `None` when a
+    /// length cannot be framed. Fixed-width columns resolve in O(1).
+    fn extent(&self, rows: &[AdmittedRow]) -> Option<(usize, usize)> {
+        match self {
+            Self::Boolean(_) => Some((rows.len(), 1)),
+            Self::Signed(values) => Some((rows.len().checked_mul(values.width())?, values.width())),
+            Self::Unsigned(values) => {
+                Some((rows.len().checked_mul(values.width())?, values.width()))
+            }
+            Self::Utf8(_) | Self::LargeUtf8(_) => {
+                let mut sum = 0_usize;
+                let mut max = 0_usize;
+                for row in rows {
+                    let len = self.len(row.record.offset());
+                    sum = sum.checked_add(len)?;
+                    max = max.max(len);
+                }
+                Some((sum, max))
+            }
         }
     }
 

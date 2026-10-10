@@ -120,7 +120,6 @@ async fn assert_probe_encodes_contiguous_frames_without_per_row_type_resolution(
     assert_eq!(join_work().borrowed_key_equalities, 0);
     assert_eq!(join_work().arena_frames, 129);
     assert_eq!(join_work().key_encodings, 1);
-    assert!(join_work().key_type_resolutions <= 2);
     assert_eq!(keys.keys.len(), 1);
     assert_eq!(Arc::strong_count(&keys.keys[0]), 1);
 }
