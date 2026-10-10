@@ -1,7 +1,9 @@
 use std::sync::{Arc, Weak};
 
 use datafusion::arrow::{
-    array::{Int64Array, StringArray, TimestampMicrosecondArray},
+    array::{
+        Array, ArrayRef, Int64Array, LargeBinaryArray, StringArray, TimestampMicrosecondArray,
+    },
     buffer::{Buffer, OffsetBuffer, ScalarBuffer},
     datatypes::{DataType, Field, Schema, TimeUnit},
     record_batch::RecordBatch,
@@ -130,6 +132,7 @@ fn assert_compacted(compacted: &CompactBatch) {
 
 #[test]
 fn test_compaction_borrows_large_backing_with_a_small_constructor_budget() {
+    assert_flat_concat_peak_is_prepaid();
     let source_pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(PADDING + 3));
     let (source, owner) = source_record(&source_pool);
     let rows = selected_rows(&source);
@@ -183,6 +186,67 @@ fn test_compaction_borrows_large_backing_with_a_small_constructor_budget() {
     assert_eq!(source_pool.reserved(), 0);
     assert_compacted(&compacted);
     drop(compacted);
+    drop(workspace);
+    assert_eq!(pool.reserved(), 0);
+}
+
+fn assert_flat_concat_peak_is_prepaid() {
+    let arrays: [ArrayRef; 3] = [
+        Arc::new(Int64Array::from(vec![Some(7), None, Some(9)])),
+        Arc::new(StringArray::from(vec![Some("a"), None, Some("bc")])),
+        Arc::new(LargeBinaryArray::from(vec![
+            Some(b"a".as_slice()),
+            None,
+            Some(b"bc".as_slice()),
+        ])),
+    ];
+    for source in arrays {
+        assert_flat_concat_allocations(&source);
+    }
+}
+
+fn assert_flat_concat_allocations(source: &ArrayRef) {
+    let selected = (0..129)
+        .map(|row| source.slice(row % source.len(), 1))
+        .collect::<Vec<_>>();
+    let arrays = selected.iter().map(Arc::as_ref).collect::<Vec<_>>();
+    let schema = Arc::new(Schema::new(vec![Field::new(
+        "value",
+        source.data_type().clone(),
+        true,
+    )]));
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(CONSTRUCTOR_BUDGET));
+    let workspace = MemoryConsumer::new("flat-concat-peak").register(&pool);
+    let mut paid = 0;
+    let allocations = allocation_counter::measure(|| {
+        let credit = workspace.new_empty();
+        super::budget::payload_seed()
+            .and_then(|bytes| super::accounting::reserve(&credit, bytes))
+            .unwrap();
+        let funding = super::Funding::new([Arc::clone(&schema), Arc::clone(&schema)], credit, None);
+        super::admit(&arrays, &workspace, &funding, &|| Ok(())).unwrap();
+        let output = datafusion::arrow::compute::concat(&arrays).unwrap();
+        paid = pool.reserved();
+        assert_eq!(output.len(), 129);
+        assert_eq!(output.null_count(), 43);
+        for (index, expected) in selected.iter().enumerate() {
+            assert_eq!(output.slice(index, 1).to_data(), expected.to_data());
+        }
+        drop((output, funding));
+    });
+    eprintln!(
+        "flat concat {:?}: heap peak={}B, prepaid={}B, live after drop={}B",
+        source.data_type(),
+        allocations.bytes_max,
+        paid,
+        allocations.bytes_current
+    );
+    assert!(
+        allocations.bytes_max <= u64::try_from(paid).unwrap(),
+        "{allocations:?}, paid={paid}"
+    );
+    assert_eq!(allocations.bytes_current, 0);
+    assert_eq!(source.len(), 3);
     drop(workspace);
     assert_eq!(pool.reserved(), 0);
 }
