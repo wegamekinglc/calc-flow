@@ -653,20 +653,35 @@ fn count_duplicate_identities<'a>(
     inspect_duplicate_identities(state, side, identities, context).map(|(duplicates, _)| duplicates)
 }
 
+struct DuplicateProbes {
+    skip_resident: bool,
+    seen: Option<HashSet<LeftOrder, RandomState>>,
+    append_duplicates: Option<u64>,
+}
+
 fn inspect_duplicate_identities<'a>(
     state: &state::State,
     side: usize,
     identities: impl ExactSizeIterator<Item = &'a LeftOrder> + Clone,
     context: &StreamOperatorContext<'_>,
 ) -> Result<(u64, bool)> {
-    let (skip_resident, mut seen) = prepare_duplicate_probes(state, side, &identities, context)?;
+    let DuplicateProbes {
+        skip_resident,
+        mut seen,
+        append_duplicates,
+    } = prepare_duplicate_probes(state, side, &identities, context)?;
+    if let Some(duplicates) = append_duplicates {
+        context.check_cancelled()?;
+        return Ok((
+            duplicates,
+            ordered_append_proof(skip_resident, true, duplicates),
+        ));
+    }
     let ordered = seen.is_none();
     let mut previous = None;
     let mut duplicates = 0;
     for (position, identity) in identities.enumerate() {
-        if position % 1_024 == 0 {
-            context.check_cancelled()?;
-        }
+        check_input_cancellation(position, context)?;
         if repeated_identity(state, side, identity, &mut seen, previous, skip_resident) {
             duplicates += 1;
         }
@@ -705,8 +720,13 @@ fn prepare_duplicate_probes<'a>(
     side: usize,
     identities: &(impl ExactSizeIterator<Item = &'a LeftOrder> + Clone),
     context: &StreamOperatorContext<'_>,
-) -> Result<(bool, Option<HashSet<LeftOrder, RandomState>>)> {
-    let sorted = identities_are_sorted((*identities).clone(), context)?;
+) -> Result<DuplicateProbes> {
+    let (sorted, duplicates) = if side == 0 {
+        let duplicates = sorted_left_duplicate_count((*identities).clone(), context)?;
+        (duplicates.is_some(), duplicates)
+    } else {
+        (identities_are_sorted((*identities).clone(), context)?, None)
+    };
     let skip_resident = if sorted {
         identities_are_after_state(state, side, (*identities).clone())
     } else {
@@ -714,7 +734,33 @@ fn prepare_duplicate_probes<'a>(
     };
     let seen =
         (!sorted).then(|| HashSet::with_capacity_and_hasher(identities.len(), RandomState::new()));
-    Ok((skip_resident, seen))
+    Ok(DuplicateProbes {
+        skip_resident,
+        seen,
+        append_duplicates: duplicates.filter(|_| skip_resident),
+    })
+}
+
+fn sorted_left_duplicate_count<'a>(
+    identities: impl Iterator<Item = &'a LeftOrder>,
+    context: &StreamOperatorContext<'_>,
+) -> Result<Option<u64>> {
+    use std::cmp::Ordering;
+
+    let mut previous: Option<&LeftOrder> = None;
+    let mut duplicates = 0;
+    for (position, identity) in identities.enumerate() {
+        check_input_cancellation(position, context)?;
+        if let Some(last) = previous {
+            match last.cmp(identity) {
+                Ordering::Greater => return Ok(None),
+                Ordering::Equal => duplicates += 1,
+                Ordering::Less => {}
+            }
+        }
+        previous = Some(identity);
+    }
+    Ok(Some(duplicates))
 }
 
 fn unordered_identities_are_after_state<'a>(
@@ -1811,6 +1857,43 @@ mod identity_tests {
         ));
         assert_eq!(state::take_identity_probes(), 0);
         assert_eq!(state.right.get(&key).unwrap().len(), 1);
+        assert_sorted_left_scan_cancellation();
+    }
+
+    fn assert_sorted_left_scan_cancellation() {
+        let key = state::Encoding::from_slice(&[1]);
+        let sequence = state::Encoding::from_slice(&[2]);
+        let mut state = state::State::default();
+        state.left.insert(
+            (10, key.clone(), sequence.clone()),
+            state::RowRef::fixture(0),
+        );
+        let rows = (11..2_059)
+            .map(|time| (time, key.clone(), sequence.clone()))
+            .collect::<Vec<_>>();
+        for cancelled_at in [1_024, rows.len() - 1] {
+            let cancellation = CancellationToken::new();
+            let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, cancellation.clone());
+            let context = StreamOperatorContext::new(&job, "asof", None);
+            let identities = rows.iter().enumerate().map(|(position, identity)| {
+                if position == cancelled_at {
+                    cancellation.cancel();
+                }
+                identity
+            });
+            state::take_identity_probes();
+            assert!(matches!(
+                inspect_duplicate_identities(&state, 0, identities, &context),
+                Err(crate::CalcFlowError::Cancelled { .. })
+            ));
+            assert_eq!(state::take_identity_probes(), 0);
+            assert_eq!(state.left.len(), 1);
+            assert!(
+                state
+                    .left
+                    .contains_key(&(10, key.clone(), sequence.clone()))
+            );
+        }
     }
 
     #[test]
@@ -1889,6 +1972,78 @@ mod identity_tests {
         assert_eq!(
             count_duplicate_identities(&state, 1, shuffled.iter(), &context).unwrap(),
             1
+        );
+        assert_left_duplicate_semantics(&context);
+        assert_left_append_scan_bound(&context);
+    }
+
+    fn assert_left_duplicate_semantics(context: &StreamOperatorContext<'_>) {
+        let key = state::Encoding::from_slice(&[1]);
+        let sequence = state::Encoding::from_slice(&[2]);
+        let identity = |time| (time, key.clone(), sequence.clone());
+        let mut state = state::State::default();
+        state.left.insert(identity(10), state::RowRef::fixture(0));
+        let cases = [
+            (vec![], (0, true)),
+            (vec![identity(11)], (0, true)),
+            (vec![identity(11), identity(12)], (0, true)),
+            (vec![identity(11), identity(11), identity(12)], (1, false)),
+            (vec![identity(10), identity(10), identity(11)], (2, false)),
+            (vec![identity(9), identity(10), identity(10)], (2, false)),
+            (vec![identity(12), identity(11), identity(12)], (1, false)),
+            (
+                vec![identity(11), identity(11), identity(12), identity(11)],
+                (2, false),
+            ),
+            (
+                vec![
+                    (10, key.clone(), state::Encoding::from_slice(&[3])),
+                    (10, state::Encoding::from_slice(&[3]), sequence.clone()),
+                ],
+                (0, true),
+            ),
+            (
+                vec![(10, state::Encoding::from_slice(&[0]), sequence)],
+                (0, false),
+            ),
+        ];
+        for (rows, expected) in cases {
+            state::take_identity_probes();
+            assert_eq!(
+                inspect_duplicate_identities(&state, 0, rows.iter(), context).unwrap(),
+                expected,
+                "rows={rows:?}"
+            );
+            let probes = state::take_identity_probes();
+            if expected.1 {
+                assert_eq!(probes, 0, "append does not inspect resident rows");
+            }
+        }
+    }
+
+    fn assert_left_append_scan_bound(context: &StreamOperatorContext<'_>) {
+        use std::{cell::Cell, rc::Rc};
+
+        let key = state::Encoding::from_slice(&[1]);
+        let sequence = state::Encoding::from_slice(&[2]);
+        let identity = |time| (time, key.clone(), sequence.clone());
+        let mut state = state::State::default();
+        state.left.insert(identity(1), state::RowRef::fixture(0));
+        let rows = [identity(4), identity(5), identity(6), identity(7)];
+        let visits = Rc::new(Cell::new(0));
+        let observed = Rc::clone(&visits);
+        let identities = rows
+            .iter()
+            .inspect(move |_| observed.set(observed.get() + 1));
+        assert_eq!(
+            inspect_duplicate_identities(&state, 0, identities, context).unwrap(),
+            (0, true)
+        );
+        assert!(
+            (rows.len()..=rows.len() + 1).contains(&visits.get()),
+            "ordered left validation visited {} identities; expected at most {}",
+            visits.get(),
+            rows.len() + 1
         );
     }
 }
