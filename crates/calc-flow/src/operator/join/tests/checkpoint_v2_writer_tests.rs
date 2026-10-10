@@ -253,3 +253,187 @@ async fn assert_bulk_capture_fits_default_runtime_credit() {
     drop(job);
     assert_eq!(pool.reserved(), 0);
 }
+
+#[tokio::test]
+async fn test_prepared_join_checkpoint_fits_bounded_constructor_credit() {
+    const ROWS: usize = 8_193;
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("key", DataType::Int64, false),
+        Field::new(
+            "at",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            false,
+        ),
+        Field::new("text", DataType::Utf8, true),
+    ]));
+    let spec = StreamJoinSpec::inner(
+        ["key"],
+        ["key"],
+        "at",
+        "at",
+        JoinTimeBounds::new(Duration::ZERO, Duration::from_micros(10)).unwrap(),
+        JoinStateLimits::new(10_000, 10 << 20, 10_000).unwrap(),
+    )
+    .unwrap();
+    let mut operator = StreamJoinOperator::new(
+        "bounded-prepare",
+        Arc::clone(&schema),
+        Arc::clone(&schema),
+        spec.clone(),
+    )
+    .unwrap();
+    let record = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(Int64Array::from(vec![7; ROWS])),
+            Arc::new(TimestampMicrosecondArray::from(vec![100; ROWS])),
+            Arc::new(
+                (0..ROWS)
+                    .map(|row| (row % 3 != 0).then_some(if row % 2 == 0 { "a" } else { "bc" }))
+                    .collect::<StringArray>(),
+            ),
+        ],
+    )
+    .unwrap();
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "bounded-prepare", None);
+    let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+    operator
+        .process_data(
+            "left",
+            Batch::table(vec![record.clone()], BatchMetadata::default()).unwrap(),
+            &context,
+            &mut collector,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        operator.status().left.retained_rows,
+        u64::try_from(ROWS).unwrap()
+    );
+    let runtime = operator.runtime.runtime().unwrap();
+    let pool = runtime.incremental_memory_pool();
+    let pressure = runtime.incremental_reservation("bounded-prepare-pressure");
+    pressure
+        .try_grow((1 << 30) - pool.reserved() - (16 << 20))
+        .unwrap();
+    operator
+        .prepare_checkpoint_async(&context)
+        .await
+        .expect("prepared base encoding must fit the bounded constructor workspace");
+    let snapshot = operator.checkpoint(Epoch::INITIAL).unwrap();
+    assert_eq!(operator.state.last_checkpoint_epoch, Some(Epoch::INITIAL));
+    drop(pressure);
+    let mut restored =
+        StreamJoinOperator::new("bounded-prepare", Arc::clone(&schema), schema, spec).unwrap();
+    restored.restore(&snapshot).unwrap();
+    assert_eq!(restored.status(), operator.status());
+    for (index, row) in restored.state.left.iter().enumerate() {
+        assert_eq!(row.row_id, u64::try_from(index).unwrap());
+        assert_eq!(*row.record.view(), record.slice(index, 1));
+    }
+    drop((snapshot, restored, operator));
+    drop(context);
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop(job);
+    assert_eq!(pool.reserved(), 0);
+    assert_mixed_prepared_capture_is_deterministic().await;
+}
+
+async fn assert_mixed_prepared_capture_is_deterministic() {
+    let (first, first_pool) = mixed_prepared_capture().await;
+    let (second, second_pool) = mixed_prepared_capture().await;
+    assert_same_segments(&first, &second);
+    drop((first, second));
+    assert_eq!((first_pool.reserved(), second_pool.reserved()), (0, 0));
+}
+
+async fn mixed_prepared_capture() -> (
+    OperatorStateSnapshot,
+    Arc<dyn datafusion::execution::memory_pool::MemoryPool>,
+) {
+    const ROWS: usize = 2_049;
+    let parents = [
+        record(
+            &[100; 4],
+            &[Some("a"), None, Some("猫"), Some("z")],
+            &["red", "blue", "green", "red"],
+            vec![
+                Some(vec![Some(1), None]),
+                None,
+                Some(vec![]),
+                Some(vec![Some(4)]),
+            ],
+        ),
+        record(
+            &[100; 4],
+            &[None, Some("b"), Some("新"), Some("last")],
+            &["orange", "green", "blue", "orange"],
+            vec![
+                None,
+                Some(vec![Some(2)]),
+                Some(vec![None]),
+                Some(vec![Some(5), Some(6)]),
+            ],
+        ),
+    ];
+    let selection = (0..ROWS)
+        .map(|row| (row % 2, 1 + (row % 3)))
+        .collect::<Vec<_>>();
+    let records = selection
+        .iter()
+        .map(|&(parent, row)| parents[parent].slice(row, 1))
+        .collect::<Vec<_>>();
+    let spec = StreamJoinSpec::inner(
+        ["key"],
+        ["key"],
+        "at",
+        "at",
+        JoinTimeBounds::new(Duration::ZERO, Duration::from_micros(10)).unwrap(),
+        JoinStateLimits::new(10_000, 10 << 20, 10_000).unwrap(),
+    )
+    .unwrap();
+    let mut operator =
+        StreamJoinOperator::new("mixed-prepare", schema(), schema(), spec.clone()).unwrap();
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "mixed-prepare", None);
+    let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+    operator
+        .process_data(
+            "left",
+            Batch::table(records, BatchMetadata::default()).unwrap(),
+            &context,
+            &mut collector,
+        )
+        .await
+        .unwrap();
+    assert_eq!(operator.state.left.len(), ROWS);
+    assert!(
+        operator
+            .state
+            .left
+            .windows(2)
+            .all(|pair| { !Arc::ptr_eq(pair[0].record.column(0), pair[1].record.column(0)) }),
+        "the fixture must reach more than 1,024 independent selection runs"
+    );
+    let pool = operator
+        .runtime
+        .runtime()
+        .unwrap()
+        .incremental_memory_pool();
+    operator.prepare_checkpoint_async(&context).await.unwrap();
+    let snapshot = operator.checkpoint(Epoch::INITIAL).unwrap();
+    let mut restored = StreamJoinOperator::new("mixed-prepare", schema(), schema(), spec).unwrap();
+    restored.restore(&snapshot).unwrap();
+    assert_eq!(restored.status(), operator.status());
+    for (index, &(parent, row)) in selection.iter().enumerate() {
+        let restored_row = &restored.state.left[index];
+        assert_eq!(restored_row.row_id, u64::try_from(index).unwrap());
+        assert_eq!(*restored_row.record.view(), parents[parent].slice(row, 1));
+    }
+    drop((restored, operator));
+    drop(context);
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop(job);
+    (snapshot, pool)
+}
