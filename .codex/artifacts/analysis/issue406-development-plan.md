@@ -108,12 +108,33 @@ Performance acceptance remains outstanding. The new eight-row acceptance
 protocol replaces the old unexecuted final comparison inventory; preserve the
 already collected evidence as historical evidence, without relabeling it.
 
-Next, establish the complete eight-row baseline and attribute the remaining
-costs. Candidate investigations include actual owned-probe cancellation after
-proving that the dispatch gate opens, unused-column gathering in Join followed
-by arithmetic expressions, and the small-batch Python bridge. Priority follows
-measured cost and the unmet targets. Investigating one path does not remove any
-required final workload.
+The complete initial inventory has now been attempted against pinned main
+`588726c8` and runtime `e8a28d99`, with execution harness `427426b2`. All eight
+rows are represented: 52 metric arms have 20 samples each; 12 are blocked by
+eight physical checkpoint preparation failures. The absolute OFF goals remain
+unmet. Main's enabled runtime timings are processing diagnostics because EOF
+checkpoint completion fails. See the [complete diagnosis](issue406-eight-workload-diagnosis.md)
+for all eight rows, separate OFF/LOW/ON observations, failure attribution and
+provenance. Four fixed CPU profiles also completed within their 180-second
+budget; they do not replace acceptance measurements.
+
+Two source corrections are reviewed and committed: `a9fe388c` bounds checkpoint
+construction by contiguous row runs (22 focused tests), and `9be7bd3f` separates
+probe scratch from retained key credit (15 focused tests). Both preserve prepaid
+allocation and alias lifetimes; each has recorded RED/GREEN evidence and passing
+library Clippy. Test-target Clippy retains the known pinned-toolchain generated
+libtest failure. Neither correction has new performance measurements yet.
+
+Next, remove geometric wire-buffer growth peaks with checked exact capacities
+for base/delta indices and payload frames. Retain cancellation and byte-for-byte
+builder output; constructor coalescing preserves the v2 format and deterministic
+equivalent recovery, without claiming the old IPC physical grouping. Validate
+the actual four-column retained 4M fixture and live old-history overlap under
+the existing pool before making capacity claims. Then prioritize Join, ASOF and
+harness changes using the completed profiles. Each increment needs a reviewed
+implementation and focused comparison; the final comparison still covers every
+row and checkpoint policy against the then-current runtime. Investigating or
+fixing one path does not remove any required final workload.
 
 Completion requires reviewed implementations, focused correctness checks,
 complete and reproducible eight-row evidence with separate checkpoint modes,
