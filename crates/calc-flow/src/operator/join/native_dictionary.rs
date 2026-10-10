@@ -110,6 +110,13 @@ pub(super) struct NativeIndex {
 }
 
 impl NativeIndex {
+    fn owner_bytes() -> Option<usize> {
+        std::alloc::Layout::new::<[AtomicUsize; 2]>()
+            .extend(std::alloc::Layout::new::<Self>())
+            .ok()
+            .map(|(layout, _)| layout.pad_to_align().size())
+    }
+
     fn empty(credit: MemoryReservation) -> Self {
         Self {
             entries: HashTable::new(),
@@ -120,7 +127,9 @@ impl NativeIndex {
             run_backing_bytes: 0,
             funding: Arc::new(Funding {
                 credit,
-                resident: AtomicUsize::new(BASE_BYTES),
+                resident: AtomicUsize::new(
+                    BASE_BYTES + Self::owner_bytes().expect("index owner layout"),
+                ),
             }),
             #[cfg(test)]
             hash_mask: u64::MAX,
@@ -392,6 +401,7 @@ impl NativeIndex {
                 .sum::<usize>()
         );
         BASE_BYTES
+            + Self::owner_bytes().expect("index owner layout")
             + self.entries.allocation_size()
             + self.slots.capacity() * size_of::<Option<KeyRun>>()
             + self.free.capacity() * size_of::<u32>()
@@ -448,9 +458,10 @@ fn checked_slots(required: usize) -> Option<usize> {
 }
 
 fn charge_sum<const N: usize>(terms: [Option<usize>; N]) -> Option<usize> {
-    terms
-        .into_iter()
-        .try_fold(BASE_BYTES, |total, term| total.checked_add(term?))
+    terms.into_iter().try_fold(
+        BASE_BYTES.checked_add(NativeIndex::owner_bytes()?)?,
+        |total, term| total.checked_add(term?),
+    )
 }
 
 fn doubled(bytes: Option<usize>) -> Option<usize> {

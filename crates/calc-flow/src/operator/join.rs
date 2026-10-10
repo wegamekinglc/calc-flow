@@ -1804,6 +1804,7 @@ mod tests {
     mod native_lookup_tests;
     mod optimization_tests;
     mod output_gather_tests;
+    mod owned_probe_tests;
     mod sql_key_scratch_tests;
 
     async fn v1_fixture_captures() -> Vec<OperatorStateSnapshot> {
@@ -2925,6 +2926,9 @@ pub struct StreamJoinOperator {
     ingress_progress: IngressProgressSnapshot,
     compaction_release: Option<tokio::sync::oneshot::Receiver<()>>,
     compaction_cleanup: Option<crate::runtime::streaming::gather_work::AttemptCleanup>,
+    probe_control: Option<Arc<datafusion::execution::memory_pool::MemoryReservation>>,
+    #[cfg(test)]
+    probe_test_hook: Option<data_work::TestHook>,
     v2_containers: Option<Arc<checkpoint_v2::ContainerFunding>>,
     v2_writer: checkpoint_v2::WriterState,
     #[cfg(test)]
@@ -3232,7 +3236,7 @@ struct StreamJoinState {
 #[derive(Default)]
 struct RetainedRows(
     Arc<Vec<StoredRow>>,
-    Option<native_lookup::NativeIndex>,
+    Option<Arc<native_lookup::NativeIndex>>,
     columnar::SparseQueue,
 );
 
@@ -3248,7 +3252,9 @@ impl RetainedRows {
             self.2.enqueue_if_due(&row.record);
         }
         if let Some(index) = &mut self.1 {
-            index.append(self.0.len(), &rows);
+            Arc::get_mut(index)
+                .expect("native probe released before retained append")
+                .append(self.0.len(), &rows);
         }
         std::ops::DerefMut::deref_mut(self).extend(rows);
     }
@@ -3256,6 +3262,7 @@ impl RetainedRows {
     fn swap_remove(&mut self, index: usize) -> StoredRow {
         let row = std::ops::DerefMut::deref_mut(self).swap_remove(index);
         if let Some(native) = &mut self.1 {
+            let native = Arc::get_mut(native).expect("native probe released before eviction");
             native.remove(&row, self.0.get(index).map(|row| (row, index)), |dense| {
                 &self.0[dense].encoded_key
             });
@@ -3376,6 +3383,7 @@ mod borrowed_key;
 mod checkpoint_compaction;
 mod checkpoint_v2;
 mod columnar;
+mod data_work;
 mod key_arena;
 mod materialization;
 mod metadata_validation;
@@ -3460,6 +3468,9 @@ impl StreamJoinOperator {
             ingress_progress: IngressProgressSnapshot::default(),
             compaction_release: None,
             compaction_cleanup: None,
+            probe_control: None,
+            #[cfg(test)]
+            probe_test_hook: None,
             v2_containers: None,
             v2_writer: checkpoint_v2::WriterState::default(),
             #[cfg(test)]
@@ -4049,6 +4060,10 @@ impl StreamJoinOperator {
                 }),
                 admitted,
             );
+        }
+        let (owned, admitted) = self.owned_native_matches(plan, admitted, context).await;
+        if let Some(result) = owned {
+            return (result, admitted);
         }
         match self.native_matches(plan, &admitted) {
             Ok(Some(native)) => {

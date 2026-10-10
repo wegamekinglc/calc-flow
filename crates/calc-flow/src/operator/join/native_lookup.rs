@@ -53,6 +53,10 @@ pub(super) struct NativeKeys {
 }
 
 impl NativeKeys {
+    pub(super) fn id(&self, position: usize) -> u32 {
+        self.ids[position]
+    }
+
     pub(super) fn key(&self, position: usize) -> &Arc<FramedKey> {
         &self.keys[self.ids[position] as usize]
     }
@@ -350,7 +354,10 @@ impl StreamJoinOperator {
         for (pos, row) in admitted.iter().enumerate() {
             pairs.extend(
                 windows
-                    .range(pos, time_range(self.spec.bounds, plan, row.event_time))
+                    .range(
+                        pos,
+                        time_range(self.spec.bounds, plan.incoming_is_left, row.event_time),
+                    )
                     .map(|opposite_index| MatchedPair {
                         pos,
                         opposite_index,
@@ -392,7 +399,7 @@ impl StreamJoinOperator {
         Ok(credit)
     }
 
-    fn ensure_native_index(&mut self, left: bool) -> Result<bool> {
+    pub(super) fn ensure_native_index(&mut self, left: bool) -> Result<bool> {
         let rows = if left {
             &self.state.left
         } else {
@@ -412,13 +419,17 @@ impl StreamJoinOperator {
         } else {
             &mut self.state.right
         };
-        rows.1 = Some(NativeIndex::new(rows, credit));
+        rows.1 = Some(Arc::new(NativeIndex::new(rows, credit)));
         Ok(true)
     }
 }
 
-fn time_range(bounds: JoinTimeBounds, plan: &SidePlan, time: EventTime) -> (EventTime, EventTime) {
-    let (before, after) = if plan.incoming_is_left {
+pub(super) fn time_range(
+    bounds: JoinTimeBounds,
+    incoming_is_left: bool,
+    time: EventTime,
+) -> (EventTime, EventTime) {
+    let (before, after) = if incoming_is_left {
         (bounds.before_micros, bounds.after_micros)
     } else {
         (bounds.after_micros, bounds.before_micros)
@@ -480,7 +491,10 @@ fn count_pairs(
         count = count
             .checked_add(
                 windows
-                    .count(pos, time_range(bounds, plan, row.event_time))
+                    .count(
+                        pos,
+                        time_range(bounds, plan.incoming_is_left, row.event_time),
+                    )
                     .min(remaining),
             )
             .ok_or_else(|| scratch_error("join"))?;

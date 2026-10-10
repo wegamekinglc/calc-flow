@@ -10,8 +10,8 @@ use datafusion::execution::memory_pool::MemoryReservation;
 use tokio::sync::Notify;
 
 use super::{
-    AdmissionResult, GatherHome, GatherScope, GatherStop, OwnedCpuWork, RetirementGuard, Slot,
-    WorkAdapter, WorkTicket, cancelled,
+    AdmissionResult, GatherHome, GatherScope, GatherStop, OwnedCpuWork, ParallelCpuWork,
+    RetirementGuard, Slot, WorkAdapter, WorkPackage, WorkTicket, cancelled,
 };
 use crate::{Result, StreamJobContext};
 
@@ -52,8 +52,8 @@ struct TrackedCredit {
     _release: CreditRelease,
 }
 
-struct ObservedSubmission<W> {
-    work: Option<WorkAdapter<W>>,
+struct ObservedSubmission<P> {
+    work: Option<P>,
     credit: MemoryReservation,
     stop: GatherStop,
     retirement: RetirementGuard,
@@ -121,8 +121,36 @@ impl GatherScope {
         retirement: RetirementGuard,
         observer: &'a mut Option<AttemptCleanup>,
     ) -> impl Future<Output = AdmissionResult<ObservedTicket<W::Output>>> + 'a {
+        self.submit_observed_package(WorkAdapter(work), credit, stop, retirement, observer)
+    }
+
+    pub(crate) fn submit_observed_parallel_work<'a, W: ParallelCpuWork>(
+        &'a self,
+        work: Arc<W>,
+        credit: MemoryReservation,
+        stop: GatherStop,
+        retirement: RetirementGuard,
+        observer: &'a mut Option<AttemptCleanup>,
+    ) -> impl Future<Output = AdmissionResult<ObservedTicket<Vec<W::Output>>>> + 'a {
+        self.submit_observed_package(
+            super::parallel::Package(work),
+            credit,
+            stop,
+            retirement,
+            observer,
+        )
+    }
+
+    fn submit_observed_package<'a, P: WorkPackage>(
+        &'a self,
+        work: P,
+        credit: MemoryReservation,
+        stop: GatherStop,
+        retirement: RetirementGuard,
+        observer: &'a mut Option<AttemptCleanup>,
+    ) -> impl Future<Output = AdmissionResult<ObservedTicket<P::Output>>> + 'a {
         let submission = ObservedSubmission {
-            work: Some(WorkAdapter(work)),
+            work: Some(work),
             credit,
             stop,
             retirement,

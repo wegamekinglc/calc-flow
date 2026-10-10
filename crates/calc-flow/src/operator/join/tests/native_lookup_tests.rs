@@ -730,6 +730,7 @@ async fn native_index_budget_denial(service: &crate::runtime::streaming::gather_
 #[test]
 fn test_empty_native_result_funds_key_vector_until_actual_drop() {
     checkpoint_compaction_tests::isolated_checkpoint_test(|service, runtime| {
+        runtime.block_on(owned_probe_tests::assert_owned_process_data(service));
         runtime.block_on(empty_native_result_credit(service));
     });
 }
@@ -797,6 +798,7 @@ async fn empty_native_result_credit(service: &crate::runtime::streaming::gather_
 #[test]
 fn test_native_fallback_refunds_unused_index_before_legacy_sql() {
     checkpoint_compaction_tests::isolated_checkpoint_test(|service, runtime| {
+        runtime.block_on(owned_probe_tests::assert_refused_process_data(service));
         runtime.block_on(native_fallback_index_refund(service));
     });
 }
