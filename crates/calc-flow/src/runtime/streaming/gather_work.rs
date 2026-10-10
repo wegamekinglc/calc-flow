@@ -1144,6 +1144,10 @@ fn internal(message: &str) -> CalcFlowError {
 
 #[cfg(test)]
 impl JobGatherOwner {
+    pub(crate) fn attempt_sequence(&self) -> u64 {
+        self.0.home.state.lock().next_attempt
+    }
+
     pub(crate) fn funding(&self) -> (usize, usize, usize) {
         let state = self.0.home.state.lock();
         let home = state.control.as_ref().map_or(0, MemoryReservation::size);

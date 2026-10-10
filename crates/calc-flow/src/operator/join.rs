@@ -2939,6 +2939,8 @@ pub struct StreamJoinOperator {
     probe_unit_test_hook: Option<data_work::UnitTestHook>,
     #[cfg(test)]
     materialize_unit_test_hook: Option<Arc<dyn Fn(usize, bool) + Send + Sync>>,
+    #[cfg(test)]
+    materialize_take_test_hook: Option<Arc<dyn Fn(usize, usize) + Send + Sync>>,
     v2_containers: Option<Arc<checkpoint_v2::ContainerFunding>>,
     v2_writer: checkpoint_v2::WriterState,
     #[cfg(test)]
@@ -3486,6 +3488,8 @@ impl StreamJoinOperator {
             probe_unit_test_hook: None,
             #[cfg(test)]
             materialize_unit_test_hook: None,
+            #[cfg(test)]
+            materialize_take_test_hook: None,
             v2_containers: None,
             v2_writer: checkpoint_v2::WriterState::default(),
             #[cfg(test)]

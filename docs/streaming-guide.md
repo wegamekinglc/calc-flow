@@ -989,14 +989,15 @@ If worker admission is refused, matching resumes through the existing serial
 native and DataFusion paths after the attempted work has been released.
 
 Each validated output chunk can separately use up to eight materialization
-workers, with at least 4,096 ordered pairs per unit and at least two units.
-Their balanced consecutive pair ranges are independent of probe input ranges;
-even one incoming row with 8,192 matches can use two units. Only the current
-canonical chunk is constructed, merged in range order, and emitted before
-starting another chunk. Selection buffers, fragments, merge scratch and the
-final output remain funded through their actual lifetimes. Published Array
-and Buffer clones retain output credit after worker shutdown and release it
-when their last owners are dropped.
+workers. The unit count is bounded by the output-column count and one unit
+per 4,096 ordered pairs; fewer than two units keeps serial materialization.
+Workers own balanced consecutive column ranges and each column takes all of
+the current chunk's ordered pairs once. Even one incoming row with 8,192
+matches can use two units. The actor combines complete columns in ordinal
+order and emits one canonical chunk before starting another. Shared selection
+buffers, result controls and output buffers remain funded through their actual
+lifetimes. Published Array and Buffer clones retain output credit after worker
+shutdown and release it when their last owners are dropped.
 
 This path supports nonempty Boolean, positive-width primitive (including
 timestamp and decimal), Utf8/LargeUtf8 and Binary/LargeBinary columns when

@@ -120,11 +120,18 @@ async fn assert_output_lifetime(service: &TestService) {
         StreamJoinOperator::new("match", left_schema(), right_schema(), declaration()).unwrap();
     preload(&mut operator, &context).await;
     let observed = observe(&mut operator, &run);
+    let takes = Arc::new(Mutex::new(Vec::new()));
+    let recorded = takes.clone();
+    operator.materialize_take_test_hook = Some(Arc::new(move |column, rows| {
+        recorded.lock().unwrap().push((column, rows));
+    }));
+    let attempts_before = run.gather_owner().attempt_sequence();
     let mut output = EdgeCollector::new(operator.output_ports().to_vec());
     operator
         .process_data("left", left_batch(vec![0]), &context, &mut output)
         .await
         .unwrap();
+    let attempts = run.gather_owner().attempt_sequence() - attempts_before;
     let messages = output.drain("output");
     assert_eq!(messages.len(), 1);
     let batch = messages[0].as_data().unwrap();
@@ -183,6 +190,18 @@ async fn assert_output_lifetime(service: &TestService) {
     assert!(
         held > 0,
         "escaping Array/Buffer clones must keep output resident credit after shutdown"
+    );
+    let mut actual_takes = takes.lock().unwrap().clone();
+    actual_takes.sort_unstable();
+    assert_eq!(
+        (actual_takes, attempts),
+        (
+            (0..6)
+                .map(|column| (column, CHUNK_ROWS))
+                .collect::<Vec<_>>(),
+            1
+        ),
+        "one canonical chunk takes every column once with one actual worker attempt"
     );
 }
 

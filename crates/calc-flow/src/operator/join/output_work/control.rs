@@ -1,8 +1,7 @@
 use super::{
     bounds::{self, Certificate, Shape},
     funding::{OutputBuffer, OutputFunding},
-    inputs::Selection,
-    worker::{Fragment, FragmentWork, MergeWork},
+    worker::{Fragment, FragmentWork},
 };
 use crate::runtime::streaming::gather_work::cleanup_control_bytes;
 use datafusion::arrow::{
@@ -57,20 +56,10 @@ fn wrapped_owner() -> Option<usize> {
     sum(&[owned, arc::<tokio_util::bytes::Bytes>()?, buffer_owner()?])
 }
 
-pub(super) fn fragment_column(
-    shape: Shape,
-    _data_type: &datafusion::arrow::datatypes::DataType,
-    nullable: bool,
-) -> Option<usize> {
-    let buffers = shape.buffers() + usize::from(nullable);
-    sum(&[array_owner(shape)?, bounds::mul(buffers, buffer_owner()?)?])
-}
-
-pub(super) fn final_column(shape: Shape, nullable: bool, fragments: usize) -> Option<usize> {
+pub(super) fn final_column(shape: Shape, nullable: bool) -> Option<usize> {
     sum(&[
         rebound_controls(shape, nullable)?,
-        builder_controls(shape)?,
-        bounds::mul(fragments, size_of::<&dyn datafusion::arrow::array::Array>())?,
+        bounds::mul(2 * shape.buffers(), size_of::<Buffer>())?,
     ])
 }
 
@@ -80,19 +69,6 @@ fn rebound_controls(shape: Shape, nullable: bool) -> Option<usize> {
         array_owner(shape)?,
         array_owner(shape)?,
         bounds::mul(buffers, bounds::add(buffer_owner()?, wrapped_owner()?)?)?,
-    ])
-}
-
-fn builder_controls(shape: Shape) -> Option<usize> {
-    let reset = if let Shape::Bytes(width) = shape {
-        4 * width
-    } else {
-        0
-    };
-    sum(&[
-        4 * size_of::<Buffer>(),
-        bounds::mul(2 * shape.buffers(), size_of::<Buffer>())?,
-        reset,
     ])
 }
 
@@ -108,18 +84,16 @@ fn snapshot(rows: usize) -> Option<usize> {
         arc::<FragmentWork>()?,
         arc::<MemoryReservation>()?,
         release_channel()?,
-        release_channel()?,
-        bounds::mul(rows, size_of::<Selection>())?,
+        bounds::mul(rows, 2 * size_of::<u64>())?,
+        2 * buffer_owner()?,
     ])
 }
 
 fn fragments(rows: usize, columns: usize) -> Option<usize> {
-    let count = super::units(rows);
+    let count = super::units(rows, columns);
     sum(&[
-        bounds::mul(rows, 2 * size_of::<u64>())?,
-        bounds::mul(count, 2 * buffer_owner()?)?,
         bounds::mul(count.next_power_of_two().max(4), size_of::<Fragment>())?,
-        bounds::mul(bounds::mul(count, columns)?, size_of::<ArrayRef>())?,
+        bounds::mul(columns, size_of::<ArrayRef>())?,
     ])
 }
 
@@ -127,10 +101,7 @@ fn calls(name: &str) -> Option<usize> {
     let caller = super::super::metadata_validation::inventory::caller_controls(name)?;
     let registration = super::super::metadata_validation::inventory::registration_controls()?;
     sum(&[
-        size_of::<MergeWork>(),
         cleanup_control_bytes::<Vec<Fragment>>(),
-        cleanup_control_bytes::<RecordBatch>(),
-        caller,
         caller,
         registration,
     ])

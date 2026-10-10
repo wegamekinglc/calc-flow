@@ -30,9 +30,8 @@ impl Shape {
         if matches!(self, Self::Bytes(_)) { 2 } else { 1 }
     }
 
-    fn data(self, rows: usize, selected_bytes: usize, merged: bool) -> Option<usize> {
+    fn data(self, rows: usize, selected_bytes: usize) -> Option<usize> {
         match self {
-            Self::Bits if merged => rounded(rows.div_ceil(8), 64),
             Self::Bits => bitmap(rows),
             Self::Primitive(width) => mul(rows, width),
             Self::Bytes(offset) => add(mul(rows.checked_add(1)?, offset)?, selected_bytes),
@@ -56,10 +55,6 @@ pub(super) fn mul(left: usize, right: usize) -> Option<usize> {
         .filter(|bytes| isize::try_from(*bytes).is_ok())
 }
 
-fn rounded(bytes: usize, alignment: usize) -> Option<usize> {
-    mul(bytes.div_ceil(alignment), alignment)
-}
-
 fn bitmap(rows: usize) -> Option<usize> {
     mul(rows.div_ceil(64), 8)
 }
@@ -69,7 +64,9 @@ pub(super) async fn certify(
     range: Range<usize>,
     context: &StreamOperatorContext<'_>,
 ) -> Result<Option<Certificate>> {
-    if super::units(range.len()) < 2 || materializer.schema.fields().is_empty() {
+    if super::units(range.len(), materializer.schema.fields().len()) < 2
+        || materializer.schema.fields().is_empty()
+    {
         return Ok(None);
     }
     if !same_parents(materializer, range.clone(), context).await? {
@@ -198,62 +195,16 @@ async fn column_cost(
         .0
         .nulls()
         .is_some();
-    Ok(cost(shape, data_type, range.len(), bytes, nullable))
+    Ok(cost(shape, range.len(), bytes, nullable))
 }
 
-fn cost(
-    shape: Shape,
-    data_type: &DataType,
-    rows: usize,
-    bytes: usize,
-    nullable: bool,
-) -> Option<Certificate> {
-    Some(Certificate {
-        workspace: fragment_cost(shape, data_type, rows, bytes, nullable)?,
-        output: merged_cost(shape, rows, bytes, nullable)?,
-    })
-}
-
-fn fragment_cost(
-    shape: Shape,
-    data_type: &DataType,
-    rows: usize,
-    bytes: usize,
-    nullable: bool,
-) -> Option<usize> {
-    let count = super::units(rows);
-    let mut workspace = bytes;
-    for ordinal in 0..count {
-        let rows = super::range(rows, ordinal).len();
-        workspace = add(
-            workspace,
-            one_fragment_cost(shape, data_type, rows, nullable)?,
-        )?;
-    }
-    Some(workspace)
-}
-
-fn one_fragment_cost(
-    shape: Shape,
-    data_type: &DataType,
-    rows: usize,
-    nullable: bool,
-) -> Option<usize> {
+fn cost(shape: Shape, rows: usize, bytes: usize, nullable: bool) -> Option<Certificate> {
     let data = add(
-        shape.data(rows, 0, false)?,
+        shape.data(rows, bytes)?,
         if nullable { bitmap(rows)? } else { 0 },
     )?;
-    add(data, control::fragment_column(shape, data_type, nullable)?)
-}
-
-fn merged_cost(shape: Shape, rows: usize, bytes: usize, nullable: bool) -> Option<usize> {
-    let nulls = if nullable {
-        rounded(rows.div_ceil(8), 64)?
-    } else {
-        0
-    };
-    add(
-        add(shape.data(rows, bytes, true)?, nulls)?,
-        control::final_column(shape, nullable, super::units(rows))?,
-    )
+    Some(Certificate {
+        workspace: 0,
+        output: add(data, control::final_column(shape, nullable)?)?,
+    })
 }
