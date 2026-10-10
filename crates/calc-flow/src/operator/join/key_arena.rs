@@ -182,12 +182,6 @@ struct KeyColumn<'a> {
 }
 
 impl<'a> KeyColumn<'a> {
-    fn frame_supported(&self, row: usize) -> bool {
-        !self.array.is_null(row)
-            && u32::try_from(self.timezone.len()).is_ok()
-            && u32::try_from(self.values.len(row)).is_ok()
-    }
-
     fn bind(array: &'a dyn Array) -> Option<Self> {
         let values = KeyValues::bind(array)?;
         let tag = key_type_tag(array.data_type()).ok()?;

@@ -9,7 +9,7 @@ const PROBE_ROWS: usize = 8_192;
 fn probe_operator() -> StreamJoinOperator {
     let mut declaration = spec();
     declaration.limits = JoinStateLimits::new(20_000, 10_000_000, 8_192).unwrap();
-    let mut operator =
+    let operator =
         StreamJoinOperator::new("match", left_schema(), right_schema(), declaration).unwrap();
     data_work::relax_probe_cost_gate_for_test();
     operator

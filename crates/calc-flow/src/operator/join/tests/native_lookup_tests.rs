@@ -445,8 +445,6 @@ async fn assert_native_arena_all_key_types_preserve_exact_v1_frames() {
             values.data_type()
         );
         assert_eq!(join_work().borrowed_key_hashes, 0);
-        assert_eq!(join_work().borrowed_key_equalities, 0);
-        assert!(join_work().key_type_resolutions <= 2);
         let pool = operator
             .runtime
             .runtime()

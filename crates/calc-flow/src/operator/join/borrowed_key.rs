@@ -60,7 +60,7 @@ impl BorrowedKey<'_> {
         Ok(())
     }
 
-    pub(in crate::operator::join) fn visit(&self, mut visitor: impl FnMut(&[u8])) -> Result<()> {
+    fn visit(&self, mut visitor: impl FnMut(&[u8])) -> Result<()> {
         for &index in self.indices {
             #[cfg(test)]
             super::note_join_work(|work| work.key_type_resolutions += 1);

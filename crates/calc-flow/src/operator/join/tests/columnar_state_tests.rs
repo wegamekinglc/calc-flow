@@ -2365,3 +2365,37 @@ async fn test_owned_copy_key_scratch_does_not_borrow_whole_chunk_backing() {
     drop(keys);
     assert_eq!(pool.reserved(), 0);
 }
+
+#[tokio::test]
+async fn slim_probes_without_dispatch_stay_serial() {
+    let mut declaration = spec();
+    declaration.limits = JoinStateLimits::new(20_000, 10_000_000, 8_192).unwrap();
+    let mut operator =
+        StreamJoinOperator::new("match", left_schema(), right_schema(), declaration).unwrap();
+    let job_context = job();
+    let context = StreamOperatorContext::new(&job_context, "match", None);
+    let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+    operator
+        .process_data("right", right_batch(vec![0]), &context, &mut collector)
+        .await
+        .unwrap();
+    let dispatched = Arc::new(std::sync::Mutex::new(0_usize));
+    let recorder = Arc::clone(&dispatched);
+    operator.probe_test_hook = Some(Arc::new(move |_, _, _| {
+        *recorder.lock().unwrap() += 1;
+    }));
+    reset_join_work();
+    operator
+        .process_data("left", left_batch(vec![0; 8_192]), &context, &mut collector)
+        .await
+        .unwrap();
+    let output = collector.drain("output");
+    let output_rows: usize = output
+        .iter()
+        .filter_map(|message| message.as_data())
+        .map(Batch::num_rows)
+        .sum();
+    assert_eq!(output_rows, 8_192);
+    assert_eq!(*dispatched.lock().unwrap(), 0);
+    assert!(join_work().native_range_visits > 0);
+}
