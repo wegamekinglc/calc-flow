@@ -499,7 +499,8 @@ def _validate_history_alias(history: dict, before: dict) -> None:
         or alias.get("kind") != "StateSegment"
         or alias.get("pool_id") != "history"
         or alias.get("has_owner") is not True
-        or alias.get("credit_scope") != "shared_encoder_owner"
+        or alias.get("credit_scope")
+        != "per_segment_backing_plus_shared_capture_controls"
     ):
         raise ValueError("missing owned source-pool segment alias")
     _history_count(alias.get("snapshot_epoch"), 4, "segment alias epoch")

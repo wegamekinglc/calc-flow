@@ -448,7 +448,7 @@ def history_observation():
                 "bytes": 1,
                 "sha256": "e" * 64,
                 "has_owner": True,
-                "credit_scope": "shared_encoder_owner",
+                "credit_scope": "per_segment_backing_plus_shared_capture_controls",
             },
             "oracle": oracle,
             "output_rows": 4_000_000,
@@ -534,6 +534,7 @@ class JoinCheckpointHistoryTests(unittest.TestCase):
             ("has_owner", False),
             ("pool_id", "restore_new"),
             ("credit_scope", "segment_bytes"),
+            ("credit_scope", "shared_encoder_owner"),
             ("snapshot_epoch", 5),
         ):
             invalid = history_observation()

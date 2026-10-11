@@ -182,7 +182,10 @@ async fn retained_history_preserves_row3_fixture_progress_and_complete_restores(
     assert_eq!(alias["kind"], "StateSegment");
     assert_eq!(alias["pool_id"], "history");
     assert_eq!(alias["has_owner"], true);
-    assert_eq!(alias["credit_scope"], "shared_encoder_owner");
+    assert_eq!(
+        alias["credit_scope"],
+        "per_segment_backing_plus_shared_capture_controls"
+    );
     assert_eq!(alias["snapshot_epoch"], 4);
     assert!(
         history["before"]["segments"]

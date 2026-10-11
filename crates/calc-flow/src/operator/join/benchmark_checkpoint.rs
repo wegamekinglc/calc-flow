@@ -735,7 +735,7 @@ impl HeldHistory {
         drop(segment_alias);
         require(
             pool.reserved() == 0,
-            "segment alias did not refund its shared encoder credit",
+            "segment alias did not refund its backing and capture-control credit",
         )?;
         Ok(report)
     }
@@ -759,7 +759,7 @@ fn held_segment(
         "snapshot_epoch": snapshot.inline_metadata["epoch"],
         "name": name, "bytes": segment.bytes().len(),
         "sha256": hex::encode(Sha256::digest(segment.bytes())),
-        "has_owner": true, "credit_scope": "shared_encoder_owner"});
+        "has_owner": true, "credit_scope": "per_segment_backing_plus_shared_capture_controls"});
     Ok((segment.clone(), evidence))
 }
 
