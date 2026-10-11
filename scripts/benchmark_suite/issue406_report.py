@@ -178,7 +178,7 @@ def _revision(case, base: dict, head: dict, records: dict, assessment: dict) -> 
 
 
 def _find(
-    cases: list[dict], row: int, workload: str, mode: str, *, rows=1_000_000, threads=1
+    cases: list[dict], row: int, workload: str, mode: str, *, shape=(1_000_000, 1)
 ) -> dict:
     return next(
         case
@@ -186,8 +186,7 @@ def _find(
         if case["row"] == row
         and case["workload"] == workload
         and case["mode"] == mode
-        and case["rows"] == rows
-        and case["threads"] == threads
+        and (case["rows"], case["threads"]) == shape
     )
 
 
@@ -281,11 +280,11 @@ def _runtime_target(
 ) -> dict:
     absolute, modes = [], []
     for threads, limit in limits:
-        off = _find(cases, row, workload, "off", rows=rows, threads=threads)
+        off = _find(cases, row, workload, "off", shape=(rows, threads))
         absolute.append(_absolute(off, limit))
         modes.extend(
             _mode_effect(
-                off, _find(cases, row, workload, mode, rows=rows, threads=threads), mode
+                off, _find(cases, row, workload, mode, shape=(rows, threads)), mode
             )
             for mode in ("low", "on")
         )
@@ -293,7 +292,7 @@ def _runtime_target(
         {
             "mode": mode,
             "threads": threads,
-            **_find(cases, row, workload, mode, rows=rows, threads=threads)["baseline"],
+            **_find(cases, row, workload, mode, shape=(rows, threads))["baseline"],
         }
         for threads, _limit in limits
         for mode in ("low", "on")
@@ -311,7 +310,7 @@ def _scaling_target(cases: list[dict]) -> dict:
     scaling, effects = [], []
     for mode in ("off", "low", "on"):
         small, large = (
-            _find(cases, 3, "join_retained", mode, rows=rows)
+            _find(cases, 3, "join_retained", mode, shape=(rows, 1))
             for rows in (1_000_000, 4_000_000)
         )
         available = small["candidate"]["status"] == large["candidate"]["status"] == "ok"
@@ -364,8 +363,8 @@ def _scaling_target(cases: list[dict]) -> dict:
         if mode != "off":
             effects.extend(
                 _mode_effect(
-                    _find(cases, 3, "join_retained", "off", rows=rows),
-                    _find(cases, 3, "join_retained", mode, rows=rows),
+                    _find(cases, 3, "join_retained", "off", shape=(rows, 1)),
+                    _find(cases, 3, "join_retained", mode, shape=(rows, 1)),
                     mode,
                 )
                 for rows in (1_000_000, 4_000_000)
@@ -435,26 +434,10 @@ def _overhead(
         return {"side": side, "mode": mode, "target_status": "unmeasured"}
     proof = report.get("scheduling_proofs", {}).get(f"{side}/{mode}")
     errors = []
-    normalized = {"asof": [], "asof_operator": []}
     # Match source references by their recorded location, including warmups.
     # These are semantic replay links; timing aggregation remains independent.
     try:
-        for name in normalized:
-            record = records[components[name]["case"], side]
-            if len(record.get("warmups", [])) != ROUNDS:
-                raise ValueError("ASOF replay requires both recorded warmups")
-            for sample in [*record["warmups"], *_samples(record)]:
-                item = {
-                    **sample,
-                    "seconds": sample["settled_processing_seconds"]
-                    if name == "asof"
-                    else sample["processing_seconds"],
-                }
-                if name == "asof_operator" and "match_identity" not in item:
-                    item["match_identity"] = matched_native_identity(
-                        item, mode, item["cpu_affinity"]
-                    )
-                normalized[name].append(item)
+        normalized = _normalize_replays(components, records, side, mode)
         native_reference = normalized["asof_operator"][ROUNDS]
         e2e_reference = normalized["asof"][ROUNDS]
         projection = arms["projection"]["statistics"]["p50"]
@@ -851,3 +834,24 @@ def render_acceptance_markdown(summary: dict) -> str:
         ]
     )
     return "\n".join(parts)
+
+
+def _normalize_replays(components: dict, records: dict, side: str, mode: str) -> dict:
+    normalized = {"asof": [], "asof_operator": []}
+    for name in normalized:
+        record = records[components[name]["case"], side]
+        if len(record.get("warmups", [])) != ROUNDS:
+            raise ValueError("ASOF replay requires both recorded warmups")
+        for sample in [*record["warmups"], *_samples(record)]:
+            item = {
+                **sample,
+                "seconds": sample["settled_processing_seconds"]
+                if name == "asof"
+                else sample["processing_seconds"],
+            }
+            if name == "asof_operator" and "match_identity" not in item:
+                item["match_identity"] = matched_native_identity(
+                    item, mode, item["cpu_affinity"]
+                )
+            normalized[name].append(item)
+    return normalized

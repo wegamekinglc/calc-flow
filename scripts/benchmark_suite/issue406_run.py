@@ -20,6 +20,13 @@ from scripts.benchmark_suite.issue406_acceptance import (
     validate_complete_results,
     validate_observation,
 )
+from scripts.benchmark_suite.issue406_harness import (
+    WHEEL_TARGET,
+    native_harness_reuse,
+    validate_acceptance_harness,
+    validate_native_profile,
+    validate_traced_wheel_invocations,
+)
 from scripts.benchmark_suite.process import (
     ROOT,
     Worker,
@@ -59,76 +66,30 @@ async def collect(runner, output: Path) -> dict:
     report = {"measurements": list(records.values()), "state": "running"}
     output.mkdir(parents=True, exist_ok=True)
 
-    def journal(value):
-        with (output / "attempts.jsonl").open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps(value, allow_nan=False) + "\n")
-
-    async def invoke(group, side, round_index, index):
-        started = time.monotonic()
-        attempt = {
-            "cases": [case.id for case in group],
-            "side": side,
-            "round": round_index,
-            "index": index,
-            "phase": "warmup" if index is None else "sample",
-        }
-        journal({**attempt, "state": "started"})
-        try:
-            if index is None:
-                result = await runner.prepare(group, side, round_index)
-            else:
-                result = await runner.sample(group, side, round_index, index)
-        except BaseException as error:
-            journal(
-                {
-                    **attempt,
-                    "state": "failed",
-                    "elapsed_seconds": time.monotonic() - started,
-                    "error": f"{type(error).__name__}: {error}",
-                }
-            )
-            raise
-        journal(
-            {
-                **attempt,
-                "state": "completed",
-                "elapsed_seconds": time.monotonic() - started,
-            }
-        )
-        return result
-
-    def record(group, side, round_index, index, samples):
-        if set(samples) != {case.id for case in group}:
-            raise ValueError("shared invocation omitted or added a target metric")
-        for case in group:
-            target = records[case.id, side]
-            if index is None:
-                target["warmups"].append(samples[case.id])
-            else:
-                target["rounds"][round_index].append(samples[case.id])
-        write_json(
-            output / "progress.json",
-            {
-                "case": group[0].id,
-                "side": side,
-                "round": round_index,
-                "index": index,
-                "state": "running",
-            },
-        )
-
     try:
         for group in collection_groups():
             for round_index in range(ROUNDS):
                 try:
                     for side in group[0].sides:
-                        samples = await invoke(group, side, round_index, None)
-                        record(group, side, round_index, None, samples)
+                        samples = await _invoke_collection(
+                            runner, output, group, side, (round_index, None)
+                        )
+                        _record_collection(
+                            records, output, group, (side, round_index, None), samples
+                        )
                     for index in range(SAMPLES):
                         for side in pair_order(index):
                             if side in group[0].sides:
-                                samples = await invoke(group, side, round_index, index)
-                                record(group, side, round_index, index, samples)
+                                samples = await _invoke_collection(
+                                    runner, output, group, side, (round_index, index)
+                                )
+                                _record_collection(
+                                    records,
+                                    output,
+                                    group,
+                                    (side, round_index, index),
+                                    samples,
+                                )
                 finally:
                     cleanup = asyncio.create_task(runner.finish_round())
                     try:
@@ -181,52 +142,7 @@ def competing_work(owned: set[int]) -> list[dict]:
 
 def validate_plan(plan: dict) -> None:
     """Require the complete frozen inventory and hash every declared input."""
-    if (
-        plan.get("schema") != "calc-flow.issue406-execution.v1"
-        or plan.get("budget_seconds") != 4500
-        or plan.get("settlement_seconds") != 300
-        or plan.get("cases") != [asdict(case) for case in acceptance_inventory()]
-    ):
-        raise ValueError("execution plan differs from the frozen acceptance contract")
-    precharged = plan.get("precharged_seconds", 0)
-    if (
-        type(precharged) not in (int, float)
-        or not math.isfinite(precharged)
-        or not 0 <= precharged < 4200
-    ):
-        raise ValueError("invalid precharged final correctness budget")
-    cpus = plan.get("cpus")
-    if (
-        not isinstance(cpus, list)
-        or len(cpus) != 32
-        or len(set(cpus)) != 32
-        or any(type(cpu) is not int for cpu in cpus)
-        or not set(cpus).issubset(os.sched_getaffinity(0))
-    ):
-        raise ValueError("execution requires one available fixed 32-CPU set")
-    files = plan.get("sealed_files")
-    if not isinstance(files, dict) or not files:
-        raise ValueError("missing sealed source and artifact inventory")
-    if plan.get("harness_git_sha") != _clean_revision(ROOT):
-        raise ValueError("execution harness revision changed")
-    required = {
-        str(path.resolve())
-        for directory in (ROOT / "benchmarks", ROOT / "scripts/benchmark_suite")
-        for path in directory.rglob("*.py")
-    } | {str(ROOT / "scripts/toolkit.py")}
-    if not required.issubset(files):
-        raise ValueError("incomplete sealed Python harness inventory")
-    for path, digest in files.items():
-        if sha256_file(Path(path)) != digest:
-            raise ValueError(f"sealed execution input changed: {path}")
-    from scripts.benchmark_suite.issue406_harness import (
-        WHEEL_TARGET,
-        native_harness_reuse,
-        validate_acceptance_harness,
-        validate_native_profile,
-        validate_traced_wheel_invocations,
-    )
-
+    files = _validate_plan_inventory(plan)
     reuse = plan["native_harness_reuse"]
     build_harness = reuse["original_build_harness_git_sha"]
     if reuse != native_harness_reuse(build_harness):
@@ -236,106 +152,12 @@ def validate_plan(plan: dict) -> None:
     enabled_builds = {}
     traced_environment = None
     for side in ("baseline", "candidate"):
-        release = plan["releases"][side]
-        if files.get(release["native_path"]) != release["native_sha256"]:
-            raise ValueError("release native is missing from the sealed inventory")
-        installed = {
-            str(path.resolve())
-            for path in (Path(release["site"]) / "calc_flow").rglob("*")
-            if path.is_file() and "__pycache__" not in path.parts
-        }
-        if not installed or not installed.issubset(files):
-            raise ValueError("installed Python package files are not fully sealed")
-        traced = plan["row7_releases"][side]
-        if (
-            traced["product_commit"] != release["product_commit"]
-            or traced["instrumentation"] != "asof-dispatch-trace"
-            or traced["harness_target"] != WHEEL_TARGET
-            or files.get(traced["native_path"]) != traced["native_sha256"]
-            or files.get(traced["wheel_path"]) != traced["wheel_sha256"]
-            or traced["build_metadata"] not in files
-        ):
-            raise ValueError("row-7 instrumented release identity differs")
-        traced_installed = {
-            str(path.resolve())
-            for path in (Path(traced["site"]) / "calc_flow").rglob("*")
-            if path.is_file() and "__pycache__" not in path.parts
-        }
-        if not traced_installed or not traced_installed.issubset(files):
-            raise ValueError("row-7 installed package is not fully sealed")
-        traced_output = Path(traced["build_output"])
-        traced_attestation = validate_acceptance_harness(traced_output, WHEEL_TARGET)
-        if (
-            str(traced_output / f"build-{WHEEL_TARGET}.acceptance-harness.json")
-            not in files
-        ):
-            raise ValueError("row-7 source attestation is not sealed")
-        wheel_build = json.loads(Path(traced["build_metadata"]).read_text())
-        if (
-            wheel_build["failure"] is not None
-            or wheel_build["harness_git_sha"] != build_harness
-            or traced_attestation["harness_git_sha"] != build_harness
-            or wheel_build["revision"] != release["product_commit"]
-            or traced_attestation["product_git_sha"] != release["product_commit"]
-            or wheel_build["flags"] != plan["expected_native_flags"]
-            or wheel_build["rustc"] != plan["expected_native_rustc"]
-            or wheel_build["lock_fingerprint"] != traced_attestation["lock_fingerprint"]
-            or wheel_build["native_sha256"] != traced["native_sha256"]
-            or wheel_build["wheel_sha256"] != traced["wheel_sha256"]
-        ):
-            raise ValueError("row-7 compiled wheel settings differ")
-        validate_traced_wheel_invocations(wheel_build)
+        wheel_build = _validate_plan_wheel(plan, side, files, build_harness)
         if traced_environment is None:
             traced_environment = wheel_build["environment"]
         elif traced_environment != wheel_build["environment"]:
             raise ValueError("row-7 paired wheel build environments differ")
-        expected_binaries = {
-            f"{target}/{mode}"
-            for target in ("stream_join_perf", "stream_asof_e2e")
-            for mode in (("enabled",) if side == "baseline" else ("enabled", "off"))
-        }
-        if set(plan["native_binaries"][side]) != expected_binaries:
-            raise ValueError("native binary inventory omits or adds an acceptance arm")
-        for name, descriptor in plan["native_binaries"][side].items():
-            if files.get(descriptor["path"]) != descriptor["sha256"]:
-                raise ValueError(
-                    "native benchmark is missing from the sealed inventory"
-                )
-            target, mode = name.split("/")
-            if side == "baseline" and mode == "off":
-                raise ValueError("main does not support checkpoint-off")
-            record = validate_acceptance_harness(
-                Path(descriptor["build_output"]), descriptor["harness_target"]
-            )
-            attestation = str(
-                Path(descriptor["build_output"])
-                / f"build-{descriptor['harness_target']}.acceptance-harness.json"
-            )
-            if attestation not in files:
-                raise ValueError("native source attestation is not sealed")
-            if (
-                target not in record["targets"]
-                or record["harness_git_sha"] != build_harness
-                or record["product_git_sha"] != release["product_commit"]
-            ):
-                raise ValueError("native and wheel product revisions differ")
-            build_path = Path(descriptor["compiled_artifacts"])
-            if str(build_path) not in files:
-                raise ValueError("compiled native settings are not sealed")
-            build = json.loads(build_path.read_text())
-            if build["flags"] != plan["expected_native_flags"]:
-                raise ValueError("native build flags differ from the approved flags")
-            if build["rustc"] != plan["expected_native_rustc"]:
-                raise ValueError("native compiler differs from the approved compiler")
-            if "cfg" in " ".join(str(value) for value in build["flags"].values()):
-                raise ValueError("external Rust cfg flags are not approved")
-            validate_native_profile(build["artifacts"], checkpoint_off=mode == "off")
-            if mode == "enabled":
-                previous = enabled_builds.setdefault(target, build["artifacts"])
-                if previous != build["artifacts"]:
-                    raise ValueError(
-                        "paired compiled dependency/profile inventory differs"
-                    )
+        _validate_plan_binaries(plan, side, files, build_harness, enabled_builds)
 
 
 class AcceptanceRunner:
@@ -844,68 +666,8 @@ async def run(plan: dict, output: Path) -> dict:
     except BaseException as error:
         report.update(state="stopped", error=f"{type(error).__name__}: {error}")
     finally:
-        runner.stop.set()
-        if collection is not None and not collection.done():
-            collection.cancel()
-        # Signal cancellation before awaiting the collector's owned round cleanup.
-        report["settlement"] = await _complete_owned(
-            asyncio.create_task(runner.settle())
-        )
-        for task in (collection, guard):
-            if task is not None:
-                with suppress(BaseException):
-                    await _complete_owned(task)
-        if (
-            guard is not None
-            and not guard.cancelled()
-            and guard.exception() is not None
-        ):
-            report["state"] = "stopped"
-            report["assessment"]["environment_suitable"] = False
-            report["error"] = f"resource guard: {guard.exception()}"
-        partial = output / "partial.json"
-        if partial.exists() and "measurements" not in report:
-            report["measurements"] = json.loads(partial.read_text())["measurements"]
-        if report["settlement"]["forced_kill_pids"]:
-            report["assessment"]["environment_suitable"] = False
-        from scripts.benchmark_suite.issue406_report import (
-            render_acceptance_markdown,
-            summarize_acceptance,
-        )
-
-        report["elapsed_seconds"] = time.monotonic() - started
-        report["budget_seconds"] = plan["budget_seconds"]
-        report["precharged_seconds"] = plan.get("precharged_seconds", 0)
-        report["budget_satisfied"] = report["elapsed_seconds"] <= plan["budget_seconds"]
-        summary = summarize_acceptance(report)
-        write_json(output / "summary.json", summary)
-        (output / "performance.md").write_text(
-            render_acceptance_markdown(summary), encoding="utf-8"
-        )
-        write_json(output / "resources.json", runner.resources)
-        report["elapsed_seconds"] = time.monotonic() - started
-        report["budget_satisfied"] = report["elapsed_seconds"] <= plan["budget_seconds"]
-        write_json(output / "result.json", report)
-        write_json(
-            output / "evidence-sha256.json",
-            {
-                str(path.relative_to(output)): sha256_file(path)
-                for path in sorted(output.rglob("*"))
-                if path.is_file()
-            },
-        )
-        elapsed = time.monotonic() - started
-        report["elapsed_seconds_including_sealing"] = elapsed
-        report["budget_satisfied"] = elapsed <= plan["budget_seconds"]
-        write_json(
-            output / "budget.json",
-            {
-                "elapsed_seconds_including_sealing": elapsed,
-                "budget_seconds": plan["budget_seconds"],
-                "budget_satisfied": report["budget_satisfied"],
-                "evidence_seal_sha256": sha256_file(output / "evidence-sha256.json"),
-            },
-        )
+        await _settle_acceptance_collection(runner, collection, guard, report, output)
+        _seal_acceptance_report(plan, output, started, report, runner.resources)
         for sig, handler in previous_signals.items():
             loop.remove_signal_handler(sig)
             signal.signal(sig, handler)
@@ -929,6 +691,292 @@ def main() -> int:
         )
     )
     return 0 if report["state"] == "complete" and report["budget_satisfied"] else 1
+
+
+def _validate_plan_inventory(plan: dict) -> dict:
+    if (
+        plan.get("schema") != "calc-flow.issue406-execution.v1"
+        or plan.get("budget_seconds") != 4500
+        or plan.get("settlement_seconds") != 300
+        or plan.get("cases") != [asdict(case) for case in acceptance_inventory()]
+    ):
+        raise ValueError("execution plan differs from the frozen acceptance contract")
+    precharged = plan.get("precharged_seconds", 0)
+    if (
+        type(precharged) not in (int, float)
+        or not math.isfinite(precharged)
+        or not 0 <= precharged < 4200
+    ):
+        raise ValueError("invalid precharged final correctness budget")
+    cpus = plan.get("cpus")
+    if (
+        not isinstance(cpus, list)
+        or len(cpus) != 32
+        or len(set(cpus)) != 32
+        or any(type(cpu) is not int for cpu in cpus)
+        or not set(cpus).issubset(os.sched_getaffinity(0))
+    ):
+        raise ValueError("execution requires one available fixed 32-CPU set")
+    files = plan.get("sealed_files")
+    if not isinstance(files, dict) or not files:
+        raise ValueError("missing sealed source and artifact inventory")
+    if plan.get("harness_git_sha") != _clean_revision(ROOT):
+        raise ValueError("execution harness revision changed")
+    required = {
+        str(path.resolve())
+        for directory in (ROOT / "benchmarks", ROOT / "scripts/benchmark_suite")
+        for path in directory.rglob("*.py")
+    } | {str(ROOT / "scripts/toolkit.py")}
+    if not required.issubset(files):
+        raise ValueError("incomplete sealed Python harness inventory")
+    for path, digest in files.items():
+        if sha256_file(Path(path)) != digest:
+            raise ValueError(f"sealed execution input changed: {path}")
+    return files
+
+
+def _validate_plan_wheel(
+    plan: dict, side: str, files: dict, build_harness: str
+) -> dict:
+    release = plan["releases"][side]
+    if files.get(release["native_path"]) != release["native_sha256"]:
+        raise ValueError("release native is missing from the sealed inventory")
+    installed = {
+        str(path.resolve())
+        for path in (Path(release["site"]) / "calc_flow").rglob("*")
+        if path.is_file() and "__pycache__" not in path.parts
+    }
+    if not installed or not installed.issubset(files):
+        raise ValueError("installed Python package files are not fully sealed")
+    traced = plan["row7_releases"][side]
+    if (
+        traced["product_commit"] != release["product_commit"]
+        or traced["instrumentation"] != "asof-dispatch-trace"
+        or traced["harness_target"] != WHEEL_TARGET
+        or files.get(traced["native_path"]) != traced["native_sha256"]
+        or files.get(traced["wheel_path"]) != traced["wheel_sha256"]
+        or traced["build_metadata"] not in files
+    ):
+        raise ValueError("row-7 instrumented release identity differs")
+    traced_installed = {
+        str(path.resolve())
+        for path in (Path(traced["site"]) / "calc_flow").rglob("*")
+        if path.is_file() and "__pycache__" not in path.parts
+    }
+    if not traced_installed or not traced_installed.issubset(files):
+        raise ValueError("row-7 installed package is not fully sealed")
+    traced_output = Path(traced["build_output"])
+    traced_attestation = validate_acceptance_harness(traced_output, WHEEL_TARGET)
+    if (
+        str(traced_output / f"build-{WHEEL_TARGET}.acceptance-harness.json")
+        not in files
+    ):
+        raise ValueError("row-7 source attestation is not sealed")
+    wheel_build = json.loads(Path(traced["build_metadata"]).read_text())
+    if (
+        wheel_build["failure"] is not None
+        or wheel_build["harness_git_sha"] != build_harness
+        or traced_attestation["harness_git_sha"] != build_harness
+        or wheel_build["revision"] != release["product_commit"]
+        or traced_attestation["product_git_sha"] != release["product_commit"]
+        or wheel_build["flags"] != plan["expected_native_flags"]
+        or wheel_build["rustc"] != plan["expected_native_rustc"]
+        or wheel_build["lock_fingerprint"] != traced_attestation["lock_fingerprint"]
+        or wheel_build["native_sha256"] != traced["native_sha256"]
+        or wheel_build["wheel_sha256"] != traced["wheel_sha256"]
+    ):
+        raise ValueError("row-7 compiled wheel settings differ")
+    validate_traced_wheel_invocations(wheel_build)
+    return wheel_build
+
+
+def _validate_plan_binaries(
+    plan: dict, side: str, files: dict, build_harness: str, enabled_builds: dict
+) -> None:
+    release = plan["releases"][side]
+    expected_binaries = {
+        f"{target}/{mode}"
+        for target in ("stream_join_perf", "stream_asof_e2e")
+        for mode in (("enabled",) if side == "baseline" else ("enabled", "off"))
+    }
+    if set(plan["native_binaries"][side]) != expected_binaries:
+        raise ValueError("native binary inventory omits or adds an acceptance arm")
+    for name, descriptor in plan["native_binaries"][side].items():
+        if files.get(descriptor["path"]) != descriptor["sha256"]:
+            raise ValueError("native benchmark is missing from the sealed inventory")
+        target, mode = name.split("/")
+        if side == "baseline" and mode == "off":
+            raise ValueError("main does not support checkpoint-off")
+        record = validate_acceptance_harness(
+            Path(descriptor["build_output"]), descriptor["harness_target"]
+        )
+        attestation = str(
+            Path(descriptor["build_output"])
+            / f"build-{descriptor['harness_target']}.acceptance-harness.json"
+        )
+        if attestation not in files:
+            raise ValueError("native source attestation is not sealed")
+        if (
+            target not in record["targets"]
+            or record["harness_git_sha"] != build_harness
+            or record["product_git_sha"] != release["product_commit"]
+        ):
+            raise ValueError("native and wheel product revisions differ")
+        build = _validate_plan_native_build(plan, descriptor, files, mode)
+        if mode == "enabled":
+            previous = enabled_builds.setdefault(target, build["artifacts"])
+            if previous != build["artifacts"]:
+                raise ValueError("paired compiled dependency/profile inventory differs")
+
+
+async def _invoke_collection(
+    runner, output: Path, group, side: str, position: tuple
+) -> dict:
+    round_index, index = position
+
+    def journal(value):
+        with (output / "attempts.jsonl").open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(value, allow_nan=False) + "\n")
+
+    started = time.monotonic()
+    attempt = {
+        "cases": [case.id for case in group],
+        "side": side,
+        "round": round_index,
+        "index": index,
+        "phase": "warmup" if index is None else "sample",
+    }
+    journal({**attempt, "state": "started"})
+    try:
+        if index is None:
+            result = await runner.prepare(group, side, round_index)
+        else:
+            result = await runner.sample(group, side, round_index, index)
+    except BaseException as error:
+        journal(
+            {
+                **attempt,
+                "state": "failed",
+                "elapsed_seconds": time.monotonic() - started,
+                "error": f"{type(error).__name__}: {error}",
+            }
+        )
+        raise
+    journal(
+        {
+            **attempt,
+            "state": "completed",
+            "elapsed_seconds": time.monotonic() - started,
+        }
+    )
+    return result
+
+
+def _seal_acceptance_report(
+    plan: dict, output: Path, started: float, report: dict, resources: list
+) -> None:
+    from scripts.benchmark_suite.issue406_report import (
+        render_acceptance_markdown,
+        summarize_acceptance,
+    )
+
+    report["elapsed_seconds"] = time.monotonic() - started
+    report["budget_seconds"] = plan["budget_seconds"]
+    report["precharged_seconds"] = plan.get("precharged_seconds", 0)
+    report["budget_satisfied"] = report["elapsed_seconds"] <= plan["budget_seconds"]
+    summary = summarize_acceptance(report)
+    write_json(output / "summary.json", summary)
+    (output / "performance.md").write_text(
+        render_acceptance_markdown(summary), encoding="utf-8"
+    )
+    write_json(output / "resources.json", resources)
+    report["elapsed_seconds"] = time.monotonic() - started
+    report["budget_satisfied"] = report["elapsed_seconds"] <= plan["budget_seconds"]
+    write_json(output / "result.json", report)
+    write_json(
+        output / "evidence-sha256.json",
+        {
+            str(path.relative_to(output)): sha256_file(path)
+            for path in sorted(output.rglob("*"))
+            if path.is_file()
+        },
+    )
+    elapsed = time.monotonic() - started
+    report["elapsed_seconds_including_sealing"] = elapsed
+    report["budget_satisfied"] = elapsed <= plan["budget_seconds"]
+    write_json(
+        output / "budget.json",
+        {
+            "elapsed_seconds_including_sealing": elapsed,
+            "budget_seconds": plan["budget_seconds"],
+            "budget_satisfied": report["budget_satisfied"],
+            "evidence_seal_sha256": sha256_file(output / "evidence-sha256.json"),
+        },
+    )
+
+
+def _record_collection(
+    records: dict, output: Path, group, position: tuple, samples: dict
+) -> None:
+    side, round_index, index = position
+    if set(samples) != {case.id for case in group}:
+        raise ValueError("shared invocation omitted or added a target metric")
+    for case in group:
+        target = records[case.id, side]
+        if index is None:
+            target["warmups"].append(samples[case.id])
+        else:
+            target["rounds"][round_index].append(samples[case.id])
+    write_json(
+        output / "progress.json",
+        {
+            "case": group[0].id,
+            "side": side,
+            "round": round_index,
+            "index": index,
+            "state": "running",
+        },
+    )
+
+
+async def _settle_acceptance_collection(
+    runner, collection, guard, report: dict, output: Path
+) -> None:
+    runner.stop.set()
+    if collection is not None and not collection.done():
+        collection.cancel()
+    # Signal cancellation before awaiting the collector's owned round cleanup.
+    report["settlement"] = await _complete_owned(asyncio.create_task(runner.settle()))
+    for task in (collection, guard):
+        if task is not None:
+            with suppress(BaseException):
+                await _complete_owned(task)
+    if guard is not None and not guard.cancelled() and guard.exception() is not None:
+        report["state"] = "stopped"
+        report["assessment"]["environment_suitable"] = False
+        report["error"] = f"resource guard: {guard.exception()}"
+    partial = output / "partial.json"
+    if partial.exists() and "measurements" not in report:
+        report["measurements"] = json.loads(partial.read_text())["measurements"]
+    if report["settlement"]["forced_kill_pids"]:
+        report["assessment"]["environment_suitable"] = False
+
+
+def _validate_plan_native_build(
+    plan: dict, descriptor: dict, files: dict, mode: str
+) -> dict:
+    build_path = Path(descriptor["compiled_artifacts"])
+    if str(build_path) not in files:
+        raise ValueError("compiled native settings are not sealed")
+    build = json.loads(build_path.read_text())
+    if build["flags"] != plan["expected_native_flags"]:
+        raise ValueError("native build flags differ from the approved flags")
+    if build["rustc"] != plan["expected_native_rustc"]:
+        raise ValueError("native compiler differs from the approved compiler")
+    if "cfg" in " ".join(str(value) for value in build["flags"].values()):
+        raise ValueError("external Rust cfg flags are not approved")
+    validate_native_profile(build["artifacts"], checkpoint_off=mode == "off")
+    return build
 
 
 if __name__ == "__main__":

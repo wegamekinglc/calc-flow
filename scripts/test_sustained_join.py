@@ -222,7 +222,8 @@ class CheckpointWindowTests(unittest.TestCase):
             )
 
     def test_only_wholly_observed_nonterminal_epochs_qualify(self):
-        def sample(before, after, current, elapsed, completed, terminal=False):
+        def sample(before, after, checkpoint, terminal=False):
+            current, elapsed, completed = checkpoint
             return {
                 "before_ns": before,
                 "after_ns": after,
@@ -236,14 +237,14 @@ class CheckpointWindowTests(unittest.TestCase):
             }
 
         observations = [
-            sample(20_000, 21_000, 1, 15, None),
-            sample(30_000, 31_000, None, None, 1),
-            sample(50_000, 51_000, 2, 5, 1),
-            sample(60_000, 61_000, None, None, 2),
-            sample(70_000, 71_000, 3, 5, 2),
-            sample(99_000, 101_000, None, None, 3),
-            sample(110_000, 111_000, 4, 5, 3, True),
-            sample(120_000, 121_000, None, None, 4),
+            sample(20_000, 21_000, (1, 15, None)),
+            sample(30_000, 31_000, (None, None, 1)),
+            sample(50_000, 51_000, (2, 5, 1)),
+            sample(60_000, 61_000, (None, None, 2)),
+            sample(70_000, 71_000, (3, 5, 2)),
+            sample(99_000, 101_000, (None, None, 3)),
+            sample(110_000, 111_000, (4, 5, 3), terminal=True),
+            sample(120_000, 121_000, (None, None, 4)),
         ]
         windows = checkpoint_windows(observations, start_ns=40_000, end_ns=100_000)
         self.assertEqual(

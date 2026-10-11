@@ -374,36 +374,7 @@ def matched_overhead(
     scheduling_proof: dict | None = None,
 ) -> dict:
     """Retain the signed instrumented residual with verified recorded replay."""
-    product_commit = end_to_end.get("product_commit")
-    if (
-        not isinstance(product_commit, str)
-        or re.fullmatch(r"[0-9a-f]{40}", product_commit) is None
-        or product_commit != native.get("product_commit")
-    ):
-        raise ValueError("ASOF overhead requires the same exact product revision")
-    identity = end_to_end.get("match_identity")
-    if (
-        not isinstance(identity, dict)
-        or not identity
-        or identity != native.get("match_identity")
-    ):
-        raise ValueError("ASOF overhead requires matching component identities")
-    required = (
-        "project_sha256",
-        "inputs_sha256",
-        "shared_partial_order_sha256",
-        "output_contract_sha256",
-        "compiled_plan_fingerprint",
-        "checkpoint_enabled",
-        "rows_per_side",
-        "batch_rows",
-        "mode",
-        "cpu_affinity",
-        "processing_boundary",
-        "output_frontier",
-    )
-    if any(field not in identity for field in required):
-        raise ValueError("ASOF overhead requires complete matching identities")
+    identity = _matched_component_identity(end_to_end, native)
     if (
         identity["checkpoint_enabled"] is not (identity["mode"] != "off")
         or identity["mode"] not in ("off", "low")
@@ -448,7 +419,7 @@ def matched_overhead(
     equivalent = replay_proof is not None
     if declared_verified:
         expected_proof = {
-            "product_commit": product_commit,
+            "product_commit": end_to_end["product_commit"],
             "native_executable_sha256": native.get("native_executable_sha256"),
             "project_sha256": identity["project_sha256"],
             "compiled_projection_sha256": native["compiled_projection_sha256"],
@@ -494,3 +465,37 @@ def matched_overhead(
         "canonical_native_events_sha256": native["canonical_native_events_sha256"],
         "compiled_projection_sha256": native["compiled_projection_sha256"],
     }
+
+
+def _matched_component_identity(end_to_end: dict, native: dict) -> dict:
+    product_commit = end_to_end.get("product_commit")
+    if (
+        not isinstance(product_commit, str)
+        or re.fullmatch(r"[0-9a-f]{40}", product_commit) is None
+        or product_commit != native.get("product_commit")
+    ):
+        raise ValueError("ASOF overhead requires the same exact product revision")
+    identity = end_to_end.get("match_identity")
+    if (
+        not isinstance(identity, dict)
+        or not identity
+        or identity != native.get("match_identity")
+    ):
+        raise ValueError("ASOF overhead requires matching component identities")
+    required = (
+        "project_sha256",
+        "inputs_sha256",
+        "shared_partial_order_sha256",
+        "output_contract_sha256",
+        "compiled_plan_fingerprint",
+        "checkpoint_enabled",
+        "rows_per_side",
+        "batch_rows",
+        "mode",
+        "cpu_affinity",
+        "processing_boundary",
+        "output_frontier",
+    )
+    if any(field not in identity for field in required):
+        raise ValueError("ASOF overhead requires complete matching identities")
+    return identity

@@ -11,6 +11,8 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pyarrow as pa
 
+from benchmarks.join_asof_acceptance import MatchedFixture
+
 
 class AcceptanceBoundaryTests(unittest.IsolatedAsyncioTestCase):
     async def test_final_cut_waits_for_output_projection_dispatch_completion(self):
@@ -197,7 +199,7 @@ class AcceptanceFixtureTests(unittest.TestCase):
         untouched = copy.deepcopy(fixture["events"])
         with TemporaryDirectory() as raw:
             root = Path(raw)
-            manifest = export_matched_fixture(root, **fixture)
+            manifest = export_matched_fixture(root, MatchedFixture(**fixture))
             stored = json.loads((root / manifest["events"]["path"]).read_text())
             self.assertEqual(stored, untouched)
             reader = pa.ipc.open_file(root / manifest["inputs"]["quotes.input"]["path"])
@@ -225,7 +227,7 @@ class AcceptanceFixtureTests(unittest.TestCase):
             with self.subTest(change=change), TemporaryDirectory() as raw:
                 root = Path(raw)
                 with self.assertRaises(ValueError):
-                    export_matched_fixture(root, **fixture)
+                    export_matched_fixture(root, MatchedFixture(**fixture))
                 self.assertEqual(list(root.iterdir()), [])
 
 
@@ -320,7 +322,7 @@ class SealedJoinFixtureTests(unittest.TestCase):
         fixture = self.fixture()
         with TemporaryDirectory() as raw:
             root = Path(raw)
-            manifest = export_matched_fixture(root, **fixture)
+            manifest = export_matched_fixture(root, MatchedFixture(**fixture))
             self.assertEqual(manifest["rows"], 3)
             self.assertEqual(manifest["dimension_rows"], 1)
             self.assertNotIn("rows_per_side", manifest)
@@ -349,7 +351,7 @@ class SealedJoinFixtureTests(unittest.TestCase):
             with TemporaryDirectory() as raw:
                 root = Path(raw)
                 with self.assertRaises(ValueError):
-                    export_matched_fixture(root, **fixture)
+                    export_matched_fixture(root, MatchedFixture(**fixture))
                 self.assertEqual(list(root.iterdir()), [])
 
 
@@ -411,7 +413,7 @@ class AcceptanceRuntimePolicyTests(unittest.TestCase):
 
 
 class AcceptanceLifecycleTests(unittest.IsolatedAsyncioTestCase):
-    async def exercise(self, *, observer_fails=False, asof=False):
+    async def exercise(self, *, observer_fails=False, asof=False, trace_failure=None):
         import asyncio
         from datetime import datetime, timedelta
         from types import ModuleType
@@ -463,6 +465,8 @@ class AcceptanceLifecycleTests(unittest.IsolatedAsyncioTestCase):
             ],
             "callback_counts": {"data": 2, "ingress_progress": 2, "watermark": 1},
         }
+        if trace_failure == "validation":
+            trace["record_count"] = 0
         job = SimpleNamespace(
             status=lambda: {
                 "checkpoint": dict(checkpoint),
@@ -475,6 +479,10 @@ class AcceptanceLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 _benchmark_take_dispatch_trace=Mock(return_value=json.dumps(trace)),
             ),
         )
+        if trace_failure == "capture":
+            job._inner._benchmark_take_dispatch_trace.side_effect = RuntimeError(
+                "injected trace capture failure"
+            )
 
         async def wait():
             await done.wait()
@@ -560,6 +568,22 @@ class AcceptanceLifecycleTests(unittest.IsolatedAsyncioTestCase):
             job._inner._benchmark_start_dispatch_trace.assert_called_once_with(False)
             job._inner._benchmark_take_dispatch_trace.assert_called_once_with()
         return result[1], windows
+
+    async def test_trace_failure_preserves_progressive_settled_evidence(self):
+        from benchmarks.checkpoint_cycles import CycleValidationError
+
+        for phase in ("capture", "validation"):
+            with self.subTest(phase=phase):
+                with self.assertRaises(CycleValidationError) as failure:
+                    await self.exercise(asof=True, trace_failure=phase)
+                evidence = failure.exception.evidence
+                self.assertEqual(evidence["final_frontier_status"], {"frontier": 9})
+                self.assertEqual(evidence["settled_processing_ended_ns"], 350)
+                self.assertEqual(evidence["settled_processing_seconds"], 250 / 1e9)
+                self.assertTrue(evidence["processing_settled"])
+                self.assertEqual(evidence["dispatch_trace_capture_started_ns"], 350)
+                self.assertEqual("before_eof" in evidence, phase == "validation")
+                self.assertTrue(evidence["cleanup_complete"])
 
     async def test_trace_is_taken_after_settled_timer_and_retains_runtime_data_counts(
         self,

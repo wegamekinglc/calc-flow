@@ -59,52 +59,7 @@ def validate_join_checkpoint_history(observation: dict) -> dict:
         )
     ):
         raise ValueError("incomplete fixed checkpoint history diagnostic")
-    for field, expected in (
-        ("left_rows", 4_000_000),
-        ("dimension_rows", 64),
-        ("resident_rows", 4_000_064),
-        ("batch_rows", 64_000),
-        ("pool_limit_bytes", 1 << 30),
-    ):
-        _history_count(observation.get(field), expected, field)
-    expected_spec = {
-        "join_type": "inner",
-        "left_keys": ["symbol"],
-        "right_keys": ["symbol"],
-        "left_event_time": "event_time",
-        "right_event_time": "event_time",
-        "bounds": {"before_micros": 62_499_000_001, "after_micros": 0},
-        "limits": {
-            "max_state_rows_per_side": 4_000_064,
-            "max_state_bytes_per_side": 4_096_065_536,
-            "max_matches_per_input_batch": 64_064,
-        },
-        "left_prefix": "quote",
-        "right_prefix": "dimension",
-    }
-    if observation.get("join_spec") != expected_spec:
-        raise ValueError("checkpoint history Join specification differs from row3")
-    for section in ("limits", "bounds"):
-        for field, expected in expected_spec[section].items():
-            _history_count(observation["join_spec"][section][field], expected, field)
-    expected_fixture = {
-        "entities": 64,
-        "base_micros": 1_767_225_600_000_000,
-        "left_schema": [
-            ["event_time", "timestamp_us_utc", False],
-            ["sequence", "uint64", False],
-            ["symbol", "string", False],
-            ["price", "float64", False],
-        ],
-        "right_schema": [
-            ["symbol", "string", False],
-            ["factor", "float64", False],
-            ["sequence", "uint64", False],
-            ["event_time", "timestamp_us_utc", False],
-        ],
-    }
-    if observation.get("fixture") != expected_fixture:
-        raise ValueError("checkpoint history fixture differs from row3")
+    _validate_history_geometry(observation)
     fresh, history = observation.get("fresh"), observation.get("history")
     if not isinstance(fresh, dict) or not isinstance(history, dict):
         raise ValueError("missing fresh or retained-history evidence")
@@ -115,43 +70,8 @@ def validate_join_checkpoint_history(observation: dict) -> dict:
         _history_count(item.get("output_rows"), 4_000_000, "output rows")
         if _history_oracle(item.get("oracle")) != oracle:
             raise ValueError("history full-state oracle differs")
-    _history_count(history.get("dirty_epochs"), 4, "dirty epochs")
-    checkpoints = history.get("checkpoints")
-    if not isinstance(checkpoints, list) or len(checkpoints) != 4:
-        raise ValueError("missing four dirty checkpoint epochs")
-    for index, checkpoint in enumerate(checkpoints):
-        _history_snapshot(
-            checkpoint, epoch=index + 1, rows=3_999_997 + index, replacement=False
-        )
-    before, after = history.get("before"), history.get("after")
-    _history_snapshot(after, epoch=5, rows=4_000_000, replacement=True)
-    if before != checkpoints[-1] or before["base_sha256"] == after["base_sha256"]:
-        raise ValueError("missing held-history base replacement")
-    if (
-        history.get("old_segments_unchanged") is not True
-        or history.get("old_segments_after") != before["segments"]
-    ):
-        raise ValueError("held old-history segment bytes changed")
-    alias = history.get("alias_ownership")
-    if (
-        not isinstance(alias, dict)
-        or alias.get("kind") != "StateSegment"
-        or alias.get("pool_id") != "history"
-        or alias.get("has_owner") is not True
-        or alias.get("credit_scope") != "shared_encoder_owner"
-    ):
-        raise ValueError("missing owned source-pool segment alias")
-    _history_count(alias.get("snapshot_epoch"), 4, "segment alias epoch")
-    member = next(
-        (item for item in before["segments"] if item["name"] == alias.get("name")), None
-    )
-    if (
-        member is None
-        or not member["name"].startswith("left-payload-")
-        or alias.get("sha256") != member["sha256"]
-    ):
-        raise ValueError("held segment alias differs from E4 inventory")
-    _history_count(alias.get("bytes"), member["bytes"], "held segment bytes")
+    before = _validate_history_versions(history)
+    _validate_history_alias(history, before)
     restores = observation.get("restores")
     if not isinstance(restores, list) or len(restores) != 2:
         raise ValueError("missing both read-only restore oracles")
@@ -390,33 +310,7 @@ def validate_native_component(observation: dict) -> dict:
         or observation["snapshot_layout_version"] not in (1, 2)
     ):
         raise ValueError("missing native snapshot validation proof")
-    segments = observation.get("snapshot_segments")
-    if not isinstance(segments, list) or not segments:
-        raise ValueError("missing native snapshot segments")
-    names = set()
-    total = 0
-    for segment in segments:
-        if not isinstance(segment, dict):
-            raise ValueError("invalid native snapshot segment")
-        name, size, digest = (segment.get(key) for key in ("name", "bytes", "sha256"))
-        if (
-            not isinstance(name, str)
-            or not name
-            or name in names
-            or type(size) is not int
-            or size <= 0
-            or not isinstance(digest, str)
-            or len(digest) != 64
-            or any(character not in "0123456789abcdef" for character in digest)
-        ):
-            raise ValueError("invalid native snapshot segment")
-        names.add(name)
-        total += size
-    if (
-        type(observation.get("snapshot_bytes")) is not int
-        or total != observation["snapshot_bytes"]
-    ):
-        raise ValueError("native snapshot segment bytes do not match total")
+    _validate_snapshot_segments(observation)
     return {
         **observation,
         "capture_us_per_row": observation["snapshot_seconds"]
@@ -465,54 +359,7 @@ def _validate_compaction(observation: dict) -> dict:
             < sample["preparation_seconds"] + sample["handler_seconds"]
         ):
             raise ValueError("combined compaction clock omits work")
-        witness = sample.get("compaction_witness")
-        if (
-            not isinstance(witness, dict)
-            or witness.get("setup_dirty_epochs") != 4
-            or witness.get("layout_version") not in (1, 2)
-        ):
-            raise ValueError("invalid native compaction witness")
-        before, after = (
-            witness.get(f"{cut}_base_sha256") for cut in ("before", "after")
-        )
-        for hashes in (before, after):
-            if (
-                not isinstance(hashes, dict)
-                or not hashes
-                or any(
-                    not isinstance(name, str)
-                    or not name.endswith("-base")
-                    or not isinstance(digest, str)
-                    or len(digest) != 64
-                    or any(character not in "0123456789abcdef" for character in digest)
-                    for name, digest in hashes.items()
-                )
-            ):
-                raise ValueError("invalid native compaction base inventory")
-        before_deltas, after_deltas = (
-            witness.get(f"{cut}_deltas") for cut in ("before", "after")
-        )
-        for deltas in (before_deltas, after_deltas):
-            if (
-                not isinstance(deltas, list)
-                or any(
-                    not isinstance(name, str) or "-delta-" not in name
-                    for name in deltas
-                )
-                or len(deltas) != len(set(deltas))
-            ):
-                raise ValueError("invalid native compaction delta inventory")
-        if mode == "armed" and (
-            before == after or len(before_deltas) <= len(after_deltas)
-        ):
-            raise ValueError(
-                "armed preparation did not replace the base and fold deltas"
-            )
-        if mode == "steady" and (
-            before != after
-            or witness.get("before_base_epoch") != witness.get("after_base_epoch")
-        ):
-            raise ValueError("steady preparation unexpectedly changed the base")
+        _validate_compaction_witness(sample, mode)
     return {
         **observation,
         "handler_ratio": observation["armed"]["handler_seconds"]
@@ -573,3 +420,170 @@ def validate_small_batch(observation: dict) -> dict:
         "full_handler_samples": samples[:-1],
         "partial_handler_samples": samples[-1:],
     }
+
+
+def _validate_history_geometry(observation: dict) -> None:
+    for field, expected in (
+        ("left_rows", 4_000_000),
+        ("dimension_rows", 64),
+        ("resident_rows", 4_000_064),
+        ("batch_rows", 64_000),
+        ("pool_limit_bytes", 1 << 30),
+    ):
+        _history_count(observation.get(field), expected, field)
+    expected_spec = {
+        "join_type": "inner",
+        "left_keys": ["symbol"],
+        "right_keys": ["symbol"],
+        "left_event_time": "event_time",
+        "right_event_time": "event_time",
+        "bounds": {"before_micros": 62_499_000_001, "after_micros": 0},
+        "limits": {
+            "max_state_rows_per_side": 4_000_064,
+            "max_state_bytes_per_side": 4_096_065_536,
+            "max_matches_per_input_batch": 64_064,
+        },
+        "left_prefix": "quote",
+        "right_prefix": "dimension",
+    }
+    if observation.get("join_spec") != expected_spec:
+        raise ValueError("checkpoint history Join specification differs from row3")
+    for section in ("limits", "bounds"):
+        for field, expected in expected_spec[section].items():
+            _history_count(observation["join_spec"][section][field], expected, field)
+    expected_fixture = {
+        "entities": 64,
+        "base_micros": 1_767_225_600_000_000,
+        "left_schema": [
+            ["event_time", "timestamp_us_utc", False],
+            ["sequence", "uint64", False],
+            ["symbol", "string", False],
+            ["price", "float64", False],
+        ],
+        "right_schema": [
+            ["symbol", "string", False],
+            ["factor", "float64", False],
+            ["sequence", "uint64", False],
+            ["event_time", "timestamp_us_utc", False],
+        ],
+    }
+    if observation.get("fixture") != expected_fixture:
+        raise ValueError("checkpoint history fixture differs from row3")
+
+
+def _validate_history_versions(history: dict) -> dict:
+    _history_count(history.get("dirty_epochs"), 4, "dirty epochs")
+    checkpoints = history.get("checkpoints")
+    if not isinstance(checkpoints, list) or len(checkpoints) != 4:
+        raise ValueError("missing four dirty checkpoint epochs")
+    for index, checkpoint in enumerate(checkpoints):
+        _history_snapshot(
+            checkpoint, epoch=index + 1, rows=3_999_997 + index, replacement=False
+        )
+    before, after = history.get("before"), history.get("after")
+    _history_snapshot(after, epoch=5, rows=4_000_000, replacement=True)
+    if before != checkpoints[-1] or before["base_sha256"] == after["base_sha256"]:
+        raise ValueError("missing held-history base replacement")
+    if (
+        history.get("old_segments_unchanged") is not True
+        or history.get("old_segments_after") != before["segments"]
+    ):
+        raise ValueError("held old-history segment bytes changed")
+    return before
+
+
+def _validate_history_alias(history: dict, before: dict) -> None:
+    alias = history.get("alias_ownership")
+    if (
+        not isinstance(alias, dict)
+        or alias.get("kind") != "StateSegment"
+        or alias.get("pool_id") != "history"
+        or alias.get("has_owner") is not True
+        or alias.get("credit_scope") != "shared_encoder_owner"
+    ):
+        raise ValueError("missing owned source-pool segment alias")
+    _history_count(alias.get("snapshot_epoch"), 4, "segment alias epoch")
+    member = next(
+        (item for item in before["segments"] if item["name"] == alias.get("name")), None
+    )
+    if (
+        member is None
+        or not member["name"].startswith("left-payload-")
+        or alias.get("sha256") != member["sha256"]
+    ):
+        raise ValueError("held segment alias differs from E4 inventory")
+    _history_count(alias.get("bytes"), member["bytes"], "held segment bytes")
+
+
+def _validate_snapshot_segments(observation: dict) -> None:
+    segments = observation.get("snapshot_segments")
+    if not isinstance(segments, list) or not segments:
+        raise ValueError("missing native snapshot segments")
+    names = set()
+    total = 0
+    for segment in segments:
+        if not isinstance(segment, dict):
+            raise ValueError("invalid native snapshot segment")
+        name, size, digest = (segment.get(key) for key in ("name", "bytes", "sha256"))
+        if (
+            not isinstance(name, str)
+            or not name
+            or name in names
+            or type(size) is not int
+            or size <= 0
+            or not isinstance(digest, str)
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+        ):
+            raise ValueError("invalid native snapshot segment")
+        names.add(name)
+        total += size
+    if (
+        type(observation.get("snapshot_bytes")) is not int
+        or total != observation["snapshot_bytes"]
+    ):
+        raise ValueError("native snapshot segment bytes do not match total")
+
+
+def _validate_compaction_witness(sample: dict, mode: str) -> None:
+    witness = sample.get("compaction_witness")
+    if (
+        not isinstance(witness, dict)
+        or witness.get("setup_dirty_epochs") != 4
+        or witness.get("layout_version") not in (1, 2)
+    ):
+        raise ValueError("invalid native compaction witness")
+    before, after = (witness.get(f"{cut}_base_sha256") for cut in ("before", "after"))
+    for hashes in (before, after):
+        if (
+            not isinstance(hashes, dict)
+            or not hashes
+            or any(
+                not isinstance(name, str)
+                or not name.endswith("-base")
+                or not isinstance(digest, str)
+                or len(digest) != 64
+                or any(character not in "0123456789abcdef" for character in digest)
+                for name, digest in hashes.items()
+            )
+        ):
+            raise ValueError("invalid native compaction base inventory")
+    before_deltas, after_deltas = (
+        witness.get(f"{cut}_deltas") for cut in ("before", "after")
+    )
+    for deltas in (before_deltas, after_deltas):
+        if (
+            not isinstance(deltas, list)
+            or any(
+                not isinstance(name, str) or "-delta-" not in name for name in deltas
+            )
+            or len(deltas) != len(set(deltas))
+        ):
+            raise ValueError("invalid native compaction delta inventory")
+    if mode == "armed" and (before == after or len(before_deltas) <= len(after_deltas)):
+        raise ValueError("armed preparation did not replace the base and fold deltas")
+    if mode == "steady" and (
+        before != after
+        or witness.get("before_base_epoch") != witness.get("after_base_epoch")
+    ):
+        raise ValueError("steady preparation unexpectedly changed the base")

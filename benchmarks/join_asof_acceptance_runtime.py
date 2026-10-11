@@ -111,7 +111,6 @@ def _dispatch_trace(value: str, case: dict, status: dict, frontier: int, sink) -
 async def measure_acceptance_job(job, sources, sink, streams, *, case: dict) -> tuple:
     """Retain processing evidence even when baseline EOF has a known failure."""
     from benchmarks import engine_stream as stream
-    from benchmarks.join_asof_acceptance import await_asof_frontier
 
     evidence = {"checkpoint_observations": []}
     observations = evidence["checkpoint_observations"]
@@ -128,67 +127,27 @@ async def measure_acceptance_job(job, sources, sink, streams, *, case: dict) -> 
         observer = asyncio.create_task(_observe_checkpoints(job, observations, stop))
         capture_trace = case["workload"] == "asof" and case["batch_rows"] == 1024
         if capture_trace:
-            trace_setup = time.perf_counter_ns()
-            await asyncio.wait_for(
-                asyncio.gather(*(source.ready.wait() for source in sources.values())),
-                30,
+            evidence["dispatch_trace_setup_seconds"] = await _start_processing_trace(
+                job, sources, sink, case
             )
-            stream._require_ready_sources(sources, sink)
-            job._inner._benchmark_start_dispatch_trace(case["mode"] == "on")
-            evidence["dispatch_trace_setup_seconds"] = (
-                time.perf_counter_ns() - trace_setup
-            ) / 1e9
         table, seconds, clocks = await stream._measure_ready_clock(
             sources,
             sink,
             streams,
             job,
-            static_join=case["workload"] == "join_sealed",
-            retained_join=case["workload"] == "join_retained",
+            join_mode={"join_sealed": "sealed", "join_retained": "retained"}.get(
+                case["workload"]
+            ),
         )
         evidence.update(clocks)
         evidence["processing_seconds"] = seconds
         if capture_trace:
-            watermark = streams["quotes.input"][-1].at
-            micros = stream.BASE_MICROS + (watermark - stream.BASE) // timedelta(
-                microseconds=1
-            )
-            # ASOF publishes a closed output frontier one microsecond before
-            # the minimum input watermark. Publication follows callback return.
-            evidence["final_frontier_status"] = await asyncio.wait_for(
-                await_asof_frontier(
-                    job,
-                    int(micros) - 1,
-                    output_node_id=case["dispatch_output_node_id"],
-                ),
-                30,
-            )
-            settled = time.perf_counter_ns()
-            evidence["settled_processing_seconds"] = (
-                settled - clocks["processing_started_ns"]
-            ) / 1e9
-            evidence["settled_processing_ended_ns"] = settled
-            evidence["processing_settled"] = True
-            capture_started = time.perf_counter_ns()
-            evidence["dispatch_trace_capture_started_ns"] = capture_started
-            raw_trace = job._inner._benchmark_take_dispatch_trace()
-            evidence["before_eof"] = job.status()
-            evidence["dispatch_trace"] = _dispatch_trace(
-                raw_trace, case, evidence["before_eof"], int(micros) - 1, sink
-            )
-            evidence["dispatch_trace_capture_seconds"] = (
-                time.perf_counter_ns() - capture_started
-            ) / 1e9
+            await _finish_processing_trace(job, streams, sink, case, evidence)
         observations.append(checkpoint_observation(job))
         if not capture_trace:
             evidence["before_eof"] = job.status()
         evidence["terminal_started_ns"] = time.perf_counter_ns()
-        if case["workload"] == "join_retained":
-            for event in streams["right"]:
-                if isinstance(event, stream.Watermark):
-                    await sources["right"].push(event)
-        for source in sources.values():
-            await source.push(None)
+        await _end_acceptance_sources(sources, streams, case)
 
     async def complete():
         nonlocal outcome
@@ -206,84 +165,23 @@ async def measure_acceptance_job(job, sources, sink, streams, *, case: dict) -> 
         evidence["after_eof"] = job.status()
         evidence["terminal_error"] = str(error) or type(error).__name__
     finally:
-        stop.set()
-        if observer is not None:
-            observer_cancel = await _settle_owned(observer)
-            observer_failure = observer_cancel or (
-                asyncio.CancelledError()
-                if observer.cancelled()
-                else observer.exception()
-            )
-        cleanup_started = time.perf_counter_ns()
-        cancellation, cleanup_error = await _cancel_owned_job(job, evidence)
-        stopped = time.perf_counter_ns()
-        evidence["cleanup_seconds"] = (stopped - cleanup_started) / 1e9
-        evidence["job_seconds"] = (stopped - started) / 1e9
-        evidence["job_cpu_seconds"] = (time.process_time_ns() - cpu_started) / 1e9
-        if "processing_started_ns" in evidence:
-            evidence["full_cycle_seconds"] = (
-                stopped - evidence["processing_started_ns"]
-            ) / 1e9
-        evidence["after_cleanup"] = job.status()
-        evidence["cleanup_complete"] = evidence.pop("cleanup_completed")
-    if observer_failure is not None:
-        if isinstance(observer_failure, asyncio.CancelledError):
-            raise observer_failure
-        raise RuntimeError(
-            "checkpoint observer failed after owned cleanup"
-        ) from observer_failure
+        (
+            observer_failure,
+            cancellation,
+            cleanup_error,
+            cleanup_started,
+        ) = await _finish_acceptance_job(
+            job, evidence, observer, stop, (started, cpu_started)
+        )
     failure = cancellation or cleanup_error or failure
-    if isinstance(failure, asyncio.CancelledError):
-        failure.evidence = evidence
-        raise failure
-    if failure is not None and (
-        case.get("side") != "baseline"
-        or table is None
-        or "terminal_started_ns" not in evidence
-        or not evidence["cleanup_complete"]
-    ):
-        raise CycleValidationError("invalid acceptance sample", evidence) from failure
+    _require_acceptance_outcome(failure, observer_failure, table, evidence, case)
     evidence["lifecycle"] = "completed" if failure is None else "failed"
     if failure is not None:
         evidence["lifecycle_error"] = evidence["terminal_error"]
     evidence["terminal_seconds"] = (
         cleanup_started - evidence["terminal_started_ns"]
     ) / 1e9
-    windows = checkpoint_windows(
-        observations,
-        start_ns=evidence["processing_started_ns"],
-        end_ns=evidence.get(
-            "settled_processing_ended_ns", evidence["processing_ended_ns"]
-        ),
-    )
-    evidence["checkpoint_windows"] = windows
-    evidence["completed_processing_epochs"] = [
-        item["epoch"] for item in windows if item["inside_steady"]
-    ]
-    evidence["nonterminal_epochs"] = sorted(
-        {
-            epoch
-            for observation in observations
-            if evidence["processing_started_ns"]
-            <= observation["after_ns"]
-            <= evidence["terminal_started_ns"]
-            for epoch in (
-                observation["checkpoint"]["current_epoch"],
-                observation["checkpoint"]["last_completed_epoch"],
-            )
-            if epoch is not None
-        }
-    )
-    evidence["processing_checkpoint_free"] = all(
-        observation["checkpoint"][key] is None
-        for observation in observations
-        if observation["before_ns"] <= evidence["terminal_started_ns"]
-        for key in ("current_epoch", "last_completed_epoch")
-    ) and all(
-        evidence["before_eof"]["checkpoint"][key] is None
-        for key in ("current_epoch", "last_completed_epoch")
-    )
-    evidence["observer_policy"] = "all-modes-status-every-10ms-plus-final-frontier-1ms"
+    evidence.update(_processing_checkpoint_evidence(observations, evidence))
     return table, evidence
 
 
@@ -520,3 +418,150 @@ class AcceptanceEngineCase:
             self.loop.run_until_complete(self.loop.shutdown_asyncgens())
             self.loop.run_until_complete(self.loop.shutdown_default_executor())
             self.loop.close()
+
+
+async def _start_processing_trace(job, sources, sink, case: dict) -> float:
+    from benchmarks import engine_stream as stream
+
+    trace_setup = time.perf_counter_ns()
+    await asyncio.wait_for(
+        asyncio.gather(*(source.ready.wait() for source in sources.values())),
+        30,
+    )
+    stream._require_ready_sources(sources, sink)
+    job._inner._benchmark_start_dispatch_trace(case["mode"] == "on")
+    return (time.perf_counter_ns() - trace_setup) / 1e9
+
+
+async def _finish_processing_trace(
+    job, streams, sink, case: dict, evidence: dict
+) -> None:
+    from benchmarks import engine_stream as stream
+    from benchmarks.join_asof_acceptance import await_asof_frontier
+
+    watermark = streams["quotes.input"][-1].at
+    micros = stream.BASE_MICROS + (watermark - stream.BASE) // timedelta(microseconds=1)
+    # ASOF publishes a closed output frontier one microsecond before
+    # the minimum input watermark. Publication follows callback return.
+    evidence["final_frontier_status"] = await asyncio.wait_for(
+        await_asof_frontier(
+            job,
+            int(micros) - 1,
+            output_node_id=case["dispatch_output_node_id"],
+        ),
+        30,
+    )
+    settled = time.perf_counter_ns()
+    evidence["settled_processing_seconds"] = (
+        settled - evidence["processing_started_ns"]
+    ) / 1e9
+    evidence["settled_processing_ended_ns"] = settled
+    evidence["processing_settled"] = True
+    capture_started = time.perf_counter_ns()
+    evidence["dispatch_trace_capture_started_ns"] = capture_started
+    raw_trace = job._inner._benchmark_take_dispatch_trace()
+    evidence["before_eof"] = job.status()
+    evidence["dispatch_trace"] = _dispatch_trace(
+        raw_trace, case, evidence["before_eof"], int(micros) - 1, sink
+    )
+    evidence["dispatch_trace_capture_seconds"] = (
+        time.perf_counter_ns() - capture_started
+    ) / 1e9
+
+
+def _processing_checkpoint_evidence(observations: list[dict], evidence: dict) -> dict:
+    result = {}
+    windows = checkpoint_windows(
+        observations,
+        start_ns=evidence["processing_started_ns"],
+        end_ns=evidence.get(
+            "settled_processing_ended_ns", evidence["processing_ended_ns"]
+        ),
+    )
+    result["checkpoint_windows"] = windows
+    result["completed_processing_epochs"] = [
+        item["epoch"] for item in windows if item["inside_steady"]
+    ]
+    result["nonterminal_epochs"] = sorted(
+        {
+            epoch
+            for observation in observations
+            if evidence["processing_started_ns"]
+            <= observation["after_ns"]
+            <= evidence["terminal_started_ns"]
+            for epoch in (
+                observation["checkpoint"]["current_epoch"],
+                observation["checkpoint"]["last_completed_epoch"],
+            )
+            if epoch is not None
+        }
+    )
+    result["processing_checkpoint_free"] = all(
+        observation["checkpoint"][key] is None
+        for observation in observations
+        if observation["before_ns"] <= evidence["terminal_started_ns"]
+        for key in ("current_epoch", "last_completed_epoch")
+    ) and all(
+        evidence["before_eof"]["checkpoint"][key] is None
+        for key in ("current_epoch", "last_completed_epoch")
+    )
+    result["observer_policy"] = "all-modes-status-every-10ms-plus-final-frontier-1ms"
+    return result
+
+
+async def _finish_acceptance_job(
+    job, evidence: dict, observer, stop, started: tuple
+) -> tuple:
+    started, cpu_started = started
+    observer_failure = None
+    stop.set()
+    if observer is not None:
+        observer_cancel = await _settle_owned(observer)
+        observer_failure = observer_cancel or (
+            asyncio.CancelledError() if observer.cancelled() else observer.exception()
+        )
+    cleanup_started = time.perf_counter_ns()
+    cancellation, cleanup_error = await _cancel_owned_job(job, evidence)
+    stopped = time.perf_counter_ns()
+    evidence["cleanup_seconds"] = (stopped - cleanup_started) / 1e9
+    evidence["job_seconds"] = (stopped - started) / 1e9
+    evidence["job_cpu_seconds"] = (time.process_time_ns() - cpu_started) / 1e9
+    if "processing_started_ns" in evidence:
+        evidence["full_cycle_seconds"] = (
+            stopped - evidence["processing_started_ns"]
+        ) / 1e9
+    evidence["after_cleanup"] = job.status()
+    evidence["cleanup_complete"] = evidence.pop("cleanup_completed")
+    return observer_failure, cancellation, cleanup_error, cleanup_started
+
+
+def _require_acceptance_outcome(
+    failure, observer_failure, table, evidence: dict, case: dict
+) -> None:
+    if observer_failure is not None:
+        if isinstance(observer_failure, asyncio.CancelledError):
+            raise observer_failure
+        raise RuntimeError(
+            "checkpoint observer failed after owned cleanup"
+        ) from observer_failure
+    if isinstance(failure, asyncio.CancelledError):
+        failure.evidence = evidence
+        raise failure
+    if failure is not None and (
+        case.get("side") != "baseline"
+        or table is None
+        or "terminal_started_ns" not in evidence
+        or not evidence["cleanup_complete"]
+    ):
+        raise CycleValidationError("invalid acceptance sample", evidence) from failure
+
+
+async def _end_acceptance_sources(sources, streams, case: dict) -> None:
+    from benchmarks import engine_stream as stream
+
+    if case["workload"] == "join_retained":
+        for event in streams["right"]:
+            if isinstance(event, stream.Watermark):
+                await sources["right"].push(event)
+    for source in sources.values():
+        await source.push(None)

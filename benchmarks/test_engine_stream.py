@@ -350,7 +350,7 @@ def test_retained_join_preloads_without_sealing_and_records_processing_cut():
             sink,
             {name: (data, watermark) for name in ("left", "right")},
             SimpleNamespace(status=status),
-            retained_join=True,
+            join_mode="retained",
         )
         assert output.equals(batch.to_pyarrow())
         assert [name for name, _event in events] == ["right", "left", "left"]

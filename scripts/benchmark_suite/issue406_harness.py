@@ -234,6 +234,18 @@ def _files(source: Path) -> dict[str, str]:
     return {path: sha256_file(source / path) for path in sorted(set(paths))}
 
 
+def _apply_literal_patches(contents: str, patches: tuple, path: str) -> str:
+    for before, after in patches:
+        if after in contents:
+            if contents.count(after) != 1:
+                raise ValueError("duplicate benchmark literal patch")
+        elif contents.count(before) == 1:
+            contents = contents.replace(before, after, 1)
+        else:
+            raise ValueError(f"benchmark literal anchor is not unique: {path}")
+    return contents
+
+
 def _effective(source: Path) -> dict[str, bytes]:
     effective = {path: (ROOT / path).read_bytes() for path in COPIED_FILES}
     for path, insertion in INSERTIONS.items():
@@ -250,14 +262,7 @@ def _effective(source: Path) -> dict[str, bytes]:
         effective[path] = (original + insertion).encode()
     for path, patches in LITERAL_PATCHES.items():
         contents = effective.get(path, (source / path).read_bytes()).decode()
-        for before, after in patches:
-            if after in contents:
-                if contents.count(after) != 1:
-                    raise ValueError("duplicate benchmark literal patch")
-            elif contents.count(before) == 1:
-                contents = contents.replace(before, after, 1)
-            else:
-                raise ValueError(f"benchmark literal anchor is not unique: {path}")
+        contents = _apply_literal_patches(contents, patches, path)
         effective[path] = contents.encode()
     return effective
 

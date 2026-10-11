@@ -499,7 +499,7 @@ async def _measure_ready(
     static_join: bool = False,
 ) -> tuple[pa.Table, float]:
     table, seconds, _clocks = await _measure_ready_clock(
-        sources, sink, streams, job, static_join=static_join
+        sources, sink, streams, job, join_mode="sealed" if static_join else None
     )
     return table, seconds
 
@@ -510,11 +510,11 @@ async def _measure_ready_clock(
     streams: dict[str, tuple],
     job,
     *,
-    static_join: bool = False,
-    retained_join: bool = False,
+    join_mode: str | None = None,
 ) -> tuple[pa.Table, float, dict]:
-    if static_join and retained_join:
-        raise ValueError("Join cannot be both sealed and fully retained")
+    if join_mode not in (None, "sealed", "retained"):
+        raise ValueError("unknown Join measurement mode")
+    static_join, retained_join = join_mode == "sealed", join_mode == "retained"
     await asyncio.wait_for(
         asyncio.gather(*(source.ready.wait() for source in sources.values())),
         timeout=30,

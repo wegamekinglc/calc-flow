@@ -116,8 +116,6 @@ def validate_matched_observation(observation: dict, scenario: str) -> dict:
 def _validate_matched_observation(
     observation: dict, scenario: str, *, rows: int, check_only: bool
 ) -> dict:
-    from scripts.toolkit import fingerprint_json
-
     row_field = "rows_per_side" if scenario == "asof_join" else "rows"
     if (
         observation.get("schema") != "calc-flow.matched-native-observation.v1"
@@ -158,41 +156,7 @@ def _validate_matched_observation(
         or observation["assembled_output_batches"] <= 0
     ):
         raise ValueError("missing matched native oracle or cleanup evidence")
-    for field in (
-        "project_sha256",
-        "inputs_sha256",
-        "events_sha256",
-        "shared_partial_order_sha256",
-        "canonical_native_events_sha256",
-        "output_contract_sha256",
-        "compiled_plan_fingerprint",
-        "compiled_projection_sha256",
-    ):
-        digest = observation.get(field)
-        if (
-            not isinstance(digest, str)
-            or len(digest) != 64
-            or any(character not in "0123456789abcdef" for character in digest)
-        ):
-            raise ValueError(f"invalid matched native identity: {field}")
-    projection = observation.get("compiled_projection")
-    if (
-        not isinstance(projection, list)
-        or not projection
-        or fingerprint_json(projection, allow_nan=False)
-        != observation["compiled_projection_sha256"]
-    ):
-        raise ValueError("compiled projection identity mismatch")
-    expected_kind = "stream_asof_join" if scenario == "asof_join" else "stream_join"
-    if (
-        sum(
-            node.get("kind") == expected_kind
-            for node in projection
-            if isinstance(node, dict)
-        )
-        != 1
-    ):
-        raise ValueError("compiled projection omits the matched join")
+    _validate_projection_identity(observation, scenario)
     for field in ("post_processing_status", "callback_counts", "node_callback_counts"):
         if not isinstance(observation.get(field), dict) or not observation[field]:
             raise ValueError(f"missing native callback evidence: {field}")
@@ -232,3 +196,43 @@ def _validate_matched_observation(
         "processing_checkpoint_free": True,
         "processing_settled": True,
     }
+
+
+def _validate_projection_identity(observation: dict, scenario: str) -> None:
+    from scripts.toolkit import fingerprint_json
+
+    for field in (
+        "project_sha256",
+        "inputs_sha256",
+        "events_sha256",
+        "shared_partial_order_sha256",
+        "canonical_native_events_sha256",
+        "output_contract_sha256",
+        "compiled_plan_fingerprint",
+        "compiled_projection_sha256",
+    ):
+        digest = observation.get(field)
+        if (
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+        ):
+            raise ValueError(f"invalid matched native identity: {field}")
+    projection = observation.get("compiled_projection")
+    if (
+        not isinstance(projection, list)
+        or not projection
+        or fingerprint_json(projection, allow_nan=False)
+        != observation["compiled_projection_sha256"]
+    ):
+        raise ValueError("compiled projection identity mismatch")
+    expected_kind = "stream_asof_join" if scenario == "asof_join" else "stream_join"
+    if (
+        sum(
+            node.get("kind") == expected_kind
+            for node in projection
+            if isinstance(node, dict)
+        )
+        != 1
+    ):
+        raise ValueError("compiled projection omits the matched join")

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -15,6 +16,22 @@ import pyarrow as pa
 from scripts.toolkit import fingerprint_json, sha256_file, write_json
 
 FINAL_FRONTIER_POLL_SECONDS = 0.001
+
+
+@dataclass(frozen=True, slots=True)
+class MatchedFixture:
+    """Immutable declaration of the data and identity sealed for native replay."""
+
+    project: dict
+    inputs: dict[str, list[pa.RecordBatch]]
+    events: dict
+    expected: pa.Table
+    output_binding: str
+    plan_fingerprint: str
+    rows: int
+    batch_rows: int
+    checkpoint_enabled: bool
+    scenario: str = "asof_join"
 
 
 async def await_asof_frontier(
@@ -109,12 +126,7 @@ def validate_one_to_one_output(actual: pa.Table, expected: pa.Table) -> dict:
 
 
 def _validate_fixture_events(inputs: dict, events: dict, batch_rows: int) -> None:
-    if set(events) != {"preload", "processing", "terminal", "barriers"}:
-        raise ValueError("fixture requires exact phase and barrier sections")
-    if events["preload"]:
-        raise ValueError("matched ASOF fixture must start with empty state")
-    if any(not isinstance(events[phase], list) for phase in events):
-        raise ValueError("fixture event sections must be lists")
+    _validate_asof_sections(events)
     visited = Counter()
     ids = set()
     marks = {}
@@ -133,34 +145,7 @@ def _validate_fixture_events(inputs: dict, events: dict, batch_rows: int) -> Non
                     raise ValueError("terminal events must end each input exactly once")
                 ended.add(name)
                 continue
-            if kind == "end":
-                raise ValueError("EOF is forbidden in processing events")
-            if type(event.get("chunk_id")) is not int or event["chunk_id"] < 0:
-                raise ValueError("processing events require a chunk ID")
-            if kind == "data":
-                indices = event.get("batches")
-                if (
-                    not isinstance(indices, list)
-                    or not indices
-                    or any(
-                        type(item) is not int or not 0 <= item < len(inputs[name])
-                        for item in indices
-                    )
-                    or sum(inputs[name][item].num_rows for item in indices) > batch_rows
-                ):
-                    raise ValueError(
-                        "fixture data event has invalid record-batch group"
-                    )
-                visited.update((name, item) for item in indices)
-            elif kind == "watermark":
-                value = event.get("micros")
-                if type(value) is not int or (name in marks and value < marks[name]):
-                    raise ValueError(
-                        "fixture watermarks must be monotonic integer microseconds"
-                    )
-                marks[name] = value
-            else:
-                raise ValueError("matched processing only admits data and watermarks")
+            _validate_asof_processing(event, inputs, batch_rows, visited, marks)
     expected = Counter(
         (name, index)
         for name, batches in inputs.items()
@@ -168,36 +153,7 @@ def _validate_fixture_events(inputs: dict, events: dict, batch_rows: int) -> Non
     )
     if visited != expected or ended != set(inputs):
         raise ValueError("fixture must use every input batch and end each source once")
-    barriers = events["barriers"]
-    processing = events["processing"]
-    if len(processing) != 4 * len(barriers):
-        raise ValueError("every matched ASOF chunk requires one complete barrier")
-    rows = 0
-    for chunk, barrier in enumerate(barriers):
-        group = processing[4 * chunk : 4 * chunk + 4]
-        order = [(event["input"], event["kind"]) for event in group]
-        if order != [
-            ("reference.input", "data"),
-            ("quotes.input", "data"),
-            ("reference.input", "watermark"),
-            ("quotes.input", "watermark"),
-        ]:
-            raise ValueError(
-                "fixture chunks must match the maintained submission order"
-            )
-        if any(event["chunk_id"] != chunk for event in group):
-            raise ValueError("fixture chunk IDs must be consecutive")
-        rows += sum(
-            inputs["quotes.input"][index].num_rows for index in group[1]["batches"]
-        )
-        if barrier != {
-            "chunk_id": chunk,
-            "after_events": [event["event_id"] for event in group],
-            "output_rows": rows,
-        }:
-            raise ValueError(
-                "fixture barrier must follow its complete chunk at the exact row count"
-            )
+    _validate_asof_barriers(inputs, events)
 
 
 def _validate_join_fixture(
@@ -216,41 +172,8 @@ def _validate_join_fixture(
     if not 1 <= sum(batch.num_rows for batch in inputs["right"]) <= 64:
         raise ValueError("sealed Join dimension must use at most 64 fixture entities")
     visited = Counter()
-    for phase, binding in (("preload", "right"), ("processing", "left")):
-        records = events[phase]
-        if not records or len(records) % 2:
-            raise ValueError("sealed Join messages must alternate data and watermark")
-        last_watermark = None
-        for index, record in enumerate(records):
-            expected_kind = "data" if index % 2 == 0 else "watermark"
-            if (
-                record.get("input") != binding
-                or record.get("kind") != expected_kind
-                or record.get("event_id") != f"{phase}/{index}"
-                or record.get("chunk_id") != index // 2
-            ):
-                raise ValueError("sealed Join fixture has inconsistent event identity")
-            if expected_kind == "data":
-                batches = record.get("batches")
-                if (
-                    not isinstance(batches, list)
-                    or not batches
-                    or any(
-                        type(item) is not int or not 0 <= item < len(inputs[binding])
-                        for item in batches
-                    )
-                    or sum(inputs[binding][item].num_rows for item in batches)
-                    > batch_rows
-                ):
-                    raise ValueError("sealed Join fixture has an invalid batch group")
-                visited.update((binding, item) for item in batches)
-            else:
-                micros = record.get("micros")
-                if type(micros) is not int or (
-                    last_watermark is not None and micros < last_watermark
-                ):
-                    raise ValueError("sealed Join requires monotonic watermarks")
-                last_watermark = micros
+    for phase in ("preload", "processing"):
+        visited.update(_validate_join_phase(inputs, events, phase, batch_rows))
     expected = Counter(
         (name, index)
         for name, batches in inputs.items()
@@ -263,19 +186,7 @@ def _validate_join_fixture(
         for index, name in enumerate(("right", "left"))
     ]:
         raise ValueError("sealed Join must end each input exactly once")
-    barriers = events["barriers"]
-    if len(events["processing"]) != 2 * len(barriers):
-        raise ValueError("sealed Join native chunks require complete barriers")
-    total = 0
-    for chunk, barrier in enumerate(barriers):
-        group = events["processing"][2 * chunk : 2 * chunk + 2]
-        total += sum(inputs["left"][index].num_rows for index in group[0]["batches"])
-        if barrier != {
-            "chunk_id": chunk,
-            "after_events": [event["event_id"] for event in group],
-            "output_rows": total,
-        }:
-            raise ValueError("sealed Join native barrier row count differs")
+    _validate_join_barriers(inputs, events)
 
 
 def _write_ipc(path: Path, batches: list[pa.RecordBatch]) -> dict:
@@ -304,21 +215,19 @@ def _partial_order(events: dict) -> dict:
     return {**phases, "barriers": events.get("barriers", [])}
 
 
-def export_matched_fixture(
-    root: Path,
-    *,
-    project: dict,
-    inputs: dict[str, list[pa.RecordBatch]],
-    events: dict,
-    expected: pa.Table,
-    output_binding: str,
-    plan_fingerprint: str,
-    rows: int,
-    batch_rows: int,
-    checkpoint_enabled: bool,
-    scenario: str = "asof_join",
-) -> dict:
+def export_matched_fixture(root: Path, fixture: MatchedFixture) -> dict:
     """Seal exact Arrow message groups, project, oracle, and ordering constraints."""
+    project, inputs, events, expected = (
+        fixture.project,
+        fixture.inputs,
+        fixture.events,
+        fixture.expected,
+    )
+    output_binding = fixture.output_binding
+    plan_fingerprint = fixture.plan_fingerprint
+    rows, batch_rows = fixture.rows, fixture.batch_rows
+    checkpoint_enabled = fixture.checkpoint_enabled
+    scenario = fixture.scenario
 
     if (
         type(rows) is not int
@@ -429,15 +338,17 @@ def export_runtime_fixture(
     ]
     return export_matched_fixture(
         root,
-        project=program.to_project().model_dump(mode="json"),
-        inputs=inputs,
-        events=events,
-        expected=expected,
-        output_binding="output",
-        plan_fingerprint=program.compile_stream(stream.Runtime()).fingerprint,
-        rows=case["rows"],
-        batch_rows=case["batch_rows"],
-        checkpoint_enabled=case["mode"] != "off",
+        MatchedFixture(
+            project=program.to_project().model_dump(mode="json"),
+            inputs=inputs,
+            events=events,
+            expected=expected,
+            output_binding="output",
+            plan_fingerprint=program.compile_stream(stream.Runtime()).fingerprint,
+            rows=case["rows"],
+            batch_rows=case["batch_rows"],
+            checkpoint_enabled=case["mode"] != "off",
+        ),
     )
 
 
@@ -496,16 +407,18 @@ def export_join_runtime_fixture(
     ]
     return export_matched_fixture(
         root,
-        project=program.to_project().model_dump(mode="json"),
-        inputs=inputs,
-        events=events,
-        expected=expected,
-        output_binding="output",
-        plan_fingerprint=program.compile_stream(stream.Runtime()).fingerprint,
-        rows=case["rows"],
-        batch_rows=case["batch_rows"],
-        checkpoint_enabled=case["mode"] != "off",
-        scenario="join_sealed",
+        MatchedFixture(
+            project=program.to_project().model_dump(mode="json"),
+            inputs=inputs,
+            events=events,
+            expected=expected,
+            output_binding="output",
+            plan_fingerprint=program.compile_stream(stream.Runtime()).fingerprint,
+            rows=case["rows"],
+            batch_rows=case["batch_rows"],
+            checkpoint_enabled=case["mode"] != "off",
+            scenario="join_sealed",
+        ),
     )
 
 
@@ -605,3 +518,134 @@ def export_ordering_fixture(root: Path, *, checkpoint_enabled: bool = True) -> d
 from benchmarks.join_asof_acceptance_runtime import (  # noqa: E402
     AcceptanceEngineCase as AcceptanceEngineCase,
 )
+
+
+def _validate_asof_barriers(inputs: dict, events: dict) -> None:
+    barriers = events["barriers"]
+    processing = events["processing"]
+    if len(processing) != 4 * len(barriers):
+        raise ValueError("every matched ASOF chunk requires one complete barrier")
+    rows = 0
+    for chunk, barrier in enumerate(barriers):
+        group = processing[4 * chunk : 4 * chunk + 4]
+        order = [(event["input"], event["kind"]) for event in group]
+        if order != [
+            ("reference.input", "data"),
+            ("quotes.input", "data"),
+            ("reference.input", "watermark"),
+            ("quotes.input", "watermark"),
+        ]:
+            raise ValueError(
+                "fixture chunks must match the maintained submission order"
+            )
+        if any(event["chunk_id"] != chunk for event in group):
+            raise ValueError("fixture chunk IDs must be consecutive")
+        rows += sum(
+            inputs["quotes.input"][index].num_rows for index in group[1]["batches"]
+        )
+        if barrier != {
+            "chunk_id": chunk,
+            "after_events": [event["event_id"] for event in group],
+            "output_rows": rows,
+        }:
+            raise ValueError(
+                "fixture barrier must follow its complete chunk at the exact row count"
+            )
+
+
+def _validate_asof_processing(
+    event: dict, inputs: dict, batch_rows: int, visited: Counter, marks: dict
+) -> None:
+    name, kind = event.get("input"), event.get("kind")
+    if kind == "end":
+        raise ValueError("EOF is forbidden in processing events")
+    if type(event.get("chunk_id")) is not int or event["chunk_id"] < 0:
+        raise ValueError("processing events require a chunk ID")
+    if kind == "data":
+        indices = event.get("batches")
+        if (
+            not isinstance(indices, list)
+            or not indices
+            or any(
+                type(item) is not int or not 0 <= item < len(inputs[name])
+                for item in indices
+            )
+            or sum(inputs[name][item].num_rows for item in indices) > batch_rows
+        ):
+            raise ValueError("fixture data event has invalid record-batch group")
+        visited.update((name, item) for item in indices)
+    elif kind == "watermark":
+        value = event.get("micros")
+        if type(value) is not int or (name in marks and value < marks[name]):
+            raise ValueError(
+                "fixture watermarks must be monotonic integer microseconds"
+            )
+        marks[name] = value
+    else:
+        raise ValueError("matched processing only admits data and watermarks")
+
+
+def _validate_join_phase(
+    inputs: dict, events: dict, phase: str, batch_rows: int
+) -> Counter:
+    binding = "right" if phase == "preload" else "left"
+    visited = Counter()
+    records = events[phase]
+    if not records or len(records) % 2:
+        raise ValueError("sealed Join messages must alternate data and watermark")
+    last_watermark = None
+    for index, record in enumerate(records):
+        expected_kind = "data" if index % 2 == 0 else "watermark"
+        if (
+            record.get("input") != binding
+            or record.get("kind") != expected_kind
+            or record.get("event_id") != f"{phase}/{index}"
+            or record.get("chunk_id") != index // 2
+        ):
+            raise ValueError("sealed Join fixture has inconsistent event identity")
+        if expected_kind == "data":
+            batches = record.get("batches")
+            if (
+                not isinstance(batches, list)
+                or not batches
+                or any(
+                    type(item) is not int or not 0 <= item < len(inputs[binding])
+                    for item in batches
+                )
+                or sum(inputs[binding][item].num_rows for item in batches) > batch_rows
+            ):
+                raise ValueError("sealed Join fixture has an invalid batch group")
+            visited.update((binding, item) for item in batches)
+        else:
+            micros = record.get("micros")
+            if type(micros) is not int or (
+                last_watermark is not None and micros < last_watermark
+            ):
+                raise ValueError("sealed Join requires monotonic watermarks")
+            last_watermark = micros
+    return visited
+
+
+def _validate_asof_sections(events: dict) -> None:
+    if set(events) != {"preload", "processing", "terminal", "barriers"}:
+        raise ValueError("fixture requires exact phase and barrier sections")
+    if events["preload"]:
+        raise ValueError("matched ASOF fixture must start with empty state")
+    if any(not isinstance(events[phase], list) for phase in events):
+        raise ValueError("fixture event sections must be lists")
+
+
+def _validate_join_barriers(inputs: dict, events: dict) -> None:
+    barriers = events["barriers"]
+    if len(events["processing"]) != 2 * len(barriers):
+        raise ValueError("sealed Join native chunks require complete barriers")
+    total = 0
+    for chunk, barrier in enumerate(barriers):
+        group = events["processing"][2 * chunk : 2 * chunk + 2]
+        total += sum(inputs["left"][index].num_rows for index in group[0]["batches"])
+        if barrier != {
+            "chunk_id": chunk,
+            "after_events": [event["event_id"] for event in group],
+            "output_rows": total,
+        }:
+            raise ValueError("sealed Join native barrier row count differs")
