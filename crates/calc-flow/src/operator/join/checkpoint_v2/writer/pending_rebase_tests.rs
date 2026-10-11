@@ -90,9 +90,21 @@ async fn test_pending_rebase_preserves_payloads_restores_and_continues() {
     assert_eq!(pool.reserved(), 0);
 }
 
-#[tokio::test]
-async fn test_pending_rebase_cancellation_and_refusal_refund_both_phases() {
-    let enabled = job();
+#[test]
+fn test_pending_rebase_cancellation_and_refusal_refund_both_phases() {
+    // Shared-service pressure can retire idle generation credit between assertions.
+    let service = crate::runtime::streaming::gather_work::TestService::new(1, 1).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(pending_rebase_refund(&service));
+    drop(runtime);
+    service.shutdown();
+}
+
+async fn pending_rebase_refund(service: &crate::runtime::streaming::gather_work::TestService) {
+    let enabled = job().with_gather_owner(service.owner("pending-rebase-refund".into()));
     let context = StreamOperatorContext::new(&enabled, "prepared-reuse", None);
     let (mut join, old) = checkpointed_from(&context, with_one_gib_pool(operator())).await;
     for side in ["left", "right"] {
@@ -162,8 +174,12 @@ async fn test_pending_rebase_cancellation_and_refusal_refund_both_phases() {
         .unwrap()
         .incremental_reservation("pending-rebase-refusal");
     pressure.try_grow((1 << 30) - pool.reserved()).unwrap();
-    let failure = join.prepare_checkpoint_async(&context).await;
-    assert!(failure.is_err());
+    let failure = join.prepare_checkpoint_async(&context).await.unwrap_err();
+    assert!(
+        matches!(failure, crate::CalcFlowError::Internal { ref message }
+            if message == "V2 IPC constructor credit admission failed"),
+        "{failure}"
+    );
     assert_eq!(edge_tests::image(&join), before);
     drop(pressure);
     assert_eq!(pool.reserved(), reserved);

@@ -172,3 +172,21 @@ and `sys.modules` entries together and restore both afterward. All 21 acceptance
 tests pass; the exact seven-module workflow command passes all 139 tests.
 No benchmark sample, lifecycle validation or production timing boundary changes.
 The failed run is retained; a fresh full workflow will validate the fix.
+
+## Checkpoint refund test isolation
+
+Windows CI at `f96ab586` rejects cancellation check 143: pool credit falls from
+226,628 to 210,244 bytes. The 16,384-byte difference matches a native gather pool
+generation. Concurrent tests can pressure the shared process service and retire
+that idle generation while this test checks its synchronous encoder refunds.
+
+Use the existing isolated one-worker `TestService` for this test. Keep every
+cancellation point and strict pool/image assertion, and require the final
+preparation refusal to be the IPC constructor credit-admission error. Run the
+async body inside an explicitly owned runtime; shut down the service after
+leaving Tokio. This changes test ownership only, with no production policy,
+runtime limit, encoder or measurement changes.
+
+The focused six pending-rebase tests pass, including every cancellation point
+and the exact budget refusal. Test-inclusive all-feature Clippy and scoped
+formatting pass. No new registered test crosses the libtest array-size threshold.
