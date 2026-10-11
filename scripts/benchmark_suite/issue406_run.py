@@ -20,6 +20,7 @@ from scripts.benchmark_suite.issue406_acceptance import (
     validate_complete_results,
     validate_observation,
 )
+from scripts.benchmark_suite.issue406_fresh import SCHEMA as FRESH_SCHEMA
 from scripts.benchmark_suite.issue406_harness import (
     WHEEL_TARGET,
     native_harness_reuse,
@@ -144,20 +145,83 @@ def validate_plan(plan: dict) -> None:
     """Require the complete frozen inventory and hash every declared input."""
     files = _validate_plan_inventory(plan)
     reuse = plan["native_harness_reuse"]
-    build_harness = reuse["original_build_harness_git_sha"]
-    if reuse != native_harness_reuse(build_harness):
-        raise ValueError("native build reuse witness changed")
+    fresh = plan.get("schema") == FRESH_SCHEMA
+    if fresh:
+        _validate_fresh_releases(plan, files)
+    else:
+        build_harness = reuse["original_build_harness_git_sha"]
+        if reuse != native_harness_reuse(build_harness):
+            raise ValueError("native build reuse witness changed")
     if competing_work(set()):
         raise ValueError("another controlled build or measurement is active")
     enabled_builds = {}
-    traced_environment = None
+    traced_identities = []
     for side in ("baseline", "candidate"):
-        wheel_build = _validate_plan_wheel(plan, side, files, build_harness)
-        if traced_environment is None:
-            traced_environment = wheel_build["environment"]
-        elif traced_environment != wheel_build["environment"]:
-            raise ValueError("row-7 paired wheel build environments differ")
-        _validate_plan_binaries(plan, side, files, build_harness, enabled_builds)
+        if fresh:
+            build_harness = reuse[side]["original_build_harness_git_sha"]
+        wheel_harness = (
+            plan["row7_harness_reuse"][side]["original_build_harness_git_sha"]
+            if fresh
+            else build_harness
+        )
+        wheel_build = _validate_plan_wheel(plan, side, files, wheel_harness)
+        environment = {
+            key: value
+            for key, value in wheel_build["environment"].items()
+            if not fresh or key != "CARGO_TARGET_DIR"
+        }
+        traced_identities.append((environment, wheel_build.get("validated_artifacts")))
+        _validate_plan_binaries(
+            plan,
+            side,
+            files,
+            build_harness,
+            enabled_builds,
+        )
+    if traced_identities[0] != traced_identities[1]:
+        raise ValueError(
+            "row-7 build environment or dependency/profile inventory differs"
+        )
+
+
+def _validate_fresh_releases(plan: dict, files: dict) -> Path:
+    from scripts.benchmark_suite.issue406_failures import validate_main_failure_identity
+    from scripts.benchmark_suite.issue406_reuse import (
+        FROZEN,
+        HISTORICAL,
+        WITNESS_SHA256,
+        validate_ordinary_release,
+    )
+
+    witness = plan["historical_harness_witness"]
+    compatibility = Path(witness["path"])
+    if (
+        witness["sha256"] != WITNESS_SHA256
+        or files.get(str(compatibility)) != WITNESS_SHA256
+    ):
+        raise ValueError("historical compatibility witness is not sealed")
+    for key in ("native_harness_reuse", "row7_harness_reuse"):
+        if set(plan[key]) != {"baseline", "candidate"}:
+            raise ValueError("fresh build-harness roles differ")
+        for side, reuse in plan[key].items():
+            historical = key == "native_harness_reuse" and side == "baseline"
+            revision = HISTORICAL if historical else FROZEN
+            expected = native_harness_reuse(
+                revision, compatibility=compatibility if historical else None
+            )
+            if reuse != expected:
+                raise ValueError("fresh native build reuse witness changed")
+    releases = [*plan["releases"].values(), plan["retained_control"]]
+    builds = [validate_ordinary_release(release, files) for release in releases]
+    validate_main_failure_identity(plan, files)
+    if (
+        any(build != builds[0] for build in builds[1:])
+        or builds[0]["rustc"] != plan["expected_native_rustc"]
+    ):
+        raise ValueError(
+            "ordinary release dependencies, compiler or build settings differ"
+        )
+    return compatibility
 
 
 class AcceptanceRunner:
@@ -167,24 +231,50 @@ class AcceptanceRunner:
         self.plan, self.output, self.started = plan, output, started
         self.workers = {}
         self.processes = {}
+        self.groups = {}
+        self.creations = set()
+        self.cleanup_tasks = set()
+        self.prepared_cases = {}
+        self.retired = {}
         self.environments = {}
         self.resources = []
         self.stop = asyncio.Event()
 
     async def register_process(self, creation):
+        self.creations.add(creation)
         try:
-            process = await asyncio.shield(creation)
-        except asyncio.CancelledError:
-            process = await _complete_owned(creation)
-            self.processes[process.pid] = process
-            raise
+            try:
+                process = await asyncio.shield(creation)
+            except asyncio.CancelledError:
+                process = await _complete_owned(creation)
+                self._own_process(process)
+                raise
+            self._own_process(process)
+            return process
+        finally:
+            self.creations.discard(creation)
+
+    def _own_process(self, process):
         self.processes[process.pid] = process
-        return process
+        if self.fresh:
+            self.groups[process.pid] = process
+
+    @property
+    def fresh(self) -> bool:
+        return self.plan.get("schema") == FRESH_SCHEMA
 
     def cpus(self, case) -> list[int]:
         return self.plan["cpus"][: case.threads]
 
     def release(self, case, side) -> dict:
+        if side == "previous":
+            from scripts.benchmark_suite.issue406_fresh import retained_cases
+
+            if not self.fresh or case not in retained_cases():
+                raise ValueError(
+                    "previous release is restricted to retained OFF controls"
+                )
+            return self.plan["retained_control"]
         key = "row7_releases" if case.row == 7 else "releases"
         return self.plan[key][side]
 
@@ -226,6 +316,7 @@ class AcceptanceRunner:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=log,
                 limit=WORKER_RESPONSE_LIMIT,
+                start_new_session=self.fresh,
             )
         )
         try:
@@ -260,6 +351,20 @@ class AcceptanceRunner:
         )
 
         case = group[0]
+        product = (
+            self.release(case, side)["product_commit"]
+            if self.fresh
+            else self.plan["releases"][side]["product_commit"]
+        )
+        if (
+            self.fresh
+            and case.workload in RUNTIME_WORKLOADS
+            and (
+                raw.get("product_commit") != product
+                or raw.get("cpu_affinity") != self.cpus(case)
+            )
+        ):
+            raise ValueError("raw runtime product or affinity differs from its release")
         if case.row in (4, 5):
             raw = validate_native_component(raw)
             if case.row == 4:
@@ -316,7 +421,7 @@ class AcceptanceRunner:
         normalized = {
             key: {
                 **value,
-                "product_commit": self.plan["releases"][side]["product_commit"],
+                "product_commit": product,
                 "observation_id": observation_id,
                 "raw_observation_sha256": raw_digest,
                 "group_member_ids": [member.id for member in group],
@@ -324,7 +429,11 @@ class AcceptanceRunner:
             for key, value in mapped.items()
         }
         for member in group:
-            validate_observation(member, side, normalized[member.id])
+            validate_observation(
+                member,
+                "candidate" if side == "previous" else side,
+                normalized[member.id],
+            )
         return normalized
 
     async def prepare(self, group, side, round_index):
@@ -346,8 +455,11 @@ class AcceptanceRunner:
                     != result["fixture_sha256"]
                 ):
                     raise ValueError("exported Join fixture changed")
-                await worker.close()
-                self.processes.pop(worker.process.pid)
+                if self.fresh:
+                    await self.close_worker(side)
+                else:
+                    await worker.close()
+                    self.processes.pop(worker.process.pid)
                 self.workers.pop(side)
             return await self.sample(group, side, round_index, None)
         worker = await self._start_worker(case, side, round_index)
@@ -355,9 +467,10 @@ class AcceptanceRunner:
             **asdict(case),
             "family": "join-asof-acceptance",
             "side": side,
-            "product_commit": self.plan["releases"][side]["product_commit"],
+            "product_commit": self.release(case, side)["product_commit"],
             "fixture_root": str(self.fixture_root(side, case.mode, round_index)),
         }
+        self.prepared_cases[(case.id, side, round_index)] = specification
         response = await worker.request(operation="prepare", case=specification)
         if response["case"] != specification:
             raise ValueError("worker prepared a different acceptance workload")
@@ -469,6 +582,7 @@ class AcceptanceRunner:
                     env=_child_environment(None, self.cpus(case)),
                     stdout=stdout_file,
                     stderr=log,
+                    start_new_session=self.fresh,
                 )
             )
             process = await self.register_process(creation)
@@ -485,7 +599,10 @@ class AcceptanceRunner:
                 "cpu_affinity": self.cpus(case),
             },
         )
-        self.processes.pop(process.pid)
+        if self.fresh:
+            await self.retire_process(process.pid)
+        else:
+            self.processes.pop(process.pid)
         if process.returncode:
             raise RuntimeError(f"native component failed; see {destination}")
         observed = json.loads(stdout)
@@ -519,8 +636,20 @@ class AcceptanceRunner:
             raise ValueError("native observed CPU/thread configuration differs")
         return {**observed, "native_executable_sha256": binary["sha256"]}
 
-    async def finish_round(self):
+    async def finish_round(self, selected_side=None):
         for side, worker in tuple(self.workers.items()):
+            if selected_side is not None and side != selected_side:
+                continue
+            if self.fresh:
+                response = await worker.request(operation="finish")
+                if (
+                    response.get("state") != "completed"
+                    or response.get("samples") != SAMPLES + 1
+                ):
+                    raise ValueError("worker did not finish exactly eleven invocations")
+                await self.close_worker(side)
+                self.workers.pop(side)
+                continue
             try:
                 if worker.process.returncode is None:
                     response = await worker.request(operation="finish")
@@ -531,18 +660,68 @@ class AcceptanceRunner:
                 self.processes.pop(worker.process.pid, None)
                 self.workers.pop(side, None)
 
+    def group_members(self) -> dict:
+        import psutil
+
+        members = {pid: [] for pid in self.groups}
+        for process in psutil.process_iter(("pid", "status")):
+            with suppress(ProcessLookupError, psutil.NoSuchProcess):
+                group = os.getpgid(process.pid)
+                if group in members and process.info["status"] != psutil.STATUS_ZOMBIE:
+                    members[group].append(process.pid)
+        return members
+
+    async def retire_process(self, pid: int) -> None:
+        process = self.processes[pid]
+        if process.returncode is None or self.group_members().get(pid):
+            raise RuntimeError("exited process has live owned descendants")
+        self.retired[pid] = {"returncode": process.returncode, "group_empty": True}
+        self.groups.pop(pid, None)
+        self.processes.pop(pid)
+
+    async def close_worker(self, side: str, *, allow_failure=False) -> None:
+        worker = self.workers[side]
+        worker.process.stdin.close()
+        await worker.process.wait()
+        if (
+            worker.process.returncode is None
+            or worker.process.returncode < 0
+            or (worker.process.returncode and not allow_failure)
+        ):
+            raise RuntimeError("worker did not exit naturally")
+        await self.retire_process(worker.process.pid)
+        worker.log.close()
+
+    async def known_main_failure(self, group, side, round_index, index, error):
+        from scripts.benchmark_suite.issue406_failures import recognize_owned_failure
+
+        return await recognize_owned_failure(
+            self, group, (side, round_index, index), error
+        )
+
     async def resources_guard(self):
         import psutil
 
         while not self.stop.is_set():
             controller_rss = psutil.Process().memory_info().rss
             rss, children = controller_rss, []
-            for pid, process in tuple(self.processes.items()):
-                if process.returncode is not None:
-                    continue
+            owned = (
+                {pid for members in self.group_members().values() for pid in members}
+                if self.fresh
+                else {
+                    pid
+                    for pid, process in self.processes.items()
+                    if process.returncode is None
+                }
+            )
+            for pid in owned:
                 try:
                     observed = psutil.Process(pid)
-                    for item in (observed, *observed.children(recursive=True)):
+                    for item in (
+                        (observed,)
+                        if self.fresh
+                        else (observed, *observed.children(recursive=True))
+                    ):
                         memory = item.memory_info().rss
                         rss += memory
                         children.append(
@@ -551,6 +730,7 @@ class AcceptanceRunner:
                                 "rss": memory,
                                 "cpu_seconds": sum(item.cpu_times()[:2]),
                                 "threads": [list(thread) for thread in item.threads()],
+                                "cpu_affinity": item.cpu_affinity(),
                             }
                         )
                 except psutil.NoSuchProcess:
@@ -562,7 +742,7 @@ class AcceptanceRunner:
                 with suppress(FileNotFoundError):
                     if path.is_file():
                         used += path.stat().st_size
-            conflicts = competing_work(set(self.processes))
+            conflicts = competing_work(owned)
             self.resources.append(
                 {
                     "elapsed_seconds": time.monotonic() - self.started,
@@ -583,6 +763,8 @@ class AcceptanceRunner:
                 await asyncio.wait_for(self.stop.wait(), 1)
 
     async def settle(self):
+        if self.fresh:
+            return await self.settle_fresh()
         for process in self.processes.values():
             if process.returncode is None:
                 with suppress(ProcessLookupError):
@@ -601,10 +783,110 @@ class AcceptanceRunner:
         self.processes.clear()
         return {"settled": True, "forced_kill_pids": forced}
 
+    async def settle_fresh(self):
+        deadline = min(
+            self.started + self.plan["settlement_deadline_seconds"],
+            time.monotonic() + self.plan["settlement_seconds"],
+        )
+        self.settlement_deadline = deadline
+        reserve = min(5, max(0, deadline - time.monotonic()) / 2)
+        process_deadline = deadline - reserve
+        cleanup = tuple(self.cleanup_tasks)
+        for task in cleanup:
+            task.cancel()
+        signaled, forced, processes = await self._settle_groups(process_deadline)
+        creations = tuple(self.creations)
+        for task in (*creations, *cleanup):
+            task.cancel()
+        if creations:
+            await asyncio.wait(
+                creations, timeout=max(0, deadline - time.monotonic()) / 2
+            )
+        final_signaled, final_forced, final_processes = await self._settle_groups(
+            deadline, force=True
+        )
+        signaled.extend(pid for pid in final_signaled if pid not in signaled)
+        forced.extend(pid for pid in final_forced if pid not in forced)
+        processes.update(final_processes)
+        if cleanup:
+            await asyncio.wait(cleanup, timeout=max(0, deadline - time.monotonic()))
+        errors = []
+        for task in cleanup:
+            if task.done() and not task.cancelled() and task.exception() is not None:
+                errors.append(str(task.exception()))
+        io_settled = await self._settle_io(processes, deadline)
+        for worker in self.workers.values():
+            worker.log.close()
+        self.workers.clear()
+        members = self.group_members()
+        return {
+            "settled": time.monotonic() <= deadline
+            and not self.groups
+            and not self.creations
+            and io_settled
+            and all(task.done() for task in cleanup),
+            "forced_kill_pids": forced,
+            "terminated_groups": signaled,
+            "surviving_group_pids": [
+                pid for group in members.values() for pid in group
+            ],
+            "unsettled_groups": sorted(self.groups),
+            "pending_creations": len(self.creations),
+            "cancelled_creations": sum(task.cancelled() for task in creations),
+            "cleanup_errors": errors,
+            "deadline_satisfied": time.monotonic() <= deadline,
+        }
+
+    async def _settle_groups(self, deadline, *, force=False):
+        grace = time.monotonic() if force else min(deadline, time.monotonic() + 10)
+        signaled, forced, processes = [], [], {}
+        while (self.groups or self.creations) and time.monotonic() < deadline:
+            processes.update(self.processes)
+            members = self.group_members()
+            for pid, process in tuple(self.groups.items()):
+                if not members[pid] and process.returncode is not None:
+                    await self.retire_process(pid)
+                    continue
+                if pid not in signaled:
+                    with suppress(ProcessLookupError):
+                        os.killpg(pid, signal.SIGTERM)
+                    signaled.append(pid)
+                if time.monotonic() >= grace and pid not in forced:
+                    with suppress(ProcessLookupError):
+                        os.killpg(pid, signal.SIGKILL)
+                    forced.append(pid)
+            if self.groups or self.creations:
+                await asyncio.sleep(min(0.02, max(0, deadline - time.monotonic())))
+        return signaled, forced, processes
+
+    async def _settle_io(self, processes, deadline):
+        tasks = [
+            asyncio.create_task(process.communicate()) for process in processes.values()
+        ]
+        if not tasks:
+            return True
+        done, pending = await asyncio.wait(
+            tasks, timeout=max(0, deadline - time.monotonic())
+        )
+        for task in done:
+            with suppress(BaseException):
+                task.result()
+        for task in pending:
+            task.cancel()
+        if pending:
+            for process in processes.values():
+                process._transport.close()
+            await asyncio.wait(pending, timeout=max(0, deadline - time.monotonic()))
+        return not pending
+
 
 async def run(plan: dict, output: Path) -> dict:
     """Execute once, charging setup, preflight, collection, cleanup and sealing."""
-    started = time.monotonic() - plan.get("precharged_seconds", 0)
+    started = (
+        time.monotonic()
+        - plan.get("precharged_seconds", 0)
+        - plan.get("startup_allowance_seconds", 0)
+    )
     if output.exists() and any(output.iterdir()):
         raise ValueError("acceptance execution requires a fresh output directory")
     output.mkdir(parents=True, exist_ok=True)
@@ -645,12 +927,17 @@ async def run(plan: dict, output: Path) -> dict:
                 "worker_response_limit_bytes": WORKER_RESPONSE_LIMIT,
             },
         )
+        remaining = plan.get(
+            "collection_cutoff_seconds",
+            plan["budget_seconds"] - plan["settlement_seconds"],
+        ) - (time.monotonic() - started)
+        if remaining <= 0:
+            raise TimeoutError("collection budget exhausted during preflight")
         guard = asyncio.create_task(runner.resources_guard())
-        collection = asyncio.create_task(collect(runner, output))
-        remaining = (
-            plan["budget_seconds"]
-            - plan["settlement_seconds"]
-            - (time.monotonic() - started)
+        from scripts.benchmark_suite.issue406_fresh import collect_fresh
+
+        collection = asyncio.create_task(
+            (collect_fresh if runner.fresh else collect)(runner, output)
         )
         async with asyncio.timeout(remaining):
             done, _ = await asyncio.wait(
@@ -660,6 +947,7 @@ async def run(plan: dict, output: Path) -> dict:
                 guard.result()
                 raise RuntimeError("resource guard exited unexpectedly")
             report = {**report, **collection.result()}
+        report["assessment"]["environment_suitable"] = True
         validate_complete_results(report)
         report["state"] = "complete"
         report["assessment"]["environment_suitable"] = True
@@ -674,6 +962,67 @@ async def run(plan: dict, output: Path) -> dict:
     return report
 
 
+async def _run_cli(plan: dict, output: Path) -> dict:
+    """Prevent the dedicated controller's final asyncio sweep from hanging."""
+    started = (
+        time.monotonic()
+        - plan.get("precharged_seconds", 0)
+        - plan.get("startup_allowance_seconds", 0)
+    )
+    report = await run(plan, output)
+    pending = {
+        task
+        for task in asyncio.all_tasks()
+        if task is not asyncio.current_task() and not task.done()
+    }
+    if plan.get("schema") == FRESH_SCHEMA and pending:
+        _exit_unsettled_controller(plan, output, started, pending)
+    return report
+
+
+def _exit_unsettled_controller(
+    plan: dict, output: Path, started: float, pending
+) -> None:
+    """Stop only this CLI's descendants before an explicit, nonzero failure exit."""
+    import psutil
+
+    deadline = min(
+        time.monotonic() + 1,
+        started + plan["budget_seconds"] - plan["final_seal_allowance_seconds"],
+    )
+    processes = psutil.Process().children(recursive=True)
+    groups = set()
+    for process in processes:
+        with suppress(ProcessLookupError):
+            group = os.getpgid(process.pid)
+            if group != os.getpgrp():
+                groups.add(group)
+    for group in groups:
+        with suppress(ProcessLookupError):
+            os.killpg(group, signal.SIGKILL)
+    for process in processes:
+        with suppress(psutil.NoSuchProcess):
+            process.kill()
+    _, alive = psutil.wait_procs(processes, timeout=max(0, deadline - time.monotonic()))
+    record = {
+        "schema": "calc-flow.issue406-ownership-failure.v1",
+        "settled": False,
+        "reason": "owned tasks survived the absolute settlement deadline",
+        "pending_tasks": len(pending),
+        "terminated_pids": [process.pid for process in processes],
+        "terminated_groups": sorted(groups),
+        "surviving_pids": [process.pid for process in alive],
+        "deadline_satisfied": time.monotonic() <= deadline,
+        "elapsed_seconds": time.monotonic() - started,
+        "exit_code": 1,
+    }
+    path = output / "ownership-failure.json"
+    write_json(path, record)
+    with path.open("rb") as stream:
+        os.fsync(stream.fileno())
+    os._exit(1)
+
+
 def main() -> int:
     import argparse
 
@@ -684,7 +1033,7 @@ def main() -> int:
     args = parser.parse_args()
     if sha256_file(args.plan) != args.plan_sha256:
         raise ValueError("execution plan differs from the reviewed seal")
-    report = asyncio.run(run(json.loads(args.plan.read_text()), args.output))
+    report = asyncio.run(_run_cli(json.loads(args.plan.read_text()), args.output))
     print(
         json.dumps(
             {key: value for key, value in report.items() if key != "measurements"}
@@ -694,7 +1043,11 @@ def main() -> int:
 
 
 def _validate_plan_inventory(plan: dict) -> dict:
-    if (
+    if plan.get("schema") == FRESH_SCHEMA:
+        from scripts.benchmark_suite.issue406_fresh import validate_envelope
+
+        validate_envelope(plan)
+    elif (
         plan.get("schema") != "calc-flow.issue406-execution.v1"
         or plan.get("budget_seconds") != 4500
         or plan.get("settlement_seconds") != 300
@@ -702,7 +1055,7 @@ def _validate_plan_inventory(plan: dict) -> dict:
     ):
         raise ValueError("execution plan differs from the frozen acceptance contract")
     precharged = plan.get("precharged_seconds", 0)
-    if (
+    if plan.get("schema") != FRESH_SCHEMA and (
         type(precharged) not in (int, float)
         or not math.isfinite(precharged)
         or not 0 <= precharged < 4200
@@ -766,7 +1119,20 @@ def _validate_plan_wheel(
     if not traced_installed or not traced_installed.issubset(files):
         raise ValueError("row-7 installed package is not fully sealed")
     traced_output = Path(traced["build_output"])
-    traced_attestation = validate_acceptance_harness(traced_output, WHEEL_TARGET)
+    reconstruction = traced.get("helper_reconstruction")
+    if plan.get("schema") == FRESH_SCHEMA:
+        from scripts.benchmark_suite.issue406_reuse import helper_reconstruction
+
+        expected = (
+            helper_reconstruction(Path(plan["historical_harness_witness"]["path"]))
+            if side == "baseline"
+            else None
+        )
+        if reconstruction != expected:
+            raise ValueError("fresh traced helper reconstruction differs")
+    traced_attestation = validate_acceptance_harness(
+        traced_output, WHEEL_TARGET, reconstruction=reconstruction
+    )
     if (
         str(traced_output / f"build-{WHEEL_TARGET}.acceptance-harness.json")
         not in files
@@ -784,15 +1150,38 @@ def _validate_plan_wheel(
         or wheel_build["lock_fingerprint"] != traced_attestation["lock_fingerprint"]
         or wheel_build["native_sha256"] != traced["native_sha256"]
         or wheel_build["wheel_sha256"] != traced["wheel_sha256"]
+        or wheel_build.get("helper_reconstruction") != reconstruction
     ):
         raise ValueError("row-7 compiled wheel settings differ")
     validate_traced_wheel_invocations(wheel_build)
+    if plan.get("schema") == FRESH_SCHEMA:
+        from scripts.benchmark_suite.issue406_reuse import (
+            validate_traced_audit,
+            validate_wheel_members,
+        )
+
+        validate_wheel_members(traced, files)
+        return {
+            **wheel_build,
+            "validated_artifacts": validate_traced_audit(
+                traced, traced_attestation, files
+            ),
+        }
     return wheel_build
 
 
 def _validate_plan_binaries(
-    plan: dict, side: str, files: dict, build_harness: str, enabled_builds: dict
+    plan: dict,
+    side: str,
+    files: dict,
+    build_harness: str,
+    enabled_builds: dict,
 ) -> None:
+    compatibility = (
+        Path(plan["historical_harness_witness"]["path"])
+        if plan.get("schema") == FRESH_SCHEMA and side == "baseline"
+        else None
+    )
     release = plan["releases"][side]
     expected_binaries = {
         f"{target}/{mode}"
@@ -808,7 +1197,9 @@ def _validate_plan_binaries(
         if side == "baseline" and mode == "off":
             raise ValueError("main does not support checkpoint-off")
         record = validate_acceptance_harness(
-            Path(descriptor["build_output"]), descriptor["harness_target"]
+            Path(descriptor["build_output"]),
+            descriptor["harness_target"],
+            compatibility=compatibility,
         )
         attestation = str(
             Path(descriptor["build_output"])
@@ -875,6 +1266,9 @@ async def _invoke_collection(
 def _seal_acceptance_report(
     plan: dict, output: Path, started: float, report: dict, resources: list
 ) -> None:
+    if plan.get("schema") == FRESH_SCHEMA:
+        _seal_fresh_report(plan, output, started, report, resources)
+        return
     from scripts.benchmark_suite.issue406_report import (
         render_acceptance_markdown,
         summarize_acceptance,
@@ -915,6 +1309,104 @@ def _seal_acceptance_report(
     )
 
 
+def _seal_fresh_report(plan, output, started, report, resources):
+    allowance = plan["final_seal_allowance_seconds"]
+    deadline = started + plan["budget_seconds"] - allowance
+    report.update(
+        elapsed_seconds=time.monotonic() - started,
+        budget_seconds=plan["budget_seconds"],
+        precharged_seconds=plan.get("precharged_seconds", 0),
+        startup_allowance_seconds=plan["startup_allowance_seconds"],
+        final_seal_allowance_seconds=allowance,
+        budget_satisfied=time.monotonic() < deadline,
+    )
+    write_json(output / "resources.json", resources)
+    complete = _write_fresh_summary(output, report, deadline)
+    write_json(output / "result.json", report)
+    hashes = {}
+    for path in sorted(output.rglob("*")):
+        if time.monotonic() >= deadline:
+            complete = False
+            break
+        if path.is_file():
+            hashes[str(path.relative_to(output))] = sha256_file(path)
+    if not complete or time.monotonic() >= deadline:
+        complete = False
+        _expire_fresh_report(output, report)
+        write_json(output / "result.json", report)
+        for name in ("result.json", "summary.json", "performance.md"):
+            hashes[name] = sha256_file(output / name)
+    write_json(output / "evidence-sha256.json", hashes)
+    elapsed = time.monotonic() - started
+    if complete and elapsed + allowance > plan["budget_seconds"]:
+        complete = False
+        _expire_fresh_report(output, report)
+        write_json(output / "result.json", report)
+        for name in ("result.json", "summary.json", "performance.md"):
+            hashes[name] = sha256_file(output / name)
+        write_json(output / "evidence-sha256.json", hashes)
+        elapsed = time.monotonic() - started
+    report["elapsed_seconds_including_sealing"] = elapsed
+    report["budget_satisfied"] = (
+        complete and elapsed + allowance <= plan["budget_seconds"]
+    )
+    write_json(
+        output / "budget.json",
+        {
+            "elapsed_seconds_including_sealing": elapsed,
+            "final_seal_allowance_seconds": allowance,
+            "accounted_seconds": elapsed + allowance,
+            "budget_seconds": plan["budget_seconds"],
+            "budget_satisfied": report["budget_satisfied"],
+            "evidence_complete": complete,
+            "evidence_seal_sha256": sha256_file(output / "evidence-sha256.json"),
+        },
+    )
+
+
+def _write_fresh_summary(output, report, deadline):
+    from scripts.benchmark_suite.issue406_report import (
+        render_acceptance_markdown,
+        summarize_acceptance,
+    )
+
+    if time.monotonic() >= deadline:
+        _expire_fresh_report(output, report)
+        return False
+    summary = summarize_acceptance(report)
+    if time.monotonic() >= deadline:
+        _expire_fresh_report(output, report)
+        return False
+    write_json(output / "summary.json", summary)
+    (output / "performance.md").write_text(
+        render_acceptance_markdown(summary), encoding="utf-8"
+    )
+    return True
+
+
+def _expire_fresh_report(output, report):
+    report.update(
+        state="stopped",
+        error="analysis or sealing budget exhausted",
+        budget_satisfied=False,
+    )
+    report["assessment"]["environment_suitable"] = False
+    write_json(
+        output / "summary.json",
+        {
+            "schema": "calc-flow.issue406-summary-aborted.v1",
+            "evidence_complete": False,
+            "verdict": "inconclusive",
+            "reason": report["error"],
+        },
+    )
+    (output / "performance.md").write_text(
+        "Analysis or sealing budget exhausted; no acceptance verdict. "
+        "Raw observations are retained.\n",
+        encoding="utf-8",
+    )
+
+
 def _record_collection(
     records: dict, output: Path, group, position: tuple, samples: dict
 ) -> None:
@@ -942,24 +1434,57 @@ def _record_collection(
 async def _settle_acceptance_collection(
     runner, collection, guard, report: dict, output: Path
 ) -> None:
-    runner.stop.set()
+    if not runner.fresh:
+        runner.stop.set()
     if collection is not None and not collection.done():
         collection.cancel()
     # Signal cancellation before awaiting the collector's owned round cleanup.
     report["settlement"] = await _complete_owned(asyncio.create_task(runner.settle()))
-    for task in (collection, guard):
-        if task is not None:
-            with suppress(BaseException):
-                await _complete_owned(task)
-    if guard is not None and not guard.cancelled() and guard.exception() is not None:
+    runner.stop.set()
+    pending = await _settle_controller_tasks(runner, (collection, guard))
+    if runner.fresh:
+        report["settlement"]["pending_controller_tasks"] = pending
+        report["settlement"]["settled"] &= not pending
+    if (
+        guard is not None
+        and guard.done()
+        and not guard.cancelled()
+        and guard.exception() is not None
+    ):
         report["state"] = "stopped"
         report["assessment"]["environment_suitable"] = False
         report["error"] = f"resource guard: {guard.exception()}"
     partial = output / "partial.json"
-    if partial.exists() and "measurements" not in report:
-        report["measurements"] = json.loads(partial.read_text())["measurements"]
-    if report["settlement"]["forced_kill_pids"]:
+    if partial.exists():
+        for key, value in json.loads(partial.read_text()).items():
+            if key not in ("state", "error"):
+                report.setdefault(key, value)
+    if (
+        report["settlement"]["forced_kill_pids"]
+        or not report["settlement"]["settled"]
+        or report["settlement"].get("terminated_groups")
+        or report["settlement"].get("cleanup_errors")
+    ):
         report["assessment"]["environment_suitable"] = False
+        report["state"] = "stopped"
+
+
+async def _settle_controller_tasks(runner, owned) -> int:
+    tasks = [task for task in owned if task is not None]
+    if runner.fresh:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            _, pending = await asyncio.wait(
+                tasks, timeout=max(0, runner.settlement_deadline - time.monotonic())
+            )
+            return len(pending)
+    else:
+        for task in tasks:
+            with suppress(BaseException):
+                await _complete_owned(task)
+    return 0
 
 
 def _validate_plan_native_build(

@@ -370,7 +370,13 @@ def common_acceptance_harness(source: Path, output: Path, target: str):
         write_json(evidence, {**record, "product_files_verified": True})
 
 
-def validate_acceptance_harness(output: Path, target: str) -> dict:
+def validate_acceptance_harness(
+    output: Path,
+    target: str,
+    *,
+    compatibility: Path | None = None,
+    reconstruction: dict | None = None,
+) -> dict:
     """Revalidate the persisted product, helper, and closed insertion recipe."""
     try:
         record = json.loads(
@@ -380,7 +386,21 @@ def validate_acceptance_harness(output: Path, target: str) -> dict:
         mirror = Path(record["build_source"])
         original = _files(source)
         overlay = _effective(source)
-        if record["harness_git_sha"] != _clean_revision(ROOT):
+        if reconstruction is not None:
+            from scripts.benchmark_suite.issue406_reuse import reconstructed_overlay
+
+            if compatibility is not None:
+                raise ValueError("conflicting native source reconstruction")
+            native_harness_reuse(record["harness_git_sha"])
+            overlay = reconstructed_overlay(overlay, record, reconstruction)
+        elif record.get("helper_reconstruction") is not None:
+            raise ValueError("unrequested native source reconstruction")
+        elif compatibility is not None:
+            from scripts.benchmark_suite.issue406_reuse import historical_overlay
+
+            native_harness_reuse(record["harness_git_sha"], compatibility=compatibility)
+            overlay = historical_overlay(overlay, compatibility)
+        elif record["harness_git_sha"] != _clean_revision(ROOT):
             native_harness_reuse(record["harness_git_sha"])
         expected = {
             "schema": SCHEMA,
@@ -410,9 +430,15 @@ def validate_acceptance_harness(output: Path, target: str) -> dict:
         raise ValueError("invalid issue406 native harness attestation") from error
 
 
-def native_harness_reuse(build_revision: str) -> dict:
+def native_harness_reuse(
+    build_revision: str, *, compatibility: Path | None = None
+) -> dict:
     """Prove a Python-only correction leaves the historical native overlay intact."""
     current = _clean_revision(ROOT)
+    if compatibility is not None:
+        from scripts.benchmark_suite.issue406_reuse import reviewed_reuse
+
+        return reviewed_reuse(ROOT, build_revision, current, compatibility)
     history = command_output(["git", "rev-list", current], cwd=ROOT).splitlines()
     if build_revision not in history:
         raise ValueError("native build harness is missing from execution history")

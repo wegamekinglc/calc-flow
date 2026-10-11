@@ -498,6 +498,8 @@ def _overhead_target(cases: list[dict], records: dict, report: dict) -> dict:
 
 def summarize_acceptance(report: dict) -> dict:
     """Return every inventory row, including partial and unsupported evidence."""
+    from scripts.benchmark_suite.issue406_fresh_report import summarize_retained_control
+
     inventory = acceptance_inventory()
     known = {case.id: case for case in inventory}
     records = {}
@@ -596,6 +598,11 @@ def summarize_acceptance(report: dict) -> dict:
         "historical_values": (
             "Historical issue figures identify targets only; every displayed "
             "current/base statistic comes from this report."
+        ),
+        **(
+            {"retained_control": summarize_retained_control(report)}
+            if "retained_control" in report
+            else {}
         ),
     }
 
@@ -833,6 +840,12 @@ def render_acceptance_markdown(summary: dict) -> str:
             "",
         ]
     )
+    if "retained_control" in summary:
+        from scripts.benchmark_suite.issue406_fresh_report import (
+            render_retained_control,
+        )
+
+        parts.extend(render_retained_control(summary["retained_control"]))
     return "\n".join(parts)
 
 
