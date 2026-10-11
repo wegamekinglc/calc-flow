@@ -104,6 +104,7 @@ impl WriterState {
 struct Inputs {
     rows: [Option<Arc<Vec<StoredRow>>>; 2],
     pending: Option<Vec<PendingOp>>,
+    rebase_pending: Option<encode::rebase::PendingInput>,
     history: Option<encode::rebase::HistoryInput>,
     containers: Option<Arc<super::ContainerFunding>>,
     released: Option<tokio::sync::oneshot::Sender<()>>,
@@ -114,6 +115,7 @@ impl Drop for Inputs {
         drop(self.rows[0].take());
         drop(self.rows[1].take());
         drop(self.pending.take());
+        drop(self.rebase_pending.take());
         drop(self.history.take());
         self.containers = None;
         if let Some(released) = self.released.take() {
@@ -162,7 +164,7 @@ impl OwnedCpuWork for WriterWork {
         ])
     }
 
-    fn run(self, stop: &GatherStop) -> Result<Self::Output> {
+    fn run(mut self, stop: &GatherStop) -> Result<Self::Output> {
         stop.check()?;
         #[cfg(test)]
         if let Some(hook) = &self.hook {
@@ -175,9 +177,19 @@ impl OwnedCpuWork for WriterWork {
 }
 
 impl WriterWork {
-    fn encode(&self, stop: &GatherStop) -> Result<encode::Base> {
-        if let Some(history) = &self.inputs.history {
-            return encode::rebase::encode(history, &self.workspace, &|| stop.check());
+    fn encode(&mut self, stop: &GatherStop) -> Result<encode::Base> {
+        if let Some(history) = self.inputs.history.take() {
+            return if let Some(pending) = self.inputs.rebase_pending.take() {
+                encode::rebase::encode_pending(
+                    history,
+                    pending,
+                    &self.schemas,
+                    &self.workspace,
+                    &|| stop.check(),
+                )
+            } else {
+                encode::rebase::encode(&history, &self.workspace, &|| stop.check())
+            };
         }
         if let Some(pending) = &self.inputs.pending {
             return encode::pending_owned(
@@ -436,6 +448,7 @@ impl StreamJoinOperator {
         let mut inputs = Inputs {
             rows: [None, None],
             pending: None,
+            rebase_pending: None,
             history: None,
             containers: None,
             released: None,
@@ -458,6 +471,10 @@ impl StreamJoinOperator {
             }
             Preparation::Rebase => {
                 inputs.history = Some(encode::rebase::copy(self, workspace, context).await?);
+                if !self.state.deltas.pending.is_empty() {
+                    inputs.rebase_pending =
+                        Some(encode::rebase::PendingInput::copy(self, workspace, context).await?);
+                }
             }
         }
         Ok(inputs)

@@ -9,6 +9,26 @@ earlier measurements below keep their original revisions. OFF scaling observes
 failure and all final acceptance verdicts remain unresolved. No retry or fill-in
 was performed, and all owned processes settled.
 
+The pending-aware checkpoint rebase correction now preserves the trusted, checkpoint-
+enabled, append-only fast path when the current batch contains new rows. It serializes
+only pending Upserts, shares the existing payload owners, and retires temporary input
+ownership before allocating merged indexes. Both phases remain memory-funded. Exact
+checkpoint-cut validation and atomic installation remain unchanged; tombstones,
+migration, disabled checkpointing, and untrusted history retain their existing fallback
+boundaries. Malformed selected history remains an error.
+
+The unchanged 32,768-left-row plus 64-right-row diagnostic now passes within its
+original 10 MiB pool: E6 preparation peaks at 8,009,855 bytes, introduces no new writer-
+admission refusal, and preserves the held checkpoint payload. All owned memory returns
+to zero. A separate focused test restores the rebased snapshot and verifies continued
+outputs. Ownership, cancellation, malformed-input, and fallback controls also pass. The
+pending-input fault sweep covers 59 allocation refusals, and the malformed history
+control covers 16 variants with pending Upserts. The 16 focused invocations cover 15
+distinct tests. Scoped formatting and library Clippy pass, and final specialist review
+approves this correction. These are correctness diagnostics, not performance samples.
+They do not establish the cause or successful recovery of the managed 4M/E11 failure;
+that original workload and the eight performance targets still require fresh evidence.
+
 The active user objective is to complete the development plan against the
 eight-workload target table supplied on 2026-10-11. That table supersedes the
 earlier example comparison table and the incomplete seven-workload final

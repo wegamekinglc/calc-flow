@@ -220,3 +220,185 @@ async fn retained_history_preserves_row3_fixture_progress_and_complete_restores(
     }
     assert_eq!(evidence["owned_cleanup_complete"], true);
 }
+
+#[tokio::test]
+async fn test_dirty_replacement_fits_bounded_pool_and_preserves_owned_history() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const ROWS: usize = 32_768;
+    const INITIAL_ROWS: usize = 28_672;
+    const LIMIT: usize = 10 << 20;
+
+    fn observation(
+        phase: &str,
+        pool: &ObservedPool,
+        operator: &StreamJoinOperator,
+        bases: &AtomicUsize,
+    ) -> Value {
+        json!({
+            "phase": phase,
+            "pool": pool.snapshot(),
+            "left_rows": operator.status().left.retained_rows,
+            "pending_changes": operator.state.deltas.pending.iter().count(),
+            "base_writer_calls": bases.load(Ordering::SeqCst),
+        })
+    }
+
+    let pool = Arc::new(ObservedPool::new("dirty-replacement", LIMIT));
+    let mut operator = fixture_operator(ROWS).unwrap();
+    let job = job();
+    let bases = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&bases);
+    operator.set_checkpoint_writer_base_test_hook(Arc::new(move |_| {
+        counted.fetch_add(1, Ordering::SeqCst);
+    }));
+    let mut phase = "initialize".to_owned();
+    let mut observations = Vec::new();
+    let mut captures = Vec::new();
+    let mut held = None;
+    let mut alias_name = String::new();
+    let mut alias_digest = String::new();
+    let mut owners = Vec::new();
+    let mut row_owner = None;
+    let mut before_oracle = None;
+    let result: Result<()> = async {
+        operator.runtime.initialize_benchmark_pool(pool.clone())?;
+        operator.ingress_progress = progress(None);
+        for epoch in 1..=5 {
+            phase = format!("epoch_{epoch}_admission");
+            pool.begin_phase();
+            if epoch == 1 {
+                feed(&mut operator, &job, false, 0, ENTITIES).await?;
+            }
+            let (start, end) = if epoch == 1 {
+                (0, INITIAL_ROWS)
+            } else {
+                let start = INITIAL_ROWS + (epoch - 2) * 512;
+                (start, start + 512)
+            };
+            feed_quotes(&mut operator, &job, start, end, ROWS).await?;
+            observations.push(observation(&phase, &pool, &operator, &bases));
+            phase = format!("epoch_{epoch}_prepare");
+            pool.begin_phase();
+            prepare(&mut operator, &job).await?;
+            observations.push(observation(&phase, &pool, &operator, &bases));
+            phase = format!("epoch_{epoch}_capture");
+            pool.begin_phase();
+            let snapshot = operator.checkpoint(Epoch::new(epoch as u64).unwrap())?;
+            let deltas = &snapshot.inline_metadata["v2_inventory"]["deltas"];
+            require(
+                deltas
+                    .as_array()
+                    .is_some_and(|deltas| deltas.len() == epoch - 1),
+                "scaled dirty replacement did not capture fresh base and four deltas",
+            )?;
+            captures.push(json!({
+                "epoch": epoch,
+                "base_epoch": snapshot.inline_metadata["v2_inventory"]["base_epoch"],
+                "delta_count": deltas.as_array().map(Vec::len),
+                "segments": segments(&snapshot),
+            }));
+            observations.push(observation(&phase, &pool, &operator, &bases));
+            if epoch == 5 {
+                owners = snapshot
+                    .segments
+                    .iter()
+                    .map(|(name, segment)| {
+                        (
+                            name.clone(),
+                            Arc::downgrade(&segment.bytes_arc()),
+                            segment.bytes_arc().capacity(),
+                            segment.has_owner(),
+                        )
+                    })
+                    .collect();
+                let (alias, evidence) = held_segment(&snapshot, pool.id)?;
+                alias_name = evidence["name"].as_str().unwrap().to_owned();
+                alias_digest = evidence["sha256"].as_str().unwrap().to_owned();
+                held = Some(alias);
+            }
+            drop(snapshot);
+        }
+        phase = "epoch_6_admission".into();
+        pool.begin_phase();
+        feed_quotes(&mut operator, &job, INITIAL_ROWS + 4 * 512, ROWS, ROWS).await?;
+        observations.push(observation(&phase, &pool, &operator, &bases));
+        before_oracle = Some(validate_state(&operator, ROWS)?);
+        row_owner = Some(Arc::downgrade(&operator.state.left.0));
+        phase = "epoch_6_prepare".into();
+        pool.begin_phase();
+        prepare(&mut operator, &job).await?;
+        observations.push(observation(&phase, &pool, &operator, &bases));
+        phase = "epoch_6_capture".into();
+        pool.begin_phase();
+        let snapshot = operator.checkpoint(Epoch::new(6).unwrap())?;
+        captures.push(json!({
+            "epoch": 6,
+            "base_epoch": snapshot.inline_metadata["v2_inventory"]["base_epoch"],
+            "delta_count": snapshot.inline_metadata["v2_inventory"]["deltas"]
+                .as_array().map(Vec::len),
+            "segments": segments(&snapshot),
+        }));
+        drop(snapshot);
+        Ok(())
+    }
+    .await;
+    observations.push(observation(&phase, &pool, &operator, &bases));
+    let original_error = result
+        .as_ref()
+        .err()
+        .map(|error| json!({"debug": format!("{error:?}"), "display": error.to_string()}));
+    let after_oracle = validate_state(&operator, ROWS).map_err(|error| format!("{error:?}"));
+    let alias_unchanged = held
+        .as_ref()
+        .is_some_and(|alias| hex::encode(Sha256::digest(alias.bytes())) == alias_digest);
+    let owners_before_drop = owners
+        .iter()
+        .map(|(name, owner, capacity, funded)| {
+            json!({"name": name, "capacity": capacity, "funded": funded,
+            "alive": owner.upgrade().is_some(), "explicit_alias": *name == alias_name})
+        })
+        .collect::<Vec<_>>();
+    drop(operator);
+    let after_operator_drop = pool.snapshot();
+    let cleanup = crate::benchmark_internals::settle_job(&job).await;
+    let after_drain = pool.snapshot();
+    drop(job);
+    let after_job_drop = pool.snapshot();
+    let owners_after_drain = owners.iter().map(|(name, owner, capacity, _)| {
+        json!({"name": name, "capacity": capacity, "alive": owner.upgrade().is_some()})
+    }).collect::<Vec<_>>();
+    let rows_retired = row_owner.is_some_and(|owner| owner.upgrade().is_none());
+    drop(held);
+    let all_segments_retired = owners
+        .iter()
+        .all(|(_, owner, _, _)| owner.upgrade().is_none());
+    let final_pool = pool.snapshot();
+    let complete_cleanup =
+        cleanup.is_ok() && final_pool.reserved_bytes == 0 && all_segments_retired;
+    let evidence = json!({
+        "case": "dirty_replacement_scaled",
+        "left_rows": ROWS, "right_rows": ENTITIES, "pool_limit_bytes": LIMIT,
+        "last_phase": phase, "original_error": original_error,
+        "observations": observations, "captures": captures,
+        "before_oracle": before_oracle, "after_oracle": after_oracle,
+        "held_alias_name": alias_name, "held_alias_unchanged": alias_unchanged,
+        "owners_before_operator_drop": owners_before_drop,
+        "after_operator_drop": after_operator_drop, "after_drain": after_drain,
+        "after_job_drop": after_job_drop, "owners_after_drain": owners_after_drain,
+        "rows_retired": rows_retired, "all_segments_retired": all_segments_retired,
+        "cleanup_error": cleanup.as_ref().err().map(|error| format!("{error:?}")),
+        "final_pool": final_pool, "owned_cleanup_complete": complete_cleanup,
+    });
+    eprintln!("DIRTY_REPLACEMENT_EVIDENCE {evidence}");
+    assert!(
+        complete_cleanup,
+        "diagnostic must settle before asserting the result"
+    );
+    assert!(
+        result.is_ok(),
+        "dirty replacement failed: {original_error:?}"
+    );
+    assert_eq!(Some(after_oracle.unwrap()), before_oracle);
+    assert!(alias_unchanged && rows_retired && all_segments_retired);
+}

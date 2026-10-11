@@ -117,6 +117,15 @@ fn add_unreferenced_payload(base: &mut encode::Base) {
 
 #[tokio::test]
 async fn test_rebase_rejects_malformed_selected_history_without_mutating_state() {
+    check_malformed_history(false).await;
+}
+
+#[tokio::test]
+async fn test_pending_rebase_rejects_malformed_selected_history_without_mutating_state() {
+    check_malformed_history(true).await;
+}
+
+async fn check_malformed_history(with_pending: bool) {
     let enabled = job();
     let context = StreamOperatorContext::new(&enabled, "prepared-reuse", None);
     let mut pools = Vec::new();
@@ -139,6 +148,10 @@ async fn test_rebase_rejects_malformed_selected_history_without_mutating_state()
         "extra_payload",
     ] {
         let (mut join, old) = checkpointed(&context).await;
+        if with_pending {
+            admit_left(&mut join, &context).await;
+            assert!(!join.state.deltas.pending.is_empty());
+        }
         let base = join.v2_writer.base.as_mut().unwrap();
         let mut bytes = base.segments["left-delta-4"].bytes().to_vec();
         match invalid {
@@ -261,7 +274,10 @@ async fn test_rebase_cancellation_cleans_both_passes_and_preserves_history() {
     assert_eq!(pool.reserved(), 0);
 }
 
-fn interleaved(snapshot: OperatorStateSnapshot) -> OperatorStateSnapshot {
+pub(super) fn remap_left_ids(
+    snapshot: OperatorStateSnapshot,
+    remap: impl Fn(u64) -> u64,
+) -> OperatorStateSnapshot {
     let mut snapshot = snapshot;
     let mut renamed = BTreeMap::new();
     let mut payloads = Vec::new();
@@ -281,7 +297,7 @@ fn interleaved(snapshot: OperatorStateSnapshot) -> OperatorStateSnapshot {
             for offset in 0..rows {
                 let slot = &mut bytes[32 + offset * 8..40 + offset * 8];
                 let id = u64::from_le_bytes(slot.try_into().unwrap());
-                slot.copy_from_slice(&(id / 2 + (id % 2) * 4).to_le_bytes());
+                slot.copy_from_slice(&remap(id).to_le_bytes());
             }
             let replacement = StateSegment::new(bytes);
             renamed.insert(old, hex::decode(replacement.sha256()).unwrap());
@@ -310,7 +326,7 @@ fn interleaved(snapshot: OperatorStateSnapshot) -> OperatorStateSnapshot {
                 + usize::try_from(u64::from_le_bytes(input[64..72].try_into().unwrap())).unwrap();
             let mut row = input[..length].to_vec();
             let original_id = u64::from_le_bytes(row[..8].try_into().unwrap());
-            let id = original_id / 2 + (original_id % 2) * 4;
+            let id = remap(original_id);
             row[..8].copy_from_slice(&id.to_le_bytes());
             let digest = hex::encode(&row[24..56]);
             row[24..56].copy_from_slice(&renamed[&digest]);
@@ -332,7 +348,7 @@ async fn test_rebase_merges_validated_restored_interleaved_ids_across_epochs() {
     let enabled = job();
     let context = StreamOperatorContext::new(&enabled, "prepared-reuse", None);
     let (original, old) = checkpointed(&context).await;
-    let snapshot = interleaved(old);
+    let snapshot = remap_left_ids(old, |id| id / 2 + (id % 2) * 4);
     let mut join = operator();
     join.restore(&snapshot).unwrap();
     let mut expected = operator();
@@ -400,21 +416,22 @@ async fn test_rebase_encodes_empty_and_one_sided_history() {
 }
 
 #[tokio::test]
-async fn test_rebase_falls_back_for_pending_tombstoned_migrating_and_off_history() {
+async fn test_rebase_falls_back_for_tombstoned_migrating_and_off_history() {
     let enabled = job();
     let context = StreamOperatorContext::new(&enabled, "prepared-reuse", None);
     let disabled = job().with_checkpointing(false);
     let off = StreamOperatorContext::new(&disabled, "prepared-reuse", None);
     let mut pools = Vec::new();
-    for boundary in ["pending", "tombstone", "migration", "off"] {
+    for boundary in ["pending_tombstone", "tombstone", "migration", "off"] {
         let (mut join, old) = checkpointed(&context).await;
         let bases = count_base(&mut join);
         match boundary {
-            "pending" => admit_left(&mut join, &context).await,
-            "tombstone" => {
+            "pending_tombstone" | "tombstone" => {
                 let mut output = EdgeCollector::new(join.output_ports().to_vec());
                 join.on_end(&context, &mut output).await.unwrap();
-                drop(join.checkpoint(Epoch::new(5).unwrap()).unwrap());
+                if boundary == "tombstone" {
+                    drop(join.checkpoint(Epoch::new(5).unwrap()).unwrap());
+                }
             }
             "migration" => join.v2_writer.migration_required = true,
             "off" => {}

@@ -4,9 +4,10 @@ use super::{
     Result, SideExpected, StateSegment, StreamJoinOperator, StreamOperatorContext, accounting,
     error, frame, funding,
 };
+use crate::operator::join::PendingOp;
 use crate::operator::join::columnar::Quantum;
 
-enum Segment<'a> {
+pub(super) enum Segment<'a> {
     Index(JoinSide, Option<u64>),
     Payload(JoinSide, &'a str),
 }
@@ -23,14 +24,16 @@ pub(super) async fn eligible(
     let Some(base) = &writer.base else {
         return Ok(false);
     };
-    if !context.job().checkpointing()
-        || !writer.history_trusted
-        || writer.migration_required
-        || !operator.state.deltas.pending.is_empty()
-    {
+    if !context.job().checkpointing() || !writer.history_trusted || writer.migration_required {
         return Ok(false);
     }
     let mut quantum = Quantum::default();
+    for op in operator.state.deltas.pending.iter() {
+        quantum.step(context, 1, 0).await?;
+        if !matches!(op, PendingOp::Upsert { .. }) {
+            return Ok(false);
+        }
+    }
     let indexes = validate_lists(operator, base, epoch.as_u64(), &mut quantum, context).await?;
     if base.segments.len() != accounting::add(indexes, base.payloads.len())?
         || !base.segments.contains_key("left-base")
@@ -113,7 +116,11 @@ fn validate_delta(operator: &StreamJoinOperator, side: JoinSide, epoch: u64) -> 
     Ok(())
 }
 
-fn payload_entry<'a>(base: &'a Base, side: JoinSide, digest: &str) -> Result<&'a PayloadEntry> {
+pub(super) fn payload_entry<'a>(
+    base: &'a Base,
+    side: JoinSide,
+    digest: &str,
+) -> Result<&'a PayloadEntry> {
     let index = base
         .payloads
         .binary_search_by(|entry| (entry.side, entry.sha256.as_str()).cmp(&(side.as_str(), digest)))
@@ -169,6 +176,7 @@ pub(super) async fn copy(
             Segment::Index(side, epoch) => history.indexes.push(IndexInput {
                 side,
                 epoch,
+                pending: false,
                 segment: segment.clone(),
             }),
             Segment::Payload(side, digest) => {
@@ -222,7 +230,7 @@ pub(super) fn index(
     })
 }
 
-fn classify(name: &str) -> Result<Segment<'_>> {
+pub(super) fn classify(name: &str) -> Result<Segment<'_>> {
     if name.len() > "right-payload-".len() + 64 {
         return Err(error("V2 rebase segment name is too long"));
     }

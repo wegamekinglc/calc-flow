@@ -9,10 +9,14 @@ use crate::{Result, StateSegment, StreamOperatorContext};
 mod funding;
 mod input;
 mod merge;
+mod pending;
+
+pub(in crate::operator::join::checkpoint_v2::writer) use pending::PendingInput;
 
 struct IndexInput {
     side: JoinSide,
     epoch: Option<u64>,
+    pending: bool,
     segment: StateSegment,
 }
 
@@ -90,6 +94,16 @@ pub(in crate::operator::join::checkpoint_v2::writer) fn encode(
     }
     check()?;
     Ok(encoder.finish())
+}
+
+pub(in crate::operator::join::checkpoint_v2::writer) fn encode_pending(
+    history: HistoryInput,
+    pending: PendingInput,
+    schemas: &[super::SchemaRef; 2],
+    workspace: &MemoryReservation,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<Base> {
+    pending::encode(history, pending, schemas, workspace, check)
 }
 
 fn copy_payloads(

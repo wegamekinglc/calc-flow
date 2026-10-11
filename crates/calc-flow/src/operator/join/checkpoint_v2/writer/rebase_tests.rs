@@ -12,6 +12,9 @@ mod edge_tests;
 #[path = "rebase_owner_tests.rs"]
 mod owner_tests;
 
+#[path = "pending_rebase_tests.rs"]
+mod pending_tests;
+
 async fn admit_left(join: &mut StreamJoinOperator, context: &StreamOperatorContext<'_>) {
     let mut output = EdgeCollector::new(join.output_ports().to_vec());
     join.process_data(

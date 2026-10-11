@@ -6,6 +6,7 @@ use super::{HistoryInput, JoinSide, MemoryReservation, Result, accounting, error
 struct Cursor<'a> {
     records: frame::Records<'a>,
     head: Option<frame::Upsert<'a>>,
+    pending: bool,
 }
 
 impl Cursor<'_> {
@@ -78,6 +79,7 @@ pub(super) fn scan(
     let expected = &history.expected[usize::from(side == JoinSide::Right)];
     let mut counts = Counts::default();
     let mut previous = None;
+    let mut pending_started = false;
     while let Some(Reverse((id, index))) = heap.pop() {
         check()?;
         let cursor = &mut cursors[index];
@@ -86,6 +88,12 @@ pub(super) fn scan(
             return Err(error("V2 rebase row IDs are not globally unique and valid"));
         }
         previous = Some(id);
+        if pending_started && !cursor.pending {
+            return Err(error(
+                "V2 rebase pending rows do not follow captured history",
+            ));
+        }
+        pending_started |= cursor.pending;
         locate(history, &mut payloads, side, &row)?;
         counts = counts.append(&row)?;
         visit(&row)?;
@@ -123,6 +131,7 @@ fn cursors<'a>(
         let mut cursor = Cursor {
             records: index.records(),
             head: None,
+            pending: input.pending,
         };
         cursor.advance()?;
         cursors.push(cursor);
