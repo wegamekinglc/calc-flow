@@ -6,6 +6,7 @@ use crate::{CalcFlowError, Epoch, EventTime};
 use datafusion::arrow::{
     array::{Int64Array, StringArray, TimestampMicrosecondArray},
     datatypes::{DataType, Field, Schema, TimeUnit},
+    ipc::writer::StreamWriter,
     record_batch::RecordBatch,
 };
 use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryConsumer, MemoryPool};
@@ -50,6 +51,342 @@ fn fixture() -> (Vec<StoredRow>, RecordBatch) {
         })
         .collect();
     (rows, record)
+}
+
+fn flat_ipc_fixture(length: usize) -> (Vec<StoredRow>, RecordBatch) {
+    use datafusion::arrow::array::{Float64Array, UInt64Array};
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(
+            "event_time",
+            DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+            false,
+        ),
+        Field::new("sequence", DataType::UInt64, false),
+        Field::new("symbol", DataType::Utf8, false),
+        Field::new("price", DataType::Float64, false),
+    ]));
+    let symbols = (0..length)
+        .map(|row| format!("S{:03}", row % 64))
+        .collect::<Vec<_>>();
+    let record = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(TimestampMicrosecondArray::from(vec![100; length]).with_timezone("UTC")),
+            Arc::new(UInt64Array::from_iter_values(
+                0..u64::try_from(length).unwrap(),
+            )),
+            Arc::new(StringArray::from(symbols)),
+            Arc::new(Float64Array::from(vec![1.25; length])),
+        ],
+    )
+    .unwrap();
+    let parent = Arc::new(record.clone());
+    let rows = (0..length)
+        .map(|index| StoredRow {
+            record: RowPayload::Rowed {
+                parent: Arc::clone(&parent),
+                row: index,
+            },
+            event_time: EventTime::from_micros(100),
+            row_id: u64::try_from(index).unwrap(),
+            charge: state_row_charge(&record, index, &[2], "ipc-owner").unwrap(),
+            encoded_key: Arc::new(encode_join_key_v1(&record, index, &[2]).unwrap().into()),
+        })
+        .collect();
+    (rows, record)
+}
+
+fn stream_writer_bytes(record: &RecordBatch) -> Vec<u8> {
+    let options = IpcWriteOptions::try_new(8, false, MetadataVersion::V5).unwrap();
+    let mut bytes = Vec::new();
+    let mut writer =
+        StreamWriter::try_new_with_options(&mut bytes, record.schema_ref(), options).unwrap();
+    writer.write(record).unwrap();
+    writer.finish().unwrap();
+    drop(writer);
+    bytes
+}
+
+fn rich_ipc_fixture() -> (Vec<StoredRow>, RecordBatch) {
+    use datafusion::arrow::{
+        array::{DictionaryArray, Int32Array, ListArray},
+        datatypes::Int32Type,
+    };
+
+    let (_, original) = fixture();
+    let dictionary = Arc::new(
+        DictionaryArray::<Int32Type>::try_new(
+            Int32Array::from(vec![Some(1), None, Some(0)]),
+            Arc::new(StringArray::from(vec!["blue", "猫"])),
+        )
+        .unwrap(),
+    ) as ArrayRef;
+    let nested = Arc::new(ListArray::from_iter_primitive::<Int32Type, _, _>(vec![
+        Some(vec![Some(3), None]),
+        None,
+        Some(vec![]),
+    ])) as ArrayRef;
+    let mut fields = original
+        .schema_ref()
+        .fields()
+        .iter()
+        .map(|field| field.as_ref().clone())
+        .collect::<Vec<_>>();
+    fields.extend([
+        Field::new("dictionary", dictionary.data_type().clone(), true),
+        Field::new("nested", nested.data_type().clone(), true),
+    ]);
+    let mut columns = original.columns().to_vec();
+    columns.extend([dictionary, nested]);
+    let record = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap();
+    let parent = Arc::new(record.clone());
+    let rows = (0..record.num_rows())
+        .map(|index| StoredRow {
+            record: RowPayload::Rowed {
+                parent: Arc::clone(&parent),
+                row: index,
+            },
+            event_time: EventTime::from_micros(100),
+            row_id: u64::try_from(index).unwrap(),
+            charge: state_row_charge(&record, index, &[0, 2], "ipc-owner").unwrap(),
+            encoded_key: Arc::new(encode_join_key_v1(&record, index, &[0, 2]).unwrap().into()),
+        })
+        .collect();
+    (rows, record)
+}
+
+#[derive(Debug)]
+struct IpcPool {
+    inner: GreedyMemoryPool,
+    peak: std::sync::atomic::AtomicUsize,
+}
+
+impl IpcPool {
+    fn note_peak(&self) {
+        self.peak
+            .fetch_max(self.inner.reserved(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn peak(&self) -> usize {
+        self.peak.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl std::fmt::Display for IpcPool {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.inner, formatter)
+    }
+}
+
+impl MemoryPool for IpcPool {
+    fn name(&self) -> &'static str {
+        "ipc-ownership-test"
+    }
+
+    fn grow(&self, reservation: &MemoryReservation, additional: usize) {
+        self.inner.grow(reservation, additional);
+        self.note_peak();
+    }
+
+    fn shrink(&self, reservation: &MemoryReservation, bytes: usize) {
+        self.inner.shrink(reservation, bytes);
+    }
+
+    fn try_grow(
+        &self,
+        reservation: &MemoryReservation,
+        additional: usize,
+    ) -> datafusion::common::Result<()> {
+        self.inner.try_grow(reservation, additional)?;
+        self.note_peak();
+        Ok(())
+    }
+
+    fn reserved(&self) -> usize {
+        self.inner.reserved()
+    }
+
+    fn memory_limit(&self) -> datafusion::execution::memory_pool::MemoryLimit {
+        self.inner.memory_limit()
+    }
+}
+
+#[test]
+fn test_owned_ipc_messages_drop_compacted_owners_and_preserve_stream_bytes() {
+    for (rows, record) in [flat_ipc_fixture(65), rich_ipc_fixture()] {
+        let references = rows.iter().collect::<Vec<_>>();
+        let (reference_pool, reference_credit) = reservation(16 << 20);
+        let compacted =
+            compact::compact(&references, record.schema(), &reference_credit, &|| Ok(())).unwrap();
+        let expected = stream_writer_bytes(&compacted.record);
+        drop((compacted, reference_credit));
+        assert_eq!(reference_pool.reserved(), 0);
+
+        let tracking = Arc::new(IpcPool {
+            inner: GreedyMemoryPool::new(16 << 20),
+            peak: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let pool: Arc<dyn MemoryPool> = tracking.clone();
+        let workspace = MemoryConsumer::new("ipc-owners").register(&pool);
+        let credit = workspace.new_empty();
+        let mut output = None;
+        let allocations = allocation_counter::measure(|| {
+            let compacted =
+                compact::compact(&references, record.schema(), &workspace, &|| Ok(())).unwrap();
+            let owner = compacted.funding_owner();
+            let column = Arc::downgrade(compacted.record.columns().last().unwrap());
+            let scratch = super::super::budget::stream_scratch(&compacted.record).unwrap();
+            ensure(&credit, scratch).unwrap();
+            let encoded = encode_stream(compacted, &|| Ok(())).unwrap();
+            assert!(
+                owner.upgrade().is_none(),
+                "compaction credit must retire before output"
+            );
+            assert!(
+                column.upgrade().is_none(),
+                "compacted arrays must drop before their credit"
+            );
+            let encoded_bytes = std::iter::once(&encoded.schema)
+                .chain(encoded.dictionaries.iter())
+                .chain(std::iter::once(&encoded.batch))
+                .map(|message| message.ipc_message.capacity() + message.arrow_data.capacity())
+                .sum::<usize>()
+                + encoded.dictionaries.capacity() * size_of::<EncodedData>();
+            assert!(encoded_bytes > 0 && encoded_bytes <= credit.size());
+            let mut bytes = PaidBuffer::new(&credit, scratch);
+            write_stream(&mut bytes, encoded, &|| Ok(())).unwrap();
+            output = Some(bytes.into_bytes().unwrap());
+        });
+        let output = output.unwrap();
+        assert_eq!(output, expected);
+        assert_eq!(
+            &output[output.len() - 8..],
+            &[255, 255, 255, 255, 0, 0, 0, 0]
+        );
+        assert!(allocations.bytes_max <= u64::try_from(tracking.peak()).unwrap());
+        drop(workspace);
+        assert!(usize::try_from(allocations.bytes_current).unwrap() <= pool.reserved());
+        assert!(output.capacity() <= credit.size());
+        drop((output, credit));
+        assert_eq!(pool.reserved(), 0);
+    }
+}
+
+#[test]
+fn test_owned_ipc_cancellation_releases_every_phase() {
+    let (rows, record) = rich_ipc_fixture();
+    let references = rows.iter().collect::<Vec<_>>();
+    for cancel_after_generation in [false, true] {
+        let (pool, workspace) = reservation(16 << 20);
+        let compacted =
+            compact::compact(&references, record.schema(), &workspace, &|| Ok(())).unwrap();
+        let owner = compacted.funding_owner();
+        let scratch = super::super::budget::stream_scratch(&compacted.record).unwrap();
+        let credit = workspace.new_empty();
+        ensure(&credit, scratch).unwrap();
+        let cancelled = std::cell::Cell::new(false);
+        let result = encode_stream(compacted, &|| {
+            if !cancel_after_generation || owner.upgrade().is_none() {
+                cancelled.set(true);
+                Err(CalcFlowError::Cancelled {
+                    run_id: "ipc-generation".into(),
+                })
+            } else {
+                Ok(())
+            }
+        });
+        assert!(cancelled.get());
+        assert!(matches!(result, Err(CalcFlowError::Cancelled { .. })));
+        assert!(owner.upgrade().is_none());
+        drop((result, credit, workspace));
+        assert_eq!(pool.reserved(), 0);
+    }
+
+    for boundary in [0, 1, 2] {
+        let (pool, workspace) = reservation(16 << 20);
+        let compacted =
+            compact::compact(&references, record.schema(), &workspace, &|| Ok(())).unwrap();
+        let expected = stream_writer_bytes(&compacted.record);
+        let owner = compacted.funding_owner();
+        let scratch = super::super::budget::stream_scratch(&compacted.record).unwrap();
+        let credit = workspace.new_empty();
+        ensure(&credit, scratch).unwrap();
+        let encoded = encode_stream(compacted, &|| Ok(())).unwrap();
+        assert!(owner.upgrade().is_none());
+        let stop = match boundary {
+            0 => 1,
+            1 => 2,
+            _ => encoded.dictionaries.len() + 3,
+        };
+        let checks = std::cell::Cell::new(0);
+        let mut output = PaidBuffer::new(&credit, scratch);
+        let result = write_stream(&mut output, encoded, &|| {
+            checks.set(checks.get() + 1);
+            if checks.get() == stop {
+                Err(CalcFlowError::Cancelled {
+                    run_id: "ipc-output".into(),
+                })
+            } else {
+                Ok(())
+            }
+        });
+        assert!(matches!(result, Err(CalcFlowError::Cancelled { .. })));
+        assert_eq!(checks.get(), stop);
+        let output = output.into_bytes().unwrap();
+        assert!(expected.starts_with(&output));
+        if boundary == 0 {
+            assert!(output.is_empty());
+        } else if boundary == 2 {
+            assert_eq!(output, expected[..expected.len() - 8]);
+        }
+        assert!(output.capacity() <= credit.size());
+        drop((output, credit, workspace));
+        assert_eq!(pool.reserved(), 0);
+    }
+}
+
+#[test]
+fn test_payload_retires_compacted_batch_before_ipc_output_growth() {
+    let (rows, record) = flat_ipc_fixture(8_192);
+    let references = rows.iter().collect::<Vec<_>>();
+    let ipc = stream_writer_bytes(&record);
+    let mut expected = Vec::new();
+    expected.extend_from_slice(&header(*PAYLOAD_MAGIC, JoinSide::Left));
+    expected.extend_from_slice(&integer(rows.len()).unwrap());
+    expected.extend_from_slice(&integer(ipc.len()).unwrap());
+    for row in &rows {
+        expected.extend_from_slice(&row.row_id.to_le_bytes());
+    }
+    expected.extend_from_slice(&ipc);
+
+    let (pool, workspace) = reservation(2_400_000);
+    let mut encoder = Encoder::new(&workspace).unwrap();
+    encoder.install("held".into(), vec![0x59; 4_096]).unwrap();
+    let held = encoder.output.segments["held"].clone();
+    let digest = encoder
+        .payload(
+            &references,
+            record.schema(),
+            JoinSide::Left,
+            &workspace,
+            &|| Ok(()),
+        )
+        .expect("owned encoded messages must release compacted Arrow credit before IPC growth");
+    let name = format!("left-payload-{}", hex::encode(digest));
+    let segment = encoder.output.segments[&name].clone();
+    assert_eq!(segment.bytes(), expected);
+    assert_eq!(held.bytes(), &[0x59; 4_096]);
+    let owner = Arc::downgrade(&encoder.funding);
+    drop((encoder, workspace));
+    assert!(owner.upgrade().is_some() && pool.reserved() > 0);
+    assert_eq!(segment.bytes(), expected);
+    drop(segment);
+    assert!(owner.upgrade().is_some() && pool.reserved() > 0);
+    assert_eq!(held.bytes(), &[0x59; 4_096]);
+    drop(held);
+    assert!(owner.upgrade().is_none());
+    assert_eq!(pool.reserved(), 0);
 }
 
 fn geometric_base(
@@ -160,9 +497,7 @@ fn test_payload_frame_exact_capacity_preserves_ipc_and_segment_owner() {
     let (reference_pool, reference_credit) = reservation(4 << 20);
     let scratch = super::super::budget::stream_scratch(&record).unwrap();
     ensure(&reference_credit, scratch).unwrap();
-    let mut ipc = PaidBuffer::new(&reference_credit, scratch);
-    write_stream(&mut ipc, &record, &|| Ok(())).unwrap();
-    let ipc = ipc.into_bytes().unwrap();
+    let ipc = stream_writer_bytes(&record);
     let length = 32 + 8 * rows.len() + ipc.len();
     let mut reference = PaidBuffer::new(&reference_credit, scratch + ipc.capacity());
     append_payload(

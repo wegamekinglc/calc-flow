@@ -1,11 +1,14 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, io::Write, sync::Arc};
 
 use datafusion::arrow::{
     array::ArrayRef,
     datatypes::SchemaRef,
     ipc::{
         MetadataVersion,
-        writer::{IpcWriteOptions, StreamWriter},
+        writer::{
+            CompressionContext, DictionaryTracker, EncodedData, IpcDataGenerator, IpcWriteOptions,
+            write_message,
+        },
     },
 };
 use datafusion::execution::memory_pool::MemoryReservation;
@@ -231,10 +234,10 @@ impl Encoder {
         let compacted = compact::compact(rows, schema, workspace, check)?;
         let scratch = super::budget::stream_scratch(&compacted.record)?;
         ensure(&self.funding, add(self.retained, scratch)?)?;
+        let encoded = encode_stream(compacted, check)?;
         let mut ipc = PaidBuffer::new(&self.funding, add(self.retained, scratch)?);
-        write_stream(&mut ipc, &compacted.record, check)?;
+        write_stream(&mut ipc, encoded, check)?;
         let ipc = ipc.into_bytes()?;
-        drop(compacted);
         self.frame_payload(rows, side, ipc, check)
     }
 
@@ -370,22 +373,68 @@ fn payload_frame_bytes(rows: usize, ipc: usize) -> Result<usize> {
     sum(&[32, product(rows, 8)?, ipc])
 }
 
-fn write_stream(
-    output: &mut PaidBuffer<'_>,
-    record: &datafusion::arrow::record_batch::RecordBatch,
+struct EncodedStream {
+    schema: EncodedData,
+    dictionaries: Vec<EncodedData>,
+    batch: EncodedData,
+    options: IpcWriteOptions,
+}
+
+fn encode_stream(
+    compacted: compact::CompactBatch,
     check: &dyn Fn() -> Result<()>,
-) -> Result<()> {
+) -> Result<EncodedStream> {
+    check()?;
     let options = IpcWriteOptions::try_new(8, false, MetadataVersion::V5)
         .map_err(|_| error("V2 checkpoint IPC options are invalid"))?;
-    let mut writer = StreamWriter::try_new_with_options(output, record.schema_ref(), options)
-        .map_err(|_| error("V2 checkpoint IPC schema encoding failed"))?;
+    let generator = IpcDataGenerator::default();
+    let mut dictionaries = DictionaryTracker::new(false);
+    let schema = generator.schema_to_bytes_with_dictionary_tracker(
+        compacted.record.schema_ref(),
+        &mut dictionaries,
+        &options,
+    );
     check()?;
-    writer
-        .write(record)
+    let mut compression = CompressionContext::default();
+    let (encoded_dictionaries, batch) = generator
+        .encode(
+            &compacted.record,
+            &mut dictionaries,
+            &options,
+            &mut compression,
+        )
+        .map_err(|_| error("V2 checkpoint IPC payload encoding failed"))?;
+    drop((dictionaries, compression));
+    drop(compacted);
+    check()?;
+    Ok(EncodedStream {
+        schema,
+        dictionaries: encoded_dictionaries,
+        batch,
+        options,
+    })
+}
+
+fn write_stream(
+    output: &mut PaidBuffer<'_>,
+    encoded: EncodedStream,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<()> {
+    check()?;
+    write_message(&mut *output, encoded.schema, &encoded.options)
+        .map_err(|_| error("V2 checkpoint IPC schema encoding failed"))?;
+    for dictionary in encoded.dictionaries {
+        check()?;
+        write_message(&mut *output, dictionary, &encoded.options)
+            .map_err(|_| error("V2 checkpoint IPC payload encoding failed"))?;
+    }
+    check()?;
+    write_message(&mut *output, encoded.batch, &encoded.options)
         .map_err(|_| error("V2 checkpoint IPC payload encoding failed"))?;
     check()?;
-    writer
-        .finish()
+    output
+        .write_all(&[255, 255, 255, 255, 0, 0, 0, 0])
+        .and_then(|()| output.flush())
         .map_err(|_| error("V2 checkpoint IPC finish failed"))
 }
 

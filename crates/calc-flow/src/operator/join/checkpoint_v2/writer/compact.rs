@@ -27,6 +27,16 @@ pub(super) struct CompactBatch {
     _funding: Arc<Funding>,
 }
 
+#[cfg(test)]
+impl CompactBatch {
+    pub(super) fn funding_owner(&self) -> std::sync::Weak<Funding> {
+        let Self {
+            _funding: funding, ..
+        } = self;
+        Arc::downgrade(funding)
+    }
+}
+
 pub(super) fn compact(
     rows: &[&StoredRow],
     schema: SchemaRef,
