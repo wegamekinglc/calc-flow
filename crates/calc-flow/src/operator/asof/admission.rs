@@ -18,6 +18,7 @@ use datafusion::execution::memory_pool::MemoryReservation;
 use hashbrown::HashTable;
 use std::{collections::HashSet, hash::BuildHasher, sync::Arc};
 
+mod direct;
 pub(super) mod parallel;
 
 #[derive(Clone, Copy)]
@@ -358,6 +359,27 @@ impl StreamAsofJoinOperator {
         let identity_workspace = self
             .reserve_admission_identities(batch, input, context)
             .await?;
+        let direct = match direct::plan(self, batch, input, context) {
+            Err(error)
+                if matches!(
+                    &error,
+                    crate::CalcFlowError::OperatorReason {
+                        reason_code: StreamingFailureReason::AsofWorkspaceLimitExceeded,
+                        ..
+                    }
+                ) =>
+            {
+                self.validate_duplicates_without_workspace(batch, input, context)
+                    .await?;
+                return Err(error);
+            }
+            result => result?,
+        };
+        if let Some(plan) = direct {
+            return plan
+                .prepare(self, batch, input, identity_workspace, context)
+                .await;
+        }
         let InputIdentities {
             rows,
             duplicates,
@@ -611,6 +633,8 @@ impl StreamAsofJoinOperator {
             rows.iter().map(|(identity, _, _, _)| identity),
             context,
         )?;
+        #[cfg(test)]
+        identity_tests::columnar::direct::record_canonical_rows(rows.len());
         let right_capacities = admitted_right_capacities(keys.values, input.index);
         Ok(InputIdentities {
             rows,
@@ -867,6 +891,12 @@ fn identities_are_after_state<'a>(
 }
 
 impl Admission {
+    pub fn len(&self) -> usize {
+        self.left_chunks.as_ref().map_or(self.rows.len(), |chunks| {
+            chunks.iter().map(state::PreparedLeftChunk::len).sum()
+        })
+    }
+
     pub fn install(
         &mut self,
         ingress: &str,

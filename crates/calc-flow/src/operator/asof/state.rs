@@ -791,6 +791,15 @@ impl IntegerColumn {
 }
 
 impl EncodedColumns {
+    pub(super) fn is_inline_string_dictionary(&self) -> bool {
+        match self {
+            Self::StringKeys { rows, .. } => {
+                (0..rows.len()).all(|row| Encoding::fits_inline(rows.row(row)))
+            }
+            _ => false,
+        }
+    }
+
     pub(super) fn with_row<R>(&self, row: usize, use_bytes: impl FnOnce(&[u8]) -> R) -> R {
         match self {
             Self::Integer(column) => column.with_row(row, use_bytes),

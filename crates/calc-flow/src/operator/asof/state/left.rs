@@ -137,6 +137,64 @@ fn copied_chunk_sequences(
 }
 
 impl ChunkData {
+    fn from_inline_strings(
+        encoded: super::EncodedColumns,
+        batch: &PayloadBatch,
+        side: &AsofJoinSide,
+        name: &str,
+        cancelled: &dyn Fn() -> Result<()>,
+    ) -> Result<Self> {
+        let super::EncodedColumns::StringKeys { rows, ids } = encoded else {
+            unreachable!("proven inline string dictionary")
+        };
+        super::validate_key_count(rows.len() as u64, name)?;
+        let mut keys = Vec::with_capacity(1);
+        let mut key_counts = Vec::with_capacity(1);
+        for row in 0..rows.len() {
+            if row.is_multiple_of(128) {
+                cancelled()?;
+            }
+            if keys.len() == keys.capacity() {
+                keys.reserve_exact(keys.len().max(1));
+                key_counts.reserve_exact(key_counts.len().max(1));
+            }
+            debug_assert!(Encoding::fits_inline(rows.row(row)));
+            keys.push(Some(Encoding::from_slice(rows.row(row))));
+            key_counts.push(0);
+        }
+        for (row, id) in ids.iter().enumerate() {
+            if row.is_multiple_of(128) {
+                cancelled()?;
+            }
+            key_counts[*id as usize] += 1;
+        }
+        let count = batch.record.num_rows();
+        debug_assert_eq!(ids.len(), count);
+        let times = super::super::admission::times(&batch.record, side)
+            .values()
+            .to_vec();
+        let sequences = copied_chunk_sequences(
+            batch,
+            side,
+            count,
+            true,
+            true,
+            SequenceKind::for_side(&batch.record.schema(), side),
+        )
+        .expect("proven contiguous unsigned admission");
+        cancelled()?;
+        Ok(Self {
+            times: times.into(),
+            positions: None,
+            start: 0,
+            keys,
+            key_counts,
+            key_ids: ids,
+            sequences,
+            owners: EncodingOwners::default(),
+        })
+    }
+
     fn prepare_admission_range(
         rows: &[(LeftOrder, AdmissionRef)],
         batch: &PayloadBatch,
@@ -429,6 +487,42 @@ pub(in super::super) struct PreparedLeftChunk {
 }
 
 impl PreparedLeftChunk {
+    pub fn len(&self) -> usize {
+        self.data.sequences.len()
+    }
+
+    pub fn prepare_inline_strings(
+        keys: Vec<super::EncodedColumns>,
+        batches: &[Arc<PayloadBatch>],
+        side: &AsofJoinSide,
+        name: &str,
+        cancelled: &dyn Fn() -> Result<()>,
+    ) -> Result<Vec<Self>> {
+        debug_assert_eq!(keys.len(), batches.len());
+        keys.into_iter()
+            .zip(batches)
+            .map(|(keys, owner)| {
+                cancelled()?;
+                u32::try_from(owner.record.num_rows()).map_err(|_| {
+                    super::super::reason(
+                        name,
+                        crate::StreamingFailureReason::AsofCounterOverflow,
+                        "ASOF left chunk exceeds compact row range",
+                    )
+                })?;
+                let data = ChunkData::from_inline_strings(keys, owner, side, name, cancelled)?;
+                Ok(Self {
+                    owner: owner.clone(),
+                    data,
+                    #[cfg(test)]
+                    borrowed_identity_rows: 0,
+                    #[cfg(test)]
+                    preparation_allocation: None,
+                })
+            })
+            .collect()
+    }
+
     #[cfg(test)]
     pub fn borrowed_identity_rows(&self) -> usize {
         self.borrowed_identity_rows

@@ -102,7 +102,7 @@ impl StreamAsofJoinOperator {
             .prepare_admission(validated, batch, context)
             .await
             .map_err(|error| self.attempt_error(error))?;
-        if admission.rows.is_empty() {
+        if admission.len() == 0 {
             return Ok(());
         }
         self.install_admission(ingress, admission, validated, context)
@@ -132,7 +132,7 @@ impl StreamAsofJoinOperator {
             .log_projection(projected, index_len, &journal, retention_bytes)
             .map_err(|error| self.attempt_error(error))?;
         let mut status = self
-            .admitted_status(validated.index, admission.rows.len(), &projected)
+            .admitted_status(validated.index, admission.len(), &projected)
             .map_err(|error| self.attempt_error(error))?;
         let index_workspace = self
             .reserve_workspace(if context.job().checkpointing() {
