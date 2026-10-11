@@ -259,3 +259,50 @@ is `9b6938635595557ed559ee54f4a71ce8db9e59b445c296feec83be588e9ffcd4`;
 the raw evidence seal SHA-256 is
 `76b537af8823df01bf9a3dc25a87a9cd2b89531143b445d6769a8cb7b56545bd`.
 `completion.json` binds that seal, the stopped result and its budget record.
+
+## IPC owner lifetime and remaining capacity requirements
+
+A focused 8,192-row, four-column regression reproduced the same IPC encoding
+failure with an unchanged 2,400,000-byte pool. Commit `8a740b1e` separates Arrow
+message generation from output copying: schema, dictionary and record messages
+own their encoded byte vectors; their generator tracker and compression context
+are destroyed, followed by the compacted Arrow batch, before output-buffer growth.
+The batch's independent reservation owner can therefore retire at its actual
+last use. PaidBuffer prepayment, encoder scratch/high-water, memory limits and
+v2 index/payload formats remain unchanged.
+
+The tight-pool test now succeeds. Complete bytes match the previous StreamWriter
+for flat, dictionary, nested and null data. Phase-boundary cancellation, alias
+lifetime, allocation accounting and prepared checkpoint controls are included in
+22 passing focused tests. Library Clippy and scoped formatting pass; test-target
+Clippy retains only the documented generated-libtest failure. This is a
+correctness/resource result, not a new
+performance sample or a completed 4M checkpoint.
+
+Source arithmetic establishes why another whole-lifecycle run cannot pass on
+this correction alone. For the fixed 4M left schema, each independent serialized
+base requires at least 340,000,032 index bytes plus 160,000,036 payload bytes.
+Keeping two copies plus the observed 100,990,496-byte admitted-state reservation
+requires at least 1,100,990,632 bytes, exceeding 1 GiB by 27,248,808 bytes before
+right-side data, controls or scratch. The current writer keeps an earlier
+prepared base until replacement completes, and a held E4 snapshot must remain
+valid throughout rebase. This lower bound is source-derived; the actual sealed
+9063 run stopped earlier, at fresh preparation.
+
+Do not spend another release build on the expectation that the phase split or
+constructor chunking alone removes this lower bound. Next designs must reuse an
+unchanged prepared cut and share immutable checkpoint payloads safely during
+eligible history rebase, with reservation ownership matching the bytes retained.
+The restore fold needs a separate bounded-memory design before claiming the
+complete 4M lifecycle. Its existing reservation for two locator trees and one
+payload-row set alone exceeds 6,576,106,860 bytes at 4,000,064 upserts under the
+pinned whole-node-per-entry budget. This is another source-derived admission
+lower bound, not an observed restore failure in the stopped 9063 run. Expiration
+container budgeting must also be included in the complete restore bound. Every unsupported history shape must preserve existing
+correctness through the fallback; wire-format or validation changes require
+separate review. Final acceptance still includes all eight workload rows and
+checkpoint modes.
+
+Validation logs and hashes are recorded in the feature worktree
+`target/issue406-complete-acceptance/ipc-owner-validation.json`; the exact
+source accounting worksheet is `ipc-owner-source-diagnosis.json` beside it.

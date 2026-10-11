@@ -134,17 +134,41 @@ stopped before all timing samples; cleanup settled and reservation returned to
 zero. Build/audit time was 614.567 seconds; the stopped attempt took 8.065 seconds.
 The eight-row timing table still describes `e8a28d99`.
 
-Next, diagnose this exact IPC buffer/credit overlap and add a focused failing
-regression before correcting it. Then validate the actual four-column retained
-4M fixture and live old-history overlap under the existing pool before making
-capacity claims. Exact wire
-allocation preserves byte-for-byte builder output and cancellation; constructor
-coalescing preserves the v2 format and deterministic equivalent recovery,
-without claiming the old IPC physical grouping. Then prioritize Join, ASOF and
-harness changes using the completed profiles. Each increment needs a reviewed
-implementation and focused comparison; the final comparison still covers every
-row and checkpoint policy against the then-current runtime. Investigating or
-fixing one path does not remove any required final workload.
+The IPC lifetime correction in `8a740b1e` reproduces that failure at 8,192 rows
+in a 2,400,000-byte pool, then succeeds by retiring the compacted input after
+owned Arrow messages are generated and before output growth. All 22 focused
+checks pass; library Clippy passes. No new performance samples were collected.
+
+Further source analysis shows that two independent 4M left serialized bases
+plus the observed admitted state exceed 1 GiB by at least 27,248,808 bytes,
+before scratch/right-side/control costs. Restore's existing fold reservations
+independently exceed 6.576 GB for 4,000,064 upserts. Constructor chunking or the
+IPC phase split alone cannot make the complete lifecycle pass. Keep the next
+release build/full diagnostic held until the relevant ownership and restore
+bounds are resolved.
+
+The next implementation steps are:
+
+1. Reuse fresh preparation only when its complete Cut matches; retain
+   cancellation, retirement and epoch checks and reject stale cuts.
+2. Review and test separate segment backing credit, Base controls and temporary
+   encoding credit. Every held alias must retain its own required funding.
+3. For fully checkpointed append-only history, review a bounded sorted-index
+   merge that shares existing whole payload segments. Pending operations,
+   tombstones and partially dead payloads retain the existing encoder. Prove a
+   complete simultaneous-reservation upper bound before attempting 4M again.
+4. Design bounded restore folding and live-container construction while
+   preserving all malformed-history rejection and recovery semantics.
+5. Resume the remaining Join, ASOF, parallelism and harness improvements using
+   the completed CPU profiles. The reviewed single-string local interning
+   proposal remains an independent next CPU optimization.
+
+Exact wire allocation preserves byte-for-byte builder output and cancellation;
+constructor coalescing preserves the v2 format and deterministic equivalent
+recovery without claiming the old IPC physical grouping. Each increment needs
+reviewed implementation and focused evidence. The final comparison still covers
+every row and checkpoint policy against the then-current runtime. An unchanged
+known failure is retained, not retried to fill a table or disguised as noise.
 
 Completion requires reviewed implementations, focused correctness checks,
 complete and reproducible eight-row evidence with separate checkpoint modes,
