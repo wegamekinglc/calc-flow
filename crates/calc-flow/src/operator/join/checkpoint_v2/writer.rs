@@ -21,6 +21,9 @@ mod encode;
 mod metadata;
 
 #[cfg(test)]
+mod prepared_tests;
+
+#[cfg(test)]
 pub(in crate::operator::join) type WriterTestHook = Arc<dyn Fn(&MemoryReservation) + Send + Sync>;
 
 #[derive(Default)]
@@ -192,7 +195,9 @@ impl StreamJoinOperator {
     }
 
     fn v2_preparation_kind(&self) -> Option<Preparation> {
-        if self.state.last_checkpoint_epoch.is_none()
+        if self.fresh_v2_preparation_matches() {
+            None
+        } else if self.state.last_checkpoint_epoch.is_none()
             || self.v2_writer.migration_required
             || self.v2_writer.dirty_epochs >= 4
         {
