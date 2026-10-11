@@ -12,16 +12,16 @@ Historical main figures below are supplied reference values, not fresh results.
 Every final report must retain all eight rows, identify the measured main and
 candidate commits, and distinguish measurements from targets.
 
-| Workload (1M rows unless specified)    | Historical main      | Single-thread target            | Parallel target |
-|----------------------------------------|----------------------|---------------------------------|-----------------|
-| Stream Join, sealed dimension          | 701 ms               | <= 60 ms                        | <= 15 ms        |
-| Stream Join, 10M rows                  | 8,061 ms             | <= 600 ms                       | <= 150 ms       |
-| Retained Stream Join, 1M to 4M scaling | 5.7x (previous main) | <= 4.4x                         | —               |
-| Join capture / restore per row         | 1.8 / 2.3 us         | <= 0.1 / 0.2 us                 | —               |
-| Join handler latency during compaction | 40x steady           | <= 2x steady                    | —               |
-| Stream ASOF                            | 391 ms               | <= 100 ms                       | <= 30 ms        |
-| ASOF suite overhead, 1,024-row batches | 167 ms over operator | <= 2x measured projection floor | —               |
-| Join operator cost per 1,024-row batch | 0.2–0.9 ms           | <= 0.05 ms                      | —               |
+| Workload (1M rows unless specified)      | Historical main        | Single-thread target              | Parallel target   |
+|------------------------------------------|------------------------|-----------------------------------|-------------------|
+| Stream Join, sealed dimension            | 701 ms                 | <= 60 ms                          | <= 15 ms          |
+| Stream Join, 10M rows                    | 8,061 ms               | <= 600 ms                         | <= 150 ms         |
+| Retained Stream Join, 1M to 4M scaling   | 5.7x (previous main)   | <= 4.4x                           | —                 |
+| Join capture / restore per row           | 1.8 / 2.3 us           | <= 0.1 / 0.2 us                   | —                 |
+| Join handler latency during compaction   | 40x steady             | <= 2x steady                      | —                 |
+| Stream ASOF                              | 391 ms                 | <= 100 ms                         | <= 30 ms          |
+| ASOF suite overhead, 1,024-row batches   | 167 ms over operator   | <= 2x measured projection floor   | —                 |
+| Join operator cost per 1,024-row batch   | 0.2–0.9 ms             | <= 0.05 ms                        | —                 |
 
 The absolute stream targets use checkpoint-disabled execution. Separately
 measure enabled and low-frequency checkpoints on applicable streaming paths;
@@ -127,8 +127,17 @@ RED/GREEN evidence and passing
 library Clippy. Test-target Clippy retains the known pinned-toolchain generated
 libtest failure. These corrections have no new performance measurements yet.
 
-Next, validate the actual four-column retained 4M fixture and live old-history
-overlap under the existing pool before making capacity claims. Exact wire
+The fixed 4M diagnostic at `9063f2fe` has now run once. Full admission passes,
+but fresh preparation fails its IPC write reservation: 997,664,473 live bytes
+plus 134,217,216 requested bytes exceeds the unchanged 1 GiB pool. The collector
+stopped before all timing samples; cleanup settled and reservation returned to
+zero. Build/audit time was 614.567 seconds; the stopped attempt took 8.065 seconds.
+The eight-row timing table still describes `e8a28d99`.
+
+Next, diagnose this exact IPC buffer/credit overlap and add a focused failing
+regression before correcting it. Then validate the actual four-column retained
+4M fixture and live old-history overlap under the existing pool before making
+capacity claims. Exact wire
 allocation preserves byte-for-byte builder output and cancellation; constructor
 coalescing preserves the v2 format and deterministic equivalent recovery,
 without claiming the old IPC physical grouping. Then prioritize Join, ASOF and
