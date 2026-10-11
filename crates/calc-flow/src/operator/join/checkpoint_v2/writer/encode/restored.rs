@@ -20,7 +20,8 @@ pub(in crate::operator::join::checkpoint_v2::writer) struct RestoredHistory {
 struct Counts {
     payloads: usize,
     deltas: usize,
-    bytes: usize,
+    controls: usize,
+    segments: usize,
 }
 
 pub(in crate::operator::join::checkpoint_v2::writer) fn decode(
@@ -30,9 +31,11 @@ pub(in crate::operator::join::checkpoint_v2::writer) fn decode(
     check: &dyn Fn() -> Result<()>,
 ) -> Result<RestoredHistory> {
     check()?;
-    let encoder = Encoder::new(workspace)?;
+    let mut encoder = Encoder::new(workspace)?;
     let counts = required(snapshot, inventory, check)?;
-    ensure(&encoder.funding, add(encoder.retained, counts.bytes)?)?;
+    let retained = add(encoder.retained, counts.controls)?;
+    ensure(&encoder.funding, add(retained, counts.segments)?)?;
+    encoder.retained = retained;
     copy_history(snapshot, inventory, &counts, encoder, check)
 }
 
@@ -53,7 +56,7 @@ fn copy_history(
         deltas,
         base_epoch: inventory.base_epoch,
         dirty_epochs,
-        base: encoder.output,
+        base: encoder.finish(),
     })
 }
 
@@ -62,10 +65,12 @@ fn required(
     inventory: &inventory::Inventory<'_>,
     check: &dyn Fn() -> Result<()>,
 ) -> Result<Counts> {
+    let (controls, segments) = segment_bytes(snapshot, check)?;
     let counts = Counts {
         payloads: 0,
         deltas: 0,
-        bytes: segment_bytes(snapshot, check)?,
+        controls,
+        segments,
     };
     let counts = payload_bytes(counts, inventory, check)?;
     let counts = delta_bytes(counts, inventory, check)?;
@@ -75,18 +80,15 @@ fn required(
 fn segment_bytes(
     snapshot: &OperatorStateSnapshot,
     check: &dyn Fn() -> Result<()>,
-) -> Result<usize> {
-    let mut bytes = budget::tree::<String, StateSegment>(snapshot.segments.len())?;
+) -> Result<(usize, usize)> {
+    let mut controls = budget::tree::<String, StateSegment>(snapshot.segments.len())?;
+    let mut segments = 0;
     for (name, segment) in &snapshot.segments {
         check()?;
-        bytes = sum(&[
-            bytes,
-            name.len(),
-            segment.sha256().len(),
-            segment_owner_bytes(segment)?,
-        ])?;
+        controls = add(controls, name.len())?;
+        segments = add(segments, segment_owner_bytes(segment)?)?;
     }
-    Ok(bytes)
+    Ok((controls, segments))
 }
 
 fn payload_bytes(
@@ -98,7 +100,7 @@ fn payload_bytes(
         check()?;
         geometry::checked(payload)?;
         counts.payloads = add(counts.payloads, 1)?;
-        counts.bytes = add(counts.bytes, 64)?;
+        counts.controls = add(counts.controls, 64)?;
     }
     Ok(counts)
 }
@@ -112,8 +114,8 @@ fn delta_bytes(
         check()?;
         let (_, sides) = geometry::checked(delta)?;
         counts.deltas = add(counts.deltas, 1)?;
-        counts.bytes = add(
-            counts.bytes,
+        counts.controls = add(
+            counts.controls,
             product(sides.len(), size_of::<&'static str>())?,
         )?;
     }
@@ -121,8 +123,8 @@ fn delta_bytes(
 }
 
 fn finish_counts(mut counts: Counts) -> Result<Counts> {
-    counts.bytes = sum(&[
-        counts.bytes,
+    counts.controls = sum(&[
+        counts.controls,
         product(counts.payloads, size_of::<PayloadEntry>())?,
         product(counts.deltas, size_of::<DeltaEntry>())?,
     ])?;
@@ -130,14 +132,20 @@ fn finish_counts(mut counts: Counts) -> Result<Counts> {
 }
 
 fn segment_owner_bytes(segment: &StateSegment) -> Result<usize> {
-    if segment.has_owner() {
-        accounting::arc::<(Owner, Owner)>()
+    let backing = if segment.has_owner() {
+        accounting::arc::<(Owner, Owner)>()?
     } else {
         add(
             accounting::arc::<Vec<u8>>()?,
             segment.bytes_arc().capacity(),
-        )
-    }
+        )?
+    };
+    sum(&[
+        backing,
+        segment.sha256().len(),
+        accounting::arc::<MemoryReservation>()?,
+        budget::registration_bytes()?,
+    ])
 }
 
 fn copy_deltas(
@@ -185,10 +193,12 @@ fn copy_segments(
 ) -> Result<()> {
     for (name, segment) in &snapshot.segments {
         check()?;
-        encoder.output.segments.insert(
-            name.clone(),
-            segment.clone().with_owner(encoder.funding.clone()),
-        );
+        let charge = segment_owner_bytes(segment)?;
+        let name = name.clone();
+        let segment = segment
+            .clone()
+            .with_owner(Arc::new(encoder.funding.split(charge)));
+        encoder.output.segments.insert(name, segment);
     }
     Ok(())
 }

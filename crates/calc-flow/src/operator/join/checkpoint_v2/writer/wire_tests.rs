@@ -160,9 +160,20 @@ fn rich_ipc_fixture() -> (Vec<StoredRow>, RecordBatch) {
 struct IpcPool {
     inner: GreedyMemoryPool,
     peak: std::sync::atomic::AtomicUsize,
+    retiring: std::sync::Mutex<Option<std::sync::Weak<Vec<u8>>>>,
+    retirements: std::sync::atomic::AtomicUsize,
 }
 
 impl IpcPool {
+    fn new(limit: usize) -> Self {
+        Self {
+            inner: GreedyMemoryPool::new(limit),
+            peak: std::sync::atomic::AtomicUsize::new(0),
+            retiring: std::sync::Mutex::new(None),
+            retirements: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
     fn note_peak(&self) {
         self.peak
             .fetch_max(self.inner.reserved(), std::sync::atomic::Ordering::Relaxed);
@@ -190,6 +201,11 @@ impl MemoryPool for IpcPool {
     }
 
     fn shrink(&self, reservation: &MemoryReservation, bytes: usize) {
+        if let Some(retiring) = self.retiring.lock().unwrap().as_ref() {
+            assert_eq!(retiring.strong_count(), 0, "bytes must drop before credit");
+            self.retirements
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         self.inner.shrink(reservation, bytes);
     }
 
@@ -223,10 +239,7 @@ fn test_owned_ipc_messages_drop_compacted_owners_and_preserve_stream_bytes() {
         drop((compacted, reference_credit));
         assert_eq!(reference_pool.reserved(), 0);
 
-        let tracking = Arc::new(IpcPool {
-            inner: GreedyMemoryPool::new(16 << 20),
-            peak: std::sync::atomic::AtomicUsize::new(0),
-        });
+        let tracking = Arc::new(IpcPool::new(16 << 20));
         let pool: Arc<dyn MemoryPool> = tracking.clone();
         let workspace = MemoryConsumer::new("ipc-owners").register(&pool);
         let credit = workspace.new_empty();
@@ -379,10 +392,14 @@ fn test_payload_retires_compacted_batch_before_ipc_output_growth() {
     assert_eq!(held.bytes(), &[0x59; 4_096]);
     let owner = Arc::downgrade(&encoder.funding);
     drop((encoder, workspace));
-    assert!(owner.upgrade().is_some() && pool.reserved() > 0);
+    assert!(owner.upgrade().is_none());
+    let capacity = segment.bytes_arc().capacity();
+    let both = pool.reserved();
+    assert!(both >= capacity + held.bytes_arc().capacity());
     assert_eq!(segment.bytes(), expected);
     drop(segment);
-    assert!(owner.upgrade().is_some() && pool.reserved() > 0);
+    assert!(both - pool.reserved() >= capacity);
+    assert!(pool.reserved() >= held.bytes_arc().capacity());
     assert_eq!(held.bytes(), &[0x59; 4_096]);
     drop(held);
     assert!(owner.upgrade().is_none());
@@ -509,7 +526,9 @@ fn test_payload_frame_exact_capacity_preserves_ipc_and_segment_owner() {
     )
     .unwrap();
     let expected = reference.into_bytes().unwrap();
-    let (pool, workspace) = reservation(4 << 20);
+    let tracking = Arc::new(IpcPool::new(4 << 20));
+    let pool: Arc<dyn MemoryPool> = tracking.clone();
+    let workspace = MemoryConsumer::new("exact-frame-test").register(&pool);
     let mut encoder = Encoder::new(&workspace).unwrap();
     let live = encoder.retained + ipc.capacity();
     ensure(&encoder.funding, live).unwrap();
@@ -527,14 +546,15 @@ fn test_payload_frame_exact_capacity_preserves_ipc_and_segment_owner() {
     );
     assert_eq!(segment.sha256(), hex::encode(Sha256::digest(&expected)));
     assert!(
-        encoder.funding.size() >= live + length,
+        tracking.peak() >= live + length,
         "live IPC and exact output must be prepaid together"
     );
-    assert!(allocations.bytes_max <= u64::try_from(encoder.funding.size()).unwrap());
-    assert!(usize::try_from(allocations.bytes_current).unwrap() <= encoder.funding.size());
+    assert!(allocations.bytes_max <= u64::try_from(tracking.peak()).unwrap());
+    assert!(usize::try_from(allocations.bytes_current).unwrap() <= pool.reserved());
     let owner = Arc::downgrade(&encoder.funding);
     drop((encoder, workspace));
-    assert!(owner.upgrade().is_some() && pool.reserved() > 0);
+    assert!(owner.upgrade().is_none());
+    assert!(pool.reserved() >= segment.bytes_arc().capacity());
     assert_eq!(segment.bytes(), expected);
     drop(segment);
     assert!(owner.upgrade().is_none());
@@ -617,7 +637,12 @@ fn test_delta_exact_capacity_preserves_mixed_wire_and_segment_owners() {
     let segments = output.segments.values().cloned().collect::<Vec<_>>();
     let owner = Arc::downgrade(&output.funding);
     drop((output, workspace));
-    assert!(owner.upgrade().is_some() && pool.reserved() > 0);
+    assert!(owner.upgrade().is_none());
+    let backing = segments
+        .iter()
+        .map(|segment| segment.bytes_arc().capacity())
+        .sum::<usize>();
+    assert!(pool.reserved() >= backing);
     assert!(segments.iter().all(StateSegment::has_owner));
     drop(segments);
     assert!(owner.upgrade().is_none());
@@ -672,3 +697,6 @@ fn test_payload_frame_size_rejects_checked_overflow() {
     assert!(payload_frame_bytes(usize::MAX / 8 + 1, 0).is_err());
     assert!(payload_frame_bytes(0, usize::MAX).is_err());
 }
+
+#[path = "funding_tests.rs"]
+mod funding_tests;

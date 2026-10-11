@@ -165,8 +165,17 @@ async fn test_fresh_preparation_reuses_owners_without_writer_credit() {
     drop(context);
     assert!(job.gather_owner().close_and_drain().await.is_empty());
     drop(job);
-    assert_eq!(pool.reserved(), owned_bytes);
-    drop(segments);
+    let backing = segments
+        .values()
+        .map(|segment| segment.bytes_arc().capacity())
+        .sum::<usize>();
+    assert!(pool.reserved() >= backing);
+    for segment in segments.into_values() {
+        let before = pool.reserved();
+        let capacity = segment.bytes_arc().capacity();
+        drop(segment);
+        assert!(before - pool.reserved() >= capacity);
+    }
     assert_eq!(pool.reserved(), 0);
 }
 

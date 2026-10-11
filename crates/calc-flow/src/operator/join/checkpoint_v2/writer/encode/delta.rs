@@ -28,7 +28,7 @@ pub(super) fn encode(
         )?;
     }
     check()?;
-    Ok(encoder.output)
+    Ok(encoder.finish())
 }
 
 fn encode_side(

@@ -90,6 +90,20 @@ fn bulk_bytes<T>(length: usize) -> Result<usize> {
     product(product(length, 3)?.max(4), size_of::<T>())
 }
 
+fn segment_charge(capacity: usize) -> Result<usize> {
+    sum(&[
+        capacity,
+        accounting::arc::<Vec<u8>>()?,
+        64,
+        accounting::arc::<MemoryReservation>()?,
+        budget::registration_bytes()?,
+    ])
+}
+
+fn own_segment(bytes: Vec<u8>, credit: &MemoryReservation, charge: usize) -> StateSegment {
+    StateSegment::new(bytes).with_owner(Arc::new(credit.split(charge)))
+}
+
 pub(super) fn pending(
     pending: &super::super::super::PendingLog,
     schemas: &[SchemaRef; 2],
@@ -179,7 +193,7 @@ pub(super) fn base(
         )?;
     }
     check()?;
-    Ok(encoder.output)
+    Ok(encoder.finish())
 }
 
 impl Encoder {
@@ -202,6 +216,11 @@ impl Encoder {
             funding,
             retained: seed,
         })
+    }
+
+    fn finish(self) -> Base {
+        self.funding.shrink(self.funding.size() - self.retained);
+        self.output
     }
 
     fn side(
@@ -281,14 +300,13 @@ impl Encoder {
         let overhead = sum(&[
             budget::tree::<String, StateSegment>(1)?,
             name.capacity(),
-            accounting::arc::<Vec<u8>>()?,
-            64,
             accounting::vector_peak::<PayloadEntry>(2)?,
             128,
         ])?;
-        let retained = sum(&[self.retained, bytes.capacity(), overhead])?;
-        ensure(&self.funding, retained)?;
-        let segment = StateSegment::new(bytes).with_owner(self.funding.clone());
+        let retained = add(self.retained, overhead)?;
+        let backing = segment_charge(bytes.capacity())?;
+        ensure(&self.funding, add(retained, backing)?)?;
+        let segment = own_segment(bytes, &self.funding, backing);
         self.output.segments.insert(name, segment);
         self.retained = retained;
         Ok(())
