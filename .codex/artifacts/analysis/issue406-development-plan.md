@@ -252,23 +252,59 @@ are disabled. Their focused correctness and ownership evidence is recorded in
 the diagnosis. The cff terminal regression remains the measured result until a
 fresh comparison demonstrates the effect of the correction.
 
-The next implementation steps are:
+Three later source increments remain unmeasured in release performance:
+`16af86e4` prepares strictly ordered ASOF left input directly as columnar chunks;
+`d4e66037` gathers eligible Join output columns on owned parallel workers;
+`a681e7da` constructs each checkpoint payload segment once and reuses its
+checksum for its inventory name and index reference. The ASOF path is restricted
+to one inline Utf8 key and one UInt64 sequence, with an actual resident-state
+ordering proof. Other inputs retain the validated path. Join parallel gathering
+requires at least 64,000 output rows and six eligible columns; small or unsupported
+outputs keep serial gathering. Neither restriction is a claim of speedup.
 
-1. Validate complete-expiry retirement in the next common release measurement,
-   preserving both processing and terminal/full-cycle clocks. The final watermark
-   before EOF is the relevant trigger; no timing gain follows from a work-count
-   test alone.
-2. Remove redundant ASOF per-row identity construction for a narrowly proven
-   ordered columnar left input. Preserve actual restored-state boundaries,
-   duplicate/error precedence, payload projection and funded worker ownership.
-3. Profile snapshot/restore before choosing its next optimization. Continue Join
-   output parallelism with existing owned workers, preserving buffer funding
-   through asynchronous delivery. Reuse built artifacts for the checkpoint
-   profile; the profile is not another acceptance-timing run.
-4. Reconcile all eight rows on the final runtime, with separate OFF/LOW/ON
-   policies, complete planned samples and explicit main comparison limitations.
-   Keep the cff attempt and its incomplete row 5 immutable; do not extend or retry
-   it to obtain a favorable verdict.
+Ten ASOF and nine Join controls pass. They cover exact dictionary/order and
+error behavior, projected nullable slices, checkpoint bytes and continuation,
+funded worker cancellation/abandonment, actual concurrent gathering, early
+reservation fallback, failed service admission and output credit across awaited
+delivery. The direct ASOF task is eight bytes smaller on this build, charged
+once by its wrapper and once by work admission. The intermediate credit differs
+by 16 bytes; the later overall peak and successful state-install cutoff remain
+unchanged. This does not claim a general 16-byte reduction or lower row funding.
+
+Eleven checkpoint controls pass after a genuine base-path RED observed 3,264
+bytes hashed for 1,632 payload bytes; cleanup completed before the assertion.
+The final test exercises both base and pending encoders, checks the independent
+segment SHA against metadata and decoded index references, and requires one
+hash pass. Exact wire, funded allocations, alias retirement, refusal, cancellation
+and restore controls pass. The implementation keeps `StateSegment::new` as the
+checksum constructor and prepays segment/control ownership before constructing
+it; it does not extend the trust contract of `from_validated`.
+
+Library Clippy, scoped formatting, whitespace and generated-contract checks
+pass. Test-target Clippy still fails with exactly the prior
+`large_stack_arrays` compiler message; no lint is suppressed. Final independent
+source and evidence review approves these scoped implementations, not merge
+readiness or the performance targets.
+
+The checkpoint CPU profile is complete. The duplicated payload digest represents
+208 / 2,194 attributed preparation samples (9.48%), and is now removed at source.
+Cancellation checking and row-level restore validation remain distinct proposals;
+CPU percentages cannot substitute for latency measurements.
+
+The next steps are:
+
+1. Build and measure the complete eight-workload inventory on one common runtime,
+   with separate OFF/LOW/ON policies, explicit pinned-main limitations and complete
+   preregistered samples. Compare cff versus the new runtime for retained OFF 1M/4M,
+   including the final watermark, terminal time and full lifecycle.
+2. Use the resulting evidence to select remaining checkpoint work. Candidate
+   changes are bounded writer cancellation checks and reused restore decoding
+   setup/scratch. Preserve cancellation bounds, prepaid ownership, every obsolete
+   historical row check, and both validation scans.
+3. Reconcile all eight rows against the final runtime after further changes.
+   Keep every missed target, invalid main comparison and incomplete attempt
+   visible; do not extend the sealed cff compaction run or retry for a favorable
+   classification.
 
 The observed Python complexity CI failure is corrected in `25b6eb78` without
 changing the baseline or acceptance semantics. All 102 unique focused tests pass,

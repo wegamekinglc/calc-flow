@@ -677,3 +677,85 @@ Neither increment has new release timings: all eight measured table rows and
 the terminal regression above still describe their named historical runtimes.
 The added maximum scalar also changes expiration-control size, so the earlier
 cff capacity bounds are not relabeled as exact bounds for this new source.
+
+## Direct ASOF, parallel Join gather and payload digest reuse
+
+Three later source increments remain unmeasured in release performance:
+`16af86e4` prepares strictly ordered ASOF left input directly as columnar chunks;
+`d4e66037` gathers eligible Join output columns on owned parallel workers;
+`a681e7da` constructs each checkpoint payload segment once and reuses its
+checksum for its inventory name and index reference. The ASOF path is restricted
+to one inline Utf8 key and one UInt64 sequence, with an actual resident-state
+ordering proof. Other inputs retain the validated path. Join parallel gathering
+requires at least 64,000 output rows and six eligible columns; small or unsupported
+outputs keep serial gathering. Neither restriction is a claim of speedup.
+
+Ten ASOF and nine Join controls pass. They cover exact dictionary/order and
+error behavior, projected nullable slices, checkpoint bytes and continuation,
+funded worker cancellation/abandonment, actual concurrent gathering, early
+reservation fallback, failed service admission and output credit across awaited
+delivery. The direct ASOF task is eight bytes smaller on this build, charged
+once by its wrapper and once by work admission. The intermediate credit differs
+by 16 bytes; the later overall peak and successful state-install cutoff remain
+unchanged. This does not claim a general 16-byte reduction or lower row funding.
+
+Eleven checkpoint controls pass after a genuine base-path RED observed 3,264
+bytes hashed for 1,632 payload bytes; cleanup completed before the assertion.
+The final test exercises both base and pending encoders, checks the independent
+segment SHA against metadata and decoded index references, and requires one
+hash pass. Exact wire, funded allocations, alias retirement, refusal, cancellation
+and restore controls pass. The implementation keeps `StateSegment::new` as the
+checksum constructor and prepays segment/control ownership before constructing
+it; it does not extend the trust contract of `from_validated`.
+
+Library Clippy, scoped formatting, whitespace and generated-contract checks
+pass. Test-target Clippy still fails with exactly the prior
+`large_stack_arrays` compiler message; no lint is suppressed. Final independent
+source and evidence review approves these scoped implementations, not merge
+readiness or the performance targets.
+
+The checkpoint diagnosis reused the audited cff native binary: one excluded
+warmup and three profiles completed in 35.276 / 180 seconds with full oracles
+and all owned processes settled. Of 2,194 preparation-root samples, SHA-256
+has 931 self samples (42.4%) and cancellation checking has 810 inclusive samples
+(36.9%; its tree check has 707 self samples). The redundant explicit payload
+SHA contributes 208 samples, 9.48% of attributed preparation samples. It is not
+all SHA work, a statistical bound, or a predicted wall-time improvement.
+Restore history validation has 4,358 / 5,674 inclusive samples (76.8%).
+
+The run lost 42 / 37 / 36 events. Whole-process samples total 60,310, with
+52,330 (86.8%) outside the selected phase roots; capture-only has just 112.
+Release inline information and WSL2 isolation are limited. These CPU observations
+justify the narrow digest correction and further investigation of bounded
+cancellation checks and per-row restore setup, without changing the timing
+verdicts above or removing historical validation.
+
+Profile evidence is under `target/issue406-checkpoint-profile/`. The plan hash
+is `a02e08f15f661d728f8bcc8bce1bafa30aac3994fe1168c354acadbe3c6164b7`;
+completion is `9e70d04242dc51172e0ae78b34145801d65043f866765600e6d3cefb421adfcd`;
+the acquisition evidence manifest is
+`3d47c24a242887be4c5e219dbfd00ec8200dcce3fe523421acea5aed5262be3b`.
+Independent review checked the native attribution, source hash chain and all
+sealed evidence. New release timings remain outstanding.
+
+The implementation validation manifests are in the feature worktree:
+
+- `target/issue406-direct-left/validation-final.json`,
+  `afd8395b9ff8ddfe66a323e18d6851d1a22789ddb07571ac399ca180e718f5f1`;
+- `target/issue406-column-gather/validation-final.json`,
+  `28f11087fc6bf22d02a26a652f7039a79367535e06475ff15facb5c21ea37a39`;
+- `target/issue406-payload-digest/validation-final.json`,
+  `88bbf02d1f7d1a7625c86663532ed7eb3108dd5072820a1df0d376eb5b8a48bb`.
+
+The single saved CI snapshot for `40b39c70` shows Linux Rust parity and Windows
+Clippy failures. Their exact logs both stop at the known large-stack-array
+signature on Rust 1.88; neither establishes a runtime test failure or a green
+run. No further status snapshot was polled for that head. The diagnosis is
+`target/issue406-ci-40b/report.md`, SHA-256
+`3dd14977a2862e88e907dc97658f4af7d64d3ce704f93f904d764b0b8d567dd3`.
+
+All eight measured rows and main/OFF/LOW/ON limitations above remain unchanged.
+The next acquisition uses one common new runtime for the complete requested
+inventory, plus a pinned cff retained-OFF comparison to test the terminal
+regression correction. It will use separately recorded fixed sample counts and
+wall budgets; it will not extend the sealed incomplete cff compaction attempt.
