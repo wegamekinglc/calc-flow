@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod tests {
+    mod column_gather_tests;
     mod complete_expiry_tests;
     mod expiration_heap_tests;
 
@@ -4445,6 +4446,7 @@ impl StreamJoinOperator {
         if prepared.output.is_empty() {
             return Ok(());
         }
+        let runtime = self.runtime.runtime()?;
         let materializer = materialization::JoinOutput {
             schema: self.output_ports[0]
                 .schema()
@@ -4468,7 +4470,18 @@ impl StreamJoinOperator {
         )?;
         for range in ranges {
             context.check_cancelled()?;
-            let record = materializer.materialize(range)?;
+            let (record, funding) = match output_gather::materialize(
+                &materializer,
+                range.clone(),
+                runtime,
+                context,
+                &mut self.compaction_cleanup,
+            )
+            .await?
+            {
+                Some(gathered) => gathered,
+                None => (materializer.materialize(range)?, Vec::new()),
+            };
             let metadata =
                 BatchMetadata::new(&self.name, self.state.next_output_sequence, BTreeMap::new())?;
             let message = Batch::table(vec![record], metadata)?;
@@ -4479,6 +4492,7 @@ impl StreamJoinOperator {
                 ));
             }
             output.emit("output", message).await?;
+            drop(funding);
             self.state.next_output_sequence += 1;
         }
         Ok(())

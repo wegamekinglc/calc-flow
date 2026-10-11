@@ -7,6 +7,12 @@ use datafusion::arrow::{
 };
 use std::collections::BTreeMap;
 
+mod owned;
+pub(super) use owned::materialize;
+
+#[cfg(test)]
+pub(super) mod test_support;
+
 pub(super) enum SideGather<'a> {
     Single {
         columns: &'a [ArrayRef],
@@ -115,6 +121,8 @@ pub(super) fn column<'a>(
     canonical: &DataType,
     payloads: impl Iterator<Item = &'a RowPayload>,
 ) -> Result<ArrayRef> {
+    #[cfg(test)]
+    let _observation = test_support::observe(test_support::hook(), index);
     if let Some(taken) = gather.and_then(|gather| gather.column(index)) {
         return Ok(canonical_column(taken, canonical));
     }
