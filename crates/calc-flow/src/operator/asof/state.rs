@@ -850,12 +850,8 @@ impl EncodedColumns {
         seed: &datafusion::common::hash_utils::RandomState,
         count: usize,
     ) -> Result<Vec<u64>> {
-        if let Self::StringKeys { rows, ids } = self {
-            let values = match rows.storage {
-                EncodedBatchStorage::Binary(_) => Self::Binary(rows.clone()),
-                EncodedBatchStorage::LargeBinary(_) => Self::Rows(rows.clone()),
-            };
-            let unique = values.hashes(seed, rows.len())?;
+        if let Self::StringKeys { ids, .. } = self {
+            let unique = self.dictionary_hashes(seed)?;
             return Ok(ids[..count].iter().map(|id| unique[*id as usize]).collect());
         }
         let mut hashes = vec![0; count];
@@ -877,6 +873,20 @@ impl EncodedColumns {
             }
         }
         Ok(hashes)
+    }
+
+    pub(super) fn dictionary_hashes(
+        &self,
+        seed: &datafusion::common::hash_utils::RandomState,
+    ) -> Result<Vec<u64>> {
+        let Self::StringKeys { rows, .. } = self else {
+            unreachable!("dictionary hashing requires string-key encodings")
+        };
+        let values = match rows.storage {
+            EncodedBatchStorage::Binary(_) => Self::Binary(rows.clone()),
+            EncodedBatchStorage::LargeBinary(_) => Self::Rows(rows.clone()),
+        };
+        values.hashes(seed, rows.len())
     }
 
     #[cfg(test)]
