@@ -26,28 +26,28 @@ boundary. OFF observes H 363.28 ms against 2×floor 344.91 ms; candidate LOW
 observes H 360.75 ms against 368.55 ms. ON end-to-end includes checkpoint work,
 so its native residual is not an applicable harness-only metric.
 
-| Workload                                   | Fresh main 588726c8                   | Candidate runtime e8a28d99          | Target / observation                      |
-|--------------------------------------------|---------------------------------------|-------------------------------------|-------------------------------------------|
-| Join 1M, 1 / 32 CPU                        | LOW: 125.6 / 305.8 ms †               | OFF: 87.1 / 89.5 ms                 | ≤60 / ≤15 ms; above                       |
-| Join 10M, 1 / 32 CPU                       | LOW: 3355.7 / 5132.5 ms †             | OFF: 933.8 / 916.6 ms               | ≤600 / ≤150 ms; above                     |
-| Retained Join 4M ÷ 1M                      | LOW: 4.711× †; ON failed              | OFF: 4.697×; ON failed              | ≤4.4×; above                              |
-| Join capture / restore, per row            | Checkpoint preparation failed         | Checkpoint preparation failed       | ≤0.1 / ≤0.2 µs; capture/restore blocked   |
-| Join handler during compaction             | Fixture checkpoint failed             | Fixture checkpoint failed           | ≤2× steady; handler comparison blocked    |
-| ASOF 1M per input, 1 / 32 CPU              | LOW: 292.7 / 319.2 ms †               | OFF: 300.1 / 320.3 ms               | ≤100 / ≤30 ms; above                      |
-| ASOF harness overhead, 1,024-row batches   | LOW: H 361.1 ms; 2×floor 386.0 ms †   | OFF: H 363.3 ms; 2×floor 344.9 ms   | H ≤2×projection floor; above              |
-| Join full 1,024-row callback               | Enabled: 92.52 µs                     | OFF: 90.93 µs; enabled: 89.55 µs    | ≤50 µs; above                             |
+| Workload                                     | Fresh main 588726c8                     | Candidate runtime e8a28d99            | Target / observation                        |
+|----------------------------------------------|-----------------------------------------|---------------------------------------|---------------------------------------------|
+| Join 1M, 1 / 32 CPU                          | LOW: 125.6 / 305.8 ms †                 | OFF: 87.1 / 89.5 ms                   | ≤60 / ≤15 ms; above                         |
+| Join 10M, 1 / 32 CPU                         | LOW: 3355.7 / 5132.5 ms †               | OFF: 933.8 / 916.6 ms                 | ≤600 / ≤150 ms; above                       |
+| Retained Join 4M ÷ 1M                        | LOW: 4.711× †; ON failed                | OFF: 4.697×; ON failed                | ≤4.4×; above                                |
+| Join capture / restore, per row              | Checkpoint preparation failed           | Checkpoint preparation failed         | ≤0.1 / ≤0.2 µs; capture/restore blocked     |
+| Join handler during compaction               | Fixture checkpoint failed               | Fixture checkpoint failed             | ≤2× steady; handler comparison blocked      |
+| ASOF 1M per input, 1 / 32 CPU                | LOW: 292.7 / 319.2 ms †                 | OFF: 300.1 / 320.3 ms                 | ≤100 / ≤30 ms; above                        |
+| ASOF harness overhead, 1,024-row batches     | LOW: H 361.1 ms; 2×floor 386.0 ms †     | OFF: H 363.3 ms; 2×floor 344.9 ms     | H ≤2×projection floor; above                |
+| Join full 1,024-row callback                 | Enabled: 92.52 µs                       | OFF: 90.93 µs; enabled: 89.55 µs      | ≤50 µs; above                               |
 
-| Case                             | Main LOW †, ms   | Candidate LOW, ms   | Main ON †, ms     | Candidate ON, ms   | Candidate OFF, ms   |
-|----------------------------------|------------------|---------------------|-------------------|--------------------|---------------------|
-| row 1, 1,000,000, 1 CPU          | 125.58           | 89.10               | 210.13            | 94.53              | 87.07               |
-| row 1, 1,000,000, 32 CPU         | 305.77           | 89.83               | 383.75            | 91.15              | 89.45               |
-| row 2, 10,000,000, 1 CPU         | 3355.70          | 934.77              | 3611.02           | 1195.38            | 933.81              |
-| row 2, 10,000,000, 32 CPU        | 5132.48          | 938.86              | 5425.91           | 1150.25            | 916.56              |
-| row 3, 1,000,000, 1 CPU          | 416.91           | 369.40              | FAILED (warmup)   | FAILED (warmup)    | 255.32              |
-| row 3, 4,000,000, 1 CPU          | 1963.98          | 1790.99             | FAILED (warmup)   | FAILED (warmup)    | 1199.20             |
-| row 6, 1,000,000, 1 CPU          | 292.69           | 292.13              | 293.32            | 292.07             | 300.12              |
-| row 6, 1,000,000, 32 CPU         | 319.16           | 317.45              | 319.41            | 321.14             | 320.30              |
-| row 7, ASOF settled E2E, 1 CPU   | 704.30           | 702.18              | 900.61            | 824.86             | 702.67              |
+| Case                               | Main LOW †, ms     | Candidate LOW, ms     | Main ON †, ms       | Candidate ON, ms     | Candidate OFF, ms     |
+|------------------------------------|--------------------|-----------------------|---------------------|----------------------|-----------------------|
+| row 1, 1,000,000, 1 CPU            | 125.58             | 89.10                 | 210.13              | 94.53                | 87.07                 |
+| row 1, 1,000,000, 32 CPU           | 305.77             | 89.83                 | 383.75              | 91.15                | 89.45                 |
+| row 2, 10,000,000, 1 CPU           | 3355.70            | 934.77                | 3611.02             | 1195.38              | 933.81                |
+| row 2, 10,000,000, 32 CPU          | 5132.48            | 938.86                | 5425.91             | 1150.25              | 916.56                |
+| row 3, 1,000,000, 1 CPU            | 416.91             | 369.40                | FAILED (warmup)     | FAILED (warmup)      | 255.32                |
+| row 3, 4,000,000, 1 CPU            | 1963.98            | 1790.99               | FAILED (warmup)     | FAILED (warmup)      | 1199.20               |
+| row 6, 1,000,000, 1 CPU            | 292.69             | 292.13                | 293.32              | 292.07               | 300.12                |
+| row 6, 1,000,000, 32 CPU           | 319.16             | 317.45                | 319.41              | 321.14               | 320.30                |
+| row 7, ASOF settled E2E, 1 CPU     | 704.30             | 702.18                | 900.61              | 824.86               | 702.67                |
 
 OFF disables checkpoints completely. LOW uses a 24-hour interval and still
 performs terminal checkpoint completion. ON uses 100 ms. Relative throughput
@@ -107,12 +107,12 @@ The processing windows contained 1,841 / 1,938 / 23,509 / 5,900 CPU samples
 respectively; every window has native-stack coverage. The largest measured
 regions are:
 
-| Case                   | Inclusive sampled CPU cost                                      |
-|------------------------|-----------------------------------------------------------------|
-| Sealed Join, 1 CPU     | Key interning 25.15%; output materialization 20.91%             |
-| Sealed Join, 32 CPUs   | Key interning 23.94%; output materialization 19.66%             |
-| Retained Join 4M       | BTreeMap insertion 22.93%; probe-key table assembly 17.18%      |
-| ASOF, 1 CPU            | Input admission 69.19%; identities 30.07%; encode_rows 17.03%   |
+| Case                     | Inclusive sampled CPU cost                                        |
+|--------------------------|-------------------------------------------------------------------|
+| Sealed Join, 1 CPU       | Key interning 25.15%; output materialization 20.91%               |
+| Sealed Join, 32 CPUs     | Key interning 23.94%; output materialization 19.66%               |
+| Retained Join 4M         | BTreeMap insertion 22.93%; probe-key table assembly 17.18%        |
+| ASOF, 1 CPU              | Input admission 69.19%; identities 30.07%; encode_rows 17.03%     |
 
 Inclusive regions overlap and cannot be summed. For sealed Join with 32 CPUs,
 one Tokio worker accounts for 91.69–94.38% of Tokio samples within each window;
@@ -230,15 +230,15 @@ It stopped at 8.065 seconds, including startup allowance, checks, settlement and
 sealing. All 4,000,000 left rows and 64 dimension rows were admitted. The actual
 bounded reservation observer reported these shared-pool totals:
 
-| Observation                                  | Bytes           |
-|----------------------------------------------|-----------------|
-| Unchanged DataFusion pool limit              | 1,073,741,824   |
-| Live reservation after complete admission    | 100,990,496     |
-| Peak reservation during admission            | 327,112,480     |
-| Live / peak at failed fresh preparation      | 997,664,473     |
-| Rejected additional write reservation        | 134,217,216     |
-| Required total if that request were granted  | 1,131,881,689   |
-| Final reservation after owned cleanup        | 0               |
+| Observation                                    | Bytes             |
+|------------------------------------------------|-------------------|
+| Unchanged DataFusion pool limit                | 1,073,741,824     |
+| Live reservation after complete admission      | 100,990,496       |
+| Peak reservation during admission              | 327,112,480       |
+| Live / peak at failed fresh preparation        | 997,664,473       |
+| Rejected additional write reservation          | 134,217,216       |
+| Required total if that request were granted    | 1,131,881,689     |
+| Final reservation after owned cleanup          | 0                 |
 
 The failure is `V2 checkpoint IPC payload encoding failed`, in `fresh_prepare`;
 the rejected consumer is `sql-incremental:stream-join-v2-write`. This is an
@@ -330,3 +330,53 @@ performance result. The eight-row comparison still measures `e8a28d99`. Held E4
 history during a replacement base and bounded restore remain separate capacity
 requirements; the next full release build and 4M diagnostic remain held until
 their simultaneous allocation bounds are resolved.
+
+## Separate segment backing from encoder workspace
+
+Commit `640d8c84` attaches prepaid capacity and ownership controls to each encoded
+segment. Base inventory controls remain separate, and encoder completion refunds
+only temporary funding after its buffers retire. Retargeted indexes receive new
+funding while old aliases stay valid. Restored owned segments preserve opaque
+source owners and fund additional wrapper controls; unowned segments receive
+independent backing funding. Capture wrappers also retain their own controls, so
+a held snapshot segment need not represent only its byte length.
+
+Four focused RED cases exposed sibling backing remaining pinned, row-dependent
+scratch surviving encoder completion, retarget retaining unrelated Base controls,
+and unowned restored aliases failing independent retirement. They now pass;
+34 unique related tests and core library Clippy pass. Source/evidence hashes are
+in the feature worktree's
+`target/issue406-complete-acceptance/segment-credit-validation.json`.
+
+A subsequent source worksheet identifies a separate E1 blocker: the synchronous
+pending path reserves 960,014,640 bytes for copied operations and 863,999,352
+bytes for materialized left rows before payload encoding. Their 1,824,013,992-byte
+sum already exceeds 1 GiB. Borrowed pending encoding, shared-payload rebase and
+bounded restore are still required. The proposed rebase and restore leading
+terms (941,016,759 and 928,234,338 bytes) exclude unresolved owners and overlap;
+these are conditional calculations, not measured admission or sufficient bounds.
+Funding a new append-grown expiration representation in ordinary source state
+would also exceed fresh/rebase capacity and requires an explicit combined remedy.
+The full 4M release/measurement hold remains.
+
+The read-only worksheet is in the parent checkout at
+`target/issue406-ipc-lifetime-followup/capacity-upper-bounds.md`, SHA-256
+`66ef5fb963aad21d9c9ae4da1f66a44cb8810057a6f4bd06c2e2f1855df3c0eb`.
+No new performance claim follows from these source bounds or focused tests.
+
+## Focused CI corrections
+
+Commit `25b6eb78` decomposes the acceptance harness after its observed complexity
+ratchet failure, preserving validator order, progressive failure evidence and
+native-overlay recipe boundaries. The recipe identity changes with the source;
+old sealed measurements and attestations remain immutable. All 102 unique
+focused tests pass, as do Ruff and the unchanged complexity ratchet.
+
+Commit `fe40a96c` corrects the five observed Rust CI fixture failures: ordinary
+sinks for the disabled-checkpoint benchmark, checkpoint-aware inner state for a
+manual-snapshot soak, readiness-based graceful shutdown, and three canonical
+publication-path hooks. The two soak failures were reproduced locally before the
+fix, and all five cases pass afterward. Windows is not yet validated. Scoped test
+Clippy still fails solely on the known generated-libtest `large_stack_arrays`
+diagnostic; this unresolved check blocks merge. No production persistence logic,
+coverage threshold or lint requirement is weakened.

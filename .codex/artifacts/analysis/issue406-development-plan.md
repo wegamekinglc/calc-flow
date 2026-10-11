@@ -12,16 +12,16 @@ Historical main figures below are supplied reference values, not fresh results.
 Every final report must retain all eight rows, identify the measured main and
 candidate commits, and distinguish measurements from targets.
 
-| Workload (1M rows unless specified)      | Historical main        | Single-thread target              | Parallel target   |
-|------------------------------------------|------------------------|-----------------------------------|-------------------|
-| Stream Join, sealed dimension            | 701 ms                 | <= 60 ms                          | <= 15 ms          |
-| Stream Join, 10M rows                    | 8,061 ms               | <= 600 ms                         | <= 150 ms         |
-| Retained Stream Join, 1M to 4M scaling   | 5.7x (previous main)   | <= 4.4x                           | —                 |
-| Join capture / restore per row           | 1.8 / 2.3 us           | <= 0.1 / 0.2 us                   | —                 |
-| Join handler latency during compaction   | 40x steady             | <= 2x steady                      | —                 |
-| Stream ASOF                              | 391 ms                 | <= 100 ms                         | <= 30 ms          |
-| ASOF suite overhead, 1,024-row batches   | 167 ms over operator   | <= 2x measured projection floor   | —                 |
-| Join operator cost per 1,024-row batch   | 0.2–0.9 ms             | <= 0.05 ms                        | —                 |
+| Workload (1M rows unless specified)        | Historical main          | Single-thread target                | Parallel target     |
+|--------------------------------------------|--------------------------|-------------------------------------|---------------------|
+| Stream Join, sealed dimension              | 701 ms                   | <= 60 ms                            | <= 15 ms            |
+| Stream Join, 10M rows                      | 8,061 ms                 | <= 600 ms                           | <= 150 ms           |
+| Retained Stream Join, 1M to 4M scaling     | 5.7x (previous main)     | <= 4.4x                             | —                   |
+| Join capture / restore per row             | 1.8 / 2.3 us             | <= 0.1 / 0.2 us                     | —                   |
+| Join handler latency during compaction     | 40x steady               | <= 2x steady                        | —                   |
+| Stream ASOF                                | 391 ms                   | <= 100 ms                           | <= 30 ms            |
+| ASOF suite overhead, 1,024-row batches     | 167 ms over operator     | <= 2x measured projection floor     | —                   |
+| Join operator cost per 1,024-row batch     | 0.2–0.9 ms               | <= 0.05 ms                          | —                   |
 
 The absolute stream targets use checkpoint-disabled execution. Separately
 measure enabled and low-frequency checkpoints on applicable streaming paths;
@@ -154,20 +154,43 @@ and retirement. Library Clippy passes; the known test-target generated-libtest
 diagnostic remains. This avoids a redundant writer for an unchanged cut; it does
 not solve held-history replacement or restore capacity.
 
+Commit `640d8c84` now separates each segment's byte-capacity reservation from
+Base inventory controls and temporary encoding credit. Held aliases retain their
+own backing and registration funding; completing an encoder retires only scratch
+that is no longer live. Four recorded ownership/admission failures now pass,
+along with the related writer controls (34 unique focused tests). Library Clippy
+passes. These are correctness and ownership checks, with no new timing samples.
+
 The next implementation steps are:
 
-1. Implement the reviewed separation of segment backing credit, Base controls
-   and temporary encoding credit. Every held alias must retain its own required
-   funding, including surviving shared-registration controls.
-2. For fully checkpointed append-only history, review a bounded sorted-index
-   merge that shares existing whole payload segments. Pending operations,
-   tombstones and partially dead payloads retain the existing encoder. Prove a
-   complete simultaneous-reservation upper bound before attempting 4M again.
-3. Design bounded restore folding and live-container construction while
-   preserving all malformed-history rejection and recovery semantics.
-4. Resume the remaining Join, ASOF, parallelism and harness improvements using
-   the completed CPU profiles. The reviewed single-string local interning
-   proposal remains an independent next CPU optimization.
+1. Remove the synchronous pending writer's full `PendingOp` copy and materialized
+   `StoredRow` copy by encoding borrowed, side-local sorted views. At the fixed
+   E1 fixture their existing reservations alone sum to 1,824,013,992 bytes, before
+   state, compaction or IPC. Keep owned async capture separate, preserve wire
+   bytes and tombstone ordering, and clear pending only after successful capture.
+2. For fully checkpointed append-only history, implement the reviewed bounded
+   sorted-index merge sharing existing whole payload segments. Pending operations,
+   tombstones and partially dead payloads retain the existing encoder. Reconcile
+   all held old/new backing, capture controls and retirement ownership.
+3. Implement bounded restore folding and scoped per-row scratch while preserving
+   malformed-history rejection and atomic recovery. Explicitly select the
+   expiration representation and its source-pool funding boundary: charging the
+   proposed append-grown arrays to ordinary source state also requires reducing
+   fresh writer scratch and held-rebase overlap.
+4. Recompute complete simultaneous-reservation bounds before another release
+   build/full 4M diagnostic. The worksheet's 941 MB rebase and 928 MB restore
+   leading terms exclude unresolved controls and are not capacity certificates.
+5. Continue the independently selected single-string local interning optimization
+   from the CPU profile, followed by remaining Join, ASOF, parallelism and harness
+   improvements. Its focused tests are in progress; no speedup is claimed yet.
+
+The observed Python complexity CI failure is corrected in `25b6eb78` without
+changing the baseline or acceptance semantics. All 102 unique focused tests pass,
+including failure-evidence preservation, and Ruff/complexity checks pass. Commit
+`fe40a96c` corrects checkpoint-aware soak fixtures and canonical publication hook
+paths; the five previously failing cases pass locally. Windows awaits CI. The
+pinned-toolchain generated-libtest `large_stack_arrays` failure remains unresolved;
+no lint suppression, toolchain change or test removal is included.
 
 Exact wire allocation preserves byte-for-byte builder output and cancellation;
 constructor coalescing preserves the v2 format and deterministic equivalent
