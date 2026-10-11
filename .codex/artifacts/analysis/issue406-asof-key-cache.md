@@ -2,8 +2,9 @@
 
 PR #407 merged as `acd10e0e`. The follow-up workflow fix PR #408 merged
 as `89e51141` after all 37 CI checks passed;
-its current complete benchmark is run `38162461866`, against merged main
-`acd10e0e`. The earlier run `38158920926` was cancelled after dependency-stage
+its complete benchmark run `38162461866`, against merged main
+`acd10e0e`, passed release builds but failed the `warm-10` support tests.
+The earlier run `38158920926` was cancelled after dependency-stage
 hangs; its cancellation is not a passing result. Runtime performance targets
 remain unmet; that workflow fix changes no runtime source.
 
@@ -155,3 +156,19 @@ enabled small-batch comparison is retained in PR #407.
 Earlier retained-state LOW/ON throughput misses its 90%/75% OFF goals. That
 finding remains open. No historical value above is silently carried forward as
 a new candidate measurement or a complete acceptance pass.
+
+## Benchmark support-test isolation
+
+Full benchmark run `38162461866` reaches sharded measurement after the workflow
+repair. Its `warm-10` support step exposes six acceptance-test errors when
+`benchmarks.engine_stream` has already been imported by preceding modules.
+The fixtures replace `sys.modules` entries but leave the package attributes
+pointing to the real module, so `from benchmarks import engine_stream` escapes
+the fixture. This is a test isolation defect, not a timing or runtime failure.
+
+A new regression first installs a preloaded package attribute and fails with
+`preloaded module escaped test scope`. Scope the fixture's package attributes
+and `sys.modules` entries together and restore both afterward. All 21 acceptance
+tests pass; the exact seven-module workflow command passes all 139 tests.
+No benchmark sample, lifecycle validation or production timing boundary changes.
+The failed run is retained; a fresh full workflow will validate the fix.
