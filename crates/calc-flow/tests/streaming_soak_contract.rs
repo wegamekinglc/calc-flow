@@ -10,6 +10,10 @@ use std::{
 mod contracts;
 use contracts::*;
 
+#[path = "../benches/support/streaming_soak/reporting.rs"]
+mod reporting;
+use reporting::*;
+
 fn validate_private_checkpoint_benchmark_report(path: &Path) -> Result<serde_json::Value> {
     let bytes = read_private_checkpoint_benchmark_report(path)?;
     let digest_path = PathBuf::from(format!("{}.sha256", path.display()));
@@ -766,6 +770,20 @@ fn checkpoint_restart_process_evidence_fails_closed() {
     assert_checkpoint_soak_rejects_invalid_timeline(&plans, &reports, &parent_timings);
 
     let evidence = aggregate_checkpoint_soak_processes(plans, reports, exits, parent_timings);
+    assert_eq!(evidence.report.restarts, 2);
+    assert_eq!(evidence.report.generation_exit_codes, [0, 0, 0]);
+    assert_eq!(evidence.report.completed_epochs, 30);
+    assert_eq!(evidence.report.compacted_window_epochs, 3);
+    assert_eq!(evidence.report.maximum_manifest_count, 2);
+    assert_eq!(evidence.report.maximum_state_bytes, 1);
+    assert_eq!(evidence.report.source_records, 20);
+    assert_eq!(evidence.report.output_records, 40);
+    assert_eq!(evidence.report.duplicate_records, 0);
+    assert_eq!(evidence.report.missing_records, 0);
+    assert_eq!(evidence.report.temporary_artifacts, 0);
+    assert_eq!(evidence.report.terminal_tasks, 0);
+    assert_eq!(evidence.report.terminal_charged_edges, 0);
+    assert_eq!(evidence.report.terminal_registries, (0, 0));
     assert_eq!(
         evidence.report.generation_process_ids,
         [10_000, 10_001, 10_002]

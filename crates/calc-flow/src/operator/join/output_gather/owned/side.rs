@@ -68,19 +68,7 @@ impl OwnedSide {
         context: &StreamOperatorContext<'_>,
     ) -> Result<Self> {
         let mut rows = Vec::with_capacity(capacity);
-        for chunk in prefix.chunks(64) {
-            let bytes = 32 * chunk.len();
-            quantum.step(context, chunk.len(), bytes).await?;
-            #[cfg(test)]
-            tests::note_charge(tests::Phase::Promotion, chunk.len(), bytes);
-            rows.extend(
-                chunk
-                    .iter()
-                    .map(|&row| (0, usize::try_from(row).expect("source offset fits usize"))),
-            );
-            #[cfg(test)]
-            tests::note_promoted(chunk.len());
-        }
+        Self::promote_prefix(&prefix, &mut rows, quantum, context).await?;
         drop(prefix);
         context.check_cancelled()?;
         let identity = source.columns().as_ptr() as usize;
@@ -109,6 +97,28 @@ impl OwnedSide {
             }
         }
         Ok(Self::Multiple { sources, rows })
+    }
+
+    async fn promote_prefix(
+        prefix: &[u64],
+        rows: &mut Vec<(usize, usize)>,
+        quantum: &mut Quantum,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<()> {
+        for chunk in prefix.chunks(64) {
+            let bytes = 32 * chunk.len();
+            quantum.step(context, chunk.len(), bytes).await?;
+            #[cfg(test)]
+            tests::note_charge(tests::Phase::Promotion, chunk.len(), bytes);
+            rows.extend(
+                chunk
+                    .iter()
+                    .map(|&row| (0, usize::try_from(row).expect("source offset fits usize"))),
+            );
+            #[cfg(test)]
+            tests::note_promoted(chunk.len());
+        }
+        Ok(())
     }
 
     pub(super) fn width(&self) -> usize {

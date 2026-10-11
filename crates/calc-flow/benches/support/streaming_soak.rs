@@ -3,6 +3,12 @@ mod contracts;
 use crate as engine;
 use contracts::*;
 
+#[cfg(target_os = "linux")]
+#[path = "streaming_soak/reporting.rs"]
+mod reporting;
+#[cfg(target_os = "linux")]
+use reporting::*;
+
 pub(super) mod diagnostics;
 
 use std::{
@@ -85,12 +91,6 @@ const EDGE_BUDGET: EdgeBudget = EdgeBudget {
 
 const CHECKPOINT_SOAK_MAX_RETAINED_EPOCHS: usize = 64;
 const _: () = assert!(CHECKPOINT_SOAK_SAMPLE_COUNT % CHECKPOINT_SOAK_GENERATIONS == 0);
-const _: () = assert!(CHECKPOINT_RSS_STABLE_WINDOW_SAMPLES % 2 == 0);
-const _: () = assert!(
-    CHECKPOINT_RSS_PROCESS_WARMUP_SAMPLES + CHECKPOINT_RSS_STABLE_WINDOW_SAMPLES
-        == CHECKPOINT_SOAK_PROCESS_SAMPLE_COUNT
-);
-const _: () = assert!(MAX_CHECKPOINT_RSS_NORMALIZED_GROWTH_SPREAD_KIB < MAX_MEDIAN_GROWTH_KIB);
 
 // This bounds the OS/test-harness startup omitted by the child-local clock,
 // plus report publication and parent polling after the child finishes.

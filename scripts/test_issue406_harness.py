@@ -81,8 +81,11 @@ def rustdoc_sources() -> tuple[bytes, bytes, bytes, bytes]:
 
 
 def git_blob(contents: bytes) -> str:
+    # Git blob IDs require SHA-1; witness content is separately sealed with SHA-256.
+    # nosemgrep: insecure-hash-algorithm-sha1
     return hashlib.sha1(
-        b"blob " + str(len(contents)).encode() + b"\0" + contents
+        b"blob " + str(len(contents)).encode() + b"\0" + contents,
+        usedforsecurity=False,
     ).hexdigest()
 
 
