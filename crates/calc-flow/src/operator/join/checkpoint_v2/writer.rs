@@ -19,6 +19,7 @@ mod compact;
 mod cut;
 mod encode;
 mod metadata;
+mod row;
 
 #[cfg(test)]
 mod prepared_tests;

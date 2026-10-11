@@ -125,7 +125,7 @@ impl StreamRuntimeState {
         self.runtime.is_some()
     }
 
-    #[cfg(feature = "benchmark-internals")]
+    #[cfg(any(test, feature = "benchmark-internals"))]
     fn initialize_benchmark_pool(
         &mut self,
         pool: Arc<dyn datafusion::execution::memory_pool::MemoryPool>,

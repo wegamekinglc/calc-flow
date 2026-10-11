@@ -14,6 +14,9 @@ use std::{
     time::Duration,
 };
 
+#[path = "pending_capture_tests.rs"]
+mod pending_capture_tests;
+
 fn schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
         Field::new("key", DataType::Int64, false),

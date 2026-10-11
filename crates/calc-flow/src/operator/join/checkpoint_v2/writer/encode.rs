@@ -23,6 +23,7 @@ use super::super::{
 use super::{
     buffer::{PaidBuffer, ensure, error},
     compact,
+    row::{CheckpointRow, PendingUpsert},
 };
 use crate::{Result, StateSegment};
 
@@ -111,8 +112,7 @@ pub(super) fn pending(
     workspace: &MemoryReservation,
     check: &dyn Fn() -> Result<()>,
 ) -> Result<Base> {
-    let owned = copy_pending(pending, workspace, check)?;
-    pending_owned(&owned, schemas, epoch, workspace, check)
+    delta::encode(|| pending.iter(), schemas, epoch, workspace, check)
 }
 
 pub(super) fn copy_pending(
@@ -166,7 +166,7 @@ pub(super) fn pending_owned(
     workspace: &MemoryReservation,
     check: &dyn Fn() -> Result<()>,
 ) -> Result<Base> {
-    delta::encode(pending, schemas, epoch, workspace, check)
+    delta::encode(|| pending.iter(), schemas, epoch, workspace, check)
 }
 
 struct Encoder {
@@ -244,7 +244,7 @@ impl Encoder {
 
     fn payload(
         &mut self,
-        rows: &[&StoredRow],
+        rows: &[impl CheckpointRow],
         schema: SchemaRef,
         side: JoinSide,
         workspace: &MemoryReservation,
@@ -262,7 +262,7 @@ impl Encoder {
 
     fn frame_payload(
         &mut self,
-        rows: &[&StoredRow],
+        rows: &[impl CheckpointRow],
         side: JoinSide,
         ipc: Vec<u8>,
         check: &dyn Fn() -> Result<()>,
@@ -329,10 +329,11 @@ fn integer(value: usize) -> Result<[u8; 8]> {
 
 fn upsert(
     buffer: &mut PaidBuffer<'_>,
-    row: &StoredRow,
+    row: &impl CheckpointRow,
     digest: &[u8; 32],
     position: usize,
 ) -> Result<()> {
+    let row = row.row();
     let mut fixed = [0_u8; 72];
     fixed[..8].copy_from_slice(&row.row_id.to_le_bytes());
     fixed[8..16].copy_from_slice(&row.event_time.as_micros().to_le_bytes());
@@ -341,7 +342,7 @@ fn upsert(
     fixed[56..64].copy_from_slice(&integer(position)?);
     fixed[64..72].copy_from_slice(&integer(row.encoded_key.len())?);
     buffer.append(&fixed)?;
-    buffer.append(&row.encoded_key)
+    buffer.append(row.encoded_key)
 }
 
 fn ordered_rows<'a>(
@@ -379,11 +380,11 @@ fn encode_index(
     index.into_bytes()
 }
 
-fn upsert_bytes(rows: &[&StoredRow], check: &dyn Fn() -> Result<()>) -> Result<usize> {
+fn upsert_bytes(rows: &[impl CheckpointRow], check: &dyn Fn() -> Result<()>) -> Result<usize> {
     check()?;
     rows.iter().try_fold(0, |bytes, row| {
         check()?;
-        sum(&[bytes, 72, row.encoded_key.len()])
+        sum(&[bytes, 72, row.row().encoded_key.len()])
     })
 }
 
@@ -458,7 +459,7 @@ fn write_stream(
 
 fn append_payload(
     bytes: &mut PaidBuffer<'_>,
-    rows: &[&StoredRow],
+    rows: &[impl CheckpointRow],
     side: JoinSide,
     ipc: &[u8],
     check: &dyn Fn() -> Result<()>,
@@ -470,7 +471,7 @@ fn append_payload(
     bytes.append(&fixed)?;
     for row in rows {
         check()?;
-        bytes.append(&row.row_id.to_le_bytes())?;
+        bytes.append(&row.row().row_id.to_le_bytes())?;
     }
     bytes.append(ipc)
 }

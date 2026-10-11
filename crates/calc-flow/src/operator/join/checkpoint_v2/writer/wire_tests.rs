@@ -700,3 +700,6 @@ fn test_payload_frame_size_rejects_checked_overflow() {
 
 #[path = "funding_tests.rs"]
 mod funding_tests;
+
+#[path = "pending_tests.rs"]
+mod pending_tests;

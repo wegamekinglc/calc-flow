@@ -240,7 +240,7 @@ impl DataFusionRuntime {
         Self::new_with_pool(config, Arc::new(GreedyMemoryPool::new(1 << 30)), started)
     }
 
-    #[cfg(feature = "benchmark-internals")]
+    #[cfg(any(test, feature = "benchmark-internals"))]
     pub(crate) fn with_benchmark_pool(
         config: DataFusionConfig,
         pool: Arc<dyn datafusion::execution::memory_pool::MemoryPool>,

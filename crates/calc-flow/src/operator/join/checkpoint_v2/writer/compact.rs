@@ -8,7 +8,6 @@ use datafusion::arrow::{
 };
 use datafusion::execution::memory_pool::MemoryReservation;
 
-use super::super::super::StoredRow;
 use super::super::{
     budget,
     ipc::{
@@ -17,7 +16,7 @@ use super::super::{
     },
     payload::Funding,
 };
-use super::buffer::error;
+use super::{buffer::error, row::CheckpointRow};
 use crate::Result;
 
 const SELECTION_RUNS_PER_CHUNK: usize = 1_024;
@@ -38,7 +37,7 @@ impl CompactBatch {
 }
 
 pub(super) fn compact(
-    rows: &[&StoredRow],
+    rows: &[impl CheckpointRow],
     schema: SchemaRef,
     workspace: &MemoryReservation,
     check: &dyn Fn() -> Result<()>,
@@ -62,7 +61,7 @@ pub(super) fn compact(
 }
 
 fn compact_column(
-    rows: &[&StoredRow],
+    rows: &[impl CheckpointRow],
     index: usize,
     workspace: &MemoryReservation,
     funding: &Arc<Funding>,
@@ -91,7 +90,7 @@ fn compact_column(
 }
 
 fn concatenate_column(
-    rows: &[&StoredRow],
+    rows: &[impl CheckpointRow],
     index: usize,
     workspace: &MemoryReservation,
     funding: &Arc<Funding>,
@@ -128,18 +127,19 @@ fn admit_selections(rows: usize, workspace: &MemoryReservation) -> Result<usize>
 }
 
 fn selected_column(
-    rows: &[&StoredRow],
+    rows: &[impl CheckpointRow],
     index: usize,
     workspace: &MemoryReservation,
     check: &dyn Fn() -> Result<()>,
 ) -> Result<(ArrayRef, usize)> {
     check()?;
-    let first = rows[0];
+    let first = rows[0].row();
     let source = first.record.column(index);
     let offset = first.record.offset();
     let mut count = 1;
     for row in &rows[1..] {
         check()?;
+        let row = row.row();
         if !Arc::ptr_eq(source, row.record.column(index))
             || offset.checked_add(count) != Some(row.record.offset())
         {
