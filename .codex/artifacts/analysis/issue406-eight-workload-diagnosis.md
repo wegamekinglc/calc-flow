@@ -630,3 +630,50 @@ SHA-256 `62aabdec6bd36bedcb56dba86043001ebc108d2ef9bb0007747a6f49203c80ba`.
 Independent review verified all 207 sealed inputs and 413 evidence files. The
 ordinary stripped artifact has no type DWARF; its source/revision/flags/sections
 were audited, and actual capacity comes from the hard-capped diagnostic.
+
+## Post-measurement ASOF descriptors and complete Join expiry
+
+Commit `3b4ecafb` consumes the owned ASOF input-descriptor vector through a
+fallible iterator transformation instead of explicitly allocating a second
+output-descriptor vector. Payload partitioning, projection, compact row
+references and reservation ownership retain their prior behavior. On the
+aligned 4,088-row fixture, the old source's extra allocation peak is 229,440
+bytes; the new source records 512 bytes on each ingress. Eleven distinct focused
+controls pass, including the separate 4,096-row unaligned layout, discarded
+batches, projection, duplicate/workspace precedence, journal/recovery and
+cancelled worker waits.
+
+The aligned test checks actual vector capacity divisibility. Rust may still
+perform an allocation-layout adjustment for unaligned capacities; this change
+does not guarantee pointer identity or zero reallocations. Reused 64-byte input
+slots become 56-byte descriptors on the measured test architecture, so retained
+capacity can exceed a freshly exact-sized output vector. The evidence establishes
+removal of the explicit second backing, not an unconditional retained-memory or
+latency reduction. Source and six raw logs are frozen in the feature worktree's
+`target/issue406-asof-descriptors/validation.json`.
+
+Commit `5ab1ac09` addresses the measured retained-Join terminal path. The
+expiration index tracks its maximum event time inside funded storage. With
+checkpoints disabled, a watermark strictly beyond that maximum plus the
+retention extension, or opposite-ingress Ended progress, can retire the complete
+side without individual heap pops and native-index repairs. Partial expiry and
+checkpoint-enabled ordinal-sorted tombstones retain the existing path.
+
+The bulk path checks aggregate metrics before mutation, marks shared payload
+offsets dead, then clears rows and lookup inventories. Funded expiration arrays
+keep their capacity, reservation and next admission ordinal through empty reuse.
+The production final-watermark RED records 65 heap visits; the corrected path
+records zero. Ten focused controls pass, including strict equality and i128
+boundaries, out-of-order append/growth, Ended/reuse, pre-cancellation, metric
+overflow, restored admission refusal/retry, sparse aliases and unchanged ON
+journal ordering. Two affected tests were rechecked after a test-only refactor.
+
+Both increments pass library Clippy, scoped formatting, generated-contract and
+whitespace checks. Test-target Clippy retains only the known generated-libtest
+diagnostic and remains an unresolved gate. The EOF validation manifest is
+`target/issue406-eof-bulk/validation-final.json`, SHA-256
+`fd5538e5ba90137054e842b2498955edd18e5c2ef11991b568dd6d12f7db7a5c`.
+Neither increment has new release timings: all eight measured table rows and
+the terminal regression above still describe their named historical runtimes.
+The added maximum scalar also changes expiration-control size, so the earlier
+cff capacity bounds are not relabeled as exact bounds for this new source.

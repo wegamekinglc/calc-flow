@@ -245,20 +245,29 @@ settled, and no forced kill or retry occurred. All eight rows remain in the
 [diagnosis](issue406-eight-workload-diagnosis.md); final-runtime acceptance is
 still incomplete.
 
+Two subsequent implementation increments are reviewed and committed. They have
+no new release-performance measurements. `3b4ecafb` reuses owned ASOF descriptor
+storage; `5ab1ac09` retires completely expired Join state in bulk when checkpoints
+are disabled. Their focused correctness and ownership evidence is recorded in
+the diagnosis. The cff terminal regression remains the measured result until a
+fresh comparison demonstrates the effect of the correction.
+
 The next implementation steps are:
 
-1. Fix the measured retained-state retirement regression. The harness's terminal
-   phase includes its withheld final watermark before EOF, so an EOF-only change
-   would miss the hot path. Preserve partial expiry, cancellation and checkpoint
-   journal semantics while evaluating whole-side retirement with checkpoints OFF.
-2. Complete the focused ASOF descriptor-reuse change and its allocation/fidelity
-   tests. Keep payload preparation, errors and reservation ownership unchanged.
-3. Profile the newly measurable snapshot/restore operations before further
-   optimization. Continue Join output parallelism using existing owned workers,
-   preserving paid buffer lifetimes through asynchronous delivery.
+1. Validate complete-expiry retirement in the next common release measurement,
+   preserving both processing and terminal/full-cycle clocks. The final watermark
+   before EOF is the relevant trigger; no timing gain follows from a work-count
+   test alone.
+2. Remove redundant ASOF per-row identity construction for a narrowly proven
+   ordered columnar left input. Preserve actual restored-state boundaries,
+   duplicate/error precedence, payload projection and funded worker ownership.
+3. Profile snapshot/restore before choosing its next optimization. Continue Join
+   output parallelism with existing owned workers, preserving buffer funding
+   through asynchronous delivery. Reuse built artifacts for the checkpoint
+   profile; the profile is not another acceptance-timing run.
 4. Reconcile all eight rows on the final runtime, with separate OFF/LOW/ON
    policies, complete planned samples and explicit main comparison limitations.
-   Keep this attempt and its incomplete row 5 immutable; do not extend or retry
+   Keep the cff attempt and its incomplete row 5 immutable; do not extend or retry
    it to obtain a favorable verdict.
 
 The observed Python complexity CI failure is corrected in `25b6eb78` without
