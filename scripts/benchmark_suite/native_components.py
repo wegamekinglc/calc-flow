@@ -372,7 +372,7 @@ def _validate_compaction_witness(sample: dict, mode: str) -> None:
     for deltas in (before_deltas, after_deltas):
         _validate_compaction_deltas(deltas)
     _validate_compaction_change(
-        witness, mode, before, after, before_deltas, after_deltas
+        witness, mode, (before, after), (before_deltas, after_deltas)
     )
 
 
@@ -616,9 +616,9 @@ def _validate_capture_rows(observation: dict) -> None:
             raise ValueError(f"invalid actual row denominator: {field}")
 
 
-def _validate_compaction_change(
-    witness, mode, before, after, before_deltas, after_deltas
-):
+def _validate_compaction_change(witness, mode, bases, deltas):
+    before, after = bases
+    before_deltas, after_deltas = deltas
     if mode == "armed" and (before == after or len(before_deltas) <= len(after_deltas)):
         raise ValueError("armed preparation did not replace the base and fold deltas")
     if mode == "steady" and (

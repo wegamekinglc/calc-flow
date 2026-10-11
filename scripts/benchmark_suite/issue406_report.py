@@ -373,7 +373,7 @@ def _overhead(
     arms = {name: case[side] for name, case in components.items()}
     if any(not arm["complete"] for arm in arms.values()):
         return {"side": side, "mode": mode, "target_status": "unmeasured"}
-    return _measured_overhead(components, records, report, side, mode, arms)
+    return _measured_overhead(components, records, report, (side, mode), arms)
 
 
 def _overhead_target(cases: list[dict], records: dict, report: dict) -> dict:
@@ -759,7 +759,8 @@ def _scaling_baseline(small, large, mode):
     return baseline
 
 
-def _matched_overhead_summary(components, records, side, mode, arms, proof):
+def _matched_overhead_summary(components, records, selection, arms, proof):
+    side, mode = selection
     normalized = _normalize_replays(components, records, side, mode)
     native_reference = normalized["asof_operator"][ROUNDS]
     e2e_reference = normalized["asof"][ROUNDS]
@@ -911,15 +912,14 @@ def _comparison_rows(summary):
     return comparisons
 
 
-def _measured_overhead(components, records, report, side, mode, arms):
+def _measured_overhead(components, records, report, selection, arms):
+    side, mode = selection
     proof = report.get("scheduling_proofs", {}).get(f"{side}/{mode}")
     errors = []
     # Match source references by their recorded location, including warmups.
     # These are semantic replay links; timing aggregation remains independent.
     try:
-        derived = _matched_overhead_summary(
-            components, records, side, mode, arms, proof
-        )
+        derived = _matched_overhead_summary(components, records, selection, arms, proof)
     except (KeyError, ValueError) as error:
         errors.append(str(error))
         derived = {"target_status": "inconclusive"}

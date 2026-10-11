@@ -3174,9 +3174,9 @@ struct RestoreSchema<'a> {
     decoded_owned_work: bool,
 }
 
-#[cfg(feature = "benchmark-internals")]
+#[cfg(feature = "benchmark-checkpoint-diagnostic")]
 mod benchmark_checkpoint;
-#[cfg(feature = "benchmark-internals")]
+#[cfg(feature = "benchmark-checkpoint-diagnostic")]
 pub(crate) use benchmark_checkpoint::run_checkpoint_history_diagnostic;
 
 mod admission_masks;

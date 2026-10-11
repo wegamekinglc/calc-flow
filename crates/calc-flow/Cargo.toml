@@ -11,6 +11,7 @@ exclude = ["tests/**"]
 [features]
 benchmark-internals = []
 benchmark-checkpoint-off = ["benchmark-internals"]
+benchmark-checkpoint-diagnostic = ["benchmark-internals"]
 
 [dependencies]
 ahash.workspace = true

@@ -20,6 +20,7 @@ const BATCH_ROWS: usize = 64_000;
 pub(crate) enum Component {
     CaptureRestore,
     Compaction,
+    #[cfg(feature = "benchmark-checkpoint-diagnostic")]
     CheckpointHistory,
 }
 
@@ -37,7 +38,9 @@ pub(crate) fn parse_arguments(
     let component = match name.as_str() {
         "join_capture_restore_1m" => Component::CaptureRestore,
         "join_compaction_1m" => Component::Compaction,
+        #[cfg(feature = "benchmark-checkpoint-diagnostic")]
         "join_checkpoint_history_4m" if check => Component::CheckpointHistory,
+        #[cfg(feature = "benchmark-checkpoint-diagnostic")]
         "join_checkpoint_history_4m" => return Err("checkpoint history requires --check"),
         _ => return Err("unknown native component"),
     };

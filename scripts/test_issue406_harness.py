@@ -89,6 +89,36 @@ def git_blob(contents: bytes) -> str:
     ).hexdigest()
 
 
+def rustdoc_witness(candidate, recipe_path, historical, addition):
+    prefix = (
+        (candidate / recipe_path)
+        .read_text()
+        .split("\ndef validate_acceptance_harness(")[0]
+    )
+    frozen_files = {
+        path: (candidate / path).read_bytes() for path in harness.COPIED_FILES
+    }
+    historical_files = {**frozen_files, RUSTDOC_PATH: historical}
+    return {
+        "recipe": {
+            "path": recipe_path,
+            "boundary": "\ndef validate_acceptance_harness(",
+            "historical_prefix_sha256": hashlib.sha256(prefix.encode()).hexdigest(),
+            "candidate_prefix_sha256": hashlib.sha256(prefix.encode()).hexdigest(),
+        },
+        "copied_files": {
+            path: {
+                "historical_git_blob": git_blob(historical_files[path]),
+                "historical_sha256": hashlib.sha256(historical_files[path]).hexdigest(),
+                "candidate_build_git_blob": git_blob(contents),
+                "candidate_build_sha256": hashlib.sha256(contents).hexdigest(),
+                "exact_additions": [addition.decode()] if path == RUSTDOC_PATH else [],
+            }
+            for path, contents in frozen_files.items()
+        },
+    }
+
+
 @contextmanager
 def rustdoc_fixture(root: Path):
     """Exercise the three existing provenance entries using source-only fixtures."""
@@ -117,33 +147,7 @@ def rustdoc_fixture(root: Path):
             baseline, frozen_output, "stream_asof_e2e"
         ):
             pass
-        prefix = recipe.read_text().split("\ndef validate_acceptance_harness(")[0]
-        frozen_files = {
-            path: (candidate / path).read_bytes() for path in harness.COPIED_FILES
-        }
-        historical_files = {**frozen_files, RUSTDOC_PATH: historical}
-        witness = {
-            "recipe": {
-                "path": recipe_path,
-                "boundary": "\ndef validate_acceptance_harness(",
-                "historical_prefix_sha256": hashlib.sha256(prefix.encode()).hexdigest(),
-                "candidate_prefix_sha256": hashlib.sha256(prefix.encode()).hexdigest(),
-            },
-            "copied_files": {
-                path: {
-                    "historical_git_blob": git_blob(historical_files[path]),
-                    "historical_sha256": hashlib.sha256(
-                        historical_files[path]
-                    ).hexdigest(),
-                    "candidate_build_git_blob": git_blob(contents),
-                    "candidate_build_sha256": hashlib.sha256(contents).hexdigest(),
-                    "exact_additions": [addition.decode()]
-                    if path == RUSTDOC_PATH
-                    else [],
-                }
-                for path, contents in frozen_files.items()
-            },
-        }
+        witness = rustdoc_witness(candidate, recipe_path, historical, addition)
         witness_path = root / "witness.json"
         write_json(witness_path, witness)
         stack.enter_context(

@@ -15,6 +15,7 @@ from contextlib import suppress
 from dataclasses import asdict, replace
 from pathlib import Path
 
+from scripts.benchmark_suite import issue406_fresh_v3 as v3
 from scripts.benchmark_suite.issue406_acceptance import (
     acceptance_inventory,
     validate_complete_results,
@@ -25,6 +26,7 @@ from scripts.benchmark_suite.issue406_harness import (
     WHEEL_TARGET,
     native_harness_reuse,
     validate_acceptance_harness,
+    validate_fresh_acceptance_harness,
     validate_native_profile,
     validate_traced_wheel_invocations,
 )
@@ -41,6 +43,7 @@ from scripts.toolkit import fingerprint_json, sha256_file, write_json
 
 RUNTIME_WORKLOADS = ("join_sealed", "join_retained", "asof", "projection")
 WORKER_RESPONSE_LIMIT = 32 << 20
+FRESH_SCHEMAS = (FRESH_SCHEMA, v3.SCHEMA)
 
 
 def collection_groups() -> tuple[tuple, ...]:
@@ -148,26 +151,14 @@ def competing_work(owned: set[int]) -> list[dict]:
 def validate_plan(plan: dict) -> None:
     """Require the complete frozen inventory and hash every declared input."""
     files = _validate_plan_inventory(plan)
-    reuse = plan["native_harness_reuse"]
-    fresh = plan.get("schema") == FRESH_SCHEMA
-    if fresh:
-        _validate_fresh_releases(plan, files)
-    else:
-        build_harness = reuse["original_build_harness_git_sha"]
-        if reuse != native_harness_reuse(build_harness):
-            raise ValueError("native build reuse witness changed")
+    fresh = plan.get("schema") in FRESH_SCHEMAS
+    _validate_release_policy(plan, files)
     if competing_work(set()):
         raise ValueError("another controlled build or measurement is active")
     enabled_builds = {}
     traced_identities = []
     for side in ("baseline", "candidate"):
-        if fresh:
-            build_harness = reuse[side]["original_build_harness_git_sha"]
-        wheel_harness = (
-            plan["row7_harness_reuse"][side]["original_build_harness_git_sha"]
-            if fresh
-            else build_harness
-        )
+        build_harness, wheel_harness = _plan_build_harnesses(plan, side)
         wheel_build = _validate_plan_wheel(plan, side, files, wheel_harness)
         environment = _plan_wheel_environment(wheel_build, fresh)
         traced_identities.append((environment, wheel_build.get("validated_artifacts")))
@@ -182,6 +173,29 @@ def validate_plan(plan: dict) -> None:
         raise ValueError(
             "row-7 build environment or dependency/profile inventory differs"
         )
+
+
+def _validate_release_policy(plan, files):
+    if plan.get("schema") == v3.SCHEMA:
+        v3.validate_releases(plan, files)
+    elif plan.get("schema") == FRESH_SCHEMA:
+        _validate_fresh_releases(plan, files)
+    else:
+        reuse = plan["native_harness_reuse"]
+        if reuse != native_harness_reuse(reuse["original_build_harness_git_sha"]):
+            raise ValueError("native build reuse witness changed")
+
+
+def _plan_build_harnesses(plan, side):
+    if plan.get("schema") == v3.SCHEMA:
+        return plan["harness_git_sha"], plan["harness_git_sha"]
+    if plan.get("schema") == FRESH_SCHEMA:
+        return tuple(
+            plan[key][side]["original_build_harness_git_sha"]
+            for key in ("native_harness_reuse", "row7_harness_reuse")
+        )
+    harness = plan["native_harness_reuse"]["original_build_harness_git_sha"]
+    return harness, harness
 
 
 def _validate_fresh_releases(plan: dict, files: dict) -> Path:
@@ -251,7 +265,7 @@ class AcceptanceRunner:
 
     @property
     def fresh(self) -> bool:
-        return self.plan.get("schema") == FRESH_SCHEMA
+        return self.plan.get("schema") in FRESH_SCHEMAS
 
     def cpus(self, case) -> list[int]:
         return self.plan["cpus"][: case.threads]
@@ -313,8 +327,9 @@ class AcceptanceRunner:
             log.close()
             raise
         worker = Worker(process, log)
+        self._record_worker_invocation(root, process, case, release)
         self.workers[side] = worker
-        identity = await worker.request(operation="hello", scope="core")
+        identity = await self._worker_request(worker, operation="hello", scope="core")
         if (
             identity["native_sha256"] != release["native_sha256"]
             or identity["cpu_affinity"] != self.cpus(case)
@@ -329,6 +344,45 @@ class AcceptanceRunner:
             raise ValueError("paired environment changed")
         write_json(root / "environment.json", identity)
         return worker
+
+    def _record_worker_invocation(self, root, process, case, release):
+        if self.plan.get("schema") == v3.SCHEMA:
+            write_json(
+                root / "invocation.json",
+                {
+                    "pid": process.pid,
+                    "argv": [
+                        sys.executable,
+                        "-m",
+                        "scripts.benchmark_suite",
+                        "worker",
+                        "--root",
+                        str(root),
+                    ],
+                    "cpu_affinity": self.cpus(case),
+                    "product_commit": release["product_commit"],
+                    "native_sha256": release["native_sha256"],
+                    "harness_git_sha": self.plan["harness_git_sha"],
+                },
+            )
+
+    async def _worker_request(self, worker, **message):
+        if self.plan.get("schema") != v3.SCHEMA:
+            return await worker.request(**message)
+        root = Path(worker.log.name).parent
+        with (root / "requests.jsonl").open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(message, allow_nan=False) + "\n")
+        worker.process.stdin.write((json.dumps(message) + "\n").encode())
+        await worker.process.stdin.drain()
+        line = await asyncio.wait_for(worker.process.stdout.readline(), timeout=900)
+        with (root / "stdout.log").open("ab") as stream:
+            stream.write(line)
+        if not line:
+            raise RuntimeError(f"benchmark worker exited; see {worker.log.name}")
+        response = json.loads(line)
+        if not isinstance(response, dict) or "error" in response:
+            raise RuntimeError(f"invalid worker result: {response}")
+        return response
 
     def _normalize(self, group, side, raw, observation_id, raw_digest):
         case = group[0]
@@ -354,6 +408,7 @@ class AcceptanceRunner:
             }
             for key, value in mapped.items()
         }
+        _require_v3_samples(self.plan, normalized)
         for member in group:
             validate_observation(
                 member,
@@ -443,8 +498,8 @@ class AcceptanceRunner:
                         self.fixture_root(side, case.mode, round_index, join=True)
                     ),
                 }
-                result = await worker.request(
-                    operation="acceptance-fixture", case=specification
+                result = await self._worker_request(
+                    worker, operation="acceptance-fixture", case=specification
                 )
                 if (
                     sha256_file(Path(result["fixture_path"]))
@@ -467,7 +522,9 @@ class AcceptanceRunner:
             "fixture_root": str(self.fixture_root(side, case.mode, round_index)),
         }
         self.prepared_cases[(case.id, side, round_index)] = specification
-        response = await worker.request(operation="prepare", case=specification)
+        response = await self._worker_request(
+            worker, operation="prepare", case=specification
+        )
         if response["case"] != specification:
             raise ValueError("worker prepared a different acceptance workload")
         return self._persist(group, side, round_index, None, response["warmup"])
@@ -476,6 +533,13 @@ class AcceptanceRunner:
         destination = self.destination(group, side, round_index, index)
         destination.mkdir(parents=True, exist_ok=True)
         write_json(destination / "observation.json", raw)
+        if self.plan.get("schema") == v3.SCHEMA and raw.get("lifecycle") == "failed":
+            self._validate_runtime_product(
+                group[0], raw, self.release(group[0], side)["product_commit"]
+            )
+            raise v3.FailedLifecycle(
+                "v3 returned failed lifecycle; diagnostic observation preserved"
+            )
         normalized = self._normalize(
             group,
             side,
@@ -533,7 +597,7 @@ class AcceptanceRunner:
     async def sample(self, group, side, round_index, index):
         case = group[0]
         if case.workload in RUNTIME_WORKLOADS:
-            raw = await self.workers[side].request(operation="sample")
+            raw = await self._worker_request(self.workers[side], operation="sample")
         else:
             raw = await self._native(group, side, round_index, index)
         return self._persist(group, side, round_index, index, raw)
@@ -653,7 +717,7 @@ class AcceptanceRunner:
             if selected_side is not None and side != selected_side:
                 continue
             if self.fresh:
-                response = await worker.request(operation="finish")
+                response = await self._worker_request(worker, operation="finish")
                 if (
                     response.get("state") != "completed"
                     or response.get("samples") != SAMPLES + 1
@@ -667,7 +731,7 @@ class AcceptanceRunner:
     async def _finish_legacy_worker(self, side, worker):
         try:
             if worker.process.returncode is None:
-                response = await worker.request(operation="finish")
+                response = await self._worker_request(worker, operation="finish")
                 if response.get("state") != "completed":
                     raise ValueError("worker failed to finish its round")
         finally:
@@ -711,6 +775,11 @@ class AcceptanceRunner:
         from scripts.benchmark_suite.issue406_failures import recognize_owned_failure
 
         return await recognize_owned_failure(
+            self, group, (side, round_index, index), error
+        )
+
+    async def known_fresh_failure(self, group, side, round_index, index, error):
+        return await v3.recognize_owned_failure(
             self, group, (side, round_index, index), error
         )
 
@@ -949,16 +1018,8 @@ async def _await_collection_result(report, collection, guard, remaining):
         return {**report, **collection.result()}
 
 
-async def run(plan: dict, output: Path) -> dict:
-    """Execute once, charging setup, preflight, collection, cleanup and sealing."""
-    started = (
-        time.monotonic()
-        - plan.get("precharged_seconds", 0)
-        - plan.get("startup_allowance_seconds", 0)
-    )
-    _prepare_collection_output(output)
-    runner = AcceptanceRunner(plan, output, started)
-    report = {
+def _initial_report(plan):
+    return {
         "state": "preflight",
         "plan_fingerprint": fingerprint_json(plan),
         "assessment": {
@@ -969,7 +1030,36 @@ async def run(plan: dict, output: Path) -> dict:
             .get("machine_type", "unverified"),
         },
         "scheduling_proofs": plan.get("scheduling_proofs", {}),
+        **(v3.report_identity(plan) if plan.get("schema") == v3.SCHEMA else {}),
     }
+
+
+def _require_v3_samples(plan, samples):
+    if plan.get("schema") == v3.SCHEMA:
+        v3.require_completed(samples)
+
+
+def _validate_collection(plan, report):
+    if plan.get("schema") == v3.SCHEMA:
+        v3.validate_complete_results(report)
+    else:
+        validate_complete_results(report)
+
+
+def _failed_run_state(report):
+    return "incomplete" if report.get("state") == "incomplete" else "stopped"
+
+
+async def run(plan: dict, output: Path) -> dict:
+    """Execute once, charging setup, preflight, collection, cleanup and sealing."""
+    started = (
+        time.monotonic()
+        - plan.get("precharged_seconds", 0)
+        - plan.get("startup_allowance_seconds", 0)
+    )
+    _prepare_collection_output(output)
+    runner = AcceptanceRunner(plan, output, started)
+    report = _initial_report(plan)
     collection = guard = None
     parent = asyncio.current_task()
     loop = asyncio.get_running_loop()
@@ -1008,11 +1098,12 @@ async def run(plan: dict, output: Path) -> dict:
         )
         report = await _await_collection_result(report, collection, guard, remaining)
         report["assessment"]["environment_suitable"] = True
-        validate_complete_results(report)
+        _validate_collection(plan, report)
         report["state"] = "complete"
         report["assessment"]["environment_suitable"] = True
     except BaseException as error:
-        report.update(state="stopped", error=f"{type(error).__name__}: {error}")
+        state = _failed_run_state(report)
+        report.update(state=state, error=f"{type(error).__name__}: {error}")
     finally:
         await _settle_acceptance_collection(runner, collection, guard, report, output)
         _seal_acceptance_report(plan, output, started, report, runner.resources)
@@ -1035,7 +1126,7 @@ async def _run_cli(plan: dict, output: Path) -> dict:
         for task in asyncio.all_tasks()
         if task is not asyncio.current_task() and not task.done()
     }
-    if plan.get("schema") == FRESH_SCHEMA and pending:
+    if plan.get("schema") in FRESH_SCHEMAS and pending:
         _exit_unsettled_controller(plan, output, started, pending)
     return report
 
@@ -1133,8 +1224,8 @@ def _validate_plan_wheel(
     traced_output = Path(traced["build_output"])
     reconstruction = traced.get("helper_reconstruction")
     _validate_plan_reconstruction(plan, side, reconstruction)
-    traced_attestation = validate_acceptance_harness(
-        traced_output, WHEEL_TARGET, reconstruction=reconstruction
+    traced_attestation = _validate_source_attestation(
+        plan, traced_output, WHEEL_TARGET, reconstruction=reconstruction
     )
     if (
         str(traced_output / f"build-{WHEEL_TARGET}.acceptance-harness.json")
@@ -1146,13 +1237,11 @@ def _validate_plan_wheel(
         wheel_build,
         build_harness,
         traced_attestation,
-        release,
         plan,
         traced,
-        reconstruction,
     )
     validate_traced_wheel_invocations(wheel_build)
-    if plan.get("schema") == FRESH_SCHEMA:
+    if plan.get("schema") in FRESH_SCHEMAS:
         from scripts.benchmark_suite.issue406_reuse import (
             validate_traced_audit,
             validate_wheel_members,
@@ -1175,18 +1264,12 @@ def _validate_plan_binaries(
     build_harness: str,
     enabled_builds: dict,
 ) -> None:
-    compatibility = (
-        Path(plan["historical_harness_witness"]["path"])
-        if plan.get("schema") == FRESH_SCHEMA and side == "baseline"
-        else None
-    )
-    release = plan["releases"][side]
     expected_binaries = _plan_binary_inventory(side)
     if set(plan["native_binaries"][side]) != expected_binaries:
         raise ValueError("native binary inventory omits or adds an acceptance arm")
-    for name, descriptor in plan["native_binaries"][side].items():
+    for name in plan["native_binaries"][side]:
         target, mode, build = _validate_plan_binary(
-            plan, side, name, descriptor, files, compatibility, build_harness, release
+            plan, side, name, files, build_harness
         )
         if mode == "enabled":
             previous = enabled_builds.setdefault(target, build["artifacts"])
@@ -1240,7 +1323,7 @@ async def _invoke_collection(
 def _seal_acceptance_report(
     plan: dict, output: Path, started: float, report: dict, resources: list
 ) -> None:
-    if plan.get("schema") == FRESH_SCHEMA:
+    if plan.get("schema") in FRESH_SCHEMAS:
         _seal_fresh_report(plan, output, started, report, resources)
         return
     from scripts.benchmark_suite.issue406_report import (
@@ -1349,6 +1432,13 @@ def _write_fresh_summary(output, report, deadline):
         summarize_acceptance,
     )
 
+    if report.get("execution_schema") == v3.SCHEMA:
+        from scripts.benchmark_suite.issue406_fresh_report import (
+            render_v3,
+            summarize_v3,
+        )
+
+        summarize_acceptance, render_acceptance_markdown = summarize_v3, render_v3
     if time.monotonic() >= deadline:
         _expire_fresh_report(output, report)
         return False
@@ -1370,6 +1460,9 @@ def _expire_fresh_report(output, report):
         budget_satisfied=False,
     )
     report["assessment"]["environment_suitable"] = False
+    if report.get("execution_schema") == v3.SCHEMA:
+        _write_aborted_v3(output, report)
+        return
     write_json(
         output / "summary.json",
         {
@@ -1382,6 +1475,22 @@ def _expire_fresh_report(output, report):
     (output / "performance.md").write_text(
         "Analysis or sealing budget exhausted; no acceptance verdict. "
         "Raw observations are retained.\n",
+        encoding="utf-8",
+    )
+
+
+def _write_aborted_v3(output, report):
+    from scripts.benchmark_suite.issue406_fresh_report import aborted_v3_summary
+    from scripts.benchmark_suite.report import table
+
+    summary = aborted_v3_summary(report)
+    write_json(output / "summary.json", summary)
+    rows = [[item["row"], item["title"], item["status"]] for item in summary["targets"]]
+    (output / "performance.md").write_text(
+        "Acquisition incomplete; acceptance inconclusive. Analysis or sealing budget "
+        "exhausted; raw observations are retained.\n\n"
+        + table(["Row", "Workload", "Evidence"], rows)
+        + "\n",
         encoding="utf-8",
     )
 
@@ -1531,7 +1640,7 @@ def _validate_plan_reuse_roles(
 
 def _validate_plan_precharge(plan):
     precharged = plan.get("precharged_seconds", 0)
-    if plan.get("schema") != FRESH_SCHEMA and (
+    if plan.get("schema") not in FRESH_SCHEMAS and (
         type(precharged) not in (int, float)
         or not math.isfinite(precharged)
         or not 0 <= precharged < 4200
@@ -1552,7 +1661,9 @@ def _validate_plan_cpus(plan):
 
 
 def _validate_plan_envelope(plan):
-    if plan.get("schema") == FRESH_SCHEMA:
+    if plan.get("schema") == v3.SCHEMA:
+        v3.validate_envelope(plan)
+    elif plan.get("schema") == FRESH_SCHEMA:
         from scripts.benchmark_suite.issue406_fresh import validate_envelope
 
         validate_envelope(plan)
@@ -1598,6 +1709,8 @@ def _validate_plan_traced_installation(traced, files):
 
 
 def _validate_plan_reconstruction(plan, side, reconstruction):
+    if plan.get("schema") == v3.SCHEMA and reconstruction is not None:
+        raise ValueError("v3 forbids historical helper reconstruction")
     if plan.get("schema") == FRESH_SCHEMA:
         from scripts.benchmark_suite.issue406_reuse import helper_reconstruction
 
@@ -1611,20 +1724,15 @@ def _validate_plan_reconstruction(plan, side, reconstruction):
 
 
 def _validate_plan_compiled_wheel(
-    wheel_build,
-    build_harness,
-    traced_attestation,
-    release,
-    plan,
-    traced,
-    reconstruction,
+    wheel_build, build_harness, traced_attestation, plan, traced
 ):
+    reconstruction = traced.get("helper_reconstruction")
     if (
         wheel_build["failure"] is not None
         or wheel_build["harness_git_sha"] != build_harness
         or traced_attestation["harness_git_sha"] != build_harness
-        or wheel_build["revision"] != release["product_commit"]
-        or traced_attestation["product_git_sha"] != release["product_commit"]
+        or wheel_build["revision"] != traced["product_commit"]
+        or traced_attestation["product_git_sha"] != traced["product_commit"]
         or not _plan_compiled_wheel_settings(
             wheel_build, plan, traced_attestation, traced, reconstruction
         )
@@ -1645,18 +1753,19 @@ def _plan_compiled_wheel_settings(
     )
 
 
-def _validate_plan_binary(
-    plan, side, name, descriptor, files, compatibility, build_harness, release
-):
+def _validate_plan_binary(plan, side, name, files, build_harness):
+    descriptor = plan["native_binaries"][side][name]
+    release = plan["releases"][side]
     if files.get(descriptor["path"]) != descriptor["sha256"]:
         raise ValueError("native benchmark is missing from the sealed inventory")
     target, mode = name.split("/")
     if side == "baseline" and mode == "off":
         raise ValueError("main does not support checkpoint-off")
-    record = validate_acceptance_harness(
+    record = _validate_source_attestation(
+        plan,
         Path(descriptor["build_output"]),
         descriptor["harness_target"],
-        compatibility=compatibility,
+        compatibility=_plan_native_compatibility(plan, side),
     )
     attestation = str(
         Path(descriptor["build_output"])
@@ -1672,6 +1781,28 @@ def _validate_plan_binary(
         raise ValueError("native and wheel product revisions differ")
     build = _validate_plan_native_build(plan, descriptor, files, mode)
     return target, mode, build
+
+
+def _plan_native_compatibility(plan, side):
+    return (
+        Path(plan["historical_harness_witness"]["path"])
+        if plan.get("schema") == FRESH_SCHEMA and side == "baseline"
+        else None
+    )
+
+
+def _validate_source_attestation(
+    plan, output, target, *, compatibility=None, reconstruction=None
+):
+    if plan.get("schema") == v3.SCHEMA:
+        if compatibility is not None or reconstruction is not None:
+            raise ValueError("v3 forbids historical source exceptions")
+        return validate_fresh_acceptance_harness(
+            output, target, harness_git_sha=plan["harness_git_sha"]
+        )
+    return validate_acceptance_harness(
+        output, target, compatibility=compatibility, reconstruction=reconstruction
+    )
 
 
 def _plan_python_sources():

@@ -562,3 +562,137 @@ def _traced_wheel_features(arguments: list[str]) -> tuple[list[str], set[str]]:
         if value.startswith('feature="')
     }
     return cfg, actual_features
+
+
+FRESH_SCHEMA = "calc-flow.issue406-native-harness.v2"
+_CARGO_PATH = "crates/calc-flow/Cargo.toml"
+_DIAGNOSTIC_INSERTION = 'benchmark-checkpoint-diagnostic = ["benchmark-internals"]\n'
+
+
+def _effective_fresh(source: Path) -> dict[str, bytes]:
+    overlay = _effective(source)
+    cargo = overlay[_CARGO_PATH].decode()
+    legacy = INSERTIONS[_CARGO_PATH]
+    fresh = legacy + _DIAGNOSTIC_INSERTION
+    legacy_features = tomllib.loads(legacy)["features"]
+    fresh_features = tomllib.loads(fresh)["features"]
+    features = tomllib.loads(cargo)["features"]
+    if features == legacy_features:
+        cargo = cargo.replace(legacy, fresh, 1)
+    elif features != fresh_features or cargo.count(fresh) != 1:
+        raise ValueError("unreviewed fresh benchmark feature declaration")
+    return {**overlay, _CARGO_PATH: cargo.encode()}
+
+
+def _populate_fresh_mirror(source: Path, mirror: Path, original: dict, overlay: dict):
+    command_output(
+        [
+            "git",
+            "clone",
+            "--shared",
+            "--no-checkout",
+            "--quiet",
+            str(source),
+            str(mirror),
+        ]
+    )
+    command_output(
+        [
+            "git",
+            "-c",
+            "filter.lfs.process=",
+            "-c",
+            "filter.lfs.smudge=",
+            "-c",
+            "filter.lfs.required=false",
+            "checkout",
+            "--detach",
+            "--quiet",
+            _clean_revision(source),
+        ],
+        cwd=mirror,
+    )
+    if _files(mirror) != original:
+        raise ValueError("owned mirror differs from exact product files")
+    for path, contents in overlay.items():
+        destination = mirror / path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(contents)
+
+
+def _fresh_harness_record(source, output, target, original, overlay):
+    return {
+        "schema": FRESH_SCHEMA,
+        "target": target,
+        "targets": list(TARGETS),
+        "product_git_sha": _clean_revision(source),
+        "harness_git_sha": _clean_revision(ROOT),
+        "product_source": str(source),
+        "build_output": str(output),
+        "original_files_fingerprint": fingerprint_json(original),
+        "original_overlay": {path: original.get(path) for path in overlay},
+        "effective_files": {
+            path: hashlib.sha256(data).hexdigest() for path, data in overlay.items()
+        },
+        "lock_fingerprint": _lock_identity(source),
+        "product_files_verified": True,
+        "compatibility": None,
+        "helper_reconstruction": None,
+    }
+
+
+@contextmanager
+def fresh_acceptance_harness(source: Path, output: Path, target: str):
+    """Apply the v2 diagnostic-gated overlay without historical source reuse."""
+    if target not in (*TARGETS, WHEEL_TARGET):
+        raise ValueError("unsupported issue406 native target")
+    source, output = source.resolve(), output.resolve()
+    _clean_revision(source)
+    _clean_revision(ROOT)
+    tracked = command_output(["git", "ls-files"], cwd=ROOT).splitlines()
+    if not set(COPIED_FILES).issubset(tracked):
+        raise ValueError("native helper files must belong to the harness revision")
+    original, overlay = _files(source), _effective_fresh(source)
+    output.mkdir(parents=True, exist_ok=True)
+    evidence = output / f"build-{target}.acceptance-harness.json"
+    if evidence.exists():
+        raise ValueError("native harness requires fresh build evidence")
+    with TemporaryDirectory(prefix=f"{target}-", dir=output) as raw:
+        mirror = Path(raw) / "source"
+        _populate_fresh_mirror(source, mirror, original, overlay)
+        record = {
+            **_fresh_harness_record(source, output, target, original, overlay),
+            "build_source": str(mirror),
+        }
+        write_json(evidence, {**record, "product_files_verified": False})
+        _verify_mirror(
+            mirror, original, record["effective_files"], record["lock_fingerprint"]
+        )
+        yield mirror
+        _verify_mirror(
+            mirror, original, record["effective_files"], record["lock_fingerprint"]
+        )
+        write_json(evidence, record)
+
+
+def validate_fresh_acceptance_harness(
+    output: Path, target: str, *, harness_git_sha: str
+) -> dict:
+    """Require the exact current clean harness for a fresh v2 attestation."""
+    try:
+        record = json.loads(
+            (output / f"build-{target}.acceptance-harness.json").read_text()
+        )
+        if _clean_revision(ROOT) != harness_git_sha:
+            raise ValueError("fresh harness revision differs from the reviewed seal")
+        if not {"compatibility", "helper_reconstruction"}.issubset(record):
+            raise ValueError("fresh harness must explicitly exclude historical reuse")
+        source, mirror = Path(record["product_source"]), Path(record["build_source"])
+        original, overlay = _files(source), _effective_fresh(source)
+        expected = _fresh_harness_record(
+            source, output.resolve(), target, original, overlay
+        )
+        _validate_harness_record(record, expected, mirror, output, target)
+        return record
+    except (OSError, KeyError, TypeError, ValueError) as error:
+        raise ValueError("invalid fresh issue406 native harness attestation") from error

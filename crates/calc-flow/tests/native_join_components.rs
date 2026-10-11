@@ -3,6 +3,34 @@
 #[path = "../benches/support/native_join_components.rs"]
 mod native_join_components;
 
+#[cfg(not(feature = "benchmark-checkpoint-diagnostic"))]
+#[test]
+fn test_checkpoint_history_requires_explicit_diagnostic_feature() {
+    let result = native_join_components::parse_arguments(&[
+        "--native-component".into(),
+        "join_checkpoint_history_4m".into(),
+        "--check".into(),
+    ]);
+    assert_eq!(result, Err("unknown native component"));
+}
+
+#[cfg(feature = "benchmark-checkpoint-diagnostic")]
+#[test]
+fn test_checkpoint_history_is_available_with_explicit_diagnostic_feature() {
+    let result = native_join_components::parse_arguments(&[
+        "--native-component".into(),
+        "join_checkpoint_history_4m".into(),
+        "--check".into(),
+    ]);
+    assert_eq!(
+        result,
+        Ok(Some((
+            native_join_components::Component::CheckpointHistory,
+            true
+        )))
+    );
+}
+
 #[test]
 fn test_native_component_arguments_are_closed_before_execution() {
     use native_join_components::{Component, parse_arguments};
@@ -23,15 +51,6 @@ fn test_native_component_arguments_are_closed_before_execution() {
         ])
         .unwrap(),
         Some((Component::Compaction, true))
-    );
-    assert_eq!(
-        parse_arguments(&[
-            "--native-component".into(),
-            "join_checkpoint_history_4m".into(),
-            "--check".into(),
-        ])
-        .unwrap(),
-        Some((Component::CheckpointHistory, true))
     );
     for arguments in [
         vec!["--native-component"],

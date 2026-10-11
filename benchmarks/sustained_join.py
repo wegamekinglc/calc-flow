@@ -254,6 +254,29 @@ def _observation_clock_invalid(
     return before > after or (previous_before is not None and before < previous_before)
 
 
+def _checkpoint_start_bounds(item: dict, before: int, after: int, elapsed: int) -> dict:
+    lower, upper = before - elapsed * 1000 - 999, after - elapsed * 1000
+    prior_lower, prior_upper = item["start_lower_ns"], item["start_upper_ns"]
+    return {
+        "start_lower_ns": lower if prior_lower is None else max(prior_lower, lower),
+        "start_upper_ns": upper if prior_upper is None else min(prior_upper, upper),
+    }
+
+
+def _observed_checkpoint_state(item: dict, checkpoint: dict, before: int, after: int):
+    terminal = item["terminal_observed"] | checkpoint["terminal"]
+    phase, phases = checkpoint["phase"], item["observed_phases"]
+    result = {
+        **item,
+        "terminal_observed": terminal,
+        "observed_phases": phases if phase in phases else [*phases, phase],
+    }
+    elapsed = checkpoint["elapsed_micros"]
+    if elapsed is not None:
+        result.update(_checkpoint_start_bounds(item, before, after, elapsed))
+    return result
+
+
 def checkpoint_windows(
     observations: list[dict], *, start_ns: int, end_ns: int
 ) -> list[dict]:
@@ -275,34 +298,16 @@ def checkpoint_windows(
             },
         )
 
-    def record_current(checkpoint, current, before, after):
-        if current is not None:
-            item = state(current)
-            item["terminal_observed"] |= checkpoint["terminal"]
-            phase = checkpoint["phase"]
-            if phase not in item["observed_phases"]:
-                item["observed_phases"].append(phase)
-            elapsed = checkpoint["elapsed_micros"]
-            if elapsed is not None:
-                lower, upper = before - elapsed * 1000 - 999, after - elapsed * 1000
-                prior_lower, prior_upper = (
-                    item["start_lower_ns"],
-                    item["start_upper_ns"],
-                )
-                item["start_lower_ns"] = (
-                    lower if prior_lower is None else max(prior_lower, lower)
-                )
-                item["start_upper_ns"] = (
-                    upper if prior_upper is None else min(prior_upper, upper)
-                )
-
     for observation in observations:
         before, after = observation["before_ns"], observation["after_ns"]
         if _observation_clock_invalid(before, after, previous_before):
             raise ValueError("checkpoint observation clocks are not monotonic")
         checkpoint = observation["checkpoint"]
         current = checkpoint["current_epoch"]
-        record_current(checkpoint, current, before, after)
+        if current is not None:
+            epochs[current] = _observed_checkpoint_state(
+                state(current), checkpoint, before, after
+            )
         completed = checkpoint["last_completed_epoch"]
         if completed is not None:
             state(completed)
@@ -316,9 +321,9 @@ def checkpoint_windows(
     return _finalize_checkpoint_windows(epochs, start_ns, end_ns)
 
 
-def _inside_steady(
-    item: dict, lower, upper, completed, start_ns: int, end_ns: int
-) -> bool:
+def _inside_steady(item: dict, start_ns: int, end_ns: int) -> bool:
+    lower, upper = item["start_lower_ns"], item["start_upper_ns"]
+    completed = item["completion_upper_ns"]
     return (
         lower is not None
         and upper is not None
@@ -337,9 +342,7 @@ def _finalize_checkpoint_windows(epochs, start_ns, end_ns):
         item = {**epochs[epoch]}
         lower, upper = item["start_lower_ns"], item["start_upper_ns"]
         completed = item["completion_upper_ns"]
-        item["inside_steady"] = _inside_steady(
-            item, lower, upper, completed, start_ns, end_ns
-        )
+        item["inside_steady"] = _inside_steady(item, start_ns, end_ns)
         if upper is not None and item["completion_lower_ns"] is not None:
             item["duration_lower_ns"] = max(0, item["completion_lower_ns"] - upper)
             item["duration_upper_ns"] = max(0, completed - lower)

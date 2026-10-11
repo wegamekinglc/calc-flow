@@ -31,7 +31,7 @@ pub use cross_section::{
     CrossSectionValuePolicy, NullPlacement, RankTieMethod, SortDirection,
 };
 pub use expression::ExpressionOperator;
-#[cfg(feature = "benchmark-internals")]
+#[cfg(feature = "benchmark-checkpoint-diagnostic")]
 pub(crate) use join::run_checkpoint_history_diagnostic;
 pub(crate) use join::supported_key_type;
 #[cfg(test)]
@@ -127,7 +127,7 @@ impl StreamRuntimeState {
         self.runtime.is_some()
     }
 
-    #[cfg(any(test, feature = "benchmark-internals"))]
+    #[cfg(any(test, feature = "benchmark-checkpoint-diagnostic"))]
     fn initialize_benchmark_pool(
         &mut self,
         pool: Arc<dyn datafusion::execution::memory_pool::MemoryPool>,

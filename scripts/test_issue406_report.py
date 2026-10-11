@@ -10,7 +10,7 @@ def selected(row, workload=None, mode="off", rows=1_000_000, threads=1):
     return next(
         case
         for case in acceptance_inventory()
-        if selected_case(case, row, workload, mode, rows, threads)
+        if selected_case(case, row, workload, mode, (rows, threads))
     )
 
 
@@ -294,7 +294,8 @@ class AcceptanceReportTests(unittest.TestCase):
         self.assertEqual(phases["oracle_seconds"]["p50"], 0.003)
 
 
-def selected_case(case, row, workload, mode, rows, threads):
+def selected_case(case, row, workload, mode, shape):
+    rows, threads = shape
     return (
         case.row == row
         and (workload is None or case.workload == workload)

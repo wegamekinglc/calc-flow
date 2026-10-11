@@ -243,7 +243,7 @@ impl DataFusionRuntime {
         Self::new_with_pool(config, Arc::new(UnboundedMemoryPool::default()), started)
     }
 
-    #[cfg(any(test, feature = "benchmark-internals"))]
+    #[cfg(any(test, feature = "benchmark-checkpoint-diagnostic"))]
     pub(crate) fn with_benchmark_pool(
         config: DataFusionConfig,
         pool: Arc<dyn datafusion::execution::memory_pool::MemoryPool>,

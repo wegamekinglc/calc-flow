@@ -6,11 +6,11 @@ import math
 
 from scripts.benchmark_suite.issue406_acceptance import validate_observation
 from scripts.benchmark_suite.issue406_fresh import (
-    CANDIDATE,
     PREVIOUS,
     retained_cases,
     validate_retained_case,
 )
+from scripts.benchmark_suite.issue406_fresh_v3 import candidate_commit
 from scripts.benchmark_suite.report import ROUNDS, SAMPLES, comparison, table
 
 PHASES = ("processing_seconds", "terminal_seconds", "full_cycle_seconds")
@@ -147,7 +147,10 @@ def summarize_retained_control(report: dict) -> dict:
     return {
         "schema": "calc-flow.issue406-retained-control-summary.v1",
         "previous": {"label": "cff retained-OFF control", "product_commit": PREVIOUS},
-        "candidate": {"label": "current candidate", "product_commit": CANDIDATE},
+        "candidate": {
+            "label": "current candidate",
+            "product_commit": candidate_commit(report),
+        },
         "cases": [_case(report, case, suitable) for case in retained_cases()],
         "scope": (
             "Fresh cff/current temporal pairs. Candidate observations reference the "
@@ -215,3 +218,176 @@ def _case_status(complete: bool, errors: list) -> str:
     if not complete:
         return "incomplete"
     return "invalid" if errors else "complete"
+
+
+def summarize_v3(report: dict) -> dict:
+    """Retain every target while failed diagnostics never enter valid statistics."""
+    from scripts.benchmark_suite import issue406_fresh_v3 as v3
+    from scripts.benchmark_suite.issue406_report import summarize_acceptance
+
+    clean, invalid = _valid_v3_ledger(report)
+    summary = summarize_acceptance(clean)
+    errors = list(summary["evidence_validation_errors"])
+    try:
+        v3.validate_complete_results(report)
+    except (KeyError, TypeError, ValueError, IndexError) as error:
+        errors.append(str(error))
+    outcomes = _v3_outcomes(report, invalid)
+    cases = [
+        {
+            **case,
+            **{
+                side: _v3_arm_state(case, side, outcomes)
+                for side in ("baseline", "candidate")
+            },
+        }
+        for case in summary["cases"]
+    ]
+    complete = summary["evidence_complete"] and not errors
+    return {
+        **summary,
+        "schema": "calc-flow.issue406-summary.v3",
+        "cases": cases,
+        "evidence_complete": complete,
+        "evidence_validation_errors": sorted(set(errors)),
+        "acquisition_status": "complete" if complete else "incomplete",
+        "acceptance_status": _v3_acceptance_status(report, complete),
+        "failed_attempts": report.get("failed_attempts", []),
+        "failed_arms": report.get("failed_arms", []),
+        "dependent_unattempted": report.get("dependent_unattempted", []),
+        "candidate_product_commit": candidate_commit(report),
+    }
+
+
+def _valid_v3_ledger(report):
+    invalid = set()
+
+    def validated(records):
+        output = []
+        for record in records:
+            samples = [
+                *record.get("warmups", []),
+                *(sample for group in record.get("rounds", []) for sample in group),
+            ]
+            failed = any(sample.get("lifecycle") != "completed" for sample in samples)
+            if failed:
+                invalid.add((record["case"], record["side"]))
+            output.append(
+                {**record, "warmups": [], "rounds": [[], []]} if failed else record
+            )
+        return output
+
+    primary = validated(report.get("measurements", []))
+    control = report.get("retained_control", {})
+    return {
+        **report,
+        "measurements": primary,
+        **(
+            {
+                "retained_control": {
+                    **control,
+                    "measurements": validated(control.get("measurements", [])),
+                }
+            }
+            if control
+            else {}
+        ),
+    }, invalid
+
+
+def _v3_outcomes(report, invalid):
+    outcomes = {
+        (record["case"], record["side"]): "attempted"
+        for record in report.get("measurements", [])
+        if record.get("warmups") or any(record.get("rounds", []))
+    }
+    failed = {
+        (case, failure["side"])
+        for failure in [
+            *report.get("failed_arms", []),
+            *report.get("failed_attempts", []),
+        ]
+        for case in failure["cases"]
+    }
+    return {**outcomes, **{key: "failed" for key in failed | invalid}}
+
+
+def _v3_arm_state(case, side, outcomes):
+    arm = case[side]
+    if arm["status"] == "unsupported":
+        return {**arm, "attempt_status": "unsupported", "validity": "unsupported"}
+    attempt = outcomes.get((case["case"], side), "unattempted")
+    valid = arm["complete"] and attempt != "failed"
+    return {
+        **arm,
+        "attempt_status": attempt,
+        "validity": "valid" if valid else "incomplete",
+    }
+
+
+def render_v3(summary: dict) -> str:
+    """Expose acquisition and per-arm outcomes alongside the maintained eight rows."""
+    from scripts.benchmark_suite.issue406_report import render_acceptance_markdown
+
+    states = [
+        [case["case"], side, case[side]["attempt_status"], case[side]["validity"]]
+        for case in summary["cases"]
+        for side in ("baseline", "candidate")
+    ]
+    return (
+        render_acceptance_markdown(summary)
+        + "\n"
+        + f"Acquisition: {summary['acquisition_status']}; "
+        + f"acceptance: {summary['acceptance_status']}.\n\n"
+        + table(["Case", "Arm", "Attempt", "Evidence"], states)
+        + "\n"
+    )
+
+
+def _v3_acceptance_status(report, complete):
+    assessment = report.get("assessment", {})
+    valid = (
+        complete
+        and report.get("state") == "complete"
+        and report.get("budget_satisfied") is True
+        and assessment.get("environment_suitable") is True
+        and assessment.get("compatibility_verified") is True
+    )
+    return "eligible-for-review" if valid else "inconclusive"
+
+
+def aborted_v3_summary(report):
+    """Keep the fixed inventory explicit when no analysis time remains."""
+    from dataclasses import asdict
+
+    from scripts.benchmark_suite.issue406_acceptance import acceptance_inventory
+    from scripts.benchmark_suite.issue406_report import TITLES
+
+    outcomes = _v3_outcomes(report, set())
+    cases = []
+    for case in acceptance_inventory():
+        arms = {
+            side: {
+                "status": "incomplete" if side in case.sides else "unsupported",
+                "complete": False,
+                "statistics": None,
+            }
+            for side in ("baseline", "candidate")
+        }
+        row = {**asdict(case), "case": case.id, **arms}
+        cases.append(
+            {**row, **{side: _v3_arm_state(row, side, outcomes) for side in arms}}
+        )
+    return {
+        "schema": "calc-flow.issue406-summary-aborted.v3",
+        "evidence_complete": False,
+        "acquisition_status": "incomplete",
+        "acceptance_status": "inconclusive",
+        "failed_attempts": report.get("failed_attempts", []),
+        "reason": report["error"],
+        "cases": cases,
+        "targets": [
+            {"row": row, "title": title, "status": "incomplete"}
+            for row, title in TITLES.items()
+        ],
+    }

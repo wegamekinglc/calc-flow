@@ -122,6 +122,10 @@ async def collect_fresh(runner, output: Path) -> dict:
         },
         "known_failures": [],
     }
+    from scripts.benchmark_suite import issue406_fresh_v3 as v3
+
+    fresh_v3 = runner.plan.get("schema") == v3.SCHEMA
+    report.update(_v3_report_fields(runner.plan))
     exhausted = set()
     output.mkdir(parents=True, exist_ok=True)
 
@@ -132,19 +136,22 @@ async def collect_fresh(runner, output: Path) -> dict:
 
         async def operation():
             try:
-                return await _invoke_collection(
+                result = await _invoke_collection(
                     runner, output, group, side, (round_index, index)
                 )
-            except Exception as error:
-                failure = None
-                if side == "baseline" and round_index == 0 and index is None:
-                    failure = await runner.known_main_failure(
-                        group, side, round_index, index, error
-                    )
+                _require_fresh_lifecycle(runner.plan, result)
+                return result
+            except BaseException as error:
+                _record_failed_attempt(report, group, (side, round_index, index), error)
+                if not isinstance(error, Exception):
+                    raise
+                failure = await _recognized_failure(
+                    runner, group, (side, round_index, index), error
+                )
                 if failure is None:
                     raise
                 exhausted.add(key)
-                report["known_failures"].append(
+                report["failed_arms" if fresh_v3 else "known_failures"].append(
                     _exhausted_arm(group, side, round_index, index, failure)
                 )
                 return None
@@ -165,16 +172,93 @@ async def collect_fresh(runner, output: Path) -> dict:
 
     try:
         for group in collection_groups():
+            _skip_failed_dependencies(runner.plan, group, exhausted, report)
             await _collect_group(runner, group, invoke, report)
             write_json(output / "partial.json", report)
         validate_retained_control(report)
-        report["state"] = "collected-with-failures" if exhausted else "collected"
+        report["state"] = _collection_state(fresh_v3, exhausted)
         return report
     except BaseException as error:
         report.update(state="stopped", error=f"{type(error).__name__}: {error}")
         raise
     finally:
         write_json(output / "partial.json", report)
+
+
+def _v3_report_fields(plan):
+    from scripts.benchmark_suite.issue406_fresh_v3 import SCHEMA, report_identity
+
+    return (
+        {
+            **report_identity(plan),
+            "failed_attempts": [],
+            "failed_arms": [],
+            "dependent_unattempted": [],
+        }
+        if plan.get("schema") == SCHEMA
+        else {}
+    )
+
+
+def _record_failed_attempt(report, group, position, error):
+    if "failed_attempts" not in report:
+        return
+    side, round_index, index = position
+    report["failed_attempts"].append(
+        {
+            "cases": [case.id for case in group],
+            "side": side,
+            "round": round_index,
+            "index": index,
+            "phase": "warmup" if index is None else "sample",
+            "error": f"{type(error).__name__}: {error}",
+        }
+    )
+
+
+async def _recognized_failure(runner, group, position, error):
+    from scripts.benchmark_suite.issue406_fresh_v3 import SCHEMA
+
+    side, round_index, index = position
+    if not _first_baseline(side, round_index, index):
+        return None
+    recognize = (
+        runner.known_fresh_failure
+        if runner.plan.get("schema") == SCHEMA
+        else runner.known_main_failure
+    )
+    return await recognize(group, side, round_index, index, error)
+
+
+def _require_fresh_lifecycle(plan, result):
+    from scripts.benchmark_suite.issue406_fresh_v3 import SCHEMA, require_completed
+
+    if plan.get("schema") == SCHEMA:
+        require_completed(result)
+
+
+def _first_baseline(side, round_index, index):
+    return (side, round_index, index) == ("baseline", 0, None)
+
+
+def _skip_failed_dependencies(plan, group, exhausted, report):
+    from scripts.benchmark_suite import issue406_fresh_v3 as v3
+
+    if plan.get("schema") != v3.SCHEMA:
+        return
+    source = v3.replay_source(group[0])
+    for side in group[0].sides:
+        if (source, side) in exhausted:
+            exhausted.add((group[0].id, side))
+            report["dependent_unattempted"].append(
+                v3.unattempted_dependency(group, side, source)
+            )
+
+
+def _collection_state(fresh_v3, exhausted):
+    if not exhausted:
+        return "collected"
+    return "incomplete" if fresh_v3 else "collected-with-failures"
 
 
 def _exhausted_arm(group, side, round_index, index, failure):
@@ -257,6 +341,7 @@ def validate_retained_case(report: dict, case) -> None:
         raise ValueError("unknown retained control case")
     control = report.get("retained_control", {})
     selected = {
+        **report,
         "measurements": [
             row for row in report.get("measurements", []) if row.get("case") == case.id
         ],
@@ -281,6 +366,8 @@ def validate_retained_control(report: dict) -> None:
 
 
 def _validate_retained(report: dict, selected: set[str]) -> None:
+    from scripts.benchmark_suite.issue406_fresh_v3 import candidate_commit
+
     control = report.get("retained_control", {})
     primary = {
         (record["case"], record["side"]): record
@@ -306,7 +393,7 @@ def _validate_retained(report: dict, selected: set[str]) -> None:
         _validate_retained_pair_order(pair, index)
         for side, source, revision in (
             ("previous", records, PREVIOUS),
-            ("candidate", primary, CANDIDATE),
+            ("candidate", primary, candidate_commit(report)),
         ):
             sample = _retained_sample(source, case, side, round_index, index)
             _validate_retained_reference(pair, side, sample, revision, observations)
