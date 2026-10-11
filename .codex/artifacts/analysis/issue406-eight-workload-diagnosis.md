@@ -512,7 +512,7 @@ libtest diagnostic, with identical code, message and spans. Frozen source hashes
 and exact commands are recorded in the feature worktree's
 `target/issue406-bounded-restore/restore-validation.json`.
 
-The reviewed capacity appendix is
+The pre-build capacity appendix is
 `target/issue406-complete-acceptance/restore-capacity-current.md` in that worktree,
 SHA-256 `39213c5223fcc5e6854e472ec9bfbd62ec0a6de61382340d9713c14702201c39`.
 Its conservative maxima are fresh 997,684,907 bytes, E1 979,353,235, held-E4
@@ -527,5 +527,106 @@ old-state/same-pool restore.
 The parent checkout's `target/issue406-bounded-restore-followup/plan.md` preserves
 the diagnostic-first sequence, seven workloads/five physical groups, fixed
 sample counts and 900-second budget. Controller/provenance checks pass (11).
-No release artifact, actual 4M result or timing sample exists for this increment
-yet. The eight-row performance tables remain explicitly historical runtime e8.
+The following measured follow-up supersedes the earlier capacity estimates
+where noted; the earlier eight-row tables retain their original runtime e8.
+
+## Measured bounded-restore follow-up at cffcf57b
+
+The ordinary wheel and enabled native binary were built from the same clean
+`cffcf57be9c5cada667c6109156bcbfe5b084f27` source and harness, with pinned compiler,
+dependencies and ordinary release flags. Build/audit took 667.792 seconds.
+The fixed 4M correctness lifecycle passed, but performance acceptance remains
+incomplete and a material terminal regression requires correction.
+
+All values below are medians. Main `588726c8` and earlier e8 columns retain prior
+evidence; main has no true OFF mode. Main LOW/ON values marked dagger failed EOF
+checkpoint completion and cannot support a complete-lifecycle speedup claim.
+Current numbers measure cff only; later source changes require new evidence.
+
+| Row / workload                     | Historical main 588726c8        | Earlier e8a28d99              | Current cffcf57b / target                       |
+|------------------------------------|---------------------------------|-------------------------------|-------------------------------------------------|
+| 1: Join 1M, 1 / 32 CPU             | LOW 125.6 / 305.8 ms †          | OFF 87.1 / 89.5 ms            | Unmeasured; ≤60 / ≤15 ms                        |
+| 2: Join 10M, 1 / 32 CPU            | LOW 3355.7 / 5132.5 ms †        | OFF 933.8 / 916.6 ms          | Unmeasured; ≤600 / ≤150 ms                      |
+| 3: Retained Join 4M ÷ 1M           | LOW 4.711× †; ON failed         | OFF 4.697×; ON failed         | OFF 3.486×; observed ≤4.4×                      |
+| 4: Capture / restore per total row | Preparation failed              | Preparation failed            | 0.221539 / 0.494471 µs; above ≤0.1 / ≤0.2       |
+| 5: Handler, compacting ÷ steady    | Fixture checkpoint failed       | Fixture checkpoint failed     | 0.985× partial; 18/20; inconclusive; target ≤2× |
+| 6: ASOF 1M per input, 1 / 32 CPU   | LOW 292.7 / 319.2 ms †          | OFF 300.1 / 320.3 ms          | Unmeasured; ≤100 / ≤30 ms                       |
+| 7: ASOF harness, 1,024-row batches | LOW H 361.1; 2×floor 386.0 ms † | OFF H 363.3; 2×floor 344.9 ms | Unmeasured; H ≤2×projection floor               |
+| 8: Full 1,024-row Join callback    | Enabled 92.52 µs                | OFF 90.93; enabled 89.55 µs   | Unmeasured; ≤50 µs                              |
+
+The fresh retained-OFF comparator was remeasured e8, rather than the historical
+e8 column: 1M processing p50 383.842 to 258.226 ms and 4M 1512.430 to 900.200 ms.
+Each size completed two rounds of ten adjacent alternating pairs. Both maintained
+processing gates classify improved. The round changes/intervals are -31.53%
+[-37.28%, -25.72%] and -30.17% [-36.53%, -14.60%] at 1M; -39.31%
+[-43.27%, -33.70%] and -43.27% [-52.05%, -37.93%] at 4M. Each ten-pair interval
+has 97.8516% coverage. Ratios of aggregate medians give -32.73% / -40.48%, a
+different statistic from paired medians. Fresh scaling is 3.940x e8 / 3.486x cff;
+no paired scaling interval is claimed across the separate size groups.
+
+The phase costs reveal a regression that the processing timer excludes:
+
+| Workload / phase | Fresh e8 p50 | cff p50     | Maintained paired classification |
+|------------------|--------------|-------------|----------------------------------|
+| 1M terminal      | 246.586 ms   | 403.564 ms  | regression                       |
+| 4M terminal      | 378.132 ms   | 1475.115 ms | regression                       |
+| 4M full cycle    | 1876.961 ms  | 2381.441 ms | regression (+26.88% p50 ratio)   |
+
+Both round lower bounds exceed +5% for these phase comparisons. The 1M full-cycle
+comparison is inconclusive. These are measured regressions within this
+acquisition, with unverified WSL2 isolation; they are not a machine-independent
+latency guarantee. The terminal timer includes the withheld watermark that
+retires retained rows before source EOF. That path is the next focused diagnosis.
+
+Capture/restore has 20 complete observations plus two warmups. Its denominator is
+500,000 left plus 500,000 right rows, one million total. Snapshot p50 is
+221.539 ms, including 210.613 ms preparation and 11.292 ms capture-only medians;
+restore is 494.471 ms. Separate phase medians need not add to the aggregate
+median. Omitting preparation would incorrectly claim the snapshot target passed.
+Both per-row targets remain missed, and previous failed main/e8 components do
+not provide a valid speedup denominator.
+
+Compaction retains 18 paired component observations (rounds 10 + 8) and two
+warmups. Handler medians are compacting 0.509049 ms and steady 0.516818 ms;
+compacting preparation is 217.803 ms and combined time 218.291 ms. The partial
+0.984968x ratio is descriptive only. The fixed 240-second group budget cancelled
+the next call; the final planned call was never attempted. No retry or additional
+samples ran. Every completed observation retains four dirty epochs, changed base,
+folded deltas, equal output/state and the restore oracle.
+
+The whole collector stopped at 566.758 / 900 seconds, including setup, warmups,
+oracles and settlement. Of 133 planned physical calls, 132 were attempted:
+118 completed measured calls, 12 completed warmups, one completed correctness
+lifecycle and one cancelled call. The eight metric arms contain 156 timed
+observations: six complete arms and two partial arms. All 52 owned PIDs settled,
+with no forced kills, survivors or unsettled pipes. Sampled maximum aggregate
+RSS was 2,391,285,760 bytes; no resource or competing-work threshold failed.
+
+The unchanged 4M diagnostic observed fresh/history pool peaks of
+997,663,225 / 979,293,354 bytes and E4/E5 restore peaks of
+932,489,048 / 932,453,624, below the original 1,073,741,824-byte limit. All four
+pools had zero failed grows and zero final reservations. Both restored histories
+matched the complete left/right row oracles and retained E4 segment hashes.
+
+The earlier source worksheets omitted all-valid Arrow IPC bitmaps: serialized
+backing needs 2,000,128 additional bytes, and restored backing needs 4,000,172.
+These were already reserved correctly by the implementation. Corrected
+conservative rebase/capture bounds are 943,251,521 / 943,244,391 bytes; restore
+bounds are 932,493,947 / 932,456,163. Existing fresh/E1 constructor envelopes
+already counted validity workspace. The new reconciliation preserves the old
+worksheets and exactly explains observed restore peaks after subtracting
+already-retired history/row scratch.
+
+Evidence lives in the parent checkout's
+`target/issue406-bounded-restore-followup/analysis/report.md` (SHA-256
+`bb0b01dda43716784f6cf17840a94d525259e79231764e4a3a8e3a509061c352`) and
+`analysis/summary.json` under that same root (SHA-256
+`ec2228b18df537acf400fc0f1583ca5c71fe0fbd3459a6b0926c10848e008696`).
+The measurement evidence seal is
+`d1ff91234143437af061603bcbcb0f225b50565dcf5d868b46d65680004e95c7`.
+The feature worktree's capacity correction is
+`target/issue406-complete-acceptance/restore-capacity-bitmap-reconciliation.md`,
+SHA-256 `62aabdec6bd36bedcb56dba86043001ebc108d2ef9bb0007747a6f49203c80ba`.
+Independent review verified all 207 sealed inputs and 413 evidence files. The
+ordinary stripped artifact has no type DWARF; its source/revision/flags/sections
+were audited, and actual capacity comes from the hard-capped diagnostic.

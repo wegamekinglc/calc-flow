@@ -215,27 +215,51 @@ credit; retry succeeds. Library Clippy passes. Test-target Clippy retains only t
 its code, message and spans match the prior baseline. The frozen validation
 manifest records all source hashes and exact commands.
 
-The reviewed fixed-fixture source bounds are 997,684,907 bytes for fresh
-construction, 979,353,235 for E1, 941,251,393 for held-history rebase,
-941,244,263 for E5 capture, and 928,493,775 / 928,455,991 for E4 / E5 restore.
-They fit the unchanged 1,073,741,824-byte pool for the specified fixture.
-The restore bounds require synchronous execution into an empty destination
-with source and destination funded by separate pools; fresh preparation and
-rebase retain their owned asynchronous workers. These are conservative source
-bounds, not observed 4M completion, RSS bounds or performance results.
+The release build/audit at `cffcf57b` took 667.792 seconds. The unchanged 4M
+checkpoint lifecycle passed under the original 1 GiB pools: all four pools had
+zero failed grows and zero final reservations, and both restores validated every
+row. Measured peaks were fresh 997,663,225 bytes, history 979,293,354, old restore
+932,489,048 and new restore 932,453,624.
+
+The source worksheets had omitted Arrow's all-valid IPC bitmaps from serialized
+and restored backing. The correction preserves the original worksheets and
+explains the measured restore peaks exactly. Conservative rebase/capture bounds
+become 943,251,521 / 943,244,391 bytes; restore bounds become
+932,493,947 / 932,456,163. Fresh/E1 constructor bounds are unchanged. These remain
+pool-reservation bounds for the specified fixture; empty-destination restore has
+separate source funding. They do not bound RSS or same-pool/live-state restore.
+
+The follow-up collected complete retained OFF 1M/4M and capture/restore groups.
+Fresh e8-to-cff processing p50 improved from 383.842 to 258.226 ms at 1M and
+1512.430 to 900.200 ms at 4M; current scaling is 3.486x. However, both EOF sizes
+and the 4M full-cycle comparison are regressions under the maintained paired
+rule in this acquisition. Full-cycle 4M p50 rose from 1876.961 to 2381.441 ms
+(+26.88%). Host isolation remains unverified; the regression requires diagnosis
+and must not be hidden by the processing improvement.
+
+Snapshot/restore cost is 0.221539 / 0.494471 us per total resident row, above
+both targets. The compaction group exhausted its fixed 240-second allowance at
+18/20 samples per arm. Its descriptive handler ratio is 0.985x, with no acceptance
+verdict. The collector stopped at 566.758 / 900 seconds, all 52 child processes
+settled, and no forced kill or retry occurred. All eight rows remain in the
+[diagnosis](issue406-eight-workload-diagnosis.md); final-runtime acceptance is
+still incomplete.
 
 The next implementation steps are:
 
-1. Freeze the reviewed restore source and audit ordinary release wheel/native
-   artifacts. Run the unchanged 4M lifecycle once under the original 1 GiB pools.
-   Stop later measurements on any failure and preserve all prior evidence.
-2. Within the fixed 900-second follow-up budget, measure retained Join OFF
-   1M/4M against e8, plus capture/restore and actual compaction/steady handlers.
-   Preserve two rounds of ten samples, seven workloads in five physical groups,
-   and the 133-invocation maximum. This subset does not complete acceptance.
-3. Continue the remaining Join, ASOF, parallelism and harness improvements using
-   the completed CPU profiles. Measure all increments with the final runtime;
-   retain all eight targets and checkpoint policies.
+1. Fix the measured retained-state retirement regression. The harness's terminal
+   phase includes its withheld final watermark before EOF, so an EOF-only change
+   would miss the hot path. Preserve partial expiry, cancellation and checkpoint
+   journal semantics while evaluating whole-side retirement with checkpoints OFF.
+2. Complete the focused ASOF descriptor-reuse change and its allocation/fidelity
+   tests. Keep payload preparation, errors and reservation ownership unchanged.
+3. Profile the newly measurable snapshot/restore operations before further
+   optimization. Continue Join output parallelism using existing owned workers,
+   preserving paid buffer lifetimes through asynchronous delivery.
+4. Reconcile all eight rows on the final runtime, with separate OFF/LOW/ON
+   policies, complete planned samples and explicit main comparison limitations.
+   Keep this attempt and its incomplete row 5 immutable; do not extend or retry
+   it to obtain a favorable verdict.
 
 The observed Python complexity CI failure is corrected in `25b6eb78` without
 changing the baseline or acceptance semantics. All 102 unique focused tests pass,
