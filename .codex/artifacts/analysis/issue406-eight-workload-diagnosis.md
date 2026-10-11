@@ -348,11 +348,11 @@ and unowned restored aliases failing independent retirement. They now pass;
 in the feature worktree's
 `target/issue406-complete-acceptance/segment-credit-validation.json`.
 
-A subsequent source worksheet identifies a separate E1 blocker: the synchronous
-pending path reserves 960,014,640 bytes for copied operations and 863,999,352
+At the worksheet revision, source analysis identified a separate E1 blocker:
+the synchronous pending path reserved 960,014,640 bytes for copied operations and 863,999,352
 bytes for materialized left rows before payload encoding. Their 1,824,013,992-byte
-sum already exceeds 1 GiB. Borrowed pending encoding, shared-payload rebase and
-bounded restore are still required. The proposed rebase and restore leading
+sum already exceeded 1 GiB. The later borrowed-pending increment below resolves
+this copy term; shared-payload rebase and bounded restore remain required. The proposed rebase and restore leading
 terms (941,016,759 and 928,234,338 bytes) exclude unresolved owners and overlap;
 these are conditional calculations, not measured admission or sufficient bounds.
 Funding a new append-grown expiration representation in ordinary source state
@@ -380,3 +380,64 @@ fix, and all five cases pass afterward. Windows is not yet validated. Scoped tes
 Clippy still fails solely on the known generated-libtest `large_stack_arrays`
 diagnostic; this unresolved check blocks merge. No production persistence logic,
 coverage threshold or lint requirement is weakened.
+
+## Intern repeated string keys before canonical framing
+
+Commit `0d2b23c7` specializes the local batch dictionary for one non-null Utf8 or
+LargeUtf8 key. It compares borrowed values with their type tag, including forced
+hash collisions, and constructs canonical key bytes only on a local miss. Global
+dictionary hashing, canonical bytes, exact admission arithmetic and resident
+ownership remain unchanged; composite/null/non-fitting inputs retain their
+existing path. No Arrow input owner escapes through a borrowed lookup key.
+
+Both runtime work-count REDs now pass: 14 rows with six distinct values construct
+six frames, and the mixed-tag collision fixture constructs 12 for 28 rows. The
+owned-key encoding count was already D; the removed work is N transient frames
+and D copies, replaced by D direct constructions. All nine focused tests and
+library Clippy pass. Evidence is in the feature worktree's
+`target/issue406-complete-acceptance/string-interner-validation.json`.
+This establishes less framing work, not a measured wall-time improvement.
+
+## Borrow pending rows during checkpoint encoding
+
+Commit `0dbbfea5` passes the immutable PendingLog directly to the synchronous
+encoder. For each side it builds exact, prepaid selections of borrowed upserts
+and tombstones, preserving row-ID ordering and every payload/key/time/charge
+field. Generic read-only row accessors feed the existing compact, IPC, payload
+frame and index writers. Actual selection vectors retire before their child
+reservation; one side's scratch does not remain charged during the next side.
+
+Three runtime REDs are resolved: unprepared 8,192-left/64-right encoding now fits
+its unchanged 2,400,000-byte pool; cancellation no longer leaves temporary credit
+in a still-live caller workspace; and a cancelled nonempty log takes precedence
+over a full-pool encoder admission. Independent geometric-index and StreamWriter
+payload oracles cover rich sliced Legacy/Rowed inputs, empty/one-sided/tombstone
+histories and removed/reused pending slots. Exact and one-byte-short selection
+admission, actual allocation peaks, held segment aliases, every encoder callback
+cancellation point and full capture rejection/retry are covered.
+
+All 30 unique focused tests pass: 28 encoder/compaction and existing Base-drain
+checks, one full-capture fault/retry test, and one distinct dirty-Delta worker
+ownership/drain test. The latter confirms copied pending inputs survive actual
+worker execution even after live rows and old history retire. Library Clippy
+passes; final test Clippy still fails solely on the generated-libtest
+`large_stack_arrays` diagnostic. No new lint suppression or resource limit is
+introduced. Source/evidence hashes and exact commands are in the parent checkout
+at `target/issue406-ipc-lifetime-followup/pending-validation.json`.
+
+At the fixed 4M E1 geometry, synchronous selection becomes 31,999,976 bytes for
+left rows and 512 for right rows at separate phases. It removes the original
+960,014,640-byte owned pending copy and 863,999,352-byte materialized-row
+reservation. Reusing the prior conservative source/compact/IPC terms yields a
+979,287,699-byte leading sum; unresolved owners and overlaps prevent treating that
+as a complete capacity certificate. Async preparation still owns and funds its
+full pending copy, so the corresponding large async case remains too large.
+Fresh preparation, held-E4 replacement, restore and expiration funding retain
+their separate requirements. No new release build or performance workload ran.
+
+The supplement is
+`target/issue406-ipc-lifetime-followup/pending-capacity-supplement.md` in the parent
+checkout, SHA-256
+`39db752837f811f592fe73efb8e2230f0121e6e982c96157e34ed3c1d10de3aa`.
+The eight-row timing tables remain the last measured runtime; current-runtime
+acceptance is still outstanding.

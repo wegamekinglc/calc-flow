@@ -161,28 +161,41 @@ that is no longer live. Four recorded ownership/admission failures now pass,
 along with the related writer controls (34 unique focused tests). Library Clippy
 passes. These are correctness and ownership checks, with no new timing samples.
 
+Commit `0d2b23c7` implements the selected single-string local interner. It
+constructs canonical frames only for distinct values, preserving full canonical
+bytes, collision equality, admission arithmetic and aliases. Nine focused tests
+and library Clippy pass. Work-count tests reduce 14 frames to 6 and 28 to 12;
+owned-key encoding counts were already distinct-value counts. No timing gain is
+claimed from these tests.
+
+Commit `0dbbfea5` now borrows pending rows for synchronous checkpoint encoding.
+Each side owns an exact prepaid pointer selection; no full pending-log or
+materialized StoredRow copy is created, and scratch retires with its allocations.
+Three runtime REDs resolve, and 30 unique focused tests pass, including complete
+capture fault/retry and distinct Base/Delta worker ownership through cancellation.
+Library Clippy passes; the known generated-libtest diagnostic remains. Async
+preparation still owns its original pending copy through worker drain and is not
+certified to fit the hypothetical 4M dirty batch.
+
 The next implementation steps are:
 
-1. Remove the synchronous pending writer's full `PendingOp` copy and materialized
-   `StoredRow` copy by encoding borrowed, side-local sorted views. At the fixed
-   E1 fixture their existing reservations alone sum to 1,824,013,992 bytes, before
-   state, compaction or IPC. Keep owned async capture separate, preserve wire
-   bytes and tombstone ordering, and clear pending only after successful capture.
-2. For fully checkpointed append-only history, implement the reviewed bounded
-   sorted-index merge sharing existing whole payload segments. Pending operations,
+1. For fully checkpointed append-only history, finalize the eligibility and
+   funding guards, then implement a bounded sorted-index merge sharing existing
+   whole payload segments. Pending operations,
    tombstones and partially dead payloads retain the existing encoder. Reconcile
    all held old/new backing, capture controls and retirement ownership.
-3. Implement bounded restore folding and scoped per-row scratch while preserving
+2. Implement bounded restore folding and scoped per-row scratch while preserving
    malformed-history rejection and atomic recovery. Explicitly select the
    expiration representation and its source-pool funding boundary: charging the
    proposed append-grown arrays to ordinary source state also requires reducing
    fresh writer scratch and held-rebase overlap.
-4. Recompute complete simultaneous-reservation bounds before another release
-   build/full 4M diagnostic. The worksheet's 941 MB rebase and 928 MB restore
-   leading terms exclude unresolved controls and are not capacity certificates.
-5. Continue the independently selected single-string local interning optimization
-   from the CPU profile, followed by remaining Join, ASOF, parallelism and harness
-   improvements. Its focused tests are in progress; no speedup is claimed yet.
+3. Recompute complete simultaneous-reservation bounds before another release
+   build/full 4M diagnostic. The worksheet's 941 MB rebase, 928 MB restore and
+   borrowed E1's 979 MB leading terms exclude unresolved controls and are not
+   capacity certificates.
+4. Continue the remaining Join, ASOF, parallelism and harness improvements using
+   the completed CPU profiles. Measure the interner and pending-writer increments
+   with the final runtime; retain all eight targets and checkpoint policies.
 
 The observed Python complexity CI failure is corrected in `25b6eb78` without
 changing the baseline or acceptance semantics. All 102 unique focused tests pass,
