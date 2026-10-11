@@ -63,13 +63,15 @@ jobs:
           scripts.test_benchmark_frontend
           scripts.test_benchmark_pytest
       - name: Test benchmark and performance support scripts
+        timeout-minutes: 5
         run: >-
-          python -m unittest
+          python -m unittest -v
           scripts.test_analyze_sql_datafusion_attribution
           scripts.test_benchmark_asof
           scripts.test_benchmark_asof_eviction
           scripts.test_benchmark_engine_lifecycle
           scripts.test_benchmark_measure
+          scripts.test_benchmark_native_acceptance
           scripts.test_retained_benchmark_suite
           scripts.test_benchmark_join_materialization
           scripts.test_benchmark_sql_decimal
@@ -80,6 +82,15 @@ jobs:
           scripts.test_groupby_diagnostic_rustc
           scripts.test_checkpoint_benchmark
           scripts.test_checkpoint_cycles
+          scripts.test_issue406_acceptance
+          scripts.test_issue406_build_identity
+          scripts.test_issue406_failures
+          scripts.test_issue406_fresh
+          scripts.test_issue406_fresh_harness
+          scripts.test_issue406_fresh_report
+          scripts.test_issue406_harness
+          scripts.test_issue406_report
+          scripts.test_issue406_reuse
           scripts.test_native_memory_profile
           scripts.test_native_slow_sink_diagnostics
           scripts.test_release_collectors
@@ -239,7 +250,9 @@ jobs:
           PYTHONPATH=target/adapter-site:. JAX_PLATFORMS=cpu \
             target/benchmark-venv/bin/python -m unittest \
             scripts.test_profile_warm_stream scripts.test_performance_plan \
-            scripts.test_entity_parallel_inventory
+            scripts.test_entity_parallel_inventory scripts.test_join_asof_acceptance \
+            scripts.test_issue406_fresh_runner scripts.test_issue406_fresh_v3 \
+            scripts.test_issue406_run
           PYTHONPATH=target/adapter-site:. JAX_PLATFORMS=cpu \
             target/benchmark-venv/bin/python -m pytest benchmarks/test_warm_stream.py -q
       - name: Run all cases and compare versions on this runner
