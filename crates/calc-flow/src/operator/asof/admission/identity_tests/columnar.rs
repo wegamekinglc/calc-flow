@@ -7,6 +7,8 @@ use datafusion::arrow::{
 use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryLimit, MemoryPool};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+mod descriptors;
+
 #[derive(Debug)]
 struct ObservedPool {
     inner: GreedyMemoryPool,

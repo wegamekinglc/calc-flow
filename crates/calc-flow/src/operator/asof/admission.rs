@@ -1086,15 +1086,18 @@ fn encode_rows(
         .iter()
         .map(|(_, payload)| payload.clone())
         .collect();
-    let mut input = rows.into_iter();
-    let mut result = Vec::with_capacity(input.len());
-    for (batch_index, (count, _payload)) in payloads.into_iter().enumerate() {
-        for ordinal in 0..count {
-            let (identity, _, _, key_index) = input.next().expect("partitioned ASOF input row");
-            result.push((
+    let mut partitions = payloads.into_iter().enumerate();
+    let mut partition = partitions.next();
+    let mut ordinal = 0;
+    let result = rows
+        .into_iter()
+        .map(|(identity, _, _, key_index)| {
+            let (batch_index, (count, _payload)) =
+                partition.as_ref().expect("partitioned ASOF input row");
+            let row = (
                 identity,
                 AdmissionRef {
-                    batch_index,
+                    batch_index: *batch_index,
                     row: u32::try_from(ordinal).map_err(|_| {
                         reason(
                             name,
@@ -1104,10 +1107,16 @@ fn encode_rows(
                     })?,
                     key_index,
                 },
-            ));
-        }
-    }
-    debug_assert!(input.next().is_none());
+            );
+            ordinal += 1;
+            if ordinal == *count {
+                partition = partitions.next();
+                ordinal = 0;
+            }
+            Ok(row)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    debug_assert!(partition.is_none());
     Ok((result, batches))
 }
 
