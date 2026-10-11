@@ -93,12 +93,33 @@ struct InputKeys {
 }
 
 impl InputKeys {
+    fn intern_cached(
+        &mut self,
+        bytes: &[u8],
+        hash: Option<u64>,
+        cached: Option<&mut Option<u32>>,
+        operator: &StreamAsofJoinOperator,
+    ) -> Result<(state::Encoding, u32)> {
+        if let Some(id) = cached.as_deref().copied().flatten() {
+            let key = &mut self.values[id as usize];
+            key.rows += 1;
+            return Ok((key.encoding.clone(), id));
+        }
+        let (key, id) = self.intern(bytes, hash, operator)?;
+        if let Some(cached) = cached {
+            *cached = Some(id);
+        }
+        Ok((key, id))
+    }
+
     fn intern(
         &mut self,
         bytes: &[u8],
         hash: Option<u64>,
         operator: &StreamAsofJoinOperator,
     ) -> Result<(state::Encoding, u32)> {
+        #[cfg(test)]
+        identity_tests::columnar::right_keys::record_intern();
         let resident = &operator.state.right;
         let name = &operator.name;
         let hash = hash.unwrap_or_else(|| resident.hasher().hash_one(bytes));
@@ -160,8 +181,16 @@ struct InputEncodings<'a> {
     columns: Option<(state::EncodedColumns, state::EncodedColumns)>,
     hashes: Option<Vec<u64>>,
     _hash_workspace: Option<MemoryReservation>,
+    key_cache: Option<DictionaryKeys>,
     input: ValidatedInput,
     range: std::ops::Range<usize>,
+}
+
+/// Admission-key IDs belong to this record's dictionary and one `InputKeys` owner.
+struct DictionaryKeys {
+    ids: Vec<Option<u32>>,
+    hashes: Vec<u64>,
+    _workspace: MemoryReservation,
 }
 
 impl<'a> InputEncodings<'a> {
@@ -184,8 +213,12 @@ impl<'a> InputEncodings<'a> {
         let columns = (accepted == batch.num_rows())
             .then(|| Self::encode_identity_columns(operator, batch, side))
             .transpose()?;
-        let (hashes, hash_workspace) =
-            Self::batch_key_hashes(operator, batch, input, columns.as_ref())?;
+        let key_cache = Self::dictionary_keys(operator, batch, input, columns.as_ref())?;
+        let (hashes, hash_workspace) = if key_cache.is_some() {
+            (None, None)
+        } else {
+            Self::batch_key_hashes(operator, batch, input, columns.as_ref())?
+        };
         let range = if columns.is_some() {
             0..batch.num_rows()
         } else {
@@ -198,8 +231,33 @@ impl<'a> InputEncodings<'a> {
             columns,
             hashes,
             _hash_workspace: hash_workspace,
+            key_cache,
             input,
             range,
+        }))
+    }
+
+    fn dictionary_keys(
+        operator: &StreamAsofJoinOperator,
+        batch: &RecordBatch,
+        input: ValidatedInput,
+        columns: Option<&(state::EncodedColumns, state::EncodedColumns)>,
+    ) -> Result<Option<DictionaryKeys>> {
+        let Some((keys @ state::EncodedColumns::StringKeys { rows, .. }, _)) = columns else {
+            return Ok(None);
+        };
+        // Do not spend more optional workspace than the existing per-row hashes.
+        let bytes = rows.len() as u64 * (size_of::<Option<u32>>() + size_of::<u64>()) as u64;
+        if input.index != 1 || bytes > batch.num_rows() as u64 * size_of::<u64>() as u64 {
+            return Ok(None);
+        }
+        let Ok(workspace) = operator.reserve_workspace(bytes) else {
+            return Ok(None);
+        };
+        Ok(Some(DictionaryKeys {
+            ids: vec![None; rows.len()],
+            hashes: keys.dictionary_hashes(operator.state.right.hasher())?,
+            _workspace: workspace,
         }))
     }
 
@@ -234,9 +292,15 @@ impl<'a> InputEncodings<'a> {
     fn with_row<R>(
         &mut self,
         row: usize,
-        use_identity: impl FnOnce(&[u8], Option<u64>, state::Encoding) -> Result<R>,
+        use_identity: impl FnOnce(
+            &[u8],
+            Option<u64>,
+            state::Encoding,
+            Option<&mut Option<u32>>,
+        ) -> Result<R>,
     ) -> Result<R> {
         if !self.range.contains(&row) {
+            self.key_cache = None;
             self.columns = None;
             let event_times = times(self.batch, self.side);
             let count = event_times.values()[row..]
@@ -253,12 +317,17 @@ impl<'a> InputEncodings<'a> {
         }
         let (keys, sequences) = self.columns.as_ref().expect("accepted ASOF encodings");
         let index = row - self.range.start;
+        let (hash, cached) = if let Some(cache) = &mut self.key_cache {
+            let state::EncodedColumns::StringKeys { ids, .. } = keys else {
+                unreachable!("cached admission keys require string dictionary IDs")
+            };
+            let id = ids[index] as usize;
+            (Some(cache.hashes[id]), Some(&mut cache.ids[id]))
+        } else {
+            (self.hashes.as_ref().map(|hashes| hashes[row]), None)
+        };
         keys.with_row(index, |bytes| {
-            use_identity(
-                bytes,
-                self.hashes.as_ref().map(|hashes| hashes[row]),
-                sequences.row(index),
-            )
+            use_identity(bytes, hash, sequences.row(index), cached)
         })
     }
 
@@ -591,11 +660,11 @@ impl StreamAsofJoinOperator {
         time: i64,
         row: usize,
     ) -> Result<(LeftOrder, u32)> {
-        encodings.with_row(row, |bytes, hash, sequence| {
+        encodings.with_row(row, |bytes, hash, sequence, cached| {
             let (key, key_index) = if input.index == 0 && state::Encoding::fits_inline(bytes) {
                 (state::Encoding::from_slice(bytes), 0)
             } else {
-                keys.intern(bytes, hash, self)?
+                keys.intern_cached(bytes, hash, cached, self)?
             };
             Ok(((time, key, sequence), key_index))
         })

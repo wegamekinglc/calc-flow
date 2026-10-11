@@ -372,6 +372,7 @@ class AcceptanceRuntimePolicyTests(unittest.TestCase):
         comparison = ModuleType("benchmarks.engine_comparison")
         comparison.expected_output = Mock()
         comparison.workload = Mock(side_effect=AssertionError("ordinary workload"))
+        engine = ModuleType("benchmarks.engine_stream")
         with TemporaryDirectory() as raw:
             root = Path(raw)
             case = {
@@ -387,11 +388,11 @@ class AcceptanceRuntimePolicyTests(unittest.TestCase):
                     "sys.modules",
                     {
                         "benchmarks.engine_comparison": comparison,
-                        "benchmarks.engine_stream": ModuleType(
-                            "benchmarks.engine_stream"
-                        ),
+                        "benchmarks.engine_stream": engine,
                     },
                 ),
+                patch("benchmarks.engine_comparison", comparison, create=True),
+                patch("benchmarks.engine_stream", engine, create=True),
                 patch(
                     "benchmarks.join_asof_acceptance.export_ordering_fixture",
                     return_value={"rows_per_side": 2049},
@@ -536,6 +537,7 @@ class AcceptanceLifecycleTests(unittest.IsolatedAsyncioTestCase):
         ready.set()
         with (
             patch.dict("sys.modules", {engine.__name__: engine}),
+            patch("benchmarks.engine_stream", engine, create=True),
             patch(
                 "benchmarks.join_asof_acceptance_runtime._observe_checkpoints", observe
             ),
@@ -686,6 +688,7 @@ class AcceptancePlanOwnershipTests(unittest.IsolatedAsyncioTestCase):
         }
         with (
             patch.dict("sys.modules", {engine.__name__: engine}),
+            patch("benchmarks.engine_stream", engine, create=True),
             patch(
                 "benchmarks.join_asof_acceptance_runtime.measure_acceptance_job",
                 new=AsyncMock(return_value=(table, evidence)),
@@ -700,6 +703,19 @@ class AcceptancePlanOwnershipTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plan.fingerprint_reads, 1)
         self.assertIs(result[0], table)
         return result[1]
+
+    async def test_preloaded_stream_module_is_restored_after_plan_capture(self):
+        from types import ModuleType
+
+        import benchmarks
+
+        preloaded = ModuleType("benchmarks.engine_stream")
+        preloaded.Runtime = Mock(
+            side_effect=AssertionError("preloaded module escaped test scope")
+        )
+        with patch("benchmarks.engine_stream", preloaded, create=True):
+            await self.exercise("a" * 64)
+            self.assertIs(benchmarks.engine_stream, preloaded)
 
     async def test_trace_identity_survives_runner_consuming_the_plan(self):
         evidence = await self.exercise("a" * 64)
