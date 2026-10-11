@@ -1,8 +1,8 @@
 # Benchmarks
 
-The [scheduled benchmark suite](../docs/benchmark-suite.md) runs the overhead, small and
-standard Python scales, every registered Rust bench target, Studio, frontend and
-isolated stream lifecycle measurements. It adds SQL/native-streaming and
+The [scheduled benchmark suite](../docs/benchmark-suite.md) runs the overhead, small,
+standard and nightly Python scales, every registered Rust bench target, Studio,
+frontend and isolated stream lifecycle measurements. It adds SQL/native-streaming and
 external-engine comparisons at every decade from 10 to 10,000,000 rows, plus warm-state
 incremental measurements. Its 06:00 and 18:00 Asia/Shanghai runs publish
 complete Markdown tables and raw artifacts, including failures. Manual runs
@@ -11,8 +11,8 @@ remain available independently of regular CI.
 Historical `rolling/*.json` reports use Git LFS. Install Git LFS and run
 `git lfs pull --include='benchmarks/rolling/*.json'` to inspect them locally.
 
-The slow legacy Python `nightly` scale is not part of the automated suite.
-The separate 10-to-10M engine and warm-state matrices remain enabled. Native
+The Python scale shards and separate 10-to-10M engine and warm-state matrices
+are part of the complete 22-shard scheduled and manual suite. Native
 streaming in the cross-library table starts from an already-ready runner with
 empty rolling state; runner startup and EOF/shutdown are outside its timer.
 Source/task/channel, rolling, watermarks and Arrow output remain included.
@@ -90,7 +90,7 @@ the corresponding finite or per-batch snapshot oracle. These cases have new
 identities, so the existing compiled-plan and `Program.stream` histories retain
 their original timing contracts.
 
-Standalone scales (`nightly` is manual-only, not a CI suite shard):
+Python scales included in the scheduled and manual suite:
 
 | Scale      | Table rows | Array elements | Matrix dimension |
 |------------|-----------:|---------------:|-----------------:|

@@ -275,7 +275,8 @@ async fn test_sql_retained_checkpoint_keeps_large_metadata_out_of_inline_manifes
 
 #[tokio::test]
 async fn test_sql_retained_checkpoint_ipc_body_is_prepaid_and_failure_atomic() {
-    let (mut operator, job, mut output) = setup(RAW_SUM);
+    let (operator, job, mut output) = setup(RAW_SUM);
+    let mut operator = operator.with_one_gib_pool_for_test();
     let context = StreamOperatorContext::new(&job, "totals", None);
     let values: ArrayRef = Arc::new(Int64Array::from_iter_values(0..100_000));
     let record = RecordBatch::try_new(
@@ -418,7 +419,8 @@ async fn test_sql_retained_empty_metadata_changes_and_failed_updates_recover_exa
 async fn test_sql_retained_snapshot_holds_input_and_metadata_body_credits_after_reset() {
     let mut held = Vec::new();
     for with_metadata in [false, true] {
-        let (mut operator, job, mut output) = setup(RAW_SUM);
+        let (operator, job, mut output) = setup(RAW_SUM);
+        let mut operator = operator.with_one_gib_pool_for_test();
         let context = StreamOperatorContext::new(&job, "totals", None);
         let input = if with_metadata {
             let data = wide_input(0).0;
@@ -569,7 +571,8 @@ async fn assert_schema_workspace_funded(
     metadata: std::collections::HashMap<String, String>,
     source: &str,
 ) {
-    let (mut operator, job, mut output) = setup(RAW_SUM);
+    let (operator, job, mut output) = setup(RAW_SUM);
+    let mut operator = operator.with_one_gib_pool_for_test();
     let context = StreamOperatorContext::new(&job, "totals", None);
     let record = RecordBatch::try_new(
         Arc::new(Schema::new_with_metadata(
