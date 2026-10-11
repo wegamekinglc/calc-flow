@@ -18,8 +18,11 @@ pub struct StreamJobContext {
     settings: JsonMap,
     deadline: Option<DateTime<Utc>>,
     cancellation: CancellationToken,
+    checkpointing: bool,
     static_inputs: Arc<BTreeMap<String, Batch>>,
     gather: super::gather_work::JobGatherOwner,
+    #[cfg(feature = "benchmark-internals")]
+    dispatch_trace: crate::benchmark_internals::DispatchTraceOwner,
 }
 
 impl fmt::Debug for StreamJobContext {
@@ -51,8 +54,11 @@ impl StreamJobContext {
             settings,
             deadline,
             cancellation,
+            checkpointing: true,
             static_inputs: Arc::new(BTreeMap::new()),
             gather: super::gather_work::JobGatherOwner::new(job_id.to_string().into()),
+            #[cfg(feature = "benchmark-internals")]
+            dispatch_trace: crate::benchmark_internals::DispatchTraceOwner::default(),
         }
     }
 
@@ -65,6 +71,11 @@ impl StreamJobContext {
 
     pub(crate) fn gather_owner(&self) -> &super::gather_work::JobGatherOwner {
         &self.gather
+    }
+
+    #[cfg(feature = "benchmark-internals")]
+    pub(crate) fn dispatch_trace(&self) -> &crate::benchmark_internals::DispatchTraceOwner {
+        &self.dispatch_trace
     }
 
     pub(crate) fn with_gather_owner(mut self, gather: super::gather_work::JobGatherOwner) -> Self {
@@ -94,6 +105,16 @@ impl StreamJobContext {
 
     pub const fn cancellation(&self) -> &CancellationToken {
         &self.cancellation
+    }
+
+    /// Whether this job maintains checkpoint state and can capture durable epochs.
+    pub const fn checkpointing(&self) -> bool {
+        self.checkpointing
+    }
+
+    pub(crate) const fn with_checkpointing(mut self, checkpointing: bool) -> Self {
+        self.checkpointing = checkpointing;
+        self
     }
 
     #[allow(

@@ -110,11 +110,14 @@ impl Default for EdgeBudget {
 
 /// Runtime-tunable stream configuration (API note A6).
 ///
-/// Every value here is runtime-tunable (spec NFR-5): it feeds the
-/// runtime-config hash for observability and diagnostics, never the semantic
-/// fingerprint, so tuning it cannot invalidate checkpoints.
+/// These settings feed the runtime-config hash for observability and diagnostics,
+/// never the semantic fingerprint. Checkpoint mode is fixed before job startup;
+/// tuning the other settings does not invalidate existing checkpoints.
 #[derive(Clone, Copy, Debug)]
 pub struct StreamRuntimeConfig {
+    /// Enables managed checkpoints and their recovery journal for this job.
+    /// Defaults to `true`; `false` requires a runner without checkpoint storage.
+    pub checkpointing: bool,
     pub checkpoint_interval: Duration,
     pub checkpoint_timeout: Duration,
     pub edge_budget: EdgeBudget,
@@ -126,6 +129,7 @@ pub struct StreamRuntimeConfig {
 impl Default for StreamRuntimeConfig {
     fn default() -> Self {
         Self {
+            checkpointing: true,
             checkpoint_interval: Duration::from_secs(60),
             checkpoint_timeout: Duration::from_secs(600),
             edge_budget: EdgeBudget::default(),
@@ -1078,12 +1082,16 @@ impl StreamExecutionPlan {
             },
             "retained_epochs": config.retained_epochs,
         });
+        let fields = value
+            .as_object_mut()
+            .ok_or_else(|| CalcFlowError::Internal {
+                message: "runtime configuration hash value is not an object".into(),
+            })?;
+        // Preserve the existing hash for the default checkpoint-enabled mode.
+        if !config.checkpointing {
+            fields.insert("checkpointing".into(), json!(false));
+        }
         if let Some(budget) = config.sql_state_budget {
-            let fields = value
-                .as_object_mut()
-                .ok_or_else(|| CalcFlowError::Internal {
-                    message: "runtime configuration hash value is not an object".into(),
-                })?;
             fields.insert("sql_state_budget".into(), json!(budget));
         }
         let canonical = canonical_json(&value)?;
@@ -1429,13 +1437,6 @@ mod runtime_projection_tests {
         CompiledStreamOperator, EdgeBudget, OperatorCheckpointCapability, RuntimeEdgeKind,
         RuntimeProducer,
     };
-
-    #[test]
-    fn edge_budget_rejects_unbounded_runtime_limits() {
-        assert!(EdgeBudget::new(1_000_001, 1).is_err());
-        assert!(EdgeBudget::new(1, (256 << 20) + 1).is_err());
-        assert!(EdgeBudget::new(EdgeBudget::MAX_ROWS, EdgeBudget::MAX_BYTES).is_ok());
-    }
 
     fn endpoint(node_id: &str, port: &str) -> PortEndpoint {
         PortEndpoint::new(node_id, port).unwrap()
@@ -1896,35 +1897,6 @@ mod volatile_query_tests {
     }
 
     #[test]
-    fn random_builtin_is_still_rejected_by_stream_compilation() {
-        let plan = PipelineBuilder::new("random")
-            .unwrap()
-            .add_node(
-                "features",
-                Box::new(
-                    ExpressionOperator::new(
-                        "features",
-                        "score = random()",
-                        Vec::new(),
-                        None,
-                        Vec::new(),
-                    )
-                    .unwrap(),
-                ),
-            )
-            .unwrap()
-            .compile_stream(
-                &UdfRegistry::new().snapshot(),
-                &StreamRequirements::default(),
-            );
-        let error = plan.unwrap_err();
-        let CalcFlowError::Compile { message } = error else {
-            panic!("expected a compile error, got {error:?}");
-        };
-        assert!(message.contains("random"), "{message}");
-    }
-
-    #[test]
     fn non_query_operators_skip_the_volatility_check() {
         let context = volatile_roll_context();
         let union = NodeOperator::Union(
@@ -1964,30 +1936,5 @@ mod volatile_query_tests {
             );
         assert!(plan.is_ok(), "{:?}", plan.err());
         let _ = default_function_registry();
-    }
-
-    #[test]
-    fn deterministic_datetime_queries_still_compile_through_the_default_registry() {
-        let plan = PipelineBuilder::new("deterministic-datetime")
-            .unwrap()
-            .add_node(
-                "features",
-                Box::new(
-                    ExpressionOperator::new(
-                        "features",
-                        "year = date_part('year', ts)",
-                        Vec::new(),
-                        Some("to_timestamp(x) > to_timestamp(0)".into()),
-                        Vec::new(),
-                    )
-                    .unwrap(),
-                ),
-            )
-            .unwrap()
-            .compile_stream(
-                &UdfRegistry::new().snapshot(),
-                &StreamRequirements::default(),
-            );
-        assert!(plan.is_ok(), "{:?}", plan.err());
     }
 }

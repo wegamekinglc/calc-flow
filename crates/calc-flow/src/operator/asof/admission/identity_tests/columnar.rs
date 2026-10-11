@@ -7,6 +7,9 @@ use datafusion::arrow::{
 use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryLimit, MemoryPool};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+mod descriptors;
+pub(in super::super) mod direct;
+
 #[derive(Debug)]
 struct ObservedPool {
     inner: GreedyMemoryPool,
@@ -93,7 +96,7 @@ fn schema(key: DataType, sequence: DataType) -> SchemaRef {
     ]))
 }
 
-fn fixture(schema: &SchemaRef) -> StreamAsofJoinOperator {
+pub(in super::super) fn fixture(schema: &SchemaRef) -> StreamAsofJoinOperator {
     shaped_fixture(
         schema,
         &["key".into()],
@@ -252,7 +255,8 @@ async fn differential_input(
     let reserved = pool.reserved();
     let (mut legacy, _) = prepared(operator, batch, input, &context, true).await;
     let (mut fast, _) = prepared(operator, batch, input, &context, false).await;
-    assert_eq!(fast.rows.len(), legacy.rows.len());
+    assert_eq!(fast.len(), legacy.len());
+    assert!(fast.rows.is_empty() || fast.rows.len() == legacy.rows.len());
     for ((fast_order, fast_ref), (legacy_order, legacy_ref)) in fast.rows.iter().zip(&legacy.rows) {
         assert_eq!(fast_order, legacy_order);
         assert_eq!(
@@ -268,7 +272,7 @@ async fn differential_input(
         .iter()
         .map(state::PreparedLeftChunk::borrowed_identity_rows)
         .sum();
-    assert_eq!(borrowed, if eligible { 0 } else { fast.rows.len() });
+    assert_eq!(borrowed, if eligible { 0 } else { fast.len() });
     let fast_chunks = fast.left_chunks.take().unwrap();
     let legacy_chunks = legacy.left_chunks.take().unwrap();
     assert_eq!(fast_chunks.len(), legacy_chunks.len());

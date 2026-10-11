@@ -1,5 +1,9 @@
 #[cfg(test)]
 mod tests {
+    mod column_gather_tests;
+    mod complete_expiry_tests;
+    mod expiration_heap_tests;
+
     use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
     use datafusion::arrow::{
@@ -92,47 +96,6 @@ mod tests {
             BatchMetadata::default(),
         )
         .unwrap()
-    }
-
-    #[test]
-    fn derives_exact_prefixed_ports() {
-        let operator =
-            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
-
-        assert_eq!(
-            operator
-                .input_ports()
-                .iter()
-                .map(Port::name)
-                .collect::<Vec<_>>(),
-            ["left", "right"]
-        );
-        let output = operator.output_ports()[0].schema().unwrap();
-        assert_eq!(
-            output
-                .fields()
-                .iter()
-                .map(|field| field.name().as_str())
-                .collect::<Vec<_>>(),
-            [
-                "authorization__account_id",
-                "authorization__authorized_at",
-                "authorization__amount",
-                "payment__account_id",
-                "payment__paid_at",
-                "payment__status",
-            ]
-        );
-        assert!(output.field(2).is_nullable());
-        assert!(output.field(5).is_nullable());
-    }
-
-    #[test]
-    fn rejects_values_beyond_the_json_safe_integer_domain() {
-        let too_large = STREAM_JOIN_MAX_SAFE_JSON_INTEGER + 1;
-        assert!(JoinStateLimits::new(too_large, 1, 1).is_err());
-        assert!(JoinTimeBounds::new(Duration::from_micros(too_large), Duration::ZERO).is_err());
-        assert!(JoinStateLimits::new(1, 1, 1).is_ok());
     }
 
     #[test]
@@ -1428,6 +1391,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_checkpoint_disabled_join_preserves_matches_without_pending_rows() {
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        let job = job().with_checkpointing(false);
+        let context = StreamOperatorContext::new(&job, "match", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data("left", left_batch(vec![0, 1]), &context, &mut collector)
+            .await
+            .unwrap();
+        assert_eq!(operator.status().left.retained_rows, 2);
+        assert!(operator.status().left.retained_bytes > 0);
+        let mut enabled =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        let enabled_job = self::job();
+        let enabled_context = StreamOperatorContext::new(&enabled_job, "match", None);
+        enabled
+            .process_data(
+                "left",
+                left_batch(vec![0, 1]),
+                &enabled_context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            operator.status().left.retained_bytes,
+            enabled.status().left.retained_bytes
+        );
+        assert!(operator.state.deltas.pending.is_empty());
+        operator
+            .process_data("right", right_batch(vec![0]), &context, &mut collector)
+            .await
+            .unwrap();
+        assert_eq!(operator.status().emitted_match_rows, 2);
+        assert_eq!(
+            collector.drain("output")[0].as_data().unwrap().num_rows(),
+            2
+        );
+        let progress = progress_context(
+            &job,
+            (IngressState::Active, None),
+            (IngressState::Active, Some(60_000_002)),
+        );
+        operator
+            .on_ingress_progress("right", &progress)
+            .await
+            .unwrap();
+        assert_eq!(operator.status().left.retained_rows, 0);
+        assert_eq!(operator.status().left.retained_bytes, 0);
+        assert!(operator.state.deltas.pending.is_empty());
+        operator.on_end(&context, &mut collector).await.unwrap();
+        assert!(operator.state.deltas.pending.is_empty());
+        assert_eq!(operator.status().right.retained_rows, 0);
+    }
+
+    #[tokio::test]
     async fn checkpoint_and_restore_round_trip_preserves_state_and_counters() {
         let mut operator =
             StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
@@ -2122,212 +2142,6 @@ mod tests {
         assert!(operator.retained_key_cache.left.is_none());
     }
 
-    #[test]
-    fn metadata_exposes_data_only_configuration_and_debug() {
-        let operator =
-            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
-        assert_eq!(operator.name(), "match");
-        assert_eq!(operator.input_ports().len(), 2);
-        assert_eq!(operator.output_ports().len(), 1);
-        let configuration = operator.configuration();
-        assert_eq!(configuration["join_type"], "inner");
-        assert_eq!(configuration["left_event_time"], "authorized_at");
-        assert!(!configuration.contains_key("callable"));
-        let debug = format!("{operator:?}");
-        assert!(debug.contains("match"), "{debug}");
-    }
-
-    #[test]
-    fn spec_validation_rejects_invalid_declarations() {
-        let bounds =
-            JoinTimeBounds::new(Duration::from_secs(300), Duration::from_secs(60)).unwrap();
-        let limits = JoinStateLimits::new(100, 1_000_000, 1_000).unwrap();
-
-        let empty_keys = StreamJoinSpec::inner(
-            Vec::<String>::new(),
-            ["account_id"],
-            "authorized_at",
-            "paid_at",
-            bounds,
-            limits,
-        );
-        assert!(empty_keys.is_err());
-
-        let unequal = StreamJoinSpec::inner(
-            ["a", "b"],
-            ["account_id"],
-            "authorized_at",
-            "paid_at",
-            bounds,
-            limits,
-        );
-        assert!(unequal.is_err());
-
-        let duplicate = StreamJoinSpec::inner(
-            ["account_id", "account_id"],
-            ["account_id", "account_id"],
-            "authorized_at",
-            "paid_at",
-            bounds,
-            limits,
-        );
-        assert!(duplicate.is_err());
-
-        let empty_event_time = StreamJoinSpec::inner(
-            ["account_id"],
-            ["account_id"],
-            "",
-            "paid_at",
-            bounds,
-            limits,
-        );
-        assert!(empty_event_time.is_err());
-
-        let valid = StreamJoinSpec::inner(
-            ["account_id"],
-            ["account_id"],
-            "authorized_at",
-            "paid_at",
-            bounds,
-            limits,
-        )
-        .unwrap();
-        assert!(valid.clone().with_prefixes("same", "same").is_err());
-        assert!(valid.clone().with_prefixes("not valid", "right").is_err());
-
-        let prefixed = valid.with_prefixes("authorization", "payment").unwrap();
-        assert_eq!(prefixed.left_keys(), ["account_id"]);
-        assert_eq!(prefixed.right_keys(), ["account_id"]);
-        assert_eq!(prefixed.left_event_time(), "authorized_at");
-        assert_eq!(prefixed.right_event_time(), "paid_at");
-        assert_eq!(prefixed.left_prefix(), "authorization");
-        assert_eq!(prefixed.right_prefix(), "payment");
-        assert_eq!(prefixed.join_type(), StreamJoinType::Inner);
-        assert_eq!(prefixed.bounds().before(), Duration::from_secs(300));
-        assert_eq!(prefixed.bounds().after(), Duration::from_secs(60));
-        assert_eq!(prefixed.limits().max_state_rows_per_side(), 100);
-        assert_eq!(prefixed.limits().max_state_bytes_per_side(), 1_000_000);
-        assert_eq!(prefixed.limits().max_matches_per_input_batch(), 1_000);
-        assert!(format!("{prefixed:?}").contains("StreamJoinSpec"));
-    }
-
-    #[test]
-    fn serde_round_trips_and_rejects_unknown_or_wrong_kind_fields() {
-        let source = r#"{
-            "join_type": "inner",
-            "left_keys": ["account_id"],
-            "right_keys": ["account_id"],
-            "left_event_time": "authorized_at",
-            "right_event_time": "paid_at",
-            "bounds": {"before_micros": 300000000, "after_micros": 60000000},
-            "limits": {
-                "max_state_rows_per_side": 100,
-                "max_state_bytes_per_side": 1000000,
-                "max_matches_per_input_batch": 1000
-            }
-        }"#;
-        let parsed: StreamJoinSpec = serde_json::from_str(source).unwrap();
-        assert_eq!(parsed.left_prefix(), "left");
-        assert_eq!(parsed.right_prefix(), "right");
-        let encoded = serde_json::to_value(&parsed).unwrap();
-        assert_eq!(encoded["bounds"]["before_micros"], 300_000_000);
-
-        let unknown = source.replace(
-            "\"join_type\": \"inner\",",
-            "\"join_type\": \"inner\", \"extra\": 1,",
-        );
-        assert!(serde_json::from_str::<StreamJoinSpec>(&unknown).is_err());
-
-        let outer_join = source.replace("\"inner\"", "\"outer\"");
-        assert!(serde_json::from_str::<StreamJoinSpec>(&outer_join).is_err());
-
-        let unknown_bound = source.replace(
-            "\"before_micros\": 300000000,",
-            "\"before_micros\": 300000000, \"extra\": 1,",
-        );
-        assert!(serde_json::from_str::<StreamJoinSpec>(&unknown_bound).is_err());
-
-        let unknown_limit = source.replace(
-            "\"max_matches_per_input_batch\": 1000",
-            "\"max_matches_per_input_batch\": 1000, \"extra\": 1",
-        );
-        assert!(serde_json::from_str::<StreamJoinSpec>(&unknown_limit).is_err());
-
-        let zero_limit = source.replace(
-            "\"max_state_rows_per_side\": 100",
-            "\"max_state_rows_per_side\": 0",
-        );
-        assert!(serde_json::from_str::<StreamJoinSpec>(&zero_limit).is_err());
-    }
-
-    #[tokio::test]
-    async fn event_time_columns_accept_every_timestamp_unit_and_reject_others() {
-        for (unit, _value) in [
-            (TimeUnit::Second, 1_i64),
-            (TimeUnit::Millisecond, 1_000),
-            (TimeUnit::Microsecond, 1_000_000),
-            (TimeUnit::Nanosecond, 1_000_000_000),
-        ] {
-            let schema = Arc::new(Schema::new(vec![
-                Field::new("account_id", DataType::Int64, false),
-                Field::new(
-                    "authorized_at",
-                    DataType::Timestamp(unit, Some("UTC".into())),
-                    false,
-                ),
-                Field::new("amount", DataType::Int64, true),
-            ]));
-            let operator = StreamJoinOperator::new("match", schema, right_schema(), spec());
-            assert!(operator.is_ok(), "unit {unit:?} must be supported");
-        }
-
-        let not_a_timestamp = Arc::new(Schema::new(vec![
-            Field::new("account_id", DataType::Int64, false),
-            Field::new("authorized_at", DataType::Int64, false),
-            Field::new("amount", DataType::Int64, true),
-        ]));
-        let rejected = StreamJoinOperator::new("match", not_a_timestamp, right_schema(), spec());
-        assert!(
-            rejected.is_err(),
-            "non-timestamp event time must be rejected"
-        );
-
-        let missing_key = Arc::new(Schema::new(vec![
-            Field::new("ledger_id", DataType::Int64, false),
-            Field::new(
-                "authorized_at",
-                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
-                false,
-            ),
-        ]));
-        let rejected = StreamJoinOperator::new("match", missing_key, right_schema(), spec());
-        assert!(rejected.is_err(), "missing key column must be rejected");
-
-        let wrong_key_type = Arc::new(Schema::new(vec![
-            Field::new("account_id", DataType::Float64, false),
-            Field::new(
-                "authorized_at",
-                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
-                false,
-            ),
-            Field::new("amount", DataType::Int64, true),
-        ]));
-        let rejected = StreamJoinOperator::new("match", wrong_key_type, right_schema(), spec());
-        assert!(rejected.is_err(), "unsupported key type must be rejected");
-
-        let zoned = Arc::new(Schema::new(vec![
-            Field::new("account_id", DataType::Int64, false),
-            Field::new(
-                "authorized_at",
-                DataType::Timestamp(TimeUnit::Microsecond, Some("America/New_York".into())),
-                false,
-            ),
-            Field::new("amount", DataType::Int64, true),
-        ]));
-        let rejected = StreamJoinOperator::new("match", zoned, right_schema(), spec());
-        assert!(rejected.is_err(), "non-UTC timezone must be rejected");
-    }
-
     #[tokio::test]
     async fn variable_width_payloads_are_charged_and_limited_deterministically() {
         let payload_schema = Arc::new(Schema::new(vec![
@@ -2456,8 +2270,12 @@ struct JoinWork {
     native_boundary_visits: usize,
     admission_mask_blocks: usize,
     native_shifted_entries: usize,
+    native_eviction_comparisons: usize,
+    native_funding_refunds: usize,
     output_column_views: usize,
     output_column_takes: usize,
+    output_column_interleaves: usize,
+    output_source_lookups: usize,
     native_key_lookups: usize,
     scalar_admissions: usize,
     generic_fast_rows: usize,
@@ -2478,7 +2296,9 @@ thread_local! {
         retained_visits: 0, pending_visits: 0, key_encodings: 0, time_decoders: 0,
         sql_probe_table_builds: 0, native_range_visits: 0, native_boundary_visits: 0,
         admission_mask_blocks: 0, native_shifted_entries: 0,
-        output_column_views: 0, output_column_takes: 0,
+        native_eviction_comparisons: 0, native_funding_refunds: 0,
+        output_column_views: 0, output_column_takes: 0, output_column_interleaves: 0,
+        output_source_lookups: 0,
         native_key_lookups: 0,
         scalar_admissions: 0, generic_fast_rows: 0, admission_grants: 0,
         quantum_steps: 0, quantum_boundaries: 0,
@@ -3264,6 +3084,9 @@ impl RetainedRows {
 
     fn swap_remove(&mut self, index: usize) -> StoredRow {
         let row = std::ops::DerefMut::deref_mut(self).swap_remove(index);
+        if let Some(moved) = self.0.get(index) {
+            moved.record.mark_live(index);
+        }
         if let Some(native) = &mut self.1 {
             let native = Arc::get_mut(native).expect("native probe released before eviction");
             native.remove(&row, self.0.get(index).map(|row| (row, index)), |dense| {
@@ -3294,47 +3117,6 @@ impl std::ops::DerefMut for RetainedRows {
     }
 }
 
-#[derive(Default)]
-struct ExpirationIndex {
-    entries: BTreeMap<(EventTime, u64), (usize, u128)>,
-    next_ordinal: u128,
-}
-
-impl ExpirationIndex {
-    fn restored(rows: &[StoredRow]) -> Self {
-        Self {
-            entries: rows
-                .iter()
-                .enumerate()
-                .map(|(index, row)| ((row.event_time, row.row_id), (index, index as u128)))
-                .collect(),
-            next_ordinal: rows.len() as u128,
-        }
-    }
-
-    fn append(&mut self, offset: usize, rows: &[StoredRow]) {
-        for (index, row) in rows.iter().enumerate() {
-            self.entries.insert(
-                (row.event_time, row.row_id),
-                (offset + index, self.next_ordinal + index as u128),
-            );
-        }
-        self.next_ordinal += rows.len() as u128;
-    }
-
-    fn identities(&self, rows: &[StoredRow]) -> Vec<(u64, EventTime, Arc<columnar::FramedKey>)> {
-        let mut ordered = self.entries.values().copied().collect::<Vec<_>>();
-        ordered.sort_by_key(|(_, ordinal)| *ordinal);
-        ordered
-            .into_iter()
-            .map(|(index, _)| {
-                let row = &rows[index];
-                (row.row_id, row.event_time, Arc::clone(&row.encoded_key))
-            })
-            .collect()
-    }
-}
-
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct JoinCheckpointMetadata {
@@ -3346,6 +3128,17 @@ struct JoinCheckpointMetadata {
     metrics: JoinMetrics,
     ended: bool,
     epoch: u64,
+}
+
+#[cfg(test)]
+pub(crate) fn with_one_gib_pool(mut operator: StreamJoinOperator) -> StreamJoinOperator {
+    operator
+        .runtime
+        .initialize_benchmark_pool(Arc::new(
+            datafusion::execution::memory_pool::GreedyMemoryPool::new(1 << 30),
+        ))
+        .unwrap();
+    operator
 }
 
 #[cfg(test)]
@@ -3381,12 +3174,19 @@ struct RestoreSchema<'a> {
     decoded_owned_work: bool,
 }
 
+#[cfg(feature = "benchmark-checkpoint-diagnostic")]
+mod benchmark_checkpoint;
+#[cfg(feature = "benchmark-checkpoint-diagnostic")]
+pub(crate) use benchmark_checkpoint::run_checkpoint_history_diagnostic;
+
 mod admission_masks;
 mod borrowed_key;
 mod checkpoint_compaction;
 mod checkpoint_v2;
 mod columnar;
 mod data_work;
+mod expiration;
+use expiration::ExpirationIndex;
 mod key_arena;
 mod materialization;
 mod metadata_validation;
@@ -4067,10 +3867,11 @@ impl StreamJoinOperator {
             );
         }
         let (owned, admitted) = self.owned_native_matches(plan, admitted, context).await;
-        if let Some(result) = owned {
-            return (result, admitted);
-        }
-        match self.native_matches(plan, &admitted) {
+        let keys = match owned {
+            data_work::ProbeAttempt::Complete(result) => return (result, admitted),
+            data_work::ProbeAttempt::Serial(keys) => keys,
+        };
+        match self.native_matches(plan, &admitted, keys) {
             Ok(Some(native)) => {
                 return (
                     Ok(PreparedMatches {
@@ -4409,6 +4210,7 @@ impl StreamJoinOperator {
         if prepared.output.is_empty() {
             return Ok(());
         }
+        let runtime = self.runtime.runtime()?;
         let materializer = materialization::JoinOutput {
             schema: self.output_ports[0]
                 .schema()
@@ -4432,7 +4234,18 @@ impl StreamJoinOperator {
         )?;
         for range in ranges {
             context.check_cancelled()?;
-            let record = materializer.materialize(range)?;
+            let (record, funding) = match output_gather::materialize(
+                &materializer,
+                range.clone(),
+                runtime,
+                context,
+                &mut self.compaction_cleanup,
+            )
+            .await?
+            {
+                Some(gathered) => gathered,
+                None => (materializer.materialize(range)?, Vec::new()),
+            };
             let metadata =
                 BatchMetadata::new(&self.name, self.state.next_output_sequence, BTreeMap::new())?;
             let message = Batch::table(vec![record], metadata)?;
@@ -4443,6 +4256,7 @@ impl StreamJoinOperator {
                 ));
             }
             output.emit("output", message).await?;
+            drop(funding);
             self.state.next_output_sequence += 1;
         }
         Ok(())
@@ -4460,7 +4274,13 @@ impl StreamJoinOperator {
         Ok(())
     }
 
-    fn commit_prepared(&mut self, ingress: &str, prepared: PreparedJoinBatch) -> Result<()> {
+    fn commit_prepared(
+        &mut self,
+        ingress: &str,
+        prepared: PreparedJoinBatch,
+        checkpointing: bool,
+        expiration_append: expiration::AppendPlan,
+    ) -> Result<()> {
         let mut metrics = prepared.metrics;
         (metrics.retained_rows, metrics.retained_bytes) =
             prospective_state_charge(&metrics, &prepared.retained, &self.name)?;
@@ -4469,25 +4289,34 @@ impl StreamJoinOperator {
         } else {
             JoinSide::Right
         };
-        for row in &prepared.retained {
-            row.record.mark_live();
-            self.state.deltas.pending.push(PendingOp::Upsert {
-                side,
-                row_id: row.row_id,
-                event_time: row.event_time,
-                encoded_key: Arc::clone(&row.encoded_key),
-                record: row.record.clone(),
-                charge: row.charge,
-            });
+        let retained_offset = if side == JoinSide::Left {
+            self.state.left.len()
+        } else {
+            self.state.right.len()
+        };
+        for (offset, row) in prepared.retained.iter().enumerate() {
+            row.record.mark_live(retained_offset + offset);
+            if checkpointing {
+                self.state.deltas.pending.push(PendingOp::Upsert {
+                    side,
+                    row_id: row.row_id,
+                    event_time: row.event_time,
+                    encoded_key: Arc::clone(&row.encoded_key),
+                    record: row.record.clone(),
+                    charge: row.charge,
+                });
+            }
         }
         if side == JoinSide::Left {
             self.state.next_left_row_id = prepared.next_row_id;
             if !prepared.retained.is_empty() {
                 self.retained_key_cache.left = None;
             }
-            self.state
-                .left_expirations
-                .append(self.state.left.len(), &prepared.retained);
+            self.state.left_expirations.append(
+                &self.state.left,
+                &prepared.retained,
+                expiration_append,
+            );
             self.state.left.extend(prepared.retained);
             self.state.metrics.left = metrics;
         } else {
@@ -4495,9 +4324,11 @@ impl StreamJoinOperator {
             if !prepared.retained.is_empty() {
                 self.retained_key_cache.right = None;
             }
-            self.state
-                .right_expirations
-                .append(self.state.right.len(), &prepared.retained);
+            self.state.right_expirations.append(
+                &self.state.right,
+                &prepared.retained,
+                expiration_append,
+            );
             self.state.right.extend(prepared.retained);
             self.state.metrics.right = metrics;
         }
@@ -4507,7 +4338,12 @@ impl StreamJoinOperator {
         Ok(())
     }
 
-    fn evict_progress(&mut self, ingress: &str, progress: IngressProgress) -> Result<()> {
+    fn evict_progress(
+        &mut self,
+        ingress: &str,
+        progress: IngressProgress,
+        checkpointing: bool,
+    ) -> Result<()> {
         match ingress {
             "left" => {
                 let before = self.state.right.len();
@@ -4516,7 +4352,7 @@ impl StreamJoinOperator {
                     &mut self.state.right_expirations,
                     progress,
                     &mut self.state.metrics.right,
-                    &mut self.state.deltas.pending,
+                    checkpointing.then_some(&mut self.state.deltas.pending),
                     EvictionPolicy {
                         extension_micros: self.spec.bounds.before_micros,
                         side: JoinSide::Right,
@@ -4534,7 +4370,7 @@ impl StreamJoinOperator {
                     &mut self.state.left_expirations,
                     progress,
                     &mut self.state.metrics.left,
-                    &mut self.state.deltas.pending,
+                    checkpointing.then_some(&mut self.state.deltas.pending),
                     EvictionPolicy {
                         extension_micros: self.spec.bounds.after_micros,
                         side: JoinSide::Left,
@@ -4683,11 +4519,29 @@ impl StreamOperator for StreamJoinOperator {
     ) -> Result<()> {
         context.check_cancelled()?;
         self.await_compaction_release(context).await?;
+        if !context.job().checkpointing() {
+            self.v2_writer.invalidate_history();
+        }
         let prepared = self.prepare_batch(ingress, &batch, context).await?;
-        self.v2_writer.changed(true)?;
+        let expirations = if prepared.incoming_is_left {
+            &self.state.left_expirations
+        } else {
+            &self.state.right_expirations
+        };
+        let expiration_append = expirations
+            .prepare_append(prepared.retained.len(), context)
+            .await?;
+        if context.job().checkpointing() {
+            self.v2_writer.changed(true)?;
+        }
         self.emit_prepared(&prepared, context, output).await?;
         self.record_prepared_emitted(prepared.output.len())?;
-        self.commit_prepared(ingress, prepared)?;
+        self.commit_prepared(
+            ingress,
+            prepared,
+            context.job().checkpointing(),
+            expiration_append,
+        )?;
         if self.has_sparse_candidates() {
             return self.repair_sparse_chunks(context).await;
         }
@@ -4706,8 +4560,12 @@ impl StreamOperator for StreamJoinOperator {
         } else {
             self.await_compaction_release(context).await?;
         }
-        self.v2_writer.changed(true)?;
-        self.evict_progress(ingress, progress)?;
+        if context.job().checkpointing() {
+            self.v2_writer.changed(true)?;
+        } else {
+            self.v2_writer.invalidate_history();
+        }
+        self.evict_progress(ingress, progress, context.job().checkpointing())?;
         if self.has_sparse_candidates() {
             return self.repair_sparse_chunks(context).await;
         }
@@ -4730,19 +4588,23 @@ impl StreamOperator for StreamJoinOperator {
         _output: &mut dyn StreamCollector,
     ) -> Result<()> {
         self.await_compaction_release(context).await?;
-        self.v2_writer.changed(true)?;
-        let left_identities = self.state.left_expirations.identities(&self.state.left);
-        record_tombstones(
-            &mut self.state.deltas.pending,
-            JoinSide::Left,
-            left_identities,
-        );
-        let right_identities = self.state.right_expirations.identities(&self.state.right);
-        record_tombstones(
-            &mut self.state.deltas.pending,
-            JoinSide::Right,
-            right_identities,
-        );
+        if context.job().checkpointing() {
+            self.v2_writer.changed(true)?;
+            let left_identities = self.state.left_expirations.identities(&self.state.left);
+            record_tombstones(
+                &mut self.state.deltas.pending,
+                JoinSide::Left,
+                left_identities,
+            );
+            let right_identities = self.state.right_expirations.identities(&self.state.right);
+            record_tombstones(
+                &mut self.state.deltas.pending,
+                JoinSide::Right,
+                right_identities,
+            );
+        } else {
+            self.v2_writer.invalidate_history();
+        }
         self.state.left.clear();
         self.state.right.clear();
         self.state.left_expirations = ExpirationIndex::default();
@@ -4931,8 +4793,8 @@ impl StreamJoinOperator {
         let segments_since_base =
             u32::try_from(carried.len()).map_err(|_| counter_overflow(&self.name, "segments"))?;
         let state = StreamJoinState {
-            left_expirations: ExpirationIndex::restored(&left),
-            right_expirations: ExpirationIndex::restored(&right),
+            left_expirations: ExpirationIndex::restored(&left)?,
+            right_expirations: ExpirationIndex::restored(&right)?,
             left: left.into(),
             right: right.into(),
             next_left_row_id: metadata.next_left_row_id,
@@ -4948,8 +4810,10 @@ impl StreamJoinOperator {
                 ..DeltaTracking::default()
             },
         };
-        for row in state.left.iter().chain(state.right.iter()) {
-            row.record.mark_live();
+        for rows in [&state.left, &state.right] {
+            for (dense, row) in rows.iter().enumerate() {
+                row.record.mark_live(dense);
+            }
         }
         check()?;
         let writer = self.v2_writer.next_owner(true)?;
@@ -6694,7 +6558,7 @@ fn evict_opposite(
     expirations: &mut ExpirationIndex,
     progress: IngressProgress,
     metrics: &mut SideMetrics,
-    pending: &mut PendingLog,
+    pending: Option<&mut PendingLog>,
     policy: EvictionPolicy<'_>,
 ) -> Result<()> {
     let EvictionPolicy {
@@ -6702,30 +6566,71 @@ fn evict_opposite(
         side,
         operator_id,
     } = policy;
+    if pending.is_none()
+        && expirations.last_time().is_some_and(|time| {
+            progress.state() == crate::IngressState::Ended
+                || progress.watermark().is_some_and(|watermark| {
+                    i128::from(time.as_micros()) + i128::from(extension_micros)
+                        < i128::from(watermark.as_micros())
+                })
+        })
+    {
+        return evict_all(rows, expirations, metrics, operator_id);
+    }
     let mut evicted = Vec::new();
+    let mut count = 0_u64;
     let mut bytes = 0_u64;
     while let Some((ordinal, row)) = take_expired(rows, expirations, progress, extension_micros) {
         rows.2.remove(&row.record);
         bytes = bytes
             .checked_add(row.charge)
             .ok_or_else(|| counter_overflow(operator_id, "evicted bytes"))?;
-        evicted.push((ordinal, row));
+        count = count
+            .checked_add(1)
+            .ok_or_else(|| counter_overflow(operator_id, "evicted rows"))?;
+        if pending.is_some() {
+            evicted.push((ordinal, row));
+        }
     }
-    if evicted.is_empty() {
+    if count == 0 {
         return Ok(());
     }
-    evicted.sort_by_key(|(ordinal, _)| *ordinal);
-    let count =
-        u64::try_from(evicted.len()).map_err(|_| counter_overflow(operator_id, "evicted rows"))?;
-    record_tombstones(
-        pending,
-        side,
-        evicted
-            .into_iter()
-            .map(|(_, row)| (row.row_id, row.event_time, row.encoded_key))
-            .collect(),
-    );
+    if let Some(pending) = pending {
+        evicted.sort_by_key(|(ordinal, _)| *ordinal);
+        record_tombstones(
+            pending,
+            side,
+            evicted
+                .into_iter()
+                .map(|(_, row)| (row.row_id, row.event_time, row.encoded_key))
+                .collect(),
+        );
+    }
     update_evicted_metrics(metrics, count, bytes, operator_id)
+}
+
+fn evict_all(
+    rows: &mut RetainedRows,
+    expirations: &mut ExpirationIndex,
+    metrics: &mut SideMetrics,
+    operator_id: &str,
+) -> Result<()> {
+    let count =
+        u64::try_from(rows.len()).map_err(|_| counter_overflow(operator_id, "evicted rows"))?;
+    let bytes = rows.iter().try_fold(0_u64, |bytes, row| {
+        bytes
+            .checked_add(row.charge)
+            .ok_or_else(|| counter_overflow(operator_id, "evicted bytes"))
+    })?;
+    let mut next_metrics = metrics.clone();
+    update_evicted_metrics(&mut next_metrics, count, bytes, operator_id)?;
+    for row in rows.0.iter() {
+        rows.2.remove(&row.record);
+    }
+    rows.clear();
+    expirations.clear();
+    *metrics = next_metrics;
+    Ok(())
 }
 
 fn update_evicted_metrics(
@@ -6752,7 +6657,7 @@ fn take_expired(
     progress: IngressProgress,
     extension: u64,
 ) -> Option<(u128, StoredRow)> {
-    let (&(time, _), _) = expirations.entries.first_key_value()?;
+    let time = expirations.first_time(rows)?;
     let expired = progress.state() == crate::IngressState::Ended
         || progress.watermark().is_some_and(|watermark| {
             i128::from(time.as_micros()) + i128::from(extension) < i128::from(watermark.as_micros())
@@ -6760,20 +6665,10 @@ fn take_expired(
     if !expired {
         return None;
     }
-    let (_, (index, ordinal)) = expirations
-        .entries
-        .pop_first()
-        .expect("expiration prefix exists");
+    let (index, ordinal) = expirations.pop(rows).expect("expiration prefix exists");
     #[cfg(test)]
     note_join_work(|work| work.retained_visits += 1);
     let row = rows.swap_remove(index);
-    if let Some(moved) = rows.get(index) {
-        expirations
-            .entries
-            .get_mut(&(moved.event_time, moved.row_id))
-            .expect("every live row has an expiration entry")
-            .0 = index;
-    }
     Some((ordinal, row))
 }
 

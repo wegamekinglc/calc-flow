@@ -573,6 +573,7 @@ pub(super) struct Transaction {
     pub rows: usize,
     groups: Vec<(usize, Group)>,
     track_updates: bool,
+    checkpointing: bool,
     new_groups: Vec<Option<Group>>,
     _reservation: MemoryReservation,
     proof: Option<grouped_float::Proof>,
@@ -992,12 +993,17 @@ impl IncrementalSql {
         let (records, groups, new_groups, container) = self
             .prepare_transaction(candidates, &reservation, context, name)
             .await?;
-        let dirty = self
-            .dirty
-            .prepare(self.groups.len() + new_groups.len(), name)?;
+        let checkpointing = context.job().checkpointing();
+        let dirty = if checkpointing {
+            self.dirty
+                .prepare(self.groups.len() + new_groups.len(), name)?
+        } else {
+            None
+        };
         Ok(Transaction {
             records,
             track_updates: input.0,
+            checkpointing,
             dirty,
             #[cfg(test)]
             rows: input.1,
@@ -2048,14 +2054,16 @@ impl IncrementalSql {
             self.sequential = Some(proof);
         }
         for (slot, group) in transaction.groups {
-            if transaction.track_updates {
+            if transaction.checkpointing && transaction.track_updates {
                 self.dirty.mark(slot);
             }
             self.groups[slot] = group;
         }
         for group in transaction.new_groups.into_iter().flatten() {
             let slot = self.groups.len();
-            self.dirty.mark(slot);
+            if transaction.checkpointing {
+                self.dirty.mark(slot);
+            }
             self.index.insert(group.key.clone(), slot);
             self.groups.push(group);
         }

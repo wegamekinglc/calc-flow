@@ -561,7 +561,7 @@ async fn copy_inventory(
             row_id: row.row_id,
             time: row.time,
             bytes,
-            live: std::sync::atomic::AtomicBool::new(false),
+            dense: AtomicUsize::new(usize::MAX),
         });
     }
     Ok(())

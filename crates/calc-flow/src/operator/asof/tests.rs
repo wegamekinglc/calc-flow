@@ -387,6 +387,53 @@ async fn assert_shared_right_copy_preparation(admission: bool) {
 }
 
 #[tokio::test]
+async fn test_checkpoint_disabled_asof_keeps_live_state_without_log_owners() {
+    let (mut operator, left, right) = prefix_fixture();
+    let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new())
+        .with_checkpointing(false);
+    let context = StreamOperatorContext::new(&job, "asof", None);
+    let mut output = EdgeCollector::new(operator.output_ports().to_vec());
+    for (side, batch) in [("left", left), ("right", right)] {
+        operator
+            .process_data(side, batch, &context, &mut output)
+            .await
+            .unwrap();
+        assert!(operator.status.state_rows > 0);
+        assert!(operator.status.state_bytes > 0);
+        assert_eq!(
+            operator.current_inventory(None).unwrap().bytes,
+            operator.status.state_bytes
+        );
+        assert!(operator.checkpoint_log.credit.is_none());
+        assert!(operator.checkpoint_log.registry.is_none());
+        assert!(operator.checkpoint_log.journal.is_empty());
+        assert_eq!(operator.checkpoint_log.bytes(), 0);
+    }
+    operator
+        .on_watermark(EventTime::from_micros(102), &context, &mut output)
+        .await
+        .unwrap();
+    assert_eq!(operator.status.emitted_left_rows, 2);
+    assert_eq!(operator.status.pending_left_rows, 1);
+    assert!(operator.checkpoint_log.credit.is_none());
+    operator.on_end(&context, &mut output).await.unwrap();
+    assert_eq!(operator.status.emitted_left_rows, 3);
+    assert_eq!(operator.status.matched_rows, 3);
+    assert_eq!(operator.status.state_rows, 0);
+    assert_eq!(operator.status.state_bytes, 0);
+    assert!(operator.checkpoint_log.credit.is_none());
+    assert!(operator.checkpoint_log.journal.is_empty());
+    assert_eq!(
+        output
+            .drain("output")
+            .iter()
+            .map(|message| message.as_data().unwrap().num_rows())
+            .sum::<usize>(),
+        3
+    );
+}
+
+#[tokio::test]
 async fn new_checkpoint_uses_columnar_v6_and_restores_the_same_state_charge() {
     let (mut operator, left, right) = prefix_fixture();
     let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());

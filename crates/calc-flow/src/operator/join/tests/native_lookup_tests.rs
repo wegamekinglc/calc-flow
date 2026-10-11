@@ -184,7 +184,7 @@ async fn assert_reference(
     let reference = reference.unwrap();
     reset_join_work();
     let native = operator
-        .native_matches(&plan, &admitted)
+        .native_matches(&plan, &admitted, None)
         .unwrap()
         .expect("eligible native key");
     assert_eq!(join_work().sql_probe_table_builds, 0);
@@ -298,7 +298,7 @@ async fn test_composite_native_framing_distinguishes_equal_concatenations() {
     let (plan, admitted) = admitted_probe(&mut operator, "right", &probe, &context).await;
     assert_eq!(
         operator
-            .native_matches(&plan, &admitted)
+            .native_matches(&plan, &admitted, None)
             .unwrap()
             .unwrap()
             .pairs
@@ -352,7 +352,10 @@ async fn test_native_probe_interns_each_distinct_repeated_key_once() {
     let source = keyed_right_batch(&[7, 8, 7, 7, 8, 7], &[2, 2, 1, 0, 1, 2]);
     let (plan, admitted) = admitted_probe(&mut operator, "right", &source, &context).await;
     reset_join_work();
-    let native = operator.native_matches(&plan, &admitted).unwrap().unwrap();
+    let native = operator
+        .native_matches(&plan, &admitted, None)
+        .unwrap()
+        .unwrap();
     assert_eq!(join_work().sql_probe_table_builds, 0);
     assert_eq!(join_work().key_encodings, 2);
     assert_eq!(native.pairs.len(), 8);
@@ -367,6 +370,66 @@ async fn test_native_probe_interns_each_distinct_repeated_key_once() {
         .unwrap()
         .incremental_memory_pool();
     drop((native, admitted, operator));
+    drop(context);
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop(job);
+    assert_eq!(pool.reserved(), 0);
+}
+
+#[tokio::test]
+async fn test_retained_probe_keys_release_batch_scratch_before_next_admission() {
+    let rows = 16_384;
+    let mut operator = with_one_gib_pool(
+        StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap(),
+    );
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "match", None);
+    let source = right_batch(vec![0; rows]);
+    let (plan, admitted) = admitted_probe(&mut operator, "right", &source, &context).await;
+    let runtime = operator.runtime.runtime().unwrap();
+    let pool = runtime.incremental_memory_pool();
+    let original = native_lookup::probe_key_charge(&admitted, &plan.key_indices).unwrap();
+    let pressure = runtime.incremental_reservation("native-key-lifetime-pressure");
+    pressure
+        .try_grow((1 << 30) - pool.reserved() - (original - 1))
+        .unwrap();
+    let full = pool.reserved();
+    assert!(
+        operator
+            .native_probe_keys(&plan, &admitted)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(pool.reserved(), full);
+    pressure.shrink(original);
+    let baseline = pool.reserved();
+    let mut first = None;
+    let allocated = allocation_counter::measure(|| {
+        first = operator.native_probe_keys(&plan, &admitted).unwrap();
+    });
+    let first = first.expect("first full construction reservation fits");
+    assert!(allocated.bytes_max <= u64::try_from(original).unwrap());
+    let retained = Arc::clone(first.key(0));
+    assert!(Arc::ptr_eq(&retained, first.key(rows - 1)));
+    let released = allocation_counter::measure(|| drop(first));
+    let live = allocated.bytes_current + released.bytes_current;
+    assert!(live > 0);
+    assert!(usize::try_from(live).unwrap() <= pool.reserved() - baseline);
+    let second = operator.native_probe_keys(&plan, &admitted).unwrap();
+    assert!(
+        second.is_some(),
+        "retained key aliases must not keep the first batch's construction scratch"
+    );
+    drop(second);
+    assert!(
+        pool.reserved() - baseline <= 4_096,
+        "one repeated key must retain only its funded owner, not 16,384 row descriptors"
+    );
+    let released = allocation_counter::measure(|| drop(retained));
+    assert_eq!(live + released.bytes_current, 0);
+    assert_eq!(pool.reserved(), baseline);
+    drop(pressure);
+    drop((admitted, operator));
     drop(context);
     assert!(job.gather_owner().close_and_drain().await.is_empty());
     drop(job);
@@ -438,12 +501,12 @@ async fn assert_native_arena_all_key_types_preserve_exact_v1_frames() {
             keys.row_keys().map(|key| key.to_vec()).collect::<Vec<_>>(),
             expected
         );
-        assert_eq!(
-            join_work().arena_frames,
-            values.len(),
-            "{}",
-            values.data_type()
-        );
+        let frames = if matches!(values.data_type(), DataType::Utf8 | DataType::LargeUtf8) {
+            expected.iter().collect::<BTreeSet<_>>().len()
+        } else {
+            values.len()
+        };
+        assert_eq!(join_work().arena_frames, frames, "{}", values.data_type());
         assert_eq!(join_work().borrowed_key_hashes, 0);
         assert_eq!(join_work().borrowed_key_equalities, 0);
         assert!(join_work().key_type_resolutions <= 2);
@@ -579,10 +642,7 @@ async fn assert_native_probe_key_funding(values: ArrayRef) {
     });
     let keys = keys.expect("eligible key fixtures must take the native path");
     let paid = pool.reserved() - baseline;
-    assert_eq!(
-        paid, layout.charge,
-        "native admission keeps the exact previous P threshold"
-    );
+    assert!(paid <= layout.charge);
     if layout.fits(admitted.len(), plan.key_indices.len()) {
         assert!(
             measured.bytes_max
@@ -593,22 +653,24 @@ async fn assert_native_probe_key_funding(values: ArrayRef) {
     let mut live = measured.bytes_current;
     assert!(live > 0);
     assert!(
-        measured.bytes_max <= u64::try_from(paid).unwrap(),
-        "type={}, rows={}, peak={}, funding={paid}",
+        measured.bytes_max <= u64::try_from(layout.charge).unwrap(),
+        "type={}, rows={}, peak={}, admission={}",
         values.data_type(),
         values.len(),
-        measured.bytes_max
+        measured.bytes_max,
+        layout.charge
     );
     assert!(usize::try_from(live).unwrap() <= paid);
     let first_alias = Arc::clone(keys.key(0));
     let last_alias = Arc::clone(keys.key(admitted.len() - 1));
-    assert_eq!(first_alias.funded_owner().unwrap().1, paid);
-    assert_eq!(last_alias.funded_owner().unwrap().1, paid);
+    let retained_paid = first_alias.funded_owner().unwrap().1;
+    assert!(retained_paid < paid);
+    assert_eq!(last_alias.funded_owner().unwrap().1, retained_paid);
     let released = allocation_counter::measure(|| drop(keys));
     live += released.bytes_current;
     assert!(live > 0);
-    assert!(usize::try_from(live).unwrap() <= paid);
-    assert_eq!(pool.reserved(), baseline + paid);
+    assert!(usize::try_from(live).unwrap() <= retained_paid);
+    assert_eq!(pool.reserved(), baseline + retained_paid);
     let released = allocation_counter::measure(|| drop((first_alias, last_alias)));
     assert_eq!(live + released.bytes_current, 0);
     assert_eq!(pool.reserved(), baseline);
@@ -682,8 +744,9 @@ fn test_native_index_budget_denial_keeps_state_and_refunds_append() {
 }
 
 async fn native_index_budget_denial(service: &crate::runtime::streaming::gather_work::TestService) {
-    let mut operator =
-        StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+    let mut operator = with_one_gib_pool(
+        StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap(),
+    );
     let job = job().with_gather_owner(service.owner("native-index-refund".into()));
     let context = StreamOperatorContext::new(&job, "match", None);
     let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
@@ -701,7 +764,12 @@ async fn native_index_budget_denial(service: &crate::runtime::streaming::gather_
     let pool = runtime.incremental_memory_pool();
     let pressure = runtime.incremental_reservation("native-index-pressure");
     pressure.try_grow((1 << 30) - pool.reserved()).unwrap();
-    assert!(operator.native_matches(&plan, &admitted).unwrap().is_none());
+    assert!(
+        operator
+            .native_matches(&plan, &admitted, None)
+            .unwrap()
+            .is_none()
+    );
     reset_join_work();
     let (matches, admitted) = operator.evaluate_matches(&plan, admitted, &context).await;
     let failure = matches.err().unwrap();
@@ -712,7 +780,10 @@ async fn native_index_budget_denial(service: &crate::runtime::streaming::gather_
     assert_eq!(pool.reserved(), 1 << 30);
     drop(pressure);
     assert_resident_and_gather_funding(pool.as_ref(), &job, admitted_paid);
-    let native = operator.native_matches(&plan, &admitted).unwrap().unwrap();
+    let native = operator
+        .native_matches(&plan, &admitted, None)
+        .unwrap()
+        .unwrap();
     drop(native);
     assert!(index_funding(&operator) > 1_024);
     let paid = assert_resident_and_gather_funding(
@@ -767,7 +838,10 @@ async fn empty_native_result_credit(service: &crate::runtime::streaming::gather_
     )
     .await;
     reset_join_work();
-    let mut native = operator.native_matches(&plan, &admitted).unwrap().unwrap();
+    let mut native = operator
+        .native_matches(&plan, &admitted, None)
+        .unwrap()
+        .unwrap();
     assert!(native.pairs.is_empty());
     assert_eq!(join_work().key_encodings, 2);
     assert_eq!(join_work().sql_probe_table_builds, 0);
@@ -820,8 +894,9 @@ fn test_native_fallback_refunds_unused_index_before_legacy_sql() {
 async fn native_fallback_index_refund(
     service: &crate::runtime::streaming::gather_work::TestService,
 ) {
-    let mut operator =
-        StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+    let mut operator = with_one_gib_pool(
+        StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap(),
+    );
     let job = job().with_gather_owner(service.owner("native-fallback-index".into()));
     let context = StreamOperatorContext::new(&job, "match", None);
     let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
@@ -868,6 +943,99 @@ async fn native_fallback_index_refund(
     drop(admitted);
     drop(context);
     drop(operator);
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop(job);
+    assert_eq!(pool.reserved(), 0);
+}
+
+#[tokio::test]
+async fn test_string_probe_keeps_exact_admission_threshold_and_alias_funding() {
+    for large in [false, true] {
+        for distinct in [false, true] {
+            let values = (0..17)
+                .map(|row| format!("é-key-{}", if distinct { row } else { row % 3 }))
+                .collect::<Vec<_>>();
+            let array: ArrayRef = if large {
+                Arc::new(LargeStringArray::from(values))
+            } else {
+                Arc::new(StringArray::from(values))
+            };
+            assert_string_probe_admission_and_funding(array).await;
+        }
+    }
+}
+
+async fn assert_string_probe_admission_and_funding(values: ArrayRef) {
+    let left = typed_schema(&left_schema(), values.data_type());
+    let right = typed_schema(&right_schema(), values.data_type());
+    let source = typed_batch(&right_batch(vec![0; values.len()]), &right, &values);
+    let mut operator =
+        with_one_gib_pool(StreamJoinOperator::new("match", left, right, spec()).unwrap());
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "match", None);
+    let (plan, admitted) = admitted_probe(&mut operator, "right", &source, &context).await;
+    let expected = admitted
+        .iter()
+        .map(|row| {
+            encode_join_key_columns_v1(row.record.columns(), row.record.offset(), &plan.key_indices)
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let layout = key_arena::ArenaLayout::measure(&admitted, &plan.key_indices)
+        .unwrap()
+        .unwrap();
+    assert!(layout.fits(admitted.len(), 1));
+    assert_eq!(
+        layout.charge,
+        native_lookup::probe_key_charge(&admitted, &[0]).unwrap()
+    );
+    let runtime = operator.runtime.runtime().unwrap();
+    let pool = runtime.incremental_memory_pool();
+    let baseline = pool.reserved();
+    let pressure = runtime.incremental_reservation("string-exact-threshold");
+    pressure
+        .try_grow((1 << 30) - baseline - (layout.charge - 1))
+        .unwrap();
+    let denied = pool.reserved();
+    assert!(
+        operator
+            .native_probe_keys(&plan, &admitted)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(pool.reserved(), denied);
+    pressure.shrink(1);
+    let prepaid = pool.reserved();
+    reset_join_work();
+    let mut keys = None;
+    let allocated = allocation_counter::measure(|| {
+        keys = operator.native_probe_keys(&plan, &admitted).unwrap();
+    });
+    let keys = keys.expect("the unchanged exact charge must admit the string interner");
+    let distinct = expected.iter().collect::<BTreeSet<_>>().len();
+    assert_eq!(join_work().key_encodings, distinct);
+    assert_eq!(join_work().arena_frames, distinct);
+    assert_eq!(
+        keys.row_keys().map(|key| key.to_vec()).collect::<Vec<_>>(),
+        expected
+    );
+    assert!(allocated.bytes_max <= u64::try_from(layout.charge).unwrap());
+    assert!(usize::try_from(allocated.bytes_current).unwrap() <= pool.reserved() - prepaid);
+    let first = Arc::clone(keys.key(0));
+    let last = Arc::clone(keys.key(admitted.len() - 1));
+    let released = allocation_counter::measure(|| drop(keys));
+    let live = allocated.bytes_current + released.bytes_current;
+    assert!(live > 0);
+    assert!(usize::try_from(live).unwrap() <= pool.reserved() - prepaid);
+    assert_eq!(first.as_slice(), expected[0]);
+    assert_eq!(last.as_slice(), expected[expected.len() - 1]);
+    let released = allocation_counter::measure(|| drop((first, last)));
+    assert_eq!(live + released.bytes_current, 0);
+    assert_eq!(pool.reserved(), prepaid);
+    drop(pressure);
+    assert_eq!(pool.reserved(), baseline);
+    drop((admitted, operator));
+    drop(context);
     assert!(job.gather_owner().close_and_drain().await.is_empty());
     drop(job);
     assert_eq!(pool.reserved(), 0);

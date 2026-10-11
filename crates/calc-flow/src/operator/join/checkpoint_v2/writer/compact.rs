@@ -8,7 +8,6 @@ use datafusion::arrow::{
 };
 use datafusion::execution::memory_pool::MemoryReservation;
 
-use super::super::super::StoredRow;
 use super::super::{
     budget,
     ipc::{
@@ -17,16 +16,28 @@ use super::super::{
     },
     payload::Funding,
 };
-use super::buffer::error;
+use super::{buffer::error, row::CheckpointRow};
 use crate::Result;
+
+const SELECTION_RUNS_PER_CHUNK: usize = 1_024;
 
 pub(super) struct CompactBatch {
     pub(super) record: RecordBatch,
     _funding: Arc<Funding>,
 }
 
+#[cfg(test)]
+impl CompactBatch {
+    pub(super) fn funding_owner(&self) -> std::sync::Weak<Funding> {
+        let Self {
+            _funding: funding, ..
+        } = self;
+        Arc::downgrade(funding)
+    }
+}
+
 pub(super) fn compact(
-    rows: &[&StoredRow],
+    rows: &[impl CheckpointRow],
     schema: SchemaRef,
     workspace: &MemoryReservation,
     check: &dyn Fn() -> Result<()>,
@@ -50,35 +61,57 @@ pub(super) fn compact(
 }
 
 fn compact_column(
-    rows: &[&StoredRow],
+    rows: &[impl CheckpointRow],
     index: usize,
     workspace: &MemoryReservation,
     funding: &Arc<Funding>,
     check: &dyn Fn() -> Result<()>,
 ) -> Result<ArrayRef> {
+    let (first, mut consumed) = concatenate_column(rows, index, workspace, funding, check)?;
+    if consumed == rows.len() {
+        return Ok(first);
+    }
     let scratch = workspace.new_empty();
-    concatenate_column(rows, index, &scratch, funding, check)
+    let count = add(
+        1,
+        (rows.len() - consumed).div_ceil(SELECTION_RUNS_PER_CHUNK),
+    )?;
+    admit_selections(count, &scratch)?;
+    let mut chunks = Vec::with_capacity(count);
+    chunks.push(first);
+    while consumed < rows.len() {
+        let (chunk, count) =
+            concatenate_column(&rows[consumed..], index, workspace, funding, check)?;
+        chunks.push(chunk);
+        consumed = add(consumed, count)?;
+    }
+    let arrays = chunks.iter().map(Arc::as_ref).collect::<Vec<_>>();
+    concatenate(&arrays, &scratch, funding, check)
 }
 
 fn concatenate_column(
-    rows: &[&StoredRow],
+    rows: &[impl CheckpointRow],
     index: usize,
     workspace: &MemoryReservation,
     funding: &Arc<Funding>,
     check: &dyn Fn() -> Result<()>,
-) -> Result<ArrayRef> {
-    let count = admit_selections(rows.len(), workspace)?;
+) -> Result<(ArrayRef, usize)> {
+    let scratch = workspace.new_empty();
+    let count = admit_selections(rows.len().min(SELECTION_RUNS_PER_CHUNK), &scratch)?;
     let mut selected = Vec::with_capacity(count);
-    for row in rows {
-        selected.push(selected_column(row, index, workspace, check)?);
+    let mut consumed = 0;
+    while consumed < rows.len() && selected.len() < SELECTION_RUNS_PER_CHUNK {
+        let (column, count) = selected_column(&rows[consumed..], index, &scratch, check)?;
+        selected.push(column);
+        consumed = add(consumed, count)?;
     }
-    if rows.len() == 1 {
+    if selected.len() == 1 {
         let first = &selected[0];
-        admit_selection(first.as_ref(), workspace, check)?;
+        admit_selection(first.as_ref(), &scratch, check)?;
         selected.push(first.slice(0, 0));
     }
     let arrays = selected.iter().map(Arc::as_ref).collect::<Vec<_>>();
-    concatenate(&arrays, workspace, funding, check)
+    Ok((concatenate(&arrays, &scratch, funding, check)?, consumed))
 }
 
 fn admit_selections(rows: usize, workspace: &MemoryReservation) -> Result<usize> {
@@ -94,14 +127,28 @@ fn admit_selections(rows: usize, workspace: &MemoryReservation) -> Result<usize>
 }
 
 fn selected_column(
-    row: &StoredRow,
+    rows: &[impl CheckpointRow],
     index: usize,
     workspace: &MemoryReservation,
     check: &dyn Fn() -> Result<()>,
-) -> Result<ArrayRef> {
+) -> Result<(ArrayRef, usize)> {
     check()?;
-    admit_selection(row.record.column(index).as_ref(), workspace, check)?;
-    Ok(row.record.column_view(index))
+    let first = rows[0].row();
+    let source = first.record.column(index);
+    let offset = first.record.offset();
+    let mut count = 1;
+    for row in &rows[1..] {
+        check()?;
+        let row = row.row();
+        if !Arc::ptr_eq(source, row.record.column(index))
+            || offset.checked_add(count) != Some(row.record.offset())
+        {
+            break;
+        }
+        count = add(count, 1)?;
+    }
+    admit_selection(source.as_ref(), workspace, check)?;
+    Ok((source.slice(offset, count), count))
 }
 
 fn admit_selection(

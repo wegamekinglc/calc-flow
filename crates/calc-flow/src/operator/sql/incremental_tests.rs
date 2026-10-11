@@ -268,7 +268,16 @@ async fn test_sql_incremental_retention_does_not_copy_historical_handles() {
 }
 
 async fn assert_prefix_oracle(query: &str, incoming: &[Batch], eligible: bool) -> SqlOperator {
-    let mut operator = SqlOperator::new("totals", query, vec!["events".into()], vec![]).unwrap();
+    let operator = SqlOperator::new("totals", query, vec!["events".into()], vec![]).unwrap();
+    assert_operator_prefix_oracle(operator, query, incoming, eligible).await
+}
+
+async fn assert_operator_prefix_oracle(
+    mut operator: SqlOperator,
+    query: &str,
+    incoming: &[Batch],
+    eligible: bool,
+) -> SqlOperator {
     let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
     let job = StreamJobContext::new(1, "prefix", JsonMap::new(), None, CancellationToken::new());
     let context = StreamOperatorContext::new(&job, "totals", None);
@@ -554,7 +563,7 @@ async fn test_sql_incremental_unique_groups_fit_bounded_pool() {
                 grouped_batch(keys, values)
             }
         };
-        let mut operator = SqlOperator::new("totals", "SELECT key, COUNT(*) AS rows, COUNT(value) AS valid, SUM(value) AS total, MIN(value) AS lo, MAX(value) AS hi FROM events GROUP BY key", vec!["events".into()], vec![]).unwrap();
+        let mut operator = SqlOperator::new("totals", "SELECT key, COUNT(*) AS rows, COUNT(value) AS valid, SUM(value) AS total, MIN(value) AS lo, MAX(value) AS hi FROM events GROUP BY key", vec!["events".into()], vec![]).unwrap().with_one_gib_pool_for_test();
         let pressure = operator
             .stream_state
             .runtime()
@@ -621,7 +630,8 @@ async fn test_sql_incremental_count_zero_columns_uses_bounded_workspace() {
         vec!["events".into()],
         vec![],
     )
-    .unwrap();
+    .unwrap()
+    .with_one_gib_pool_for_test();
     let pressure = operator
         .stream_state
         .runtime()
@@ -668,7 +678,8 @@ async fn test_sql_incremental_count_unused_payload_does_not_charge_workspace() {
         vec!["events".into()],
         vec![],
     )
-    .unwrap();
+    .unwrap()
+    .with_one_gib_pool_for_test();
     let pressure = operator
         .stream_state
         .runtime()
@@ -697,7 +708,8 @@ async fn test_sql_incremental_ignored_wide_empty_schema_does_not_reserve_handles
         vec!["events".into()],
         vec![],
     )
-    .unwrap();
+    .unwrap()
+    .with_one_gib_pool_for_test();
     let job = StreamJobContext::new(
         1,
         "wide-empty",
@@ -783,7 +795,8 @@ async fn test_sql_incremental_pending_empty_record_copies_are_reserved() {
         vec!["events".into()],
         vec![],
     )
-    .unwrap();
+    .unwrap()
+    .with_one_gib_pool_for_test();
     let pressure = operator
         .stream_state
         .runtime()
@@ -877,8 +890,9 @@ async fn test_sql_incremental_rejected_new_groups_release_candidates_and_retry_o
             }
         };
         let query = "SELECT key, COUNT(*) AS rows, SUM(value) AS total FROM events GROUP BY key";
-        let mut operator =
-            SqlOperator::new("totals", query, vec!["events".into()], vec![]).unwrap();
+        let mut operator = SqlOperator::new("totals", query, vec!["events".into()], vec![])
+            .unwrap()
+            .with_one_gib_pool_for_test();
         let job =
             StreamJobContext::new(1, "reject", JsonMap::new(), None, CancellationToken::new());
         let context = StreamOperatorContext::new(&job, "totals", None);
@@ -1147,7 +1161,9 @@ async fn test_sql_incremental_restore_reserves_empty_record_handles_atomically()
         .unwrap();
     let snapshot = source.checkpoint(Epoch::INITIAL).unwrap();
     assert_eq!(snapshot.inline_metadata["bytes"], serde_json::json!(0));
-    let mut restored = SqlOperator::new("totals", query, vec!["events".into()], vec![]).unwrap();
+    let mut restored = SqlOperator::new("totals", query, vec!["events".into()], vec![])
+        .unwrap()
+        .with_one_gib_pool_for_test();
     let pressure = restored
         .stream_state
         .runtime()

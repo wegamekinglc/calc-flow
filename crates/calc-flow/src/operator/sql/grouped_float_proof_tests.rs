@@ -14,6 +14,13 @@ use datafusion::{
 
 async fn plan(dtype: &DataType) -> (DataFusionRuntime, super::super::IncrementalSql, Batch) {
     let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+    plan_with_runtime(dtype, runtime).await
+}
+
+async fn plan_with_runtime(
+    dtype: &DataType,
+    runtime: DataFusionRuntime,
+) -> (DataFusionRuntime, super::super::IncrementalSql, Batch) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("key", DataType::Int64, true),
         Field::new("value", dtype.clone(), true),
@@ -79,7 +86,14 @@ async fn test_grouped_float_capacity_covers_real_native_arbitrary_jump() {
 #[tokio::test]
 async fn test_grouped_float_proof_growth_refusal_refunds_and_preserves_state() {
     for dtype in [DataType::Float32, DataType::Float64] {
-        let (runtime, mut plan, batch) = plan(&dtype).await;
+        let runtime = DataFusionRuntime::with_benchmark_pool(
+            DataFusionConfig::default(),
+            Arc::new(datafusion::execution::memory_pool::GreedyMemoryPool::new(
+                1 << 30,
+            )),
+        )
+        .unwrap();
+        let (runtime, mut plan, batch) = plan_with_runtime(&dtype, runtime).await;
         let job = StreamJobContext::new(
             921,
             "proof",

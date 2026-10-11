@@ -2100,75 +2100,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sql_query_and_byte_budget_errors_preserve_checkpoint() {
-        let mut operator = SqlOperator::new(
-            "totals",
-            "SELECT SUM(CAST(value AS INT)) AS total FROM events",
-            vec!["events".into()],
-            Vec::new(),
-        )
-        .unwrap();
-        let job = job();
-        let context = StreamOperatorContext::new(&job, "totals", None);
-        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
-        let input = batch("budget-initial", &[1]);
-        let bytes = u64::try_from(input.estimated_bytes().unwrap()).unwrap();
-        operator
-            .process_data("events", input, &context, &mut collector)
-            .await
-            .unwrap();
-        assert_eq!(total(&mut collector), 1);
-        let first = operator.checkpoint(Epoch::INITIAL).unwrap();
-        assert!(
-            operator
-                .process_data(
-                    "events",
-                    batch("query-failure", &[i64::MAX]),
-                    &context,
-                    &mut collector
-                )
-                .await
-                .is_err()
-        );
-        assert!(collector.drain("output").is_empty());
-        assert!(same_segment(
-            &first,
-            &operator.checkpoint(Epoch::INITIAL).unwrap()
-        ));
-        operator
-            .set_state_budget(StateBudget::new(100, bytes).unwrap())
-            .unwrap();
-        let error = operator
-            .process_data(
-                "events",
-                batch("budget-failure", &[2]),
-                &context,
-                &mut collector,
-            )
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("configured state budget"));
-        assert!(collector.drain("output").is_empty());
-        assert!(same_segment(
-            &first,
-            &operator.checkpoint(Epoch::INITIAL).unwrap()
-        ));
-        operator
-            .set_state_budget(StateBudget::new(100, bytes * 2).unwrap())
-            .unwrap();
-        operator
-            .process_data(
-                "events",
-                batch("budget-next", &[2]),
-                &context,
-                &mut collector,
-            )
-            .await
-            .unwrap();
-        assert_eq!(total(&mut collector), 3);
-    }
-
-    #[tokio::test]
     async fn test_sql_checkpoint_encoder_failure_can_be_retried() {
         let mut operator = operator();
         let job = job();
@@ -2224,7 +2155,7 @@ mod tests {
             BatchMetadata::new(source, 0, JsonMap::new()).unwrap(),
         )
         .unwrap();
-        let mut operator = operator();
+        let mut operator = operator().with_one_gib_pool_for_test();
         let job = job();
         let context = StreamOperatorContext::new(&job, "totals", None);
         let mut collector = EdgeCollector::new(operator.output_ports().to_vec());

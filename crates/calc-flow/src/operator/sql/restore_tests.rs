@@ -54,7 +54,15 @@ async fn push(operator: &mut SqlOperator, batch: Batch, job: &StreamJobContext) 
 }
 
 async fn seeded(values: &[i64], job: &StreamJobContext) -> SqlOperator {
-    let mut operator = SqlOperator::new("totals", QUERY, vec!["events".into()], vec![]).unwrap();
+    let operator = SqlOperator::new("totals", QUERY, vec!["events".into()], vec![]).unwrap();
+    seed_operator(operator, values, job).await
+}
+
+async fn seed_operator(
+    mut operator: SqlOperator,
+    values: &[i64],
+    job: &StreamJobContext,
+) -> SqlOperator {
     let _output = push(&mut operator, input("direct-prepare-seed", values), job).await;
     operator
 }
@@ -200,7 +208,14 @@ async fn test_cancelled_and_empty_prepared_restore_preserve_committed_state() {
 #[tokio::test]
 async fn test_invalid_and_unfunded_prepared_restore_preserve_previous_state() {
     let job = job();
-    let mut target = seeded(&[1, 2], &job).await;
+    let mut target = seed_operator(
+        SqlOperator::new("totals", QUERY, vec!["events".into()], vec![])
+            .unwrap()
+            .with_one_gib_pool_for_test(),
+        &[1, 2],
+        &job,
+    )
+    .await;
     let mut source = seeded(&[10, 20], &job).await;
     let committed = target.checkpoint(Epoch::INITIAL).unwrap();
     let replacement = source.checkpoint(Epoch::INITIAL).unwrap();
@@ -275,7 +290,14 @@ async fn test_prepared_current_checkpoint_snapshot_is_paid_without_installing() 
 #[tokio::test]
 async fn test_checkpoint_identity_fee_rejection_preserves_state_and_refunds() {
     let job = job();
-    let mut operator = seeded(&[1, 2], &job).await;
+    let mut operator = seed_operator(
+        SqlOperator::new("totals", QUERY, vec!["events".into()], vec![])
+            .unwrap()
+            .with_one_gib_pool_for_test(),
+        &[1, 2],
+        &job,
+    )
+    .await;
     let committed = operator.checkpoint(Epoch::INITIAL).unwrap();
     let pool = pool(&operator);
     let before = pool.reserved();

@@ -94,7 +94,7 @@ async fn test_having_errors_and_refusals_preserve_state_and_retry() {
     let query = "SELECT SUM(value) AS total FROM events HAVING 100 / (3 - COUNT(*)) > 0";
     let job = job();
     let context = StreamOperatorContext::new(&job, "float_extrema", None);
-    let mut state = operator(&dtype, query);
+    let mut state = operator(&dtype, query).with_one_gib_pool_for_test();
     let first = vec![vec![Some(ONE)]];
     drop(process(&mut state, input(&dtype, &first, 0), &context).await);
     assert!(state.incremental.is_some());

@@ -1,4 +1,5 @@
 use super::*;
+use datafusion::execution::memory_pool::GreedyMemoryPool;
 use datafusion::{
     arrow::{
         array::{Float32Array, Float64Array, Int64Array},

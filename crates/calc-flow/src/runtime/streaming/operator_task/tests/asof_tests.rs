@@ -152,6 +152,18 @@ impl TaskFixture {
             }
             messages.push(message);
         }
+        assert_eq!(
+            self.harness
+                .progress
+                .snapshot()
+                .stream_asof_join
+                .map(|status| status.state_bytes),
+            ack.state
+                .inline_metadata
+                .get("metrics")
+                .and_then(|metrics| metrics["state_bytes"].as_u64()),
+            "task status must include checkpoint-owned state before the next message"
+        );
         self.epoch = self.epoch.next().unwrap();
         messages
     }
@@ -222,6 +234,73 @@ fn watermarks(messages: &[StreamMessage]) -> Vec<i64> {
         .filter_map(StreamMessage::as_watermark)
         .map(EventTime::as_micros)
         .collect()
+}
+
+#[cfg(feature = "benchmark-internals")]
+#[tokio::test]
+async fn test_benchmark_trace_records_actual_asof_dispatch_and_callbacks() {
+    let mut task = TaskFixture::new().await;
+    let recorder = task.harness.dispatch_trace.clone();
+    recorder.start(7, "fingerprint", "node", false).unwrap();
+    recorder.register_nodes(&["node".into()]).unwrap();
+    task.send("right", StreamMessage::data(row(100, 1))).await;
+    task.watermark("right", 106).await;
+    task.send("left", StreamMessage::data(row(105, 1))).await;
+    task.watermark("left", 106).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while task
+            .harness
+            .progress
+            .snapshot()
+            .stream_asof_join
+            .is_none_or(|status| {
+                status.emitted_left_rows != 1
+                    || status.output_watermark_micros != Some(EventTime::from_micros(105))
+            })
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let trace = recorder.take().unwrap();
+    assert_eq!(trace["record_count"], 4);
+    assert_eq!(
+        trace["callback_counts"],
+        serde_json::json!({"data":2,"ingress_progress":2,"watermark":1})
+    );
+    assert_eq!(trace["completed_frontiers"]["node"], 106);
+    for side in ["left", "right"] {
+        let events = trace["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|event| event["ingress"] == side)
+            .collect::<Vec<_>>();
+        assert_eq!(events[0]["kind"], "data");
+        assert_eq!(events[0]["ordinal"], 0);
+        assert_eq!(events[1]["kind"], "watermark");
+    }
+    task.finish().await;
+    for message in [
+        StreamMessage::idle(),
+        StreamMessage::barrier(Epoch::INITIAL),
+        StreamMessage::end_of_input(),
+    ] {
+        let recorder = crate::benchmark_internals::DispatchTraceOwner::default();
+        recorder.start(7, "fingerprint", "node", false).unwrap();
+        assert!(recorder.record("node", "left", &message).is_err());
+        assert!(recorder.take().is_err());
+    }
+    let recorder = crate::benchmark_internals::DispatchTraceOwner::default();
+    recorder.start(7, "fingerprint", "node", true).unwrap();
+    recorder
+        .record("node", "right", &StreamMessage::barrier(Epoch::INITIAL))
+        .unwrap();
+    assert_eq!(
+        recorder.take().unwrap()["events"][0],
+        serde_json::json!({"kind":"barrier","ingress":"right","epoch":1})
+    );
 }
 
 #[tokio::test]

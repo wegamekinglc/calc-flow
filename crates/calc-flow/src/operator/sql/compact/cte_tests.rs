@@ -122,7 +122,7 @@ async fn test_cte_refusal_refunds_and_retry_is_once() {
         let dtype = DataType::Float64;
         let job = job();
         let context = StreamOperatorContext::new(&job, "float_extrema", None);
-        let mut state = operator(&dtype, query);
+        let mut state = operator(&dtype, query).with_one_gib_pool_for_test();
         drop(
             process(
                 &mut state,

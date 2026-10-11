@@ -336,31 +336,44 @@ of the plan. Compilation applies the deterministic-UDF rule above. Before a
 checkpointed job starts, whole-job preflight proves every reachable
 source, operator, bounded edge, and bound sink for each exactly-once output.
 It reports the output and first incompatible stable component before connector
-lifecycle work. An internal job path without checkpoint wiring rejects every
-exactly-once request. The frozen requested/effective proof is kept for every
-output. A best-effort request is never upgraded; an at-least-once request is
+lifecycle work. A job with `StreamRuntimeConfig.checkpointing=false` rejects
+every exactly-once request and every sink requiring an epoch commit protocol.
+It also rejects immutable source history before connector lifecycle work.
+The frozen requested/effective proof is kept for every output. A best-effort request is never upgraded; an at-least-once request is
 downgraded explicitly when a reachable source is lossy or unreplayable; and no
-request is silently upgraded.
+request is silently upgraded. Every runnable checkpoint-disabled output has
+effective `BestEffort` delivery, even when its sources are replayable.
 
 Two hashes describe the plan:
 
 - the semantic fingerprint covers execution mode, graph structure, operator
   configurations, and the UDF catalog; it decides checkpoint compatibility;
-- the runtime-config hash covers `StreamRuntimeConfig` — checkpoint interval
+- the runtime-config hash covers `StreamRuntimeConfig` — checkpoint mode, interval
   and timeout, the per-edge envelope/row/byte budget, and retained epochs —
   and feeds observability and diagnostics only, so retuning it never invalidates
   checkpoints. Durations must be exact multiples of one microsecond, and
-  both budget fields must be positive. The defaults are a 60-second checkpoint
+  both budget fields must be positive. Checkpointing defaults to enabled. Other defaults
+  are a 60-second checkpoint
   interval, a 600-second checkpoint timeout, 10,000 envelopes, 10,000 rows and
   64 MiB per edge, and two retained epochs.
 
 ## Job preflight
 
 The crate-root `StreamingRunner` runs a bounded
-source-to-operator-to-sink job with managed epoch checkpoints and returns an
-owning `StreamingJob`. Its public connector and lifecycle types project the
+source-to-operator-to-sink job with optional managed epoch checkpoints and
+returns an owning `StreamingJob`. Its public connector and lifecycle types project the
 internal task/coordinator machinery without exposing control-message
 constructors or connector payloads.
+
+`StreamingRunner::new` requires managed storage and defaults to checkpointing.
+`StreamingRunner::without_checkpoints` owns no storage and sets
+`checkpointing=false`; a supplied runtime config must agree with that choice.
+The immutable job context exposes the selected mode to operators. Disabled
+jobs retain live state and all runtime budgets, but omit recovery-only Join,
+ASOF, SQL, and Window bookkeeping, checkpoint coordination, restore, and
+terminal snapshots. EOF still drains final output and awaits cleanup. The
+checkpoint status retains its existing empty projection; configuration, rather
+than a zero epoch count, identifies disabled mode.
 
 One pure whole-job preflight consumes the plan and validates the context
 fingerprint, runtime topology, every source and sink route, duplicate or
@@ -534,6 +547,52 @@ checksum. Corrupt higher candidates, links, unexpected entry types, and paths
 outside the managed roots fail closed. Regular abandoned `.tmp*` manifest
 files are removed during a serialized scan; links and directories are never
 followed or removed as temporary files.
+
+Each managed operator or sink snapshot first classifies all its segments.
+Already-established session carries retain their original handles and avoid
+staging, validation, publication, and payload reloads. New segments stage in one
+batch, pass staged validation, and publish alongside any matching committed
+segments whose publication is not yet confirmed. These operations complete
+before the participant acknowledges the checkpoint.
+
+`StateLineageBackend::stage_segments` accepts borrowed handle/byte-slice pairs
+as `&[(&StateHandle, &[u8])]`. Its provided implementation preflights conflicting
+identities at the same path, processes exact duplicate pairs once, and delegates
+to `stage_segment` sequentially in first-appearance order. A duplicate handle
+with different bytes is rejected. Existing backend implementations retain
+their single-operation guarantees without implementing another method. Local
+also rejects distinct handles that resolve to the same staging target. Empty
+input succeeds without staging I/O.
+
+The local backend holds publication serialization for the complete staging
+batch. Each new file is written, flushed, synced, and persisted without
+overwriting an existing file. After all requested files pass integrity checks,
+each affected staging owner directory is synced once. Single `stage_segment`
+calls retain a complete staging durability boundary before returning success.
+Visible staged bytes from a failed attempt must be verified and their directory
+synced again on retry; matching bytes alone do not establish durability.
+Directory creation retains separate ancestor synchronization, including retries
+through a fresh lineage session. Subsequent publication renames segments in
+order and syncs each affected committed directory once; manifest publication
+retains its separate durability boundary.
+
+`StateLineageBackend::publish_segments` provides a compatible sequential default
+for other backends: it preflights conflicting handles and exact duplicates,
+accepts successfully verified committed handles, and calls `publish_segment`
+only for missing handles. Its success retains that backend's existing
+committed-read and publication guarantees. Retrying visible committed files
+with the local backend verifies their bytes and repeats directory confirmation
+before reporting success.
+
+A failed staging or publication batch can leave complete, visible orphan files;
+it does not advance the session's carried or verified handles or working pins.
+Classification or staging failure starts no publication and produces no
+manifest or checkpoint acknowledgement. Managed cancellation starts no batch
+when already requested; once admitted, the entire batch, including its backend
+lock wait and remaining segments, settles while lineage ownership is retained.
+Cancellation during staging then returns without validation, publication, or
+new session entries, pins, or acknowledgement. Arbitrarily dropping a public
+backend future does not provide this managed settlement guarantee.
 
 Bounded manifest loading also accepts legacy v3 source entries that omitted
 `history`. It retains that omission through serialization and checksum

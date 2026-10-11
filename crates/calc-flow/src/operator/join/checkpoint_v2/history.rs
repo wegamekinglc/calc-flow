@@ -1,12 +1,13 @@
-use std::collections::{BTreeMap, BTreeSet};
-
 use datafusion::execution::memory_pool::MemoryReservation;
 
-use super::super::{JoinSide, OperatorStateSnapshot, metadata_validation::ValidatedMetadata};
-use super::frame::{Index, Record, Tombstone, Upsert};
-use super::geometry::{Geometry, checked, invalid};
-use super::inventory::{self, Inventory};
-use crate::{CalcFlowError, Result};
+use super::super::{JoinSide, OperatorStateSnapshot};
+use super::frame::{Payload, Records};
+use super::geometry::{self, Geometry, checked, invalid};
+use super::inventory;
+use super::ipc::accounting::{product, reserve, sum};
+use crate::Result;
+
+mod merge;
 
 #[derive(Clone, Copy)]
 pub(super) struct Locator<'a> {
@@ -16,191 +17,145 @@ pub(super) struct Locator<'a> {
     pub(super) digest: [u8; 32],
     pub(super) payload_row: u64,
     pub(super) key: &'a [u8],
-    introduced_in: Option<u64>,
 }
 
-#[derive(Default)]
-pub(super) struct SideHistory<'a> {
-    pub(super) live: BTreeMap<u64, Locator<'a>>,
-    pub(super) locators: BTreeSet<([u8; 32], u64)>,
-    pub(super) historical: BTreeMap<u64, Locator<'a>>,
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct LiveSummary {
+    pub(super) rows: usize,
+    pub(super) bytes: u64,
 }
 
-pub(super) fn fold<'a>(
-    snapshot: &'a OperatorStateSnapshot,
-    inventory: &Inventory<'_>,
-    metadata: &ValidatedMetadata,
-    geometry: &Geometry,
-    workspace: &MemoryReservation,
-    check: &dyn Fn() -> Result<()>,
-) -> Result<[SideHistory<'a>; 2]> {
-    reserve(workspace, geometry)?;
-    check()?;
-    let left = fold_side(
-        snapshot,
-        inventory,
-        JoinSide::Left,
-        metadata.next_left_row_id,
-        check,
-    )?;
-    check()?;
-    let right = fold_side(
-        snapshot,
-        inventory,
-        JoinSide::Right,
-        metadata.next_right_row_id,
-        check,
-    )?;
-    check()?;
-    Ok([left, right])
-}
-
-fn fold_side<'a>(
-    snapshot: &'a OperatorStateSnapshot,
-    inventory: &Inventory<'_>,
-    side: JoinSide,
-    next_id: u64,
-    check: &dyn Fn() -> Result<()>,
-) -> Result<SideHistory<'a>> {
-    let mut history = SideHistory::default();
-    history.apply(&base_index(snapshot, side)?, next_id, check)?;
-    fold_deltas(snapshot, inventory, side, next_id, check, &mut history)?;
-    Ok(history)
-}
-
-fn fold_deltas<'a>(
-    snapshot: &'a OperatorStateSnapshot,
-    inventory: &Inventory<'_>,
-    side: JoinSide,
-    next_id: u64,
-    check: &dyn Fn() -> Result<()>,
-    history: &mut SideHistory<'a>,
-) -> Result<()> {
-    for delta in inventory.delta_sides() {
-        check()?;
-        let (epoch, sides) = checked(delta)?;
-        if !listed_side(sides, side)? {
-            continue;
-        }
-        history.apply(&delta_index(snapshot, side, epoch)?, next_id, check)?;
+impl LiveSummary {
+    fn add(&mut self, locator: &Locator<'_>) -> Result<()> {
+        self.rows = self
+            .rows
+            .checked_add(1)
+            .ok_or_else(|| invalid("V2 retained row count overflow"))?;
+        self.bytes = self
+            .bytes
+            .checked_add(locator.charge)
+            .ok_or_else(|| invalid("V2 retained byte count overflow"))?;
+        Ok(())
     }
-    Ok(())
 }
 
-fn delta_index(snapshot: &OperatorStateSnapshot, side: JoinSide, epoch: u64) -> Result<Index<'_>> {
-    let segment = delta_segment(snapshot, side, epoch)?;
-    checked(Index::delta(segment, side, epoch))
+struct IndexGroups<'a> {
+    side: JoinSide,
+    epoch: Option<u64>,
+    groups: [Records<'a>; 2],
 }
 
-fn base_index(snapshot: &OperatorStateSnapshot, side: JoinSide) -> Result<Index<'_>> {
-    let name = match side {
-        JoinSide::Left => "left-base",
-        JoinSide::Right => "right-base",
-    };
-    let base = snapshot
-        .segments
-        .get(name)
-        .ok_or_else(|| invalid("V2 base segment is missing"))?;
-    checked(Index::base(base.bytes(), side))
+struct PayloadFrame<'a> {
+    side: JoinSide,
+    digest: [u8; 32],
+    frame: Payload<'a>,
 }
 
-impl<'a> SideHistory<'a> {
-    fn apply(
-        &mut self,
-        index: &Index<'a>,
-        next_id: u64,
+pub(super) struct History<'a> {
+    indexes: Vec<IndexGroups<'a>>,
+    payloads: Vec<PayloadFrame<'a>>,
+    credit: MemoryReservation,
+}
+
+impl<'a> History<'a> {
+    pub(super) fn new(
+        snapshot: &'a OperatorStateSnapshot,
+        geometry: &Geometry,
+        workspace: &MemoryReservation,
         check: &dyn Fn() -> Result<()>,
-    ) -> Result<()> {
-        let mut records = index.records();
-        loop {
+    ) -> Result<Self> {
+        let indexes = snapshot
+            .segments
+            .len()
+            .checked_sub(geometry.payloads)
+            .ok_or_else(|| invalid("V2 index count underflow"))?;
+        let mut history = Self::allocate(indexes, geometry.payloads, workspace)?;
+        for (name, segment) in &snapshot.segments {
             check()?;
-            let Some(record) = checked(records.next())? else {
-                return Ok(());
-            };
-            match record {
-                Record::Upsert(row) => self.upsert(&row, next_id, index.epoch)?,
-                Record::Tombstone(row) => self.remove(&row, index.epoch)?,
-            }
+            history.add_segment(name, segment.bytes(), check)?;
         }
+        Ok(history)
     }
 
-    fn upsert(&mut self, row: &Upsert<'a>, next_id: u64, epoch: Option<u64>) -> Result<()> {
-        if row.row_id >= next_id || self.historical.contains_key(&row.row_id) {
+    fn allocate(indexes: usize, payloads: usize, workspace: &MemoryReservation) -> Result<Self> {
+        let credit = workspace.new_empty();
+        reserve(
+            &credit,
+            sum(&[
+                product(indexes, size_of::<IndexGroups<'_>>())?,
+                product(payloads, size_of::<PayloadFrame<'_>>())?,
+            ])?,
+        )?;
+        let history = Self {
+            indexes: Vec::with_capacity(indexes),
+            payloads: Vec::with_capacity(payloads),
+            credit,
+        };
+        if history.indexes.capacity() != indexes || history.payloads.capacity() != payloads {
             return Err(invalid(
-                "V2 historical row ID is reused or exceeds its next ID",
+                "V2 history descriptor capacity differs from its funding",
             ));
         }
-        if !self.locators.insert((row.digest, row.payload_row)) {
-            return Err(invalid("V2 payload row is introduced more than once"));
+        Ok(history)
+    }
+
+    fn add_segment(
+        &mut self,
+        name: &str,
+        bytes: &'a [u8],
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<()> {
+        let (side, suffix) = checked(inventory::split_side(name))?;
+        if let Some(digest) = suffix.strip_prefix("payload-") {
+            self.payloads.push(PayloadFrame {
+                side,
+                digest: checked(inventory::digest(digest))?,
+                frame: checked(Payload::decode(bytes, side))?,
+            });
+        } else {
+            let index = geometry::index(bytes, suffix, side)?;
+            self.indexes.push(IndexGroups {
+                side,
+                epoch: index.epoch,
+                groups: index.groups(check)?,
+            });
         }
-        let locator = Locator {
-            row_id: row.row_id,
-            time: row.time,
-            charge: row.charge,
-            digest: row.digest,
-            payload_row: row.payload_row,
-            key: row.key,
-            introduced_in: epoch,
-        };
-        self.historical.insert(row.row_id, locator);
-        self.live.insert(row.row_id, locator);
         Ok(())
     }
 
-    fn remove(&mut self, row: &Tombstone<'_>, epoch: Option<u64>) -> Result<()> {
-        let live = self
-            .live
-            .get(&row.row_id)
-            .ok_or_else(|| invalid("V2 tombstone does not identify a live row"))?;
-        if epoch.is_some() && live.introduced_in == epoch {
-            return Err(invalid("V2 index upsert and tombstone groups overlap"));
+    pub(super) fn scan(
+        &self,
+        side: JoinSide,
+        next_id: u64,
+        check: &dyn Fn() -> Result<()>,
+        mut visit: impl FnMut(&Locator<'a>, bool) -> Result<()>,
+    ) -> Result<LiveSummary> {
+        let mut scan = merge::Scan::new(self, side, check)?;
+        let mut summary = LiveSummary::default();
+        while let Some((locator, live)) = scan.next(next_id, check)? {
+            self.locate(side, &locator)?;
+            if live {
+                summary.add(&locator)?;
+            }
+            visit(&locator, live)?;
         }
-        if live.time != row.time || live.key != row.key {
-            return Err(invalid("V2 tombstone identity differs from its live row"));
+        Ok(summary)
+    }
+
+    fn locate(&self, side: JoinSide, locator: &Locator<'_>) -> Result<()> {
+        let index = self
+            .payloads
+            .binary_search_by_key(&(side, locator.digest), |payload| {
+                (payload.side, payload.digest)
+            })
+            .map_err(|_| invalid("V2 upsert references an unknown payload"))?;
+        let row = usize::try_from(locator.payload_row)
+            .map_err(|_| invalid("V2 payload row does not fit usize"))?;
+        if checked(self.payloads[index].frame.row_id(row))? != locator.row_id {
+            return Err(invalid("V2 payload row ID differs from its upsert"));
         }
-        self.live.remove(&row.row_id);
         Ok(())
     }
-}
-
-fn listed_side(sides: &[serde_json::Value], expected: JoinSide) -> Result<bool> {
-    for value in sides {
-        if checked(inventory::side(value))? == expected {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-fn delta_segment(snapshot: &OperatorStateSnapshot, side: JoinSide, epoch: u64) -> Result<&[u8]> {
-    let prefix = match side {
-        JoinSide::Left => "left-delta-",
-        JoinSide::Right => "right-delta-",
-    };
-    snapshot
-        .segments
-        .iter()
-        .find(|(name, _)| {
-            name.strip_prefix(prefix)
-                .and_then(|text| text.parse::<u64>().ok())
-                == Some(epoch)
-        })
-        .map(|(_, segment)| segment.bytes())
-        .ok_or_else(|| invalid("V2 listed delta segment is missing"))
-}
-
-fn reserve(workspace: &MemoryReservation, geometry: &Geometry) -> Result<()> {
-    let count = geometry.upserts;
-    let bytes = tree::<u64, Locator<'_>>(count)
-        .and_then(|bytes| bytes.checked_add(tree::<u64, Locator<'_>>(count)?))
-        .and_then(|bytes| bytes.checked_add(tree::<([u8; 32], u64), ()>(count)?))
-        .and_then(|bytes| bytes.checked_add(2 * size_of::<SideHistory<'_>>()))
-        .ok_or_else(|| invalid("V2 history workspace charge overflow"))?;
-    workspace
-        .try_grow(bytes)
-        .map_err(|_| CalcFlowError::Internal {
-            message: "V2 history workspace credit admission failed".into(),
-        })
 }
 
 pub(super) fn tree<K, V>(count: usize) -> Option<usize> {

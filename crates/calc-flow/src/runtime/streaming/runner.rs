@@ -155,6 +155,7 @@ pub(super) struct JobCore {
     status_projection: StatusProjection,
     runtime_status: Mutex<RuntimeStatus>,
     checkpoint_enabled: bool,
+    sink_lifecycle_timeout: Duration,
     manual_checkpoint: Mutex<Option<CheckpointCoordinatorHandle>>,
     operation_cancel_requested: AtomicBool,
     entity_work: JobEntityWorkOwner,
@@ -225,6 +226,7 @@ impl JobCore {
                 ..RuntimeStatus::default()
             }),
             checkpoint_enabled,
+            sink_lifecycle_timeout: CONNECTOR_CLOSE_TIMEOUT,
             manual_checkpoint: Mutex::new(None),
             operation_cancel_requested: AtomicBool::new(false),
             entity_work: JobEntityWorkOwner::new(
@@ -942,6 +944,16 @@ impl OneShotContinuousRunner {
         OneShotStartObserver::new(runner, start)
     }
 
+    pub(crate) fn start_with_config(
+        self,
+        spec: ContinuousJobSpec,
+        config: StreamRuntimeConfig,
+    ) -> OneShotStartObserver {
+        let runner = self.runner;
+        let start = runner.start_with_config(spec, config);
+        OneShotStartObserver::new(runner, start)
+    }
+
     pub(crate) fn start_checkpointed(
         self,
         spec: ContinuousJobSpec,
@@ -1098,7 +1110,22 @@ impl ContinuousRunner {
     }
 
     pub(crate) fn start(&self, spec: ContinuousJobSpec) -> StartObserver {
-        self.start_internal(spec, None)
+        let config = StreamRuntimeConfig {
+            checkpointing: false,
+            checkpoint_timeout: CONNECTOR_CLOSE_TIMEOUT,
+            edge_budget: spec.edge_budget,
+            ..StreamRuntimeConfig::default()
+        };
+        self.start_with_config(spec, config)
+    }
+
+    pub(crate) fn start_with_config(
+        &self,
+        mut spec: ContinuousJobSpec,
+        config: StreamRuntimeConfig,
+    ) -> StartObserver {
+        spec.edge_budget = config.edge_budget;
+        self.start_internal(spec, None, config)
     }
 
     pub(crate) fn start_checkpointed(
@@ -1106,7 +1133,8 @@ impl ContinuousRunner {
         spec: ContinuousJobSpec,
         checkpoint: CheckpointRuntimeSpec,
     ) -> StartObserver {
-        self.start_internal(spec, Some(checkpoint))
+        let config = checkpoint.config;
+        self.start_internal(spec, Some(checkpoint), config)
     }
 
     #[allow(
@@ -1117,13 +1145,21 @@ impl ContinuousRunner {
         &self,
         mut spec: ContinuousJobSpec,
         checkpoint: Option<CheckpointRuntimeSpec>,
+        config: StreamRuntimeConfig,
     ) -> StartObserver {
         #[cfg(test)]
         let launch_probe = self.core.next_launch_probe.lock().take();
-        if let Some(budget) = checkpoint
-            .as_ref()
-            .and_then(|checkpoint| checkpoint.config.sql_state_budget)
-        {
+        if let Err(error) = config.validate() {
+            return preflight_error_observer(error);
+        }
+        if config.checkpointing != checkpoint.is_some() {
+            return preflight_error_observer(CalcFlowError::InvalidArgument {
+                field: "checkpointing".into(),
+                message: "must match the runner's checkpoint storage mode".into(),
+            });
+        }
+        spec.context = spec.context.with_checkpointing(config.checkpointing);
+        if let Some(budget) = config.sql_state_budget {
             if let Err(error) = spec.plan.set_sql_state_budget(Some(budget)) {
                 return preflight_error_observer(error);
             }
@@ -1135,7 +1171,7 @@ impl ContinuousRunner {
             },
             None => None,
         };
-        let validated = match preflight_job(spec) {
+        let mut validated = match preflight_job(spec) {
             Ok(validated) => validated,
             Err(error) => {
                 return StartObserver::ready(Err(StartFailure {
@@ -1164,6 +1200,14 @@ impl ContinuousRunner {
                 field: format!("requirements.delivery.{output_id}"),
                 message: "exactly-once delivery requires a checkpoint runtime".into(),
             });
+        }
+        if checkpoint.is_none() {
+            if let Err(error) = validate_checkpoint_disabled_job(&validated) {
+                return preflight_error_observer(error);
+            }
+            for proof in validated.delivery_proofs.values_mut() {
+                proof.effective = crate::DeliveryGuarantee::BestEffort;
+            }
         }
         if checkpoint.is_some()
             && let Err(error) = validate_checkpoint_operator_capabilities(&validated.plan)
@@ -1205,15 +1249,18 @@ impl ContinuousRunner {
         let job_id = validated.context.job_id();
         let status_projection = StatusProjection::new(&validated);
         let metrics = metrics_for_job(&validated);
-        let core = JobCore::new(
-            launch_id,
-            job_id,
-            self.core.commands.clone(),
-            metrics,
-            status_projection,
-            checkpoint.is_some(),
-            validated.plan.name.clone(),
-        );
+        let core = JobCore {
+            sink_lifecycle_timeout: config.checkpoint_timeout,
+            ..JobCore::new(
+                launch_id,
+                job_id,
+                self.core.commands.clone(),
+                metrics,
+                status_projection,
+                checkpoint.is_some(),
+                validated.plan.name.clone(),
+            )
+        };
         #[cfg(test)]
         let core = JobCore {
             launch_probe,
@@ -1400,6 +1447,28 @@ fn preflight_error_observer(error: CalcFlowError) -> StartObserver {
         diagnostic_id: None,
         cleanup_failures: Vec::new(),
     }))
+}
+
+fn validate_checkpoint_disabled_job(job: &ValidatedContinuousJob) -> crate::Result<()> {
+    for (output_id, sinks) in &job.sinks {
+        for sink in sinks {
+            if !sink.binding.is_ordinary() {
+                return Err(CalcFlowError::InvalidArgument {
+                    field: format!("sinks.{output_id}.{}.delivery", sink.sink_id),
+                    message: "epoch-based sink delivery requires a checkpoint runtime".into(),
+                });
+            }
+        }
+    }
+    for (source_id, source) in &job.sources {
+        if source.history_spec().is_some() {
+            return Err(CalcFlowError::InvalidArgument {
+                field: format!("sources.{source_id}.history"),
+                message: "immutable history requires managed checkpoint storage".into(),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn checkpoint_identity(
@@ -3762,11 +3831,7 @@ fn register_boundary_tasks(
                 metrics: core.metrics.clone(),
                 data_gate: runtime.data_gate.subscribe(),
                 launch_cancel: core.launch_cancel.clone(),
-                lifecycle_timeout: checkpoint
-                    .as_ref()
-                    .map_or(CONNECTOR_CLOSE_TIMEOUT, |checkpoint| {
-                        checkpoint.config.checkpoint_timeout
-                    }),
+                lifecycle_timeout: core.sink_lifecycle_timeout,
                 checkpoint: sink_checkpoint,
                 epoch_owner: SinkEpochOwner::default(),
                 #[cfg(test)]

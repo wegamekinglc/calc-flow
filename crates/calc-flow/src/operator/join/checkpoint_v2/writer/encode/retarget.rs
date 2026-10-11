@@ -2,9 +2,10 @@ use datafusion::execution::memory_pool::MemoryReservation;
 
 use super::super::super::{
     budget,
-    ipc::accounting::{self, add, sum},
+    ipc::accounting::{add, sum},
 };
-use super::super::buffer::{ensure, error};
+use super::super::buffer::{PaidBuffer, ensure, error};
+use super::{own_segment, segment_charge};
 use crate::{Epoch, Result, StateSegment};
 
 pub(in crate::operator::join::checkpoint_v2::writer) fn at_epoch(
@@ -30,24 +31,21 @@ fn rebind(
     side: &str,
     epoch: Epoch,
 ) -> Result<(String, StateSegment)> {
-    admit(original, encoded.segments.len(), encoded.credit())?;
+    let charge = admit(original, encoded.segments.len(), encoded.credit())?;
     let name = format!("{side}-delta-{}", epoch.as_u64());
-    let mut bytes = original.bytes().to_vec();
+    let mut bytes = PaidBuffer::exact(encoded.credit(), 0, original.bytes().len())?;
+    bytes.append(original.bytes())?;
+    let mut bytes = bytes.into_bytes()?;
     write_epoch(&mut bytes, epoch)?;
-    let replacement = StateSegment::new(bytes).with_owner(encoded.funding.clone());
+    let replacement = own_segment(bytes, encoded.credit(), charge);
     Ok((name, replacement))
 }
 
-fn admit(segment: &StateSegment, segments: usize, credit: &MemoryReservation) -> Result<()> {
+fn admit(segment: &StateSegment, segments: usize, credit: &MemoryReservation) -> Result<usize> {
     let map = budget::tree::<String, StateSegment>(add(segments, 1)?)?;
-    let bytes = sum(&[
-        segment.bytes().len(),
-        96,
-        64,
-        accounting::arc::<Vec<u8>>()?,
-        map,
-    ])?;
-    ensure(credit, add(credit.size(), bytes)?)
+    let backing = segment_charge(segment.bytes().len())?;
+    ensure(credit, sum(&[credit.size(), backing, 96, map])?)?;
+    Ok(backing)
 }
 
 fn write_epoch(bytes: &mut [u8], epoch: Epoch) -> Result<()> {

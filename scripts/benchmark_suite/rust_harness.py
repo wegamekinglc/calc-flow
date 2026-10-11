@@ -14,6 +14,7 @@ from scripts.toolkit import command_output, fingerprint_json, sha256_file, write
 
 TARGET = "stream_join_perf"
 BENCH = Path(f"crates/calc-flow/benches/{TARGET}.rs")
+SUPPORT = Path("crates/calc-flow/benches/support/native_join_components.rs")
 SCHEMA = "calc-flow.common-rust-harness.v1"
 
 
@@ -38,12 +39,21 @@ def _declaration(original: str, measured: str) -> dict | None:
     return matched
 
 
+def _support_files() -> dict[str, str]:
+    if not (ROOT / SUPPORT).exists():
+        return {}
+    tracked = command_output(["git", "ls-files", "--", str(SUPPORT)], cwd=ROOT)
+    if tracked != SUPPORT.as_posix():
+        raise ValueError("common Rust harness support must belong to its revision")
+    return {SUPPORT.as_posix(): sha256_file(ROOT / SUPPORT)}
+
+
 @contextmanager
 def common_join_harness(source: Path, output: Path, target: str):
-    """Overlay only the Join bench in an owned exact-revision build mirror.
+    """Overlay the Join bench and its support in an exact-revision build mirror.
 
     Both product checkouts remain read-only. The detached clone has the same
-    tracked product files and lock; only its declared benchmark is replaced.
+    tracked product files and lock; only its declared benchmark files change.
     """
     if target != TARGET:
         yield source
@@ -54,6 +64,7 @@ def common_join_harness(source: Path, output: Path, target: str):
     original = sha256_file(source / BENCH)
     measured = sha256_file(ROOT / BENCH)
     declaration = _declaration(original, measured)
+    support_files = _support_files()
     output.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(prefix=f"{TARGET}-", dir=output) as raw:
         mirror = Path(raw).resolve() / "source"
@@ -93,6 +104,10 @@ def common_join_harness(source: Path, output: Path, target: str):
                 "owned Rust build mirror differs from the product revision"
             )
         (mirror / BENCH).write_bytes((ROOT / BENCH).read_bytes())
+        for relative in support_files:
+            destination = mirror / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes((ROOT / relative).read_bytes())
         write_json(
             output / f"build-{TARGET}.harness.json",
             {
@@ -103,6 +118,7 @@ def common_join_harness(source: Path, output: Path, target: str):
                 "harness_git_sha": harness_sha,
                 "original_sha256": original,
                 "measured_sha256": measured,
+                "support_files": support_files,
                 "build_source": str(mirror),
                 "build_output": str(output.resolve()),
                 "migration_reference": None
@@ -162,7 +178,12 @@ def _with_validated_harness(identity: dict, record: object, output: Path) -> dic
         **identity,
         "measured_harnesses": {TARGET: record},
         "measured_workload_fingerprints": {
-            TARGET: fingerprint_json({BENCH.as_posix(): record["measured_sha256"]})
+            TARGET: fingerprint_json(
+                {
+                    BENCH.as_posix(): record["measured_sha256"],
+                    **record.get("support_files", {}),
+                }
+            )
         },
     }
 
@@ -171,6 +192,7 @@ def _matches_current_harness(record: dict, output: Path) -> bool:
     return (
         record.get("harness_git_sha") == _clean_revision(ROOT)
         and record.get("measured_sha256") == sha256_file(ROOT / BENCH)
+        and record.get("support_files", {}) == _support_files()
         and _owned_build_path(record.get("build_source"), output)
     )
 

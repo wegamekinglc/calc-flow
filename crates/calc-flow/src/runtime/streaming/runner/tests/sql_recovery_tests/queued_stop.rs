@@ -344,9 +344,9 @@ async fn queued_operators(
     (SqlOperator, MemoryReservation),
     (SqlOperator, MemoryReservation),
 ) {
-    let mut first = sql().await;
+    let mut first = sql().await.with_one_gib_pool_for_test();
     let first_refund_probe = recovery_refund_probe(&mut first, saved);
-    let mut queued = sql().await;
+    let mut queued = sql().await.with_one_gib_pool_for_test();
     let queued_refund_probe = recovery_refund_probe(&mut queued, queued_saved);
     ((first, first_refund_probe), (queued, queued_refund_probe))
 }

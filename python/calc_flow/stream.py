@@ -145,8 +145,9 @@ T = TypeVar("T")
 class StreamResults(Generic[T]):
     """One-shot stream owned by ``async with``; iterate only inside its context.
 
-    Ordinary iterables have best-effort delivery and temporary checkpoints, with
-    no restart guarantee. Use an explicit runner for durable recovery or sinks.
+    Ordinary iterables have best-effort delivery and, by default, temporary
+    checkpoints, with no restart guarantee. Use an explicit runner for durable
+    recovery or sinks. Set ``config.checkpointing=False`` to omit checkpoints.
     """
 
     def __init__(self, request: _StreamRequest, *, table_output: bool) -> None:
@@ -206,8 +207,10 @@ class StreamResults(Generic[T]):
             ]
             for name, _ in self._request.program.outputs
         }
-        await self._create_root()
-        checkpoints = ManagedCheckpointRuntime(self._root)
+        checkpoints = None
+        if config.checkpointing:
+            await self._create_root()
+            checkpoints = ManagedCheckpointRuntime(self._root)
         runner = StreamingRunner(
             plan, sources, sinks, checkpoints, config=config, static_inputs=static
         )

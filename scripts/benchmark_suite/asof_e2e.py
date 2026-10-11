@@ -92,3 +92,189 @@ def _valid_allocations(sample: dict) -> bool:
             "allocation_count",
         )
     )
+
+
+def validate_matched_native(observation: dict) -> dict:
+    """Validate the fixed million-row compiled ASOF replay and its evidence."""
+    return validate_matched_observation(observation, "asof_join")
+
+
+def validate_matched_correctness(observation: dict) -> dict:
+    """Validate the fixed 3073-row actual-dispatch correctness preflight."""
+    return _validate_matched_observation(
+        observation, "asof_join", rows=3073, check_only=True
+    )
+
+
+def validate_matched_observation(observation: dict, scenario: str) -> dict:
+    """Validate the common sealed-fixture observation used by ASOF and Join."""
+    return _validate_matched_observation(
+        observation, scenario, rows=1_000_000, check_only=False
+    )
+
+
+def _validate_matched_observation(
+    observation: dict, scenario: str, *, rows: int, check_only: bool
+) -> dict:
+    row_field = "rows_per_side" if scenario == "asof_join" else "rows"
+    if not _matched_workload_header(
+        observation, scenario, check_only
+    ) or not _matched_workload_shape(observation, row_field, rows):
+        raise ValueError("invalid matched native workload contract")
+    _validate_matched_clocks(observation)
+    _validate_matched_completion(observation, rows)
+    _validate_projection_identity(observation, scenario)
+    _validate_matched_callbacks(observation)
+    _validate_matched_affinity(observation)
+    _validate_matched_threads(observation)
+    if type(observation.get("process_id")) is not int or observation["process_id"] <= 0:
+        raise ValueError("missing observed process identity")
+    return {
+        **observation,
+        "oracle_passed": True,
+        "cleanup_complete": True,
+        "lifecycle": "completed",
+        "nonterminal_epochs": [],
+        "processing_checkpoint_free": True,
+        "processing_settled": True,
+    }
+
+
+def _validate_projection_identity(observation: dict, scenario: str) -> None:
+    from scripts.toolkit import fingerprint_json
+
+    _validate_projection_hashes(observation)
+    projection = observation.get("compiled_projection")
+    if (
+        not isinstance(projection, list)
+        or not projection
+        or fingerprint_json(projection, allow_nan=False)
+        != observation["compiled_projection_sha256"]
+    ):
+        raise ValueError("compiled projection identity mismatch")
+    expected_kind = "stream_asof_join" if scenario == "asof_join" else "stream_join"
+    if (
+        sum(
+            node.get("kind") == expected_kind
+            for node in projection
+            if isinstance(node, dict)
+        )
+        != 1
+    ):
+        raise ValueError("compiled projection omits the matched join")
+
+
+def _matched_workload_header(observation, scenario, check_only):
+    return (
+        observation.get("schema") == "calc-flow.matched-native-observation.v1"
+        and observation.get("scenario") == scenario
+        and observation.get("check_only") is check_only
+        and type(observation.get("checkpoint_enabled")) is bool
+        and type(observation.get("nonterminal_epochs")) is int
+        and observation["nonterminal_epochs"] == 0
+    )
+
+
+def _matched_workload_shape(observation, row_field, rows):
+    return (
+        type(observation.get(row_field)) is int
+        and observation[row_field] == rows
+        and type(observation.get("batch_rows")) is int
+        and observation["batch_rows"] == 1024
+        and observation.get("output_budget")
+        == {"max_rows": 1024, "max_bytes": 64 << 20}
+    )
+
+
+def _validate_matched_clocks(observation):
+    for field in (
+        "setup_seconds",
+        "processing_seconds",
+        "terminal_seconds",
+        "oracle_seconds",
+        "cleanup_seconds",
+    ):
+        seconds = observation.get(field)
+        if (
+            type(seconds) not in (int, float)
+            or not math.isfinite(seconds)
+            or seconds <= 0
+        ):
+            raise ValueError(f"invalid matched native clock: {field}")
+
+
+def _validate_matched_completion(observation, rows):
+    if (
+        observation.get("validated_all_rows") is not True
+        or observation.get("owned_cleanup_complete") is not True
+        or type(observation.get("output_rows")) is not int
+        or observation["output_rows"] != rows
+        or not _matched_assembled_output(observation, rows)
+    ):
+        raise ValueError("missing matched native oracle or cleanup evidence")
+
+
+def _matched_assembled_output(observation, rows):
+    return (
+        type(observation.get("assembled_output_rows")) is int
+        and observation["assembled_output_rows"] == rows
+        and type(observation.get("assembled_output_batches")) is int
+        and observation["assembled_output_batches"] > 0
+    )
+
+
+def _validate_matched_affinity(observation):
+    cpus = observation.get("observed_cpu_affinity")
+    if (
+        not isinstance(cpus, list)
+        or not cpus
+        or any(type(cpu) is not int or cpu < 0 for cpu in cpus)
+        or cpus != sorted(set(cpus))
+    ):
+        raise ValueError("invalid observed process affinity")
+
+
+def _validate_matched_threads(observation):
+    environment = observation.get("observed_thread_environment")
+    if not isinstance(environment, dict) or any(
+        not isinstance(environment.get(key), str)
+        or not environment[key].isdigit()
+        or int(environment[key]) <= 0
+        for key in (
+            "TOKIO_WORKER_THREADS",
+            "OMP_NUM_THREADS",
+            "OPENBLAS_NUM_THREADS",
+            "MKL_NUM_THREADS",
+            "NUMEXPR_NUM_THREADS",
+            "VECLIB_MAXIMUM_THREADS",
+            "RAYON_NUM_THREADS",
+            "POLARS_MAX_THREADS",
+        )
+    ):
+        raise ValueError("missing observed thread environment")
+
+
+def _validate_projection_hashes(observation):
+    for field in (
+        "project_sha256",
+        "inputs_sha256",
+        "events_sha256",
+        "shared_partial_order_sha256",
+        "canonical_native_events_sha256",
+        "output_contract_sha256",
+        "compiled_plan_fingerprint",
+        "compiled_projection_sha256",
+    ):
+        digest = observation.get(field)
+        if (
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+        ):
+            raise ValueError(f"invalid matched native identity: {field}")
+
+
+def _validate_matched_callbacks(observation):
+    for field in ("post_processing_status", "callback_counts", "node_callback_counts"):
+        if not isinstance(observation.get(field), dict) or not observation[field]:
+            raise ValueError(f"missing native callback evidence: {field}")

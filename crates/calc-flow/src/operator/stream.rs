@@ -257,6 +257,24 @@ pub struct StreamOperatorContext<'a> {
 }
 
 impl<'a> StreamOperatorContext<'a> {
+    #[cfg(test)]
+    pub(crate) fn with_test_job<'b>(
+        &'b self,
+        job: &'b StreamJobContext,
+    ) -> StreamOperatorContext<'b> {
+        StreamOperatorContext {
+            job,
+            operator_id: self.operator_id,
+            input_watermark: self.input_watermark,
+            ingress_progress: self.ingress_progress.clone(),
+            output_budget: self.output_budget,
+            late_metrics: Arc::clone(&self.late_metrics),
+            rolling_metrics: self.rolling_metrics.clone(),
+            entity_work: self.entity_work.clone(),
+            task_id: self.task_id,
+        }
+    }
+
     /// Creates a context for one operator within a job.
     pub fn new(
         job: &'a StreamJobContext,

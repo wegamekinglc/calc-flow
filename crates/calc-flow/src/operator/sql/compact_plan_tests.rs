@@ -407,7 +407,20 @@ async fn test_compact_paid_sync_catalog_shadow_and_function_identity_boundaries(
 
 #[tokio::test]
 async fn test_compact_paid_sync_old_new_coexistence_and_refusals_preserve_state() {
-    let runtime = configured_runtime(false);
+    let runtime = DataFusionRuntime::with_benchmark_pool(
+        DataFusionConfig {
+            batch_size: 19,
+            target_partitions: 2,
+            min_rows_per_partition: 1,
+            enable_rolling_rewrite: false,
+            ..DataFusionConfig::default()
+        },
+        Arc::new(datafusion::execution::memory_pool::GreedyMemoryPool::new(
+            1 << 30,
+        )),
+    )
+    .unwrap();
+    runtime.incremental_planner_context(1 << 20);
     let pool = pool(&runtime);
     let logical = schema(&DataType::Int64);
     let physical = Arc::new(logical.project(&[2, 0]).unwrap());

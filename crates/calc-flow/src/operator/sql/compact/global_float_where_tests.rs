@@ -116,7 +116,7 @@ async fn test_global_float_where_large_record_fits_bounded_workspace() {
     let query = QUERIES[0];
     let job = job();
     let context = StreamOperatorContext::new(&job, "float_extrema", None);
-    let mut state = filtered_operator(&dtype, query);
+    let mut state = filtered_operator(&dtype, query).with_one_gib_pool_for_test();
     let first = vec![vec![Some(ONE)]];
     drop(process(&mut state, selected_input(&dtype, &first, 0), &context).await);
     let pool = state
@@ -320,7 +320,7 @@ async fn test_global_float_where_refusal_preserves_tail_and_once_retry() {
         let job = job();
         let context = StreamOperatorContext::new(&job, "float_extrema", None);
         let query = QUERIES[1];
-        let mut state = filtered_operator(&dtype, query);
+        let mut state = filtered_operator(&dtype, query).with_one_gib_pool_for_test();
         let first = vec![vec![Some(ONE); 4096], vec![Some(ONE)]];
         drop(process(&mut state, selected_input(&dtype, &first, 0), &context).await);
         let before = state.checkpoint(Epoch::INITIAL).unwrap();

@@ -28,7 +28,15 @@ async fn assert_native_probe_resolves_each_distinct_key_once_before_both_window_
         .prepare_batch("left", &left, &context)
         .await
         .unwrap();
-    operator.commit_prepared("left", prepared).unwrap();
+    let expiration_append = operator
+        .state
+        .left_expirations
+        .prepare_append(prepared.retained.len(), &context)
+        .await
+        .unwrap();
+    operator
+        .commit_prepared("left", prepared, true, expiration_append)
+        .unwrap();
     reset_join_work();
     let right = with_keys(&right_batch(vec![0; 6]), vec![7, 9, 7, 8, 9, 8]);
     let prepared = operator

@@ -46,7 +46,7 @@ async fn test_string_key_refused_update_refunds_and_retries_exactly() {
         let dtype = DataType::Float64;
         let job = job();
         let context = StreamOperatorContext::new(&job, "grouped_float", None);
-        let mut state = string_operator(&dtype, &key_type, ALL);
+        let mut state = string_operator(&dtype, &key_type, ALL).with_one_gib_pool_for_test();
         let mut parts = string_arrivals().into_iter();
         let mut prefix = parts.next().unwrap();
         drop(

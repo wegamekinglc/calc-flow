@@ -872,3 +872,60 @@ fn connector_error_display_carries_identity_operation_and_detail() {
         "the public error keeps identity and operation visible"
     );
 }
+
+mod delivery_contract {
+    use calc_flow::{
+        ConnectorCapabilities, DeliveryCapability, DeliveryGuarantee, DeliveryParticipant,
+        ParticipantRole, ReplayCapability, SinkDelivery, TransactionSupport, WatermarkSupport,
+        validate_delivery_guarantee,
+    };
+
+    fn sink_participant(transaction: TransactionSupport) -> DeliveryParticipant {
+        DeliveryParticipant {
+            path: "sinks[0]".into(),
+            role: ParticipantRole::Sink,
+            capabilities: ConnectorCapabilities {
+                delivery: DeliveryCapability::AtLeastOnce,
+                replay: ReplayCapability::Unreplayable,
+                watermark: WatermarkSupport::GeneratedOnly,
+                transaction,
+                snapshot: false,
+                polling: false,
+                cdc: false,
+                lookup: false,
+            },
+        }
+    }
+
+    #[test]
+    fn retry_deduplication_does_not_prove_exactly_once() {
+        let error = validate_delivery_guarantee(
+            DeliveryGuarantee::ExactlyOnce,
+            &[sink_participant(TransactionSupport::RetryDeduplicated)],
+        )
+        .expect_err("bounded retry deduplication must not prove exactly-once");
+
+        assert!(error.to_string().contains("unmet: transaction"), "{error}");
+    }
+
+    #[test]
+    fn ledger_idempotency_projects_unbounded_retention() {
+        assert_eq!(
+            ConnectorCapabilities {
+                delivery: DeliveryCapability::AtLeastOnce,
+                replay: ReplayCapability::Unreplayable,
+                watermark: WatermarkSupport::GeneratedOnly,
+                transaction: TransactionSupport::LedgerIdempotent,
+                snapshot: false,
+                polling: false,
+                cdc: false,
+                lookup: false,
+            }
+            .sink_delivery(),
+            SinkDelivery::EpochIdempotent {
+                mechanism: "ledger".into(),
+                retention: calc_flow::RetentionClass::Unbounded,
+            },
+        );
+    }
+}

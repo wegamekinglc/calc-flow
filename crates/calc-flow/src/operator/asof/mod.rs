@@ -102,7 +102,7 @@ impl StreamAsofJoinOperator {
             .prepare_admission(validated, batch, context)
             .await
             .map_err(|error| self.attempt_error(error))?;
-        if admission.rows.is_empty() {
+        if admission.len() == 0 {
             return Ok(());
         }
         self.install_admission(ingress, admission, validated, context)
@@ -125,16 +125,21 @@ impl StreamAsofJoinOperator {
             .prepare_log_retention(
                 &std::collections::BTreeMap::default(),
                 &std::collections::BTreeMap::default(),
+                context.job().checkpointing(),
             )
             .map_err(|error| self.attempt_error(error))?;
         let projected = self
             .log_projection(projected, index_len, &journal, retention_bytes)
             .map_err(|error| self.attempt_error(error))?;
         let mut status = self
-            .admitted_status(validated.index, admission.rows.len(), &projected)
+            .admitted_status(validated.index, admission.len(), &projected)
             .map_err(|error| self.attempt_error(error))?;
         let index_workspace = self
-            .reserve_workspace(index_len)
+            .reserve_workspace(if context.job().checkpointing() {
+                index_len
+            } else {
+                0
+            })
             .map_err(|error| self.attempt_error(error))?;
         let batches = self
             .state
@@ -172,7 +177,7 @@ impl StreamAsofJoinOperator {
         self.state.install_encoding_owners(owners);
         self.status = status;
         self.checkpoint_log.install_journal(journal);
-        self.checkpoint_log.credit = Some(credit);
+        self.checkpoint_log.credit = credit;
         self.checkpoint_log.retention_bytes = retention_bytes;
         self.checkpoint_log.pending = None;
         self.checkpoint_log.dirty_cut = self.checkpoint_log.keeps_delta();

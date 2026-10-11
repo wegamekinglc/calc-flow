@@ -47,6 +47,15 @@ impl Drop for Registration {
 }
 
 impl SqlOperator {
+    pub(crate) fn with_one_gib_pool_for_test(mut self) -> Self {
+        self.stream_state
+            .initialize_benchmark_pool(Arc::new(
+                datafusion::execution::memory_pool::GreedyMemoryPool::new(1 << 30),
+            ))
+            .unwrap();
+        self
+    }
+
     pub(crate) fn on_prepared_restore_for_test(
         &self,
         metadata: &BatchMetadata,

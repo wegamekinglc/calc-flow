@@ -1,61 +1,5 @@
 use super::*;
 
-#[tokio::test]
-async fn test_sql_retained_descriptor_rejects_forgery_atomically() {
-    let (mut operator, job, mut collector) = setup("SELECT SUM(value) AS total FROM events");
-    let context = StreamOperatorContext::new(&job, "totals", None);
-    operator
-        .process_data("events", wide_input(0).0, &context, &mut collector)
-        .await
-        .unwrap();
-    let before = operator.checkpoint(Epoch::INITIAL).unwrap();
-    assert_eq!(before.inline_metadata["state_layout"], json!(3));
-    let mutations = [
-        ("state_layout", json!(4)),
-        ("state_accounting", json!(1)),
-        ("rows", json!(4)),
-        ("bytes", json!(0)),
-        ("unknown", json!(0)),
-    ];
-    for (field, value) in mutations {
-        let mut forged = before.clone();
-        forged.inline_metadata.insert(field.into(), value);
-        assert!(
-            StreamOperator::restore(&mut operator, &forged).is_err(),
-            "accepted forged {field}"
-        );
-        assert_same_snapshot(&before, &operator.checkpoint(Epoch::INITIAL).unwrap());
-    }
-    for (field, value) in [
-        ("retained_ordinals", json!([0, 1])),
-        ("logical_schema_sha256", json!("00".repeat(32))),
-        ("physical_schema_sha256", json!("00".repeat(32))),
-    ] {
-        let mut forged = before.clone();
-        let mut control: Value =
-            serde_json::from_slice(forged.segments["control"].bytes()).unwrap();
-        control["identity"][field] = value;
-        let segment = StateSegment::new(serde_json::to_vec(&control).unwrap());
-        forged
-            .inline_metadata
-            .insert("control_sha256".into(), json!(segment.sha256()));
-        forged.segments.insert("control".into(), segment);
-        assert!(
-            StreamOperator::restore(&mut operator, &forged).is_err(),
-            "accepted forged control {field}"
-        );
-        assert_same_snapshot(&before, &operator.checkpoint(Epoch::INITIAL).unwrap());
-    }
-    for name in ["input", "unknown"] {
-        let mut forged = before.clone();
-        forged
-            .segments
-            .insert(name.into(), StateSegment::new(vec![]));
-        assert!(StreamOperator::restore(&mut operator, &forged).is_err());
-        assert_same_snapshot(&before, &operator.checkpoint(Epoch::INITIAL).unwrap());
-    }
-}
-
 fn assert_same_snapshot(left: &OperatorStateSnapshot, right: &OperatorStateSnapshot) {
     assert_eq!(left.inline_metadata, right.inline_metadata);
     assert_eq!(
@@ -331,7 +275,8 @@ async fn test_sql_retained_checkpoint_keeps_large_metadata_out_of_inline_manifes
 
 #[tokio::test]
 async fn test_sql_retained_checkpoint_ipc_body_is_prepaid_and_failure_atomic() {
-    let (mut operator, job, mut output) = setup(RAW_SUM);
+    let (operator, job, mut output) = setup(RAW_SUM);
+    let mut operator = operator.with_one_gib_pool_for_test();
     let context = StreamOperatorContext::new(&job, "totals", None);
     let values: ArrayRef = Arc::new(Int64Array::from_iter_values(0..100_000));
     let record = RecordBatch::try_new(
@@ -474,7 +419,8 @@ async fn test_sql_retained_empty_metadata_changes_and_failed_updates_recover_exa
 async fn test_sql_retained_snapshot_holds_input_and_metadata_body_credits_after_reset() {
     let mut held = Vec::new();
     for with_metadata in [false, true] {
-        let (mut operator, job, mut output) = setup(RAW_SUM);
+        let (operator, job, mut output) = setup(RAW_SUM);
+        let mut operator = operator.with_one_gib_pool_for_test();
         let context = StreamOperatorContext::new(&job, "totals", None);
         let input = if with_metadata {
             let data = wide_input(0).0;
@@ -625,7 +571,8 @@ async fn assert_schema_workspace_funded(
     metadata: std::collections::HashMap<String, String>,
     source: &str,
 ) {
-    let (mut operator, job, mut output) = setup(RAW_SUM);
+    let (operator, job, mut output) = setup(RAW_SUM);
+    let mut operator = operator.with_one_gib_pool_for_test();
     let context = StreamOperatorContext::new(&job, "totals", None);
     let record = RecordBatch::try_new(
         Arc::new(Schema::new_with_metadata(

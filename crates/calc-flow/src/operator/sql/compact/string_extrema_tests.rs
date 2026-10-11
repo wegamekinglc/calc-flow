@@ -291,7 +291,7 @@ async fn test_string_extrema_pressure_and_refused_output_refund_then_retry() {
             let job =
                 StreamJobContext::new(942, "texts", JsonMap::new(), None, CancellationToken::new());
             let context = StreamOperatorContext::new(&job, "string_extrema", None);
-            let mut state = operator(&dtype, query);
+            let mut state = operator(&dtype, query).with_one_gib_pool_for_test();
             let mut prefix = arrivals().remove(0);
             drop(process(&mut state, input(&dtype, &prefix, 0), &context).await);
             let before = state.checkpoint(Epoch::INITIAL).unwrap();

@@ -63,6 +63,20 @@
       "candidate_sha256": "d50cb1560aa3be6bb1184d0902c43c65152aad49c2cf4fc26c1187472192a16f",
       "reason": "Common focused checkpoint harness on both unchanged products: exact two-case selection and populated V1/V2 cut proof, unchanged extracted timed closures, fixtures and Criterion samples. Selector uses explicit UTF-8 decoding before skipping argv0; one precise args-os audit false positive is documented because only closed benchmark case selection uses arguments, never security identity.",
       "reference": "Issue #363 / PR #395; bounded source review SHA256 88ebc81286b76eac9a90bbb77899697e428dd307dc6cd079d8a9ac4d6b4ed1a2; local selector audit disposition"
+    },
+    {
+      "target": "stream_join_perf",
+      "baseline_sha256": "d50cb1560aa3be6bb1184d0902c43c65152aad49c2cf4fc26c1187472192a16f",
+      "candidate_sha256": "8016fbe8351d3300aaa87daf08e938864d23496064c03e22f092b34cc934617a",
+      "reason": "Add opt-in 1M capture/restore and compaction components plus sealed matched-fixture handler timing under the benchmark-only feature. Maintained default Criterion cases are unchanged; the common acceptance overlay applies the same entry point and helpers to both pinned products.",
+      "reference": "Issue #406 / PR #407; .codex/artifacts/specs/issue406-performance-acceptance.md"
+    },
+    {
+      "target": "stream_asof_e2e",
+      "baseline_sha256": "cffcc8d393f0fa6ad86da3c78eb61db7ac4a0e72b727dbf1a734c1d2ff8d12d4",
+      "candidate_sha256": "e5d1b4793a4fcf1277482812c1637e7b6723cc7503e6cc806b9dc1734910d8bd",
+      "reason": "Keep the four maintained legacy cases behind the default entry point; add a feature-only compiled fixture and actual ASOF dispatch replay with an explicit System allocator. The common acceptance overlay applies the same helper and instrumentation to both pinned products.",
+      "reference": "Issue #406 / PR #407; .codex/artifacts/specs/issue406-performance-acceptance.md"
     }
   ]
 }

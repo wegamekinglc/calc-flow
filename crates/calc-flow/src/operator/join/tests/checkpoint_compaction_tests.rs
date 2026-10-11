@@ -157,8 +157,21 @@ async fn cancelled_checkpoint_preparation_leaves_dirty_changes_and_previous_capt
 async fn checkpoint_worker_fixture(
     job: &StreamJobContext,
 ) -> (StreamJoinOperator, OperatorStateSnapshot, EdgeCollector) {
-    let mut operator =
-        StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+    let operator = StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+    checkpoint_worker_fixture_from(job, operator).await
+}
+
+async fn bounded_checkpoint_worker_fixture(
+    job: &StreamJobContext,
+) -> (StreamJoinOperator, OperatorStateSnapshot, EdgeCollector) {
+    let operator = StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+    checkpoint_worker_fixture_from(job, with_one_gib_pool(operator)).await
+}
+
+async fn checkpoint_worker_fixture_from(
+    job: &StreamJobContext,
+    mut operator: StreamJoinOperator,
+) -> (StreamJoinOperator, OperatorStateSnapshot, EdgeCollector) {
     let context = StreamOperatorContext::new(job, "match", None);
     let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
     let mut previous = OperatorStateSnapshot::default();
@@ -754,7 +767,7 @@ async fn checkpoint_credit_retirement(
 ) {
     let job = job().with_gather_owner(service.owner("checkpoint-credit-retirement".into()));
     let context = StreamOperatorContext::new(&job, "match", None);
-    let (mut operator, _, _) = checkpoint_worker_fixture(&job).await;
+    let (mut operator, _, _) = bounded_checkpoint_worker_fixture(&job).await;
     let pool = operator
         .runtime
         .runtime()
@@ -830,7 +843,8 @@ fn checkpoint_observer_is_published_before_native_capacity_wait() {
             let second_job =
                 job().with_gather_owner(service.owner("checkpoint-capacity-second".into()));
             let second_context = StreamOperatorContext::new(&second_job, "match", None);
-            let (mut second, _, mut collector) = checkpoint_worker_fixture(&second_job).await;
+            let (mut second, _, mut collector) =
+                bounded_checkpoint_worker_fixture(&second_job).await;
             let pool = second.runtime.runtime().unwrap().incremental_memory_pool();
             let pressure = second
                 .runtime
@@ -913,7 +927,7 @@ fn checkpoint_observer_is_published_before_native_capacity_wait() {
 async fn checkpoint_credit_failure(spare: usize) {
     let job = job();
     let context = StreamOperatorContext::new(&job, "match", None);
-    let (mut operator, previous, mut collector) = checkpoint_worker_fixture(&job).await;
+    let (mut operator, previous, mut collector) = bounded_checkpoint_worker_fixture(&job).await;
     operator
         .process_data("left", left_batch(vec![5]), &context, &mut collector)
         .await

@@ -1287,7 +1287,7 @@ async fn compact_sql_request_fee_refusal_returns_actual_operator_before_launch()
     let source = "managed-request-fee-source";
     let manifest = capture(directory.path(), source, false).await;
     let saved = snapshot(directory.path(), &manifest).await;
-    let mut operator = sql().await;
+    let mut operator = sql().await.with_one_gib_pool_for_test();
     let pressure = operator.reserve_recovery_envelope(&saved).unwrap();
     pressure.try_grow((1 << 30) - pressure.size()).unwrap();
     assert!(operator.stream_runtime_initialized());
@@ -1366,7 +1366,7 @@ async fn compact_sql_dropped_queued_request_does_not_block_next_join() {
     let expected_bytes = manifest.operators()[NODE].inline_metadata["bytes"]
         .as_u64()
         .unwrap();
-    let mut first = sql().await;
+    let mut first = sql().await.with_one_gib_pool_for_test();
     let fee = first.reserve_recovery_envelope(&saved).unwrap();
     let refund_probe = fee.new_empty();
     drop(fee);
@@ -1528,7 +1528,7 @@ async fn compact_sql_returned_active_join_does_not_block_next_request() {
     let second_source = "returned-active-second-source";
     let (_second_directory, _second_manifest, second_saved, second_bytes) =
         captured_sql_recovery(second_directory, second_source).await;
-    let mut first = sql().await;
+    let mut first = sql().await.with_one_gib_pool_for_test();
     let refund_probe = recovery_refund_probe(&mut first, &first_saved);
     let first_gate = Arc::new(Gate::default());
     let first_registration =

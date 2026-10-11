@@ -3,7 +3,7 @@ use super::StoredRow;
 use super::borrowed_key::KeyHashState;
 use super::borrowed_key::framed_hash;
 use super::columnar::FramedKey;
-use super::key_arena::{ArenaLayout, visit_key_frames};
+use super::key_arena::{ArenaLayout, visit_key_frames, visit_string_values};
 use super::native_dictionary::BASE_BYTES;
 pub(super) use super::native_dictionary::{AppendCredit, NativeIndex};
 use super::{
@@ -14,7 +14,7 @@ use crate::{CalcFlowError, EventTime, Result};
 use datafusion::arrow::datatypes::{DataType, Schema};
 use datafusion::execution::memory_pool::MemoryReservation;
 use hashbrown::HashTable;
-use std::sync::Arc;
+use std::{hash::BuildHasher, sync::Arc};
 
 #[cfg(test)]
 #[path = "tests/native_index_allocation_tests.rs"]
@@ -50,6 +50,7 @@ pub(super) struct NativeKeys {
     pub(super) keys: Vec<Arc<FramedKey>>,
     ids: Vec<u32>,
     _credit: Arc<MemoryReservation>,
+    _scratch: MemoryReservation,
 }
 
 impl NativeKeys {
@@ -140,6 +141,52 @@ impl ProbeKeyInterner {
         )
     }
 
+    fn push_string(
+        &mut self,
+        tag: u8,
+        bytes: &[u8],
+        credit: &Arc<MemoryReservation>,
+        name: &str,
+    ) -> Result<()> {
+        self.push_string_hashed(tag, bytes, self.hasher.hash_one(bytes), credit, name)
+    }
+
+    fn push_string_hashed(
+        &mut self,
+        tag: u8,
+        bytes: &[u8],
+        hash: u64,
+        credit: &Arc<MemoryReservation>,
+        name: &str,
+    ) -> Result<()> {
+        self.push_with(
+            hash,
+            |stored| stored.first() == Some(&tag) && stored.get(9..) == Some(bytes),
+            || {
+                let length = u32::try_from(bytes.len())
+                    .map_err(|_| super::charge_overflow("key value length"))?;
+                let capacity = bytes
+                    .len()
+                    .checked_add(9)
+                    .ok_or_else(|| scratch_error(name))?;
+                let mut frame = Vec::with_capacity(capacity);
+                frame.extend_from_slice(&[tag, 0, 0, 0, 0]);
+                frame.extend_from_slice(&length.to_le_bytes());
+                frame.extend_from_slice(bytes);
+                #[cfg(test)]
+                super::note_join_work(|work| {
+                    work.arena_frames += 1;
+                    work.key_encodings += 1;
+                });
+                Ok(super::columnar::funded_encoded_key(
+                    frame,
+                    Arc::clone(credit),
+                ))
+            },
+            name,
+        )
+    }
+
     fn push_bytes(
         &mut self,
         bytes: &[u8],
@@ -196,12 +243,50 @@ impl ProbeKeyInterner {
         Ok(())
     }
 
-    fn finish(self, credit: Arc<MemoryReservation>) -> NativeKeys {
-        NativeKeys {
-            keys: self.keys,
-            ids: self.ids,
+    fn finish(self, credit: Arc<MemoryReservation>, name: &str) -> Result<NativeKeys> {
+        let owner = std::alloc::Layout::new::<[std::sync::atomic::AtomicUsize; 2]>()
+            .extend(std::alloc::Layout::new::<FramedKey>())
+            .map_err(|_| scratch_error(name))?
+            .0
+            .pad_to_align()
+            .size();
+        let retained = self.keys.iter().try_fold(BASE_BYTES, |bytes, key| {
+            bytes.checked_add(owner)?.checked_add(key.capacity())
+        });
+        let scratch = self
+            .keys
+            .capacity()
+            .checked_mul(size_of::<Arc<FramedKey>>())
+            .and_then(|bytes| bytes.checked_add(self.ids.capacity().checked_mul(size_of::<u32>())?))
+            // Serial ProbeWindows allocates these slots while it borrows the IDs.
+            .and_then(|bytes| {
+                bytes.checked_add(self.keys.len().checked_mul(size_of::<Option<u32>>())?)
+            });
+        let (retained, scratch) = retained
+            .zip(scratch)
+            .filter(|(retained, scratch)| {
+                retained
+                    .checked_add(*scratch)
+                    .is_some_and(|total| total <= credit.size())
+            })
+            .ok_or_else(|| scratch_error(name))?;
+        let Self {
+            keys,
+            ids,
+            hashes,
+            dictionary,
+            ..
+        } = self;
+        drop((hashes, dictionary));
+        // Key aliases may outlive this batch's IDs and lookup vectors.
+        let scratch = credit.split(scratch);
+        credit.shrink(credit.size() - retained);
+        Ok(NativeKeys {
+            keys,
+            ids,
             _credit: credit,
-        }
+            _scratch: scratch,
+        })
     }
 }
 
@@ -214,9 +299,15 @@ fn intern_probe_keys(
 ) -> Result<NativeKeys> {
     let mut interner = ProbeKeyInterner::new(admitted.len());
     if let Some(layout) = layout.filter(|layout| layout.fits(admitted.len(), indices.len())) {
-        visit_key_frames(admitted, indices, layout, |bytes| {
-            interner.push_bytes(bytes, &credit, name)
-        })?;
+        if layout.single_string {
+            visit_string_values(admitted, indices[0], |tag, bytes| {
+                interner.push_string(tag, bytes, &credit, name)
+            })?;
+        } else {
+            visit_key_frames(admitted, indices, layout, |bytes| {
+                interner.push_bytes(bytes, &credit, name)
+            })?;
+        }
     } else {
         for row in admitted {
             let key = super::borrowed_key::BorrowedKey {
@@ -227,7 +318,7 @@ fn intern_probe_keys(
             interner.push(key, &credit, name)?;
         }
     }
-    Ok(interner.finish(credit))
+    interner.finish(credit, name)
 }
 
 #[cfg(test)]
@@ -240,10 +331,16 @@ pub(super) fn colliding_probe_keys(
     let mut interner = ProbeKeyInterner::new(admitted.len());
     let layout = ArenaLayout::measure(admitted, indices)?.expect("eligible collision fixture");
     assert!(layout.fits(admitted.len(), indices.len()));
-    visit_key_frames(admitted, indices, layout, |bytes| {
-        interner.push_bytes_hashed(bytes, 0, &shared, "collision-test")
-    })?;
-    Ok(interner.finish(shared))
+    if layout.single_string {
+        visit_string_values(admitted, indices[0], |tag, bytes| {
+            interner.push_string_hashed(tag, bytes, 0, &shared, "collision-test")
+        })?;
+    } else {
+        visit_key_frames(admitted, indices, layout, |bytes| {
+            interner.push_bytes_hashed(bytes, 0, &shared, "collision-test")
+        })?;
+    }
+    interner.finish(shared, "collision-test")
 }
 
 impl StreamJoinOperator {
@@ -259,6 +356,7 @@ impl StreamJoinOperator {
         &mut self,
         plan: &SidePlan,
         admitted: &[AdmittedRow],
+        keys: Option<NativeKeys>,
     ) -> Result<Option<NativeMatches>> {
         if !eligible(&self.compiled, self.input_schema(0)) {
             return Ok(None);
@@ -266,7 +364,7 @@ impl StreamJoinOperator {
         if !self.ensure_native_index(!plan.incoming_is_left)? {
             return Ok(None);
         }
-        let matched = self.probe_native_index(plan, admitted)?;
+        let matched = self.probe_native_index(plan, admitted, keys)?;
         if matched.is_none() {
             let opposite = if plan.incoming_is_left {
                 &mut self.state.right
@@ -282,8 +380,13 @@ impl StreamJoinOperator {
         &mut self,
         plan: &SidePlan,
         admitted: &[AdmittedRow],
+        keys: Option<NativeKeys>,
     ) -> Result<Option<NativeMatches>> {
-        let Some(keys) = self.native_probe_keys(plan, admitted)? else {
+        let keys = match keys {
+            Some(keys) => Some(keys),
+            None => self.native_probe_keys(plan, admitted)?,
+        };
+        let Some(keys) = keys else {
             return Ok(None);
         };
         self.collect_native_pairs(plan, admitted, keys)

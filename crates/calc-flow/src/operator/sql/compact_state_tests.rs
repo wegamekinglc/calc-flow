@@ -496,7 +496,13 @@ fn reject_native_record_shapes(
 
 #[tokio::test]
 async fn test_compact_native_state_credit_refusal_and_cancellation_preserve_installed_state() {
-    let runtime = runtime();
+    let runtime = DataFusionRuntime::with_benchmark_pool(
+        DataFusionConfig::default(),
+        Arc::new(datafusion::execution::memory_pool::GreedyMemoryPool::new(
+            1 << 30,
+        )),
+    )
+    .unwrap();
     let kind = DataType::Int64;
     let mut original = plan(&runtime, &kind, true);
     apply(
@@ -631,7 +637,13 @@ fn runtime() -> DataFusionRuntime {
 
 #[test]
 fn test_compact_native_descriptor_funds_output_schema_after_plan_drop() {
-    let runtime = runtime();
+    let runtime = DataFusionRuntime::with_benchmark_pool(
+        DataFusionConfig::default(),
+        Arc::new(datafusion::execution::memory_pool::GreedyMemoryPool::new(
+            1 << 30,
+        )),
+    )
+    .unwrap();
     let columns = (0..8)
         .map(|slot| format!("SUM(value) AS \"{}_{}\"", "wide_alias".repeat(4096), slot))
         .collect::<Vec<_>>()

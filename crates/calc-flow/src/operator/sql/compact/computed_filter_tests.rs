@@ -268,7 +268,7 @@ async fn test_computed_filter_large_record_uses_bounded_workspace() {
     let dtype = DataType::Float64;
     let job = job();
     let context = StreamOperatorContext::new(&job, "float_extrema", None);
-    let mut state = operator(&dtype, GLOBAL);
+    let mut state = operator(&dtype, GLOBAL).with_one_gib_pool_for_test();
     let first = vec![Some(ONE); 3];
     drop(
         process(

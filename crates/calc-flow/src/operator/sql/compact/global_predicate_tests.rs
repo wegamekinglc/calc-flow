@@ -194,7 +194,7 @@ async fn test_global_predicate_refusal_preserves_state_refunds_and_retries() {
         let job =
             StreamJobContext::new(945, "texts", JsonMap::new(), None, CancellationToken::new());
         let context = StreamOperatorContext::new(&job, "string_extrema", None);
-        let mut state = filtered_operator(&dtype, query);
+        let mut state = filtered_operator(&dtype, query).with_one_gib_pool_for_test();
         let prefix = arrivals().remove(0);
         drop(process(&mut state, filtered_input(&dtype, &prefix, 0), &context).await);
         assert!(state.incremental.is_some() && state.retained.is_none());

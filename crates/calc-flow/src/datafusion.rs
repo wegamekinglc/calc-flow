@@ -14,7 +14,7 @@ use datafusion::{
     execution::{
         TaskContext,
         context::{SessionConfig, SessionContext},
-        memory_pool::GreedyMemoryPool,
+        memory_pool::UnboundedMemoryPool,
         runtime_env::{RuntimeEnv, RuntimeEnvBuilder},
         session_state::SessionStateBuilder,
     },
@@ -231,15 +231,34 @@ impl DataFusionRuntime {
 
     /// Creates a run-scoped runtime that owns a lazily initialized `DataFusion` session.
     ///
+    /// Memory reservations are accounted per runtime without an implicit byte limit.
+    /// SQL result collection and explicitly configured operator budgets remain bounded.
+    ///
     /// # Errors
     ///
     /// Returns [`CalcFlowError::InvalidArgument`] when either configuration
     /// value is zero.
     pub fn new(config: DataFusionConfig) -> Result<Self> {
         let started = Instant::now();
+        Self::new_with_pool(config, Arc::new(UnboundedMemoryPool::default()), started)
+    }
+
+    #[cfg(any(test, feature = "benchmark-checkpoint-diagnostic"))]
+    pub(crate) fn with_benchmark_pool(
+        config: DataFusionConfig,
+        pool: Arc<dyn datafusion::execution::memory_pool::MemoryPool>,
+    ) -> Result<Self> {
+        Self::new_with_pool(config, pool, Instant::now())
+    }
+
+    fn new_with_pool(
+        config: DataFusionConfig,
+        pool: Arc<dyn datafusion::execution::memory_pool::MemoryPool>,
+        started: Instant,
+    ) -> Result<Self> {
         config.validate()?;
         let runtime_env = RuntimeEnvBuilder::new()
-            .with_memory_pool(Arc::new(GreedyMemoryPool::new(1 << 30)))
+            .with_memory_pool(pool)
             .build_arc()
             .map_err(|error| datafusion_error(None, error))?;
         let runtime_acquire_ns = nanos(started.elapsed());
@@ -1411,16 +1430,24 @@ mod tests {
     };
 
     #[test]
-    fn each_run_owns_a_bounded_datafusion_memory_pool() {
+    fn each_run_owns_an_unbounded_accounted_datafusion_memory_pool() {
         let left = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
         let right = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
         let left_environment = left.context().runtime_env();
         let right_environment = right.context().runtime_env();
 
+        let reservation = datafusion::execution::memory_pool::MemoryConsumer::new("over-1gib")
+            .register(&left_environment.memory_pool);
+        let bytes = (1 << 30) + 1;
+        reservation.try_grow(bytes).unwrap();
+        assert_eq!(left_environment.memory_pool.reserved(), bytes);
+        assert_eq!(right_environment.memory_pool.reserved(), 0);
         assert!(matches!(
             left_environment.memory_pool.memory_limit(),
-            MemoryLimit::Finite(limit) if limit > 0
+            MemoryLimit::Infinite
         ));
+        drop(reservation);
+        assert_eq!(left_environment.memory_pool.reserved(), 0);
         assert!(!Arc::ptr_eq(
             &left_environment.memory_pool,
             &right_environment.memory_pool

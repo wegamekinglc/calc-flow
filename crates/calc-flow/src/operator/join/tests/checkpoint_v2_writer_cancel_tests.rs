@@ -174,3 +174,182 @@ fn test_v2_writer_cancel_retains_accepted_inputs_until_actual_drain() {
         runtime.block_on(cancelled_writer(service));
     });
 }
+
+fn dirty_record() -> RecordBatch {
+    let input = record(&[97], &[Some("ok")], &["red"], vec![Some(vec![Some(9)])]);
+    let key: ArrayRef = Arc::new(Int64Array::from(vec![11]));
+    RecordBatch::try_new(
+        input.schema(),
+        std::iter::once(key)
+            .chain(input.columns()[1..].iter().cloned())
+            .collect(),
+    )
+    .unwrap()
+}
+
+async fn seed_dirty(
+    context: &StreamOperatorContext<'_>,
+) -> (StreamJoinOperator, OperatorStateSnapshot) {
+    let mut join = seed(context).await;
+    let first = join.checkpoint(Epoch::INITIAL).unwrap();
+    assert!(join.state.deltas.pending.is_empty());
+    let mut output = EdgeCollector::new(join.output_ports().to_vec());
+    join.process_data(
+        "left",
+        Batch::table(vec![dirty_record()], BatchMetadata::default()).unwrap(),
+        context,
+        &mut output,
+    )
+    .await
+    .unwrap();
+    assert!(output.drain("output").is_empty());
+    (join, first)
+}
+
+fn assert_dirty_uninstalled(
+    join: &StreamJoinOperator,
+    previous: &StreamJoinStatus,
+    rows: *const Vec<StoredRow>,
+) {
+    assert_eq!(join.status(), *previous);
+    assert_eq!(Arc::as_ptr(&join.state.left.0), rows);
+    assert_eq!((join.state.left.len(), join.state.right.len()), (2, 0));
+    assert_eq!(
+        (
+            join.state.next_left_row_id,
+            join.state.next_right_row_id,
+            join.state.next_output_sequence,
+        ),
+        (2, 0, 0)
+    );
+    assert_eq!(join.state.last_checkpoint_epoch, Some(Epoch::INITIAL));
+    assert!(!join.state.ended);
+    assert!(join.state.deltas.base.is_empty());
+    assert!(join.state.deltas.segments.is_empty());
+    let mut pending = join.state.deltas.pending.iter();
+    let Some(PendingOp::Upsert {
+        side,
+        row_id,
+        event_time,
+        encoded_key,
+        record,
+        charge,
+    }) = pending.next()
+    else {
+        panic!("the dirty Delta upsert must remain pending");
+    };
+    assert_eq!(
+        (*side, *row_id, event_time.as_micros(), *charge),
+        (JoinSide::Left, 1, 97, 141)
+    );
+    assert_eq!(*record.view(), dirty_record());
+    assert_eq!(
+        encoded_key.as_slice(),
+        encode_join_key_v1(&dirty_record(), 0, &[0]).unwrap()
+    );
+    assert!(Arc::ptr_eq(encoded_key, &join.state.left[1].encoded_key));
+    assert!(Arc::ptr_eq(
+        record.column(0),
+        join.state.left[1].record.column(0)
+    ));
+    assert!(pending.next().is_none());
+}
+
+async fn cancelled_delta_writer(service: &crate::runtime::streaming::gather_work::TestService) {
+    let job = job().with_gather_owner(service.owner("v2-delta-writer-cancel".into()));
+    let context = StreamOperatorContext::new(&job, "v2-match", None);
+    let (mut join, first) = seed_dirty(&context).await;
+    let pool = join.runtime.runtime().unwrap().incremental_memory_pool();
+    let previous = join.status();
+    let rows = Arc::downgrade(&join.state.left.0);
+    let column = Arc::downgrade(join.state.left[1].record.column(0));
+    let key = Arc::downgrade(&join.state.left[1].encoded_key);
+    assert!(!Arc::ptr_eq(
+        join.state.left[0].record.column(0),
+        join.state.left[1].record.column(0)
+    ));
+    assert!(!Arc::ptr_eq(
+        &join.state.left[0].encoded_key,
+        &join.state.left[1].encoded_key
+    ));
+    let segments = first
+        .segments
+        .values()
+        .map(|segment| Arc::downgrade(&segment.bytes_arc()))
+        .collect::<Vec<_>>();
+    let owners = segments
+        .iter()
+        .map(std::sync::Weak::strong_count)
+        .collect::<Vec<_>>();
+    let WriterGate {
+        hook,
+        entered,
+        mut release,
+    } = writer_gate();
+    join.set_checkpoint_writer_test_hook(hook);
+    let mut preparing = Box::pin(join.prepare_checkpoint_async(&context));
+    assert!(futures::poll!(preparing.as_mut()).is_pending());
+    let (paid, native) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::select! {
+            entered = entered => entered.unwrap(),
+            result = preparing.as_mut() => panic!("writer completed before release: {result:?}"),
+        }
+    })
+    .await
+    .unwrap();
+    job.cancellation().cancel();
+    drop(preparing);
+    assert_dirty_uninstalled(&join, &previous, rows.as_ptr());
+    assert_eq!(
+        segments
+            .iter()
+            .map(std::sync::Weak::strong_count)
+            .collect::<Vec<_>>(),
+        owners,
+        "cancelled Delta preparation must preserve the current Base owners"
+    );
+    drop(join);
+    drop(first);
+
+    let mut drain = Box::pin(job.gather_owner().close_and_drain());
+    let pending = futures::poll!(drain.as_mut()).is_pending();
+    let retained_inputs = column.upgrade().is_some() && key.upgrade().is_some();
+    let retired_live_rows = rows.upgrade().is_none();
+    let retired_history = segments.iter().all(|segment| segment.upgrade().is_none());
+    let (_, _, attempt) = job.gather_owner().funding();
+    let reserved = pool.reserved();
+    release.release();
+    let failures = tokio::time::timeout(Duration::from_secs(5), drain)
+        .await
+        .unwrap();
+    assert!(native);
+    assert!(paid > 0);
+    assert!(pending);
+    assert!(
+        retained_inputs,
+        "the owned pending copy must retain its inputs"
+    );
+    assert!(
+        retired_live_rows,
+        "Delta work must not retain Base row inputs"
+    );
+    assert!(retired_history);
+    assert!(attempt > 0);
+    assert!(reserved >= attempt);
+    assert!(failures.is_empty(), "{failures:?}");
+    assert!(column.upgrade().is_none());
+    assert!(key.upgrade().is_none());
+    let (home, generation, attempt) = job.gather_owner().funding();
+    assert_eq!((generation, attempt), (0, 0));
+    assert_eq!(pool.reserved(), home);
+    drop(context);
+    drop(job);
+    assert_eq!(pool.reserved(), 0);
+}
+
+#[test]
+fn test_v2_delta_writer_cancel_retains_pending_inputs_until_actual_drain() {
+    checkpoint_compaction_tests::isolated_checkpoint_test(|service, runtime| {
+        runtime.block_on(cancelled_delta_writer(service));
+    });
+}

@@ -96,3 +96,38 @@ class BenchmarkWorkerTests(unittest.TestCase):
                 self.root,
             )
         self.factory.assert_not_called()
+
+    def test_join_asof_acceptance_uses_one_preparation_warmup(self):
+        acceptance = ModuleType("benchmarks.join_asof_acceptance")
+        acceptance.AcceptanceEngineCase = Mock()
+        active = acceptance.AcceptanceEngineCase.return_value
+        active.sample.return_value = {"processing_seconds": 1.0}
+        with patch.dict("sys.modules", {acceptance.__name__: acceptance}):
+            response, prepared = dispatch(
+                {"operation": "prepare", "case": {"family": "join-asof-acceptance"}},
+                None,
+                self.root,
+            )
+        self.assertIs(prepared, active)
+        self.assertEqual(response["warmup"], active.sample.return_value)
+        active.sample.assert_called_once_with()
+        self.factory.assert_not_called()
+
+    def test_acceptance_fixture_export_starts_no_job_or_warmup(self):
+        acceptance = ModuleType("benchmarks.join_asof_acceptance")
+        acceptance.prepare_acceptance_fixture = Mock(
+            return_value={"fixture_path": "fixture.json"}
+        )
+        case = {"workload": "join_small_batch"}
+        with patch.dict("sys.modules", {acceptance.__name__: acceptance}):
+            response, active = dispatch(
+                {"operation": "acceptance-fixture", "case": case}, None, self.root
+            )
+            with self.assertRaisesRegex(ValueError, "already active"):
+                dispatch(
+                    {"operation": "acceptance-fixture", "case": case}, Mock(), self.root
+                )
+        self.assertEqual(response, {"fixture_path": "fixture.json"})
+        self.assertIsNone(active)
+        acceptance.prepare_acceptance_fixture.assert_called_once_with(case, self.root)
+        self.factory.assert_not_called()

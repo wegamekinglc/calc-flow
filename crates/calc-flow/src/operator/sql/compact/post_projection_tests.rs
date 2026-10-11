@@ -149,7 +149,7 @@ async fn test_postaggregate_cast_errors_and_refusal_preserve_state_and_retry() {
     let query = "SELECT CAST(SUM(value) AS SMALLINT) AS total FROM events";
     let job = job();
     let context = StreamOperatorContext::new(&job, "float_extrema", None);
-    let mut state = operator(&dtype, query);
+    let mut state = operator(&dtype, query).with_one_gib_pool_for_test();
     let first = vec![vec![Some(ONE)]];
     drop(process(&mut state, input(&dtype, &first, 0), &context).await);
     assert!(state.incremental.is_some());

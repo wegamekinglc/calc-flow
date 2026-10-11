@@ -33,7 +33,7 @@ struct CapacityEviction {
     length: u64,
     inventory: state::Inventory,
     journal: super::checkpoint::index_v3::log::journal::Journal,
-    credit: Arc<MemoryReservation>,
+    credit: Option<Arc<MemoryReservation>>,
     retention_bytes: u64,
     columns: MemoryReservation,
 }
@@ -72,7 +72,7 @@ impl StreamAsofJoinOperator {
             }
             // Defer right-side eviction until all ready left rows are emitted.
             // Each accepted prefix can then share the committed right segment.
-            let headroom = self.checkpoint_workspace()?;
+            let headroom = self.checkpoint_workspace(context.job().checkpointing())?;
             let (mut count, prefix_workspace) = self.finalizable_rows(frontier, ended, context)?;
             let prepared_output = self
                 .prepare_output(&mut count, &prefix_workspace, context)
@@ -84,7 +84,10 @@ impl StreamAsofJoinOperator {
         self.finish_progress(frontier, ended, context).await
     }
 
-    fn checkpoint_workspace(&self) -> Result<MemoryReservation> {
+    fn checkpoint_workspace(&self, checkpointing: bool) -> Result<MemoryReservation> {
+        if !checkpointing {
+            return self.reserve_workspace(0);
+        }
         self.reserve_workspace(
             self.prepared
                 .as_ref()
@@ -190,7 +193,7 @@ impl StreamAsofJoinOperator {
             credit,
             retention_bytes,
             columns,
-        } = self.prepare_capacity_eviction()?;
+        } = self.prepare_capacity_eviction(context.job().checkpointing())?;
         let dictionary = self.state.right.prepare_compaction(
             self.state.right.len() - preview.projected_right.0,
             &columns,
@@ -215,7 +218,7 @@ impl StreamAsofJoinOperator {
         debug_assert_eq!(evicted, preview.evicted_payloads);
         self.status = status;
         self.checkpoint_log.install_journal(journal);
-        self.checkpoint_log.credit = Some(credit);
+        self.checkpoint_log.credit = credit;
         self.checkpoint_log.retention_bytes = retention_bytes;
         self.checkpoint_log.pending = None;
         self.checkpoint_log.dirty_cut = self.checkpoint_log.keeps_delta();
@@ -234,11 +237,11 @@ impl StreamAsofJoinOperator {
         self.retirement.wait(context).await
     }
 
-    fn prepare_capacity_eviction(&self) -> Result<CapacityEviction> {
+    fn prepare_capacity_eviction(&self, checkpointing: bool) -> Result<CapacityEviction> {
         let (preview, length, inventory, bytes) = self.capacity_eviction_projection()?;
         let journal = self.prepare_log_eviction(&preview)?;
         let (credit, retention_bytes) =
-            self.prepare_log_retention(&preview.owners, &preview.batches)?;
+            self.prepare_log_retention(&preview.owners, &preview.batches, checkpointing)?;
         let inventory = self.log_projection(inventory, length, &journal, retention_bytes)?;
         let columns = self.reserve_workspace(bytes)?;
         Ok(CapacityEviction {

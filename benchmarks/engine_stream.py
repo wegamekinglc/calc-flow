@@ -91,14 +91,29 @@ def _join_span(table: pa.Table) -> timedelta:
     return timedelta(microseconds=span)
 
 
-def _join_limits(dimension_rows: int, batch_rows: int | None = None) -> JoinStateLimits:
+def _join_limits(
+    dimension_rows: int,
+    batch_rows: int | None = None,
+    *,
+    retained_rows: int | None = None,
+) -> JoinStateLimits:
     """Bound the sealed static dimension and one in-flight quote batch."""
 
-    capacity = dimension_rows + (BATCH_ROWS if batch_rows is None else batch_rows)
-    return JoinStateLimits(capacity, max(capacity << 10, 1 << 30), capacity)
+    batch = BATCH_ROWS if batch_rows is None else batch_rows
+    capacity = dimension_rows + max(batch, retained_rows or 0)
+    return JoinStateLimits(
+        capacity, max(capacity << 10, 1 << 30), dimension_rows + batch
+    )
 
 
-def _join_stream_output(table: pa.Table, dimension: pa.Table, quotes, batch_rows: int):
+def _join_stream_output(
+    table: pa.Table,
+    dimension: pa.Table,
+    quotes,
+    batch_rows: int,
+    *,
+    retained_rows: int | None = None,
+):
     """Return the bounded temporal join output and its program inputs."""
 
     if table is None or dimension is None:
@@ -123,7 +138,9 @@ def _join_stream_output(table: pa.Table, dimension: pa.Table, quotes, batch_rows
         left_event_time="event_time",
         right_event_time="event_time",
         bounds=JoinTimeBounds(_join_span(table), timedelta()),
-        limits=_join_limits(dimension.num_rows, batch_rows),
+        limits=_join_limits(
+            dimension.num_rows, batch_rows, retained_rows=retained_rows
+        ),
         left_prefix="quote",
         right_prefix="dimension",
     )
@@ -180,13 +197,38 @@ def _scalar_stream_output(scenario: str, quotes):
     return output
 
 
-def stream_plan(
+def _asof_stream_output(table: pa.Table | None, quotes, batch_rows: int):
+    if table is None:
+        raise ValueError("asof_join stream plans require the workload table")
+    reference = table_input(
+        "reference",
+        schema=QUOTE_FIELDS,
+        entity_by=("symbol",),
+        event_time="event_time",
+        sequence_by=("sequence",),
+    )
+    joined = tables.stream_asof_join(
+        quotes,
+        reference,
+        tolerance=timedelta(),
+        limits=AsofStateLimits(2 * batch_rows + 128, 1 << 30),
+    )
+    output = joined.select(
+        sequence=joined["left__sequence"], value=joined["right__price"]
+    )
+    return output, (quotes, reference)
+
+
+def stream_program(
     scenario: str,
     table: pa.Table | None = None,
     dimension: pa.Table | None = None,
     *,
     batch_rows: int | None = None,
+    retained_rows: int | None = None,
 ):
+    """Declare the maintained stream graph, with opt-in full quote retention."""
+
     batch_rows = BATCH_ROWS if batch_rows is None else batch_rows
     quotes = table_input(
         "quotes",
@@ -205,25 +247,7 @@ def stream_plan(
             aggregates=(window.sum("price", output="value"),),
         ).select("symbol", "window_start", "value")
     elif scenario == "asof_join":
-        if table is None:
-            raise ValueError("asof_join stream plans require the workload table")
-        reference = table_input(
-            "reference",
-            schema=QUOTE_FIELDS,
-            entity_by=("symbol",),
-            event_time="event_time",
-            sequence_by=("sequence",),
-        )
-        joined = tables.stream_asof_join(
-            quotes,
-            reference,
-            tolerance=timedelta(),
-            limits=AsofStateLimits(2 * batch_rows + 128, 1 << 30),
-        )
-        output = joined.select(
-            sequence=joined["left__sequence"], value=joined["right__price"]
-        )
-        inputs = (quotes, reference)
+        output, inputs = _asof_stream_output(table, quotes, batch_rows)
     elif scenario == "group_by":
         if table is None:
             raise ValueError("group_by stream plans require the workload table")
@@ -238,7 +262,9 @@ def stream_plan(
             aggregates=(window.sum("price", output="value"),),
         ).select("symbol", "value")
     elif scenario == "join":
-        output, inputs = _join_stream_output(table, dimension, quotes, batch_rows)
+        output, inputs = _join_stream_output(
+            table, dimension, quotes, batch_rows, retained_rows=retained_rows
+        )
     elif scenario == "interval_join":
         reference = table_input(
             "reference",
@@ -269,6 +295,18 @@ def stream_plan(
         output = _scalar_stream_output(scenario, quotes)
     return Program(
         "suite-stream", engine="streaming", inputs=inputs, outputs=(("result", output),)
+    )
+
+
+def stream_plan(
+    scenario: str,
+    table: pa.Table | None = None,
+    dimension: pa.Table | None = None,
+    *,
+    batch_rows: int | None = None,
+):
+    return stream_program(
+        scenario, table, dimension, batch_rows=batch_rows
     ).compile_stream(Runtime())
 
 
@@ -464,23 +502,36 @@ async def _measure_ready(
     *,
     static_join: bool = False,
 ) -> tuple[pa.Table, float]:
-    await asyncio.wait_for(
-        asyncio.gather(*(source.ready.wait() for source in sources.values())),
-        timeout=30,
+    table, seconds, _clocks = await _measure_ready_clock(
+        sources, sink, streams, job, join_mode="sealed" if static_join else None
     )
-    _require_ready_sources(sources, sink)
-    pending = streams
+    return table, seconds
+
+
+async def _preload_join_dimension(
+    sources: dict, streams: dict, job, static_join: bool
+) -> tuple:
+    dimension_rows = None
+    dimension_events = (
+        streams["right"]
+        if static_join
+        else tuple(event for event in streams["right"] if isinstance(event, Data))
+    )
+    for event in dimension_events:
+        await sources["right"].push(event)
     if static_join:
-        for event in streams["right"]:
-            await sources["right"].push(event)
         delta = streams["right"][-1].at - BASE
         watermark = BASE_MICROS + delta // timedelta(microseconds=1)
-        await asyncio.wait_for(
-            _wait_static_dimension_progress(job, watermark),
-            timeout=600,
-        )
-        pending = {"left": streams["left"]}
-    started = time.perf_counter_ns()
+        await asyncio.wait_for(_wait_static_dimension_progress(job, watermark), 600)
+    else:
+        dimension_rows = sum(event.batch.num_rows for event in dimension_events)
+        await asyncio.wait_for(_wait_retained_dimension(job, dimension_rows), 600)
+    return {"left": streams["left"]}, dimension_rows
+
+
+async def _push_processing_events(
+    sources: dict, streams: dict, sink, pending: dict
+) -> None:
     if (
         set(streams) == {"reference.input", "quotes.input"}
         and len(streams["quotes.input"]) > 2
@@ -489,16 +540,79 @@ async def _measure_ready(
         pending = {}
     for name, event in interleaved_events(pending):
         await sources[name].push(event)
+
+
+async def _measure_ready_clock(
+    sources: dict[str, _ReadySource],
+    sink: _CollectSink,
+    streams: dict[str, tuple],
+    job,
+    *,
+    join_mode: str | None = None,
+) -> tuple[pa.Table, float, dict]:
+    if join_mode not in (None, "sealed", "retained"):
+        raise ValueError("unknown Join measurement mode")
+    static_join, retained_join = join_mode == "sealed", join_mode == "retained"
+    await asyncio.wait_for(
+        asyncio.gather(*(source.ready.wait() for source in sources.values())),
+        timeout=30,
+    )
+    _require_ready_sources(sources, sink)
+    pending = streams
+    if static_join or retained_join:
+        pending, dimension_rows = await _preload_join_dimension(
+            sources, streams, job, static_join
+        )
+    started = time.perf_counter_ns()
+    await _push_processing_events(sources, streams, sink, pending)
     await asyncio.wait_for(sink.complete.wait(), timeout=600)
     if sink.rows != sink.expected_rows:
         raise RuntimeError("stream output row count differs from the timed workload")
     table = pa.concat_tables(sink.tables)
-    seconds = (time.perf_counter_ns() - started) / 1e9
+    ended = time.perf_counter_ns()
+    seconds = (ended - started) / 1e9
     if static_join:
         await asyncio.wait_for(
             _wait_static_quote_progress(job, sink.expected_rows), timeout=600
         )
-    return table, seconds
+    if retained_join:
+        await asyncio.wait_for(
+            _wait_retained_quotes(job, sink.expected_rows, dimension_rows), 600
+        )
+    return (
+        table,
+        seconds,
+        {
+            "processing_started_ns": started,
+            "processing_ended_ns": ended,
+        },
+    )
+
+
+async def _wait_retained_dimension(job, rows: int) -> None:
+    while True:
+        status = _static_join_status(job)
+        if (
+            status["left"]["retained_rows"]
+            or status["right"]["watermark_micros"] is not None
+        ):
+            raise RuntimeError(
+                "retained Join preload admitted quotes or sealed dimension"
+            )
+        if status["right"]["retained_rows"] == rows:
+            return
+        await asyncio.sleep(0.001)
+
+
+async def _wait_retained_quotes(job, rows: int, dimension_rows: int) -> None:
+    from benchmarks.join_asof_acceptance import validate_retained_status
+
+    while True:
+        status = _static_join_status(job)
+        if status["emitted_match_rows"] >= rows:
+            validate_retained_status(status, rows, dimension_rows)
+            return
+        await asyncio.sleep(0.001)
 
 
 async def _feed_asof_chunks(

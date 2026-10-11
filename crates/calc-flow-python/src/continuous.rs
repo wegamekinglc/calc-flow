@@ -16,7 +16,9 @@ use pyo3::{
     intern,
     prelude::*,
     sync::PyOnceLock,
-    types::{PyAny, PyCFunction, PyCapsule, PyDict, PyDictMethods, PyList, PyTuple, PyType},
+    types::{
+        PyAny, PyBool, PyCFunction, PyCapsule, PyDict, PyDictMethods, PyList, PyTuple, PyType,
+    },
 };
 
 use crate::{
@@ -1143,6 +1145,11 @@ fn build_static_inputs(
 }
 
 fn runtime_config(config: &Bound<'_, PyDict>) -> PyResult<calc_flow::StreamRuntimeConfig> {
+    let checkpointing = match config.get_item("checkpointing")? {
+        Some(value) if value.is_instance_of::<PyBool>() => value.extract()?,
+        Some(_) => return Err(PyTypeError::new_err("checkpointing must be a bool")),
+        None => true,
+    };
     let sql_state_max_rows = config
         .get_item("sql_state_max_rows")?
         .map(|value| value.extract::<u64>())
@@ -1163,6 +1170,7 @@ fn runtime_config(config: &Bound<'_, PyDict>) -> PyResult<calc_flow::StreamRunti
         }
     };
     Ok(calc_flow::StreamRuntimeConfig {
+        checkpointing,
         checkpoint_interval: duration_config(config, "checkpoint_interval_micros")?,
         checkpoint_timeout: duration_config(config, "checkpoint_timeout_micros")?,
         edge_budget: edge_budget_config(config)?,
@@ -1174,6 +1182,7 @@ fn runtime_config(config: &Bound<'_, PyDict>) -> PyResult<calc_flow::StreamRunti
 #[pymethods]
 impl PyContinuousStreamingRunner {
     #[new]
+    #[pyo3(signature = (plan, sources, sinks, checkpoints, config, static_inputs))]
     #[allow(
         clippy::needless_pass_by_value,
         reason = "PyO3 constructor extraction owns its PyRef boundary values"
@@ -1182,25 +1191,33 @@ impl PyContinuousStreamingRunner {
         plan: PyRef<'_, PyStreamExecutionPlan>,
         sources: &Bound<'_, PyDict>,
         sinks: &Bound<'_, PyDict>,
-        checkpoints: PyRef<'_, PyManagedCheckpointRuntime>,
+        checkpoints: Option<PyRef<'_, PyManagedCheckpointRuntime>>,
         config: &Bound<'_, PyDict>,
         static_inputs: &Bound<'_, PyDict>,
     ) -> PyResult<Self> {
+        let config = runtime_config(config)?;
+        if config.checkpointing != checkpoints.is_some() {
+            return Err(PyValueError::new_err(
+                "checkpointing must match the presence of managed checkpoint storage",
+            ));
+        }
         let awaits = Arc::new(PythonAwaitRegistry::new());
         let context = Arc::new(Mutex::new(None));
         let ownership = Arc::new(ConnectorOwnership::new());
         let (sources, mut roots) = build_sources(sources, &awaits, &context, &ownership)?;
         let (sinks, sink_roots) = build_sinks(sinks, &awaits, &context, &ownership)?;
         roots.extend(sink_roots);
-        let config = runtime_config(config)?;
         let (plan, plan_owner) = plan.take()?;
         roots.push(Arc::new(PythonRoot::new(plan_owner)));
-        let checkpoints = checkpoints.take()?;
+        let checkpoints = checkpoints.map(|value| value.take()).transpose()?;
         let static_inputs = build_static_inputs(static_inputs)?;
-        let runner = calc_flow::StreamingRunner::new(plan, sources, sinks, checkpoints)
-            .and_then(|runner| runner.with_runtime_config(config))
-            .and_then(|runner| runner.with_static_inputs(static_inputs))
-            .map_err(streaming_py_err)?;
+        let runner = match checkpoints {
+            Some(checkpoints) => calc_flow::StreamingRunner::new(plan, sources, sinks, checkpoints),
+            None => calc_flow::StreamingRunner::without_checkpoints(plan, sources, sinks),
+        }
+        .and_then(|runner| runner.with_runtime_config(config))
+        .and_then(|runner| runner.with_static_inputs(static_inputs))
+        .map_err(streaming_py_err)?;
         Ok(Self {
             inner: Arc::new(RunnerStartState {
                 runner: Mutex::new(Some(runner)),
@@ -1344,6 +1361,29 @@ impl PyStreamingJob {
 
     fn _enable_callback_profiling(&self) {
         self.awaits.enable_profiling();
+    }
+
+    #[cfg(feature = "benchmark-internals")]
+    #[pyo3(signature = (allow_barriers=false))]
+    fn _benchmark_start_dispatch_trace(&self, allow_barriers: bool) -> PyResult<()> {
+        self.job()?
+            .benchmark_start_dispatch_trace(allow_barriers)
+            .map_err(streaming_py_err)
+    }
+
+    #[cfg(feature = "benchmark-internals")]
+    fn _benchmark_take_dispatch_trace(&self) -> PyResult<String> {
+        let trace = self
+            .job()?
+            .benchmark_take_dispatch_trace()
+            .map_err(streaming_py_err)?;
+        let encoded = serde_json::to_string(&trace);
+        encoded.map_err(|error| PyRuntimeError::new_err(error.to_string()))
+    }
+
+    #[cfg(feature = "benchmark-internals")]
+    fn _benchmark_dispatch_frontier(&self, node_id: &str) -> PyResult<Option<i64>> {
+        Ok(self.job()?.benchmark_dispatch_frontier(node_id))
     }
 
     fn _take_callback_profile(&self) -> PyResult<String> {
@@ -2328,6 +2368,53 @@ mod tests {
         PyContinuousStreamingRunner, PyManagedCheckpointRuntime, checked_static_array_shape,
     };
     use crate::{batch::PyBatch, pipeline::PyStreamExecutionPlan};
+
+    #[test]
+    fn benchmark_dispatch_trace_methods_follow_feature_gate() {
+        Python::initialize();
+        Python::attach(|py| {
+            let class = py.get_type::<super::PyStreamingJob>();
+            for name in [
+                "_benchmark_start_dispatch_trace",
+                "_benchmark_take_dispatch_trace",
+                "_benchmark_dispatch_frontier",
+            ] {
+                assert_eq!(
+                    class.hasattr(name).unwrap(),
+                    cfg!(feature = "benchmark-internals"),
+                    "unexpected visibility for {name}",
+                );
+            }
+            #[cfg(feature = "benchmark-internals")]
+            {
+                let cleared = Py::new(
+                    py,
+                    super::PyStreamingJob {
+                        inner: parking_lot::Mutex::new(None),
+                        roots: Arc::new(parking_lot::Mutex::new(Vec::new())),
+                        awaits: Arc::new(crate::runtime::PythonAwaitRegistry::new()),
+                        context: Arc::new(parking_lot::Mutex::new(None)),
+                    },
+                )
+                .unwrap();
+                let instance = cleared.bind(py);
+                for error in [
+                    instance
+                        .call_method0("_benchmark_start_dispatch_trace")
+                        .unwrap_err(),
+                    instance
+                        .call_method0("_benchmark_take_dispatch_trace")
+                        .unwrap_err(),
+                    instance
+                        .call_method1("_benchmark_dispatch_frontier", ("result",))
+                        .unwrap_err(),
+                ] {
+                    assert!(error.is_instance_of::<pyo3::exceptions::PyRuntimeError>(py));
+                    assert!(error.to_string().contains("StreamingJob has been cleared"));
+                }
+            }
+        });
+    }
 
     #[test]
     fn rolling_status_preserves_nanoseconds_full_integer_range_and_snapshots() {
@@ -3325,7 +3412,7 @@ mod tests {
                 plan.borrow(py),
                 &sources,
                 &sinks,
-                checkpoints.borrow(py),
+                Some(checkpoints.borrow(py)),
                 &config,
                 &static_inputs,
             )

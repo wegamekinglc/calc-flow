@@ -293,6 +293,75 @@ def test_static_join_limits_allow_only_dimension_and_one_batch():
     assert limits.max_matches_per_input_batch == 128 + engine_stream.BATCH_ROWS
 
 
+def test_explicit_retained_join_limits_admit_the_full_quote_state():
+    limits = engine_stream._join_limits(64, 1024, retained_rows=1_000_000)
+    assert limits.max_state_rows_per_side == 1_000_064
+    assert limits.max_matches_per_input_batch == 1088
+    assert engine_stream._join_limits(64, 1024).max_state_rows_per_side == 1088
+
+
+def test_retained_join_preloads_without_sealing_and_records_processing_cut():
+    async def exercise():
+        sink = engine_stream._CollectSink(2)
+        await sink.open()
+        batch = Batch.from_pyarrow(engine_stream.pa.table({"value": [1, 2]}))
+        data = Data(batch, Cursor(b"rows", {}))
+        watermark = Watermark(BASE)
+        events = []
+        admitted = False
+
+        class Source:
+            def __init__(self, name):
+                self.name = name
+                self.opened = asyncio.Event()
+                self.ready = asyncio.Event()
+                self.opened.set()
+                self.ready.set()
+
+            async def push(self, event):
+                events.append((self.name, event))
+                if self.name == "left" and isinstance(event, Data):
+                    assert admitted
+                    assert ("right", watermark) not in events
+                    await sink.write(batch)
+
+        def status():
+            nonlocal admitted
+            admitted = ("right", data) in events
+            common = {
+                "retained_bytes": 100,
+                "evicted_rows": 0,
+                "watermark_micros": None,
+                "idle": False,
+                "ended": False,
+            }
+            return {
+                "stream_joins": {
+                    "join": {
+                        "emitted_match_rows": sink.rows,
+                        "left": {**common, "retained_rows": sink.rows},
+                        "right": {**common, "retained_rows": 2 if admitted else 0},
+                    }
+                }
+            }
+
+        output, seconds, clocks = await engine_stream._measure_ready_clock(
+            {name: Source(name) for name in ("left", "right")},
+            sink,
+            {name: (data, watermark) for name in ("left", "right")},
+            SimpleNamespace(status=status),
+            join_mode="retained",
+        )
+        assert output.equals(batch.to_pyarrow())
+        assert [name for name, _event in events] == ["right", "left", "left"]
+        assert (
+            seconds
+            == (clocks["processing_ended_ns"] - clocks["processing_started_ns"]) / 1e9
+        )
+
+    asyncio.run(exercise())
+
+
 @pytest.mark.parametrize("metric", ("retained_rows", "evicted_rows"))
 def test_static_dimension_gate_rejects_left_state(metric):
     def status():

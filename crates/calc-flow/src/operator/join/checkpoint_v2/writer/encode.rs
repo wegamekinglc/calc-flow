@@ -1,16 +1,18 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, io::Write, sync::Arc};
 
 use datafusion::arrow::{
     array::ArrayRef,
     datatypes::SchemaRef,
     ipc::{
         MetadataVersion,
-        writer::{IpcWriteOptions, StreamWriter},
+        writer::{
+            CompressionContext, DictionaryTracker, EncodedData, IpcDataGenerator, IpcWriteOptions,
+            write_message,
+        },
     },
 };
 use datafusion::execution::memory_pool::MemoryReservation;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 
 use super::super::super::{JoinSide, StoredRow};
 use super::super::{
@@ -20,10 +22,12 @@ use super::super::{
 use super::{
     buffer::{PaidBuffer, ensure, error},
     compact,
+    row::{CheckpointRow, PendingUpsert},
 };
 use crate::{Result, StateSegment};
 
 mod delta;
+pub(super) mod rebase;
 pub(super) mod restored;
 pub(super) mod retarget;
 
@@ -46,6 +50,14 @@ pub(super) struct Base {
 }
 
 impl Base {
+    #[cfg(test)]
+    pub(super) fn test_owners(&self) -> Vec<std::sync::Weak<MemoryReservation>> {
+        std::iter::once(&self.funding)
+            .chain(&self.owners)
+            .map(Arc::downgrade)
+            .collect()
+    }
+
     pub(super) fn credit(&self) -> &MemoryReservation {
         &self.funding
     }
@@ -87,6 +99,22 @@ fn bulk_bytes<T>(length: usize) -> Result<usize> {
     product(product(length, 3)?.max(4), size_of::<T>())
 }
 
+fn segment_charge(capacity: usize) -> Result<usize> {
+    sum(&[
+        capacity,
+        accounting::arc::<Vec<u8>>()?,
+        64,
+        accounting::arc::<MemoryReservation>()?,
+        budget::registration_bytes()?,
+    ])
+}
+
+fn own_segment(bytes: Vec<u8>, credit: &MemoryReservation, charge: usize) -> StateSegment {
+    #[cfg(test)]
+    tests::digest::record_payload_hash(&bytes);
+    StateSegment::new(bytes).with_owner(Arc::new(credit.split(charge)))
+}
+
 pub(super) fn pending(
     pending: &super::super::super::PendingLog,
     schemas: &[SchemaRef; 2],
@@ -94,8 +122,7 @@ pub(super) fn pending(
     workspace: &MemoryReservation,
     check: &dyn Fn() -> Result<()>,
 ) -> Result<Base> {
-    let owned = copy_pending(pending, workspace, check)?;
-    pending_owned(&owned, schemas, epoch, workspace, check)
+    delta::encode(|| pending.iter(), schemas, epoch, workspace, check)
 }
 
 pub(super) fn copy_pending(
@@ -149,7 +176,7 @@ pub(super) fn pending_owned(
     workspace: &MemoryReservation,
     check: &dyn Fn() -> Result<()>,
 ) -> Result<Base> {
-    delta::encode(pending, schemas, epoch, workspace, check)
+    delta::encode(|| pending.iter(), schemas, epoch, workspace, check)
 }
 
 struct Encoder {
@@ -176,7 +203,7 @@ pub(super) fn base(
         )?;
     }
     check()?;
-    Ok(encoder.output)
+    Ok(encoder.finish())
 }
 
 impl Encoder {
@@ -201,6 +228,11 @@ impl Encoder {
         })
     }
 
+    fn finish(self) -> Base {
+        self.funding.shrink(self.funding.size() - self.retained);
+        self.output
+    }
+
     fn side(
         &mut self,
         rows: &[StoredRow],
@@ -222,7 +254,7 @@ impl Encoder {
 
     fn payload(
         &mut self,
-        rows: &[&StoredRow],
+        rows: &[impl CheckpointRow],
         schema: SchemaRef,
         side: JoinSide,
         workspace: &MemoryReservation,
@@ -231,30 +263,42 @@ impl Encoder {
         let compacted = compact::compact(rows, schema, workspace, check)?;
         let scratch = super::budget::stream_scratch(&compacted.record)?;
         ensure(&self.funding, add(self.retained, scratch)?)?;
+        let encoded = encode_stream(compacted, check)?;
         let mut ipc = PaidBuffer::new(&self.funding, add(self.retained, scratch)?);
-        write_stream(&mut ipc, &compacted.record, check)?;
-        let ipc = ipc.into_bytes();
-        drop(compacted);
+        write_stream(&mut ipc, encoded, check)?;
+        let ipc = ipc.into_bytes()?;
         self.frame_payload(rows, side, ipc, check)
     }
 
     fn frame_payload(
         &mut self,
-        rows: &[&StoredRow],
+        rows: &[impl CheckpointRow],
         side: JoinSide,
         ipc: Vec<u8>,
         check: &dyn Fn() -> Result<()>,
     ) -> Result<[u8; 32]> {
-        let mut bytes = PaidBuffer::new(&self.funding, add(self.retained, ipc.capacity())?);
+        check()?;
+        let capacity = payload_frame_bytes(rows.len(), ipc.len())?;
+        let mut bytes =
+            PaidBuffer::exact(&self.funding, add(self.retained, ipc.capacity())?, capacity)?;
         append_payload(&mut bytes, rows, side, &ipc, check)?;
-        let bytes = bytes.into_bytes();
+        let bytes = bytes.into_bytes()?;
         drop(ipc);
         check()?;
         self.admit_payload_entry(bytes.capacity())?;
-        let digest: [u8; 32] = Sha256::digest(&bytes).into();
-        let sha256 = hex::encode(digest);
-        let entry = payload_entry(side, &sha256, rows.len(), bytes.len())?;
-        self.install(format!("{}-payload-{sha256}", side.as_str()), bytes)?;
+        let name_capacity = side.as_str().len() + "-payload-".len() + 64;
+        let (retained, backing) = self.admit_segment(name_capacity, bytes.capacity())?;
+        let segment = own_segment(bytes, &self.funding, backing);
+        let mut digest = [0; 32];
+        hex::decode_to_slice(segment.sha256(), &mut digest)
+            .map_err(|_| error("invalid generated V2 payload digest"))?;
+        let entry = payload_entry(side, segment.sha256(), rows.len(), segment.bytes().len())?;
+        let mut name = String::with_capacity(name_capacity);
+        name.push_str(side.as_str());
+        name.push_str("-payload-");
+        name.push_str(segment.sha256());
+        self.output.segments.insert(name, segment);
+        self.retained = retained;
         self.output.payloads.push(entry);
         Ok(digest)
     }
@@ -272,20 +316,24 @@ impl Encoder {
     }
 
     fn install(&mut self, name: String, bytes: Vec<u8>) -> Result<()> {
-        let overhead = sum(&[
-            budget::tree::<String, StateSegment>(1)?,
-            name.capacity(),
-            accounting::arc::<Vec<u8>>()?,
-            64,
-            accounting::vector_peak::<PayloadEntry>(2)?,
-            128,
-        ])?;
-        let retained = sum(&[self.retained, bytes.capacity(), overhead])?;
-        ensure(&self.funding, retained)?;
-        let segment = StateSegment::new(bytes).with_owner(self.funding.clone());
+        let (retained, backing) = self.admit_segment(name.capacity(), bytes.capacity())?;
+        let segment = own_segment(bytes, &self.funding, backing);
         self.output.segments.insert(name, segment);
         self.retained = retained;
         Ok(())
+    }
+
+    fn admit_segment(&self, name_capacity: usize, capacity: usize) -> Result<(usize, usize)> {
+        let overhead = sum(&[
+            budget::tree::<String, StateSegment>(1)?,
+            name_capacity,
+            accounting::vector_peak::<PayloadEntry>(2)?,
+            128,
+        ])?;
+        let retained = add(self.retained, overhead)?;
+        let backing = segment_charge(capacity)?;
+        ensure(&self.funding, add(retained, backing)?)?;
+        Ok((retained, backing))
     }
 }
 
@@ -305,10 +353,11 @@ fn integer(value: usize) -> Result<[u8; 8]> {
 
 fn upsert(
     buffer: &mut PaidBuffer<'_>,
-    row: &StoredRow,
+    row: &impl CheckpointRow,
     digest: &[u8; 32],
     position: usize,
 ) -> Result<()> {
+    let row = row.row();
     let mut fixed = [0_u8; 72];
     fixed[..8].copy_from_slice(&row.row_id.to_le_bytes());
     fixed[8..16].copy_from_slice(&row.event_time.as_micros().to_le_bytes());
@@ -317,7 +366,7 @@ fn upsert(
     fixed[56..64].copy_from_slice(&integer(position)?);
     fixed[64..72].copy_from_slice(&integer(row.encoded_key.len())?);
     buffer.append(&fixed)?;
-    buffer.append(&row.encoded_key)
+    buffer.append(row.encoded_key)
 }
 
 fn ordered_rows<'a>(
@@ -341,7 +390,9 @@ fn encode_index(
     retained: usize,
     check: &dyn Fn() -> Result<()>,
 ) -> Result<Vec<u8>> {
-    let mut index = PaidBuffer::new(credit, retained);
+    let capacity = add(32, upsert_bytes(rows, check)?)?;
+    check()?;
+    let mut index = PaidBuffer::exact(credit, retained, capacity)?;
     let mut fixed = [0; 32];
     fixed[..16].copy_from_slice(&header(*BASE_MAGIC, side));
     fixed[16..24].copy_from_slice(&integer(rows.len())?);
@@ -350,31 +401,89 @@ fn encode_index(
         check()?;
         upsert(&mut index, row, digest, position)?;
     }
-    Ok(index.into_bytes())
+    index.into_bytes()
+}
+
+fn upsert_bytes(rows: &[impl CheckpointRow], check: &dyn Fn() -> Result<()>) -> Result<usize> {
+    check()?;
+    rows.iter().try_fold(0, |bytes, row| {
+        check()?;
+        sum(&[bytes, 72, row.row().encoded_key.len()])
+    })
+}
+
+fn payload_frame_bytes(rows: usize, ipc: usize) -> Result<usize> {
+    sum(&[32, product(rows, 8)?, ipc])
+}
+
+struct EncodedStream {
+    schema: EncodedData,
+    dictionaries: Vec<EncodedData>,
+    batch: EncodedData,
+    options: IpcWriteOptions,
+}
+
+fn encode_stream(
+    compacted: compact::CompactBatch,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<EncodedStream> {
+    check()?;
+    let options = IpcWriteOptions::try_new(8, false, MetadataVersion::V5)
+        .map_err(|_| error("V2 checkpoint IPC options are invalid"))?;
+    let generator = IpcDataGenerator::default();
+    let mut dictionaries = DictionaryTracker::new(false);
+    let schema = generator.schema_to_bytes_with_dictionary_tracker(
+        compacted.record.schema_ref(),
+        &mut dictionaries,
+        &options,
+    );
+    check()?;
+    let mut compression = CompressionContext::default();
+    let (encoded_dictionaries, batch) = generator
+        .encode(
+            &compacted.record,
+            &mut dictionaries,
+            &options,
+            &mut compression,
+        )
+        .map_err(|_| error("V2 checkpoint IPC payload encoding failed"))?;
+    drop((dictionaries, compression));
+    drop(compacted);
+    check()?;
+    Ok(EncodedStream {
+        schema,
+        dictionaries: encoded_dictionaries,
+        batch,
+        options,
+    })
 }
 
 fn write_stream(
     output: &mut PaidBuffer<'_>,
-    record: &datafusion::arrow::record_batch::RecordBatch,
+    encoded: EncodedStream,
     check: &dyn Fn() -> Result<()>,
 ) -> Result<()> {
-    let options = IpcWriteOptions::try_new(8, false, MetadataVersion::V5)
-        .map_err(|_| error("V2 checkpoint IPC options are invalid"))?;
-    let mut writer = StreamWriter::try_new_with_options(output, record.schema_ref(), options)
-        .map_err(|_| error("V2 checkpoint IPC schema encoding failed"))?;
     check()?;
-    writer
-        .write(record)
+    write_message(&mut *output, encoded.schema, &encoded.options)
+        .map_err(|_| error("V2 checkpoint IPC schema encoding failed"))?;
+    for dictionary in encoded.dictionaries {
+        check()?;
+        write_message(&mut *output, dictionary, &encoded.options)
+            .map_err(|_| error("V2 checkpoint IPC payload encoding failed"))?;
+    }
+    check()?;
+    write_message(&mut *output, encoded.batch, &encoded.options)
         .map_err(|_| error("V2 checkpoint IPC payload encoding failed"))?;
     check()?;
-    writer
-        .finish()
+    output
+        .write_all(&[255, 255, 255, 255, 0, 0, 0, 0])
+        .and_then(|()| output.flush())
         .map_err(|_| error("V2 checkpoint IPC finish failed"))
 }
 
 fn append_payload(
     bytes: &mut PaidBuffer<'_>,
-    rows: &[&StoredRow],
+    rows: &[impl CheckpointRow],
     side: JoinSide,
     ipc: &[u8],
     check: &dyn Fn() -> Result<()>,
@@ -386,7 +495,7 @@ fn append_payload(
     bytes.append(&fixed)?;
     for row in rows {
         check()?;
-        bytes.append(&row.row_id.to_le_bytes())?;
+        bytes.append(&row.row().row_id.to_le_bytes())?;
     }
     bytes.append(ipc)
 }
@@ -399,3 +508,7 @@ fn payload_entry(side: JoinSide, sha256: &str, rows: usize, bytes: usize) -> Res
         bytes: u64::try_from(bytes).map_err(|_| error("V2 payload length overflow"))?,
     })
 }
+
+#[cfg(test)]
+#[path = "wire_tests.rs"]
+mod tests;

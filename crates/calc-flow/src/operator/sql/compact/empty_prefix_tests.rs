@@ -122,7 +122,7 @@ async fn test_empty_prefix_activation_refusal_preserves_state_and_retries() {
     for query in [GROUPED, GLOBAL] {
         let job = job();
         let context = StreamOperatorContext::new(&job, "grouped_float", None);
-        let mut state = operator_query(&dtype, query);
+        let mut state = operator_query(&dtype, query).with_one_gib_pool_for_test();
         drop(process(&mut state, input(&dtype, &[vec![]], 0), &context).await);
         let snapshot = state.checkpoint(Epoch::INITIAL).unwrap();
         let pool = state

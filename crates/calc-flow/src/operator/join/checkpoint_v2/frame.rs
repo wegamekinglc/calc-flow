@@ -105,6 +105,31 @@ impl<'a> Index<'a> {
             previous_tombstone: None,
         }
     }
+
+    pub(super) fn groups(
+        &self,
+        check: &dyn Fn() -> crate::Result<()>,
+    ) -> crate::Result<[Records<'a>; 2]> {
+        let mut records = self.records();
+        for _ in 0..self.upserts {
+            check()?;
+            super::geometry::checked(records.next())?;
+        }
+        let boundary = self.body.len() - records.reader.bytes.len();
+        loop {
+            check()?;
+            if super::geometry::checked(records.next())?.is_none() {
+                break;
+            }
+        }
+        let mut upserts = self.records();
+        upserts.reader = Reader::new(&self.body[..boundary]);
+        upserts.tombstones = 0;
+        let mut tombstones = self.records();
+        tombstones.reader = Reader::new(&self.body[boundary..]);
+        tombstones.upserts = 0;
+        Ok([upserts, tombstones])
+    }
 }
 
 pub(super) struct Upsert<'a> {
@@ -127,6 +152,7 @@ pub(super) enum Record<'a> {
     Tombstone(Tombstone<'a>),
 }
 
+#[derive(Clone, Copy)]
 pub(super) struct Records<'a> {
     reader: Reader<'a>,
     upserts: usize,
@@ -194,6 +220,7 @@ fn checked_bytes(count: usize, width: usize) -> Result<usize> {
         .ok_or(InvalidFrame("frame length overflow"))
 }
 
+#[derive(Clone, Copy)]
 struct Reader<'a> {
     bytes: &'a [u8],
 }

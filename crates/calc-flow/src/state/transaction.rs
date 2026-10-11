@@ -119,6 +119,19 @@ pub(crate) enum ManifestPublication {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SegmentPublication {
+    Carried,
+    Visible,
+    Staged,
+}
+
+struct StagedStateSegments {
+    handles: Vec<StateHandle>,
+    validation: Vec<StateHandle>,
+    publication: Vec<StateHandle>,
+}
+
 pub(crate) struct StagedOperatorState {
     pub(crate) inline_metadata: JsonMap,
     pub(crate) segments: Vec<StateHandle>,
@@ -486,25 +499,25 @@ impl ManifestTransaction {
         snapshot: OperatorStateSnapshot,
         cancellation: &CancellationToken,
     ) -> Result<StagedOperatorState> {
-        let (staged, unpublished) = self
+        let staged = self
             .collect_staged_state_segments(operator_id, epoch, &snapshot.segments, cancellation)
             .await?;
-        self.validate_staged_segments(&unpublished, cancellation)
+        self.validate_staged_segments(&staged.validation, cancellation)
             .await?;
-        self.publish_staged_segments(&unpublished, cancellation)
+        self.publish_staged_segments(&staged.publication, cancellation)
             .await?;
         #[cfg(test)]
-        if !staged.is_empty() {
+        if !staged.handles.is_empty() {
             self.inject_fault(ManifestTransactionFaultPoint::StateStage)?;
         }
         Ok(StagedOperatorState {
             working: WorkingStatePins::acquire(
                 self.session_segments.clone(),
                 self.lineage.clone(),
-                &staged,
+                &staged.handles,
             )?,
             inline_metadata: snapshot.inline_metadata,
-            segments: staged,
+            segments: staged.handles,
         })
     }
 
@@ -523,18 +536,18 @@ impl ManifestTransaction {
             Ok(self.operation.lock().await)
         })
         .await?;
-        let (staged, unpublished) = self
+        let staged = self
             .collect_staged_state_segments(sink_id, epoch, &segments, cancellation)
             .await?;
-        self.validate_staged_segments(&unpublished, cancellation)
+        self.validate_staged_segments(&staged.validation, cancellation)
             .await?;
-        self.publish_staged_segments(&unpublished, cancellation)
+        self.publish_staged_segments(&staged.publication, cancellation)
             .await?;
         #[cfg(test)]
-        if !staged.is_empty() {
+        if !staged.handles.is_empty() {
             self.inject_fault(ManifestTransactionFaultPoint::StateStage)?;
         }
-        Ok(staged)
+        Ok(staged.handles)
     }
 
     async fn collect_staged_state_segments(
@@ -543,13 +556,15 @@ impl ManifestTransaction {
         epoch: Epoch,
         segments: &BTreeMap<String, StateSegment>,
         cancellation: &CancellationToken,
-    ) -> Result<(Vec<StateHandle>, Vec<StateHandle>)> {
+    ) -> Result<StagedStateSegments> {
         let owner_hash = digest(owner_id);
         let mut staged = Vec::with_capacity(segments.len());
-        let mut unpublished = Vec::with_capacity(segments.len());
+        let mut validation = Vec::with_capacity(segments.len());
+        let mut publication = Vec::with_capacity(segments.len());
+        let mut new_segments = Vec::with_capacity(segments.len());
         for (segment_id, segment) in segments {
-            let (handle, needs_publication) = self
-                .stage_state_segment(
+            let (handle, status) = self
+                .classify_state_segment(
                     owner_id,
                     epoch,
                     &owner_hash,
@@ -558,16 +573,29 @@ impl ManifestTransaction {
                     cancellation,
                 )
                 .await?;
-            if needs_publication {
-                unpublished.push(handle.clone());
+            if status == SegmentPublication::Staged {
+                validation.push(handle.clone());
+                new_segments.push((handle.clone(), segment.bytes()));
+            }
+            if status != SegmentPublication::Carried {
+                publication.push(handle.clone());
             }
             staged.push(handle);
         }
+        let entries = new_segments
+            .iter()
+            .map(|(handle, bytes)| (handle, *bytes))
+            .collect::<Vec<_>>();
+        self.stage_new_segments(&entries, cancellation).await?;
         staged.sort_unstable();
-        Ok((staged, unpublished))
+        Ok(StagedStateSegments {
+            handles: staged,
+            validation,
+            publication,
+        })
     }
 
-    async fn stage_state_segment(
+    async fn classify_state_segment(
         &self,
         owner_id: &str,
         epoch: Epoch,
@@ -575,7 +603,7 @@ impl ManifestTransaction {
         segment_id: &str,
         segment: &StateSegment,
         cancellation: &CancellationToken,
-    ) -> Result<(StateHandle, bool)> {
+    ) -> Result<(StateHandle, SegmentPublication)> {
         let byte_len =
             u64::try_from(segment.bytes().len()).map_err(|_| CalcFlowError::InvalidArgument {
                 field: format!("state.{owner_id}.segments.{segment_id}"),
@@ -595,7 +623,7 @@ impl ManifestTransaction {
             })
             .cloned()
         {
-            return Ok((carried, false));
+            return Ok((carried, SegmentPublication::Carried));
         }
         let segment_hash = digest(segment_id);
         let relative_path = format!(
@@ -611,36 +639,40 @@ impl ManifestTransaction {
             byte_len,
             segment.sha256(),
         )?;
-        let outcome = match owner_settled(
+        match owner_settled(
             cancellation,
             "state-stage-existing-read",
             self.lineage.load_segment(&handle),
         )
         .await
         {
-            Ok(committed) if committed == segment.bytes() => Ok((handle, false)),
+            Ok(committed) if committed == segment.bytes() => {
+                Ok((handle, SegmentPublication::Visible))
+            }
             Ok(_) => Err(CalcFlowError::CheckpointMismatch {
                 message: format!(
                     "state owner {owner_id:?} committed segment {segment_id:?} changed bytes"
                 ),
             }),
-            Err(CalcFlowError::NotFound { .. }) => {
-                owner_settled(
-                    cancellation,
-                    "state-stage-write",
-                    self.lineage.stage_segment(&handle, segment.bytes()),
-                )
-                .await?;
-                Ok((handle, true))
-            }
+            Err(CalcFlowError::NotFound { .. }) => Ok((handle, SegmentPublication::Staged)),
             Err(error) => Err(error),
-        };
-        if let Ok((handle, false)) = &outcome {
-            let mut session = self.session_segments.lock();
-            session.carried.insert(carry_key, handle.clone());
-            session.verified.insert(handle.clone());
         }
-        outcome
+    }
+
+    async fn stage_new_segments(
+        &self,
+        segments: &[(&StateHandle, &[u8])],
+        cancellation: &CancellationToken,
+    ) -> Result<()> {
+        if segments.is_empty() {
+            return Ok(());
+        }
+        owner_settled(
+            cancellation,
+            "state-stage-write",
+            self.lineage.stage_segments(segments),
+        )
+        .await
     }
 
     async fn validate_staged_segments(
@@ -664,14 +696,15 @@ impl ManifestTransaction {
         handles: &[StateHandle],
         cancellation: &CancellationToken,
     ) -> Result<()> {
-        for handle in handles {
-            owner_settled(
-                cancellation,
-                "state-stage-publish",
-                self.lineage.publish_segment(handle),
-            )
-            .await?;
+        if handles.is_empty() {
+            return Ok(());
         }
+        owner_settled(
+            cancellation,
+            "state-stage-publish",
+            self.lineage.publish_segments(handles),
+        )
+        .await?;
         let mut session = self.session_segments.lock();
         for handle in handles {
             session.carried.insert(
@@ -1708,6 +1741,7 @@ fn io_error(path: &Path, source: std::io::Error) -> CalcFlowError {
 
 #[cfg(test)]
 mod tests {
+    mod publication;
     mod source_history;
 
     use std::{
@@ -2017,7 +2051,7 @@ mod tests {
         let bytes = b"unpublished-state";
         let segment = StateSegment::new(bytes.to_vec());
         let (handle, needs_publication) = transaction
-            .stage_state_segment(
+            .classify_state_segment(
                 "window",
                 Epoch::INITIAL,
                 &super::digest("window"),
@@ -2027,7 +2061,14 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(needs_publication);
+        assert_eq!(needs_publication, super::SegmentPublication::Staged);
+        transaction
+            .stage_new_segments(
+                &[(&handle, segment.bytes())],
+                &crate::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
         assert!(matches!(
             lineage.load_segment(&handle).await,
             Err(CalcFlowError::NotFound { .. })

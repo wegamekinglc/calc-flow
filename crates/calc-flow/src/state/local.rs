@@ -77,6 +77,10 @@ impl StateBackend for LocalStateBackend {
 }
 
 mod preload;
+mod publication;
+#[cfg(test)]
+pub(super) mod publication_tests;
+mod staging;
 
 impl LocalStateBackend {
     pub(crate) async fn open_local_lineage(
@@ -115,8 +119,11 @@ impl LocalStateBackend {
             lock_file,
             publication: Mutex::new(()),
             validated: SyncMutex::new(BTreeSet::new()),
+            segment_directories: Arc::default(),
             #[cfg(test)]
             prepaid_read_hook: SyncMutex::new(None),
+            #[cfg(test)]
+            publication_hook: Arc::default(),
         })
     }
 }
@@ -127,8 +134,11 @@ pub(crate) struct LocalStateLineageBackend {
     lock_file: File,
     publication: Mutex<()>,
     validated: SyncMutex<BTreeSet<StateHandle>>,
+    segment_directories: Arc<SyncMutex<publication::SegmentDirectories>>,
     #[cfg(test)]
     prepaid_read_hook: SyncMutex<Option<preload::ReadHook>>,
+    #[cfg(test)]
+    publication_hook: Arc<SyncMutex<Option<publication_tests::PublicationHook>>>,
 }
 
 impl Drop for LocalStateLineageBackend {
@@ -145,14 +155,11 @@ impl StateLineageBackend for LocalStateLineageBackend {
     }
 
     async fn stage_segment(&self, handle: &StateHandle, bytes: &[u8]) -> Result<()> {
-        let paths = self.managed_paths(handle)?;
-        let handle = handle.clone();
-        let bytes = bytes.to_vec();
-        let _guard = self.publication.lock().await;
-        let staged_handle = handle.clone();
-        worker(move || stage_file(&paths, &staged_handle, &bytes)).await?;
-        self.validated.lock().remove(&handle);
-        Ok(())
+        self.stage_segments(&[(handle, bytes)]).await
+    }
+
+    async fn stage_segments(&self, segments: &[(&StateHandle, &[u8])]) -> Result<()> {
+        staging::stage_segments(self, segments).await
     }
 
     async fn validate_segment(&self, handle: &StateHandle) -> Result<()> {
@@ -166,25 +173,46 @@ impl StateLineageBackend for LocalStateLineageBackend {
     }
 
     async fn publish_segment(&self, handle: &StateHandle) -> Result<()> {
-        let paths = self.managed_paths(handle)?;
-        let handle = handle.clone();
-        let _guard = self.publication.lock().await;
+        self.publish_segments(std::slice::from_ref(handle)).await
+    }
 
-        let committed = paths.committed.clone();
-        let committed_handle = handle.clone();
-        if worker(move || committed_file_matches(&committed, &committed_handle)).await? {
+    async fn publish_segments(&self, handles: &[StateHandle]) -> Result<()> {
+        let unique = super::backend::publication_handles(handles)?;
+        let paths = unique
+            .iter()
+            .map(|handle| self.managed_paths(handle))
+            .collect::<Result<Vec<_>>>()?;
+        if unique.is_empty() {
             return Ok(());
         }
-        if !self.validated.lock().contains(&handle) {
-            return Err(CalcFlowError::Conflict {
-                resource: "validated state segment".into(),
-                key: handle.segment_id().into(),
-            });
+        let _guard = self.publication.lock().await;
+        let entries = unique
+            .iter()
+            .zip(paths)
+            .map(|(handle, paths)| {
+                (
+                    (*handle).clone(),
+                    paths,
+                    self.validated.lock().contains(*handle),
+                )
+            })
+            .collect();
+        #[cfg(test)]
+        let hook = self.publication_hook.lock().clone();
+        let directories = self.segment_directories.clone();
+        worker(move || {
+            publication::publish_files(
+                entries,
+                &directories,
+                #[cfg(test)]
+                hook.as_ref(),
+            )
+        })
+        .await?;
+        let mut validated = self.validated.lock();
+        for handle in unique {
+            validated.remove(handle);
         }
-
-        let published_handle = handle.clone();
-        worker(move || publish_file(&paths, &published_handle)).await?;
-        self.validated.lock().remove(&handle);
         Ok(())
     }
 
@@ -526,14 +554,30 @@ fn is_lock_contention(error: &std::io::Error) -> bool {
     )
 }
 
-fn stage_file(paths: &ManagedSegmentPaths, handle: &StateHandle, bytes: &[u8]) -> Result<()> {
+fn stage_file(
+    paths: &ManagedSegmentPaths,
+    handle: &StateHandle,
+    bytes: &[u8],
+    directories: &SyncMutex<publication::SegmentDirectories>,
+    #[cfg(test)] hook: Option<&publication_tests::PublicationHook>,
+) -> Result<()> {
     validate_expected_bytes(handle, bytes)?;
-    prepare_segment_directories(paths)?;
+    prepare_segment_directories(
+        paths,
+        &mut directories.lock(),
+        #[cfg(test)]
+        hook,
+    )?;
     if reuse_staged_file(paths, handle)? {
         return Ok(());
     }
     reject_committed_file(paths, handle)?;
-    write_staged_file(paths, bytes)
+    write_staged_file(
+        paths,
+        bytes,
+        #[cfg(test)]
+        hook,
+    )
 }
 
 fn reuse_staged_file(paths: &ManagedSegmentPaths, handle: &StateHandle) -> Result<bool> {
@@ -554,7 +598,11 @@ fn reject_committed_file(paths: &ManagedSegmentPaths, handle: &StateHandle) -> R
     Ok(())
 }
 
-fn write_staged_file(paths: &ManagedSegmentPaths, bytes: &[u8]) -> Result<()> {
+fn write_staged_file(
+    paths: &ManagedSegmentPaths,
+    bytes: &[u8],
+    #[cfg(test)] hook: Option<&publication_tests::PublicationHook>,
+) -> Result<()> {
     let mut temporary = tempfile::NamedTempFile::new_in(&paths.staging_parent)
         .map_err(|source| io_error(&paths.staging_parent, source))?;
     temporary
@@ -563,6 +611,12 @@ fn write_staged_file(paths: &ManagedSegmentPaths, bytes: &[u8]) -> Result<()> {
     temporary
         .flush()
         .map_err(|source| io_error(temporary.path(), source))?;
+    #[cfg(test)]
+    publication_tests::observe(
+        hook,
+        publication_tests::Operation::FileSync,
+        temporary.path(),
+    )?;
     temporary
         .as_file()
         .sync_all()
@@ -570,21 +624,41 @@ fn write_staged_file(paths: &ManagedSegmentPaths, bytes: &[u8]) -> Result<()> {
     temporary
         .persist_noclobber(&paths.staging)
         .map_err(|error| io_error(&paths.staging, error.error))?;
-    sync_directory(&paths.staging_parent)
+    Ok(())
 }
 
-fn publish_file(paths: &ManagedSegmentPaths, handle: &StateHandle) -> Result<()> {
-    prepare_segment_directories(paths)?;
-    read_validated_file(&paths.staging, handle)?;
-    std::fs::rename(&paths.staging, &paths.committed)
-        .map_err(|source| io_error(&paths.committed, source))?;
-    sync_directory(&paths.committed_parent)
+fn sync_staging_directory(
+    directory: &Path,
+    #[cfg(test)] hook: Option<&publication_tests::PublicationHook>,
+) -> Result<()> {
+    #[cfg(test)]
+    publication_tests::observe(hook, publication_tests::Operation::StagingSync, directory)?;
+    sync_directory(directory)
 }
 
-fn prepare_segment_directories(paths: &ManagedSegmentPaths) -> Result<()> {
+fn prepare_segment_directories(
+    paths: &ManagedSegmentPaths,
+    directories: &mut publication::SegmentDirectories,
+    #[cfg(test)] hook: Option<&publication_tests::PublicationHook>,
+) -> Result<()> {
     let (root, lineage, epoch, operator) = managed_segment_components(paths)?;
-    prepare_staging_directories(root, &lineage, &epoch, &operator)?;
-    prepare_committed_directories(root, &lineage, &operator)
+    prepare_staging_directories(
+        root,
+        &lineage,
+        &epoch,
+        &operator,
+        directories,
+        #[cfg(test)]
+        hook,
+    )?;
+    prepare_committed_directories(
+        root,
+        &lineage,
+        &operator,
+        directories,
+        #[cfg(test)]
+        hook,
+    )
 }
 
 fn managed_segment_components(
@@ -606,12 +680,42 @@ fn prepare_staging_directories(
     lineage: &str,
     epoch: &str,
     operator: &str,
+    directories: &mut publication::SegmentDirectories,
+    #[cfg(test)] hook: Option<&publication_tests::PublicationHook>,
 ) -> Result<()> {
     validate_directory(root)?;
-    let staging = ensure_child_directory(root, "staging")?;
-    let staging_lineage = ensure_child_directory(&staging, lineage)?;
-    let staging_epoch = ensure_child_directory(&staging_lineage, epoch)?;
-    ensure_child_directory(&staging_epoch, operator)?;
+    let staging = publication::ensure_segment_directory(
+        root,
+        "staging",
+        directories,
+        false,
+        #[cfg(test)]
+        hook,
+    )?;
+    let staging_lineage = publication::ensure_segment_directory(
+        &staging,
+        lineage,
+        directories,
+        false,
+        #[cfg(test)]
+        hook,
+    )?;
+    let staging_epoch = publication::ensure_segment_directory(
+        &staging_lineage,
+        epoch,
+        directories,
+        false,
+        #[cfg(test)]
+        hook,
+    )?;
+    publication::ensure_segment_directory(
+        &staging_epoch,
+        operator,
+        directories,
+        false,
+        #[cfg(test)]
+        hook,
+    )?;
     Ok(())
 }
 
@@ -660,10 +764,37 @@ fn remove_managed_staging_entry(path: &Path) -> Result<()> {
     }
 }
 
-fn prepare_committed_directories(root: &Path, lineage: &str, operator: &str) -> Result<()> {
-    let committed = ensure_child_directory(root, "committed")?;
-    let committed_lineage = ensure_child_directory(&committed, lineage)?;
-    ensure_child_directory(&committed_lineage, operator)?;
+fn prepare_committed_directories(
+    root: &Path,
+    lineage: &str,
+    operator: &str,
+    directories: &mut publication::SegmentDirectories,
+    #[cfg(test)] hook: Option<&publication_tests::PublicationHook>,
+) -> Result<()> {
+    let committed = publication::ensure_segment_directory(
+        root,
+        "committed",
+        directories,
+        true,
+        #[cfg(test)]
+        hook,
+    )?;
+    let committed_lineage = publication::ensure_segment_directory(
+        &committed,
+        lineage,
+        directories,
+        true,
+        #[cfg(test)]
+        hook,
+    )?;
+    publication::ensure_segment_directory(
+        &committed_lineage,
+        operator,
+        directories,
+        true,
+        #[cfg(test)]
+        hook,
+    )?;
     Ok(())
 }
 
@@ -1102,7 +1233,7 @@ mod tests {
         CommitFaultPoint::AfterManifestPublication,
     ];
 
-    fn state_handle(
+    pub(super) fn state_handle(
         key: &StateLineageKey,
         epoch: Epoch,
         segment_id: &str,
@@ -1147,149 +1278,6 @@ mod tests {
             static_inputs: BTreeMap::new(),
         })
         .unwrap()
-    }
-
-    #[tokio::test]
-    async fn local_segment_state_machine_checks_visibility_bytes_and_large_payloads() {
-        let directory = TempDir::new().unwrap();
-        let key = StateLineageKey::new("orders", PIPELINE_FINGERPRINT).unwrap();
-        let backend = LocalStateBackend::new(directory.path()).await.unwrap();
-        let lineage = backend.open_lineage(&key).await.unwrap();
-        let bytes = vec![7_u8; 10 * 1024 * 1024 + 1];
-        let handle = state_handle(&key, Epoch::INITIAL, "large-base", &bytes);
-
-        assert!(matches!(
-            lineage.load_segment(&handle).await,
-            Err(crate::CalcFlowError::NotFound { .. })
-        ));
-        lineage.stage_segment(&handle, &bytes).await.unwrap();
-        assert!(matches!(
-            lineage.load_segment(&handle).await,
-            Err(crate::CalcFlowError::NotFound { .. })
-        ));
-        assert!(matches!(
-            lineage.publish_segment(&handle).await,
-            Err(crate::CalcFlowError::Conflict { .. })
-        ));
-        lineage.validate_segment(&handle).await.unwrap();
-        lineage.publish_segment(&handle).await.unwrap();
-        assert_eq!(lineage.load_segment(&handle).await.unwrap(), bytes);
-
-        std::fs::write(directory.path().join(handle.relative_path()), b"truncated").unwrap();
-        assert!(matches!(
-            lineage.load_segment(&handle).await,
-            Err(crate::CalcFlowError::CheckpointMismatch { .. })
-        ));
-    }
-
-    #[tokio::test]
-    async fn orphan_collection_removes_every_unreachable_committed_segment() {
-        let directory = TempDir::new().unwrap();
-        let key = StateLineageKey::new("orders", PIPELINE_FINGERPRINT).unwrap();
-        let backend = LocalStateBackend::new(directory.path()).await.unwrap();
-        let lineage = backend.open_lineage(&key).await.unwrap();
-        let mut handles = Vec::new();
-        for epoch in 1..=3 {
-            let bytes = format!("epoch-{epoch}").into_bytes();
-            let handle = state_handle(
-                &key,
-                Epoch::new(epoch).unwrap(),
-                &format!("delta-{epoch:04}"),
-                &bytes,
-            );
-            lineage.stage_segment(&handle, &bytes).await.unwrap();
-            lineage.validate_segment(&handle).await.unwrap();
-            lineage.publish_segment(&handle).await.unwrap();
-            handles.push((handle, bytes));
-        }
-
-        assert_eq!(
-            lineage
-                .collect_orphans(&[handles[1].0.clone()])
-                .await
-                .unwrap(),
-            2
-        );
-        assert!(matches!(
-            lineage.load_segment(&handles[0].0).await,
-            Err(crate::CalcFlowError::NotFound { .. })
-        ));
-        assert_eq!(
-            lineage.load_segment(&handles[1].0).await.unwrap(),
-            handles[1].1
-        );
-        assert!(matches!(
-            lineage.load_segment(&handles[2].0).await,
-            Err(crate::CalcFlowError::NotFound { .. })
-        ));
-    }
-
-    #[tokio::test]
-    async fn reopening_lineage_discards_abandoned_staging_segments() {
-        let directory = TempDir::new().unwrap();
-        let key = StateLineageKey::new("orders", PIPELINE_FINGERPRINT).unwrap();
-        let backend = LocalStateBackend::new(directory.path()).await.unwrap();
-        let lineage = backend.open_lineage(&key).await.unwrap();
-        let epoch = Epoch::new(3).unwrap();
-        let abandoned = state_handle(&key, epoch, "delta-0003", b"abandoned");
-        lineage
-            .stage_segment(&abandoned, b"abandoned")
-            .await
-            .unwrap();
-        drop(lineage);
-
-        let restarted = backend.open_lineage(&key).await.unwrap();
-        let replacement = state_handle(&key, epoch, "delta-0003", b"replacement");
-        restarted
-            .stage_segment(&replacement, b"replacement")
-            .await
-            .unwrap();
-        restarted.validate_segment(&replacement).await.unwrap();
-        restarted.publish_segment(&replacement).await.unwrap();
-        assert_eq!(
-            restarted.load_segment(&replacement).await.unwrap(),
-            b"replacement"
-        );
-    }
-
-    #[tokio::test]
-    async fn lineage_lease_and_unexpected_managed_file_type_fail_closed() {
-        let directory = TempDir::new().unwrap();
-        let key = StateLineageKey::new("orders", PIPELINE_FINGERPRINT).unwrap();
-        let first_backend = LocalStateBackend::new(directory.path()).await.unwrap();
-        let second_backend = LocalStateBackend::new(directory.path()).await.unwrap();
-        let first_lineage = first_backend.open_lineage(&key).await.unwrap();
-        assert!(matches!(
-            second_backend.open_lineage(&key).await,
-            Err(crate::CalcFlowError::Conflict { .. })
-        ));
-        drop(first_lineage);
-
-        let lineage = second_backend.open_lineage(&key).await.unwrap();
-        let lineage_root = directory.path().join("committed").join(lineage_hash(&key));
-        std::fs::create_dir_all(&lineage_root).unwrap();
-        std::fs::write(lineage_root.join(digest("window")), b"not-a-directory").unwrap();
-        assert!(matches!(
-            lineage.collect_orphans(&[]).await,
-            Err(crate::CalcFlowError::Format { .. })
-        ));
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn managed_symlink_fails_closed_before_orphan_collection() {
-        let directory = TempDir::new().unwrap();
-        let key = StateLineageKey::new("orders", PIPELINE_FINGERPRINT).unwrap();
-        let backend = LocalStateBackend::new(directory.path()).await.unwrap();
-        let lineage = backend.open_lineage(&key).await.unwrap();
-        let lineage_root = directory.path().join("committed").join(lineage_hash(&key));
-        std::fs::create_dir_all(&lineage_root).unwrap();
-        std::os::unix::fs::symlink(directory.path(), lineage_root.join(digest("window"))).unwrap();
-
-        assert!(matches!(
-            lineage.collect_orphans(&[]).await,
-            Err(crate::CalcFlowError::Format { .. })
-        ));
     }
 
     #[test]

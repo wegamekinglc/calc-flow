@@ -88,6 +88,10 @@ def prepare_case(case: dict, root: Path):
             factory = WarmCase
         case "engines":
             factory = EngineCase
+        case "join-asof-acceptance":
+            from benchmarks.join_asof_acceptance import AcceptanceEngineCase
+
+            factory = AcceptanceEngineCase
         case "engine-diagnostic":
             from benchmarks.performance_diagnostics import EngineDiagnosticCase
 
@@ -128,6 +132,12 @@ def dispatch(message: dict, active, root: Path):
     match operation:
         case "hello":
             return environment(message.get("scope", "all")), active
+        case "acceptance-fixture":
+            if active is not None:
+                raise ValueError("a benchmark is already active")
+            from benchmarks.join_asof_acceptance import prepare_acceptance_fixture
+
+            return prepare_acceptance_fixture(message["case"], root), None
         case "prepare":
             if active is not None:
                 raise ValueError("a benchmark is already active")

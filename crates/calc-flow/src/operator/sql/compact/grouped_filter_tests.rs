@@ -225,7 +225,7 @@ async fn test_grouped_filtered_refusal_refunds_then_retries_exactly() {
 async fn refusal(dtype: DataType, key_type: DataType, text: String) {
     let job = job();
     let context = StreamOperatorContext::new(&job, "grouped_float", None);
-    let mut state = filtered_operator(&dtype, &key_type, &text);
+    let mut state = filtered_operator(&dtype, &key_type, &text).with_one_gib_pool_for_test();
     let arrivals = string_arrivals();
     drop(
         process(

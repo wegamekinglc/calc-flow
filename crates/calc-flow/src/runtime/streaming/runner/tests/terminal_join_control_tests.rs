@@ -132,7 +132,17 @@ fn owned_target(
     Arc<dyn MemoryPool>,
     StreamJobContext,
 ) {
-    let mut target = join();
+    owned_operator(service, join())
+}
+
+fn owned_operator(
+    service: &TestService,
+    mut target: StreamJoinOperator,
+) -> (
+    CompiledStreamOperator,
+    Arc<dyn MemoryPool>,
+    StreamJobContext,
+) {
     let pool = target.checkpoint_preload_test_pool().unwrap();
     let job = plain_job().with_gather_owner(service.owner("terminal-controls".into()));
     (
@@ -343,7 +353,8 @@ async fn check_refusal_and_cancel(service: &TestService) {
 }
 
 async fn check_refusal(service: &TestService, restore: &OperatorRestoreState) {
-    let (mut operator, pool, job) = owned_target(service);
+    let (mut operator, pool, job) =
+        owned_operator(service, crate::operator::with_one_gib_pool(join()));
     let MemoryLimit::Finite(limit) = pool.memory_limit() else {
         panic!("finite pool")
     };

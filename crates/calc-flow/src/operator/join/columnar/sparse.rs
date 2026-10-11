@@ -3,14 +3,17 @@ use crate::operator::join::{JoinSide, PendingOp, RetainedRows, StreamJoinOperato
 use crate::{Result, StreamOperatorContext, time::EventTime};
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicUsize, Ordering},
 };
+
+#[cfg(test)]
+mod tests;
 
 pub(super) struct ChunkRow {
     pub row_id: u64,
     pub time: EventTime,
     pub bytes: usize,
-    pub live: AtomicBool,
+    pub dense: AtomicUsize,
 }
 
 #[derive(Default)]
@@ -72,9 +75,9 @@ impl Drop for SparseQueue {
 }
 
 impl PayloadChunk {
-    fn add_live(&self, offset: usize) {
+    fn add_live(&self, offset: usize, dense: usize) {
         let row = &self.inventory[offset];
-        if !row.live.swap(true, Ordering::Relaxed) {
+        if row.dense.swap(dense, Ordering::Relaxed) == usize::MAX {
             self.live_count.fetch_add(1, Ordering::Relaxed);
             self.live_bytes.fetch_add(row.bytes, Ordering::Relaxed);
         }
@@ -82,7 +85,7 @@ impl PayloadChunk {
 
     fn remove_live(&self, offset: usize) {
         let row = &self.inventory[offset];
-        if row.live.swap(false, Ordering::Relaxed) {
+        if row.dense.swap(usize::MAX, Ordering::Relaxed) != usize::MAX {
             self.live_count.fetch_sub(1, Ordering::Relaxed);
             self.live_bytes.fetch_sub(row.bytes, Ordering::Relaxed);
         }
@@ -100,14 +103,14 @@ impl PayloadChunk {
 }
 
 impl RowPayload {
-    pub(in crate::operator::join) fn mark_live(&self) {
+    pub(in crate::operator::join) fn mark_live(&self, dense: usize) {
         if let Self::Shared { chunk, row } = self {
-            chunk.add_live(*row);
+            chunk.add_live(*row, dense);
         }
     }
 
-    fn belongs_to(&self, chunk: &Arc<PayloadChunk>) -> bool {
-        matches!(self, Self::Shared { chunk: current, .. } if Arc::ptr_eq(current, chunk))
+    fn belongs_to(&self, chunk: &Arc<PayloadChunk>, offset: usize) -> bool {
+        matches!(self, Self::Shared { chunk: current, row } if *row == offset && Arc::ptr_eq(current, chunk))
     }
 }
 
@@ -132,16 +135,19 @@ impl StreamJoinOperator {
         }
     }
 
-    fn sparse_position(&self, port: usize, time: EventTime, id: u64) -> Option<usize> {
-        let expirations = if port == 0 {
-            &self.state.left_expirations
-        } else {
-            &self.state.right_expirations
-        };
-        expirations
-            .entries
-            .get(&(time, id))
-            .map(|(index, _)| *index)
+    fn sparse_position(
+        &self,
+        port: usize,
+        chunk: &Arc<PayloadChunk>,
+        source: usize,
+    ) -> Option<usize> {
+        let entry = chunk.inventory.get(source)?;
+        let dense = entry.dense.load(Ordering::Relaxed);
+        let retained = self.sparse_rows(port).get(dense)?;
+        (retained.row_id == entry.row_id
+            && retained.event_time == entry.time
+            && retained.record.belongs_to(chunk, source))
+        .then_some(dense)
     }
 
     async fn sparse_selection(
@@ -158,11 +164,7 @@ impl StreamJoinOperator {
         };
         for (source, row) in chunk.inventory.iter().enumerate() {
             quantum.step(context, 8, 0).await?;
-            if row.live.load(Ordering::Relaxed)
-                && self
-                    .sparse_position(port, row.time, row.row_id)
-                    .is_some_and(|index| self.sparse_rows(port)[index].record.belongs_to(chunk))
-            {
+            if self.sparse_position(port, chunk, source).is_some() {
                 selected.rows.push(SelectedRow {
                     source,
                     row_id: row.row_id,
@@ -188,13 +190,13 @@ impl StreamJoinOperator {
         };
         for (offset, selected) in selection.iter().enumerate() {
             let index = self
-                .sparse_position(port, selected.time, selected.row_id)
+                .sparse_position(port, original, selected.source)
                 .expect("owned sparse selection remains live until installation");
             let payload = RowPayload::Shared {
                 chunk: Arc::clone(replacement),
                 row: offset,
             };
-            payload.mark_live();
+            payload.mark_live(index);
             self.sparse_rows_mut(port)[index].record = payload.clone();
             self.state
                 .deltas

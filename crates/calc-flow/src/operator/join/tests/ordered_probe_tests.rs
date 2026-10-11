@@ -33,6 +33,7 @@ async fn restored_operator(limit: u64, context: &StreamOperatorContext<'_>) -> S
     declaration.limits = JoinStateLimits::new(20_000, 10_000_000, limit).unwrap();
     let mut operator =
         StreamJoinOperator::new("match", left_schema(), right_schema(), declaration).unwrap();
+    data_work::relax_probe_cost_gate_for_test();
     let record = RecordBatch::try_new(
         right_schema(),
         vec![
