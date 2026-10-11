@@ -5,6 +5,10 @@ from __future__ import annotations
 import re
 from dataclasses import replace
 
+from scripts.benchmark_suite.issue406_build_identity import (
+    build_harness_commit,
+    validate_build_harness,
+)
 from scripts.benchmark_suite.issue406_fresh import CANDIDATE, MAIN
 from scripts.benchmark_suite.report import ROUNDS, SAMPLES
 
@@ -59,6 +63,7 @@ def report_identity(plan: dict) -> dict:
         "execution_schema": SCHEMA,
         "candidate_product_commit": plan["candidate_product_commit"],
         "harness_git_sha": plan["harness_git_sha"],
+        "build_harness_git_sha": build_harness_commit(plan),
     }
 
 
@@ -79,6 +84,7 @@ def validate_releases(plan: dict, files: dict) -> None:
 
     from scripts.benchmark_suite.issue406_reuse import validate_ordinary_release
 
+    validate_build_harness(plan, files)
     releases = [*plan["releases"].values(), plan["retained_control"]]
     builds = [validate_ordinary_release(release, files) for release in releases]
     if (
@@ -91,7 +97,7 @@ def validate_releases(plan: dict, files: dict) -> None:
     candidate = json.loads(
         Path(plan["releases"]["candidate"]["build_metadata"]).read_text()
     )
-    if candidate.get("harness_git_sha") != plan["harness_git_sha"]:
+    if candidate.get("harness_git_sha") != build_harness_commit(plan):
         raise ValueError("fresh candidate wheel was not built by the sealed harness")
 
 
@@ -152,6 +158,12 @@ def unattempted_dependency(group, side, source):
 
 EOF_REASON = "terminal status contains a checkpoint failure"
 IPC_REASON = "V2 IPC constructor credit admission failed"
+_RUNTIME_OPERATOR_COUNTS = {
+    "join_sealed": 2,
+    "join_retained": 2,
+    "asof": 4,
+    "projection": 1,
+}
 
 
 def _contains(observed, expected) -> bool:
@@ -240,7 +252,7 @@ def _terminal_sentinel(case, status) -> bool:
         "expected_sink_commits": 1,
         "expected_sink_precommits": 1,
         "expected_sources": 1 if case.workload == "projection" else 2,
-        "expected_operators": 1 if case.workload == "projection" else 2,
+        "expected_operators": _RUNTIME_OPERATOR_COUNTS[case.workload],
     }
     if not _contains(status.get("checkpoint"), checkpoint):
         return False
@@ -259,7 +271,7 @@ def _terminal_components(case, status) -> bool:
         "suite"
     }:
         return False
-    if len(status.get("operators", {})) != (1 if case.workload == "projection" else 2):
+    if len(status.get("operators", {})) != _RUNTIME_OPERATOR_COUNTS[case.workload]:
         return False
     return _ended_components(status) and _contains(
         status["sinks"]["suite"], {"delivered_rows": case.rows}
@@ -401,7 +413,7 @@ def _fresh_source(record, plan):
     expected = {
         "schema": FRESH_SCHEMA,
         "product_git_sha": MAIN,
-        "harness_git_sha": plan["harness_git_sha"],
+        "harness_git_sha": build_harness_commit(plan),
         "compatibility": None,
         "helper_reconstruction": None,
         "product_files_verified": True,

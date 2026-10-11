@@ -188,7 +188,8 @@ def _validate_release_policy(plan, files):
 
 def _plan_build_harnesses(plan, side):
     if plan.get("schema") == v3.SCHEMA:
-        return plan["harness_git_sha"], plan["harness_git_sha"]
+        harness = plan.get("build_harness_git_sha", plan["harness_git_sha"])
+        return harness, harness
     if plan.get("schema") == FRESH_SCHEMA:
         return tuple(
             plan[key][side]["original_build_harness_git_sha"]
@@ -1797,8 +1798,12 @@ def _validate_source_attestation(
     if plan.get("schema") == v3.SCHEMA:
         if compatibility is not None or reconstruction is not None:
             raise ValueError("v3 forbids historical source exceptions")
+        source = plan.get("build_harness_source")
         return validate_fresh_acceptance_harness(
-            output, target, harness_git_sha=plan["harness_git_sha"]
+            output,
+            target,
+            harness_git_sha=plan.get("build_harness_git_sha", plan["harness_git_sha"]),
+            **({"harness_source": Path(source)} if source is not None else {}),
         )
     return validate_acceptance_harness(
         output, target, compatibility=compatibility, reconstruction=reconstruction

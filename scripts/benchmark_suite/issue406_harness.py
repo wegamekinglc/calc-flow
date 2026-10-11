@@ -569,8 +569,15 @@ _CARGO_PATH = "crates/calc-flow/Cargo.toml"
 _DIAGNOSTIC_INSERTION = 'benchmark-checkpoint-diagnostic = ["benchmark-internals"]\n'
 
 
-def _effective_fresh(source: Path) -> dict[str, bytes]:
+def _effective_fresh(
+    source: Path, *, harness_source: Path | None = None
+) -> dict[str, bytes]:
     overlay = _effective(source)
+    if harness_source is not None:
+        overlay = {
+            **overlay,
+            **{path: (harness_source / path).read_bytes() for path in COPIED_FILES},
+        }
     cargo = overlay[_CARGO_PATH].decode()
     legacy = INSERTIONS[_CARGO_PATH]
     fresh = legacy + _DIAGNOSTIC_INSERTION
@@ -620,13 +627,16 @@ def _populate_fresh_mirror(source: Path, mirror: Path, original: dict, overlay: 
         destination.write_bytes(contents)
 
 
-def _fresh_harness_record(source, output, target, original, overlay):
+def _fresh_harness_record(source, output, target, files, *, harness_source=None):
+    original, overlay = files
     return {
         "schema": FRESH_SCHEMA,
         "target": target,
         "targets": list(TARGETS),
         "product_git_sha": _clean_revision(source),
-        "harness_git_sha": _clean_revision(ROOT),
+        "harness_git_sha": _clean_revision(
+            ROOT if harness_source is None else harness_source
+        ),
         "product_source": str(source),
         "build_output": str(output),
         "original_files_fingerprint": fingerprint_json(original),
@@ -661,7 +671,7 @@ def fresh_acceptance_harness(source: Path, output: Path, target: str):
         mirror = Path(raw) / "source"
         _populate_fresh_mirror(source, mirror, original, overlay)
         record = {
-            **_fresh_harness_record(source, output, target, original, overlay),
+            **_fresh_harness_record(source, output, target, (original, overlay)),
             "build_source": str(mirror),
         }
         write_json(evidence, {**record, "product_files_verified": False})
@@ -676,21 +686,31 @@ def fresh_acceptance_harness(source: Path, output: Path, target: str):
 
 
 def validate_fresh_acceptance_harness(
-    output: Path, target: str, *, harness_git_sha: str
+    output: Path,
+    target: str,
+    *,
+    harness_git_sha: str,
+    harness_source: Path | None = None,
 ) -> dict:
-    """Require the exact current clean harness for a fresh v2 attestation."""
+    """Require the exact clean build harness for a fresh v2 attestation."""
     try:
+        harness_source = ROOT if harness_source is None else harness_source.resolve()
         record = json.loads(
             (output / f"build-{target}.acceptance-harness.json").read_text()
         )
-        if _clean_revision(ROOT) != harness_git_sha:
+        if _clean_revision(harness_source) != harness_git_sha:
             raise ValueError("fresh harness revision differs from the reviewed seal")
         if not {"compatibility", "helper_reconstruction"}.issubset(record):
             raise ValueError("fresh harness must explicitly exclude historical reuse")
         source, mirror = Path(record["product_source"]), Path(record["build_source"])
-        original, overlay = _files(source), _effective_fresh(source)
+        original = _files(source)
+        overlay = _effective_fresh(source, harness_source=harness_source)
         expected = _fresh_harness_record(
-            source, output.resolve(), target, original, overlay
+            source,
+            output.resolve(),
+            target,
+            (original, overlay),
+            harness_source=harness_source,
         )
         _validate_harness_record(record, expected, mirror, output, target)
         return record

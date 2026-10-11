@@ -16,6 +16,114 @@ CARGO_PATH = "crates/calc-flow/Cargo.toml"
 
 
 class FreshAcceptanceHarnessTests(unittest.TestCase):
+    def test_v3_attestation_routes_declared_build_source_and_revision(self):
+        from scripts.benchmark_suite.issue406_run import _validate_source_attestation
+        from scripts.test_issue406_fresh_v3 import plan_v3
+
+        plan = {
+            **plan_v3(),
+            "build_harness_git_sha": "c" * 40,
+            "build_harness_source": "/sealed/build-harness",
+        }
+        with patch(
+            "scripts.benchmark_suite.issue406_run.validate_fresh_acceptance_harness",
+            return_value={},
+        ) as validate:
+            self.assertEqual(
+                _validate_source_attestation(plan, Path("build"), "target"), {}
+            )
+            validate.assert_called_once_with(
+                Path("build"),
+                "target",
+                harness_git_sha="c" * 40,
+                harness_source=Path("/sealed/build-harness"),
+            )
+
+    def test_fresh_attestation_uses_explicit_build_source(self):
+        with TemporaryDirectory() as raw:
+            root = Path(raw)
+            baseline, candidate = fixtures(root)
+            build_source = root / "build-harness"
+            command_output(
+                ["git", "clone", "--quiet", str(candidate), str(build_source)]
+            )
+            revision = command_output(["git", "rev-parse", "HEAD"], cwd=build_source)
+            output = root / "output"
+            with (
+                patch.object(harness, "ROOT", build_source),
+                harness.fresh_acceptance_harness(baseline, output, "stream_join_perf"),
+            ):
+                pass
+            helper = candidate / harness.COPIED_FILES[0]
+            helper.write_text("// different execution checkout helper\n")
+            commit(candidate)
+            with patch.object(harness, "ROOT", candidate):
+                record = harness.validate_fresh_acceptance_harness(
+                    output,
+                    "stream_join_perf",
+                    harness_git_sha=revision,
+                    harness_source=build_source,
+                )
+                self.assertEqual(record["harness_git_sha"], revision)
+                self.assertIsNone(record["compatibility"])
+                self.assertIsNone(record["helper_reconstruction"])
+
+    def test_explicit_build_attestation_rejects_source_and_artifact_drift(self):
+        with TemporaryDirectory() as raw:
+            root = Path(raw)
+            baseline, candidate = fixtures(root)
+            revision = command_output(["git", "rev-parse", "HEAD"], cwd=candidate)
+            output = root / "output"
+            with patch.object(harness, "ROOT", candidate):
+                with harness.fresh_acceptance_harness(
+                    baseline, output, "calc_flow_python"
+                ):
+                    pass
+                for source, supplied in ((baseline, revision), (candidate, "0" * 40)):
+                    with (
+                        self.subTest(source=source, revision=supplied),
+                        self.assertRaisesRegex(ValueError, "attestation"),
+                    ):
+                        harness.validate_fresh_acceptance_harness(
+                            output,
+                            "calc_flow_python",
+                            harness_git_sha=supplied,
+                            harness_source=source,
+                        )
+                evidence = output / "build-calc_flow_python.acceptance-harness.json"
+                original = evidence.read_text()
+                record = json.loads(original)
+                evidence.write_text(json.dumps({**record, "harness_git_sha": "0" * 40}))
+                with self.assertRaisesRegex(ValueError, "attestation"):
+                    harness.validate_fresh_acceptance_harness(
+                        output,
+                        "calc_flow_python",
+                        harness_git_sha=revision,
+                        harness_source=candidate,
+                    )
+                evidence.write_text(original)
+                helper = candidate / harness.COPIED_FILES[0]
+                helper.write_text(helper.read_text() + "// dirty\n")
+                with self.assertRaisesRegex(ValueError, "attestation"):
+                    harness.validate_fresh_acceptance_harness(
+                        output,
+                        "calc_flow_python",
+                        harness_git_sha=revision,
+                        harness_source=candidate,
+                    )
+
+    def test_v3_build_roles_use_declared_build_harness(self):
+        from scripts.benchmark_suite.issue406_run import _plan_build_harnesses
+        from scripts.test_issue406_fresh_v3 import HARNESS, plan_v3
+
+        plan = {**plan_v3(), "build_harness_git_sha": "c" * 40}
+        for side in ("baseline", "candidate"):
+            with self.subTest(side=side):
+                self.assertEqual(_plan_build_harnesses(plan, side), ("c" * 40,) * 2)
+                self.assertEqual(
+                    _plan_build_harnesses(plan_v3(), side), (HARNESS, HARNESS)
+                )
+
     def test_fresh_overlay_uses_identical_helpers_and_opt_in_diagnostic(self):
         with TemporaryDirectory() as raw:
             root = Path(raw)

@@ -335,6 +335,57 @@ class V3ClosedSignatureTests(unittest.TestCase):
         raw["oracle"]["max_abs_error"] = False
         self.assertIsNone(v3.runtime_failure_signature(self.case, raw))
 
+    def test_terminal_operator_inventory_matches_each_maintained_workload(self):
+        from dataclasses import replace
+
+        inventories = (
+            ("join_sealed", ("join", "result"), ("left", "right")),
+            ("join_retained", ("join", "result"), ("left", "right")),
+            (
+                "asof",
+                (
+                    "quotes",
+                    "reference",
+                    "cf_stream_asof_join_f580a4748edf1f12",
+                    "result",
+                ),
+                ("quotes.input", "reference.input"),
+            ),
+            ("projection", ("result",), ("input",)),
+        )
+        for workload, operators, sources in inventories:
+            with self.subTest(workload=workload):
+                case = replace(self.case, workload=workload, rows=3073)
+                raw = eof_observation(case)
+                for phase in ("after_eof", "after_cleanup"):
+                    status = raw[phase]
+                    status["operators"] = {
+                        name: {"ended": True, "errors": 0} for name in operators
+                    }
+                    status["sources"] = {
+                        name: {"ended": True, "errors": 0} for name in sources
+                    }
+                    status["checkpoint"].update(
+                        expected_operators=len(operators), expected_sources=len(sources)
+                    )
+                self.assertEqual(
+                    v3.runtime_failure_signature(case, raw),
+                    "runtime_eof_shutdown_sentinel",
+                )
+                self.assert_wrong_operator_inventory_rejected(case, raw)
+
+    def assert_wrong_operator_inventory_rejected(self, case, raw):
+        for phase in ("after_eof", "after_cleanup"):
+            altered = copy.deepcopy(raw)
+            altered[phase]["checkpoint"]["expected_operators"] += 1
+            self.assertIsNone(v3.runtime_failure_signature(case, altered))
+            altered = copy.deepcopy(raw)
+            altered[phase]["operators"].pop(next(iter(altered[phase]["operators"])))
+            self.assertIsNone(v3.runtime_failure_signature(case, altered))
+            altered = copy.deepcopy(raw)
+            altered[phase]["operators"]["unexpected"] = {"ended": True, "errors": 0}
+            self.assertIsNone(v3.runtime_failure_signature(case, altered))
+
     def test_ipc_reason_is_closed_but_locations_come_from_fresh_sealed_binary(self):
         case = next(group[0] for group in collection_groups() if group[0].row == 4)
         diagnostic = (
