@@ -87,34 +87,11 @@ def _arm(case, side: str, record: dict | None) -> dict:
         return {"status": "unsupported", "statistics": None, "complete": False}
     samples = _samples(record)
     values = [sample.get(case.metric) for sample in samples]
-    complete = (
-        record is not None
-        and len(record.get("rounds", [])) == ROUNDS
-        and all(len(group) == SAMPLES for group in record["rounds"])
-    )
-    problems = []
-    for sample in samples:
-        try:
-            validate_observation(case, side, sample)
-        except ValueError as error:
-            problems.append(str(error))
+    complete = _complete_arm(record)
+    problems = _arm_problems(case, side, samples)
     lifecycle = Counter(sample.get("lifecycle", "missing") for sample in samples)
-    status = (
-        "unmeasured"
-        if not samples
-        else "incomplete"
-        if not complete
-        else "invalid"
-        if problems
-        else "diagnostic"
-        if lifecycle.get("failed")
-        else "ok"
-    )
-    phases = {
-        field: _stats([sample[field] for sample in samples])
-        for field in PHASES
-        if samples and all(_finite(sample.get(field)) for sample in samples)
-    }
+    status = _arm_status(samples, complete, problems, lifecycle)
+    phases = _arm_phases(samples)
     return {
         "status": status,
         "complete": complete and not problems,
@@ -127,15 +104,7 @@ def _arm(case, side: str, record: dict | None) -> dict:
             bool(sample.get("advancing_processing_epochs")) for sample in samples
         ),
         "measured_samples": len(samples),
-        "checkpoint_bytes": _stats(
-            [sample["checkpoint_evidence"]["state_bytes"] for sample in samples]
-        )
-        if samples
-        and all(
-            _finite(sample.get("checkpoint_evidence", {}).get("state_bytes"))
-            for sample in samples
-        )
-        else None,
+        "checkpoint_bytes": _arm_checkpoint_bytes(samples),
     }
 
 
@@ -144,13 +113,7 @@ def _revision(case, base: dict, head: dict, records: dict, assessment: dict) -> 
         return {"verdict": "candidate-only", "round_intervals": []}
     if not base["complete"] or not head["complete"]:
         return {"verdict": "unmeasured-or-invalid", "round_intervals": []}
-    values = {
-        side: [
-            [sample[case.metric] for sample in group]
-            for group in records[case.id, side]["rounds"]
-        ]
-        for side in ("baseline", "candidate")
-    }
+    values = _revision_values(case, records)
     result = comparison(
         {
             "id": case.id,
@@ -320,29 +283,7 @@ def _scaling_target(cases: list[dict]) -> dict:
             if available
             else None
         )
-        base_valid = small["baseline"]["complete"] and large["baseline"]["complete"]
-        base_ratio = (
-            large["baseline"]["statistics"]["p50"]
-            / small["baseline"]["statistics"]["p50"]
-            if base_valid
-            else None
-        )
-        baseline = {
-            "ratio_of_p50": base_ratio,
-            "one_million": small["baseline"]["statistics"],
-            "four_million": large["baseline"]["statistics"],
-            "status": "diagnostic"
-            if base_valid
-            and (
-                small["baseline"]["status"] != "ok"
-                or large["baseline"]["status"] != "ok"
-            )
-            else "ok"
-            if base_valid
-            else "unsupported"
-            if mode == "off"
-            else "unmeasured",
-        }
+        baseline = _scaling_baseline(small, large, mode)
         scaling.append(
             {
                 "mode": mode,
@@ -432,50 +373,7 @@ def _overhead(
     arms = {name: case[side] for name, case in components.items()}
     if any(not arm["complete"] for arm in arms.values()):
         return {"side": side, "mode": mode, "target_status": "unmeasured"}
-    proof = report.get("scheduling_proofs", {}).get(f"{side}/{mode}")
-    errors = []
-    # Match source references by their recorded location, including warmups.
-    # These are semantic replay links; timing aggregation remains independent.
-    try:
-        normalized = _normalize_replays(components, records, side, mode)
-        native_reference = normalized["asof_operator"][ROUNDS]
-        e2e_reference = normalized["asof"][ROUNDS]
-        projection = arms["projection"]["statistics"]["p50"]
-        if len({item["observation_id"] for item in normalized["asof"]}) != 22:
-            raise ValueError("ASOF replay reused a source observation")
-        for source, replay in zip(
-            normalized["asof"], normalized["asof_operator"], strict=True
-        ):
-            if source["match_identity"] != e2e_reference["match_identity"]:
-                raise ValueError("ASOF workload identity changed across observations")
-            matched = matched_overhead(
-                source, replay, projection, scheduling_proof=proof
-            )
-            if matched["schedule_status"] != "recorded-dispatch-chain-replayed":
-                raise ValueError("ASOF observation lacks its verified recorded replay")
-        e2e = {**e2e_reference, "seconds": arms["asof"]["statistics"]["p50"]}
-        native = {
-            **native_reference,
-            "seconds": arms["asof_operator"]["statistics"]["p50"],
-        }
-        derived = matched_overhead(e2e, native, projection, scheduling_proof=proof)
-        derived["semantic_replays_validated"] = len(normalized["asof"])
-    except (KeyError, ValueError) as error:
-        errors.append(str(error))
-        derived = {"target_status": "inconclusive"}
-    if any(arm["status"] != "ok" for arm in arms.values()):
-        derived["target_status"] = "diagnostic"
-    return {
-        "side": side,
-        "mode": mode,
-        **derived,
-        "components": {name: arm["statistics"] for name, arm in arms.items()},
-        "errors": errors,
-        "uncertainty": (
-            "Signed difference of independent component p50 values; component "
-            "median intervals are retained separately, with no paired residual CI."
-        ),
-    }
+    return _measured_overhead(components, records, report, side, mode, arms)
 
 
 def _overhead_target(cases: list[dict], records: dict, report: dict) -> dict:
@@ -502,12 +400,7 @@ def summarize_acceptance(report: dict) -> dict:
 
     inventory = acceptance_inventory()
     known = {case.id: case for case in inventory}
-    records = {}
-    for record in report.get("measurements", []):
-        key = (record.get("case"), record.get("side"))
-        if key[0] not in known or key[1] not in known[key[0]].sides or key in records:
-            raise ValueError("unexpected or duplicate acceptance result")
-        records[key] = record
+    records = _summary_records(report, known)
     assessment = {**report.get("assessment", {})}
     if report.get("settlement", {}).get("forced_kill_pids"):
         assessment["environment_suitable"] = False
@@ -524,53 +417,8 @@ def summarize_acceptance(report: dict) -> dict:
                 "revision_comparison": _revision(case, base, head, records, assessment),
             }
         )
-    targets = [
-        _runtime_target(cases, 1, "join_sealed", 1_000_000, ((1, 0.060), (32, 0.015))),
-        _runtime_target(cases, 2, "join_sealed", 10_000_000, ((1, 0.600), (32, 0.150))),
-        _scaling_target(cases),
-        {
-            "row": 4,
-            "title": TITLES[4],
-            "mode": "intrinsically-enabled",
-            "absolute": [
-                _absolute(
-                    _find(cases, 4, name, "enabled"),
-                    limit,
-                    factor=1_000_000 / _find(cases, 4, name, "enabled")["rows"],
-                    unit="microseconds/row",
-                )
-                for name, limit in (("join_capture", 0.1), ("join_restore", 0.2))
-            ],
-        },
-        _compaction_target(cases),
-        _runtime_target(cases, 6, "asof", 1_000_000, ((1, 0.100), (32, 0.030))),
-        _overhead_target(cases, records, report),
-        {
-            "row": 8,
-            "title": TITLES[8],
-            "absolute": [
-                _absolute(
-                    _find(cases, 8, "join_small_batch", mode),
-                    50.0,
-                    factor=1_000_000,
-                    unit="microseconds/full-batch callback",
-                )
-                for mode in ("off", "enabled")
-            ],
-            "low_on": (
-                "Native contexts have no periodic interval; "
-                "enabled context is reported separately."
-            ),
-        },
-    ]
-    validation_errors = []
-    try:
-        validate_complete_results(report)
-    except ValueError as error:
-        validation_errors.append(str(error))
-    complete = not validation_errors and all(
-        case[side]["complete"] for case in cases for side in known[case["case"]].sides
-    )
+    targets = _acceptance_targets(cases, records, report)
+    validation_errors, complete = _summary_completeness(report, cases, known)
     return {
         "schema": "calc-flow.issue406-summary.v1",
         "evidence_complete": complete,
@@ -682,20 +530,7 @@ def _main_cell(target: dict) -> str:
             f"armed {_stat_cell(baseline['armed']['statistics'])} s; "
             f"steady {_stat_cell(baseline['steady']['statistics'])} s"
         )
-    if "absolute" in target:
-        return "; ".join(
-            f"{item['mode']}/{item['metric']}: "
-            f"{_stat_cell(item['baseline'])} {item['unit']}"
-            for item in target["absolute"]
-            if item["mode"] != "off"
-        )
-    return "; ".join(
-        f"{item['mode']}: H={_number(item.get('overhead_seconds'), 1000)} ms, "
-        f"2×floor={_number(item.get('target_seconds'), 1000)} ms "
-        f"({item['target_status']})"
-        for item in target["overhead"]
-        if item["side"] == "baseline" and item["mode"] != "off"
-    )
+    return _main_component_cell(target)
 
 
 def render_acceptance_markdown(summary: dict) -> str:
@@ -755,22 +590,7 @@ def render_acceptance_markdown(summary: dict) -> str:
         "CPU attribution.",
         "",
     ]
-    modes = [
-        [
-            target["row"],
-            f"N={item['rows']}/{item['threads']}CPU/{item['mode']}",
-            _number(item["throughput_ratio"]),
-            f"≥{item['target_ratio']}",
-            item["configuration_target_status"],
-            f"{item['periodic_impact']} "
-            f"({item['advancing_epoch_samples']}/20 observations)",
-            _stat_cell(item["phases"].get("terminal_seconds"), 1000),
-            _stat_cell(item["phases"].get("full_cycle_seconds"), 1000),
-            _stat_cell(item["checkpoint_bytes"]),
-        ]
-        for target in summary["targets"]
-        for item in target.get("mode_effects", [])
-    ]
+    modes = _mode_rows(summary)
     parts.extend(
         [
             table(
@@ -798,27 +618,7 @@ def render_acceptance_markdown(summary: dict) -> str:
             "",
         ]
     )
-    comparisons = []
-    for case in summary["cases"]:
-        revision = case["revision_comparison"]
-        intervals = (
-            "; ".join(
-                f"{item['median']:+.3f}% [{item['low']:+.3f}, {item['high']:+.3f}]"
-                for item in revision["round_intervals"]
-            )
-            or "—"
-        )
-        comparisons.append(
-            [
-                case["case"],
-                _stat_cell(case["baseline"]["statistics"]),
-                case["baseline"]["status"],
-                _stat_cell(case["candidate"]["statistics"]),
-                case["candidate"]["status"],
-                intervals,
-                revision["verdict"],
-            ]
-        )
+    comparisons = _comparison_rows(summary)
     parts.extend(
         [
             "All timing statistics below are seconds; native checkpoint metrics "
@@ -868,3 +668,271 @@ def _normalize_replays(components: dict, records: dict, side: str, mode: str) ->
                 )
             normalized[name].append(item)
     return normalized
+
+
+def _complete_arm(record):
+    complete = (
+        record is not None
+        and len(record.get("rounds", [])) == ROUNDS
+        and all(len(group) == SAMPLES for group in record["rounds"])
+    )
+    return complete
+
+
+def _arm_problems(case, side, samples):
+    problems = []
+    for sample in samples:
+        try:
+            validate_observation(case, side, sample)
+        except ValueError as error:
+            problems.append(str(error))
+    return problems
+
+
+def _arm_status(samples, complete, problems, lifecycle):
+    status = (
+        "unmeasured"
+        if not samples
+        else "incomplete"
+        if not complete
+        else "invalid"
+        if problems
+        else "diagnostic"
+        if lifecycle.get("failed")
+        else "ok"
+    )
+    return status
+
+
+def _arm_phases(samples):
+    phases = {
+        field: _stats([sample[field] for sample in samples])
+        for field in PHASES
+        if samples and all(_finite(sample.get(field)) for sample in samples)
+    }
+    return phases
+
+
+def _arm_checkpoint_bytes(samples):
+    return (
+        _stats([sample["checkpoint_evidence"]["state_bytes"] for sample in samples])
+        if samples
+        and all(
+            _finite(sample.get("checkpoint_evidence", {}).get("state_bytes"))
+            for sample in samples
+        )
+        else None
+    )
+
+
+def _revision_values(case, records):
+    values = {
+        side: [
+            [sample[case.metric] for sample in group]
+            for group in records[case.id, side]["rounds"]
+        ]
+        for side in ("baseline", "candidate")
+    }
+    return values
+
+
+def _scaling_baseline(small, large, mode):
+    base_valid = small["baseline"]["complete"] and large["baseline"]["complete"]
+    base_ratio = (
+        large["baseline"]["statistics"]["p50"] / small["baseline"]["statistics"]["p50"]
+        if base_valid
+        else None
+    )
+    baseline = {
+        "ratio_of_p50": base_ratio,
+        "one_million": small["baseline"]["statistics"],
+        "four_million": large["baseline"]["statistics"],
+        "status": "diagnostic"
+        if base_valid
+        and (small["baseline"]["status"] != "ok" or large["baseline"]["status"] != "ok")
+        else "ok"
+        if base_valid
+        else "unsupported"
+        if mode == "off"
+        else "unmeasured",
+    }
+    return baseline
+
+
+def _matched_overhead_summary(components, records, side, mode, arms, proof):
+    normalized = _normalize_replays(components, records, side, mode)
+    native_reference = normalized["asof_operator"][ROUNDS]
+    e2e_reference = normalized["asof"][ROUNDS]
+    projection = arms["projection"]["statistics"]["p50"]
+    if len({item["observation_id"] for item in normalized["asof"]}) != 22:
+        raise ValueError("ASOF replay reused a source observation")
+    for source, replay in zip(
+        normalized["asof"], normalized["asof_operator"], strict=True
+    ):
+        if source["match_identity"] != e2e_reference["match_identity"]:
+            raise ValueError("ASOF workload identity changed across observations")
+        matched = matched_overhead(source, replay, projection, scheduling_proof=proof)
+        if matched["schedule_status"] != "recorded-dispatch-chain-replayed":
+            raise ValueError("ASOF observation lacks its verified recorded replay")
+    e2e = {**e2e_reference, "seconds": arms["asof"]["statistics"]["p50"]}
+    native = {
+        **native_reference,
+        "seconds": arms["asof_operator"]["statistics"]["p50"],
+    }
+    derived = matched_overhead(e2e, native, projection, scheduling_proof=proof)
+    derived["semantic_replays_validated"] = len(normalized["asof"])
+    return derived
+
+
+def _summary_records(report, known):
+    records = {}
+    for record in report.get("measurements", []):
+        key = (record.get("case"), record.get("side"))
+        if key[0] not in known or key[1] not in known[key[0]].sides or key in records:
+            raise ValueError("unexpected or duplicate acceptance result")
+        records[key] = record
+    return records
+
+
+def _acceptance_targets(cases, records, report):
+    targets = [
+        _runtime_target(cases, 1, "join_sealed", 1_000_000, ((1, 0.060), (32, 0.015))),
+        _runtime_target(cases, 2, "join_sealed", 10_000_000, ((1, 0.600), (32, 0.150))),
+        _scaling_target(cases),
+        {
+            "row": 4,
+            "title": TITLES[4],
+            "mode": "intrinsically-enabled",
+            "absolute": [
+                _absolute(
+                    _find(cases, 4, name, "enabled"),
+                    limit,
+                    factor=1_000_000 / _find(cases, 4, name, "enabled")["rows"],
+                    unit="microseconds/row",
+                )
+                for name, limit in (("join_capture", 0.1), ("join_restore", 0.2))
+            ],
+        },
+        _compaction_target(cases),
+        _runtime_target(cases, 6, "asof", 1_000_000, ((1, 0.100), (32, 0.030))),
+        _overhead_target(cases, records, report),
+        {
+            "row": 8,
+            "title": TITLES[8],
+            "absolute": [
+                _absolute(
+                    _find(cases, 8, "join_small_batch", mode),
+                    50.0,
+                    factor=1_000_000,
+                    unit="microseconds/full-batch callback",
+                )
+                for mode in ("off", "enabled")
+            ],
+            "low_on": (
+                "Native contexts have no periodic interval; "
+                "enabled context is reported separately."
+            ),
+        },
+    ]
+    return targets
+
+
+def _summary_completeness(report, cases, known):
+    validation_errors = []
+    try:
+        validate_complete_results(report)
+    except ValueError as error:
+        validation_errors.append(str(error))
+    complete = not validation_errors and all(
+        case[side]["complete"] for case in cases for side in known[case["case"]].sides
+    )
+    return validation_errors, complete
+
+
+def _main_component_cell(target):
+    if "absolute" in target:
+        return "; ".join(
+            f"{item['mode']}/{item['metric']}: "
+            f"{_stat_cell(item['baseline'])} {item['unit']}"
+            for item in target["absolute"]
+            if item["mode"] != "off"
+        )
+    return "; ".join(
+        f"{item['mode']}: H={_number(item.get('overhead_seconds'), 1000)} ms, "
+        f"2×floor={_number(item.get('target_seconds'), 1000)} ms "
+        f"({item['target_status']})"
+        for item in target["overhead"]
+        if item["side"] == "baseline" and item["mode"] != "off"
+    )
+
+
+def _mode_rows(summary):
+    modes = [
+        [
+            target["row"],
+            f"N={item['rows']}/{item['threads']}CPU/{item['mode']}",
+            _number(item["throughput_ratio"]),
+            f"≥{item['target_ratio']}",
+            item["configuration_target_status"],
+            f"{item['periodic_impact']} "
+            f"({item['advancing_epoch_samples']}/20 observations)",
+            _stat_cell(item["phases"].get("terminal_seconds"), 1000),
+            _stat_cell(item["phases"].get("full_cycle_seconds"), 1000),
+            _stat_cell(item["checkpoint_bytes"]),
+        ]
+        for target in summary["targets"]
+        for item in target.get("mode_effects", [])
+    ]
+    return modes
+
+
+def _comparison_rows(summary):
+    comparisons = []
+    for case in summary["cases"]:
+        revision = case["revision_comparison"]
+        intervals = (
+            "; ".join(
+                f"{item['median']:+.3f}% [{item['low']:+.3f}, {item['high']:+.3f}]"
+                for item in revision["round_intervals"]
+            )
+            or "—"
+        )
+        comparisons.append(
+            [
+                case["case"],
+                _stat_cell(case["baseline"]["statistics"]),
+                case["baseline"]["status"],
+                _stat_cell(case["candidate"]["statistics"]),
+                case["candidate"]["status"],
+                intervals,
+                revision["verdict"],
+            ]
+        )
+    return comparisons
+
+
+def _measured_overhead(components, records, report, side, mode, arms):
+    proof = report.get("scheduling_proofs", {}).get(f"{side}/{mode}")
+    errors = []
+    # Match source references by their recorded location, including warmups.
+    # These are semantic replay links; timing aggregation remains independent.
+    try:
+        derived = _matched_overhead_summary(
+            components, records, side, mode, arms, proof
+        )
+    except (KeyError, ValueError) as error:
+        errors.append(str(error))
+        derived = {"target_status": "inconclusive"}
+    if any(arm["status"] != "ok" for arm in arms.values()):
+        derived["target_status"] = "diagnostic"
+    return {
+        "side": side,
+        "mode": mode,
+        **derived,
+        "components": {name: arm["statistics"] for name, arm in arms.items()},
+        "errors": errors,
+        "uncertainty": (
+            "Signed difference of independent component p50 values; component "
+            "median intervals are retained separately, with no paired residual CI."
+        ),
+    }

@@ -39,30 +39,7 @@ HISTORY_PHASES = (
 
 def validate_join_checkpoint_history(observation: dict) -> dict:
     """Require the fixed row3 geometry, full-state oracle and exact pool evidence."""
-    if (
-        not isinstance(observation, dict)
-        or observation.get("schema")
-        not in (
-            "calc-flow.join-checkpoint-history.v1",
-            "calc-flow.join-checkpoint-history.v2",
-        )
-        or any(
-            observation.get(field) != expected
-            for field, expected in (
-                ("case", "join_checkpoint_history_4m"),
-                ("outcome", "complete"),
-            )
-        )
-        or any(
-            observation.get(field) is not True
-            for field in (
-                "check_only",
-                "checkpoint_enabled",
-                "owned_cleanup_complete",
-            )
-        )
-    ):
-        raise ValueError("incomplete fixed checkpoint history diagnostic")
+    _validate_history_header(observation)
     unbounded = observation["schema"] == "calc-flow.join-checkpoint-history.v2"
     _validate_history_geometry(observation, unbounded=unbounded)
     fresh, history = observation.get("fresh"), observation.get("history")
@@ -77,16 +54,7 @@ def validate_join_checkpoint_history(observation: dict) -> dict:
             raise ValueError("history full-state oracle differs")
     before = _validate_history_versions(history)
     _validate_history_alias(history, before)
-    restores = observation.get("restores")
-    if not isinstance(restores, list) or len(restores) != 2:
-        raise ValueError("missing both read-only restore oracles")
-    for item, name in zip(restores, ("old_history", "replacement"), strict=True):
-        if (
-            not isinstance(item, dict)
-            or item.get("name") != name
-            or _history_oracle(item.get("oracle")) != oracle
-        ):
-            raise ValueError("restored full-state oracle differs")
+    _validate_history_restores(observation, oracle)
     _history_reservations(observation, unbounded=unbounded)
     return dict(observation)
 
@@ -132,55 +100,9 @@ def _history_snapshot(
         _history_count(snapshot.get(field), count, field)
     if snapshot.get("right_watermark_micros") is not None:
         raise ValueError("retained dimension was sealed")
-    native_index = snapshot.get("native_index_present")
-    if (
-        not isinstance(native_index, dict)
-        or set(native_index) != {"left", "right"}
-        or any(type(present) is not bool for present in native_index.values())
-    ):
-        raise ValueError("missing native index presence observation")
-    inventory = snapshot.get("segments")
-    if not isinstance(inventory, list) or not inventory:
-        raise ValueError("missing checkpoint history segments")
-    names = set()
-    for item in inventory:
-        if not isinstance(item, dict):
-            raise ValueError("invalid checkpoint history segment")
-        name, size = item.get("name"), item.get("bytes")
-        if (
-            not isinstance(name, str)
-            or not name
-            or name in names
-            or type(size) is not int
-            or size <= 0
-            or not _history_digest(item.get("sha256"))
-        ):
-            raise ValueError("invalid checkpoint history segment")
-        names.add(name)
-    _history_count(
-        snapshot.get("segment_bytes"),
-        sum(item["bytes"] for item in inventory),
-        "segment bytes",
-    )
-    base = {
-        item["name"]: item["sha256"]
-        for item in inventory
-        if item["name"].endswith("-base")
-    }
-    expected_deltas = (
-        []
-        if replacement
-        else sorted(
-            [f"left-delta-{i}" for i in range(1, epoch + 1)] + ["right-delta-1"]
-        )
-    )
-    if (
-        set(base) != {"left-base", "right-base"}
-        or snapshot.get("base_sha256") != base
-        or snapshot.get("delta_names") != expected_deltas
-        or sorted(name for name in names if "-delta-" in name) != expected_deltas
-    ):
-        raise ValueError("checkpoint history base/delta inventory differs")
+    _validate_history_native_indexes(snapshot)
+    inventory, names = _history_segment_inventory(snapshot)
+    _validate_history_segment_versions(snapshot, inventory, names, epoch, replacement)
 
 
 def _history_pool(sample: dict, *, unbounded: bool = False) -> None:
@@ -193,45 +115,8 @@ def _history_pool(sample: dict, *, unbounded: bool = False) -> None:
             )
     else:
         _history_count(sample.get("limit_bytes"), 1 << 30, "pool limit")
-    fields = (
-        "reserved_bytes",
-        "peak_reserved_bytes",
-        "phase_peak_reserved_bytes",
-        "successful_grows",
-        "successful_shrinks",
-        "failed_grows",
-    )
-    if any(type(sample.get(field)) is not int or sample[field] < 0 for field in fields):
-        raise ValueError("invalid reservation pool counters")
-    if (
-        not 0
-        <= sample["reserved_bytes"]
-        <= sample["phase_peak_reserved_bytes"]
-        <= sample["peak_reserved_bytes"]
-        or not unbounded
-        and sample["peak_reserved_bytes"] > 1 << 30
-        or sample["peak_reserved_bytes"] == 0
-        or sample["successful_grows"] == 0
-    ):
-        raise ValueError("invalid exact reservation peak")
-    if unbounded and sample["failed_grows"] != 0:
-        raise ValueError("unbounded reservation pool reported a rejected reservation")
-    rejection = sample.get("last_rejection")
-    if sample["failed_grows"] == 0:
-        if rejection is not None:
-            raise ValueError("rejection evidence without a failed reservation")
-    elif (
-        not isinstance(rejection, dict)
-        or type(rejection.get("additional_bytes")) is not int
-        or rejection["additional_bytes"] <= 0
-        or type(rejection.get("reserved_bytes")) is not int
-        or not 0 <= rejection["reserved_bytes"] <= sample["peak_reserved_bytes"]
-        or rejection.get("limit_bytes") != 1 << 30
-        or rejection["additional_bytes"] + rejection["reserved_bytes"] <= 1 << 30
-        or not isinstance(rejection.get("consumer_name"), str)
-        or not 0 < len(rejection["consumer_name"]) <= 256
-    ):
-        raise ValueError("missing or invalid last reservation rejection")
+    _validate_history_pool_counters(sample, unbounded=unbounded)
+    _validate_history_rejection(sample)
 
 
 def _history_reservations(observation: dict, *, unbounded: bool = False) -> None:
@@ -246,41 +131,10 @@ def _history_reservations(observation: dict, *, unbounded: bool = False) -> None
         raise ValueError("missing fixed reservation phases or distinct pools")
     previous = {}
     for item, (phase, name) in zip(phases, HISTORY_PHASES, strict=True):
-        _history_pool(item, unbounded=unbounded)
-        if item.get("phase") != phase or item.get("pool_id") != name:
-            raise ValueError("reservation phase or pool identity differs")
-        if name in previous and any(
-            item[field] < previous[name][field]
-            for field in (
-                "peak_reserved_bytes",
-                "successful_grows",
-                "successful_shrinks",
-                "failed_grows",
-            )
-        ):
-            raise ValueError("reservation aggregate counters went backward")
-        if (
-            phase in ("history_source_released", "history_snapshots_released")
-            and item["reserved_bytes"] == 0
-        ):
-            raise ValueError("held snapshot or segment alias lost its reservation")
-        if (
-            phase == "history_snapshots_released"
-            and item["phase_peak_reserved_bytes"] <= item["reserved_bytes"]
-        ):
-            raise ValueError(
-                "snapshot credit did not refund before the final segment alias"
-            )
+        _validate_reservation_phase(item, phase, name, previous, unbounded=unbounded)
         previous[name] = item
     for item, name in zip(pools, pool_names, strict=True):
-        _history_pool(item, unbounded=unbounded)
-        if (
-            item.get("pool_id") != name
-            or item["reserved_bytes"] != 0
-            or item
-            != {key: value for key, value in previous[name].items() if key != "phase"}
-        ):
-            raise ValueError("pool identity, final refund or final counters differ")
+        _validate_final_history_pool(item, name, previous, unbounded=unbounded)
 
 
 def validate_native_component(observation: dict) -> dict:
@@ -297,14 +151,7 @@ def validate_native_component(observation: dict) -> dict:
         return _validate_compaction(observation)
     if observation.get("case") != "join_capture_restore_1m":
         raise ValueError("invalid native component case")
-    for field in (
-        "resident_rows",
-        "captured_dirty_rows",
-        "restored_live_rows",
-        "replay_output_rows",
-    ):
-        if type(observation.get(field)) is not int or observation[field] != 1_000_000:
-            raise ValueError(f"invalid actual row denominator: {field}")
+    _validate_capture_rows(observation)
     for field in (
         "snapshot_seconds",
         "preparation_seconds",
@@ -313,18 +160,7 @@ def validate_native_component(observation: dict) -> dict:
     ):
         _positive_seconds(observation, field)
     _validate_lifecycle(observation)
-    if observation["snapshot_seconds"] + 1e-12 < (
-        observation["preparation_seconds"] + observation["capture_seconds"]
-    ):
-        raise ValueError("snapshot clock omits required preparation or capture")
-    if (
-        observation.get("validated_all_segments") is not True
-        or observation.get("restore_output_equivalent") is not True
-        or type(observation.get("snapshot_layout_version")) is not int
-        or observation["snapshot_layout_version"] not in (1, 2)
-    ):
-        raise ValueError("missing native snapshot validation proof")
-    _validate_snapshot_segments(observation)
+    _validate_capture_snapshot(observation)
     return {
         **observation,
         "capture_us_per_row": observation["snapshot_seconds"]
@@ -356,15 +192,7 @@ def _validate_compaction(observation: dict) -> dict:
         raise ValueError("missing native compaction equivalence proof")
     for mode in ("armed", "steady"):
         sample = observation.get(mode)
-        if not isinstance(sample, dict) or any(
-            type(sample.get(field)) is not int or sample[field] != rows
-            for field, rows in (
-                ("pre_handler_retained_rows", 1_000_000),
-                ("post_handler_retained_rows", 1_000_500),
-                ("replay_output_rows", 1_000_500),
-            )
-        ):
-            raise ValueError("invalid native compaction actual rows")
+        _validate_compaction_rows(sample)
         _validate_lifecycle(sample)
         for field in ("preparation_seconds", "handler_seconds", "combined_seconds"):
             _positive_seconds(sample, field)
@@ -403,26 +231,13 @@ def validate_small_batch(observation: dict) -> dict:
     from scripts.toolkit import linear_percentile
 
     validated = validate_matched_observation(observation, "join_sealed")
-    if (
-        type(observation.get("dimension_rows")) is not int
-        or observation["dimension_rows"] != 64
-    ):
+    if not _has_row_count(observation, "dimension_rows", 64):
         raise ValueError("invalid static Join dimension size")
     samples = observation.get("handler_samples")
     if not isinstance(samples, list) or len(samples) != 977:
         raise ValueError("invalid static Join callback count")
     for index, sample in enumerate(samples):
-        if (
-            not isinstance(sample, dict)
-            or type(sample.get("rows")) is not int
-            or sample["rows"] != (1024 if index < 976 else 576)
-            or type(sample.get("left_retained_rows")) is not int
-            or sample["left_retained_rows"] != 0
-            or type(sample.get("right_retained_rows")) is not int
-            or sample["right_retained_rows"] != 64
-        ):
-            raise ValueError("invalid static Join handler geometry or retention")
-        _positive_seconds(sample, "seconds")
+        _validate_small_handler(sample, index)
     if sum(sample["seconds"] for sample in samples) > observation["processing_seconds"]:
         raise ValueError("Join handler clocks exceed enclosing processing clock")
     seconds = [sample["seconds"] for sample in samples[:-1]]
@@ -437,19 +252,7 @@ def validate_small_batch(observation: dict) -> dict:
 
 
 def _validate_history_geometry(observation: dict, *, unbounded: bool = False) -> None:
-    if unbounded:
-        if (
-            observation.get("pool_policy") != "unbounded"
-            or "pool_limit_bytes" not in observation
-            or observation["pool_limit_bytes"] is not None
-        ):
-            raise ValueError(
-                "unbounded checkpoint history requires an explicit pool policy"
-            )
-    else:
-        if observation.get("pool_policy", "bounded") != "bounded":
-            raise ValueError("legacy checkpoint history requires a bounded pool policy")
-        _history_count(observation.get("pool_limit_bytes"), 1 << 30, "pool_limit_bytes")
+    _validate_history_pool_policy(observation, unbounded=unbounded)
     for field, expected in (
         ("left_rows", 4_000_000),
         ("dimension_rows", 64),
@@ -519,16 +322,7 @@ def _validate_history_versions(history: dict) -> dict:
 
 
 def _validate_history_alias(history: dict, before: dict) -> None:
-    alias = history.get("alias_ownership")
-    if (
-        not isinstance(alias, dict)
-        or alias.get("kind") != "StateSegment"
-        or alias.get("pool_id") != "history"
-        or alias.get("has_owner") is not True
-        or alias.get("credit_scope")
-        != "per_segment_backing_plus_shared_capture_controls"
-    ):
-        raise ValueError("missing owned source-pool segment alias")
+    alias = _history_alias(history)
     _history_count(alias.get("snapshot_epoch"), 4, "segment alias epoch")
     member = next(
         (item for item in before["segments"] if item["name"] == alias.get("name")), None
@@ -549,20 +343,9 @@ def _validate_snapshot_segments(observation: dict) -> None:
     names = set()
     total = 0
     for segment in segments:
-        if not isinstance(segment, dict):
-            raise ValueError("invalid native snapshot segment")
-        name, size, digest = (segment.get(key) for key in ("name", "bytes", "sha256"))
-        if (
-            not isinstance(name, str)
-            or not name
-            or name in names
-            or type(size) is not int
-            or size <= 0
-            or not isinstance(digest, str)
-            or len(digest) != 64
-            or any(character not in "0123456789abcdef" for character in digest)
-        ):
-            raise ValueError("invalid native snapshot segment")
+        name, size = _validated_segment(
+            segment, names, "invalid native snapshot segment"
+        )
         names.add(name)
         total += size
     if (
@@ -582,31 +365,260 @@ def _validate_compaction_witness(sample: dict, mode: str) -> None:
         raise ValueError("invalid native compaction witness")
     before, after = (witness.get(f"{cut}_base_sha256") for cut in ("before", "after"))
     for hashes in (before, after):
-        if (
-            not isinstance(hashes, dict)
-            or not hashes
-            or any(
-                not isinstance(name, str)
-                or not name.endswith("-base")
-                or not isinstance(digest, str)
-                or len(digest) != 64
-                or any(character not in "0123456789abcdef" for character in digest)
-                for name, digest in hashes.items()
-            )
-        ):
-            raise ValueError("invalid native compaction base inventory")
+        _validate_compaction_bases(hashes)
     before_deltas, after_deltas = (
         witness.get(f"{cut}_deltas") for cut in ("before", "after")
     )
     for deltas in (before_deltas, after_deltas):
-        if (
-            not isinstance(deltas, list)
-            or any(
-                not isinstance(name, str) or "-delta-" not in name for name in deltas
+        _validate_compaction_deltas(deltas)
+    _validate_compaction_change(
+        witness, mode, before, after, before_deltas, after_deltas
+    )
+
+
+def _validate_history_header(observation: dict) -> None:
+    if (
+        not isinstance(observation, dict)
+        or observation.get("schema")
+        not in (
+            "calc-flow.join-checkpoint-history.v1",
+            "calc-flow.join-checkpoint-history.v2",
+        )
+        or any(
+            observation.get(field) != expected
+            for field, expected in (
+                ("case", "join_checkpoint_history_4m"),
+                ("outcome", "complete"),
             )
-            or len(deltas) != len(set(deltas))
+        )
+        or any(
+            observation.get(field) is not True
+            for field in (
+                "check_only",
+                "checkpoint_enabled",
+                "owned_cleanup_complete",
+            )
+        )
+    ):
+        raise ValueError("incomplete fixed checkpoint history diagnostic")
+
+
+def _validate_history_restores(observation: dict, oracle: dict) -> None:
+    restores = observation.get("restores")
+    if not isinstance(restores, list) or len(restores) != 2:
+        raise ValueError("missing both read-only restore oracles")
+    for item, name in zip(restores, ("old_history", "replacement"), strict=True):
+        if (
+            not isinstance(item, dict)
+            or item.get("name") != name
+            or _history_oracle(item.get("oracle")) != oracle
         ):
-            raise ValueError("invalid native compaction delta inventory")
+            raise ValueError("restored full-state oracle differs")
+
+
+def _history_segment_inventory(snapshot: dict) -> tuple[list, set]:
+    inventory = snapshot.get("segments")
+    if not isinstance(inventory, list) or not inventory:
+        raise ValueError("missing checkpoint history segments")
+    names = set()
+    for item in inventory:
+        name, size = _validated_segment(
+            item, names, "invalid checkpoint history segment"
+        )
+        names.add(name)
+    _history_count(
+        snapshot.get("segment_bytes"),
+        sum(item["bytes"] for item in inventory),
+        "segment bytes",
+    )
+    return inventory, names
+
+
+def _validate_history_segment_versions(snapshot, inventory, names, epoch, replacement):
+    base = {
+        item["name"]: item["sha256"]
+        for item in inventory
+        if item["name"].endswith("-base")
+    }
+    expected_deltas = _history_delta_names(epoch, replacement)
+    if (
+        set(base) != {"left-base", "right-base"}
+        or snapshot.get("base_sha256") != base
+        or _history_deltas_differ(snapshot, names, expected_deltas)
+    ):
+        raise ValueError("checkpoint history base/delta inventory differs")
+
+
+def _validate_history_pool_counters(sample: dict, *, unbounded: bool) -> None:
+    fields = (
+        "reserved_bytes",
+        "peak_reserved_bytes",
+        "phase_peak_reserved_bytes",
+        "successful_grows",
+        "successful_shrinks",
+        "failed_grows",
+    )
+    if any(type(sample.get(field)) is not int or sample[field] < 0 for field in fields):
+        raise ValueError("invalid reservation pool counters")
+    _validate_history_pool_peak(sample, unbounded=unbounded)
+    if unbounded and sample["failed_grows"] != 0:
+        raise ValueError("unbounded reservation pool reported a rejected reservation")
+
+
+def _validate_history_rejection(sample: dict) -> None:
+    rejection = sample.get("last_rejection")
+    if sample["failed_grows"] == 0:
+        if rejection is not None:
+            raise ValueError("rejection evidence without a failed reservation")
+    elif not _valid_history_rejection(rejection, sample["peak_reserved_bytes"]):
+        raise ValueError("missing or invalid last reservation rejection")
+
+
+def _validate_reservation_phase(item, phase, name, previous, *, unbounded):
+    _history_pool(item, unbounded=unbounded)
+    if item.get("phase") != phase or item.get("pool_id") != name:
+        raise ValueError("reservation phase or pool identity differs")
+    _validate_reservation_progress(item, name, previous)
+    if (
+        phase in ("history_source_released", "history_snapshots_released")
+        and item["reserved_bytes"] == 0
+    ):
+        raise ValueError("held snapshot or segment alias lost its reservation")
+    if (
+        phase == "history_snapshots_released"
+        and item["phase_peak_reserved_bytes"] <= item["reserved_bytes"]
+    ):
+        raise ValueError(
+            "snapshot credit did not refund before the final segment alias"
+        )
+
+
+def _validate_capture_snapshot(observation: dict) -> None:
+    if observation["snapshot_seconds"] + 1e-12 < (
+        observation["preparation_seconds"] + observation["capture_seconds"]
+    ):
+        raise ValueError("snapshot clock omits required preparation or capture")
+    if (
+        observation.get("validated_all_segments") is not True
+        or observation.get("restore_output_equivalent") is not True
+        or type(observation.get("snapshot_layout_version")) is not int
+        or observation["snapshot_layout_version"] not in (1, 2)
+    ):
+        raise ValueError("missing native snapshot validation proof")
+    _validate_snapshot_segments(observation)
+
+
+def _validate_compaction_rows(sample: dict) -> None:
+    if not isinstance(sample, dict) or any(
+        type(sample.get(field)) is not int or sample[field] != rows
+        for field, rows in (
+            ("pre_handler_retained_rows", 1_000_000),
+            ("post_handler_retained_rows", 1_000_500),
+            ("replay_output_rows", 1_000_500),
+        )
+    ):
+        raise ValueError("invalid native compaction actual rows")
+
+
+def _validate_small_handler(sample: dict, index: int) -> None:
+    if (
+        not isinstance(sample, dict)
+        or not _has_row_count(sample, "rows", 1024 if index < 976 else 576)
+        or not _has_row_count(sample, "left_retained_rows", 0)
+        or not _has_row_count(sample, "right_retained_rows", 64)
+    ):
+        raise ValueError("invalid static Join handler geometry or retention")
+    _positive_seconds(sample, "seconds")
+
+
+def _validate_history_pool_policy(observation: dict, *, unbounded: bool) -> None:
+    if unbounded:
+        if (
+            observation.get("pool_policy") != "unbounded"
+            or "pool_limit_bytes" not in observation
+            or observation["pool_limit_bytes"] is not None
+        ):
+            raise ValueError(
+                "unbounded checkpoint history requires an explicit pool policy"
+            )
+    else:
+        if observation.get("pool_policy", "bounded") != "bounded":
+            raise ValueError("legacy checkpoint history requires a bounded pool policy")
+        _history_count(observation.get("pool_limit_bytes"), 1 << 30, "pool_limit_bytes")
+
+
+def _history_alias(history: dict) -> dict:
+    alias = history.get("alias_ownership")
+    if (
+        not isinstance(alias, dict)
+        or alias.get("kind") != "StateSegment"
+        or alias.get("pool_id") != "history"
+        or alias.get("has_owner") is not True
+        or alias.get("credit_scope")
+        != "per_segment_backing_plus_shared_capture_controls"
+    ):
+        raise ValueError("missing owned source-pool segment alias")
+    return alias
+
+
+def _validate_compaction_bases(hashes: dict) -> None:
+    if (
+        not isinstance(hashes, dict)
+        or not hashes
+        or any(
+            not isinstance(name, str)
+            or not name.endswith("-base")
+            or not _history_digest(digest)
+            for name, digest in hashes.items()
+        )
+    ):
+        raise ValueError("invalid native compaction base inventory")
+
+
+def _validate_compaction_deltas(deltas: list) -> None:
+    if (
+        not isinstance(deltas, list)
+        or any(not isinstance(name, str) or "-delta-" not in name for name in deltas)
+        or len(deltas) != len(set(deltas))
+    ):
+        raise ValueError("invalid native compaction delta inventory")
+
+
+def _validate_history_native_indexes(snapshot: dict) -> None:
+    native_index = snapshot.get("native_index_present")
+    if (
+        not isinstance(native_index, dict)
+        or set(native_index) != {"left", "right"}
+        or any(type(present) is not bool for present in native_index.values())
+    ):
+        raise ValueError("missing native index presence observation")
+
+
+def _validate_final_history_pool(item, name, previous, *, unbounded):
+    _history_pool(item, unbounded=unbounded)
+    if (
+        item.get("pool_id") != name
+        or item["reserved_bytes"] != 0
+        or item
+        != {key: value for key, value in previous[name].items() if key != "phase"}
+    ):
+        raise ValueError("pool identity, final refund or final counters differ")
+
+
+def _validate_capture_rows(observation: dict) -> None:
+    for field in (
+        "resident_rows",
+        "captured_dirty_rows",
+        "restored_live_rows",
+        "replay_output_rows",
+    ):
+        if type(observation.get(field)) is not int or observation[field] != 1_000_000:
+            raise ValueError(f"invalid actual row denominator: {field}")
+
+
+def _validate_compaction_change(
+    witness, mode, before, after, before_deltas, after_deltas
+):
     if mode == "armed" and (before == after or len(before_deltas) <= len(after_deltas)):
         raise ValueError("armed preparation did not replace the base and fold deltas")
     if mode == "steady" and (
@@ -614,3 +626,93 @@ def _validate_compaction_witness(sample: dict, mode: str) -> None:
         or witness.get("before_base_epoch") != witness.get("after_base_epoch")
     ):
         raise ValueError("steady preparation unexpectedly changed the base")
+
+
+def _history_delta_names(epoch: int, replacement: bool) -> list[str]:
+    expected_deltas = (
+        []
+        if replacement
+        else sorted(
+            [f"left-delta-{i}" for i in range(1, epoch + 1)] + ["right-delta-1"]
+        )
+    )
+    return expected_deltas
+
+
+def _validate_history_pool_peak(sample: dict, *, unbounded: bool) -> None:
+    if (
+        not 0
+        <= sample["reserved_bytes"]
+        <= sample["phase_peak_reserved_bytes"]
+        <= sample["peak_reserved_bytes"]
+        or not unbounded
+        and sample["peak_reserved_bytes"] > 1 << 30
+        or sample["peak_reserved_bytes"] == 0
+        or sample["successful_grows"] == 0
+    ):
+        raise ValueError("invalid exact reservation peak")
+
+
+def _validate_reservation_progress(item: dict, name: str, previous: dict) -> None:
+    if name in previous and any(
+        item[field] < previous[name][field]
+        for field in (
+            "peak_reserved_bytes",
+            "successful_grows",
+            "successful_shrinks",
+            "failed_grows",
+        )
+    ):
+        raise ValueError("reservation aggregate counters went backward")
+
+
+def _has_row_count(sample: dict, field: str, rows: int) -> bool:
+    return type(sample.get(field)) is int and sample[field] == rows
+
+
+def _validated_segment(segment: dict, names: set, message: str) -> tuple[str, int]:
+    if not isinstance(segment, dict):
+        raise ValueError(message)
+    name, size = segment.get("name"), segment.get("bytes")
+    if not _valid_segment_size(name, size, names) or not _history_digest(
+        segment.get("sha256")
+    ):
+        raise ValueError(message)
+    return name, size
+
+
+def _valid_segment_size(name, size, names: set) -> bool:
+    return (
+        isinstance(name, str)
+        and bool(name)
+        and name not in names
+        and type(size) is int
+        and size > 0
+    )
+
+
+def _valid_history_rejection(rejection: dict, peak: int) -> bool:
+    return (
+        isinstance(rejection, dict)
+        and _valid_rejected_reservation(rejection, peak)
+        and isinstance(rejection.get("consumer_name"), str)
+        and 0 < len(rejection["consumer_name"]) <= 256
+    )
+
+
+def _valid_rejected_reservation(rejection: dict, peak: int) -> bool:
+    return (
+        type(rejection.get("additional_bytes")) is int
+        and rejection["additional_bytes"] > 0
+        and type(rejection.get("reserved_bytes")) is int
+        and 0 <= rejection["reserved_bytes"] <= peak
+        and rejection.get("limit_bytes") == 1 << 30
+        and rejection["additional_bytes"] + rejection["reserved_bytes"] > 1 << 30
+    )
+
+
+def _history_deltas_differ(snapshot: dict, names: set, expected: list[str]) -> bool:
+    return (
+        snapshot.get("delta_names") != expected
+        or sorted(name for name in names if "-delta-" in name) != expected
+    )

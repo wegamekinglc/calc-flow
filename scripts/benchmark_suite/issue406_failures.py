@@ -53,30 +53,47 @@ def main_failure_identity(plan: dict, case, side: str, round_index: int, index) 
     release = plan.get("releases", {}).get("baseline", {})
     identity = plan.get("known_main_failure_identity", {})
     return (
+        _first_main_warmup(plan, side, round_index, index)
+        and _main_release_identity(release, identity)
+        and case.threads == 1
+        and (_retained_case(case) or _native_case(case))
+    )
+
+
+def _first_main_warmup(plan, side, round_index, index) -> bool:
+    return (
         plan.get("schema") == SCHEMA
         and side == "baseline"
         and round_index == 0
         and index is None
-        and release.get("product_commit") == MAIN
+    )
+
+
+def _main_release_identity(release, identity) -> bool:
+    return (
+        release.get("product_commit") == MAIN
         and identity.get("product_commit") == MAIN
         and release.get("native_sha256") == identity.get("native_sha256")
         and isinstance(identity.get("native_sha256"), str)
-        and case.threads == 1
-        and (
-            (
-                case.row == 3
-                and case.workload == "join_retained"
-                and case.mode == "on"
-                and case.rows in JOIN_NODES
-                and case.batch_rows == 64_000
-            )
-            or (
-                case.row in (4, 5)
-                and case.mode == "enabled"
-                and case.rows == 1_000_000
-                and case.batch_rows == (64_000 if case.row == 4 else 500)
-            )
-        )
+    )
+
+
+def _retained_case(case) -> bool:
+    return (
+        case.row == 3
+        and case.workload == "join_retained"
+        and case.mode == "on"
+        and case.rows in JOIN_NODES
+        and case.batch_rows == 64_000
+    )
+
+
+def _native_case(case) -> bool:
+    return (
+        case.row in (4, 5)
+        and case.mode == "enabled"
+        and case.rows == 1_000_000
+        and case.batch_rows == (64_000 if case.row == 4 else 500)
     )
 
 
@@ -134,6 +151,23 @@ def _retained_status(status: dict, node: str) -> bool:
         },
     ) or not _contains(status.get("checkpoint"), CHECKPOINT):
         return False
+    if not _retained_entry_errors(status, node):
+        return False
+    source = {
+        "ended": False,
+        "delivery": "lossless",
+        "replay_positioning": "exact_pause_report_and_seek",
+    }
+    if not all(
+        _contains(status["sources"][name], source) for name in ("left", "right")
+    ) or not _contains(
+        status["sources"]["right"], {"data_rows": 64, "data_batches": 1}
+    ):
+        return False
+    return _retained_joins(status, node)
+
+
+def _retained_entry_errors(status: dict, node: str) -> bool:
     for category, errors in (
         ("operators", {node: 1, "result": 0}),
         ("sources", {"left": 1, "right": 0}),
@@ -149,17 +183,10 @@ def _retained_status(status: dict, node: str) -> bool:
             )
         ):
             return False
-    source = {
-        "ended": False,
-        "delivery": "lossless",
-        "replay_positioning": "exact_pause_report_and_seek",
-    }
-    if not all(
-        _contains(status["sources"][name], source) for name in ("left", "right")
-    ) or not _contains(
-        status["sources"]["right"], {"data_rows": 64, "data_batches": 1}
-    ):
-        return False
+    return True
+
+
+def _retained_joins(status: dict, node: str) -> bool:
     joins = status.get("stream_joins", {})
     return (
         isinstance(joins, dict)
@@ -183,14 +210,7 @@ def _retained_status(status: dict, node: str) -> bool:
 def retained_failure_signature(case, observation: dict) -> str | None:
     """Recognize the recorded signature without inferring its underlying cause."""
     node = JOIN_NODES.get(case.rows)
-    if (
-        node is None
-        or case.row != 3
-        or case.workload != "join_retained"
-        or case.mode != "on"
-        or case.threads != 1
-        or case.batch_rows != 64_000
-    ):
+    if _unsupported_retained_case(case, node):
         return None
     if not _contains(
         observation,
@@ -207,6 +227,17 @@ def retained_failure_signature(case, observation: dict) -> str | None:
     ):
         return "retained_on_checkpoint_failure_cause_unresolved"
     return None
+
+
+def _unsupported_retained_case(case, node) -> bool:
+    return (
+        node is None
+        or case.row != 3
+        or case.workload != "join_retained"
+        or case.mode != "on"
+        or case.threads != 1
+        or case.batch_rows != 64_000
+    )
 
 
 def native_failure_signature(case, process: dict, diagnostic: str) -> str | None:
@@ -268,24 +299,10 @@ async def _retained_owned_failure(runner, case, error):
         f"benchmark worker exited; see {root / 'stderr.log'}",
     ):
         return None
-    try:
-        path = root / "failed-sample-1.json"
-        signature = retained_failure_signature(case, json.loads(path.read_text()))
-        identity = json.loads((root / "environment.json").read_text())
-        valid = _contains(
-            identity,
-            {
-                "native_sha256": runner.plan["known_main_failure_identity"][
-                    "native_sha256"
-                ],
-                "cpu_affinity": runner.cpus(case),
-                "tokio_worker_threads": "1",
-            },
-        )
-        if not valid or signature is None:
-            return None
-    except (OSError, ValueError, TypeError):
+    evidence = _retained_worker_evidence(runner, case, root)
+    if evidence is None:
         return None
+    path, signature = evidence
     pid = runner.workers[side].process.pid
     remaining = min(
         10,
@@ -306,6 +323,28 @@ async def _retained_owned_failure(runner, case, error):
     runner.workers.pop(side)
     paths = (path, root / "environment.json", root / "stderr.log")
     return _failure_evidence(runner, signature, pid, paths)
+
+
+def _retained_worker_evidence(runner, case, root):
+    path = root / "failed-sample-1.json"
+    try:
+        signature = retained_failure_signature(case, json.loads(path.read_text()))
+        identity = json.loads((root / "environment.json").read_text())
+        valid = _contains(
+            identity,
+            {
+                "native_sha256": runner.plan["known_main_failure_identity"][
+                    "native_sha256"
+                ],
+                "cpu_affinity": runner.cpus(case),
+                "tokio_worker_threads": "1",
+            },
+        )
+        if not valid or signature is None:
+            return None
+    except (OSError, ValueError, TypeError):
+        return None
+    return path, signature
 
 
 def _native_owned_failure(runner, group, error):
@@ -333,16 +372,11 @@ def _native_owned_failure(runner, group, error):
         pid = process["pid"]
         if (
             signature is None
-            or descriptor["sha256"] != MAIN_NATIVE
-            or process["argv"] != expected_argv
-            or process["cpu_affinity"] != runner.cpus(case)
-            or source["product_git_sha"] != MAIN
-            or source["effective_files"].get(
-                "crates/calc-flow/benches/support/native_join_components.rs"
+            or not _native_process_identity(
+                descriptor, process, expected_argv, runner, case
             )
-            != MAIN_COMPONENT_SOURCE
-            or runner.retired.get(pid) != {"returncode": 101, "group_empty": True}
-            or (root / "stdout.log").read_bytes()
+            or not _native_source_identity(source)
+            or not _native_exit_evidence(runner, pid, root)
         ):
             return None
     except (OSError, ValueError, TypeError, KeyError):
@@ -354,6 +388,31 @@ def _native_owned_failure(runner, group, error):
         source_path,
     )
     return _failure_evidence(runner, signature, pid, paths)
+
+
+def _native_process_identity(descriptor, process, expected_argv, runner, case) -> bool:
+    return (
+        descriptor["sha256"] == MAIN_NATIVE
+        and process["argv"] == expected_argv
+        and process["cpu_affinity"] == runner.cpus(case)
+    )
+
+
+def _native_source_identity(source) -> bool:
+    return (
+        source["product_git_sha"] == MAIN
+        and source["effective_files"].get(
+            "crates/calc-flow/benches/support/native_join_components.rs"
+        )
+        == MAIN_COMPONENT_SOURCE
+    )
+
+
+def _native_exit_evidence(runner, pid, root) -> bool:
+    return (
+        runner.retired.get(pid) == {"returncode": 101, "group_empty": True}
+        and not (root / "stdout.log").read_bytes()
+    )
 
 
 def _failure_evidence(runner, signature, pid, paths):

@@ -52,23 +52,30 @@ async def _observe_checkpoints(job, observations: list[dict], stop: asyncio.Even
             await asyncio.wait_for(stop.wait(), 0.01)
 
 
-def _dispatch_trace(value: str, case: dict, status: dict, frontier: int, sink) -> dict:
-    """Validate captured controls and retain actual runtime data-count evidence."""
-    trace = json.loads(value)
-    events = trace.get("events")
-    output = case["dispatch_output_node_id"]
+def _trace_control_header(trace: dict, case: dict, output: str, frontier: int) -> bool:
+    return not (
+        trace.get("overflowed") is not False
+        or trace.get("terminal_excluded") is not True
+        or trace.get("allow_barriers") is not (case["mode"] == "on")
+        or trace.get("completed_frontiers", {}).get(output, frontier - 1) < frontier
+    )
+
+
+def _validate_trace_header(
+    trace: dict, events, case: dict, output: str, frontier: int
+) -> None:
     if (
         trace.get("schema") != "calc-flow.asof-dispatch-trace.v1"
         or trace.get("capacity") != 8192
         or not isinstance(events, list)
         or not events
         or trace.get("record_count") != len(events)
-        or trace.get("overflowed") is not False
-        or trace.get("terminal_excluded") is not True
-        or trace.get("allow_barriers") is not (case["mode"] == "on")
-        or trace.get("completed_frontiers", {}).get(output, frontier - 1) < frontier
+        or not _trace_control_header(trace, case, output, frontier)
     ):
         raise ValueError("invalid or incomplete ASOF processing dispatch trace")
+
+
+def _validate_trace_controls(events: list[dict], case: dict) -> None:
     allowed = {"data", "watermark"} | ({"barrier"} if case["mode"] == "on" else set())
     if any(
         event.get("kind") not in allowed
@@ -76,6 +83,9 @@ def _dispatch_trace(value: str, case: dict, status: dict, frontier: int, sink) -
         for event in events
     ):
         raise ValueError("ASOF processing trace contains an unsupported control")
+
+
+def _trace_operator_counts(status: dict) -> dict:
     fields = (
         "input_batches",
         "input_rows",
@@ -93,6 +103,17 @@ def _dispatch_trace(value: str, case: dict, status: dict, frontier: int, sink) -
         for value in operators.values()
     ):
         raise ValueError("ASOF trace was captured after an error or terminal callback")
+    return operators
+
+
+def _dispatch_trace(value: str, case: dict, status: dict, frontier: int, sink) -> dict:
+    """Validate captured controls and retain actual runtime data-count evidence."""
+    trace = json.loads(value)
+    events = trace.get("events")
+    output = case["dispatch_output_node_id"]
+    _validate_trace_header(trace, events, case, output, frontier)
+    _validate_trace_controls(events, case)
+    operators = _trace_operator_counts(status)
     states = status.get("stream_asof_joins", {})
     if set(states) != {trace.get("node_id")}:
         raise ValueError("ASOF trace lacks the selected operator's final state")
@@ -208,6 +229,55 @@ def acceptance_checkpoint_evidence(
             }
         manifests.append({**item, "sources": sources})
     return {**evidence, "manifests": manifests}
+
+
+async def _inspect_sample_checkpoints(
+    state_root: Path, evidence: dict, case: dict, scenario: str
+) -> dict:
+    result = {}
+    try:
+        inspection = asyncio.create_task(
+            asyncio.to_thread(
+                acceptance_checkpoint_evidence,
+                state_root,
+                evidence["after_eof"]["checkpoint"],
+                checkpointing=case["mode"] != "off",
+            )
+        )
+        cancellation = await _settle_owned(inspection)
+        if cancellation is not None:
+            raise cancellation
+        checkpoint = inspection.result()
+        result["checkpoint_evidence"] = checkpoint
+        return {
+            "checkpoint_evidence": checkpoint,
+            "advancing_processing_epochs": _advancing_processing_epochs(
+                checkpoint, evidence, scenario
+            ),
+        }
+    except Exception as error:
+        if evidence["lifecycle"] == "completed":
+            raise
+        return {**result, "checkpoint_evidence_error": str(error)}
+
+
+def _advancing_processing_epochs(
+    checkpoint: dict, evidence: dict, scenario: str
+) -> list:
+    quote_binding = (
+        "left"
+        if scenario == "join"
+        else "quotes.input"
+        if scenario == "asof_join"
+        else "input"
+    )
+    return [
+        item["epoch"]
+        for item in checkpoint["manifests"]
+        if item["epoch"] in evidence["completed_processing_epochs"]
+        and not item["terminal"]
+        and (item["sources"].get(quote_binding, {}).get("rows") or 0) > 0
+    ]
 
 
 class AcceptanceEngineCase:
@@ -330,37 +400,11 @@ class AcceptanceEngineCase:
                 "dispatch trace belongs to a different plan", evidence
             )
         evidence["startup_seconds"] = startup_seconds
-        try:
-            inspection = asyncio.create_task(
-                asyncio.to_thread(
-                    acceptance_checkpoint_evidence,
-                    state_root,
-                    evidence["after_eof"]["checkpoint"],
-                    checkpointing=self.case["mode"] != "off",
-                )
+        evidence.update(
+            await _inspect_sample_checkpoints(
+                state_root, evidence, self.case, self.scenario
             )
-            cancellation = await _settle_owned(inspection)
-            if cancellation is not None:
-                raise cancellation
-            evidence["checkpoint_evidence"] = inspection.result()
-            quote_binding = (
-                "left"
-                if self.scenario == "join"
-                else "quotes.input"
-                if self.scenario == "asof_join"
-                else "input"
-            )
-            evidence["advancing_processing_epochs"] = [
-                item["epoch"]
-                for item in evidence["checkpoint_evidence"]["manifests"]
-                if item["epoch"] in evidence["completed_processing_epochs"]
-                and not item["terminal"]
-                and (item["sources"].get(quote_binding, {}).get("rows") or 0) > 0
-            ]
-        except Exception as error:
-            if evidence["lifecycle"] == "completed":
-                raise
-            evidence["checkpoint_evidence_error"] = str(error)
+        )
         return table, evidence
 
     def sample(self) -> dict:
@@ -469,20 +513,8 @@ async def _finish_processing_trace(
     ) / 1e9
 
 
-def _processing_checkpoint_evidence(observations: list[dict], evidence: dict) -> dict:
-    result = {}
-    windows = checkpoint_windows(
-        observations,
-        start_ns=evidence["processing_started_ns"],
-        end_ns=evidence.get(
-            "settled_processing_ended_ns", evidence["processing_ended_ns"]
-        ),
-    )
-    result["checkpoint_windows"] = windows
-    result["completed_processing_epochs"] = [
-        item["epoch"] for item in windows if item["inside_steady"]
-    ]
-    result["nonterminal_epochs"] = sorted(
+def _nonterminal_epochs(observations: list[dict], evidence: dict) -> list:
+    return sorted(
         {
             epoch
             for observation in observations
@@ -496,7 +528,10 @@ def _processing_checkpoint_evidence(observations: list[dict], evidence: dict) ->
             if epoch is not None
         }
     )
-    result["processing_checkpoint_free"] = all(
+
+
+def _processing_checkpoint_free(observations: list[dict], evidence: dict) -> bool:
+    return all(
         observation["checkpoint"][key] is None
         for observation in observations
         if observation["before_ns"] <= evidence["terminal_started_ns"]
@@ -504,6 +539,25 @@ def _processing_checkpoint_evidence(observations: list[dict], evidence: dict) ->
     ) and all(
         evidence["before_eof"]["checkpoint"][key] is None
         for key in ("current_epoch", "last_completed_epoch")
+    )
+
+
+def _processing_checkpoint_evidence(observations: list[dict], evidence: dict) -> dict:
+    result = {}
+    windows = checkpoint_windows(
+        observations,
+        start_ns=evidence["processing_started_ns"],
+        end_ns=evidence.get(
+            "settled_processing_ended_ns", evidence["processing_ended_ns"]
+        ),
+    )
+    result["checkpoint_windows"] = windows
+    result["completed_processing_epochs"] = [
+        item["epoch"] for item in windows if item["inside_steady"]
+    ]
+    result["nonterminal_epochs"] = _nonterminal_epochs(observations, evidence)
+    result["processing_checkpoint_free"] = _processing_checkpoint_free(
+        observations, evidence
     )
     result["observer_policy"] = "all-modes-status-every-10ms-plus-final-frontier-1ms"
     return result
@@ -535,6 +589,15 @@ async def _finish_acceptance_job(
     return observer_failure, cancellation, cleanup_error, cleanup_started
 
 
+def _invalid_failed_sample(table, evidence: dict, case: dict) -> bool:
+    return (
+        case.get("side") != "baseline"
+        or table is None
+        or "terminal_started_ns" not in evidence
+        or not evidence["cleanup_complete"]
+    )
+
+
 def _require_acceptance_outcome(
     failure, observer_failure, table, evidence: dict, case: dict
 ) -> None:
@@ -547,12 +610,7 @@ def _require_acceptance_outcome(
     if isinstance(failure, asyncio.CancelledError):
         failure.evidence = evidence
         raise failure
-    if failure is not None and (
-        case.get("side") != "baseline"
-        or table is None
-        or "terminal_started_ns" not in evidence
-        or not evidence["cleanup_complete"]
-    ):
+    if failure is not None and _invalid_failed_sample(table, evidence, case):
         raise CycleValidationError("invalid acceptance sample", evidence) from failure
 
 

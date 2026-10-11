@@ -69,7 +69,9 @@ RUSTDOC_NEW = (
 
 
 def rustdoc_sources() -> tuple[bytes, bytes, bytes, bytes]:
-    new = (Path(__file__).parents[1] / RUSTDOC_PATH).read_bytes()
+    new = (
+        Path(__file__).parent / "fixtures/issue406-rustdoc/benchmark_internals.rs.txt"
+    ).read_bytes()
     old = new.replace(RUSTDOC_NEW, RUSTDOC_OLD, 1)
     start = old.index(b"/// Checks the fixed retained Join checkpoint lifecycle")
     end = old.index(b"\n}\n\n", start) + 4

@@ -40,6 +40,18 @@ class FakeRunner:
         self.closed += 1
 
 
+async def settle_fixture_runner(runner, task):
+    if task is not None and not task.done():
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+    for process in tuple(runner.processes.values()):
+        if process.returncode is None:
+            process.kill()
+        await process.communicate()
+    await runner.settle()
+
+
 class AcceptanceDriverTests(unittest.IsolatedAsyncioTestCase):
     def test_native_replay_uses_the_exact_source_sample_trace(self):
         with TemporaryDirectory() as raw_root:
@@ -126,10 +138,22 @@ class AcceptanceDriverTests(unittest.IsolatedAsyncioTestCase):
             )
             script = "import os,time; os.write(1,b'x'*262144); time.sleep(60)"
             task = None
+            create_process = asyncio.create_subprocess_exec
+
+            async def create_fixture_native(*arguments, **options):
+                self.assertEqual(arguments[1:3], ("--cpu-list", "0"))
+                return await create_process(sys.executable, "-c", script, **options)
+
             try:
-                with patch(
-                    "scripts.benchmark_suite.issue406_run._taskset",
-                    return_value=[sys.executable, "-c", script],
+                with (
+                    patch(
+                        "scripts.benchmark_suite.issue406_run._taskset_executable",
+                        return_value="taskset",
+                    ),
+                    patch(
+                        "scripts.benchmark_suite.issue406_run.asyncio.create_subprocess_exec",
+                        side_effect=create_fixture_native,
+                    ),
                 ):
                     task = asyncio.create_task(
                         runner._native((case,), "candidate", 0, 0)
@@ -151,15 +175,7 @@ class AcceptanceDriverTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result["forced_kill_pids"], [])
                 self.assertEqual(destination.stat().st_size, 262144)
             finally:
-                if task is not None and not task.done():
-                    task.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await task
-                for process in tuple(runner.processes.values()):
-                    if process.returncode is None:
-                        process.kill()
-                    await process.communicate()
-                await runner.settle()
+                await settle_fixture_runner(runner, task)
 
     def test_matched_native_samples_receive_validated_primary_metrics(self):
         from scripts.test_benchmark_native_acceptance import matched_observation
@@ -294,10 +310,22 @@ class AcceptanceDriverTests(unittest.IsolatedAsyncioTestCase):
                 root,
                 0,
             )
+            create_process = asyncio.create_subprocess_exec
+
+            async def create_fixture_worker(*arguments, **options):
+                self.assertEqual(arguments[1:3], ("--cpu-list", "0"))
+                return await create_process(sys.executable, "-c", script, **options)
+
             try:
-                with patch(
-                    "scripts.benchmark_suite.issue406_run._taskset",
-                    return_value=[sys.executable, "-c", script],
+                with (
+                    patch(
+                        "scripts.benchmark_suite.issue406_run._taskset_executable",
+                        return_value="taskset",
+                    ),
+                    patch(
+                        "scripts.benchmark_suite.issue406_run.asyncio.create_subprocess_exec",
+                        side_effect=create_fixture_worker,
+                    ),
                 ):
                     await runner._start_worker(case, "candidate", 0)
                 await runner.finish_round()
@@ -345,11 +373,7 @@ class AcceptanceDriverTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as raw:
             runner = FakeRunner()
             report = await collect(runner, Path(raw))
-            self.assertEqual(len(report["measurements"]), 64)
-            self.assertEqual(sum(call[0] == "sample" for call in runner.calls), 1200)
-            self.assertEqual(sum(call[0] == "warmup" for call in runner.calls), 120)
-            for record in report["measurements"]:
-                self.assertEqual([len(values) for values in record["rounds"]], [10, 10])
+            self._assert_fixed_collection_counts(report, runner.calls)
             first = next(
                 group for group in collection_groups() if len(group[0].sides) == 2
             )
@@ -363,6 +387,13 @@ class AcceptanceDriverTests(unittest.IsolatedAsyncioTestCase):
                 ["baseline", "candidate", "candidate", "baseline"],
             )
             self.assertEqual(runner.closed, 72)
+
+    def _assert_fixed_collection_counts(self, report, calls):
+        self.assertEqual(len(report["measurements"]), 64)
+        self.assertEqual(sum(call[0] == "sample" for call in calls), 1200)
+        self.assertEqual(sum(call[0] == "warmup" for call in calls), 120)
+        for record in report["measurements"]:
+            self.assertEqual([len(values) for values in record["rounds"]], [10, 10])
 
     async def test_cancellation_settles_and_preserves_partial_without_retry(self):
         with TemporaryDirectory() as raw:

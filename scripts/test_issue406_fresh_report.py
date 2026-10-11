@@ -14,42 +14,10 @@ def retained_report():
     control = {"product_commit": PREVIOUS, "measurements": [], "pairs": []}
     data["retained_control"] = control
     for case in retained_cases():
-        arms = {}
-        for side in ("previous", "candidate"):
-            arm = record(case, 1.0, side=side)
-            arm["warmups"] = [copy.deepcopy(group[0]) for group in arm["rounds"]]
-            arms[side] = arm
-            destination = (
-                control["measurements"] if side == "previous" else data["measurements"]
-            )
-            destination.append(arm)
+        arms = retained_arms(case, control, data)
         for round_index in range(2):
             for index in (None, *range(10)):
-                references = {}
-                for side, revision in (
-                    ("previous", PREVIOUS),
-                    ("candidate", CANDIDATE),
-                ):
-                    arm = arms[side]
-                    sample = (
-                        arm["warmups"][round_index]
-                        if index is None
-                        else arm["rounds"][round_index][index]
-                    )
-                    seconds = 1000 if index is None else 1 + index / 100
-                    factor = 1 if side == "previous" else 0.5
-                    sample.update(
-                        product_commit=revision,
-                        observation_id=f"{case.id}/{side}/{round_index}/{index}",
-                        raw_observation_sha256="a" * 64,
-                        processing_seconds=seconds * factor,
-                        terminal_seconds=2 * seconds * factor,
-                        full_cycle_seconds=4 * seconds * factor,
-                    )
-                    references[side] = {
-                        key: sample[key]
-                        for key in ("observation_id", "raw_observation_sha256")
-                    }
+                references = pair_references(case, arms, round_index, index)
                 order = (
                     ["previous", "candidate"]
                     if index is None
@@ -68,6 +36,47 @@ def retained_report():
                     }
                 )
     return data
+
+
+def retained_arms(case, control, data):
+    arms = {}
+    for side in ("previous", "candidate"):
+        arm = record(case, 1.0, side=side)
+        arm["warmups"] = [copy.deepcopy(group[0]) for group in arm["rounds"]]
+        arms[side] = arm
+        destination = (
+            control["measurements"] if side == "previous" else data["measurements"]
+        )
+        destination.append(arm)
+    return arms
+
+
+def pair_references(case, arms, round_index, index):
+    references = {}
+    for side, revision in (
+        ("previous", PREVIOUS),
+        ("candidate", CANDIDATE),
+    ):
+        arm = arms[side]
+        sample = (
+            arm["warmups"][round_index]
+            if index is None
+            else arm["rounds"][round_index][index]
+        )
+        seconds = 1000 if index is None else 1 + index / 100
+        factor = 1 if side == "previous" else 0.5
+        sample.update(
+            product_commit=revision,
+            observation_id=f"{case.id}/{side}/{round_index}/{index}",
+            raw_observation_sha256="a" * 64,
+            processing_seconds=seconds * factor,
+            terminal_seconds=2 * seconds * factor,
+            full_cycle_seconds=4 * seconds * factor,
+        )
+        references[side] = {
+            key: sample[key] for key in ("observation_id", "raw_observation_sha256")
+        }
+    return references
 
 
 class RetainedControlReportTests(unittest.TestCase):

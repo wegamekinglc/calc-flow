@@ -70,34 +70,7 @@ async def collect(runner, output: Path) -> dict:
     try:
         for group in collection_groups():
             for round_index in range(ROUNDS):
-                try:
-                    for side in group[0].sides:
-                        samples = await _invoke_collection(
-                            runner, output, group, side, (round_index, None)
-                        )
-                        _record_collection(
-                            records, output, group, (side, round_index, None), samples
-                        )
-                    for index in range(SAMPLES):
-                        for side in pair_order(index):
-                            if side in group[0].sides:
-                                samples = await _invoke_collection(
-                                    runner, output, group, side, (round_index, index)
-                                )
-                                _record_collection(
-                                    records,
-                                    output,
-                                    group,
-                                    (side, round_index, index),
-                                    samples,
-                                )
-                finally:
-                    cleanup = asyncio.create_task(runner.finish_round())
-                    try:
-                        await asyncio.shield(cleanup)
-                    except asyncio.CancelledError:
-                        await _complete_owned(cleanup)
-                        raise
+                await _collect_round(runner, output, group, round_index, records)
     except BaseException as error:
         report.update(state="stopped", error=f"{type(error).__name__}: {error}")
         raise
@@ -106,6 +79,33 @@ async def collect(runner, output: Path) -> dict:
         return report
     finally:
         write_json(output / "partial.json", report)
+
+
+async def _collect_round(runner, output, group, round_index, records):
+    try:
+        for side in group[0].sides:
+            samples = await _invoke_collection(
+                runner, output, group, side, (round_index, None)
+            )
+            _record_collection(
+                records, output, group, (side, round_index, None), samples
+            )
+        for index in range(SAMPLES):
+            for side in pair_order(index):
+                if side in group[0].sides:
+                    samples = await _invoke_collection(
+                        runner, output, group, side, (round_index, index)
+                    )
+                    _record_collection(
+                        records, output, group, (side, round_index, index), samples
+                    )
+    finally:
+        cleanup = asyncio.create_task(runner.finish_round())
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            await _complete_owned(cleanup)
+            raise
 
 
 def _child_environment(site: Path | None, cpus: list[int]) -> dict[str, str]:
@@ -118,11 +118,15 @@ def _child_environment(site: Path | None, cpus: list[int]) -> dict[str, str]:
     }
 
 
-def _taskset(cpus: list[int], arguments: list[str]) -> list[str]:
+def _taskset_executable() -> str:
     executable = shutil.which("taskset")
     if executable is None:
         raise ValueError("acceptance requires taskset before any library import")
-    return [executable, "--cpu-list", ",".join(map(str, cpus)), *arguments]
+    return executable
+
+
+def _taskset(cpus: list[int], arguments: list[str]) -> list[str]:
+    return [_taskset_executable(), "--cpu-list", ",".join(map(str, cpus)), *arguments]
 
 
 def competing_work(owned: set[int]) -> list[dict]:
@@ -165,11 +169,7 @@ def validate_plan(plan: dict) -> None:
             else build_harness
         )
         wheel_build = _validate_plan_wheel(plan, side, files, wheel_harness)
-        environment = {
-            key: value
-            for key, value in wheel_build["environment"].items()
-            if not fresh or key != "CARGO_TARGET_DIR"
-        }
+        environment = _plan_wheel_environment(wheel_build, fresh)
         traced_identities.append((environment, wheel_build.get("validated_artifacts")))
         _validate_plan_binaries(
             plan,
@@ -200,22 +200,7 @@ def _validate_fresh_releases(plan: dict, files: dict) -> Path:
         or files.get(str(compatibility)) != WITNESS_SHA256
     ):
         raise ValueError("historical compatibility witness is not sealed")
-    for key, baseline_revision in (
-        ("native_harness_reuse", HISTORICAL),
-        ("row7_harness_reuse", FROZEN),
-    ):
-        if set(plan[key]) != {"baseline", "candidate"}:
-            raise ValueError("fresh build-harness roles differ")
-        for side, reuse in plan[key].items():
-            historical = key == "native_harness_reuse" and side == "baseline"
-            revision = (
-                baseline_revision if side == "baseline" else plan["harness_git_sha"]
-            )
-            expected = native_harness_reuse(
-                revision, compatibility=compatibility if historical else None
-            )
-            if reuse != expected:
-                raise ValueError("fresh native build reuse witness changed")
+    _validate_plan_reuse_roles(plan, compatibility, HISTORICAL, FROZEN)
     releases = [*plan["releases"].values(), plan["retained_control"]]
     builds = [validate_ordinary_release(release, files) for release in releases]
     validate_main_failure_identity(plan, files)
@@ -304,17 +289,15 @@ class AcceptanceRunner:
         release = self.release(case, side)
         creation = asyncio.create_task(
             asyncio.create_subprocess_exec(
-                *_taskset(
-                    self.cpus(case),
-                    [
-                        sys.executable,
-                        "-m",
-                        "scripts.benchmark_suite",
-                        "worker",
-                        "--root",
-                        str(root),
-                    ],
-                ),
+                _taskset_executable(),
+                "--cpu-list",
+                ",".join(map(str, self.cpus(case))),
+                sys.executable,
+                "-m",
+                "scripts.benchmark_suite",
+                "worker",
+                "--root",
+                str(root),
                 cwd=ROOT,
                 env=_child_environment(Path(release["site"]), self.cpus(case)),
                 stdin=asyncio.subprocess.PIPE,
@@ -348,79 +331,17 @@ class AcceptanceRunner:
         return worker
 
     def _normalize(self, group, side, raw, observation_id, raw_digest):
-        from scripts.benchmark_suite.asof_e2e import validate_matched_native
-        from scripts.benchmark_suite.issue406_acceptance import matched_native_identity
-        from scripts.benchmark_suite.native_components import (
-            validate_native_component,
-            validate_small_batch,
-        )
-
         case = group[0]
         product = (
             self.release(case, side)["product_commit"]
             if self.fresh
             else self.plan["releases"][side]["product_commit"]
         )
-        if (
-            self.fresh
-            and case.workload in RUNTIME_WORKLOADS
-            and (
-                raw.get("product_commit") != product
-                or raw.get("cpu_affinity") != self.cpus(case)
-            )
-        ):
-            raise ValueError("raw runtime product or affinity differs from its release")
+        self._validate_runtime_product(case, raw, product)
         if case.row in (4, 5):
-            raw = validate_native_component(raw)
-            if case.row == 4:
-                mapped = {member.id: raw for member in group}
-            else:
-                mapped = {
-                    member.id: {
-                        **raw,
-                        **raw[
-                            "armed"
-                            if member.workload.endswith("compacting")
-                            else "steady"
-                        ],
-                    }
-                    for member in group
-                }
-            mapped = {
-                key: {
-                    **value,
-                    "oracle_passed": True,
-                    "cleanup_complete": True,
-                    "lifecycle": "completed",
-                }
-                for key, value in mapped.items()
-            }
+            mapped = self._component_observations(group, raw)
         elif case.workload in ("asof_operator", "join_small_batch"):
-            validated = (
-                validate_matched_native if case.row == 7 else validate_small_batch
-            )(raw)
-            if validated["checkpoint_enabled"] is not (case.mode != "off"):
-                raise ValueError("native checkpoint semantics differ from the case")
-            mapped = {
-                case.id: {
-                    **validated,
-                    "cpu_affinity": validated["observed_cpu_affinity"],
-                    "mode": case.mode,
-                    "native_nonterminal_epoch_count": raw["nonterminal_epochs"],
-                    "nonterminal_epochs": [],
-                    "processing_checkpoint_free": True,
-                    "processing_settled": True,
-                    **(
-                        {
-                            "match_identity": matched_native_identity(
-                                validated, case.mode, self.cpus(case)
-                            )
-                        }
-                        if case.row == 7
-                        else {}
-                    ),
-                }
-            }
+            mapped = self._matched_native_observation(case, raw)
         else:
             mapped = {case.id: raw}
         normalized = {
@@ -440,6 +361,76 @@ class AcceptanceRunner:
                 normalized[member.id],
             )
         return normalized
+
+    def _validate_runtime_product(self, case, raw, product):
+        if (
+            self.fresh
+            and case.workload in RUNTIME_WORKLOADS
+            and (
+                raw.get("product_commit") != product
+                or raw.get("cpu_affinity") != self.cpus(case)
+            )
+        ):
+            raise ValueError("raw runtime product or affinity differs from its release")
+
+    def _component_observations(self, group, raw):
+        from scripts.benchmark_suite.native_components import validate_native_component
+
+        raw = validate_native_component(raw)
+        if group[0].row == 4:
+            mapped = {member.id: raw for member in group}
+        else:
+            mapped = {
+                member.id: {
+                    **raw,
+                    **raw[
+                        "armed" if member.workload.endswith("compacting") else "steady"
+                    ],
+                }
+                for member in group
+            }
+        mapped = {
+            key: {
+                **value,
+                "oracle_passed": True,
+                "cleanup_complete": True,
+                "lifecycle": "completed",
+            }
+            for key, value in mapped.items()
+        }
+        return mapped
+
+    def _matched_native_observation(self, case, raw):
+        from scripts.benchmark_suite.asof_e2e import validate_matched_native
+        from scripts.benchmark_suite.issue406_acceptance import matched_native_identity
+        from scripts.benchmark_suite.native_components import validate_small_batch
+
+        validated = (
+            validate_matched_native if case.row == 7 else validate_small_batch
+        )(raw)
+        if validated["checkpoint_enabled"] is not (case.mode != "off"):
+            raise ValueError("native checkpoint semantics differ from the case")
+        mapped = {
+            case.id: {
+                **validated,
+                "cpu_affinity": validated["observed_cpu_affinity"],
+                "mode": case.mode,
+                "native_nonterminal_epoch_count": raw["nonterminal_epochs"],
+                "nonterminal_epochs": [],
+                "processing_checkpoint_free": True,
+                "processing_settled": True,
+                **(
+                    {
+                        "match_identity": matched_native_identity(
+                            validated, case.mode, self.cpus(case)
+                        )
+                    }
+                    if case.row == 7
+                    else {}
+                ),
+            }
+        }
+        return mapped
 
     async def prepare(self, group, side, round_index):
         case = group[0]
@@ -548,31 +539,9 @@ class AcceptanceRunner:
         return self._persist(group, side, round_index, index, raw)
 
     async def _native(self, group, side, round_index, index):
-        case = group[0]
-        target = (
-            "stream_asof_e2e"
-            if case.workload == "asof_operator"
-            else "stream_join_perf"
+        case, binary, arguments, trace_path = self._native_invocation(
+            group, side, round_index, index
         )
-        variant = "off" if case.mode == "off" else "enabled"
-        binary = self.plan["native_binaries"][side][f"{target}/{variant}"]
-        if case.row in (4, 5):
-            arguments = [
-                "--native-component",
-                "join_capture_restore_1m" if case.row == 4 else "join_compaction_1m",
-            ]
-        else:
-            arguments = [
-                "--matched-fixture",
-                str(
-                    self.fixture_root(side, case.mode, round_index, join=case.row == 8)
-                    / "fixture.json"
-                ),
-            ]
-        trace_path = None
-        if case.workload == "asof_operator":
-            trace_path = self.dispatch_trace_path(case, side, round_index, index)
-            arguments.extend(("--dispatch-trace", str(trace_path)))
         destination = self.destination(group, side, round_index, index)
         destination.mkdir(parents=True, exist_ok=True)
         started = time.monotonic()
@@ -582,7 +551,11 @@ class AcceptanceRunner:
         ):
             creation = asyncio.create_task(
                 asyncio.create_subprocess_exec(
-                    *_taskset(self.cpus(case), [binary["path"], *arguments]),
+                    _taskset_executable(),
+                    "--cpu-list",
+                    ",".join(map(str, self.cpus(case))),
+                    binary["path"],
+                    *arguments,
                     cwd=ROOT,
                     env=_child_environment(None, self.cpus(case)),
                     stdout=stdout_file,
@@ -611,6 +584,39 @@ class AcceptanceRunner:
         if process.returncode:
             raise RuntimeError(f"native component failed; see {destination}")
         observed = json.loads(stdout)
+        self._validate_native_trace(observed, trace_path)
+        self._validate_native_environment(case, observed)
+        return {**observed, "native_executable_sha256": binary["sha256"]}
+
+    def _native_invocation(self, group, side, round_index, index):
+        case = group[0]
+        target = (
+            "stream_asof_e2e"
+            if case.workload == "asof_operator"
+            else "stream_join_perf"
+        )
+        variant = "off" if case.mode == "off" else "enabled"
+        binary = self.plan["native_binaries"][side][f"{target}/{variant}"]
+        if case.row in (4, 5):
+            arguments = [
+                "--native-component",
+                "join_capture_restore_1m" if case.row == 4 else "join_compaction_1m",
+            ]
+        else:
+            arguments = [
+                "--matched-fixture",
+                str(
+                    self.fixture_root(side, case.mode, round_index, join=case.row == 8)
+                    / "fixture.json"
+                ),
+            ]
+        trace_path = None
+        if case.workload == "asof_operator":
+            trace_path = self.dispatch_trace_path(case, side, round_index, index)
+            arguments.extend(("--dispatch-trace", str(trace_path)))
+        return case, binary, arguments, trace_path
+
+    def _validate_native_trace(self, observed, trace_path):
         if trace_path is not None:
             source = json.loads(trace_path.read_text())
             if (
@@ -623,6 +629,8 @@ class AcceptanceRunner:
                 or observed.get("replay_trace_sha256") != sha256_file(trace_path)
             ):
                 raise ValueError("native replay did not verify its exact source trace")
+
+    def _validate_native_environment(self, case, observed):
         thread_environment = observed.get("observed_thread_environment", {})
         expected_environment = _child_environment(None, self.cpus(case))
         if observed.get("observed_cpu_affinity") != self.cpus(case) or any(
@@ -639,7 +647,6 @@ class AcceptanceRunner:
             )
         ):
             raise ValueError("native observed CPU/thread configuration differs")
-        return {**observed, "native_executable_sha256": binary["sha256"]}
 
     async def finish_round(self, selected_side=None):
         for side, worker in tuple(self.workers.items()):
@@ -655,15 +662,18 @@ class AcceptanceRunner:
                 await self.close_worker(side)
                 self.workers.pop(side)
                 continue
-            try:
-                if worker.process.returncode is None:
-                    response = await worker.request(operation="finish")
-                    if response.get("state") != "completed":
-                        raise ValueError("worker failed to finish its round")
-            finally:
-                await worker.close()
-                self.processes.pop(worker.process.pid, None)
-                self.workers.pop(side, None)
+            await self._finish_legacy_worker(side, worker)
+
+    async def _finish_legacy_worker(self, side, worker):
+        try:
+            if worker.process.returncode is None:
+                response = await worker.request(operation="finish")
+                if response.get("state") != "completed":
+                    raise ValueError("worker failed to finish its round")
+        finally:
+            await worker.close()
+            self.processes.pop(worker.process.pid, None)
+            self.workers.pop(side, None)
 
     def group_members(self) -> dict:
         import psutil
@@ -709,44 +719,12 @@ class AcceptanceRunner:
 
         while not self.stop.is_set():
             controller_rss = psutil.Process().memory_info().rss
-            rss, children = controller_rss, []
-            owned = (
-                {pid for members in self.group_members().values() for pid in members}
-                if self.fresh
-                else {
-                    pid
-                    for pid, process in self.processes.items()
-                    if process.returncode is None
-                }
-            )
-            for pid in owned:
-                try:
-                    observed = psutil.Process(pid)
-                    for item in (
-                        (observed,)
-                        if self.fresh
-                        else (observed, *observed.children(recursive=True))
-                    ):
-                        memory = item.memory_info().rss
-                        rss += memory
-                        children.append(
-                            {
-                                "pid": item.pid,
-                                "rss": memory,
-                                "cpu_seconds": sum(item.cpu_times()[:2]),
-                                "threads": [list(thread) for thread in item.threads()],
-                                "cpu_affinity": item.cpu_affinity(),
-                            }
-                        )
-                except psutil.NoSuchProcess:
-                    pass
+            rss = controller_rss
+            owned = self._owned_resource_pids()
+            rss, children = self._process_resources(owned, rss)
             memory = psutil.virtual_memory().available
             disk = shutil.disk_usage(self.output).free
-            used = 0
-            for path in self.output.rglob("*"):
-                with suppress(FileNotFoundError):
-                    if path.is_file():
-                        used += path.stat().st_size
+            used = self._output_bytes()
             conflicts = competing_work(owned)
             self.resources.append(
                 {
@@ -766,6 +744,52 @@ class AcceptanceRunner:
                 raise RuntimeError("another controlled build or measurement started")
             with suppress(TimeoutError):
                 await asyncio.wait_for(self.stop.wait(), 1)
+
+    def _owned_resource_pids(self):
+        return (
+            {pid for members in self.group_members().values() for pid in members}
+            if self.fresh
+            else {
+                pid
+                for pid, process in self.processes.items()
+                if process.returncode is None
+            }
+        )
+
+    def _process_resources(self, owned, rss):
+        import psutil
+
+        children = []
+        for pid in owned:
+            try:
+                observed = psutil.Process(pid)
+                for item in (
+                    (observed,)
+                    if self.fresh
+                    else (observed, *observed.children(recursive=True))
+                ):
+                    memory = item.memory_info().rss
+                    rss += memory
+                    children.append(
+                        {
+                            "pid": item.pid,
+                            "rss": memory,
+                            "cpu_seconds": sum(item.cpu_times()[:2]),
+                            "threads": [list(thread) for thread in item.threads()],
+                            "cpu_affinity": item.cpu_affinity(),
+                        }
+                    )
+            except psutil.NoSuchProcess:
+                pass
+        return rss, children
+
+    def _output_bytes(self):
+        used = 0
+        for path in self.output.rglob("*"):
+            with suppress(FileNotFoundError):
+                if path.is_file():
+                    used += path.stat().st_size
+        return used
 
     async def settle(self):
         if self.fresh:
@@ -800,36 +824,21 @@ class AcceptanceRunner:
         for task in cleanup:
             task.cancel()
         signaled, forced, processes = await self._settle_groups(process_deadline)
-        creations = tuple(self.creations)
-        for task in (*creations, *cleanup):
-            task.cancel()
-        if creations:
-            await asyncio.wait(
-                creations, timeout=max(0, deadline - time.monotonic()) / 2
-            )
+        creations = await self._cancel_pending_creations(cleanup, deadline)
         final_signaled, final_forced, final_processes = await self._settle_groups(
             deadline, force=True
         )
-        signaled.extend(pid for pid in final_signaled if pid not in signaled)
-        forced.extend(pid for pid in final_forced if pid not in forced)
+        signaled = _merged_settlement_pids(signaled, final_signaled)
+        forced = _merged_settlement_pids(forced, final_forced)
         processes.update(final_processes)
-        if cleanup:
-            await asyncio.wait(cleanup, timeout=max(0, deadline - time.monotonic()))
-        errors = []
-        for task in cleanup:
-            if task.done() and not task.cancelled() and task.exception() is not None:
-                errors.append(str(task.exception()))
+        errors = await self._cleanup_task_errors(cleanup, deadline)
         io_settled = await self._settle_io(processes, deadline)
         for worker in self.workers.values():
             worker.log.close()
         self.workers.clear()
         members = self.group_members()
         return {
-            "settled": time.monotonic() <= deadline
-            and not self.groups
-            and not self.creations
-            and io_settled
-            and all(task.done() for task in cleanup),
+            "settled": self._fresh_settlement_complete(deadline, io_settled, cleanup),
             "forced_kill_pids": forced,
             "terminated_groups": signaled,
             "surviving_group_pids": [
@@ -842,24 +851,56 @@ class AcceptanceRunner:
             "deadline_satisfied": time.monotonic() <= deadline,
         }
 
+    async def _cancel_pending_creations(self, cleanup, deadline):
+        creations = tuple(self.creations)
+        for task in (*creations, *cleanup):
+            task.cancel()
+        if creations:
+            await asyncio.wait(
+                creations, timeout=max(0, deadline - time.monotonic()) / 2
+            )
+        return creations
+
+    async def _cleanup_task_errors(self, cleanup, deadline):
+        if cleanup:
+            await asyncio.wait(cleanup, timeout=max(0, deadline - time.monotonic()))
+        errors = []
+        for task in cleanup:
+            if task.done() and not task.cancelled() and task.exception() is not None:
+                errors.append(str(task.exception()))
+        return errors
+
+    def _fresh_settlement_complete(self, deadline, io_settled, cleanup):
+        return (
+            time.monotonic() <= deadline
+            and not self.groups
+            and not self.creations
+            and io_settled
+            and all(task.done() for task in cleanup)
+        )
+
     async def _settle_groups(self, deadline, *, force=False):
         grace = time.monotonic() if force else min(deadline, time.monotonic() + 10)
         signaled, forced, processes = [], [], {}
+
+        async def settle_group(pid, process, members):
+            if not members[pid] and process.returncode is not None:
+                await self.retire_process(pid)
+                return
+            if pid not in signaled:
+                with suppress(ProcessLookupError):
+                    os.killpg(pid, signal.SIGTERM)
+                signaled.append(pid)
+            if time.monotonic() >= grace and pid not in forced:
+                with suppress(ProcessLookupError):
+                    os.killpg(pid, signal.SIGKILL)
+                forced.append(pid)
+
         while (self.groups or self.creations) and time.monotonic() < deadline:
             processes.update(self.processes)
             members = self.group_members()
             for pid, process in tuple(self.groups.items()):
-                if not members[pid] and process.returncode is not None:
-                    await self.retire_process(pid)
-                    continue
-                if pid not in signaled:
-                    with suppress(ProcessLookupError):
-                        os.killpg(pid, signal.SIGTERM)
-                    signaled.append(pid)
-                if time.monotonic() >= grace and pid not in forced:
-                    with suppress(ProcessLookupError):
-                        os.killpg(pid, signal.SIGKILL)
-                    forced.append(pid)
+                await settle_group(pid, process, members)
             if self.groups or self.creations:
                 await asyncio.sleep(min(0.02, max(0, deadline - time.monotonic())))
         return signaled, forced, processes
@@ -885,6 +926,29 @@ class AcceptanceRunner:
         return not pending
 
 
+def _merged_settlement_pids(initial: list[int], final: list[int]) -> list[int]:
+    merged = list(initial)
+    merged.extend(pid for pid in final if pid not in merged)
+    return merged
+
+
+def _prepare_collection_output(output: Path) -> None:
+    if output.exists() and any(output.iterdir()):
+        raise ValueError("acceptance execution requires a fresh output directory")
+    output.mkdir(parents=True, exist_ok=True)
+
+
+async def _await_collection_result(report, collection, guard, remaining):
+    async with asyncio.timeout(remaining):
+        done, _ = await asyncio.wait(
+            (collection, guard), return_when=asyncio.FIRST_COMPLETED
+        )
+        if guard in done:
+            guard.result()
+            raise RuntimeError("resource guard exited unexpectedly")
+        return {**report, **collection.result()}
+
+
 async def run(plan: dict, output: Path) -> dict:
     """Execute once, charging setup, preflight, collection, cleanup and sealing."""
     started = (
@@ -892,9 +956,7 @@ async def run(plan: dict, output: Path) -> dict:
         - plan.get("precharged_seconds", 0)
         - plan.get("startup_allowance_seconds", 0)
     )
-    if output.exists() and any(output.iterdir()):
-        raise ValueError("acceptance execution requires a fresh output directory")
-    output.mkdir(parents=True, exist_ok=True)
+    _prepare_collection_output(output)
     runner = AcceptanceRunner(plan, output, started)
     report = {
         "state": "preflight",
@@ -944,14 +1006,7 @@ async def run(plan: dict, output: Path) -> dict:
         collection = asyncio.create_task(
             (collect_fresh if runner.fresh else collect)(runner, output)
         )
-        async with asyncio.timeout(remaining):
-            done, _ = await asyncio.wait(
-                (collection, guard), return_when=asyncio.FIRST_COMPLETED
-            )
-            if guard in done:
-                guard.result()
-                raise RuntimeError("resource guard exited unexpectedly")
-            report = {**report, **collection.result()}
+        report = await _await_collection_result(report, collection, guard, remaining)
         report["assessment"]["environment_suitable"] = True
         validate_complete_results(report)
         report["state"] = "complete"
@@ -1048,43 +1103,15 @@ def main() -> int:
 
 
 def _validate_plan_inventory(plan: dict) -> dict:
-    if plan.get("schema") == FRESH_SCHEMA:
-        from scripts.benchmark_suite.issue406_fresh import validate_envelope
-
-        validate_envelope(plan)
-    elif (
-        plan.get("schema") != "calc-flow.issue406-execution.v1"
-        or plan.get("budget_seconds") != 4500
-        or plan.get("settlement_seconds") != 300
-        or plan.get("cases") != [asdict(case) for case in acceptance_inventory()]
-    ):
-        raise ValueError("execution plan differs from the frozen acceptance contract")
-    precharged = plan.get("precharged_seconds", 0)
-    if plan.get("schema") != FRESH_SCHEMA and (
-        type(precharged) not in (int, float)
-        or not math.isfinite(precharged)
-        or not 0 <= precharged < 4200
-    ):
-        raise ValueError("invalid precharged final correctness budget")
-    cpus = plan.get("cpus")
-    if (
-        not isinstance(cpus, list)
-        or len(cpus) != 32
-        or len(set(cpus)) != 32
-        or any(type(cpu) is not int for cpu in cpus)
-        or not set(cpus).issubset(os.sched_getaffinity(0))
-    ):
-        raise ValueError("execution requires one available fixed 32-CPU set")
+    _validate_plan_envelope(plan)
+    _validate_plan_precharge(plan)
+    _validate_plan_cpus(plan)
     files = plan.get("sealed_files")
     if not isinstance(files, dict) or not files:
         raise ValueError("missing sealed source and artifact inventory")
     if plan.get("harness_git_sha") != _clean_revision(ROOT):
         raise ValueError("execution harness revision changed")
-    required = {
-        str(path.resolve())
-        for directory in (ROOT / "benchmarks", ROOT / "scripts/benchmark_suite")
-        for path in directory.rglob("*.py")
-    } | {str(ROOT / "scripts/toolkit.py")}
+    required = _plan_python_sources()
     if not required.issubset(files):
         raise ValueError("incomplete sealed Python harness inventory")
     for path, digest in files.items():
@@ -1099,42 +1126,13 @@ def _validate_plan_wheel(
     release = plan["releases"][side]
     if files.get(release["native_path"]) != release["native_sha256"]:
         raise ValueError("release native is missing from the sealed inventory")
-    installed = {
-        str(path.resolve())
-        for path in (Path(release["site"]) / "calc_flow").rglob("*")
-        if path.is_file() and "__pycache__" not in path.parts
-    }
-    if not installed or not installed.issubset(files):
-        raise ValueError("installed Python package files are not fully sealed")
+    _validate_plan_installed_release(release, files)
     traced = plan["row7_releases"][side]
-    if (
-        traced["product_commit"] != release["product_commit"]
-        or traced["instrumentation"] != "asof-dispatch-trace"
-        or traced["harness_target"] != WHEEL_TARGET
-        or files.get(traced["native_path"]) != traced["native_sha256"]
-        or files.get(traced["wheel_path"]) != traced["wheel_sha256"]
-        or traced["build_metadata"] not in files
-    ):
-        raise ValueError("row-7 instrumented release identity differs")
-    traced_installed = {
-        str(path.resolve())
-        for path in (Path(traced["site"]) / "calc_flow").rglob("*")
-        if path.is_file() and "__pycache__" not in path.parts
-    }
-    if not traced_installed or not traced_installed.issubset(files):
-        raise ValueError("row-7 installed package is not fully sealed")
+    _validate_plan_traced_identity(traced, release, files)
+    _validate_plan_traced_installation(traced, files)
     traced_output = Path(traced["build_output"])
     reconstruction = traced.get("helper_reconstruction")
-    if plan.get("schema") == FRESH_SCHEMA:
-        from scripts.benchmark_suite.issue406_reuse import helper_reconstruction
-
-        expected = (
-            helper_reconstruction(Path(plan["historical_harness_witness"]["path"]))
-            if side == "baseline"
-            else None
-        )
-        if reconstruction != expected:
-            raise ValueError("fresh traced helper reconstruction differs")
+    _validate_plan_reconstruction(plan, side, reconstruction)
     traced_attestation = validate_acceptance_harness(
         traced_output, WHEEL_TARGET, reconstruction=reconstruction
     )
@@ -1144,20 +1142,15 @@ def _validate_plan_wheel(
     ):
         raise ValueError("row-7 source attestation is not sealed")
     wheel_build = json.loads(Path(traced["build_metadata"]).read_text())
-    if (
-        wheel_build["failure"] is not None
-        or wheel_build["harness_git_sha"] != build_harness
-        or traced_attestation["harness_git_sha"] != build_harness
-        or wheel_build["revision"] != release["product_commit"]
-        or traced_attestation["product_git_sha"] != release["product_commit"]
-        or wheel_build["flags"] != plan["expected_native_flags"]
-        or wheel_build["rustc"] != plan["expected_native_rustc"]
-        or wheel_build["lock_fingerprint"] != traced_attestation["lock_fingerprint"]
-        or wheel_build["native_sha256"] != traced["native_sha256"]
-        or wheel_build["wheel_sha256"] != traced["wheel_sha256"]
-        or wheel_build.get("helper_reconstruction") != reconstruction
-    ):
-        raise ValueError("row-7 compiled wheel settings differ")
+    _validate_plan_compiled_wheel(
+        wheel_build,
+        build_harness,
+        traced_attestation,
+        release,
+        plan,
+        traced,
+        reconstruction,
+    )
     validate_traced_wheel_invocations(wheel_build)
     if plan.get("schema") == FRESH_SCHEMA:
         from scripts.benchmark_suite.issue406_reuse import (
@@ -1188,37 +1181,13 @@ def _validate_plan_binaries(
         else None
     )
     release = plan["releases"][side]
-    expected_binaries = {
-        f"{target}/{mode}"
-        for target in ("stream_join_perf", "stream_asof_e2e")
-        for mode in (("enabled",) if side == "baseline" else ("enabled", "off"))
-    }
+    expected_binaries = _plan_binary_inventory(side)
     if set(plan["native_binaries"][side]) != expected_binaries:
         raise ValueError("native binary inventory omits or adds an acceptance arm")
     for name, descriptor in plan["native_binaries"][side].items():
-        if files.get(descriptor["path"]) != descriptor["sha256"]:
-            raise ValueError("native benchmark is missing from the sealed inventory")
-        target, mode = name.split("/")
-        if side == "baseline" and mode == "off":
-            raise ValueError("main does not support checkpoint-off")
-        record = validate_acceptance_harness(
-            Path(descriptor["build_output"]),
-            descriptor["harness_target"],
-            compatibility=compatibility,
+        target, mode, build = _validate_plan_binary(
+            plan, side, name, descriptor, files, compatibility, build_harness, release
         )
-        attestation = str(
-            Path(descriptor["build_output"])
-            / f"build-{descriptor['harness_target']}.acceptance-harness.json"
-        )
-        if attestation not in files:
-            raise ValueError("native source attestation is not sealed")
-        if (
-            target not in record["targets"]
-            or record["harness_git_sha"] != build_harness
-            or record["product_git_sha"] != release["product_commit"]
-        ):
-            raise ValueError("native and wheel product revisions differ")
-        build = _validate_plan_native_build(plan, descriptor, files, mode)
         if mode == "enabled":
             previous = enabled_builds.setdefault(target, build["artifacts"])
             if previous != build["artifacts"]:
@@ -1314,6 +1283,17 @@ def _seal_acceptance_report(
     )
 
 
+def _hash_fresh_evidence(output, deadline, complete):
+    hashes = {}
+    for path in sorted(output.rglob("*")):
+        if time.monotonic() >= deadline:
+            complete = False
+            break
+        if path.is_file():
+            hashes[str(path.relative_to(output))] = sha256_file(path)
+    return hashes, complete
+
+
 def _seal_fresh_report(plan, output, started, report, resources):
     allowance = plan["final_seal_allowance_seconds"]
     deadline = started + plan["budget_seconds"] - allowance
@@ -1328,13 +1308,7 @@ def _seal_fresh_report(plan, output, started, report, resources):
     write_json(output / "resources.json", resources)
     complete = _write_fresh_summary(output, report, deadline)
     write_json(output / "result.json", report)
-    hashes = {}
-    for path in sorted(output.rglob("*")):
-        if time.monotonic() >= deadline:
-            complete = False
-            break
-        if path.is_file():
-            hashes[str(path.relative_to(output))] = sha256_file(path)
+    hashes, complete = _hash_fresh_evidence(output, deadline, complete)
     if not complete or time.monotonic() >= deadline:
         complete = False
         _expire_fresh_report(output, report)
@@ -1436,6 +1410,35 @@ def _record_collection(
     )
 
 
+def _failed_controller_task(guard) -> bool:
+    return (
+        guard is not None
+        and guard.done()
+        and not guard.cancelled()
+        and guard.exception() is not None
+    )
+
+
+def _partial_collection_fields(output: Path) -> dict:
+    partial = output / "partial.json"
+    if not partial.exists():
+        return {}
+    return {
+        key: value
+        for key, value in json.loads(partial.read_text()).items()
+        if key not in ("state", "error")
+    }
+
+
+def _settlement_incomplete(settlement: dict) -> bool:
+    return bool(
+        settlement["forced_kill_pids"]
+        or not settlement["settled"]
+        or settlement.get("terminated_groups")
+        or settlement.get("cleanup_errors")
+    )
+
+
 async def _settle_acceptance_collection(
     runner, collection, guard, report: dict, output: Path
 ) -> None:
@@ -1450,26 +1453,13 @@ async def _settle_acceptance_collection(
     if runner.fresh:
         report["settlement"]["pending_controller_tasks"] = pending
         report["settlement"]["settled"] &= not pending
-    if (
-        guard is not None
-        and guard.done()
-        and not guard.cancelled()
-        and guard.exception() is not None
-    ):
+    if _failed_controller_task(guard):
         report["state"] = "stopped"
         report["assessment"]["environment_suitable"] = False
         report["error"] = f"resource guard: {guard.exception()}"
-    partial = output / "partial.json"
-    if partial.exists():
-        for key, value in json.loads(partial.read_text()).items():
-            if key not in ("state", "error"):
-                report.setdefault(key, value)
-    if (
-        report["settlement"]["forced_kill_pids"]
-        or not report["settlement"]["settled"]
-        or report["settlement"].get("terminated_groups")
-        or report["settlement"].get("cleanup_errors")
-    ):
+    for key, value in _partial_collection_fields(output).items():
+        report.setdefault(key, value)
+    if _settlement_incomplete(report["settlement"]):
         report["assessment"]["environment_suitable"] = False
         report["state"] = "stopped"
 
@@ -1507,6 +1497,197 @@ def _validate_plan_native_build(
         raise ValueError("external Rust cfg flags are not approved")
     validate_native_profile(build["artifacts"], checkpoint_off=mode == "off")
     return build
+
+
+def _plan_wheel_environment(wheel_build, fresh):
+    environment = {
+        key: value
+        for key, value in wheel_build["environment"].items()
+        if not fresh or key != "CARGO_TARGET_DIR"
+    }
+    return environment
+
+
+def _validate_plan_reuse_roles(
+    plan, compatibility, historical_revision, frozen_revision
+):
+    for key, baseline_revision in (
+        ("native_harness_reuse", historical_revision),
+        ("row7_harness_reuse", frozen_revision),
+    ):
+        if set(plan[key]) != {"baseline", "candidate"}:
+            raise ValueError("fresh build-harness roles differ")
+        for side, reuse in plan[key].items():
+            historical = key == "native_harness_reuse" and side == "baseline"
+            revision = (
+                baseline_revision if side == "baseline" else plan["harness_git_sha"]
+            )
+            expected = native_harness_reuse(
+                revision, compatibility=compatibility if historical else None
+            )
+            if reuse != expected:
+                raise ValueError("fresh native build reuse witness changed")
+
+
+def _validate_plan_precharge(plan):
+    precharged = plan.get("precharged_seconds", 0)
+    if plan.get("schema") != FRESH_SCHEMA and (
+        type(precharged) not in (int, float)
+        or not math.isfinite(precharged)
+        or not 0 <= precharged < 4200
+    ):
+        raise ValueError("invalid precharged final correctness budget")
+
+
+def _validate_plan_cpus(plan):
+    cpus = plan.get("cpus")
+    if (
+        not isinstance(cpus, list)
+        or len(cpus) != 32
+        or len(set(cpus)) != 32
+        or any(type(cpu) is not int for cpu in cpus)
+        or not set(cpus).issubset(os.sched_getaffinity(0))
+    ):
+        raise ValueError("execution requires one available fixed 32-CPU set")
+
+
+def _validate_plan_envelope(plan):
+    if plan.get("schema") == FRESH_SCHEMA:
+        from scripts.benchmark_suite.issue406_fresh import validate_envelope
+
+        validate_envelope(plan)
+    elif (
+        plan.get("schema") != "calc-flow.issue406-execution.v1"
+        or plan.get("budget_seconds") != 4500
+        or plan.get("settlement_seconds") != 300
+        or plan.get("cases") != [asdict(case) for case in acceptance_inventory()]
+    ):
+        raise ValueError("execution plan differs from the frozen acceptance contract")
+
+
+def _validate_plan_installed_release(release, files):
+    installed = {
+        str(path.resolve())
+        for path in (Path(release["site"]) / "calc_flow").rglob("*")
+        if path.is_file() and "__pycache__" not in path.parts
+    }
+    if not installed or not installed.issubset(files):
+        raise ValueError("installed Python package files are not fully sealed")
+
+
+def _validate_plan_traced_identity(traced, release, files):
+    if (
+        traced["product_commit"] != release["product_commit"]
+        or traced["instrumentation"] != "asof-dispatch-trace"
+        or traced["harness_target"] != WHEEL_TARGET
+        or files.get(traced["native_path"]) != traced["native_sha256"]
+        or files.get(traced["wheel_path"]) != traced["wheel_sha256"]
+        or traced["build_metadata"] not in files
+    ):
+        raise ValueError("row-7 instrumented release identity differs")
+
+
+def _validate_plan_traced_installation(traced, files):
+    traced_installed = {
+        str(path.resolve())
+        for path in (Path(traced["site"]) / "calc_flow").rglob("*")
+        if path.is_file() and "__pycache__" not in path.parts
+    }
+    if not traced_installed or not traced_installed.issubset(files):
+        raise ValueError("row-7 installed package is not fully sealed")
+
+
+def _validate_plan_reconstruction(plan, side, reconstruction):
+    if plan.get("schema") == FRESH_SCHEMA:
+        from scripts.benchmark_suite.issue406_reuse import helper_reconstruction
+
+        expected = (
+            helper_reconstruction(Path(plan["historical_harness_witness"]["path"]))
+            if side == "baseline"
+            else None
+        )
+        if reconstruction != expected:
+            raise ValueError("fresh traced helper reconstruction differs")
+
+
+def _validate_plan_compiled_wheel(
+    wheel_build,
+    build_harness,
+    traced_attestation,
+    release,
+    plan,
+    traced,
+    reconstruction,
+):
+    if (
+        wheel_build["failure"] is not None
+        or wheel_build["harness_git_sha"] != build_harness
+        or traced_attestation["harness_git_sha"] != build_harness
+        or wheel_build["revision"] != release["product_commit"]
+        or traced_attestation["product_git_sha"] != release["product_commit"]
+        or not _plan_compiled_wheel_settings(
+            wheel_build, plan, traced_attestation, traced, reconstruction
+        )
+    ):
+        raise ValueError("row-7 compiled wheel settings differ")
+
+
+def _plan_compiled_wheel_settings(
+    wheel_build, plan, traced_attestation, traced, reconstruction
+):
+    return (
+        wheel_build["flags"] == plan["expected_native_flags"]
+        and wheel_build["rustc"] == plan["expected_native_rustc"]
+        and wheel_build["lock_fingerprint"] == traced_attestation["lock_fingerprint"]
+        and wheel_build["native_sha256"] == traced["native_sha256"]
+        and wheel_build["wheel_sha256"] == traced["wheel_sha256"]
+        and wheel_build.get("helper_reconstruction") == reconstruction
+    )
+
+
+def _validate_plan_binary(
+    plan, side, name, descriptor, files, compatibility, build_harness, release
+):
+    if files.get(descriptor["path"]) != descriptor["sha256"]:
+        raise ValueError("native benchmark is missing from the sealed inventory")
+    target, mode = name.split("/")
+    if side == "baseline" and mode == "off":
+        raise ValueError("main does not support checkpoint-off")
+    record = validate_acceptance_harness(
+        Path(descriptor["build_output"]),
+        descriptor["harness_target"],
+        compatibility=compatibility,
+    )
+    attestation = str(
+        Path(descriptor["build_output"])
+        / f"build-{descriptor['harness_target']}.acceptance-harness.json"
+    )
+    if attestation not in files:
+        raise ValueError("native source attestation is not sealed")
+    if (
+        target not in record["targets"]
+        or record["harness_git_sha"] != build_harness
+        or record["product_git_sha"] != release["product_commit"]
+    ):
+        raise ValueError("native and wheel product revisions differ")
+    build = _validate_plan_native_build(plan, descriptor, files, mode)
+    return target, mode, build
+
+
+def _plan_python_sources():
+    return {
+        str(path.resolve())
+        for directory in (ROOT / "benchmarks", ROOT / "scripts/benchmark_suite")
+        for path in directory.rglob("*.py")
+    } | {str(ROOT / "scripts/toolkit.py")}
+
+
+def _plan_binary_inventory(side):
+    return {
+        f"{target}/{mode}"
+        for target in ("stream_join_perf", "stream_asof_e2e")
+        for mode in (("enabled",) if side == "baseline" else ("enabled", "off"))
+    }
 
 
 if __name__ == "__main__":

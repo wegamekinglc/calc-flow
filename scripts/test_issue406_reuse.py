@@ -222,7 +222,10 @@ class HistoricalReuseTests(unittest.TestCase):
             reconstructed_overlay,
         )
 
-        new_doc = (Path(__file__).parents[1] / RUSTDOC_PATH).read_bytes()
+        new_doc = (
+            Path(__file__).parent
+            / "fixtures/issue406-rustdoc/benchmark_internals.rs.txt"
+        ).read_bytes()
         old_doc = new_doc.replace(RUSTDOC_NEW, RUSTDOC_OLD, 1)
         old, new = b"old\n", b"old\naddition\n"
         witness = {

@@ -246,20 +246,23 @@ def _apply_literal_patches(contents: str, patches: tuple, path: str) -> str:
     return contents
 
 
+def _feature_insertion(original: str, path: str, insertion: str) -> str:
+    if insertion in original:
+        if original.count(insertion) != 1:
+            raise ValueError("duplicate benchmark feature insertion")
+        return original
+    if path.endswith(".toml") and "[features]" in original:
+        raise ValueError("unreviewed product feature table")
+    if "benchmark-internals" in original or "benchmark_replay" in original:
+        raise ValueError("unreviewed benchmark feature declaration")
+    return original + insertion
+
+
 def _effective(source: Path) -> dict[str, bytes]:
     effective = {path: (ROOT / path).read_bytes() for path in COPIED_FILES}
     for path, insertion in INSERTIONS.items():
         original = (source / path).read_text()
-        if insertion in original:
-            if original.count(insertion) != 1:
-                raise ValueError("duplicate benchmark feature insertion")
-            effective[path] = original.encode()
-            continue
-        if path.endswith(".toml") and "[features]" in original:
-            raise ValueError("unreviewed product feature table")
-        if "benchmark-internals" in original or "benchmark_replay" in original:
-            raise ValueError("unreviewed benchmark feature declaration")
-        effective[path] = (original + insertion).encode()
+        effective[path] = _feature_insertion(original, path, insertion).encode()
     for path, patches in LITERAL_PATCHES.items():
         contents = effective.get(path, (source / path).read_bytes()).decode()
         contents = _apply_literal_patches(contents, patches, path)
@@ -385,27 +388,7 @@ def validate_acceptance_harness(
         source = Path(record["product_source"])
         mirror = Path(record["build_source"])
         original = _files(source)
-        overlay = _effective(source)
-        if reconstruction is not None:
-            from scripts.benchmark_suite.issue406_reuse import reconstructed_overlay
-
-            if compatibility is not None:
-                raise ValueError("conflicting native source reconstruction")
-            native_harness_reuse(record["harness_git_sha"])
-            overlay = reconstructed_overlay(overlay, record, reconstruction)
-        elif record.get("helper_reconstruction") is not None:
-            raise ValueError("unrequested native source reconstruction")
-        elif compatibility is not None:
-            from scripts.benchmark_suite.issue406_reuse import historical_overlay
-
-            native_harness_reuse(record["harness_git_sha"], compatibility=compatibility)
-            overlay = historical_overlay(overlay, compatibility)
-        elif record["harness_git_sha"] != _clean_revision(ROOT):
-            reuse = native_harness_reuse(record["harness_git_sha"])
-            if "rustdoc_compatibility" in reuse:
-                from scripts.benchmark_suite.issue406_reuse import restore_rustdoc
-
-                overlay = restore_rustdoc(overlay)
+        overlay = _validated_overlay(record, source, compatibility, reconstruction)
         expected = {
             "schema": SCHEMA,
             "target": target,
@@ -421,14 +404,7 @@ def validate_acceptance_harness(
             "lock_fingerprint": _lock_identity(source),
             "product_files_verified": True,
         }
-        if (
-            target not in (*TARGETS, WHEEL_TARGET)
-            or any(record.get(key) != value for key, value in expected.items())
-            or mirror.name != "source"
-            or not mirror.parent.name.startswith(f"{target}-")
-            or mirror.parent.parent != output.resolve()
-        ):
-            raise ValueError("mismatched evidence")
+        _validate_harness_record(record, expected, mirror, output, target)
         return record
     except (OSError, KeyError, TypeError, ValueError) as error:
         raise ValueError("invalid issue406 native harness attestation") from error
@@ -489,10 +465,7 @@ def validate_native_profile(artifacts: list[dict], *, checkpoint_off: bool) -> N
         and row["target"]["kind"] == ["lib"]
     ]
     if len(core) != 1 or any(
-        row.get("profile", {}).get("test") is not False
-        or row["profile"].get("opt_level") != "3"
-        or sorted(row.get("features", [])) != sorted(expected_features)
-        for row in core
+        not _valid_native_profile(row, expected_features) for row in core
     ):
         raise ValueError("native benchmark requires the declared release core features")
 
@@ -508,32 +481,84 @@ def validate_traced_wheel_invocations(record: dict) -> None:
         ),
     ):
         try:
-            line = record[key]
-            prefix, suffix = (
-                line.index("Running `") + len("Running `"),
-                line.rindex("`"),
-            )
-            tokens = shlex.split(line[prefix:suffix])
-            cfg = [
-                tokens[index + 1]
-                for index, token in enumerate(tokens)
-                if token == "--cfg"
-            ]
-            actual_features = {
-                value.removeprefix('feature="').removesuffix('"')
-                for value in cfg
-                if value.startswith('feature="')
-            }
-            if (
-                tokens[tokens.index("--crate-name") + 1] != crate
-                or not any(
-                    tokens[index : index + 2] == ["-C", "opt-level=3"]
-                    for index in range(len(tokens))
-                )
-                or "--test" in tokens
-                or "test" in cfg
-                or actual_features != features
-            ):
-                raise ValueError("unexpected release configuration")
+            _validate_traced_wheel_invocation(record[key], crate, features)
         except (KeyError, IndexError, TypeError, ValueError) as error:
             raise ValueError("invalid traced wheel compiler invocation") from error
+
+
+def _validated_overlay(record, source, compatibility, reconstruction):
+    overlay = _effective(source)
+    if reconstruction is not None:
+        from scripts.benchmark_suite.issue406_reuse import reconstructed_overlay
+
+        if compatibility is not None:
+            raise ValueError("conflicting native source reconstruction")
+        native_harness_reuse(record["harness_git_sha"])
+        overlay = reconstructed_overlay(overlay, record, reconstruction)
+    elif record.get("helper_reconstruction") is not None:
+        raise ValueError("unrequested native source reconstruction")
+    elif compatibility is not None:
+        from scripts.benchmark_suite.issue406_reuse import historical_overlay
+
+        native_harness_reuse(record["harness_git_sha"], compatibility=compatibility)
+        overlay = historical_overlay(overlay, compatibility)
+    elif record["harness_git_sha"] != _clean_revision(ROOT):
+        reuse = native_harness_reuse(record["harness_git_sha"])
+        if "rustdoc_compatibility" in reuse:
+            from scripts.benchmark_suite.issue406_reuse import restore_rustdoc
+
+            overlay = restore_rustdoc(overlay)
+    return overlay
+
+
+def _validate_harness_record(record, expected, mirror, output, target) -> None:
+    if (
+        target not in (*TARGETS, WHEEL_TARGET)
+        or any(record.get(key) != value for key, value in expected.items())
+        or mirror.name != "source"
+        or not mirror.parent.name.startswith(f"{target}-")
+        or mirror.parent.parent != output.resolve()
+    ):
+        raise ValueError("mismatched evidence")
+
+
+def _valid_native_profile(row: dict, expected_features: list[str]) -> bool:
+    return (
+        row.get("profile", {}).get("test") is False
+        and row["profile"].get("opt_level") == "3"
+        and sorted(row.get("features", [])) == sorted(expected_features)
+    )
+
+
+def _validate_traced_wheel_invocation(line: str, crate: str, features: set) -> None:
+    prefix, suffix = (
+        line.index("Running `") + len("Running `"),
+        line.rindex("`"),
+    )
+    tokens = shlex.split(line[prefix:suffix])
+    cfg, actual_features = _traced_wheel_features(tokens)
+    if (
+        tokens[tokens.index("--crate-name") + 1] != crate
+        or not any(
+            tokens[index : index + 2] == ["-C", "opt-level=3"]
+            for index in range(len(tokens))
+        )
+        or "--test" in tokens
+        or "test" in cfg
+        or actual_features != features
+    ):
+        raise ValueError("unexpected release configuration")
+
+
+def _traced_wheel_features(arguments: list[str]) -> tuple[list[str], set[str]]:
+    cfg = [
+        arguments[index + 1]
+        for index, argument in enumerate(arguments)
+        if argument == "--cfg"
+    ]
+    actual_features = {
+        value.removeprefix('feature="').removesuffix('"')
+        for value in cfg
+        if value.startswith('feature="')
+    }
+    return cfg, actual_features

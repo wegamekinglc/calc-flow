@@ -48,6 +48,10 @@ def validate_envelope(plan: dict) -> None:
         or not 0 <= precharged < 4795
     ):
         raise ValueError("invalid fresh preparation precharge")
+    _validate_product_revisions(plan)
+
+
+def _validate_product_revisions(plan: dict) -> None:
     if (
         set(plan.get("releases", {})) != {"baseline", "candidate"}
         or plan["releases"]["baseline"].get("product_commit") != MAIN
@@ -141,19 +145,7 @@ async def collect_fresh(runner, output: Path) -> dict:
                     raise
                 exhausted.add(key)
                 report["known_failures"].append(
-                    {
-                        "cases": [case.id for case in group],
-                        "side": side,
-                        "round": round_index,
-                        "index": index,
-                        "evidence": failure,
-                        "unattempted_slots": [
-                            [r, i]
-                            for r in range(ROUNDS)
-                            for i in (None, *range(SAMPLES))
-                            if (r, i) != (round_index, index)
-                        ],
-                    }
+                    _exhausted_arm(group, side, round_index, index, failure)
                 )
                 return None
 
@@ -183,6 +175,22 @@ async def collect_fresh(runner, output: Path) -> dict:
         raise
     finally:
         write_json(output / "partial.json", report)
+
+
+def _exhausted_arm(group, side, round_index, index, failure):
+    return {
+        "cases": [case.id for case in group],
+        "side": side,
+        "round": round_index,
+        "index": index,
+        "evidence": failure,
+        "unattempted_slots": [
+            [r, i]
+            for r in range(ROUNDS)
+            for i in (None, *range(SAMPLES))
+            if (r, i) != (round_index, index)
+        ],
+    }
 
 
 async def _collect_group(runner, group, invoke, report):
@@ -215,15 +223,7 @@ async def _collect_round(group, sides, position, invoke, report):
     round_index, budget = position
     controlled = "previous" in sides
     for index in (None, *range(SAMPLES)):
-        order = (
-            sides
-            if index is None
-            else tuple(
-                "previous" if controlled and side == "baseline" else side
-                for side in pair_order(index)
-                if controlled or side in sides
-            )
-        )
+        order = _collection_order(sides, controlled, index)
         samples = {}
         for side in order:
             samples[side] = await invoke(group, side, round_index, index, budget)
@@ -237,6 +237,18 @@ async def _collect_round(group, sides, position, invoke, report):
                     **{side: _reference(samples[side][group[0].id]) for side in sides},
                 }
             )
+
+
+def _collection_order(sides, controlled, index):
+    return (
+        sides
+        if index is None
+        else tuple(
+            "previous" if controlled and side == "baseline" else side
+            for side in pair_order(index)
+            if controlled or side in sides
+        )
+    )
 
 
 def validate_retained_case(report: dict, case) -> None:
@@ -278,19 +290,9 @@ def _validate_retained(report: dict, selected: set[str]) -> None:
         (record["case"], record["side"]): record
         for record in control.get("measurements", [])
     }
-    if (
-        control.get("product_commit") != PREVIOUS
-        or set(records) != {(case, "previous") for case in selected}
-        or len(control["measurements"]) != len(selected)
-    ):
-        raise ValueError("invalid retained control inventory")
+    _validate_retained_inventory(control, records, selected)
     pairs = control.get("pairs", [])
-    slots = {
-        (case, r, i)
-        for case in selected
-        for r in range(ROUNDS)
-        for i in (None, *range(SAMPLES))
-    }
+    slots = _retained_slots(selected)
     if len(pairs) != len(slots):
         raise ValueError("incomplete retained control pairs")
     seen = set()
@@ -301,37 +303,65 @@ def _validate_retained(report: dict, selected: set[str]) -> None:
             raise ValueError("duplicate or unexpected retained control slot")
         seen.add(slot)
         case, round_index, index = slot
-        expected_order = (
-            ["previous", "candidate"]
-            if index is None
-            else [
-                "previous" if side == "baseline" else side for side in pair_order(index)
-            ]
-        )
-        if pair.get("order") != expected_order:
-            raise ValueError("retained control pair order changed")
+        _validate_retained_pair_order(pair, index)
         for side, source, revision in (
             ("previous", records, PREVIOUS),
             ("candidate", primary, CANDIDATE),
         ):
-            record = source.get((case, side), {})
-            if (
-                len(record.get("warmups", [])) != ROUNDS
-                or [len(values) for values in record.get("rounds", [])]
-                != [SAMPLES] * ROUNDS
-            ):
-                raise ValueError("retained control has incomplete observations")
-            sample = (
-                record["warmups"][round_index]
-                if index is None
-                else record["rounds"][round_index][index]
-            )
-            reference = pair.get(side)
-            if (
-                reference != _reference(sample)
-                or sample.get("product_commit") != revision
-                or not reference["observation_id"]
-                or reference["observation_id"] in observations
-            ):
-                raise ValueError("retained control reference or product differs")
-            observations.add(reference["observation_id"])
+            sample = _retained_sample(source, case, side, round_index, index)
+            _validate_retained_reference(pair, side, sample, revision, observations)
+
+
+def _validate_retained_inventory(control, records, selected):
+    if (
+        control.get("product_commit") != PREVIOUS
+        or set(records) != {(case, "previous") for case in selected}
+        or len(control["measurements"]) != len(selected)
+    ):
+        raise ValueError("invalid retained control inventory")
+
+
+def _retained_slots(selected):
+    return {
+        (case, r, i)
+        for case in selected
+        for r in range(ROUNDS)
+        for i in (None, *range(SAMPLES))
+    }
+
+
+def _validate_retained_pair_order(pair, index):
+    expected_order = (
+        ["previous", "candidate"]
+        if index is None
+        else ["previous" if side == "baseline" else side for side in pair_order(index)]
+    )
+    if pair.get("order") != expected_order:
+        raise ValueError("retained control pair order changed")
+
+
+def _retained_sample(source, case, side, round_index, index):
+    record = source.get((case, side), {})
+    if (
+        len(record.get("warmups", [])) != ROUNDS
+        or [len(values) for values in record.get("rounds", [])] != [SAMPLES] * ROUNDS
+    ):
+        raise ValueError("retained control has incomplete observations")
+    sample = (
+        record["warmups"][round_index]
+        if index is None
+        else record["rounds"][round_index][index]
+    )
+    return sample
+
+
+def _validate_retained_reference(pair, side, sample, revision, observations):
+    reference = pair.get(side)
+    if (
+        reference != _reference(sample)
+        or sample.get("product_commit") != revision
+        or not reference["observation_id"]
+        or reference["observation_id"] in observations
+    ):
+        raise ValueError("retained control reference or product differs")
+    observations.add(reference["observation_id"])

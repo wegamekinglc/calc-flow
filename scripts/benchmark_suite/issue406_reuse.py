@@ -51,11 +51,7 @@ def rustdoc_reuse(
     """Bind actual new blobs to unchanged frozen helpers with one exact exception."""
     history = command_output(["git", "rev-list", current], cwd=root).splitlines()
     if (
-        not isinstance(RUSTDOC_PRODUCT, str)
-        or len(RUSTDOC_PRODUCT) != 40
-        or RUSTDOC_PRODUCT not in history
-        or FROZEN not in history
-        or build != FROZEN
+        not _valid_rustdoc_lineage(history, build)
         or original.get(RUSTDOC_PATH) != RUSTDOC_OLD_BLOB
         or active.get(RUSTDOC_PATH) != RUSTDOC_NEW_BLOB
         or {**active, RUSTDOC_PATH: RUSTDOC_OLD_BLOB} != original
@@ -116,33 +112,8 @@ def reviewed_reuse(root: Path, build: str, current: str, path: Path) -> dict:
     ):
         raise ValueError("unreviewed historical native build")
     recipe = witness["recipe"]
-    old = command_output(["git", "show", f"{build}:{recipe['path']}"], cwd=root).split(
-        recipe["boundary"]
-    )[0]
-    active = (root / recipe["path"]).read_text().split(recipe["boundary"])[0]
-    if (
-        hashlib.sha256(old.encode()).hexdigest() != recipe["historical_prefix_sha256"]
-        or hashlib.sha256(active.encode()).hexdigest()
-        != recipe["candidate_prefix_sha256"]
-        or set(witness["copied_files"]) != set(COPIED_FILES)
-    ):
-        raise ValueError("reviewed historical native recipe changed")
-    blobs = {}
-    bridge = {}
-    for revision, label in (
-        (build, "historical_git_blob"),
-        (current, "candidate_build_git_blob"),
-    ):
-        values = command_output(
-            ["git", "rev-parse", *(f"{revision}:{item}" for item in COPIED_FILES)],
-            cwd=root,
-        ).splitlines()
-        blobs[revision] = dict(zip(COPIED_FILES, values, strict=True))
-        expected = {item: witness["copied_files"][item][label] for item in COPIED_FILES}
-        if blobs[revision] != expected:
-            if revision != current:
-                raise ValueError("reviewed copied native source changed")
-            bridge = rustdoc_reuse(root, FROZEN, current, expected, blobs[current])
+    _validate_reviewed_recipe(root, build, recipe, witness, COPIED_FILES)
+    blobs, bridge = _reviewed_blobs(root, build, current, witness, COPIED_FILES)
     restore_copied(
         restore_rustdoc({item: (root / item).read_bytes() for item in COPIED_FILES}),
         witness["copied_files"],
@@ -217,9 +188,7 @@ def validate_traced_audit(release: dict, attestation: dict, sealed: dict) -> lis
         raise ValueError("traced dependency audit is not sealed")
     audit = json.loads(audit_path.read_text())
     messages = _build_messages("traced wheel", replay)
-    compiled = [row for row in messages if row.get("reason") == "compiler-artifact"]
-    if not compiled or any(row.get("fresh") is not True for row in compiled):
-        raise ValueError("traced dependency replay is not entirely fresh")
+    compiled = _fresh_artifacts(messages, "traced")
     expected = {
         "native_before_sha256": release["native_sha256"],
         "compiled_after_sha256": release["native_sha256"],
@@ -252,20 +221,7 @@ def validate_traced_audit(release: dict, attestation: dict, sealed: dict) -> lis
     if sorted(audit["artifacts"], key=fingerprint_json) != artifacts:
         raise ValueError("traced dependency inventory differs from compiler messages")
     validate_native_profile(artifacts, checkpoint_off=False)
-    binding = [
-        row
-        for row in artifacts
-        if row["package"].get("workspace_package") == "crates/calc-flow-python"
-        and row["target"]["kind"] == ["cdylib"]
-    ]
-    if (
-        len(binding) != 1
-        or binding[0]["profile"].get("test") is not False
-        or binding[0]["profile"].get("opt_level") != "3"
-        or binding[0]["features"]
-        != ["benchmark-internals", "connector-file", "default"]
-    ):
-        raise ValueError("traced binding profile differs")
+    _validate_traced_binding(artifacts)
     return artifacts
 
 
@@ -311,34 +267,10 @@ def validate_ordinary_release(release: dict, sealed: dict) -> dict:
         raise ValueError("ordinary build product or completion differs")
     if str(metadata) not in sealed:
         raise ValueError("ordinary build metadata is not sealed")
-    for kind in ("native", "wheel"):
-        path, digest = release[f"{kind}_path"], release[f"{kind}_sha256"]
-        if (
-            build[f"{kind}_path"] != path
-            or build[f"{kind}_sha256"] != digest
-            or sealed.get(path) != digest
-        ):
-            raise ValueError("ordinary build artifact descriptor differs")
+    _validate_ordinary_descriptors(release, build, sealed)
     _validate_ordinary_source(build, sealed)
     validate_wheel_members(release, sealed)
-    commands = [item for item in build["commands"] if item["label"] == "build"]
-    if len(commands) != 1 or commands[0]["returncode"] != 0:
-        raise ValueError("ordinary release build command is incomplete")
-    arguments = commands[0]["command"]
-    if (
-        arguments[:4] != [build["python"], "-m", "maturin", "build"]
-        or not {
-            "--release",
-            "--locked",
-            "--offline",
-            "--strip",
-            "false",
-            "--out",
-        }.issubset(arguments)
-        or "--features" in arguments
-        or "--profile" in arguments
-    ):
-        raise ValueError("ordinary release build configuration differs")
+    _validate_ordinary_build_command(build)
     return {
         "environment": {
             key: value
@@ -375,9 +307,7 @@ def validate_ordinary_audit(release: dict, build: dict, sealed: dict) -> list:
         raise ValueError("ordinary dependency audit is not sealed")
     audit = json.loads(paths["audit_path"].read_text())
     messages = _build_messages("ordinary wheel", paths["replay_path"])
-    compiled = [row for row in messages if row.get("reason") == "compiler-artifact"]
-    if not compiled or any(row.get("fresh") is not True for row in compiled):
-        raise ValueError("ordinary dependency replay is not entirely fresh")
+    compiled = _fresh_artifacts(messages, "ordinary")
     expected = {
         "native_sha256": release["native_sha256"],
         "compiled_before_sha256": release["native_sha256"],
@@ -411,15 +341,7 @@ def _validate_ordinary_profiles(artifacts: list) -> None:
         "overflow_checks": False,
         "test": False,
     }
-    workspaces = {row["package"].get("workspace_package") for row in artifacts}
-    if not {
-        "crates/calc-flow",
-        "crates/calc-flow-python",
-        "crates/calc-flow-connectors",
-    }.issubset(workspaces) or not any(
-        "checksum" in row["package"] for row in artifacts
-    ):
-        raise ValueError("ordinary wheel compiled inventory is incomplete")
+    _validate_ordinary_inventory(artifacts)
     for package, name, kind, features in (
         ("calc-flow", "calc_flow", ["lib"], []),
         (
@@ -429,13 +351,7 @@ def _validate_ordinary_profiles(artifacts: list) -> None:
             ["connector-file", "default"],
         ),
     ):
-        found = [
-            row
-            for row in artifacts
-            if row["package"].get("workspace_package") == f"crates/{package}"
-            and row["target"]["name"] == name
-            and row["target"]["kind"] == kind
-        ]
+        found = _ordinary_profile_matches(artifacts, package, name, kind)
         if (
             len(found) != 1
             or found[0]["profile"] != expected_profile
@@ -448,32 +364,10 @@ def _ordinary_invocation(line: str, crate: str, features: set) -> None:
     tokens = shlex.split(
         line[line.index("Running `") + len("Running `") : line.rindex("`")]
     )
-    if any(
-        token.startswith(("--cfg=", "--target="))
-        or token.startswith("-C")
-        and token != "-C"
-        for token in tokens
-    ):
-        raise ValueError("ordinary compiler invocation has attached options")
-    cfg = [tokens[index + 1] for index, token in enumerate(tokens) if token == "--cfg"]
-    actual = {
-        value.removeprefix('feature="').removesuffix('"')
-        for value in cfg
-        if value.startswith('feature="')
-    }
-    codegen = dict(
-        tokens[index + 1].split("=", 1)
-        for index, token in enumerate(tokens)
-        if token == "-C"
-    )
-    normalized = {
-        key: value
-        for key, value in codegen.items()
-        if key not in ("metadata", "extra-filename")
-    }
-    expected_cfg = {f'feature="{feature}"' for feature in features}
-    if crate == "calc_flow_python":
-        expected_cfg |= {f"Py_3_{minor}" for minor in range(7, 14)}
+    _reject_attached_options(tokens)
+    cfg, actual = _ordinary_cfg(tokens)
+    normalized = _ordinary_codegen(tokens)
+    expected_cfg = _ordinary_expected_cfg(crate, features)
     if (
         tokens[tokens.index("--crate-name") + 1] != crate
         or actual != features
@@ -503,6 +397,179 @@ def _validate_ordinary_invocations(audit: dict, build: dict, log: Path) -> None:
         if len(found) != 1 or found[0] != audit.get(key):
             raise ValueError("ordinary compiler invocation differs from build log")
         _ordinary_invocation(found[0], crate, features)
+    _validate_maturin_invocation(lines, build, audit)
+
+
+def _validate_ordinary_source(build: dict, sealed: dict) -> None:
+    source = Path(build["source"])
+    original = build["source_files_sha256"]
+    if not original or "Cargo.lock" not in original:
+        raise ValueError("ordinary build source inventory is incomplete")
+    for relative, digest in original.items():
+        path = source / relative
+        expected = (
+            build["cargo_lock_after_sha256"] if relative == "Cargo.lock" else digest
+        )
+        _validate_source_member(relative, path, expected, sealed)
+
+
+def validate_wheel_members(release: dict, sealed: dict) -> None:
+    site = Path(release["site"])
+    installed = _installed_members(site)
+    with zipfile.ZipFile(release["wheel_path"]) as archive:
+        members = _wheel_members(archive)
+        if not members or members != set(installed):
+            raise ValueError("ordinary installed member inventory differs from wheel")
+        for name in members:
+            with archive.open(name) as stream:
+                expected = hashlib.file_digest(stream, "sha256").hexdigest()
+            path = installed[name]
+            if sealed.get(str(path)) != expected or sha256_file(path) != expected:
+                raise ValueError("ordinary installed member differs from wheel")
+
+
+def _valid_rustdoc_lineage(history, build) -> bool:
+    return (
+        isinstance(RUSTDOC_PRODUCT, str)
+        and len(RUSTDOC_PRODUCT) == 40
+        and RUSTDOC_PRODUCT in history
+        and FROZEN in history
+        and build == FROZEN
+    )
+
+
+def _validate_reviewed_recipe(root, build, recipe, witness, copied_files):
+    old = command_output(["git", "show", f"{build}:{recipe['path']}"], cwd=root).split(
+        recipe["boundary"]
+    )[0]
+    active = (root / recipe["path"]).read_text().split(recipe["boundary"])[0]
+    if (
+        hashlib.sha256(old.encode()).hexdigest() != recipe["historical_prefix_sha256"]
+        or hashlib.sha256(active.encode()).hexdigest()
+        != recipe["candidate_prefix_sha256"]
+        or set(witness["copied_files"]) != set(copied_files)
+    ):
+        raise ValueError("reviewed historical native recipe changed")
+
+
+def _reviewed_blobs(root, build, current, witness, copied_files):
+    blobs = {}
+    bridge = {}
+    for revision, label in (
+        (build, "historical_git_blob"),
+        (current, "candidate_build_git_blob"),
+    ):
+        values = command_output(
+            ["git", "rev-parse", *(f"{revision}:{item}" for item in copied_files)],
+            cwd=root,
+        ).splitlines()
+        blobs[revision] = dict(zip(copied_files, values, strict=True))
+        expected = {item: witness["copied_files"][item][label] for item in copied_files}
+        if blobs[revision] != expected:
+            if revision != current:
+                raise ValueError("reviewed copied native source changed")
+            bridge = rustdoc_reuse(root, FROZEN, current, expected, blobs[current])
+    return blobs, bridge
+
+
+def _validate_traced_binding(artifacts):
+    binding = [
+        row
+        for row in artifacts
+        if row["package"].get("workspace_package") == "crates/calc-flow-python"
+        and row["target"]["kind"] == ["cdylib"]
+    ]
+    if (
+        len(binding) != 1
+        or binding[0]["profile"].get("test") is not False
+        or binding[0]["profile"].get("opt_level") != "3"
+        or binding[0]["features"]
+        != ["benchmark-internals", "connector-file", "default"]
+    ):
+        raise ValueError("traced binding profile differs")
+
+
+def _validate_ordinary_descriptors(release, build, sealed):
+    for kind in ("native", "wheel"):
+        path, digest = release[f"{kind}_path"], release[f"{kind}_sha256"]
+        if (
+            build[f"{kind}_path"] != path
+            or build[f"{kind}_sha256"] != digest
+            or sealed.get(path) != digest
+        ):
+            raise ValueError("ordinary build artifact descriptor differs")
+
+
+def _validate_ordinary_build_command(build):
+    commands = [item for item in build["commands"] if item["label"] == "build"]
+    if len(commands) != 1 or commands[0]["returncode"] != 0:
+        raise ValueError("ordinary release build command is incomplete")
+    _validate_ordinary_build_arguments(build, commands[0]["command"])
+
+
+def _fresh_artifacts(messages, label):
+    compiled = [row for row in messages if row.get("reason") == "compiler-artifact"]
+    if not compiled or any(row.get("fresh") is not True for row in compiled):
+        raise ValueError(f"{label} dependency replay is not entirely fresh")
+    return compiled
+
+
+def _ordinary_profile_matches(artifacts, package, name, kind):
+    return [
+        row
+        for row in artifacts
+        if row["package"].get("workspace_package") == f"crates/{package}"
+        and row["target"]["name"] == name
+        and row["target"]["kind"] == kind
+    ]
+
+
+def _reject_attached_options(tokens):
+    if any(
+        argument.startswith(("--cfg=", "--target="))
+        or argument.startswith("-C")
+        and argument != "-C"
+        for argument in tokens
+    ):
+        raise ValueError("ordinary compiler invocation has attached options")
+
+
+def _ordinary_cfg(tokens):
+    cfg = [
+        tokens[index + 1]
+        for index, argument in enumerate(tokens)
+        if argument == "--cfg"
+    ]
+    actual = {
+        value.removeprefix('feature="').removesuffix('"')
+        for value in cfg
+        if value.startswith('feature="')
+    }
+    return cfg, actual
+
+
+def _ordinary_codegen(tokens):
+    codegen = dict(
+        tokens[index + 1].split("=", 1)
+        for index, argument in enumerate(tokens)
+        if argument == "-C"
+    )
+    normalized = {
+        key: value
+        for key, value in codegen.items()
+        if key not in ("metadata", "extra-filename")
+    }
+    return normalized
+
+
+def _ordinary_expected_cfg(crate, features):
+    expected_cfg = {f'feature="{feature}"' for feature in features}
+    if crate == "calc_flow_python":
+        expected_cfg |= {f"Py_3_{minor}" for minor in range(7, 14)}
+    return expected_cfg
+
+
+def _validate_maturin_invocation(lines, build, audit):
     marker = "maturin::compile: Running "
     commands = [line.split(marker, 1)[1] for line in lines if marker in line]
     expected = [
@@ -529,6 +596,65 @@ def _validate_ordinary_invocations(audit: dict, build: dict, log: Path) -> None:
         raise ValueError("ordinary Maturin invocation count differs")
     tokens = shlex.split(commands[0])
     cargo = tokens.index("cargo")
+    _validate_maturin_arguments(tokens, cargo, expected, environment, audit)
+
+
+def _validate_source_member(relative, path, expected, sealed):
+    if (
+        Path(relative).is_absolute()
+        or ".." in Path(relative).parts
+        or sealed.get(str(path)) != expected
+        or sha256_file(path) != expected
+    ):
+        raise ValueError("ordinary build source differs from its recorded inventory")
+
+
+def _installed_members(site):
+    return {
+        str(path.relative_to(site)): path
+        for path in (site / "calc_flow").rglob("*")
+        if path.is_file() and "__pycache__" not in path.parts
+    }
+
+
+def _validate_ordinary_inventory(artifacts):
+    workspaces = {row["package"].get("workspace_package") for row in artifacts}
+    if not {
+        "crates/calc-flow",
+        "crates/calc-flow-python",
+        "crates/calc-flow-connectors",
+    }.issubset(workspaces) or not any(
+        "checksum" in row["package"] for row in artifacts
+    ):
+        raise ValueError("ordinary wheel compiled inventory is incomplete")
+
+
+def _wheel_members(archive):
+    return {
+        name
+        for name in archive.namelist()
+        if name.startswith("calc_flow/") and not name.endswith("/")
+    }
+
+
+def _validate_ordinary_build_arguments(build, arguments):
+    if (
+        arguments[:4] != [build["python"], "-m", "maturin", "build"]
+        or not {
+            "--release",
+            "--locked",
+            "--offline",
+            "--strip",
+            "false",
+            "--out",
+        }.issubset(arguments)
+        or "--features" in arguments
+        or "--profile" in arguments
+    ):
+        raise ValueError("ordinary release build configuration differs")
+
+
+def _validate_maturin_arguments(tokens, cargo, expected, environment, audit):
     if (
         tokens[:3] != ["env", "-u", "CARGO"]
         or tokens[cargo:] != expected
@@ -537,47 +663,3 @@ def _validate_ordinary_invocations(audit: dict, build: dict, log: Path) -> None:
         or audit.get("environment_assignments") != environment
     ):
         raise ValueError("ordinary Maturin invocation or environment differs")
-
-
-def _validate_ordinary_source(build: dict, sealed: dict) -> None:
-    source = Path(build["source"])
-    original = build["source_files_sha256"]
-    if not original or "Cargo.lock" not in original:
-        raise ValueError("ordinary build source inventory is incomplete")
-    for relative, digest in original.items():
-        path = source / relative
-        expected = (
-            build["cargo_lock_after_sha256"] if relative == "Cargo.lock" else digest
-        )
-        if (
-            Path(relative).is_absolute()
-            or ".." in Path(relative).parts
-            or sealed.get(str(path)) != expected
-            or sha256_file(path) != expected
-        ):
-            raise ValueError(
-                "ordinary build source differs from its recorded inventory"
-            )
-
-
-def validate_wheel_members(release: dict, sealed: dict) -> None:
-    site = Path(release["site"])
-    installed = {
-        str(path.relative_to(site)): path
-        for path in (site / "calc_flow").rglob("*")
-        if path.is_file() and "__pycache__" not in path.parts
-    }
-    with zipfile.ZipFile(release["wheel_path"]) as archive:
-        members = {
-            name
-            for name in archive.namelist()
-            if name.startswith("calc_flow/") and not name.endswith("/")
-        }
-        if not members or members != set(installed):
-            raise ValueError("ordinary installed member inventory differs from wheel")
-        for name in members:
-            with archive.open(name) as stream:
-                expected = hashlib.file_digest(stream, "sha256").hexdigest()
-            path = installed[name]
-            if sealed.get(str(path)) != expected or sha256_file(path) != expected:
-                raise ValueError("ordinary installed member differs from wheel")

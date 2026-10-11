@@ -16,24 +16,30 @@ from benchmarks.sustained_join import (
 )
 
 
-def expected_table(inventory, *, blocks=None):
+def expected_block_rows(inventory, block):
     def price(index):
         return 100 + index % 257 / 8 + index % 64 / 8
 
+    rows = []
+    for left in range(inventory.block_rows):
+        for delta in range(-5, 6):
+            right = left + delta * 64
+            if 0 <= right < inventory.block_rows:
+                rows.append(
+                    (
+                        block * inventory.block_rows + left,
+                        block * inventory.block_rows + right,
+                        price(left) * price(right),
+                    )
+                )
+    return rows
+
+
+def expected_table(inventory, *, blocks=None):
     selected = range(inventory.blocks) if blocks is None else blocks
     rows = []
     for block in selected:
-        for left in range(inventory.block_rows):
-            for delta in range(-5, 6):
-                right = left + delta * 64
-                if 0 <= right < inventory.block_rows:
-                    rows.append(
-                        (
-                            block * inventory.block_rows + left,
-                            block * inventory.block_rows + right,
-                            price(left) * price(right),
-                        )
-                    )
+        rows.extend(expected_block_rows(inventory, block))
     return pa.table(
         {
             "sequence": pa.array([row[0] for row in rows], type=pa.uint64()),

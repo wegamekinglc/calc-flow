@@ -104,6 +104,25 @@ def _validate_output_shape(table: pa.Table, maximum_rows: int) -> None:
         raise ValueError("output types/nulls differ from the full oracle")
 
 
+def _validated_pair_geometry(table: pa.Table, inventory: JoinInventory):
+    left = table["sequence"].to_numpy()
+    right = table["right_sequence"].to_numpy()
+    limit = inventory.blocks * inventory.block_rows
+    if np.any(left >= limit) or np.any(right >= limit):
+        raise ValueError("output identity outside input range")
+    left = left.astype(np.int64, copy=False)
+    right = right.astype(np.int64, copy=False)
+    block = left // inventory.block_rows
+    if np.any(block != right // inventory.block_rows):
+        raise ValueError("output contains an impossible cross-block match")
+    delta = right - left
+    if np.any(delta % 64):
+        raise ValueError("output match keys differ")
+    if np.any(np.abs(delta) > 5 * 64):
+        raise ValueError("output match exceeds inclusive time bounds")
+    return left, right, block, delta
+
+
 class BoundedJoinOracle:
     """Own exact pair occupancy without retaining delivered output tables."""
 
@@ -122,21 +141,7 @@ class BoundedJoinOracle:
         _validate_output_shape(table, self.inventory.batch_rows * 11)
         if table.num_rows == 0:
             return
-        left = table["sequence"].to_numpy()
-        right = table["right_sequence"].to_numpy()
-        limit = self.inventory.blocks * self.inventory.block_rows
-        if np.any(left >= limit) or np.any(right >= limit):
-            raise ValueError("output identity outside input range")
-        left = left.astype(np.int64, copy=False)
-        right = right.astype(np.int64, copy=False)
-        block = left // self.inventory.block_rows
-        if np.any(block != right // self.inventory.block_rows):
-            raise ValueError("output contains an impossible cross-block match")
-        delta = right - left
-        if np.any(delta % 64):
-            raise ValueError("output match keys differ")
-        if np.any(np.abs(delta) > 5 * 64):
-            raise ValueError("output match exceeds inclusive time bounds")
+        left, right, block, delta = _validated_pair_geometry(table, self.inventory)
         local_left = left % self.inventory.block_rows
         local_right = right % self.inventory.block_rows
         left_price = 100 + local_left % 257 / 8 + local_left % 64 / 8
@@ -236,6 +241,19 @@ class SustainedJoinSink:
         return None
 
 
+def _epoch_retired(epoch, current, completed) -> bool:
+    return current != epoch and (
+        (completed is not None and completed >= epoch)
+        or (current is not None and current > epoch)
+    )
+
+
+def _observation_clock_invalid(
+    before: int, after: int, previous_before: int | None
+) -> bool:
+    return before > after or (previous_before is not None and before < previous_before)
+
+
 def checkpoint_windows(
     observations: list[dict], *, start_ns: int, end_ns: int
 ) -> list[dict]:
@@ -257,12 +275,7 @@ def checkpoint_windows(
             },
         )
 
-    for observation in observations:
-        before, after = observation["before_ns"], observation["after_ns"]
-        if before > after or (previous_before is not None and before < previous_before):
-            raise ValueError("checkpoint observation clocks are not monotonic")
-        checkpoint = observation["checkpoint"]
-        current = checkpoint["current_epoch"]
+    def record_current(checkpoint, current, before, after):
         if current is not None:
             item = state(current)
             item["terminal_observed"] |= checkpoint["terminal"]
@@ -282,14 +295,19 @@ def checkpoint_windows(
                 item["start_upper_ns"] = (
                     upper if prior_upper is None else min(prior_upper, upper)
                 )
+
+    for observation in observations:
+        before, after = observation["before_ns"], observation["after_ns"]
+        if _observation_clock_invalid(before, after, previous_before):
+            raise ValueError("checkpoint observation clocks are not monotonic")
+        checkpoint = observation["checkpoint"]
+        current = checkpoint["current_epoch"]
+        record_current(checkpoint, current, before, after)
         completed = checkpoint["last_completed_epoch"]
         if completed is not None:
             state(completed)
         for epoch, item in epochs.items():
-            retired = current != epoch and (
-                (completed is not None and completed >= epoch)
-                or (current is not None and current > epoch)
-            )
+            retired = _epoch_retired(epoch, current, completed)
             if retired and item["completion_upper_ns"] is None:
                 item["completion_lower_ns"] = previous_before
                 item["completion_upper_ns"] = after
@@ -298,21 +316,29 @@ def checkpoint_windows(
     return _finalize_checkpoint_windows(epochs, start_ns, end_ns)
 
 
+def _inside_steady(
+    item: dict, lower, upper, completed, start_ns: int, end_ns: int
+) -> bool:
+    return (
+        lower is not None
+        and upper is not None
+        and lower <= upper
+        and lower >= start_ns
+        and completed is not None
+        and completed >= upper
+        and completed <= end_ns
+        and not item["terminal_observed"]
+    )
+
+
 def _finalize_checkpoint_windows(epochs, start_ns, end_ns):
     result = []
     for epoch in sorted(epochs):
         item = {**epochs[epoch]}
         lower, upper = item["start_lower_ns"], item["start_upper_ns"]
         completed = item["completion_upper_ns"]
-        item["inside_steady"] = (
-            lower is not None
-            and upper is not None
-            and lower <= upper
-            and lower >= start_ns
-            and completed is not None
-            and completed >= upper
-            and completed <= end_ns
-            and not item["terminal_observed"]
+        item["inside_steady"] = _inside_steady(
+            item, lower, upper, completed, start_ns, end_ns
         )
         if upper is not None and item["completion_lower_ns"] is not None:
             item["duration_lower_ns"] = max(0, item["completion_lower_ns"] - upper)

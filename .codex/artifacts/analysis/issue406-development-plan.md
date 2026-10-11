@@ -27,9 +27,37 @@ The original single-source and promotion RED cases now pass, together with nine
 additional focused cancellation, ordering, funding, and worker-lifecycle checks
 (11 distinct tests total). The 129-row single-source control formerly made 128
 `Quantum` calls; the new control requires at most four, without timing assertions.
-No performance result has yet been measured for this implementation. The next
-steps remain one ordinary managed 4M correctness run followed by the complete
-fresh eight-row comparison under the new candidate pool policy.
+No performance result has yet been measured for this implementation. The ordinary
+release for `ce77237f` built successfully in 383.248 seconds. One managed retained
+Join correctness run then passed with 4M input/output rows, 64,000-row batches,
+one CPU and a 100 ms checkpoint interval. Every output row matched its oracle;
+processing checkpoint epochs 1–12 completed, EOF and owned cleanup succeeded,
+and no process required forced termination. The run accounted for 19.039 of its
+300-second budget and collected no measured performance samples. The ordinary
+manifest evidence recorded no qualifying advancing processing epochs and does
+not expose pending replacement counts, so internal pending-replacement coverage
+remains unproven. This successful run does not establish the original E11 failure's
+cause. Its evidence seal is
+`089fbf3c1da3c6fbe56ca9f57efd27b78f8eaf5920b685d6e709831b9a533efc`.
+The complete fresh eight-row acquisition has not started. Subsequent CI/Codacy
+cleanup changes production and native helper source, so these built artifacts
+remain evidence for `ce77237f`; they will not be labeled as final-branch results.
+The final comparison requires newly attested artifacts for the reviewed source.
+
+The user has also authorized a stabilization milestone after this increment:
+resolve all CI, Codacy and review findings, merge PR #407 once required checks
+and final specialist review pass, then repair any remaining benchmark failure
+and dispatch the complete `benchmark-suite.yml` on merged main with the actual
+pre-merge main commit as baseline. Merge has not occurred. The earlier scheduled
+benchmark failure caused by the interval-SQL memory fixture is already fixed
+on main; it does not justify a second speculative runtime change.
+
+Current cleanup preserves the eight targets, paired sample counts, checkpoint
+modes and strict artifact validation. It relocates 120 existing tests to focused
+integration targets to reduce the generated library-test stack table, and
+extracts focused helpers for the reported Rust/Python complexity findings.
+Source review and completed Python checks do not substitute for consolidated
+Rust verification, final remote CI or new performance measurements.
 
 Latest full-inventory performance attempt: the [fresh a681e7da attempt](issue406-fresh-acceptance.md)
 stopped on the candidate's 4M retained-ON warmup at epoch 11. It contains all

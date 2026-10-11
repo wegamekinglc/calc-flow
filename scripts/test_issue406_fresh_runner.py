@@ -5,7 +5,6 @@ import io
 import json
 import os
 import signal
-import subprocess
 import sys
 import textwrap
 import time
@@ -28,7 +27,9 @@ from scripts.test_issue406_report import selected
 
 
 class FreshRunnerTests(unittest.IsolatedAsyncioTestCase):
-    def test_cli_exits_with_owned_failure_when_creation_resists_cancellation(self):
+    async def test_cli_exits_with_owned_failure_when_creation_resists_cancellation(
+        self,
+    ):
         program = textwrap.dedent("""
             import asyncio
             import sys
@@ -76,16 +77,23 @@ class FreshRunnerTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as raw:
             root = Path(raw)
             try:
-                completed = subprocess.run(
-                    [sys.executable, "-c", program, raw],
-                    capture_output=True,
-                    text=True,
-                    timeout=4,
-                    check=False,
+                process = await asyncio.create_subprocess_exec(
+                    sys.executable,
+                    "-c",
+                    program,
+                    raw,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
                 )
-                self.assertEqual(completed.returncode, 1)
+                try:
+                    _, stderr = await asyncio.wait_for(process.communicate(), 4)
+                finally:
+                    if process.returncode is None:
+                        process.kill()
+                    await process.wait()
+                self.assertEqual(process.returncode, 1)
                 self.assertTrue(
-                    (root / "ownership-failure.json").exists(), completed.stderr
+                    (root / "ownership-failure.json").exists(), stderr.decode()
                 )
                 failure = json.loads((root / "ownership-failure.json").read_text())
                 self.assertFalse(failure["settled"])

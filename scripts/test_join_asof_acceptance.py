@@ -102,6 +102,27 @@ class AcceptanceBoundaryTests(unittest.IsolatedAsyncioTestCase):
             validate_retained_status(changed, 100, 64)
 
 
+def fixture_chunk_events(inputs: dict, chunk: int, indices: list, first: int) -> list:
+    records = []
+    for kind in ("data", "watermark"):
+        for name in inputs:
+            event_id = f"processing/{first + len(records)}"
+            records.append(
+                {
+                    "kind": kind,
+                    "input": name,
+                    "event_id": event_id,
+                    "chunk_id": chunk,
+                    **(
+                        {"batches": indices}
+                        if kind == "data"
+                        else {"micros": chunk + 1}
+                    ),
+                }
+            )
+    return records
+
+
 class AcceptanceFixtureTests(unittest.TestCase):
     def test_oracle_rejects_duplicate_missing_and_wrong_values(self):
         from benchmarks.join_asof_acceptance import validate_one_to_one_output
@@ -151,24 +172,11 @@ class AcceptanceFixtureTests(unittest.TestCase):
         inputs = {name: batches for name in ("reference.input", "quotes.input")}
         events = {"preload": [], "processing": [], "terminal": [], "barriers": []}
         for chunk, indices in enumerate(([0, 1], [2])):
-            ids = []
-            for kind in ("data", "watermark"):
-                for name in inputs:
-                    event_id = f"processing/{len(events['processing'])}"
-                    events["processing"].append(
-                        {
-                            "kind": kind,
-                            "input": name,
-                            "event_id": event_id,
-                            "chunk_id": chunk,
-                            **(
-                                {"batches": indices}
-                                if kind == "data"
-                                else {"micros": chunk + 1}
-                            ),
-                        }
-                    )
-                    ids.append(event_id)
+            records = fixture_chunk_events(
+                inputs, chunk, indices, len(events["processing"])
+            )
+            events["processing"].extend(records)
+            ids = [event["event_id"] for event in records]
             events["barriers"].append(
                 {
                     "chunk_id": chunk,
@@ -364,34 +372,39 @@ class AcceptanceRuntimePolicyTests(unittest.TestCase):
         comparison = ModuleType("benchmarks.engine_comparison")
         comparison.expected_output = Mock()
         comparison.workload = Mock(side_effect=AssertionError("ordinary workload"))
-        root = Path("/tmp/issue406-ordering-route-test")
-        case = {
-            "workload": "asof_operator",
-            "rows": 2049,
-            "batch_rows": 1024,
-            "mode": "off",
-            "ordering_proof": True,
-            "fixture_root": str(root),
-        }
-        with (
-            patch.dict(
-                "sys.modules",
-                {
-                    "benchmarks.engine_comparison": comparison,
-                    "benchmarks.engine_stream": ModuleType("benchmarks.engine_stream"),
-                },
-            ),
-            patch(
-                "benchmarks.join_asof_acceptance.export_ordering_fixture",
-                return_value={"rows_per_side": 2049},
-            ) as exporter,
-            patch("benchmarks.join_asof_acceptance.sha256_file", return_value="a" * 64),
-        ):
-            result = prepare_acceptance_fixture(case, root)
-        exporter.assert_called_once_with(root, checkpoint_enabled=False)
-        comparison.workload.assert_not_called()
-        self.assertEqual(result["fixture_path"], str(root / "fixture.json"))
-        self.assertEqual(result["manifest"], {"rows_per_side": 2049})
+        with TemporaryDirectory() as raw:
+            root = Path(raw)
+            case = {
+                "workload": "asof_operator",
+                "rows": 2049,
+                "batch_rows": 1024,
+                "mode": "off",
+                "ordering_proof": True,
+                "fixture_root": str(root),
+            }
+            with (
+                patch.dict(
+                    "sys.modules",
+                    {
+                        "benchmarks.engine_comparison": comparison,
+                        "benchmarks.engine_stream": ModuleType(
+                            "benchmarks.engine_stream"
+                        ),
+                    },
+                ),
+                patch(
+                    "benchmarks.join_asof_acceptance.export_ordering_fixture",
+                    return_value={"rows_per_side": 2049},
+                ) as exporter,
+                patch(
+                    "benchmarks.join_asof_acceptance.sha256_file", return_value="a" * 64
+                ),
+            ):
+                result = prepare_acceptance_fixture(case, root)
+            exporter.assert_called_once_with(root, checkpoint_enabled=False)
+            comparison.workload.assert_not_called()
+            self.assertEqual(result["fixture_path"], str(root / "fixture.json"))
+            self.assertEqual(result["manifest"], {"rows_per_side": 2049})
 
     def test_legacy_enabled_modes_do_not_receive_new_disable_keyword(self):
         from datetime import timedelta

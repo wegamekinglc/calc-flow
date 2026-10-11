@@ -11,11 +11,14 @@ class AcceptanceInventoryTests(unittest.TestCase):
         cases = acceptance_inventory()
         self.assertEqual({case.row for case in cases}, set(range(1, 9)))
         self.assertEqual(len({case.id for case in cases}), len(cases))
+        self.assert_retained_inventory(cases)
+        self.assertTrue(all(case.rows == 1_000_000 for case in cases if case.row == 7))
+
+    def assert_retained_inventory(self, cases):
         retained = [case for case in cases if case.row == 3]
         self.assertEqual({case.rows for case in retained}, {1_000_000, 4_000_000})
         self.assertEqual({case.workload for case in retained}, {"join_retained"})
         self.assertTrue(all(case.batch_rows == 64_000 for case in retained))
-        self.assertTrue(all(case.rows == 1_000_000 for case in cases if case.row == 7))
 
     def test_checkpoint_low_is_enabled_and_main_keeps_all_supported_cells(self):
         from scripts.benchmark_suite.issue406_acceptance import (

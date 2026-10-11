@@ -10,11 +10,7 @@ def selected(row, workload=None, mode="off", rows=1_000_000, threads=1):
     return next(
         case
         for case in acceptance_inventory()
-        if case.row == row
-        and (workload is None or case.workload == workload)
-        and case.mode == mode
-        and case.rows == rows
-        and case.threads == threads
+        if selected_case(case, row, workload, mode, rows, threads)
     )
 
 
@@ -212,65 +208,10 @@ class AcceptanceReportTests(unittest.TestCase):
             "processing_boundary": "final-output-projection-watermark-completed",
             "output_frontier": "minimum-input-watermark-minus-one-microsecond",
         }
-        records = [record(case, 1.0) for case in cases.values()]
-        sequences = ([1.0] * 11 + [10.0] * 9, [0.5] * 9 + [9.0] * 11, [0.1] * 20)
-        for item, values in zip(records, sequences, strict=True):
-            for sample, value in zip(
-                [sample for group in item["rounds"] for sample in group],
-                values,
-                strict=True,
-            ):
-                sample.update(
-                    processing_seconds=value,
-                    settled_processing_seconds=value,
-                    product_commit="1" * 40,
-                    processing_settled=True,
-                    match_identity=copy.deepcopy(identity),
-                    nonterminal_epochs=[],
-                    compiled_projection=[{"node_id": "asof"}],
-                    compiled_projection_sha256="f" * 64,
-                    canonical_native_events_sha256="a" * 64,
-                    native_executable_sha256="b" * 64,
-                )
-            item["warmups"] = [copy.deepcopy(group[0]) for group in item["rounds"]]
+        records = overhead_records(cases, identity)
         sources = [*records[0]["warmups"], *sum(records[0]["rounds"], [])]
         replays = [*records[1]["warmups"], *sum(records[1]["rounds"], [])]
-        for index, (source, replay) in enumerate(zip(sources, replays, strict=True)):
-            source.update(
-                observation_id=f"source/{index}",
-                raw_observation_sha256=f"{index + 1:064x}",
-                dispatch_trace_envelope_sha256=f"{index + 101:064x}",
-                dispatch_trace={
-                    "schema": "calc-flow.asof-dispatch-trace.v1",
-                    "overflowed": False,
-                    "terminal_excluded": True,
-                    "allow_barriers": False,
-                    "compiled_plan_fingerprint": "e" * 64,
-                    "node_id": "asof",
-                    "capacity": 8192,
-                    "record_count": 1,
-                    "events": [{"kind": "watermark", "ingress": "left", "micros": 10}],
-                    "callback_counts": {
-                        "data": 2,
-                        "ingress_progress": 2,
-                        "watermark": 1,
-                    },
-                    "completed_frontiers": {"result": 9},
-                    "operator_data_counts": {"asof": {"input_rows": 2}},
-                    "asof_state": {"output_watermark_micros": 9},
-                    "output_record_batch_rows": [[1]],
-                    "output_node_id": "result",
-                    "required_output_frontier_micros": 9,
-                },
-            )
-            replay.update(
-                dispatch_trace_verified=True,
-                dispatch_replay_state_verified=True,
-                dispatch_trace=copy.deepcopy(source["dispatch_trace"]),
-                replay_source_observation_id=source["observation_id"],
-                replay_source_raw_sha256=source["raw_observation_sha256"],
-                replay_trace_sha256=source["dispatch_trace_envelope_sha256"],
-            )
+        link_overhead_replays(sources, replays)
         data = report(records)
         data["scheduling_proofs"] = {
             "candidate/off": {
@@ -351,6 +292,80 @@ class AcceptanceReportTests(unittest.TestCase):
         )
         self.assertEqual(phases["setup_seconds"]["p50"], 0.1)
         self.assertEqual(phases["oracle_seconds"]["p50"], 0.003)
+
+
+def selected_case(case, row, workload, mode, rows, threads):
+    return (
+        case.row == row
+        and (workload is None or case.workload == workload)
+        and case.mode == mode
+        and case.rows == rows
+        and case.threads == threads
+    )
+
+
+def overhead_records(cases, identity):
+    records = [record(case, 1.0) for case in cases.values()]
+    sequences = ([1.0] * 11 + [10.0] * 9, [0.5] * 9 + [9.0] * 11, [0.1] * 20)
+    for item, values in zip(records, sequences, strict=True):
+        for sample, value in zip(
+            [sample for group in item["rounds"] for sample in group],
+            values,
+            strict=True,
+        ):
+            sample.update(
+                processing_seconds=value,
+                settled_processing_seconds=value,
+                product_commit="1" * 40,
+                processing_settled=True,
+                match_identity=copy.deepcopy(identity),
+                nonterminal_epochs=[],
+                compiled_projection=[{"node_id": "asof"}],
+                compiled_projection_sha256="f" * 64,
+                canonical_native_events_sha256="a" * 64,
+                native_executable_sha256="b" * 64,
+            )
+        item["warmups"] = [copy.deepcopy(group[0]) for group in item["rounds"]]
+    return records
+
+
+def link_overhead_replays(sources, replays):
+    for index, (source, replay) in enumerate(zip(sources, replays, strict=True)):
+        source.update(
+            observation_id=f"source/{index}",
+            raw_observation_sha256=f"{index + 1:064x}",
+            dispatch_trace_envelope_sha256=f"{index + 101:064x}",
+            dispatch_trace={
+                "schema": "calc-flow.asof-dispatch-trace.v1",
+                "overflowed": False,
+                "terminal_excluded": True,
+                "allow_barriers": False,
+                "compiled_plan_fingerprint": "e" * 64,
+                "node_id": "asof",
+                "capacity": 8192,
+                "record_count": 1,
+                "events": [{"kind": "watermark", "ingress": "left", "micros": 10}],
+                "callback_counts": {
+                    "data": 2,
+                    "ingress_progress": 2,
+                    "watermark": 1,
+                },
+                "completed_frontiers": {"result": 9},
+                "operator_data_counts": {"asof": {"input_rows": 2}},
+                "asof_state": {"output_watermark_micros": 9},
+                "output_record_batch_rows": [[1]],
+                "output_node_id": "result",
+                "required_output_frontier_micros": 9,
+            },
+        )
+        replay.update(
+            dispatch_trace_verified=True,
+            dispatch_replay_state_verified=True,
+            dispatch_trace=copy.deepcopy(source["dispatch_trace"]),
+            replay_source_observation_id=source["observation_id"],
+            replay_source_raw_sha256=source["raw_observation_sha256"],
+            replay_trace_sha256=source["dispatch_trace_envelope_sha256"],
+        )
 
 
 if __name__ == "__main__":

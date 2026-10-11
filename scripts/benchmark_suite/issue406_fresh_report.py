@@ -36,32 +36,26 @@ def _validation_errors(report: dict, case, records: dict) -> list[str]:
         ]
         for sample in samples:
             try:
-                # Both roles are OFF-capable; their actual product identities
-                # and comparison roles remain checked by the ledger validator.
-                validate_observation(case, "candidate", sample)
-                for field in PHASES:
-                    value = sample.get(field)
-                    if (
-                        type(value) not in (int, float)
-                        or not math.isfinite(value)
-                        or value <= 0
-                    ):
-                        raise ValueError(f"{side}: invalid {field}")
+                _validate_phase_sample(case, side, sample)
             except ValueError as error:
                 errors.append(f"{side}: {error}")
     return sorted(set(errors))
 
 
+def _validate_phase_sample(case, side, sample):
+    # Both roles are OFF-capable; their actual product identities
+    # and comparison roles remain checked by the ledger validator.
+    validate_observation(case, "candidate", sample)
+    for field in PHASES:
+        value = sample.get(field)
+        if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+            raise ValueError(f"{side}: invalid {field}")
+
+
 def _phase(case, metric: str, records: dict, *, valid: bool, suitable: bool) -> dict:
     from scripts.benchmark_suite.issue406_report import _stats
 
-    rounds = {
-        side: [
-            [sample.get(metric) for sample in group]
-            for group in record.get("rounds", [])
-        ]
-        for side, record in records.items()
-    }
+    rounds = _phase_rounds(records, metric)
     result = {"verdict": "unmeasured-or-invalid", "round_intervals": []}
     error = None
     if valid:
@@ -94,6 +88,16 @@ def _phase(case, metric: str, records: dict, *, valid: bool, suitable: bool) -> 
     }
 
 
+def _phase_rounds(records, metric):
+    return {
+        side: [
+            [sample.get(metric) for sample in group]
+            for group in record.get("rounds", [])
+        ]
+        for side, record in records.items()
+    }
+
+
 def _case(report: dict, case, suitable: bool) -> dict:
     control = report.get("retained_control", {})
     records = {
@@ -104,10 +108,7 @@ def _case(report: dict, case, suitable: bool) -> dict:
         side: [len(group) for group in record.get("rounds", [])]
         for side, record in records.items()
     }
-    complete = all(
-        counts[side] == [SAMPLES] * ROUNDS and len(record.get("warmups", [])) == ROUNDS
-        for side, record in records.items()
-    )
+    complete = _complete_records(counts, records)
     errors = _validation_errors(report, case, records)
     phases = [
         _phase(case, metric, records, valid=complete and not errors, suitable=suitable)
@@ -121,11 +122,18 @@ def _case(report: dict, case, suitable: bool) -> dict:
         "rows": case.rows,
         "mode": "off",
         "threads": case.threads,
-        "status": "incomplete" if not complete else "invalid" if errors else "complete",
+        "status": _case_status(complete, errors),
         "sample_counts": counts,
         "validation_errors": sorted(set(errors)),
         "phases": phases,
     }
+
+
+def _complete_records(counts, records):
+    return all(
+        counts[side] == [SAMPLES] * ROUNDS and len(record.get("warmups", [])) == ROUNDS
+        for side, record in records.items()
+    )
 
 
 def summarize_retained_control(report: dict) -> dict:
@@ -201,3 +209,9 @@ def render_retained_control(summary: dict) -> list[str]:
         "remain inconclusive.",
         "",
     ]
+
+
+def _case_status(complete: bool, errors: list) -> str:
+    if not complete:
+        return "incomplete"
+    return "invalid" if errors else "complete"

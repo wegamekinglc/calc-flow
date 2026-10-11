@@ -134,14 +134,7 @@ class FreshAcquisitionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(control["measurements"]), 2)
             self.assertEqual(len(control["pairs"]), 44)
             validate_retained_control(result)
-            selected = [call for call in runner.calls if call[1] == "previous"]
-            self.assertEqual(len(selected), 44)
-            self.assertTrue(
-                all(
-                    "join_retained" in call[0] and "/off/" in call[0]
-                    for call in selected
-                )
-            )
+            self.assert_retained_calls(runner)
             pairs = [pair for pair in control["pairs"] if pair["index"] is not None]
             self.assertEqual(
                 [pair["order"] for pair in pairs[:2]],
@@ -154,6 +147,27 @@ class FreshAcquisitionTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(ValueError, "reference"):
                 validate_retained_control(corrupted)
 
+    def assert_retained_calls(self, runner):
+        selected = [call for call in runner.calls if call[1] == "previous"]
+        self.assertEqual(len(selected), 44)
+        self.assertTrue(
+            all("join_retained" in call[0] and "/off/" in call[0] for call in selected)
+        )
+
+    def assert_failed_arms_empty(self, result):
+        failed = [
+            record
+            for record in result["measurements"]
+            if record["case"].startswith("row-4/") and record["side"] == "baseline"
+        ]
+        self.assertEqual(len(failed), 2)
+        self.assertTrue(
+            all(
+                record["rounds"] == [[], []] and not record["warmups"]
+                for record in failed
+            )
+        )
+
     async def test_exact_main_failure_exhausts_one_arm_without_retry_or_old_samples(
         self,
     ):
@@ -162,18 +176,7 @@ class FreshAcquisitionTests(unittest.IsolatedAsyncioTestCase):
             result = await collect_fresh(runner, Path(raw))
             self.assertEqual(len(runner.calls), 1364 - 21)
             self.assertEqual(len(result["known_failures"]), 1)
-            failed = [
-                record
-                for record in result["measurements"]
-                if record["case"].startswith("row-4/") and record["side"] == "baseline"
-            ]
-            self.assertEqual(len(failed), 2)
-            self.assertTrue(
-                all(
-                    record["rounds"] == [[], []] and not record["warmups"]
-                    for record in failed
-                )
-            )
+            self.assert_failed_arms_empty(result)
             journal = [
                 json.loads(line)
                 for line in (Path(raw) / "attempts.jsonl").read_text().splitlines()
