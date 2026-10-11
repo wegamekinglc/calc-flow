@@ -28,6 +28,7 @@ use super::{
 use crate::{Result, StateSegment};
 
 mod delta;
+pub(super) mod rebase;
 pub(super) mod restored;
 pub(super) mod retarget;
 
@@ -50,6 +51,14 @@ pub(super) struct Base {
 }
 
 impl Base {
+    #[cfg(test)]
+    pub(super) fn test_owners(&self) -> Vec<std::sync::Weak<MemoryReservation>> {
+        std::iter::once(&self.funding)
+            .chain(&self.owners)
+            .map(Arc::downgrade)
+            .collect()
+    }
+
     pub(super) fn credit(&self) -> &MemoryReservation {
         &self.funding
     }

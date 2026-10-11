@@ -441,3 +441,43 @@ checkout, SHA-256
 `39db752837f811f592fe73efb8e2230f0121e6e982c96157e34ed3c1d10de3aa`.
 The eight-row timing tables remain the last measured runtime; current-runtime
 acceptance is still outstanding.
+
+## Share checkpoint payloads and bound expiration storage
+
+The current increment rebuilds only indexes for trusted, completely checkpointed
+append-only V2 history. Its sorted merge checks row IDs, payload locators,
+complete coverage, retained row/charge totals and next-row bounds; replacement
+indexes retain the original whole payload owners. Pending operations, tombstones and migrated or
+OFF-mutated history use the existing encoder. An OFF mutation invalidates history
+before any partial output or state mutation; ordinary delta/clean captures cannot
+silently restore trust. Installation checks the complete Cut and current policy.
+
+A three-array indexed expiration heap replaces the ordered tree. The recorded
+1,024-row constructor RED observed 101,696 requested peak bytes; the new exact
+arrays use 32,768, with no construction copy. Heap comparisons, dense removals,
+append and admission ordinals match the independent tree oracle. Source/V1
+accounting keeps its existing logical boundary. V2-restored heaps retain their
+own reservations through empty reuse, with old/new growth overlap prepaid before
+operator emission and refunded after actual allocation destruction.
+
+Sparse chunk inventory now stores a dense-slot hint in the existing 32-byte
+64-bit layout. Lookup validates row identity, exact chunk and source offset;
+moved rows and repaired chunks rebind that hint. Tests retain actual Shared
+payloads after managed V1 restore and check left/right positions independently.
+This avoids adding a second per-row lookup map or a retained-row scan.
+
+There are 41 distinct passing checks across the combined increment, including
+all-admission-point rebase refusal/retry, restored interleaved IDs, continuation,
+old-index retirement, worker drain, sparse repair and cancellation. Library
+Clippy and scoped format/contract/whitespace checks pass. The known pinned
+libtest-generated lint remains a separate unresolved CI limitation. Root fixture
+failures and their corrections remain in raw logs; they are not performance or
+expected behavior REDs.
+
+Source/evidence inventories are in the parent checkout's
+`target/issue406-expiration-heap/validation.json` and the feature worktree's
+`target/issue406-complete-acceptance/rebase-validation.json`. No release build,
+4M retry or timing workload ran for this increment. Current restore still charges
+historical maps and cumulative reader/row scratch; those remain the next changes.
+The eight-row tables above still describe runtime `e8a28d99` and do not establish
+performance for this implementation.

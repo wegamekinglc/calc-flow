@@ -196,7 +196,7 @@ pub(in crate::operator::join) fn copy_row(
         row_id,
         time,
         bytes: live_bytes,
-        live: AtomicBool::new(false),
+        dense: AtomicUsize::new(usize::MAX),
     });
     RowPayload::Shared {
         chunk: Arc::new(PayloadChunk {

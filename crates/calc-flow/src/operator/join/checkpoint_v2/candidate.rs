@@ -258,8 +258,12 @@ impl<'a, 'c> Decoder<'a, 'c> {
         let writer =
             super::WriterState::restored(self.snapshot, inventory, &self.workspace, self.check)?;
         let state = StreamJoinState {
-            left_expirations: expirations(&left, self.check)?,
-            right_expirations: expirations(&right, self.check)?,
+            left_expirations: ExpirationIndex::restored_funded(&left, &self.workspace, self.check)?,
+            right_expirations: ExpirationIndex::restored_funded(
+                &right,
+                &self.workspace,
+                self.check,
+            )?,
             left: left.into(),
             right: right.into(),
             next_left_row_id: metadata.next_left_row_id,
@@ -273,9 +277,11 @@ impl<'a, 'c> Decoder<'a, 'c> {
                 ..DeltaTracking::default()
             },
         };
-        for row in state.left.iter().chain(state.right.iter()) {
-            (self.check)()?;
-            row.record.mark_live();
+        for rows in [&state.left, &state.right] {
+            for (dense, row) in rows.iter().enumerate() {
+                (self.check)()?;
+                row.record.mark_live(dense);
+            }
         }
         (self.check)()?;
         Ok(Prepared {
@@ -339,16 +345,4 @@ fn validate_limits(spec: &StreamJoinSpec, sides: [&[StoredRow]; 2]) -> Result<()
         }
     }
     Ok(())
-}
-
-fn expirations(rows: &[StoredRow], check: &dyn Fn() -> Result<()>) -> Result<ExpirationIndex> {
-    let mut entries = BTreeMap::new();
-    for (index, row) in rows.iter().enumerate() {
-        check()?;
-        entries.insert((row.event_time, row.row_id), (index, index as u128));
-    }
-    Ok(ExpirationIndex {
-        entries,
-        next_ordinal: rows.len() as u128,
-    })
 }

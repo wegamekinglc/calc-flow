@@ -1,5 +1,7 @@
 #[cfg(test)]
 mod tests {
+    mod expiration_heap_tests;
+
     use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
     use datafusion::arrow::{
@@ -3327,6 +3329,9 @@ impl RetainedRows {
 
     fn swap_remove(&mut self, index: usize) -> StoredRow {
         let row = std::ops::DerefMut::deref_mut(self).swap_remove(index);
+        if let Some(moved) = self.0.get(index) {
+            moved.record.mark_live(index);
+        }
         if let Some(native) = &mut self.1 {
             let native = Arc::get_mut(native).expect("native probe released before eviction");
             native.remove(&row, self.0.get(index).map(|row| (row, index)), |dense| {
@@ -3354,47 +3359,6 @@ impl std::ops::Deref for RetainedRows {
 impl std::ops::DerefMut for RetainedRows {
     fn deref_mut(&mut self) -> &mut Self::Target {
         Arc::get_mut(&mut self.0).expect("compaction input released before retained mutation")
-    }
-}
-
-#[derive(Default)]
-struct ExpirationIndex {
-    entries: BTreeMap<(EventTime, u64), (usize, u128)>,
-    next_ordinal: u128,
-}
-
-impl ExpirationIndex {
-    fn restored(rows: &[StoredRow]) -> Self {
-        Self {
-            entries: rows
-                .iter()
-                .enumerate()
-                .map(|(index, row)| ((row.event_time, row.row_id), (index, index as u128)))
-                .collect(),
-            next_ordinal: rows.len() as u128,
-        }
-    }
-
-    fn append(&mut self, offset: usize, rows: &[StoredRow]) {
-        for (index, row) in rows.iter().enumerate() {
-            self.entries.insert(
-                (row.event_time, row.row_id),
-                (offset + index, self.next_ordinal + index as u128),
-            );
-        }
-        self.next_ordinal += rows.len() as u128;
-    }
-
-    fn identities(&self, rows: &[StoredRow]) -> Vec<(u64, EventTime, Arc<columnar::FramedKey>)> {
-        let mut ordered = self.entries.values().copied().collect::<Vec<_>>();
-        ordered.sort_by_key(|(_, ordinal)| *ordinal);
-        ordered
-            .into_iter()
-            .map(|(index, _)| {
-                let row = &rows[index];
-                (row.row_id, row.event_time, Arc::clone(&row.encoded_key))
-            })
-            .collect()
     }
 }
 
@@ -3455,6 +3419,8 @@ mod checkpoint_compaction;
 mod checkpoint_v2;
 mod columnar;
 mod data_work;
+mod expiration;
+use expiration::ExpirationIndex;
 mod key_arena;
 mod materialization;
 mod metadata_validation;
@@ -4534,6 +4500,7 @@ impl StreamJoinOperator {
         ingress: &str,
         prepared: PreparedJoinBatch,
         checkpointing: bool,
+        expiration_append: expiration::AppendPlan,
     ) -> Result<()> {
         let mut metrics = prepared.metrics;
         (metrics.retained_rows, metrics.retained_bytes) =
@@ -4543,8 +4510,13 @@ impl StreamJoinOperator {
         } else {
             JoinSide::Right
         };
-        for row in &prepared.retained {
-            row.record.mark_live();
+        let retained_offset = if side == JoinSide::Left {
+            self.state.left.len()
+        } else {
+            self.state.right.len()
+        };
+        for (offset, row) in prepared.retained.iter().enumerate() {
+            row.record.mark_live(retained_offset + offset);
             if checkpointing {
                 self.state.deltas.pending.push(PendingOp::Upsert {
                     side,
@@ -4561,9 +4533,11 @@ impl StreamJoinOperator {
             if !prepared.retained.is_empty() {
                 self.retained_key_cache.left = None;
             }
-            self.state
-                .left_expirations
-                .append(self.state.left.len(), &prepared.retained);
+            self.state.left_expirations.append(
+                &self.state.left,
+                &prepared.retained,
+                expiration_append,
+            );
             self.state.left.extend(prepared.retained);
             self.state.metrics.left = metrics;
         } else {
@@ -4571,9 +4545,11 @@ impl StreamJoinOperator {
             if !prepared.retained.is_empty() {
                 self.retained_key_cache.right = None;
             }
-            self.state
-                .right_expirations
-                .append(self.state.right.len(), &prepared.retained);
+            self.state.right_expirations.append(
+                &self.state.right,
+                &prepared.retained,
+                expiration_append,
+            );
             self.state.right.extend(prepared.retained);
             self.state.metrics.right = metrics;
         }
@@ -4764,13 +4740,29 @@ impl StreamOperator for StreamJoinOperator {
     ) -> Result<()> {
         context.check_cancelled()?;
         self.await_compaction_release(context).await?;
+        if !context.job().checkpointing() {
+            self.v2_writer.invalidate_history();
+        }
         let prepared = self.prepare_batch(ingress, &batch, context).await?;
+        let expirations = if prepared.incoming_is_left {
+            &self.state.left_expirations
+        } else {
+            &self.state.right_expirations
+        };
+        let expiration_append = expirations
+            .prepare_append(prepared.retained.len(), context)
+            .await?;
         if context.job().checkpointing() {
             self.v2_writer.changed(true)?;
         }
         self.emit_prepared(&prepared, context, output).await?;
         self.record_prepared_emitted(prepared.output.len())?;
-        self.commit_prepared(ingress, prepared, context.job().checkpointing())?;
+        self.commit_prepared(
+            ingress,
+            prepared,
+            context.job().checkpointing(),
+            expiration_append,
+        )?;
         if self.has_sparse_candidates() {
             return self.repair_sparse_chunks(context).await;
         }
@@ -4791,6 +4783,8 @@ impl StreamOperator for StreamJoinOperator {
         }
         if context.job().checkpointing() {
             self.v2_writer.changed(true)?;
+        } else {
+            self.v2_writer.invalidate_history();
         }
         self.evict_progress(ingress, progress, context.job().checkpointing())?;
         if self.has_sparse_candidates() {
@@ -4829,6 +4823,8 @@ impl StreamOperator for StreamJoinOperator {
                 JoinSide::Right,
                 right_identities,
             );
+        } else {
+            self.v2_writer.invalidate_history();
         }
         self.state.left.clear();
         self.state.right.clear();
@@ -5018,8 +5014,8 @@ impl StreamJoinOperator {
         let segments_since_base =
             u32::try_from(carried.len()).map_err(|_| counter_overflow(&self.name, "segments"))?;
         let state = StreamJoinState {
-            left_expirations: ExpirationIndex::restored(&left),
-            right_expirations: ExpirationIndex::restored(&right),
+            left_expirations: ExpirationIndex::restored(&left)?,
+            right_expirations: ExpirationIndex::restored(&right)?,
             left: left.into(),
             right: right.into(),
             next_left_row_id: metadata.next_left_row_id,
@@ -5035,8 +5031,10 @@ impl StreamJoinOperator {
                 ..DeltaTracking::default()
             },
         };
-        for row in state.left.iter().chain(state.right.iter()) {
-            row.record.mark_live();
+        for rows in [&state.left, &state.right] {
+            for (dense, row) in rows.iter().enumerate() {
+                row.record.mark_live(dense);
+            }
         }
         check()?;
         let writer = self.v2_writer.next_owner(true)?;
@@ -6845,7 +6843,7 @@ fn take_expired(
     progress: IngressProgress,
     extension: u64,
 ) -> Option<(u128, StoredRow)> {
-    let (&(time, _), _) = expirations.entries.first_key_value()?;
+    let time = expirations.first_time(rows)?;
     let expired = progress.state() == crate::IngressState::Ended
         || progress.watermark().is_some_and(|watermark| {
             i128::from(time.as_micros()) + i128::from(extension) < i128::from(watermark.as_micros())
@@ -6853,20 +6851,10 @@ fn take_expired(
     if !expired {
         return None;
     }
-    let (_, (index, ordinal)) = expirations
-        .entries
-        .pop_first()
-        .expect("expiration prefix exists");
+    let (index, ordinal) = expirations.pop(rows).expect("expiration prefix exists");
     #[cfg(test)]
     note_join_work(|work| work.retained_visits += 1);
     let row = rows.swap_remove(index);
-    if let Some(moved) = rows.get(index) {
-        expirations
-            .entries
-            .get_mut(&(moved.event_time, moved.row_id))
-            .expect("every live row has an expiration entry")
-            .0 = index;
-    }
     Some((ordinal, row))
 }
 

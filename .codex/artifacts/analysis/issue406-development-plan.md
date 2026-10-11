@@ -177,25 +177,40 @@ Library Clippy passes; the known generated-libtest diagnostic remains. Async
 preparation still owns its original pending copy through worker drain and is not
 certified to fit the hypothetical 4M dirty batch.
 
+The current increment adds a restricted shared-payload rebase for trusted,
+fully checkpointed, append-only V2 history. It merges ordered index records into
+exact replacement indexes while sharing immutable payload segments. Pending
+operations, tombstones, migration and untrusted OFF-mutated history retain the
+full encoder. Cut validation, retained metrics, source owners, cancellation and
+independent old-index retirement are preserved.
+
+Expiration storage now uses an indexed heap with exact restore arrays. A
+1,024-row allocation test drops construction peak from 101,696 to 32,768 bytes;
+this is an allocation measurement, not a throughput result. Ordinary source/V1
+logical accounting remains unchanged. V2-restored arrays keep separate funding
+through empty reuse and append; replacement capacity is admitted before output.
+Sparse chunk hints now carry dense positions and verify exact chunk/offset
+ownership, preserving moved-slot repair and independent left/right restore.
+
+The combined increment has 41 distinct passing focused tests and library Clippy
+passes. Tests cover tree/heap behavioral equivalence, ordering, cancellation,
+allocation refusal before emission, retry, sparse chunk repair, restored
+continuation, rebase fallback and retained segment owners. Fixture errors are
+retained separately from expected behavior REDs. No new release build or
+performance samples are included.
+
 The next implementation steps are:
 
-1. For fully checkpointed append-only history, finalize the eligibility and
-   funding guards, then implement a bounded sorted-index merge sharing existing
-   whole payload segments. Pending operations,
-   tombstones and partially dead payloads retain the existing encoder. Reconcile
-   all held old/new backing, capture controls and retirement ownership.
-2. Implement bounded restore folding and scoped per-row scratch while preserving
-   malformed-history rejection and atomic recovery. Explicitly select the
-   expiration representation and its source-pool funding boundary: charging the
-   proposed append-grown arrays to ordinary source state also requires reducing
-   fresh writer scratch and held-rebase overlap.
-3. Recompute complete simultaneous-reservation bounds before another release
-   build/full 4M diagnostic. The worksheet's 941 MB rebase, 928 MB restore and
-   borrowed E1's 979 MB leading terms exclude unresolved controls and are not
-   capacity certificates.
-4. Continue the remaining Join, ASOF, parallelism and harness improvements using
-   the completed CPU profiles. Measure the interner and pending-writer increments
-   with the final runtime; retain all eight targets and checkpoint policies.
+1. Replace historical restore maps/sets with bounded sorted-group cursors and
+   scope per-payload/per-row scratch. Preserve validation of every historical
+   payload row, including deleted rows, and atomic failed restoration.
+2. Reconcile complete simultaneous-reservation bounds for fresh/E1 encoding,
+   held E4/E5 replacement and empty-destination restore before another release
+   build/full 4M diagnostic. Current conditional control worksheets still need
+   the final source/folding terms; they are not capacity certificates.
+3. Continue the remaining Join, ASOF, parallelism and harness improvements using
+   the completed CPU profiles. Measure all increments with the final runtime;
+   retain all eight targets and checkpoint policies.
 
 The observed Python complexity CI failure is corrected in `25b6eb78` without
 changing the baseline or acceptance semantics. All 102 unique focused tests pass,

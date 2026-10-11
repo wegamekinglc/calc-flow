@@ -17,6 +17,9 @@ use std::{
 #[path = "pending_capture_tests.rs"]
 mod pending_capture_tests;
 
+#[path = "rebase_tests.rs"]
+mod rebase_tests;
+
 fn schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
         Field::new("key", DataType::Int64, false),

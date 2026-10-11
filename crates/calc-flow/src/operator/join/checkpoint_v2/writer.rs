@@ -27,7 +27,6 @@ mod prepared_tests;
 #[cfg(test)]
 pub(in crate::operator::join) type WriterTestHook = Arc<dyn Fn(&MemoryReservation) + Send + Sync>;
 
-#[derive(Default)]
 pub(in crate::operator::join) struct WriterState {
     tracker: cut::Tracker,
     prepared: Option<PreparedBase>,
@@ -37,6 +36,23 @@ pub(in crate::operator::join) struct WriterState {
     base_epoch: u64,
     dirty_epochs: u32,
     migration_required: bool,
+    history_trusted: bool,
+}
+
+impl Default for WriterState {
+    fn default() -> Self {
+        Self {
+            tracker: cut::Tracker::default(),
+            prepared: None,
+            prepared_delta: None,
+            deltas: Vec::new(),
+            base: None,
+            base_epoch: 0,
+            dirty_epochs: 0,
+            migration_required: false,
+            history_trusted: true,
+        }
+    }
 }
 
 struct PreparedBase {
@@ -71,10 +87,15 @@ impl WriterState {
         Ok(())
     }
 
+    pub(in crate::operator::join) fn invalidate_history(&mut self) {
+        self.history_trusted = false;
+    }
+
     pub(in crate::operator::join) fn next_owner(&self, migration_required: bool) -> Result<Self> {
         Ok(Self {
             tracker: self.tracker.next_owner()?,
             migration_required,
+            history_trusted: !migration_required,
             ..Self::default()
         })
     }
@@ -83,6 +104,7 @@ impl WriterState {
 struct Inputs {
     rows: [Option<Arc<Vec<StoredRow>>>; 2],
     pending: Option<Vec<PendingOp>>,
+    history: Option<encode::rebase::HistoryInput>,
     containers: Option<Arc<super::ContainerFunding>>,
     released: Option<tokio::sync::oneshot::Sender<()>>,
 }
@@ -92,6 +114,7 @@ impl Drop for Inputs {
         drop(self.rows[0].take());
         drop(self.rows[1].take());
         drop(self.pending.take());
+        drop(self.history.take());
         self.containers = None;
         if let Some(released) = self.released.take() {
             let _ = released.send(());
@@ -122,6 +145,7 @@ struct WriterWork {
 enum Preparation {
     Base,
     Delta,
+    Rebase,
 }
 
 impl OwnedCpuWork for WriterWork {
@@ -152,6 +176,9 @@ impl OwnedCpuWork for WriterWork {
 
 impl WriterWork {
     fn encode(&self, stop: &GatherStop) -> Result<encode::Base> {
+        if let Some(history) = &self.inputs.history {
+            return encode::rebase::encode(history, &self.workspace, &|| stop.check());
+        }
         if let Some(pending) = &self.inputs.pending {
             return encode::pending_owned(
                 pending,
@@ -191,6 +218,13 @@ impl StreamJoinOperator {
         self.begin_v2_preparation(context).await?;
         let Some(kind) = self.v2_preparation_kind() else {
             return context.check_cancelled();
+        };
+        let kind = if matches!(kind, Preparation::Base)
+            && encode::rebase::eligible(self, context).await?
+        {
+            Preparation::Rebase
+        } else {
+            kind
         };
         self.prepare_v2_kind(kind, context).await
     }
@@ -260,6 +294,8 @@ impl StreamJoinOperator {
                 .v2_writer
                 .tracker
                 .snapshot(self.state.last_checkpoint_epoch)
+            || (matches!(kind, Preparation::Rebase)
+                && (!context.job().checkpointing() || !self.v2_writer.history_trusted))
         {
             return Ok(());
         }
@@ -282,6 +318,7 @@ impl StreamJoinOperator {
         } else {
             self.v2_writer.prepared = Some(PreparedBase { cut, base });
         }
+        self.v2_writer.history_trusted = true;
         Ok(())
     }
 
@@ -314,7 +351,9 @@ impl StreamJoinOperator {
             .scope()?;
         let retirement = context.job().gather_owner().retain_retirement()?;
         let credit = workspace.new_empty();
-        let work = self.v2_writer_work(kind, workspace.new_empty(), context)?;
+        let work = self
+            .v2_writer_work(kind, workspace.new_empty(), context)
+            .await?;
         let ticket = scope
             .submit_observed_work(
                 work,
@@ -353,7 +392,7 @@ impl StreamJoinOperator {
         Ok(workspace)
     }
 
-    fn v2_writer_work(
+    async fn v2_writer_work(
         &mut self,
         kind: Preparation,
         workspace: MemoryReservation,
@@ -369,7 +408,7 @@ impl StreamJoinOperator {
                 restore_budget::registration_bytes()?,
             ])?,
         )?;
-        let mut inputs = self.v2_writer_inputs(kind, &workspace, &|| context.check_cancelled())?;
+        let mut inputs = self.v2_writer_inputs(kind, &workspace, context).await?;
         let (released, receiver) = tokio::sync::oneshot::channel();
         self.compaction_release = Some(receiver);
         inputs.released = Some(released);
@@ -388,31 +427,37 @@ impl StreamJoinOperator {
         })
     }
 
-    fn v2_writer_inputs(
+    async fn v2_writer_inputs(
         &self,
         kind: Preparation,
         workspace: &MemoryReservation,
-        check: &dyn Fn() -> Result<()>,
+        context: &StreamOperatorContext<'_>,
     ) -> Result<Inputs> {
         let mut inputs = Inputs {
             rows: [None, None],
             pending: None,
-            containers: self.v2_containers.clone(),
+            history: None,
+            containers: None,
             released: None,
         };
         match kind {
             Preparation::Base => {
+                inputs.containers.clone_from(&self.v2_containers);
                 inputs.rows = [
                     Some(Arc::clone(&self.state.left.0)),
                     Some(Arc::clone(&self.state.right.0)),
                 ];
             }
             Preparation::Delta => {
+                inputs.containers.clone_from(&self.v2_containers);
                 inputs.pending = Some(encode::copy_pending(
                     &self.state.deltas.pending,
                     workspace,
-                    check,
+                    &|| context.check_cancelled(),
                 )?);
+            }
+            Preparation::Rebase => {
+                inputs.history = Some(encode::rebase::copy(self, workspace, context).await?);
             }
         }
         Ok(inputs)

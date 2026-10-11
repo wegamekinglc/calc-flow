@@ -162,13 +162,31 @@ async fn test_v2_writer_prepares_only_dirty_payloads_until_four_dirty_epochs() {
         compacted.inline_metadata["v2_inventory"]["deltas"],
         serde_json::json!([])
     );
-    assert_eq!(compacted.segments.len(), 4);
-    assert_eq!(bases.load(Ordering::SeqCst), 2);
+    let payloads = compacted.inline_metadata["v2_inventory"]["payloads"]
+        .as_array()
+        .unwrap();
+    assert_eq!(compacted.segments.len(), payloads.len() + 2);
+    assert_eq!(
+        compacted.inline_metadata["v2_inventory"]["payloads"],
+        latest.inline_metadata["v2_inventory"]["payloads"]
+    );
+    for (name, segment) in &compacted.segments {
+        if name.ends_with("-base") {
+            continue;
+        }
+        assert!(name.contains("-payload-"));
+        assert_eq!(segment, &latest.segments[name]);
+        assert!(Arc::ptr_eq(
+            &segment.bytes_arc(),
+            &latest.segments[name].bytes_arc()
+        ));
+    }
+    assert_eq!(bases.load(Ordering::SeqCst), 1);
     assert_compacted_rows(&compacted);
     assert_eq!(latest.inline_metadata["v2_inventory"]["base_epoch"], 1);
     join.prepare_checkpoint_async(&context).await.unwrap();
     let clean = join.checkpoint(Epoch::new(13).unwrap()).unwrap();
-    assert_eq!(bases.load(Ordering::SeqCst), 2);
+    assert_eq!(bases.load(Ordering::SeqCst), 1);
     assert_compacted_rows(&clean);
     assert_eq!(
         clean.inline_metadata["v2_inventory"],
@@ -186,5 +204,5 @@ async fn test_v2_writer_prepares_only_dirty_payloads_until_four_dirty_epochs() {
     assert!(join.checkpoint(Epoch::new(u64::MAX).unwrap()).is_err());
     assert_eq!(join.state.last_checkpoint_epoch, Epoch::new(u64::MAX));
     assert_eq!(maximum.inline_metadata, unchanged);
-    assert_eq!(bases.load(Ordering::SeqCst), 2);
+    assert_eq!(bases.load(Ordering::SeqCst), 1);
 }

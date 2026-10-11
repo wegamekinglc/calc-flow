@@ -4,6 +4,9 @@ use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryLimit, MemoryPo
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Mutex};
 
+#[path = "rebase_admission_tests.rs"]
+mod rebase_admission_tests;
+
 #[derive(Clone, Copy, Debug)]
 struct Admission {
     reservation: usize,

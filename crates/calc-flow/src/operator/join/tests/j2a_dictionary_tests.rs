@@ -21,7 +21,15 @@ async fn test_first_retained_batch_interns_keys_and_shares_dirty_owners() {
             &prepared.retained[0].encoded_key
         ));
     }
-    operator.commit_prepared("left", prepared, true).unwrap();
+    let expiration_append = operator
+        .state
+        .left_expirations
+        .prepare_append(prepared.retained.len(), &context)
+        .await
+        .unwrap();
+    operator
+        .commit_prepared("left", prepared, true, expiration_append)
+        .unwrap();
     let retained = &operator.state.left[0].encoded_key;
     for op in operator.state.deltas.pending.iter() {
         let PendingOp::Upsert { encoded_key, .. } = op else {
@@ -51,7 +59,15 @@ async fn test_native_count_does_not_visit_materialized_pairs() {
         .prepare_batch("left", &left_batch((0..100).collect()), &context)
         .await
         .unwrap();
-    operator.commit_prepared("left", prepared, true).unwrap();
+    let expiration_append = operator
+        .state
+        .left_expirations
+        .prepare_append(prepared.retained.len(), &context)
+        .await
+        .unwrap();
+    operator
+        .commit_prepared("left", prepared, true, expiration_append)
+        .unwrap();
     reset_join_work();
     let prepared = operator
         .prepare_batch("right", &right_batch(vec![0]), &context)

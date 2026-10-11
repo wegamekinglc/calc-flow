@@ -108,9 +108,25 @@ pub(super) fn containers(rows: usize) -> Result<usize> {
     sum(&[
         product(rows, size_of::<StoredRow>())?,
         product(2, arc::<Vec<StoredRow>>()?)?,
-        tree::<(crate::EventTime, u64), (usize, u128)>(rows)?,
         sql_loan_controls()?,
     ])
+}
+
+pub(in crate::operator::join) fn expiration_credit(
+    workspace: &MemoryReservation,
+    capacity: usize,
+    controls: usize,
+) -> Result<MemoryReservation> {
+    let credit = workspace.new_empty();
+    reserve(
+        &credit,
+        sum(&[
+            product(capacity, 2 * size_of::<usize>() + size_of::<u128>())?,
+            controls,
+            registration_bytes()?,
+        ])?,
+    )?;
+    Ok(credit)
 }
 
 pub(super) fn tree<K, V>(count: usize) -> Result<usize> {
