@@ -20,7 +20,20 @@ pub(super) fn prepare(replay: &Replay, fixture: &mut Fixture) -> Result<()> {
     validate_identity(&source.envelope, &fixture.manifest)?;
     let trace = source.envelope["dispatch_trace"].clone();
     let node = validate_trace(replay, fixture, &trace)?;
-    let routes = source_ingresses(replay, &node)?;
+    let processing = reconstruct_processing(replay, fixture, &trace, &node)?;
+    let barriers = rendezvous(&processing, fixture)?;
+    fixture.processing = processing;
+    fixture.barriers = barriers;
+    Ok(())
+}
+
+fn reconstruct_processing(
+    replay: &Replay,
+    fixture: &Fixture,
+    trace: &Value,
+    node: &str,
+) -> Result<Vec<FixtureEvent>> {
+    let routes = source_ingresses(replay, node)?;
     let mut queues = BTreeMap::<String, VecDeque<FixtureEvent>>::new();
     for event in &fixture.processing {
         queues
@@ -30,7 +43,24 @@ pub(super) fn prepare(replay: &Replay, fixture: &mut Fixture) -> Result<()> {
     }
     let events = trace["events"].as_array().expect("validated events");
     let recorder = DispatchTraceOwner::default();
-    recorder.start(1, &replay.parts.fingerprint, &node, false)?;
+    recorder.start(1, &replay.parts.fingerprint, node, false)?;
+    let processing = ordered_events(&mut queues, events, node, &recorder)?;
+    if queues.values().any(|queue| !queue.is_empty())
+        || recorder.take()?["events"] != trace["events"]
+    {
+        return Err(invalid(
+            "dispatch events differ from sealed IPC geometry or per-input FIFO",
+        ));
+    }
+    Ok(processing)
+}
+
+fn ordered_events(
+    queues: &mut BTreeMap<String, VecDeque<FixtureEvent>>,
+    events: &[Value],
+    node: &str,
+    recorder: &DispatchTraceOwner,
+) -> Result<Vec<FixtureEvent>> {
     let mut processing = Vec::with_capacity(events.len());
     for actual in events {
         let ingress = actual["ingress"]
@@ -40,20 +70,17 @@ pub(super) fn prepare(replay: &Replay, fixture: &mut Fixture) -> Result<()> {
             .get_mut(ingress)
             .and_then(VecDeque::pop_front)
             .ok_or_else(|| invalid("dispatch event duplicates or exceeds fixture input"))?;
-        recorder.record(&node, ingress, &message(&event.kind))?;
+        recorder.record(node, ingress, &message(&event.kind))?;
         processing.push(event);
     }
-    if queues.values().any(|queue| !queue.is_empty())
-        || recorder.take()?["events"] != trace["events"]
-    {
-        return Err(invalid(
-            "dispatch events differ from sealed IPC geometry or per-input FIFO",
-        ));
-    }
-    let barriers = rendezvous(&processing, fixture)?;
-    fixture.processing = processing;
-    fixture.barriers = barriers;
-    Ok(())
+    Ok(processing)
+}
+
+fn invalid_source_digest(sha: &str) -> bool {
+    sha.len() != 64
+        || !sha
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn validate_identity(envelope: &Value, manifest: &Value) -> Result<()> {
@@ -61,12 +88,9 @@ fn validate_identity(envelope: &Value, manifest: &Value) -> Result<()> {
         || envelope["source_observation_id"]
             .as_str()
             .is_none_or(str::is_empty)
-        || envelope["source_raw_sha256"].as_str().is_none_or(|sha| {
-            sha.len() != 64
-                || !sha
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        })
+        || envelope["source_raw_sha256"]
+            .as_str()
+            .is_none_or(invalid_source_digest)
     {
         return Err(invalid("invalid dispatch source observation identity"));
     }
@@ -104,21 +128,45 @@ fn validate_trace(replay: &Replay, fixture: &Fixture, trace: &Value) -> Result<S
     let events = trace["events"]
         .as_array()
         .ok_or_else(|| invalid("dispatch events must be an array"))?;
-    if trace["schema"] != "calc-flow.asof-dispatch-trace.v1"
+    validate_trace_header(replay, fixture, trace, &node, events)?;
+    validate_final_frontier(replay, fixture, trace)?;
+    Ok(node)
+}
+
+fn invalid_trace_identity(trace: &Value, node: &str, fingerprint: &str, events: &[Value]) -> bool {
+    trace["schema"] != "calc-flow.asof-dispatch-trace.v1"
         || trace["node_id"] != node
-        || trace["compiled_plan_fingerprint"] != replay.parts.fingerprint
+        || trace["compiled_plan_fingerprint"] != fingerprint
         || trace["capacity"] != 8192
         || trace["record_count"].as_u64() != u64::try_from(events.len()).ok()
-        || events.is_empty()
+}
+
+fn invalid_trace_state(trace: &Value, events: &[Value], fixture: &Fixture) -> bool {
+    events.is_empty()
         || events.len() > 8192
         || trace["overflowed"] != false
         || trace["allow_barriers"] != false
         || trace["terminal_excluded"] != true
         || trace["job_id"].as_u64().is_none_or(|id| id == 0)
         || !fixture.preload.is_empty()
+}
+
+fn validate_trace_header(
+    replay: &Replay,
+    fixture: &Fixture,
+    trace: &Value,
+    node: &str,
+    events: &[Value],
+) -> Result<()> {
+    if invalid_trace_identity(trace, node, &replay.parts.fingerprint, events)
+        || invalid_trace_state(trace, events, fixture)
     {
         return Err(invalid("invalid checkpoint-free ASOF dispatch capture"));
     }
+    Ok(())
+}
+
+fn validate_final_frontier(replay: &Replay, fixture: &Fixture, trace: &Value) -> Result<()> {
     let output_node = &replay.parts.sink_routes[&replay.output_binding]
         .source
         .node_id;
@@ -143,7 +191,7 @@ fn validate_trace(replay: &Replay, fixture: &Fixture, trace: &Value) -> Result<S
             "final output projection watermark has not completed",
         ));
     }
-    Ok(node)
+    Ok(())
 }
 
 fn source_ingresses(replay: &Replay, asof: &str) -> Result<BTreeMap<String, String>> {

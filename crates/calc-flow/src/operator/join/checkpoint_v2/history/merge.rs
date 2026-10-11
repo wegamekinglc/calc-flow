@@ -2,7 +2,7 @@ use std::{cmp::Reverse, collections::BinaryHeap};
 
 use datafusion::execution::memory_pool::MemoryReservation;
 
-use super::super::frame::{Record, Records};
+use super::super::frame::{Record, Records, Upsert};
 use super::{History, JoinSide, Locator, Result, checked, invalid, product, reserve, sum};
 
 type Head = Reverse<(u64, Option<u64>, usize)>;
@@ -33,24 +33,7 @@ impl<'a> Scan<'a> {
                 .count(),
             2,
         )?;
-        let credit = history.credit.new_empty();
-        reserve(
-            &credit,
-            sum(&[
-                product(count, size_of::<Cursor<'_>>())?,
-                product(count, size_of::<Head>())?,
-            ])?,
-        )?;
-        let mut scan = Self {
-            cursors: Vec::with_capacity(count),
-            heap: BinaryHeap::with_capacity(count),
-            _credit: credit,
-        };
-        if scan.cursors.capacity() != count || scan.heap.capacity() != count {
-            return Err(invalid(
-                "V2 history cursor capacity differs from its funding",
-            ));
-        }
+        let mut scan = Self::allocate(count, &history.credit)?;
         for index in history.indexes.iter().filter(|index| index.side == side) {
             for records in index.groups {
                 check()?;
@@ -61,6 +44,28 @@ impl<'a> Scan<'a> {
                 });
                 scan.advance(scan.cursors.len() - 1)?;
             }
+        }
+        Ok(scan)
+    }
+
+    fn allocate(count: usize, workspace: &MemoryReservation) -> Result<Self> {
+        let credit = workspace.new_empty();
+        reserve(
+            &credit,
+            sum(&[
+                product(count, size_of::<Cursor<'_>>())?,
+                product(count, size_of::<Head>())?,
+            ])?,
+        )?;
+        let scan = Self {
+            cursors: Vec::with_capacity(count),
+            heap: BinaryHeap::with_capacity(count),
+            _credit: credit,
+        };
+        if scan.cursors.capacity() != count || scan.heap.capacity() != count {
+            return Err(invalid(
+                "V2 history cursor capacity differs from its funding",
+            ));
         }
         Ok(scan)
     }
@@ -90,23 +95,12 @@ impl<'a> Scan<'a> {
         Ok(Some((record, epoch)))
     }
 
-    pub(super) fn next(
+    fn remove_tombstones(
         &mut self,
-        next_id: u64,
+        row: &Upsert<'_>,
+        introduced: Option<u64>,
         check: &dyn Fn() -> Result<()>,
-    ) -> Result<Option<(Locator<'a>, bool)>> {
-        check()?;
-        let Some((record, introduced)) = self.pop()? else {
-            return Ok(None);
-        };
-        let Record::Upsert(row) = record else {
-            return Err(invalid("V2 tombstone does not identify a live row"));
-        };
-        if row.row_id >= next_id {
-            return Err(invalid(
-                "V2 historical row ID is reused or exceeds its next ID",
-            ));
-        }
+    ) -> Result<bool> {
         let mut live = true;
         while self
             .heap
@@ -131,6 +125,27 @@ impl<'a> Scan<'a> {
             }
             live = false;
         }
+        Ok(live)
+    }
+
+    pub(super) fn next(
+        &mut self,
+        next_id: u64,
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<Option<(Locator<'a>, bool)>> {
+        check()?;
+        let Some((record, introduced)) = self.pop()? else {
+            return Ok(None);
+        };
+        let Record::Upsert(row) = record else {
+            return Err(invalid("V2 tombstone does not identify a live row"));
+        };
+        if row.row_id >= next_id {
+            return Err(invalid(
+                "V2 historical row ID is reused or exceeds its next ID",
+            ));
+        }
+        let live = self.remove_tombstones(&row, introduced, check)?;
         Ok(Some((
             Locator {
                 row_id: row.row_id,

@@ -157,6 +157,17 @@ pub fn validate_matched_fixture(path: &Path) -> Result<Value> {
     if manifest["schema"] != "calc-flow.matched-native-fixture.v1" {
         return Err(invalid("unsupported fixture schema"));
     }
+    validate_fixture_mode(&manifest)?;
+    read_sealed(
+        path.parent()
+            .ok_or_else(|| invalid("fixture requires a parent directory"))?,
+        &manifest["project"],
+        "project",
+    )?;
+    Ok(manifest)
+}
+
+fn validate_fixture_mode(manifest: &Value) -> Result<()> {
     let enabled = manifest["checkpoint_enabled"]
         .as_bool()
         .ok_or_else(|| invalid("checkpoint_enabled must be boolean"))?;
@@ -165,13 +176,7 @@ pub fn validate_matched_fixture(path: &Path) -> Result<Value> {
             "checkpoint-off capability is unavailable in this binary",
         ));
     }
-    read_sealed(
-        path.parent()
-            .ok_or_else(|| invalid("fixture requires a parent directory"))?,
-        &manifest["project"],
-        "project",
-    )?;
-    Ok(manifest)
+    Ok(())
 }
 
 /// Replays a sealed fixture through the ordinary compiled native operator chain.
@@ -199,37 +204,40 @@ pub async fn run_matched_fixture(path: &Path, check_only: bool) -> Result<Value>
 /// Rejects unsupported arguments before fixture I/O, then propagates replay errors.
 pub async fn run_fixture_cli(arguments: &[String]) -> Result<Value> {
     match arguments {
-        [flag, path, trace_flag, trace]
-            if flag == "--matched-fixture" && trace_flag == "--dispatch-trace" =>
-        {
+        [flag, rest @ ..] if flag == "--matched-fixture" => run_matched_cli(rest).await,
+        [flag, path] if flag == "--prove-ordering" => run_ordering_fixture(path).await,
+        _ => Err(invalid_cli()),
+    }
+}
+
+fn invalid_cli() -> CalcFlowError {
+    invalid("matched fixture arguments require --matched-fixture PATH [--check]")
+}
+
+async fn run_matched_cli(arguments: &[String]) -> Result<Value> {
+    match arguments {
+        [path, trace_flag, trace] if trace_flag == "--dispatch-trace" => {
             run_dispatch_fixture(path, trace, false).await
         }
-        [flag, path, trace_flag, trace, check]
-            if flag == "--matched-fixture"
-                && trace_flag == "--dispatch-trace"
-                && check == "--check" =>
+        [path, trace_flag, trace, check]
+            if trace_flag == "--dispatch-trace" && check == "--check" =>
         {
             run_dispatch_fixture(path, trace, true).await
         }
-        [flag, path] if flag == "--prove-ordering" => {
-            let path = std::path::PathBuf::from(path);
-            let fixture = tokio::task::spawn_blocking(move || load_fixture(&path, true))
-                .await
-                .map_err(|error| invalid(format!("fixture loader task: {error}")))??;
-            with_process_observations(
-                crate::runtime::streaming::benchmark_replay::prove_ordering(fixture).await?,
-            )
-        }
-        [flag, path] if flag == "--matched-fixture" => {
-            run_matched_fixture(Path::new(path), false).await
-        }
-        [flag, path, check] if flag == "--matched-fixture" && check == "--check" => {
-            run_matched_fixture(Path::new(path), true).await
-        }
-        _ => Err(invalid(
-            "matched fixture arguments require --matched-fixture PATH [--check]",
-        )),
+        [path] => run_matched_fixture(Path::new(path), false).await,
+        [path, check] if check == "--check" => run_matched_fixture(Path::new(path), true).await,
+        _ => Err(invalid_cli()),
     }
+}
+
+async fn run_ordering_fixture(path: &str) -> Result<Value> {
+    let path = std::path::PathBuf::from(path);
+    let fixture = tokio::task::spawn_blocking(move || load_fixture(&path, true))
+        .await
+        .map_err(|error| invalid(format!("fixture loader task: {error}")))??;
+    with_process_observations(
+        crate::runtime::streaming::benchmark_replay::prove_ordering(fixture).await?,
+    )
 }
 
 async fn run_dispatch_fixture(path: &str, trace: &str, check_only: bool) -> Result<Value> {
@@ -266,51 +274,92 @@ fn load_fixture(path: &Path, check_only: bool) -> Result<Fixture> {
     let root = path
         .parent()
         .ok_or_else(|| invalid("fixture requires a parent"))?;
+    let geometry = fixture_geometry(&manifest, check_only)?;
+    load_fixture_contents(root, manifest, geometry)
+}
+
+#[derive(Clone, Copy)]
+struct FixtureGeometry {
+    join: bool,
+    rows: u64,
+    batch_rows: u64,
+}
+
+fn fixed_workload_mismatch(rows: u64, batch_rows: u64, check_only: bool) -> bool {
+    rows == 0 || batch_rows == 0 || (!check_only && (rows != 1_000_000 || batch_rows != 1024))
+}
+
+fn fixture_row_count(manifest: &Value, join: bool) -> Result<u64> {
+    manifest[if join { "rows" } else { "rows_per_side" }]
+        .as_u64()
+        .ok_or_else(|| invalid("rows_per_side must be positive"))
+}
+
+fn fixture_geometry(manifest: &Value, check_only: bool) -> Result<FixtureGeometry> {
     let join = manifest["scenario"] == "join_sealed";
     if !join && manifest["scenario"] != "asof_join" {
         return Err(invalid("unsupported matched fixture scenario"));
     }
-    let rows = manifest[if join { "rows" } else { "rows_per_side" }]
-        .as_u64()
-        .ok_or_else(|| invalid("rows_per_side must be positive"))?;
+    let rows = fixture_row_count(manifest, join)?;
     let batch_rows = manifest["batch_rows"]
         .as_u64()
         .ok_or_else(|| invalid("batch_rows must be positive"))?;
-    if rows == 0 || batch_rows == 0 || (!check_only && (rows != 1_000_000 || batch_rows != 1024)) {
+    if fixed_workload_mismatch(rows, batch_rows, check_only) {
         return Err(invalid("fixture does not match the fixed workload size"));
     }
-    let project = crate::import_project_json(&read_sealed(root, &manifest["project"], "project")?)?;
-    let inputs = load_inputs(root, &manifest, rows, batch_rows, join)?;
-    let expected = load_expected(root, &manifest, rows)?;
+    Ok(FixtureGeometry {
+        join,
+        rows,
+        batch_rows,
+    })
+}
+
+fn load_events(root: &Path, manifest: &Value) -> Result<Value> {
     let events: Value = serde_json::from_slice(&read_sealed(root, &manifest["events"], "events")?)
         .map_err(|error| invalid(format!("events JSON: {error}")))?;
     if manifest["canonical_native_events_sha256"].as_str() != Some(fingerprint(&events)?.as_str()) {
         return Err(invalid("canonical native events SHA256 mismatch"));
     }
-    let mut phases = prepare_events(&manifest, &events, &inputs, batch_rows, join)?;
+    Ok(events)
+}
+
+fn load_fixture_contents(
+    root: &Path,
+    manifest: Value,
+    geometry: FixtureGeometry,
+) -> Result<Fixture> {
+    let FixtureGeometry {
+        rows,
+        batch_rows,
+        join,
+    } = geometry;
+    let project = crate::import_project_json(&read_sealed(root, &manifest["project"], "project")?)?;
+    let inputs = load_inputs(root, &manifest, rows, batch_rows, join)?;
+    let expected = load_expected(root, &manifest, rows)?;
+    let events = load_events(root, &manifest)?;
+    assemble_fixture(manifest, project, &inputs, expected, &events, geometry)
+}
+
+fn assemble_fixture(
+    manifest: Value,
+    project: crate::ProjectSpec,
+    inputs: &BTreeMap<String, Vec<RecordBatch>>,
+    expected: Vec<RecordBatch>,
+    events: &Value,
+    geometry: FixtureGeometry,
+) -> Result<Fixture> {
+    let FixtureGeometry {
+        rows,
+        batch_rows,
+        join,
+    } = geometry;
+    let mut phases = prepare_events(&manifest, events, inputs, batch_rows, join)?;
     let processing = phases.remove("processing").expect("parsed phase");
-    let barriers = prepare_barriers(&events, &processing, rows, batch_rows, join)?;
+    let barriers = prepare_barriers(events, &processing, rows, batch_rows, join)?;
     let preload = phases.remove("preload").expect("parsed phase");
-    if join
-        && (preload.len() != 2
-            || preload.iter().any(|event| event.input != "right")
-            || !matches!(preload[0].kind, EventKind::Data(_))
-            || !matches!(preload[1].kind, EventKind::Watermark(_)))
-    {
-        return Err(invalid(
-            "static Join preload requires right Data then sealed Watermark",
-        ));
-    }
+    validate_preload(&preload, join)?;
     let terminal = phases.remove("terminal").expect("parsed phase");
-    if terminal.len() != inputs.len()
-        || terminal
-            .iter()
-            .map(|event| event.input.clone())
-            .collect::<BTreeSet<_>>()
-            != inputs.keys().cloned().collect()
-    {
-        return Err(invalid("every fixture input must end exactly once"));
-    }
+    validate_terminal(&terminal, inputs)?;
     Ok(Fixture {
         manifest,
         project,
@@ -323,6 +372,36 @@ fn load_fixture(path: &Path, check_only: bool) -> Result<Fixture> {
     })
 }
 
+fn validate_preload(preload: &[FixtureEvent], join: bool) -> Result<()> {
+    if join
+        && (preload.len() != 2
+            || preload.iter().any(|event| event.input != "right")
+            || !matches!(preload[0].kind, EventKind::Data(_))
+            || !matches!(preload[1].kind, EventKind::Watermark(_)))
+    {
+        return Err(invalid(
+            "static Join preload requires right Data then sealed Watermark",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_terminal(
+    terminal: &[FixtureEvent],
+    inputs: &BTreeMap<String, Vec<RecordBatch>>,
+) -> Result<()> {
+    if terminal.len() != inputs.len()
+        || terminal
+            .iter()
+            .map(|event| event.input.clone())
+            .collect::<BTreeSet<_>>()
+            != inputs.keys().cloned().collect()
+    {
+        return Err(invalid("every fixture input must end exactly once"));
+    }
+    Ok(())
+}
+
 fn load_inputs(
     root: &Path,
     manifest: &Value,
@@ -330,33 +409,12 @@ fn load_inputs(
     batch_rows: u64,
     join: bool,
 ) -> Result<BTreeMap<String, Vec<RecordBatch>>> {
-    let records = manifest["inputs"]
-        .as_object()
-        .ok_or_else(|| invalid("fixture inputs must be an object"))?;
-    if records.len() != 2 {
-        return Err(invalid("ASOF fixture requires exactly two inputs"));
-    }
+    let records = input_records(manifest)?;
     let mut inputs = BTreeMap::new();
     let mut input_identity = serde_json::Map::new();
     for (name, record) in records {
-        let input_rows = if join && name == "right" {
-            manifest["dimension_rows"]
-                .as_u64()
-                .filter(|rows| *rows > 0 && *rows <= batch_rows)
-                .ok_or_else(|| invalid("invalid static dimension row count"))?
-        } else {
-            rows
-        };
-        let batches = read_ipc(&read_sealed(root, record, name)?)?;
-        if batches
-            .iter()
-            .map(|batch| batch.num_rows() as u64)
-            .sum::<u64>()
-            != input_rows
-            || record["rows"].as_u64() != Some(input_rows)
-        {
-            return Err(invalid(format!("input {name} has inconsistent row count")));
-        }
+        let input_rows = input_row_count(manifest, name, rows, batch_rows, join)?;
+        let batches = load_input(root, record, name, input_rows)?;
         input_identity.insert(
             name.clone(),
             json!({"sha256":record["sha256"],"rows":record["rows"]}),
@@ -367,6 +425,52 @@ fn load_inputs(
         return Err(invalid("input identity SHA256 mismatch"));
     }
     Ok(inputs)
+}
+
+fn input_records(manifest: &Value) -> Result<&serde_json::Map<String, Value>> {
+    let records = manifest["inputs"]
+        .as_object()
+        .ok_or_else(|| invalid("fixture inputs must be an object"))?;
+    if records.len() != 2 {
+        return Err(invalid("ASOF fixture requires exactly two inputs"));
+    }
+    Ok(records)
+}
+
+fn input_row_count(
+    manifest: &Value,
+    name: &str,
+    rows: u64,
+    batch_rows: u64,
+    join: bool,
+) -> Result<u64> {
+    if join && name == "right" {
+        manifest["dimension_rows"]
+            .as_u64()
+            .filter(|rows| *rows > 0 && *rows <= batch_rows)
+            .ok_or_else(|| invalid("invalid static dimension row count"))
+    } else {
+        Ok(rows)
+    }
+}
+
+fn load_input(
+    root: &Path,
+    record: &Value,
+    name: &str,
+    input_rows: u64,
+) -> Result<Vec<RecordBatch>> {
+    let batches = read_ipc(&read_sealed(root, record, name)?)?;
+    if batches
+        .iter()
+        .map(|batch| batch.num_rows() as u64)
+        .sum::<u64>()
+        != input_rows
+        || record["rows"].as_u64() != Some(input_rows)
+    {
+        return Err(invalid(format!("input {name} has inconsistent row count")));
+    }
+    Ok(batches)
 }
 
 fn load_expected(root: &Path, manifest: &Value, rows: u64) -> Result<Vec<RecordBatch>> {
@@ -395,55 +499,24 @@ fn prepare_events(
     join: bool,
 ) -> Result<BTreeMap<&'static str, Vec<FixtureEvent>>> {
     let mut partial = serde_json::Map::new();
-    let mut seen = BTreeSet::new();
-    let mut ids = BTreeSet::new();
+    let mut preparation = EventPreparation {
+        inputs,
+        batch_rows,
+        join,
+        seen: BTreeSet::new(),
+        ids: BTreeSet::new(),
+    };
     let mut phases = BTreeMap::new();
     for phase in ["preload", "processing", "terminal"] {
-        let raw = events[phase]
-            .as_array()
-            .ok_or_else(|| invalid(format!("missing {phase} events")))?;
-        if !join && phase == "preload" && !raw.is_empty() {
-            return Err(invalid("ASOF preloading is outside the matched contract"));
-        }
-        let mut grouped = serde_json::Map::new();
-        let mut prepared = Vec::new();
-        for event in raw {
-            let input = event["input"]
-                .as_str()
-                .filter(|input| inputs.contains_key(*input))
-                .ok_or_else(|| invalid("unknown fixture input"))?;
-            let id = event["event_id"]
-                .as_str()
-                .ok_or_else(|| invalid("missing event identity"))?;
-            if !ids.insert(id.to_owned()) {
-                return Err(invalid("duplicate event identity"));
-            }
-            grouped
-                .entry(input.to_owned())
-                .or_insert_with(|| json!([]))
-                .as_array_mut()
-                .expect("created array")
-                .push(event.clone());
-            let kind = prepare_kind(event, input, phase, inputs, &mut seen, batch_rows, join)?;
-            let chunk = event["chunk_id"].as_u64();
-            if phase == "processing" && chunk.is_none() {
-                return Err(invalid("processing event has no chunk identity"));
-            }
-            prepared.push(FixtureEvent {
-                input: input.to_owned(),
-                kind,
-                id: id.to_owned(),
-                chunk,
-            });
-        }
-        partial.insert(phase.into(), grouped.into());
+        let (grouped, prepared) = preparation.phase(events, phase)?;
+        partial.insert(phase.into(), grouped);
         phases.insert(phase, prepared);
     }
     let expected_indices = inputs
         .iter()
         .flat_map(|(name, batches)| (0..batches.len()).map(move |index| (name.clone(), index)))
         .collect::<BTreeSet<_>>();
-    if seen != expected_indices {
+    if preparation.seen != expected_indices {
         return Err(invalid("fixture omits input record batches"));
     }
     partial.insert("barriers".into(), events["barriers"].clone());
@@ -453,6 +526,134 @@ fn prepare_events(
         return Err(invalid("shared partial order SHA256 mismatch"));
     }
     Ok(phases)
+}
+
+struct EventPreparation<'a> {
+    inputs: &'a BTreeMap<String, Vec<RecordBatch>>,
+    batch_rows: u64,
+    join: bool,
+    seen: BTreeSet<(String, usize)>,
+    ids: BTreeSet<String>,
+}
+
+impl EventPreparation<'_> {
+    fn phase(&mut self, events: &Value, phase: &str) -> Result<(Value, Vec<FixtureEvent>)> {
+        let raw = events[phase]
+            .as_array()
+            .ok_or_else(|| invalid(format!("missing {phase} events")))?;
+        if !self.join && phase == "preload" && !raw.is_empty() {
+            return Err(invalid("ASOF preloading is outside the matched contract"));
+        }
+        let mut grouped = serde_json::Map::new();
+        let mut prepared = Vec::new();
+        for event in raw {
+            prepared.push(self.event(event, phase, &mut grouped)?);
+        }
+        Ok((grouped.into(), prepared))
+    }
+
+    fn identity<'a>(&mut self, event: &'a Value) -> Result<(&'a str, &'a str)> {
+        let input = event["input"]
+            .as_str()
+            .filter(|input| self.inputs.contains_key(*input))
+            .ok_or_else(|| invalid("unknown fixture input"))?;
+        let id = event["event_id"]
+            .as_str()
+            .ok_or_else(|| invalid("missing event identity"))?;
+        if !self.ids.insert(id.to_owned()) {
+            return Err(invalid("duplicate event identity"));
+        }
+        Ok((input, id))
+    }
+
+    fn event(
+        &mut self,
+        event: &Value,
+        phase: &str,
+        grouped: &mut serde_json::Map<String, Value>,
+    ) -> Result<FixtureEvent> {
+        let (input, id) = self.identity(event)?;
+        grouped
+            .entry(input.to_owned())
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .expect("created array")
+            .push(event.clone());
+        let kind = prepare_kind(
+            event,
+            input,
+            phase,
+            self.inputs,
+            &mut self.seen,
+            self.batch_rows,
+            self.join,
+        )?;
+        let chunk = event["chunk_id"].as_u64();
+        if phase == "processing" && chunk.is_none() {
+            return Err(invalid("processing event has no chunk identity"));
+        }
+        Ok(FixtureEvent {
+            input: input.to_owned(),
+            kind,
+            id: id.to_owned(),
+            chunk,
+        })
+    }
+}
+
+fn data_record(
+    index: &Value,
+    input: &str,
+    inputs: &BTreeMap<String, Vec<RecordBatch>>,
+    seen: &mut BTreeSet<(String, usize)>,
+) -> Result<RecordBatch> {
+    let index = index
+        .as_u64()
+        .and_then(|index| usize::try_from(index).ok())
+        .ok_or_else(|| invalid("invalid data batch index"))?;
+    if !seen.insert((input.to_owned(), index)) {
+        return Err(invalid("duplicate input record batch"));
+    }
+    Ok(inputs[input]
+        .get(index)
+        .ok_or_else(|| invalid("data batch index out of range"))?
+        .clone())
+}
+
+fn data_group(
+    event: &Value,
+    input: &str,
+    inputs: &BTreeMap<String, Vec<RecordBatch>>,
+    seen: &mut BTreeSet<(String, usize)>,
+) -> Result<Vec<RecordBatch>> {
+    let indices = event["batches"]
+        .as_array()
+        .filter(|indices| !indices.is_empty())
+        .ok_or_else(|| invalid("missing data batch group"))?;
+    let mut group = Vec::new();
+    for index in indices {
+        group.push(data_record(index, input, inputs, seen)?);
+    }
+    Ok(group)
+}
+
+fn prepare_data(
+    event: &Value,
+    input: &str,
+    inputs: &BTreeMap<String, Vec<RecordBatch>>,
+    seen: &mut BTreeSet<(String, usize)>,
+    batch_rows: u64,
+) -> Result<EventKind> {
+    let group = data_group(event, input, inputs, seen)?;
+    let batch = crate::Batch::table(group, crate::BatchMetadata::default())?;
+    if batch.num_rows() == 0 || batch.num_rows() as u64 > batch_rows {
+        return Err(invalid("data group exceeds fixed message rows"));
+    }
+    Ok(EventKind::Data(batch))
+}
+
+fn is_data_phase(phase: &str, join: bool) -> bool {
+    phase == "processing" || (join && phase == "preload")
 }
 
 fn prepare_kind(
@@ -465,34 +666,10 @@ fn prepare_kind(
     join: bool,
 ) -> Result<EventKind> {
     Ok(match event["kind"].as_str() {
-        Some("data") if phase == "processing" || (join && phase == "preload") => {
-            let indices = event["batches"]
-                .as_array()
-                .filter(|indices| !indices.is_empty())
-                .ok_or_else(|| invalid("missing data batch group"))?;
-            let mut group = Vec::new();
-            for index in indices {
-                let index = index
-                    .as_u64()
-                    .and_then(|index| usize::try_from(index).ok())
-                    .ok_or_else(|| invalid("invalid data batch index"))?;
-                if !seen.insert((input.to_owned(), index)) {
-                    return Err(invalid("duplicate input record batch"));
-                }
-                group.push(
-                    inputs[input]
-                        .get(index)
-                        .ok_or_else(|| invalid("data batch index out of range"))?
-                        .clone(),
-                );
-            }
-            let batch = crate::Batch::table(group, crate::BatchMetadata::default())?;
-            if batch.num_rows() == 0 || batch.num_rows() as u64 > batch_rows {
-                return Err(invalid("data group exceeds fixed message rows"));
-            }
-            EventKind::Data(batch)
+        Some("data") if is_data_phase(phase, join) => {
+            prepare_data(event, input, inputs, seen, batch_rows)?
         }
-        Some("watermark") if phase == "processing" || (join && phase == "preload") => {
+        Some("watermark") if is_data_phase(phase, join) => {
             EventKind::Watermark(crate::EventTime::from_micros(
                 event["micros"]
                     .as_i64()
@@ -511,57 +688,119 @@ fn prepare_barriers(
     batch_rows: u64,
     join: bool,
 ) -> Result<BTreeMap<String, usize>> {
-    let mut barriers = BTreeMap::new();
-    let mut covered = BTreeSet::new();
-    let row_count = usize::try_from(rows).map_err(|_| invalid("rows exceed platform capacity"))?;
-    let mut previous_rows = 0;
+    let mut coverage = RendezvousCoverage {
+        barriers: BTreeMap::new(),
+        covered: BTreeSet::new(),
+        row_count: usize::try_from(rows).map_err(|_| invalid("rows exceed platform capacity"))?,
+        previous_rows: 0,
+    };
     for (chunk_index, barrier) in events["barriers"]
         .as_array()
         .ok_or_else(|| invalid("missing rendezvous barriers"))?
         .iter()
         .enumerate()
     {
-        let chunk = barrier["chunk_id"]
-            .as_u64()
-            .ok_or_else(|| invalid("invalid barrier chunk"))?;
-        let after = barrier["after_events"]
-            .as_array()
-            .filter(|after| after.len() == if join { 2 } else { 4 })
-            .ok_or_else(|| invalid("barrier requires two data and two watermark events"))?;
-        let ids = after
+        prepare_barrier(
+            barrier,
+            processing,
+            chunk_index,
+            FixtureGeometry {
+                join,
+                rows,
+                batch_rows,
+            },
+            &mut coverage,
+        )?;
+    }
+    if coverage.previous_rows != coverage.row_count
+        || coverage.covered != processing.iter().map(|event| event.id.clone()).collect()
+    {
+        return Err(invalid("incomplete rendezvous coverage"));
+    }
+    Ok(coverage.barriers)
+}
+
+fn barrier_event_ids(barrier: &Value, join: bool) -> Result<(u64, Vec<String>)> {
+    let chunk = barrier["chunk_id"]
+        .as_u64()
+        .ok_or_else(|| invalid("invalid barrier chunk"))?;
+    let after = barrier["after_events"]
+        .as_array()
+        .filter(|after| after.len() == if join { 2 } else { 4 })
+        .ok_or_else(|| invalid("barrier requires two data and two watermark events"))?;
+    let ids = after
+        .iter()
+        .map(|id| {
+            id.as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| invalid("invalid barrier event identity"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok((chunk, ids))
+}
+
+fn select_barrier_chunk<'a>(
+    processing: &'a [FixtureEvent],
+    chunk: u64,
+    chunk_index: usize,
+    ids: &[String],
+    join: bool,
+) -> Result<Vec<&'a FixtureEvent>> {
+    let selected = processing
+        .iter()
+        .filter(|event| event.chunk == Some(chunk))
+        .collect::<Vec<_>>();
+    if selected.len() != (if join { 2 } else { 4 })
+        || selected.iter().map(|event| &event.id).ne(ids.iter())
+    {
+        return Err(invalid("barrier does not follow its four canonical events"));
+    }
+    let width = if join { 2 } else { 4 };
+    if chunk != chunk_index as u64
+        || processing
             .iter()
-            .map(|id| {
-                id.as_str()
-                    .map(str::to_owned)
-                    .ok_or_else(|| invalid("invalid barrier event identity"))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let selected = processing
-            .iter()
-            .filter(|event| event.chunk == Some(chunk))
-            .collect::<Vec<_>>();
-        if selected.len() != (if join { 2 } else { 4 })
-            || selected.iter().map(|event| &event.id).ne(ids.iter())
-        {
-            return Err(invalid("barrier does not follow its four canonical events"));
-        }
-        let width = if join { 2 } else { 4 };
-        if chunk != chunk_index as u64
-            || processing
-                .iter()
-                .skip(chunk_index * width)
-                .take(width)
-                .map(|event| &event.id)
-                .ne(ids.iter())
-        {
-            return Err(invalid("rendezvous chunks must be contiguous"));
-        }
-        let remaining = rows.saturating_sub(chunk * batch_rows);
-        let expected_rows = usize::try_from(remaining.min(batch_rows))
-            .map_err(|_| invalid("batch size exceeds platform capacity"))?;
-        validate_chunk(&selected, join, expected_rows)?;
-        for id in &ids {
-            if !covered.insert(id.clone()) {
+            .skip(chunk_index * width)
+            .take(width)
+            .map(|event| &event.id)
+            .ne(ids.iter())
+    {
+        return Err(invalid("rendezvous chunks must be contiguous"));
+    }
+    Ok(selected)
+}
+
+fn prepare_barrier(
+    barrier: &Value,
+    processing: &[FixtureEvent],
+    chunk_index: usize,
+    geometry: FixtureGeometry,
+    coverage: &mut RendezvousCoverage,
+) -> Result<()> {
+    let FixtureGeometry {
+        rows,
+        batch_rows,
+        join,
+    } = geometry;
+    let (chunk, ids) = barrier_event_ids(barrier, join)?;
+    let selected = select_barrier_chunk(processing, chunk, chunk_index, &ids, join)?;
+    let remaining = rows.saturating_sub(chunk * batch_rows);
+    let expected_rows = usize::try_from(remaining.min(batch_rows))
+        .map_err(|_| invalid("batch size exceeds platform capacity"))?;
+    validate_chunk(&selected, join, expected_rows)?;
+    coverage.add(&ids, barrier, expected_rows)
+}
+
+struct RendezvousCoverage {
+    barriers: BTreeMap<String, usize>,
+    covered: BTreeSet<String>,
+    row_count: usize,
+    previous_rows: usize,
+}
+
+impl RendezvousCoverage {
+    fn add(&mut self, ids: &[String], barrier: &Value, expected_rows: usize) -> Result<()> {
+        for id in ids {
+            if !self.covered.insert(id.clone()) {
                 return Err(invalid("overlapping rendezvous barriers"));
             }
         }
@@ -569,18 +808,14 @@ fn prepare_barriers(
             .as_u64()
             .and_then(|rows| usize::try_from(rows).ok())
             .ok_or_else(|| invalid("invalid rendezvous output count"))?;
-        if output_rows != previous_rows + expected_rows || output_rows > row_count {
+        if output_rows != self.previous_rows + expected_rows || output_rows > self.row_count {
             return Err(invalid("invalid rendezvous row progression"));
         }
-        previous_rows = output_rows;
-        barriers.insert(ids.last().expect("four ids").clone(), output_rows);
+        self.previous_rows = output_rows;
+        self.barriers
+            .insert(ids.last().expect("four ids").clone(), output_rows);
+        Ok(())
     }
-    if previous_rows != row_count
-        || covered != processing.iter().map(|event| event.id.clone()).collect()
-    {
-        return Err(invalid("incomplete rendezvous coverage"));
-    }
-    Ok(barriers)
 }
 
 fn validate_chunk(selected: &[&FixtureEvent], join: bool, expected_rows: usize) -> Result<()> {
@@ -588,21 +823,28 @@ fn validate_chunk(selected: &[&FixtureEvent], join: bool, expected_rows: usize) 
     for event in selected {
         by_input.entry(&event.input).or_default().push(event);
     }
+    validate_chunk_inputs(&by_input, join)?;
+    if expected_rows == 0 || by_input.values().any(|group| !matches!(&group[0].kind, EventKind::Data(batch) if batch.num_rows() == expected_rows)) {
+            return Err(invalid("processing message geometry differs from full chunks and final tail"));
+        }
+    Ok(())
+}
+
+fn invalid_chunk_input(group: &[&FixtureEvent]) -> bool {
+    group.len() != 2
+        || !matches!(group[0].kind, EventKind::Data(_))
+        || !matches!(group[1].kind, EventKind::Watermark(_))
+}
+
+fn validate_chunk_inputs(by_input: &BTreeMap<&str, Vec<&FixtureEvent>>, join: bool) -> Result<()> {
     if by_input.len() != (if join { 1 } else { 2 })
         || (join && !by_input.contains_key("left"))
-        || by_input.values().any(|group| {
-            group.len() != 2
-                || !matches!(group[0].kind, EventKind::Data(_))
-                || !matches!(group[1].kind, EventKind::Watermark(_))
-        })
+        || by_input.values().any(|group| invalid_chunk_input(group))
     {
         return Err(invalid(
             "each processing input requires Data then Watermark",
         ));
     }
-    if expected_rows == 0 || by_input.values().any(|group| !matches!(&group[0].kind, EventKind::Data(batch) if batch.num_rows() == expected_rows)) {
-            return Err(invalid("processing message geometry differs from full chunks and final tail"));
-        }
     Ok(())
 }
 

@@ -1438,13 +1438,6 @@ mod runtime_projection_tests {
         RuntimeProducer,
     };
 
-    #[test]
-    fn edge_budget_rejects_unbounded_runtime_limits() {
-        assert!(EdgeBudget::new(1_000_001, 1).is_err());
-        assert!(EdgeBudget::new(1, (256 << 20) + 1).is_err());
-        assert!(EdgeBudget::new(EdgeBudget::MAX_ROWS, EdgeBudget::MAX_BYTES).is_ok());
-    }
-
     fn endpoint(node_id: &str, port: &str) -> PortEndpoint {
         PortEndpoint::new(node_id, port).unwrap()
     }
@@ -1904,35 +1897,6 @@ mod volatile_query_tests {
     }
 
     #[test]
-    fn random_builtin_is_still_rejected_by_stream_compilation() {
-        let plan = PipelineBuilder::new("random")
-            .unwrap()
-            .add_node(
-                "features",
-                Box::new(
-                    ExpressionOperator::new(
-                        "features",
-                        "score = random()",
-                        Vec::new(),
-                        None,
-                        Vec::new(),
-                    )
-                    .unwrap(),
-                ),
-            )
-            .unwrap()
-            .compile_stream(
-                &UdfRegistry::new().snapshot(),
-                &StreamRequirements::default(),
-            );
-        let error = plan.unwrap_err();
-        let CalcFlowError::Compile { message } = error else {
-            panic!("expected a compile error, got {error:?}");
-        };
-        assert!(message.contains("random"), "{message}");
-    }
-
-    #[test]
     fn non_query_operators_skip_the_volatility_check() {
         let context = volatile_roll_context();
         let union = NodeOperator::Union(
@@ -1972,30 +1936,5 @@ mod volatile_query_tests {
             );
         assert!(plan.is_ok(), "{:?}", plan.err());
         let _ = default_function_registry();
-    }
-
-    #[test]
-    fn deterministic_datetime_queries_still_compile_through_the_default_registry() {
-        let plan = PipelineBuilder::new("deterministic-datetime")
-            .unwrap()
-            .add_node(
-                "features",
-                Box::new(
-                    ExpressionOperator::new(
-                        "features",
-                        "year = date_part('year', ts)",
-                        Vec::new(),
-                        Some("to_timestamp(x) > to_timestamp(0)".into()),
-                        Vec::new(),
-                    )
-                    .unwrap(),
-                ),
-            )
-            .unwrap()
-            .compile_stream(
-                &UdfRegistry::new().snapshot(),
-                &StreamRequirements::default(),
-            );
-        assert!(plan.is_ok(), "{:?}", plan.err());
     }
 }

@@ -25,6 +25,20 @@ pub(super) struct LiveSummary {
     pub(super) bytes: u64,
 }
 
+impl LiveSummary {
+    fn add(&mut self, locator: &Locator<'_>) -> Result<()> {
+        self.rows = self
+            .rows
+            .checked_add(1)
+            .ok_or_else(|| invalid("V2 retained row count overflow"))?;
+        self.bytes = self
+            .bytes
+            .checked_add(locator.charge)
+            .ok_or_else(|| invalid("V2 retained byte count overflow"))?;
+        Ok(())
+    }
+}
+
 struct IndexGroups<'a> {
     side: JoinSide,
     epoch: Option<u64>,
@@ -55,44 +69,58 @@ impl<'a> History<'a> {
             .len()
             .checked_sub(geometry.payloads)
             .ok_or_else(|| invalid("V2 index count underflow"))?;
+        let mut history = Self::allocate(indexes, geometry.payloads, workspace)?;
+        for (name, segment) in &snapshot.segments {
+            check()?;
+            history.add_segment(name, segment.bytes(), check)?;
+        }
+        Ok(history)
+    }
+
+    fn allocate(indexes: usize, payloads: usize, workspace: &MemoryReservation) -> Result<Self> {
         let credit = workspace.new_empty();
         reserve(
             &credit,
             sum(&[
                 product(indexes, size_of::<IndexGroups<'_>>())?,
-                product(geometry.payloads, size_of::<PayloadFrame<'_>>())?,
+                product(payloads, size_of::<PayloadFrame<'_>>())?,
             ])?,
         )?;
-        let mut history = Self {
+        let history = Self {
             indexes: Vec::with_capacity(indexes),
-            payloads: Vec::with_capacity(geometry.payloads),
+            payloads: Vec::with_capacity(payloads),
             credit,
         };
-        if history.indexes.capacity() != indexes || history.payloads.capacity() != geometry.payloads
-        {
+        if history.indexes.capacity() != indexes || history.payloads.capacity() != payloads {
             return Err(invalid(
                 "V2 history descriptor capacity differs from its funding",
             ));
         }
-        for (name, segment) in &snapshot.segments {
-            check()?;
-            let (side, suffix) = checked(inventory::split_side(name))?;
-            if let Some(digest) = suffix.strip_prefix("payload-") {
-                history.payloads.push(PayloadFrame {
-                    side,
-                    digest: checked(inventory::digest(digest))?,
-                    frame: checked(Payload::decode(segment.bytes(), side))?,
-                });
-            } else {
-                let index = geometry::index(segment.bytes(), suffix, side)?;
-                history.indexes.push(IndexGroups {
-                    side,
-                    epoch: index.epoch,
-                    groups: index.groups(check)?,
-                });
-            }
-        }
         Ok(history)
+    }
+
+    fn add_segment(
+        &mut self,
+        name: &str,
+        bytes: &'a [u8],
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<()> {
+        let (side, suffix) = checked(inventory::split_side(name))?;
+        if let Some(digest) = suffix.strip_prefix("payload-") {
+            self.payloads.push(PayloadFrame {
+                side,
+                digest: checked(inventory::digest(digest))?,
+                frame: checked(Payload::decode(bytes, side))?,
+            });
+        } else {
+            let index = geometry::index(bytes, suffix, side)?;
+            self.indexes.push(IndexGroups {
+                side,
+                epoch: index.epoch,
+                groups: index.groups(check)?,
+            });
+        }
+        Ok(())
     }
 
     pub(super) fn scan(
@@ -107,14 +135,7 @@ impl<'a> History<'a> {
         while let Some((locator, live)) = scan.next(next_id, check)? {
             self.locate(side, &locator)?;
             if live {
-                summary.rows = summary
-                    .rows
-                    .checked_add(1)
-                    .ok_or_else(|| invalid("V2 retained row count overflow"))?;
-                summary.bytes = summary
-                    .bytes
-                    .checked_add(locator.charge)
-                    .ok_or_else(|| invalid("V2 retained byte count overflow"))?;
+                summary.add(&locator)?;
             }
             visit(&locator, live)?;
         }

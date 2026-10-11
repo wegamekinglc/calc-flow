@@ -172,30 +172,7 @@ fn expected_segments(pending: &PendingLog, epoch: Epoch) -> BTreeMap<String, Vec
         if rows.is_empty() && tombstones.is_empty() {
             continue;
         }
-        let digest = if rows.is_empty() {
-            [0; 32]
-        } else {
-            let records = rows
-                .iter()
-                .map(|row| row.record.view().clone())
-                .collect::<Vec<_>>();
-            let record =
-                datafusion::arrow::compute::concat_batches(&records[0].schema(), &records).unwrap();
-            let ipc = stream_writer_bytes(&record);
-            let mut payload = header(*PAYLOAD_MAGIC, side).to_vec();
-            payload.extend(u64::try_from(rows.len()).unwrap().to_le_bytes());
-            payload.extend(u64::try_from(ipc.len()).unwrap().to_le_bytes());
-            for row in &rows {
-                payload.extend(row.row_id.to_le_bytes());
-            }
-            payload.extend(ipc);
-            let digest: [u8; 32] = Sha256::digest(&payload).into();
-            segments.insert(
-                format!("{}-payload-{}", side.as_str(), hex::encode(digest)),
-                payload,
-            );
-            digest
-        };
+        let digest = expected_payload(&rows, side, &mut segments);
         let (_, credit) = reservation(16 << 20);
         segments.insert(
             format!("{}-delta-{}", side.as_str(), epoch.as_u64()),
@@ -210,6 +187,37 @@ fn expected_segments(pending: &PendingLog, epoch: Epoch) -> BTreeMap<String, Vec
         );
     }
     segments
+}
+
+fn expected_payload(
+    rows: &[StoredRow],
+    side: JoinSide,
+    segments: &mut BTreeMap<String, Vec<u8>>,
+) -> [u8; 32] {
+    if rows.is_empty() {
+        [0; 32]
+    } else {
+        let records = rows
+            .iter()
+            .map(|row| row.record.view().clone())
+            .collect::<Vec<_>>();
+        let record =
+            datafusion::arrow::compute::concat_batches(&records[0].schema(), &records).unwrap();
+        let ipc = stream_writer_bytes(&record);
+        let mut payload = header(*PAYLOAD_MAGIC, side).to_vec();
+        payload.extend(u64::try_from(rows.len()).unwrap().to_le_bytes());
+        payload.extend(u64::try_from(ipc.len()).unwrap().to_le_bytes());
+        for row in rows {
+            payload.extend(row.row_id.to_le_bytes());
+        }
+        payload.extend(ipc);
+        let digest: [u8; 32] = Sha256::digest(&payload).into();
+        segments.insert(
+            format!("{}-payload-{}", side.as_str(), hex::encode(digest)),
+            payload,
+        );
+        digest
+    }
 }
 
 fn sliced_rich_rows(legacy: bool) -> (Vec<StoredRow>, RecordBatch) {

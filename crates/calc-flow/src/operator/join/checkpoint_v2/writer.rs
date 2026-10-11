@@ -177,19 +177,27 @@ impl OwnedCpuWork for WriterWork {
 }
 
 impl WriterWork {
+    fn encode_history(
+        &mut self,
+        history: encode::rebase::HistoryInput,
+        stop: &GatherStop,
+    ) -> Result<encode::Base> {
+        if let Some(pending) = self.inputs.rebase_pending.take() {
+            encode::rebase::encode_pending(
+                history,
+                pending,
+                &self.schemas,
+                &self.workspace,
+                &|| stop.check(),
+            )
+        } else {
+            encode::rebase::encode(&history, &self.workspace, &|| stop.check())
+        }
+    }
+
     fn encode(&mut self, stop: &GatherStop) -> Result<encode::Base> {
         if let Some(history) = self.inputs.history.take() {
-            return if let Some(pending) = self.inputs.rebase_pending.take() {
-                encode::rebase::encode_pending(
-                    history,
-                    pending,
-                    &self.schemas,
-                    &self.workspace,
-                    &|| stop.check(),
-                )
-            } else {
-                encode::rebase::encode(&history, &self.workspace, &|| stop.check())
-            };
+            return self.encode_history(history, stop);
         }
         if let Some(pending) = &self.inputs.pending {
             return encode::pending_owned(
@@ -293,6 +301,20 @@ impl StreamJoinOperator {
         Ok(())
     }
 
+    fn v2_writer_cut_invalid(
+        &self,
+        cut: &cut::Cut,
+        kind: Preparation,
+        context: &StreamOperatorContext<'_>,
+    ) -> bool {
+        *cut != self
+            .v2_writer
+            .tracker
+            .snapshot(self.state.last_checkpoint_epoch)
+            || (matches!(kind, Preparation::Rebase)
+                && (!context.job().checkpointing() || !self.v2_writer.history_trusted))
+    }
+
     fn install_v2_writer_base(
         &mut self,
         base: encode::Base,
@@ -301,14 +323,7 @@ impl StreamJoinOperator {
         context: &StreamOperatorContext<'_>,
     ) -> Result<()> {
         context.check_cancelled()?;
-        if cut
-            != self
-                .v2_writer
-                .tracker
-                .snapshot(self.state.last_checkpoint_epoch)
-            || (matches!(kind, Preparation::Rebase)
-                && (!context.job().checkpointing() || !self.v2_writer.history_trusted))
-        {
+        if self.v2_writer_cut_invalid(&cut, kind, context) {
             return Ok(());
         }
         if matches!(kind, Preparation::Delta) {

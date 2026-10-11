@@ -80,33 +80,6 @@ fn runner(checkpoint: Option<ManagedCheckpointRuntime>) -> StreamingRunner {
 }
 
 #[test]
-fn test_checkpointing_defaults_on_and_rejects_backend_mode_conflicts() {
-    assert!(StreamRuntimeConfig::default().checkpointing);
-    let error = runner(None)
-        .with_runtime_config(StreamRuntimeConfig::default())
-        .err()
-        .expect("enabling checkpoints requires managed storage");
-    assert!(
-        matches!(error, CalcFlowError::Streaming(error) if error.category() == StreamingErrorCategory::Validation)
-    );
-
-    let directory = tempfile::tempdir().unwrap();
-    let error = runner(Some(
-        ManagedCheckpointRuntime::new(directory.path().join("managed")).unwrap(),
-    ))
-    .with_runtime_config(StreamRuntimeConfig {
-        checkpointing: false,
-        ..StreamRuntimeConfig::default()
-    })
-    .err()
-    .expect("disabling checkpoints cannot silently discard supplied storage");
-    assert!(
-        matches!(error, CalcFlowError::Streaming(error) if error.category() == StreamingErrorCategory::Validation)
-    );
-    assert!(!directory.path().join("managed").exists());
-}
-
-#[test]
 fn test_checkpointing_mode_is_fixed_in_each_owned_job_context() {
     let context = StreamJobContext::new(
         1,

@@ -67,33 +67,78 @@ pub(in crate::operator::join::checkpoint_v2::writer) fn encode(
 ) -> Result<Base> {
     check()?;
     let mut encoder = Encoder::new(workspace)?;
-    encoder.retained = accounting::add(encoder.retained, funding::output(history, check)?)?;
-    ensure(&encoder.funding, encoder.retained)?;
-    encoder.output.payloads = funding::vector(history.payloads.len())?;
-    copy_payloads(history, &mut encoder, check)?;
+    prepare_output(history, &mut encoder, check)?;
     for side in [JoinSide::Left, JoinSide::Right] {
-        let counts = merge::scan(history, side, workspace, check, |_| Ok(()))?;
-        let capacity = counts.index_bytes()?;
-        let charge = segment_charge(capacity)?;
-        ensure(&encoder.funding, accounting::add(encoder.retained, charge)?)?;
-        let mut bytes = PaidBuffer::exact(&encoder.funding, encoder.retained, capacity)?;
-        bytes.append(&super::header(*super::BASE_MAGIC, side))?;
-        bytes.append(&super::integer(counts.rows)?)?;
-        bytes.append(&0_u64.to_le_bytes())?;
-        let repeated = merge::scan(history, side, workspace, check, |row| {
-            append_upsert(&mut bytes, row)
-        })?;
-        if counts != repeated {
-            return Err(error("V2 rebase record passes differ"));
-        }
-        let bytes = bytes.into_bytes()?;
-        check()?;
-        let segment = own_segment(bytes, &encoder.funding, charge);
-        let name = funding::text(&[side.as_str(), "-base"])?;
-        encoder.output.segments.insert(name, segment);
+        encode_side(history, side, &mut encoder, workspace, check)?;
     }
     check()?;
     Ok(encoder.finish())
+}
+
+fn prepare_output(
+    history: &HistoryInput,
+    encoder: &mut Encoder,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<()> {
+    encoder.retained = accounting::add(encoder.retained, funding::output(history, check)?)?;
+    ensure(&encoder.funding, encoder.retained)?;
+    encoder.output.payloads = funding::vector(history.payloads.len())?;
+    copy_payloads(history, encoder, check)?;
+    Ok(())
+}
+
+fn append_index_header(bytes: &mut PaidBuffer<'_>, side: JoinSide, rows: usize) -> Result<()> {
+    bytes.append(&super::header(*super::BASE_MAGIC, side))?;
+    bytes.append(&super::integer(rows)?)?;
+    bytes.append(&0_u64.to_le_bytes())?;
+    Ok(())
+}
+
+fn index_buffer(
+    encoder: &Encoder,
+    side: JoinSide,
+    counts: merge::Counts,
+) -> Result<(PaidBuffer<'_>, usize)> {
+    let capacity = counts.index_bytes()?;
+    let charge = segment_charge(capacity)?;
+    ensure(&encoder.funding, accounting::add(encoder.retained, charge)?)?;
+    let mut bytes = PaidBuffer::exact(&encoder.funding, encoder.retained, capacity)?;
+    append_index_header(&mut bytes, side, counts.rows)?;
+    Ok((bytes, charge))
+}
+
+fn rebase_index(
+    history: &HistoryInput,
+    side: JoinSide,
+    encoder: &Encoder,
+    workspace: &MemoryReservation,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<(Vec<u8>, usize)> {
+    let counts = merge::scan(history, side, workspace, check, |_| Ok(()))?;
+    let (mut bytes, charge) = index_buffer(encoder, side, counts)?;
+    let repeated = merge::scan(history, side, workspace, check, |row| {
+        append_upsert(&mut bytes, row)
+    })?;
+    if counts != repeated {
+        return Err(error("V2 rebase record passes differ"));
+    }
+    let bytes = bytes.into_bytes()?;
+    check()?;
+    Ok((bytes, charge))
+}
+
+fn encode_side(
+    history: &HistoryInput,
+    side: JoinSide,
+    encoder: &mut Encoder,
+    workspace: &MemoryReservation,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<()> {
+    let (bytes, charge) = rebase_index(history, side, encoder, workspace, check)?;
+    let segment = own_segment(bytes, &encoder.funding, charge);
+    let name = funding::text(&[side.as_str(), "-base"])?;
+    encoder.output.segments.insert(name, segment);
+    Ok(())
 }
 
 pub(in crate::operator::join::checkpoint_v2::writer) fn encode_pending(

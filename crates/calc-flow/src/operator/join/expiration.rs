@@ -155,28 +155,7 @@ impl ExpirationIndex {
         let replacement = if required <= self.storage.heap.capacity() {
             None
         } else {
-            let capacity = required
-                .max(4)
-                .checked_next_power_of_two()
-                .ok_or_else(overflow)?;
-            let mut replacement = Storage::new(capacity, self.storage.credit.as_ref())?;
-            replacement.maximum = self.storage.maximum;
-            let mut quantum = columnar::Quantum::default();
-            for start in (0..self.storage.heap.len()).step_by(64) {
-                let end = (start + 64).min(self.storage.heap.len());
-                quantum
-                    .step(context, end - start, (end - start) * 32)
-                    .await?;
-                replacement
-                    .heap
-                    .extend_from_slice(&self.storage.heap[start..end]);
-                replacement
-                    .positions
-                    .extend_from_slice(&self.storage.positions[start..end]);
-                replacement
-                    .ordinals
-                    .extend_from_slice(&self.storage.ordinals[start..end]);
-            }
+            let replacement = self.copy_storage(required, context).await?;
             Some(replacement)
         };
         context.check_cancelled()?;
@@ -184,6 +163,36 @@ impl ExpirationIndex {
             replacement,
             next_ordinal,
         })
+    }
+
+    async fn copy_storage(
+        &self,
+        required: usize,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<Storage> {
+        let capacity = required
+            .max(4)
+            .checked_next_power_of_two()
+            .ok_or_else(overflow)?;
+        let mut replacement = Storage::new(capacity, self.storage.credit.as_ref())?;
+        replacement.maximum = self.storage.maximum;
+        let mut quantum = columnar::Quantum::default();
+        for start in (0..self.storage.heap.len()).step_by(64) {
+            let end = (start + 64).min(self.storage.heap.len());
+            quantum
+                .step(context, end - start, (end - start) * 32)
+                .await?;
+            replacement
+                .heap
+                .extend_from_slice(&self.storage.heap[start..end]);
+            replacement
+                .positions
+                .extend_from_slice(&self.storage.positions[start..end]);
+            replacement
+                .ordinals
+                .extend_from_slice(&self.storage.ordinals[start..end]);
+        }
+        Ok(replacement)
     }
 
     pub(super) fn append(&mut self, old: &[StoredRow], incoming: &[StoredRow], plan: AppendPlan) {

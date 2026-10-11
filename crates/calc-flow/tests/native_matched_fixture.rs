@@ -162,6 +162,26 @@ fn tiny_tables() -> (
     (batches, expected)
 }
 
+fn input_binding(
+    plan: &calc_flow::StreamExecutionPlan,
+    with_inputs: bool,
+    node: &str,
+    port: &str,
+) -> String {
+    plan.external_inputs()
+        .iter()
+        .find(|(_, endpoint)| {
+            if with_inputs {
+                endpoint.node_id == node
+            } else {
+                endpoint.port == port
+            }
+        })
+        .unwrap()
+        .0
+        .clone()
+}
+
 fn tiny_fixture_with_inputs(root: &std::path::Path, with_inputs: bool) -> std::path::PathBuf {
     use calc_flow::{
         ProviderRegistry, StreamRequirements, UdfRegistry, compile_stream_project_graph,
@@ -176,32 +196,8 @@ fn tiny_fixture_with_inputs(root: &std::path::Path, with_inputs: bool) -> std::p
         &StreamRequirements::default(),
     )
     .unwrap();
-    let left = plan
-        .external_inputs()
-        .iter()
-        .find(|(_, endpoint)| {
-            if with_inputs {
-                endpoint.node_id == "quotes"
-            } else {
-                endpoint.port == "left"
-            }
-        })
-        .unwrap()
-        .0
-        .clone();
-    let right = plan
-        .external_inputs()
-        .iter()
-        .find(|(_, endpoint)| {
-            if with_inputs {
-                endpoint.node_id == "reference"
-            } else {
-                endpoint.port == "right"
-            }
-        })
-        .unwrap()
-        .0
-        .clone();
+    let left = input_binding(&plan, with_inputs, "quotes", "left");
+    let right = input_binding(&plan, with_inputs, "reference", "right");
     let output = plan.external_outputs().keys().next().unwrap().clone();
     let (batches, expected) = tiny_tables();
     let inputs = json!({left.clone():write_ipc(root,"left.arrow",&batches),right.clone():write_ipc(root,"right.arrow",&batches)});

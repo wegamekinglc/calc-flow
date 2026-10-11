@@ -318,29 +318,38 @@ pub(super) fn remap_left_ids(
         if !name.starts_with("left-") || name.contains("-payload-") {
             continue;
         }
-        let header = if name == "left-base" { 32 } else { 40 };
-        let mut input = &segment.bytes()[header..];
-        let mut records = Vec::new();
-        while !input.is_empty() {
-            let length = 72
-                + usize::try_from(u64::from_le_bytes(input[64..72].try_into().unwrap())).unwrap();
-            let mut row = input[..length].to_vec();
-            let original_id = u64::from_le_bytes(row[..8].try_into().unwrap());
-            let id = remap(original_id);
-            row[..8].copy_from_slice(&id.to_le_bytes());
-            let digest = hex::encode(&row[24..56]);
-            row[24..56].copy_from_slice(&renamed[&digest]);
-            records.push((id, row));
-            input = &input[length..];
-        }
-        records.sort_by_key(|(id, _)| *id);
-        let mut bytes = segment.bytes()[..header].to_vec();
-        for (_, row) in records {
-            bytes.extend_from_slice(&row);
-        }
-        *segment = StateSegment::new(bytes);
+        *segment = remap_index(segment, name, &renamed, &remap);
     }
     snapshot
+}
+
+fn remap_index(
+    segment: &StateSegment,
+    name: &str,
+    renamed: &BTreeMap<String, Vec<u8>>,
+    remap: &impl Fn(u64) -> u64,
+) -> StateSegment {
+    let header = if name == "left-base" { 32 } else { 40 };
+    let mut input = &segment.bytes()[header..];
+    let mut records = Vec::new();
+    while !input.is_empty() {
+        let length =
+            72 + usize::try_from(u64::from_le_bytes(input[64..72].try_into().unwrap())).unwrap();
+        let mut row = input[..length].to_vec();
+        let original_id = u64::from_le_bytes(row[..8].try_into().unwrap());
+        let id = remap(original_id);
+        row[..8].copy_from_slice(&id.to_le_bytes());
+        let digest = hex::encode(&row[24..56]);
+        row[24..56].copy_from_slice(&renamed[&digest]);
+        records.push((id, row));
+        input = &input[length..];
+    }
+    records.sort_by_key(|(id, _)| *id);
+    let mut bytes = segment.bytes()[..header].to_vec();
+    for (_, row) in records {
+        bytes.extend_from_slice(&row);
+    }
+    StateSegment::new(bytes)
 }
 
 #[tokio::test]

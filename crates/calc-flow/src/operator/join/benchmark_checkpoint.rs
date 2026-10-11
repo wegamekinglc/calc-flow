@@ -334,6 +334,59 @@ fn update_digest(digest: &mut Sha256, time: i64, sequence: u64, key: &str, value
     digest.update(value.to_le_bytes());
 }
 
+fn retained_identity_matches(
+    stored: &StoredRow,
+    index: usize,
+    values: (i64, u64, &str, f64),
+    expected_time: i64,
+    expected_value: f64,
+    expected_key: &str,
+    encoded: &[u8],
+) -> bool {
+    let (time, sequence, key, value) = values;
+    sequence == index as u64
+        && stored.row_id == sequence
+        && time == expected_time
+        && stored.event_time.as_micros() == time
+        && key == expected_key
+        && value.to_bits() == expected_value.to_bits()
+        && stored.encoded_key.as_slice() == encoded
+}
+
+fn validate_retained_row<'a>(
+    stored: &'a StoredRow,
+    index: usize,
+    left: bool,
+    schema: &SchemaRef,
+    keys: &[String],
+    encoded: &[Vec<u8>],
+) -> Result<(i64, u64, &'a str, f64)> {
+    require(
+        stored.record.schema_ref() == schema,
+        "row3 oracle retained schema differs",
+    )?;
+    let values = row_values(stored.record.columns(), stored.record.offset(), left)?;
+    let expected_time = if left { quote_time(index) } else { BASE_MICROS };
+    let expected_value = if left {
+        price(index)
+    } else {
+        fixture_number(index + 1)
+    };
+    require(
+        retained_identity_matches(
+            stored,
+            index,
+            values,
+            expected_time,
+            expected_value,
+            &keys[index % ENTITIES],
+            &encoded[index % ENTITIES],
+        ),
+        "row3 full-state identity, key, time, or value differs",
+    )?;
+    Ok(values)
+}
+
 fn validate_side(rows: &[StoredRow], expected: usize, left: bool) -> Result<(String, u64)> {
     require(
         rows.len() == expected,
@@ -350,51 +403,53 @@ fn validate_side(rows: &[StoredRow], expected: usize, left: bool) -> Result<(Str
     let mut digest = Sha256::new();
     let mut charged = 0;
     for (index, stored) in rows.iter().enumerate() {
-        require(
-            stored.record.schema_ref() == &schema,
-            "row3 oracle retained schema differs",
-        )?;
         let (time, sequence, key, value) =
-            row_values(stored.record.columns(), stored.record.offset(), left)?;
-        let expected_time = if left { quote_time(index) } else { BASE_MICROS };
-        let expected_value = if left {
-            price(index)
-        } else {
-            fixture_number(index + 1)
-        };
-        require(
-            sequence == index as u64
-                && stored.row_id == sequence
-                && time == expected_time
-                && stored.event_time.as_micros() == time
-                && key == keys[index % ENTITIES]
-                && value.to_bits() == expected_value.to_bits()
-                && stored.encoded_key.as_slice() == encoded[index % ENTITIES],
-            "row3 full-state identity, key, time, or value differs",
-        )?;
+            validate_retained_row(stored, index, left, &schema, &keys, &encoded)?;
         update_digest(&mut digest, time, sequence, key, value);
         charged += stored.charge;
     }
     Ok((hex::encode(digest.finalize()), charged))
 }
 
+fn retained_counts_match(
+    status: &super::StreamJoinStatus,
+    rows: usize,
+    left_bytes: u64,
+    right_bytes: u64,
+) -> bool {
+    status.left.retained_rows == rows as u64
+        && status.right.retained_rows == ENTITIES as u64
+        && status.left.retained_bytes == left_bytes
+        && status.right.retained_bytes == right_bytes
+}
+
+fn retained_rows_unclassified(status: &super::StreamJoinStatus) -> bool {
+    status.left.evicted_rows == 0
+        && status.right.evicted_rows == 0
+        && status.left.late_rows == 0
+        && status.right.late_rows == 0
+}
+
+fn state_counters_match(
+    operator: &StreamJoinOperator,
+    rows: usize,
+    left_bytes: u64,
+    right_bytes: u64,
+) -> bool {
+    let status = operator.status();
+    retained_counts_match(&status, rows, left_bytes, right_bytes)
+        && retained_rows_unclassified(&status)
+        && status.emitted_match_rows == rows as u64
+        && !operator.state.ended
+        && operator.state.next_left_row_id == rows as u64
+        && operator.state.next_right_row_id == ENTITIES as u64
+}
+
 fn validate_state(operator: &StreamJoinOperator, rows: usize) -> Result<Value> {
     let (left, left_bytes) = validate_side(&operator.state.left, rows, true)?;
     let (right, right_bytes) = validate_side(&operator.state.right, ENTITIES, false)?;
-    let status = operator.status();
     require(
-        status.left.retained_rows == rows as u64
-            && status.right.retained_rows == ENTITIES as u64
-            && status.left.retained_bytes == left_bytes
-            && status.right.retained_bytes == right_bytes
-            && status.left.evicted_rows == 0
-            && status.right.evicted_rows == 0
-            && status.left.late_rows == 0
-            && status.right.late_rows == 0
-            && status.emitted_match_rows == rows as u64
-            && !operator.state.ended
-            && operator.state.next_left_row_id == rows as u64
-            && operator.state.next_right_row_id == ENTITIES as u64,
+        state_counters_match(operator, rows, left_bytes, right_bytes),
         "row3 full-state counters differ",
     )?;
     Ok(
@@ -440,6 +495,53 @@ async fn feed(
             &mut output,
         )
         .await?;
+    validate_feed_output(&mut output, left, start, count)
+}
+
+fn output_values_match(
+    quote: (i64, u64, &str, f64),
+    factor: (i64, u64, &str, f64),
+    next: usize,
+    expected_keys: &[String],
+) -> bool {
+    quote.1 == next as u64
+        && quote.0 == quote_time(next)
+        && quote.3.to_bits() == price(next).to_bits()
+        && quote.2 == expected_keys[next % ENTITIES]
+        && quote.2 == factor.2
+        && factor.1 == (next % ENTITIES) as u64
+        && factor.0 == BASE_MICROS
+        && factor.3.to_bits() == fixture_number(next % ENTITIES + 1).to_bits()
+}
+
+fn validate_output_record(
+    record: &RecordBatch,
+    left: bool,
+    mut next: usize,
+    expected_keys: &[String],
+) -> Result<usize> {
+    require(
+        left && record.num_columns() == 8,
+        "row3 output schema or preload differs",
+    )?;
+    for offset in 0..record.num_rows() {
+        let quote = row_values(&record.columns()[..4], offset, true)?;
+        let factor = row_values(&record.columns()[4..], offset, false)?;
+        require(
+            output_values_match(quote, factor, next, expected_keys),
+            "row3 complete output oracle differs",
+        )?;
+        next += 1;
+    }
+    Ok(next)
+}
+
+fn validate_feed_output(
+    output: &mut EdgeCollector,
+    left: bool,
+    start: usize,
+    count: usize,
+) -> Result<()> {
     let expected_keys = (0..ENTITIES)
         .map(|key| format!("S{key:03}"))
         .collect::<Vec<_>>();
@@ -449,26 +551,7 @@ async fn feed(
             .as_data()
             .ok_or_else(|| crate::benchmark_internals::invalid("non-data Join output"))?;
         for record in batch.table_payload()?.batches() {
-            require(
-                left && record.num_columns() == 8,
-                "row3 output schema or preload differs",
-            )?;
-            for offset in 0..record.num_rows() {
-                let quote = row_values(&record.columns()[..4], offset, true)?;
-                let factor = row_values(&record.columns()[4..], offset, false)?;
-                require(
-                    quote.1 == next as u64
-                        && quote.0 == quote_time(next)
-                        && quote.3.to_bits() == price(next).to_bits()
-                        && quote.2 == expected_keys[next % ENTITIES]
-                        && quote.2 == factor.2
-                        && factor.1 == (next % ENTITIES) as u64
-                        && factor.0 == BASE_MICROS
-                        && factor.3.to_bits() == fixture_number(next % ENTITIES + 1).to_bits(),
-                    "row3 complete output oracle differs",
-                )?;
-                next += 1;
-            }
+            next = validate_output_record(record, left, next, &expected_keys)?;
         }
     }
     require(
@@ -679,17 +762,43 @@ async fn prepare(operator: &mut StreamJoinOperator, job: &StreamJobContext) -> R
     operator.prepare_checkpoint_async(&context).await
 }
 
-async fn fresh_phase(
+async fn fresh_admission(
     diagnostic: &mut Diagnostic,
     rows: usize,
     job: &StreamJobContext,
-) -> Result<Value> {
+) -> Result<(StreamJoinOperator, Arc<ObservedPool>, Value)> {
     let (mut operator, pool) = diagnostic.operator(rows, "fresh")?;
     diagnostic.start(&pool, "fresh_admission");
     feed(&mut operator, job, false, 0, ENTITIES).await?;
     feed_quotes(&mut operator, job, 0, rows, rows).await?;
     let oracle = validate_state(&operator, rows)?;
     diagnostic.finish();
+    Ok((operator, pool, oracle))
+}
+
+fn validate_fresh_captures(
+    first_inventory: &[Value],
+    second: &OperatorStateSnapshot,
+    oracle: &Value,
+    operator: &StreamJoinOperator,
+    rows: usize,
+) -> Result<()> {
+    require(
+        first_inventory == segments(second),
+        "unchanged fresh capture changed segment bytes",
+    )?;
+    require(
+        *oracle == validate_state(operator, rows)?,
+        "fresh preparation changed retained state",
+    )
+}
+
+async fn fresh_phase(
+    diagnostic: &mut Diagnostic,
+    rows: usize,
+    job: &StreamJobContext,
+) -> Result<Value> {
+    let (mut operator, pool, oracle) = fresh_admission(diagnostic, rows, job).await?;
     for phase in ["fresh_prepare", "fresh_prepare_repeat"] {
         diagnostic.start(&pool, phase);
         prepare(&mut operator, job).await?;
@@ -704,14 +813,7 @@ async fn fresh_phase(
     diagnostic.finish();
     diagnostic.start(&pool, "fresh_capture_clean");
     let second = operator.checkpoint(Epoch::new(2).expect("fixed nonzero epoch"))?;
-    require(
-        first_inventory == segments(&second),
-        "unchanged fresh capture changed segment bytes",
-    )?;
-    require(
-        oracle == validate_state(&operator, rows)?,
-        "fresh preparation changed retained state",
-    )?;
+    validate_fresh_captures(&first_inventory, &second, &oracle, &operator, rows)?;
     diagnostic.finish();
     diagnostic.start(&pool, "fresh_released");
     drop((first, second, operator));
@@ -775,17 +877,18 @@ fn held_segment(
     Ok((segment.clone(), evidence))
 }
 
-async fn history_phase(
+async fn captured_history(
     diagnostic: &mut Diagnostic,
+    operator: &mut StreamJoinOperator,
+    pool: &Arc<ObservedPool>,
     rows: usize,
     job: &StreamJobContext,
-) -> Result<HeldHistory> {
-    let (mut operator, pool) = diagnostic.operator(rows, "history")?;
-    diagnostic.start(&pool, "history_checkpoint_1");
-    feed(&mut operator, job, false, 0, ENTITIES).await?;
-    feed_quotes(&mut operator, job, 0, rows - 3, rows).await?;
+) -> Result<(OperatorStateSnapshot, Vec<Value>)> {
+    diagnostic.start(pool, "history_checkpoint_1");
+    feed(operator, job, false, 0, ENTITIES).await?;
+    feed_quotes(operator, job, 0, rows - 3, rows).await?;
     let mut before = operator.checkpoint(Epoch::INITIAL)?;
-    let mut checkpoints = vec![snapshot_evidence(&operator, &before)];
+    let mut checkpoints = vec![snapshot_evidence(operator, &before)];
     diagnostic.finish();
     for (index, phase) in [
         "history_checkpoint_2",
@@ -795,13 +898,18 @@ async fn history_phase(
     .into_iter()
     .enumerate()
     {
-        diagnostic.start(&pool, phase);
+        diagnostic.start(pool, phase);
         let first = rows - 3 + index;
-        feed_quotes(&mut operator, job, first, first + 1, rows).await?;
+        feed_quotes(operator, job, first, first + 1, rows).await?;
         before = operator.checkpoint(Epoch::new(index as u64 + 2).expect("fixed nonzero epoch"))?;
-        checkpoints.push(snapshot_evidence(&operator, &before));
+        checkpoints.push(snapshot_evidence(operator, &before));
         diagnostic.finish();
     }
+    validate_captured_history(&before)?;
+    Ok((before, checkpoints))
+}
+
+fn validate_captured_history(before: &OperatorStateSnapshot) -> Result<()> {
     let history = before
         .inline_metadata
         .get("v2_inventory")
@@ -815,18 +923,32 @@ async fn history_phase(
                 .enumerate()
                 .all(|(index, delta)| delta["epoch"] == index as u64 + 1),
         "history did not record four dirty epochs",
-    )?;
-    let oracle = validate_state(&operator, rows)?;
-    let before_evidence = snapshot_evidence(&operator, &before);
-    diagnostic.start(&pool, "history_replace");
-    prepare(&mut operator, job).await?;
+    )
+}
+
+async fn prepare_history_replacement(
+    diagnostic: &mut Diagnostic,
+    operator: &mut StreamJoinOperator,
+    pool: &Arc<ObservedPool>,
+    job: &StreamJobContext,
+) -> Result<()> {
+    diagnostic.start(pool, "history_replace");
+    prepare(operator, job).await?;
     diagnostic.finish();
-    diagnostic.start(&pool, "history_prepare_clean");
-    prepare(&mut operator, job).await?;
+    diagnostic.start(pool, "history_prepare_clean");
+    prepare(operator, job).await?;
     diagnostic.finish();
-    diagnostic.start(&pool, "history_capture");
-    let after = operator.checkpoint(Epoch::new(5).expect("fixed nonzero epoch"))?;
-    let after_evidence = snapshot_evidence(&operator, &after);
+    Ok(())
+}
+
+fn validate_replaced_history(
+    operator: &StreamJoinOperator,
+    rows: usize,
+    before: &OperatorStateSnapshot,
+    before_evidence: &Value,
+    after_evidence: &Value,
+    oracle: &Value,
+) -> Result<Vec<Value>> {
     require(
         before_evidence["base_sha256"] != after_evidence["base_sha256"]
             && before_evidence["base_epoch"] != after_evidence["base_epoch"]
@@ -835,30 +957,88 @@ async fn history_phase(
                 .is_some_and(Vec::is_empty),
         "history preparation did not replace the base and fold its deltas",
     )?;
-    let old_segments_after = segments(&before);
+    let old_segments_after = segments(before);
     require(
         before_evidence["segments"] == json!(old_segments_after),
         "held old snapshot bytes changed",
     )?;
     require(
-        oracle == validate_state(&operator, rows)?,
+        *oracle == validate_state(operator, rows)?,
         "base replacement changed retained state",
     )?;
+    Ok(old_segments_after)
+}
+
+fn capture_history_replacement(
+    diagnostic: &mut Diagnostic,
+    operator: &mut StreamJoinOperator,
+    pool: &Arc<ObservedPool>,
+    before: &OperatorStateSnapshot,
+    before_evidence: &Value,
+    oracle: &Value,
+    rows: usize,
+) -> Result<(OperatorStateSnapshot, Value, Vec<Value>)> {
+    diagnostic.start(pool, "history_capture");
+    let after = operator.checkpoint(Epoch::new(5).expect("fixed nonzero epoch"))?;
+    let after_evidence = snapshot_evidence(operator, &after);
+    let old_segments_after = validate_replaced_history(
+        operator,
+        rows,
+        before,
+        before_evidence,
+        &after_evidence,
+        oracle,
+    )?;
     diagnostic.finish();
-    let (segment_alias, alias_ownership) = held_segment(&before, pool.id)?;
-    diagnostic.start(&pool, "history_source_released");
-    drop(operator);
+    Ok((after, after_evidence, old_segments_after))
+}
+
+fn restore_history_snapshots(
+    diagnostic: &mut Diagnostic,
+    rows: usize,
+    pool: &ObservedPool,
+    before: &OperatorStateSnapshot,
+    after: &OperatorStateSnapshot,
+    oracle: &Value,
+) -> Result<()> {
     require(
         pool.reserved() > 0,
         "held snapshot and segment aliases lost their reservation",
     )?;
     diagnostic.finish();
     for (name, pool_id, snapshot) in [
-        ("old_history", "restore_old", &before),
-        ("replacement", "restore_new", &after),
+        ("old_history", "restore_old", before),
+        ("replacement", "restore_new", after),
     ] {
-        diagnostic.restore(rows, name, pool_id, snapshot, &oracle)?;
+        diagnostic.restore(rows, name, pool_id, snapshot, oracle)?;
     }
+    Ok(())
+}
+
+async fn history_phase(
+    diagnostic: &mut Diagnostic,
+    rows: usize,
+    job: &StreamJobContext,
+) -> Result<HeldHistory> {
+    let (mut operator, pool) = diagnostic.operator(rows, "history")?;
+    let (before, checkpoints) =
+        captured_history(diagnostic, &mut operator, &pool, rows, job).await?;
+    let oracle = validate_state(&operator, rows)?;
+    let before_evidence = snapshot_evidence(&operator, &before);
+    prepare_history_replacement(diagnostic, &mut operator, &pool, job).await?;
+    let (after, after_evidence, old_segments_after) = capture_history_replacement(
+        diagnostic,
+        &mut operator,
+        &pool,
+        &before,
+        &before_evidence,
+        &oracle,
+        rows,
+    )?;
+    let (segment_alias, alias_ownership) = held_segment(&before, pool.id)?;
+    diagnostic.start(&pool, "history_source_released");
+    drop(operator);
+    restore_history_snapshots(diagnostic, rows, &pool, &before, &after, &oracle)?;
     let report = json!({"dirty_epochs": 4, "checkpoints": checkpoints,
         "before": before_evidence, "after": after_evidence,
         "old_segments_after": old_segments_after, "old_segments_unchanged": true,

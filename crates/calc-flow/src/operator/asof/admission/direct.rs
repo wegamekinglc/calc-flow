@@ -28,41 +28,14 @@ pub(super) fn plan(
     if identity_tests::columnar::legacy_requested() {
         return Ok(None);
     }
+    if !eligible(operator, batch, input) {
+        return Ok(None);
+    }
     let side = operator.spec.left();
-    let schema = &operator.schemas[0];
-    let ([key], [sequence]) = (side.keys(), side.sequence_by()) else {
+    let records = batch.table_payload()?.batches();
+    let Some(keys) = encode_ordered_keys(operator, records, side, input, context)? else {
         return Ok(None);
     };
-    if input.index != 0
-        || batch.num_rows() == 0
-        || schema
-            .field_with_name(key)
-            .expect("validated key")
-            .data_type()
-            != &DataType::Utf8
-        || schema
-            .field_with_name(sequence)
-            .expect("validated sequence")
-            .data_type()
-            != &DataType::UInt64
-    {
-        return Ok(None);
-    }
-    let records = batch.table_payload()?.batches();
-    if !strictly_ordered(records, side, input, context)? {
-        return Ok(None);
-    }
-    let mut keys = Vec::new();
-    for record in records.iter().filter(|record| record.num_rows() != 0) {
-        context.check_cancelled()?;
-        let encoded = state::encode_key_columns(record, side.keys(), |bytes| {
-            operator.reserve_workspace(bytes)
-        })?;
-        if !encoded.is_inline_string_dictionary() {
-            return Ok(None);
-        }
-        keys.push(encoded);
-    }
     let first = records
         .iter()
         .find(|record| record.num_rows() != 0)
@@ -89,6 +62,54 @@ pub(super) fn plan(
         keys,
         rows: batch.num_rows(),
     }))
+}
+
+fn eligible(operator: &StreamAsofJoinOperator, batch: &Batch, input: ValidatedInput) -> bool {
+    let side = operator.spec.left();
+    let schema = &operator.schemas[0];
+    let ([key], [sequence]) = (side.keys(), side.sequence_by()) else {
+        return false;
+    };
+    if input.index != 0
+        || batch.num_rows() == 0
+        || schema
+            .field_with_name(key)
+            .expect("validated key")
+            .data_type()
+            != &DataType::Utf8
+        || schema
+            .field_with_name(sequence)
+            .expect("validated sequence")
+            .data_type()
+            != &DataType::UInt64
+    {
+        return false;
+    }
+    true
+}
+
+fn encode_ordered_keys(
+    operator: &StreamAsofJoinOperator,
+    records: &[RecordBatch],
+    side: &AsofJoinSide,
+    input: ValidatedInput,
+    context: &StreamOperatorContext<'_>,
+) -> Result<Option<Vec<state::EncodedColumns>>> {
+    if !strictly_ordered(records, side, input, context)? {
+        return Ok(None);
+    }
+    let mut keys = Vec::new();
+    for record in records.iter().filter(|record| record.num_rows() != 0) {
+        context.check_cancelled()?;
+        let encoded = state::encode_key_columns(record, side.keys(), |bytes| {
+            operator.reserve_workspace(bytes)
+        })?;
+        if !encoded.is_inline_string_dictionary() {
+            return Ok(None);
+        }
+        keys.push(encoded);
+    }
+    Ok(Some(keys))
 }
 
 fn strictly_ordered(
@@ -171,30 +192,10 @@ impl IdentityPlan {
             _keys: None,
         };
         context.check_cancelled()?;
-        // Inline keys and UInt64 sequences use at most 27 canonical bytes per
-        // row, so the existing 4096-row /128KiB inline threshold is equivalent.
-        let (rows, left_chunks, workspace) = if self.rows <= 4_096 {
-            let chunks = state::PreparedLeftChunk::prepare_inline_strings(
-                self.keys,
-                &batches,
-                operator.spec.left(),
-                &operator.name,
-                &|| context.check_cancelled(),
-            )?;
-            context.check_cancelled()?;
-            (Vec::new(), Some(chunks), workspace)
-        } else {
-            let descriptor = operator.reserve_left_work(batches.len())?;
-            let work = ChunkWork {
-                keys: self.keys,
-                batches: batches.clone(),
-                workspace,
-                side: operator.spec.left().clone(),
-                name: operator.name.clone(),
-                _descriptor: descriptor,
-            };
-            operator.run_cpu_work(work, context).await?
-        };
+        let expected_rows = self.rows;
+        let (rows, left_chunks, workspace) = self
+            .prepare_chunks(operator, &batches, workspace, context)
+            .await?;
         let admission = Admission {
             rows,
             batches,
@@ -204,8 +205,40 @@ impl IdentityPlan {
             right_buckets: None,
             _workspace: workspace,
         };
-        debug_assert_eq!(admission.len(), self.rows);
+        debug_assert_eq!(admission.len(), expected_rows);
         Ok(admission)
+    }
+
+    async fn prepare_chunks(
+        self,
+        operator: &mut StreamAsofJoinOperator,
+        batches: &[Arc<state::PayloadBatch>],
+        workspace: AdmissionWorkspace,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<PreparedInput> {
+        // Inline canonical keys retain the existing 4096-row /128KiB work threshold.
+        if self.rows <= 4_096 {
+            let chunks = state::PreparedLeftChunk::prepare_inline_strings(
+                self.keys,
+                batches,
+                operator.spec.left(),
+                &operator.name,
+                &|| context.check_cancelled(),
+            )?;
+            context.check_cancelled()?;
+            Ok((Vec::new(), Some(chunks), workspace))
+        } else {
+            let descriptor = operator.reserve_left_work(batches.len())?;
+            let work = ChunkWork {
+                keys: self.keys,
+                batches: batches.to_vec(),
+                workspace,
+                side: operator.spec.left().clone(),
+                name: operator.name.clone(),
+                _descriptor: descriptor,
+            };
+            operator.run_cpu_work(work, context).await
+        }
     }
 }
 

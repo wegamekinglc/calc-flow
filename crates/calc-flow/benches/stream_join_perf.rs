@@ -346,6 +346,13 @@ enum FocusedCheckpoint {
     Prepare,
 }
 
+#[derive(Clone, Copy)]
+enum FocusedSelection {
+    Disabled,
+    List,
+    Probe(FocusedCheckpoint),
+}
+
 fn focused_checkpoint_mode() -> bool {
     match std::env::var(FOCUSED_CHECKPOINT_ENV) {
         Err(std::env::VarError::NotPresent) => return false,
@@ -363,9 +370,9 @@ fn focused_checkpoint_case(name: &str) -> FocusedCheckpoint {
     }
 }
 
-fn focused_checkpoint_selection() -> Option<Option<FocusedCheckpoint>> {
+fn focused_checkpoint_selection() -> FocusedSelection {
     if !focused_checkpoint_mode() {
-        return None;
+        return FocusedSelection::Disabled;
     }
     // Only closed benchmark selectors use these arguments; argv[0] is not an identity.
     // Validate every argument before skipping argv[0], matching env::args on invalid UTF-8.
@@ -379,22 +386,21 @@ fn focused_checkpoint_selection() -> Option<Option<FocusedCheckpoint>> {
         .into_iter()
         .skip(1)
         .collect::<Vec<_>>();
-    let selected = match args.as_slice() {
-        [flag] if flag == "--list" => None,
+    match args.as_slice() {
+        [flag] if flag == "--list" => FocusedSelection::List,
         [name, exact, bench] if exact == "--exact" && bench == "--bench" => {
-            Some(focused_checkpoint_case(name))
+            FocusedSelection::Probe(focused_checkpoint_case(name))
         }
         _ => panic!("focused mode accepts --list or <approved-case> --exact --bench"),
-    };
-    Some(selected)
+    }
 }
 
 fn focused_checkpoint(
     c: &mut Criterion,
     runtime: &tokio::runtime::Runtime,
-    selected: Option<FocusedCheckpoint>,
+    selected: FocusedSelection,
 ) {
-    if let Some(selected) = selected {
+    if let FocusedSelection::Probe(selected) = selected {
         runtime.block_on(focused_checkpoint_probe(selected));
     }
     let mut group = c.benchmark_group("join");
@@ -555,8 +561,8 @@ fn baseline(c: &mut Criterion) {
     let focused = focused_checkpoint_selection();
     println!("JOIN_PERF_PROVENANCE {}", provenance());
     let runtime = tokio::runtime::Runtime::new().unwrap();
-    if let Some(selected) = focused {
-        focused_checkpoint(c, &runtime, selected);
+    if !matches!(focused, FocusedSelection::Disabled) {
+        focused_checkpoint(c, &runtime, focused);
         return;
     }
     let batches = ScenarioBatches::new();
@@ -903,7 +909,8 @@ fn restore_scenarios(
 criterion_group!(benches, baseline);
 
 fn main() {
-    let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    // Select a benchmark workload; argv[0] never establishes identity or authorization.
+    let arguments = std::env::args().skip(1).collect::<Vec<_>>(); // nosemgrep: args
     if arguments.first().map(String::as_str) == Some("--matched-fixture") {
         run_matched(&arguments);
     } else if arguments.first().map(String::as_str) == Some("--native-component") {

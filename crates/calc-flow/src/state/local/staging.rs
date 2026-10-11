@@ -31,24 +31,29 @@ pub(super) async fn stage_segments(
         if seen.insert(paths.staging_parent.clone()) {
             staging_directories.push(paths.staging_parent.clone());
         }
-        let owned_handle = handle.clone();
-        let bytes = bytes.to_vec();
-        let directories = lineage.segment_directories.clone();
-        #[cfg(test)]
-        let file_hook = hook.clone();
-        worker(move || {
-            stage_file(
-                &paths,
-                &owned_handle,
-                &bytes,
-                &directories,
-                #[cfg(test)]
-                file_hook.as_ref(),
-            )
-        })
+        stage_entry(
+            lineage,
+            handle,
+            bytes,
+            paths,
+            #[cfg(test)]
+            hook.as_ref(),
+        )
         .await?;
         lineage.validated.lock().remove(handle);
     }
+    finish_staging(
+        staging_directories,
+        #[cfg(test)]
+        hook,
+    )
+    .await
+}
+
+async fn finish_staging(
+    staging_directories: Vec<super::PathBuf>,
+    #[cfg(test)] hook: Option<super::publication_tests::PublicationHook>,
+) -> Result<()> {
     worker(move || {
         for directory in staging_directories {
             sync_staging_directory(
@@ -58,6 +63,31 @@ pub(super) async fn stage_segments(
             )?;
         }
         Ok(())
+    })
+    .await
+}
+
+async fn stage_entry(
+    lineage: &LocalStateLineageBackend,
+    handle: &StateHandle,
+    bytes: &[u8],
+    paths: ManagedSegmentPaths,
+    #[cfg(test)] hook: Option<&super::publication_tests::PublicationHook>,
+) -> Result<()> {
+    let owned_handle = handle.clone();
+    let bytes = bytes.to_vec();
+    let directories = lineage.segment_directories.clone();
+    #[cfg(test)]
+    let file_hook = hook.cloned();
+    worker(move || {
+        stage_file(
+            &paths,
+            &owned_handle,
+            &bytes,
+            &directories,
+            #[cfg(test)]
+            file_hook.as_ref(),
+        )
     })
     .await
 }

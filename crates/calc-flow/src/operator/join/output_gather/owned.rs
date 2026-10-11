@@ -3,7 +3,7 @@ use super::super::{
     operator_error,
 };
 use crate::runtime::streaming::gather_work::{
-    AttemptCleanup, GatherOperatorId, GatherStop, ParallelCpuWork,
+    AttemptCleanup, GatherOperatorId, GatherStop, ObservedTicket, ParallelCpuWork,
 };
 use crate::{DataFusionRuntime, Result, StreamJobContext, StreamOperatorContext};
 use datafusion::arrow::{array::ArrayRef, datatypes::SchemaRef, record_batch::RecordBatch};
@@ -78,12 +78,7 @@ fn records<'a>(output: &'a JoinOutput<'_>, pair: &MatchedPair) -> (&'a RowPayloa
     }
 }
 
-async fn capture(
-    output: &JoinOutput<'_>,
-    range: Range<usize>,
-    runtime: &DataFusionRuntime,
-    context: &StreamOperatorContext<'_>,
-) -> Result<Option<Arc<Columns>>> {
+fn supports_capture(output: &JoinOutput<'_>, range: &Range<usize>) -> bool {
     if !profitable(range.len(), output.schema.fields().len())
         || !output
             .schema
@@ -92,17 +87,30 @@ async fn capture(
             .all(|field| super::independently_compact(field.data_type()))
         || output.admitted_charges.is_none()
     {
-        return Ok(None);
+        return false;
     }
-    let matched = &output.matched[range];
+    let matched = &output.matched[range.clone()];
     if matched.is_empty()
         || !matched.iter().all(|pair| {
             let (left, right) = records(output, pair);
             left.shared_columns().is_some() && right.shared_columns().is_some()
         })
     {
+        return false;
+    }
+    true
+}
+
+async fn capture(
+    output: &JoinOutput<'_>,
+    range: Range<usize>,
+    runtime: &DataFusionRuntime,
+    context: &StreamOperatorContext<'_>,
+) -> Result<Option<Arc<Columns>>> {
+    if !supports_capture(output, &range) {
         return Ok(None);
     }
+    let matched = &output.matched[range];
     let input_credit = runtime.incremental_reservation("stream-join-gather");
     let output_credit = input_credit.new_empty();
     let input_bytes = funding::input_bytes(matched.len(), output.schema, output.operator_id)?;
@@ -146,6 +154,29 @@ pub(in crate::operator::join) async fn materialize(
     let ticket = scope
         .submit_observed_parallel_work(work, credit, stop.clone(), retirement, cleanup)
         .await?;
+    let columns = finish_gather(ticket, &stop, context, cleanup).await?;
+    let record = RecordBatch::try_new(
+        Arc::clone(output.schema),
+        columns
+            .iter()
+            .map(|column| Arc::clone(&column.array))
+            .collect(),
+    )
+    .map_err(|error| {
+        operator_error(
+            output.operator_id,
+            &format!("output projection failed: {error}"),
+        )
+    })?;
+    Ok(Some((record, columns)))
+}
+
+async fn finish_gather(
+    ticket: ObservedTicket<Vec<ColumnResult>>,
+    stop: &GatherStop,
+    context: &StreamOperatorContext<'_>,
+    cleanup: &mut Option<AttemptCleanup>,
+) -> Result<Vec<ColumnResult>> {
     let gathered = tokio::select! {
         biased;
         () = cancelled(context.job()) => {
@@ -161,24 +192,11 @@ pub(in crate::operator::join) async fn materialize(
         Ok(())
     })?;
     if let Some(attempt) = cleanup.as_ref() {
-        attempt.wait(&stop).await?;
+        attempt.wait(stop).await?;
     }
     *cleanup = None;
     context.check_cancelled()?;
-    let record = RecordBatch::try_new(
-        Arc::clone(output.schema),
-        columns
-            .iter()
-            .map(|column| Arc::clone(&column.array))
-            .collect(),
-    )
-    .map_err(|error| {
-        operator_error(
-            output.operator_id,
-            &format!("output projection failed: {error}"),
-        )
-    })?;
-    Ok(Some((record, columns)))
+    Ok(columns)
 }
 
 async fn cancelled(job: &StreamJobContext) {

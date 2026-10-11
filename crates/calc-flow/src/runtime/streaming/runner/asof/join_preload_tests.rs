@@ -318,6 +318,22 @@ async fn test_join_late_load_error_refunds_only_after_actual_read_exit() {
     abandoned_join_wire(true, false).await;
 }
 
+fn entry_with_invalid_join_segment(entry: &OperatorManifestEntry) -> OperatorManifestEntry {
+    let mut invalid = entry.clone();
+    invalid.segments.push(
+        StateHandle::new(
+            "other",
+            Epoch::INITIAL,
+            "invalid",
+            "committed/a.segment",
+            1,
+            &"0".repeat(64),
+        )
+        .unwrap(),
+    );
+    invalid
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn test_join_preload_refusal_and_identity_errors_do_not_read_or_change_checkpoint() {
     let directory = tempfile::tempdir().unwrap();
@@ -339,18 +355,7 @@ async fn test_join_preload_refusal_and_identity_errors_do_not_read_or_change_che
         },
     )
     .await;
-    let mut invalid = entry.clone();
-    invalid.segments.push(
-        StateHandle::new(
-            "other",
-            Epoch::INITIAL,
-            "invalid",
-            "committed/a.segment",
-            1,
-            &"0".repeat(64),
-        )
-        .unwrap(),
-    );
+    let invalid = entry_with_invalid_join_segment(&entry);
     let cancel = CancellationToken::new();
     let loads = LoadOwner::default();
     assert!(matches!(

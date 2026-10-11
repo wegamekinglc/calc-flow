@@ -87,9 +87,7 @@ impl<'a, 'c> Decoder<'a, 'c> {
     }
 
     pub(super) fn decode(mut self) -> Result<Prepared> {
-        let inventory = Inventory::decode(self.snapshot, self.check)?;
-        (self.check)()?;
-        let geometry = Geometry::inspect(self.snapshot, &inventory, self.check)?;
+        let (inventory, geometry) = self.inspect()?;
         let metadata = self.decode_metadata()?;
         let history = History::new(self.snapshot, &geometry, &self.workspace, self.check)?;
         let summaries = self.summaries(&history, &metadata)?;
@@ -98,6 +96,13 @@ impl<'a, 'c> Decoder<'a, 'c> {
         drop(history);
         drop(payloads);
         self.prepare(metadata, rows, &inventory)
+    }
+
+    fn inspect(&self) -> Result<(Inventory<'a>, Geometry)> {
+        let inventory = Inventory::decode(self.snapshot, self.check)?;
+        (self.check)()?;
+        let geometry = Geometry::inspect(self.snapshot, &inventory, self.check)?;
+        Ok((inventory, geometry))
     }
 
     fn decode_metadata(&self) -> Result<ValidatedMetadata> {
@@ -215,22 +220,33 @@ impl<'a, 'c> Decoder<'a, 'c> {
             return Err(invalid("V2 restored row capacity differs from its funding"));
         }
         let actual = history.scan(side, next_id, self.check, |locator, live| {
-            (self.check)()?;
-            let workspace = self.workspace.new_empty();
-            let context = self.row_context(side, &workspace);
-            let (payload, index) = located_payload(payloads, side, locator)?;
-            let validated = row::validate(payload.owner.record(), index, locator, &context)?;
-            if live {
-                rows.push(self.stored_row(payload, index, locator, validated)?);
-            } else {
-                drop(validated);
-            }
-            Ok(())
+            self.validate_row_into(side, locator, live, payloads, &mut rows)
         })?;
         if actual != summary || rows.len() != summary.rows {
             return Err(invalid("V2 history changed between validation passes"));
         }
         Ok(rows)
+    }
+
+    fn validate_row_into(
+        &self,
+        side: JoinSide,
+        locator: &history::Locator<'_>,
+        live: bool,
+        payloads: &BTreeMap<(JoinSide, [u8; 32]), Decoded<'_>>,
+        rows: &mut Vec<StoredRow>,
+    ) -> Result<()> {
+        (self.check)()?;
+        let workspace = self.workspace.new_empty();
+        let context = self.row_context(side, &workspace);
+        let (payload, index) = located_payload(payloads, side, locator)?;
+        let validated = row::validate(payload.owner.record(), index, locator, &context)?;
+        if live {
+            rows.push(self.stored_row(payload, index, locator, validated)?);
+        } else {
+            drop(validated);
+        }
+        Ok(())
     }
 
     fn row_context<'b>(
@@ -268,6 +284,15 @@ impl<'a, 'c> Decoder<'a, 'c> {
                 |_, _| Ok(()),
             )?,
         ];
+        self.validate_summaries(&summaries, metadata)?;
+        Ok(summaries)
+    }
+
+    fn validate_summaries(
+        &self,
+        summaries: &[LiveSummary; 2],
+        metadata: &ValidatedMetadata,
+    ) -> Result<()> {
         let limits = self.config.spec.limits();
         for (summary, metrics) in summaries
             .iter()
@@ -284,7 +309,7 @@ impl<'a, 'c> Decoder<'a, 'c> {
                 return Err(invalid("V2 restored state exceeds configured limits"));
             }
         }
-        Ok(summaries)
+        Ok(())
     }
 
     fn stored_row(
@@ -343,12 +368,7 @@ impl<'a, 'c> Decoder<'a, 'c> {
                 ..DeltaTracking::default()
             },
         };
-        for rows in [&state.left, &state.right] {
-            for (dense, row) in rows.iter().enumerate() {
-                (self.check)()?;
-                row.record.mark_live(dense);
-            }
-        }
+        self.mark_live(&state)?;
         (self.check)()?;
         Ok(Prepared {
             state,
@@ -356,6 +376,16 @@ impl<'a, 'c> Decoder<'a, 'c> {
             containers: self.containers,
             workspace: self.workspace,
         })
+    }
+
+    fn mark_live(&self, state: &StreamJoinState) -> Result<()> {
+        for rows in [&state.left, &state.right] {
+            for (dense, row) in rows.iter().enumerate() {
+                (self.check)()?;
+                row.record.mark_live(dense);
+            }
+        }
+        Ok(())
     }
 
     fn validate_retained_metrics(

@@ -68,26 +68,7 @@ struct Replay {
 
 impl Replay {
     fn new(fixture: &Fixture) -> Result<Self> {
-        let plan = crate::compile_stream_project_graph(
-            &fixture.project,
-            &ProviderRegistry::default(),
-            &UdfRegistry::new().snapshot(),
-            &StreamRequirements::default(),
-        )?;
-        if fixture.manifest["compiled_plan_fingerprint"].as_str() != Some(plan.fingerprint()) {
-            return Err(invalid("compiled plan fingerprint mismatch"));
-        }
-        let budget = EdgeBudget::new(
-            usize::try_from(
-                fixture.manifest["batch_rows"]
-                    .as_u64()
-                    .expect("validated batch size"),
-            )
-            .map_err(|_| invalid("batch size exceeds platform capacity"))?,
-            64 << 20,
-        )?;
-        let mut parts = plan.into_runtime_parts(budget)?;
-        validate_graph(&parts, fixture.manifest["scenario"] == "join_sealed")?;
+        let (mut parts, budget) = replay_plan(fixture)?;
         let output_binding = fixture.manifest["output_binding"]
             .as_str()
             .ok_or_else(|| invalid("missing output binding"))?
@@ -176,22 +157,23 @@ impl Replay {
         self.output_rows
     }
 
-    async fn event(&mut self, event: &FixtureEvent) -> Result<()> {
+    fn source_event(&self, event: &FixtureEvent) -> Result<(String, String, EventKind)> {
         let route = self
             .parts
             .source_routes
             .get(&event.input)
             .ok_or_else(|| invalid("fixture input differs from compiled bindings"))?;
-        let mut queue = VecDeque::from([(
+        Ok((
             route.target.node_id.clone(),
             route.target.port.clone(),
             event.kind.clone(),
-        )]);
+        ))
+    }
+
+    async fn event(&mut self, event: &FixtureEvent) -> Result<()> {
+        let mut queue = VecDeque::from([self.source_event(event)?]);
         while let Some((node_id, ingress, kind)) = queue.pop_front() {
-            let state = self
-                .nodes
-                .get_mut(&node_id)
-                .ok_or_else(|| invalid("compiled edge names missing node"))?;
+            let state = node_for_event(&mut self.nodes, &node_id)?;
             let messages = Invocation {
                 job: &self.job,
                 audit: &mut self.audit,
@@ -204,33 +186,111 @@ impl Replay {
             .await?;
             for message in messages {
                 for edge in &state.node.output_edges["output"] {
-                    match &self.parts.edges[edge].consumer {
-                        RuntimeConsumer::Node { node_id, ingress } => {
-                            queue.push_back((node_id.clone(), ingress.clone(), message.clone()));
-                        }
-                        RuntimeConsumer::Sink { output_id }
-                            if *output_id == self.output_binding =>
-                        {
-                            if let EventKind::Data(batch) = &message {
-                                let table = batch.table_payload()?;
-                                if let Some(groups) = &mut self.audit.output_groups {
-                                    *groups.get_mut(self.audit.output_group_count).ok_or_else(
-                                        || invalid("dispatch output geometry capacity exceeded"),
-                                    )? = table.batches().len();
-                                    self.audit.output_group_count += 1;
-                                }
-                                self.output_rows += batch.num_rows();
-                                self.output.extend(table.batches().iter().cloned());
-                            }
-                        }
-                        RuntimeConsumer::Sink { .. } => {
-                            return Err(invalid("unexpected compiled output"));
-                        }
-                    }
+                    route_message(
+                        &self.parts.edges[edge].consumer,
+                        &message,
+                        &mut queue,
+                        &self.output_binding,
+                        &mut self.output,
+                        &mut self.output_rows,
+                        &mut self.audit,
+                    )?;
                 }
             }
         }
         Ok(())
+    }
+}
+
+fn node_for_event<'a>(
+    nodes: &'a mut BTreeMap<String, ReplayNode>,
+    node_id: &str,
+) -> Result<&'a mut ReplayNode> {
+    nodes
+        .get_mut(node_id)
+        .ok_or_else(|| invalid("compiled edge names missing node"))
+}
+
+fn replay_plan(fixture: &Fixture) -> Result<(StreamRuntimePlanParts, EdgeBudget)> {
+    let plan = crate::compile_stream_project_graph(
+        &fixture.project,
+        &ProviderRegistry::default(),
+        &UdfRegistry::new().snapshot(),
+        &StreamRequirements::default(),
+    )?;
+    if fixture.manifest["compiled_plan_fingerprint"].as_str() != Some(plan.fingerprint()) {
+        return Err(invalid("compiled plan fingerprint mismatch"));
+    }
+    let budget = EdgeBudget::new(
+        usize::try_from(
+            fixture.manifest["batch_rows"]
+                .as_u64()
+                .expect("validated batch size"),
+        )
+        .map_err(|_| invalid("batch size exceeds platform capacity"))?,
+        64 << 20,
+    )?;
+    let parts = plan.into_runtime_parts(budget)?;
+    validate_graph(&parts, fixture.manifest["scenario"] == "join_sealed")?;
+    Ok((parts, budget))
+}
+
+fn collect_output(
+    batch: &Batch,
+    output: &mut Vec<RecordBatch>,
+    output_rows: &mut usize,
+    audit: &mut ReplayAudit,
+) -> Result<()> {
+    let table = batch.table_payload()?;
+    if let Some(groups) = &mut audit.output_groups {
+        *groups
+            .get_mut(audit.output_group_count)
+            .ok_or_else(|| invalid("dispatch output geometry capacity exceeded"))? =
+            table.batches().len();
+        audit.output_group_count += 1;
+    }
+    *output_rows += batch.num_rows();
+    output.extend(table.batches().iter().cloned());
+    Ok(())
+}
+
+fn route_message(
+    consumer: &RuntimeConsumer,
+    message: &EventKind,
+    queue: &mut VecDeque<(String, String, EventKind)>,
+    output_binding: &str,
+    output: &mut Vec<RecordBatch>,
+    output_rows: &mut usize,
+    audit: &mut ReplayAudit,
+) -> Result<()> {
+    match consumer {
+        RuntimeConsumer::Node { node_id, ingress } => {
+            queue.push_back((node_id.clone(), ingress.clone(), message.clone()));
+        }
+        RuntimeConsumer::Sink { output_id } if output_id == output_binding => {
+            if let EventKind::Data(batch) = message {
+                collect_output(batch, output, output_rows, audit)?;
+            }
+        }
+        RuntimeConsumer::Sink { .. } => return Err(invalid("unexpected compiled output")),
+    }
+    Ok(())
+}
+
+fn aggregate_input(kind: &EventKind) -> AggregateInput {
+    match kind {
+        EventKind::Data(_) => AggregateInput::Data,
+        EventKind::Watermark(at) => AggregateInput::Watermark(*at),
+        EventKind::Idle => AggregateInput::Idle,
+        EventKind::End => AggregateInput::End,
+    }
+}
+
+fn event_watermark(kind: &EventKind) -> Option<EventTime> {
+    if let EventKind::Watermark(at) = kind {
+        Some(*at)
+    } else {
+        None
     }
 }
 
@@ -244,11 +304,7 @@ struct Invocation<'a> {
 }
 
 impl Invocation<'_> {
-    async fn dispatch(
-        &mut self,
-        state: &mut ReplayNode,
-        kind: EventKind,
-    ) -> Result<Vec<EventKind>> {
+    fn trace_dispatch(&self, state: &ReplayNode, kind: &EventKind) -> Result<()> {
         if matches!(
             state.node.operator,
             CompiledStreamOperator::StreamAsofJoin(_)
@@ -256,39 +312,47 @@ impl Invocation<'_> {
             self.job.dispatch_trace().record(
                 self.node_id,
                 self.ingress,
-                &dispatch::message(&kind),
+                &dispatch::message(kind),
             )?;
         }
-        let watermark = if let EventKind::Watermark(at) = &kind {
-            Some(*at)
-        } else {
-            None
-        };
+        Ok(())
+    }
+
+    fn record_fanout(&mut self, messages: &[EventKind]) {
+        if let Some(counts) = self.audit.node_data.get_mut(self.node_id) {
+            for message in messages {
+                if let EventKind::Data(batch) = message {
+                    counts.fanned_out_batches += 1;
+                    counts.fanned_out_rows +=
+                        u64::try_from(batch.num_rows()).expect("fixture rows fit u64");
+                }
+            }
+        }
+    }
+
+    async fn dispatch(
+        &mut self,
+        state: &mut ReplayNode,
+        kind: EventKind,
+    ) -> Result<Vec<EventKind>> {
+        self.trace_dispatch(state, &kind)?;
+        let watermark = event_watermark(&kind);
         let previous = state.progress.input_watermark();
-        let aggregate = match &kind {
-            EventKind::Data(_) => AggregateInput::Data,
-            EventKind::Watermark(at) => AggregateInput::Watermark(*at),
-            EventKind::Idle => AggregateInput::Idle,
-            EventKind::End => AggregateInput::End,
-        };
+        let aggregate = aggregate_input(&kind);
         let emissions = state.progress.evaluate(self.ingress, aggregate)?;
         let snapshot = state.progress.snapshot()?;
         let mut collector = EdgeCollector::new(state.node.output_ports.values().cloned().collect());
         let mut pending = Vec::new();
         let controls = if let EventKind::Data(batch) = kind {
-            if let Some(counts) = self.audit.node_data.get_mut(self.node_id) {
-                counts.input_batches += 1;
-                counts.input_rows += u64::try_from(batch.num_rows()).expect("fixture rows fit u64");
-            }
-            let context = StreamOperatorContext::with_ingress_progress(
-                self.job,
-                self.node_id,
+            self.dispatch_data(
+                state,
+                batch,
                 previous,
                 snapshot,
+                &mut collector,
+                &mut pending,
             )
-            .with_output_budget(self.budget);
-            self.data(state, batch, &context, &mut collector, &mut pending)
-                .await?;
+            .await?;
             Vec::new()
         } else {
             self.progress(
@@ -309,21 +373,36 @@ impl Invocation<'_> {
             })
             .chain(controls)
             .collect::<Vec<_>>();
-        if let Some(counts) = self.audit.node_data.get_mut(self.node_id) {
-            for message in &messages {
-                if let EventKind::Data(batch) = message {
-                    counts.fanned_out_batches += 1;
-                    counts.fanned_out_rows +=
-                        u64::try_from(batch.num_rows()).expect("fixture rows fit u64");
-                }
-            }
-        }
+        self.record_fanout(&messages);
         if let Some(at) = watermark {
             self.job
                 .dispatch_trace()
                 .complete_watermark(self.node_id, at.as_micros());
         }
         Ok(messages)
+    }
+
+    async fn dispatch_data(
+        &mut self,
+        state: &mut ReplayNode,
+        batch: Batch,
+        previous: Option<EventTime>,
+        snapshot: IngressProgressSnapshot,
+        collector: &mut EdgeCollector,
+        pending: &mut Vec<StreamMessage>,
+    ) -> Result<()> {
+        if let Some(counts) = self.audit.node_data.get_mut(self.node_id) {
+            counts.input_batches += 1;
+            counts.input_rows += u64::try_from(batch.num_rows()).expect("fixture rows fit u64");
+        }
+        let context = StreamOperatorContext::with_ingress_progress(
+            self.job,
+            self.node_id,
+            previous,
+            snapshot,
+        )
+        .with_output_budget(self.budget);
+        self.data(state, batch, &context, collector, pending).await
     }
 
     async fn data(
@@ -383,6 +462,26 @@ impl Invocation<'_> {
             .on_ingress_progress(self.ingress, &context, collector)
             .await?;
         self.record(state, "ingress_progress", &before, collector, pending)?;
+        let (ended, idle) = self
+            .progress_emissions(state, previous, &snapshot, emissions, collector, pending)
+            .await?;
+        let mut controls = progress_controls(state, &snapshot, idle)?;
+        if ended {
+            self.end(state, snapshot, collector, pending).await?;
+            controls.push(EventKind::End);
+        }
+        Ok(controls)
+    }
+
+    async fn progress_emissions(
+        &mut self,
+        state: &mut ReplayNode,
+        previous: Option<EventTime>,
+        snapshot: &IngressProgressSnapshot,
+        emissions: Vec<ProgressEmissionKind>,
+        collector: &mut EdgeCollector,
+        pending: &mut Vec<StreamMessage>,
+    ) -> Result<(bool, bool)> {
         let mut previous_watermark = previous;
         let mut ended = false;
         let mut idle = false;
@@ -409,38 +508,26 @@ impl Invocation<'_> {
                 ProgressEmissionKind::EndOfInput => ended = true,
             }
         }
-        let mut controls = Vec::new();
-        if let Some(at) = state
-            .node
-            .operator
-            .output_frontier_candidate(state.progress.input_watermark(), &snapshot)?
-            .filter(|at| {
-                state
-                    .progress
-                    .output_frontier
-                    .is_none_or(|previous| *at > previous)
-            })
-        {
-            state.progress.output_frontier = Some(at);
-            controls.push(EventKind::Watermark(at));
-        }
-        if idle && !state.node.operator.suppresses_output_idle() {
-            controls.push(EventKind::Idle);
-        }
-        if ended {
-            let before = trace_status(&state.node.operator, self.audit.trace.is_some())?;
-            let context = StreamOperatorContext::with_ingress_progress(
-                self.job,
-                self.node_id,
-                state.progress.input_watermark(),
-                snapshot,
-            )
-            .with_output_budget(self.budget);
-            state.node.operator.on_end(&context, collector).await?;
-            self.record(state, "end", &before, collector, pending)?;
-            controls.push(EventKind::End);
-        }
-        Ok(controls)
+        Ok((ended, idle))
+    }
+
+    async fn end(
+        &mut self,
+        state: &mut ReplayNode,
+        snapshot: IngressProgressSnapshot,
+        collector: &mut EdgeCollector,
+        pending: &mut Vec<StreamMessage>,
+    ) -> Result<()> {
+        let before = trace_status(&state.node.operator, self.audit.trace.is_some())?;
+        let context = StreamOperatorContext::with_ingress_progress(
+            self.job,
+            self.node_id,
+            state.progress.input_watermark(),
+            snapshot,
+        )
+        .with_output_budget(self.budget);
+        state.node.operator.on_end(&context, collector).await?;
+        self.record(state, "end", &before, collector, pending)
     }
 
     fn record(
@@ -492,12 +579,44 @@ impl Invocation<'_> {
     }
 }
 
+fn progress_controls(
+    state: &mut ReplayNode,
+    snapshot: &IngressProgressSnapshot,
+    idle: bool,
+) -> Result<Vec<EventKind>> {
+    let mut controls = Vec::new();
+    if let Some(at) = state
+        .node
+        .operator
+        .output_frontier_candidate(state.progress.input_watermark(), snapshot)?
+        .filter(|at| {
+            state
+                .progress
+                .output_frontier
+                .is_none_or(|previous| *at > previous)
+        })
+    {
+        state.progress.output_frontier = Some(at);
+        controls.push(EventKind::Watermark(at));
+    }
+    if idle && !state.node.operator.suppresses_output_idle() {
+        controls.push(EventKind::Idle);
+    }
+    Ok(controls)
+}
+
 fn trace_status(operator: &CompiledStreamOperator, enabled: bool) -> Result<Value> {
     if !enabled {
         return Ok(Value::Null);
     }
     serde_json::to_value(operator.stream_asof_join_status())
         .map_err(|error| invalid(error.to_string()))
+}
+
+fn invalid_fifo_group(group: &[FixtureEvent]) -> bool {
+    group.len() != 2
+        || !matches!(group[0].kind, EventKind::Data(_))
+        || !matches!(group[1].kind, EventKind::Watermark(_))
 }
 
 fn fifo_orders(events: &[FixtureEvent]) -> Result<Vec<Vec<FixtureEvent>>> {
@@ -509,13 +628,7 @@ fn fifo_orders(events: &[FixtureEvent]) -> Result<Vec<Vec<FixtureEvent>>> {
             .push(event.clone());
     }
     let groups = groups.into_values().collect::<Vec<_>>();
-    if groups.len() != 2
-        || groups.iter().any(|group| {
-            group.len() != 2
-                || !matches!(group[0].kind, EventKind::Data(_))
-                || !matches!(group[1].kind, EventKind::Watermark(_))
-        })
-    {
+    if groups.len() != 2 || groups.iter().any(|group| invalid_fifo_group(group)) {
         return Err(invalid(
             "ordering proof requires Data then Watermark on each source",
         ));
@@ -536,7 +649,7 @@ fn fifo_orders(events: &[FixtureEvent]) -> Result<Vec<Vec<FixtureEvent>>> {
     Ok(orders)
 }
 
-pub(crate) async fn prove_ordering(fixture: Fixture) -> Result<Value> {
+fn proof_chunks(fixture: &Fixture) -> Result<Vec<Vec<FixtureEvent>>> {
     let mut chunks = BTreeMap::<u64, Vec<FixtureEvent>>::new();
     for event in &fixture.processing {
         chunks
@@ -554,60 +667,89 @@ pub(crate) async fn prove_ordering(fixture: Fixture) -> Result<Value> {
             "ordering proof requires two full chunks and one final partial chunk",
         ));
     }
+    Ok(chunks)
+}
+
+fn chunk_rows(chunk: &[FixtureEvent]) -> Option<usize> {
+    chunk.iter().find_map(|event| {
+        if let EventKind::Data(batch) = &event.kind {
+            Some(batch.num_rows())
+        } else {
+            None
+        }
+    })
+}
+
+fn proof_geometry(fixture: &Fixture, chunks: &[Vec<FixtureEvent>]) -> Result<usize> {
     let batch_rows = usize::try_from(
         fixture.manifest["batch_rows"]
             .as_u64()
             .expect("validated batch rows"),
     )
     .map_err(|_| invalid("batch size exceeds platform capacity"))?;
-    let rows = |chunk: &[FixtureEvent]| {
-        chunk
-            .iter()
-            .find_map(|event| {
-                if let EventKind::Data(batch) = &event.kind {
-                    Some(batch.num_rows())
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(0)
-    };
-    if rows(&chunks[0]) != batch_rows
-        || rows(&chunks[1]) != batch_rows
-        || rows(&chunks[2]) == 0
-        || rows(&chunks[2]) >= batch_rows
+    if chunk_rows(&chunks[0]).unwrap_or(0) != batch_rows
+        || chunk_rows(&chunks[1]).unwrap_or(0) != batch_rows
+        || chunk_rows(&chunks[2]).unwrap_or(0) == 0
+        || chunk_rows(&chunks[2]).unwrap_or(0) >= batch_rows
     {
         return Err(invalid(
             "ordering proof has invalid full/final chunk geometry",
         ));
     }
-    let orders0 = fifo_orders(&chunks[0])?;
-    let orders1 = fifo_orders(&chunks[1])?;
+    Ok(batch_rows)
+}
+
+async fn finish_proof_schedule(
+    replay: &mut Replay,
+    fixture: &Fixture,
+    chunks: [&[FixtureEvent]; 3],
+    first: usize,
+    second: usize,
+) -> Result<Value> {
+    let result = prove_schedule(replay, fixture, chunks, first, second).await;
+    if result.is_err() {
+        replay.job.cancellation().cancel();
+    }
+    replay.nodes.clear();
+    let cleanup = settle_job(&replay.job).await;
+    let sample = result?;
+    cleanup?;
+    Ok(sample)
+}
+
+async fn proof_schedules(
+    fixture: &Fixture,
+    orders0: &[Vec<FixtureEvent>],
+    orders1: &[Vec<FixtureEvent>],
+    partial: &[FixtureEvent],
+) -> Result<(Vec<Value>, Value)> {
     let mut schedules = Vec::new();
     let mut projection = Value::Null;
     for (first, order0) in orders0.iter().enumerate() {
         for (second, order1) in orders1.iter().enumerate() {
-            let mut replay = Replay::new(&fixture)?;
+            let mut replay = Replay::new(fixture)?;
             projection = replay.projection();
             replay.audit.trace = Some(Vec::new());
-            let result = prove_schedule(
+            let sample = finish_proof_schedule(
                 &mut replay,
-                &fixture,
-                [order0.as_slice(), order1.as_slice(), chunks[2].as_slice()],
+                fixture,
+                [order0.as_slice(), order1.as_slice(), partial],
                 first,
                 second,
             )
-            .await;
-            if result.is_err() {
-                replay.job.cancellation().cancel();
-            }
-            replay.nodes.clear();
-            let cleanup = settle_job(&replay.job).await;
-            let sample = result?;
-            cleanup?;
+            .await?;
             schedules.push(sample);
         }
     }
+    Ok((schedules, projection))
+}
+
+pub(crate) async fn prove_ordering(fixture: Fixture) -> Result<Value> {
+    let chunks = proof_chunks(&fixture)?;
+    let batch_rows = proof_geometry(&fixture, &chunks)?;
+    let orders0 = fifo_orders(&chunks[0])?;
+    let orders1 = fifo_orders(&chunks[1])?;
+    let (schedules, projection) = proof_schedules(&fixture, &orders0, &orders1, &chunks[2]).await?;
     let expected = &schedules[0]["rendezvous"];
     let equivalent = schedules
         .iter()
@@ -618,12 +760,19 @@ pub(crate) async fn prove_ordering(fixture: Fixture) -> Result<Value> {
     let manifest = &fixture.manifest;
     Ok(json!({
         "schema":"calc-flow.native-ordering-proof.v1","schedule_count":36,"rendezvous_equivalent":equivalent,"callback_traces_identical":trace_identical,
-        "all_outputs_validated":true,"all_owned_cleanup_complete":true,"final_partial_rows":rows(&chunks[2]),"schedules":schedules,
+        "all_outputs_validated":true,"all_owned_cleanup_complete":true,"final_partial_rows":chunk_rows(&chunks[2]).unwrap_or(0),"schedules":schedules,
         "project_sha256":manifest["project"]["sha256"],"compiled_plan_fingerprint":manifest["compiled_plan_fingerprint"],"compiled_projection":projection,"compiled_projection_sha256":fingerprint(&projection)?,
         "inputs_sha256":manifest["inputs_sha256"],"shared_partial_order_sha256":manifest["shared_partial_order_sha256"],"canonical_native_events_sha256":manifest["canonical_native_events_sha256"],
         "batch_rows":batch_rows,"rows_per_side":manifest["rows_per_side"],"checkpoint_enabled":manifest["checkpoint_enabled"],
         "claim":"observable rendezvous equivalence; callback traces retained; no CPU-work equivalence claim"
     }))
+}
+
+async fn replay_events(replay: &mut Replay, events: &[FixtureEvent]) -> Result<()> {
+    for event in events {
+        replay.event(event).await?;
+    }
+    Ok(())
 }
 
 async fn prove_schedule(
@@ -636,28 +785,15 @@ async fn prove_schedule(
     let mut rendezvous = Vec::new();
     let mut expected_rows = 0;
     for chunk in chunks {
-        for event in chunk {
-            replay.event(event).await?;
-        }
-        expected_rows += chunk
-            .iter()
-            .find_map(|event| {
-                if let EventKind::Data(batch) = &event.kind {
-                    Some(batch.num_rows())
-                } else {
-                    None
-                }
-            })
-            .expect("proof data event");
+        replay_events(replay, chunk).await?;
+        expected_rows += chunk_rows(chunk).expect("proof data event");
         if replay.output_rows() != expected_rows {
             return Err(invalid("ordering proof rendezvous output differs"));
         }
         rendezvous.push(json!({"status":replay.status()?,"output_rows":replay.output_rows(),"output_batch_rows":replay.output.iter().map(RecordBatch::num_rows).collect::<Vec<_>>(),"callback_counts":replay.audit.callbacks,"node_callback_counts":replay.audit.node_callbacks}));
     }
     validate_output(&replay.output, &fixture.expected)?;
-    for event in &fixture.terminal {
-        replay.event(event).await?;
-    }
+    replay_events(replay, &fixture.terminal).await?;
     validate_output(&replay.output, &fixture.expected)?;
     Ok(
         json!({"first_order":first,"second_order":second,"rendezvous":rendezvous,"callback_trace":replay.audit.trace.take().expect("proof tracing"),"output_rows":replay.output_rows(),"validated_all_rows":true}),
@@ -675,29 +811,9 @@ fn validate_graph(parts: &StreamRuntimePlanParts, sealed_join: bool) -> Result<(
             )
         })
         .collect::<Vec<_>>();
-    if joins.len() != 1
-        || !matches!(parts.nodes.len(), 2 | 4)
-        || parts.source_routes.len() != 2
-        || parts.sink_routes.len() != 1
-        || parts.edges.len() != parts.nodes.len() + 2
-    {
-        return Err(invalid(
-            "matched ASOF requires two optional input expressions, one ASOF and one output expression",
-        ));
-    }
+    validate_graph_shape(parts, joins.len())?;
     let join = joins[0];
-    if sealed_join != matches!(join.operator, CompiledStreamOperator::StreamJoin(_)) {
-        return Err(invalid("compiled join kind differs from fixture scenario"));
-    }
-    if join
-        .input_ports
-        .keys()
-        .map(String::as_str)
-        .ne(["left", "right"])
-        || join.output_ports.len() != 1
-    {
-        return Err(invalid("unexpected ASOF ports"));
-    }
+    validate_join_ports(join, sealed_join)?;
     let output_id = &parts
         .sink_routes
         .values()
@@ -711,32 +827,105 @@ fn validate_graph(parts: &StreamRuntimePlanParts, sealed_join: bool) -> Result<(
         .map(|route| route.target.node_id.as_str())
         .collect::<BTreeSet<_>>();
     for node in &parts.nodes {
-        if node.output_edges.len() != 1 || node.output_edges.values().any(|edges| edges.len() != 1)
-        {
-            return Err(invalid("matched graph forbids fanout and side outputs"));
-        }
-        if node.node_id == join.node_id {
-            continue;
-        }
-        if !matches!(node.operator, CompiledStreamOperator::Expression(_))
-            || node.input_ports.len() != 1
-        {
-            return Err(invalid("matched graph contains an unexpected operator"));
-        }
-        let input_edge = &parts.edges[node.ingress_edges.values().next().expect("one ingress")];
-        let output_edge = &parts.edges[&node.output_edges.values().next().expect("one output")[0]];
-        if &node.node_id == output_id {
-            if !matches!(&input_edge.producer,RuntimeProducer::Node{node_id,..} if node_id==&join.node_id)
-                || !matches!(output_edge.consumer, RuntimeConsumer::Sink { .. })
-            {
-                return Err(invalid("output projection must directly follow ASOF"));
-            }
-        } else if !sources.contains(node.node_id.as_str())
-            || !matches!(input_edge.producer, RuntimeProducer::Source { .. })
-            || !matches!(&output_edge.consumer,RuntimeConsumer::Node{node_id,..} if node_id==&join.node_id)
-        {
-            return Err(invalid("input expressions must directly feed ASOF"));
-        }
+        validate_graph_node(parts, node, join, output_id, &sources)?;
+    }
+    Ok(())
+}
+
+fn validate_graph_shape(parts: &StreamRuntimePlanParts, joins: usize) -> Result<()> {
+    if joins != 1
+        || !matches!(parts.nodes.len(), 2 | 4)
+        || parts.source_routes.len() != 2
+        || parts.sink_routes.len() != 1
+        || parts.edges.len() != parts.nodes.len() + 2
+    {
+        return Err(invalid(
+            "matched ASOF requires two optional input expressions, one ASOF and one output expression",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_join_ports(join: &RuntimeStreamNode, sealed_join: bool) -> Result<()> {
+    if sealed_join != matches!(join.operator, CompiledStreamOperator::StreamJoin(_)) {
+        return Err(invalid("compiled join kind differs from fixture scenario"));
+    }
+    if join
+        .input_ports
+        .keys()
+        .map(String::as_str)
+        .ne(["left", "right"])
+        || join.output_ports.len() != 1
+    {
+        return Err(invalid("unexpected ASOF ports"));
+    }
+    Ok(())
+}
+
+fn validate_fanout(node: &RuntimeStreamNode) -> Result<()> {
+    if node.output_edges.len() != 1 || node.output_edges.values().any(|edges| edges.len() != 1) {
+        return Err(invalid("matched graph forbids fanout and side outputs"));
+    }
+    Ok(())
+}
+
+fn validate_output_projection(
+    input: &RuntimeProducer,
+    output: &RuntimeConsumer,
+    join: &str,
+) -> Result<()> {
+    if !matches!(input, RuntimeProducer::Node{node_id,..} if node_id == join)
+        || !matches!(output, RuntimeConsumer::Sink { .. })
+    {
+        return Err(invalid("output projection must directly follow ASOF"));
+    }
+    Ok(())
+}
+
+fn validate_input_projection(
+    node: &str,
+    sources: &BTreeSet<&str>,
+    input: &RuntimeProducer,
+    output: &RuntimeConsumer,
+    join: &str,
+) -> Result<()> {
+    if !sources.contains(node)
+        || !matches!(input, RuntimeProducer::Source { .. })
+        || !matches!(output,RuntimeConsumer::Node{node_id,..} if node_id == join)
+    {
+        return Err(invalid("input expressions must directly feed ASOF"));
+    }
+    Ok(())
+}
+
+fn validate_graph_node(
+    parts: &StreamRuntimePlanParts,
+    node: &RuntimeStreamNode,
+    join: &RuntimeStreamNode,
+    output_id: &str,
+    sources: &BTreeSet<&str>,
+) -> Result<()> {
+    validate_fanout(node)?;
+    if node.node_id == join.node_id {
+        return Ok(());
+    }
+    if !matches!(node.operator, CompiledStreamOperator::Expression(_))
+        || node.input_ports.len() != 1
+    {
+        return Err(invalid("matched graph contains an unexpected operator"));
+    }
+    let input_edge = &parts.edges[node.ingress_edges.values().next().expect("one ingress")];
+    let output_edge = &parts.edges[&node.output_edges.values().next().expect("one output")[0]];
+    if node.node_id == output_id {
+        validate_output_projection(&input_edge.producer, &output_edge.consumer, &join.node_id)?;
+    } else {
+        validate_input_projection(
+            &node.node_id,
+            sources,
+            &input_edge.producer,
+            &output_edge.consumer,
+            &join.node_id,
+        )?;
     }
     Ok(())
 }
@@ -771,42 +960,20 @@ async fn run_owned(
     setup_start: Instant,
     projection: Value,
 ) -> Result<Value> {
-    for event in &fixture.preload {
-        replay.event(event).await?;
-    }
+    replay_events(replay, &fixture.preload).await?;
     let preload_callbacks = replay.audit.callbacks.clone();
     let preload_node_callbacks = replay.audit.node_callbacks.clone();
     dispatch::start(replay, fixture)?;
     let setup_seconds = setup_start.elapsed().as_secs_f64();
-    replay.audit.collect_handlers = fixture.manifest["scenario"] == "join_sealed";
-    let processing_start = Instant::now();
-    for event in &fixture.processing {
-        replay.event(event).await?;
-        if let Some(rows) = fixture.barriers.get(&event.id) {
-            if replay.output_rows() != *rows {
-                return Err(invalid("native rendezvous output count mismatch"));
-            }
-        }
-    }
-    let assembled = Batch::table(replay.output.clone(), BatchMetadata::default())?;
-    let processing_seconds = processing_start.elapsed().as_secs_f64();
-    let dispatch_trace = dispatch::finish(replay, fixture)?;
-    replay.audit.collect_handlers = false;
-    let post_processing_status = replay.status()?;
+    let (assembled, processing_seconds, dispatch_trace, post_processing_status) =
+        processing_phase(replay, fixture).await?;
     let processing_callbacks = callback_delta(&replay.audit.callbacks, &preload_callbacks);
     let processing_node_callbacks =
         node_callback_delta(&replay.audit.node_callbacks, &preload_node_callbacks);
     let before_terminal_callbacks = replay.audit.callbacks.clone();
     let before_terminal_node_callbacks = replay.audit.node_callbacks.clone();
     let processing_rows = replay.output_rows();
-    let terminal_start = Instant::now();
-    for event in &fixture.terminal {
-        replay.event(event).await?;
-    }
-    let terminal_seconds = terminal_start.elapsed().as_secs_f64();
-    if replay.output_rows() != processing_rows {
-        return Err(invalid("matched output required EOF to complete"));
-    }
+    let terminal_seconds = terminal_phase(replay, fixture, processing_rows).await?;
     let oracle_start = Instant::now();
     validate_output(&replay.output, &fixture.expected)?;
     let oracle_seconds = oracle_start.elapsed().as_secs_f64();
@@ -827,6 +994,57 @@ async fn run_owned(
         "preload_callback_counts":preload_callbacks,"processing_callback_counts":processing_callbacks,"processing_node_callback_counts":processing_node_callbacks,
         "terminal_callback_counts":callback_delta(&replay.audit.callbacks,&before_terminal_callbacks),"terminal_node_callback_counts":node_callback_delta(&replay.audit.node_callbacks,&before_terminal_node_callbacks),
     });
+    attach_dispatch_trace(&mut result, dispatch_trace, fixture);
+    Ok(result)
+}
+
+async fn process_fixture(replay: &mut Replay, fixture: &Fixture) -> Result<()> {
+    for event in &fixture.processing {
+        replay.event(event).await?;
+        if let Some(rows) = fixture.barriers.get(&event.id) {
+            if replay.output_rows() != *rows {
+                return Err(invalid("native rendezvous output count mismatch"));
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn processing_phase(
+    replay: &mut Replay,
+    fixture: &Fixture,
+) -> Result<(Batch, f64, Option<Value>, Value)> {
+    replay.audit.collect_handlers = fixture.manifest["scenario"] == "join_sealed";
+    let processing_start = Instant::now();
+    process_fixture(replay, fixture).await?;
+    let assembled = Batch::table(replay.output.clone(), BatchMetadata::default())?;
+    let processing_seconds = processing_start.elapsed().as_secs_f64();
+    let dispatch_trace = dispatch::finish(replay, fixture)?;
+    replay.audit.collect_handlers = false;
+    let post_processing_status = replay.status()?;
+    Ok((
+        assembled,
+        processing_seconds,
+        dispatch_trace,
+        post_processing_status,
+    ))
+}
+
+async fn terminal_phase(
+    replay: &mut Replay,
+    fixture: &Fixture,
+    processing_rows: usize,
+) -> Result<f64> {
+    let terminal_start = Instant::now();
+    replay_events(replay, &fixture.terminal).await?;
+    let terminal_seconds = terminal_start.elapsed().as_secs_f64();
+    if replay.output_rows() != processing_rows {
+        return Err(invalid("matched output required EOF to complete"));
+    }
+    Ok(terminal_seconds)
+}
+
+fn attach_dispatch_trace(result: &mut Value, dispatch_trace: Option<Value>, fixture: &Fixture) {
     if let Some(trace) = dispatch_trace {
         let source = fixture.dispatch_replay.as_ref().expect("dispatch source");
         result["dispatch_trace"] = trace;
@@ -836,7 +1054,6 @@ async fn run_owned(
         result["replay_source_raw_sha256"] = source.envelope["source_raw_sha256"].clone();
         result["replay_trace_sha256"] = source.sha256.clone().into();
     }
-    Ok(result)
 }
 
 fn callback_delta(
@@ -867,7 +1084,7 @@ fn node_callback_delta(
         .collect()
 }
 
-fn validate_output(actual: &[RecordBatch], expected: &[RecordBatch]) -> Result<()> {
+fn validate_projection_order(actual: &[RecordBatch], expected: &[RecordBatch]) -> Result<()> {
     if actual.iter().chain(expected).any(|record| {
         record
             .schema()
@@ -880,55 +1097,100 @@ fn validate_output(actual: &[RecordBatch], expected: &[RecordBatch]) -> Result<(
             "native and oracle projection order must be sequence, value",
         ));
     }
-    let rows = expected.iter().map(RecordBatch::num_rows).sum::<usize>();
-    let mut values = vec![None; rows];
-    for record in expected {
-        let sequence = record
-            .column_by_name("sequence")
-            .and_then(|array| array.as_any().downcast_ref::<UInt64Array>())
-            .ok_or_else(|| invalid("oracle sequence must be UInt64"))?;
-        let value = record
-            .column_by_name("value")
-            .and_then(|array| array.as_any().downcast_ref::<Float64Array>())
-            .ok_or_else(|| invalid("oracle value must be Float64"))?;
-        for row in 0..record.num_rows() {
-            let index = usize::try_from(sequence.value(row))
-                .map_err(|_| invalid("oracle index overflow"))?;
-            if sequence.is_null(row)
-                || value.is_null(row)
-                || index >= rows
-                || values[index].replace(value.value(row)).is_some()
-            {
-                return Err(invalid("invalid oracle sequence"));
-            }
+    Ok(())
+}
+
+fn oracle_columns(record: &RecordBatch) -> Result<(&UInt64Array, &Float64Array)> {
+    let sequence = record
+        .column_by_name("sequence")
+        .and_then(|array| array.as_any().downcast_ref::<UInt64Array>())
+        .ok_or_else(|| invalid("oracle sequence must be UInt64"))?;
+    let value = record
+        .column_by_name("value")
+        .and_then(|array| array.as_any().downcast_ref::<Float64Array>())
+        .ok_or_else(|| invalid("oracle value must be Float64"))?;
+    Ok((sequence, value))
+}
+
+fn record_oracle_values(record: &RecordBatch, values: &mut [Option<f64>]) -> Result<()> {
+    let (sequence, value) = oracle_columns(record)?;
+    for row in 0..record.num_rows() {
+        let index =
+            usize::try_from(sequence.value(row)).map_err(|_| invalid("oracle index overflow"))?;
+        if sequence.is_null(row)
+            || value.is_null(row)
+            || index >= values.len()
+            || values[index].replace(value.value(row)).is_some()
+        {
+            return Err(invalid("invalid oracle sequence"));
         }
     }
+    Ok(())
+}
+
+fn oracle_values(expected: &[RecordBatch], rows: usize) -> Result<Vec<Option<f64>>> {
+    let mut values = vec![None; rows];
+    for record in expected {
+        record_oracle_values(record, &mut values)?;
+    }
+    Ok(values)
+}
+
+fn native_columns(record: &RecordBatch) -> Result<(&UInt64Array, &Float64Array)> {
+    let sequence = record
+        .column_by_name("sequence")
+        .and_then(|array| array.as_any().downcast_ref::<UInt64Array>())
+        .ok_or_else(|| invalid("native sequence must be UInt64"))?;
+    let value = record
+        .column_by_name("value")
+        .and_then(|array| array.as_any().downcast_ref::<Float64Array>())
+        .ok_or_else(|| invalid("native value must be Float64"))?;
+    Ok((sequence, value))
+}
+
+fn validate_native_row(
+    sequence: &UInt64Array,
+    value: &Float64Array,
+    row: usize,
+    values: &[Option<f64>],
+    seen: &mut [bool],
+) -> Result<()> {
+    let index =
+        usize::try_from(sequence.value(row)).map_err(|_| invalid("native index overflow"))?;
+    if sequence.is_null(row)
+        || value.is_null(row)
+        || index >= values.len()
+        || seen[index]
+        || values[index] != Some(value.value(row))
+    {
+        return Err(invalid("native output differs from full oracle"));
+    }
+    seen[index] = true;
+    Ok(())
+}
+
+fn validate_native_record(
+    record: &RecordBatch,
+    values: &[Option<f64>],
+    seen: &mut [bool],
+) -> Result<()> {
+    if record.num_columns() != 2 {
+        return Err(invalid("native output projection has extra columns"));
+    }
+    let (sequence, value) = native_columns(record)?;
+    for row in 0..record.num_rows() {
+        validate_native_row(sequence, value, row, values, seen)?;
+    }
+    Ok(())
+}
+
+fn validate_output(actual: &[RecordBatch], expected: &[RecordBatch]) -> Result<()> {
+    validate_projection_order(actual, expected)?;
+    let rows = expected.iter().map(RecordBatch::num_rows).sum::<usize>();
+    let values = oracle_values(expected, rows)?;
     let mut seen = vec![false; rows];
     for record in actual {
-        if record.num_columns() != 2 {
-            return Err(invalid("native output projection has extra columns"));
-        }
-        let sequence = record
-            .column_by_name("sequence")
-            .and_then(|array| array.as_any().downcast_ref::<UInt64Array>())
-            .ok_or_else(|| invalid("native sequence must be UInt64"))?;
-        let value = record
-            .column_by_name("value")
-            .and_then(|array| array.as_any().downcast_ref::<Float64Array>())
-            .ok_or_else(|| invalid("native value must be Float64"))?;
-        for row in 0..record.num_rows() {
-            let index = usize::try_from(sequence.value(row))
-                .map_err(|_| invalid("native index overflow"))?;
-            if sequence.is_null(row)
-                || value.is_null(row)
-                || index >= rows
-                || seen[index]
-                || values[index] != Some(value.value(row))
-            {
-                return Err(invalid("native output differs from full oracle"));
-            }
-            seen[index] = true;
-        }
+        validate_native_record(record, &values, &mut seen)?;
     }
     if seen.iter().any(|seen| !*seen) {
         return Err(invalid("native output is incomplete"));

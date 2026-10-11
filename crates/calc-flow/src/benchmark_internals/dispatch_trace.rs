@@ -249,19 +249,28 @@ impl Record {
         self.rows = batch.num_rows();
         self.batches = table.batches().len();
         for (index, batch) in table.batches().iter().enumerate() {
-            let sequence = batch
-                .column_by_name("sequence")
-                .and_then(|column| column.as_any().downcast_ref::<UInt64Array>())
-                .ok_or_else(|| invalid("dispatch sequence must be UInt64"))?;
-            if sequence.is_empty() || sequence.null_count() != 0 {
-                return Err(invalid("dispatch sequence must be populated"));
-            }
-            self.batch_rows[index] = batch.num_rows();
-            if index == 0 {
-                self.first = sequence.value(0);
-            }
-            self.last = sequence.value(sequence.len() - 1);
+            self.read_record_batch(index, batch)?;
         }
+        Ok(())
+    }
+
+    fn read_record_batch(
+        &mut self,
+        index: usize,
+        batch: &datafusion::arrow::record_batch::RecordBatch,
+    ) -> Result<()> {
+        let sequence = batch
+            .column_by_name("sequence")
+            .and_then(|column| column.as_any().downcast_ref::<UInt64Array>())
+            .ok_or_else(|| invalid("dispatch sequence must be UInt64"))?;
+        if sequence.is_empty() || sequence.null_count() != 0 {
+            return Err(invalid("dispatch sequence must be populated"));
+        }
+        self.batch_rows[index] = batch.num_rows();
+        if index == 0 {
+            self.first = sequence.value(0);
+        }
+        self.last = sequence.value(sequence.len() - 1);
         Ok(())
     }
 

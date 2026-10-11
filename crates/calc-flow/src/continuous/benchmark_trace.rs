@@ -1,5 +1,23 @@
 use super::{Result, StreamingJob};
 
+fn operator_started(operator: &crate::OperatorStatus) -> bool {
+    operator.input_batches != 0
+        || operator.fanned_out_batches != 0
+        || operator.errors != 0
+        || operator.ended
+}
+
+fn asof_admission_started(asof: &crate::StreamAsofJoinStatus) -> bool {
+    asof.left.accepted_rows != 0
+        || asof.right.accepted_rows != 0
+        || asof.left.watermark_micros.is_some()
+        || asof.right.watermark_micros.is_some()
+}
+
+fn asof_ingress_stopped(asof: &crate::StreamAsofJoinStatus) -> bool {
+    asof.left.ended || asof.right.ended || asof.left.idle || asof.right.idle
+}
+
 impl StreamingJob {
     /// Enables the fixed ASOF benchmark recorder before source feeding starts.
     ///
@@ -11,28 +29,14 @@ impl StreamingJob {
         let status = self.status();
         if statuses.len() != 1
             || status.operators.is_empty()
-            || status.operators.values().any(|operator| {
-                operator.input_batches != 0
-                    || operator.fanned_out_batches != 0
-                    || operator.errors != 0
-                    || operator.ended
-            })
+            || status.operators.values().any(operator_started)
         {
             return Err(crate::benchmark_internals::invalid(
                 "dispatch capture requires one empty ASOF job",
             ));
         }
         let (node, asof) = statuses.first_key_value().expect("one ASOF");
-        if asof.left.accepted_rows != 0
-            || asof.right.accepted_rows != 0
-            || asof.left.watermark_micros.is_some()
-            || asof.right.watermark_micros.is_some()
-            || asof.left.ended
-            || asof.right.ended
-            || asof.left.idle
-            || asof.right.idle
-            || asof.state_rows != 0
-        {
+        if asof_admission_started(asof) || asof_ingress_stopped(asof) || asof.state_rows != 0 {
             return Err(crate::benchmark_internals::invalid(
                 "ASOF processing already started",
             ));

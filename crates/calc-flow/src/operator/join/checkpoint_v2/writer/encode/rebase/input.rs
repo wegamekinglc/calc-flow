@@ -17,55 +17,113 @@ pub(super) async fn eligible(
     context: &StreamOperatorContext<'_>,
 ) -> Result<bool> {
     context.check_cancelled()?;
-    let writer = &operator.v2_writer;
-    let Some(epoch) = operator.state.last_checkpoint_epoch else {
+    let Some((base, epoch)) = eligible_base(operator, context) else {
         return Ok(false);
     };
-    let Some(base) = &writer.base else {
-        return Ok(false);
-    };
-    if !context.job().checkpointing() || !writer.history_trusted || writer.migration_required {
+    let mut quantum = Quantum::default();
+    if !pending_upserts(operator, &mut quantum, context).await? {
         return Ok(false);
     }
-    let mut quantum = Quantum::default();
+    validate_inventory(operator, base, epoch, &mut quantum, context).await?;
+    let eligible = validate_segments(operator, base, &mut quantum, context).await?;
+    context.check_cancelled()?;
+    Ok(eligible)
+}
+
+fn eligible_base<'a>(
+    operator: &'a StreamJoinOperator,
+    context: &StreamOperatorContext<'_>,
+) -> Option<(&'a Base, u64)> {
+    let writer = &operator.v2_writer;
+    let epoch = operator.state.last_checkpoint_epoch?;
+    let base = writer.base.as_ref()?;
+    if !context.job().checkpointing() || !writer.history_trusted || writer.migration_required {
+        return None;
+    }
+    Some((base, epoch.as_u64()))
+}
+
+async fn pending_upserts(
+    operator: &StreamJoinOperator,
+    quantum: &mut Quantum,
+    context: &StreamOperatorContext<'_>,
+) -> Result<bool> {
     for op in operator.state.deltas.pending.iter() {
         quantum.step(context, 1, 0).await?;
         if !matches!(op, PendingOp::Upsert { .. }) {
             return Ok(false);
         }
     }
-    let indexes = validate_lists(operator, base, epoch.as_u64(), &mut quantum, context).await?;
+    Ok(true)
+}
+
+async fn validate_inventory(
+    operator: &StreamJoinOperator,
+    base: &Base,
+    epoch: u64,
+    quantum: &mut Quantum,
+    context: &StreamOperatorContext<'_>,
+) -> Result<()> {
+    let writer = &operator.v2_writer;
+    let indexes = validate_lists(operator, base, epoch, quantum, context).await?;
     if base.segments.len() != accounting::add(indexes, base.payloads.len())?
         || !base.segments.contains_key("left-base")
         || !base.segments.contains_key("right-base")
-        || writer.base_epoch > epoch.as_u64()
+        || writer.base_epoch > epoch
     {
         return Err(error("V2 rebase segment inventory differs"));
     }
+    Ok(())
+}
+
+async fn validate_segments(
+    operator: &StreamJoinOperator,
+    base: &Base,
+    quantum: &mut Quantum,
+    context: &StreamOperatorContext<'_>,
+) -> Result<bool> {
     let mut eligible = true;
     for (name, segment) in &base.segments {
         quantum.step(context, 1, 64).await?;
-        checked(inventory::digest(segment.sha256()))?;
-        if !segment.has_owner() {
-            return Err(error("V2 rebase segment has no backing owner"));
+        eligible &= validate_segment(operator, base, name, segment)?;
+    }
+    Ok(eligible)
+}
+
+fn validate_segment(
+    operator: &StreamJoinOperator,
+    base: &Base,
+    name: &str,
+    segment: &StateSegment,
+) -> Result<bool> {
+    checked(inventory::digest(segment.sha256()))?;
+    if !segment.has_owner() {
+        return Err(error("V2 rebase segment has no backing owner"));
+    }
+    match classify(name)? {
+        Segment::Index(side, epoch) => {
+            return validate_index(operator, segment, side, epoch);
         }
-        match classify(name)? {
-            Segment::Index(side, epoch) => {
-                let index = index(segment, side, epoch)?;
-                if let Some(epoch) = epoch {
-                    validate_delta(operator, side, epoch)?;
-                } else if writer.base_epoch == 0 && index.upserts != 0 {
-                    return Err(error("V2 rebase epoch-zero base must be empty"));
-                }
-                eligible &= index.tombstones == 0;
-            }
-            Segment::Payload(side, digest) => {
-                validate_payload(base, segment, side, digest)?;
-            }
+        Segment::Payload(side, digest) => {
+            validate_payload(base, segment, side, digest)?;
         }
     }
-    context.check_cancelled()?;
-    Ok(eligible)
+    Ok(true)
+}
+
+fn validate_index(
+    operator: &StreamJoinOperator,
+    segment: &StateSegment,
+    side: JoinSide,
+    epoch: Option<u64>,
+) -> Result<bool> {
+    let index = index(segment, side, epoch)?;
+    if let Some(epoch) = epoch {
+        validate_delta(operator, side, epoch)?;
+    } else if operator.v2_writer.base_epoch == 0 && index.upserts != 0 {
+        return Err(error("V2 rebase epoch-zero base must be empty"));
+    }
+    Ok(index.tombstones == 0)
 }
 
 async fn validate_lists(
@@ -92,6 +150,15 @@ async fn validate_lists(
         previous = delta.epoch;
         indexes = accounting::add(indexes, delta.sides.len())?;
     }
+    validate_payload_list(base, quantum, context).await?;
+    Ok(indexes)
+}
+
+async fn validate_payload_list(
+    base: &Base,
+    quantum: &mut Quantum,
+    context: &StreamOperatorContext<'_>,
+) -> Result<()> {
     let mut previous = None;
     for payload in &base.payloads {
         quantum.step(context, 1, 64).await?;
@@ -102,7 +169,7 @@ async fn validate_lists(
         }
         previous = Some((side, digest));
     }
-    Ok(indexes)
+    Ok(())
 }
 
 fn validate_delta(operator: &StreamJoinOperator, side: JoinSide, epoch: u64) -> Result<()> {
@@ -157,6 +224,21 @@ pub(super) async fn copy(
         .base
         .as_ref()
         .expect("eligible rebase Base");
+    let mut history = allocate_history(operator, base, workspace)?;
+    let mut quantum = Quantum::default();
+    for (name, segment) in &base.segments {
+        quantum.step(context, 1, 64).await?;
+        copy_segment(&mut history, base, name, segment)?;
+    }
+    context.check_cancelled()?;
+    Ok(history)
+}
+
+fn allocate_history(
+    operator: &StreamJoinOperator,
+    base: &Base,
+    workspace: &MemoryReservation,
+) -> Result<HistoryInput> {
     let indexes = base
         .segments
         .len()
@@ -164,35 +246,39 @@ pub(super) async fn copy(
         .ok_or_else(|| error("V2 rebase input count overflow"))?;
     let expected = expectations(operator)?;
     accounting::reserve(workspace, funding::inputs(indexes, base.payloads.len())?)?;
-    let mut history = HistoryInput {
+    let history = HistoryInput {
         indexes: funding::vector(indexes)?,
         payloads: funding::vector(base.payloads.len())?,
         expected,
     };
-    let mut quantum = Quantum::default();
-    for (name, segment) in &base.segments {
-        quantum.step(context, 1, 64).await?;
-        match classify(name)? {
-            Segment::Index(side, epoch) => history.indexes.push(IndexInput {
+    Ok(history)
+}
+
+fn copy_segment(
+    history: &mut HistoryInput,
+    base: &Base,
+    name: &str,
+    segment: &StateSegment,
+) -> Result<()> {
+    match classify(name)? {
+        Segment::Index(side, epoch) => history.indexes.push(IndexInput {
+            side,
+            epoch,
+            pending: false,
+            segment: segment.clone(),
+        }),
+        Segment::Payload(side, digest) => {
+            let entry = payload_entry(base, side, digest)?;
+            history.payloads.push(PayloadInput {
                 side,
-                epoch,
-                pending: false,
+                digest: checked(inventory::digest(digest))?,
+                rows: usize::try_from(entry.rows)
+                    .map_err(|_| error("V2 rebase input row count overflow"))?,
                 segment: segment.clone(),
-            }),
-            Segment::Payload(side, digest) => {
-                let entry = payload_entry(base, side, digest)?;
-                history.payloads.push(PayloadInput {
-                    side,
-                    digest: checked(inventory::digest(digest))?,
-                    rows: usize::try_from(entry.rows)
-                        .map_err(|_| error("V2 rebase input row count overflow"))?,
-                    segment: segment.clone(),
-                });
-            }
+            });
         }
     }
-    context.check_cancelled()?;
-    Ok(history)
+    Ok(())
 }
 
 fn expectations(operator: &StreamJoinOperator) -> Result<[SideExpected; 2]> {
@@ -242,15 +328,20 @@ pub(super) fn classify(name: &str) -> Result<Segment<'_>> {
         return Ok(Segment::Payload(side, digest));
     }
     if let Some(epoch) = suffix.strip_prefix("delta-") {
-        if epoch.starts_with('0') || !epoch.bytes().all(|byte| byte.is_ascii_digit()) {
-            return Err(error("V2 rebase delta epoch is not canonical"));
-        }
-        let epoch = epoch
-            .parse::<u64>()
-            .map_err(|_| error("V2 rebase delta epoch is invalid"))?;
+        let epoch = canonical_epoch(epoch)?;
         return Ok(Segment::Index(side, Some(epoch)));
     }
     Err(error("V2 rebase segment name is invalid"))
+}
+
+fn canonical_epoch(epoch: &str) -> Result<u64> {
+    if epoch.starts_with('0') || !epoch.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(error("V2 rebase delta epoch is not canonical"));
+    }
+    let epoch = epoch
+        .parse::<u64>()
+        .map_err(|_| error("V2 rebase delta epoch is invalid"))?;
+    Ok(epoch)
 }
 
 fn side(side: &str) -> Result<JoinSide> {

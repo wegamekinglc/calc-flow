@@ -136,6 +136,34 @@ fn copied_chunk_sequences(
     SequenceColumn::from_array_prefix(column.as_ref(), rows, kind)
 }
 
+fn check_chunk_cancellation(row: usize, cancelled: &dyn Fn() -> Result<()>) -> Result<()> {
+    if row.is_multiple_of(128) {
+        cancelled()?;
+    }
+    Ok(())
+}
+
+fn chunk_order(
+    rows: &[(&LeftOrder, u32)],
+    batch: &PayloadBatch,
+    side: &AsofJoinSide,
+    cancelled: &dyn Fn() -> Result<()>,
+) -> Result<(bool, bool, Option<UInt32Array>)> {
+    cancelled()?;
+    let ordered = rows.windows(2).all(|pair| pair[0].0 < pair[1].0);
+    let contiguous = rows
+        .iter()
+        .enumerate()
+        .all(|(row, (_, position))| *position as usize == row);
+    let sorted = if ordered {
+        None
+    } else {
+        Some(chunk_sort_indices(rows, batch, side, contiguous)?)
+    };
+    cancelled()?;
+    Ok((ordered, contiguous, sorted))
+}
+
 impl ChunkData {
     fn from_inline_strings(
         encoded: super::EncodedColumns,
@@ -151,9 +179,7 @@ impl ChunkData {
         let mut keys = Vec::with_capacity(1);
         let mut key_counts = Vec::with_capacity(1);
         for row in 0..rows.len() {
-            if row.is_multiple_of(128) {
-                cancelled()?;
-            }
+            check_chunk_cancellation(row, cancelled)?;
             if keys.len() == keys.capacity() {
                 keys.reserve_exact(keys.len().max(1));
                 key_counts.reserve_exact(key_counts.len().max(1));
@@ -163,9 +189,7 @@ impl ChunkData {
             key_counts.push(0);
         }
         for (row, id) in ids.iter().enumerate() {
-            if row.is_multiple_of(128) {
-                cancelled()?;
-            }
+            check_chunk_cancellation(row, cancelled)?;
             key_counts[*id as usize] += 1;
         }
         let count = batch.record.num_rows();
@@ -238,9 +262,7 @@ impl ChunkData {
         let mut interned = HashMap::<Encoding, u32, ahash::RandomState>::default();
         let mut owners = EncodingOwners::default();
         for (ordinal, ((time, key, sequence), _)) in rows.iter().enumerate() {
-            if ordinal.is_multiple_of(128) {
-                cancelled()?;
-            }
+            check_chunk_cancellation(ordinal, cancelled)?;
             times.push(*time);
             let id = intern_chunk_key(
                 &mut interned,
@@ -284,18 +306,7 @@ impl ChunkData {
         name: &str,
         cancelled: &dyn Fn() -> Result<()>,
     ) -> Result<Self> {
-        cancelled()?;
-        let ordered = rows.windows(2).all(|pair| pair[0].0 < pair[1].0);
-        let contiguous = rows
-            .iter()
-            .enumerate()
-            .all(|(row, (_, position))| *position as usize == row);
-        let sorted = if ordered {
-            None
-        } else {
-            Some(chunk_sort_indices(rows, batch, side, contiguous)?)
-        };
-        cancelled()?;
+        let (ordered, contiguous, sorted) = chunk_order(rows, batch, side, cancelled)?;
         let positions = chunk_positions(rows, sorted.as_ref(), contiguous);
         let mut keys = Vec::with_capacity(1);
         let mut key_counts = Vec::with_capacity(1);
@@ -309,9 +320,7 @@ impl ChunkData {
         let mut interned = HashMap::<Encoding, u32, ahash::RandomState>::default();
         let mut owners = EncodingOwners::default();
         for ordinal in 0..rows.len() {
-            if ordinal.is_multiple_of(128) {
-                cancelled()?;
-            }
+            check_chunk_cancellation(ordinal, cancelled)?;
             let row = sorted
                 .as_ref()
                 .map_or(ordinal, |indices| indices.value(ordinal) as usize);

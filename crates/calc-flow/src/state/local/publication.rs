@@ -15,37 +15,14 @@ pub(super) fn publish_files(
     let mut seen = BTreeSet::new();
     let mut publication_directories: Vec<PathBuf> = Vec::new();
     for (handle, paths, validated) in entries {
-        let (root, lineage, epoch, operator) = managed_segment_components(&paths)?;
-        prepare_committed_directories(
-            root,
-            &lineage,
-            &operator,
-            &mut directories.lock(),
+        publish_segment(
+            &handle,
+            &paths,
+            validated,
+            directories,
             #[cfg(test)]
             hook,
         )?;
-        if !committed_file_matches(&paths.committed, &handle)? {
-            if !validated {
-                return Err(CalcFlowError::Conflict {
-                    resource: "validated state segment".into(),
-                    key: handle.segment_id().into(),
-                });
-            }
-            prepare_staging_directories(
-                root,
-                &lineage,
-                &epoch,
-                &operator,
-                &mut directories.lock(),
-                #[cfg(test)]
-                hook,
-            )?;
-            read_validated_file(&paths.staging, &handle)?;
-            #[cfg(test)]
-            observe(hook, Operation::Rename, &paths.committed)?;
-            std::fs::rename(&paths.staging, &paths.committed)
-                .map_err(|source| io_error(&paths.committed, source))?;
-        }
         if seen.insert(paths.committed_parent.clone()) {
             publication_directories.push(paths.committed_parent);
         }
@@ -58,10 +35,72 @@ pub(super) fn publish_files(
     Ok(())
 }
 
+fn publish_segment(
+    handle: &StateHandle,
+    paths: &ManagedSegmentPaths,
+    validated: bool,
+    directories: &SyncMutex<SegmentDirectories>,
+    #[cfg(test)] hook: Option<&PublicationHook>,
+) -> Result<()> {
+    let (root, lineage, epoch, operator) = managed_segment_components(paths)?;
+    prepare_committed_directories(
+        root,
+        &lineage,
+        &operator,
+        &mut directories.lock(),
+        #[cfg(test)]
+        hook,
+    )?;
+    if !committed_file_matches(&paths.committed, handle)? {
+        if !validated {
+            return Err(CalcFlowError::Conflict {
+                resource: "validated state segment".into(),
+                key: handle.segment_id().into(),
+            });
+        }
+        prepare_staging_directories(
+            root,
+            &lineage,
+            &epoch,
+            &operator,
+            &mut directories.lock(),
+            #[cfg(test)]
+            hook,
+        )?;
+        publish_staging_file(
+            paths,
+            handle,
+            #[cfg(test)]
+            hook,
+        )?;
+    }
+    Ok(())
+}
+
+fn publish_staging_file(
+    paths: &ManagedSegmentPaths,
+    handle: &StateHandle,
+    #[cfg(test)] hook: Option<&PublicationHook>,
+) -> Result<()> {
+    read_validated_file(&paths.staging, handle)?;
+    #[cfg(test)]
+    observe(hook, Operation::Rename, &paths.committed)?;
+    std::fs::rename(&paths.staging, &paths.committed)
+        .map_err(|source| io_error(&paths.committed, source))?;
+    Ok(())
+}
+
 #[derive(Default)]
 pub(super) struct SegmentDirectories {
     pending: BTreeSet<PathBuf>,
     confirmed_committed: BTreeSet<PathBuf>,
+}
+
+impl SegmentDirectories {
+    fn needs_confirmation(&self, path: &Path, confirm_existing: bool) -> bool {
+        self.pending.contains(path)
+            || (confirm_existing && !self.confirmed_committed.contains(path))
+    }
 }
 
 pub(super) fn ensure_segment_directory(
@@ -73,24 +112,8 @@ pub(super) fn ensure_segment_directory(
 ) -> Result<PathBuf> {
     validate_directory(parent)?;
     let path = parent.join(component);
-    match std::fs::symlink_metadata(&path) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                return Err(format_error(format!(
-                    "managed state entry {} is not a directory",
-                    path.display()
-                )));
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            std::fs::create_dir(&path).map_err(|source| io_error(&path, source))?;
-            directories.pending.insert(path.clone());
-        }
-        Err(source) => return Err(io_error(&path, source)),
-    }
-    if directories.pending.contains(&path)
-        || (confirm_existing && !directories.confirmed_committed.contains(&path))
-    {
+    create_segment_directory(&path, directories)?;
+    if directories.needs_confirmation(&path, confirm_existing) {
         #[cfg(test)]
         observe(hook, Operation::CreationSync, parent)?;
         sync_directory(parent)?;
@@ -100,4 +123,23 @@ pub(super) fn ensure_segment_directory(
         }
     }
     Ok(path)
+}
+
+fn create_segment_directory(path: &Path, directories: &mut SegmentDirectories) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(format_error(format!(
+                    "managed state entry {} is not a directory",
+                    path.display()
+                )));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir(path).map_err(|source| io_error(path, source))?;
+            directories.pending.insert(path.to_path_buf());
+        }
+        Err(source) => return Err(io_error(path, source)),
+    }
+    Ok(())
 }

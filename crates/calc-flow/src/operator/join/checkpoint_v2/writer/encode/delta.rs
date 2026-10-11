@@ -69,23 +69,7 @@ struct PendingRows<'a> {
 }
 
 impl<'a> PendingRows<'a> {
-    fn select<I: Iterator<Item = &'a PendingOp>>(
-        pending: &impl Fn() -> I,
-        side: JoinSide,
-        workspace: &MemoryReservation,
-        check: &dyn Fn() -> Result<()>,
-    ) -> Result<Self> {
-        let (upserts, removals) =
-            pending().try_fold((0, 0), |(upserts, removals), op| -> Result<_> {
-                check()?;
-                if op.identity().0 != side {
-                    Ok((upserts, removals))
-                } else if matches!(op, PendingOp::Upsert { .. }) {
-                    Ok((add(upserts, 1)?, removals))
-                } else {
-                    Ok((upserts, add(removals, 1)?))
-                }
-            })?;
+    fn allocate(upserts: usize, removals: usize, workspace: &MemoryReservation) -> Result<Self> {
         let funding = workspace.new_empty();
         accounting::reserve(
             &funding,
@@ -94,11 +78,22 @@ impl<'a> PendingRows<'a> {
                 accounting::product(removals, size_of::<&PendingOp>())?,
             ])?,
         )?;
-        let mut selected = Self {
+        let selected = Self {
             rows: exact_selection(upserts)?,
             tombstones: exact_selection(removals)?,
             funding,
         };
+        Ok(selected)
+    }
+
+    fn select<I: Iterator<Item = &'a PendingOp>>(
+        pending: &impl Fn() -> I,
+        side: JoinSide,
+        workspace: &MemoryReservation,
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<Self> {
+        let (upserts, removals) = pending_counts(pending, side, check)?;
+        let mut selected = Self::allocate(upserts, removals, workspace)?;
         for op in pending() {
             check()?;
             if op.identity().0 == side {
@@ -116,6 +111,25 @@ impl<'a> PendingRows<'a> {
         check()?;
         Ok(selected)
     }
+}
+
+fn pending_counts<'a, I: Iterator<Item = &'a PendingOp>>(
+    pending: &impl Fn() -> I,
+    side: JoinSide,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<(usize, usize)> {
+    let (upserts, removals) =
+        pending().try_fold((0, 0), |(upserts, removals), op| -> Result<_> {
+            check()?;
+            if op.identity().0 != side {
+                Ok((upserts, removals))
+            } else if matches!(op, PendingOp::Upsert { .. }) {
+                Ok((add(upserts, 1)?, removals))
+            } else {
+                Ok((upserts, add(removals, 1)?))
+            }
+        })?;
+    Ok((upserts, removals))
 }
 
 fn exact_selection<T>(count: usize) -> Result<Vec<T>> {
@@ -154,6 +168,33 @@ fn index(
     encoder: &Encoder,
     check: &dyn Fn() -> Result<()>,
 ) -> Result<Vec<u8>> {
+    let capacity = index_capacity(rows, tombstones, check)?;
+    check()?;
+    let mut bytes = PaidBuffer::exact(&encoder.funding, encoder.retained, capacity)?;
+    bytes.append(&index_header(side, epoch, rows.len(), tombstones.len())?)?;
+    append_upserts(&mut bytes, rows, digest, check)?;
+    append_tombstones(&mut bytes, tombstones, check)?;
+    bytes.into_bytes()
+}
+
+fn append_upserts(
+    bytes: &mut PaidBuffer<'_>,
+    rows: &[impl CheckpointRow],
+    digest: &[u8; 32],
+    check: &dyn Fn() -> Result<()>,
+) -> Result<()> {
+    for (position, row) in rows.iter().enumerate() {
+        check()?;
+        upsert(bytes, row, digest, position)?;
+    }
+    Ok(())
+}
+
+fn index_capacity(
+    rows: &[impl CheckpointRow],
+    tombstones: &[&PendingOp],
+    check: &dyn Fn() -> Result<()>,
+) -> Result<usize> {
     let capacity =
         tombstones
             .iter()
@@ -164,15 +205,7 @@ fn index(
                 };
                 sum(&[bytes, 24, encoded_key.len()])
             })?;
-    check()?;
-    let mut bytes = PaidBuffer::exact(&encoder.funding, encoder.retained, capacity)?;
-    bytes.append(&index_header(side, epoch, rows.len(), tombstones.len())?)?;
-    for (position, row) in rows.iter().enumerate() {
-        check()?;
-        upsert(&mut bytes, row, digest, position)?;
-    }
-    append_tombstones(&mut bytes, tombstones, check)?;
-    bytes.into_bytes()
+    Ok(capacity)
 }
 
 fn append_tombstones(

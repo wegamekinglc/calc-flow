@@ -781,3 +781,71 @@ fn conflicting_selected_datafusion_references_are_rejected_before_plan_creation(
         Err(CalcFlowError::Compile { message }) if message.contains("collides")
     ));
 }
+
+mod public_stream_contract {
+    use calc_flow::{
+        CalcFlowError, EdgeBudget, ExpressionOperator, PipelineBuilder, StreamRequirements,
+        UdfRegistry,
+    };
+
+    #[test]
+    fn edge_budget_rejects_unbounded_runtime_limits() {
+        assert!(EdgeBudget::new(1_000_001, 1).is_err());
+        assert!(EdgeBudget::new(1, (256 << 20) + 1).is_err());
+        assert!(EdgeBudget::new(EdgeBudget::MAX_ROWS, EdgeBudget::MAX_BYTES).is_ok());
+    }
+
+    #[test]
+    fn random_builtin_is_still_rejected_by_stream_compilation() {
+        let plan = PipelineBuilder::new("random")
+            .unwrap()
+            .add_node(
+                "features",
+                Box::new(
+                    ExpressionOperator::new(
+                        "features",
+                        "score = random()",
+                        Vec::new(),
+                        None,
+                        Vec::new(),
+                    )
+                    .unwrap(),
+                ),
+            )
+            .unwrap()
+            .compile_stream(
+                &UdfRegistry::new().snapshot(),
+                &StreamRequirements::default(),
+            );
+        let error = plan.unwrap_err();
+        let CalcFlowError::Compile { message } = error else {
+            panic!("expected a compile error, got {error:?}");
+        };
+        assert!(message.contains("random"), "{message}");
+    }
+
+    #[test]
+    fn deterministic_datetime_queries_still_compile_through_the_default_registry() {
+        let plan = PipelineBuilder::new("deterministic-datetime")
+            .unwrap()
+            .add_node(
+                "features",
+                Box::new(
+                    ExpressionOperator::new(
+                        "features",
+                        "year = date_part('year', ts)",
+                        Vec::new(),
+                        Some("to_timestamp(x) > to_timestamp(0)".into()),
+                        Vec::new(),
+                    )
+                    .unwrap(),
+                ),
+            )
+            .unwrap()
+            .compile_stream(
+                &UdfRegistry::new().snapshot(),
+                &StreamRequirements::default(),
+            );
+        assert!(plan.is_ok(), "{:?}", plan.err());
+    }
+}

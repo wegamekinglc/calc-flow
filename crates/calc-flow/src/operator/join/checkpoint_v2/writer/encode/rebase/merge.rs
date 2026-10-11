@@ -58,6 +58,30 @@ pub(super) fn scan(
     check: &dyn Fn() -> Result<()>,
     mut visit: impl FnMut(&frame::Upsert<'_>) -> Result<()>,
 ) -> Result<Counts> {
+    let (count, _credit) = scan_credit(history, side, workspace, check)?;
+    let mut cursors = cursors(history, side, count, check)?;
+    let mut payloads = payloads(history, check)?;
+    let mut heap = heap(&cursors, check)?;
+    let counts = scan_rows(
+        history,
+        side,
+        &mut cursors,
+        &mut payloads,
+        &mut heap,
+        check,
+        &mut visit,
+    )?;
+    validate_scan(history, side, &payloads, counts, check)?;
+    check()?;
+    Ok(counts)
+}
+
+fn scan_credit(
+    history: &HistoryInput,
+    side: JoinSide,
+    workspace: &MemoryReservation,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<(usize, MemoryReservation)> {
     check()?;
     let count = history.indexes.iter().try_fold(0, |count, input| {
         check()?;
@@ -66,16 +90,29 @@ pub(super) fn scan(
     let credit = workspace.new_empty();
     accounting::reserve(
         &credit,
-        accounting::sum(&[
-            budget::registration_bytes()?,
-            accounting::vector_peak::<Cursor<'_>>(count)?,
-            accounting::vector_peak::<Reverse<(u64, usize)>>(count)?,
-            accounting::vector_peak::<PayloadView<'_>>(history.payloads.len())?,
-        ])?,
+        scan_workspace_bytes(count, history.payloads.len())?,
     )?;
-    let mut cursors = cursors(history, side, count, check)?;
-    let mut payloads = payloads(history, check)?;
-    let mut heap = heap(&cursors, check)?;
+    Ok((count, credit))
+}
+
+fn scan_workspace_bytes(count: usize, payloads: usize) -> Result<usize> {
+    accounting::sum(&[
+        budget::registration_bytes()?,
+        accounting::vector_peak::<Cursor<'_>>(count)?,
+        accounting::vector_peak::<Reverse<(u64, usize)>>(count)?,
+        accounting::vector_peak::<PayloadView<'_>>(payloads)?,
+    ])
+}
+
+fn scan_rows(
+    history: &HistoryInput,
+    side: JoinSide,
+    cursors: &mut [Cursor<'_>],
+    payloads: &mut [PayloadView<'_>],
+    heap: &mut BinaryHeap<Reverse<(u64, usize)>>,
+    check: &dyn Fn() -> Result<()>,
+    visit: &mut impl FnMut(&frame::Upsert<'_>) -> Result<()>,
+) -> Result<Counts> {
     let expected = &history.expected[usize::from(side == JoinSide::Right)];
     let mut counts = Counts::default();
     let mut previous = None;
@@ -84,35 +121,71 @@ pub(super) fn scan(
         check()?;
         let cursor = &mut cursors[index];
         let row = cursor.head.take().expect("one heap entry per ready cursor");
-        if previous.is_some_and(|previous| id <= previous) || id >= expected.next_row_id {
-            return Err(error("V2 rebase row IDs are not globally unique and valid"));
-        }
+        validate_order(
+            previous,
+            pending_started,
+            id,
+            cursor.pending,
+            expected.next_row_id,
+        )?;
         previous = Some(id);
-        if pending_started && !cursor.pending {
-            return Err(error(
-                "V2 rebase pending rows do not follow captured history",
-            ));
-        }
         pending_started |= cursor.pending;
-        locate(history, &mut payloads, side, &row)?;
+        locate(history, payloads, side, &row)?;
         counts = counts.append(&row)?;
         visit(&row)?;
-        cursor.advance()?;
-        if let Some(row) = &cursor.head {
-            heap.push(Reverse((row.row_id, index)));
-        }
+        advance_cursor(cursor, heap, index)?;
     }
+    Ok(counts)
+}
+
+fn validate_order(
+    previous: Option<u64>,
+    pending_started: bool,
+    id: u64,
+    pending: bool,
+    next_row_id: u64,
+) -> Result<()> {
+    if previous.is_some_and(|previous| id <= previous) || id >= next_row_id {
+        return Err(error("V2 rebase row IDs are not globally unique and valid"));
+    }
+    if pending_started && !pending {
+        return Err(error(
+            "V2 rebase pending rows do not follow captured history",
+        ));
+    }
+    Ok(())
+}
+
+fn advance_cursor(
+    cursor: &mut Cursor<'_>,
+    heap: &mut BinaryHeap<Reverse<(u64, usize)>>,
+    index: usize,
+) -> Result<()> {
+    cursor.advance()?;
+    if let Some(row) = &cursor.head {
+        heap.push(Reverse((row.row_id, index)));
+    }
+    Ok(())
+}
+
+fn validate_scan(
+    history: &HistoryInput,
+    side: JoinSide,
+    payloads: &[PayloadView<'_>],
+    counts: Counts,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<()> {
+    let expected = &history.expected[usize::from(side == JoinSide::Right)];
     if counts.rows != expected.rows || counts.charge != expected.charge {
         return Err(error("V2 rebase history differs from retained row totals"));
     }
-    for (input, payload) in history.payloads.iter().zip(&payloads) {
+    for (input, payload) in history.payloads.iter().zip(payloads) {
         check()?;
         if input.side == side && payload.seen != input.rows {
             return Err(error("V2 rebase payload is not wholly referenced"));
         }
     }
-    check()?;
-    Ok(counts)
+    Ok(())
 }
 
 fn cursors<'a>(

@@ -53,7 +53,7 @@ impl Observation {
         Self
     }
 
-    fn work(&self) -> Work {
+    fn work() -> Work {
         OBSERVED.with(|observed| observed.borrow().as_ref().unwrap().work.clone())
     }
 }
@@ -137,7 +137,7 @@ async fn test_single_capture_batches_quantum_work() {
         CancellationToken::new(),
     );
     let context = StreamOperatorContext::new(&job, "match", None);
-    let observation = Observation::new(None);
+    let _observation = Observation::new(None);
     reset_join_work();
 
     let captured = OwnedSide::capture(payloads.iter(), &context).await.unwrap();
@@ -163,7 +163,7 @@ async fn test_single_capture_batches_quantum_work() {
         work.quantum_steps,
         offsets.len()
     );
-    let paid = observation.work();
+    let paid = Observation::work();
     assert_paid_work(&paid, offsets.len(), 0);
     assert_eq!(paid.charges.len(), work.quantum_steps);
     assert_eq!(
@@ -211,7 +211,7 @@ async fn test_capture_promotes_boundary_prefixes_without_losing_order_or_bounded
             CancellationToken::new(),
         );
         let context = StreamOperatorContext::new(&job, "match", None);
-        let observation = Observation::new(None);
+        let _observation = Observation::new(None);
         reset_join_work();
 
         let captured = OwnedSide::capture(payloads.iter(), &context).await.unwrap();
@@ -231,7 +231,7 @@ async fn test_capture_promotes_boundary_prefixes_without_losing_order_or_bounded
                 .collect::<Vec<_>>()
         );
         assert_eq!(rows.capacity(), payloads.len());
-        let paid = observation.work();
+        let paid = Observation::work();
         assert_paid_work(&paid, payloads.len(), prefix);
         assert_eq!(paid.charges.len(), work.quantum_steps);
         let maximum_calls = payloads.len().div_ceil(64) + prefix.div_ceil(64) + 2;
@@ -257,7 +257,7 @@ async fn assert_cancelled_capture(prefix: usize, tail: usize, cancel_after: usiz
         CancellationToken::new(),
     );
     let context = StreamOperatorContext::new(&job, "match", None);
-    let observation = Observation::new(Some((job.cancellation().clone(), cancel_after)));
+    let _observation = Observation::new(Some((job.cancellation().clone(), cancel_after)));
     reset_join_work();
 
     let result = OwnedSide::capture(payloads.iter(), &context).await;
@@ -265,7 +265,7 @@ async fn assert_cancelled_capture(prefix: usize, tail: usize, cancel_after: usiz
         result,
         Err(crate::CalcFlowError::Cancelled { .. })
     ));
-    let paid = observation.work();
+    let paid = Observation::work();
     assert_eq!(paid.promoted, cancel_after);
     let first_promotion = paid
         .charges

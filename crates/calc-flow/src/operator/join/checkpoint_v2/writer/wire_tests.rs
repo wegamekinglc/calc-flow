@@ -294,10 +294,15 @@ fn test_owned_ipc_messages_drop_compacted_owners_and_preserve_stream_bytes() {
 fn test_owned_ipc_cancellation_releases_every_phase() {
     let (rows, record) = rich_ipc_fixture();
     let references = rows.iter().collect::<Vec<_>>();
+    assert_cancelled_ipc_generation(&references, &record);
+    assert_cancelled_ipc_output(&references, &record);
+}
+
+fn assert_cancelled_ipc_generation(references: &[&StoredRow], record: &RecordBatch) {
     for cancel_after_generation in [false, true] {
         let (pool, workspace) = reservation(16 << 20);
         let compacted =
-            compact::compact(&references, record.schema(), &workspace, &|| Ok(())).unwrap();
+            compact::compact(references, record.schema(), &workspace, &|| Ok(())).unwrap();
         let owner = compacted.funding_owner();
         let scratch = super::super::budget::stream_scratch(&compacted.record).unwrap();
         let credit = workspace.new_empty();
@@ -319,11 +324,13 @@ fn test_owned_ipc_cancellation_releases_every_phase() {
         drop((result, credit, workspace));
         assert_eq!(pool.reserved(), 0);
     }
+}
 
+fn assert_cancelled_ipc_output(references: &[&StoredRow], record: &RecordBatch) {
     for boundary in [0, 1, 2] {
         let (pool, workspace) = reservation(16 << 20);
         let compacted =
-            compact::compact(&references, record.schema(), &workspace, &|| Ok(())).unwrap();
+            compact::compact(references, record.schema(), &workspace, &|| Ok(())).unwrap();
         let expected = stream_writer_bytes(&compacted.record);
         let owner = compacted.funding_owner();
         let scratch = super::super::budget::stream_scratch(&compacted.record).unwrap();
@@ -351,15 +358,19 @@ fn test_owned_ipc_cancellation_releases_every_phase() {
         assert!(matches!(result, Err(CalcFlowError::Cancelled { .. })));
         assert_eq!(checks.get(), stop);
         let output = output.into_bytes().unwrap();
-        assert!(expected.starts_with(&output));
-        if boundary == 0 {
-            assert!(output.is_empty());
-        } else if boundary == 2 {
-            assert_eq!(output, expected[..expected.len() - 8]);
-        }
+        assert_partial_ipc_output(&expected, &output, boundary);
         assert!(output.capacity() <= credit.size());
         drop((output, credit, workspace));
         assert_eq!(pool.reserved(), 0);
+    }
+}
+
+fn assert_partial_ipc_output(expected: &[u8], output: &[u8], boundary: usize) {
+    assert!(expected.starts_with(output));
+    if boundary == 0 {
+        assert!(output.is_empty());
+    } else if boundary == 2 {
+        assert_eq!(output, &expected[..expected.len() - 8]);
     }
 }
 
