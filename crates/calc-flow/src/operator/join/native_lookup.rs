@@ -3,7 +3,7 @@ use super::StoredRow;
 use super::borrowed_key::KeyHashState;
 use super::borrowed_key::framed_hash;
 use super::columnar::FramedKey;
-use super::key_arena::{ArenaLayout, visit_key_frames};
+use super::key_arena::{ArenaLayout, visit_key_frames, visit_string_values};
 use super::native_dictionary::BASE_BYTES;
 pub(super) use super::native_dictionary::{AppendCredit, NativeIndex};
 use super::{
@@ -14,7 +14,7 @@ use crate::{CalcFlowError, EventTime, Result};
 use datafusion::arrow::datatypes::{DataType, Schema};
 use datafusion::execution::memory_pool::MemoryReservation;
 use hashbrown::HashTable;
-use std::sync::Arc;
+use std::{hash::BuildHasher, sync::Arc};
 
 #[cfg(test)]
 #[path = "tests/native_index_allocation_tests.rs"]
@@ -141,6 +141,52 @@ impl ProbeKeyInterner {
         )
     }
 
+    fn push_string(
+        &mut self,
+        tag: u8,
+        bytes: &[u8],
+        credit: &Arc<MemoryReservation>,
+        name: &str,
+    ) -> Result<()> {
+        self.push_string_hashed(tag, bytes, self.hasher.hash_one(bytes), credit, name)
+    }
+
+    fn push_string_hashed(
+        &mut self,
+        tag: u8,
+        bytes: &[u8],
+        hash: u64,
+        credit: &Arc<MemoryReservation>,
+        name: &str,
+    ) -> Result<()> {
+        self.push_with(
+            hash,
+            |stored| stored.first() == Some(&tag) && stored.get(9..) == Some(bytes),
+            || {
+                let length = u32::try_from(bytes.len())
+                    .map_err(|_| super::charge_overflow("key value length"))?;
+                let capacity = bytes
+                    .len()
+                    .checked_add(9)
+                    .ok_or_else(|| scratch_error(name))?;
+                let mut frame = Vec::with_capacity(capacity);
+                frame.extend_from_slice(&[tag, 0, 0, 0, 0]);
+                frame.extend_from_slice(&length.to_le_bytes());
+                frame.extend_from_slice(bytes);
+                #[cfg(test)]
+                super::note_join_work(|work| {
+                    work.arena_frames += 1;
+                    work.key_encodings += 1;
+                });
+                Ok(super::columnar::funded_encoded_key(
+                    frame,
+                    Arc::clone(credit),
+                ))
+            },
+            name,
+        )
+    }
+
     fn push_bytes(
         &mut self,
         bytes: &[u8],
@@ -253,9 +299,15 @@ fn intern_probe_keys(
 ) -> Result<NativeKeys> {
     let mut interner = ProbeKeyInterner::new(admitted.len());
     if let Some(layout) = layout.filter(|layout| layout.fits(admitted.len(), indices.len())) {
-        visit_key_frames(admitted, indices, layout, |bytes| {
-            interner.push_bytes(bytes, &credit, name)
-        })?;
+        if layout.single_string {
+            visit_string_values(admitted, indices[0], |tag, bytes| {
+                interner.push_string(tag, bytes, &credit, name)
+            })?;
+        } else {
+            visit_key_frames(admitted, indices, layout, |bytes| {
+                interner.push_bytes(bytes, &credit, name)
+            })?;
+        }
     } else {
         for row in admitted {
             let key = super::borrowed_key::BorrowedKey {
@@ -279,9 +331,15 @@ pub(super) fn colliding_probe_keys(
     let mut interner = ProbeKeyInterner::new(admitted.len());
     let layout = ArenaLayout::measure(admitted, indices)?.expect("eligible collision fixture");
     assert!(layout.fits(admitted.len(), indices.len()));
-    visit_key_frames(admitted, indices, layout, |bytes| {
-        interner.push_bytes_hashed(bytes, 0, &shared, "collision-test")
-    })?;
+    if layout.single_string {
+        visit_string_values(admitted, indices[0], |tag, bytes| {
+            interner.push_string_hashed(tag, bytes, 0, &shared, "collision-test")
+        })?;
+    } else {
+        visit_key_frames(admitted, indices, layout, |bytes| {
+            interner.push_bytes_hashed(bytes, 0, &shared, "collision-test")
+        })?;
+    }
     interner.finish(shared, "collision-test")
 }
 

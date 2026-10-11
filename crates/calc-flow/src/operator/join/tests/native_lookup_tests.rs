@@ -500,12 +500,12 @@ async fn assert_native_arena_all_key_types_preserve_exact_v1_frames() {
             keys.row_keys().map(|key| key.to_vec()).collect::<Vec<_>>(),
             expected
         );
-        assert_eq!(
-            join_work().arena_frames,
-            values.len(),
-            "{}",
-            values.data_type()
-        );
+        let frames = if matches!(values.data_type(), DataType::Utf8 | DataType::LargeUtf8) {
+            expected.iter().collect::<BTreeSet<_>>().len()
+        } else {
+            values.len()
+        };
+        assert_eq!(join_work().arena_frames, frames, "{}", values.data_type());
         assert_eq!(join_work().borrowed_key_hashes, 0);
         assert_eq!(join_work().borrowed_key_equalities, 0);
         assert!(join_work().key_type_resolutions <= 2);
@@ -940,6 +940,98 @@ async fn native_fallback_index_refund(
     drop(admitted);
     drop(context);
     drop(operator);
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop(job);
+    assert_eq!(pool.reserved(), 0);
+}
+
+#[tokio::test]
+async fn test_string_probe_keeps_exact_admission_threshold_and_alias_funding() {
+    for large in [false, true] {
+        for distinct in [false, true] {
+            let values = (0..17)
+                .map(|row| format!("é-key-{}", if distinct { row } else { row % 3 }))
+                .collect::<Vec<_>>();
+            let array: ArrayRef = if large {
+                Arc::new(LargeStringArray::from(values))
+            } else {
+                Arc::new(StringArray::from(values))
+            };
+            assert_string_probe_admission_and_funding(array).await;
+        }
+    }
+}
+
+async fn assert_string_probe_admission_and_funding(values: ArrayRef) {
+    let left = typed_schema(&left_schema(), values.data_type());
+    let right = typed_schema(&right_schema(), values.data_type());
+    let source = typed_batch(&right_batch(vec![0; values.len()]), &right, &values);
+    let mut operator = StreamJoinOperator::new("match", left, right, spec()).unwrap();
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "match", None);
+    let (plan, admitted) = admitted_probe(&mut operator, "right", &source, &context).await;
+    let expected = admitted
+        .iter()
+        .map(|row| {
+            encode_join_key_columns_v1(row.record.columns(), row.record.offset(), &plan.key_indices)
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let layout = key_arena::ArenaLayout::measure(&admitted, &plan.key_indices)
+        .unwrap()
+        .unwrap();
+    assert!(layout.fits(admitted.len(), 1));
+    assert_eq!(
+        layout.charge,
+        native_lookup::probe_key_charge(&admitted, &[0]).unwrap()
+    );
+    let runtime = operator.runtime.runtime().unwrap();
+    let pool = runtime.incremental_memory_pool();
+    let baseline = pool.reserved();
+    let pressure = runtime.incremental_reservation("string-exact-threshold");
+    pressure
+        .try_grow((1 << 30) - baseline - (layout.charge - 1))
+        .unwrap();
+    let denied = pool.reserved();
+    assert!(
+        operator
+            .native_probe_keys(&plan, &admitted)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(pool.reserved(), denied);
+    pressure.shrink(1);
+    let prepaid = pool.reserved();
+    reset_join_work();
+    let mut keys = None;
+    let allocated = allocation_counter::measure(|| {
+        keys = operator.native_probe_keys(&plan, &admitted).unwrap();
+    });
+    let keys = keys.expect("the unchanged exact charge must admit the string interner");
+    let distinct = expected.iter().collect::<BTreeSet<_>>().len();
+    assert_eq!(join_work().key_encodings, distinct);
+    assert_eq!(join_work().arena_frames, distinct);
+    assert_eq!(
+        keys.row_keys().map(|key| key.to_vec()).collect::<Vec<_>>(),
+        expected
+    );
+    assert!(allocated.bytes_max <= u64::try_from(layout.charge).unwrap());
+    assert!(usize::try_from(allocated.bytes_current).unwrap() <= pool.reserved() - prepaid);
+    let first = Arc::clone(keys.key(0));
+    let last = Arc::clone(keys.key(admitted.len() - 1));
+    let released = allocation_counter::measure(|| drop(keys));
+    let live = allocated.bytes_current + released.bytes_current;
+    assert!(live > 0);
+    assert!(usize::try_from(live).unwrap() <= pool.reserved() - prepaid);
+    assert_eq!(first.as_slice(), expected[0]);
+    assert_eq!(last.as_slice(), expected[expected.len() - 1]);
+    let released = allocation_counter::measure(|| drop((first, last)));
+    assert_eq!(live + released.bytes_current, 0);
+    assert_eq!(pool.reserved(), prepaid);
+    drop(pressure);
+    assert_eq!(pool.reserved(), baseline);
+    drop((admitted, operator));
+    drop(context);
     assert!(job.gather_owner().close_and_drain().await.is_empty());
     drop(job);
     assert_eq!(pool.reserved(), 0);

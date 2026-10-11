@@ -12,6 +12,7 @@ use datafusion::arrow::{
 #[derive(Clone, Copy)]
 pub(super) struct ArenaLayout {
     pub(super) charge: usize,
+    pub(super) single_string: bool,
     bytes: usize,
     row_bytes: usize,
 }
@@ -31,6 +32,7 @@ impl ArenaLayout {
         };
         let mut layout = Self {
             charge: extra,
+            single_string: indices.len() == 1 && !rows.is_empty(),
             bytes: 0,
             row_bytes: 0,
         };
@@ -52,6 +54,8 @@ impl ArenaLayout {
                 // A null key cell keeps the exact per-row framing path away.
                 return Ok(false);
             }
+            self.single_string &=
+                matches!(column.values, KeyValues::Utf8(_) | KeyValues::LargeUtf8(_));
             if u32::try_from(column.timezone.len()).is_err() {
                 return Ok(false);
             }
@@ -143,6 +147,26 @@ fn table_peak(rows: usize) -> Option<usize> {
 
 fn parent_groups(rows: &[AdmittedRow]) -> impl Iterator<Item = &[AdmittedRow]> {
     rows.chunk_by(|a, b| std::ptr::eq(a.record.columns(), b.record.columns()))
+}
+
+pub(super) fn visit_string_values(
+    rows: &[AdmittedRow],
+    index: usize,
+    mut visit: impl FnMut(u8, &[u8]) -> Result<()>,
+) -> Result<()> {
+    for group in parent_groups(rows) {
+        let column = KeyColumn::bind(group[0].record.column(index).as_ref())
+            .expect("readonly sizing validated a string key column");
+        for row in group {
+            let value = match &column.values {
+                KeyValues::Utf8(values) => values.value(row.record.offset()),
+                KeyValues::LargeUtf8(values) => values.value(row.record.offset()),
+                _ => unreachable!("string layout contains only string parents"),
+            };
+            visit(column.tag, value.as_bytes())?;
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn visit_key_frames(

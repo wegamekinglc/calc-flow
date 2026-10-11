@@ -206,3 +206,245 @@ fn assert_native_index_retained_capacities_remain_funded_during_empty_run_reuse(
     assert_eq!(live + released.bytes_current, 0);
     assert_eq!(pool.reserved(), 0);
 }
+
+fn string_probe_rows(large: bool) -> (Vec<AdmittedRow>, Vec<std::sync::Weak<RecordBatch>>) {
+    use datafusion::arrow::{
+        array::{ArrayRef, LargeStringArray, StringArray},
+        datatypes::Field,
+    };
+
+    let values = [
+        String::new(),
+        "é\0値".into(),
+        "prefix".into(),
+        "prefix-more".into(),
+        "x".repeat(64),
+        "x".repeat(65),
+    ];
+    let parents = [false, true].map(|reverse| {
+        let mut padded = vec!["unused-before".to_owned()];
+        padded.extend(if reverse {
+            values.iter().rev().cloned().collect::<Vec<_>>()
+        } else {
+            values.to_vec()
+        });
+        padded.push("unused-after".into());
+        let array: ArrayRef = if large {
+            Arc::new(LargeStringArray::from(padded))
+        } else {
+            Arc::new(StringArray::from(padded))
+        };
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "key",
+            array.data_type().clone(),
+            false,
+        )]));
+        Arc::new(
+            RecordBatch::try_new(schema, vec![array])
+                .unwrap()
+                .slice(1, 6),
+        )
+    });
+    let weak = parents.iter().map(Arc::downgrade).collect();
+    let positions = [
+        (0, 4),
+        (1, 1),
+        (0, 0),
+        (0, 3),
+        (1, 5),
+        (1, 2),
+        (0, 1),
+        (1, 4),
+        (0, 5),
+        (1, 0),
+        (0, 2),
+        (1, 3),
+        (0, 4),
+        (1, 5),
+    ];
+    let rows = positions
+        .into_iter()
+        .enumerate()
+        .map(|(position, (parent, row))| AdmittedRow {
+            record: super::super::columnar::RowPayload::Rowed {
+                parent: Arc::clone(&parents[parent]),
+                row,
+            },
+            event_time: EventTime::from_micros(0),
+            row_id: position as u64,
+            retain: true,
+        })
+        .collect();
+    (rows, weak)
+}
+
+fn canonical_probe_frames(rows: &[AdmittedRow]) -> Vec<Vec<u8>> {
+    rows.iter()
+        .map(|row| {
+            super::super::encode_join_key_columns_v1(
+                row.record.columns(),
+                row.record.offset(),
+                &[0],
+            )
+            .unwrap()
+        })
+        .collect()
+}
+
+fn assert_probe_frame_identity(keys: &NativeKeys, expected: &[Vec<u8>]) {
+    assert_eq!(
+        keys.row_keys().map(|key| key.to_vec()).collect::<Vec<_>>(),
+        expected,
+    );
+    for (left, first) in expected.iter().enumerate() {
+        for (right, second) in expected.iter().enumerate() {
+            assert_eq!(keys.id(left) == keys.id(right), first == second);
+            assert_eq!(
+                Arc::ptr_eq(keys.key(left), keys.key(right)),
+                first == second
+            );
+        }
+    }
+}
+
+#[test]
+fn test_string_probe_interns_canonical_frames_once_per_distinct_value() {
+    for large in [false, true] {
+        let (rows, parents) = string_probe_rows(large);
+        let expected = canonical_probe_frames(&rows);
+        let distinct = expected
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+        assert_eq!(distinct, 6);
+        assert!(distinct < rows.len());
+        let layout = ArenaLayout::measure(&rows, &[0]).unwrap().unwrap();
+        assert!(layout.fits(rows.len(), 1));
+        assert_eq!(layout.charge, probe_key_charge(&rows, &[0]).unwrap());
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(layout.charge));
+        let credit = MemoryConsumer::new("string-interner").register(&pool);
+        credit.try_grow(layout.charge).unwrap();
+        super::super::reset_join_work();
+        let keys = intern_probe_keys(
+            &rows,
+            &[0],
+            Arc::new(credit),
+            "string-interner",
+            Some(layout),
+        )
+        .unwrap();
+        let work = super::super::join_work();
+        assert_probe_frame_identity(&keys, &expected);
+        drop(rows);
+        assert!(parents.iter().all(|parent| parent.upgrade().is_none()));
+        assert_eq!(work.key_encodings, distinct);
+        assert_eq!(
+            work.arena_frames, distinct,
+            "duplicate values must not be framed"
+        );
+        drop(keys);
+        assert_eq!(pool.reserved(), 0);
+    }
+}
+
+#[test]
+fn test_string_probe_forced_hash_collisions_keep_tagged_canonical_identity() {
+    let (mut rows, mut parents) = string_probe_rows(false);
+    let (mut large_rows, large_parents) = string_probe_rows(true);
+    rows.append(&mut large_rows);
+    parents.extend(large_parents);
+    let expected = canonical_probe_frames(&rows);
+    let distinct = expected
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    assert_eq!(distinct, 12);
+    let layout = ArenaLayout::measure(&rows, &[0]).unwrap().unwrap();
+    assert!(layout.fits(rows.len(), 1));
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(layout.charge));
+    let credit = MemoryConsumer::new("tagged-string-collisions").register(&pool);
+    credit.try_grow(layout.charge).unwrap();
+    super::super::reset_join_work();
+    let keys = colliding_probe_keys(&rows, &[0], credit).unwrap();
+    let work = super::super::join_work();
+    assert_probe_frame_identity(&keys, &expected);
+    assert_eq!(&expected[0][1..], &expected[14][1..]);
+    assert_ne!(expected[0][0], expected[14][0]);
+    assert!(!Arc::ptr_eq(keys.key(0), keys.key(14)));
+    drop(rows);
+    assert!(parents.iter().all(|parent| parent.upgrade().is_none()));
+    assert_eq!(work.key_encodings, distinct);
+    assert_eq!(
+        work.arena_frames, distinct,
+        "collisions must use the string miss path"
+    );
+    drop(keys);
+    assert_eq!(pool.reserved(), 0);
+}
+
+fn probe_array_rows(
+    values: datafusion::arrow::array::ArrayRef,
+    offsets: &[usize],
+) -> Vec<AdmittedRow> {
+    let schema = Arc::new(Schema::new(vec![datafusion::arrow::datatypes::Field::new(
+        "key",
+        values.data_type().clone(),
+        true,
+    )]));
+    let parent = Arc::new(RecordBatch::try_new(schema, vec![values]).unwrap());
+    offsets
+        .iter()
+        .enumerate()
+        .map(|(position, &row)| AdmittedRow {
+            record: super::super::columnar::RowPayload::Rowed {
+                parent: Arc::clone(&parent),
+                row,
+            },
+            event_time: EventTime::from_micros(0),
+            row_id: position as u64,
+            retain: true,
+        })
+        .collect()
+}
+
+fn assert_probe_fallback(rows: &[AdmittedRow], layout: Option<ArenaLayout>) {
+    let expected = canonical_probe_frames(rows);
+    let charge = probe_key_charge(rows, &[0]).unwrap();
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(charge));
+    let credit = MemoryConsumer::new("string-fallback").register(&pool);
+    credit.try_grow(charge).unwrap();
+    super::super::reset_join_work();
+    let keys = intern_probe_keys(rows, &[0], Arc::new(credit), "string-fallback", layout).unwrap();
+    let work = super::super::join_work();
+    assert_probe_frame_identity(&keys, &expected);
+    assert_eq!(work.arena_frames, 0);
+    assert_eq!(work.borrowed_key_hashes, rows.len());
+    drop(keys);
+    assert_eq!(pool.reserved(), 0);
+}
+
+#[test]
+fn test_string_probe_keeps_empty_null_parent_and_nonfitting_fallbacks() {
+    use datafusion::arrow::array::{StringArray, StringViewArray};
+
+    let empty = ArenaLayout::measure(&[], &[0]).unwrap().unwrap();
+    assert!(!empty.fits(0, 1));
+    assert_probe_fallback(&[], Some(empty));
+
+    let null_parent = probe_array_rows(
+        Arc::new(StringArray::from(vec![Some("kept"), None])),
+        &[0, 0],
+    );
+    assert!(ArenaLayout::measure(&null_parent, &[0]).unwrap().is_none());
+    assert_probe_fallback(&null_parent, None);
+
+    let tiny = probe_array_rows(Arc::new(StringArray::from(vec![""])), &[0]);
+    let layout = ArenaLayout::measure(&tiny, &[0]).unwrap().unwrap();
+    assert_eq!(layout.charge, probe_key_charge(&tiny, &[0]).unwrap());
+    assert!(!layout.fits(1, 1));
+    assert_probe_fallback(&tiny, Some(layout));
+
+    let unsupported = probe_array_rows(Arc::new(StringViewArray::from(vec!["kept"])), &[0]);
+    assert!(ArenaLayout::measure(&unsupported, &[0]).unwrap().is_none());
+    assert!(!native_type(&DataType::Utf8View));
+}
