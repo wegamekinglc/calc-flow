@@ -186,3 +186,47 @@ fn test_restored_expiration_index_has_bounded_construction_and_resident_storage(
     let released = allocation_counter::measure(|| drop(index));
     assert_eq!(released.bytes_current, -allocated.bytes_current);
 }
+
+#[tokio::test]
+async fn test_expiration_bulk_clear_keeps_funded_capacity_and_retention_ordinals() {
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "match", None);
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1_000_000));
+    let credit = MemoryConsumer::new("expiration-clear").register(&pool);
+    let mut retained = rows(4);
+    let mut index = ExpirationIndex::restored_funded(&retained, &credit, &|| Ok(())).unwrap();
+    assert_eq!(index.last_time(), Some(EventTime::from_micros(3)));
+    let original = pool.reserved();
+    index.clear();
+    retained.clear();
+    assert_eq!(index.last_time(), None);
+    assert_eq!(
+        pool.reserved(),
+        original,
+        "empty storage keeps its funding origin and capacity"
+    );
+    let blocker = credit.new_empty();
+    blocker.try_grow(1_000_000 - original).unwrap();
+    assert!(index.prepare_append(5, &context).await.is_err());
+    assert_eq!(pool.reserved(), 1_000_000);
+    drop(blocker);
+    let mut incoming = rows(2);
+    incoming[0].event_time = EventTime::from_micros(-5);
+    incoming[1].event_time = EventTime::from_micros(-7);
+    let plan = index.prepare_append(2, &context).await.unwrap();
+    index.append(&retained, &incoming, plan);
+    retained.extend(incoming);
+    assert_eq!(pool.reserved(), original);
+    assert_eq!(index.last_time(), Some(EventTime::from_micros(-5)));
+    let (dense, ordinal) = index.pop(&retained).unwrap();
+    assert_eq!(ordinal, 5, "clear preserves the next retention ordinal");
+    retained.swap_remove(dense);
+    assert_eq!(index.last_time(), Some(EventTime::from_micros(-5)));
+    let (dense, ordinal) = index.pop(&retained).unwrap();
+    assert_eq!(ordinal, 4);
+    retained.swap_remove(dense);
+    assert_eq!(index.last_time(), None);
+    assert_eq!(pool.reserved(), original);
+    drop(index);
+    assert_eq!(pool.reserved(), 0);
+}

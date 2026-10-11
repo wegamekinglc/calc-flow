@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod tests {
+    mod complete_expiry_tests;
     mod expiration_heap_tests;
 
     use std::{collections::BTreeMap, sync::Arc, time::Duration};
@@ -6787,6 +6788,17 @@ fn evict_opposite(
         side,
         operator_id,
     } = policy;
+    if pending.is_none()
+        && expirations.last_time().is_some_and(|time| {
+            progress.state() == crate::IngressState::Ended
+                || progress.watermark().is_some_and(|watermark| {
+                    i128::from(time.as_micros()) + i128::from(extension_micros)
+                        < i128::from(watermark.as_micros())
+                })
+        })
+    {
+        return evict_all(rows, expirations, metrics, operator_id);
+    }
     let mut evicted = Vec::new();
     let mut count = 0_u64;
     let mut bytes = 0_u64;
@@ -6817,6 +6829,30 @@ fn evict_opposite(
         );
     }
     update_evicted_metrics(metrics, count, bytes, operator_id)
+}
+
+fn evict_all(
+    rows: &mut RetainedRows,
+    expirations: &mut ExpirationIndex,
+    metrics: &mut SideMetrics,
+    operator_id: &str,
+) -> Result<()> {
+    let count =
+        u64::try_from(rows.len()).map_err(|_| counter_overflow(operator_id, "evicted rows"))?;
+    let bytes = rows.iter().try_fold(0_u64, |bytes, row| {
+        bytes
+            .checked_add(row.charge)
+            .ok_or_else(|| counter_overflow(operator_id, "evicted bytes"))
+    })?;
+    let mut next_metrics = metrics.clone();
+    update_evicted_metrics(&mut next_metrics, count, bytes, operator_id)?;
+    for row in rows.0.iter() {
+        rows.2.remove(&row.record);
+    }
+    rows.clear();
+    expirations.clear();
+    *metrics = next_metrics;
+    Ok(())
 }
 
 fn update_evicted_metrics(

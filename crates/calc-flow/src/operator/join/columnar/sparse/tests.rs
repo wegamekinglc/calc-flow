@@ -82,6 +82,56 @@ fn check_positions(join: &StreamJoinOperator) {
 }
 
 #[tokio::test]
+async fn test_complete_expiry_marks_shared_offsets_dead_and_preserves_alias_funding() {
+    let job = StreamJobContext::new(
+        1,
+        "dense-sparse",
+        JsonMap::new(),
+        None,
+        CancellationToken::new(),
+    )
+    .with_checkpointing(false);
+    let context = StreamOperatorContext::new(&job, "dense-sparse", None);
+    let mut join = operator();
+    feed(&mut join, "left", vec![2, 0, 3, 1], &context).await;
+    feed(&mut join, "right", vec![2], &context).await;
+    let payload = &join.state.left[0].record;
+    let payload_credit = payload.funded_owner().unwrap().1;
+    let (old_chunk, _) = shared(payload);
+    let buffer = payload.column(2).to_data().buffers()[0].clone();
+    let key = Arc::clone(&join.state.left[0].encoded_key);
+    let key_credit = key.funded_owner().unwrap().1;
+    let pool = join.runtime.runtime().unwrap().incremental_memory_pool();
+    join.evict_progress(
+        "right",
+        IngressProgress::new(IngressState::Active, Some(EventTime::from_micros(4))),
+        false,
+    )
+    .unwrap();
+    assert!(join.state.left.is_empty());
+    assert!(join.state.left.1.is_none());
+    assert_eq!(join.state.left.2.count, 0);
+    assert_eq!(old_chunk.live_count.load(Ordering::Relaxed), 0);
+    assert_eq!(old_chunk.live_bytes.load(Ordering::Relaxed), 0);
+    assert!(!old_chunk.queued.load(Ordering::Relaxed));
+    for entry in &old_chunk.inventory {
+        assert_eq!(entry.dense.load(Ordering::Relaxed), usize::MAX);
+    }
+    drop((old_chunk, join, context));
+    assert_eq!(pool.reserved(), payload_credit + key_credit);
+    let mut drained = Box::pin(job.gather_owner().close_and_drain());
+    assert!(
+        futures::poll!(drained.as_mut()).is_pending(),
+        "payload buffer alias still owns funded retirement"
+    );
+    drop(key);
+    assert_eq!(pool.reserved(), payload_credit);
+    drop(buffer);
+    assert!(drained.await.is_empty());
+    assert_eq!(pool.reserved(), 0);
+}
+
+#[tokio::test]
 async fn test_dense_sparse_hints_reject_wrong_offsets_and_retired_aliases() {
     let job = StreamJobContext::new(
         1,

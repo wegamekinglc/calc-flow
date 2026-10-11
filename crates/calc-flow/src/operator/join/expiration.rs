@@ -11,6 +11,7 @@ struct Storage {
     heap: Vec<usize>,
     positions: Vec<usize>,
     ordinals: Vec<u128>,
+    maximum: Option<EventTime>,
     credit: Option<MemoryReservation>,
 }
 
@@ -113,11 +114,12 @@ impl ExpirationIndex {
     ) -> Result<Self> {
         check()?;
         let mut storage = Storage::new(rows.len(), credit)?;
-        for index in 0..rows.len() {
+        for (index, row) in rows.iter().enumerate() {
             check()?;
             storage.heap.push(index);
             storage.positions.push(index);
             storage.ordinals.push(index as u128);
+            storage.maximum = storage.maximum.max(Some(row.event_time));
         }
         let view = Rows {
             old: rows,
@@ -158,6 +160,7 @@ impl ExpirationIndex {
                 .checked_next_power_of_two()
                 .ok_or_else(overflow)?;
             let mut replacement = Storage::new(capacity, self.storage.credit.as_ref())?;
+            replacement.maximum = self.storage.maximum;
             let mut quantum = columnar::Quantum::default();
             for start in (0..self.storage.heap.len()).step_by(64) {
                 let end = (start + 64).min(self.storage.heap.len());
@@ -189,13 +192,14 @@ impl ExpirationIndex {
         }
         debug_assert_eq!(old.len(), self.storage.heap.len());
         let view = Rows { old, incoming };
-        for offset in 0..incoming.len() {
+        for (offset, row) in incoming.iter().enumerate() {
             let dense = old.len() + offset;
             self.storage.heap.push(dense);
             self.storage.positions.push(dense);
             self.storage
                 .ordinals
                 .push(self.next_ordinal + offset as u128);
+            self.storage.maximum = self.storage.maximum.max(Some(row.event_time));
             self.storage.sift_up(dense, &view);
         }
         self.next_ordinal = plan.next_ordinal;
@@ -208,11 +212,25 @@ impl ExpirationIndex {
             .map(|index| rows[*index].event_time)
     }
 
+    pub(super) fn last_time(&self) -> Option<EventTime> {
+        self.storage.maximum
+    }
+
+    pub(super) fn clear(&mut self) {
+        self.storage.heap.clear();
+        self.storage.positions.clear();
+        self.storage.ordinals.clear();
+        self.storage.maximum = None;
+    }
+
     // The caller immediately performs the corresponding dense row swap_remove.
     pub(super) fn pop(&mut self, rows: &[StoredRow]) -> Option<(usize, u128)> {
         let dense = *self.storage.heap.first()?;
         let ordinal = self.storage.ordinals[dense];
         self.storage.heap.swap_remove(0);
+        if self.storage.heap.is_empty() {
+            self.storage.maximum = None;
+        }
         if let Some(&first) = self.storage.heap.first() {
             self.storage.positions[first] = 0;
             self.storage.sift_down(
