@@ -1,4 +1,8 @@
 use super::*;
+use sha2::{Digest, Sha256};
+
+#[path = "digest_tests.rs"]
+pub(super) mod digest;
 use crate::operator::join::{
     PendingOp, columnar::RowPayload, encode_join_key_v1, state_row_charge,
 };

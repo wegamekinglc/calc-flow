@@ -13,7 +13,6 @@ use datafusion::arrow::{
 };
 use datafusion::execution::memory_pool::MemoryReservation;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 
 use super::super::super::{JoinSide, StoredRow};
 use super::super::{
@@ -111,6 +110,8 @@ fn segment_charge(capacity: usize) -> Result<usize> {
 }
 
 fn own_segment(bytes: Vec<u8>, credit: &MemoryReservation, charge: usize) -> StateSegment {
+    #[cfg(test)]
+    tests::digest::record_payload_hash(&bytes);
     StateSegment::new(bytes).with_owner(Arc::new(credit.split(charge)))
 }
 
@@ -285,10 +286,19 @@ impl Encoder {
         drop(ipc);
         check()?;
         self.admit_payload_entry(bytes.capacity())?;
-        let digest: [u8; 32] = Sha256::digest(&bytes).into();
-        let sha256 = hex::encode(digest);
-        let entry = payload_entry(side, &sha256, rows.len(), bytes.len())?;
-        self.install(format!("{}-payload-{sha256}", side.as_str()), bytes)?;
+        let name_capacity = side.as_str().len() + "-payload-".len() + 64;
+        let (retained, backing) = self.admit_segment(name_capacity, bytes.capacity())?;
+        let segment = own_segment(bytes, &self.funding, backing);
+        let mut digest = [0; 32];
+        hex::decode_to_slice(segment.sha256(), &mut digest)
+            .map_err(|_| error("invalid generated V2 payload digest"))?;
+        let entry = payload_entry(side, segment.sha256(), rows.len(), segment.bytes().len())?;
+        let mut name = String::with_capacity(name_capacity);
+        name.push_str(side.as_str());
+        name.push_str("-payload-");
+        name.push_str(segment.sha256());
+        self.output.segments.insert(name, segment);
+        self.retained = retained;
         self.output.payloads.push(entry);
         Ok(digest)
     }
@@ -306,19 +316,24 @@ impl Encoder {
     }
 
     fn install(&mut self, name: String, bytes: Vec<u8>) -> Result<()> {
-        let overhead = sum(&[
-            budget::tree::<String, StateSegment>(1)?,
-            name.capacity(),
-            accounting::vector_peak::<PayloadEntry>(2)?,
-            128,
-        ])?;
-        let retained = add(self.retained, overhead)?;
-        let backing = segment_charge(bytes.capacity())?;
-        ensure(&self.funding, add(retained, backing)?)?;
+        let (retained, backing) = self.admit_segment(name.capacity(), bytes.capacity())?;
         let segment = own_segment(bytes, &self.funding, backing);
         self.output.segments.insert(name, segment);
         self.retained = retained;
         Ok(())
+    }
+
+    fn admit_segment(&self, name_capacity: usize, capacity: usize) -> Result<(usize, usize)> {
+        let overhead = sum(&[
+            budget::tree::<String, StateSegment>(1)?,
+            name_capacity,
+            accounting::vector_peak::<PayloadEntry>(2)?,
+            128,
+        ])?;
+        let retained = add(self.retained, overhead)?;
+        let backing = segment_charge(capacity)?;
+        ensure(&self.funding, add(retained, backing)?)?;
+        Ok((retained, backing))
     }
 }
 
