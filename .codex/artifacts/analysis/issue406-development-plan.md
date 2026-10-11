@@ -11,6 +11,26 @@ continues to validate historical bounded evidence. No performance numbers below
 have been reattributed to the new policy. Fresh reports must keep all eight targets,
 pinned main/current provenance, each pool policy, and distinct OFF/LOW/ON results.
 
+The next implemented increment targets owned Join **output gathering**, selected
+from the already recorded CPU profiles. On sealed Join at one and 32 CPUs, sampled
+materialize call/result handling around per-row `Quantum` calls accounted for
+10.05% and 9.23% of window samples; these overlapping profile categories do not
+establish a speedup. The implementation builds a single-source `u64` index vector
+directly, prepays at most 64 row visits per group, and constructs multi-source
+bookkeeping only when a source changes. Prefix promotion uses the same execution
+budget, separately pays for copied rows, and checks cancellation before resuming
+the held transition row. Eligibility, column kernels, output ownership and worker
+retirement retain their existing behavior. This is separate from checkpoint
+capture/restore in performance row 4.
+
+The original single-source and promotion RED cases now pass, together with nine
+additional focused cancellation, ordering, funding, and worker-lifecycle checks
+(11 distinct tests total). The 129-row single-source control formerly made 128
+`Quantum` calls; the new control requires at most four, without timing assertions.
+No performance result has yet been measured for this implementation. The next
+steps remain one ordinary managed 4M correctness run followed by the complete
+fresh eight-row comparison under the new candidate pool policy.
+
 Latest full-inventory performance attempt: the [fresh a681e7da attempt](issue406-fresh-acceptance.md)
 stopped on the candidate's 4M retained-ON warmup at epoch 11. It contains all
 eight target rows, fresh pinned-main/current mode comparisons, and complete

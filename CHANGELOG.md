@@ -9,6 +9,10 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-11: Build single-source Join output indices directly and batch capture
+  bookkeeping in bounded groups. Promote to multiple sources only when needed,
+  preserving row order, cancellation checks, and reserved-memory ownership.
+
 - 2026-10-11: Remove the implicit 1 GiB DataFusion runtime memory-pool limit.
   Keep per-runtime reservation accounting and release tracking. Explicit
   operator state budgets, edge budgets, and SQL result collection limits remain

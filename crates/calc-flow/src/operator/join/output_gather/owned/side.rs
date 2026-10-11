@@ -19,43 +19,96 @@ pub(super) enum OwnedSide {
 
 impl OwnedSide {
     pub(super) async fn capture<'a>(
-        mut payloads: impl Iterator<Item = &'a RowPayload>,
+        mut payloads: impl ExactSizeIterator<Item = &'a RowPayload>,
         context: &StreamOperatorContext<'_>,
     ) -> Result<Self> {
+        let capacity = payloads.len();
         let first = payloads.next().expect("nonempty matched range");
-        let mut sources = vec![first.clone()];
+        let source = first.clone();
         let identity = first.columns().as_ptr() as usize;
+        let mut payloads = std::iter::once(first).chain(payloads);
+        let mut rows = Vec::with_capacity(capacity);
+        let mut quantum = Quantum::default();
+        while rows.len() < capacity {
+            let count = (capacity - rows.len()).min(64);
+            let bytes = 32 * count;
+            quantum.step(context, count, bytes).await?;
+            #[cfg(test)]
+            tests::note_charge(tests::Phase::Capture, count, bytes);
+            for _ in 0..count {
+                let payload = payloads.next().expect("exact matched range");
+                if payload.columns().as_ptr() as usize != identity {
+                    return Self::capture_multiple(
+                        source,
+                        rows,
+                        payload,
+                        payloads,
+                        capacity,
+                        &mut quantum,
+                        context,
+                    )
+                    .await;
+                }
+                rows.push(payload.offset() as u64);
+            }
+        }
+        Ok(Self::Single {
+            source,
+            rows: UInt64Array::from(rows),
+        })
+    }
+
+    async fn capture_multiple<'a>(
+        source: RowPayload,
+        prefix: Vec<u64>,
+        transition: &'a RowPayload,
+        payloads: impl Iterator<Item = &'a RowPayload>,
+        capacity: usize,
+        quantum: &mut Quantum,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<Self> {
+        let mut rows = Vec::with_capacity(capacity);
+        for chunk in prefix.chunks(64) {
+            let bytes = 32 * chunk.len();
+            quantum.step(context, chunk.len(), bytes).await?;
+            #[cfg(test)]
+            tests::note_charge(tests::Phase::Promotion, chunk.len(), bytes);
+            rows.extend(
+                chunk
+                    .iter()
+                    .map(|&row| (0, usize::try_from(row).expect("source offset fits usize"))),
+            );
+            #[cfg(test)]
+            tests::note_promoted(chunk.len());
+        }
+        drop(prefix);
+        context.check_cancelled()?;
+        let identity = source.columns().as_ptr() as usize;
+        let mut sources = vec![source];
         let mut previous = (identity, 0);
         let mut parents = BTreeMap::from([previous]);
-        let mut rows = Vec::with_capacity(payloads.size_hint().0 + 1);
-        rows.push((0, first.offset()));
-        let mut quantum = Quantum::default();
-        for payload in payloads {
-            quantum.step(context, 1, 32).await?;
-            let identity = payload.columns().as_ptr() as usize;
-            if identity != previous.0 {
-                let index = *parents.entry(identity).or_insert_with(|| {
-                    let index = sources.len();
-                    sources.push(payload.clone());
-                    index
-                });
-                previous = (identity, index);
+        let mut payloads = std::iter::once(transition).chain(payloads);
+        while rows.len() < capacity {
+            let count = (capacity - rows.len()).min(64);
+            let bytes = 32 * count;
+            quantum.step(context, count, bytes).await?;
+            #[cfg(test)]
+            tests::note_charge(tests::Phase::Capture, count, bytes);
+            for _ in 0..count {
+                let payload = payloads.next().expect("exact matched range");
+                let identity = payload.columns().as_ptr() as usize;
+                if identity != previous.0 {
+                    let index = *parents.entry(identity).or_insert_with(|| {
+                        let index = sources.len();
+                        sources.push(payload.clone());
+                        index
+                    });
+                    previous = (identity, index);
+                }
+                rows.push((previous.1, payload.offset()));
             }
-            rows.push((previous.1, payload.offset()));
         }
-        if sources.len() == 1 {
-            let rows = UInt64Array::from(
-                rows.into_iter()
-                    .map(|(_, row)| row as u64)
-                    .collect::<Vec<_>>(),
-            );
-            Ok(Self::Single {
-                source: sources.pop().unwrap(),
-                rows,
-            })
-        } else {
-            Ok(Self::Multiple { sources, rows })
-        }
+        Ok(Self::Multiple { sources, rows })
     }
 
     pub(super) fn width(&self) -> usize {
@@ -129,3 +182,7 @@ impl OwnedSide {
             .map_err(|error| datafusion::arrow::error::ArrowError::ComputeError(error.to_string()))
     }
 }
+
+#[cfg(test)]
+#[path = "side_tests.rs"]
+mod tests;
