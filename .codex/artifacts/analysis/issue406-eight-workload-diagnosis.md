@@ -1,5 +1,14 @@
 # Issue 406: complete eight-workload diagnosis
 
+Latest runtime evidence: the [fresh a681e7da attempt](issue406-fresh-acceptance.md)
+stopped on the candidate's 4M retained-ON warmup at epoch 11. It contains all
+eight target rows, fresh pinned-main/current mode comparisons, and complete
+cff/current retained-OFF controls. Rows 4–8 remain unmeasured in that attempt;
+earlier measurements below keep their original revisions. OFF scaling observes
+4.011×, while sealed Join 1M/10M still miss their absolute targets. The candidate
+failure and all final acceptance verdicts remain unresolved. No retry or fill-in
+was performed, and all owned processes settled.
+
 All eight workloads were attempted against pinned main `588726c8` and candidate
 runtime `e8a28d99` (execution harness `427426b2`, native harness build `a2f31da0`).
 Of 64 supported metric arms, 52 produced both rounds of ten samples and two
