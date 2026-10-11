@@ -1,9 +1,11 @@
 # Issue 406: reuse ASOF right-key admission dictionary IDs
 
-PR #407 merged as `acd10e0e`. The follow-up workflow fix is PR #408;
-its complete benchmark is run `38158920926`, against pre-merge main
-`588726c8`. Runtime performance targets remain unmet; that workflow fix
-changes no runtime source.
+PR #407 merged as `acd10e0e`. The follow-up workflow fix PR #408 merged
+as `89e51141` after all 37 CI checks passed;
+its current complete benchmark is run `38162461866`, against merged main
+`acd10e0e`. The earlier run `38158920926` was cancelled after dependency-stage
+hangs; its cancellation is not a passing result. Runtime performance targets
+remain unmet; that workflow fix changes no runtime source.
 
 A new diagnostic profile reused measured product `67df5dac`, native SHA-256
 `573bd1e185edad150a967ae2c457f3549624f15b19c8cd79f19a9de643c8ce8c`.
@@ -60,7 +62,22 @@ The first local 32-thread admission run exhausted the existing bounded process
 infrastructure and aborted. This was diagnosed before the serial rerun; no
 resource bound or test was weakened. Final specialist source review approves
 the implementation. Library Clippy, scoped formatting and generated-contract
-checks pass. Final CI is still outstanding.
+checks pass. Windows and Linux CI then identified a potentially wrapping
+`usize` to `i64` cast in the new dictionary-order test. The fixture now uses
+checked conversion. Linux also reproduced the pinned-toolchain generated
+libtest `large_stack_arrays` diagnostic: adding five tests increases the
+2,048-entry reference array from 16,384 to 16,424 bytes. A minimal standalone
+Clippy reproduction passes with 2,048 tests and fails with 2,053.
+
+Move five existing checkpoint-OFF lifecycle tests into the existing
+`checkpointing_mode_contract` integration target, keeping all test bodies and
+21 assertions. Its fixture now constructs the same plan, sources and sinks
+through the public runner constructor. Two private context/hash controls stay
+unit tests. The all-feature unit harness returns to 2,048 entries; no lint or
+toolchain requirement is relaxed. Test-inclusive core Clippy passes in
+124 seconds. All six integration tests pass after a 176-second build
+(0.02-second test execution). Independent migration review confirms unchanged
+fixtures and equivalent public construction. Final CI remains outstanding.
 
 ## Focused paired measurement
 

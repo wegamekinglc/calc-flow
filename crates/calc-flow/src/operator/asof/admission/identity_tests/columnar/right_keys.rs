@@ -82,7 +82,7 @@ fn dictionary_ids_do_not_escape_their_record_batch() {
         .into_iter()
         .enumerate()
         .map(|(index, reversed)| {
-            let start = index as i64 * 64;
+            let start = i64::try_from(index).expect("small test batch index") * 64;
             record(
                 &schema,
                 Arc::new(StringArray::from_iter_values((0..64).map(|row| {
