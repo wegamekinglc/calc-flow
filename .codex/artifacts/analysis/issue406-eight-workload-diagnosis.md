@@ -444,7 +444,7 @@ acceptance is still outstanding.
 
 ## Share checkpoint payloads and bound expiration storage
 
-The current increment rebuilds only indexes for trusted, completely checkpointed
+Commit `70941d5f` rebuilds only indexes for trusted, completely checkpointed
 append-only V2 history. Its sorted merge checks row IDs, payload locators,
 complete coverage, retained row/charge totals and next-row bounds; replacement
 indexes retain the original whole payload owners. Pending operations, tombstones and migrated or
@@ -477,7 +477,55 @@ expected behavior REDs.
 Source/evidence inventories are in the parent checkout's
 `target/issue406-expiration-heap/validation.json` and the feature worktree's
 `target/issue406-complete-acceptance/rebase-validation.json`. No release build,
-4M retry or timing workload ran for this increment. Current restore still charges
-historical maps and cumulative reader/row scratch; those remain the next changes.
+4M retry or timing workload ran for that increment. At that revision, restore
+still charged historical maps and cumulative reader/row scratch.
 The eight-row tables above still describe runtime `e8a28d99` and do not establish
 performance for this implementation.
+
+## Bound restore history and temporary scratch
+
+The new restore path validates each index frame completely, then merges its
+independent upsert and tombstone streams by row ID and epoch. Per-identity
+lifecycle validation rejects reuse, duplicate introductions, invalid tombstones
+and mismatched keys/times. Side/range/frame-ID validation, unique introductions
+and complete payload-row counts establish a locator bijection without per-row
+historical maps or sets. Gapped epochs and independently interleaved left/right
+IDs remain valid.
+
+A first scan reconciles exact live rows and logical bytes against metadata and
+limits before admitting live-row storage. A second scan invokes the existing
+key/time/charge oracle for every introduced row, including subsequently deleted
+rows. Payload-reader child credit outlives the IPC Reader and temporary
+schema, dictionary and record controls;
+per-row scratch survives validation and resident-owner transfer. Both retire with
+their allocations. No checkpoint wire or atomic install contract changes.
+
+The original 4,096-rich-row fixture fails with the old history workspace, then
+passes with the new implementation under the same 4 MiB available credit. There
+are 21 distinct passing selected tests. All 56 positive admission points reject
+atomically under fault injection, and all 611 cancellation points preserve old
+state, refund temporary credit and permit successful retry. Controls cover
+malformed history, full pre-IPC rejection, dictionary/map payloads, held aliases,
+empty/one-sided restore, managed validation, writer continuation and rebase.
+Library Clippy passes. Test-target Clippy retains exactly the prior generated
+libtest diagnostic, with identical code, message and spans. Frozen source hashes
+and exact commands are recorded in the feature worktree's
+`target/issue406-bounded-restore/restore-validation.json`.
+
+The reviewed capacity appendix is
+`target/issue406-complete-acceptance/restore-capacity-current.md` in that worktree,
+SHA-256 `39213c5223fcc5e6854e472ec9bfbd62ec0a6de61382340d9713c14702201c39`.
+Its conservative maxima are fresh 997,684,907 bytes, E1 979,353,235, held-E4
+rebase 941,251,393, E5 capture 941,244,263, and E4/E5 restore
+928,493,775 / 928,455,991, each below the original 1 GiB pool. The bound includes
+current small-owner/cursor/heap controls, phased IPC scratch and independent
+segment funding. Restore bounds require synchronous execution into an empty
+destination with separate source/destination pools. Fresh preparation and rebase
+retain their owned asynchronous workers. These bounds certify neither RSS nor
+old-state/same-pool restore.
+
+The parent checkout's `target/issue406-bounded-restore-followup/plan.md` preserves
+the diagnostic-first sequence, seven workloads/five physical groups, fixed
+sample counts and 900-second budget. Controller/provenance checks pass (11).
+No release artifact, actual 4M result or timing sample exists for this increment
+yet. The eight-row performance tables remain explicitly historical runtime e8.

@@ -13,6 +13,9 @@ use std::io::Cursor;
 #[path = "checkpoint_v2_history_tests.rs"]
 mod history_tests;
 
+#[path = "checkpoint_v2_bounded_restore_tests.rs"]
+mod bounded_restore_tests;
+
 #[path = "checkpoint_v2_capture_tests.rs"]
 mod capture_tests;
 

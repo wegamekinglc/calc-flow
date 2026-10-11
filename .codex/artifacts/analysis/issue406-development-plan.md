@@ -177,7 +177,7 @@ Library Clippy passes; the known generated-libtest diagnostic remains. Async
 preparation still owns its original pending copy through worker drain and is not
 certified to fit the hypothetical 4M dirty batch.
 
-The current increment adds a restricted shared-payload rebase for trusted,
+Commit `70941d5f` adds a restricted shared-payload rebase for trusted,
 fully checkpointed, append-only V2 history. It merges ordered index records into
 exact replacement indexes while sharing immutable payload segments. Pending
 operations, tombstones, migration and untrusted OFF-mutated history retain the
@@ -199,15 +199,40 @@ continuation, rebase fallback and retained segment owners. Fixture errors are
 retained separately from expected behavior REDs. No new release build or
 performance samples are included.
 
+The bounded-restore increment replaces historical row maps/sets with independently
+validated upsert/tombstone cursors, merged by row identity and epoch. One pass
+checks the complete history, locator bijection and live charge totals before
+admitting the exact live-row vector. A second pass validates every historical
+payload row, including deleted rows. Reader and per-row child workspaces now
+retire after their allocations, while resident owners retain their funding.
+Prepared-state installation remains the sole publication boundary.
+
+The 21 selected tests pass, including a recorded 4,096-row capacity RED/GREEN,
+interleaved and gapped histories, malformed locators, rich Arrow payloads, exact
+alias lifetimes, all 56 restore admission refusals and all 611 cancellation
+points. Failed restore preserves the old destination and refunds temporary
+credit; retry succeeds. Library Clippy passes. Test-target Clippy retains only the known generated-libtest diagnostic;
+its code, message and spans match the prior baseline. The frozen validation
+manifest records all source hashes and exact commands.
+
+The reviewed fixed-fixture source bounds are 997,684,907 bytes for fresh
+construction, 979,353,235 for E1, 941,251,393 for held-history rebase,
+941,244,263 for E5 capture, and 928,493,775 / 928,455,991 for E4 / E5 restore.
+They fit the unchanged 1,073,741,824-byte pool for the specified fixture.
+The restore bounds require synchronous execution into an empty destination
+with source and destination funded by separate pools; fresh preparation and
+rebase retain their owned asynchronous workers. These are conservative source
+bounds, not observed 4M completion, RSS bounds or performance results.
+
 The next implementation steps are:
 
-1. Replace historical restore maps/sets with bounded sorted-group cursors and
-   scope per-payload/per-row scratch. Preserve validation of every historical
-   payload row, including deleted rows, and atomic failed restoration.
-2. Reconcile complete simultaneous-reservation bounds for fresh/E1 encoding,
-   held E4/E5 replacement and empty-destination restore before another release
-   build/full 4M diagnostic. Current conditional control worksheets still need
-   the final source/folding terms; they are not capacity certificates.
+1. Freeze the reviewed restore source and audit ordinary release wheel/native
+   artifacts. Run the unchanged 4M lifecycle once under the original 1 GiB pools.
+   Stop later measurements on any failure and preserve all prior evidence.
+2. Within the fixed 900-second follow-up budget, measure retained Join OFF
+   1M/4M against e8, plus capture/restore and actual compaction/steady handlers.
+   Preserve two rounds of ten samples, seven workloads in five physical groups,
+   and the 133-invocation maximum. This subset does not complete acceptance.
 3. Continue the remaining Join, ASOF, parallelism and harness improvements using
    the completed CPU profiles. Measure all increments with the final runtime;
    retain all eight targets and checkpoint policies.

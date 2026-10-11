@@ -11,13 +11,16 @@ use super::super::{
 use super::budget::{self, ContainerFunding};
 use super::frame::Payload;
 use super::geometry::{Geometry, checked, invalid};
-use super::history::{self, SideHistory};
+use super::history::{self, History, LiveSummary};
 use super::inventory::{self, Inventory};
 use super::ipc::accounting::{arc, reserve, sum};
 use super::payload::{Funding, OwnedPayload};
 use super::{ipc, metadata, row};
 use crate::runtime::streaming::gather_work::RetirementGuard;
 use crate::{Epoch, Result};
+
+#[cfg(test)]
+mod test_controls;
 
 pub(super) struct Config<'a> {
     pub(super) name: &'a str,
@@ -88,17 +91,11 @@ impl<'a, 'c> Decoder<'a, 'c> {
         (self.check)()?;
         let geometry = Geometry::inspect(self.snapshot, &inventory, self.check)?;
         let metadata = self.decode_metadata()?;
-        let histories = history::fold(
-            self.snapshot,
-            &inventory,
-            &metadata,
-            &geometry,
-            &self.workspace,
-            self.check,
-        )?;
+        let history = History::new(self.snapshot, &geometry, &self.workspace, self.check)?;
+        let summaries = self.summaries(&history, &metadata)?;
         let payloads = self.decode_payloads(geometry.payloads)?;
-        let rows = self.validate_histories(&histories, &payloads)?;
-        drop(histories);
+        let rows = self.validate_histories(&history, &metadata, summaries, &payloads)?;
+        drop(history);
         drop(payloads);
         self.prepare(metadata, rows, &inventory)
     }
@@ -146,6 +143,7 @@ impl<'a, 'c> Decoder<'a, 'c> {
     }
 
     fn decode_payload(&mut self, side: JoinSide, frame: &Payload<'_>) -> Result<Arc<OwnedPayload>> {
+        let workspace = self.workspace.new_empty();
         let credit = self.containers.credit.new_empty();
         reserve(&credit, budget::payload_seed()?)?;
         let funding = Funding::new(self.config.schemas.clone(), credit, self.retirements.pop());
@@ -159,7 +157,7 @@ impl<'a, 'c> Decoder<'a, 'c> {
             Arc::clone(&self.config.schemas[index]),
             frame.rows,
             &ipc::Admission {
-                workspace: &self.workspace,
+                workspace: &workspace,
                 resident: &funding,
                 verifier: &self.verifier,
                 check: self.check,
@@ -168,7 +166,7 @@ impl<'a, 'c> Decoder<'a, 'c> {
         #[cfg(test)]
         if let Some(hook) = self.config.decoded_hook {
             hook(
-                Some(&self.workspace),
+                Some(&workspace),
                 Some(owner.funded_owner()),
                 true,
                 self.config.owned_work,
@@ -179,46 +177,114 @@ impl<'a, 'c> Decoder<'a, 'c> {
 
     fn validate_histories(
         &self,
-        histories: &[SideHistory<'_>; 2],
+        history: &History<'_>,
+        metadata: &ValidatedMetadata,
+        summaries: [LiveSummary; 2],
         payloads: &BTreeMap<(JoinSide, [u8; 32]), Decoded<'_>>,
     ) -> Result<[Vec<StoredRow>; 2]> {
-        let count = ipc::accounting::add(histories[0].live.len(), histories[1].live.len())?;
+        let count = ipc::accounting::add(summaries[0].rows, summaries[1].rows)?;
         self.containers.grow(budget::containers(count)?)?;
         Ok([
-            self.validate_side(JoinSide::Left, &histories[0], payloads)?,
-            self.validate_side(JoinSide::Right, &histories[1], payloads)?,
+            self.validate_side(
+                JoinSide::Left,
+                metadata.next_left_row_id,
+                history,
+                summaries[0],
+                payloads,
+            )?,
+            self.validate_side(
+                JoinSide::Right,
+                metadata.next_right_row_id,
+                history,
+                summaries[1],
+                payloads,
+            )?,
         ])
     }
 
     fn validate_side(
         &self,
         side: JoinSide,
-        history: &SideHistory<'_>,
+        next_id: u64,
+        history: &History<'_>,
+        summary: LiveSummary,
         payloads: &BTreeMap<(JoinSide, [u8; 32]), Decoded<'_>>,
     ) -> Result<Vec<StoredRow>> {
-        let context = self.row_context(side);
-        let mut rows = Vec::with_capacity(history.live.len());
-        for locator in history.historical.values() {
+        let mut rows = Vec::with_capacity(summary.rows);
+        if rows.capacity() != summary.rows {
+            return Err(invalid("V2 restored row capacity differs from its funding"));
+        }
+        let actual = history.scan(side, next_id, self.check, |locator, live| {
             (self.check)()?;
+            let workspace = self.workspace.new_empty();
+            let context = self.row_context(side, &workspace);
             let (payload, index) = located_payload(payloads, side, locator)?;
             let validated = row::validate(payload.owner.record(), index, locator, &context)?;
-            if history.live.contains_key(&locator.row_id) {
+            if live {
                 rows.push(self.stored_row(payload, index, locator, validated)?);
+            } else {
+                drop(validated);
             }
+            Ok(())
+        })?;
+        if actual != summary || rows.len() != summary.rows {
+            return Err(invalid("V2 history changed between validation passes"));
         }
         Ok(rows)
     }
 
-    fn row_context(&self, side: JoinSide) -> row::ValidationContext<'_> {
+    fn row_context<'b>(
+        &'b self,
+        side: JoinSide,
+        workspace: &'b MemoryReservation,
+    ) -> row::ValidationContext<'b> {
         let index = side_index(side);
         row::ValidationContext {
             key_indices: self.config.keys[index],
             event_time_index: self.config.time_indices[index],
             name: self.config.name,
             side,
-            workspace: &self.workspace,
+            workspace,
             check: self.check,
         }
+    }
+
+    fn summaries(
+        &self,
+        history: &History<'_>,
+        metadata: &ValidatedMetadata,
+    ) -> Result<[LiveSummary; 2]> {
+        let summaries = [
+            history.scan(
+                JoinSide::Left,
+                metadata.next_left_row_id,
+                self.check,
+                |_, _| Ok(()),
+            )?,
+            history.scan(
+                JoinSide::Right,
+                metadata.next_right_row_id,
+                self.check,
+                |_, _| Ok(()),
+            )?,
+        ];
+        let limits = self.config.spec.limits();
+        for (summary, metrics) in summaries
+            .iter()
+            .zip([&metadata.metrics.left, &metadata.metrics.right])
+        {
+            let rows = u64::try_from(summary.rows)
+                .map_err(|_| invalid("V2 retained row count exceeds u64"))?;
+            if rows != metrics.retained_rows || summary.bytes != metrics.retained_bytes {
+                return Err(invalid("V2 restored state charge is inconsistent"));
+            }
+            if rows > limits.max_state_rows_per_side
+                || summary.bytes > limits.max_state_bytes_per_side
+            {
+                return Err(invalid("V2 restored state exceeds configured limits"));
+            }
+        }
+        Ok(summaries)
     }
 
     fn stored_row(
