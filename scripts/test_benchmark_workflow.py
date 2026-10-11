@@ -207,6 +207,23 @@ class BenchmarkWorkflowTests(unittest.TestCase):
         ):
             self.assertIn(module, suite)
 
+    def test_issue406_process_tests_use_installed_dependencies(self):
+        suite = (ROOT / ".github/workflows/benchmark-suite.yml").read_text(
+            encoding="utf-8"
+        )
+        prepare = suite.split("  build:", 1)[0]
+        installed = suite.split(
+            "      - name: Verify benchmark controllers and warm-stream scenarios", 1
+        )[1].split("      - name:", 1)[0]
+        for module in (
+            "scripts.test_issue406_fresh_runner",
+            "scripts.test_issue406_fresh_v3",
+            "scripts.test_issue406_run",
+        ):
+            with self.subTest(module=module):
+                self.assertNotIn(module, prepare)
+                self.assertIn(module, installed)
+
     def test_script_tests_run_in_the_matching_workflow(self):
         linux = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
         suite = (ROOT / ".github/workflows/benchmark-suite.yml").read_text(
