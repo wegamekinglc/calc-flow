@@ -401,7 +401,11 @@ def validate_acceptance_harness(
             native_harness_reuse(record["harness_git_sha"], compatibility=compatibility)
             overlay = historical_overlay(overlay, compatibility)
         elif record["harness_git_sha"] != _clean_revision(ROOT):
-            native_harness_reuse(record["harness_git_sha"])
+            reuse = native_harness_reuse(record["harness_git_sha"])
+            if "rustdoc_compatibility" in reuse:
+                from scripts.benchmark_suite.issue406_reuse import restore_rustdoc
+
+                overlay = restore_rustdoc(overlay)
         expected = {
             "schema": SCHEMA,
             "target": target,
@@ -457,13 +461,19 @@ def native_harness_reuse(
             cwd=ROOT,
         ).splitlines()
         blobs[revision] = dict(zip(COPIED_FILES, values, strict=True))
+    bridge = {}
     if blobs[build_revision] != blobs[current]:
-        raise ValueError("historical copied native sources changed")
+        from scripts.benchmark_suite.issue406_reuse import rustdoc_reuse
+
+        bridge = rustdoc_reuse(
+            ROOT, build_revision, current, blobs[build_revision], blobs[current]
+        )
     return {
         "original_build_harness_git_sha": build_revision,
         "execution_harness_git_sha": current,
         "recipe_prefix_sha256": hashlib.sha256(active.encode()).hexdigest(),
         "copied_file_git_blobs": blobs[current],
+        **({"rustdoc_compatibility": bridge} if bridge else {}),
     }
 
 

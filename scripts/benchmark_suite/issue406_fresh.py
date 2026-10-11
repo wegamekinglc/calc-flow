@@ -15,7 +15,7 @@ from scripts.toolkit import write_json
 
 SCHEMA = "calc-flow.issue406-execution.v2"
 MAIN = "588726c8bce0f1c57b90077064834c4a472ee5f2"
-CANDIDATE = "a681e7daf84672fa254c87b757df5618ebaf9fb2"
+CANDIDATE = "ce77237f2e91e97651eb9d1ec203fe00f328678d"
 PREVIOUS = "cffcf57be9c5cada667c6109156bcbfe5b084f27"
 
 

@@ -215,10 +215,15 @@ class HistoricalReuseTests(unittest.TestCase):
         from scripts.benchmark_suite.issue406_reuse import (
             FROZEN,
             HISTORICAL,
+            RUSTDOC_NEW,
+            RUSTDOC_OLD,
+            RUSTDOC_PATH,
             helper_reconstruction,
             reconstructed_overlay,
         )
 
+        new_doc = (Path(__file__).parents[1] / RUSTDOC_PATH).read_bytes()
+        old_doc = new_doc.replace(RUSTDOC_NEW, RUSTDOC_OLD, 1)
         old, new = b"old\n", b"old\naddition\n"
         witness = {
             "copied_files": {
@@ -226,7 +231,12 @@ class HistoricalReuseTests(unittest.TestCase):
                     "historical_sha256": hashlib.sha256(old).hexdigest(),
                     "candidate_build_sha256": hashlib.sha256(new).hexdigest(),
                     "exact_additions": ["addition\n"],
-                }
+                },
+                RUSTDOC_PATH: {
+                    "historical_sha256": hashlib.sha256(old_doc).hexdigest(),
+                    "candidate_build_sha256": hashlib.sha256(old_doc).hexdigest(),
+                    "exact_additions": [],
+                },
             }
         }
         with patch(
@@ -239,19 +249,21 @@ class HistoricalReuseTests(unittest.TestCase):
                 "helper_reconstruction": reconstruction,
             }
             self.assertEqual(
-                reconstructed_overlay({"helper.rs": new}, record, reconstruction),
-                {"helper.rs": old},
+                reconstructed_overlay(
+                    {"helper.rs": new, RUSTDOC_PATH: new_doc}, record, reconstruction
+                ),
+                {"helper.rs": old, RUSTDOC_PATH: old_doc},
             )
             self.assertEqual(record["harness_git_sha"], FROZEN)
             with self.assertRaisesRegex(ValueError, "reconstruction"):
                 reconstructed_overlay(
-                    {"helper.rs": new},
+                    {"helper.rs": new, RUSTDOC_PATH: new_doc},
                     {**record, "harness_git_sha": HISTORICAL},
                     reconstruction,
                 )
             with self.assertRaisesRegex(ValueError, "reconstruction"):
                 reconstructed_overlay(
-                    {"helper.rs": new},
+                    {"helper.rs": new, RUSTDOC_PATH: new_doc},
                     record,
                     {**reconstruction, "product_commit": "x"},
                 )

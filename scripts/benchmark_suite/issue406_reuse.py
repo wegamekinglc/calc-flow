@@ -15,6 +15,71 @@ HISTORICAL = "a2f31da023dccb00518d2e043aa628d663aa93fb"
 FROZEN = "121386713378459a4f16f63ee4848a9db7a5d466"
 
 
+RUSTDOC_PRODUCT = "5bd794d9cd4de2d40d90eb2fc7ff8c30c67c87cc"
+RUSTDOC_PATH = "crates/calc-flow/src/benchmark_internals.rs"
+RUSTDOC_OLD_SHA256 = "5d900ce4399b115e6dbdd30948c62abf0f67502b6944dd96140e87a8b95b28fe"
+RUSTDOC_NEW_SHA256 = "924fe08cef76b74164c8e7aedce011b1762ad10077c47b98e2317c955f2315da"
+RUSTDOC_OLD_BLOB = "47cfba3882afe0dad07a5b60367e8079261b60b6"
+RUSTDOC_NEW_BLOB = "d8f5235319024e416e855aabfd2349ece6b8e2c6"
+RUSTDOC_OLD = (
+    b"/// This correctness-only diagnostic observes reservations in the unchanged\n"
+    b"/// one-GiB runtime pool. It does not report performance measurements."
+)
+RUSTDOC_NEW = (
+    b"/// This correctness-only diagnostic observes reservations and refunds in the\n"
+    b"/// default unbounded runtime pool. It does not report performance measurements."
+)
+
+
+def restore_rustdoc(overlay: dict) -> dict:
+    """Recover the one frozen helper by reversing its exact reviewed rustdoc edit."""
+    value = overlay[RUSTDOC_PATH]
+    digest = hashlib.sha256(value).hexdigest()
+    if digest == RUSTDOC_OLD_SHA256:
+        return dict(overlay)
+    if digest != RUSTDOC_NEW_SHA256 or value.count(RUSTDOC_NEW) != 1:
+        raise ValueError("unreviewed native helper rustdoc source")
+    restored = value.replace(RUSTDOC_NEW, RUSTDOC_OLD, 1)
+    if hashlib.sha256(restored).hexdigest() != RUSTDOC_OLD_SHA256:
+        raise ValueError("native helper rustdoc restoration differs")
+    return {**overlay, RUSTDOC_PATH: restored}
+
+
+def rustdoc_reuse(
+    root: Path, build: str, current: str, original: dict, active: dict
+) -> dict:
+    """Bind actual new blobs to unchanged frozen helpers with one exact exception."""
+    history = command_output(["git", "rev-list", current], cwd=root).splitlines()
+    if (
+        not isinstance(RUSTDOC_PRODUCT, str)
+        or len(RUSTDOC_PRODUCT) != 40
+        or RUSTDOC_PRODUCT not in history
+        or FROZEN not in history
+        or build != FROZEN
+        or original.get(RUSTDOC_PATH) != RUSTDOC_OLD_BLOB
+        or active.get(RUSTDOC_PATH) != RUSTDOC_NEW_BLOB
+        or {**active, RUSTDOC_PATH: RUSTDOC_OLD_BLOB} != original
+    ):
+        raise ValueError("unreviewed native helper rustdoc compatibility")
+    contents = (root / RUSTDOC_PATH).read_bytes()
+    restored = restore_rustdoc({RUSTDOC_PATH: contents})[RUSTDOC_PATH]
+    if hashlib.sha256(contents).hexdigest() != RUSTDOC_NEW_SHA256:
+        raise ValueError("active native helper differs from reviewed rustdoc")
+    return {
+        "schema": "calc-flow.issue406-rustdoc-compatibility.v1",
+        "product_ancestor": RUSTDOC_PRODUCT,
+        "frozen_native_harness_git_sha": FROZEN,
+        "execution_harness_git_sha": current,
+        "path": RUSTDOC_PATH,
+        "actual_sha256": RUSTDOC_NEW_SHA256,
+        "restored_sha256": hashlib.sha256(restored).hexdigest(),
+        "actual_git_blob": RUSTDOC_NEW_BLOB,
+        "restored_git_blob": RUSTDOC_OLD_BLOB,
+        "old_literal_sha256": hashlib.sha256(RUSTDOC_OLD).hexdigest(),
+        "new_literal_sha256": hashlib.sha256(RUSTDOC_NEW).hexdigest(),
+    }
+
+
 def load_witness(path: Path) -> dict:
     """Accept exactly the reviewed bytes, retaining their historical caveats."""
     if sha256_file(path) != WITNESS_SHA256:
@@ -63,6 +128,7 @@ def reviewed_reuse(root: Path, build: str, current: str, path: Path) -> dict:
     ):
         raise ValueError("reviewed historical native recipe changed")
     blobs = {}
+    bridge = {}
     for revision, label in (
         (build, "historical_git_blob"),
         (current, "candidate_build_git_blob"),
@@ -72,13 +138,13 @@ def reviewed_reuse(root: Path, build: str, current: str, path: Path) -> dict:
             cwd=root,
         ).splitlines()
         blobs[revision] = dict(zip(COPIED_FILES, values, strict=True))
-        if any(
-            blobs[revision][item] != witness["copied_files"][item][label]
-            for item in COPIED_FILES
-        ):
-            raise ValueError("reviewed copied native source changed")
+        expected = {item: witness["copied_files"][item][label] for item in COPIED_FILES}
+        if blobs[revision] != expected:
+            if revision != current:
+                raise ValueError("reviewed copied native source changed")
+            bridge = rustdoc_reuse(root, FROZEN, current, expected, blobs[current])
     restore_copied(
-        {item: (root / item).read_bytes() for item in COPIED_FILES},
+        restore_rustdoc({item: (root / item).read_bytes() for item in COPIED_FILES}),
         witness["copied_files"],
     )
     return {
@@ -89,11 +155,14 @@ def reviewed_reuse(root: Path, build: str, current: str, path: Path) -> dict:
         "historical_copied_file_git_blobs": blobs[build],
         "copied_file_git_blobs": blobs[current],
         "compatibility_witness_sha256": WITNESS_SHA256,
+        **({"rustdoc_compatibility": bridge} if bridge else {}),
     }
 
 
 def historical_overlay(overlay: dict, witness_path: Path) -> dict:
-    return restore_copied(overlay, load_witness(witness_path)["copied_files"])
+    return restore_copied(
+        restore_rustdoc(overlay), load_witness(witness_path)["copied_files"]
+    )
 
 
 def helper_reconstruction(path: Path) -> dict:

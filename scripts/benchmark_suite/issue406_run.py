@@ -200,12 +200,17 @@ def _validate_fresh_releases(plan: dict, files: dict) -> Path:
         or files.get(str(compatibility)) != WITNESS_SHA256
     ):
         raise ValueError("historical compatibility witness is not sealed")
-    for key in ("native_harness_reuse", "row7_harness_reuse"):
+    for key, baseline_revision in (
+        ("native_harness_reuse", HISTORICAL),
+        ("row7_harness_reuse", FROZEN),
+    ):
         if set(plan[key]) != {"baseline", "candidate"}:
             raise ValueError("fresh build-harness roles differ")
         for side, reuse in plan[key].items():
             historical = key == "native_harness_reuse" and side == "baseline"
-            revision = HISTORICAL if historical else FROZEN
+            revision = (
+                baseline_revision if side == "baseline" else plan["harness_git_sha"]
+            )
             expected = native_harness_reuse(
                 revision, compatibility=compatibility if historical else None
             )

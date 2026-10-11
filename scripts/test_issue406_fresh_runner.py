@@ -276,10 +276,13 @@ class FreshRunnerTests(unittest.IsolatedAsyncioTestCase):
         from scripts.benchmark_suite.issue406_run import validate_plan
 
         plan = fresh_plan()
+        controller = "d" * 40
+        plan["harness_git_sha"] = controller
         old = {"original_build_harness_git_sha": HISTORICAL}
-        new = {"original_build_harness_git_sha": FROZEN}
+        frozen = {"original_build_harness_git_sha": FROZEN}
+        new = {"original_build_harness_git_sha": controller}
         plan["native_harness_reuse"] = {"baseline": old, "candidate": new}
-        plan["row7_harness_reuse"] = {"baseline": new, "candidate": new}
+        plan["row7_harness_reuse"] = {"baseline": frozen, "candidate": new}
         plan["historical_harness_witness"] = {
             "path": "/reviewed/witness.json",
             "sha256": WITNESS_SHA256,
@@ -300,7 +303,7 @@ class FreshRunnerTests(unittest.IsolatedAsyncioTestCase):
                 side_effect=lambda revision, **kwargs: {
                     "original_build_harness_git_sha": revision
                 },
-            ),
+            ) as reuse,
             patch(
                 "scripts.benchmark_suite.issue406_reuse.validate_ordinary_release",
                 return_value={"rustc": "rustc"},
@@ -320,12 +323,56 @@ class FreshRunnerTests(unittest.IsolatedAsyncioTestCase):
             ) as native,
         ):
             validate_plan(plan)
+            for key, side, wrong in (
+                ("native_harness_reuse", "baseline", FROZEN),
+                ("native_harness_reuse", "baseline", controller),
+                ("row7_harness_reuse", "baseline", HISTORICAL),
+                ("row7_harness_reuse", "baseline", controller),
+                ("native_harness_reuse", "candidate", FROZEN),
+                ("row7_harness_reuse", "candidate", FROZEN),
+                ("native_harness_reuse", "candidate", "e" * 40),
+                ("row7_harness_reuse", "candidate", "e" * 40),
+            ):
+                invalid = {
+                    **plan,
+                    key: {
+                        **plan[key],
+                        side: {"original_build_harness_git_sha": wrong},
+                    },
+                }
+                with (
+                    self.subTest(key=key, side=side, wrong=wrong),
+                    self.assertRaisesRegex(ValueError, "reuse witness"),
+                ):
+                    validate_plan(invalid)
+            with self.assertRaisesRegex(ValueError, "reuse witness"):
+                validate_plan({**plan, "harness_git_sha": "e" * 40})
+        self.assertEqual(
+            [
+                (call.args[0], call.kwargs["compatibility"])
+                for call in reuse.call_args_list[:4]
+            ],
+            [
+                (HISTORICAL, Path("/reviewed/witness.json")),
+                (controller, None),
+                (FROZEN, None),
+                (controller, None),
+            ],
+        )
         self.assertEqual(ordinary.call_count, 3)
         self.assertEqual(
-            [call.args[3] for call in wheel.call_args_list], [FROZEN, FROZEN]
+            [call.args[0]["product_commit"] for call in ordinary.call_args_list],
+            [
+                plan["releases"]["baseline"]["product_commit"],
+                CANDIDATE,
+                PREVIOUS,
+            ],
         )
         self.assertEqual(
-            [call.args[3] for call in native.call_args_list], [HISTORICAL, FROZEN]
+            [call.args[3] for call in wheel.call_args_list], [FROZEN, controller]
+        )
+        self.assertEqual(
+            [call.args[3] for call in native.call_args_list], [HISTORICAL, controller]
         )
 
     async def test_known_failure_requires_prepared_identity_and_natural_empty_group(
