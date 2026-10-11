@@ -277,7 +277,7 @@ def validate_ordinary_release(release: dict, sealed: dict) -> dict:
             if key != "CARGO_TARGET_DIR"
         },
         "python": build["python"],
-        "rustc": build["rustc"],
+        "rustc": build["rustc"].rstrip("\r\n"),
         "lock_fingerprint": _lock_identity(Path(build["source"])),
         "compiled_artifacts": validate_ordinary_audit(release, build, sealed),
     }

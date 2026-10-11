@@ -285,7 +285,7 @@ class HistoricalReuseTests(unittest.TestCase):
                 "wheel_sha256": sha256_file(wheel),
                 "environment": {"RUSTFLAGS": None},
                 "python": "python",
-                "rustc": "rustc",
+                "rustc": "rustc\n",
                 "commands": [
                     {
                         "label": "build",
