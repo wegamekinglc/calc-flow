@@ -636,13 +636,7 @@ async fn watermark_equality_is_on_time_and_eviction_is_strict() {
 }
 
 fn assert_compacted_v2_history(snapshot: &OperatorStateSnapshot) {
-    assert_v2_history(
-        snapshot,
-        4,
-        [4, 0],
-        &[(5, "left")],
-        &[("left", 4), ("left", 1)],
-    );
+    assert_v2_history(snapshot, 4, [4, 0], &[(5, "left")], &[("left", 1); 5]);
 }
 
 #[tokio::test]
@@ -695,6 +689,16 @@ async fn compaction_survives_restore_checkpoint_restore_cycles() {
         compacted.segments.keys().collect::<Vec<_>>()
     );
 
+    // Index compaction preserves the four immutable payload owners.
+    for (name, segment) in &previous.as_ref().unwrap().segments {
+        if name.contains("-payload-") {
+            assert_eq!(&compacted.segments[name], segment);
+            assert!(Arc::ptr_eq(
+                &segment.bytes_arc(),
+                &compacted.segments[name].bytes_arc()
+            ));
+        }
+    }
     assert_compacted_v2_history(&compacted);
     assert_eq!(operator.status().left.retained_rows, 5);
     assert_eq!(operator.status().left.retained_bytes, 525);
