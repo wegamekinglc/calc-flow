@@ -147,19 +147,25 @@ IPC phase split alone cannot make the complete lifecycle pass. Keep the next
 release build/full diagnostic held until the relevant ownership and restore
 bounds are resolved.
 
+Commit `f9adf9e2` now reuses fresh preparation only when all four Cut fields
+match. Three new tests and seven existing writer regressions pass, including
+full-pool reuse, stale fields, complete byte/recovery equivalence, cancellation
+and retirement. Library Clippy passes; the known test-target generated-libtest
+diagnostic remains. This avoids a redundant writer for an unchanged cut; it does
+not solve held-history replacement or restore capacity.
+
 The next implementation steps are:
 
-1. Reuse fresh preparation only when its complete Cut matches; retain
-   cancellation, retirement and epoch checks and reject stale cuts.
-2. Review and test separate segment backing credit, Base controls and temporary
-   encoding credit. Every held alias must retain its own required funding.
-3. For fully checkpointed append-only history, review a bounded sorted-index
+1. Implement the reviewed separation of segment backing credit, Base controls
+   and temporary encoding credit. Every held alias must retain its own required
+   funding, including surviving shared-registration controls.
+2. For fully checkpointed append-only history, review a bounded sorted-index
    merge that shares existing whole payload segments. Pending operations,
    tombstones and partially dead payloads retain the existing encoder. Prove a
    complete simultaneous-reservation upper bound before attempting 4M again.
-4. Design bounded restore folding and live-container construction while
+3. Design bounded restore folding and live-container construction while
    preserving all malformed-history rejection and recovery semantics.
-5. Resume the remaining Join, ASOF, parallelism and harness improvements using
+4. Resume the remaining Join, ASOF, parallelism and harness improvements using
    the completed CPU profiles. The reviewed single-string local interning
    proposal remains an independent next CPU optimization.
 

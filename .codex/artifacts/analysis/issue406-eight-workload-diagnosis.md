@@ -306,3 +306,27 @@ checkpoint modes.
 Validation logs and hashes are recorded in the feature worktree
 `target/issue406-complete-acceptance/ipc-owner-validation.json`; the exact
 source accounting worksheet is `ipc-owner-source-diagnosis.json` beside it.
+
+## Reuse an unchanged fresh prepared cut
+
+Commit `f9adf9e2` avoids submitting another checkpoint writer when the complete
+fresh preparation Cut still matches: generation, captured epoch, revision and
+dirty revision. The existing cancellation, retirement and advancing-epoch
+checks remain before reuse. This applies to fresh prepared bases; it does not
+extend to prepared deltas or replace dirty history.
+
+The recorded RED prepared a real state, reserved the remaining 1 GiB pool and
+repeated the unchanged preparation. The old writer failed constructor admission;
+the new path succeeds without allocating a second base. Three new tests check
+identical owners and checkpoint bytes, complete restored state, each stale Cut
+field independently, and cancellation while waiting for retirement. Seven
+existing writer regressions also pass. Library Clippy, scoped formatting and
+contract checks pass; test-target Clippy retains the known generated-libtest
+diagnostic. Evidence is in the feature worktree's
+`target/issue406-complete-acceptance/prepared-reuse-validation.json`.
+
+These ten tests establish reuse semantics and resource ownership, not a new
+performance result. The eight-row comparison still measures `e8a28d99`. Held E4
+history during a replacement base and bounded restore remain separate capacity
+requirements; the next full release build and 4M diagnostic remain held until
+their simultaneous allocation bounds are resolved.
