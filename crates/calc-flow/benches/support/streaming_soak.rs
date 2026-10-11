@@ -448,8 +448,11 @@ impl StreamOperator for SoakWindowOperator {
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
         let new_keys = Self::input_keys(&batch);
+        // This wrapper exercises operator-local snapshots with manual epochs.
+        let checkpoint_job = context.job().clone().with_checkpointing(true);
+        let context = context.with_test_job(&checkpoint_job);
         self.inner
-            .process_data(ingress, batch, context, output)
+            .process_data(ingress, batch, &context, output)
             .await?;
         self.live_keys.extend(new_keys);
         self.processed_batches = self
@@ -472,7 +475,9 @@ impl StreamOperator for SoakWindowOperator {
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
-        self.inner.on_watermark(watermark, context, output).await?;
+        let checkpoint_job = context.job().clone().with_checkpointing(true);
+        let context = context.with_test_job(&checkpoint_job);
+        self.inner.on_watermark(watermark, &context, output).await?;
         self.live_keys
             .retain(|(_, end, _)| *end > watermark.as_micros());
         self.refresh_live_key_probe(false);
@@ -484,7 +489,9 @@ impl StreamOperator for SoakWindowOperator {
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
-        self.inner.on_end(context, output).await?;
+        let checkpoint_job = context.job().clone().with_checkpointing(true);
+        let context = context.with_test_job(&checkpoint_job);
+        self.inner.on_end(&context, output).await?;
         self.live_keys.clear();
         self.capture_prepared_state()?;
         self.refresh_live_key_probe(true);
@@ -3789,6 +3796,31 @@ struct PrivateFullRunnerFixture {
     mode: PrivateFullRunnerMode,
 }
 
+struct PrivateFullRunnerOrdinarySink {
+    written_records: Arc<AtomicUsize>,
+    closed: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl OrdinaryStreamSink for PrivateFullRunnerOrdinarySink {
+    async fn open(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn write(&mut self, batch: &Batch) -> Result<()> {
+        self.written_records.fetch_add(
+            checkpoint_matrix_output_records(batch)?.len(),
+            Ordering::SeqCst,
+        );
+        Ok(())
+    }
+
+    async fn close(&mut self) -> Result<()> {
+        self.closed.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
 async fn prepare_private_full_runner_benchmark(
     mode: PrivateFullRunnerMode,
 ) -> PrivateFullRunnerFixture {
@@ -3811,6 +3843,24 @@ async fn prepare_private_full_runner_benchmark(
         CancellationToken::new(),
         checkpointed,
     );
+    let spec = if checkpointed {
+        spec
+    } else {
+        ContinuousJobSpec {
+            sinks: spec
+                .sinks
+                .into_iter()
+                .map(|sink| NamedSinkBinding {
+                    binding: OrdinarySinkBinding::new(Box::new(PrivateFullRunnerOrdinarySink {
+                        written_records: Arc::clone(&sink_writes),
+                        closed: Arc::clone(&sink_closed),
+                    })),
+                    ..sink
+                })
+                .collect(),
+            ..spec
+        }
+    };
     let checkpoint = if checkpointed {
         let backend = Arc::new(
             LocalStateBackend::new(directory.path().join("state"))
@@ -7067,7 +7117,12 @@ async fn real_soak_topology_graceful_smoke_conserves_every_accepted_sequence() {
         ))
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(30)).await;
+    let checkpoint_progress = tokio::time::timeout(Duration::from_secs(10), async {
+        while window_probe.lock().total_segment_bytes == 0 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await;
 
     let outcome = job.shutdown().await;
 
@@ -7077,6 +7132,10 @@ async fn real_soak_topology_graceful_smoke_conserves_every_accepted_sequence() {
         "graceful soak smoke failed: {outcome:?}"
     );
     assert_eq!(outcome.cause, TerminalCause::GracefulShutdown);
+    assert!(
+        checkpoint_progress.is_ok(),
+        "the soak did not capture nonempty operator state before shutdown"
+    );
     let accepted = accepted.snapshot();
     assert_delivery_conservation(&accepted, &sink_a.lock(), "sink A");
     assert_delivery_conservation(&accepted, &sink_b.lock(), "sink B");

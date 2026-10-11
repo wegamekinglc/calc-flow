@@ -84,7 +84,7 @@ async fn assert_creation_sync_retry(subtree: &str) {
     let key = StateLineageKey::new("publication", &digest("pipeline")).unwrap();
     let lineage = backend.open_local_lineage(&key).await.unwrap();
     let handle = tests::state_handle(&key, Epoch::INITIAL, "one", b"payload");
-    let failed_parent = directory.path().join(subtree);
+    let failed_parent = lineage.root.path.join(subtree);
     set_hook(
         &lineage,
         Some(Arc::new(move |operation, path| {
@@ -253,7 +253,7 @@ async fn batch_partial_rename_and_persistent_sync_failure_retries() {
         lineage.stage_segment(handle, b"payload").await.unwrap();
         lineage.validate_segment(handle).await.unwrap();
     }
-    let second = directory.path().join(handles[1].relative_path());
+    let second = lineage.managed_paths(&handles[1]).unwrap().committed;
     set_hook(
         &lineage,
         Some(Arc::new(move |operation, path| {
@@ -415,12 +415,7 @@ async fn second_directory_failure_reconfirms_both_directories() {
         lineage.stage_segment(handle, b"payload").await.unwrap();
         lineage.validate_segment(handle).await.unwrap();
     }
-    let second = directory
-        .path()
-        .join(handles[1].relative_path())
-        .parent()
-        .unwrap()
-        .to_owned();
+    let second = lineage.managed_paths(&handles[1]).unwrap().committed_parent;
     let attempts = Arc::new(SyncMutex::new(Vec::new()));
     let observed = attempts.clone();
     set_hook(
