@@ -41,10 +41,14 @@ def validate_join_checkpoint_history(observation: dict) -> dict:
     """Require the fixed row3 geometry, full-state oracle and exact pool evidence."""
     if (
         not isinstance(observation, dict)
+        or observation.get("schema")
+        not in (
+            "calc-flow.join-checkpoint-history.v1",
+            "calc-flow.join-checkpoint-history.v2",
+        )
         or any(
             observation.get(field) != expected
             for field, expected in (
-                ("schema", "calc-flow.join-checkpoint-history.v1"),
                 ("case", "join_checkpoint_history_4m"),
                 ("outcome", "complete"),
             )
@@ -59,7 +63,8 @@ def validate_join_checkpoint_history(observation: dict) -> dict:
         )
     ):
         raise ValueError("incomplete fixed checkpoint history diagnostic")
-    _validate_history_geometry(observation)
+    unbounded = observation["schema"] == "calc-flow.join-checkpoint-history.v2"
+    _validate_history_geometry(observation, unbounded=unbounded)
     fresh, history = observation.get("fresh"), observation.get("history")
     if not isinstance(fresh, dict) or not isinstance(history, dict):
         raise ValueError("missing fresh or retained-history evidence")
@@ -82,7 +87,7 @@ def validate_join_checkpoint_history(observation: dict) -> dict:
             or _history_oracle(item.get("oracle")) != oracle
         ):
             raise ValueError("restored full-state oracle differs")
-    _history_reservations(observation)
+    _history_reservations(observation, unbounded=unbounded)
     return dict(observation)
 
 
@@ -178,10 +183,16 @@ def _history_snapshot(
         raise ValueError("checkpoint history base/delta inventory differs")
 
 
-def _history_pool(sample: dict) -> None:
+def _history_pool(sample: dict, *, unbounded: bool = False) -> None:
     if not isinstance(sample, dict):
         raise ValueError("missing reservation pool observation")
-    _history_count(sample.get("limit_bytes"), 1 << 30, "pool limit")
+    if unbounded:
+        if "limit_bytes" not in sample or sample["limit_bytes"] is not None:
+            raise ValueError(
+                "unbounded reservation pool requires an explicit null limit"
+            )
+    else:
+        _history_count(sample.get("limit_bytes"), 1 << 30, "pool limit")
     fields = (
         "reserved_bytes",
         "peak_reserved_bytes",
@@ -197,11 +208,14 @@ def _history_pool(sample: dict) -> None:
         <= sample["reserved_bytes"]
         <= sample["phase_peak_reserved_bytes"]
         <= sample["peak_reserved_bytes"]
-        <= 1 << 30
+        or not unbounded
+        and sample["peak_reserved_bytes"] > 1 << 30
         or sample["peak_reserved_bytes"] == 0
         or sample["successful_grows"] == 0
     ):
         raise ValueError("invalid exact reservation peak")
+    if unbounded and sample["failed_grows"] != 0:
+        raise ValueError("unbounded reservation pool reported a rejected reservation")
     rejection = sample.get("last_rejection")
     if sample["failed_grows"] == 0:
         if rejection is not None:
@@ -220,7 +234,7 @@ def _history_pool(sample: dict) -> None:
         raise ValueError("missing or invalid last reservation rejection")
 
 
-def _history_reservations(observation: dict) -> None:
+def _history_reservations(observation: dict, *, unbounded: bool = False) -> None:
     pools, phases = observation.get("pools"), observation.get("reservation_phases")
     pool_names = ("fresh", "history", "restore_old", "restore_new")
     if (
@@ -232,7 +246,7 @@ def _history_reservations(observation: dict) -> None:
         raise ValueError("missing fixed reservation phases or distinct pools")
     previous = {}
     for item, (phase, name) in zip(phases, HISTORY_PHASES, strict=True):
-        _history_pool(item)
+        _history_pool(item, unbounded=unbounded)
         if item.get("phase") != phase or item.get("pool_id") != name:
             raise ValueError("reservation phase or pool identity differs")
         if name in previous and any(
@@ -259,7 +273,7 @@ def _history_reservations(observation: dict) -> None:
             )
         previous[name] = item
     for item, name in zip(pools, pool_names, strict=True):
-        _history_pool(item)
+        _history_pool(item, unbounded=unbounded)
         if (
             item.get("pool_id") != name
             or item["reserved_bytes"] != 0
@@ -422,13 +436,25 @@ def validate_small_batch(observation: dict) -> dict:
     }
 
 
-def _validate_history_geometry(observation: dict) -> None:
+def _validate_history_geometry(observation: dict, *, unbounded: bool = False) -> None:
+    if unbounded:
+        if (
+            observation.get("pool_policy") != "unbounded"
+            or "pool_limit_bytes" not in observation
+            or observation["pool_limit_bytes"] is not None
+        ):
+            raise ValueError(
+                "unbounded checkpoint history requires an explicit pool policy"
+            )
+    else:
+        if observation.get("pool_policy", "bounded") != "bounded":
+            raise ValueError("legacy checkpoint history requires a bounded pool policy")
+        _history_count(observation.get("pool_limit_bytes"), 1 << 30, "pool_limit_bytes")
     for field, expected in (
         ("left_rows", 4_000_000),
         ("dimension_rows", 64),
         ("resident_rows", 4_000_064),
         ("batch_rows", 64_000),
-        ("pool_limit_bytes", 1 << 30),
     ):
         _history_count(observation.get(field), expected, field)
     expected_spec = {

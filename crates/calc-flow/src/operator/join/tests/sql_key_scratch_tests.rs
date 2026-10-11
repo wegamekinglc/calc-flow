@@ -359,11 +359,20 @@ async fn gated_producer(keys: RecordBatch, gate: Arc<ProducerGate>, metadata_onl
     let _ = stream.next().await;
 }
 
-async fn scratch_fixture(rows: usize) -> (StreamJoinOperator, StreamJobContext) {
+fn scratch_operator() -> StreamJoinOperator {
     let mut declaration = spec();
     declaration.limits = JoinStateLimits::new(4_096, 4_000_000, 1_000).unwrap();
-    let mut operator =
-        StreamJoinOperator::new("match", left_schema(), right_schema(), declaration).unwrap();
+    StreamJoinOperator::new("match", left_schema(), right_schema(), declaration).unwrap()
+}
+
+async fn scratch_fixture(rows: usize) -> (StreamJoinOperator, StreamJobContext) {
+    scratch_fixture_from(rows, scratch_operator()).await
+}
+
+async fn scratch_fixture_from(
+    rows: usize,
+    mut operator: StreamJoinOperator,
+) -> (StreamJoinOperator, StreamJobContext) {
     let job = job();
     let context = StreamOperatorContext::new(&job, "match", None);
     let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
@@ -705,7 +714,7 @@ async fn test_closed_scratch_home_preserves_actual_cancel_and_deadline() {
 }
 
 async fn paid_key_pressure_case(headroom: usize) {
-    let (mut operator, job) = scratch_fixture(64).await;
+    let (mut operator, job) = scratch_fixture_from(64, with_one_gib_pool(scratch_operator())).await;
     let context = StreamOperatorContext::new(&job, "match", None);
     let plan = operator.side_plan("right").unwrap();
     let mut bundle = operator.admission_bundle(&plan);
@@ -793,7 +802,7 @@ async fn string_budget_case(
     stage: crate::runtime::streaming::gather_work::admission_probe::AdmissionStage,
 ) {
     use crate::runtime::streaming::gather_work::admission_probe::AdmissionProbe;
-    let (mut operator, job) = scratch_fixture(1).await;
+    let (mut operator, job) = scratch_fixture_from(1, with_one_gib_pool(scratch_operator())).await;
     let context = StreamOperatorContext::new(&job, "match", None);
     let plan = operator.side_plan("right").unwrap();
     let input = right_batch(vec![0]);

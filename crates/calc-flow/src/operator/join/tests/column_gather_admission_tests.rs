@@ -17,8 +17,9 @@ fn test_join_column_gather_admission_refusal_does_not_emit_or_commit() {
 }
 
 async fn assert_refusal(service: &TestService, stage: AdmissionStage) {
-    let mut operator =
-        StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+    let mut operator = with_one_gib_pool(
+        StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap(),
+    );
     let source_job = job();
     let source_context = StreamOperatorContext::new(&source_job, "match", None);
     let mut collector = EdgeCollector::new(operator.output_ports().to_vec());

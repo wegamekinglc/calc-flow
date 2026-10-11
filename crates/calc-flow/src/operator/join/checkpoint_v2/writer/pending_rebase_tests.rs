@@ -94,7 +94,7 @@ async fn test_pending_rebase_preserves_payloads_restores_and_continues() {
 async fn test_pending_rebase_cancellation_and_refusal_refund_both_phases() {
     let enabled = job();
     let context = StreamOperatorContext::new(&enabled, "prepared-reuse", None);
-    let (mut join, old) = checkpointed(&context).await;
+    let (mut join, old) = checkpointed_from(&context, with_one_gib_pool(operator())).await;
     for side in ["left", "right"] {
         drop(admit_side(&mut join, side, &context).await);
     }

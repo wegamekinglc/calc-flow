@@ -1088,7 +1088,7 @@ fn sparse_left_fixture() -> StreamJoinOperator {
 
 #[tokio::test]
 async fn test_sparse_chunk_refusal_retries_after_actual_credit_release() {
-    let mut operator = sparse_left_fixture();
+    let mut operator = with_one_gib_pool(sparse_left_fixture());
     let job = job();
     let context = StreamOperatorContext::new(&job, "match", None);
     let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
@@ -2292,7 +2292,7 @@ async fn test_owned_copy_headers_exhaust_cooperative_budget_before_native_retent
 
 #[tokio::test]
 async fn test_owned_copy_denied_funding_keeps_legacy_admission_and_pool_zero() {
-    let mut operator = operator_fixture();
+    let mut operator = with_one_gib_pool(operator_fixture());
     let runtime = operator.runtime.runtime().unwrap();
     let pressure = runtime.incremental_reservation("owned-copy-pressure");
     let pool = runtime.incremental_memory_pool();

@@ -3,7 +3,7 @@ use crate::{
     CancellationToken, Epoch, JsonMap, OperatorStateSnapshot, StreamJobContext, StreamOperator,
     operator::join::{
         JoinStateLimits, JoinTimeBounds, StreamJoinOperator, StreamJoinSpec, encode_join_key_v1,
-        encode_side, state_row_charge,
+        encode_side, state_row_charge, with_one_gib_pool,
     },
     runtime::streaming::gather_work::TestService,
 };
@@ -21,6 +21,12 @@ use std::{
 };
 
 fn operator() -> StreamJoinOperator {
+    let mut operator = uninitialized_operator();
+    operator.prepare_checkpoint_preload_runtime().unwrap();
+    operator
+}
+
+fn uninitialized_operator() -> StreamJoinOperator {
     let schema = Arc::new(Schema::new(vec![
         Field::new("key", DataType::Int64, false),
         Field::new(
@@ -38,9 +44,7 @@ fn operator() -> StreamJoinOperator {
         JoinStateLimits::new(100, 100_000, 100).unwrap(),
     )
     .unwrap();
-    let mut output = StreamJoinOperator::new("match", Arc::clone(&schema), schema, spec).unwrap();
-    output.prepare_checkpoint_preload_runtime().unwrap();
-    output
+    StreamJoinOperator::new("match", Arc::clone(&schema), schema, spec).unwrap()
 }
 
 fn job(service: &TestService, cancellation: CancellationToken) -> StreamJobContext {
@@ -415,7 +419,7 @@ async fn finish_refusal(
 async fn check_resident_refusal(service: &TestService) {
     use datafusion::execution::memory_pool::{MemoryConsumer, MemoryLimit};
     let snapshot = snapshot(&mut operator());
-    let mut target = operator();
+    let mut target = with_one_gib_pool(uninitialized_operator());
     let pool = pool(&target);
     let original =
         super::super::super::inventory::required(&snapshot, &target.spec, &target.name).unwrap();
@@ -464,7 +468,7 @@ async fn check_attempt_refusal(service: &TestService) {
     use crate::runtime::streaming::gather_work::admission_probe::{AdmissionProbe, AdmissionStage};
     use datafusion::execution::memory_pool::MemoryLimit;
     let snapshot = snapshot(&mut operator());
-    let mut target = operator();
+    let mut target = with_one_gib_pool(uninitialized_operator());
     let pool = pool(&target);
     let job = job(service, CancellationToken::new());
     let MemoryLimit::Finite(limit) = pool.memory_limit() else {

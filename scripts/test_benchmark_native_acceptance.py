@@ -503,6 +503,82 @@ class JoinCheckpointHistoryTests(unittest.TestCase):
         self.assertEqual(self.validate(observation), observation)
         self.assertEqual(observation, original)
 
+    def unbounded_observation(self):
+        observation = history_observation()
+        observation.update(
+            schema="calc-flow.join-checkpoint-history.v2",
+            pool_policy="unbounded",
+            pool_limit_bytes=None,
+        )
+        for sample in observation["pools"] + observation["reservation_phases"]:
+            sample.update(
+                limit_bytes=None,
+                peak_reserved_bytes=2 << 30,
+                phase_peak_reserved_bytes=(1 << 30) + 123,
+            )
+        return observation
+
+    def test_unbounded_history_accepts_peaks_above_one_gib_without_mutation(self):
+        observation = self.unbounded_observation()
+        original = deepcopy(observation)
+        self.assertEqual(self.validate(observation), observation)
+        self.assertEqual(observation, original)
+
+    def test_unbounded_history_requires_explicit_policy_and_null_limits(self):
+        mutations = (
+            lambda d: d.pop("pool_policy"),
+            lambda d: d.update(pool_policy="bounded"),
+            lambda d: d.pop("pool_limit_bytes"),
+            *(
+                lambda d, value=value: d.update(pool_limit_bytes=value)
+                for value in (0, 1 << 30, (1 << 64) - 1, False, "null")
+            ),
+            lambda d: d.update(schema="calc-flow.join-checkpoint-history.v3"),
+        )
+        for index, mutate in enumerate(mutations):
+            invalid = self.unbounded_observation()
+            mutate(invalid)
+            with self.subTest(index=index), self.assertRaises(ValueError):
+                self.validate(invalid)
+        for collection in ("pools", "reservation_phases"):
+            invalid = self.unbounded_observation()
+            invalid[collection][0].pop("limit_bytes")
+            with self.subTest(collection=collection), self.assertRaises(ValueError):
+                self.validate(invalid)
+            for limit in (0, 1 << 30, (1 << 64) - 1, False, "null"):
+                invalid = self.unbounded_observation()
+                invalid[collection][0]["limit_bytes"] = limit
+                with (
+                    self.subTest(collection=collection, limit=limit),
+                    self.assertRaises(ValueError),
+                ):
+                    self.validate(invalid)
+
+    def test_unbounded_history_retains_reservation_oracle_and_cleanup_checks(self):
+        mutations = (
+            lambda d: d["pools"][0].update(failed_grows=1),
+            lambda d: d["pools"][0].update(last_rejection={}),
+            lambda d: d["pools"][0].update(reserved_bytes=1),
+            lambda d: d["reservation_phases"][0].update(
+                phase_peak_reserved_bytes=(2 << 30) + 1
+            ),
+            lambda d: d["reservation_phases"][0].pop("peak_reserved_bytes"),
+            lambda d: d["history"]["oracle"].update(validated_all_rows=False),
+            lambda d: d["history"]["alias_ownership"].update(has_owner=False),
+            lambda d: d.update(owned_cleanup_complete=False),
+        )
+        for index, mutate in enumerate(mutations):
+            invalid = self.unbounded_observation()
+            mutate(invalid)
+            with self.subTest(index=index), self.assertRaises(ValueError):
+                self.validate(invalid)
+
+    def test_legacy_history_cannot_claim_an_unbounded_pool_policy(self):
+        invalid = history_observation()
+        invalid["pool_policy"] = "unbounded"
+        with self.assertRaises(ValueError):
+            self.validate(invalid)
+
     def test_history_requires_explicit_boolean_native_index_observations(self):
         for value in (
             None,

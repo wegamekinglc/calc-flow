@@ -11,6 +11,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 const HIDDEN_BITS: u64 = 0x7ff8_0000_0000_0055;
 
 fn nullable_operator(utf8: bool) -> StreamJoinOperator {
+    let mut target = uninitialized_nullable_operator(utf8);
+    target.prepare_checkpoint_preload_runtime().unwrap();
+    target
+}
+
+fn uninitialized_nullable_operator(utf8: bool) -> StreamJoinOperator {
     let key_type = if utf8 {
         DataType::Utf8
     } else {
@@ -25,15 +31,13 @@ fn nullable_operator(utf8: bool) -> StreamJoinOperator {
         ),
         Field::new("price", DataType::Float64, true),
     ]));
-    let mut target = StreamJoinOperator::new(
+    StreamJoinOperator::new(
         "match",
         Arc::clone(&schema),
         schema,
         operator().spec.clone(),
     )
-    .unwrap();
-    target.prepare_checkpoint_preload_runtime().unwrap();
-    target
+    .unwrap()
 }
 
 fn price(offset: usize, packed: u8) -> Float64Array {
@@ -431,7 +435,7 @@ fn refusal_hook(
 fn check_partial_refusal(job: &StreamJobContext) {
     let snapshot = nullable_snapshot();
     let unchanged = snapshot.clone();
-    let mut target = nullable_operator(true);
+    let mut target = with_one_gib_pool(uninitialized_nullable_operator(true));
     let pool = pool(&target);
     let mut construction = construction(&target, &snapshot, job);
     assert!(poll_copy(construction.copy(&target, &snapshot, job)).unwrap());

@@ -9,6 +9,12 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-11: Remove the implicit 1 GiB DataFusion runtime memory-pool limit.
+  Keep per-runtime reservation accounting and release tracking. Explicit
+  operator state budgets, edge budgets, and SQL result collection limits remain
+  independent. Checkpoint performance diagnostics use the unbounded runtime
+  default and record their pool policy separately from historical bounded runs.
+
 - 2026-10-11: Add `StateLineageBackend::stage_segments` for borrowed snapshot
   segments, with a sequential default for existing backends. Local staging
   syncs each owner directory once per batch while retaining every file,

@@ -431,7 +431,7 @@ async fn test_current_compact_restore_pool_refusal_is_atomic_and_refunds() {
     let job = job();
     let context = StreamOperatorContext::new(&job, "compact", None);
     let external = ownerless_snapshot(&context).await;
-    let mut state = operator(false, false);
+    let mut state = operator(false, false).with_one_gib_pool_for_test();
     drop(
         process(
             &mut state,

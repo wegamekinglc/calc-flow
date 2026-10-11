@@ -379,8 +379,9 @@ async fn test_native_probe_interns_each_distinct_repeated_key_once() {
 #[tokio::test]
 async fn test_retained_probe_keys_release_batch_scratch_before_next_admission() {
     let rows = 16_384;
-    let mut operator =
-        StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+    let mut operator = with_one_gib_pool(
+        StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap(),
+    );
     let job = job();
     let context = StreamOperatorContext::new(&job, "match", None);
     let source = right_batch(vec![0; rows]);
@@ -743,8 +744,9 @@ fn test_native_index_budget_denial_keeps_state_and_refunds_append() {
 }
 
 async fn native_index_budget_denial(service: &crate::runtime::streaming::gather_work::TestService) {
-    let mut operator =
-        StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+    let mut operator = with_one_gib_pool(
+        StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap(),
+    );
     let job = job().with_gather_owner(service.owner("native-index-refund".into()));
     let context = StreamOperatorContext::new(&job, "match", None);
     let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
@@ -892,8 +894,9 @@ fn test_native_fallback_refunds_unused_index_before_legacy_sql() {
 async fn native_fallback_index_refund(
     service: &crate::runtime::streaming::gather_work::TestService,
 ) {
-    let mut operator =
-        StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+    let mut operator = with_one_gib_pool(
+        StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap(),
+    );
     let job = job().with_gather_owner(service.owner("native-fallback-index".into()));
     let context = StreamOperatorContext::new(&job, "match", None);
     let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
@@ -966,7 +969,8 @@ async fn assert_string_probe_admission_and_funding(values: ArrayRef) {
     let left = typed_schema(&left_schema(), values.data_type());
     let right = typed_schema(&right_schema(), values.data_type());
     let source = typed_batch(&right_batch(vec![0; values.len()]), &right, &values);
-    let mut operator = StreamJoinOperator::new("match", left, right, spec()).unwrap();
+    let mut operator =
+        with_one_gib_pool(StreamJoinOperator::new("match", left, right, spec()).unwrap());
     let job = job();
     let context = StreamOperatorContext::new(&job, "match", None);
     let (plan, admitted) = admitted_probe(&mut operator, "right", &source, &context).await;

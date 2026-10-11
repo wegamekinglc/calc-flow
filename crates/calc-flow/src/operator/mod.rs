@@ -34,6 +34,8 @@ pub use expression::ExpressionOperator;
 #[cfg(feature = "benchmark-internals")]
 pub(crate) use join::run_checkpoint_history_diagnostic;
 pub(crate) use join::supported_key_type;
+#[cfg(test)]
+pub(crate) use join::with_one_gib_pool;
 pub use join::{
     JoinStateLimits, JoinTimeBounds, STREAM_JOIN_MAX_SAFE_JSON_INTEGER,
     STREAM_JOIN_STATE_ROW_OVERHEAD_BYTES_V1, StreamJoinOperator, StreamJoinSideStatus,

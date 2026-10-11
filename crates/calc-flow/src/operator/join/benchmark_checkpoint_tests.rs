@@ -41,6 +41,28 @@ fn exact_pool_peak_retains_transients_refunds_aliases_and_isolates_pools() {
 }
 
 #[test]
+fn unbounded_pool_preserves_peaks_and_refunds_above_one_gib() {
+    let pool = Arc::new(ObservedPool::unbounded("unbounded"));
+    let memory: Arc<dyn MemoryPool> = pool.clone();
+    assert!(matches!(memory.memory_limit(), MemoryLimit::Infinite));
+    let reservation = MemoryConsumer::new("tracked").register(&memory);
+    let bytes = (1 << 30) + 1;
+    reservation.try_grow(bytes).unwrap();
+    let observed = pool.snapshot();
+    assert_eq!(observed.limit_bytes, None);
+    assert_eq!(observed.reserved_bytes, bytes);
+    assert_eq!(observed.peak_reserved_bytes, bytes);
+    assert_eq!(observed.phase_peak_reserved_bytes, bytes);
+    assert_eq!(observed.successful_grows, 1);
+    assert_eq!(observed.failed_grows, 0);
+    assert!(observed.last_rejection.is_none());
+    drop(reservation);
+    assert_eq!(pool.snapshot().reserved_bytes, 0);
+    assert_eq!(pool.snapshot().successful_shrinks, 1);
+    assert_eq!(pool.snapshot().peak_reserved_bytes, bytes);
+}
+
+#[test]
 fn concurrent_pool_reservations_have_one_simultaneous_peak() {
     let pool = Arc::new(ObservedPool::new("concurrent", 1_024));
     let barrier = Arc::new(Barrier::new(2));
@@ -215,9 +237,12 @@ async fn retained_history_preserves_row3_fixture_progress_and_complete_restores(
     assert_eq!(evidence["restores"].as_array().unwrap().len(), 2);
     for pool in evidence["pools"].as_array().unwrap() {
         assert_eq!(pool["reserved_bytes"], 0);
-        assert_eq!(pool["limit_bytes"], 1 << 30);
+        assert!(pool["limit_bytes"].is_null());
         assert!(pool["peak_reserved_bytes"].as_u64().unwrap() > 0);
     }
+    assert_eq!(evidence["schema"], "calc-flow.join-checkpoint-history.v2");
+    assert_eq!(evidence["pool_policy"], "unbounded");
+    assert!(evidence["pool_limit_bytes"].is_null());
     assert_eq!(evidence["owned_cleanup_complete"], true);
 }
 
@@ -402,3 +427,6 @@ async fn test_dirty_replacement_fits_bounded_pool_and_preserves_owned_history() 
     assert_eq!(Some(after_oracle.unwrap()), before_oracle);
     assert!(alias_unchanged && rows_retired && all_segments_retired);
 }
+
+#[path = "benchmark_checkpoint_full_tests.rs"]
+mod full_tests;

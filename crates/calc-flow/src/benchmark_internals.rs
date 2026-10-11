@@ -135,8 +135,8 @@ pub async fn settle_job(job: &crate::StreamJobContext) -> Result<()> {
 
 /// Checks the fixed retained Join checkpoint lifecycle with four million quotes.
 ///
-/// This correctness-only diagnostic observes reservations in the unchanged
-/// one-GiB runtime pool. It does not report performance measurements.
+/// This correctness-only diagnostic observes reservations and refunds in the
+/// default unbounded runtime pool. It does not report performance measurements.
 ///
 /// # Errors
 /// Returns an error if the diagnostic fixture cannot be constructed. Lifecycle

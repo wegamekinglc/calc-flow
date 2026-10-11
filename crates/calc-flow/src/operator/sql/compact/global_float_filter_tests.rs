@@ -212,7 +212,7 @@ async fn test_global_float_filters_refusal_preserves_state_and_once_retry() {
     for dtype in [DataType::Float32, DataType::Float64] {
         let job = job();
         let context = StreamOperatorContext::new(&job, "float_extrema", None);
-        let mut state = filtered_operator(&dtype, FILTERED);
+        let mut state = filtered_operator(&dtype, FILTERED).with_one_gib_pool_for_test();
         let first = finite_arrivals(false).remove(0);
         let initial = process(&mut state, filtered_input(&dtype, &first, 0), &context).await;
         let prefix = oracle(&initial, &dtype, FILTERED, &[first.clone()]).await;

@@ -1,5 +1,7 @@
 use std::{collections::BTreeMap, fmt, sync::Arc};
 
+#[cfg(test)]
+use datafusion::execution::memory_pool::GreedyMemoryPool;
 use datafusion::{
     arrow::{
         array::{
@@ -8,7 +10,7 @@ use datafusion::{
         datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit},
         record_batch::RecordBatch,
     },
-    execution::memory_pool::{GreedyMemoryPool, MemoryLimit, MemoryPool, MemoryReservation},
+    execution::memory_pool::{MemoryLimit, MemoryPool, MemoryReservation, UnboundedMemoryPool},
 };
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -43,22 +45,22 @@ struct Counters {
 struct Rejection {
     additional_bytes: usize,
     reserved_bytes: usize,
-    limit_bytes: usize,
+    limit_bytes: Option<usize>,
     consumer_name: String,
 }
 
 #[derive(Debug)]
 struct ObservedPool {
     id: &'static str,
-    limit: usize,
-    pool: GreedyMemoryPool,
+    limit: Option<usize>,
+    pool: Arc<dyn MemoryPool>,
     counters: Mutex<Counters>,
 }
 
 #[derive(Debug, Serialize)]
 struct PoolSnapshot {
     pool_id: &'static str,
-    limit_bytes: usize,
+    limit_bytes: Option<usize>,
     reserved_bytes: usize,
     peak_reserved_bytes: usize,
     phase_peak_reserved_bytes: usize,
@@ -69,11 +71,21 @@ struct PoolSnapshot {
 }
 
 impl ObservedPool {
+    #[cfg(test)]
     fn new(id: &'static str, limit: usize) -> Self {
         Self {
             id,
-            limit,
-            pool: GreedyMemoryPool::new(limit),
+            limit: Some(limit),
+            pool: Arc::new(GreedyMemoryPool::new(limit)),
+            counters: Mutex::default(),
+        }
+    }
+
+    fn unbounded(id: &'static str) -> Self {
+        Self {
+            id,
+            limit: None,
+            pool: Arc::new(UnboundedMemoryPool::default()),
             counters: Mutex::default(),
         }
     }
@@ -549,11 +561,11 @@ impl Diagnostic {
     fn new(rows: usize) -> Result<Self> {
         let operator = fixture_operator(rows)?;
         Ok(Self {
-            report: json!({"schema": "calc-flow.join-checkpoint-history.v1",
+            report: json!({"schema": "calc-flow.join-checkpoint-history.v2",
                 "case": "join_checkpoint_history_4m", "outcome": "running",
                 "check_only": true, "checkpoint_enabled": true,
                 "left_rows": rows, "dimension_rows": ENTITIES, "resident_rows": rows + ENTITIES,
-                "batch_rows": BATCH_ROWS, "pool_limit_bytes": POOL_BYTES,
+                "batch_rows": BATCH_ROWS, "pool_policy": "unbounded", "pool_limit_bytes": null,
                 "operator_id": OPERATOR, "join_spec": operator.spec(),
                 "fixture": fixture_description(), "reservation_phases": [], "restores": [],
                 "owned_cleanup_complete": false}),
@@ -569,7 +581,7 @@ impl Diagnostic {
         id: &'static str,
     ) -> Result<(StreamJoinOperator, Arc<ObservedPool>)> {
         let mut operator = fixture_operator(rows)?;
-        let pool = Arc::new(ObservedPool::new(id, POOL_BYTES));
+        let pool = Arc::new(ObservedPool::unbounded(id));
         self.pools.push(Arc::clone(&pool));
         operator.runtime.initialize_benchmark_pool(pool.clone())?;
         operator.ingress_progress = progress(None);

@@ -91,7 +91,7 @@ async fn test_aggregate_float_input_casts_refusal_refunds_and_once_retry() {
     let dtype = DataType::Float64;
     let job = job();
     let context = StreamOperatorContext::new(&job, "float_extrema", None);
-    let mut state = operator(&dtype, WHERE_CAST);
+    let mut state = operator(&dtype, WHERE_CAST).with_one_gib_pool_for_test();
     let first = vec![vec![Some(ONE)]];
     drop(process(&mut state, input(&dtype, &first, 0), &context).await);
     assert!(state.incremental.is_some());

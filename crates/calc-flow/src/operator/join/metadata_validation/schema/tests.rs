@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     CancellationToken, Epoch, JsonMap, StreamOperator,
-    operator::join::{JoinStateLimits, JoinTimeBounds, StreamJoinSpec},
+    operator::join::{JoinStateLimits, JoinTimeBounds, StreamJoinSpec, with_one_gib_pool},
     runtime::streaming::gather_work::TestService,
 };
 use datafusion::arrow::datatypes::{DataType, Field, TimeUnit};
@@ -391,11 +391,10 @@ fn wide_operator() -> StreamJoinOperator {
         fields.push(Arc::new(Field::new(name, DataType::Utf8, true)));
     }
     let schema = Arc::new(Schema::new(fields));
-    let mut output =
+    with_one_gib_pool(
         StreamJoinOperator::new("match", Arc::clone(&schema), schema, original.spec.clone())
-            .unwrap();
-    output.prepare_checkpoint_preload_runtime().unwrap();
-    output
+            .unwrap(),
+    )
 }
 
 fn native_parse_probe(operator: &mut StreamJoinOperator) -> (Arc<AtomicUsize>, Arc<AtomicUsize>) {
@@ -475,10 +474,10 @@ async fn check_attempt_refusal(service: &TestService) {
     let mut fields = original.input_schema(0).fields().to_vec();
     fields.push(Arc::new(Field::new("payload", DataType::LargeUtf8, true)));
     let schema = Arc::new(Schema::new(fields));
-    let mut operator =
+    let mut operator = with_one_gib_pool(
         StreamJoinOperator::new("match", Arc::clone(&schema), schema, original.spec.clone())
-            .unwrap();
-    operator.prepare_checkpoint_preload_runtime().unwrap();
+            .unwrap(),
+    );
     let snapshot = snapshot(&mut operator);
     let job = job(service);
     assert!(

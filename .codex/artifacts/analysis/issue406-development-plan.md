@@ -1,6 +1,17 @@
 # Issue 406: development and acceptance status
 
-Latest runtime evidence: the [fresh a681e7da attempt](issue406-fresh-acceptance.md)
+The user has removed the implicit 1 GiB runtime-pool constraint. The current
+candidate uses `UnboundedMemoryPool` in ordinary execution and primary checkpoint
+diagnostics, while retaining per-runtime reservation accounting and release tracking.
+Explicit state, edge, and SQL result collection budgets remain separate. Refusal
+controls now install their finite pools explicitly; the earlier 10 MiB and 1 GiB
+operator diagnostics are historical bounded controls, not performance requirements.
+Checkpoint-history v2 records `pool_policy=unbounded` and null limits, while v1
+continues to validate historical bounded evidence. No performance numbers below
+have been reattributed to the new policy. Fresh reports must keep all eight targets,
+pinned main/current provenance, each pool policy, and distinct OFF/LOW/ON results.
+
+Latest full-inventory performance attempt: the [fresh a681e7da attempt](issue406-fresh-acceptance.md)
 stopped on the candidate's 4M retained-ON warmup at epoch 11. It contains all
 eight target rows, fresh pinned-main/current mode comparisons, and complete
 cff/current retained-OFF controls. Rows 4–8 remain unmeasured in that attempt;
@@ -41,16 +52,16 @@ Historical main figures below are supplied reference values, not fresh results.
 Every final report must retain all eight rows, identify the measured main and
 candidate commits, and distinguish measurements from targets.
 
-| Workload (1M rows unless specified)        | Historical main          | Single-thread target                | Parallel target     |
-|--------------------------------------------|--------------------------|-------------------------------------|---------------------|
-| Stream Join, sealed dimension              | 701 ms                   | <= 60 ms                            | <= 15 ms            |
-| Stream Join, 10M rows                      | 8,061 ms                 | <= 600 ms                           | <= 150 ms           |
-| Retained Stream Join, 1M to 4M scaling     | 5.7x (previous main)     | <= 4.4x                             | —                   |
-| Join capture / restore per row             | 1.8 / 2.3 us             | <= 0.1 / 0.2 us                     | —                   |
-| Join handler latency during compaction     | 40x steady               | <= 2x steady                        | —                   |
-| Stream ASOF                                | 391 ms                   | <= 100 ms                           | <= 30 ms            |
-| ASOF suite overhead, 1,024-row batches     | 167 ms over operator     | <= 2x measured projection floor     | —                   |
-| Join operator cost per 1,024-row batch     | 0.2–0.9 ms               | <= 0.05 ms                          | —                   |
+| Workload (1M rows unless specified)    | Historical main      | Single-thread target            | Parallel target |
+|----------------------------------------|----------------------|---------------------------------|-----------------|
+| Stream Join, sealed dimension          | 701 ms               | <= 60 ms                        | <= 15 ms        |
+| Stream Join, 10M rows                  | 8,061 ms             | <= 600 ms                       | <= 150 ms       |
+| Retained Stream Join, 1M to 4M scaling | 5.7x (previous main) | <= 4.4x                         | —               |
+| Join capture / restore per row         | 1.8 / 2.3 us         | <= 0.1 / 0.2 us                 | —               |
+| Join handler latency during compaction | 40x steady           | <= 2x steady                    | —               |
+| Stream ASOF                            | 391 ms               | <= 100 ms                       | <= 30 ms        |
+| ASOF suite overhead, 1,024-row batches | 167 ms over operator | <= 2x measured projection floor | —               |
+| Join operator cost per 1,024-row batch | 0.2–0.9 ms           | <= 0.05 ms                      | —               |
 
 The absolute stream targets use checkpoint-disabled execution. Separately
 measure enabled and low-frequency checkpoints on applicable streaming paths;

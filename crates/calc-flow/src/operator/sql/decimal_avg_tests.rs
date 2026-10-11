@@ -127,7 +127,15 @@ fn unchanged_checkpoint(before: &OperatorStateSnapshot, operator: &mut SqlOperat
 
 async fn avg_transaction(value: &ScalarValue, native: bool, reject: bool) {
     let initial = decimal_batch(value, &[0, 1], &[None, Some(4)], native);
-    let mut operator = assert_prefix_oracle(AVG_QUERY, std::slice::from_ref(&initial), true).await;
+    let mut operator = assert_operator_prefix_oracle(
+        SqlOperator::new("totals", AVG_QUERY, vec!["events".into()], vec![])
+            .unwrap()
+            .with_one_gib_pool_for_test(),
+        AVG_QUERY,
+        std::slice::from_ref(&initial),
+        true,
+    )
+    .await;
     let job = StreamJobContext::new(1, "prefix", JsonMap::new(), None, CancellationToken::new());
     let context = StreamOperatorContext::new(&job, "totals", None);
     let before = operator.checkpoint(Epoch::INITIAL).unwrap();

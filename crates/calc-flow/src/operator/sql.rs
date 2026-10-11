@@ -2224,7 +2224,7 @@ mod tests {
             BatchMetadata::new(source, 0, JsonMap::new()).unwrap(),
         )
         .unwrap();
-        let mut operator = operator();
+        let mut operator = operator().with_one_gib_pool_for_test();
         let job = job();
         let context = StreamOperatorContext::new(&job, "totals", None);
         let mut collector = EdgeCollector::new(operator.output_ports().to_vec());

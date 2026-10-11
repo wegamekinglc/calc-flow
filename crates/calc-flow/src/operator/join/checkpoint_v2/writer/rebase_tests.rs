@@ -30,7 +30,14 @@ async fn admit_left(join: &mut StreamJoinOperator, context: &StreamOperatorConte
 async fn checkpointed(
     context: &StreamOperatorContext<'_>,
 ) -> (StreamJoinOperator, OperatorStateSnapshot) {
-    let mut join = seeded(context).await;
+    checkpointed_from(context, operator()).await
+}
+
+async fn checkpointed_from(
+    context: &StreamOperatorContext<'_>,
+    operator: StreamJoinOperator,
+) -> (StreamJoinOperator, OperatorStateSnapshot) {
+    let mut join = seeded_from(context, operator).await;
     let mut snapshot = join.checkpoint(Epoch::INITIAL).unwrap();
     for epoch in 2..=4 {
         admit_left(&mut join, context).await;

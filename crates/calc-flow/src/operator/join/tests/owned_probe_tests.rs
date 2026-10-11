@@ -242,7 +242,7 @@ async fn assert_abandoned_probe(service: &TestService, phase: data_work::ProbePh
 }
 
 pub(super) async fn assert_refused_process_data(service: &TestService) {
-    let mut operator = probe_operator();
+    let mut operator = with_one_gib_pool(probe_operator());
     let job = job().with_gather_owner(service.owner("refused-probe".into()));
     let context = StreamOperatorContext::new(&job, "match", None);
     let mut collector = EdgeCollector::new(operator.output_ports().to_vec());

@@ -45,7 +45,8 @@ async fn test_composite_key_refused_update_refunds_and_retries_exactly() {
         let key_type = DataType::Utf8;
         let job = job();
         let context = StreamOperatorContext::new(&job, "grouped_float", None);
-        let mut state = composite_operator(&dtype, &key_type, &bucket_type);
+        let mut state =
+            composite_operator(&dtype, &key_type, &bucket_type).with_one_gib_pool_for_test();
         let mut parts = string_arrivals().into_iter();
         let mut prefix = parts.next().unwrap();
         drop(

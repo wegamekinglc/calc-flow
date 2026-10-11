@@ -67,7 +67,7 @@ fn bounded_snapshot(operator: &StreamJoinOperator) -> OperatorStateSnapshot {
 
 #[test]
 fn test_v2_restore_4096_rows_fits_fixed_four_mib_workspace() {
-    let mut operator = bounded_operator();
+    let mut operator = with_one_gib_pool(bounded_operator());
     operator.restore(&snapshot(&operator)).unwrap();
     assert_restored(&operator);
     let snapshot = bounded_snapshot(&operator);

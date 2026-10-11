@@ -3,7 +3,7 @@ use crate::{
     CancellationToken, Epoch, JsonMap, OperatorStateSnapshot, StreamJobContext, StreamOperator,
     operator::join::{
         JoinStateLimits, JoinTimeBounds, StreamJoinOperator, StreamJoinSpec, encode_join_key_v1,
-        encode_side, state_row_charge,
+        encode_side, state_row_charge, with_one_gib_pool,
     },
     runtime::streaming::gather_work::TestService,
 };
@@ -24,6 +24,12 @@ use std::{
 mod nullable_tests;
 
 fn operator() -> StreamJoinOperator {
+    let mut operator = uninitialized_operator();
+    operator.prepare_checkpoint_preload_runtime().unwrap();
+    operator
+}
+
+fn uninitialized_operator() -> StreamJoinOperator {
     let schema = Arc::new(Schema::new(vec![
         Field::new("symbol", DataType::Utf8, false),
         Field::new(
@@ -42,9 +48,7 @@ fn operator() -> StreamJoinOperator {
         JoinStateLimits::new(100, 4_194_304, 100).unwrap(),
     )
     .unwrap();
-    let mut operator = StreamJoinOperator::new("match", Arc::clone(&schema), schema, spec).unwrap();
-    operator.prepare_checkpoint_preload_runtime().unwrap();
-    operator
+    StreamJoinOperator::new("match", Arc::clone(&schema), schema, spec).unwrap()
 }
 
 fn job(service: &TestService, cancellation: CancellationToken) -> StreamJobContext {
@@ -682,7 +686,7 @@ async fn check_dynamic_refusal(service: &TestService) {
     use datafusion::execution::memory_pool::MemoryLimit;
     use std::sync::atomic::{AtomicUsize, Ordering};
     let snapshot = snapshot(&mut operator());
-    let mut target = operator();
+    let mut target = with_one_gib_pool(uninitialized_operator());
     let pool = pool(&target);
     let job = job(service, CancellationToken::new());
     let parses = Arc::new(AtomicUsize::new(0));

@@ -2,7 +2,7 @@ use super::*;
 use crate::{
     Batch, BatchMetadata, CancellationToken, EdgeCollector, JsonMap, OperatorMetadata,
     StreamJobContext, StreamOperator,
-    operator::join::{JoinStateLimits, JoinTimeBounds, StreamJoinSpec},
+    operator::join::{JoinStateLimits, JoinTimeBounds, StreamJoinSpec, with_one_gib_pool},
 };
 use datafusion::arrow::{
     array::{Int64Array, StringArray, TimestampMicrosecondArray},
@@ -73,7 +73,13 @@ fn record(side: &str) -> RecordBatch {
 }
 
 async fn seeded(context: &StreamOperatorContext<'_>) -> StreamJoinOperator {
-    let mut join = operator();
+    seeded_from(context, operator()).await
+}
+
+async fn seeded_from(
+    context: &StreamOperatorContext<'_>,
+    mut join: StreamJoinOperator,
+) -> StreamJoinOperator {
     for side in ["left", "right"] {
         let mut output = EdgeCollector::new(join.output_ports().to_vec());
         join.process_data(
@@ -127,7 +133,7 @@ fn assert_restored(snapshot: &OperatorStateSnapshot, expected: &StreamJoinOperat
 async fn test_fresh_preparation_reuses_owners_without_writer_credit() {
     let job = job();
     let context = StreamOperatorContext::new(&job, "prepared-reuse", None);
-    let mut join = seeded(&context).await;
+    let mut join = seeded_from(&context, with_one_gib_pool(operator())).await;
     let writers = count_writer(&mut join);
     join.prepare_checkpoint_async(&context).await.unwrap();
     let prepared = join.v2_writer.prepared.as_ref().unwrap();

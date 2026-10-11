@@ -3378,6 +3378,17 @@ struct JoinCheckpointMetadata {
 }
 
 #[cfg(test)]
+pub(crate) fn with_one_gib_pool(mut operator: StreamJoinOperator) -> StreamJoinOperator {
+    operator
+        .runtime
+        .initialize_benchmark_pool(Arc::new(
+            datafusion::execution::memory_pool::GreedyMemoryPool::new(1 << 30),
+        ))
+        .unwrap();
+    operator
+}
+
+#[cfg(test)]
 type MetadataTestHook =
     Arc<dyn Fn(Option<&datafusion::execution::memory_pool::MemoryReservation>, bool) + Send + Sync>;
 

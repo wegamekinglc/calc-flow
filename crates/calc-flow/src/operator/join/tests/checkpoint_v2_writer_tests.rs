@@ -275,13 +275,15 @@ async fn test_prepared_join_checkpoint_fits_bounded_constructor_credit() {
         JoinStateLimits::new(10_000, 10 << 20, 10_000).unwrap(),
     )
     .unwrap();
-    let mut operator = StreamJoinOperator::new(
-        "bounded-prepare",
-        Arc::clone(&schema),
-        Arc::clone(&schema),
-        spec.clone(),
-    )
-    .unwrap();
+    let mut operator = with_one_gib_pool(
+        StreamJoinOperator::new(
+            "bounded-prepare",
+            Arc::clone(&schema),
+            Arc::clone(&schema),
+            spec.clone(),
+        )
+        .unwrap(),
+    );
     let record = RecordBatch::try_new(
         Arc::clone(&schema),
         vec![

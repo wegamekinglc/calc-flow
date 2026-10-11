@@ -321,7 +321,11 @@ async fn test_join_late_load_error_refunds_only_after_actual_read_exit() {
 #[tokio::test(flavor = "current_thread")]
 async fn test_join_preload_refusal_and_identity_errors_do_not_read_or_change_checkpoint() {
     let directory = tempfile::tempdir().unwrap();
-    let mut operator = join_operator();
+    let CompiledStreamOperator::StreamJoin(operator) = join_operator() else {
+        unreachable!();
+    };
+    let mut operator =
+        CompiledStreamOperator::StreamJoin(Box::new(crate::operator::with_one_gib_pool(*operator)));
     let pool = join_pool(&mut operator);
     let (entered, _observed) = oneshot::channel();
     let (_release, blocked) = std::sync::mpsc::channel();

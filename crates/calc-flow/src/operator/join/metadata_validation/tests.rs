@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     CancellationToken, Epoch, JsonMap, StreamOperator,
-    operator::join::{JoinStateLimits, JoinTimeBounds},
+    operator::join::{JoinStateLimits, JoinTimeBounds, with_one_gib_pool},
     runtime::streaming::gather_work::TestService,
 };
 use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
@@ -318,7 +318,7 @@ fn test_metadata_refusal_refunds_before_original_restore() {
         .enable_all()
         .build()
         .unwrap();
-    let mut operator = initialized_operator();
+    let mut operator = with_one_gib_pool(operator_fixture());
     let snapshot = valid_snapshot(&mut operator);
     let original = snapshot.inline_metadata.clone();
     let pool = operator
