@@ -3266,7 +3266,8 @@ mod tests {
     #[tokio::test]
     async fn sensitive_lifecycle_panic_payloads_never_reach_process_stderr() {
         if std::env::var_os(SENSITIVE_PANIC_CHILD).is_none() {
-            let executable = std::env::current_exe().unwrap();
+            // Same-user test reentry; this path makes no authorization decision.
+            let executable = std::env::current_exe().unwrap(); // nosemgrep
             let output = tokio::task::spawn_blocking(move || {
                 Command::new(&executable)
                     .args([
@@ -3308,7 +3309,7 @@ mod tests {
         }
 
         assert_eq!(
-            std::env::current_exe().unwrap().as_os_str(),
+            std::env::current_exe().unwrap().as_os_str(), // nosemgrep
             std::env::var_os(SENSITIVE_PANIC_CHILD).unwrap(),
             "the panic probe must reuse the running test binary and its feature set"
         );

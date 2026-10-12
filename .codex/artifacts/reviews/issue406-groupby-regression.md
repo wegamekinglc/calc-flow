@@ -6,6 +6,9 @@
 followed by the window scratch-map and test-harness repair on
 `86d0a3bdad39deb0fa5b736d95f0802cf8efb2a5` plus the reviewed worktree diff.
 The repair touches two Rust files and its specification, analysis and review.
+The subsequent review covers only test comments on
+`6978f3bf773d76f77d60a4d181e2ad88596438d1` and the narrow static-analysis exception
+documented below.
 PR #412 remains draft according to the implementer's handoff. No new PR check
 snapshot or prior GitHub reviews were requested for this incremental review.
 The reviewer read the changed files and existing verification evidence without
@@ -40,6 +43,12 @@ unresolved pending the separately authorized complete benchmark and required CI.
   `cargo clippy --locked -p calc-flow --lib --tests --all-features -- -D warnings`.
   The implementer reports `cargo fmt --all --check` passed; its inspected
   `repair-format-final.log` is empty. No new dependency or feature is required.
+- Comment-only follow-up: **Reviewed without rerunning checks**. The retained
+  `semgrep-current-exe-before.json` and `semgrep-current-exe-after.json` both
+  report Semgrep 1.180.0 and no scan errors. The original rule reports one
+  informational `current-exe` finding before the annotations and zero afterward.
+  This proves the supplied rule's local suppression, not a new hosted Codacy
+  result. The reviewer inspected the rule, both result files and the exact diff.
 - Python diagnostic: **Passed** in focused verification. The reviewer read
   `focused.log`: nine checks passed in 0.044 seconds, and `imports.log`: four
   import/dependency checks passed in 0.279 seconds.
@@ -119,6 +128,16 @@ The following diagnostic findings were addressed:
 - `validate_trace` now requires a nonzero hexadecimal address in a native DSO
   frame, rejecting path-only warnings and zero addresses as well as lost,
   throttled and non-native traces.
+
+The later `current-exe` finding is an accepted, localized false positive in
+`sensitive_lifecycle_panic_payloads_never_reach_process_stderr`. Both calls are
+inside `#[cfg(test)]`: the parent reenters its ordinary test binary at the same
+privilege, and the child checks executable identity as a regression assertion.
+Neither call makes an authorization decision or crosses a privilege boundary.
+The parent call now explains this and both call lines carry `// nosemgrep`.
+There is no rule modification, file exclusion or suppression of product code.
+The generic annotations apply to those two lines only; this approval does not
+extend to a privileged runner or future authorization use of the path.
 
 ### Style Issues
 
@@ -242,10 +261,23 @@ cause of the earlier regression.
 The analysis now qualifies the lookup-region interpretation at its point of use
 and explicitly states that these observations cannot exclude other causes.
 
+The implementer reports the one authorized complete suite was dispatched as
+`38228629578`, comparing the pinned main baseline with candidate
+`6978f3bf773d76f77d60a4d181e2ad88596438d1`. No result is asserted here. The only
+subsequent source-file diff adds the explanatory comment and two suppression
+annotations inside the test module; all executable expressions are unchanged.
+The product implementation, dependencies, features and benchmark harness remain
+equivalent to that candidate. Continue using this run's exact candidate identity
+and artifact seals; do not relabel its products as the later comment commit.
+These comments require no additional benchmark dispatch. The reported running
+Windows job also has no final result in this review.
+
 ### Verdict
 
-**Approve** for the reviewed implementation and one authorized complete-suite
-verification after committing the reviewed repair. No source findings remain.
+**Approve** for the reviewed implementation, narrow test-only static-analysis
+exception and continued use of the one authorized complete-suite run's original
+candidate products. No source findings remain. No additional measurement is
+required for these comments.
 This is not a merge approval: required CI, including the four Windows failures,
 and the complete benchmark acceptance result are still unresolved. The original
 regression is not marked fixed, and no speedup is established by these local

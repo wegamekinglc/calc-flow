@@ -232,3 +232,52 @@ Rust formatting, generated-contract and whitespace checks pass; Cargo.lock has
 no remaining drift in this repair worktree. No full local regression suite or
 local product timing comparison was run; the authorized remote complete suite
 and original Windows CI configuration remain the outstanding acceptance gates.
+
+### Complete-run provenance and scanner follow-up
+
+The complete repair comparison was dispatched once as
+[run 38228629578](https://github.com/wegamekinglc/calc-flow/actions/runs/38228629578),
+created at 09:14:49 UTC. Baseline is main `e538099228b54882fe3b9fcc72d802e9998221ed`;
+measured candidate is `6978f3bf773d76f77d60a4d181e2ad88596438d1`. The 260-minute
+overall budget ends at 13:34:49 UTC. Catalog/ref resolution and its maintained
+support tests passed; final release/measurement/summary results remain pending.
+
+Codacy reported one new audit finding on the test's `current_exe` call. The
+[upstream rule](https://github.com/semgrep/semgrep-rules/blob/develop/rust/lang/security/current-exe.yml)
+matches that call directly; the [Rust security guidance](https://doc.rust-lang.org/std/env/fn.current_exe.html#security)
+concerns trusting the path in security-sensitive operations. Here both calls
+are under `cfg(test)`, for same-user test reentry and executable identity, without
+an authorization decision. Two line-scoped `nosemgrep` comments document this
+reviewed exception; no rule or file-wide exclusion changes. Semgrep 1.180.0 with
+the upstream rule reports one finding before and zero after, with no scan errors.
+The later annotation/review increment changes only test comments and documents;
+keep the original measured candidate SHA and seals rather than relabeling the
+run as measurement of the later commit. No benchmark retry is needed for it.
+
+
+### First repaired Windows result
+
+Windows run [38228597776](https://github.com/wegamekinglc/calc-flow/actions/runs/38228597776)
+passed for measured repair commit `6978f3bf`. Its Rust job
+`114742244069` took 18m19s including build/setup/cleanup. The core test executable
+reports 2,033 passed, seven ignored and two separately selected smoke tests
+filtered out in 90.54s; both serial smoke tests then pass in 71.13s. Each of the
+four tests that timed out at `86d0a3bd` and the sensitive-log child test reports
+`ok`. Python tests, Windows cfg Clippy and the Windows gate also pass. The
+workflow's existing test parallelism and timeout values were not changed.
+
+This is a successful validation of the repaired source on that CI runner. It
+does not establish that the nested build caused every earlier timeout. The
+complete performance suite and the final comment commit's CI remain separate
+pending gates. The retained log is
+`target/issue406-morning-benchmark-failure/repair-complete/windows-repair.log`.
+
+
+Linux core job `114742242718` subsequently passed in run
+[38228597721](https://github.com/wegamekinglc/calc-flow/actions/runs/38228597721):
+all-feature workspace Clippy, precompilation, normal Rust execution and
+warning-free rustdoc completed successfully. The combined coverage job also
+passed (21m45s), including its maintained coverage gate. macOS smoke had already
+passed. The remaining source-head scanner finding is addressed by the reviewed
+line-local comments above; its hosted result must be rechecked after pushing
+those comments. Complete benchmark measurement is still in progress.
