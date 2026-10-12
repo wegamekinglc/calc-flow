@@ -30,11 +30,7 @@ pub(super) fn plan(
     input: ValidatedInput,
     context: &StreamOperatorContext<'_>,
 ) -> Result<Option<Plan>> {
-    #[cfg(test)]
-    if identity_tests::columnar::legacy_requested() {
-        return Ok(None);
-    }
-    if input.index != 1 || !direct::eligible(operator, batch, input) {
+    if !eligible(operator, batch, input) {
         return Ok(None);
     }
     let side = operator.spec.right();
@@ -55,6 +51,31 @@ pub(super) fn plan(
         columns: Columns { records: columns },
         capacities: admitted_right_capacities(keys.values, 1),
     }))
+}
+
+fn eligible(operator: &StreamAsofJoinOperator, batch: &Batch, input: ValidatedInput) -> bool {
+    #[cfg(test)]
+    if identity_tests::columnar::legacy_requested() {
+        return false;
+    }
+    input.index == 1 && direct::eligible(operator, batch, input)
+}
+
+fn dictionary_mapping(
+    operator: &StreamAsofJoinOperator,
+    rows: &state::EncodedBatch,
+    keys: &mut InputKeys,
+    context: &StreamOperatorContext<'_>,
+) -> Result<Vec<u32>> {
+    (0..rows.len())
+        .map(|id| {
+            check_input_cancellation(id, context)?;
+            let (_, index) = keys.intern(rows.row(id), None, operator)?;
+            // The dictionary lookup does not itself admit a row.
+            keys.values[index as usize].rows -= 1;
+            Ok(index)
+        })
+        .collect()
 }
 
 impl RecordColumns {
@@ -82,15 +103,7 @@ impl RecordColumns {
                 "ASOF payload row exceeds compact reference range",
             )
         })?;
-        let mapping = (0..rows.len())
-            .map(|id| {
-                check_input_cancellation(id, context)?;
-                let (_, index) = keys.intern(rows.row(id), None, operator)?;
-                // The dictionary lookup does not itself admit a row.
-                keys.values[index as usize].rows -= 1;
-                Ok(index)
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let mapping = dictionary_mapping(operator, &rows, keys, context)?;
         let times = times(record, side);
         let sequences = record
             .column_by_name(&side.sequence_by()[0])

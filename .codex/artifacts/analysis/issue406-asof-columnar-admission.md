@@ -57,6 +57,14 @@ probe setup to focused helpers. The final eight direct tests pass again in
 8.63 seconds and all-feature core/test Clippy passes in 26.64 seconds; formatting
 and generated-contract checks remain clean.
 
+Hosted Codacy re-analysis still rated the two production helpers at 10, above
+the limit of 8. A second extraction moves eligibility and dictionary mapping
+into focused helpers. Local Lizard 1.23.0 reproduces the previous 10/10 findings
+and reports all 18 functions in the two new modules at or below 8 (the two
+production functions are now 8/8). The final eight direct tests pass again in
+8.79 seconds and all-feature core/test Clippy passes in 1 minute 32 seconds.
+Hosted analysis remains an independent outstanding check.
+
 ## Performance evidence and complete target inventory
 
 Earlier OFF profiles attributed 44.62% inclusive samples to ASOF admission,

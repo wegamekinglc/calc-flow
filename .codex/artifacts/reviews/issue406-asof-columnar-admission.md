@@ -3,8 +3,10 @@
 **Branch:** `feature/issue406-asof-columnar-admission` → `main`
 **Implementation base:** `8ee5b71b7b862d4e44bd0be390d182cf950d17f7`
 **Current base:** `8ce5380bd6b6704473cba4ca1083820dd1059e42`
-**Reviewed:** 2026-10-12, initial implementation and the two-file complexity
-refactor at `5e08b60425f611f4d755cf62fe36f7f322d1cb0a`, plus the analysis updates.
+**Reviewed:** 2026-10-12, initial implementation, both complexity refactors and
+the analysis updates. The final one-file extraction is based on
+`08a25562f185c4ec30150f36f5f09c30c70b991e`; the reviewed `admission/right.rs`
+SHA256 is `f5a75867a4424e40c97511ae305ae6c62265acdff2babf51b8c7b248da0cb13d`.
 **Scope:** Source correctness and functional verification. The overall performance
 goal remains paused. The initial review preceded PR creation; no new GitHub status
 snapshot was taken for this incremental review. Required CI remains a separate
@@ -20,6 +22,7 @@ only when a delta journal needs them.
 
 The complexity refactor extracts record preparation, key remapping and the retained
 maximum predicate. Differential test helpers extract seed/restore and left probes.
+The final extraction moves eligibility and dictionary mapping into separate helpers.
 Validation, fallback, cancellation, processing order and resource cleanup remain
 equivalent to the previously reviewed implementation.
 
@@ -46,6 +49,12 @@ cargo fmt --all --check
   records successful completion in 26.64 seconds. The implementer also confirmed
   `cargo fmt --all --check` completed with exit zero. These checks used the same
   focused test and Clippy commands shown above; the reviewer did not repeat them.
+- After the final eligibility/dictionary extraction, `codacy-direct-final.log`
+  records eight passed, zero failed, in 8.79 seconds after a 2 minute 47 second
+  build. `codacy-clippy-final.log` records successful completion in 1 minute
+  32 seconds. These logs build version `2026.10.12` after the release rebase.
+  Formatting again completed with exit zero; the restored Cargo lockfile and
+  generated contracts have no unintended diff.
 - Python, Studio backend and Studio frontend: **Not touched**; suites not run.
 - New unresolved failures: **None**. The earlier parallel test attempt exhausted
   existing native-worker capacity and was not counted as passing. Intermediate
@@ -76,7 +85,7 @@ git diff --check
 None remain in the source and functional scope.
 
 The review finding originally in `admission/right.rs::plan` was addressed:
-dictionary-key interning in `RecordColumns::prepare` now calls
+dictionary-key interning in `dictionary_mapping` now calls
 `check_input_cancellation` periodically, preserving the previous cancellation
 opportunity for high-cardinality inputs.
 
@@ -84,8 +93,15 @@ opportunity for high-cardinality inputs.
 
 None remain. The analysis artifact's table alignment was corrected, and the
 changed Markdown has final newlines and no trailing whitespace.
-The two Codacy complexity findings were addressed with focused helper extraction;
-this source review does not claim a fresh remote Codacy result.
+
+The first extraction did not fully close the hosted Codacy findings: `plan` and
+`RecordColumns::prepare` still measured 10 against the limit of 8. The final
+extraction preserves the legacy/side eligibility short-circuit and the unchanged
+dictionary loop, including cancellation, temporary row-count reversal and errors.
+`complexity-final.json` records Lizard 1.23.0 reproducing the previous 10/10 and
+measuring the final functions at 8/8; all 18 functions across the two new modules
+are at or below 8. This is local evidence. Hosted Codacy remains an outstanding
+CI check, and this review does not claim that it has passed.
 
 ### Test Coverage
 
@@ -131,6 +147,13 @@ evidence that the CI failure was invalid or that performance is equivalent.
 The documented single recovery run remains follow-up evidence to evaluate;
 neither its completion nor a resolved root cause is claimed here. The rebase's
 release version changes do not relabel either measured product artifact.
+
+The corrected investigation distinguishes the dispatched workflow definition at
+`8ce5380b` from its explicit candidate/baseline checkouts at `8ee5b71b` and
+`89e51141`. The historical `group_by` adapter enables checkpoints with a 24-hour
+interval and stops its ready-to-output timer before EOF and the terminal
+checkpoint; successful job completion is still required. Source inspection
+confirms this low-frequency scope, which is separate from OFF/LOW/ON acceptance.
 
 ### Verdict
 
