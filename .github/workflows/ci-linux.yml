@@ -327,148 +327,6 @@ jobs:
           format: cobertura
           file: coverage.xml
           parallel: true
-  frontend:
-    name: Studio build + tests
-    needs: changes
-    if: needs.changes.outputs.docs_only != 'true'
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: web-ui
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      - name: Set up Node.js
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        with:
-          node-version: 20.20.0
-          cache: npm
-          cache-dependency-path: web-ui/package-lock.json
-      - name: Install dependencies
-        run: npm ci
-      - name: Lint studio frontend
-        run: npm run lint
-      - name: Build studio
-        run: npm run build
-      - name: Run frontend tests
-        run: npm test
-      - name: Audit production dependencies
-        run: npm audit --omit=dev
-  studio-backend:
-    name: Studio backend tests
-    needs:
-      - changes
-      - package
-      - coverage-baseline
-    if: needs.changes.outputs.docs_only != 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version-file: .python-version
-      - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-        with:
-          enable-cache: true
-      - name: Set up Node.js
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        with:
-          node-version: 20.20.0
-          cache: npm
-          cache-dependency-path: web-ui/package-lock.json
-      - name: Download core distributions
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: python-distributions
-          path: dist
-      - name: Install studio dependencies
-        run: |
-          uv sync --package calc-flow-studio --extra dev --no-install-workspace
-          uv pip install --python .venv/bin/python --no-deps dist/calc_flow_python-*.whl
-          uv pip install --python .venv/bin/python --no-deps --editable web-ui/backend
-          cd web-ui && npm ci
-      - name: Run studio backend coverage
-        timeout-minutes: 15
-        working-directory: web-ui/backend
-        env:
-          PYTHONUNBUFFERED: "1"
-        run: >-
-          uv run --no-sync --project . pytest -vv -o faulthandler_timeout=60
-          --cov=calc_flow_studio --cov-report=term-missing --cov-report=xml
-      - name: Verify generated API contract
-        run: |
-          uv run --no-sync --project web-ui/backend \
-            python web-ui/scripts/export_openapi.py
-          npm --prefix web-ui run generate:api
-          git diff --exit-code -- web-ui/openapi.json web-ui/src/api/schema.d.ts
-      - name: Upload studio coverage report
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: studio-python-coverage
-          path: web-ui/backend/coverage.xml
-          if-no-files-found: error
-          retention-days: 14
-      - name: Report studio coverage to Coveralls
-        uses: coverallsapp/github-action@8d6379e14d29928660c4ba802d8e85393440b329 # v2.3.8
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          flag-name: studio
-          compare-sha: ${{ needs.coverage-baseline.outputs.compare_sha }}
-          format: cobertura
-          file: web-ui/backend/coverage.xml
-          parallel: true
-  browser-e2e:
-    name: Studio browser workflow
-    needs:
-      - changes
-      - package
-    if: needs.changes.outputs.docs_only != 'true'
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: web-ui
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version-file: .python-version
-      - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-        with:
-          enable-cache: true
-      - name: Download core distributions
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: python-distributions
-          path: dist
-      - name: Install backend
-        working-directory: .
-        run: |
-          uv sync --package calc-flow-studio --no-install-workspace
-          uv pip install --python .venv/bin/python --no-deps dist/calc_flow_python-*.whl
-          uv pip install --python .venv/bin/python --no-deps --editable web-ui/backend
-      - name: Set up Node.js
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        with:
-          node-version: 20.20.0
-          cache: npm
-          cache-dependency-path: web-ui/package-lock.json
-      - name: Install frontend
-        run: npm ci
-      - name: Cache Playwright browsers
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('web-ui/package-lock.json') }}
-      - name: Install Chromium
-        run: npx playwright install --with-deps chromium
-      - name: Run browser workflow
-        run: npm run test:e2e
   package:
     name: Build + isolated wheel smoke test
     needs: changes
@@ -620,85 +478,6 @@ jobs:
             python/tests/test_stream_entrypoints.py \
             python/tests/test_execution_options.py \
             python/tests/test_compute.py
-  studio-package:
-    name: Build + isolated studio wheel smoke test
-    needs:
-      - changes
-      - package
-      - frontend
-      - studio-backend
-    if: needs.changes.outputs.docs_only != 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version-file: .python-version
-      - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-        with:
-          enable-cache: true
-      - name: Set up Node.js
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        with:
-          node-version: 20.20.0
-          cache: npm
-          cache-dependency-path: web-ui/package-lock.json
-      - name: Download core distributions
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: python-distributions
-          path: dist
-      - name: Build studio wheel
-        run: |
-          npm --prefix web-ui ci
-          npm --prefix web-ui run build
-          uv build --project web-ui/backend --wheel --out-dir dist
-      - name: Install and inspect studio wheels
-        run: |
-          uv venv /tmp/calc-flow-studio-wheel
-          uv pip install --python /tmp/calc-flow-studio-wheel/bin/python \
-            dist/calc_flow_python-*.whl dist/calc_flow_studio-*.whl
-          test -x /tmp/calc-flow-studio-wheel/bin/calc-flow-web
-          /tmp/calc-flow-studio-wheel/bin/python - <<'PY'
-          from importlib.metadata import requires
-          from pathlib import Path
-
-          import calc_flow
-          import calc_flow_studio
-          import tomllib
-
-          app = calc_flow_studio.create_app()
-          paths = [route.path for route in app.routes]
-          assert "/api/v3/catalog" in app.openapi()["paths"]
-          assert "/" in paths
-          assert "/assets" in paths
-          assert not hasattr(calc_flow, "web")
-          with Path("pyproject.toml").open("rb") as stream:
-              version = tomllib.load(stream)["project"]["version"]
-          upper_bound = f"<{int(version.split('.')[0]) + 1}"
-          core_requirements = requires("calc-flow-python") or []
-          studio_requirements = requires("calc-flow-studio") or []
-          assert not any("fastapi" in item.lower() for item in core_requirements)
-          assert not any("uvicorn" in item.lower() for item in core_requirements)
-          assert any(
-              item.lower().startswith("calc-flow-python")
-              and f">={version}" in item
-              and upper_bound in item
-              for item in studio_requirements
-          )
-          index = next(route for route in app.routes if route.path == "/").endpoint()
-          assert Path(index.path).is_file()
-          PY
-      - name: Upload release artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: studio-python-distributions
-          path: dist/calc_flow_studio-*.whl
-          if-no-files-found: error
-          retention-days: 30
   rust-core:
     name: Rust core parity
     needs: changes
@@ -1013,7 +792,6 @@ jobs:
     needs:
       - changes
       - lint-and-test
-      - studio-backend
       - rust-coverage
     if: always() && needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
@@ -1035,13 +813,9 @@ jobs:
       - connector-containers-ch
       - connector-containers-mysql
       - lint-and-test
-      - frontend
-      - studio-backend
-      - browser-e2e
       - package
       - legacy-python-wheel
       - python-compatibility
-      - studio-package
       - rust-core
       - rust-coverage
       - rust-supply-chain
@@ -1057,13 +831,9 @@ jobs:
       CONNECTOR_MYSQL_RESULT: ${{ needs.connector-containers-mysql.result }}
       CONNECTOR_CH_RESULT: ${{ needs.connector-containers-ch.result }}
       LINT_RESULT: ${{ needs.lint-and-test.result }}
-      FRONTEND_RESULT: ${{ needs.frontend.result }}
-      STUDIO_BACKEND_RESULT: ${{ needs.studio-backend.result }}
-      BROWSER_RESULT: ${{ needs.browser-e2e.result }}
       PACKAGE_RESULT: ${{ needs.package.result }}
       LEGACY_PYTHON_WHEEL_RESULT: ${{ needs.legacy-python-wheel.result }}
       PYTHON_COMPATIBILITY_RESULT: ${{ needs.python-compatibility.result }}
-      STUDIO_PACKAGE_RESULT: ${{ needs.studio-package.result }}
       RUST_CORE_RESULT: ${{ needs.rust-core.result }}
       RUST_COVERAGE_RESULT: ${{ needs.rust-coverage.result }}
       RUST_SUPPLY_CHAIN_RESULT: ${{ needs.rust-supply-chain.result }}
@@ -1083,13 +853,9 @@ jobs:
             "$CONNECTOR_CH_RESULT" \
             "$CONNECTOR_MYSQL_RESULT" \
             "$LINT_RESULT" \
-            "$FRONTEND_RESULT" \
-            "$STUDIO_BACKEND_RESULT" \
-            "$BROWSER_RESULT" \
             "$PACKAGE_RESULT" \
             "$LEGACY_PYTHON_WHEEL_RESULT" \
             "$PYTHON_COMPATIBILITY_RESULT" \
-            "$STUDIO_PACKAGE_RESULT" \
             "$RUST_CORE_RESULT" \
             "$RUST_COVERAGE_RESULT" \
             "$RUST_SUPPLY_CHAIN_RESULT" \

@@ -28,7 +28,6 @@ def child_environment(
         "OPENBLAS_NUM_THREADS": "1",
         "MKL_NUM_THREADS": "1",
         "JAX_PLATFORMS": "cpu",
-        "npm_config_cache": str(ROOT / "target/npm-cache"),
         "UV_CACHE_DIR": os.environ.get("UV_CACHE_DIR", str(ROOT / "target/uv-cache")),
     }
 

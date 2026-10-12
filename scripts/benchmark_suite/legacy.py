@@ -6,19 +6,12 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import sys
 from pathlib import Path
 
 from scripts.benchmark_suite.catalog import CONTRACT
-from scripts.benchmark_suite.frontend import (
-    case_identity,
-    dependency_metadata,
-    metadata_problem,
-    workload_sources,
-)
 from scripts.benchmark_suite.identity import IDENTITIES, validate_component
-from scripts.benchmark_suite.normalize import pytest_rows, read_json, vitest_rows
+from scripts.benchmark_suite.normalize import pytest_rows, read_json
 from scripts.benchmark_suite.process import ROOT, child_environment, command, install
 from scripts.benchmark_suite.provenance import harness_sha256
 from scripts.benchmark_suite.report import comparison, validate_shards
@@ -26,8 +19,6 @@ from scripts.toolkit import sha256_file
 
 
 def pytest_arguments(family: str) -> list[str]:
-    if family == "studio":
-        return ["web-ui/backend/benchmarks/test_performance.py"]
     if family == "lifecycle":
         return [
             "benchmarks/test_symbolic_baseline.py::test_stream_window_checkpoint_and_recovery"
@@ -38,9 +29,7 @@ def pytest_arguments(family: str) -> list[str]:
 async def _pytest_run(shard: dict, source: Path, site: Path, output: Path) -> dict:
     environment = {
         **child_environment(site),
-        "PYTHONPATH": os.pathsep.join(
-            str(path) for path in (site, source, ROOT, source / "web-ui/backend/src")
-        ),
+        "PYTHONPATH": os.pathsep.join(str(path) for path in (site, source, ROOT)),
         "CALC_FLOW_BENCHMARK_SCALE": shard.get("scale", "standard"),
         "CALC_FLOW_SUITE_INVENTORY": str(output / "inventory.json"),
     }
@@ -60,9 +49,6 @@ async def _pytest_run(shard: dict, source: Path, site: Path, output: Path) -> di
     )
     rows = pytest_rows(output / "pytest.json")
     validate_shards(read_json(output / "inventory.json"), list(rows))
-    benchmark_root = (
-        source / "web-ui/backend" if shard["family"] == "studio" else source
-    )
     rows = {
         name: {
             **row,
@@ -70,7 +56,7 @@ async def _pytest_run(shard: dict, source: Path, site: Path, output: Path) -> di
                 **row["metadata"],
                 "benchmark_support_sha256": sha256_file(ROOT / "benchmarks/support.py"),
                 "benchmark_source_sha256": hashlib.sha256(
-                    (benchmark_root / name.split("::", 1)[0]).read_bytes()
+                    (source / name.split("::", 1)[0]).read_bytes()
                 ).hexdigest(),
             },
         }
@@ -92,52 +78,10 @@ async def _pytest_run(shard: dict, source: Path, site: Path, output: Path) -> di
     return rows
 
 
-async def _frontend_run(source: Path, output: Path) -> dict:
-    frontend = source / "web-ui"
-    identity = dependency_metadata((frontend / "package-lock.json").read_bytes())
-    runner = frontend / "node_modules/.cache/calc-flow-benchmark.mjs"
-    runner.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(ROOT / "scripts/benchmark_suite/frontend.mjs", runner)
-    shutil.copyfile(
-        Path(__file__).with_name("frontend_identity.mjs"),
-        runner.with_name("frontend_identity.mjs"),
-    )
-    sources = workload_sources(frontend, runner)
-    await command(
-        ["node", str(runner)],
-        cwd=frontend,
-        log=output / "run.log",
-        env=child_environment(),
-    )
-    shutil.copyfile(
-        source / "target/benchmark-suite/vitest.json", output / "vitest.json"
-    )
-    rows = vitest_rows(output / "vitest.json")
-    machine = read_json(output / "vitest.json").get("machine_identity")
-    return {
-        name: {
-            **row,
-            "metadata": {
-                **row["metadata"],
-                **identity,
-                **case_identity(machine, sources, name, row["metadata"]["group"]),
-            },
-        }
-        for name, row in rows.items()
-    }
-
-
-async def _setup(shard: dict, releases: dict, roots: dict, output: Path) -> dict:
+async def _setup(releases: dict, output: Path) -> dict:
     sites = {}
     for side in ("baseline", "candidate"):
         sites[side] = await install(releases[side], output / side)
-        if shard["family"] == "frontend":
-            await command(
-                ["npm", "ci"],
-                cwd=roots[side] / "web-ui",
-                log=output / side / "npm-install.log",
-                env=child_environment(),
-            )
     return sites
 
 
@@ -227,17 +171,13 @@ def block_problem(name: str, blocks: dict) -> str | None:
     for key in ("rows", "scope"):
         if any(row[key] != rows[0][key] for row in rows):
             return f"benchmark {key} changed; no timing classification"
-    return _fingerprint_problem(
-        [row["metadata"] for row in rows],
-        frontend=rows[0]["scope"] == "vitest-native-boundary",
-    )
+    return _fingerprint_problem([row["metadata"] for row in rows])
 
 
-def _fingerprint_problem(metadata: list[dict], *, frontend: bool = False) -> str | None:
-    problem = (
-        metadata_problem(metadata) if frontend else _raw_identity_problem(metadata)
+def _fingerprint_problem(metadata: list[dict]) -> str | None:
+    problem = _raw_identity_problem(metadata) or _required_fingerprints_problem(
+        metadata
     )
-    problem = problem or _required_fingerprints_problem(metadata)
     if problem:
         return problem
     for key in (
@@ -322,7 +262,7 @@ async def measure_legacy(
         from scripts.benchmark_suite.rust import measure_rust
 
         return await measure_rust(shard, releases, roots, output)
-    sites = await _setup(shard, releases, roots, output)
+    sites = await _setup(releases, output)
     environment = await observe_workers(sites, releases, roots, output)
     blocks = {"baseline": [], "candidate": []}
     report = {
@@ -338,11 +278,7 @@ async def measure_legacy(
         destination = output / f"block-{index}-{side}"
         destination.mkdir(parents=True, exist_ok=True)
         try:
-            block = (
-                await _frontend_run(roots[side], destination)
-                if shard["family"] == "frontend"
-                else await _pytest_run(shard, roots[side], sites[side], destination)
-            )
+            block = await _pytest_run(shard, roots[side], sites[side], destination)
             blocks[side].append(block)
         except Exception as error:
             report["errors"].append(f"{side} block {index}: {error}")

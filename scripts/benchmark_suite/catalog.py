@@ -269,10 +269,7 @@ def shards() -> list[dict]:
             for family in ("engines", "warm")
             for rows in ROW_SCALES
         ),
-        *(
-            {"id": family, "family": family}
-            for family in ("rust", "studio", "frontend", "lifecycle")
-        ),
+        *({"id": family, "family": family} for family in ("rust", "lifecycle")),
     ]
 
 

@@ -121,7 +121,6 @@ class CodexAgentConfigTests(unittest.TestCase):
         self.assertIn("\ndescription: ", skill.split("---", 2)[1])
         for heading in (
             "## Python",
-            "## Web UI and backend",
             "## Tests",
             "## Markdown",
             "## Verification",

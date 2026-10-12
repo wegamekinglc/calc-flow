@@ -7,8 +7,8 @@ pages explain how the implementation provides those behaviors.
 ## 1. Overview and first run
 
 1. [Introduction](introduction.md): capabilities, vocabulary, and execution modes.
-2. [Getting started](getting-started.md): installation, a first calculation,
-   and starting Studio on Linux or Windows.
+2. [Getting started](getting-started.md): installation and a first
+   calculation.
 3. [Example learning paths](examples.md): which programs to run next.
 
 ## 2. Function guides
@@ -32,8 +32,6 @@ pages explain how the implementation provides those behaviors.
 6. [Connectors](connectors/README.md): overview and one guide per connector,
    with Python examples for every supported read/write direction, service setup,
    configuration, and delivery limits.
-7. [Studio](studio-guide.md): edit projects, inspect calculations, and operate
-   local jobs.
 
 ## 3. API references
 
@@ -46,8 +44,8 @@ pages explain how the implementation provides those behaviors.
 4. [Rust runtime reference](rust-api.md): internal types, operator traits, and
    examples for runtime contributors and extension authors.
 
-The [project schema](../schemas/project-v3.schema.json) and
-[OpenAPI document](../web-ui/openapi.json) define the serialized contracts.
+The [project schema](../schemas/project-v3.schema.json) defines the serialized
+project contract.
 
 ## 4. Design and implementation
 

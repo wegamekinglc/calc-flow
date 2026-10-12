@@ -6,8 +6,8 @@ Calc Flow's application API is Python: immutable expressions, Arrow convenience
 execution, composable SQL and Python functions, owned async stream results,
 reusable programs, and explicit integrations. Rust is the internal
 runtime and owns table computation, plans, stream state, and recovery. PyO3 joins
-those layers; connectors are trusted implementations behind capability gates,
-and Studio is a separate loopback application. There is one table runtime.
+those layers, and connectors are trusted implementations behind capability
+gates. There is one table runtime.
 
 This document explains component ownership and end-to-end design. Use the
 [getting-started guide](getting-started.md) for installation, the
@@ -30,7 +30,6 @@ On this page:
 - [Delivery model](#delivery-model)
 - [Project and registry design](#project-and-registry-design)
 - [Python boundary](#python-boundary)
-- [Studio boundary](#studio-boundary)
 - [Failure, cancellation, and diagnostics](#failure-cancellation-and-diagnostics)
 - [Extension choices](#extension-choices)
 
@@ -41,7 +40,7 @@ Python application -> expressions / Program -> lowering -> PyO3 ─┐
                                                                 │
 Rust runtime extensions ─────────────────────────────────────────┤
                                                                 v
-Studio /api/v3 -> worker ───────────────────────────> native graph compiler
+                                                native graph compiler
                                                                 │
                                                 batch plan / stream plan
                                                                 │
@@ -56,8 +55,6 @@ Studio /api/v3 -> worker ──────────────────�
 | `calc-flow-python`     | PyO3 classes and async bridges                                              | Alternative execution semantics                   |
 | `python/calc_flow`     | Expression API, convenience execution, lowering, integrations               | Serialized executable code                        |
 | `calc-flow-connectors` | File, Kafka, PostgreSQL, MySQL, ClickHouse, HTTP, WebSocket implementations | Graph compilation or job supervision              |
-| `calc-flow-studio`     | Local process workers, resource limits, `/api/v3`, static assets            | Public-hosted multi-user service                  |
-| React Studio           | Project editing, job controls, SSE observation                              | Direct access to connector secrets or checkpoints |
 
 ## Stable contracts
 
@@ -357,18 +354,6 @@ The Python continuous adapter validates connector method shapes before native
 launch. It keeps connector callbacks on their owning event loop and provides
 guarded blocking methods only outside an active loop.
 
-## Studio boundary
-
-Studio is a local application, not part of the core wheel. Its FastAPI backend
-accepts only loopback hosting, persists projects, spawns bounded workers, and
-owns job concurrency, memory, checkpoint-disk, cancellation, and shutdown
-limits. `/api/v3/jobs` exposes admission and lifecycle controls. Server-sent
-events provide reconnectable status and result observation.
-
-The frontend edits the same project-v3 document used by Rust and Python. Its
-checked OpenAPI file and generated TypeScript types must change together with
-backend models.
-
 ## Failure, cancellation, and diagnostics
 
 Public failures are typed. Streaming errors include safe category, job/epoch,
@@ -392,8 +377,6 @@ diagnostics and do not overwrite the primary terminal cause.
   operator factory.
 - Add a transport through `calc-flow-connectors` and a capability descriptor;
   keep credentials behind secret references.
-- Add local operational workflows through Studio without moving engine
-  semantics into FastAPI or React.
 
 The main design rule is simple: configuration is inert data, trusted code is
 registered out of band, compilation freezes identity, and runners own every

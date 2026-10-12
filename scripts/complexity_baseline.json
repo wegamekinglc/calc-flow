@@ -51,8 +51,7 @@
     "scripts/run_sql_datafusion_matrix.py": 1,
     "scripts/test_verify_complexity_gates.py": 2,
     "scripts/verify_complexity_gates.py": 1,
-    "scripts/verify_security_gates.py": 1,
-    "web-ui/backend/src/calc_flow_studio/run_manager.py": 5
+    "scripts/verify_security_gates.py": 1
   },
   "ruff_complexity": {
     "benchmarks/array_support.py": {
@@ -129,30 +128,6 @@
     },
     "scripts/verify_python_release.py": {
       "C901": 2
-    },
-    "web-ui/backend/src/calc_flow_studio/app.py": {
-      "PLR0913": 1
-    },
-    "web-ui/backend/src/calc_flow_studio/routes.py": {
-      "C901": 2,
-      "PLR0915": 2
-    },
-    "web-ui/backend/src/calc_flow_studio/run_manager.py": {
-      "C901": 5,
-      "PLR0912": 3,
-      "PLR0913": 1,
-      "PLR0915": 2
-    },
-    "web-ui/backend/tests/test_app.py": {
-      "C901": 1,
-      "PLR0915": 1
-    },
-    "web-ui/backend/tests/test_run_manager.py": {
-      "C901": 2,
-      "PLR0915": 2
-    },
-    "web-ui/scripts/web_ui_process.py": {
-      "PLR0913": 1
     }
   }
 }

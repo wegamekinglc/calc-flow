@@ -709,9 +709,9 @@ Run the complete source-watermark-window-sink example with:
 cargo run -p calc-flow --example windowed_streaming
 ```
 
-Project v3 represents the operator as a data-only `window` node. Python and
-Studio can use that form directly; the functional Python builder has no
-separate window convenience method. The
+Project v3 represents the operator as a data-only `window` node. Python can
+use that form directly; the functional Python builder has no separate window
+convenience method. The
 [project guide](projects-guide.md#union-and-event-time-windows) contains the
 exact project fragment.
 
@@ -933,15 +933,12 @@ per-side `watermark_micros`, `idle`, and `ended`, retained rows and bytes,
 evicted, late, and null drop counters,
 `late_affected_batches`, `max_lateness_micros`, plus the node's
 `emitted_match_rows`, `state_limit_failures`, and `match_limit_failures`. Jobs
-without a Join node report an empty mapping. Studio progress events carry the
-same per-node rows as a `stream_joins` list on the run event.
+without a Join node report an empty mapping.
 Watermarks are the last accepted ingress frontier, initially `None`; idle
 preserves that frontier and does not imply EOF. A non-terminal managed restart
 exposes restored progress before the running job's startup acknowledgement.
 Terminal-manifest recovery completes without restoring per-Join observations.
-Rust/Python retain exact integer microseconds. Studio transports the new
-watermarks as canonical signed
-decimal strings or JSON `null` and keeps existing counters as numbers.
+Rust/Python retain exact integer microseconds.
 
 ### Join output materialization and recovery
 
@@ -1025,8 +1022,8 @@ workspace budgets, composition, and recovery guarantees.
 ASOF uses the `stream_asof_join@1` operator identity and independent checkpoint
 state/layout/accounting version 3. Earlier ASOF checkpoint versions are rejected. Its
 `job.status()["stream_asof_joins"]` mapping is separate from `stream_joins`.
-Studio carries ASOF counters and watermark microseconds as decimal strings;
-Python keeps integers. Ordinary sink replay and temporary iterable checkpoints
+Python keeps ASOF counters and watermark microseconds as integers. Ordinary
+sink replay and temporary iterable checkpoints
 retain the delivery boundaries described in this guide.
 
 ## Checkpoints and recovery

@@ -36,12 +36,6 @@ COVERAGE = (
         "Run unit, property, and coverage tests",
         "python-coverage",
     ),
-    (
-        "studio",
-        "Studio backend tests",
-        "Run studio backend coverage",
-        "studio-python-coverage",
-    ),
 )
 
 
@@ -59,7 +53,6 @@ def _fixture() -> tuple[dict, dict]:
     base_statuses = [
         _status("coverage/coveralls (push)", 10),
         _status("Coveralls - python", 11),
-        _status("Coveralls - studio", 12),
     ]
     head_statuses = [_status("coverage/coveralls", 20)]
     reports = {}
@@ -70,7 +63,7 @@ def _fixture() -> tuple[dict, dict]:
             "commit_sha": sha,
             "url": f"https://github.com/{REPOSITORY}/actions/runs/{run_id}",
         }
-    for number, run_id in ((11, 50), (12, 50), (21, 60), (22, 60), (23, 60)):
+    for number, run_id in ((11, 50), (21, 60), (22, 60)):
         reports[f"https://coveralls.io/jobs/{number}.json"] = {
             "id": number,
             "repo_name": REPOSITORY,
@@ -396,7 +389,7 @@ class EquivalentMeasurementTests(unittest.TestCase):
         candidate = result["candidate"]
         self.assertEqual(candidate["head_sha"], HEAD)
         self.assertEqual(candidate["run"]["id"], 60)
-        self.assertEqual(set(candidate["artifacts"]), {"rust", "python", "studio"})
+        self.assertEqual(set(candidate["artifacts"]), {"rust", "python"})
         self.assertEqual(candidate["report"]["build"]["commit_sha"], MEASUREMENT)
         self.assertEqual((github, reports), before)
 
@@ -426,7 +419,7 @@ class EquivalentMeasurementTests(unittest.TestCase):
     def test_candidate_partial_flags_are_not_a_complete_baseline(self) -> None:
         github, reports = _fixture()
         github[f"{PREFIX}/commits/{HEAD}/statuses?per_page=100"][1].pop()
-        with self.assertRaisesRegex(ValueError, "three flags"):
+        with self.assertRaisesRegex(ValueError, "both flags"):
             _resolve_fixture(github, reports)
 
     def test_flag_reports_from_a_different_run_or_repo_are_rejected(self) -> None:

@@ -10,7 +10,9 @@ Calc Flow is a Python calculation library for Arrow tables and stateful streams.
 Compose typed expressions, SQL, and reusable Python functions in one pipeline.
 Collect a dataset or iterate its results as data arrives. Rust provides the internal runtime:
 DataFusion table execution, graph compilation, state, checkpoints, and recovery.
-Calc Flow Studio is a separate local FastAPI and React application.
+Calc Flow Studio, the local FastAPI and React application, lives in the
+separate [calc-flow-studio](https://github.com/wegamekinglc/calc-flow-studio)
+repository.
 
 ## Install
 
@@ -83,14 +85,11 @@ crates/calc-flow  (Rust core: Batch, graph compiler, DataFusion, runners, stores
   ├─ crates/calc-flow-connectors  (trusted transport implementations)
   └─ crates/calc-flow-python  (PyO3 _native binding + registered connectors)
        └─ python/calc_flow  (Python expressions, Arrow execution + integrations)
-            └─ web-ui/backend  (calc-flow-studio FastAPI, /api/v3, loopback only)
-                  └─ web-ui/src  (React + TypeScript + Vite + React Flow studio, via REST)
 ```
 
 The native dependency edges are `crates/calc-flow ← calc-flow-connectors` and
-`crates/calc-flow ← crates/calc-flow-python ← python/calc_flow ← web-ui/backend`.
-The frontend talks to the backend over the `/api/v3` REST contract only; the
-Python package is not a second engine.
+`crates/calc-flow ← crates/calc-flow-python ← python/calc_flow`.
+The Python package is not a second engine.
 
 | Path                           | Purpose                                                                                                                                  |
 |--------------------------------|------------------------------------------------------------------------------------------------------------------------------------------|
@@ -98,8 +97,6 @@ Python package is not a second engine.
 | `crates/calc-flow-connectors/` | Trusted file, Kafka, PostgreSQL, MySQL, ClickHouse, HTTP, and WebSocket connectors behind feature gates                                  |
 | `crates/calc-flow-python/`     | PyO3 binding exposing the core as `calc_flow._native`                                                                                    |
 | `python/calc_flow/`            | Python expressions and SQL, `pipe`, Arrow collection, owned stream results, lowering, and runtime integrations                           |
-| `web-ui/backend/`              | `calc-flow-studio` FastAPI service under `/api/v3`, loopback-bound, spawned bounded continuous-job workers                               |
-| `web-ui/src/`                  | React + TypeScript + Vite + React Flow studio; API types generated from `web-ui/openapi.json`                                            |
 | `schemas/`                     | `project-v3.schema.json`, the canonical generated project contract                                                                       |
 | `examples/`                    | Executable Python expression and integration examples                                                                                    |
 | `benchmarks/`                  | Benchmark workloads; scheduled regression gates and informational comparisons                                                            |
@@ -154,60 +151,19 @@ contain references only.
 Runtime extension authors use `UdfRegistry` for native DataFusion UDFs and
 `ProviderRegistry` for explicitly registered external operators.
 
-## Studio
-
-`web-ui/backend/` is the independently packaged `calc-flow-studio` FastAPI
-service. `web-ui/` is the React, TypeScript, Vite, and React Flow client.
-The local service:
-
-- exposes the v3 REST API under `/api/v3`;
-- binds only to loopback and is intentionally single-user;
-- validates and stores v3 project documents;
-- runs bounded continuous jobs in spawned workers;
-- serves generated frontend assets from the Studio wheel.
-
-Start both development processes on macOS, Linux, or WSL:
-
-```bash
-./web-ui/scripts/start_web_ui.sh
-```
-
-On native Windows PowerShell:
-
-```powershell
-.\web-ui\scripts\start_web_ui.ps1
-```
-
-Open `http://127.0.0.1:5173`, then stop the managed processes with the
-matching command for your platform:
-
-```bash
-./web-ui/scripts/stop_web_ui.sh
-```
-
-```powershell
-.\web-ui\scripts\stop_web_ui.ps1
-```
-
-Both launchers keep logs and process state under `.calc-flow-web/`.
-
-The checked OpenAPI contract is
-[web-ui/openapi.json](web-ui/openapi.json); generated TypeScript request and
-response types are in `web-ui/src/api/schema.d.ts`.
-
 ## Project contracts
 
-Calc Flow accepts strict project-v3 documents and exposes the Studio
-`/api/v3` surface. Read [projects and persistence](docs/projects-guide.md)
-for validation, serialization, and reloading a graph. Historical changes are
-recorded in [CHANGELOG.md](CHANGELOG.md).
+Calc Flow accepts strict project-v3 documents. Read
+[projects and persistence](docs/projects-guide.md) for validation,
+serialization, and reloading a graph. Historical changes are recorded in
+[CHANGELOG.md](CHANGELOG.md).
 
 ## Development
 
 Large Cargo and Maturin outputs should use the repository `target/` tree.
 The complete CI/full-verification command reference is below. Local changes use
 the smallest affected checks under [AGENTS.md Verification](AGENTS.md#verification);
-full regression, Rust 90% coverage, and Studio backend 85% coverage belong to
+full regression and Rust 90% coverage belong to
 CI; routine benchmark measurements run on their own schedule:
 
 ```bash
@@ -228,17 +184,6 @@ JAX_PLATFORMS=cpu uv run pytest python/tests -q
 JAX_PLATFORMS=cpu uv run python scripts/run_examples.py
 uv run ruff check .
 uv run ruff format --check .
-
-cd web-ui/backend
-uv run --project . --extra dev pytest --cov=calc_flow_studio
-
-cd ..
-npm ci
-npm run sync:api
-npm run build
-npm test
-npm run test:e2e
-npm audit --omit=dev
 ```
 
 Regular CI runs `cargo audit`, `cargo deny --locked check`, core package
@@ -257,10 +202,9 @@ the maintained repository commands and constraints.
 - **[Continuous streaming](docs/streaming-guide.md)** — source-to-recovery tutorial
 - **[Connectors](docs/connectors/README.md)** — transport configuration and guarantees
 - **[Projects and persistence](docs/projects-guide.md)** — JSON/YAML and file stores
-- **[Studio](docs/studio-guide.md)** — local editing, inspection, and job controls
 - **[Python API](docs/python-api.md)** — Python surface and examples
-- **[Expression workflows](docs/symbolic-workflows.md)** — declaration-to-Studio
-  batch, stream, recovery, static matrix, and performance workflows
+- **[Expression workflows](docs/symbolic-workflows.md)** — batch, stream,
+  recovery, static matrix, and performance workflows
 - **[Rust runtime reference](docs/rust-api.md)** — native surface and examples
 - **[API reference](docs/api-reference.md)** — supported surfaces at a glance
 - **[Expression API](docs/symbolic-api.md)** — declarations, analysis, and compile requirements

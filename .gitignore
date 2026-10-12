@@ -5,14 +5,6 @@ settings.local.json
 settings.json
 *.pyc
 .idea
-web-ui/coverage
-web-ui/dist
-web-ui/backend/src/calc_flow_studio/static
-web-ui/node_modules
-web-ui/*.tsbuildinfo
-web-ui/playwright-report
-web-ui/test-results
-.calc-flow-web/
 .calc-flow-projects/
 .calc-flow-checkpoints/
 .benchmarks/

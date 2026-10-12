@@ -248,11 +248,11 @@ class BenchmarkSuiteTests(unittest.TestCase):
             {"overhead", "small", "standard", "nightly"},
         )
         self.assertTrue(
-            {"python", "engines", "warm", "rust", "studio", "frontend"}
+            {"python", "engines", "warm", "rust", "lifecycle"}
             <= {s["family"] for s in matrix}
         )
         self.assertEqual(len(matrix), len({s["id"] for s in matrix}))
-        self.assertEqual(len(matrix), 22)
+        self.assertEqual(len(matrix), 20)
 
     def test_native_throughput_matrix_excludes_runner_startup(self):
         cases = [

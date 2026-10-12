@@ -52,7 +52,6 @@ class TestThreatModel(unittest.TestCase):
         names = {command.name for command in AUDIT_COMMANDS}
         self.assertIn("cargo audit", names)
         self.assertIn("cargo deny", names)
-        self.assertIn("npm audit", names)
 
 
 class TestChecklistOutput(unittest.TestCase):

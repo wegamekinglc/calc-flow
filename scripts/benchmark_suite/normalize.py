@@ -66,27 +66,3 @@ def criterion_rows(root: Path) -> dict:
     if not rows:
         raise ValueError("Criterion produced no benchmark samples")
     return rows
-
-
-def vitest_rows(path: Path) -> dict:
-    report = read_json(path)
-    rows = {}
-    for file in report["files"]:
-        for group in file["groups"]:
-            for case in group["benchmarks"]:
-                name = case["name"]
-                if name in rows:
-                    raise ValueError(f"duplicate Vitest benchmark: {name}")
-                if not case["samples"]:
-                    raise ValueError(
-                        "Vitest raw samples are required; enable includeSamples"
-                    )
-                rows[name] = {
-                    "samples": [value / 1000 for value in case["samples"]],
-                    "rows": None,
-                    "scope": "vitest-native-boundary",
-                    "metadata": {"group": group["fullName"]},
-                }
-    if not rows:
-        raise ValueError("Vitest produced no benchmark samples")
-    return rows

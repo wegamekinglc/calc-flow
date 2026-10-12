@@ -35,7 +35,7 @@ class WarmProfileTests(unittest.TestCase):
                 distribution = project_name.replace("-", "_")
                 wheel = directory / f"{distribution}-4.0.0-cp313-abi3-linux_x86_64.whl"
                 wheel.touch()
-                (directory / "calc_flow_studio-4.0.0-py3-none-any.whl").touch()
+                (directory / "unrelated_package-4.0.0-py3-none-any.whl").touch()
                 self.assertEqual(profile._core_wheel(directory, directory), wheel)
 
     def test_benchmark_build_rejects_missing_or_ambiguous_core_wheels(self) -> None:

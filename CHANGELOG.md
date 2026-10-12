@@ -9,6 +9,13 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-13: Move Calc Flow Studio out of this repository. The `web-ui/`
+  subtree, Studio guide, Studio CI jobs, and Studio release tooling are
+  removed; the application now lives in the separate
+  [calc-flow-studio](https://github.com/wegamekinglc/calc-flow-studio)
+  repository and depends on `calc-flow-python` only as a published package.
+  The core engine, Python API, and release workflow are unchanged.
+
 - 2026-10-12: Move the workspace crates, Python core, Studio, and frontend to
   calendar version `2026.10.12` for the `calc-flow-python` release. Studio
   requires `calc-flow-python>=2026.10.12,<2027`.

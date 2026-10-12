@@ -3,8 +3,8 @@
 [Documentation](README.md) / 2.5 Projects and persistence
 
 A project stores a graph and execution configuration as data. Use it to save a
-calculation, validate it on another entry point, or load it into Studio. Saving
-a project does not save a running job's state; streaming state belongs to
+calculation or validate it on another entry point. Saving a project does not
+save a running job's state; streaming state belongs to
 [managed checkpoints](streaming-guide.md#checkpoints-and-recovery).
 
 ## Save, load, and execute a graph
@@ -145,20 +145,15 @@ and array paths fail with `temporal_output_unavailable`. The restriction
 follows the edge through allowed transforms; column names cannot override it.
 Batch mode fails with `unsupported_mode`. Invalid policy versions, reserved
 fields, and mismatched explicit schemas report `unsupported_version`,
-`reserved_field`, and `schema_mismatch`. Studio reports missing physical
-Sink coverage as `missing_binding`, with a path into the actual project.
-Native stream compilation failures reach Studio as single `stream_compile`
-issues whose message embeds the project path and native code; Studio surfaces
-both, rewriting `sink_output_mismatch` to `missing_binding` and taking the
-referenced `graph.edges[N]` path from `temporal_output_unavailable` messages.
+`reserved_field`, and `schema_mismatch`.
 
 Keep a new stable lineage for each policy/topology change and explicitly
 record the source activation position and historical replay destination or
 deduplication choice. Old Error/Drop project serialization and checkpoint
 bytes retain their contract, but their checkpoints cannot initialize the new
 policy. See [two-branch recovery](streaming-guide.md#durable-recovery-of-both-branches).
-Project format 3, manifest version 3, and Studio REST `/api/v3` are independent
-of package version 2026.10.12.
+Project format 3 and manifest version 3 are independent of package version
+2026.10.12.
 
 ## Union and event-time windows
 
@@ -274,10 +269,9 @@ or export an expression Program in stream mode to construct this graph.
 
 The [ASOF guide](asof-join-guide.md) defines selection, watermark/idle waiting,
 late policies, resource bounds, and recovery. A connector-backed project must
-provide watermark progress on all source paths reaching ASOF. Studio's generic
-import, inspection, and save preserve this kind and its nested configuration;
-there is no dedicated ASOF editor. Project format and managed manifests remain
-v3, and inner `stream_join` has its own independent spec and checkpoint identity.
+provide watermark progress on all source paths reaching ASOF. Project format
+and managed manifests remain v3, and inner `stream_join` has its own
+independent spec and checkpoint identity.
 
 ## Static input declarations
 
@@ -345,11 +339,5 @@ is rejected against the recorded digest before sources open. See
 [static inputs](streaming-guide.md#static-inputs) for the runner semantics and
 the digest contract. An empty declaration array is omitted from canonical
 JSON when no static values are declared.
-
-Studio REST cannot carry live values, so submitting a stored project that
-declares static inputs fails closed with `422` before any worker is spawned;
-the `detail` names the first `static_inputs.{name}` as unresolvable and no
-run, handle, or worker is created. Supply the values through the Python
-runtime instead.
 
 Next: [connectors](connectors/README.md).

@@ -105,8 +105,8 @@ to supply physical graph bindings and explicit runtime/state settings.
 Enable the Rust connector crate's `mysql` feature, or build the Python binding
 with `--features connector-mysql`. Register Rust factories with
 `register_mysql_connectors`; the Python binding registers them automatically
-and exposes them through `Runtime().capabilities().connectors`, including Studio's
-existing capability API. The default wheel still includes only `file`.
+and exposes them through `Runtime().capabilities().connectors`. The default
+wheel still includes only `file`.
 
 ```json
 {

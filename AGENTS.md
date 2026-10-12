@@ -7,15 +7,16 @@ collection, owned async stream results, and integrations. The
 `calc-flow` crate is the internal runtime and owns immutable `Batch` values,
 graph compilation, DataFusion execution, projects, stores, checkpoints, and
 runners. PyO3 and Python lowering connect the API to that single table runtime. `calc-flow-connectors` delivers connector implementations behind
-feature gates. `calc-flow-studio` is a separate local FastAPI and
-React application serving the `/api/v3` continuous job API. See `docs/introduction.md`.
+feature gates. The Studio application lives in the separate
+[calc-flow-studio](https://github.com/wegamekinglc/calc-flow-studio)
+repository and depends on `calc-flow-python` as a published package. See
+`docs/introduction.md`.
 
 ## Commands
 
 These are complete command references for CI and explicitly scoped full
 verification. Select local checks under [Verification](#verification).
-Start each command group at the repository root. The Studio groups use
-subshells so their working-directory changes do not affect later commands.
+Start each command group at the repository root.
 
 ```bash
 # Rust core and PyO3 Rust unit tests
@@ -37,23 +38,6 @@ JAX_PLATFORMS=cpu uv run pytest python/tests -q
 uv run ruff check .
 uv run ruff format --check .
 uv run ruff format .
-
-# Studio backend
-(
-  cd web-ui/backend
-  uv run --project . --extra dev pytest --cov=calc_flow_studio
-)
-
-# Studio frontend and generated API
-(
-  cd web-ui
-  npm ci
-  npm run sync:api
-  npm run build
-  npm test
-  npm run test:e2e
-  npm audit --omit=dev
-)
 
 # Supply chain and release helpers
 cargo audit --ignore RUSTSEC-2026-0176 --ignore RUSTSEC-2026-0177 --ignore RUSTSEC-2026-0235
@@ -97,9 +81,6 @@ CALC_FLOW_BENCHMARK_SCALE=overhead \
   JAX_PLATFORMS=cpu \
   uv run --extra benchmark pytest benchmarks --benchmark-only
 ```
-
-Use `./web-ui/scripts/start_web_ui.sh` and
-`./web-ui/scripts/stop_web_ui.sh` for the managed local Studio.
 
 ## Git conventions
 
@@ -148,9 +129,8 @@ Ordinary feature work must not rewrite either team definition.
 
 ### Python
 
-- Target CPython 3.9 or newer for `calc-flow-python`; Studio development uses
-  Python 3.13 or newer. Use four spaces and double quotes, and retain
-  `from __future__ import annotations`.
+- Target CPython 3.9 or newer for `calc-flow-python`. Use four spaces and
+  double quotes, and retain `from __future__ import annotations`.
 - Use built-in type syntax such as `list[str]`, `dict[str, object]`, and
   `A | B`.
 - Prefer functions and frozen/slot data containers. Add a class only for
@@ -161,17 +141,6 @@ Ordinary feature work must not rewrite either team definition.
 - Keep pure CPU-local transforms synchronous. Await file, stream, process, and
   network I/O; blocking convenience methods must reject a running event loop.
 - Do not add compatibility shims for the removed Python v1 implementation.
-
-### Web
-
-- Apply the same functional-first and input-immutability rules to FastAPI and
-  TypeScript.
-- Use asynchronous FastAPI I/O and thread/process boundaries for blocking or
-  CPU work.
-- Update React state immutably; use functional updates when new state depends
-  on previous state. Clean up streams, timers, listeners, requests, and child
-  processes.
-- Keep React Flow node-type maps outside render functions.
 
 For Markdown tables, align columns with pipes and pad separator rows so their
 dashes span the full column width, including cell spaces.
@@ -293,19 +262,6 @@ selectors.
 - Python runner/store adapters expose async methods and explicit blocking
   convenience methods.
 
-### Studio
-
-- `web-ui/backend/` is the independent `calc-flow-studio` package. Its
-  FastAPI routes live under `/api/v3`; by default `serve()` rejects non-loopback
-  hosts, and changing that security boundary requires a separately reviewed
-  exception.
-- `RunManager` owns spawned continuous-job workers with concurrency,
-  resident-memory, checkpoint-disk, cancellation, shutdown, and lifecycle
-  controls.
-- `web-ui/` is React, TypeScript, Vite, and React Flow. API types are generated
-  from `web-ui/openapi.json`; regenerate both after route/model/version
-  changes.
-
 ## Tests
 
 - Rust unit tests live beside source; integration tests live under
@@ -316,24 +272,19 @@ selectors.
   focused test modules; do not create a shared `conftest.py`.
 - Preserve `tests/fixtures/v1/` unchanged as historical parity evidence. It is
   not a v2 runtime or package path.
-- Studio backend tests live under `web-ui/backend/tests/` and enforce the
-  independent 85% coverage floor.
-- Frontend unit tests use Vitest; browser workflow tests use Playwright.
 - Every behavior change starts with a focused failing test and records the
   expected failure before implementation.
 
 ## Release invariants
 
-- Workspace crate, Python core, Studio, and frontend versions move together
-  as calendar versions (`YYYY.M.D` release dates, for example `2026.9.22`).
-  The binding's Rust dependency is exact; Studio accepts the release's
-  calendar year, and release tags are annotated `calc-flow-python-v<version>`
-  at the current `main` head.
+- Workspace crate and Python core versions move together as calendar versions
+  (`YYYY.M.D` release dates, for example `2026.9.22`). The binding's Rust
+  dependency is exact, and release tags are annotated
+  `calc-flow-python-v<version>` at the current `main` head.
 - Core wheels contain only `calc_flow`, native module, metadata/SBOM, and
-  license. Studio wheels contain only the Studio package/static assets,
-  metadata, and license.
+  license.
 - Source distributions contain essential Rust/Python build sources but never
-  frozen `src/calc_flow`, Studio, fixtures, or guidance directories.
+  frozen `src/calc_flow`, fixtures, or guidance directories.
 - The published crate includes license/source/examples/benches and excludes
   repository-only integration tests.
 - Preserve pinned workflow actions, Maturin/Rust versions, audit policies, and
@@ -352,8 +303,8 @@ to validate prose.
 Full regression gates belong to GitHub CI. Routine benchmark measurements run
 independently at 06:00 and 18:00 Asia/Shanghai every day. The complete commands
 remain references for CI and explicitly scoped full verification. Keep the
-combined Rust 90% line floor (including connector services) and independent
-Studio backend 85% floor; a skipped local coverage run does not prove either gate.
+combined Rust 90% line floor (including connector services); a skipped local
+coverage run does not prove the gate.
 Expand local full testing only for an explicit user request, reproduction or
 diagnosis of a CI failure, or a clearly high-risk change without CI coverage.
 State the specific reason and limited scope before using an exception. Local
@@ -406,18 +357,15 @@ release requires its artifact verification and post-build unit tests to pass.
 The final specialist review remains required; merging also requires explicit
 authority and green required checks.
 
-Confirm generated contracts have no unintended drift and check whitespace:
+Confirm the generated contract has no unintended drift and check whitespace:
 
 ```bash
-git diff --exit-code -- \
-  schemas/project-v3.schema.json \
-  web-ui/openapi.json \
-  web-ui/src/api/schema.d.ts
+git diff --exit-code -- schemas/project-v3.schema.json
 git diff --check
 ```
 
 The Python release workflow builds and verifies the core wheels and source
 distribution, tests installed Linux wheels across supported Python versions,
 and publishes only the core package on release tags. Benchmarks, soaks, audits,
-crate and Studio packaging, and documentation checks do not run in that workflow.
+crate packaging, and documentation checks do not run in that workflow.
 Select local release verification under the same scope and exception rules above.

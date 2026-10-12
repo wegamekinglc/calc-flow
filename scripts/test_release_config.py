@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import ast
-import json
 import re
 import tomllib
 import unittest
@@ -68,11 +67,7 @@ class ReleaseConfigTests(unittest.TestCase):
 
     def test_generated_contracts_are_pinned_to_lf(self) -> None:
         attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8")
-        for path in (
-            "schemas/project-v3.schema.json",
-            "web-ui/openapi.json",
-            "web-ui/src/api/schema.d.ts",
-        ):
+        for path in ("schemas/project-v3.schema.json",):
             with self.subTest(path=path):
                 self.assertIn(f"{path} text eol=lf", attributes.splitlines())
 
@@ -131,21 +126,10 @@ class ReleaseConfigTests(unittest.TestCase):
             r"20\d{2}\.(?:[1-9]|1[0-2])\.(?:[1-9]|[12]\d|3[01])\Z",
         )
         exact_pin = f"={version}"
-        upper_bound = f"<{int(version.split('.')[0]) + 1}"
-        studio_requirement = f"calc-flow-python>={version},{upper_bound}"
         binding = tomllib.loads(
             (ROOT / "crates/calc-flow-python/Cargo.toml").read_text(encoding="utf-8")
         )
         package = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-        studio = tomllib.loads(
-            (ROOT / "web-ui/backend/pyproject.toml").read_text(encoding="utf-8")
-        )
-        frontend = json.loads(
-            (ROOT / "web-ui/package.json").read_text(encoding="utf-8")
-        )
-        frontend_lock = json.loads(
-            (ROOT / "web-ui/package-lock.json").read_text(encoding="utf-8")
-        )
 
         self.assertEqual(binding["dependencies"]["calc-flow"]["version"], exact_pin)
         for name in ("calc-flow", "calc-flow-connectors", "calc-flow-python"):
@@ -171,23 +155,10 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertEqual(package["tool"]["maturin"]["module-name"], "calc_flow._native")
         self.assertNotIn("features", package["tool"]["maturin"])
         self.assertIsInstance(binding["dependencies"]["pyo3"], str)
-        self.assertEqual(studio["project"]["version"], version)
-        self.assertIn(studio_requirement, studio["project"]["dependencies"])
-        self.assertEqual(frontend["version"], version)
-        self.assertEqual(frontend_lock["version"], version)
-        self.assertEqual(frontend_lock["packages"][""]["version"], version)
         self.assertIn(
             f'__version__ = "{version}"',
             (ROOT / "python/calc_flow/__init__.py").read_text(encoding="utf-8"),
         )
-        self.assertIn(
-            f'version="{version}"',
-            (ROOT / "web-ui/backend/src/calc_flow_studio/app.py").read_text(
-                encoding="utf-8"
-            ),
-        )
-        openapi = json.loads((ROOT / "web-ui/openapi.json").read_text(encoding="utf-8"))
-        self.assertEqual(openapi["info"]["version"], version)
 
     def test_ci_uses_calver_bounds_and_release_uses_calver_tags(self) -> None:
         release_text = "\n".join(
@@ -203,7 +174,6 @@ class ReleaseConfigTests(unittest.TestCase):
         )
         self.assertNotIn('">=5.0.0"', ci_workflow)
         self.assertNotIn('"<6"', ci_workflow)
-        self.assertIn("int(version.split('.')[0]) + 1", ci_workflow)
 
         release_workflow = (ROOT / ".github/workflows/release.yml").read_text(
             encoding="utf-8"
@@ -214,7 +184,7 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIn("python scripts/verify_python_release.py", release_workflow)
 
     def test_python_projects_ship_license_files(self) -> None:
-        for project in (ROOT, ROOT / "web-ui/backend"):
+        for project in (ROOT,):
             with self.subTest(project=project):
                 config = tomllib.loads(
                     (project / "pyproject.toml").read_text(encoding="utf-8")
@@ -225,7 +195,7 @@ class ReleaseConfigTests(unittest.TestCase):
                 self.assertIn("Version 2.0, January 2004", license_text)
 
     def test_python_projects_publish_nonempty_readmes(self) -> None:
-        for project in (ROOT, ROOT / "web-ui/backend"):
+        for project in (ROOT,):
             with self.subTest(project=project):
                 config = tomllib.loads(
                     (project / "pyproject.toml").read_text(encoding="utf-8")
@@ -249,10 +219,6 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertEqual(config.count(frozen_harness), 1)
         self.assertNotIn('  - "crates/calc-flow/benches/**"', config)
         self.assertTrue((ROOT / harness_path).is_file())
-        self.assertEqual(config.count('      - "web-ui/**"'), 2)
-        self.assertIn("Biome's default Qwik", config)
-        self.assertIn("sandbox does not install", config)
-        self.assertEqual(config.count('  - "web-ui/src/api/schema.d.ts"'), 1)
         legacy_issue_slug = "_".join(("dal", "38"))
         self.assertFalse(
             (
@@ -288,7 +254,7 @@ class ReleaseConfigTests(unittest.TestCase):
     def test_pr_ci_checks_all_supported_python_versions(self) -> None:
         workflow = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
         compatibility = workflow.split("  python-compatibility:\n", 1)[1].split(
-            "  studio-package:\n", 1
+            "  rust-core:\n", 1
         )[0]
         self.assertIn("  python-compatibility:\n", workflow)
         self.assertIn(
@@ -314,9 +280,9 @@ class ReleaseConfigTests(unittest.TestCase):
 
     def test_pr_ci_core_wheel_uses_explicit_abi3_feature(self) -> None:
         workflow = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
-        package = workflow.split("  package:\n", 1)[1].split("  studio-package:\n", 1)[
-            0
-        ]
+        package = workflow.split("  package:\n", 1)[1].split(
+            "  legacy-python-wheel:\n", 1
+        )[0]
 
         self.assertIn("uv build --sdist", package)
         self.assertIn(
@@ -387,7 +353,6 @@ class ReleaseConfigTests(unittest.TestCase):
 
         for expected in (
             "`pypi`",
-            "Studio is not uploaded",
             "release.yml",
             "git tag -a calc-flow-python-v<version>",
             "PyPI versions and files are immutable",
@@ -401,20 +366,6 @@ class ReleaseConfigTests(unittest.TestCase):
             for line in release_table.splitlines()
         }
         self.assertEqual(len(pipe_positions), 1)
-
-    def test_frontend_module_stems_do_not_collide_on_windows(self) -> None:
-        modules = sorted((ROOT / "web-ui/src").rglob("*.ts")) + sorted(
-            (ROOT / "web-ui/src").rglob("*.tsx")
-        )
-        paths_by_stem: dict[str, list[str]] = {}
-        for module in modules:
-            key = str(module.relative_to(ROOT).with_suffix("")).casefold()
-            paths_by_stem.setdefault(key, []).append(str(module.relative_to(ROOT)))
-        collisions = {
-            stem: paths for stem, paths in paths_by_stem.items() if len(paths) > 1
-        }
-
-        self.assertEqual(collisions, {})
 
     def test_public_package_tables_have_full_width_separators(self) -> None:
         for path in ("docs/api-reference.md", "docs/python-release.md"):
@@ -607,21 +558,14 @@ class ReleaseConfigTests(unittest.TestCase):
 
     def test_linux_ci_builds_the_core_wheel_once_for_consumers(self) -> None:
         workflow = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
-        package = workflow.split("  package:\n", 1)[1].split("  studio-package:\n", 1)[
-            0
-        ]
-        studio_package = workflow.split("  studio-package:\n", 1)[1].split(
-            "  rust-core:\n", 1
+        package = workflow.split("  package:\n", 1)[1].split(
+            "  legacy-python-wheel:\n", 1
         )[0]
 
         self.assertIn("needs: changes", package)
         self.assertNotIn("needs: lint-and-test", package)
         self.assertIn("name: python-distributions", package)
-        self.assertEqual(workflow.count("name: Download core distributions"), 4)
-        self.assertGreaterEqual(workflow.count("--no-install-workspace"), 3)
-        self.assertGreaterEqual(workflow.count("uv run --no-sync"), 5)
-        self.assertIn("name: Download core distributions", studio_package)
-        self.assertNotIn("\n          uv build\n", studio_package)
+        self.assertEqual(workflow.count("name: Download core distributions"), 1)
 
     def test_ci_executes_script_unit_tests(self) -> None:
         windows_test = (
@@ -708,12 +652,11 @@ class ReleaseConfigTests(unittest.TestCase):
     def test_linux_ci_reports_parallel_coverage_to_coveralls(self) -> None:
         workflow = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
 
-        self.assertEqual(workflow.count("uses: coverallsapp/github-action@"), 4)
-        self.assertEqual(workflow.count("parallel: true"), 3)
-        self.assertEqual(workflow.count("format: cobertura"), 2)
+        self.assertEqual(workflow.count("uses: coverallsapp/github-action@"), 3)
+        self.assertEqual(workflow.count("parallel: true"), 2)
+        self.assertEqual(workflow.count("format: cobertura"), 1)
         for flag, report in (
             ("python", "file: coverage.xml"),
-            ("studio", "file: web-ui/backend/coverage.xml"),
             ("rust", "file: rust-lcov.info"),
         ):
             with self.subTest(flag=flag):
@@ -722,7 +665,6 @@ class ReleaseConfigTests(unittest.TestCase):
 
         finish = workflow.split("  coveralls-finish:\n", 1)[1]
         self.assertIn("- lint-and-test", finish)
-        self.assertIn("- studio-backend", finish)
         self.assertIn("- rust-coverage", finish)
         self.assertIn(
             "if: always() && needs.changes.outputs.docs_only != 'true'",
@@ -746,7 +688,7 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIn("if: needs.changes.outputs.docs_only != 'true'", baseline)
         self.assertNotIn("continue-on-error", baseline)
         self.assertIn("coverage-baseline.json", baseline)
-        for job in ("lint-and-test", "studio-backend", "rust-coverage"):
+        for job in ("lint-and-test", "rust-coverage"):
             section = re.split(
                 r"\n  (?=\S)", workflow.split(f"  {job}:\n", 1)[1], maxsplit=1
             )[0]
@@ -767,7 +709,7 @@ class ReleaseConfigTests(unittest.TestCase):
         from scripts.benchmark_suite.rust import bench_targets
 
         families = {shard["family"] for shard in shards()}
-        self.assertTrue({"rust", "studio", "frontend", "lifecycle"} <= families)
+        self.assertTrue({"rust", "lifecycle"} <= families)
         self.assertEqual(
             set(bench_targets(ROOT)),
             {
@@ -792,10 +734,6 @@ class ReleaseConfigTests(unittest.TestCase):
                 "benchmarks/test_symbolic_baseline.py::test_stream_window_checkpoint_and_recovery"
             ],
         )
-        self.assertEqual(
-            pytest_arguments("studio"),
-            ["web-ui/backend/benchmarks/test_performance.py"],
-        )
         self.assertIn("not stream_lifecycle", pytest_arguments("python"))
         core = (ROOT / "crates/calc-flow/benches/core.rs").read_text(encoding="utf-8")
         for case in (
@@ -805,24 +743,6 @@ class ReleaseConfigTests(unittest.TestCase):
             "stream/backpressure_saturated",
         ):
             self.assertIn(case, core)
-
-    def test_checked_openapi_has_every_native_stream_operator_kind(self) -> None:
-        project = json.loads(
-            (ROOT / "schemas/project-v3.schema.json").read_text(encoding="utf-8")
-        )
-        openapi = json.loads((ROOT / "web-ui/openapi.json").read_text(encoding="utf-8"))
-        for component_name in ("ProjectCreateRequest", "ProjectDocument"):
-            embedded = openapi["components"]["schemas"][component_name]
-            for spec_name in ("RollingOutputSpec", "CrossSectionOutputSpec"):
-                expected = {
-                    variant["properties"]["kind"]["const"]
-                    for variant in project["$defs"][spec_name]["oneOf"]
-                }
-                actual = {
-                    variant["properties"]["kind"]["const"]
-                    for variant in embedded["$defs"][spec_name]["oneOf"]
-                }
-                self.assertEqual(actual, expected, f"{component_name}.{spec_name}")
 
     def test_benchmark_suite_isolates_stream_lifecycle_evidence(self) -> None:
         from scripts.benchmark_suite.catalog import shards
@@ -845,9 +765,6 @@ class ReleaseConfigTests(unittest.TestCase):
 
     def test_python_package_excludes_unsupported_pyarrow_25(self) -> None:
         core = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-        studio = tomllib.loads(
-            (ROOT / "web-ui/backend/pyproject.toml").read_text(encoding="utf-8")
-        )
         self.assertIn(
             "pyarrow>=21.0.0,<22; python_version < '3.10'",
             core["project"]["dependencies"],
@@ -856,7 +773,6 @@ class ReleaseConfigTests(unittest.TestCase):
             "pyarrow>=24.0.0,<25; python_version >= '3.10'",
             core["project"]["dependencies"],
         )
-        self.assertIn("pyarrow>=24.0.0,<25", studio["project"]["dependencies"])
 
     def test_final_release_error_docs_do_not_claim_alpha_status(self) -> None:
         stale_claims = {
@@ -876,12 +792,8 @@ class ReleaseConfigTests(unittest.TestCase):
     def test_normative_docs_use_final_package_and_project_versions(self) -> None:
         workspace = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
         package = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-        studio = tomllib.loads(
-            (ROOT / "web-ui/backend/pyproject.toml").read_text(encoding="utf-8")
-        )
         version = workspace["workspace"]["package"]["version"]
         self.assertEqual(package["project"]["version"], version)
-        self.assertEqual(studio["project"]["version"], version)
 
         documentation = {
             "README.md": ("# Calc Flow\n", "uv add calc-flow-python"),
@@ -889,7 +801,6 @@ class ReleaseConfigTests(unittest.TestCase):
                 "# Calc Flow API reference\n",
                 f"`calc-flow-python=={version}`",
                 f'`calc-flow = "{version}"`',
-                f"`calc-flow-studio=={version}`",
                 "Project format version `3`",
                 "Published package versions can lag",
                 "getting-started.md#build-and-install-from-source",
@@ -926,7 +837,6 @@ class ReleaseConfigTests(unittest.TestCase):
                 f"calc-flow=={stale_version}.0",
                 f"calc-flow@{stale_version}.0",
                 f"calc-flow-python=={stale_version}.0",
-                f"calc-flow-studio=={stale_version}.0",
                 f"version `{stale_version}.0`",
             )
         )
@@ -957,9 +867,7 @@ class ReleaseConfigTests(unittest.TestCase):
             rust_api,
         )
 
-    def test_getting_started_covers_packages_source_and_studio_platforms(
-        self,
-    ) -> None:
+    def test_getting_started_covers_packages_source_and_platforms(self) -> None:
         guide_path = ROOT / "docs/getting-started.md"
         self.assertTrue(guide_path.is_file())
         guide = guide_path.read_text(encoding="utf-8")
@@ -969,7 +877,6 @@ class ReleaseConfigTests(unittest.TestCase):
             "## Prerequisites",
             "## Install published packages",
             "## Build and install from source",
-            "## Start and stop Studio",
             "## Verify the installation",
             "## Troubleshooting",
             "### Linux and WSL",
@@ -983,14 +890,8 @@ class ReleaseConfigTests(unittest.TestCase):
             "UV_TOOL_DIR",
             "-delete",
             "Remove-Item",
-            "uv run --no-sync --package calc-flow-studio calc-flow-web",
-            "./web-ui/scripts/start_web_ui.sh",
-            r".\web-ui\scripts\start_web_ui.ps1",
         ):
             self.assertIn(command, guide)
-
-        self.assertNotIn("uv tool install calc-flow-studio", guide)
-        self.assertIn("Studio is not published to PyPI", guide)
 
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         self.assertIn("[getting started](docs/getting-started.md)", readme)

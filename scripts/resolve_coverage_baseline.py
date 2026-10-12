@@ -15,7 +15,7 @@ try:
 except ImportError:  # direct execution puts only scripts/ on sys.path
     from toolkit import FULL_SHA, require_executable, write_json
 
-FLAGS = frozenset(("rust", "python", "studio"))
+FLAGS = frozenset(("rust", "python"))
 AGGREGATES = frozenset(("coverage/coveralls", "coverage/coveralls (push)"))
 FLAG_PREFIX = "Coveralls - "
 COVERAGE = {
@@ -28,11 +28,6 @@ COVERAGE = {
         "Ruff + unit tests",
         "Run unit, property, and coverage tests",
         "python-coverage",
-    ),
-    "studio": (
-        "Studio backend tests",
-        "Run studio backend coverage",
-        "studio-python-coverage",
     ),
 }
 
@@ -345,7 +340,7 @@ def _equivalent_candidate(repository: str, base_sha: str, tree: str) -> dict:
         raise ValueError("merged PR head full tree differs from the base")
     statuses = _latest_statuses(repository, head)
     if _flag_statuses(statuses).keys() != FLAGS:
-        raise ValueError("candidate measurement must contain all three flags")
+        raise ValueError("candidate measurement must contain both flags")
     _require_successful_statuses(statuses)
     report = _coverage_report(repository, statuses)
     measurement = report["build"]["commit_sha"]
