@@ -1,5 +1,18 @@
 # October 12 morning benchmark investigation
 
+## Current repair outcome
+
+The one authorized [complete repair comparison](https://github.com/wegamekinglc/calc-flow/actions/runs/38228629578)
+succeeded: 22 shards, 809 unique results, zero errors and zero confirmed
+regressions. Main `e5380992` versus measured product `6978f3bf` gives LOW 10M
+group-by 744.856 / 686.566 ms (-7.8257%, `improved`). Source head `db7945ba`
+has 34 successful checks and four successful external contexts; combined Rust
+line coverage is 92.96%. Original-wheel regression verdicts and their unproven
+cause remain documented below. All 150 inconclusive and three informational
+slowdown results remain visible; the wider eight-target optimization goal stays
+paused. Final specialist evidence review is Approve; required documentation-head
+CI must still pass before merge.
+
 ## Confirmed failure
 
 [Scheduled run 38178694560](https://github.com/wegamekinglc/calc-flow/actions/runs/38178694560)
@@ -9,14 +22,14 @@ contains 809 result rows and exactly one error:
 The engine shard failed its regression check; the aggregate gate propagated that
 failure. This was neither a missing-result failure nor a failed correctness oracle.
 
-| CI observation               | Value                                        |
-|------------------------------|----------------------------------------------|
-| Baseline                     | `89e511416d5793e11cefd74b1a7c09aae96f81bd`   |
-| Candidate                    | `8ee5b71b7b862d4e44bd0be390d182cf950d17f7`   |
-| Baseline / candidate p50     | 853.563 / 953.112 ms                         |
-| Combined p50 change          | +11.663%                                     |
-| Round 1 paired median / CI   | +11.740% [+11.251%, +12.360%]                |
-| Round 2 paired median / CI   | +11.583% [+11.330%, +11.790%]                |
+| CI observation             | Value                                      |
+|----------------------------|--------------------------------------------|
+| Baseline                   | `89e511416d5793e11cefd74b1a7c09aae96f81bd` |
+| Candidate                  | `8ee5b71b7b862d4e44bd0be390d182cf950d17f7` |
+| Baseline / candidate p50   | 853.563 / 953.112 ms                       |
+| Combined p50 change        | +11.663%                                   |
+| Round 1 paired median / CI | +11.740% [+11.251%, +12.360%]              |
+| Round 2 paired median / CI | +11.583% [+11.330%, +11.790%]              |
 
 Each round contains ten adjacent AB/BA pairs with successful oracles. Both lower
 confidence bounds exceed the maintained +5% threshold, so the original run is a
@@ -56,11 +69,11 @@ round. The recorded total budget was 600 seconds, including creation, startup,
 oracles and cleanup; no builds were needed. Collection completed in 119.327 seconds
 with no observed native-build overlap.
 
-| Local diagnostic   | First arm p50   | Second arm p50   | Change    | Verdict                   |
-|--------------------|-----------------|------------------|-----------|---------------------------|
-| A/A                | 489.122 ms      | 489.322 ms       | +0.041%   | no-confirmed-regression   |
-| B/B                | 494.282 ms      | 494.593 ms       | +0.063%   | no-confirmed-regression   |
-| A/B                | 493.931 ms      | 498.305 ms       | +0.885%   | no-confirmed-regression   |
+| Local diagnostic | First arm p50 | Second arm p50 | Change  | Verdict                 |
+|------------------|---------------|----------------|---------|-------------------------|
+| A/A              | 489.122 ms    | 489.322 ms     | +0.041% | no-confirmed-regression |
+| B/B              | 494.282 ms    | 494.593 ms     | +0.063% | no-confirmed-regression |
+| A/B              | 493.931 ms    | 498.305 ms     | +0.885% | no-confirmed-regression |
 
 A/B paired intervals were +0.635% [-1.219%, +2.336%] and +0.509%
 [-0.456%, +2.745%]. This local WSL host (Python 3.13.9, affinity 0–3 on a 32-CPU
@@ -78,12 +91,12 @@ resource diagnostics. It does not rebuild or substitute the current ASOF feature
 It completed with all 51 cases and no missing/oracle errors. Only the original
 10M stream group_by case regressed again:
 
-| Recovery observation         | Value                                  |
-|------------------------------|----------------------------------------|
-| Baseline / candidate p50     | 860.439 / 947.314 ms                   |
-| Combined p50 change          | +10.097%                               |
-| Round 1 paired median / CI   | +9.951% [+9.255%, +10.574%]            |
-| Round 2 paired median / CI   | +10.146% [+8.905%, +10.633%]           |
+| Recovery observation       | Value                        |
+|----------------------------|------------------------------|
+| Baseline / candidate p50   | 860.439 / 947.314 ms         |
+| Combined p50 change        | +10.097%                     |
+| Round 1 paired median / CI | +9.951% [+9.255%, +10.574%]  |
+| Round 2 paired median / CI | +10.146% [+8.905%, +10.633%] |
 
 Both original native seals and common harness hash match. All 197 host resource
 snapshots report zero swap usage; minimum available host memory was 8,543MiB.
@@ -107,11 +120,11 @@ common harness. All 120 paired observations passed their oracles, all twelve
 paired worker completions succeeded, all fourteen worker input IPC hashes matched,
 and all fourteen exit records were zero. Profile samples remain separate.
 
-| GitHub diagnostic   | First arm p50   | Second arm p50   | Change    | Maintained verdict         |
-|---------------------|-----------------|------------------|-----------|----------------------------|
-| A/A                 | 476.592 ms      | 475.786 ms       | -0.169%   | no-confirmed-regression    |
-| B/B                 | 487.065 ms      | 491.649 ms       | +0.941%   | inconclusive               |
-| A/B                 | 470.508 ms      | 468.189 ms       | -0.493%   | inconclusive               |
+| GitHub diagnostic | First arm p50 | Second arm p50 | Change  | Maintained verdict      |
+|-------------------|---------------|----------------|---------|-------------------------|
+| A/A               | 476.592 ms    | 475.786 ms     | -0.169% | no-confirmed-regression |
+| B/B               | 487.065 ms    | 491.649 ms     | +0.941% | inconclusive            |
+| A/B               | 470.508 ms    | 468.189 ms     | -0.493% | inconclusive            |
 
 A/B paired intervals are +0.145% [-4.010%, +9.737%] and -0.784%
 [-2.793%, +0.445%]. B/B round one's upper bound is +7.252%. These intervals do
@@ -134,14 +147,14 @@ modules and their process maps remain the address source.
 
 Offline grouping by the original ELF unwind-table function boundaries gives:
 
-| Original native range start, A / B  | Self samples, A / B   | Share of all CPU samples, A / B  |
-|-------------------------------------|-----------------------|----------------------------------|
-| `0x15d14c0` / `0x15e0e60`           | 392 / 391             | 31.92% / 27.65%                  |
-| `0x1364920` / `0x1905280`           | 168 / 205             | 13.68% / 14.50%                  |
-| `0x1513570` / `0x1522f10`           | 115 / 133             | 9.36% / 9.41%                    |
-| `0x1394130` / `0x1935770`           | 96 / 107              | 7.82% / 7.57%                    |
-| `0x15140a0` / `0x1523a40`           | 64 / 74               | 5.21% / 5.23%                    |
-| `0x13672d0` / `0x1907ac0`           | 48 / 61               | 3.91% / 4.31%                    |
+| Original native range start, A / B | Self samples, A / B | Share of all CPU samples, A / B |
+|------------------------------------|---------------------|---------------------------------|
+| `0x15d14c0` / `0x15e0e60`          | 392 / 391           | 31.92% / 27.65%                 |
+| `0x1364920` / `0x1905280`          | 168 / 205           | 13.68% / 14.50%                 |
+| `0x1513570` / `0x1522f10`          | 115 / 133           | 9.36% / 9.41%                   |
+| `0x1394130` / `0x1935770`          | 96 / 107            | 7.82% / 7.57%                   |
+| `0x15140a0` / `0x1523a40`          | 64 / 74             | 5.21% / 5.23%                   |
+| `0x13672d0` / `0x1907ac0`          | 48 / 61             | 3.91% / 4.31%                   |
 
 The first range has 1,142/1,306 inclusive samples (93.00%/92.36%). Its most
 sampled instruction is at the same function offset `+0x21e5` in both products,
@@ -330,3 +343,105 @@ zero errors and passes maintained fragment/provenance validation against main
 `improved`. It retains the 24-hour checkpoint interval and terminal completion
 outside the ready-to-Arrow timer. This is a partial new-product comparison;
 the complete report and the original failing 10M workload remain pending.
+
+
+### Windows isolation runtime validation
+
+Isolation head `db7945ba` passed Windows run
+[38234579578](https://github.com/wegamekinglc/calc-flow/actions/runs/38234579578).
+Rust job `114762066124` reports 1,969 core tests passed, four ignored and all 69
+soak cases deferred in 51.42s. Its serial stage reports exactly 66 passed, three
+ignored and 1,973 other core cases filtered out in 48.40s. Independent extraction
+of test names from the retained log confirms 69 distinct soak cases: 66 `ok`,
+three existing `ignored`, no failures. Thus the combined core inventory is
+unchanged at 2,042 tests; all 2,035 non-ignored cases execute. PyO3, connector,
+Python, Clippy, process-cleanup and the required Windows gate also pass.
+
+The recorded log is `repair-complete/windows-isolation-rust.log`. This validates
+the scoped scheduling repair on this runner with the unchanged deadlines and
+oracles; it does not prove the exact earlier filesystem/scheduling cause or
+promise absence of future CI instability.
+
+Linux run
+[38234579540](https://github.com/wegamekinglc/calc-flow/actions/runs/38234579540)
+then passed on the same source head. Its core lib execution reports 2,041 passed
+and seven existing ignored tests in 177.58s; Clippy, precompilation, the remaining
+Rust targets, three isolated PyO3 executions and warning-free rustdoc pass.
+The combined Rust/connector coverage job takes 23m52s and reports 92.96% line
+coverage (176,363 lines, 12,415 missed), above the unchanged 90% floor. The
+retained logs are `repair-complete/linux-isolation-core.log` and
+`repair-complete/linux-isolation-coverage.log`.
+
+The final source-head snapshot contains 34 successful check runs and four
+successful external contexts, including Codacy, Windows, macOS and every
+Coveralls context; none are pending, cancelled or failed. At that interim snapshot, the full benchmark
+report was still pending. Twenty completed shards had 640 validated
+result rows, zero execution errors and zero confirmed regressions, with 146
+inconclusive results and three informational slowdowns retained. The 10M engine
+and Rust fragments were pending, so that partial inventory did not establish
+complete-suite acceptance; the subsequent final result follows.
+
+## Completed main-versus-repair suite
+
+[Complete suite 38228629578](https://github.com/wegamekinglc/calc-flow/actions/runs/38228629578) succeeded once in 117m20s, including queues, builds, setup, measurement, transfer and cleanup, within its fixed 260-minute budget. Both ordinary locked release wheel builds passed (22m33s / 22m11s). All 22 shards and the aggregate gate passed: **809 unique results, no missing cases, no errors and no confirmed regressions**. Coverage is 409 engine, 26 warm, 248 Python, 118 Rust, five Studio, two frontend and one lifecycle results. The downloaded consolidated JSON exactly matches the 22 independently validated fragments. [Full 809-row report and JSON](https://github.com/wegamekinglc/calc-flow/actions/runs/38228629578/artifacts/11742858650) retain every case.
+
+The maintained labels remain visible: two improved, 62 no-confirmed-regression, 150 inconclusive, 221 external references, 355 informational, three informational slowdowns and 16 validated metrics. This does not establish equivalence for the inconclusive rows.
+
+Commits after `6978f3bf` change only test comments, Windows CI scheduling/configuration checks and evidence documents. Product code, dependencies, features and benchmark harness remain equivalent to that measured candidate. The original measured SHA and wheel/native seals remain authoritative; the products are not relabeled as later-commit wheels.
+
+### Fresh main-versus-repair comparisons
+
+| Case                                | Checkpoint / scope      | Main ms  | Candidate ms | Change | Maintained verdict      |
+|-------------------------------------|-------------------------|----------|--------------|--------|-------------------------|
+| group_by 100,000                    | LOW 24h / ready→Arrow   | 7.483    | 6.770        | -9.52% | improved                |
+| group_by 1,000,000                  | LOW 24h / ready→Arrow   | 78.150   | 73.261       | -6.26% | no-confirmed-regression |
+| group_by 10,000,000                 | LOW 24h / ready→Arrow   | 744.856  | 686.566      | -7.83% | improved                |
+| join 1,000,000                      | LOW 24h / ready→Arrow   | 115.125  | 115.866      | +0.64% | no-confirmed-regression |
+| join 10,000,000                     | LOW 24h / ready→Arrow   | 935.282  | 923.712      | -1.24% | no-confirmed-regression |
+| asof_join 1,000,000                 | LOW 24h / ready→Arrow   | 229.265  | 228.689      | -0.25% | no-confirmed-regression |
+| asof_join 10,000,000                | LOW 24h / ready→Arrow   | 2105.536 | 2101.136     | -0.21% | no-confirmed-regression |
+| join 1,000,000 / batch 1,024        | LOW 24h / ready→Arrow   | 439.490  | 436.722      | -0.63% | no-confirmed-regression |
+| join 10,000,000 / batch 1,024       | LOW 24h / ready→Arrow   | 3744.371 | 3765.791     | +0.57% | no-confirmed-regression |
+| asof_join 1,000,000 / batch 1,024   | LOW 24h / ready→Arrow   | 955.406  | 959.170      | +0.39% | no-confirmed-regression |
+| asof_join 10,000,000 / batch 1,024  | LOW 24h / ready→Arrow   | 8492.758 | 8536.933     | +0.52% | no-confirmed-regression |
+| projection 1,000,000 / batch 1,024  | LOW 24h / ready→Arrow   | 415.240  | 425.594      | +2.49% | inconclusive            |
+| projection 10,000,000 / batch 1,024 | LOW 24h / ready→Arrow   | 3765.913 | 3727.965     | -1.01% | no-confirmed-regression |
+| join 1,000,000 / batch 64,000       | ON 100ms / ack+recovery | 259.762  | 264.458      | +1.81% | no-confirmed-regression |
+| join 1,000,000 / batch 1,024        | ON 100ms / ack+recovery | 573.255  | 575.710      | +0.43% | no-confirmed-regression |
+| asof_join 1,000,000 / batch 64,000  | ON 100ms / ack+recovery | 379.126  | 377.310      | -0.48% | no-confirmed-regression |
+| asof_join 1,000,000 / batch 1,024   | ON 100ms / ack+recovery | 2306.954 | 2403.740     | +4.20% | inconclusive            |
+| projection 1,000,000 / batch 1,024  | ON 100ms / ack+recovery | 536.713  | 542.488      | +1.08% | no-confirmed-regression |
+
+Measured main `e538099228b54882fe3b9fcc72d802e9998221ed` and candidate `6978f3bf773d76f77d60a4d181e2ad88596438d1`, using two rounds of ten paired samples for historical engine/warm cases. Every throughput row here, including exact-cursor 1,024-row batches, keeps checkpointing enabled with a 24-hour interval (LOW). Terminal capture is outside the ready-to-Arrow timer, but successful job completion is required. The adapter field `checkpoint_interval_millis=None` selects the throughput protocol; it does not disable the runtime default. This suite supplies no new true-OFF comparison. ON is the paced 100ms checkpoint acknowledgment/recovery contract. Their timing scopes are distinct; subtracting them does not isolate checkpoint cost.
+
+10M group-by is 744.856435 ms / 686.566208 ms (-7.8257%); its round intervals are [-8.7330%, -5.3521%] and [-10.2687%, -6.9408%], with maintained verdict `improved`. The 100k result is also `improved`. At 1M, the -6.2569% p50 difference retains verdict `no-confirmed-regression`: interval highs are -4.7499% and -4.9600%. The 10M runner records AMD EPYC 9V74 with four logical CPUs. Earlier failed runs lack comparable CPU metadata, so this new main-versus-repair result does not prove the historical slowdown's cause or erase those earlier verdicts.
+
+The retained complete report is `repair-complete/report/summary.json` and
+`summary.md`; all raw shards are under `repair-complete/available-shards/`.
+`complete-validation.json` records the recomputed inventory, labels and group-by
+intervals. The collector identity is
+`e30672098c018ef1a650492403bf5ae4813d0182e2b4921cb9233b4d26b8b2e6`.
+The successful run spans 09:14:49–11:12:09 UTC, 7,040 seconds including builds
+and collection. No second full dispatch, filtered samples or relaxed gate follows.
+
+This complete maintained suite does not rerun the separate eight-target native
+acceptance inventory. Sealed 1/32-CPU kernels, 1M capture/restore and compaction,
+matched retention scaling, full 1,024-row callbacks and traced harness residuals
+retain their prior evidence and paused status. Scheduled Criterion capture/restore
+cases use different row counts/scopes and cannot be substituted for those goals.
+The PR and final review retain every user target and OFF/LOW/ON distinction.
+
+### Final review correction to small-batch checkpoint labels
+
+The first derived comparison table incorrectly labeled six 1,024-row throughput
+results OFF. Final source review found that `benchmarks/engine_stream.py`'s
+`_start_replay_job` passes a 24-hour interval and does not set `checkpointing=False`;
+`StreamRuntimeConfig.checkpointing` defaults to true. `_run_throughput_stream`
+also requires terminal completion after the timed output. These cases are LOW,
+not OFF. The analysis, PR comparison and derived tables now say LOW consistently;
+the original measurements, immutable raw artifacts and verdicts are unchanged.
+The original catalog's `checkpoint_interval_millis=None` describes the throughput
+variant rather than proving checkpoint disablement. No new true-OFF result is
+claimed. ON 100ms acknowledgment/recovery measurements retain their own scope.
+The eight-target inventory header distinguishes enabled checkpoint components
+from OFF throughput goals, and preserves its historical evidence separately.

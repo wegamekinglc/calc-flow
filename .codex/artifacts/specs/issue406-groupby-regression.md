@@ -118,9 +118,11 @@ do not prove that this caused all four failures.
   A correctness/infrastructure failure requires diagnosis and a concrete repair
   before any justified new run. An unresolved regression remains a failure.
 - Report OFF, LOW and ON according to the actual case. Historical group_by remains
-  LOW (24-hour interval, terminal capture outside the timer), not OFF. Existing
-  OFF and paced checkpoint/recovery cases retain their distinct scopes. No default
-  runtime memory-pool cap is introduced.
+  LOW (24-hour interval, terminal capture outside the timer), not OFF. Exact-cursor
+  small-batch suite cases also keep checkpointing enabled at 24 hours and are LOW.
+  This complete suite adds no new true-OFF comparison; the separate native
+  acceptance modes and paced checkpoint/recovery scopes remain distinct. No
+  default runtime memory-pool cap is introduced.
 - Completion requires the entire suite to produce its consolidated report with
   no missing cases, correctness/infrastructure errors or confirmed regressions,
   and green required CI plus final specialist review before merge.

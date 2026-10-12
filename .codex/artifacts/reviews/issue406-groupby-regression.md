@@ -9,9 +9,14 @@ The repair touches two Rust files and its specification, analysis and review.
 The subsequent review covers only test comments on
 `6978f3bf773d76f77d60a4d181e2ad88596438d1` and the narrow static-analysis exception
 documented below.
-The latest increment reviews Windows soak isolation on
+The previous increment reviewed Windows soak isolation on
 `c449ad38cd9e412cc730bbedae37fee15af29e2e` plus the worktree changes to
 `.github/workflows/ci-windows.yml` and `scripts/test_run_rust_tests.py`.
+The current evidence review is for source head
+`db7945baaac133a6a3449cd8244bb5fab1df5e36`, using retained CI logs and the
+final documentation diff, all 22 benchmark fragments and the consolidated
+809-result report. Measured product identity remains
+`6978f3bf773d76f77d60a4d181e2ad88596438d1`.
 PR #412 remains draft according to the implementer's handoff. No new PR check
 snapshot or prior GitHub reviews were requested for this incremental review.
 The reviewer read the changed files and existing verification evidence without
@@ -27,14 +32,46 @@ the original workload, paired classification and common harness, with a fixed
 The original diagnostic is complete and its results remain inconclusive for A/B.
 The subsequent user-authorized repair uses the existing randomized AHash for
 four temporary window lookup maps and makes the sensitive-log test reuse its
-current executable. The repeated 10M streaming `group_by` regression remains
-unresolved pending the separately authorized complete benchmark and required CI.
+current executable. The one authorized complete benchmark now passes with
+809 unique results, no errors and no confirmed regressions. Its LOW 10M streaming
+`group_by` comparison improves from 744.856435ms to 686.566208ms (-7.8257%).
+This establishes the current main-versus-repair result; the original-wheel
+regressions remain recorded and their historical cause remains unproven.
+Source-head CI is successful. Final documentation-head checks still precede merge.
 The Windows follow-up moves the complete checkpoint-soak module into the
 existing serial stage while keeping the remaining Rust suite parallel.
 
 ### Build and Test Results
 
-- Rust: **Passed, focused local verification only**. The reviewer read
+- Complete benchmark: **Passed**. Retained run `38228629578` is successful,
+  with all 22 shards and the aggregate complete. It spans 09:14:49–11:12:09 UTC,
+  117m20s including queues and builds, within the fixed 260-minute budget.
+  All 809 consolidated entries exactly match their original fragment entries;
+  no missing or duplicate case, correctness error or confirmed regression was
+  found. The reviewer inspected artifacts without starting another measurement.
+- Source-head CI: **Passed** in the supplied snapshot. All 34 check runs are
+  completed/successful at `db7945ba`; all four external contexts are successful
+  at that same full SHA. No failed, cancelled, pending or inconclusive CI checks
+  appear in `source-head-check-runs.json` or `source-head-statuses.json`.
+  These include Linux, Windows, macOS, Codacy, packaging, Python compatibility,
+  Studio, dependency-policy and Coveralls gates. The reviewer made no CI query.
+- Windows Rust: **Passed**. `windows-isolation-rust.log` records ordinary core
+  1,969 passed / four ignored / 69 deferred in 51.42s; the serial module records
+  66 passed / three ignored / 1,973 filtered in 48.40s. Name-by-name comparison
+  against the earlier successful run gives the same 2,042 distinct core tests,
+  with no missing or extra cases and no overlap between the two new stages.
+  All 2,035 non-ignored cases execute. The three serial ignored cases are the
+  existing opt-in private benchmark and two twenty-minute soaks.
+- Linux Rust: **Passed**. `linux-isolation-core.log` records 2,041 passed,
+  seven ignored and no filtered core tests in 177.58s. The three isolated PyO3
+  executions each pass 132 tests, in 3.62s, 3.21s and 3.20s. The same source-head
+  core job, including Clippy and rustdoc, is successful.
+- Combined Rust coverage: **Passed**. `linux-isolation-coverage.log` reports
+  176,363 lines / 12,415 missed / **92.96%**, with the unchanged
+  `--fail-under-lines 90` gate. The retained log includes successful opt-in
+  Kafka, PostgreSQL/CDC, MySQL and ClickHouse tests in this combined run;
+  connector source remains in the reported coverage table.
+- Earlier focused Rust verification: **Passed**. The reviewer read
   `window-before.log` and `window-after.log`: both selections pass 35 tests with
   one pre-existing ignored soak, in 0.28 and 0.31 seconds. The implementer
   identified the after-run executable as the rebuilt all-feature
@@ -68,9 +105,12 @@ existing serial stage while keeping the remaining Rust suite parallel.
   evidence. The focused tests execute the actual shell wrapper with harmless
   fixtures, verifying exit 42, both output streams and permission restoration.
   Actionlint was unavailable and was not run.
-- Studio backend and frontend: **Not touched**; suites not run.
+- Python and Studio product sources: **Not touched by this repair**. Their
+  source-head CI test/build checks pass in the retained snapshot. Detailed
+  Studio coverage percentages were not independently re-extracted here.
 - New unresolved local failures: **None identified** in the reviewed repair.
-- Required CI: **Unresolved**. The retained Windows log for `86d0a3bd` has
+- Historical CI failures, superseded by the successful source-head run above:
+  the retained Windows log for `86d0a3bd` has
   2,029 passed, four failed and seven ignored Rust tests. The failures concern
   writer-v2 recovery, queued launch cancellation, SQL queue draining and
   checkpoint-soak cancellation. Reusing the current executable removes nested
@@ -84,7 +124,7 @@ existing serial stage while keeping the remaining Rust suite parallel.
   These failures are `m5_fault_manifest_rename_restart`,
   `m5_fault_manifest_rename_panic`, `m5_fault_retention_restart` and
   `m5_fault_source_cut_restart`. The original executable-identity fix is already
-  present. The new Windows isolation has not yet produced a required CI result.
+  present. The subsequent `db7945ba` isolation run above passes all four cases.
 - Windows workflow regression: **RED then GREEN**. Existing
   `windows-isolation-red.log` records the missing complete-module skip assertion
   failing once; `windows-isolation-green.log` records all four configuration
@@ -95,8 +135,9 @@ existing serial stage while keeping the remaining Rust suite parallel.
   `OK (skipped=1)`: 19 passed and one pre-existing platform skip. The implementer
   reports passing focused Ruff lint/format, PyYAML workflow parsing and
   whitespace checks. These were not rerun by the reviewer.
-- Existing regression: **Unresolved**. The original-wheel recovery again reports
-  +10.097% for 10M streaming `group_by`; this review does not turn it green.
+- Historical regression: **Preserved**. The original-wheel runs retain their
+  +11.663% and +10.097% verdicts. The fresh main-versus-repair 10M comparison is
+  `improved`; its result does not prove what caused those earlier regressions.
 - Completed diagnostic: **Collection succeeded; A/B inconclusive**. The reviewer
   read the retained artifacts from run `38209692076`, artifact `11728218142`.
   No tests, native builds, benchmarks, workflow validation or CI queries were
@@ -129,13 +170,15 @@ git diff --exit-code -- schemas/project-v3.schema.json web-ui/openapi.json web-u
 
 Changed diagnostic Markdown alignment, trailing whitespace and final newlines
 passed the earlier review. Full local product suites, Rust coverage and Studio
-coverage were not run; no coverage gate or final CI result is established here.
+coverage were not rerun by the reviewer. The current CI and Rust coverage claims
+come from the retained source-head evidence above, not from local execution.
 
 ### Blocking Issues
 
-No source findings remain in the reviewed implementation. Required CI failures
-and the unresolved performance acceptance gate still block merge; they do not
-block committing this repair and running its one authorized complete suite.
+No source or evidence findings remain in the reviewed implementation and final
+documentation diff. Source-head CI and the complete benchmark are successful.
+The final documentation commit must retain green required checks before merge;
+the source-head snapshot cannot be relabeled as that later commit's result.
 The following diagnostic findings were addressed:
 
 - `AuditWorker.start` now owns subprocess creation through cancellation and
@@ -151,6 +194,11 @@ The following diagnostic findings were addressed:
 - `validate_trace` now requires a nonzero hexadecimal address in a native DSO
   frame, rejecting path-only warnings and zero addresses as well as lost,
   throttled and non-native traces.
+- The final comparison initially mislabeled six 1,024-row throughput cases as
+  OFF. Source inspection showed enabled checkpointing at a 24-hour interval.
+  The specification, analysis, PR body and derived comparison tables now say
+  LOW and explicitly retain required terminal completion outside the timer.
+  No measurement or immutable raw artifact was altered by this correction.
 
 The later `current-exe` finding is an accepted, localized false positive in
 `sensitive_lifecycle_panic_payloads_never_reach_process_stderr`. Both calls are
@@ -326,7 +374,8 @@ comments plus the Windows workflow and its Python configuration tests; product
 code, dependencies and benchmark harness remain unchanged. Results from
 `38228629578` remain applicable to that exact measured product and must retain
 its original candidate SHA and seals. This CI scheduling change requires its
-own required Windows result, not another product measurement.
+own required Windows result, which is now successful, not another product
+measurement.
 
 The failed `ManifestRename/Restart` case reports `SourcesCut`, 5.5044197 seconds
 and zero fault triggers, so it expired before the intended injection. The
@@ -335,29 +384,143 @@ with sink/checkpoint errors; retention and source-cut restart cases also report
 unexpected sink/checkpoint failures. These observations justify reducing
 cross-test contention as a concrete CI experiment, but do not prove one shared
 root cause. Neither the earlier passing run nor the absence of nested Cargo
-establishes that all failures are fixed. The new CI result must validate the
-unchanged oracles and full test selection.
+establishes their historical root cause. The new CI result validates the
+unchanged oracles and full test selection on its runner without claiming that
+future Windows instability is impossible.
 
 The final specification and analysis document this Windows scheduling follow-up,
-the preserved deadlines, the exact selector and the outstanding required CI
+the preserved deadlines, the exact selector and the now successful required CI
 result. `harness_sha256()` reads the maintained benchmark sources, adapters and
 lockfile; its inspected input list excludes both changed CI/configuration-test
-files. The new partial 100k report is explicitly separate from full acceptance.
+files. The earlier partial 100k report remains an explicitly interim observation.
 The retained fragment has 65 cases and no errors, with the pinned source refs and
 common harness hash. Its streaming `group_by` result matches the documented
 7.4830205ms / 6.770371ms medians, -9.5236% change and two negative intervals.
-The analysis correctly leaves the original failing 10M workload and the
-consolidated full-suite result pending.
+At that interim stage, the 10M workload and consolidated result were still
+pending. The final evidence below now supplies both.
+
+### Completed benchmark evidence
+
+The final review completes the existing run `38228629578`; it does not start a
+new measurement or repeat the already reviewed 640-case subset. The two newly
+available fragments contribute 51 10M engine and 118 Rust cases. The reviewer
+read `complete-run.json`, `complete-validation.json`, the consolidated report
+and those original fragments, and reconciled every consolidated entry against
+the complete fragment inventory. All 809 entries match exactly: 409 engine,
+26 warm, 248 Python, 118 Rust, five Studio, two frontend and one lifecycle.
+Every case reports `status=ok` and established correctness, all execution-error
+lists are empty, and no duplicate or missing case was found. The complete
+report artifact is `11742858650`.
+
+All 22 fragments identify baseline `e538099228b54882fe3b9fcc72d802e9998221ed`
+and measured candidate `6978f3bf773d76f77d60a4d181e2ad88596438d1`, ordinary clean
+release builds, matching dependency-lock identity and consistent wheel/native
+seals. The common harness hash is
+`e30672098c018ef1a650492403bf5ae4813d0182e2b4921cb9233b4d26b8b2e6`.
+The source changes through `db7945ba` remain test comments, CI scheduling/tests
+and documentation; they do not change that product or measurement harness.
+
+The previously reviewed engine/warm evidence contains 768 round records,
+11,520 successful sample oracles and 1,152 completed worker records.
+The new 10M fragment adds 102 round records, 1,460 successful sample oracles
+and 146 completed worker records. Loaded native hashes match
+the release manifests throughout. Each case retains two rounds of ten samples
+per applicable arm, identical round environments and exact agreement between
+summary timings and original sample timings. Recorded environments use Python
+3.13.16, four available CPUs and 32 Tokio workers; this is not the paused
+eight-target protocol's matched one-CPU/32-CPU acceptance configuration.
+
+Read-only reconciliation of the 192 earlier historical paired rows and 22 new
+10M paired rows reproduces their medians, order-statistic intervals and
+maintained verdicts. All 1,040 previously reviewed warm
+cursor observations follow their declared retained-history positions. The
+640 paced checkpoint/recovery observations retain matching workload dimensions,
+nonterminal epoch evidence, a partial pre-checkpoint row count, verified
+recovery and at least the declared 100ms interval. The reviewer did not invoke
+the product, a benchmark runner, a test suite or a CI query to inspect these files.
+
+The Rust fragment contains 102 timed cases and 16 allocation metrics. All
+16,280 original timings are finite and positive, and the case arrays agree
+with all 408 retained arm/round block records. Aggregate medians, round-minimum
+changes and maintained informational labels agree with the raw observations.
+Both arms have matching machine, dependency, workload and compiled-dependency
+identities; their recorded fingerprints and all per-target stamps reconcile.
+All 12 benchmark targets have retained successful build completion in both
+arms, and the common measured Join harness agrees across arms. The 160 retained
+allocation repetitions complete their requested dispatches on the expected
+thread and pass their output assertions; all 16 reported allocation metrics
+agree with their underlying repetitions and are unchanged between arms.
+Rust suite-block timings and allocation counters remain distinct from paired
+engine acceptance; neither is silently promoted into the paused native goals.
+
+The complete verdicts are 221 external references, 150 inconclusive,
+62 no-confirmed-regression, two improved, 355 informational, three
+informational slowdowns and 16 validated metrics. No confirmed regression
+appears in this complete run. Inconclusive results do not establish equivalence. The three
+informational slowdowns remain visible: small JAX elementwise plan execution,
+standard JAX mean kernel execution, and the standard NumPy transpose/reshape
+diagnostic plan. Their maintained suite-block labels use round minima;
+aggregate medians do not override those labels or turn them into confirmed
+paired regressions.
+
+LOW 10M streaming `group_by` records 744.856435ms / 686.566208ms (-7.8257%).
+Its paired intervals are [-8.7330%, -5.3521%] and [-10.2687%, -6.9408%], so the
+unchanged rule classifies it as `improved`. The 100k result is also `improved`;
+the 1M -6.2569% difference retains `no-confirmed-regression`, since its interval
+highs are -4.7499% and -4.9600%. The 10M host reports AMD EPYC 9V74 and four
+logical CPUs. Earlier failures lack comparable CPU metadata; the new result
+does not establish their cause or erase their earlier regression verdicts.
+
+All 18 final comparison rows and all 12 retained interim comparison rows
+reconcile with the original case IDs, medians, percentage changes and labels.
+The corrected descriptions consistently call throughput cases LOW and paced
+100ms acknowledgment/recovery cases ON. The final specification, analysis and
+derived tables have aligned pipe columns. Original raw results are preserved.
+
+### Paused eight-target scope and checkpoint modes
+
+The broader optimization goal remains paused. This repair comparison does not
+supply new acceptance observations for the following eight target rows.
+Historical references below are the user's issue references, not fresh main
+measurements. No target is declared met by this complete maintained suite.
+
+| ID | Workload                                   | Historical reference | Single-CPU target             | Parallel target | This review    |
+|----|--------------------------------------------|----------------------|-------------------------------|-----------------|----------------|
+| 1  | Sealed-dimension StreamJoin, 1M quotes     | 701 ms               | ≤60 ms                        | ≤15 ms          | Not reassessed |
+| 2  | Sealed-dimension StreamJoin, 10M quotes    | 8,061 ms             | ≤600 ms                       | ≤150 ms         | Not reassessed |
+| 3  | Retained StreamJoin, 1M→4M resident quotes | 5.7×                 | ≤4.4×                         | —               | Not reassessed |
+| 4  | Join capture / restore per row             | 1.8 / 2.3 µs         | ≤0.1 / 0.2 µs                 | —               | Not reassessed |
+| 5  | Join handler latency during compaction     | 40× steady           | ≤2× steady                    | —               | Not reassessed |
+| 6  | StreamASOF, 1M rows per side               | 391 ms               | ≤100 ms                       | ≤30 ms          | Not reassessed |
+| 7  | ASOF harness overhead, 1,024-row batches   | 167 ms over operator | ≤2× measured projection floor | —               | Not reassessed |
+| 8  | Join operator cost, 1,024-row batch        | 0.2–0.9 ms           | ≤0.05 ms                      | —               | Not reassessed |
+
+OFF means checkpointing is actually disabled, including terminal checkpoint
+work. This complete run does not establish new OFF acceptance measurements.
+Historical streaming `group_by`, ordinary/small-batch streaming and warm cases
+use enabled checkpointing with a 24-hour interval: LOW, with terminal completion
+still required outside their processing timer. They are not OFF observations.
+The separate paced checkpoint/recovery cases use ON at 100ms and include their
+declared durable recovery work; their clocks must not be substituted for LOW.
+
+For the paused target protocol, rows 1, 2, 3, 6 and 7 retain separate OFF/LOW/ON
+acceptance. Rows 4 and 5 are checkpoint-enabled component measurements rather
+than invented periodic-frequency arms; row 8 distinguishes direct OFF/enabled
+contexts. Row 7 requires the newly measured projection floor at its prescribed
+size; the historical roughly 70ms reference is twice the historical floor,
+not a current measured floor. No missing mode or eight-target row is silently
+dropped, and no further eight-target measurement is authorized by this review.
 
 ### Verdict
 
 **Approve** for the reviewed implementation, narrow test-only static-analysis
-exception, Windows soak isolation and continued use of the one authorized
-complete-suite run's original candidate products. No source findings remain.
-No additional product measurement is required for the comments or CI change.
-This is not a merge approval: required CI, including the four Windows failures,
-and the complete benchmark acceptance result are still unresolved. The original
-regression is not marked fixed, and no speedup is established by these local
-tests or the earlier non-reproducing profile. Keep PR #412 draft until the full
-report has no missing cases, correctness/infrastructure errors or confirmed
-regressions, required CI is green, and the final specialist review is complete.
+exception, Windows soak isolation and final complete-suite evidence. No source,
+documentation or evidence finding remains. The 22-shard, 809-result acceptance
+is complete with no missing cases, correctness/infrastructure errors or confirmed
+regressions. The measured candidate retains its original SHA and seals.
+
+The final specialist review is complete. Commit the reviewed documentation and
+require green checks on that final head before the authorized merge. No new
+product measurement is needed for these evidence-only changes. Preserve the
+150 inconclusive cases, three informational slowdowns and unresolved historical
+causality; do not claim equivalence or completion of the paused eight-target goal.
