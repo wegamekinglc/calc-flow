@@ -2,8 +2,10 @@
 
 **Branch:** `fix/issue406-groupby-regression` → `main`
 **Base:** `e538099228b54882fe3b9fcc72d802e9998221ed`
-**Reviewed:** 2026-10-12, uncommitted diagnostic, workflow, test and artifact changes.
-No PR checks or prior GitHub reviews were consulted for this branch review.
+**Reviewed:** 2026-10-12, diagnostic implementation and its completed-run evidence;
+incremental workflow and analysis changes after `82306c6f`.
+PR #412 remains draft according to the implementer's handoff. No new PR check
+snapshot or prior GitHub reviews were requested for this incremental review.
 The reviewer read the changed files and existing verification evidence without
 running tests, native builds or benchmarks.
 
@@ -14,9 +16,10 @@ A/B comparisons followed by one address profile per native module. It retains
 the original workload, paired classification and common harness, with a fixed
 600-second collection budget and cancellation at 550 seconds.
 
-The reviewed scope supports one diagnostic dispatch. It does not change
-production behavior or the benchmark gate and does not resolve the repeated
-10M streaming `group_by` regression.
+The one diagnostic dispatch has completed. The incremental change records its
+results and retains CPU topology in future scheduled shard artifacts. Production
+behavior and the benchmark gate remain unchanged; the repeated 10M streaming
+`group_by` regression remains unresolved.
 
 ### Build and Test Results
 
@@ -39,6 +42,12 @@ production behavior or the benchmark gate and does not resolve the repeated
 - New unresolved failures: **None identified** in this diagnostic scope.
 - Existing regression: **Unresolved**. The original-wheel recovery again reports
   +10.097% for 10M streaming `group_by`; this review does not turn it green.
+- Completed diagnostic: **Collection succeeded; A/B inconclusive**. The reviewer
+  read the retained artifacts from run `38209692076`, artifact `11728218142`.
+  No tests, native builds, benchmarks, workflow validation or CI queries were
+  started for this incremental evidence review. The existing
+  `workflow-yaml.log` records both workflow files parsed and every step having
+  `run` or `uses`; the implementer also reported a passing whitespace check.
 
 Validation files are under this worktree's
 `target/issue406-local-validation/`. The focused implementation checks were:
@@ -84,6 +93,7 @@ None remain in the reviewed diagnostic. The following findings were addressed:
 None remain in the reviewed files. The specification's table alignment was
 corrected. The implementation reuses existing subprocess, measurement and
 classification helpers rather than adding a general measurement framework.
+The incremental analysis tables also align in the supplied formatting evidence.
 
 ### Test Coverage
 
@@ -94,9 +104,10 @@ termination cancellation and shell failure evidence/permission restoration.
 Existing diagnostic tests retain alternating pair order, input-hash comparison,
 environment validation, failure evidence and the old DAL-301 contract.
 
-The actual GitHub host, installed perf tool, permissions and native address
-capture have not yet been exercised by this diagnostic. Its preflight and trace
-checks must fail closed if the host cannot supply the specified evidence.
+The completed diagnostic exercised the GitHub host, installed perf tool,
+permissions and native address capture. This establishes collection on that host;
+it does not establish comparable CPU hardware for the earlier failed runs or
+prove that the observed sampling addresses explain their regression.
 
 ### Documentation Consistency
 
@@ -128,11 +139,51 @@ available; the document correctly avoids treating these as continuous worker
 peak measurements. Checkpointing remains enabled with a 24-hour interval, with
 EOF and the terminal checkpoint outside the paired timer.
 
+The completed five-case run records 179.518 seconds, no observed build overlap
+and the original wheel/native seals and common harness hash. All 120 paired
+observations pass their oracles, all twelve paired worker completions succeeded,
+all fourteen input hash mappings match, and all fourteen exit records are zero.
+All 692 host observations have zero swap usage and at least 14,273,576,960 bytes
+available. These remain sampled observations rather than continuous guarantees.
+
+A/A is -0.169% with `no-confirmed-regression`; B/B is +0.941% and A/B is -0.493%,
+both `inconclusive`. A/B's first interval extends to +9.737%, and B/B's first
+interval to +7.252%. Collection success does not establish equivalence or
+supersede either earlier +11.663% / +10.097% regression verdict.
+
+The runner reports AMD EPYC 9V45, family 26/model 2, two cores/four threads and
+32MiB L3. Earlier artifacts lack CPU model/cache records, so attributing the
+different timing level to a CPU-model change would remain speculative. The new
+`lscpu --json` step runs before measurement and writes `host-cpu.json` beneath
+the existing uploaded result tree. The shard runner preserves that file, and
+the aggregate consumes `results.json` rather than arbitrary JSON metadata.
+
+The raw profile streams contain 1,228/1,414 CPU samples in the two 30-second,
+49Hz windows, with 44/52 successful oracle-checked workloads. Recorded trace
+validation reports no lost or throttle events. Job logs confirm the temporary
+profiling permission changed from 4 to 1 and returned to 4. The six documented
+native ranges, self counts and percentages match `profile-address-summary.json`;
+the leading range has 1,142/1,306 inclusive samples. Its most sampled instruction
+is at offset `+0x21e5` in both products, with 67/70 self samples.
+
+The retained normalized disassemblies each contain 3,746 identical offset and
+instruction pairs for A, B and the existing ordinary local symbolized artifact.
+External call targets and RIP-relative relocations are normalized away. This
+supports an explicitly inferred mapping to the local
+`WindowAggregateOperator::process_data` future, not resolved original symbols,
+identical executable layouts or proven causality. Short prefixes do not resolve
+other function names. Hash/lookup work is a lead for a future reproduction;
+this profile includes work outside the paired timer and does not identify the
+cause of the earlier regression.
+The analysis now qualifies the lookup-region interpretation at its point of use
+and explicitly states that these observations cannot exclude other causes.
+
 ### Verdict
 
-**Approve** for one dispatch of the reviewed fixed diagnostic after committing
-the reviewed files. Preserve the 600-second budget, all five fixed cases and any
-partial/failure evidence; do not retry or expand the workload to obtain a passing
-result. Evaluate the resulting artifacts before proposing a production fix or
-claiming the original regression resolved. This is not a merge-ready or final-CI
-claim and does not resume the paused broader performance goal.
+**Approve** for the reviewed diagnostic, completed-run evidence and CPU metadata
+increment. No blocking findings remain in that scope. The fixed collection is
+complete; no retry or workload expansion is needed. The original regression
+remains unresolved, and no production fix is justified by this non-reproducing
+profile alone. Keep PR #412 draft; this review
+does not establish merge readiness, final CI success or resumption of the paused
+broader performance goal.

@@ -255,6 +255,10 @@ jobs:
             scripts.test_issue406_run scripts.test_issue406_groupby_diagnostic
           PYTHONPATH=target/adapter-site:. JAX_PLATFORMS=cpu \
             target/benchmark-venv/bin/python -m pytest benchmarks/test_warm_stream.py -q
+      - name: Record benchmark CPU topology
+        run: |
+          mkdir -p target/benchmark-results
+          lscpu --json > target/benchmark-results/host-cpu.json
       - name: Run all cases and compare versions on this runner
         env:
           BENCHMARK_SHARD: ${{ matrix.id }}
