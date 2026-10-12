@@ -158,7 +158,7 @@ deduplication choice. Old Error/Drop project serialization and checkpoint
 bytes retain their contract, but their checkpoints cannot initialize the new
 policy. See [two-branch recovery](streaming-guide.md#durable-recovery-of-both-branches).
 Project format 3, manifest version 3, and Studio REST `/api/v3` are independent
-of package version 2026.9.25.
+of package version 2026.10.12.
 
 ## Union and event-time windows
 

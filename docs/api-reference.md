@@ -9,11 +9,11 @@ The versions below describe this checkout. Published package versions can lag
 the source; use the [source installation](getting-started.md#build-and-install-from-source)
 for the contracts documented here.
 
-| Surface          | Package or path               | Purpose                                    |
-|------------------|-------------------------------|--------------------------------------------|
-| Python API       | `calc-flow-python==2026.9.25` | Expressions, Arrow execution, integrations |
-| Rust core        | `calc-flow = "2026.9.25"`     | Internal runtime and extension contracts   |
-| Local Studio API | `calc-flow-studio==2026.9.25` | Loopback FastAPI service and React assets  |
+| Surface          | Package or path                | Purpose                                    |
+|------------------|--------------------------------|--------------------------------------------|
+| Python API       | `calc-flow-python==2026.10.12` | Expressions, Arrow execution, integrations |
+| Rust core        | `calc-flow = "2026.10.12"`     | Internal runtime and extension contracts   |
+| Local Studio API | `calc-flow-studio==2026.10.12` | Loopback FastAPI service and React assets  |
 
 For examples and lifecycle detail, see the [executable example guide](examples.md),
 [Rust runtime reference](rust-api.md), [Python API](python-api.md), and
@@ -548,11 +548,11 @@ manifest publication uses `CheckpointPublicationUnknownError`.
 ## Version and compatibility
 
 The Rust crate, Python binding, Studio package, and frontend are versioned
-`2026.9.25` in this checkout. Project format version `3` and checkpoint-manifest version `3` are
+`2026.10.12` in this checkout. Project format version `3` and checkpoint-manifest version `3` are
 separate protocol values from the package version.
 
 Package versions use calendar versioning (`YYYY.M.D` release dates). Studio
-requires `calc-flow-python>=2026.9.25,<2027`.
+requires `calc-flow-python>=2026.10.12,<2027`.
 
 Projects accept strict format `3`; Studio serves `/api/v3`. See
 [projects and persistence](projects-guide.md) for validation and storage.
