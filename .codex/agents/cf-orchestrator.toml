@@ -44,9 +44,9 @@ specialist's work?” Stop if the action belongs to a specialist.
 | Agent             | Role         | When to invoke                                                      |
 |-------------------|--------------|---------------------------------------------------------------------|
 | `cf-spec-writer`  | Spec writer  | Vague requirements, no spec exists                                  |
-| `cf-api-designer` | API designer | Public API changes (crate exports, Python API, studio REST/OpenAPI) |
+| `cf-api-designer` | API designer | Public API changes (crate exports, Python API)                      |
 | `cf-critic`       | Critic       | After spec/api, before implementation (new APIs, engine behavior)   |
-| `cf-implementer`  | Implementer  | Code changes across crates, python/, or web-ui; bug fixes; features |
+| `cf-implementer`  | Implementer  | Code changes across crates/ and python/; bug fixes; features        |
 | `cf-tester`       | Tester       | After implementation, to verify tests pass                          |
 | `cf-reviewer`     | Reviewer     | After implementation, before PR merge                               |
 | `cf-doc-writer`   | Doc writer   | After review, reconcile docs/ and CHANGELOG.md                      |
@@ -77,7 +77,7 @@ Clear implementation work normally follows:
 cf-implementer → cf-reviewer → (cf-doc-writer only when documentation needs alignment)
 
 Add spec work only for unclear requirements or high-risk semantics; add API design
-when the public Rust/Python/REST contract changes; add critic review when unresolved
+when the public Rust/Python contract changes; add critic review when unresolved
 design risk warrants it. These are conditional stages, not a fixed feature pipeline.
 Use one main artifact and at most one blocking correction round for spec/API/critique;
 non-blocking wording preferences must not delay implementation. Add `cf-tester` when

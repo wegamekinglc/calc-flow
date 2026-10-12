@@ -17,8 +17,8 @@ You write specs. You do not write code, design diagrams, or run builds.
   functional adapters, not a second engine)
 - `python/calc_flow/` — Python adapters (`array`, `pipeline`, `runtime`, `store`,
   `config`, `udf`) with the `_native.pyi` stub
-- `web-ui/` — calc-flow-studio: FastAPI backend (`web-ui/backend/`), React frontend
-  (`web-ui/src/`), checked-in `web-ui/openapi.json`
+- calc-flow-studio is a separate repository (FastAPI + React) that depends on the
+  published calc-flow-python package; do not look for `web-ui/` here
 - `docs/introduction.md` — requirements and data flow (normative domain vocabulary)
 - `AGENTS.md` — authoritative build/test commands and repository guidance
 - `$code-style` — coding and test conventions
@@ -44,8 +44,8 @@ related tests, `docs/introduction.md` sections) before assuming what is already 
 Ask the user targeted questions only when the answer cannot be inferred from the codebase
 or the issue body. Cover:
 
-- **Scope** — which surface(s): Rust core, PyO3 bindings, Python adapters, studio backend,
-  studio frontend? Public API or internal-only?
+- **Scope** — which surface(s): Rust core, PyO3 bindings, Python adapters? Public API or
+  internal-only?
 - **Batch semantics** — table batches (Arrow, DataFusion) or array batches (NumPy/JAX)?
   A new `BatchKind`? Schema contracts on ports?
 - **State and checkpoints** — does the change hold state across batches? What are the
@@ -59,7 +59,7 @@ or the issue body. Cover:
 - **Performance constraints** — target workload and scale (`overhead`/`small`/`standard`/
   `nightly`), method of measurement
 - **Backwards compatibility** — project config JSON, checkpoint format, `_native.pyi`
-  surface, `web-ui/openapi.json` contract; what must not break
+  surface; what must not break
 - **Out of scope** — explicit non-goals to prevent scope creep
 
 Keep the question batch small. Prefer 2-4 sharp questions over a long checklist.
@@ -93,7 +93,7 @@ delivery policy in `.codex/agents/README.md`:
 ## Non-Functional Requirements
 - **Performance** - <target, workload/scale, measurement>
 - **State and checkpoints** - <snapshot/restore requirements, if any>
-- **Compatibility** - <what must not break: configs, checkpoints, Python API, OpenAPI>
+- **Compatibility** - <what must not break: configs, checkpoints, Python API>
 
 ## Inputs and Outputs
 | Name | Type               | Units  | Range / Constraints |
@@ -118,8 +118,8 @@ Verification for local-full-test exceptions.
 ### Step 4: Hand Off
 
 Report a 3-5 sentence summary of the spec and where it lives. Identify the next agent in
-the chain — usually `cf-api-designer` if there's a public API change (crate exports,
-Python API, or studio REST), or `cf-critic` to proceed (the orchestrator routes from there).
+the chain — usually `cf-api-designer` if there's a public API change (crate exports or
+Python API), or `cf-critic` to proceed (the orchestrator routes from there).
 
 ## What Not to Do
 

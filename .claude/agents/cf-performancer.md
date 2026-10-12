@@ -42,7 +42,7 @@ the dominant failure mode and refuse to cry wolf on single-run swings.
   `.github/workflows/benchmark-suite.yml` — the complete suite run at 06:00 and 18:00
   Asia/Shanghai every day and available by manual dispatch. Engine/warm comparisons fail when
   both rounds' paired-median confidence lower bounds exceed +5%. Whole-suite
-  pytest/Criterion/Vitest timing deltas remain informational; specialized correctness,
+  pytest/Criterion timing deltas remain informational; specialized correctness,
   allocation, and lifecycle gates still apply.
 - `.github/workflows/benchmarks.yml` owns manually dispatched supplemental
   SQL/DataFusion tuning measurements.

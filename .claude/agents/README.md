@@ -1,8 +1,10 @@
 # Calc Flow Agent Team
 
-A coordinated team of specialist agents for Calc Flow's Rust runtime, Python
-application API, and local Studio. The orchestrator routes work to the roles
-needed for each request, including documentation and independent review.
+A coordinated team of specialist agents for Calc Flow's Rust runtime and Python
+application API. Calc Flow Studio lives in the separate calc-flow-studio repository
+(FastAPI + React) and depends on the published calc-flow-python package; do not look
+for `web-ui/` here. The orchestrator routes work to the roles needed for each request,
+including documentation and independent review.
 
 This directory is a Claude compatibility mirror. The canonical agent definitions and
 descriptions live in `.codex/agents/`; synchronize team changes from `.codex/agents/` to
@@ -14,7 +16,7 @@ this directory, never in the reverse direction.
 |--------------|-------------------|--------|--------------------------------------------|---------------------------------------------|
 | Orchestrator | `cf-orchestrator` | purple | authorized context and completion reports  | task list                                   |
 | Spec writer  | `cf-spec-writer`  | orange | issues, introduction.md, AGENTS.md, rules  | `.codex/artifacts/specs/<slug>.md`          |
-| API designer | `cf-api-designer` | pink   | spec, crate exports, stubs, openapi.json   | `.codex/artifacts/api-notes/<slug>.md`      |
+| API designer | `cf-api-designer` | pink   | spec, crate exports, stubs                 | `.codex/artifacts/api-notes/<slug>.md`      |
 | Critic       | `cf-critic`       | red    | spec, api-note                             | `.codex/artifacts/critiques/<slug>.md`      |
 | Implementer  | `cf-implementer`  | green  | spec, api-note, critique                   | source code, tests, TDD in worktree         |
 | Tester       | `cf-tester`       | cyan   | source under-test, conventions             | tests for the touched surfaces, in worktree |
@@ -51,8 +53,8 @@ Follow [AGENTS.md Verification](../../AGENTS.md#verification): smallest local te
 necessary module checks; full regression gates in regular CI; routine benchmarks in
 the separate twice-daily scheduled workflow; local full runs only by explicit request,
 CI failure diagnosis, or clear high risk without CI coverage. State the reason and
-limited scope. Keep the Rust 90% line and Studio
-backend 85% coverage floors. Do not repeat unchanged passing checks. Take at most one
+limited scope. Keep the Rust 90% line coverage floor. Do not repeat unchanged passing
+checks. Take at most one
 non-blocking CI snapshot after a commit/push or at review handoff; do not wait or poll
 unless final results were explicitly requested. Pending permits handoff, not merge;
 required failures and unresolved checks still block merge.
@@ -97,7 +99,7 @@ Filenames share a single kebab-case slug derived from the request, so work trace
 
 ## Conventions Each Agent Honors
 
-- `.claude/rules/code-style.md` — functional-first Python/TypeScript, immutability, no
+- `.claude/rules/code-style.md` — functional-first Python, immutability, no
   caller-owned mutation, Arrow/Array-API backing rules, aligned markdown tables
 - `AGENTS.md` — authoritative build/test/verify commands per surface; `CLAUDE.md`
   mirrors the maintained operational guidance for Claude users
