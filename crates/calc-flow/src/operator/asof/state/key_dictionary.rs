@@ -382,6 +382,12 @@ impl RightState {
             .insert_admitted(order, row);
     }
 
+    pub fn push_reserved_unsigned(&mut self, id: u32, time: i64, sequence: u64, row: RowRef) {
+        Arc::get_mut(&mut self.entries[id as usize].bucket)
+            .expect("reserved ASOF admission bucket")
+            .push_admitted_unsigned(time, sequence, row);
+    }
+
     pub fn refresh_key(&mut self, key: &Encoding) {
         let id = self
             .find(self.hasher.hash_one(key.as_slice()), key.as_slice())

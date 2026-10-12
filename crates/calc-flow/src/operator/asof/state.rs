@@ -106,7 +106,7 @@ impl std::fmt::Debug for EncodedBatch {
 }
 
 impl EncodedBatch {
-    fn row(&self, row: usize) -> &[u8] {
+    pub(super) fn row(&self, row: usize) -> &[u8] {
         match &self.storage {
             EncodedBatchStorage::Binary(rows) => rows.value(row),
             EncodedBatchStorage::LargeBinary(rows) => rows.value(row),

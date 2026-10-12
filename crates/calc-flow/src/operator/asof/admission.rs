@@ -20,6 +20,7 @@ use std::{collections::HashSet, hash::BuildHasher, sync::Arc};
 
 mod direct;
 pub(super) mod parallel;
+mod right;
 
 #[derive(Clone, Copy)]
 pub(super) struct ValidatedInput {
@@ -42,6 +43,7 @@ pub(super) struct Admission {
     pub left_chunks: Option<Vec<state::PreparedLeftChunk>>,
     pub right_capacities: Vec<(state::Encoding, usize)>,
     pub right_buckets: Option<parallel::PreparedAdmission>,
+    pub right_columns: Option<right::Columns>,
     _workspace: AdmissionWorkspace,
 }
 
@@ -449,6 +451,25 @@ impl StreamAsofJoinOperator {
                 .prepare(self, batch, input, identity_workspace, context)
                 .await;
         }
+        let right = match right::plan(self, batch, input, context) {
+            Err(error)
+                if matches!(
+                    &error,
+                    crate::CalcFlowError::OperatorReason {
+                        reason_code: StreamingFailureReason::AsofWorkspaceLimitExceeded,
+                        ..
+                    }
+                ) =>
+            {
+                self.validate_duplicates_without_workspace(batch, input, context)
+                    .await?;
+                return Err(error);
+            }
+            result => result?,
+        };
+        if let Some(plan) = right {
+            return plan.prepare(self, batch, input, identity_workspace, context);
+        }
         let InputIdentities {
             rows,
             duplicates,
@@ -489,6 +510,7 @@ impl StreamAsofJoinOperator {
             accepted,
             right_capacities,
             right_buckets: None,
+            right_columns: None,
             _workspace: workspace,
         })
     }
@@ -961,6 +983,9 @@ fn identities_are_after_state<'a>(
 
 impl Admission {
     pub fn len(&self) -> usize {
+        if self.right_columns.is_some() {
+            return self.right_capacities.iter().map(|(_, count)| count).sum();
+        }
         self.left_chunks.as_ref().map_or(self.rows.len(), |chunks| {
             chunks.iter().map(state::PreparedLeftChunk::len).sum()
         })
@@ -1003,13 +1028,17 @@ impl Admission {
                         )
                     })
                     .collect::<Vec<_>>();
-                for (identity, payload) in self.rows.drain(..) {
-                    let row = payload_refs[payload.batch_index].with_row(payload.row);
-                    state.right.insert_reserved(
-                        handles[payload.key_index as usize],
-                        (identity.0, identity.2),
-                        row,
-                    );
+                if let Some(columns) = self.right_columns.take() {
+                    columns.install(&mut state.right, &handles, &payload_refs);
+                } else {
+                    for (identity, payload) in self.rows.drain(..) {
+                        let row = payload_refs[payload.batch_index].with_row(payload.row);
+                        state.right.insert_reserved(
+                            handles[payload.key_index as usize],
+                            (identity.0, identity.2),
+                            row,
+                        );
+                    }
                 }
             }
             for (key, _) in self.right_capacities.drain(..) {

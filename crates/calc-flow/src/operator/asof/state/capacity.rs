@@ -76,9 +76,10 @@ impl State {
             owners.project_add_counts(self.admission_owned_encodings(rows, chunks, right_counts));
         let pool = self.batches.project_admission(batches, name)?;
         let mut inventory = snapshot.inventory_without_index();
-        let count = chunks.map_or(rows.len(), |chunks| {
-            chunks.iter().map(PreparedLeftChunk::len).sum()
-        });
+        let count = chunks.map_or_else(
+            || right_counts.iter().map(|(_, count)| count).sum(),
+            |chunks| chunks.iter().map(PreparedLeftChunk::len).sum(),
+        );
         inventory =
             self.admission_column_inventory(inventory, count, chunks, right_counts, name)?;
         inventory.bytes = checked(

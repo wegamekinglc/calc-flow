@@ -1,6 +1,7 @@
 use super::*;
 
 mod lifecycle;
+mod right;
 
 thread_local! {
     static CANONICAL_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -35,7 +36,7 @@ pub(in super::super::super::super) fn string_unsigned_input(count: usize) -> Bat
 }
 
 #[test]
-fn test_direct_left_admission_avoids_per_row_canonical_descriptors() {
+fn test_direct_admission_avoids_per_row_canonical_descriptors() {
     use crate::{OperatorMetadata, StreamOperator};
 
     let input = string_unsigned_input(4_097);
@@ -86,6 +87,41 @@ fn test_direct_left_admission_avoids_per_row_canonical_descriptors() {
         canonical, 0,
         "eligible input built canonical row descriptors"
     );
+    right_avoids_descriptors();
+}
+
+fn right_avoids_descriptors() {
+    use crate::{OperatorMetadata, StreamOperator};
+
+    let input = string_unsigned_input(4_097);
+    let schema = input.table_payload().unwrap().batches()[0].schema();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let mut operator = fixture(&schema);
+        let pool = operator.runtime.pool.clone();
+        let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+        let context = StreamOperatorContext::new(&job, "asof", None);
+        let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+        CANONICAL_ROWS.set(0);
+        operator
+            .process_data("right", input, &context, &mut output)
+            .await
+            .unwrap();
+        assert_eq!(operator.status.right.accepted_rows, 4_097);
+        assert_eq!(operator.status.state_rows, 4_097);
+        assert_eq!(operator.status.retained_right_rows, 4_097);
+        assert_eq!(
+            CANONICAL_ROWS.replace(0),
+            0,
+            "right admission built per-row canonical descriptors"
+        );
+        drop((operator, output, context));
+        drop(job);
+        assert_eq!(pool.reserved(), 0);
+    });
 }
 
 async fn compare_preparation(
@@ -215,6 +251,7 @@ fn test_direct_left_dictionary_boundaries_and_fallback_match_legacy() {
             &service,
         ));
     }
+    runtime.block_on(right::run_cases(&service));
     drop(runtime);
     service.shutdown();
 }

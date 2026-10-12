@@ -28,7 +28,7 @@ pub(super) fn plan(
     if identity_tests::columnar::legacy_requested() {
         return Ok(None);
     }
-    if !eligible(operator, batch, input) {
+    if input.index != 0 || !eligible(operator, batch, input) {
         return Ok(None);
     }
     let side = operator.spec.left();
@@ -64,14 +64,17 @@ pub(super) fn plan(
     }))
 }
 
-fn eligible(operator: &StreamAsofJoinOperator, batch: &Batch, input: ValidatedInput) -> bool {
-    let side = operator.spec.left();
-    let schema = &operator.schemas[0];
+pub(super) fn eligible(
+    operator: &StreamAsofJoinOperator,
+    batch: &Batch,
+    input: ValidatedInput,
+) -> bool {
+    let side = input.side(&operator.spec);
+    let schema = &operator.schemas[input.index];
     let ([key], [sequence]) = (side.keys(), side.sequence_by()) else {
         return false;
     };
-    if input.index != 0
-        || batch.num_rows() == 0
+    if batch.num_rows() == 0
         || schema
             .field_with_name(key)
             .expect("validated key")
@@ -112,7 +115,7 @@ fn encode_ordered_keys(
     Ok(Some(keys))
 }
 
-fn strictly_ordered(
+pub(super) fn strictly_ordered(
     records: &[RecordBatch],
     side: &AsofJoinSide,
     input: ValidatedInput,
@@ -203,6 +206,7 @@ impl IdentityPlan {
             left_chunks,
             right_capacities: Vec::new(),
             right_buckets: None,
+            right_columns: None,
             _workspace: workspace,
         };
         debug_assert_eq!(admission.len(), expected_rows);
@@ -246,11 +250,19 @@ fn encode_complete_payloads(
     operator: &StreamAsofJoinOperator,
     input: &Batch,
 ) -> Result<Vec<Arc<state::PayloadBatch>>> {
+    encode_complete_payloads_for(operator, input, 0)
+}
+
+pub(super) fn encode_complete_payloads_for(
+    operator: &StreamAsofJoinOperator,
+    input: &Batch,
+    side: usize,
+) -> Result<Vec<Arc<state::PayloadBatch>>> {
     let retained = operator
         .payload_projection
         .as_ref()
-        .map(|plan| &plan.columns[0]);
-    let base = operator.admission_base(0);
+        .map(|plan| &plan.columns[side]);
+    let base = operator.admission_base(side);
     let mut position = 0;
     input
         .table_payload()?
@@ -269,9 +281,9 @@ fn encode_complete_payloads(
             let compact = compact_complete_record(projected.as_ref().unwrap_or(record))?;
             let payload = encode_payload(
                 compact,
-                0,
+                side,
                 base + position,
-                operator.physical_header(0),
+                operator.physical_header(side),
                 &operator.name,
             )?;
             position += record.num_rows() as u64;
