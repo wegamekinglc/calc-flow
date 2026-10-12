@@ -1339,6 +1339,39 @@ impl<'a> OutputRun<'a> {
 
 impl ChunkRun<'_> {
     fn visit_keys(self, count: usize, prefix: &mut super::LeftPrefix, batch: BatchKey) {
+        let slots = self.chunk.data.keys.len();
+        if slots <= 64 {
+            let mut counts = [0; 64];
+            self.visit_key_counts(count, prefix, batch, &mut counts[..slots]);
+        } else if slots <= count / 2 {
+            // Histogram scratch fits within the selected-row u32 copy it replaces.
+            let mut counts = vec![0; slots];
+            self.visit_key_counts(count, prefix, batch, &mut counts);
+        } else {
+            self.visit_sorted_keys(count, prefix, batch);
+        }
+    }
+
+    fn visit_key_counts(
+        self,
+        count: usize,
+        prefix: &mut super::LeftPrefix,
+        batch: BatchKey,
+        counts: &mut [usize],
+    ) {
+        let data = &self.chunk.data;
+        for id in &data.key_ids[self.start..self.start + count] {
+            counts[*id as usize] += 1;
+        }
+        for (id, amount) in counts.iter().copied().enumerate() {
+            if amount != 0 {
+                let key = data.keys[id].as_ref().expect("live ASOF key");
+                prefix.visit_key(key, batch, amount);
+            }
+        }
+    }
+
+    fn visit_sorted_keys(self, count: usize, prefix: &mut super::LeftPrefix, batch: BatchKey) {
         let data = &self.chunk.data;
         let mut key_ids = data.key_ids[self.start..self.start + count].to_vec();
         key_ids.sort_unstable();
