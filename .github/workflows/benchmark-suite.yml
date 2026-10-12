@@ -252,7 +252,7 @@ jobs:
             scripts.test_profile_warm_stream scripts.test_performance_plan \
             scripts.test_entity_parallel_inventory scripts.test_join_asof_acceptance \
             scripts.test_issue406_fresh_runner scripts.test_issue406_fresh_v3 \
-            scripts.test_issue406_run
+            scripts.test_issue406_run scripts.test_issue406_groupby_diagnostic
           PYTHONPATH=target/adapter-site:. JAX_PLATFORMS=cpu \
             target/benchmark-venv/bin/python -m pytest benchmarks/test_warm_stream.py -q
       - name: Run all cases and compare versions on this runner

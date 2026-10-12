@@ -14,13 +14,20 @@ class BenchmarkWorkflowTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/benchmarks.yml").read_text(
             encoding="utf-8"
         )
-        self.assertIn("options: [standard, dal301-groupby, suite-recovery]", workflow)
+        self.assertIn(
+            "options: [standard, dal301-groupby, suite-recovery, issue406-groupby]",
+            workflow,
+        )
         for job in ("sql-datafusion-paired", "sql-datafusion-matrix"):
             definition = workflow.split(f"  {job}:\n", 1)[1].split("    steps:", 1)[0]
             self.assertIn("if: inputs.mode == 'standard'", definition)
         recovery = workflow.split("  suite-recovery:\n", 1)[1]
         self.assertIn("if: inputs.mode == 'suite-recovery'", recovery)
         self.assertIn("actions: read", workflow)
+        diagnostic = workflow.split("  issue406-groupby:\n", 1)[1].split(
+            "  suite-recovery:\n", 1
+        )[0]
+        self.assertIn("if: inputs.mode == 'issue406-groupby'", diagnostic)
 
     def test_recovery_preserves_sealed_wheels_and_full_shard_measurement(self):
         workflow = (ROOT / ".github/workflows/benchmarks.yml").read_text(

@@ -8,20 +8,29 @@ import time
 from contextlib import suppress
 from pathlib import Path
 
-from scripts.benchmark_suite.process import ROOT, Worker, child_environment
+from scripts.benchmark_suite.process import (
+    ROOT,
+    Worker,
+    _complete_owned,
+    _raise_command_error,
+    _stop_command,
+    child_environment,
+)
 from scripts.toolkit import sha256_file, write_json
 
 
 class AuditWorker(Worker):
+    worker_module = "scripts.groupby_diagnostic"
+
     @classmethod
     async def start(cls, site: Path, root: Path):
         root.mkdir(parents=True, exist_ok=True)
         log = (root / "stderr.log").open("wb")
-        try:
-            process = await asyncio.create_subprocess_exec(
+        creation = asyncio.create_task(
+            asyncio.create_subprocess_exec(
                 sys.executable,
                 "-m",
-                "scripts.groupby_diagnostic",
+                cls.worker_module,
                 "worker",
                 "--output",
                 str(root),
@@ -31,8 +40,16 @@ class AuditWorker(Worker):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=log,
             )
-        except BaseException:
-            log.close()
+        )
+        try:
+            process = await asyncio.shield(creation)
+        except BaseException as error:
+            try:
+                await _stop_command(creation, None)
+            except BaseException as cleanup_error:
+                _raise_command_error(error, cleanup_error)
+            finally:
+                log.close()
             raise
         return cls(process, log)
 
@@ -60,8 +77,13 @@ class AuditWorker(Worker):
 
     async def close(self) -> None:
         path = Path(self.log.name).with_name("exit.json")
+        closing = asyncio.create_task(super().close())
         try:
-            await super().close()
+            try:
+                await asyncio.shield(closing)
+            except asyncio.CancelledError:
+                await _complete_owned(closing)
+                raise
         finally:
             write_json(
                 path, {"pid": self.process.pid, "exit_code": self.process.returncode}

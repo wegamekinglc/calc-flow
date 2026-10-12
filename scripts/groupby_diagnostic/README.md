@@ -95,3 +95,32 @@ For a local selection-only check, without building or sampling:
 python -m scripts.groupby_diagnostic plan --output target/dal301-plan
 python -m unittest scripts.test_groupby_diagnostic scripts.test_rust_toolchain_diagnostics
 ```
+
+## October 12 original-wheel 10M diagnostic
+
+The morning failure and one sealed-wheel recovery both report a 10–12% regression
+for `calc-flow-stream/group_by`, N=10000000. The separate `issue406-groupby` manual
+mode collects only A/A, B/B, A/B and one original-native address profile per side.
+It does not run the DAL-301 cases, rebuild wheels, or run a complete shard.
+
+```bash
+gh workflow run benchmarks.yml --repo wegamekinglc/calc-flow \
+  --ref fix/issue406-groupby-regression -f mode=issue406-groupby
+```
+
+Dispatch once after review. The maintained case, oracle, paired statistics and
+common harness hash stay unchanged. Original wheel/native seals, Python 3.13.16
+and actual four-CPU GitHub-hosted Linux are required. Collection has a 600-second
+budget including fixture/preflight/startup/cleanup, with cancellation at 550
+seconds; no native builds are needed. Dependencies/tools/artifact transfer are
+separate workflow setup. This historical case has checkpoints enabled at a
+24-hour interval; its timer excludes terminal capture and is not checkpoint OFF.
+
+Perf samples the original stripped modules at 49Hz using `cpu-clock:u` and DWARF
+unwinding. The temporary runner records and sets `perf_event_paranoid=1`, restoring
+its previous value on shell exit. Native addresses are evidence, not resolved
+Rust function names. Raw samples/maps/events, resource traces, seals, input hashes,
+IPC and command/exit logs survive failure. Installed package directories and
+local Arrow fixture intermediates are excluded from upload. A completed collector
+does not turn a regression verdict into a pass. See the
+[fixed diagnosis specification](../../.codex/artifacts/specs/issue406-groupby-regression.md).

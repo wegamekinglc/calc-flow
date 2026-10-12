@@ -75,13 +75,32 @@ Triggered exactly one existing `suite-recovery` run,
 for the failed `engines-10000000` shard. It reuses the original run's sealed wheels
 and exact source refs, preserves the complete shard and unchanged gate, and keeps
 resource diagnostics. It does not rebuild or substitute the current ASOF feature.
-Its completion and raw evidence must be evaluated before claiming the failure
-resolved. Do not retry repeatedly for a passing result.
+It completed with all 51 cases and no missing/oracle errors. Only the original
+10M stream group_by case regressed again:
+
+| Recovery observation       | Value                                |
+|----------------------------|--------------------------------------|
+| Baseline / candidate p50   | 860.439 / 947.314 ms                 |
+| Combined p50 change        | +10.097%                             |
+| Round 1 paired median / CI | +9.951% [+9.255%, +10.574%]          |
+| Round 2 paired median / CI | +10.146% [+8.905%, +10.633%]         |
+
+Both original native seals and common harness hash match. All 197 host resource
+snapshots report zero swap usage; minimum available host memory was 8,543MiB.
+The group_by snapshot had 14,196MiB available and a worker RSS of 827,580KiB.
+These snapshots show no memory pressure explanation for the repeated regression;
+they are not continuous per-worker peak measurements. The systemd unit's reported
+3MiB peak does not describe the workers and is not used as their memory evidence.
+No additional full-shard retries are planned.
 
 The dispatched workflow definition comes from release main `8ce5380b`, advanced
 after the morning run. The recovery job explicitly checks out candidate
 `8ee5b71b` and baseline `89e51141`; its product inputs remain the original refs.
 The workflow run head must not be mislabeled as the measured product.
+
+The next collection is the fixed five-case original-wheel diagnostic specified in
+`../specs/issue406-groupby-regression.md`: three controls/comparisons and two
+instruction-address profiles, with a 600-second budget and no native rebuilds.
 
 Root cause attribution is still open. A host-dependent binary/code-layout effect
 or runner behavior is a hypothesis, not an established finding. No production
