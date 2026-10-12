@@ -9,6 +9,15 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-13: Make Studio's parent-side registration reads tolerant of the full
+  record contract. `RunManager` capabilities and preview submission skip
+  records of kinds Studio cannot replay in a worker, such as `kafka_decoder`,
+  instead of raising `KeyError`, and strip unlisted keys such as the NumPy and
+  JAX helpers' process-local `stream_lifecycle` proof before transport, so
+  helper-installed providers replay into preview workers instead of failing
+  the strict worker preflight. The worker preflight is unchanged and still
+  rejects malformed or unknown records.
+
 - 2026-10-12: Make three `calc_flow.Runtime` methods public:
   `register_mapping_provider`, `registration_snapshot`, and
   `capability_registration_snapshot`. The underscore spellings

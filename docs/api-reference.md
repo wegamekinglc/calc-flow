@@ -501,9 +501,12 @@ session route is excluded from the generated OpenAPI document.
 `/capabilities` deliberately separates two scopes. `runtime` is the parent
 session snapshot used for compilation. `preview.workerRegistrations` describes
 whether a matching registration can be reconstructed as `serialized`,
-`lazyBuiltin`, or `unavailable` in a spawned worker. Transportability
-is not a promise that arbitrary project input is executable: normal compile,
-Port, option, input-format, and resource-limit checks still apply.
+`lazyBuiltin`, or `unavailable` in a spawned worker. Registration records of
+kinds Studio cannot replay in a worker, such as `kafka_decoder`, are omitted
+from `preview.workerRegistrations`; the `runtime` scope is unchanged and never
+lists them either. Transportability is not a promise that arbitrary project
+input is executable: normal compile, Port, option, input-format, and
+resource-limit checks still apply.
 
 Only NumPy/JAX `expression@1` is eligible for lazy built-in reconstruction.
 There is no lazy `table_matmul@1`; a parent registration may therefore be

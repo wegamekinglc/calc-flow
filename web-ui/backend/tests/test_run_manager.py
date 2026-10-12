@@ -1453,6 +1453,184 @@ def test_worker_preflight_failure_does_not_advance_runtime_revision() -> None:
     assert runtime.registration_snapshot() == before
 
 
+def _kafka_decoder_record() -> dict[str, object]:
+    return {
+        "kind": "kafka_decoder",
+        "name": "payload",
+        "version": "1",
+        "function": _worker_callback,
+    }
+
+
+def _mapped_identity_project() -> ProjectDocument:
+    return ProjectDocument.model_validate(
+        {
+            "format_version": 3,
+            "id": "mapped",
+            "name": "Mapped provider",
+            "runtime": {"mode": "batch", "options": {}},
+            "graph": {
+                "name": "Mapped provider",
+                "nodes": [
+                    {
+                        "id": "mapped",
+                        "operator": {
+                            "kind": "external",
+                            "provider": "test",
+                            "name": "mapped_identity",
+                            "version": "1",
+                            "options": {},
+                        },
+                        "input_ports": [
+                            {"name": "input", "kind": "table", "required": True}
+                        ],
+                        "output_ports": [
+                            {"name": "output", "kind": "table", "required": True}
+                        ],
+                    }
+                ],
+            },
+            "data_sources": [_source(data=[{"value": 7}])],
+        }
+    )
+
+
+def test_selected_registrations_strip_private_keys_and_skip_decoder_records() -> None:
+    project_json = json.dumps(
+        {
+            "graph": {
+                "nodes": [
+                    {
+                        "operator": {
+                            "kind": "external",
+                            "provider": "test",
+                            "name": "identity",
+                            "version": "1",
+                        }
+                    },
+                    {
+                        "operator": {
+                            "kind": "external",
+                            "provider": "test",
+                            "name": "mapped_identity",
+                            "version": "1",
+                        }
+                    },
+                    {
+                        "operator": {
+                            "kind": "expression",
+                            "expression": "result = identity(value)",
+                            "udfs": [
+                                {
+                                    "kind": "data_fusion_scalar",
+                                    "provider": "test",
+                                    "name": "identity",
+                                    "version": "1",
+                                }
+                            ],
+                        }
+                    },
+                ]
+            }
+        }
+    )
+    registrations = (
+        {**_valid_worker_provider(), "stream_lifecycle": object()},
+        {
+            **_valid_worker_mapping_provider(),
+            "name": "mapped_identity",
+            "stream_lifecycle": object(),
+        },
+        {**_valid_worker_scalar_udf(), "stream_lifecycle": object()},
+        _kafka_decoder_record(),
+    )
+
+    selected = _selected_registrations(project_json, registrations)
+
+    assert selected == (
+        _valid_worker_provider(),
+        {**_valid_worker_mapping_provider(), "name": "mapped_identity"},
+        _valid_worker_scalar_udf(),
+    )
+    run_manager_module._preflight_registrations(selected)
+
+
+def test_submit_restores_helper_records_without_their_private_keys() -> None:
+    runtime = Runtime()
+
+    def identity(inputs: dict[str, Batch], _options: object) -> dict[str, Batch]:
+        return {"output": inputs["input"]}
+
+    runtime.register_mapping_provider(
+        "test",
+        "mapped_identity",
+        "1",
+        identity,
+        input_ports=(("input", "table"),),
+        output_ports=(("output", "table"),),
+    )
+    snapshot = runtime.registration_snapshot()
+
+    class HelperRuntime:
+        def registration_snapshot(self) -> tuple[dict[str, object], ...]:
+            return (
+                {**snapshot[0], "stream_lifecycle": object()},
+                _kafka_decoder_record(),
+            )
+
+    manager = RunManager(
+        runtime=HelperRuntime(),  # type: ignore[arg-type]
+        use_processes=False,
+    )
+
+    run = manager.submit(_mapped_identity_project(), RunRequest())
+
+    assert _wait(manager, run.id, timeout=20) is RunStatus.COMPLETED
+    result = manager.get(run.id).result
+    assert result is not None
+    assert result.outputs["output"].rows == ({"value": 7},)
+    manager.shutdown()
+
+
+def test_capabilities_skip_decoder_records_in_the_parent_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        run_manager_module,
+        "_preflight_lazy_builtins",
+        lambda: (),
+        raising=False,
+    )
+    runtime = Runtime()
+    runtime.register_provider("test", "identity", "1", lambda batch, _options: batch)
+    snapshot, registrations = runtime.capability_registration_snapshot()
+
+    class DecoderRuntime:
+        def capability_registration_snapshot(self) -> object:
+            return snapshot, (*registrations, _kafka_decoder_record())
+
+        def validation_report(self, project_json: str) -> dict[str, object]:
+            return runtime.validation_report(project_json)
+
+    manager = RunManager(
+        runtime=DecoderRuntime(),  # type: ignore[arg-type]
+        use_processes=False,
+    )
+
+    document = manager.capabilities().model_dump(mode="json", by_alias=True)
+
+    assert document["preview"]["workerRegistrations"] == [
+        {
+            "reconstruction": "serialized",
+            "registrationKind": "provider",
+            "provider": "test",
+            "name": "identity",
+            "version": "1",
+        }
+    ]
+    manager.shutdown()
+
+
 def test_worker_registers_only_exact_referenced_builtin_providers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
