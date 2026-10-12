@@ -228,10 +228,19 @@ fn admission_changes(
             });
         }
     } else {
-        for (identity, reference) in &admission.rows {
+        let columnar = admission
+            .right_columns
+            .as_ref()
+            .into_iter()
+            .flat_map(|columns| columns.identities(&admission.right_capacities));
+        let canonical = admission
+            .rows
+            .iter()
+            .map(|(identity, reference)| (identity.clone(), *reference));
+        for (identity, reference) in columnar.chain(canonical) {
             let batch = &admission.batches[reference.batch_index];
             edits.push(Change {
-                identity: Identity::Right(identity.clone()),
+                identity: Identity::Right(identity),
                 before: None,
                 after: Some(Version::Right {
                     tag: 1,
@@ -461,7 +470,7 @@ impl StreamAsofJoinOperator {
         let count = if side == 0 {
             admission.left_chunks.as_ref().map_or(0, Vec::len)
         } else {
-            admission.rows.len()
+            admission.len()
         };
         if self.log_prefers_base(count as u64) {
             return Ok(Journal::base());

@@ -146,7 +146,7 @@ impl StreamAsofJoinOperator {
             .batches
             .project_admission(&admission.batches, &self.name)?
             .new_batches;
-        if ingress == "right" {
+        if ingress == "right" && admission.right_columns.is_none() {
             admission.right_buckets = admission::parallel::prepare(self, &admission, context)
                 .await
                 .map_err(|error| self.attempt_error(error))?;

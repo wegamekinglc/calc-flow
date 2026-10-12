@@ -208,6 +208,14 @@ impl SequenceColumn {
         }
     }
 
+    pub fn push_unsigned_64(&mut self, value: u64) {
+        debug_assert_eq!(self.kind, SequenceKind::Unsigned(8));
+        let Storage::Integer(values) = &mut self.storage else {
+            unreachable!("proven unsigned sequence column")
+        };
+        values.extend_from_slice(&value.to_le_bytes());
+    }
+
     pub fn insert(&mut self, index: usize, value: Encoding) {
         self.reserve(1);
         let raw = self

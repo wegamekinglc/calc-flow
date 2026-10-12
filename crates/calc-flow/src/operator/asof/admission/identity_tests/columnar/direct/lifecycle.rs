@@ -42,6 +42,7 @@ fn test_direct_left_nullable_projection_compacts_slices_without_mutation() {
             let sliced = batch(vec![original.slice(17, 3)]);
             compare_preparation(&mut operator, &sliced, None, true, &service).await;
         }
+        right::projected_cases(&input, &service).await;
         assert_eq!(input.table_payload().unwrap().batches()[0], original);
         assert_eq!(
             original

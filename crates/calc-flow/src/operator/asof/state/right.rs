@@ -514,6 +514,16 @@ impl RightBucket {
             .insert(order, payload);
     }
 
+    pub fn push_admitted_unsigned(&mut self, time: i64, sequence: u64, payload: RowRef) {
+        let run = self
+            .payloads
+            .as_mut()
+            .expect("reserved ASOF payload columns");
+        run.times.push(time);
+        run.sequences.push_unsigned_64(sequence);
+        run.values.push(Some(payload));
+    }
+
     pub fn with_admitted(
         &self,
         rows: &[(RightOrder, RowRef)],
