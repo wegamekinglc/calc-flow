@@ -281,3 +281,52 @@ passed (21m45s), including its maintained coverage gate. macOS smoke had already
 passed. The remaining source-head scanner finding is addressed by the reviewed
 line-local comments above; its hosted result must be rechecked after pushing
 those comments. Complete benchmark measurement is still in progress.
+
+
+### Subsequent Windows fault-test failure and scoped isolation repair
+
+Comment head `c449ad38` passed hosted Codacy. Its later Windows Rust job
+`114753441793` in run
+[38231970645](https://github.com/wegamekinglc/calc-flow/actions/runs/38231970645)
+failed with 2,029 passed, four failed, seven ignored and two filtered tests in
+156.27s. The failed cases are `m5_fault_manifest_rename_restart`,
+`m5_fault_manifest_rename_panic`, `m5_fault_retention_restart` and
+`m5_fault_source_cut_restart`. This differs from the earlier four failures and
+prevents treating the first green run as proof that all Windows instability was
+caused by nested Cargo.
+
+For ManifestRename/Restart the job reached only SourcesCut, elapsed 5.504s,
+with zero injected fault triggers. ManifestRename/Panic did execute its intended
+panic, then failed while checkpointing on restart. Other failures show durable
+sink checkpoint errors. These logs establish failure before or outside the
+intended oracle, but do not identify the exact Windows filesystem/scheduling
+cause. The complete raw log is retained in `repair-complete/windows-comments-rust.log`.
+
+The repair extends the already existing serial Windows checkpoint soak stage
+to the entire soak module. Identical `runtime::streaming::soak::` selectors defer
+that module from the parallel core command and run it afterward with one test
+thread. The remaining core suite stays parallel; all fault assertions, runtime
+five-second checkpoint timeouts, step/job deadlines, generation artifact capture
+and exit-status forwarding are unchanged. No test is newly ignored. Specialist
+log inventory finds 66 executable Windows module cases and three already ignored;
+final CI must account for all 69. The existing Linux binary lists 70 module cases
+out of 2,048 tests; its selection partitions into 1,978 parallel and 70 isolated
+cases with no overlap or omission (Windows has a platform-specific inventory).
+
+The workflow-selection check failed once before implementation, then all four
+isolation checks passed. The directly affected Python harness module completed
+20 tests in 3.113s, with one pre-existing platform skip. Ruff lint/format passed.
+These are configuration/harness checks, not a successful Windows runtime result.
+The complete suite's original candidate, dependencies, collector hash inputs and
+benchmark timing scopes are unaffected by this CI-only change.
+
+### First fresh repair comparison
+
+The completed 100k engine fragment of run `38228629578` contains 65 cases with
+zero errors and passes maintained fragment/provenance validation against main
+`e5380992` and candidate `6978f3bf`. LOW streaming `group_by` p50 is
+7.4830205 ms / 6.770371 ms, a -9.5236% change. Its two round intervals are
+[-12.1083%, -7.1205%] and [-10.7744%, -8.6412%], with maintained verdict
+`improved`. It retains the 24-hour checkpoint interval and terminal completion
+outside the ready-to-Arrow timer. This is a partial new-product comparison;
+the complete report and the original failing 10M workload remain pending.

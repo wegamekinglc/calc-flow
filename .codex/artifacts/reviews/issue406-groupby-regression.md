@@ -9,6 +9,9 @@ The repair touches two Rust files and its specification, analysis and review.
 The subsequent review covers only test comments on
 `6978f3bf773d76f77d60a4d181e2ad88596438d1` and the narrow static-analysis exception
 documented below.
+The latest increment reviews Windows soak isolation on
+`c449ad38cd9e412cc730bbedae37fee15af29e2e` plus the worktree changes to
+`.github/workflows/ci-windows.yml` and `scripts/test_run_rust_tests.py`.
 PR #412 remains draft according to the implementer's handoff. No new PR check
 snapshot or prior GitHub reviews were requested for this incremental review.
 The reviewer read the changed files and existing verification evidence without
@@ -26,6 +29,8 @@ The subsequent user-authorized repair uses the existing randomized AHash for
 four temporary window lookup maps and makes the sensitive-log test reuse its
 current executable. The repeated 10M streaming `group_by` regression remains
 unresolved pending the separately authorized complete benchmark and required CI.
+The Windows follow-up moves the complete checkpoint-soak module into the
+existing serial stage while keeping the remaining Rust suite parallel.
 
 ### Build and Test Results
 
@@ -70,8 +75,26 @@ unresolved pending the separately authorized complete benchmark and required CI.
   writer-v2 recovery, queued launch cancellation, SQL queue draining and
   checkpoint-soak cancellation. Reusing the current executable removes nested
   native compilation and a demonstrated feature mismatch; it does not prove
-  that either caused all four timeouts. A new required Windows result must
-  establish that they pass in the original parallel configuration.
+  that either caused all four timeouts. The later retained `6978f3bf` log has
+  2,033 passed, seven ignored and two smoke tests deferred; both smoke tests
+  subsequently pass. The main lib execution takes 90.54s and the smoke stage
+  71.13s. This is evidence for that run, not an absence of Windows instability.
+- The retained `c449ad38` log from run `38231970645`, job `114753441793`, has
+  2,029 passed, four failed, seven ignored and two deferred tests in 156.27s.
+  These failures are `m5_fault_manifest_rename_restart`,
+  `m5_fault_manifest_rename_panic`, `m5_fault_retention_restart` and
+  `m5_fault_source_cut_restart`. The original executable-identity fix is already
+  present. The new Windows isolation has not yet produced a required CI result.
+- Windows workflow regression: **RED then GREEN**. Existing
+  `windows-isolation-red.log` records the missing complete-module skip assertion
+  failing once; `windows-isolation-green.log` records all four configuration
+  tests passing in 0.002s. These test the workflow contract, not Windows runtime
+  behavior. No Rust tests, measurements or CI queries were launched for this
+  incremental review.
+- The existing `windows-harness-tests.log` records 20 tests in 3.113s with
+  `OK (skipped=1)`: 19 passed and one pre-existing platform skip. The implementer
+  reports passing focused Ruff lint/format, PyYAML workflow parsing and
+  whitespace checks. These were not rerun by the reviewer.
 - Existing regression: **Unresolved**. The original-wheel recovery again reports
   +10.097% for 10M streaming `group_by`; this review does not turn it green.
 - Completed diagnostic: **Collection succeeded; A/B inconclusive**. The reviewer
@@ -139,6 +162,16 @@ There is no rule modification, file exclusion or suppression of product code.
 The generic annotations apply to those two lines only; this approval does not
 extend to a privileged runner or future authorization use of the path.
 
+The Windows isolation has no outstanding source findings. The same complete
+`runtime::streaming::soak::` prefix is used by `--lib-skip` and the serial Cargo
+selection. The harness applies its skip only to the calc-flow target group;
+connector and PyO3 execution stays unchanged. The soak module is part of the
+core lib test, including its macro-generated fault cases and nested modules.
+No matching integration/example test is lost. Both stages retain all features,
+and a nonzero serial result still fails the required Windows job and gate.
+The dedicated stage is skipped if an earlier stage fails, as before; such a run
+is failed and cannot establish full coverage or merge readiness.
+
 ### Style Issues
 
 None remain in the reviewed files. The specification's table alignment was
@@ -147,6 +180,21 @@ classification helpers rather than adding a general measurement framework.
 The incremental analysis tables also align in the supplied formatting evidence.
 
 ### Test Coverage
+
+The Windows change retains every soak test and its assertions. The successful
+retained Windows log lists 69 module cases: 66 passed and three pre-existing
+ignored cases, including the two separately run generation smokes. The later
+failed parallel run lists 67 module cases: 60 passed, four failed and three
+ignored; its two deferred smokes were not reached. A successful new serial stage
+should account for the same 66 executable cases and three ignored cases.
+There is no `--ignored`, new ignored attribute, deadline relaxation or blanket
+serialization of unrelated core tests. Async work inside each test retains its
+existing runtime behavior. The module's five-second checkpoint deadline and the
+50-minute parallel, 10-minute serial and 60-minute job budgets stay unchanged.
+The implementer additionally reports a read-only listing of the existing Linux
+test executable: 2,048 total, split into 1,978 ordinary and 70 soak tests, with
+no overlap or omission. Its platform-specific count does not replace the
+69-case Windows inventory from the retained logs.
 
 The repair retains the existing window tests for null, full-width integer,
 composite and string keys; colliding slot-cache entries; hopping windows;
@@ -188,8 +236,9 @@ retry or threshold change. The broader eight-target performance goal stays pause
 
 The production diff does not change public APIs, input immutability, canonical
 keys, state accounting, checkpoint versions, row update order or ordered
-serialization. The test diff does not relax runtime deadlines or Windows
-concurrency. The analysis correctly distinguishes the demonstrated executable
+serialization. The child-harness diff does not relax runtime deadlines. The
+later CI change isolates only the soak module from other test cases. The
+analysis correctly distinguishes the demonstrated executable
 mismatch from an unproven explanation for the four CI timeouts and records the
 test-harness timings separately from product performance. No normative API or
 architecture documentation change is needed for these internal substitutions.
@@ -269,15 +318,43 @@ annotations inside the test module; all executable expressions are unchanged.
 The product implementation, dependencies, features and benchmark harness remain
 equivalent to that candidate. Continue using this run's exact candidate identity
 and artifact seals; do not relabel its products as the later comment commit.
-These comments require no additional benchmark dispatch. The reported running
-Windows job also has no final result in this review.
+These comments require no additional benchmark dispatch.
+
+The subsequent Windows failures do not change that product comparison. Relative
+to `6978f3bf`, source and workflow inspection finds only the reviewed Rust test
+comments plus the Windows workflow and its Python configuration tests; product
+code, dependencies and benchmark harness remain unchanged. Results from
+`38228629578` remain applicable to that exact measured product and must retain
+its original candidate SHA and seals. This CI scheduling change requires its
+own required Windows result, not another product measurement.
+
+The failed `ManifestRename/Restart` case reports `SourcesCut`, 5.5044197 seconds
+and zero fault triggers, so it expired before the intended injection. The
+`ManifestRename/Panic` case did reach the injected panic but failed its restart
+with sink/checkpoint errors; retention and source-cut restart cases also report
+unexpected sink/checkpoint failures. These observations justify reducing
+cross-test contention as a concrete CI experiment, but do not prove one shared
+root cause. Neither the earlier passing run nor the absence of nested Cargo
+establishes that all failures are fixed. The new CI result must validate the
+unchanged oracles and full test selection.
+
+The final specification and analysis document this Windows scheduling follow-up,
+the preserved deadlines, the exact selector and the outstanding required CI
+result. `harness_sha256()` reads the maintained benchmark sources, adapters and
+lockfile; its inspected input list excludes both changed CI/configuration-test
+files. The new partial 100k report is explicitly separate from full acceptance.
+The retained fragment has 65 cases and no errors, with the pinned source refs and
+common harness hash. Its streaming `group_by` result matches the documented
+7.4830205ms / 6.770371ms medians, -9.5236% change and two negative intervals.
+The analysis correctly leaves the original failing 10M workload and the
+consolidated full-suite result pending.
 
 ### Verdict
 
 **Approve** for the reviewed implementation, narrow test-only static-analysis
-exception and continued use of the one authorized complete-suite run's original
-candidate products. No source findings remain. No additional measurement is
-required for these comments.
+exception, Windows soak isolation and continued use of the one authorized
+complete-suite run's original candidate products. No source findings remain.
+No additional product measurement is required for the comments or CI change.
 This is not a merge approval: required CI, including the four Windows failures,
 and the complete benchmark acceptance result are still unresolved. The original
 regression is not marked fixed, and no speedup is established by these local

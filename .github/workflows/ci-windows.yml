@@ -59,8 +59,8 @@ jobs:
   # The Rust and Python legs used to share one job, so the pytest suite sat
   # behind the maturin build for the whole Rust harness. They build disjoint
   # artifacts, so run them as parallel jobs; the harness serializes the
-  # embedded-Python lib test itself and the core crate is parallel-safe, so
-  # RUST_TEST_THREADS is no longer forced to one here.
+  # embedded-Python lib test itself. Keep the core suite parallel, with the
+  # checkpoint soak module isolated below.
   rust-tests:
     name: Rust tests
     needs: changes
@@ -81,18 +81,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
-      # The soak smoke tests fork generation child processes; on the 4 vCPU
-      # runner each CreateProcess triggers a Defender scan of the large debug
-      # test binary and amplifies contention for every time-sensitive
-      # guardrail (DAL-255). Keep them out of the parallel lib suite and run
-      # exactly those two tests serially after it (DAL-261) instead of
-      # relaxing the guardrails.
+      # Checkpoint fault/restart cases perform durable filesystem I/O; parallel
+      # Windows execution can expire their five-second checkpoint deadline
+      # before reaching the injected fault. The same module's generation forks
+      # also amplify contention (DAL-255/DAL-261). Run this module serially
+      # after the parallel suite, preserving every test and its deadlines.
       - name: Run Rust tests
         timeout-minutes: 50
         run: >-
           python scripts/run_rust_tests.py --python-stress-runs 1
-          --lib-skip checkpoint_restart_soak_smoke
-      - name: Run soak smoke tests serially
+          --lib-skip runtime::streaming::soak::
+      - name: Run checkpoint soak tests serially
         timeout-minutes: 10
         shell: pwsh
         env:
@@ -110,7 +109,7 @@ jobs:
             run_id = $env:GITHUB_RUN_ID
             run_attempt = $env:GITHUB_RUN_ATTEMPT
           } | ConvertTo-Json | Set-Content "$smokeRoot/checkout.json"
-          cargo test -p calc-flow --lib --all-features checkpoint_restart_soak_smoke -- --test-threads=1 1> "$smokeRoot/parent.stdout" 2> "$smokeRoot/parent.stderr"
+          cargo test -p calc-flow --lib --all-features runtime::streaming::soak:: -- --test-threads=1 1> "$smokeRoot/parent.stdout" 2> "$smokeRoot/parent.stderr"
           $smokeExitCode = $LASTEXITCODE
           @{ exit_code = $smokeExitCode } | ConvertTo-Json | Set-Content "$smokeRoot/exit.json"
           Get-Content "$smokeRoot/parent.stdout"

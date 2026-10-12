@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 HARNESS = ROOT / "scripts/run_rust_tests.py"
 WINDOWS_WORKFLOW = ROOT / ".github/workflows/ci-windows.yml"
 LINUX_WORKFLOW = ROOT / ".github/workflows/ci-linux.yml"
-SOAK_SMOKE_FILTER = "checkpoint_restart_soak_smoke"
+WINDOWS_SOAK_FILTER = "runtime::streaming::soak::"
 
 
 def _write_python_command(directory: Path, name: str, source: str) -> Path:
@@ -623,29 +623,27 @@ if arguments[:3] == ["test", "-p", "calc-flow-python"]:
                     process.stderr.close()
 
 
-class WindowsSoakSmokeIsolationTests(unittest.TestCase):
-    # The soak smoke tests fork generation child processes; on the 4 vCPU
-    # Windows runner those forks amplify contention for every time-sensitive
-    # guardrail (DAL-255/DAL-261), so the workflow must keep them isolated
-    # from the parallel lib suite instead of relaxing the guardrails.
+class WindowsCheckpointSoakIsolationTests(unittest.TestCase):
+    # Durable checkpoint faults and generation forks compete for Windows I/O.
+    # Preserve their deadlines by keeping this module out of the parallel suite.
     def _rust_tests_job(self) -> str:
         workflow = WINDOWS_WORKFLOW.read_text(encoding="utf-8")
         return workflow.split("  rust-tests:\n", 1)[1].split("  python-tests:\n", 1)[0]
 
-    def test_windows_main_lib_suite_skips_the_soak_smoke_tests(self) -> None:
-        self.assertIn(f"--lib-skip {SOAK_SMOKE_FILTER}", self._rust_tests_job())
+    def test_windows_parallel_suite_defers_all_checkpoint_soak_cases(self) -> None:
+        self.assertIn(f"--lib-skip {WINDOWS_SOAK_FILTER}", self._rust_tests_job())
 
-    def test_windows_runs_the_soak_smoke_tests_serially_in_a_dedicated_step(
+    def test_windows_runs_the_same_checkpoint_soak_cases_serially(
         self,
     ) -> None:
         soak_step = self._rust_tests_job().split(
-            "name: Run soak smoke tests serially\n", 1
+            "name: Run checkpoint soak tests serially\n", 1
         )[1]
         for fragment in (
             "cargo test -p calc-flow",
             "--lib",
             "--all-features",
-            SOAK_SMOKE_FILTER,
+            WINDOWS_SOAK_FILTER,
             "--test-threads=1",
         ):
             self.assertIn(fragment, soak_step)

@@ -124,3 +124,27 @@ do not prove that this caused all four failures.
 - Completion requires the entire suite to produce its consolidated report with
   no missing cases, correctness/infrastructure errors or confirmed regressions,
   and green required CI plus final specialist review before merge.
+
+
+### Windows durable checkpoint test isolation follow-up
+
+Comment-only head `c449ad38` passed Codacy but Windows Rust job `114753441793`
+failed four different M5 fault/restart tests. The recorded source-cut timeout
+preceded the intended fault (`fault_triggers=0`); other failures occurred during
+restart checkpointing. The underlying Windows scheduling/filesystem cause is
+not established. An unchanged retry is not authorized by this evidence.
+
+Extend the existing Windows serial soak stage from its two generation smoke
+tests to the complete `runtime::streaming::soak::` module. Use the exact same
+module prefix for the parallel command's skip and the later serial command's
+selection. Keep every test, all original failure/restart oracles, the five-second
+checkpoint timeout and existing job/step deadlines. The rest of the core suite,
+connectors, PyO3 and Linux execution retain their current scheduling. No product,
+release build or benchmark collector changes accompany this fix.
+
+Require workflow-selection RED/GREEN, the directly affected test-runner Python
+module, Ruff and YAML validation, specialist incremental review and final Windows
+CI. Its successful serial stage must account for the original module's Windows
+inventory (66 executable cases and three pre-existing ignored tests). The existing
+complete benchmark continues to use candidate `6978f3bf` and its original seals;
+this CI-only adjustment does not justify another performance measurement.
