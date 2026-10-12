@@ -240,6 +240,7 @@ def _capabilities_response(
     registrations: tuple[RegistrationRecord, ...],
     lazy_builtins: tuple[LazyBuiltinIdentity, ...],
 ) -> CapabilitiesResponse:
+    registrations = _transportable_registrations(registrations)
     runtime_document = asdict(snapshot)
     runtime_document.pop("schema_version")
     runtime_document["scope"]["kind"] = "runtimeSession"
@@ -749,6 +750,59 @@ def _resident_bytes(worker: Any) -> int | None:
         return None
 
 
+_TRANSPORTABLE_RECORD_KEYS = {
+    "provider": frozenset(
+        {
+            "kind",
+            "provider",
+            "name",
+            "version",
+            "callback",
+            "options_schema",
+            "accepts_context",
+            "provider_mode",
+            "input_ports",
+            "output_ports",
+        }
+    ),
+    "scalar_udf": frozenset(
+        {
+            "kind",
+            "provider",
+            "name",
+            "version",
+            "input_types",
+            "return_type",
+            "volatility",
+            "function",
+        }
+    ),
+}
+
+
+def _transportable_registrations(
+    registrations: tuple[RegistrationRecord, ...],
+) -> tuple[RegistrationRecord, ...]:
+    """Reduce trusted snapshot records to the contract keys Studio replays.
+
+    Records of a kind Studio cannot reconstruct in a worker, such as
+    ``kafka_decoder``, are skipped. Unlisted keys, such as the NumPy and JAX
+    helpers' process-local ``stream_lifecycle`` proof, are stripped so the
+    strict worker preflight accepts the replayed registration.
+    """
+    transportable: list[RegistrationRecord] = []
+    for registration in registrations:
+        if type(registration) is not dict:
+            continue
+        keys = _TRANSPORTABLE_RECORD_KEYS.get(dict.get(registration, "kind"))
+        if keys is None:
+            continue
+        transportable.append(
+            {key: value for key, value in dict.items(registration) if key in keys}
+        )
+    return tuple(transportable)
+
+
 def _register_referenced_builtins(
     runtime: Runtime,
     project_json: str,
@@ -784,6 +838,7 @@ def _selected_registrations(
     project_json: str,
     registrations: tuple[RegistrationRecord, ...],
 ) -> tuple[RegistrationRecord, ...]:
+    registrations = _transportable_registrations(registrations)
     project = json.loads(project_json)
     nodes = project["graph"]["nodes"]
     references: set[tuple[str, str, str, str]] = set()
@@ -832,7 +887,7 @@ def _restore_registrations(
                 else {}
             )
             if registration.mode == "mapping":
-                runtime._register_mapping_provider(
+                runtime.register_mapping_provider(
                     registration.provider,
                     registration.name,
                     registration.version,
@@ -1286,7 +1341,7 @@ class RunManager:
                 "runtime capability snapshot is unavailable for this session"
             )
         while True:
-            snapshot, registrations = self._runtime._capability_registration_snapshot()
+            snapshot, registrations = self._runtime.capability_registration_snapshot()
             key = (snapshot.scope.session_id, snapshot.scope.revision)
             with self._lock:
                 cached = self._capability_cache.get(key)
@@ -1310,7 +1365,7 @@ class RunManager:
             )
 
             with self._lock:
-                current, _ = self._runtime._capability_registration_snapshot()
+                current, _ = self._runtime.capability_registration_snapshot()
                 current_key = (current.scope.session_id, current.scope.revision)
                 if current_key != key:
                     continue
@@ -1345,7 +1400,7 @@ class RunManager:
             prepared, options = prepare_run(project, request)
             registrations = _selected_registrations(
                 project.canonical_json(),
-                self._runtime._registration_snapshot() if self._runtime else (),
+                self._runtime.registration_snapshot() if self._runtime else (),
             )
             worker_payload = _serialize_worker_payload(
                 project, prepared, options, registrations

@@ -626,7 +626,7 @@ def test_context_aware_mapping_provider_observes_authoritative_run_options() -> 
         return {"output": inputs["weights"]}
 
     runtime = Runtime()
-    runtime._register_mapping_provider(
+    runtime.register_mapping_provider(
         "test",
         "mapping",
         "1",
@@ -714,7 +714,7 @@ def test_accepts_context_requires_an_exact_bool_without_partial_registration(
     accepts_context: object,
 ) -> None:
     runtime = Runtime()
-    before = runtime._registration_snapshot()
+    before = runtime.registration_snapshot()
 
     with pytest.raises(TypeError, match="accepts_context"):
         runtime.register_provider(
@@ -725,7 +725,7 @@ def test_accepts_context_requires_an_exact_bool_without_partial_registration(
             accepts_context=accepts_context,  # type: ignore[arg-type]
         )
 
-    assert runtime._registration_snapshot() == before
+    assert runtime.registration_snapshot() == before
 
 
 def test_direct_native_registration_rejects_non_bool_context_flag() -> None:
@@ -797,7 +797,7 @@ def test_concurrent_registrations_keep_their_context_flags_isolated() -> None:
     with ThreadPoolExecutor(max_workers=4) as executor:
         list(executor.map(register, range(12)))
 
-    snapshot = runtime._registration_snapshot()
+    snapshot = runtime.registration_snapshot()
     assert len(snapshot) == 12
     assert {
         registration["name"]: registration.get("accepts_context", False)

@@ -1285,7 +1285,7 @@ def test_table_matmul_registration_and_fingerprint_are_deterministic(
     for runtime in runtimes:
         register(runtime)
 
-    registrations = runtimes[0]._registration_snapshot()
+    registrations = runtimes[0].registration_snapshot()
     assert [
         (entry["provider"], entry["name"], entry["version"]) for entry in registrations
     ] == [
