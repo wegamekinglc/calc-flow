@@ -329,6 +329,14 @@ class DefaultBaselineTests(unittest.TestCase):
         self.assertEqual(result["compare_sha"], "")
         self.assertEqual(result["origin"], "default_no_flags")
 
+    def test_retired_studio_flag_on_the_base_commit_is_ignored(self) -> None:
+        github, reports = _fixture()
+        github[f"{PREFIX}/commits/{BASE}/statuses?per_page=100"][0].append(
+            _status("Coveralls - studio", 12)
+        )
+        result = _resolve_fixture(github, reports)
+        self.assertEqual(result["origin"], "equivalent_merged_pr")
+
     def test_github_pagination_keeps_every_json_page(self) -> None:
         pages = [[{"id": 1}], [{"id": 2}]]
         completed = Mock(

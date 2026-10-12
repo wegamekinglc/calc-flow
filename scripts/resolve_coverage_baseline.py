@@ -16,6 +16,9 @@ except ImportError:  # direct execution puts only scripts/ on sys.path
     from toolkit import FULL_SHA, require_executable, write_json
 
 FLAGS = frozenset(("rust", "python"))
+# Base commits from before the Studio split still report the retired "studio"
+# Coveralls flag; ignore it instead of rejecting those bases.
+_RETIRED_FLAGS = frozenset(("studio",))
 AGGREGATES = frozenset(("coverage/coveralls", "coverage/coveralls (push)"))
 FLAG_PREFIX = "Coveralls - "
 COVERAGE = {
@@ -137,9 +140,9 @@ def _flag_statuses(statuses: dict) -> dict:
         for context, row in statuses.items()
         if context.startswith(FLAG_PREFIX)
     }
-    if not flags.keys() <= FLAGS:
+    if not flags.keys() <= FLAGS | _RETIRED_FLAGS:
         raise ValueError("unexpected Coveralls flags")
-    return flags
+    return {name: row for name, row in flags.items() if name in FLAGS}
 
 
 def _flag_report(repository: str, status: dict, run_id: int) -> dict:
