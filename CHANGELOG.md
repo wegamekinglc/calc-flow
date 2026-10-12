@@ -9,6 +9,10 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-12: Move the workspace crates, Python core, Studio, and frontend to
+  calendar version `2026.10.12` for the `calc-flow-python` release. Studio
+  requires `calc-flow-python>=2026.10.12,<2027`.
+
 - 2026-10-11: Build single-source Join output indices directly and batch capture
   bookkeeping in bounded groups. Promote to multiple sources only when needed,
   preserving row order, cancellation checks, and reserved-memory ownership.
