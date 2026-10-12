@@ -48,17 +48,13 @@ class VerifyPythonReleaseTests(unittest.TestCase):
         self.addCleanup(rmtree, self.directory)
 
     @staticmethod
-    def _metadata(name: str, *, requires_dist: str | None = None) -> bytes:
+    def _metadata(name: str) -> bytes:
         metadata = Message()
         metadata["Metadata-Version"] = "2.4"
         metadata["Name"] = name
         metadata["Version"] = VERSION
         metadata["License-Expression"] = "Apache-2.0"
-        metadata["Requires-Python"] = (
-            ">=3.9" if name == "calc-flow-python" else ">=3.13"
-        )
-        if requires_dist is not None:
-            metadata["Requires-Dist"] = requires_dist
+        metadata["Requires-Python"] = ">=3.9"
         metadata.set_payload("Calc Flow release fixture\n")
         return metadata.as_bytes()
 
@@ -99,29 +95,6 @@ class VerifyPythonReleaseTests(unittest.TestCase):
             )
         return wheel
 
-    def _studio_wheel(self) -> Path:
-        wheel = self.directory / f"calc_flow_studio-{VERSION}-py3-none-any.whl"
-        dist_info = f"calc_flow_studio-{VERSION}.dist-info"
-        with ZipFile(wheel, "w") as archive:
-            archive.writestr("calc_flow_studio/__init__.py", b"fixture")
-            archive.writestr("calc_flow_studio/static/index.html", b"fixture")
-            archive.writestr(
-                f"{dist_info}/METADATA",
-                self._metadata(
-                    "calc-flow-studio",
-                    requires_dist="calc-flow-python<2027,>=2026.10.12",
-                ),
-            )
-            archive.writestr(
-                f"{dist_info}/WHEEL",
-                self._wheel_metadata(pure=True, tags=("py3-none-any",)),
-            )
-            archive.writestr(
-                f"{dist_info}/licenses/LICENSE",
-                b"Apache License\nVersion 2.0, January 2004\n",
-            )
-        return wheel
-
     def _sdist(self) -> Path:
         sdist = self.directory / f"calc_flow_python-{VERSION}.tar.gz"
         root = f"calc_flow_python-{VERSION}"
@@ -146,7 +119,6 @@ class VerifyPythonReleaseTests(unittest.TestCase):
         for target in sorted(CORE_TARGETS):
             for python_tag in PYTHON_TAGS:
                 self._core_wheel(target, python_tag=python_tag)
-        self._studio_wheel()
         self._sdist()
 
     def test_versions_match_the_release_tag(self) -> None:
@@ -154,7 +126,6 @@ class VerifyPythonReleaseTests(unittest.TestCase):
 
         self.assertEqual(config.version, VERSION)
         self.assertEqual(config.requires_python, ">=3.9")
-        self.assertEqual(config.studio_requires_python, ">=3.13")
 
     def test_pypi_preflight_checks_only_the_published_core_project(self) -> None:
         with patch(
@@ -183,7 +154,7 @@ class VerifyPythonReleaseTests(unittest.TestCase):
 
         manifest = validate_release(self.directory, root=ROOT)
 
-        self.assertEqual(len(manifest), 32)
+        self.assertEqual(len(manifest), 31)
         self.assertEqual(
             manifest, sorted(manifest, key=lambda line: line.split("  ", 1)[1])
         )
@@ -193,7 +164,6 @@ class VerifyPythonReleaseTests(unittest.TestCase):
         for target in sorted(CORE_TARGETS):
             for python_tag in ("cp39", "cp313"):
                 self._core_wheel(target, python_tag=python_tag)
-        self._studio_wheel()
         self._sdist()
 
         with self.assertRaisesRegex(ValueError, "cp310"):
@@ -217,9 +187,9 @@ class VerifyPythonReleaseTests(unittest.TestCase):
             for python_tag in PYTHON_TAGS:
                 self._core_wheel(target, python_tag=python_tag)
         self._sdist()
-        self._studio_wheel()
+        (self.directory / "bogus-1.0.0-py3-none-any.whl").touch()
 
-        with self.assertRaisesRegex(ValueError, "unexpected release artifacts"):
+        with self.assertRaisesRegex(ValueError, "unexpected wheel artifacts"):
             validate_release(self.directory, root=ROOT, core_only=True)
 
     def test_core_only_release_requires_linux_and_windows_wheels(self) -> None:
@@ -239,7 +209,6 @@ class VerifyPythonReleaseTests(unittest.TestCase):
     def test_release_requires_legacy_and_modern_abi3_wheels(self) -> None:
         for target in sorted(CORE_TARGETS):
             self._core_wheel(target)
-        self._studio_wheel()
         self._sdist()
 
         with self.assertRaisesRegex(ValueError, "cp39"):
@@ -249,7 +218,6 @@ class VerifyPythonReleaseTests(unittest.TestCase):
         for target in sorted(CORE_TARGETS - {"linux-aarch64"}):
             for python_tag in PYTHON_TAGS:
                 self._core_wheel(target, python_tag=python_tag)
-        self._studio_wheel()
         self._sdist()
 
         with self.assertRaisesRegex(ValueError, "missing=.*linux-aarch64"):
@@ -261,7 +229,6 @@ class VerifyPythonReleaseTests(unittest.TestCase):
                 self._core_wheel(target, python_tag=python_tag)
         self._core_wheel("windows-amd64", python_tag="cp39")
         self._core_wheel("windows-amd64", abi="cp313")
-        self._studio_wheel()
         self._sdist()
 
         with self.assertRaisesRegex(ValueError, "ABI.*abi3"):

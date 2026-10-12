@@ -1,8 +1,8 @@
 # Benchmarks
 
 The [scheduled benchmark suite](../docs/benchmark-suite.md) runs the overhead, small,
-standard and nightly Python scales, every registered Rust bench target, Studio,
-frontend and isolated stream lifecycle measurements. It adds SQL/native-streaming and
+standard and nightly Python scales, every registered Rust bench target, and
+isolated stream lifecycle measurements. It adds SQL/native-streaming and
 external-engine comparisons at every decade from 10 to 10,000,000 rows, plus warm-state
 incremental measurements. Its 06:00 and 18:00 Asia/Shanghai runs publish
 complete Markdown tables and raw artifacts, including failures. Manual runs
@@ -12,7 +12,7 @@ Historical `rolling/*.json` reports use Git LFS. Install Git LFS and run
 `git lfs pull --include='benchmarks/rolling/*.json'` to inspect them locally.
 
 The Python scale shards and separate 10-to-10M engine and warm-state matrices
-are part of the complete 22-shard scheduled and manual suite. Native
+are part of the complete 20-shard scheduled and manual suite. Native
 streaming in the cross-library table starts from an already-ready runner with
 empty rolling state; runner startup and EOF/shutdown are outside its timer.
 Source/task/channel, rolling, watermarks and Arrow output remain included.
@@ -167,10 +167,7 @@ Ordinary Python cases record raw machine/dependency/workload identities and
 their SHA-256 fingerprints through `support.py`. The workload includes the
 scenario, timing scope, backend, scale, dimensions, row counts, and seed.
 The unified suite runs each checkout's tests with the current collector and
-shared support, retaining both source hashes. Its Node runner records actual
-hardware/runtime identity and binds case/group, benchmark/config sources,
-and runner hashes to each frontend workload. Raw npm lock provenance remains
-available alongside the normalized dependency fingerprint. See
+shared support, retaining both source hashes. See
 [comparison identities](../docs/benchmark-suite.md#revision-comparisons-and-regression-gate).
 
 Optional standalone comparison uses `python -m scripts.release_performance` for
@@ -232,8 +229,7 @@ and x64 mode; NumPy reports omit those fields.
 Classify performance only when contract-v2 reports have matching machine,
 dependency, and workload fingerprints. Incompatible identities produce no
 timing classification. Reports without contract-v2 metadata are legacy
-artifacts: the Studio can display them as `unverified`, but it must not label
-them stable, improved, or regressed.
+artifacts and must not be labeled stable, improved, or regressed.
 
 Compare saved reports with `pytest-benchmark` after collecting compatible
 runner samples. Do not compare results across different machines, dependency
@@ -438,16 +434,7 @@ fan-in, four-way fan-out, and saturated backpressure cases. Reports retain
 exact release, source, toolchain, dependency, and workload provenance.
 Whole-suite Rust timing deltas remain informational; allocation checks and
 the separate release comparisons of `core` and `stream_join_perf` still apply.
-
-Studio observability coverage runs separately with `standard` inputs. It
-measures checkpoint-directory scans for 1x100, 10x100, and 100x10 job/file
-shapes plus 10,000-row JSON and chunked Arrow IPC decode/`combine_chunks`
-paths. The frontend benchmark exercises report matching at 100 and 1,000
-cases and records the exact commit, Node/npm versions, package lock, and
-benchmark source hashes in its artifact. These scheduled Studio and
-frontend results remain informational: no automated threshold consumes them,
-and their workflow-presence tests fail closed if a scenario is silently
-removed. The unified engine/warm paired-median confidence gate also applies
+The unified engine/warm paired-median confidence gate also applies
 to its own cases, alongside the specialized release and lifecycle contracts;
 see [revision comparisons](../docs/benchmark-suite.md#revision-comparisons-and-regression-gate).
 

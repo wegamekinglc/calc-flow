@@ -985,11 +985,9 @@ whole-job preflight, the task supervisor, checkpoint coordinator/transaction
 internals, raw status and metrics, and the runner-scoped reaper.
 
 Runtime-owned control-message and transaction internals do not appear in
-project-v3 documents or Studio responses. Python binds the public continuous
-facade, while Studio owns persistent `/api/v3/jobs` lifecycle, checkpoint,
-shutdown, cancellation, and SSE observation routes. The public v3 manifest
-model and state backend remain the runtime's durable recovery truth; Studio
-does not expose raw cursor, connector state, secret, or filesystem payloads.
+project-v3 documents. Python binds the public continuous facade. The public
+v3 manifest model and state backend remain the runtime's durable recovery
+truth.
 
 
 See [verification](verification.md#streaming-stress-and-soak-checks) for the

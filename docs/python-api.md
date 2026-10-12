@@ -939,11 +939,9 @@ callback after `TypeError`. Native cancellation tokens are intentionally not
 part of the public Python API.
 
 Run settings, deadlines, and provider-context opt-in are not serialized into
-projects, checkpoints, or Studio API payloads.
+projects or checkpoints.
 
 `ExecutionOptions.deadline` is an absolute cooperative engine deadline.
-Studio's `RunOptions.timeout_seconds` is instead a process-level preview limit; it
-does not populate execution settings or a deadline in the worker.
 
 ## Async execution
 
@@ -1288,4 +1286,4 @@ connector features, prepared source data, and empty sink destinations;
 follow the [connector setup](connectors/README.md) before adding
 `--include-services` to the runner command.
 The [expression workflow guide](symbolic-workflows.md) maps the symbolic examples
-to analysis, lowering, checkpoint recovery, static inputs, and Studio.
+to analysis, lowering, checkpoint recovery, and static inputs.

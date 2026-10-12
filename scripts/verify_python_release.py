@@ -17,13 +17,9 @@ from urllib.parse import quote
 from zipfile import ZipFile
 
 if __package__:
-    from scripts.inspect_wheel import (
-        inspect_sdist,
-        inspect_studio_wheel,
-        inspect_wheel,
-    )
+    from scripts.inspect_wheel import inspect_sdist, inspect_wheel
 else:
-    from inspect_wheel import inspect_sdist, inspect_studio_wheel, inspect_wheel
+    from inspect_wheel import inspect_sdist, inspect_wheel
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -52,8 +48,6 @@ _VERSION_RE = re.compile(
 class ReleaseConfig:
     version: str
     requires_python: str
-    studio_requires_python: str
-    studio_requirement: str
 
 
 def _read_toml(path: Path) -> dict[str, object]:
@@ -75,10 +69,6 @@ def _string(value: object, path: str) -> str:
 
 def project_configuration(root: Path = ROOT) -> ReleaseConfig:
     package = _mapping(_read_toml(root / "pyproject.toml")["project"], "project")
-    studio = _mapping(
-        _read_toml(root / "web-ui/backend/pyproject.toml")["project"],
-        "studio.project",
-    )
     workspace = _mapping(_read_toml(root / "Cargo.toml")["workspace"], "workspace")
     workspace_package = _mapping(workspace["package"], "workspace.package")
     binding = _read_toml(root / "crates/calc-flow-python/Cargo.toml")
@@ -94,17 +84,12 @@ def project_configuration(root: Path = ROOT) -> ReleaseConfig:
 
     if package.get("name") != "calc-flow-python":
         raise ValueError("pyproject.toml project.name must equal 'calc-flow-python'")
-    if studio.get("name") != "calc-flow-studio":
-        raise ValueError(
-            "web-ui/backend/pyproject.toml project.name must equal 'calc-flow-studio'"
-        )
 
     version = _string(package.get("version"), "project.version")
     if _FINAL_VERSION_RE.fullmatch(version) is None:
         raise ValueError(f"project.version={version!r} must be a final X.Y.Z version")
     aligned_versions = {
         "workspace.package.version": workspace_package.get("version"),
-        "studio.project.version": studio.get("version"),
         "binding.calc-flow.version": core_dependency.get("version"),
         "binding.calc-flow-connectors.version": connector_dependency.get("version"),
     }
@@ -129,41 +114,9 @@ def project_configuration(root: Path = ROOT) -> ReleaseConfig:
         package.get("requires-python"),
         "project.requires-python",
     )
-    studio_requires_python = _string(
-        studio.get("requires-python"),
-        "studio.project.requires-python",
-    )
-    if requires_python != ">=3.9" or studio_requires_python != ">=3.13":
-        raise ValueError(
-            "core requires-python must be '>=3.9' and Studio must be '>=3.13': "
-            f"{requires_python!r}, {studio_requires_python!r}"
-        )
-
-    dependencies = studio.get("dependencies")
-    if not isinstance(dependencies, list) or not all(
-        isinstance(dependency, str) for dependency in dependencies
-    ):
-        raise ValueError("studio.project.dependencies must be a string list")
-    studio_requirements = [
-        dependency
-        for dependency in dependencies
-        if dependency.lower().startswith("calc-flow")
-    ]
-    if len(studio_requirements) != 1:
-        raise ValueError("Studio must declare exactly one calc-flow-python requirement")
-    studio_requirement = studio_requirements[0]
-    upper_bound = f"<{int(version.split('.')[0]) + 1}"
-    if _normalized_requirement(studio_requirement) != (
-        "calc-flow-python",
-        tuple(sorted((f">={version}", upper_bound))),
-    ):
-        raise ValueError(
-            f"Studio requirement {studio_requirement!r} does not cover "
-            f"{version} within its calendar year"
-        )
-    return ReleaseConfig(
-        version, requires_python, studio_requires_python, studio_requirement
-    )
+    if requires_python != ">=3.9":
+        raise ValueError(f"core requires-python must be '>=3.9': {requires_python!r}")
+    return ReleaseConfig(version, requires_python)
 
 
 def ensure_version_is_new_on_pypi(project: str, version: str) -> None:
@@ -373,58 +326,6 @@ def validate_core_wheel(
     return (target, python_tag), sha256(path.read_bytes()).hexdigest()
 
 
-def _normalized_requirement(requirement: str) -> tuple[str, tuple[str, ...]]:
-    compact = "".join(requirement.lower().split())
-    match = re.fullmatch(r"([a-z0-9_.-]+)(.*)", compact)
-    if match is None:
-        raise ValueError(f"invalid requirement {requirement!r}")
-    name = re.sub(r"[-_.]+", "-", match.group(1))
-    specifiers = tuple(sorted(filter(None, match.group(2).split(","))))
-    return name, specifiers
-
-
-def validate_studio_wheel(path: Path, config: ReleaseConfig) -> str:
-    inspect_studio_wheel(path)
-    distribution, version, python_tag, abi_tag, platform_tag = _wheel_parts(path)
-    expected_parts = ("calc_flow_studio", config.version, "py3", "none", "any")
-    actual_parts = (distribution, version, python_tag, abi_tag, platform_tag)
-    if actual_parts != expected_parts:
-        raise ValueError(
-            f"{path.name}: Studio wheel fields {actual_parts!r} != {expected_parts!r}"
-        )
-
-    dist_info = f"{distribution}-{version}.dist-info"
-    with ZipFile(path) as archive:
-        metadata = _metadata_from_wheel(path, archive, dist_info, "METADATA")
-        wheel_metadata = _metadata_from_wheel(path, archive, dist_info, "WHEEL")
-    _validate_project_metadata(
-        path,
-        metadata,
-        name="calc-flow-studio",
-        config=config,
-        requires_python=config.studio_requires_python,
-    )
-    requirements = metadata.get_all("Requires-Dist", [])
-    expected_requirement = _normalized_requirement(config.studio_requirement)
-    matching_requirements = [
-        requirement
-        for requirement in requirements
-        if _normalized_requirement(requirement) == expected_requirement
-    ]
-    if len(matching_requirements) != 1:
-        raise ValueError(
-            f"{path.name}: expected one Requires-Dist {config.studio_requirement!r}, "
-            f"found {requirements!r}"
-        )
-    _validate_wheel_metadata(
-        path,
-        wheel_metadata,
-        pure=True,
-        tags=("py3-none-any",),
-    )
-    return sha256(path.read_bytes()).hexdigest()
-
-
 def validate_sdist(path: Path, config: ReleaseConfig) -> str:
     expected_name = f"calc_flow_python-{config.version}.tar.gz"
     if path.name != expected_name:
@@ -437,17 +338,14 @@ def _relative_name(path: Path, dist_dir: Path) -> str:
     return str(PurePosixPath(path.relative_to(dist_dir)))
 
 
-def _wheel_artifacts(dist_dir: Path) -> tuple[list[Path], list[Path]]:
+def _wheel_artifacts(dist_dir: Path) -> list[Path]:
     core_wheels = sorted(dist_dir.rglob("calc_flow_python-*.whl"))
-    studio_wheels = sorted(dist_dir.rglob("calc_flow_studio-*.whl"))
-    unknown_wheels = sorted(
-        set(dist_dir.rglob("*.whl")) - set(core_wheels) - set(studio_wheels)
-    )
+    unknown_wheels = sorted(set(dist_dir.rglob("*.whl")) - set(core_wheels))
     if unknown_wheels:
         raise ValueError(
             f"unexpected wheel artifacts: {[path.name for path in unknown_wheels]}"
         )
-    return core_wheels, studio_wheels
+    return core_wheels
 
 
 def _reject_extra_artifacts(
@@ -465,20 +363,16 @@ def _reject_extra_artifacts(
 
 def _release_artifacts(
     dist_dir: Path, core_only: bool
-) -> tuple[list[Path], list[Path], list[Path]]:
-    core_wheels, studio_wheels = _wheel_artifacts(dist_dir)
+) -> tuple[list[Path], list[Path]]:
+    core_wheels = _wheel_artifacts(dist_dir)
     sdists = sorted(dist_dir.rglob("*.tar.gz"))
     if core_only:
         _reject_extra_artifacts(dist_dir, core_wheels, sdists)
-    elif len(studio_wheels) != 1:
-        raise ValueError(
-            f"expected one Studio wheel, found {[path.name for path in studio_wheels]}"
-        )
     if len(sdists) != 1:
         raise ValueError(
             f"expected one source distribution, found {[path.name for path in sdists]}"
         )
-    return core_wheels, studio_wheels, sdists
+    return core_wheels, sdists
 
 
 def validate_release(
@@ -493,7 +387,7 @@ def validate_release(
     if not dist_dir.is_dir():
         raise ValueError(f"release directory does not exist: {dist_dir}")
 
-    core_wheels, studio_wheels, sdists = _release_artifacts(dist_dir, core_only)
+    core_wheels, sdists = _release_artifacts(dist_dir, core_only)
 
     manifest_by_name: dict[str, str] = {}
     actual_targets: set[tuple[str, str]] = set()
@@ -515,11 +409,6 @@ def validate_release(
             f"core wheel matrix mismatch: missing={missing}, unexpected={unexpected}"
         )
 
-    if not core_only:
-        studio = studio_wheels[0]
-        manifest_by_name[_relative_name(studio, dist_dir)] = validate_studio_wheel(
-            studio, config
-        )
     sdist = sdists[0]
     manifest_by_name[_relative_name(sdist, dist_dir)] = validate_sdist(sdist, config)
     return [f"{manifest_by_name[name]}  {name}" for name in sorted(manifest_by_name)]

@@ -253,10 +253,9 @@ alias/schema pairs. Only successful native planning enters the cache. Successful
 registrations clear it alongside the compile cache. It retains planning
 metadata and does not retain user rows, running state, or DataFusion sessions.
 
-`Program.explain` reports deterministic physical sharing and state/copy facts.
-Studio inspects facts encoded in the lowered project document. Neither is a
-measurement of latency, peak memory, or throughput. Execution timings, job
-status, and the [benchmark suite](benchmark-suite.md) provide measurements.
+`Program.explain` reports deterministic physical sharing and state/copy facts,
+not a measurement of latency, peak memory, or throughput. Execution timings,
+job status, and the [benchmark suite](benchmark-suite.md) provide measurements.
 
 The relevant runnable examples are
 [09](../examples/09_symbolic_financial_features.py),

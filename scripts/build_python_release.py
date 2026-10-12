@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -12,13 +11,9 @@ from pathlib import Path
 from shutil import rmtree
 
 if __package__:
-    from scripts.inspect_wheel import (
-        inspect_sdist,
-        inspect_studio_wheel,
-        inspect_wheel,
-    )
+    from scripts.inspect_wheel import inspect_sdist, inspect_wheel
 else:
-    from inspect_wheel import inspect_sdist, inspect_studio_wheel, inspect_wheel
+    from inspect_wheel import inspect_sdist, inspect_wheel
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -66,8 +61,6 @@ def prepare_dist_dir(
 def build_commands(root: Path, dist_dir: Path) -> tuple[BuildStep, ...]:
     root = root.resolve()
     dist_dir = dist_dir.resolve()
-    web_ui = root / "web-ui"
-    npm = "npm.cmd" if os.name == "nt" else "npm"
     return (
         BuildStep(
             "core wheel",
@@ -97,21 +90,6 @@ def build_commands(root: Path, dist_dir: Path) -> tuple[BuildStep, ...]:
             ),
             root,
         ),
-        BuildStep("Studio frontend dependencies", (npm, "ci"), web_ui),
-        BuildStep("Studio frontend", (npm, "run", "build"), web_ui),
-        BuildStep(
-            "Studio wheel",
-            (
-                "uv",
-                "build",
-                "--project",
-                "web-ui/backend",
-                "--wheel",
-                "--out-dir",
-                str(dist_dir),
-            ),
-            root,
-        ),
     )
 
 
@@ -128,7 +106,7 @@ def build_python_release(
     *,
     clean: bool = False,
     root: Path = ROOT,
-) -> tuple[Path, Path, Path]:
+) -> tuple[Path, Path]:
     output = prepare_dist_dir(dist_dir, clean, root)
     for step in build_commands(root, output):
         print(f"Building {step.name}...", flush=True)
@@ -142,21 +120,14 @@ def build_python_release(
         sorted(output.glob("calc_flow_python-*.tar.gz")),
         "core source distribution",
     )
-    studio_wheel = _single_artifact(
-        sorted(output.glob("calc_flow_studio-*.whl")),
-        "Studio wheel",
-    )
     inspect_wheel(core_wheel)
     inspect_sdist(sdist)
-    inspect_studio_wheel(studio_wheel)
-    return core_wheel, sdist, studio_wheel
+    return core_wheel, sdist
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description=(
-            "Build the local core wheel, core sdist, and Studio wheel under target/"
-        )
+        description="Build the local core wheel and core sdist under target/"
     )
     parser.add_argument(
         "--dist-dir",

@@ -72,37 +72,6 @@ def inspect_wheel(wheel: Path) -> int:
     return len(names)
 
 
-def inspect_studio_wheel(wheel: Path) -> int:
-    with ZipFile(wheel) as archive:
-        names = [name for name in archive.namelist() if not name.endswith("/")]
-
-    required = {
-        "calc_flow_studio/__init__.py",
-        "calc_flow_studio/static/index.html",
-    }
-    missing = required.difference(names)
-    if missing:
-        raise ValueError(f"{wheel}: missing Studio entries: {sorted(missing)}")
-    _require_wheel_license(names, "calc_flow_studio-", wheel)
-
-    for name in names:
-        path = PurePosixPath(name)
-        in_package = path.parts[0] == "calc_flow_studio"
-        in_metadata = path.parts[0].startswith("calc_flow_studio-") and path.parts[
-            0
-        ].endswith(".dist-info")
-        if not (in_package or in_metadata):
-            raise ValueError(f"{wheel}: unexpected Studio wheel entry: {name}")
-        if _is_repository_guidance(path):
-            raise ValueError(f"{wheel}: forbidden Studio wheel entry: {name}")
-        if in_package and _FORBIDDEN_PARTS.intersection(
-            part.lower() for part in path.parts
-        ):
-            raise ValueError(f"{wheel}: forbidden Studio wheel entry: {name}")
-
-    return len(names)
-
-
 def _archive_names(archive_path: Path) -> list[str]:
     with open_tar(archive_path, "r:gz") as archive:
         return [member.name for member in archive.getmembers() if member.isfile()]
@@ -156,7 +125,6 @@ def inspect_sdist(sdist: Path) -> int:
     for path in relative:
         forbidden = (
             path.parts[:2] == ("src", "calc_flow")
-            or path.parts[:1] == ("web-ui",)
             or path.parts[:2] == ("tests", "fixtures")
             or _is_repository_guidance(path)
         )
@@ -180,14 +148,11 @@ def inspect_crate(crate: Path) -> int:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Verify Calc Flow release artifacts")
-    parser.add_argument(
-        "kind", choices=("core-wheel", "studio-wheel", "sdist", "crate")
-    )
+    parser.add_argument("kind", choices=("core-wheel", "sdist", "crate"))
     parser.add_argument("artifacts", nargs="+", type=Path)
     args = parser.parse_args()
     inspectors = {
         "core-wheel": inspect_wheel,
-        "studio-wheel": inspect_studio_wheel,
         "sdist": inspect_sdist,
         "crate": inspect_crate,
     }

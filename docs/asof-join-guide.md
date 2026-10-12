@@ -388,16 +388,12 @@ At successful terminal drain,
 and `pending_left_rows == 0`.
 
 Rust/Python counters remain integers and absent watermarks remain null/`None`.
-Studio SSE events expose `stream_asof_joins` as a list with node IDs: integer
-counters, gauges, and watermark microseconds are canonical decimal strings to
-preserve the full i64/u64 range in JavaScript. Missing watermarks are JSON null
-and idle/ended remain booleans. Project tolerance/limits remain JSON-safe
-numbers. The existing inner Join status format is independent.
+Project tolerance/limits remain JSON-safe numbers. The existing inner Join
+status format is independent.
 
 ASOF-local runtime reasons distinguish invalid input, duplicate identity, late
 rows, state/workspace/output limits, counter overflow, and protocol violations
 with the `asof_` prefix. Checkpoint mismatch and earlier source/runtime failures
 retain their own categories. No status or diagnostic includes row payloads.
-Studio supports strict project import, inspection, and save without a dedicated
-ASOF editor. See the [project representation](projects-guide.md#bounded-backward-asof-join)
+See the [project representation](projects-guide.md#bounded-backward-asof-join)
 and [API reference](api-reference.md).

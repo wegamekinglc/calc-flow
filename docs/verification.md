@@ -53,9 +53,6 @@ The repository command groups cover:
 - Rust formatting, all-target/all-feature Clippy, the core/PyO3 test harness,
   rustdoc, and workspace coverage.
 - Python native installation, binding/adapter tests, and Ruff.
-- Studio backend tests with its independent coverage floor.
-- Frontend dependency installation, API generation, build, unit tests,
-  Playwright workflows, and dependency audit.
 - Supply-chain policy and packaging/release helper tests.
 
 The Rust test harness must inherit the same managed Python environment used
@@ -65,15 +62,15 @@ the environment variables listed in [AGENTS.md](../AGENTS.md#commands).
 Missing services block an attempted full coverage run; skipping that run locally
 does not prove coverage or block a scoped handoff that records CI as unverified.
 
-Linux CI validates the Coveralls comparison before uploading its Rust, Python,
-and Studio reports. If a base build contains only some of those flags, the
+Linux CI validates the Coveralls comparison before uploading its Rust and
+Python reports. If a base build contains only some of those flags, the
 [baseline resolver](../scripts/resolve_coverage_baseline.py) requires a complete,
 successful Linux run from that base's merged PR, with the same full source tree
-at the actual measurement commit. Its latest attempt must contain all three
+at the actual measurement commit. Its latest attempt must contain both
 successful coverage jobs and required test steps. Each coverage artifact must
 match the run, head, and repository and have been created during its successful
 job. This accepts successful jobs carried forward by a rerun, whose original
-execution timestamps remain in GitHub's latest-attempt job records. All three
+execution timestamps remain in GitHub's latest-attempt job records. Both
 uploads use that verified comparison SHA; earlier failed attempts remain in the
 run history. CI retains the run, attempt, jobs, and artifact provenance. An
 unverifiable partial base blocks CI. Complete bases and absent reports keep the
@@ -82,7 +79,7 @@ default comparison, and coverage thresholds remain unchanged.
 After checks, confirm generated contracts and whitespace:
 
 ```bash
-git diff --exit-code -- schemas/project-v3.schema.json web-ui/openapi.json web-ui/src/api/schema.d.ts
+git diff --exit-code -- schemas/project-v3.schema.json
 git diff --check
 ```
 

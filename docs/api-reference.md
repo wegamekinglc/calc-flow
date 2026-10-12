@@ -3,17 +3,16 @@
 [Documentation](README.md) / 3.1 API reference
 
 Python is the application API. Rust implements the internal runtime and exposes
-extension interfaces; Studio provides local project and job controls:
+extension interfaces:
 
 The versions below describe this checkout. Published package versions can lag
 the source; use the [source installation](getting-started.md#build-and-install-from-source)
 for the contracts documented here.
 
-| Surface          | Package or path                | Purpose                                    |
-|------------------|--------------------------------|--------------------------------------------|
-| Python API       | `calc-flow-python==2026.10.12` | Expressions, Arrow execution, integrations |
-| Rust core        | `calc-flow = "2026.10.12"`     | Internal runtime and extension contracts   |
-| Local Studio API | `calc-flow-studio==2026.10.12` | Loopback FastAPI service and React assets  |
+| Surface    | Package or path                | Purpose                                    |
+|------------|--------------------------------|--------------------------------------------|
+| Python API | `calc-flow-python==2026.10.12` | Expressions, Arrow execution, integrations |
+| Rust core  | `calc-flow = "2026.10.12"`     | Internal runtime and extension contracts   |
 
 For examples and lifecycle detail, see the [executable example guide](examples.md),
 [Rust runtime reference](rust-api.md), [Python API](python-api.md), and
@@ -24,7 +23,6 @@ On this page:
 - [Examples](#examples)
 - [Python package](#python-package)
 - [Rust modules and exports](#rust-modules-and-exports)
-- [Local HTTP API](#local-http-api)
 - [Error categories](#error-categories)
 - [Version and compatibility](#version-and-compatibility)
 
@@ -281,8 +279,8 @@ context is separate from the compile-time provider `options` mapping. Calc
 Flow does not inspect callback signatures or retry a call with another arity.
 The false flag selects the two-argument ABI; true selects the three-argument ABI.
 Execution settings and deadlines are per-run values; provider-context opt-in
-belongs to the runtime registration. They are not serialized into project,
-checkpoint, or Studio API payloads.
+belongs to the runtime registration. They are not serialized into project or
+checkpoint payloads.
 
 Capability schema version 3 contains only frozen data:
 `RuntimeSessionScope`, `OperatorCapability`, `UdfCapability`,
@@ -470,84 +468,6 @@ Generate local rustdoc with:
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 ```
 
-## Local HTTP API
-
-The separate Studio service exposes its supported API under `/api/v3`.
-
-| Method                 | Route                     | Purpose                                           |
-|------------------------|---------------------------|---------------------------------------------------|
-| `GET`                  | `/catalog`                | UDF-only top-level array                          |
-| `GET`                  | `/session`                | Read this launch's token for mutating requests    |
-| `GET`                  | `/capabilities`           | Runtime, connector, and worker capabilities       |
-| `GET`                  | `/schema/project`         | Rust-generated v3 project JSON Schema             |
-| `GET`, `POST`          | `/projects`               | List or create projects                           |
-| `POST`                 | `/projects/import`        | Safely import JSON or YAML                        |
-| `GET`, `PUT`, `DELETE` | `/projects/{id}`          | Read, replace, or delete a project                |
-| `GET`                  | `/projects/{id}/export`   | Export canonical JSON or safe YAML                |
-| `POST`                 | `/projects/{id}/validate` | Validate and compile a stored graph               |
-| `POST`, `GET`          | `/jobs`                   | Start a continuous job or list owned jobs         |
-| `GET`                  | `/jobs/{id}`              | Read typed job lifecycle status                   |
-| `GET`                  | `/jobs/{id}/events`       | Resume-safe job event SSE                         |
-| `POST`                 | `/jobs/{id}/checkpoint`   | Trigger one durable checkpoint                    |
-| `POST`                 | `/jobs/{id}/shutdown`     | Request graceful terminal checkpoint and shutdown |
-| `POST`                 | `/jobs/{id}/cancel`       | Cancel and settle a job                           |
-| `GET`                  | `/resource-limits`        | Read enforced continuous-job resource bounds      |
-
-Studio accepts loopback Host headers and local Studio origins. `POST`, `PUT`,
-`PATCH`, and `DELETE` requests must send the token from `GET /api/v3/session`
-in `X-Calc-Flow-Session`; the browser client does this automatically. The
-session route is excluded from the generated OpenAPI document.
-
-`/capabilities` deliberately separates two scopes. `runtime` is the parent
-session snapshot used for compilation. `preview.workerRegistrations` describes
-whether a matching registration can be reconstructed as `serialized`,
-`lazyBuiltin`, or `unavailable` in a spawned worker. Registration records of
-kinds Studio cannot replay in a worker, such as `kafka_decoder`, are omitted
-from `preview.workerRegistrations`; the `runtime` scope is unchanged and never
-lists them either. Transportability is not a promise that arbitrary project
-input is executable: normal compile, Port, option, input-format, and
-resource-limit checks still apply.
-
-Only NumPy/JAX `expression@1` is eligible for lazy built-in reconstruction.
-There is no lazy `table_matmul@1`; a parent registration may therefore be
-compile-capable while worker reconstruction is unavailable. Clients should
-disable only the unsupported job action and keep project editing and
-parent-runtime validation available.
-
-The response envelope carries one schema version: `schemaVersion` is `3`, and
-the nested `runtime` object omits its own version field. The browser decoder
-rejects a response whose `schemaVersion` is not `3` or that carries any extra
-field before React receives it. Unknown capability-rule identities, unknown
-lifecycle vocabulary, and inconsistent `stateVersion`/`stateful` combinations
-are rejected by the backend response models as well as the decoder.
-Validation and job responses use generated discriminated unions, so
-backend and frontend must be deployed from the same generated contract.
-The SSE route documents each `data` payload as the generated `RunEvent` model;
-its framing and resume protocol remain a stream rather than a JSON response.
-The frontend event type consumes the generated ASOF metric shape. ASOF
-`stream_asof_joins` counters/gauges/watermark microseconds use canonical decimal
-strings, absent watermarks are null, and idle/ended are booleans. Python status
-keeps integer values; existing inner metrics retain their representation.
-
-Project writes that fail validation answer `422` with a structured envelope on
-`POST /projects`, `POST /projects/import`, and `PUT /projects/{id}`: the
-`detail` field is either an invalid `ValidationReport`
-(`kind: "invalid"`, `issues` of `path`/`code`/`message`, `fingerprint: null`)
-or the standard request-validation error list. Malformed stream Join input
-carries the stable issue codes `unsupported_join_type`, `invalid_time_bound`,
-`invalid_join_limit`, `invalid_join_keys`, `incompatible_key_type`,
-`invalid_event_time`, and `invalid_output_prefix`.
-
-REST payloads cannot carry live values, so `POST /jobs` fails closed for a
-stored project that declares static inputs: the response is `422`, its
-`detail` names the first `static_inputs.{name}` as unresolvable over REST, and
-no run, handle, or worker is created. Supply static values through the Python
-runtime instead.
-
-The checked contract is [web-ui/openapi.json](../web-ui/openapi.json).
-`npm run sync:api` regenerates it and
-[`schema.d.ts`](../web-ui/src/api/schema.d.ts) from the FastAPI application.
-
 ## Error categories
 
 Rust returns `CalcFlowError` variants. Python exposes the stable hierarchy:
@@ -568,12 +488,13 @@ manifest publication uses `CheckpointPublicationUnknownError`.
 
 ## Version and compatibility
 
-The Rust crate, Python binding, Studio package, and frontend are versioned
-`2026.10.12` in this checkout. Project format version `3` and checkpoint-manifest version `3` are
-separate protocol values from the package version.
+The Rust crate and Python binding are versioned `2026.10.12` in this checkout.
+Project format version `3` and checkpoint-manifest version `3` are separate
+protocol values from the package version. The Studio application moved to the
+separate [calc-flow-studio](https://github.com/wegamekinglc/calc-flow-studio)
+repository and is versioned there.
 
-Package versions use calendar versioning (`YYYY.M.D` release dates). Studio
-requires `calc-flow-python>=2026.10.12,<2027`.
+Package versions use calendar versioning (`YYYY.M.D` release dates).
 
-Projects accept strict format `3`; Studio serves `/api/v3`. See
+Projects accept strict format `3`. See
 [projects and persistence](projects-guide.md) for validation and storage.

@@ -63,21 +63,20 @@ scheduled inventory or its verdict calculation.
 ## Complete inventory
 
 The catalog is executable: `python -m scripts.benchmark_suite catalog` emits
-the same 22 shards consumed by the scheduled and manual suite. The Python
+the same 20 shards consumed by the scheduled and manual suite. The Python
 matrix includes overhead, small, standard and nightly scales.
 The separate engine and warm-state matrices still run every decade
-through 10M rows. Dynamic pytest, Criterion and Vitest inventories preserve
+through 10M rows. Dynamic pytest and Criterion inventories preserve
 benchmark cases without a second hand-written case list.
 
-| Family          | Dimensions                                          | Cases per dimension                                       |
-|-----------------|-----------------------------------------------------|-----------------------------------------------------------|
-| Python          | overhead 1k, small 10k, standard 100k, nightly 1M   | All collected non-lifecycle pytest benchmarks             |
-| Engines         | 10, 100, 1k, 10k, 100k, 1M, 10M rows                | 57 through 10k, 65 at 100k/1M, 51 at 10M                  |
-| Warm streaming  | 10, 100, 1k, 10k, 100k, 1M, 10M history; append 64  | SMA(20), SMA(5) minus SMA(20)                             |
-| Warm append     | History 1M; append 1, 4, 16, 64, 640, 6,400, 64,000 | Both indicators; append 64 shared with history matrix     |
-| Rust            | Every `[[bench]]` target in the core crate          | Core, allocation, state/window, Join/ASOF, SQL/DataFusion |
-| Studio/frontend | Python HTTP benchmarks and Vitest benchmark files   | All collected benchmark cases                             |
-| Lifecycle       | Isolated checkpoint/recovery benchmark              | Existing minimum-20-round evidence validation             |
+| Family         | Dimensions                                          | Cases per dimension                                       |
+|----------------|-----------------------------------------------------|-----------------------------------------------------------|
+| Python         | overhead 1k, small 10k, standard 100k, nightly 1M   | All collected non-lifecycle pytest benchmarks             |
+| Engines        | 10, 100, 1k, 10k, 100k, 1M, 10M rows                | 57 through 10k, 65 at 100k/1M, 51 at 10M                  |
+| Warm streaming | 10, 100, 1k, 10k, 100k, 1M, 10M history; append 64  | SMA(20), SMA(5) minus SMA(20)                             |
+| Warm append    | History 1M; append 1, 4, 16, 64, 640, 6,400, 64,000 | Both indicators; append 64 shared with history matrix     |
+| Rust           | Every `[[bench]]` target in the core crate          | Core, allocation, state/window, Join/ASOF, SQL/DataFusion |
+| Lifecycle      | Isolated checkpoint/recovery benchmark              | Existing minimum-20-round evidence validation             |
 
 The Python shard includes nine streaming operator examples at every Python
 scale and four selected `Program.execute` cases. The Rust `stream_union` target
@@ -125,7 +124,7 @@ tumbling windows. These cases retain bounded in-flight state
 rather than both complete input streams.
 Missing DataFusion, Polars, TA-Lib, or Finance-Python fails its shard. DataFusion Python 54 matches
 the core's DataFusion major; the shared requirements file pins all Python
-build/benchmark/Studio dependencies with hashes.
+build/benchmark dependencies with hashes.
 
 Finance-Python 0.9.10 runs from commit
 `3e33d3e70c3458b4c6dcf76b88df6148229b402c` in a separate Python 3.9
@@ -495,7 +494,7 @@ a slowdown even with identical binaries and nearly unchanged P50 values.
 The fixed +5% threshold, two-round sample budget and correctness checks remain
 unchanged; the suite does not retry measurements to select a passing timing result.
 External libraries are measured references, never fake historical baselines.
-The pytest/Criterion/Vitest suites run ABBA whole-suite
+The pytest/Criterion suites run ABBA whole-suite
 blocks. Their deltas remain informational because those blocks are not
 per-call paired observations. Allocation counters have a separate unit-correct
 table and are not mislabeled as milliseconds.
@@ -515,17 +514,6 @@ hash. Ordinary Python cases record raw machine, dependency, and workload
 identities with SHA-256 fingerprints. Workload identity includes scenario,
 timing scope, backend, scale, dimensions, row counts, and seed; array cases
 retain their more specific contract-v2 identities.
-
-The frontend runner records the actual Node process's hardware and runtime
-identity, including CPU models/count, memory, architecture, Node/V8 versions,
-and thread-related settings. Each workload binds the case/group and hashes
-of the benchmark sources, Vite config, runner, and identity collector.
-Dependency identity uses `frontend-npm-lock-v1`: only the top-level and root
-package version fields are omitted from the comparison lock. The unmodified
-lock hash and both version values remain in provenance. Missing, malformed,
-corrupt, or incompatible comparison identities produce an error without a
-timing classification, including when both sides lack the same fingerprint.
-Comparable ABBA suite blocks remain informational.
 
 The Rust suite retains the full `Cargo.lock` hash and aggregate compiled
 dependency identity for provenance. Each case's comparison fingerprint covers
@@ -622,8 +610,6 @@ A second table places every supported engine implementation side by side. No top
 filtering is applied. Build, measurement and summary artifacts retain raw
 JSON/JSONL samples, original runner formats, stdout/stderr, release/native and
 harness hashes, exact source refs and environment identities for 30 days.
-Vitest's default JSON reporter discards samples; the adapter explicitly
-collects its retained task samples and verifies their counts before export.
 
 Wrong/dirty releases, incompatible workload fingerprints, missing or duplicate
 cases/shards, changed confirmation environments, failed correctness and

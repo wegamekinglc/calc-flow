@@ -25,7 +25,7 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BASELINE_PATH = REPO_ROOT / "scripts" / "complexity_baseline.json"
-SCAN_ROOTS: tuple[str, ...] = ("benchmarks", "crates", "python", "scripts", "web-ui")
+SCAN_ROOTS: tuple[str, ...] = ("benchmarks", "crates", "python", "scripts")
 SKIPPED_PARTS = frozenset({"node_modules", "__pycache__", ".venv", "target"})
 SOURCE_SUFFIXES = frozenset({".rs", ".py"})
 RUFF_COMPLEXITY_SELECT = ("C901", "PLR0912", "PLR0913", "PLR0915")

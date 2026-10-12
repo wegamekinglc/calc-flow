@@ -9,6 +9,13 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-13: Move Calc Flow Studio out of this repository. The `web-ui/`
+  subtree, Studio guide, Studio CI jobs, and Studio release tooling are
+  removed; the application now lives in the separate
+  [calc-flow-studio](https://github.com/wegamekinglc/calc-flow-studio)
+  repository and depends on `calc-flow-python` only as a published package.
+  The core engine, Python API, and release workflow are unchanged.
+
 - 2026-10-13: Make Studio's parent-side registration reads tolerant of the full
   record contract. `RunManager` capabilities and preview submission skip
   records of kinds Studio cannot replay in a worker, such as `kafka_decoder`,

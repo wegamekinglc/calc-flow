@@ -14,8 +14,8 @@ On this page:
 
 ## Symbolic declarations and static analysis
 
-For end-to-end batch, continuous, recovery, static NumPy/JAX matrix, Studio
-inspection, and performance workflows, see the
+For end-to-end batch, continuous, recovery, static NumPy/JAX matrix, and
+performance workflows, see the
 [expression workflow guide](symbolic-workflows.md).
 
 Use `import calc_flow as cf` for typed immutable expressions and reusable

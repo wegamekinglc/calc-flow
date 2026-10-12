@@ -2,16 +2,14 @@
 
 [Documentation](README.md) / 2.4 Expression workflows
 
-Calc Flow's Python expression API, imported from `calc_flow`, declares immutable
-calculations and lowers them into
-the same strict project-v3 graph that the native engine and Studio use. No
-Python callback or expression object captured by a symbolic declaration runs
-while a lowered native operator executes. Explicitly registered runtime
-providers and application-owned Python sources and sinks can still invoke
-Python through their normal interfaces. Studio does not contain a second
-symbolic compiler. This guide connects the public declarations to batch,
-continuous, recovery, array-provider, inspection, and performance workflows
-implemented in Calc Flow.
+Calc Flow's Python expression API, imported from `calc_flow`, declares
+immutable calculations and lowers them into the same strict project-v3 graph
+that the native engine uses. No Python callback or expression object captured
+by a symbolic declaration runs while a lowered native operator executes.
+Explicitly registered runtime providers and application-owned Python sources
+and sinks can still invoke Python through their normal interfaces. This guide
+connects the public declarations to batch, continuous, recovery,
+array-provider, and performance workflows implemented in Calc Flow.
 
 The complete declaration reference is in the [expression API](symbolic-api.md).
 Use this guide to choose an executable example and understand the boundary
@@ -28,7 +26,6 @@ On this page:
 - [Use static matrices with NumPy or JAX](#use-static-matrices-with-numpy-or-jax)
 - [Read capability failures](#read-capability-failures)
 - [Interpret performance output](#interpret-performance-output)
-- [Inspect a lowered project in Studio](#inspect-a-lowered-project-in-studio)
 
 ## Compose SQL and Python functions
 
@@ -281,41 +278,6 @@ These are plan estimates and shape facts, not sampled runtime telemetry. Use
 execution timings, stream status, provider metadata, and process metrics for
 measured latency, resident memory, and copy volume. A plan estimate can explain
 where work must occur; it cannot promise a device transfer time or peak RSS.
-
-## Inspect a lowered project in Studio
-
-Export expressions with `program.to_project(runtime, mode="stream")` or the
-default batch mode. [Example 14](../examples/14_project_persistence.py) shows the
-public export and JSON/YAML/store round trip. Export contains native graph and
-input placeholders, without live data, builders, or Python logical aliases.
-Stream launch still requires explicit operational bindings and state settings.
-
-Studio accepts and saves only a strict `ProjectDocument` v3. Selecting a node
-shows a **Lowered project inspection** section derived from that document:
-
-- serialized source expressions or lowered rolling/cross-section operations;
-- node kind and exact external provider identity;
-- bounded state and watermark requirements for native nodes, or `unknown` for
-  external-provider lifecycle facts not encoded by `ProjectDocument`;
-- static input declarations and known byte sizes; and
-- table/array, host/device, static-placement, and result-attachment copy
-  boundaries.
-
-Copy-boundary facts are shown only for the recognized direct-matmul document
-shape emitted for the built-in `numpy:symbolic_matrix@1` and
-`jax:symbolic_matrix@1` providers. Arbitrary external providers and unrecognized
-or extended option shapes can attach different semantics to similarly named
-fields, so Studio does not infer lifecycle or copy facts for them.
-
-The section is an inspector, not a compiler. It does not reconstruct the
-original Python expression objects, execute Python callables, or infer facts
-from live row values. Its state sizes are lower bounds or declared limits;
-runtime status and metrics remain authoritative.
-
-Studio can inspect a project that declares static inputs, but `POST /jobs`
-rejects that project with `422` because the REST contract intentionally has no
-field for live static values. Execute such a document through the Python
-stream runner, where `static_inputs` is an explicit application-owned mapping.
 
 For implementation details, continue with [symbolic compiler design](symbolic-design.md).
 For serialization, continue with [projects and persistence](projects-guide.md).

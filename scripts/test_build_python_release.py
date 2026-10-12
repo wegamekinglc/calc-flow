@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -55,7 +54,7 @@ class BuildPythonReleaseTests(unittest.TestCase):
         self.assertTrue(self.directory.is_dir())
         self.assertEqual(list(self.directory.iterdir()), [])
 
-    def test_build_commands_cover_core_sdist_and_studio(self) -> None:
+    def test_build_commands_cover_core_wheel_and_sdist(self) -> None:
         commands = build_commands(ROOT, self.directory)
 
         self.assertEqual(
@@ -63,9 +62,6 @@ class BuildPythonReleaseTests(unittest.TestCase):
             [
                 "core wheel",
                 "core source distribution",
-                "Studio frontend dependencies",
-                "Studio frontend",
-                "Studio wheel",
             ],
         )
         self.assertEqual(
@@ -73,11 +69,7 @@ class BuildPythonReleaseTests(unittest.TestCase):
             ("uv", "run", "maturin", "build", "--release"),
         )
         self.assertIn("--locked", commands[0].command)
-        npm = "npm.cmd" if os.name == "nt" else "npm"
-        self.assertEqual(commands[2].command, (npm, "ci"))
-        self.assertEqual(commands[2].cwd, ROOT / "web-ui")
-        self.assertEqual(commands[-1].cwd, ROOT)
-        self.assertEqual(commands[-1].command[:3], ("uv", "build", "--project"))
+        self.assertTrue(all(step.cwd == ROOT for step in commands))
 
 
 if __name__ == "__main__":

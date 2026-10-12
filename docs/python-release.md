@@ -4,12 +4,12 @@
 
 The [Python package release workflow](../.github/workflows/release.yml) publishes
 only `calc-flow-python`. Install it with `pip install calc-flow-python` and
-import `calc_flow`. Studio is not uploaded to PyPI by this workflow.
+import `calc_flow`.
 
 ## Version and artifacts
 
 Use the planned release date as the calendar version `YYYY.M.D`, without zero
-padding. Keep the workspace crate, Python core, Studio, frontend, native
+padding. Keep the workspace crate, Python core, native
 dependency constraints, and `calc_flow.__version__` aligned. The tag must be
 annotated, named `calc-flow-python-v<version>`, and point to the current `main`
 head. The version must not already exist on PyPI.
@@ -51,7 +51,7 @@ The workflow:
    source distribution through the `pypi` environment using Trusted Publishing.
 
 Manual workflow dispatch builds artifacts and runs the post-build unit tests
-without publishing. Benchmark, soak, audit, documentation, crate, and Studio
+without publishing. Benchmark, soak, audit, documentation, and crate
 work are outside this Python publishing workflow.
 
 ## Trusted Publisher

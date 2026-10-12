@@ -5,8 +5,7 @@
 Calc Flow is a Python calculation library for Arrow tables and stateful streams.
 Write calculations as immutable Python expressions, compute a finite dataset,
 or keep the same calculation running as data arrives. The internal Rust runtime
-owns table execution, state, and recovery. Calc Flow Studio provides a separate
-local browser interface.
+owns table execution, state, and recovery.
 
 ## What you can do
 
@@ -31,7 +30,6 @@ local browser interface.
 - Persist strict JSON/YAML projects and use registered file, Kafka, PostgreSQL,
   MySQL, ClickHouse, HTTP, or WebSocket connectors:
   [projects](projects-guide.md) and [connectors](connectors/README.md).
-- Edit and inspect projects and operate local jobs in [Studio](studio-guide.md).
 
 ## The basic vocabulary
 
@@ -145,7 +143,7 @@ These protocol versions are separate from this checkout's package version `2026.
 Streaming delivery is checked per output against source, operator, and sink
 capabilities. Ordinary sinks can receive duplicates after recovery; exactly-once
 delivery requires a compatible route and transactional or epoch-idempotent
-sink evidence. Studio serves `/api/v3` on loopback for local use.
+sink evidence.
 
 Continue to [getting started](getting-started.md), then choose a program from
 the [example learning paths](examples.md). For implementation ownership, read

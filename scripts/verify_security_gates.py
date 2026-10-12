@@ -1,7 +1,7 @@
 """M7-02 security and supply-chain gate runner.
 
 Validates the threat-model coverage checklist and invokes the audit
-tools (cargo audit, cargo deny, npm audit) against the workspace with
+tools (cargo audit, cargo deny) against the workspace with
 all connector features enabled. Documents per-threat evidence linking
 to the named tests that enforce each boundary.
 
@@ -376,11 +376,6 @@ AUDIT_COMMANDS: tuple[AuditCommand, ...] = (
         name="cargo deny",
         argv=("cargo", "deny", "--locked", "check"),
         cwd=REPOSITORY_ROOT,
-    ),
-    AuditCommand(
-        name="npm audit",
-        argv=("npm", "audit", "--omit=dev"),
-        cwd=REPOSITORY_ROOT / "web-ui",
     ),
 )
 

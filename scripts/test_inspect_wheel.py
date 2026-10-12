@@ -8,19 +8,9 @@ from tarfile import open as open_tar
 from zipfile import ZipFile
 
 if __package__:
-    from scripts.inspect_wheel import (
-        inspect_crate,
-        inspect_sdist,
-        inspect_studio_wheel,
-        inspect_wheel,
-    )
+    from scripts.inspect_wheel import inspect_crate, inspect_sdist, inspect_wheel
 else:
-    from inspect_wheel import (
-        inspect_crate,
-        inspect_sdist,
-        inspect_studio_wheel,
-        inspect_wheel,
-    )
+    from inspect_wheel import inspect_crate, inspect_sdist, inspect_wheel
 
 
 class InspectWheelTests(unittest.TestCase):
@@ -102,7 +92,7 @@ class InspectWheelTests(unittest.TestCase):
             "calc_flow/__init__.py",
             "calc_flow/_native.abi3.so",
             "calc_flow_python-2.0.0.dist-info/licenses/LICENSE",
-            "web-ui/index.html",
+            "examples/pipeline.py",
         )
 
         with self.assertRaisesRegex(ValueError, "unexpected wheel entry"):
@@ -168,48 +158,6 @@ class InspectWheelTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "native module"):
             inspect_wheel(wheel)
-
-    def test_accepts_studio_wheel_with_license(self) -> None:
-        wheel = self._wheel_with(
-            "calc_flow_studio/__init__.py",
-            "calc_flow_studio/static/index.html",
-            "calc_flow_studio-2.0.0.dist-info/METADATA",
-            "calc_flow_studio-2.0.0.dist-info/licenses/LICENSE",
-        )
-
-        self.assertEqual(inspect_studio_wheel(wheel), 4)
-
-    def test_rejects_studio_wheel_without_license(self) -> None:
-        wheel = self._wheel_with(
-            "calc_flow_studio/__init__.py",
-            "calc_flow_studio/static/index.html",
-            "calc_flow_studio-2.0.0.dist-info/METADATA",
-        )
-
-        with self.assertRaisesRegex(ValueError, "missing Apache-2.0 license"):
-            inspect_studio_wheel(wheel)
-
-    def test_rejects_repository_only_symbolic_plans_from_studio_wheel(self) -> None:
-        wheel = self._wheel_with(
-            "calc_flow_studio/__init__.py",
-            "calc_flow_studio/static/index.html",
-            "calc_flow_studio-2.0.0.dist-info/licenses/LICENSE",
-            "calc_flow_studio/docs/superpowers/specs/symbolic-engine.md",
-        )
-
-        with self.assertRaisesRegex(ValueError, "forbidden Studio wheel entry"):
-            inspect_studio_wheel(wheel)
-
-    def test_rejects_repository_guidance_from_studio_wheel(self) -> None:
-        wheel = self._wheel_with(
-            "calc_flow_studio/__init__.py",
-            "calc_flow_studio/static/index.html",
-            "calc_flow_studio-2.0.0.dist-info/licenses/LICENSE",
-            "calc_flow_studio/AGENTS.md",
-        )
-
-        with self.assertRaisesRegex(ValueError, "forbidden Studio wheel entry"):
-            inspect_studio_wheel(wheel)
 
     def test_accepts_sdist_with_license_and_no_frozen_python(self) -> None:
         sdist = self._archive_with(

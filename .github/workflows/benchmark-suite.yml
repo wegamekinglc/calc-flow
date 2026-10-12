@@ -60,7 +60,6 @@ jobs:
           scripts.test_benchmark_rust_provenance
           scripts.test_benchmark_rust_migrations
           scripts.test_benchmark_worker
-          scripts.test_benchmark_frontend
           scripts.test_benchmark_pytest
       - name: Test benchmark and performance support scripts
         timeout-minutes: 5
@@ -178,10 +177,6 @@ jobs:
         with:
           python-version-file: .python-version
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        if: matrix.family == 'frontend'
-        with:
-          node-version: 20.20.0
       - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
         if: matrix.family == 'rust'
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
@@ -189,7 +184,7 @@ jobs:
         with:
           workspaces: . -> target/benchmark-rust-build
           key: complete-benchmark-rust
-      - name: Install locked benchmark and Studio dependencies
+      - name: Install locked benchmark dependencies
         run: |
           uv venv target/benchmark-venv
           uv pip sync --python target/benchmark-venv/bin/python \
@@ -223,9 +218,9 @@ jobs:
         env:
           FINANCE_PYTHON_PYTHON: target/finance-python-venv/bin/python
         run: |
-          uv pip compile pyproject.toml web-ui/backend/pyproject.toml \
+          uv pip compile pyproject.toml \
             --all-extras --no-emit-package calc-flow-python \
-            --no-emit-package calc-flow-studio --generate-hashes \
+            --generate-hashes \
             --python-version 3.13 \
             --output-file benchmarks/requirements.lock
           uv pip compile benchmarks/finance-python-requirements.in \
