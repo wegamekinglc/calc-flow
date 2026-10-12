@@ -175,3 +175,60 @@ per-comparison evidence and resource trace are preserved under the main checkout
 The fixed GitHub diagnostic is artifact `11728218142`, preserved under
 `github-diagnostic/` there; its outcome, raw perf streams, maps, IPC and seals
 remain available. The analysis does not mark the original failure resolved.
+
+## User-authorized repair follow-up
+
+The user subsequently requested further fixes and a fully runnable complete
+benchmark. This is a new repair/verification phase; the completed original-wheel
+five-case diagnostic is not retried and the wider eight-target goal stays paused.
+
+The candidate replaces standard SipHash in window aggregation's four temporary
+lookup maps with the workspace's existing randomized AHash. These maps retain
+exact key equality and are never serialized or traversed to determine update
+order. Group IDs still follow first occurrence; accumulator updates retain input
+order and install/encode still consume a BTreeMap. Existing canonical keys, state
+budgets and checkpoint formats remain unchanged. This is a testable response to
+the hash-processing hotspot, not proof of the historical regression's cause.
+The 35 focused window tests pass before and after the internal hash refactor
+(0.28 / 0.31 seconds; one pre-existing ignored test). No hasher-type mirror test
+was added. Source builds are separate from performance measurements.
+
+PR #412 head `86d0a3bd` Windows CI completed with 2,029 Rust tests passing and four
+failures: writer-v2 checkpoint recovery, queued launch cancellation, unstopped SQL
+queue draining, and checkpoint-soak cancellation. Linux gates and Codacy passed.
+Source inspection found that the sensitive-log test starts Cargo again without
+its parent's features while the parallel lib tests execute. This creates a
+second native build; it is a resource-contention lead, not proof that it caused
+all four timeouts.
+
+A focused regression assertion requires the child to use exactly its parent's
+executable. It fails under the old Cargo launch: parent `calc_flow-00fd9a3140990999`
+versus child `calc_flow-242dcf7e84a09783`. The child recompiles the native test
+library, and the RED test takes 181.80 seconds after its parent's build; nested
+Cargo also rewrites only the lockfile's `flatbuffers`/`fs2` ordering. That incidental
+worktree change was restored, preserving the unrelated root worktree lockfile.
+The fix starts `current_exe` from an awaited `spawn_blocking` task, which owns
+the child through captured-output completion; all original
+redaction/sentinel/source-location checks remain. An intermediate compile check
+rejected `tokio::process`, whose feature is not enabled; the final approach uses
+the existing dependencies and does not add process/signal crates. Runtime timeouts and the Windows test concurrency remain unchanged.
+
+The next acceptance check is one complete maintained workflow dispatch comparing
+main `e538099228b54882fe3b9fcc72d802e9998221ed` against the reviewed repair commit.
+It includes all 22 shards, every maintained case and the existing correctness,
+provenance, completeness and regression gates. The fixed sample counts and total
+260-minute dispatch budget (builds, queues and cleanup included) are recorded in
+the specification. No production speedup or full-suite success is claimed before
+those artifacts exist.
+
+The same-executable child regression is now GREEN in 0.01 seconds after a
+separate 71-second rebuild. The original RED spent 181.80 seconds in its nested
+build/child before failing. These are test-harness observations, not product
+benchmark timings. Required Windows CI must still validate its original parallel
+configuration and the four previously timed-out tests.
+
+Scoped all-feature core/lib/test Clippy passes with `-D warnings` in 95 seconds.
+Rust formatting, generated-contract and whitespace checks pass; Cargo.lock has
+no remaining drift in this repair worktree. No full local regression suite or
+local product timing comparison was run; the authorized remote complete suite
+and original Windows CI configuration remain the outstanding acceptance gates.

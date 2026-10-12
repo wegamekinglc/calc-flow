@@ -1,9 +1,11 @@
-## Branch Review: Original-wheel 10M group_by diagnosis
+## PR #412 Review: group_by diagnosis and scoped repair
 
 **Branch:** `fix/issue406-groupby-regression` → `main`
 **Base:** `e538099228b54882fe3b9fcc72d802e9998221ed`
-**Reviewed:** 2026-10-12, diagnostic implementation and its completed-run evidence;
-incremental workflow and analysis changes after `82306c6f`.
+**Reviewed:** 2026-10-12, diagnostic implementation and completed-run evidence,
+followed by the window scratch-map and test-harness repair on
+`86d0a3bdad39deb0fa5b736d95f0802cf8efb2a5` plus the reviewed worktree diff.
+The repair touches two Rust files and its specification, analysis and review.
 PR #412 remains draft according to the implementer's handoff. No new PR check
 snapshot or prior GitHub reviews were requested for this incremental review.
 The reviewer read the changed files and existing verification evidence without
@@ -16,14 +18,28 @@ A/B comparisons followed by one address profile per native module. It retains
 the original workload, paired classification and common harness, with a fixed
 600-second collection budget and cancellation at 550 seconds.
 
-The one diagnostic dispatch has completed. The incremental change records its
-results and retains CPU topology in future scheduled shard artifacts. Production
-behavior and the benchmark gate remain unchanged; the repeated 10M streaming
-`group_by` regression remains unresolved.
+The original diagnostic is complete and its results remain inconclusive for A/B.
+The subsequent user-authorized repair uses the existing randomized AHash for
+four temporary window lookup maps and makes the sensitive-log test reuse its
+current executable. The repeated 10M streaming `group_by` regression remains
+unresolved pending the separately authorized complete benchmark and required CI.
 
 ### Build and Test Results
 
-- Rust: **Not touched**; no native build or Rust suite run for this change.
+- Rust: **Passed, focused local verification only**. The reviewer read
+  `window-before.log` and `window-after.log`: both selections pass 35 tests with
+  one pre-existing ignored soak, in 0.28 and 0.31 seconds. The implementer
+  identified the after-run executable as the rebuilt all-feature
+  `calc_flow-00fd9a3140990999`; later source changes affect only the child harness.
+- Same-executable child regression: **RED then GREEN**. The RED log proves the
+  old nested Cargo command launched `calc_flow-242dcf7e84a09783` instead of its
+  parent's all-feature executable; the assertion failed after 181.80 seconds.
+  `privacy-same-binary-green2.log` records one passing test in 0.01 seconds after
+  a separate 71-second build. All original privacy assertions remain present.
+- Rust Clippy: **Passed**. `repair-clippy.log` records completion in 1m35s for
+  `cargo clippy --locked -p calc-flow --lib --tests --all-features -- -D warnings`.
+  The implementer reports `cargo fmt --all --check` passed; its inspected
+  `repair-format-final.log` is empty. No new dependency or feature is required.
 - Python diagnostic: **Passed** in focused verification. The reviewer read
   `focused.log`: nine checks passed in 0.044 seconds, and `imports.log`: four
   import/dependency checks passed in 0.279 seconds.
@@ -39,7 +55,14 @@ behavior and the benchmark gate remain unchanged; the repeated 10M streaming
   fixtures, verifying exit 42, both output streams and permission restoration.
   Actionlint was unavailable and was not run.
 - Studio backend and frontend: **Not touched**; suites not run.
-- New unresolved failures: **None identified** in this diagnostic scope.
+- New unresolved local failures: **None identified** in the reviewed repair.
+- Required CI: **Unresolved**. The retained Windows log for `86d0a3bd` has
+  2,029 passed, four failed and seven ignored Rust tests. The failures concern
+  writer-v2 recovery, queued launch cancellation, SQL queue draining and
+  checkpoint-soak cancellation. Reusing the current executable removes nested
+  native compilation and a demonstrated feature mismatch; it does not prove
+  that either caused all four timeouts. A new required Windows result must
+  establish that they pass in the original parallel configuration.
 - Existing regression: **Unresolved**. The original-wheel recovery again reports
   +10.097% for 10M streaming `group_by`; this review does not turn it green.
 - Completed diagnostic: **Collection succeeded; A/B inconclusive**. The reviewer
@@ -49,7 +72,13 @@ behavior and the benchmark gate remain unchanged; the repeated 10M streaming
   `workflow-yaml.log` records both workflow files parsed and every step having
   `run` or `uses`; the implementer also reported a passing whitespace check.
 
-Validation files are under this worktree's
+The new Rust validation files are under the main checkout's
+`target/issue406-morning-benchmark-failure/`. The reviewer read existing logs
+and source; no Rust execution, benchmark or CI query was started by the reviewer.
+The implementer reports no generated-contract or `Cargo.lock` drift and a
+passing final `git diff --check` for this repair.
+
+Earlier diagnostic validation files are under this worktree's
 `target/issue406-local-validation/`. The focused implementation checks were:
 
 ```bash
@@ -66,13 +95,16 @@ git diff --check -- scripts .github/workflows .codex/artifacts
 git diff --exit-code -- schemas/project-v3.schema.json web-ui/openapi.json web-ui/src/api/schema.d.ts Cargo.lock
 ```
 
-Changed Markdown alignment, trailing whitespace and final newlines also pass.
-Product regression suites, Rust coverage and Studio coverage were not run; no
-coverage gate or final CI result is established here.
+Changed diagnostic Markdown alignment, trailing whitespace and final newlines
+passed the earlier review. Full local product suites, Rust coverage and Studio
+coverage were not run; no coverage gate or final CI result is established here.
 
 ### Blocking Issues
 
-None remain in the reviewed diagnostic. The following findings were addressed:
+No source findings remain in the reviewed implementation. Required CI failures
+and the unresolved performance acceptance gate still block merge; they do not
+block committing this repair and running its one authorized complete suite.
+The following diagnostic findings were addressed:
 
 - `AuditWorker.start` now owns subprocess creation through cancellation and
   settles a process created during that cancellation before propagating it.
@@ -97,6 +129,19 @@ The incremental analysis tables also align in the supplied formatting evidence.
 
 ### Test Coverage
 
+The repair retains the existing window tests for null, full-width integer,
+composite and string keys; colliding slot-cache entries; hopping windows;
+stable checkpoint encoding and restored continuation; floating-point state;
+budget refusal; and output ordering. The four maps supply lookup and insertion,
+while first occurrence assigns IDs and the existing ordered installation supplies
+observable order. No assertion merely mirroring the chosen hasher is needed.
+
+The sensitive-log regression adds an exact executable identity assertion while
+preserving commit, abort, recovery, status and panic redaction checks. Its child
+is launched inside an awaited blocking task, so captured process I/O does not
+block the Tokio executor. The task owns the child until output collection ends;
+this test adds no timeout, detached process or public cancellation interface.
+
 The focused tests cover fixed products/workload/counts, alternate-product
 rejection, wrong-case refusal before dispatch, trace loss and address validation,
 bad-host preflight, denied profiling permissions, process-creation cancellation,
@@ -110,6 +155,25 @@ it does not establish comparable CPU hardware for the earlier failed runs or
 prove that the observed sampling addresses explain their regression.
 
 ### Documentation Consistency
+
+The repair specification explicitly supersedes the completed diagnostic's
+no-full-suite restriction under the user's new request. It permits one complete
+`benchmark-suite.yml` dispatch: main
+`e538099228b54882fe3b9fcc72d802e9998221ed` against the immutable reviewed repair
+commit, with ordinary locked release wheels and all 22 maintained shards.
+The 409 engine and 26 warm cases retain two rounds of ten pairs and existing
+oracles and regression rules; other families retain their maintained semantics.
+The 260-minute total budget includes builds, queues, setup, transfer and cleanup.
+Exhaustion requires cancellation and retained evidence, rather than an automatic
+retry or threshold change. The broader eight-target performance goal stays paused.
+
+The production diff does not change public APIs, input immutability, canonical
+keys, state accounting, checkpoint versions, row update order or ordered
+serialization. The test diff does not relax runtime deadlines or Windows
+concurrency. The analysis correctly distinguishes the demonstrated executable
+mismatch from an unproven explanation for the four CI timeouts and records the
+test-harness timings separately from product performance. No normative API or
+architecture documentation change is needed for these internal substitutions.
 
 The implementation follows the fixed five-case specification. Both source refs,
 wheel/native seals and the original common harness hash are pinned. The harness
@@ -180,10 +244,11 @@ and explicitly states that these observations cannot exclude other causes.
 
 ### Verdict
 
-**Approve** for the reviewed diagnostic, completed-run evidence and CPU metadata
-increment. No blocking findings remain in that scope. The fixed collection is
-complete; no retry or workload expansion is needed. The original regression
-remains unresolved, and no production fix is justified by this non-reproducing
-profile alone. Keep PR #412 draft; this review
-does not establish merge readiness, final CI success or resumption of the paused
-broader performance goal.
+**Approve** for the reviewed implementation and one authorized complete-suite
+verification after committing the reviewed repair. No source findings remain.
+This is not a merge approval: required CI, including the four Windows failures,
+and the complete benchmark acceptance result are still unresolved. The original
+regression is not marked fixed, and no speedup is established by these local
+tests or the earlier non-reproducing profile. Keep PR #412 draft until the full
+report has no missing cases, correctness/infrastructure errors or confirmed
+regressions, required CI is green, and the final specialist review is complete.
