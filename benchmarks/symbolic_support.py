@@ -319,7 +319,7 @@ def counting_matmul_runtime(backend: str) -> tuple[Runtime, CountingTableMatmul]
     namespace = _matmul_namespace(backend)
     counting = CountingTableMatmul(_TableMatmulProvider(backend, namespace))
     runtime = Runtime()
-    runtime._register_mapping_provider(
+    runtime.register_mapping_provider(
         backend,
         "table_matmul",
         "1",

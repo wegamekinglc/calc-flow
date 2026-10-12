@@ -278,7 +278,7 @@ class Runtime:
             self._registrations.append(registration)
             self._invalidate_symbolic_compile_cache()
 
-    def _register_mapping_provider(
+    def register_mapping_provider(
         self,
         provider: str,
         name: str,
@@ -290,6 +290,14 @@ class Runtime:
         options_schema: ProviderOptionsSchema | None = None,
         accepts_context: bool = False,
     ) -> None:
+        """Register a trusted provider mapping named input Ports to output Ports.
+
+        Each port is a ``(port_name, batch_kind)`` pair; ``batch_kind`` is
+        ``"table"`` or ``"array"``. The callback receives ``(inputs, options)``,
+        or ``(inputs, options, context)`` when ``accepts_context`` is true, and
+        returns a mapping from output port name to ``Batch``. Both port
+        sequences are copied; the caller's sequences are never mutated.
+        """
         if type(accepts_context) is not bool:
             raise TypeError(
                 "accepts_context must be an exact bool; "
@@ -527,8 +535,13 @@ class Runtime:
             for registration in self._registrations
         )
 
-    def _registration_snapshot(self) -> tuple[dict[str, Any], ...]:
-        """Return successful trusted registrations as defensive plain records."""
+    def registration_snapshot(self) -> tuple[dict[str, Any], ...]:
+        """Return this runtime's successful trusted registrations, oldest first.
+
+        Each record is a new ``dict`` holding the arguments of one registration,
+        including its live callable. Records are process-local trusted values,
+        not data: never place them in a project, checkpoint, or API payload.
+        """
         with self._registration_lock:
             return self._copied_registrations()
 
@@ -536,13 +549,19 @@ class Runtime:
         return self._inner.catalog()
 
     def capabilities(self) -> RuntimeCapabilities:
-        snapshot, _ = self._capability_registration_snapshot()
+        snapshot, _ = self.capability_registration_snapshot()
         return snapshot
 
-    def _capability_registration_snapshot(
+    def capability_registration_snapshot(
         self,
     ) -> tuple[RuntimeCapabilities, tuple[dict[str, Any], ...]]:
-        """Capture safe metadata and private worker records at one revision."""
+        """Return ``capabilities()`` and ``registration_snapshot()`` as one
+        consistent pair.
+
+        The records are the registrations that ``capabilities`` describes: each
+        ``provider`` and ``scalar_udf`` record has one capability entry with the
+        same identity.
+        """
         with self._registration_lock:
             registrations = self._copied_registrations()
             snapshot = runtime_capabilities(

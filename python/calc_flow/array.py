@@ -1255,7 +1255,7 @@ def register_numpy(runtime: Runtime) -> None:
         supports_static_inputs=False,
         array_rules=_NUMPY_STREAM_ARRAY_RULES,
     )
-    runtime._register_mapping_provider(
+    runtime.register_mapping_provider(
         "numpy",
         "table_matmul",
         "1",
@@ -1264,7 +1264,7 @@ def register_numpy(runtime: Runtime) -> None:
         output_ports=_TABLE_MATMUL_OUTPUT_PORTS,
     )
     symbolic_matrix = _SymbolicMatrixProvider("numpy", np)
-    runtime._register_mapping_provider(
+    runtime.register_mapping_provider(
         "numpy",
         "symbolic_matrix",
         "1",
@@ -1307,7 +1307,7 @@ def register_jax(runtime: Runtime) -> None:
         supports_static_inputs=False,
         array_rules=_JAX_STREAM_ARRAY_RULES,
     )
-    runtime._register_mapping_provider(
+    runtime.register_mapping_provider(
         "jax",
         "table_matmul",
         "1",
@@ -1316,7 +1316,7 @@ def register_jax(runtime: Runtime) -> None:
         output_ports=_TABLE_MATMUL_OUTPUT_PORTS,
     )
     symbolic_matrix = _SymbolicMatrixProvider("jax", jnp)
-    runtime._register_mapping_provider(
+    runtime.register_mapping_provider(
         "jax",
         "symbolic_matrix",
         "1",

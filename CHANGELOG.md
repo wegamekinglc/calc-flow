@@ -16,6 +16,26 @@ measurements. Use the current guides for supported behavior.
   repository and depends on `calc-flow-python` only as a published package.
   The core engine, Python API, and release workflow are unchanged.
 
+- 2026-10-13: Make Studio's parent-side registration reads tolerant of the full
+  record contract. `RunManager` capabilities and preview submission skip
+  records of kinds Studio cannot replay in a worker, such as `kafka_decoder`,
+  instead of raising `KeyError`, and strip unlisted keys such as the NumPy and
+  JAX helpers' process-local `stream_lifecycle` proof before transport, so
+  helper-installed providers replay into preview workers instead of failing
+  the strict worker preflight. The worker preflight is unchanged and still
+  rejects malformed or unknown records.
+
+- 2026-10-12: Make three `calc_flow.Runtime` methods public:
+  `register_mapping_provider`, `registration_snapshot`, and
+  `capability_registration_snapshot`. The underscore spellings
+  `_register_mapping_provider`, `_registration_snapshot`, and
+  `_capability_registration_snapshot` are removed with no aliases, including
+  the previously documented `_register_mapping_provider`. To migrate, rename
+  the call; arguments and behavior are unchanged. The public names first ship
+  in the release after `2026.10.12`. Registration records are trusted
+  process-local values, while `capabilities()` remains the data-only view. The
+  native binding, Rust exports, REST, and OpenAPI are unchanged.
+
 - 2026-10-12: Move the workspace crates, Python core, Studio, and frontend to
   calendar version `2026.10.12` for the `calc-flow-python` release. Studio
   requires `calc-flow-python>=2026.10.12,<2027`.
