@@ -3,9 +3,9 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: Standard benchmarks, DAL-301 diagnostic, or sealed-wheel recovery
+        description: Standard benchmarks, fixed diagnostics, or sealed-wheel recovery
         type: choice
-        options: [standard, dal301-groupby, suite-recovery]
+        options: [standard, dal301-groupby, suite-recovery, issue406-groupby]
         default: standard
       release_run_id:
         description: Original complete-suite run containing both sealed wheels
@@ -296,6 +296,81 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
 
+  issue406-groupby:
+    name: Profile original October 12 group_by wheels
+    if: inputs.mode == 'issue406-groupby'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      UV_CACHE_DIR: ${{ github.workspace }}/target/uv-cache
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13.16'
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - name: Install locked dependencies and Linux sampler
+        run: |
+          uv venv target/diagnostic-venv
+          uv pip sync --python target/diagnostic-venv/bin/python \
+            --require-hashes benchmarks/requirements.lock
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends linux-tools-common linux-tools-generic
+          perf_binary=$(printf '%s\n' /usr/lib/linux-tools-*/perf | sort -V | tail -1)
+          test -x "$perf_binary"
+          printf 'ISSUE406_PERF=%s\n' "$perf_binary" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          github-token: ${{ github.token }}
+          run-id: 38178694560
+          artifact-ids: 11716974975
+          path: target/issue406-releases/A
+          merge-multiple: true
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          github-token: ${{ github.token }}
+          run-id: 38178694560
+          artifact-ids: 11716848795
+          path: target/issue406-releases/B
+          merge-multiple: true
+      - name: Run fixed controls and original-native address profiles
+        shell: bash
+        run: |
+          mkdir -p target/issue406-evidence
+          test -x "$ISSUE406_PERF"
+          printf '%s\n' "$ISSUE406_PERF" > target/issue406-evidence/perf-binary.txt
+          previous_paranoid=$(cat /proc/sys/kernel/perf_event_paranoid)
+          printf '%s\n' "$previous_paranoid" > target/issue406-evidence/previous-paranoid.txt
+          restore_permissions() {
+            sudo sysctl -w "kernel.perf_event_paranoid=$previous_paranoid"
+          }
+          trap restore_permissions EXIT
+          sudo sysctl -w kernel.perf_event_paranoid=1
+          set +e
+          target/diagnostic-venv/bin/python -m scripts.groupby_diagnostic.issue406 run \
+            --releases target/issue406-releases --perf "$ISSUE406_PERF" \
+            --output target/issue406-evidence \
+            > target/issue406-evidence/stdout.log \
+            2> target/issue406-evidence/stderr.log
+          diagnostic_status=$?
+          set -e
+          printf '%s\n' "$diagnostic_status" > target/issue406-evidence/exit-code.txt
+          cat target/issue406-evidence/stdout.log target/issue406-evidence/stderr.log
+          exit "$diagnostic_status"
+      - name: Retain original-wheel diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: issue406-groupby-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            target/issue406-evidence/**/*.json
+            target/issue406-evidence/**/*.jsonl
+            target/issue406-evidence/**/*.log
+            target/issue406-evidence/**/*.txt
+            target/issue406-evidence/**/*.data
+            !target/issue406-evidence/sites/**/site/**
+          if-no-files-found: error
+          retention-days: 30
   suite-recovery:
     name: Recover one complete benchmark shard
     if: inputs.mode == 'suite-recovery'

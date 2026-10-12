@@ -15,11 +15,13 @@ from scripts.groupby_diagnostic.runtime import AuditWorker, monitor, resource_sa
 from scripts.toolkit import git_output, sha256_file, write_json
 
 
-async def round_(case: dict, sites: dict, releases: dict, root: Path) -> dict:
+async def round_(
+    case: dict, sites: dict, releases: dict, root: Path, *, worker_type=AuditWorker
+) -> dict:
     workers = {}
     try:
         for side, site in sites.items():
-            workers[side] = await AuditWorker.start(site, root / side)
+            workers[side] = await worker_type.start(site, root / side)
         environment = await _prepare(workers, releases, case)
         if workers["baseline"].input_hashes != workers["candidate"].input_hashes:
             raise ValueError("paired input IPC bytes differ")
@@ -51,10 +53,16 @@ async def close_workers(workers: dict, root: Path) -> None:
         raise RuntimeError(f"worker cleanup failed: {errors}")
 
 
-async def paired(case: dict, sites: dict, releases: dict, root: Path) -> dict:
+async def paired(
+    case: dict, sites: dict, releases: dict, root: Path, *, worker_type=AuditWorker
+) -> dict:
     evidence = []
     for index in range(ROUNDS):
-        evidence.append(await round_(case, sites, releases, root / f"round-{index}"))
+        evidence.append(
+            await round_(
+                case, sites, releases, root / f"round-{index}", worker_type=worker_type
+            )
+        )
         write_json(root / "rounds.json", evidence)
     if evidence[0]["environment"] != evidence[1]["environment"]:
         raise ValueError("confirmation environment differs")

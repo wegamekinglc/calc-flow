@@ -3266,29 +3266,23 @@ mod tests {
     #[tokio::test]
     async fn sensitive_lifecycle_panic_payloads_never_reach_process_stderr() {
         if std::env::var_os(SENSITIVE_PANIC_CHILD).is_none() {
-            let cargo = std::path::Path::new(env!("CARGO"));
-            assert!(
-                cargo.is_absolute(),
-                "Cargo must provide its test harness with an absolute executable path"
-            );
-            let output = Command::new(cargo)
-                .current_dir(env!("CARGO_MANIFEST_DIR"))
-                .args([
-                    "test",
-                    "--quiet",
-                    "--package",
-                    env!("CARGO_PKG_NAME"),
-                    "--lib",
-                    "runtime::streaming::sink_task::tests::sensitive_lifecycle_panic_payloads_never_reach_process_stderr",
-                    "--",
-                    "--exact",
-                    "--nocapture",
-                    "--test-threads=1",
-                ])
-                .env(SENSITIVE_PANIC_CHILD, "1")
-                .env("RUST_BACKTRACE", "0")
-                .output()
-                .unwrap();
+            // Same-user test reentry; this path makes no authorization decision.
+            let executable = std::env::current_exe().unwrap(); // nosemgrep
+            let output = tokio::task::spawn_blocking(move || {
+                Command::new(&executable)
+                    .args([
+                        "runtime::streaming::sink_task::tests::sensitive_lifecycle_panic_payloads_never_reach_process_stderr",
+                        "--exact",
+                        "--nocapture",
+                        "--test-threads=1",
+                    ])
+                    .env(SENSITIVE_PANIC_CHILD, &executable)
+                    .env("RUST_BACKTRACE", "0")
+                    .output()
+            })
+            .await
+            .unwrap()
+            .unwrap();
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
 
@@ -3314,6 +3308,11 @@ mod tests {
             return;
         }
 
+        assert_eq!(
+            std::env::current_exe().unwrap().as_os_str(), // nosemgrep
+            std::env::var_os(SENSITIVE_PANIC_CHILD).unwrap(),
+            "the panic probe must reuse the running test binary and its feature set"
+        );
         exercise_commit_panic_redaction().await;
         exercise_abort_panic_redaction().await;
         exercise_recovery_panic_redaction().await;

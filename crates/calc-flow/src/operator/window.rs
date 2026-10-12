@@ -473,15 +473,17 @@ struct CachedWindowSlot {
     index: usize,
 }
 
+type ScratchMap<K, V> = HashMap<K, V, ahash::RandomState>;
+
 /// Per-batch accumulator scratch: hashed while rows stream in, then sorted
 /// once into the deterministic window-key order installs and encodes observe.
 struct BatchScratch<'a> {
-    group_ids: HashMap<Arc<[u8]>, usize>,
-    string_group_ids: HashMap<Option<&'a str>, usize>,
-    integer_group_ids: HashMap<keys::IntegerKey, usize>,
+    group_ids: ScratchMap<Arc<[u8]>, usize>,
+    string_group_ids: ScratchMap<Option<&'a str>, usize>,
+    integer_group_ids: ScratchMap<keys::IntegerKey, usize>,
     group_keys: Vec<Arc<[u8]>>,
     // Keyed by (window start, group); the fixed geometry determines the end.
-    slots: HashMap<(i64, usize), usize>,
+    slots: ScratchMap<(i64, usize), usize>,
     slot_cache: [Option<CachedWindowSlot>; 64],
     slot_cache_ways: usize,
     entries: Vec<(WindowKey, AccumulatorRow)>,
@@ -500,11 +502,11 @@ impl<'a> BatchScratch<'a> {
             _ => 0,
         };
         Self {
-            group_ids: HashMap::new(),
-            string_group_ids: HashMap::new(),
-            integer_group_ids: HashMap::new(),
+            group_ids: ScratchMap::default(),
+            string_group_ids: ScratchMap::default(),
+            integer_group_ids: ScratchMap::default(),
             group_keys: Vec::new(),
-            slots: HashMap::new(),
+            slots: ScratchMap::default(),
             slot_cache: [None; 64],
             slot_cache_ways,
             entries: Vec::new(),
