@@ -1,7 +1,9 @@
 # Calc Flow Codex Agent Team
 
 The Codex-native calc-flow team coordinates specialized work across the
-Rust-native engine, PyO3/Python adapters, FastAPI backend, and React Studio.
+Rust-native engine and PyO3/Python adapters. Calc Flow Studio lives in the
+separate calc-flow-studio repository (FastAPI + React) and depends on the
+published calc-flow-python package; do not look for `web-ui/` here.
 The orchestrator routes work through the specialists; each specialist keeps a
 bounded responsibility and returns a concise, verified hand-off.
 
@@ -15,7 +17,7 @@ changes from this directory to those mirrors, never in the reverse direction.
 |--------------|-------------------|------------------------------------------|-----------------------------------------------|
 | Orchestrator | `cf-orchestrator` | request and specialist reports           | task plan and consolidated hand-offs          |
 | Spec writer  | `cf-spec-writer`  | request, issues, architecture, guidance  | `.codex/artifacts/specs/<slug>.md`            |
-| API designer | `cf-api-designer` | spec, exports, stubs, OpenAPI, examples  | `.codex/artifacts/api-notes/<slug>.md`        |
+| API designer | `cf-api-designer` | spec, exports, stubs, examples           | `.codex/artifacts/api-notes/<slug>.md`        |
 | Critic       | `cf-critic`       | spec and API note                        | `.codex/artifacts/critiques/<slug>.md`        |
 | Implementer  | `cf-implementer`  | approved artifacts and relevant source   | source and focused tests in a worktree        |
 | Tester       | `cf-tester`       | behavior, source, and existing tests     | tests for the affected surfaces               |
@@ -52,8 +54,8 @@ Follow [AGENTS.md Verification](../../AGENTS.md#verification): smallest local te
 necessary module checks; full regression gates in regular CI; routine benchmarks in
 the separate twice-daily scheduled workflow; local full runs only by explicit request,
 CI failure diagnosis, or clear high risk without CI coverage. State the reason and
-limited scope. Keep the Rust 90% line and Studio
-backend 85% coverage floors. Do not repeat unchanged passing checks. Take at most one
+limited scope. Keep the Rust 90% line coverage floor. Do not repeat unchanged passing
+checks. Take at most one
 non-blocking CI snapshot after a commit/push or at review handoff; do not wait or poll
 unless final results were explicitly requested. Pending permits handoff, not merge;
 required failures and unresolved checks still block merge.

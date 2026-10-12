@@ -3,13 +3,13 @@
 Apply these rules to all changes in this repository. Rust core style (Rust
 2024, `unsafe_code = "forbid"`, `calc_flow::Result<T>`, async ownership,
 rustdoc) is governed by the `Coding style` section of
-[AGENTS.md](../../AGENTS.md); this file covers the Python adapters, the web
-surfaces, Markdown, tests, and verification.
+[AGENTS.md](../../AGENTS.md); this file covers the Python adapters,
+Markdown, tests, and verification.
 
 ## Python
 
-* Target CPython 3.9 or newer for the core Python package; Studio targets 3.13
-  or newer. Do not add compatibility shims for the removed
+* Target CPython 3.9 or newer for the core Python package. Do not add
+  compatibility shims for the removed
   pure-Python v1 implementation (`src/calc_flow/` is gone).
 * Keep `from __future__ import annotations` in Python modules unless the project
   explicitly removes it everywhere.
@@ -36,31 +36,13 @@ surfaces, Markdown, tests, and verification.
 * Do not add incomplete stubs, unused fixtures, unused CLIs, or placeholder
   modules just to reserve future structure.
 
-## Web UI and backend
-
-* Apply the functional-first, input-immutability, and function-over-class rules
-  above to both TypeScript frontend code and Python backend code under
-  `web-ui/`.
-* Keep web I/O asynchronous whenever the framework or library supports it.
-  Await network, file, stream, and process operations rather than blocking
-  FastAPI's event loop or the browser main thread.
-* Keep pure, CPU-local transformations synchronous. Do not mark a function
-  `async` when it performs no asynchronous work.
-* Update React state immutably. Use functional state updates when deriving a new
-  value from previous state.
-* Clean up streams, timers, requests, workers, and other asynchronous resources
-  when their owning component, request, or run ends. Avoid floating promises and
-  make cancellation and failure paths explicit.
-
 ## Tests
 
 * Rust unit tests live beside source under `crates/calc-flow/src/`; integration
   tests live under `crates/calc-flow/tests/`. The `calc-flow-python` PyO3
   binding has no separate Rust integration-test directory — its behavior is
   covered by inline unit tests and the Python suite under `python/tests/`.
-* Python binding and adapter tests live under `python/tests/`. Studio backend
-  tests live under `web-ui/backend/tests/` (independent 85% coverage floor).
-  Frontend unit tests use Vitest; browser workflows use Playwright.
+* Python binding and adapter tests live under `python/tests/`.
 * Define fixtures in focused test modules. Do not create a shared `conftest.py`.
 * Name Python test functions `test_<behavior>()`. Keep tests focused on public
   behavior, regressions, and state recovery paths; avoid tests that only assert
@@ -85,7 +67,7 @@ Follow the local scope, CI responsibilities, and three full-test exceptions in
 change and necessary formatter/linter/type checks for directly affected modules.
 Full regression and routine performance gates belong to CI; the complete command
 groups in AGENTS.md remain CI or explicitly scoped full-verification references.
-Preserve the Rust 90% line and Studio backend 85% coverage floors. Do not repeat
+Preserve the Rust 90% line coverage floor. Do not repeat
 unchanged passing checks or rebuild native code only to review documentation.
 For Markdown and agent guidance, check changed structure, synchronization,
 links/anchors, whitespace, final newlines, and necessary existing examples.

@@ -62,7 +62,7 @@ When the review ends, remove the review worktree (`git worktree remove`) so
 
 Read the PR description and scan the diff to understand:
 - What is being changed and why?
-- Which surfaces are affected (Rust core, Python, studio backend, studio frontend)?
+- Which surfaces are affected (Rust core, Python)?
 - Is this a new feature, bug fix, refactor, or cleanup?
 - Does the PR title follow the parent-repo convention — category prefix (`feat:`,
   `fix:`, `docs:`, `chore:`, `refactor:`, `test:`, `style:`, `perf:`, `ci:`), under 70
@@ -88,14 +88,6 @@ need context. Check:
   Any]`, `A | B`)
 - Functions are pure transforms; no mutation of inputs or caller-owned objects
 - No new dependency without discussion in the PR
-
-#### Web UI and backend
-- Network/file/stream/process I/O is asynchronous; nothing blocks FastAPI's event loop
-  or the browser main thread
-- React state updated immutably; async resources (streams, timers, requests, workers)
-  cleaned up when their owner unmounts/ends
-- If the REST contract changed: `web-ui/openapi.json` and the generated frontend types
-  are updated together (`npm run sync:api`) in the same PR
 
 #### Domain invariants
 - `Batch` envelopes stay immutable end-to-end
@@ -123,10 +115,8 @@ need context. Check:
 #### Security
 - No hardcoded secrets or credentials
 - YAML handling stays safe-load only; no arbitrary deserialization of untrusted input
-- The studio backend stays loopback-only
-- If dependency manifests changed: `cargo deny --locked check`,
-  `cargo audit` (with the repo's documented ignores), and `npm audit --omit=dev` are
-  addressed in the PR
+- If dependency manifests changed: `cargo deny --locked check` and
+  `cargo audit` (with the repo's documented ignores) are addressed in the PR
 
 ### Step 4: Targeted Local Verification and CI Gate
 
@@ -134,9 +124,9 @@ Review the implementation evidence first, then run only the smallest additional 
 needed for the diff and directly affected behavior, inside the review worktree. Use
 focused tests and necessary module compile, format, lint, or type checks. Do not repeat
 unchanged passing checks. Full regression gates belong to regular CI; routine
-benchmarks run in the separate twice-daily scheduled workflow. The complete commands,
-combined Rust 90% line gate, and Studio 85% floor remain in
-`AGENTS.md`. Its three local-full-test exceptions are explicit user request, CI failure
+benchmarks run in the separate twice-daily scheduled workflow. The complete commands and
+combined Rust 90% line gate remain in `AGENTS.md`. Its three local-full-test exceptions
+are explicit user request, CI failure
 diagnosis, or clear high risk without CI coverage; state the reason and limited scope.
 
 Use at most one non-blocking CI status snapshot per review handoff (reuse Step 1's
@@ -169,8 +159,6 @@ Output a structured review with these sections:
 ### Build and Test Results
 - Rust: **Passed** / **Failed** / **Not touched**
 - Python: **Passed** / **Failed** / **Not touched**
-- Studio backend: **Passed** / **Failed** / **Not touched**
-- Studio frontend: **Passed** / **Failed** / **Not touched**
 - New failures: <list or "None">
 - Regressions: <list or "None">
 
@@ -226,13 +214,10 @@ merging it, confirm that intent before using a close operation.
 |----------------|-----------------------------------------------------------------------|
 | Rust           | fmt + clippy `-D warnings` clean; harness green; llvm-cov ≥90         |
 | Python         | ruff check/format clean; `pytest python/tests` green                  |
-| Backend        | `pytest --cov=calc_flow_studio` green                                 |
-| Frontend       | `npm run build` + `npm test` green; e2e when flows change             |
 | Branches       | `feature/<desc>` / `fix/<desc>` off `main`                            |
 | Commits        | imperative <72 chars + why body; no attribution trailer               |
 | PR             | category prefix <70 chars; `## Summary` + `## Test plan`              |
 | Domain         | Batch immutable; DataFusion-only tables; no `eval`; data-only configs |
-| Studio backend | loopback-only; safe YAML only                                         |
 
 ## What Not to Do
 

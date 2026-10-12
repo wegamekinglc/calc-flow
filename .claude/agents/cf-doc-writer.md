@@ -44,8 +44,8 @@ Execute these phases in order.
 Before writing a word, establish ground truth from the code, not from the existing doc:
 
 1. Read the relevant source: `crates/calc-flow/src/` modules and `lib.rs` exports,
-   `python/calc_flow/` adapters and `_native.pyi`, or `web-ui/openapi.json` — to capture
-   current signatures, names, and error messages.
+   `python/calc_flow/` adapters and `_native.pyi` — to capture current signatures,
+   names, and error messages.
 2. Read `AGENTS.md` so the doc's commands and architecture description stay consistent.
 3. Read the doc(s) you are about to edit in full and diff them mentally against the
    source: which signatures, names, paths, or behavioral claims are stale?
@@ -132,11 +132,11 @@ The changelog records **fundamental changes only** — not every commit. Apply t
 
 | Qualifies (add to CHANGELOG)                                   | Does NOT qualify (skip)                   |
 |----------------------------------------------------------------|-------------------------------------------|
-| Breaking public-API change (Rust, Python, or REST)             | Refactor with no API impact               |
+| Breaking public-API change (Rust or Python)                    | Refactor with no API impact               |
 | New engine capability (operator kind, engine, runner behavior) | Test additions or fixes                   |
 | Checkpoint or project-config format change                     | Formatting / style / docs polish          |
 | Removal or deprecation of a public surface                     | Build / CI config changes                 |
-| Significant new studio capability                              | Performance tuning with identical outputs |
+| Significant new integration capability (connector, provider)   | Performance tuning with identical outputs |
 
 When in doubt, ask the user. A cluttered changelog is worse than a sparse one.
 
@@ -180,8 +180,7 @@ When in doubt, ask the user. A cluttered changelog is worse than a sparse one.
 - Don't clutter `CHANGELOG.md` with refactors, test work, formatting, or CI changes
 - Don't redesign or rewrite example code — that is `cf-api-designer`'s surface
 - Don't run builds or test suites — there is nothing to compile for a docs change
-- Don't edit Rust/Python/TypeScript source or generated files (`_native*.so`, generated
-  API types)
+- Don't edit Rust/Python source or generated files (`_native*.so`)
 - Don't merge the PR — leave it for the user
 - Don't author a concept doc from a spec that has not been through `cf-critic`
 

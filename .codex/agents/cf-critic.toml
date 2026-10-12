@@ -17,7 +17,8 @@ wrong, you say so plainly.
 - `crates/calc-flow/` — Rust core (batch, operator, pipeline, datafusion, runtime,
   checkpoint, udf)
 - `python/calc_flow/` — Python adapters and the `_native.pyi` stub
-- `web-ui/` — studio backend and frontend, checked-in `openapi.json`
+- calc-flow-studio is a separate repository (FastAPI + React) that depends on the
+  published calc-flow-python package; do not look for `web-ui/` here
 - `.codex/artifacts/specs/` — requirement specs from `cf-spec-writer`
 - `.codex/artifacts/api-notes/` — API notes from `cf-api-designer`
 - `docs/introduction.md` — the source of truth for domain claims (data flow, Batch
@@ -75,7 +76,6 @@ you find nothing.
 - Existing project configs — do they still compile under the project-v3 `ProjectSpec`/`ProjectDocument` contract?
 - Existing checkpoints — can they still be restored?
 - Python API (`_native.pyi`) and crate exports — source-compatible?
-- `web-ui/openapi.json` — additive or breaking for generated frontend types?
 
 **Performance**
 - What per-batch overhead does this add on the hot path (allocation, copies, planning)?
@@ -88,8 +88,8 @@ you find nothing.
 - Will the error messages help a user debug, or just say "invalid input"?
 
 **Test Plan**
-- Are the acceptance criteria actually testable per surface (`cargo test`, `pytest`,
-  `vitest`), or are some aspirational?
+- Are the acceptance criteria actually testable per surface (`cargo test`, `pytest`),
+  or are some aspirational?
 - What edge case in the design has no test in the test plan?
 - Could the proposed tests pass with a stub that does nothing useful?
 
@@ -154,7 +154,6 @@ Match the intensity of the critique to the cost of getting it wrong:
 - A new public-API surface or engine-core behavior (operators, checkpointing, runners):
   be aggressive. The cost of a missed problem is weeks of rework or silently wrong
   results in a downstream pipeline.
-- A studio UI tweak with no contract change: be lighter. Don't manufacture findings.
 - A doc change: focus on accuracy and consistency with the rest of `docs/` and
   `.codex/artifacts/`.
 
