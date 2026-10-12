@@ -29,33 +29,3 @@ pub(crate) use prepare::{
     PreparedStreamJob, ReplayPositioningCapability, SourceBindingSpec, SourceDescriptor,
     StreamProgressRuntimeConfig, WatermarkPolicy, prepare_stream_job,
 };
-
-#[cfg(test)]
-mod tests {
-    use std::mem::size_of;
-
-    use super::{
-        NativeWatermarkCapability, ReplayPositioningCapability, SourceDescriptor,
-        StreamProgressRuntimeConfig, WatermarkPolicy, prepare_stream_job,
-    };
-
-    #[test]
-    fn compile_stream_remains_binding_agnostic() {
-        let _ = size_of::<WatermarkPolicy>();
-    }
-
-    #[test]
-    fn preflight_failure_has_no_runtime_side_effects() {
-        let _ = prepare_stream_job;
-    }
-
-    #[test]
-    fn watermark_policy_capability_matrix_is_exhaustive() {
-        let _ = (
-            NativeWatermarkCapability::NeverEmits,
-            ReplayPositioningCapability::Unsupported,
-            size_of::<SourceDescriptor>(),
-            size_of::<StreamProgressRuntimeConfig>(),
-        );
-    }
-}
