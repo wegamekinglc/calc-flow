@@ -3,7 +3,7 @@
 #[cfg(test)]
 use super::identity_tests;
 use super::{
-    Admission, AdmissionRef, AdmissionWorkspace, Array, Batch, InputKeys, LeftOrder,
+    Admission, AdmissionRef, AdmissionWorkspace, Array, Batch, InputKeys, LeftOrder, RecordBatch,
     ReservedIdentities, Result, StreamAsofJoinOperator, StreamOperatorContext,
     StreamingFailureReason, TimestampMicrosecondArray, UInt64Array, ValidatedInput,
     admitted_right_capacities, check_input_cancellation, direct, reason, state, times,
@@ -45,14 +45,34 @@ pub(super) fn plan(
     let mut keys = InputKeys::default();
     let mut columns = Vec::new();
     for record in records.iter().filter(|record| record.num_rows() != 0) {
+        let Some(record) = RecordColumns::prepare(operator, record, &mut keys, context)? else {
+            return Ok(None);
+        };
+        columns.push(record);
+    }
+    context.check_cancelled()?;
+    Ok(Some(Plan {
+        columns: Columns { records: columns },
+        capacities: admitted_right_capacities(keys.values, 1),
+    }))
+}
+
+impl RecordColumns {
+    fn prepare(
+        operator: &StreamAsofJoinOperator,
+        record: &RecordBatch,
+        keys: &mut InputKeys,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<Option<Self>> {
         context.check_cancelled()?;
+        let side = operator.spec.right();
         let encoded = state::encode_key_columns(record, side.keys(), |bytes| {
             operator.reserve_workspace(bytes)
         })?;
         if !encoded.is_inline_string_dictionary() {
             return Ok(None);
         }
-        let state::EncodedColumns::StringKeys { rows, mut ids } = encoded else {
+        let state::EncodedColumns::StringKeys { rows, ids } = encoded else {
             unreachable!("proven inline string dictionary")
         };
         u32::try_from(ids.len() - 1).map_err(|_| {
@@ -78,37 +98,59 @@ pub(super) fn plan(
             .as_any()
             .downcast_ref::<UInt64Array>()
             .expect("direct unsigned sequence");
-        for (row, id) in ids.iter_mut().enumerate() {
-            check_input_cancellation(row, context)?;
-            *id = mapping[*id as usize];
-            let key = &mut keys.values[*id as usize];
-            if key.rows == 0 {
-                let sequence = sequence_encoding(sequences.value(row));
-                if operator
-                    .state
-                    .right
-                    .get(&key.encoding)
-                    .and_then(state::RightBucket::last_key_value)
-                    .is_some_and(|((time, previous), _)| {
-                        (time, previous.as_ref()) >= (&times.value(row), &sequence)
-                    })
-                {
-                    return Ok(None);
-                }
-            }
-            key.rows += 1;
-        }
-        columns.push(RecordColumns {
+        let mut columns = Self {
             times: times.clone(),
             sequences: sequences.clone(),
             keys: ids,
-        });
+        };
+        if !columns.remap(operator, &mapping, keys, context)? {
+            return Ok(None);
+        }
+        Ok(Some(columns))
     }
-    context.check_cancelled()?;
-    Ok(Some(Plan {
-        columns: Columns { records: columns },
-        capacities: admitted_right_capacities(keys.values, 1),
-    }))
+
+    fn remap(
+        &mut self,
+        operator: &StreamAsofJoinOperator,
+        mapping: &[u32],
+        keys: &mut InputKeys,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<bool> {
+        for (row, id) in self.keys.iter_mut().enumerate() {
+            check_input_cancellation(row, context)?;
+            *id = mapping[*id as usize];
+            let key = &mut keys.values[*id as usize];
+            if key.rows == 0
+                && !follows_retained(
+                    operator,
+                    &key.encoding,
+                    self.times.value(row),
+                    self.sequences.value(row),
+                )
+            {
+                return Ok(false);
+            }
+            key.rows += 1;
+        }
+        Ok(true)
+    }
+}
+
+fn follows_retained(
+    operator: &StreamAsofJoinOperator,
+    key: &state::Encoding,
+    time: i64,
+    sequence: u64,
+) -> bool {
+    let sequence = sequence_encoding(sequence);
+    !operator
+        .state
+        .right
+        .get(key)
+        .and_then(state::RightBucket::last_key_value)
+        .is_some_and(|((previous_time, previous), _)| {
+            (previous_time, previous.as_ref()) >= (&time, &sequence)
+        })
 }
 
 impl Plan {

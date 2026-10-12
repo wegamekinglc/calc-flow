@@ -318,19 +318,7 @@ async fn compare(
         .with_checkpointing(checkpointing)
         .with_gather_owner(service.owner("direct-right-differential".into()));
     let context = StreamOperatorContext::new(&job, "asof", None);
-    if let Some(seed) = seed {
-        for op in [&mut fast, &mut legacy] {
-            let mut output = EdgeCollector::new(op.output_ports().to_vec());
-            op.process_data("right", seed.clone(), &context, &mut output)
-                .await
-                .unwrap();
-        }
-        if checkpointing {
-            let snapshot = assert_capture_equal(&mut fast, &mut legacy, &context).await;
-            fast.restore(&snapshot).unwrap();
-            legacy.restore(&snapshot).unwrap();
-        }
-    }
+    seed_right(&mut fast, &mut legacy, seed, checkpointing, &context).await;
     let validated = ValidatedInput {
         index: 1,
         watermark,
@@ -382,22 +370,10 @@ async fn compare(
     if checkpointing {
         assert_capture_equal(&mut fast, &mut legacy, &context).await;
     }
-    let mut outputs = Vec::new();
-    for op in [&mut fast, &mut legacy] {
-        let mut output = EdgeCollector::new(op.output_ports().to_vec());
-        // Prepare accepted rows explicitly for the mixed-late case.
-        let accepted = if watermark.is_some() {
-            let record = &input.table_payload().unwrap().batches()[0];
-            batch(vec![record.slice(1, record.num_rows() - 1)])
-        } else {
-            input.clone()
-        };
-        op.process_data("left", accepted, &context, &mut output)
-            .await
-            .unwrap();
-        op.on_end(&context, &mut output).await.unwrap();
-        outputs.push(output_records(&mut output));
-    }
+    let outputs = [
+        probe_left(&mut fast, input, watermark, &context).await,
+        probe_left(&mut legacy, input, watermark, &context).await,
+    ];
     assert_eq!(outputs[0], outputs[1]);
     assert_eq!(fast.status, legacy.status);
     drop((fast, legacy, outputs));
@@ -405,4 +381,48 @@ async fn compare(
     drop(context);
     drop(job);
     assert!(pools.iter().all(|pool| pool.reserved() == 0));
+}
+
+async fn seed_right(
+    fast: &mut StreamAsofJoinOperator,
+    legacy: &mut StreamAsofJoinOperator,
+    seed: Option<&Batch>,
+    checkpointing: bool,
+    context: &StreamOperatorContext<'_>,
+) {
+    let Some(seed) = seed else {
+        return;
+    };
+    for op in [&mut *fast, &mut *legacy] {
+        let mut output = EdgeCollector::new(op.output_ports().to_vec());
+        op.process_data("right", seed.clone(), context, &mut output)
+            .await
+            .unwrap();
+    }
+    if checkpointing {
+        let snapshot = assert_capture_equal(fast, legacy, context).await;
+        fast.restore(&snapshot).unwrap();
+        legacy.restore(&snapshot).unwrap();
+    }
+}
+
+async fn probe_left(
+    op: &mut StreamAsofJoinOperator,
+    input: &Batch,
+    watermark: Option<i64>,
+    context: &StreamOperatorContext<'_>,
+) -> Vec<RecordBatch> {
+    let mut output = EdgeCollector::new(op.output_ports().to_vec());
+    // Prepare accepted rows explicitly for the mixed-late case.
+    let accepted = if watermark.is_some() {
+        let record = &input.table_payload().unwrap().batches()[0];
+        batch(vec![record.slice(1, record.num_rows() - 1)])
+    } else {
+        input.clone()
+    };
+    op.process_data("left", accepted, context, &mut output)
+        .await
+        .unwrap();
+    op.on_end(context, &mut output).await.unwrap();
+    output_records(&mut output)
 }
