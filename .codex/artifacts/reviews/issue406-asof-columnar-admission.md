@@ -1,11 +1,14 @@
-## Branch Review: ASOF right columnar admission
+## PR #411 Review: ASOF right columnar admission
 
 **Branch:** `feature/issue406-asof-columnar-admission` → `main`
-**Base:** `8ee5b71b7b862d4e44bd0be390d182cf950d17f7`
-**Reviewed:** 2026-10-12, uncommitted implementation; 15 source, test and artifact files.
+**Implementation base:** `8ee5b71b7b862d4e44bd0be390d182cf950d17f7`
+**Current base:** `8ce5380bd6b6704473cba4ca1083820dd1059e42`
+**Reviewed:** 2026-10-12, initial implementation and the two-file complexity
+refactor at `5e08b60425f611f4d755cf62fe36f7f322d1cb0a`, plus the analysis updates.
 **Scope:** Source correctness and functional verification. The overall performance
-goal remains paused. No PR check runs or prior GitHub reviews were available for
-this uncommitted branch review; required CI remains a separate merge gate.
+goal remains paused. The initial review preceded PR creation; no new GitHub status
+snapshot was taken for this incremental review. Required CI remains a separate
+merge gate.
 
 ### Summary
 
@@ -14,6 +17,11 @@ remapped key IDs instead of allocating canonical row descriptors. The fast path
 proves that each touched key follows its actual retained maximum, preserves the
 existing fallback and admission transaction, and reconstructs canonical identities
 only when a delta journal needs them.
+
+The complexity refactor extracts record preparation, key remapping and the retained
+maximum predicate. Differential test helpers extract seed/restore and left probes.
+Validation, fallback, cancellation, processing order and resource cleanup remain
+equivalent to the previously reviewed implementation.
 
 ### Build and Test Results
 
@@ -33,6 +41,11 @@ cargo fmt --all --check
   `direct-final.log` record eight passed, zero failed, in 8.56 seconds.
 - Clippy: **Passed**, with completion in 49.78 seconds in `clippy-final.log`.
   Formatting completed with exit zero; `format.log` contains no diagnostics.
+- After the complexity refactor, `codacy-direct.log` records eight passed, zero
+  failed, in 8.63 seconds after a 1 minute 12 second build. `codacy-clippy.log`
+  records successful completion in 26.64 seconds. The implementer also confirmed
+  `cargo fmt --all --check` completed with exit zero. These checks used the same
+  focused test and Clippy commands shown above; the reviewer did not repeat them.
 - Python, Studio backend and Studio frontend: **Not touched**; suites not run.
 - New unresolved failures: **None**. The earlier parallel test attempt exhausted
   existing native-worker capacity and was not counted as passing. Intermediate
@@ -41,6 +54,9 @@ cargo fmt --all --check
 - Regressions: None identified in the reviewed source and focused verification.
   Full regression and coverage suites were not run locally; this review does not
   establish the combined Rust 90% coverage gate.
+- Separate scheduled performance failure: the morning 10M streaming `group_by`
+  regression remains unresolved. Its candidate predates this PR, and the local
+  diagnostic does not replace the original CI verdict.
 
 Logs are under the main checkout's
 `target/issue406-asof-columnar-performance/`. The implementer recorded the initial
@@ -59,14 +75,17 @@ git diff --check
 
 None remain in the source and functional scope.
 
-The review finding in `admission/right.rs::plan` was addressed: dictionary-key
-interning now calls `check_input_cancellation` periodically, preserving the
-previous cancellation opportunity for high-cardinality inputs.
+The review finding originally in `admission/right.rs::plan` was addressed:
+dictionary-key interning in `RecordColumns::prepare` now calls
+`check_input_cancellation` periodically, preserving the previous cancellation
+opportunity for high-cardinality inputs.
 
 ### Style Issues
 
 None remain. The analysis artifact's table alignment was corrected, and the
 changed Markdown has final newlines and no trailing whitespace.
+The two Codacy complexity findings were addressed with focused helper extraction;
+this source review does not claim a fresh remote Codacy result.
 
 ### Test Coverage
 
@@ -98,6 +117,20 @@ limit changed. The existing runtime-envelope documentation remains consistent.
 The analysis artifact records the paused performance scope and makes no timing
 claim for this candidate. Historical timing values were not remeasured as part
 of this review.
+
+The morning benchmark investigation accurately preserves the separate evidence:
+809 CI result rows contain one regression, with a +11.663% combined p50 change and
+both round interval lower bounds above +11%. The reviewer independently checked
+the original result, the two wheel and native seals, the fixed local plan and
+driver/harness provenance, all local measured-sample oracles, and the 119.327-second
+diagnostic result. Its three comparisons and 600-second budget stayed fixed; the
+467 recorded resource samples show no observed native build overlap.
+
+The WSL A/B result of +0.885% is a non-reproduction on another environment, not
+evidence that the CI failure was invalid or that performance is equivalent.
+The documented single recovery run remains follow-up evidence to evaluate;
+neither its completion nor a resolved root cause is claimed here. The rebase's
+release version changes do not relabel either measured product artifact.
 
 ### Verdict
 

@@ -24,6 +24,11 @@ valid regression verdict under that rule. The exact order-statistic interval is
 nominally 95%, conservatively 97.85% at ten pairs under its iid assumption.
 No threshold, sample filtering or verdict was changed.
 
+This historical group_by case uses checkpoints enabled with a 24-hour interval;
+its ready-to-output timer ends before EOF and the terminal checkpoint, while the
+worker still requires successful job completion. It is a low-frequency case,
+not a checkpoint-OFF measurement. OFF/LOW/ON acceptance remains separate.
+
 The original native SHA256 values are:
 
 - Baseline: `48e63a99052bece0cf59309b9057e3e950a8673383a0fbf3b6ca5e1cdc5454a6`.
@@ -73,9 +78,10 @@ resource diagnostics. It does not rebuild or substitute the current ASOF feature
 Its completion and raw evidence must be evaluated before claiming the failure
 resolved. Do not retry repeatedly for a passing result.
 
-The workflow checkout for recovery is release main `8ce5380b`, advanced after the
-morning run; its product inputs remain the explicit morning refs. The release
-version update must not be mislabeled as the measured product.
+The dispatched workflow definition comes from release main `8ce5380b`, advanced
+after the morning run. The recovery job explicitly checks out candidate
+`8ee5b71b` and baseline `89e51141`; its product inputs remain the original refs.
+The workflow run head must not be mislabeled as the measured product.
 
 Root cause attribution is still open. A host-dependent binary/code-layout effect
 or runner behavior is a hypothesis, not an established finding. No production

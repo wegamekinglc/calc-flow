@@ -1,6 +1,8 @@
 # Issue 406: ASOF right columnar admission
 
-Base main: `8ee5b71b7b862d4e44bd0be390d182cf950d17f7` (PR #409 merged).
+Implementation base: `8ee5b71b7b862d4e44bd0be390d182cf950d17f7` (PR #409 merged).
+Rebased onto release main `8ce5380bd6b6704473cba4ca1083820dd1059e42`
+without conflicts; the release changes versions/docs and do not alter this path.
 The overall eight-target performance goal is paused at the user's request.
 This increment completes the already-started ASOF admission change; the next
 explicit task is diagnosing the morning benchmark failure.
@@ -47,6 +49,13 @@ Clippy passes in 49.78 seconds; formatting, generated-contract and whitespace
 checks pass. Specialist source review approves with no remaining code blockers.
 No unit test registrations were added; the generated all-feature harness remains
 at 2,048 tests. CI and performance acceptance are separate outstanding gates.
+
+PR #411 Codacy identified two complexity findings. Splitting record preparation,
+key remapping and retained-order proof into focused helpers preserves validation
+and cancellation order. The differential test now delegates seed/restore and left
+probe setup to focused helpers. The final eight direct tests pass again in
+8.63 seconds and all-feature core/test Clippy passes in 26.64 seconds; formatting
+and generated-contract checks remain clean.
 
 ## Performance evidence and complete target inventory
 
