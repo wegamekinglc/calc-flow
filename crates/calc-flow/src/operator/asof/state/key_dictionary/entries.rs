@@ -210,6 +210,37 @@ impl Entries {
             position: 0,
         }
     }
+
+    /// Select distinct handles without visiting untouched resident entries.
+    pub fn select_mut<const N: usize>(&mut self, ids: &[u32]) -> [Option<&mut Entry>; N] {
+        assert!(ids.len() <= N, "bounded ASOF entry selection");
+        let mut order = [(0_u32, 0_u32, 0_usize); N];
+        for (index, id) in ids.iter().enumerate() {
+            let location = self.directory[*id as usize];
+            order[index] = (location.shard, location.position, index);
+        }
+        order[..ids.len()].sort_unstable();
+        let mut order = &order[..ids.len()];
+        let mut selected = std::array::from_fn(|_| None);
+        for (index, shard) in self.shards.iter_mut().enumerate() {
+            let mut remaining = shard.as_mut_slice();
+            let mut start = 0;
+            while let Some(&(shard, position, target)) = order.first() {
+                if shard as usize != index {
+                    break;
+                }
+                let position = position as usize;
+                let (_, tail) = remaining.split_at_mut(position - start);
+                let (entry, tail) = tail.split_first_mut().expect("admitted ASOF entry");
+                selected[target] = Some(&mut entry.entry);
+                remaining = tail;
+                start = position + 1;
+                order = &order[1..];
+            }
+        }
+        debug_assert!(order.is_empty());
+        selected
+    }
 }
 
 impl Index<usize> for Entries {

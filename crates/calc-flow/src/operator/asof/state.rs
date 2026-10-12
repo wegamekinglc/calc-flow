@@ -27,6 +27,7 @@ thread_local! {
     static LEFT_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static IDENTITY_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static KEY_INSTALL_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static RESERVED_BUCKET_ACCESSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static ADMISSION_ACCOUNTING_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static ENCODING_HASHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static PREFIX_UPDATES: std::cell::Cell<(usize, usize, usize)> = const { std::cell::Cell::new((0, 0, 0)) };
@@ -50,6 +51,11 @@ pub(super) fn take_identity_probes() -> usize {
 #[cfg(test)]
 pub(super) fn take_key_install_lookups() -> usize {
     KEY_INSTALL_LOOKUPS.with(|visits| visits.replace(0))
+}
+
+#[cfg(test)]
+pub(super) fn take_reserved_bucket_accesses() -> usize {
+    RESERVED_BUCKET_ACCESSES.with(|visits| visits.replace(0))
 }
 
 #[cfg(test)]
