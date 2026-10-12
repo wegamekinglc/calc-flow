@@ -254,12 +254,26 @@ return type, volatility, and a vectorized callable.
 takes one Kafka payload as `bytes` and returns a `pyarrow.RecordBatch` or
 `pyarrow.Table`; custom Kafka sources select the decoder through the
 `decoder` option identity.
+`register_mapping_provider(provider, name, version, callback, *, input_ports,
+output_ports, options_schema=None, accepts_context=False)` registers a trusted
+provider that maps named input Ports to named output Ports. Each port is a
+`(port_name, batch_kind)` pair whose kind is `table` or `array`; both port
+sequences are copied, and the callback returns a mapping from output port
+name to `Batch`.
 
-`register_provider` and `_register_mapping_provider` accept keyword-only
+`registration_snapshot()` returns the runtime's successful trusted
+registrations as records, oldest first, and
+`capability_registration_snapshot()` returns `capabilities()` and those
+records as one consistent pair. Records are trusted process-local values that
+hold the registered callables; `capabilities()` is the data-only view. The
+record keys, copy guarantees, and replay rules are in the
+[Python API guide](python-api.md#trusted-registration-records).
+
+`register_provider` and `register_mapping_provider` accept keyword-only
 `accepts_context=False`. A single provider registered with `register_provider`
 receives one `Batch` as its first argument: `(batch, options)` by default or
 `(batch, options, context)` when opted in. A mapping provider registered with
-`_register_mapping_provider` receives a named input mapping:
+`register_mapping_provider` receives a named input mapping:
 `(inputs, options)` or `(inputs, options, context)`. The frozen,
 engine-created `ProviderContext` exposes the authoritative run `settings` and
 normalized `deadline`; each settings read is a fresh deep copy. This run
@@ -286,7 +300,11 @@ stable for one `Runtime`; its revision advances once for each successful
 registry entry. Failed duplicates do not advance it, while the three-entry
 NumPy and JAX helpers can expose a real partial success. Snapshots already
 returned to callers do not change when later registrations advance the
-revision.
+revision. The records returned by `capability_registration_snapshot()` are
+the registrations its capabilities describe. Compare revisions for equality
+only. An equal session ID and revision do not imply equal provider lifecycle
+fields: the stream-proof step of the NumPy and JAX helpers updates an
+existing registration without advancing the revision.
 
 `register_numpy(runtime)` installs `numpy:expression@1`,
 `numpy:table_matmul@1`, and `numpy:symbolic_matrix@1`;

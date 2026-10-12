@@ -633,14 +633,15 @@ compilation rejects read-only queries that call volatile built-in SQL
 functions such as `random()` or wall-clock built-ins such as `now()`,
 `current_date()`, and `current_time()` (aliases included).
 
-The `register_provider` API accepts no lifecycle
+Neither `register_provider` nor `register_mapping_provider` accepts lifecycle
 metadata, so a registered provider's entry is always batch-only with
 conservative values: `modes=("batch",)`, `finality="unproven"`,
 `stateful=False`, `microbatch_invariant=False`, `requires_watermark=False`,
 `checkpoint_support="stateless"`, `state_version=None`,
 `deterministic=False`, `replay_safe=False`, `supports_static_inputs=False`,
-`partition_contract="none"`, and `array_rules=None`. A registration record
-carrying forged lifecycle keys is ignored rather than upgraded, and omission
+`partition_contract="none"`, and `array_rules=None`. Lifecycle keys forged
+onto a [trusted registration record](#trusted-registration-records) are
+unlisted keys: they are ignored rather than upgrading the entry, and omission
 never opts a provider into stream execution. `finality="unproven"` means
 registration evidence establishes no output-finality contract; it is the
 truthful conservative value for a batch-only registration and does not narrow
@@ -654,7 +655,8 @@ process-local stateless stream proofs to their `expression@1` and
 `deterministic=True`, `replay_safe=True`, and a `row_axis_independent` array
 contract. `expression@1` carries `elementwise_broadcast@1` and does not support
 static inputs; `symbolic_matrix@1` carries the matrix shape rules and does.
-The public `Runtime.register_provider` signature has no lifecycle arguments,
+The public `Runtime.register_provider` and
+`Runtime.register_mapping_provider` signatures have no lifecycle arguments,
 so an arbitrary Python callback remains batch-only rather than acquiring this
 proof from caller-supplied metadata.
 
@@ -674,6 +676,188 @@ snapshots remain isolated from later revisions. Snapshots are immutable and
 defensively copied: mutating a caller-owned sequence after registration cannot
 change a returned snapshot. Operators sort by `(kind, version)`; providers and
 UDFs sort by `(provider, name, version)`.
+
+### Trusted registration records
+
+`capabilities()` is the data-only view of a runtime. Two further `Runtime`
+methods return the registrations themselves, for an embedder that lists them
+or rebuilds them on another runtime:
+
+```python
+def registration_snapshot(self) -> tuple[dict[str, Any], ...]: ...
+
+
+def capability_registration_snapshot(
+    self,
+) -> tuple[RuntimeCapabilities, tuple[dict[str, Any], ...]]: ...
+```
+
+`registration_snapshot()` returns this runtime's successful trusted
+registrations, oldest first. `capability_registration_snapshot()` returns
+`capabilities()` and `registration_snapshot()` as one consistent pair. Each
+record is a plain `dict` holding the arguments of one registration, including
+its live callable. Records are process-local trusted values, not data.
+
+Records are returned in registration order. The table describes the keys Calc
+Flow produces today: a record carries every listed key with the listed type
+and presence rule. A record may also carry keys the table does not list (see
+unlisted keys below). Key order inside a record is not guaranteed.
+
+| Kind            | Key                           | Value type                        | Present                          |
+|-----------------|-------------------------------|-----------------------------------|----------------------------------|
+| `provider`      | `kind`                        | `str`, equal to `"provider"`      | always                           |
+| `provider`      | `provider`, `name`, `version` | `str`                             | always                           |
+| `provider`      | `callback`                    | callable                          | always                           |
+| `provider`      | `options_schema`              | `ProviderOptionsSchema` or `None` | always                           |
+| `provider`      | `accepts_context`             | `bool`, equal to `True`           | only when registered with `True` |
+| `provider`      | `provider_mode`               | `str`, equal to `"mapping"`       | only for mapping providers       |
+| `provider`      | `input_ports`, `output_ports` | `tuple[tuple[str, str], ...]`     | only for mapping providers       |
+| `scalar_udf`    | `kind`                        | `str`, equal to `"scalar_udf"`    | always                           |
+| `scalar_udf`    | `provider`, `name`, `version` | `str`                             | always                           |
+| `scalar_udf`    | `input_types`                 | `tuple[str, ...]`                 | always                           |
+| `scalar_udf`    | `return_type`, `volatility`   | `str`                             | always                           |
+| `scalar_udf`    | `function`                    | callable                          | always                           |
+| `kafka_decoder` | `kind`                        | `str`, equal to `"kafka_decoder"` | always                           |
+| `kafka_decoder` | `name`, `version`             | non-empty `str`                   | always                           |
+| `kafka_decoder` | `function`                    | callable                          | always                           |
+
+- A `provider` record without `provider_mode` came from `register_provider`.
+  A missing `accepts_context` means `False`.
+- Port pairs are `(port_name, batch_kind)` in declaration order;
+  `batch_kind` is `"table"` or `"array"`.
+- A `kafka_decoder` record has no `provider` key and exists only on wheels
+  built with `connector-kafka`.
+- The listed keys of a record are the arguments of the one successful call
+  that produced it: `register_provider`, `register_mapping_provider`,
+  `register_scalar_udf`, or `register_kafka_decoder`.
+
+Read records as a tolerant reader. Adding a record kind or adding a key is
+not a breaking change. Removing or retyping a listed key, changing a presence
+rule, or changing record order is breaking and is announced in
+[CHANGELOG.md](../CHANGELOG.md) with its migration. Consumers read `kind`
+first and use only the listed keys. A consumer that lists registrations may
+skip kinds it does not handle. A consumer that replays them must treat a
+skipped kind as a registration missing from the target runtime, and fail or
+report it when the workload references it.
+
+Replaying a record through the public registration methods reproduces its
+identity, callable, ports, options schema, and context opt-in. For scalar UDFs
+and batch-only providers that is the whole registration. That is not the whole
+registration for the `expression@1` and `symbolic_matrix@1` providers
+installed by `register_numpy` and `register_jax`: their stream capability
+comes from a process-local proof that no public registration method accepts,
+so a replayed copy is batch-only.
+To get them with stream capability on another runtime, call the same helper
+there instead of replaying their records. Do not present a replayed runtime
+as equivalent to its source unless the `ProviderCapability` entries of the
+replayed providers compare equal on both.
+
+Records can carry unlisted keys holding private process-local values; today
+`stream_lifecycle` on the records of those helper-installed providers is the
+only one. Unlisted keys carry no compatibility promise, and no public
+registration method accepts one, so a lifecycle key added to a record never
+upgrades a provider. Build each registration call, and anything you
+transport, from the listed keys only.
+
+A snapshot copies the containers and shares the values:
+
+- Fresh on every call: the outer `tuple` and each record `dict`. Adding,
+  replacing, or deleting keys in a returned record never affects the runtime,
+  a later snapshot, or another caller's snapshot.
+- Shared by reference: every value. `callback` and `function` are the
+  registered objects themselves, with their closures and state.
+  `options_schema` is the frozen instance passed at registration. Port and
+  input-type values are immutable tuples built from the caller's sequences at
+  registration.
+- All shared values other than the callables are immutable, so sharing is
+  observable only through a callable.
+- Neither snapshot method calls, inspects, or serializes a registered
+  callable.
+- Records are not data-only. They are not JSON-serializable and must not
+  enter a project, checkpoint, catalog, REST payload, or log. Projects still
+  name a registration only by its identity, and `capabilities()` remains the
+  data-only view.
+- Calc Flow makes no transport promise. Moving a record to another process
+  means serializing its callable under the caller's own trust decision;
+  deserializing it there executes code.
+
+`capability_registration_snapshot()` derives both values from one copy of the
+runtime's records, which is what makes the pair consistent. A snapshot never
+observes a single registration call half-applied; a helper such as
+`register_numpy` is several such calls and is not atomic. For one returned
+pair `capabilities, records`:
+
+- `records` are the registrations that `capabilities` describes at
+  `capabilities.scope.revision`.
+- `capabilities.providers` has exactly one entry per `provider` record and
+  `capabilities.udfs` one per `scalar_udf` record, with the same identities.
+  Capability entries are sorted by identity while records keep registration
+  order, so match them by `(provider, name, version)` rather than by
+  position. `kafka_decoder` records have no capability entry.
+- With no registration call, including a `register_numpy` or `register_jax`
+  call, running or completing in between,
+  `capabilities == runtime.capabilities()` and
+  `records == runtime.registration_snapshot()`.
+
+Across calls on one `Runtime`, `scope.session_id` is constant and
+`scope.revision` never decreases; a successful registration advances it as
+described above. Compare revisions for equality only: do not derive a record
+count or a number of registrations from one.
+
+On one `Runtime`, equal `(scope.session_id, scope.revision)` means the same
+registrations in the same order with the same callables. It does not mean
+equal provider lifecycle fields: the stream-proof step of `register_numpy` and
+`register_jax` updates an existing record without advancing the revision.
+Through the public API the difference is observable only when another thread
+takes a snapshot while one of those helpers is running.
+
+The example registers a mapping provider, takes one pair, and replays its
+records onto a second runtime through the public registration methods:
+
+```python
+from calc_flow import Runtime
+
+
+def scale(inputs, options):
+    return {"output": inputs["weights"]}
+
+
+parent = Runtime()
+parent.register_mapping_provider(
+    "acme",
+    "scale",
+    "1",
+    scale,
+    input_ports=(("table", "table"), ("weights", "array")),
+    output_ports=(("output", "array"),),
+)
+
+capabilities, records = parent.capability_registration_snapshot()
+assert capabilities.providers[0].name == records[0]["name"] == "scale"
+
+worker = Runtime()
+for record in records:
+    if record["kind"] != "provider":  # read kind before any other key
+        raise ValueError(f"cannot replay a {record['kind']} registration")
+    identity = (record["provider"], record["name"], record["version"])
+    options = {
+        "options_schema": record["options_schema"],
+        "accepts_context": record.get("accepts_context", False),
+    }
+    if record.get("provider_mode") == "mapping":
+        worker.register_mapping_provider(
+            *identity,
+            record["callback"],
+            input_ports=record["input_ports"],
+            output_ports=record["output_ports"],
+            **options,
+        )
+    else:
+        worker.register_provider(*identity, record["callback"], **options)
+
+# A batch-only provider replays completely; a helper-installed one does not.
+assert worker.capabilities().providers == capabilities.providers
+```
 
 ## Execution options and provider context
 
@@ -741,7 +925,7 @@ runtime.register_provider(
 A single provider callback receives one `Batch`: `(batch, provider_options)`
 when `accepts_context=False`, the default, or
 `(batch, provider_options, context)` when it is true. A mapping provider
-registered with `_register_mapping_provider` receives its named input mapping
+registered with `register_mapping_provider` receives its named input mapping
 instead: `(inputs, provider_options)` when false or
 `(inputs, provider_options, context)` when true.
 

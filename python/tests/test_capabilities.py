@@ -511,7 +511,7 @@ def test_array_helpers_expose_expression_and_mapped_provider_contracts(
 
 def test_compound_registration_exposes_a_real_partial_success() -> None:
     runtime = Runtime()
-    runtime._register_mapping_provider(
+    runtime.register_mapping_provider(
         "numpy",
         "table_matmul",
         "1",
@@ -578,7 +578,7 @@ def test_register_numpy_rejects_non_mapping_matrix_registration(
             accepts_context=bool(options.get("accepts_context", False)),
         )
 
-    monkeypatch.setattr(Runtime, "_register_mapping_provider", register_as_non_mapping)
+    monkeypatch.setattr(Runtime, "register_mapping_provider", register_as_non_mapping)
     runtime = Runtime()
 
     with pytest.raises(
@@ -1093,7 +1093,7 @@ def test_capability_snapshot_ignores_later_mutation_of_caller_owned_sequences() 
     output_ports = [("output", "array")]
     input_types = ["int64", "float64"]
 
-    runtime._register_mapping_provider(
+    runtime.register_mapping_provider(
         "numpy",
         "table_matmul",
         "1",

@@ -832,7 +832,7 @@ def _restore_registrations(
                 else {}
             )
             if registration.mode == "mapping":
-                runtime._register_mapping_provider(
+                runtime.register_mapping_provider(
                     registration.provider,
                     registration.name,
                     registration.version,
@@ -1286,7 +1286,7 @@ class RunManager:
                 "runtime capability snapshot is unavailable for this session"
             )
         while True:
-            snapshot, registrations = self._runtime._capability_registration_snapshot()
+            snapshot, registrations = self._runtime.capability_registration_snapshot()
             key = (snapshot.scope.session_id, snapshot.scope.revision)
             with self._lock:
                 cached = self._capability_cache.get(key)
@@ -1310,7 +1310,7 @@ class RunManager:
             )
 
             with self._lock:
-                current, _ = self._runtime._capability_registration_snapshot()
+                current, _ = self._runtime.capability_registration_snapshot()
                 current_key = (current.scope.session_id, current.scope.revision)
                 if current_key != key:
                     continue
@@ -1345,7 +1345,7 @@ class RunManager:
             prepared, options = prepare_run(project, request)
             registrations = _selected_registrations(
                 project.canonical_json(),
-                self._runtime._registration_snapshot() if self._runtime else (),
+                self._runtime.registration_snapshot() if self._runtime else (),
             )
             worker_payload = _serialize_worker_payload(
                 project, prepared, options, registrations

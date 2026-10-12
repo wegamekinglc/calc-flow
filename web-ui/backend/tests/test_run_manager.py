@@ -596,7 +596,7 @@ def test_parent_payload_contains_no_calc_flow_extension_objects() -> None:
     project = _udf_project()
     prepared, options = prepare_run(project, RunRequest())
     registrations = _selected_registrations(
-        project.canonical_json(), runtime._registration_snapshot()
+        project.canonical_json(), runtime.registration_snapshot()
     )
     payload = _serialize_worker_payload(project, prepared, options, registrations)
     project_json, serialized_inputs, options_data, serialized_registrations = (
@@ -653,7 +653,7 @@ def test_worker_payload_rejects_a_registration_that_captures_runtime() -> None:
     project = _udf_project()
     prepared, options = prepare_run(project, RunRequest())
     registrations = _selected_registrations(
-        project.canonical_json(), runtime._registration_snapshot()
+        project.canonical_json(), runtime.registration_snapshot()
     )
 
     with pytest.raises(RunManagerError, match="trusted registrations"):
@@ -891,11 +891,11 @@ def test_capabilities_deduplicate_lazy_builtins_by_registration_kind(
 
 def test_capabilities_reject_a_malformed_runtime_snapshot() -> None:
     runtime = Runtime()
-    snapshot, registrations = runtime._capability_registration_snapshot()
+    snapshot, registrations = runtime.capability_registration_snapshot()
     malformed = replace(snapshot, batch_kinds=("tensor",))
 
     class MalformedRuntime:
-        def _capability_registration_snapshot(self):
+        def capability_registration_snapshot(self):
             return malformed, registrations
 
     manager = RunManager(runtime=MalformedRuntime(), use_processes=False)  # type: ignore[arg-type]
@@ -919,7 +919,7 @@ def test_worker_restores_mapping_and_context_provider_modes() -> None:
         def register_provider(self, *args: object, **kwargs: object) -> None:
             calls.append(("legacy", args, kwargs))
 
-        def _register_mapping_provider(self, *args: object, **kwargs: object) -> None:
+        def register_mapping_provider(self, *args: object, **kwargs: object) -> None:
             calls.append(("mapping", args, kwargs))
 
     def callback(*_: object) -> None:
@@ -1049,9 +1049,9 @@ class _RecordingRegistrationRuntime:
         self.calls.append("provider")
         self.inner.register_provider(*args, **kwargs)
 
-    def _register_mapping_provider(self, *args: object, **kwargs: object) -> None:
+    def register_mapping_provider(self, *args: object, **kwargs: object) -> None:
         self.calls.append("mapping")
-        self.inner._register_mapping_provider(*args, **kwargs)
+        self.inner.register_mapping_provider(*args, **kwargs)
 
     def register_scalar_udf(self, **kwargs: object) -> None:
         self.calls.append("scalar")
@@ -1062,7 +1062,7 @@ def _assert_unsupported_registration_tail_is_redacted(
     tail: object,
 ) -> RunManagerError:
     runtime = _RecordingRegistrationRuntime()
-    before = runtime.inner._registration_snapshot()
+    before = runtime.inner.registration_snapshot()
 
     with pytest.raises(RunManagerError) as caught:
         _restore_registrations(  # type: ignore[arg-type]
@@ -1077,7 +1077,7 @@ def _assert_unsupported_registration_tail_is_redacted(
     assert caught.value.__cause__ is None
     assert caught.value.__context__ is None
     assert runtime.calls == []
-    assert runtime.inner._registration_snapshot() == before
+    assert runtime.inner.registration_snapshot() == before
     return caught.value
 
 
@@ -1412,7 +1412,7 @@ def test_worker_preflights_the_whole_registration_tuple_before_mutation(
         def register_provider(self, *_: object, **__: object) -> None:
             calls.append("provider")
 
-        def _register_mapping_provider(self, *_: object, **__: object) -> None:
+        def register_mapping_provider(self, *_: object, **__: object) -> None:
             calls.append("mapping")
 
         def register_scalar_udf(self, **_: object) -> None:
@@ -1432,7 +1432,7 @@ def test_worker_preflights_the_whole_registration_tuple_before_mutation(
 
 def test_worker_preflight_failure_does_not_advance_runtime_revision() -> None:
     runtime = Runtime()
-    before = runtime._registration_snapshot()
+    before = runtime.registration_snapshot()
 
     with pytest.raises(
         RunManagerError,
@@ -1450,7 +1450,7 @@ def test_worker_preflight_failure_does_not_advance_runtime_revision() -> None:
             ),
         )
 
-    assert runtime._registration_snapshot() == before
+    assert runtime.registration_snapshot() == before
 
 
 def test_worker_registers_only_exact_referenced_builtin_providers(
@@ -1539,7 +1539,7 @@ def test_worker_executes_only_the_referenced_trusted_udf(
             function=function,
         )
     selected = _selected_registrations(
-        _udf_project().canonical_json(), runtime._registration_snapshot()
+        _udf_project().canonical_json(), runtime.registration_snapshot()
     )
     assert [registration["name"] for registration in selected] == ["identity"]
     manager = RunManager(runtime=runtime, use_processes=use_processes)
@@ -1568,7 +1568,7 @@ def test_worker_restores_and_executes_a_mapped_table_provider(
     def identity(inputs: dict[str, Batch], _options: object) -> dict[str, Batch]:
         return {"output": inputs["input"]}
 
-    runtime._register_mapping_provider(
+    runtime.register_mapping_provider(
         "test",
         "mapped_identity",
         "1",

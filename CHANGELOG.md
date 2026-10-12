@@ -9,6 +9,17 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-12: Make three `calc_flow.Runtime` methods public:
+  `register_mapping_provider`, `registration_snapshot`, and
+  `capability_registration_snapshot`. The underscore spellings
+  `_register_mapping_provider`, `_registration_snapshot`, and
+  `_capability_registration_snapshot` are removed with no aliases, including
+  the previously documented `_register_mapping_provider`. To migrate, rename
+  the call; arguments and behavior are unchanged. The public names first ship
+  in the release after `2026.10.12`. Registration records are trusted
+  process-local values, while `capabilities()` remains the data-only view. The
+  native binding, Rust exports, REST, and OpenAPI are unchanged.
+
 - 2026-10-12: Move the workspace crates, Python core, Studio, and frontend to
   calendar version `2026.10.12` for the `calc-flow-python` release. Studio
   requires `calc-flow-python>=2026.10.12,<2027`.
