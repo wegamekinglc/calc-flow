@@ -458,10 +458,10 @@ def test_registration_snapshots_are_fresh_records_sharing_registered_values() ->
     assert first == second
     assert first is not second
     assert all(left is not right for left, right in zip(first, second))
-    for provider_record, udf_record in (first, second):
-        assert provider_record["callback"] is _single_provider
-        assert provider_record["options_schema"] is schema
-        assert udf_record["function"] is _scalar_identity
+    for snapshot in (first, second):
+        assert snapshot[0]["callback"] is _single_provider
+        assert snapshot[0]["options_schema"] is schema
+        assert snapshot[1]["function"] is _scalar_identity
 
     first[0]["name"] = "mutated"
     first[0]["unlisted"] = object()
