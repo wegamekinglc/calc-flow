@@ -10,7 +10,7 @@ changes. Build both comparison arms from their exact current sources.
 
 ## Evidence and selection
 
-The current-main ordinary-release profile in
+The historical ordinary-release profile of then-main `8f890f28` in
 [admission analysis](https://github.com/wegamekinglc/calc-flow/blob/0401d4b7849bcf8af203b77ca42a9e8e51795bab/.codex/artifacts/analysis/issue406-asof-admission-bulk.md) identifies
 output-prefix matching at 29.34% / 33.35% inclusive at one / 32 CPUs. The
 single-CPU profile attributes 5.16% self samples to sorting. These samples are

@@ -35,6 +35,14 @@ def runtime_config_arguments(mode: str) -> dict:
     }
 
 
+def _captures_dispatch_trace(case: dict) -> bool:
+    return (
+        case.get("row") == 7
+        and case["workload"] == "asof"
+        and case["batch_rows"] == 1024
+    )
+
+
 def checkpoint_observation(job) -> dict:
     before = time.perf_counter_ns()
     checkpoint = job.status()["checkpoint"]
@@ -146,7 +154,7 @@ async def measure_acceptance_job(job, sources, sink, streams, *, case: dict) -> 
         nonlocal table, observer
         observations.append(checkpoint_observation(job))
         observer = asyncio.create_task(_observe_checkpoints(job, observations, stop))
-        capture_trace = case["workload"] == "asof" and case["batch_rows"] == 1024
+        capture_trace = _captures_dispatch_trace(case)
         if capture_trace:
             evidence["dispatch_trace_setup_seconds"] = await _start_processing_trace(
                 job, sources, sink, case
@@ -328,7 +336,7 @@ class AcceptanceEngineCase:
         )
         self.fixture = None
         self.output_node_id = None
-        if self.scenario == "asof_join" and case["batch_rows"] == 1024:
+        if _captures_dispatch_trace(case):
             from benchmarks.join_asof_acceptance import (
                 export_runtime_fixture,
                 final_projection_node,

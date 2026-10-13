@@ -35,6 +35,15 @@ generated-contract drift and whitespace checks pass. Final specialist source
 and acquired-evidence review is Approve. This increment's required CI and release
 measurements remain outstanding.
 
+After rebasing onto `5fef1a31`, all 341 serial ASOF tests pass again in 35.54
+seconds. Measurement setup review exposed a separate harness bug: every ASOF
+1,024-row case tried to export a matched fixture and call native dispatch-trace
+methods, which ordinary production releases do not expose. Both operations
+now belong only to row 7's matched-harness case. Row 6 small-batch controls use
+ordinary processing timing. Two focused tests fail before this correction;
+all 23 tests in the affected Python module pass afterward, including existing
+row 7 trace, settlement, ownership and failure-evidence checks.
+
 ## Performance scope
 
 There is no release timing result for this increment yet. Source work and
@@ -54,7 +63,7 @@ The [October 13 06:00 scheduled run](https://github.com/wegamekinglc/calc-flow/a
 also succeeds at exact head `748eec89`, before the PR #413 merge. Its 24 jobs
 cover all 20 shards in main's maintained post-Studio-split catalog, with 802
 unique successful results, zero errors and zero confirmed regressions. The
-independent Studio split removed its two frontend shards from this repository;
+independent Studio split removed its Studio backend and frontend shards;
 the received shard set exactly matches the current catalog. All 156 inconclusive
 and five informational slowdown results remain visible. This is complete-suite
 operability evidence, not a prefix-candidate or true-OFF acceptance measurement.

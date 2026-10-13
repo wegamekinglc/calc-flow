@@ -364,6 +364,48 @@ class SealedJoinFixtureTests(unittest.TestCase):
 
 
 class AcceptanceRuntimePolicyTests(unittest.TestCase):
+    def test_row6_small_batches_do_not_export_a_matched_trace_fixture(self):
+        from types import ModuleType
+
+        from benchmarks.join_asof_acceptance_runtime import AcceptanceEngineCase
+
+        comparison = ModuleType("benchmarks.engine_comparison")
+        comparison.workload = Mock(
+            return_value=SimpleNamespace(
+                table=object(), dimension=object(), entities=()
+            )
+        )
+        comparison.expected_output = Mock()
+        engine = ModuleType("benchmarks.engine_stream")
+        engine.stream_events = Mock(return_value=())
+        engine.stream_program = Mock()
+        with (
+            TemporaryDirectory() as raw,
+            patch.dict(
+                "sys.modules",
+                {engine.__name__: engine, comparison.__name__: comparison},
+            ),
+            patch("benchmarks.engine_stream", engine, create=True),
+            patch("benchmarks.engine_comparison", comparison, create=True),
+            patch("benchmarks.join_asof_acceptance.export_runtime_fixture") as export,
+        ):
+            owner = AcceptanceEngineCase(
+                {
+                    "row": 6,
+                    "workload": "asof",
+                    "rows": 1024,
+                    "batch_rows": 1024,
+                    "mode": "off",
+                },
+                Path(raw),
+            )
+            try:
+                export.assert_not_called()
+                self.assertIsNone(owner.fixture)
+                self.assertIsNone(owner.output_node_id)
+            finally:
+                owner.close()
+
     def test_ordering_fixture_worker_route_uses_fixed_partial_tail_exporter(self):
         from types import ModuleType
 
@@ -427,7 +469,9 @@ class AcceptanceRuntimePolicyTests(unittest.TestCase):
 
 
 class AcceptanceLifecycleTests(unittest.IsolatedAsyncioTestCase):
-    async def exercise(self, *, observer_fails=False, asof=False, trace_failure=None):
+    async def exercise(
+        self, *, observer_fails=False, asof=False, trace_failure=None, row=7
+    ):
         import asyncio
         from datetime import datetime, timedelta
         from types import ModuleType
@@ -497,6 +541,8 @@ class AcceptanceLifecycleTests(unittest.IsolatedAsyncioTestCase):
             job._inner._benchmark_take_dispatch_trace.side_effect = RuntimeError(
                 "injected trace capture failure"
             )
+        if row == 6:
+            job._inner = SimpleNamespace()
 
         async def wait():
             await done.wait()
@@ -567,6 +613,7 @@ class AcceptanceLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     ),
                     streams,
                     case={
+                        "row": row,
                         "mode": "low",
                         "workload": "asof" if asof else "projection",
                         "batch_rows": 1024,
@@ -579,10 +626,18 @@ class AcceptanceLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 job.cancel_async.assert_awaited_once()
         self.assertEqual(result[1]["job_cpu_seconds"], 100 / 1e9)
         self.assertEqual(result[1]["full_cycle_seconds"], 250 / 1e9)
-        if asof:
+        if asof and row == 7:
             job._inner._benchmark_start_dispatch_trace.assert_called_once_with(False)
             job._inner._benchmark_take_dispatch_trace.assert_called_once_with()
         return result[1], windows
+
+    async def test_row6_small_batches_run_without_internal_trace_hooks(self):
+        evidence, _windows = await self.exercise(asof=True, row=6)
+        self.assertEqual(evidence["lifecycle"], "completed")
+        self.assertEqual(evidence["processing_seconds"], 0.0000001)
+        self.assertNotIn("dispatch_trace", evidence)
+        self.assertNotIn("dispatch_trace_setup_seconds", evidence)
+        self.assertNotIn("settled_processing_seconds", evidence)
 
     async def test_trace_failure_preserves_progressive_settled_evidence(self):
         from benchmarks.checkpoint_cycles import CycleValidationError
