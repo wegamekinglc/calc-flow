@@ -67,7 +67,8 @@ owned-work abandonment, cold checkpoint recovery and rejected collector
 continuation. Default core registration remains 2,033.
 
 Scoped `cargo clippy -p calc-flow --lib --tests --all-features -- -D warnings`
-passes after the final refactor in 26.41 seconds. It initially identifies the old `output_iter` helper's
+passes after the final refactor in 26.41 seconds. It initially identifies the
+old `output_iter` helper's
 last production caller as removed; that iterator is now explicitly test-only,
 without suppressing a lint. The first-row refactor removes duplicate offset
 branches; the exact affected regression passes again in 0.13 seconds, without
@@ -76,6 +77,10 @@ functions in the complete probe/test modules, explicitly covers every changed
 function, and reports maximum complexity eight. Formatting, generated-contract
 drift and whitespace checks pass. Product-wide CI
 and coverage are not certified by these focused local checks.
+
+Final specialist source review approves implementation
+`05c13fd983dd1ead625eef2278eb7127dac0c61c`. Review of the later measurement
+report remains separate from source approval and required CI.
 
 ## Paired comparison scope
 
@@ -99,3 +104,65 @@ equivalence from uncertainty. A comparison with this parent isolates the new
 parallel preparation change; it does not replace the earlier merged-main
 comparison or certify the original eight-target set. OFF targets remain
 100 ms / 30 ms at one / 32 CPUs, and source review is separate from performance.
+
+## Completed paired release comparison
+
+The exact parent ordinary product remains
+`6739fa2b5573f4e184266793fd9ee4d4281a5b14`, native SHA-256
+`a131c569adaa5fdb629e868be6af42ca0e5a3e31359694a37a39116930340011`.
+The freshly built candidate is
+`05c13fd983dd1ead625eef2278eb7127dac0c61c`, native SHA-256
+`cbc1a85acd9d3b1d6baf0ec2e5fe0c888a5ec53353ee2176d1ae56281a6c600b`.
+Its ordinary release build takes 428.449 seconds, recorded separately; parent
+reuse requires no build. Both arms pass ordinary audits of 294 compiled
+artifacts with equal normalized feature/profile, environment, toolchain and
+lock identities. Benchmark-internal features remain absent.
+
+Artifacts are under `target/issue406-parallel-routing-paired-20261013/`.
+The sealed plan SHA-256 is
+`bbd2edcb3f8028ba8bd3d75b8e23f97f2a6822ca5875717b2adda4096bc40b92`.
+Both fixed cases complete two rounds of ten adjacent AB/BA pairs, with one
+warmup per arm per round: 80 measured observations and eight warmups. All 88
+raw results pass full oracles, completed lifecycle, owned cleanup and true OFF
+zero-file checks. Acquisition, audit, preflight, fixtures, CPU bookkeeping,
+oracles, settlement and seals take 39.019 / 600 seconds. Every process group
+settles with no forced kills, surviving processes or cleanup errors. There are
+no sample retries, exclusions or increases.
+
+An independent read-only audit verifies all 3,109 frozen inputs and 198 output
+seals, raw/normalized correspondence, actual AB/BA order, same processing-clock
+bounds for CPU evidence and recomputed maintained statistics. The sealed
+generic `results/performance.md` retains legacy `Merged main p50` / `CI95`
+headers. This comparison's actual baseline is the exact parent above; the
+following table corrects the labels. Each ten-pair order-statistic interval has
+97.8515625% coverage. The sealed original report is preserved unchanged.
+
+| Case              | Parent p50 ms | Candidate p50 ms | Change  | Maintained paired verdict |
+|-------------------|---------------|------------------|---------|---------------------------|
+| 64k, OFF, 32 CPUs | 178.517       | 154.690          | -13.35% | improved                  |
+| 64k, OFF, 1 CPU   | 122.682       | 123.929          | +1.02%  | inconclusive              |
+
+The 32-CPU round median changes are -12.17% / -13.89%, with intervals
+[-15.59%, -10.68%] / [-14.90%, -10.26%]. Both upper bounds are below -5%,
+satisfying the maintained `improved` rule. Single-CPU round changes are
+-4.66% / +1.98%, with intervals [-11.55%, +4.20%] / [-3.28%, +9.25%].
+That control remains inconclusive; it establishes neither equivalence nor a
+confirmed regression. No blanket regression-free conclusion is justified.
+
+| Processing CPU median, ms | Parent 32 CPUs | Candidate 32 CPUs | Parent 1 CPU | Candidate 1 CPU |
+|---------------------------|----------------|-------------------|--------------|-----------------|
+| Process CPU               | 205.404        | 180.801           | 122.466      | 122.577         |
+| Busiest observed thread   | 84.447         | 66.361            | 112.012      | 113.022         |
+
+Both arms use the same sealed Appendix A thread/process accounting wrapper.
+Raw observations and the independent audit retain per-group run and runqueue
+wait times. Read boundaries have uncertainty, and retired threads cannot be
+reconstructed. These CPU values support diagnosis without establishing an exact
+thread-accounting identity or replacing paired wall-clock statistics. WSL2 host
+isolation remains unverified.
+
+The measured candidate p50 values still exceed the ASOF OFF targets of
+100 ms / 30 ms. This two-case parent comparison does not supersede the earlier
+merged-main comparison, resolve either stopped ON attempt, measure the other
+seven acceptance rows, or certify complete eight-target acceptance. Required
+CI and coverage remain outside this focused local handoff.
