@@ -56,8 +56,9 @@ The final affected run passes all 341 registered ASOF tests in 26.27 seconds.
 Scoped core/library/test Clippy with all features passes in 86 seconds.
 Formatting, the changed modules' complexity limit of eight, generated-contract
 drift and whitespace checks also pass. Final specialist source review is Approve
-at implementation commit `5aa03e54`. Performance and corrected-base CI remain
-pending; the source review does not certify a latency improvement.
+at implementation commit `5aa03e54`. At that source-review handoff, performance
+and corrected-base CI were pending; the source review alone did not certify a
+latency improvement. The later scoped performance results appear below.
 
 PR #420 merged at `ac5d7dffabe098d33ee9c07c912d3c6c63898552` after all 32
 final checks passed and no unresolved review threads remained. The routing
@@ -101,7 +102,7 @@ The 2026-10-13 acquisition uses exact main `ac5d7dff` and candidate
 candidate is freshly rebuilt, native SHA-256
 `a131c569adaa5fdb629e868be6af42ca0e5a3e31359694a37a39116930340011`.
 Recorded builds take 330.173 / 425.812 seconds, separately from acquisition.
-Both products pass the 294-test ordinary artifact audit and compiled
+Both products pass the ordinary audit of 294 compiled artifacts and the compiled
 feature/profile identity checks. Benchmark-internal features are absent.
 
 The sealed execution-plan SHA-256 is
