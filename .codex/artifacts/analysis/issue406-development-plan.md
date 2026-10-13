@@ -52,6 +52,17 @@ their original timing/retained-row definitions. Finish with a fresh complete
 eight-row comparison against then-current main and separate checkpoint modes.
 The final result must retain unmet targets and unsupported/invalid measurements.
 
+A follow-up source audit identifies a row-5 measurement limitation. The maintained
+native `compaction_sample` awaits all checkpoint preparation, rebase installation
+and release cleanup before starting `process_data`. Its `handler_seconds` is
+therefore post-compaction handler latency; base/delta witnesses prove that rebase
+occurred, but not that compaction remained active during the handler. Keep its
+separate preparation, handler and combined diagnostics, without certifying the
+original during-compaction target from either mislabeled scope. Correct and
+validate this measurement path before the final eight-row acceptance; PR #420
+does not measure or claim completion of that target. This is a source-audit
+finding, with independent review, rather than a new timing result.
+
 ## Recorded earlier implementation stages
 
 The user has removed the implicit 1 GiB runtime-pool constraint. The current
