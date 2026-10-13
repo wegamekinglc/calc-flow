@@ -61,6 +61,16 @@ the focused regression and all 11 native-lookup module tests pass. Scoped
 all-feature core/test Clippy passes in 86 seconds; formatting and whitespace
 checks pass. Required CI on the corrected head remains pending.
 
+A follow-up audit finds the same shared-service path in this module's allocation/
+alias-funding and exact string-admission tests. Both now bind their case loops
+to the same isolated fixture policy; each iteration still awaits job cleanup.
+The module's 125 assertion macros and 11 test registrations remain unchanged across
+this preventive increment. Neither test has an observed CI failure; the recorded
+RED above belongs to the retained-key scratch test. All 11 affected-module
+tests pass with eight test threads in 0.30 seconds; scoped all-feature core/test
+Clippy passes in 25.27 seconds. Formatting and contract/whitespace checks pass.
+Required CI on the final corrected head remains pending.
+
 ## Performance scope
 
 The ordinary-release comparison below measures this increment. Allocation
