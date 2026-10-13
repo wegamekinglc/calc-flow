@@ -4,9 +4,10 @@
 
 The complete eight-workload objective remains active. PR #407's implementation
 and stabilization work has merged; PR #412 repaired the complete benchmark and
-PR #413 merged the ASOF admission improvement. The next prefix-counting increment
-is PR #420. Its final corrected-head CI is pending, so it has not merged. The
-complete candidate benchmark and independent evidence review have passed.
+PR #413 merged the ASOF admission improvement. The prefix-counting increment,
+PR #420, merged on October 13 at `ac5d7dff` after all 32 final checks passed,
+with no unresolved review threads. The complete candidate benchmark and
+independent evidence review have passed.
 Earlier statements below about an unmerged #407 or
 unresolved historical test/benchmark failures describe their recorded historical
 stage, rather than current merge readiness.
@@ -31,13 +32,16 @@ summary. Preserve 145 inconclusive and 11 informational slowdown results; the
 independent final evidence review is Approve. Later documentation, test-fixture
 and registry fixes do not relabel those measured products. The final Join fixture
 fix at `e686dabd` passes all 315 focused Join tests, with one pre-existing ignored
-test, and scoped Clippy. Required CI on that exact head remains the merge gate.
+test, and scoped Clippy. All final CI checks on that exact head passed before
+the merge. Its measured binaries remain `5fef1a31` / `b77cd8bf`.
 
 The next implemented source increment routes eligible monotonic ASOF output by
 interned key IDs. Its allocation/hash and exact differential regressions, all
 341 ASOF tests and scoped Clippy pass; specialist source review is Approve.
-Performance remains unmeasured. After #420 merges, align this source onto exact
-merged main, build and attest both ordinary releases, then run the fixed five-case
+Performance remains unmeasured. This source is aligned onto exact merged main
+`ac5d7dff`, preserving the intervening release and Kafka-test updates; all five
+reviewed source/documentation patches are unchanged by rebase. Build and attest
+both ordinary releases, then run the fixed five-case
 comparison in the [routing analysis](issue406-asof-output-routing.md): OFF 64k
 at one/32 CPUs, OFF 1024 at one CPU, LOW 64k at one CPU and advancing ON 64k at
 one CPU. Each case has two rounds of ten adjacent pairs; all five cases share

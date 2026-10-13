@@ -58,6 +58,14 @@ drift and whitespace checks also pass. Final specialist source review is Approve
 at implementation commit `5aa03e54`. Performance and corrected-base CI remain
 pending; the source review does not certify a latency improvement.
 
+PR #420 merged at `ac5d7dffabe098d33ee9c07c912d3c6c63898552` after all 32
+final checks passed and no unresolved review threads remained. The routing
+branch now uses that exact main, including its independent version-release and
+Kafka-test updates. Range-diff confirms all five reviewed patches are unchanged;
+the implementation is now commit `c7b964bc`. Earlier test timings retain their
+original implementation identity, while new ordinary release builds must use
+the aligned revisions. Required CI on the routing branch remains pending.
+
 ## Planned paired measurement
 
 Before acquisition, freeze exact merged main including PR #420, the reviewed
