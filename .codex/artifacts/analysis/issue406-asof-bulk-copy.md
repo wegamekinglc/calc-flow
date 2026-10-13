@@ -131,8 +131,38 @@ test fails because its fixture still names row 7 (`harness-tests-amended.log`).
 The corrected fixture then passes that exact test alone
 (`harness-feature-fixture-fixed.log`); no native/timing attempt occurred.
 
-No timing acquisition or candidate release build has started at this phase.
+At source approval, no candidate release build or timing had started.
 Shared-environment window test/benchmark builds have been observed and must
 settle before timing acquisition. Their processes and root-worktree edits are
 owned elsewhere and are preserved. No stopped/inconclusive result, ON proof,
 unmeasured target or allocation/RSS limitation is replaced by this increment.
+
+## Built release and stopped preflight
+
+The sole build/acquisition attempt uses committed product
+`995b1b9a53c24ad156a027e9d7a2faf41e53031f`, with source/focused-evidence
+review **Approve**. The ordinary release build succeeds in **547.918896 seconds**,
+separate from measurement. Candidate native SHA-256 is
+`552b6313ccabc59d5080ea30c97965075685fbb6164b8f0b6923fa75c460e924`.
+Its ordinary artifact audit validates all **294 compiled artifacts**.
+
+The frozen execution-plan SHA-256 is
+`c219a9425df5323c473ad22797031d0712a71b777b817e32d7dbdbb49d863c22`.
+Preflight validates the exact ordinary releases and their matching build
+settings/inventories, then stops on **another controlled build or measurement**.
+It starts **zero warmups and zero measured observations**. There is no timing,
+speedup, regression or target-attainment result for this candidate.
+
+The budget report records **36.890008 / 600 seconds** including result sealing;
+the result's preceding elapsed stamp is 36.889307 seconds. This includes
+artifact audit, freeze, stopped preflight and settlement. Every owned group
+settles with no forced kill, survivors, pending creations or cleanup errors.
+The fixed attempt is not restarted or filled in after the interruption.
+On resume, a retrospective read-only audit verifies **3,131 frozen input hashes**
+and **two result seals**, the stopped reason and absence of raw observations
+(`stopped-result-audit.json`). That later evidence audit is separate from the
+controller's recorded elapsed time.
+
+The implementation and representative allocation controls are complete locally;
+paired timing remains unmeasured. All original eight targets, missing measurement
+paths, required CI/coverage and phase-wide allocation/RSS evidence remain open.

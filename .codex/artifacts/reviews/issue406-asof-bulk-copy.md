@@ -3,7 +3,7 @@
 **Branch:** `feature/issue406-asof-bulk-copy`
 **Parent:** `467a3a9b257164f9f85d69c2cc83ac32ab47f0c1`
 **Ordinary parent product:** `8d3f6933c53f0dab1a562c79ad355cd9e08c665f`
-**Reviewed state:** implementation working diff over `467a3a9b`, including
+**Reviewed product:** `995b1b9a53c24ad156a027e9d7a2faf41e53031f`, including
 the exact former-production allocation reference and its final focused evidence
 
 The reviewer owns only this report in the implementation owner's worktree.
@@ -17,7 +17,8 @@ non-null arrays through one contiguous Arrow range per column. Existing exact
 sharing runs first; short, nullable and unsupported arrays retain whole-record
 vectorized take. The former-component allocation reference now preserves the
 original fallible collection and error mapping; its corrected measurements
-resolve the evidence blocker. New paired timing remains pending.
+resolve the evidence blocker. The ordinary release build succeeds; the sole
+paired attempt stops at resource preflight before any warmup or timing sample.
 
 ## Build and test results
 
@@ -175,7 +176,8 @@ candidate builds estimated at 6–14 minutes. Three proportional cases cover
 OFF/64k at 32 and one CPU plus the necessary OFF/1,024/one-CPU setup control.
 Counts are fixed at two rounds of ten adjacent AB/BA pairs and one warmup per
 arm per round within 600 inclusive seconds after candidate build completion.
-No timing acquisition has started.
+At source approval, no candidate release build or timing had started. The sole
+subsequent attempt is recorded below; it reaches no workload observations.
 
 The first selection names row 7 and is preserved in
 `prebuild-selection-initial.json`. Before any candidate build or timing,
@@ -198,11 +200,48 @@ allocations likewise cannot certify complete phase-wide allocation/RSS, ON or
 all-eight acceptance. The analysis preserves earlier stopped/inconclusive
 results and the shared-environment isolation requirement.
 
+## Release build and stopped-attempt addendum
+
+Existing evidence under repository
+`target/issue406-bulk-copy-paired-20261014/` records the ordinary candidate build
+for exact product `995b1b9a53c24ad156a027e9d7a2faf41e53031f` succeeding in
+**547.918896 seconds**, separately from measurement. Its native SHA-256 is
+`552b6313ccabc59d5080ea30c97965075685fbb6164b8f0b6923fa75c460e924`.
+The artifact audit covers **294 compiled artifacts**. The exact reused parent
+remains product `8d3f6933c53f0dab1a562c79ad355cd9e08c665f`, native
+`3664ebab40c619a0c4e7b8a9cfe93a684ab2da24e5c3ca52f8cd88c831041d08`.
+
+The frozen execution-plan SHA-256 is
+`c219a9425df5323c473ad22797031d0712a71b777b817e32d7dbdbb49d863c22`.
+Preflight validates the ordinary releases and matching compiler, Python,
+environment, lock fingerprint and compiled-artifact inventories, then stops
+at `competing_work` with `RuntimeError: another controlled build or measurement
+is running`. The fixed attempt starts **zero warmups and zero measured
+observations**. It is not retried or completed after pause/resume.
+
+`results/result.json` records controller elapsed **36.889307 seconds**;
+`results/budget.json` records **36.890008 / 600 seconds including sealing**.
+Settlement is complete with zero forced kills, terminated/unsettled groups,
+surviving group processes, pending/cancelled creations or cleanup errors, and
+the settlement deadline is satisfied. The resource observation list is empty.
+
+The subsequent read-only audit is separate from the controller's recorded
+elapsed time. The reviewer independently verifies the frozen plan identity,
+all **3,131 input hashes**, the **two result seals**, exact parent/candidate
+build-settings and 294-artifact inventory equality, and the empty observation/
+settled result. These agree with `stopped-result-audit.json`.
+
+The stopped evidence is accurately reported and leaves source approval intact.
+There is no candidate timing, speedup, regression, equivalence or target-
+attainment verdict. Complete phase allocation/RSS, ON, required CI/coverage
+and the original eight-target acceptance remain uncertified.
+
 ## Verdict
 
 **Approve — source implementation and recorded focused evidence.** The former-
 component allocation reference finding is resolved, and no correctness,
-ownership, style or documentation blocker remains. Paired timing, complete
-phase allocation/RSS, ON and all-eight acceptance remain unproved; required
-CI/coverage are uncertified. This is a local specialist handoff, not a green-CI
-or merge-ready claim.
+ownership, style or documentation blocker remains. The successful ordinary
+build and stopped preflight are verified without changing source approval.
+Paired timing, complete phase allocation/RSS, ON and all-eight acceptance remain
+unproved; required CI/coverage are uncertified. This is a local specialist
+handoff, not a green-CI or merge-ready claim.
