@@ -9,6 +9,11 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-13: Move the workspace crates and Python core to calendar version
+  `2026.10.13` for the `calc-flow-python` release. It is the first release
+  with the public `Runtime` registration methods and the first tagged after
+  the Studio subtree left this repository.
+
 - 2026-10-13: Move Calc Flow Studio out of this repository. The `web-ui/`
   subtree, Studio guide, Studio CI jobs, and Studio release tooling are
   removed; the application now lives in the separate
