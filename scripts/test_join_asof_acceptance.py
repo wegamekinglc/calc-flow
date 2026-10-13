@@ -469,6 +469,20 @@ class AcceptanceRuntimePolicyTests(unittest.TestCase):
 
 
 class AcceptanceLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def trace_inner(trace, failure, row):
+        if row == 6:
+            return SimpleNamespace()
+        inner = SimpleNamespace(
+            _benchmark_start_dispatch_trace=Mock(),
+            _benchmark_take_dispatch_trace=Mock(return_value=json.dumps(trace)),
+        )
+        if failure == "capture":
+            inner._benchmark_take_dispatch_trace.side_effect = RuntimeError(
+                "injected trace capture failure"
+            )
+        return inner
+
     async def exercise(
         self, *, observer_fails=False, asof=False, trace_failure=None, row=7
     ):
@@ -532,17 +546,8 @@ class AcceptanceLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 "stream_asof_joins": {"asof": {"output_watermark_micros": 9}},
             },
             cancel_async=AsyncMock(),
-            _inner=SimpleNamespace(
-                _benchmark_start_dispatch_trace=Mock(),
-                _benchmark_take_dispatch_trace=Mock(return_value=json.dumps(trace)),
-            ),
+            _inner=self.trace_inner(trace, trace_failure, row),
         )
-        if trace_failure == "capture":
-            job._inner._benchmark_take_dispatch_trace.side_effect = RuntimeError(
-                "injected trace capture failure"
-            )
-        if row == 6:
-            job._inner = SimpleNamespace()
 
         async def wait():
             await done.wait()
