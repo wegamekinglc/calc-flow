@@ -3,6 +3,16 @@ use super::*;
 use crate::runtime::streaming::gather_work::TestService;
 use crate::{CancellationToken, JsonMap, StreamJobContext, StreamOperator};
 
+mod compact;
+
+thread_local! {
+    static COMPLETE_INDICES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+pub(super) fn record_complete_indices(rows: usize) {
+    COMPLETE_INDICES.with(|count| count.set(count.get() + rows));
+}
+
 struct GateWork {
     work: ChunkWork,
     entered: tokio::sync::oneshot::Sender<()>,
@@ -88,6 +98,7 @@ async fn abandoned(service: &TestService, cancel: bool) {
 
 #[test]
 fn test_direct_left_cancelled_and_abandoned_work_retains_credit_until_drain() {
+    compact::complete_records_avoid_identity_indices();
     let service = TestService::new(1, 1).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
