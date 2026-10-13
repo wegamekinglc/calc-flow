@@ -5,8 +5,9 @@
 The complete eight-workload objective remains active. PR #407's implementation
 and stabilization work has merged; PR #412 repaired the complete benchmark and
 PR #413 merged the ASOF admission improvement. The next prefix-counting increment
-is PR #420. Its final corrected-head CI and complete candidate benchmark are still
-pending, so it has not merged. Earlier statements below about an unmerged #407 or
+is PR #420. Its final corrected-head CI is pending, so it has not merged. The
+complete candidate benchmark and independent evidence review have passed.
+Earlier statements below about an unmerged #407 or
 unresolved historical test/benchmark failures describe their recorded historical
 stage, rather than current merge readiness.
 
@@ -22,6 +23,15 @@ analysis. The complete post-Studio-split benchmark contains 20 catalog shards
 and 802 cases; its four-CPU suite scopes do not establish one-/32-CPU acceptance.
 A completed full run demonstrates operability only with its exact revisions,
 retained errors, inconclusive verdicts and informational slowdowns.
+
+The PR #420 complete run compares exact main `5fef1a31` with measured candidate
+`b77cd8bf`: all 24 jobs, 20 catalog shards and 802 unique cases succeed, with zero
+errors or confirmed regressions. Fresh aggregation exactly matches the published
+summary. Preserve 145 inconclusive and 11 informational slowdown results; the
+independent final evidence review is Approve. Later documentation, test-fixture
+and registry fixes do not relabel those measured products. The final Join fixture
+fix at `e686dabd` passes all 315 focused Join tests, with one pre-existing ignored
+test, and scoped Clippy. Required CI on that exact head remains the merge gate.
 
 The next implemented source increment routes eligible monotonic ASOF output by
 interned key IDs. Its allocation/hash and exact differential regressions, all
