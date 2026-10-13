@@ -214,7 +214,7 @@ jobs:
     timeout-minutes: 30
     services:
       mysql:
-        image: public.ecr.aws/docker/library/mysql:8.4
+        image: mysql:8.4
         env:
           MYSQL_ROOT_PASSWORD: calcflow-test
           MYSQL_DATABASE: calcflow
@@ -596,7 +596,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       mysql:
-        image: public.ecr.aws/docker/library/mysql:8.4
+        image: mysql:8.4
         env:
           MYSQL_ROOT_PASSWORD: calcflow-test
           MYSQL_DATABASE: calcflow
