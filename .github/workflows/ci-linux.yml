@@ -162,7 +162,7 @@ jobs:
     services:
       postgres:
         # Docker Official Images are also published to ECR Public.
-        image: public.ecr.aws/docker/library/postgres:16
+        image: postgres:16
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -612,7 +612,7 @@ jobs:
         ports:
           - 9092:9092
       postgres:
-        image: public.ecr.aws/docker/library/postgres:16
+        image: postgres:16
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
