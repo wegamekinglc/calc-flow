@@ -285,18 +285,66 @@ fn aggregated_prefix(operator: &StreamAsofJoinOperator, count: usize) -> LeftPre
 #[test]
 fn typed_integer_prefix_updates_scale_with_distinct_keys_and_skip_sequence_owners() {
     let count = 1_024;
-    let key = Arc::new(StringArray::from_iter_values(
-        (0..count).map(|i| format!("long key {:04}", i % 64)),
-    )) as ArrayRef;
+    for (keys, scratch_bytes) in [
+        (1, 0),
+        (64, 0),
+        (65, 520),
+        (128, 1_024),
+        (512, 4_096),
+        (1_024, 4_096),
+    ] {
+        let key = Arc::new(StringArray::from_iter_values(
+            (0..count).map(|i| format!("long key {:04}", i % keys)),
+        )) as ArrayRef;
+        let sequence = Arc::new(Int64Array::from_iter_values(
+            (0..count).map(|i| i64::try_from(i).unwrap()),
+        )) as ArrayRef;
+        let operator = operator(key, sequence, std::slice::from_ref(&(0..count)));
+        let expected = rowwise_prefix(&operator, count);
+        state::take_prefix_updates();
+        let mut prefix = aggregated_prefix(&operator, count);
+        assert_eq!(state::take_prefix_updates(), (1, keys, 0));
+        assert_prefix(&prefix, &expected);
+
+        // Reuse populated prefix maps to isolate temporary key-count scratch.
+        let run = operator.state.left.output_runs().next().unwrap();
+        assert_eq!(run.len(), count);
+        let allocation = allocation_counter::measure(|| {
+            run.visit_prefix(count, &mut prefix, &operator.state.batches, "asof")
+                .unwrap();
+        });
+        assert!(
+            allocation.bytes_total <= scratch_bytes,
+            "keys={keys}, scratch_bytes={scratch_bytes}, actual={allocation:?}"
+        );
+        if scratch_bytes == 0 {
+            assert_eq!(allocation.count_total, 0);
+        }
+    }
+
+    let key = Arc::new(StringArray::from_iter_values((0..count).map(|i| {
+        let id = if i < 64 { i } else { 64 + (i - 64) % 64 };
+        format!("retired prefix key {id:04}")
+    }))) as ArrayRef;
     let sequence = Arc::new(Int64Array::from_iter_values(
         (0..count).map(|i| i64::try_from(i).unwrap()),
     )) as ArrayRef;
-    let operator = operator(key, sequence, std::slice::from_ref(&(0..count)));
-    let expected = rowwise_prefix(&operator, count);
-    state::take_prefix_updates();
-    let prefix = aggregated_prefix(&operator, count);
-    assert_eq!(state::take_prefix_updates(), (1, 64, 0));
-    assert_prefix(&prefix, &expected);
+    let mut operator = operator(key, sequence, std::slice::from_ref(&(0..count)));
+    operator.state.commit_left_prefix(8);
+    for selected in [0, 1, 31, 64, 255, 256, count - 8] {
+        let expected = rowwise_prefix(&operator, selected);
+        let actual = aggregated_prefix(&operator, selected);
+        assert_prefix(&actual, &expected);
+        assert_projected_inventory_and_journal(&operator, &actual, &expected);
+    }
+    let mut prefix = aggregated_prefix(&operator, count - 8);
+    let run = operator.state.left.output_runs().next().unwrap();
+    assert_eq!(run.len(), count - 8);
+    let allocation = allocation_counter::measure(|| {
+        run.visit_prefix(count - 8, &mut prefix, &operator.state.batches, "asof")
+            .unwrap();
+    });
+    assert!(allocation.bytes_total <= (128 * size_of::<usize>()) as u64);
 }
 
 #[test]

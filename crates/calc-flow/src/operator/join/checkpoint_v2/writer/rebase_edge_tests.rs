@@ -222,9 +222,17 @@ async fn check_malformed_history(with_pending: bool) {
     assert!(pools.iter().all(|pool| pool.reserved() == 0));
 }
 
-#[tokio::test]
-async fn test_rebase_cancellation_cleans_both_passes_and_preserves_history() {
-    let enabled = job();
+#[test]
+fn test_rebase_cancellation_cleans_both_passes_and_preserves_history() {
+    isolated_writer_test(|service, runtime| {
+        runtime.block_on(assert_rebase_cancellation_preserves_history(service));
+    });
+}
+
+async fn assert_rebase_cancellation_preserves_history(
+    service: &crate::runtime::streaming::gather_work::TestService,
+) {
+    let enabled = job().with_gather_owner(service.owner("rebase-cancel-history".into()));
     let context = StreamOperatorContext::new(&enabled, "prepared-reuse", None);
     let (mut join, old) = checkpointed(&context).await;
     let workspace = join.v2_writer_workspace().unwrap();

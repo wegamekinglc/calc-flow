@@ -376,13 +376,22 @@ async fn test_native_probe_interns_each_distinct_repeated_key_once() {
     assert_eq!(pool.reserved(), 0);
 }
 
-#[tokio::test]
-async fn test_retained_probe_keys_release_batch_scratch_before_next_admission() {
+#[test]
+fn test_retained_probe_keys_release_batch_scratch_before_next_admission() {
+    checkpoint_compaction_tests::isolated_checkpoint_test(|service, runtime| {
+        runtime.block_on(assert_retained_probe_keys_release_batch_scratch(service));
+    });
+}
+
+async fn assert_retained_probe_keys_release_batch_scratch(
+    service: &crate::runtime::streaming::gather_work::TestService,
+) {
     let rows = 16_384;
     let mut operator = with_one_gib_pool(
         StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap(),
     );
-    let job = job();
+    // Shared-service pressure can retire admission's string-copy generation.
+    let job = job().with_gather_owner(service.owner("native-key-lifetime".into()));
     let context = StreamOperatorContext::new(&job, "match", None);
     let source = right_batch(vec![0; rows]);
     let (plan, admitted) = admitted_probe(&mut operator, "right", &source, &context).await;
@@ -436,8 +445,16 @@ async fn test_retained_probe_keys_release_batch_scratch_before_next_admission() 
     assert_eq!(pool.reserved(), 0);
 }
 
-#[tokio::test]
-async fn test_native_probe_key_allocations_and_aliases_remain_funded() {
+#[test]
+fn test_native_probe_key_allocations_and_aliases_remain_funded() {
+    checkpoint_compaction_tests::isolated_checkpoint_test(|service, runtime| {
+        runtime.block_on(assert_native_probe_key_allocations_and_aliases_remain_funded(service));
+    });
+}
+
+async fn assert_native_probe_key_allocations_and_aliases_remain_funded(
+    service: &crate::runtime::streaming::gather_work::TestService,
+) {
     key_arena::tests::assert_empty_arena_sizing_for_wide_schema_allocates_nothing();
     let mut cases: Vec<ArrayRef> = vec![
         Arc::new(UInt8Array::from(vec![0])),
@@ -460,7 +477,7 @@ async fn test_native_probe_key_allocations_and_aliases_remain_funded() {
     }
     cases.extend(key_cases());
     for values in cases {
-        assert_native_probe_key_funding(values).await;
+        assert_native_probe_key_funding(values, service).await;
     }
     assert_native_arena_composite_frames_use_shared_rowed_and_legacy_offsets().await;
 }
@@ -609,12 +626,15 @@ async fn assert_native_arena_composite_frames_use_shared_rowed_and_legacy_offset
     assert_eq!(pool.reserved(), 0);
 }
 
-async fn assert_native_probe_key_funding(values: ArrayRef) {
+async fn assert_native_probe_key_funding(
+    values: ArrayRef,
+    service: &crate::runtime::streaming::gather_work::TestService,
+) {
     let left = typed_schema(&left_schema(), values.data_type());
     let right = typed_schema(&right_schema(), values.data_type());
     let source = typed_batch(&right_batch(vec![0; values.len()]), &right, &values);
     let mut operator = StreamJoinOperator::new("match", left, right, spec()).unwrap();
-    let job = job();
+    let job = job().with_gather_owner(service.owner("native-key-funding".into()));
     let context = StreamOperatorContext::new(&job, "match", None);
     let (plan, admitted) = admitted_probe(&mut operator, "right", &source, &context).await;
     let pool = operator
@@ -948,8 +968,18 @@ async fn native_fallback_index_refund(
     assert_eq!(pool.reserved(), 0);
 }
 
-#[tokio::test]
-async fn test_string_probe_keeps_exact_admission_threshold_and_alias_funding() {
+#[test]
+fn test_string_probe_keeps_exact_admission_threshold_and_alias_funding() {
+    checkpoint_compaction_tests::isolated_checkpoint_test(|service, runtime| {
+        runtime.block_on(assert_string_probe_keeps_exact_admission_and_alias_funding(
+            service,
+        ));
+    });
+}
+
+async fn assert_string_probe_keeps_exact_admission_and_alias_funding(
+    service: &crate::runtime::streaming::gather_work::TestService,
+) {
     for large in [false, true] {
         for distinct in [false, true] {
             let values = (0..17)
@@ -960,18 +990,21 @@ async fn test_string_probe_keeps_exact_admission_threshold_and_alias_funding() {
             } else {
                 Arc::new(StringArray::from(values))
             };
-            assert_string_probe_admission_and_funding(array).await;
+            assert_string_probe_admission_and_funding(array, service).await;
         }
     }
 }
 
-async fn assert_string_probe_admission_and_funding(values: ArrayRef) {
+async fn assert_string_probe_admission_and_funding(
+    values: ArrayRef,
+    service: &crate::runtime::streaming::gather_work::TestService,
+) {
     let left = typed_schema(&left_schema(), values.data_type());
     let right = typed_schema(&right_schema(), values.data_type());
     let source = typed_batch(&right_batch(vec![0; values.len()]), &right, &values);
     let mut operator =
         with_one_gib_pool(StreamJoinOperator::new("match", left, right, spec()).unwrap());
-    let job = job();
+    let job = job().with_gather_owner(service.owner("string-key-funding".into()));
     let context = StreamOperatorContext::new(&job, "match", None);
     let (plan, admitted) = admitted_probe(&mut operator, "right", &source, &context).await;
     let expected = admitted

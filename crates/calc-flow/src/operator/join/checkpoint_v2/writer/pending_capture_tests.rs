@@ -256,9 +256,11 @@ fn snapshot_wire(snapshot: &OperatorStateSnapshot) -> (JsonMap, BTreeMap<String,
     )
 }
 
-async fn capture_reference() -> (Vec<Admission>, (JsonMap, BTreeMap<String, Vec<u8>>)) {
+async fn capture_reference(
+    service: &crate::runtime::streaming::gather_work::TestService,
+) -> (Vec<Admission>, (JsonMap, BTreeMap<String, Vec<u8>>)) {
     let pool = Arc::new(CapturePool::new());
-    let job = job();
+    let job = job().with_gather_owner(service.owner("pending-capture-reference".into()));
     let context = StreamOperatorContext::new(&job, "prepared-reuse", None);
     let (mut join, old) = pending_capture(&context, pool.clone()).await;
     let base_owner = std::ptr::from_ref(join.v2_writer.base.as_ref().unwrap().credit()) as usize;
@@ -291,12 +293,20 @@ async fn capture_reference() -> (Vec<Admission>, (JsonMap, BTreeMap<String, Vec<
     (admissions, expected)
 }
 
-#[tokio::test]
-async fn test_pending_capture_admission_failures_preserve_state_and_allow_same_epoch_retry() {
-    let (admissions, expected) = capture_reference().await;
+#[test]
+fn test_pending_capture_admission_failures_preserve_state_and_allow_same_epoch_retry() {
+    isolated_writer_test(|service, runtime| {
+        runtime.block_on(assert_pending_capture_admission_failures(service));
+    });
+}
+
+async fn assert_pending_capture_admission_failures(
+    service: &crate::runtime::streaming::gather_work::TestService,
+) {
+    let (admissions, expected) = capture_reference(service).await;
     for reject in 1..=admissions.len() {
         let pool = Arc::new(CapturePool::new());
-        let job = job();
+        let job = job().with_gather_owner(service.owner("pending-capture-rejection".into()));
         let context = StreamOperatorContext::new(&job, "prepared-reuse", None);
         let (mut join, old) = pending_capture(&context, pool.clone()).await;
         let before = capture_image(&join);

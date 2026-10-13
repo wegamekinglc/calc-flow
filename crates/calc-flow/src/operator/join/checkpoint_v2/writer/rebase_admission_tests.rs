@@ -22,9 +22,12 @@ async fn captured_history(
     (join, snapshot)
 }
 
-async fn reference(with_pending: bool) -> (Vec<Admission>, (JsonMap, BTreeMap<String, Vec<u8>>)) {
+async fn reference(
+    with_pending: bool,
+    service: &crate::runtime::streaming::gather_work::TestService,
+) -> (Vec<Admission>, (JsonMap, BTreeMap<String, Vec<u8>>)) {
     let pool = Arc::new(CapturePool::new());
-    let enabled = job();
+    let enabled = job().with_gather_owner(service.owner("rebase-admission-reference".into()));
     let context = StreamOperatorContext::new(&enabled, "prepared-reuse", None);
     let (mut join, old) = captured_history(&context, pool.clone(), with_pending).await;
     let bases = Arc::new(AtomicUsize::new(0));
@@ -59,21 +62,28 @@ async fn reference(with_pending: bool) -> (Vec<Admission>, (JsonMap, BTreeMap<St
     (admissions, wire)
 }
 
-#[tokio::test]
-async fn test_rebase_rejects_each_admission_atomically_and_retries_the_same_epoch() {
-    check_admission_failures(false).await;
+#[test]
+fn test_rebase_rejects_each_admission_atomically_and_retries_the_same_epoch() {
+    isolated_writer_test(|service, runtime| {
+        runtime.block_on(check_admission_failures(false, service));
+    });
 }
 
-#[tokio::test]
-async fn test_pending_rebase_rejects_each_admission_atomically_and_retries_the_same_epoch() {
-    check_admission_failures(true).await;
+#[test]
+fn test_pending_rebase_rejects_each_admission_atomically_and_retries_the_same_epoch() {
+    isolated_writer_test(|service, runtime| {
+        runtime.block_on(check_admission_failures(true, service));
+    });
 }
 
-async fn check_admission_failures(with_pending: bool) {
-    let (admissions, expected) = reference(with_pending).await;
+async fn check_admission_failures(
+    with_pending: bool,
+    service: &crate::runtime::streaming::gather_work::TestService,
+) {
+    let (admissions, expected) = reference(with_pending, service).await;
     for reject in 1..=admissions.len() {
         let pool = Arc::new(CapturePool::new());
-        let enabled = job();
+        let enabled = job().with_gather_owner(service.owner("rebase-admission-rejection".into()));
         let context = StreamOperatorContext::new(&enabled, "prepared-reuse", None);
         let (mut join, old) = captured_history(&context, pool.clone(), with_pending).await;
         let before = capture_image(&join);
