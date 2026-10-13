@@ -204,10 +204,33 @@ impl Columns {
         handles: &[u32],
         payloads: &[state::RowRef],
     ) {
+        const STACK_BUCKETS: usize = 64;
+        if handles.len() <= STACK_BUCKETS {
+            // COW and capacity preparation already made these buckets unique.
+            // Keep their borrows on the stack without new workspace charges.
+            let mut buckets = state.reserved_unsigned_buckets::<STACK_BUCKETS>(handles);
+            self.visit_rows(payloads, |key, time, sequence, row| {
+                buckets[key as usize]
+                    .as_deref_mut()
+                    .expect("admitted ASOF key")
+                    .push_admitted_unsigned(time, sequence, row);
+            });
+        } else {
+            self.visit_rows(payloads, |key, time, sequence, row| {
+                state.push_reserved_unsigned(handles[key as usize], time, sequence, row);
+            });
+        }
+    }
+
+    fn visit_rows(
+        self,
+        payloads: &[state::RowRef],
+        mut install: impl FnMut(u32, i64, u64, state::RowRef),
+    ) {
         for (record, payload) in self.records.into_iter().zip(payloads) {
             for (row, key) in record.keys.into_iter().enumerate() {
-                state.push_reserved_unsigned(
-                    handles[key as usize],
+                install(
+                    key,
                     record.times.value(row),
                     record.sequences.value(row),
                     payload.with_row(u32::try_from(row).expect("preflighted compact reference")),

@@ -75,9 +75,49 @@ pub(super) async fn run_cases(service: &TestService) {
             .await;
         }
     }
+    dictionary_domains(service).await;
     retained_maxima();
     delta_replay(service).await;
     failure_controls().await;
+}
+
+async fn dictionary_domains(service: &TestService) {
+    let schema = schema(DataType::Utf8, DataType::UInt64);
+    let names = (0..256).map(|id| format!("S{id:03}")).collect::<Vec<_>>();
+    let seed = batch(vec![unsigned_record(
+        &schema,
+        names.iter().map(String::as_str).collect(),
+        (0..256).collect(),
+        vec![0; 256],
+    )]);
+    let sparse = batch(vec![unsigned_record(
+        &schema,
+        [255, 3, 128, 255]
+            .into_iter()
+            .map(|id| names[id].as_str())
+            .collect(),
+        vec![300, 301, 302, 303],
+        vec![10, 11, 12, 13],
+    )]);
+    let larger = batch(vec![unsigned_record(
+        &schema,
+        (0..130).map(|row| names[row % 65].as_str()).collect(),
+        (0..130).collect(),
+        (0..130).map(|row| row / 65).collect(),
+    )]);
+    for checkpointing in [false, true] {
+        compare(
+            &sparse,
+            Some(&seed),
+            None,
+            true,
+            checkpointing,
+            service,
+            None,
+        )
+        .await;
+        compare(&larger, None, None, true, checkpointing, service, None).await;
+    }
 }
 
 pub(super) async fn projected_cases(input: &Batch, service: &TestService) {
@@ -342,9 +382,12 @@ async fn compare(
             "unexpected admission path"
         );
         assert_eq!(CANONICAL_ROWS.replace(0) == 0, direct && !old);
+        let keys = admission.right_capacities.len();
+        state::take_reserved_bucket_accesses();
         op.install_admission("right", admission, validated, &context)
             .await
             .unwrap();
+        assert_bucket_visits(direct && !old, keys, input.num_rows());
     }
     assert_eq!(fast.status, legacy.status);
     assert_eq!(
@@ -381,6 +424,16 @@ async fn compare(
     drop(context);
     drop(job);
     assert!(pools.iter().all(|pool| pool.reserved() == 0));
+}
+
+fn assert_bucket_visits(direct: bool, keys: usize, rows: usize) {
+    if direct {
+        assert_eq!(
+            state::take_reserved_bucket_accesses(),
+            if keys <= 64 { keys } else { rows },
+            "ordered admission must borrow each small-domain bucket once"
+        );
+    }
 }
 
 async fn seed_right(

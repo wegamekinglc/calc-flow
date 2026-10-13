@@ -9,9 +9,14 @@ group-by 744.856 / 686.566 ms (-7.8257%, `improved`). Source head `db7945ba`
 has 34 successful checks and four successful external contexts; combined Rust
 line coverage is 92.96%. Original-wheel regression verdicts and their unproven
 cause remain documented below. All 150 inconclusive and three informational
-slowdown results remain visible; the wider eight-target optimization goal stays
-paused. Final specialist evidence review is Approve; required documentation-head
-CI must still pass before merge.
+slowdown results remain visible; PR #412 merged as `8f890f28` with all 38 checks green and final specialist
+approval. The user has resumed the wider eight-target development objective;
+see the [next ASOF increment](issue406-asof-admission-bulk.md) for current work.
+The later [18:00 scheduled full run](https://github.com/wegamekinglc/calc-flow/actions/runs/38235513830)
+also completed all 22 shards and 809 unique rows without errors or confirmed
+regressions, retaining 149 inconclusive results. Its run head is `e5380992`;
+this successful scheduled run does not replace the original failed-run evidence
+or the eight-target OFF/LOW/ON acceptance measurements.
 
 ## Confirmed failure
 

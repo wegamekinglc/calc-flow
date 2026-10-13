@@ -383,9 +383,24 @@ impl RightState {
     }
 
     pub fn push_reserved_unsigned(&mut self, id: u32, time: i64, sequence: u64, row: RowRef) {
+        #[cfg(test)]
+        super::RESERVED_BUCKET_ACCESSES.with(|visits| visits.set(visits.get() + 1));
         Arc::get_mut(&mut self.entries[id as usize].bucket)
             .expect("reserved ASOF admission bucket")
             .push_admitted_unsigned(time, sequence, row);
+    }
+
+    pub fn reserved_unsigned_buckets<const N: usize>(
+        &mut self,
+        handles: &[u32],
+    ) -> [Option<&mut RightBucket>; N] {
+        self.entries.select_mut(handles).map(|entry| {
+            entry.map(|entry| {
+                #[cfg(test)]
+                super::RESERVED_BUCKET_ACCESSES.with(|visits| visits.set(visits.get() + 1));
+                Arc::get_mut(&mut entry.bucket).expect("reserved ASOF admission bucket")
+            })
+        })
     }
 
     pub fn refresh_key(&mut self, key: &Encoding) {
@@ -685,6 +700,7 @@ mod tests {
         for key in &keys {
             state.insert_unique(0, key.clone(), RightBucket::default());
         }
+        assert_stack_selection(&mut state, &keys);
         while !keys.is_empty() {
             let id = keys.len() / 3;
             state.remove(u32::try_from(id).unwrap());
@@ -694,6 +710,29 @@ mod tests {
                 assert_eq!(state.find(0, key.as_slice()), Some(id));
                 assert_eq!(state.entries[id].key, *key);
             }
+            assert_stack_selection(&mut state, &keys);
+        }
+    }
+
+    fn assert_stack_selection(state: &mut RightState, keys: &[Encoding]) {
+        let handles = (0..keys.len())
+            .rev()
+            .step_by(3)
+            .map(|id| u32::try_from(id).unwrap())
+            .collect::<Vec<_>>();
+        let mut selected = None;
+        let allocation = allocation_counter::measure(|| {
+            selected = Some(state.entries.select_mut::<64>(&handles));
+        });
+        assert_eq!(
+            allocation.count_total, 0,
+            "selection allocated heap storage"
+        );
+        for (index, entry) in selected.unwrap().into_iter().enumerate() {
+            assert_eq!(
+                entry.map(|entry| &entry.key),
+                handles.get(index).map(|id| &keys[*id as usize])
+            );
         }
     }
 
