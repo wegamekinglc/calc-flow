@@ -323,8 +323,6 @@ struct CompiledWindowGeometry {
 struct WindowState {
     accumulators: BTreeMap<WindowKey, AccumulatorRow>,
     accumulator_bytes: u64,
-    dirty: BTreeSet<WindowKey>,
-    emitted_pending_snapshot: BTreeSet<WindowKey>,
     last_input_watermark: Option<EventTime>,
     next_output_sequence: u64,
     ended: bool,
@@ -833,8 +831,9 @@ impl WindowAggregateOperator {
     /// Sets the logical row and byte limit for retained window accumulators.
     ///
     /// The default is one million windows and 256 MiB of logical charge.
-    /// Existing state must fit the replacement budget. Checkpoint segment
-    /// copies and process RSS are outside this limit.
+    /// A window stops counting once its close is emitted. Existing state must
+    /// fit the replacement budget. Checkpoint segment copies and process RSS
+    /// are outside this limit.
     ///
     /// # Errors
     ///
@@ -1117,7 +1116,6 @@ impl WindowAggregateOperator {
             .state
             .accumulators
             .iter()
-            .filter(|(key, _)| !self.state.emitted_pending_snapshot.contains(*key))
             .map(|(key, entry)| StateOperationRow {
                 key: key.clone(),
                 entry: entry.clone(),
@@ -1170,21 +1168,17 @@ impl WindowAggregateOperator {
                 .checked_add(1)
                 .expect("all output sequences were prevalidated");
         }
-        if context.job().checkpointing() {
-            self.state
-                .emitted_pending_snapshot
-                .extend(keys.iter().cloned());
-        } else {
-            for key in keys {
-                if let Some(entry) = self.state.accumulators.remove(key) {
-                    self.state.accumulator_bytes =
-                        self.state
-                            .accumulator_bytes
-                            .saturating_sub(window_entry_bytes(
-                                logical_length(key.stable_group_key.len()),
-                                &entry,
-                            ));
-                }
+        // The tombstone delta, when checkpointing, was encoded before this
+        // emission, so accepted windows leave live state and its budget here.
+        for key in keys {
+            if let Some(entry) = self.state.accumulators.remove(key) {
+                self.state.accumulator_bytes =
+                    self.state
+                        .accumulator_bytes
+                        .saturating_sub(window_entry_bytes(
+                            logical_length(key.stable_group_key.len()),
+                            &entry,
+                        ));
             }
         }
         Ok(())
@@ -1276,9 +1270,7 @@ impl StreamOperator for WindowAggregateOperator {
             .state
             .accumulators
             .keys()
-            .filter(|key| {
-                key.end <= watermark && !self.state.emitted_pending_snapshot.contains(*key)
-            })
+            .filter(|key| key.end <= watermark)
             .cloned()
             .collect::<Vec<_>>();
         let tombstones = if context.job().checkpointing() {
@@ -1309,13 +1301,7 @@ impl StreamOperator for WindowAggregateOperator {
             return Ok(());
         }
         self.compact_prepared_if_needed(context).await?;
-        let keys = self
-            .state
-            .accumulators
-            .keys()
-            .filter(|key| !self.state.emitted_pending_snapshot.contains(*key))
-            .cloned()
-            .collect::<Vec<_>>();
+        let keys = self.state.accumulators.keys().cloned().collect::<Vec<_>>();
         let tombstones = if context.job().checkpointing() {
             self.encode_operations(self.tombstone_operations(&keys), context)
                 .await?
@@ -1368,19 +1354,6 @@ impl StreamOperator for WindowAggregateOperator {
             ));
         };
         self.state.prepared_segments.clear();
-        for key in std::mem::take(&mut self.state.emitted_pending_snapshot) {
-            if let Some(entry) = self.state.accumulators.remove(&key) {
-                self.state.accumulator_bytes =
-                    self.state
-                        .accumulator_bytes
-                        .saturating_sub(window_entry_bytes(
-                            logical_length(key.stable_group_key.len()),
-                            &entry,
-                        ));
-            }
-            self.state.dirty.remove(&key);
-        }
-        self.state.dirty.clear();
         self.state.retained_inventory = retained_inventory;
         self.state.retained_segments = retained_segments.clone();
         self.state.replace_retained_on_checkpoint = false;
@@ -1560,12 +1533,7 @@ impl WindowAggregateOperator {
         self.install_context_identity(context);
         self.state.metrics = next_metrics;
         self.state.accumulator_bytes = update.usage.bytes;
-        for (key, accumulator) in update.accumulators {
-            if context.job().checkpointing() {
-                self.state.dirty.insert(key.clone());
-            }
-            self.state.accumulators.insert(key, accumulator);
-        }
+        self.state.accumulators.extend(update.accumulators);
         if let Some(encoded) = encoded {
             self.state.prepared_segments.push(PreparedStateSegment {
                 kind: SegmentKind::Delta,
@@ -1652,7 +1620,6 @@ impl WindowAggregateOperator {
             last_checkpoint_epoch: Some(metadata.epoch),
             pipeline_fingerprint: metadata.pipeline_fingerprint,
             operator_id: metadata.operator_id,
-            ..WindowState::default()
         };
         Ok(())
     }
@@ -4280,16 +4247,17 @@ mod tests {
         )
     }
 
+    struct RejectOutput;
+
+    #[async_trait]
+    impl StreamCollector for RejectOutput {
+        async fn emit(&mut self, _port: &str, _batch: Batch) -> Result<()> {
+            Err(operator_error("window", "output rejected"))
+        }
+    }
+
     #[tokio::test]
     async fn test_checkpoint_disabled_window_releases_only_accepted_output() {
-        struct RejectOutput;
-        #[async_trait]
-        impl StreamCollector for RejectOutput {
-            async fn emit(&mut self, _port: &str, _batch: Batch) -> Result<()> {
-                Err(operator_error("window", "output rejected"))
-            }
-        }
-
         let mut operator = checkpoint_segment_operator();
         operator
             .set_state_budget(StateBudget::new(1, 1_048_576).unwrap())
@@ -4304,7 +4272,6 @@ mod tests {
         assert_eq!(operator.state.accumulators.len(), 1);
         assert!(operator.state.accumulator_bytes > 0);
         assert!(operator.state.prepared_segments.is_empty());
-        assert!(operator.state.dirty.is_empty());
         let before_bytes = operator.state.accumulator_bytes;
         let error = operator
             .on_watermark(
@@ -4318,7 +4285,6 @@ mod tests {
         assert_eq!(operator.state.accumulators.len(), 1);
         assert_eq!(operator.state.accumulator_bytes, before_bytes);
         assert!(operator.state.last_input_watermark.is_none());
-        assert!(operator.state.emitted_pending_snapshot.is_empty());
         operator
             .on_watermark(EventTime::from_micros(60_000_000), &context, &mut output)
             .await
@@ -4327,7 +4293,6 @@ mod tests {
         assert_eq!(emitted[0].as_data().unwrap().num_rows(), 1);
         assert!(operator.state.accumulators.is_empty());
         assert_eq!(operator.state.accumulator_bytes, 0);
-        assert!(operator.state.emitted_pending_snapshot.is_empty());
         assert!(operator.state.prepared_segments.is_empty());
         operator
             .process_data(
@@ -4342,7 +4307,6 @@ mod tests {
         assert_eq!(output.drain("output")[0].as_data().unwrap().num_rows(), 1);
         assert!(operator.state.accumulators.is_empty());
         assert_eq!(operator.state.accumulator_bytes, 0);
-        assert!(operator.state.emitted_pending_snapshot.is_empty());
         assert!(operator.state.prepared_segments.is_empty());
     }
 
@@ -4486,7 +4450,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn window_state_budget_releases_closed_groups_after_checkpoint() {
+    async fn checkpointing_window_releases_only_accepted_output() {
+        let mut operator = checkpoint_segment_operator();
+        let job = budget_test_job();
+        let context = StreamOperatorContext::new(&job, "window", None);
+        let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data("input", budget_test_batch(&[0, 1]), &context, &mut output)
+            .await
+            .unwrap();
+        let before_bytes = operator.state.accumulator_bytes;
+        let error = operator
+            .on_watermark(
+                EventTime::from_micros(60_000_000),
+                &context,
+                &mut RejectOutput,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("output rejected"));
+        assert_eq!(operator.state.accumulators.len(), 1);
+        assert_eq!(operator.state.accumulator_bytes, before_bytes);
+        assert!(operator.state.last_input_watermark.is_none());
+        assert_eq!(operator.state.prepared_segments.len(), 1);
+
+        operator
+            .on_watermark(EventTime::from_micros(60_000_000), &context, &mut output)
+            .await
+            .unwrap();
+        assert_eq!(output.drain("output")[0].as_data().unwrap().num_rows(), 1);
+        assert!(operator.state.accumulators.is_empty());
+        assert_eq!(operator.state.accumulator_bytes, 0);
+        // The upsert and its tombstone both wait for the next snapshot.
+        assert_eq!(operator.state.prepared_segments.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn window_state_budget_releases_closed_groups_when_emitted() {
         let mut operator = checkpoint_segment_operator();
         operator
             .set_state_budget(StateBudget::new(1, 1_048_576).unwrap())
@@ -4503,8 +4503,6 @@ mod tests {
             .on_watermark(EventTime::from_micros(60_000_000), &context, &mut output)
             .await
             .unwrap();
-        assert_eq!(operator.state.accumulators.len(), 1);
-        operator.checkpoint(crate::Epoch::INITIAL).unwrap();
         assert!(operator.state.accumulators.is_empty());
         assert_eq!(operator.state.accumulator_bytes, 0);
 
@@ -4518,6 +4516,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(operator.state.accumulators.len(), 1);
+        let open_bytes = operator.state.accumulator_bytes;
+        operator.checkpoint(crate::Epoch::INITIAL).unwrap();
+        assert_eq!(operator.state.accumulators.len(), 1);
+        assert_eq!(operator.state.accumulator_bytes, open_bytes);
     }
 
     #[tokio::test]

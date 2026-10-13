@@ -2,9 +2,9 @@ use std::{io::Cursor, sync::Arc, time::Duration};
 
 use calc_flow::{
     AggregateFunction, Batch, BatchMetadata, CancellationToken, EdgeCollector, Epoch, EventTime,
-    JsonMap, LocalStateBackend, OperatorMetadata, OperatorStateSnapshot, StateBackend, StateHandle,
-    StateLineageKey, StateSegment, StreamJobContext, StreamOperator, StreamOperatorContext,
-    WindowAggregateOperator, WindowSpec,
+    JsonMap, LocalStateBackend, OperatorMetadata, OperatorStateSnapshot, StateBackend, StateBudget,
+    StateHandle, StateLineageKey, StateSegment, StreamJobContext, StreamOperator,
+    StreamOperatorContext, WindowAggregateOperator, WindowSpec,
 };
 use datafusion::arrow::{
     array::{
@@ -181,6 +181,25 @@ fn first_output_sum(collector: &mut EdgeCollector) -> (u64, i64) {
     (batch.metadata().sequence(), sum)
 }
 
+/// Drains `(sequence, sum)` for every emitted row, in emission order.
+fn drain_output_sums(collector: &mut EdgeCollector) -> Vec<(u64, i64)> {
+    let mut rows = Vec::new();
+    for message in collector.drain("output") {
+        let batch = message.as_data().unwrap();
+        let sequence = batch.metadata().sequence();
+        for record in batch.table_payload().unwrap().batches() {
+            let sums = record
+                .column_by_name("sum_value")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            rows.extend(sums.values().iter().map(|sum| (sequence, *sum)));
+        }
+    }
+    rows
+}
+
 #[tokio::test]
 async fn checkpoint_is_incremental_arrow_ipc_and_restore_replaces_live_state() {
     let job = job();
@@ -325,6 +344,120 @@ async fn checkpointed_close_transition_and_output_sequence_survive_restore() {
         .unwrap();
     restored.on_end(&context, &mut output).await.unwrap();
     assert_eq!(first_output_sum(&mut output), (1, 7));
+}
+
+#[tokio::test]
+async fn closed_windows_leave_the_state_budget_when_emitted_between_checkpoints() {
+    let job = job();
+    let budget = StateBudget::new(1, 1 << 20).unwrap();
+    let mut source = operator();
+    source.set_state_budget(budget).unwrap();
+    let mut output = EdgeCollector::new(source.output_ports().to_vec());
+    let mut watermark = None;
+    // Three consecutive windows close before the next one opens; no
+    // checkpoint runs in between, so only one window is ever retained.
+    for (sequence, value) in [(0_i64, 5_i64), (1, 7), (2, 11)] {
+        let context = StreamOperatorContext::new(&job, "window", watermark);
+        source
+            .process_data(
+                "input",
+                input_batch(vec![sequence * 10 + 1], vec!["a"], vec![value]),
+                &context,
+                &mut output,
+            )
+            .await
+            .unwrap();
+        let closing = EventTime::from_micros((sequence + 1) * 10);
+        source
+            .on_watermark(closing, &context, &mut output)
+            .await
+            .unwrap();
+        assert_eq!(
+            drain_output_sums(&mut output),
+            [(u64::try_from(sequence).unwrap(), value)]
+        );
+        watermark = Some(closing);
+    }
+
+    let snapshot = source.checkpoint(Epoch::new(1).unwrap()).unwrap();
+    let mut restored = operator();
+    restored.set_state_budget(budget).unwrap();
+    restored.restore(&snapshot).unwrap();
+    let context = StreamOperatorContext::new(&job, "window", watermark);
+    restored
+        .process_data(
+            "input",
+            input_batch(vec![31], vec!["a"], vec![13]),
+            &context,
+            &mut output,
+        )
+        .await
+        .unwrap();
+    restored.on_end(&context, &mut output).await.unwrap();
+    assert_eq!(drain_output_sums(&mut output), [(3, 13)]);
+}
+
+#[tokio::test]
+async fn compaction_between_checkpoints_keeps_only_unemitted_windows() {
+    const STEPS: i64 = 40;
+    let job = job();
+    // Compaction replaces an empty retained inventory, then a non-empty one.
+    for early_checkpoint in [None, Some(5)] {
+        let mut source = operator();
+        // At most the closing window and the long-lived one are retained.
+        source
+            .set_state_budget(StateBudget::new(2, 1 << 20).unwrap())
+            .unwrap();
+        let mut output = EdgeCollector::new(source.output_ports().to_vec());
+        let mut watermark = None;
+        let mut emitted = Vec::new();
+        let mut epoch = 0;
+        for step in 0..STEPS {
+            let context = StreamOperatorContext::new(&job, "window", watermark);
+            // Group "a" closes every step. Group "z" opens a far window once,
+            // so only a replacement base can carry it into the snapshot.
+            let batch = if step == 0 {
+                input_batch(vec![1, 1_000_001], vec!["a", "z"], vec![1, 100])
+            } else {
+                input_batch(vec![step * 10 + 1], vec!["a"], vec![step + 1])
+            };
+            source
+                .process_data("input", batch, &context, &mut output)
+                .await
+                .unwrap();
+            let closing = EventTime::from_micros((step + 1) * 10);
+            source
+                .on_watermark(closing, &context, &mut output)
+                .await
+                .unwrap();
+            emitted.extend(drain_output_sums(&mut output));
+            watermark = Some(closing);
+            if early_checkpoint == Some(step) {
+                epoch += 1;
+                source.checkpoint(Epoch::new(epoch).unwrap()).unwrap();
+            }
+        }
+        let closed = (0..STEPS)
+            .map(|step| (u64::try_from(step).unwrap(), step + 1))
+            .collect::<Vec<_>>();
+        assert_eq!(emitted, closed);
+
+        // Eighty deltas exceed the delta threshold, so the snapshot holds a
+        // base with the open window and none of the emitted ones.
+        let snapshot = source.checkpoint(Epoch::new(epoch + 1).unwrap()).unwrap();
+        assert!(snapshot.segments.keys().any(|id| id.starts_with("base-")));
+        let open = [(u64::try_from(STEPS).unwrap(), 100)];
+        let context = StreamOperatorContext::new(&job, "window", watermark);
+        let mut restored = operator();
+        restored
+            .set_state_budget(StateBudget::new(1, 1 << 20).unwrap())
+            .unwrap();
+        restored.restore(&snapshot).unwrap();
+        restored.on_end(&context, &mut output).await.unwrap();
+        assert_eq!(drain_output_sums(&mut output), open);
+        source.on_end(&context, &mut output).await.unwrap();
+        assert_eq!(drain_output_sums(&mut output), open);
+    }
 }
 
 #[tokio::test]
