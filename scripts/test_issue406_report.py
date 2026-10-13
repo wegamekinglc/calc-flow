@@ -49,6 +49,58 @@ def report(records):
 
 
 class AcceptanceReportTests(unittest.TestCase):
+    def test_post_compaction_handlers_cannot_establish_during_compaction_target(self):
+        from scripts.benchmark_suite.issue406_report import (
+            render_acceptance_markdown,
+            summarize_acceptance,
+        )
+
+        armed = selected(5, "join_handler_compacting", mode="enabled")
+        steady = selected(5, "join_handler_steady", mode="enabled")
+        for ratio in (1.5, 3.0):
+            with self.subTest(ratio=ratio):
+                observation = report(
+                    [
+                        record(armed, ratio * 0.001),
+                        record(steady, 0.001),
+                        record(armed, 0.004, side="baseline"),
+                        record(steady, 0.001, side="baseline"),
+                    ]
+                )
+                original = copy.deepcopy(observation)
+                summary = summarize_acceptance(observation)
+                target = summary["targets"][4]
+                self.assertEqual(target["target_status"], "unmeasured")
+                self.assertEqual(target["timing_scope"], "post-compaction-handler")
+                self.assertIsNone(target["ratio_of_p50"])
+                self.assertAlmostEqual(target["post_compaction_ratio_of_p50"], ratio)
+                self.assertIsNone(target["baseline"]["ratio_of_p50"])
+                self.assertAlmostEqual(
+                    target["baseline"]["post_compaction_ratio_of_p50"], 4.0
+                )
+                self.assertIn("during compaction", target["title"])
+                self.assertEqual(len(summary["targets"]), 8)
+                self.assertEqual(observation, original)
+                markdown = render_acceptance_markdown(summary)
+                self.assertIn("During-compaction target unmeasured", markdown)
+                self.assertIn("post-compaction handler ratio", markdown)
+
+    def test_missing_compaction_control_preserves_other_seven_targets(self):
+        from scripts.benchmark_suite.issue406_report import summarize_acceptance
+
+        armed = selected(5, "join_handler_compacting", mode="enabled")
+        empty = summarize_acceptance(report([]))
+        partial = summarize_acceptance(report([record(armed, 0.001)]))
+        target = partial["targets"][4]
+        self.assertEqual(target["target_status"], "unmeasured")
+        self.assertIsNone(target["ratio_of_p50"])
+        self.assertIsNone(target["post_compaction_ratio_of_p50"])
+        self.assertFalse(partial["evidence_complete"])
+        self.assertEqual(
+            partial["targets"][:4] + partial["targets"][5:],
+            empty["targets"][:4] + empty["targets"][5:],
+        )
+
     def test_partial_report_keeps_all_eight_targets_without_fabricating_main_off(self):
         from scripts.benchmark_suite.issue406_report import summarize_acceptance
 
@@ -164,7 +216,10 @@ class AcceptanceReportTests(unittest.TestCase):
         )[0]
         self.assertIn("Fresh main (explicit policy)", primary)
         self.assertIn("low: ratio of p50 4.5 (ok)", primary)
-        self.assertIn("Enabled ratio of p50 4 (ok)", primary)
+        self.assertIn(
+            "Post-compaction handler ratio of p50 4 (diagnostic; lifecycle ok)",
+            primary,
+        )
         self.assertIn("enabled/join_capture: p50 1.8", primary)
         self.assertIn("microseconds/row", primary)
 
