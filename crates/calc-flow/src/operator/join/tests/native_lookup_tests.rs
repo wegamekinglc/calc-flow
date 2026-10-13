@@ -376,13 +376,22 @@ async fn test_native_probe_interns_each_distinct_repeated_key_once() {
     assert_eq!(pool.reserved(), 0);
 }
 
-#[tokio::test]
-async fn test_retained_probe_keys_release_batch_scratch_before_next_admission() {
+#[test]
+fn test_retained_probe_keys_release_batch_scratch_before_next_admission() {
+    checkpoint_compaction_tests::isolated_checkpoint_test(|service, runtime| {
+        runtime.block_on(assert_retained_probe_keys_release_batch_scratch(service));
+    });
+}
+
+async fn assert_retained_probe_keys_release_batch_scratch(
+    service: &crate::runtime::streaming::gather_work::TestService,
+) {
     let rows = 16_384;
     let mut operator = with_one_gib_pool(
         StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap(),
     );
-    let job = job();
+    // Shared-service pressure can retire admission's string-copy generation.
+    let job = job().with_gather_owner(service.owner("native-key-lifetime".into()));
     let context = StreamOperatorContext::new(&job, "match", None);
     let source = right_batch(vec![0; rows]);
     let (plan, admitted) = admitted_probe(&mut operator, "right", &source, &context).await;

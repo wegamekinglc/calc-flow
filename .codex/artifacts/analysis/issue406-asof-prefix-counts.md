@@ -47,6 +47,20 @@ also passes on the rebased source in 167 seconds. Measurement setup review is
 Approve after four adapter tests cover valid ON evidence, rejected manifest/
 window/cursor mutations and mismatched compiled dependency identities.
 
+The final CI exposed an unrelated, pre-existing race in the Join retained-key
+scratch test. The parity log records an unsigned subtraction overflow after
+the second key batch is dropped. Admission's string-copy worker uses a shared
+process service; another parallel test can trigger retirement and refund its
+16,384-byte generation between this test's global pool snapshots. The test now
+uses the existing isolated service fixture and binds its job to that service.
+All original allocation, admission, scratch lifetime and final refund assertions
+remain unchanged. Runtime source and the measured products are unchanged.
+The failing CI log is retained as `ci-parity-failure.log` in this increment's
+evidence directory. Independent review confirms the diagnosis and narrow scope;
+the focused regression and all 11 native-lookup module tests pass. Scoped
+all-feature core/test Clippy passes in 86 seconds; formatting and whitespace
+checks pass. Required CI on the corrected head remains pending.
+
 ## Performance scope
 
 The ordinary-release comparison below measures this increment. Allocation
