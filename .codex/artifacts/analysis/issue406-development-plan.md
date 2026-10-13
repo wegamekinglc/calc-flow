@@ -52,6 +52,14 @@ their original timing/retained-row definitions. Finish with a fresh complete
 eight-row comparison against then-current main and separate checkpoint modes.
 The final result must retain unmet targets and unsupported/invalid measurements.
 
+The original full-inventory controller freezes historical revisions and omits
+baseline OFF arms. That historical protocol is not a capability test of current
+main: the exact `5fef1a31` ordinary release has already completed verified true-OFF
+observations. The final current-main comparison must collect both revisions in
+true OFF where supported, rather than carrying forward the old unsupported-main
+label. Preserve historical artifacts and validate the new exact-revision plan
+before acquisition.
+
 A follow-up source audit identifies a row-5 measurement limitation. The maintained
 native `compaction_sample` awaits all checkpoint preparation, rebase installation
 and release cleanup before starting `process_data`. Its `handler_seconds` is
