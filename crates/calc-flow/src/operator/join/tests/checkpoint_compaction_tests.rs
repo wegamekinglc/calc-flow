@@ -924,8 +924,11 @@ fn checkpoint_observer_is_published_before_native_capacity_wait() {
     });
 }
 
-async fn checkpoint_credit_failure(spare: usize) {
-    let job = job();
+async fn checkpoint_credit_failure(
+    spare: usize,
+    service: &crate::runtime::streaming::gather_work::TestService,
+) {
+    let job = job().with_gather_owner(service.owner("checkpoint-credit-failure".into()));
     let context = StreamOperatorContext::new(&job, "match", None);
     let (mut operator, previous, mut collector) = bounded_checkpoint_worker_fixture(&job).await;
     operator
@@ -966,10 +969,15 @@ async fn checkpoint_credit_failure(spare: usize) {
     assert_eq!(pool.reserved(), 0);
 }
 
-#[tokio::test]
-async fn checkpoint_worker_admission_failure_preserves_v1_dirty_changes() {
-    checkpoint_credit_failure(0).await;
-    checkpoint_credit_failure(5 * (124 + 2 * size_of::<&StoredRow>())).await;
+#[test]
+fn checkpoint_worker_admission_failure_preserves_v1_dirty_changes() {
+    isolated_checkpoint_test(|service, runtime| {
+        runtime.block_on(checkpoint_credit_failure(0, service));
+        runtime.block_on(checkpoint_credit_failure(
+            5 * (124 + 2 * size_of::<&StoredRow>()),
+            service,
+        ));
+    });
 }
 
 #[tokio::test]

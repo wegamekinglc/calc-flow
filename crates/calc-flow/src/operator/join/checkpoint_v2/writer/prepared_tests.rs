@@ -55,6 +55,19 @@ fn job() -> StreamJobContext {
     )
 }
 
+fn isolated_writer_test(
+    check: impl FnOnce(&crate::runtime::streaming::gather_work::TestService, &tokio::runtime::Runtime),
+) {
+    let service = crate::runtime::streaming::gather_work::TestService::new(1, 1).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    check(&service, &runtime);
+    drop(runtime);
+    service.shutdown();
+}
+
 fn record(side: &str) -> RecordBatch {
     let (times, values) = if side == "left" {
         (vec![95, 96], vec![None, Some("猫")])
@@ -129,9 +142,17 @@ fn assert_restored(snapshot: &OperatorStateSnapshot, expected: &StreamJoinOperat
     }
 }
 
-#[tokio::test]
-async fn test_fresh_preparation_reuses_owners_without_writer_credit() {
-    let job = job();
+#[test]
+fn test_fresh_preparation_reuses_owners_without_writer_credit() {
+    isolated_writer_test(|service, runtime| {
+        runtime.block_on(assert_fresh_preparation_reuses_owners(service));
+    });
+}
+
+async fn assert_fresh_preparation_reuses_owners(
+    service: &crate::runtime::streaming::gather_work::TestService,
+) {
+    let job = job().with_gather_owner(service.owner("prepared-owner-reuse".into()));
     let context = StreamOperatorContext::new(&job, "prepared-reuse", None);
     let mut join = seeded_from(&context, with_one_gib_pool(operator())).await;
     let writers = count_writer(&mut join);
@@ -250,9 +271,19 @@ async fn test_fresh_preparation_rewrites_each_stale_cut_component() {
     assert!(pools.iter().all(|pool| pool.reserved() == 0));
 }
 
-#[tokio::test]
-async fn test_fresh_preparation_waits_for_retirement_and_rejects_cancellation() {
-    let job = job();
+#[test]
+fn test_fresh_preparation_waits_for_retirement_and_rejects_cancellation() {
+    isolated_writer_test(|service, runtime| {
+        runtime.block_on(assert_fresh_preparation_waits_and_rejects_cancellation(
+            service,
+        ));
+    });
+}
+
+async fn assert_fresh_preparation_waits_and_rejects_cancellation(
+    service: &crate::runtime::streaming::gather_work::TestService,
+) {
+    let job = job().with_gather_owner(service.owner("prepared-retirement-cancel".into()));
     let context = StreamOperatorContext::new(&job, "prepared-reuse", None);
     let mut join = seeded(&context).await;
     let writers = count_writer(&mut join);

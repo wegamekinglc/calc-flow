@@ -522,6 +522,7 @@ fn owner_proof_array(data_type: &DataType) -> ArrayRef {
 }
 
 fn measure_shared_owner_controls(columns: usize) {
+    let service = crate::runtime::streaming::gather_work::TestService::new(1, 1).unwrap();
     let schema = owner_proof_schema(columns);
     let mut operator =
         StreamJoinOperator::new("match", schema.clone(), right_schema(), spec()).unwrap();
@@ -544,7 +545,7 @@ fn measure_shared_owner_controls(columns: usize) {
         .build()
         .unwrap();
     runtime.block_on(tokio::task::yield_now());
-    let job = job();
+    let job = job().with_gather_owner(service.owner("shared-owner-controls".into()));
     let context = StreamOperatorContext::new(&job, "match", None);
     let selected = (0..source.as_ref().unwrap().num_rows())
         .map(|source| columnar::SelectedRow {
@@ -606,6 +607,8 @@ fn measure_shared_owner_controls(columns: usize) {
     );
     drop(job);
     assert_eq!(pool.reserved(), 0);
+    drop(runtime);
+    service.shutdown();
 }
 
 #[test]
@@ -2136,8 +2139,18 @@ async fn test_owned_and_generic_batch_masks_keep_late_and_retention_boundaries()
     }
 }
 
-#[tokio::test]
-async fn test_batch_admission_counter_overflow_refunds_masks_and_keeps_state_uncommitted() {
+#[test]
+fn test_batch_admission_counter_overflow_refunds_masks_and_keeps_state_uncommitted() {
+    checkpoint_compaction_tests::isolated_checkpoint_test(|service, runtime| {
+        runtime.block_on(assert_batch_admission_counter_overflow_refunds_masks(
+            service,
+        ));
+    });
+}
+
+async fn assert_batch_admission_counter_overflow_refunds_masks(
+    service: &crate::runtime::streaming::gather_work::TestService,
+) {
     for counter in [
         "null_event_time_rows",
         "null_key_rows",
@@ -2156,7 +2169,7 @@ async fn test_batch_admission_counter_overflow_refunds_masks_and_keeps_state_unc
         .unwrap();
         let mut operator =
             StreamJoinOperator::new("match", schema, right_schema(), spec()).unwrap();
-        let job = job();
+        let job = job().with_gather_owner(service.owner("counter-overflow".into()));
         let context = progress_context(
             &job,
             (IngressState::Active, Some(10)),

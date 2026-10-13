@@ -371,9 +371,16 @@ async fn scratch_fixture(rows: usize) -> (StreamJoinOperator, StreamJobContext) 
 
 async fn scratch_fixture_from(
     rows: usize,
-    mut operator: StreamJoinOperator,
+    operator: StreamJoinOperator,
 ) -> (StreamJoinOperator, StreamJobContext) {
-    let job = job();
+    scratch_fixture_with_job(rows, operator, job()).await
+}
+
+async fn scratch_fixture_with_job(
+    rows: usize,
+    mut operator: StreamJoinOperator,
+    job: StreamJobContext,
+) -> (StreamJoinOperator, StreamJobContext) {
     let context = StreamOperatorContext::new(&job, "match", None);
     let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
     operator
@@ -616,14 +623,18 @@ async fn test_paid_key_scratch_covers_live_and_transient_allocation() {
     assert_eq!(pool.reserved(), 0);
 }
 
-#[tokio::test]
-async fn test_paid_key_scratch_pressure_preserves_legacy_sql_acceptance() {
-    paid_key_pressure_case(128).await;
+#[test]
+fn test_paid_key_scratch_pressure_preserves_legacy_sql_acceptance() {
+    checkpoint_compaction_tests::isolated_checkpoint_test(|service, runtime| {
+        runtime.block_on(paid_key_pressure_case(128, service));
+    });
 }
 
-#[tokio::test]
-async fn test_paid_key_scratch_zero_headroom_preserves_legacy_sql_acceptance() {
-    paid_key_pressure_case(0).await;
+#[test]
+fn test_paid_key_scratch_zero_headroom_preserves_legacy_sql_acceptance() {
+    checkpoint_compaction_tests::isolated_checkpoint_test(|service, runtime| {
+        runtime.block_on(paid_key_pressure_case(0, service));
+    });
 }
 
 #[tokio::test]
@@ -713,8 +724,16 @@ async fn test_closed_scratch_home_preserves_actual_cancel_and_deadline() {
     assert_eq!(pool.reserved(), 0);
 }
 
-async fn paid_key_pressure_case(headroom: usize) {
-    let (mut operator, job) = scratch_fixture_from(64, with_one_gib_pool(scratch_operator())).await;
+async fn paid_key_pressure_case(
+    headroom: usize,
+    service: &crate::runtime::streaming::gather_work::TestService,
+) {
+    let (mut operator, job) = scratch_fixture_with_job(
+        64,
+        with_one_gib_pool(scratch_operator()),
+        job().with_gather_owner(service.owner("paid-key-pressure".into())),
+    )
+    .await;
     let context = StreamOperatorContext::new(&job, "match", None);
     let plan = operator.side_plan("right").unwrap();
     let mut bundle = operator.admission_bundle(&plan);
@@ -978,7 +997,10 @@ async fn test_payload_buffers_keep_credit_until_real_consumer_cleanup() {
     assert_eq!(pool.reserved(), 0);
 }
 
-async fn string_payload_fixture(large: bool) -> (StreamJoinOperator, StreamJobContext) {
+async fn string_payload_fixture(
+    large: bool,
+    service: &crate::runtime::streaming::gather_work::TestService,
+) -> (StreamJoinOperator, StreamJobContext) {
     use datafusion::arrow::array::LargeStringArray;
     let data_type = if large {
         DataType::LargeUtf8
@@ -1003,7 +1025,7 @@ async fn string_payload_fixture(large: bool) -> (StreamJoinOperator, StreamJobCo
     )
     .unwrap();
     let mut operator = StreamJoinOperator::new("match", left_schema(), schema, spec()).unwrap();
-    let job = job();
+    let job = job().with_gather_owner(service.owner("string-consumer".into()));
     let context = StreamOperatorContext::new(&job, "match", None);
     let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
     operator
@@ -1018,9 +1040,12 @@ async fn string_payload_fixture(large: bool) -> (StreamJoinOperator, StreamJobCo
     (operator, job)
 }
 
-async fn string_consumer_case(large: bool) {
+async fn string_consumer_case(
+    large: bool,
+    service: &crate::runtime::streaming::gather_work::TestService,
+) {
     use datafusion::arrow::array::LargeStringArray;
-    let (mut operator, job) = string_payload_fixture(large).await;
+    let (mut operator, job) = string_payload_fixture(large, service).await;
     let payload = operator.state.right[0].record.clone();
     let paid = payload.funded_owner().unwrap().1;
     let column = payload.column_view(2);
@@ -1082,14 +1107,26 @@ async fn string_consumer_case(large: bool) {
     assert_eq!(pool.reserved(), 0);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_payload_string_buffers_keep_credit_until_real_consumer_cleanup() {
-    string_consumer_case(false).await;
+fn isolated_string_consumer_case(large: bool) {
+    let service = crate::runtime::streaming::gather_work::TestService::new(1, 1).unwrap();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(string_consumer_case(large, &service));
+    drop(runtime);
+    service.shutdown();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_payload_large_string_buffers_keep_credit_until_real_consumer_cleanup() {
-    string_consumer_case(true).await;
+#[test]
+fn test_payload_string_buffers_keep_credit_until_real_consumer_cleanup() {
+    isolated_string_consumer_case(false);
+}
+
+#[test]
+fn test_payload_large_string_buffers_keep_credit_until_real_consumer_cleanup() {
+    isolated_string_consumer_case(true);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

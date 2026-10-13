@@ -71,6 +71,23 @@ tests pass with eight test threads in 0.30 seconds; scoped all-feature core/test
 Clippy passes in 25.27 seconds. Formatting and contract/whitespace checks pass.
 Required CI on the final corrected head remains pending.
 
+The bounded audit of the remaining Join tests confirms nine more groups,
+covering 13 registered tests, with the same shared-generation exposure. These
+are preventive fixes, not additional observed CI failures. Their shared-owner
+controls, admission-overflow, checkpoint-worker refusal, paid SQL-key scratch,
+string-consumer, fresh-preparation, rebase-cancellation, pending-capture and
+rebase-admission fixtures now bind an isolated service before their first
+admission. Reference and rejection paths use that service through awaited
+cleanup. String-consumer cases retain their four-worker Tokio runtime because
+their gated producer cleanup blocks synchronously. The seven changed test files
+retain all 635 assertion macros, all 91 registration names and their original
+case inventories. All Join tests pass with eight test threads: 315 passed,
+zero failed and one pre-existing ignored test, in 3.78 seconds after compilation.
+This is focused CI-regression verification; it does not establish workspace
+coverage. Scoped all-feature core/test Clippy passes in 27.14 seconds;
+formatting, generated-contract drift and whitespace checks pass. Independent
+source review finds no blocking or style findings. Required CI remains pending.
+
 ## Performance scope
 
 The ordinary-release comparison below measures this increment. Allocation
@@ -143,9 +160,14 @@ Row 6's small-batch control does not measure row 7's matched overhead or row 8's
 full Join callback.
 
 The candidate's [complete suite](https://github.com/wegamekinglc/calc-flow/actions/runs/38334954225)
-has been triggered against exact main `5fef1a31`. Its final result and this
-branch's required CI are pending. Earlier complete-suite successes above remain
-separate evidence; they do not fill missing candidate acceptance measurements.
+completed all 24 jobs and all 20 current catalog shards against exact main
+`5fef1a31` and candidate `b77cd8bf`. All 802 unique cases succeeded, with zero
+errors or confirmed regressions. The published summary exactly matches a fresh
+aggregation of the downloaded fragments. Preserve all 145 inconclusive and 11
+informational slowdown results; success does not establish equivalence or the
+eight absolute acceptance targets. Final independent review of the last 51 cases
+and aggregate, and this branch's required CI, remain pending. Later test and CI
+commits do not relabel these measured products.
 
 | Original workload               | Single-thread target         | Parallel target | This increment  |
 |---------------------------------|------------------------------|-----------------|-----------------|
