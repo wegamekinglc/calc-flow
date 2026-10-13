@@ -69,8 +69,9 @@ removals, count changes or expanded workloads occur.
   functions are outside this complexity certification.
 - Formatting, schema-drift and whitespace checks pass. Scoped all-feature
   core/library/test Clippy passes in 2m 49s (`clippy.log`). Final specialist
-  source/evidence review is **Approve**, with no findings. Paired timing and
-  full-phase allocation/RSS acceptance remain incomplete.
+  source/evidence review is **Approve**, with no findings. The later paired
+  attempt below is complete; full-phase allocation/RSS acceptance remains
+  incomplete.
 
 The existing admission allocation controls pass and retain their raw counts,
 including 95 caller allocations and 26 actual chunk-worker allocations for
@@ -78,7 +79,7 @@ including 95 caller allocations and 26 actual chunk-worker allocations for
 than this increment against its parent, and do not certify complete phase-wide
 allocation or peak-RSS acceptance.
 
-## Planned paired comparison
+## Fixed paired comparison
 
 `target/issue406-identity-ranges-paired-20261014/prebuild-selection.json` fixes
 two directly affected ASOF OFF cases: 1M rows per input, 64k messages, at 32
@@ -92,5 +93,64 @@ fixtures, CPU reads, oracles, lifecycle, cleanup and seals consume that budget.
 No retries, favorable filtering, larger sample counts or added cases are
 permitted. Full CPU and observed resource evidence remain alongside paired
 wall statistics. This selection cannot establish ON qualification, complete
-phase allocation/RSS evidence, or complete issue acceptance. Performance
-acquisition has not started, and no speedup is certified.
+phase allocation/RSS evidence, or complete issue acceptance.
+
+## Completed paired evidence
+
+The sole acquisition completes for exact parent product
+`05c13fd983dd1ead625eef2278eb7127dac0c61c` and candidate
+`8d3f6933c53f0dab1a562c79ad355cd9e08c665f`. Candidate native SHA-256 is
+`3664ebab40c619a0c4e7b8a9cfe93a684ab2da24e5c3ca52f8cd88c831041d08`.
+Both ordinary releases have matching complete inventories of **294 compiled
+artifacts**, features/profiles, normalized dependency locks, interpreter,
+toolchain and environment. Candidate build takes **380.894939 seconds**,
+separate from acquisition. The frozen execution plan SHA-256 is
+`cdee70dddc4b70fe92d456886a18e6742945a0641d70bf97c9a0e365b66e7859`.
+
+All **80 measured observations and eight warmups** pass their full million-row
+oracle, lifecycle, owned cleanup and OFF zero-file checks. The owner verifies
+all **3,118 frozen input hashes and 198 result hashes**, recomputes both
+statistics objects exactly, and checks actual adjacent AB/BA order. Additional
+provenance checks verify all 88 raw/normalized processing bounds, CPU evidence,
+product revisions and affinities, plus all eight worker native identities.
+Inclusive acquisition and sealing take **40.763058131 / 600 seconds**. All
+owned groups settle without forced kills, survivors, pending creations or
+cleanup errors. No observations are retried, removed or added.
+
+| CPUs | Parent p50, ms | Candidate p50, ms | Point change | Maintained verdict      |
+|------|----------------|-------------------|--------------|-------------------------|
+| 32   | 159.888209     | 148.191731        | -7.3154%     | no-confirmed-regression |
+| 1    | 130.997559     | 120.456423        | -8.0468%     | no-confirmed-regression |
+
+For 32 CPUs, round paired medians are -5.760743% and -7.830057%, with intervals
+[-8.798251%, -4.210052%] and [-10.781846%, -5.764932%]. For one CPU, round
+medians are -7.653816% and -5.916994%, with intervals
+[-9.991739%, -3.347668%] and [-8.486696%, -4.021210%]. Each ten-pair
+order-statistic interval has **97.8515625% coverage**. The generated report now
+labels its comparator `Exact parent p50` and uses the actual interval coverage.
+The maintained rule does not classify either case as improved. Favorable point
+estimates do not certify a speedup, equivalence or complete absence of regression.
+
+Processing CPU medians at 32 CPUs are **187.59475 → 175.1312 ms**, with busiest
+observed thread **59.18415 → 56.7925 ms**. At one CPU they are
+**130.7536 → 120.22965 ms**, with busiest observed thread
+**119.0725 → 109.23445 ms**. CPU hooks retain the maintained processing clock
+boundaries. Counter-read boundary uncertainty and retired-thread visibility
+remain; these diagnostics cannot reconstruct exact thread accounting or
+replace paired wall statistics. Whole-job CPU remains a separate raw scope.
+
+All 32 resource snapshots record no competing controlled work. Maximum observed
+aggregate RSS is **839,221,248 bytes**, including the controller and both
+workers; the largest observed single worker is **377,720,832 bytes**. These
+sampled acquisition maxima are not exact per-arm or per-phase peaks. Complete
+phase allocation and peak-RSS acceptance remains unverified, and host isolation
+on WSL2 remains unverified.
+
+Candidate p50 values still exceed the original OFF one/32-CPU targets of
+100 / 30 ms. This increment measures neither the other seven rows nor ON
+checkpoint qualification. Earlier comparisons and stopped acquisitions retain
+their original conclusions. Final specialist review of this result addendum
+is **Approve**, with no findings; required CI and workspace coverage remain
+uncertified. The reviewer independently reproduces the input/result hashes,
+ordinary release audits, raw identities, pair order, statistics, CPU medians and
+resource maxima above.
