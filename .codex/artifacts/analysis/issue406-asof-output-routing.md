@@ -183,9 +183,41 @@ The focused regression first fails with the absent snapshot helpers; the final
 affected Python module passes 30 tests. Tests cover terminal retention, no rows,
 outside-window completion, uncommitted/terminal manifests, tampered proof,
 capture boundaries, concurrent deletion, EOF ordering and owned cancellation.
-This correction has no new timing acquisition and does not repair or relabel the
-stopped raw evidence. A future ON acquisition requires a fresh frozen harness
-identity and a separately fixed case/sample/budget plan.
+The correction does not repair or relabel the stopped raw evidence. The
+separately frozen ON diagnostic below uses its own harness identity and fixed
+case/sample/budget plan.
+
+### Separate corrected-harness ON diagnostic
+
+The follow-up under `target/issue406-routing-on-proof-20261013/` selects only
+ASOF 1M/input, 64k, ON/100 ms, one CPU. It reuses the exact same attested
+ordinary native binaries, with no new builds. Before acquisition it fixes two
+rounds of ten adjacent AB/BA pairs, one warmup per arm per round, and 600 seconds
+inclusive of freezing, validation, fixtures, oracles, settlement and sealing.
+Harness commit is `8c6096e4`; plan SHA-256 is
+`30ea8ef361cb0c387d70487e7b074911c555b93524f5debb36a3b13a435724c6`.
+Its validator requires a verified pre-EOF snapshot in every new raw result,
+even when final retained-manifest proof would suffice. Six focused validator
+tests pass, including failures recorded before adding snapshot propagation and
+the mandatory snapshot guard. The original five-case acquisition is untouched.
+
+This diagnostic stops at candidate round 0, sample 2. All eight raw observations
+have successful oracles, lifecycles, cleanup and valid snapshots of epoch 1.
+Seven qualify: two warmups and five measured observations. The rejected
+candidate processes in 136.749 ms and has positive source progress, but epoch
+1's completion interval straddles processing end: [-7.851084 ms, +0.465852 ms].
+The status observations cannot prove whether completion preceded the timer's
+end; the strict whole-window predicate correctly rejects it. This differs from
+the original lost-manifest defect. It is neither proof of runtime failure nor
+proof of a completed checkpoint inside that sample's processing window.
+
+No ON p50 comparison or paired verdict is computed from the two complete pairs
+and unmatched baseline sample. No retries, sample expansion or selection follow
+this stop. Inclusive time is 12.602 / 600 seconds; all owned groups settle with
+no forced kills, survivors or cleanup errors. Independent read-only validation
+checks all 24 result seals, frozen inputs, all eight snapshot contents/hashes,
+and the recomputed completion windows. The snapshot correction works on actual
+runtime output; full fixed-count ON qualification remains incomplete.
 
 ## Original acceptance inventory
 
