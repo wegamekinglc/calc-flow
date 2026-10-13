@@ -1,8 +1,9 @@
 # Issue 406: route ASOF output matching by chunk-local keys
 
-The complete eight-target objective remains active. PR #420 is independently
-awaiting required CI and its complete benchmark; this work starts in a separate
-branch and preserves that measured product and evidence.
+The complete eight-target objective remains active. This work began in a separate
+branch while PR #420 awaited required CI and its benchmark. PR #420 subsequently
+merged at `ac5d7dff`; routing now uses that exact main as its paired baseline and
+preserves the earlier products and evidence.
 
 ## Evidence and scope
 
