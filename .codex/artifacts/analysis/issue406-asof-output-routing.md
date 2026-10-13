@@ -54,7 +54,9 @@ registrations. Logs and the isolated reproduction are retained under
 The final affected run passes all 341 registered ASOF tests in 26.27 seconds.
 Scoped core/library/test Clippy with all features passes in 86 seconds.
 Formatting, the changed modules' complexity limit of eight, generated-contract
-drift and whitespace checks also pass. Final specialist review is pending.
+drift and whitespace checks also pass. Final specialist source review is Approve
+at implementation commit `5aa03e54`. Performance and corrected-base CI remain
+pending; the source review does not certify a latency improvement.
 
 ## Planned paired measurement
 

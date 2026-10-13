@@ -1,5 +1,49 @@
 # Issue 406: development and acceptance status
 
+## Current stage, October 13, 2026
+
+The complete eight-workload objective remains active. PR #407's implementation
+and stabilization work has merged; PR #412 repaired the complete benchmark and
+PR #413 merged the ASOF admission improvement. The next prefix-counting increment
+is PR #420. Its final corrected-head CI and complete candidate benchmark are still
+pending, so it has not merged. Earlier statements below about an unmerged #407 or
+unresolved historical test/benchmark failures describe their recorded historical
+stage, rather than current merge readiness.
+
+Ordinary runtime memory remains unbounded. Explicit finite pools in refusal tests
+are test fixtures and do not reintroduce a runtime performance requirement.
+Checkpoint OFF, enabled LOW at 24 hours, and enabled ON at 100 ms remain distinct.
+ON acceptance requires verified advancing processing epochs. LOW/ON throughput
+targets are at least 90%/75% of the corresponding OFF goal, not of achieved timings.
+
+PR #420's exact 5fef1a31/b77cd8bf ordinary release comparison still misses both
+ASOF OFF absolute targets. All four cases and all eight targets remain in its
+analysis. The complete post-Studio-split benchmark contains 20 catalog shards
+and 802 cases; its four-CPU suite scopes do not establish one-/32-CPU acceptance.
+A completed full run demonstrates operability only with its exact revisions,
+retained errors, inconclusive verdicts and informational slowdowns.
+
+The next implemented source increment routes eligible monotonic ASOF output by
+interned key IDs. Its allocation/hash and exact differential regressions, all
+341 ASOF tests and scoped Clippy pass; specialist source review is Approve.
+Performance remains unmeasured. After #420 merges, align this source onto exact
+merged main, build and attest both ordinary releases, then run the fixed five-case
+comparison in the [routing analysis](issue406-asof-output-routing.md): OFF 64k
+at one/32 CPUs, OFF 1024 at one CPU, LOW 64k at one CPU and advancing ON 64k at
+one CPU. Each case has two rounds of ten adjacent pairs; all five cases share
+one 600-second total inclusive acquisition budget. Builds are accounted
+separately. Report each uncertainty and stop at the budget.
+
+Further increments must follow the measured residual bottlenecks. The latest
+ASOF profile identifies admission and output matching as diagnostic hotspots;
+its overlapping CPU shares do not establish a speedup. Join capture/restore,
+compaction callbacks, retained scaling and small-batch callback targets retain
+their original timing/retained-row definitions. Finish with a fresh complete
+eight-row comparison against then-current main and separate checkpoint modes.
+The final result must retain unmet targets and unsupported/invalid measurements.
+
+## Recorded earlier implementation stages
+
 The user has removed the implicit 1 GiB runtime-pool constraint. The current
 candidate uses `UnboundedMemoryPool` in ordinary execution and primary checkpoint
 diagnostics, while retaining per-runtime reservation accounting and release tracking.
@@ -414,4 +458,6 @@ complete and reproducible eight-row evidence with separate checkpoint modes,
 and a PR #407 performance table comparing pinned main and current code. Targets
 that are missed, comparisons that are invalid, and unresolved CI checks must
 remain visible. Neither a local speedup nor finishing one increment completes
-the full objective or authorizes merging.
+the full objective. The user has authorized merging reviewed increments once all
+required checks are green; that authority does not certify the full performance
+objective.
