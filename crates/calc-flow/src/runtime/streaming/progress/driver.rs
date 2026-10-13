@@ -5434,18 +5434,6 @@ mod tests {
     }
 
     #[test]
-    fn adapter_cannot_supply_or_forge_ready_key() {
-        let submit = super::RawIngressSender::submit;
-        let _ = submit;
-    }
-
-    #[test]
-    fn m3_observability_has_no_late_row_metric() {
-        let fields = ["unsettled_receipts", "next_central_wake", "trace"];
-        assert!(fields.iter().all(|field| !field.contains("late")));
-    }
-
-    #[test]
     fn driver_owned_ordinals_and_sequences_break_timer_ties() {
         assert!(
             super::ReadyKey {

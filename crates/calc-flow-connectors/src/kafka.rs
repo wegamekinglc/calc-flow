@@ -1548,6 +1548,12 @@ fn decode_records(encoded: &[u8]) -> Result<Vec<Vec<u8>>> {
             "prepared record count does not fit this platform",
         )
     })?;
+    // Every record consumes at least its 8-byte length prefix, so a count
+    // beyond the remaining bytes cannot decode; reject it before trusting
+    // the value for preallocation.
+    if count > (encoded.len() - offset) / 8 {
+        return Err(fail("recover", "prepared record segment is truncated"));
+    }
     let mut records = Vec::with_capacity(count);
     for _ in 0..count {
         let len = usize::try_from(take_u64(&mut offset)?).map_err(|_| {
@@ -2694,6 +2700,56 @@ mod tests {
             .expect("matching schema recovers");
         let changed = BTreeMap::from([("schema_hash".into(), Value::String("b".repeat(64)))]);
         assert!(validate_ledger_marker_schema(&marker(Some("events")), &changed).is_err());
+    }
+
+    #[test]
+    fn durable_record_framing_round_trips_and_rejects_truncated_segments() {
+        let records = vec![b"one".to_vec(), Vec::new(), b"three".to_vec()];
+        let encoded = encode_records(&records).unwrap();
+        assert_eq!(decode_records(&encoded).unwrap(), records);
+
+        let empty = encode_records(&[]).unwrap();
+        assert_eq!(empty.len(), 8);
+        assert!(decode_records(&empty).unwrap().is_empty());
+
+        let count = u64::from_be_bytes(encoded[0..8].try_into().unwrap());
+        assert_eq!(count, 3);
+
+        let truncated_header = &encoded[..7];
+        let error = decode_records(truncated_header).unwrap_err();
+        assert!(error.to_string().contains("truncated"), "{error}");
+
+        let truncated_record = &encoded[..encoded.len() - 1];
+        let error = decode_records(truncated_record).unwrap_err();
+        assert!(error.to_string().contains("truncated"), "{error}");
+
+        let mut lying_count = encoded.clone();
+        lying_count[0..8].copy_from_slice(&4_u64.to_be_bytes());
+        let error = decode_records(&lying_count).unwrap_err();
+        assert!(error.to_string().contains("truncated"), "{error}");
+
+        let mut huge_length = encoded.clone();
+        huge_length[8..16].copy_from_slice(&u64::MAX.to_be_bytes());
+        let error = decode_records(&huge_length).unwrap_err();
+        assert!(error.to_string().contains("exhausted"), "{error}");
+
+        let mut trailing = encoded.clone();
+        trailing.push(0);
+        let error = decode_records(&trailing).unwrap_err();
+        assert!(error.to_string().contains("trailing bytes"), "{error}");
+    }
+
+    #[test]
+    fn corrupt_record_counts_fail_closed_without_preallocating() {
+        let records = vec![b"one".to_vec()];
+        let encoded = encode_records(&records).unwrap();
+        for count in [u64::MAX, (1 << 48) + 1] {
+            let mut corrupt = encoded.clone();
+            corrupt[0..8].copy_from_slice(&count.to_be_bytes());
+            let error = decode_records(&corrupt)
+                .expect_err("a corrupt record count fails closed instead of aborting");
+            assert!(error.to_string().contains("truncated"), "{error}");
+        }
     }
 
     #[test]
