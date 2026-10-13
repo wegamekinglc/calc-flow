@@ -8,7 +8,7 @@ use datafusion::arrow::{
 use std::collections::BTreeMap;
 
 mod owned;
-pub(super) use owned::materialize;
+pub(super) use owned::{ColumnResult, materialize};
 
 #[cfg(test)]
 pub(super) mod test_support;

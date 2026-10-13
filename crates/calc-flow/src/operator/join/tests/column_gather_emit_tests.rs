@@ -27,15 +27,20 @@ fn test_join_column_gather_output_credit_survives_blocked_and_failed_emit() {
         .build()
         .unwrap();
     for reject in [false, true] {
-        runtime.block_on(assert_emit_credit(&service, reject));
+        for projected in [false, true] {
+            runtime.block_on(assert_emit_credit(&service, reject, projected));
+        }
     }
     drop(runtime);
     service.shutdown();
 }
 
-async fn assert_emit_credit(service: &TestService, reject: bool) {
+async fn assert_emit_credit(service: &TestService, reject: bool, projected: bool) {
     let pool = GatherPool::new(0);
     let (mut operator, source_job) = preloaded(&pool).await;
+    if projected {
+        operator.set_output_projection(vec![2, 5]).unwrap();
+    }
     let job = job().with_gather_owner(service.owner("join-emit-credit".into()));
     let context = StreamOperatorContext::new(&job, "match", None);
     let (entered, entering) = tokio::sync::oneshot::channel();
@@ -63,7 +68,7 @@ async fn assert_emit_credit(service: &TestService, reject: bool) {
         result = entering => result.unwrap(),
         result = &mut process => panic!("process finished before gated emit: {result:?}"),
     }
-    assert_eq!(calls.load(Ordering::SeqCst), 6);
+    assert_eq!(calls.load(Ordering::SeqCst), if projected { 2 } else { 6 });
     let growth = pool.growth.lock().clone();
     let input_bytes = growth[0];
     let output_bytes = growth[1];

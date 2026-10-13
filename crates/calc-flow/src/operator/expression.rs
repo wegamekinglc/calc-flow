@@ -178,6 +178,22 @@ impl ExpressionOperator {
             .map(|(indices, _)| indices)
     }
 
+    pub(crate) fn stream_required_columns(&self) -> Option<Vec<usize>> {
+        if let Some(columns) = self.stream_projection_columns() {
+            return Some(columns);
+        }
+        if !self.udfs.is_empty()
+            || self
+                .stream_state
+                .resources
+                .as_ref()
+                .is_some_and(|(_, _, selected)| !selected.is_empty())
+        {
+            return None;
+        }
+        projection::required_columns(&self.query, self.input_ports[0].schema()?)
+    }
+
     pub(crate) fn source_replay_projection(&self) -> Option<Self> {
         let input = self.input_ports[0].schema()?;
         if !self.is_exact_column_projection(input, self.output_ports[0].schema()) {

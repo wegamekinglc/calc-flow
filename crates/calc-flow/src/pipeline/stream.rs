@@ -731,7 +731,7 @@ impl PipelineBuilder {
                 });
             }
         }
-        prepare_stream_operators(&mut self, requirements, udfs)?;
+        prepare_stream_operators(&mut self, requirements, udfs, graph.table.as_ref())?;
         let edges = self
             .edges
             .iter()
@@ -760,10 +760,11 @@ fn prepare_stream_operators(
     builder: &mut PipelineBuilder,
     requirements: &StreamRequirements,
     udfs: &UdfRegistrySnapshot,
+    table: Option<&TablePlanResources>,
 ) -> Result<()> {
     validate_deterministic_udfs(&builder.nodes, requirements, udfs)?;
     validate_external_provider_lifecycles(&builder.nodes, requirements)?;
-    projection::push_asof_output_projections(builder)
+    projection::push_output_projections(builder, table)
 }
 
 fn build_runtime_nodes(

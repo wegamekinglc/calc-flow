@@ -2738,6 +2738,8 @@ pub struct StreamJoinOperator {
     spec: StreamJoinSpec,
     input_ports: [Port; 2],
     output_ports: [Port; 1],
+    logical_output_schema: SchemaRef,
+    output_columns: Option<Arc<[usize]>>,
     compiled: CompiledJoin,
     payload_schema_bytes: [Option<usize>; 2],
     payload_native_eligible: bool,
@@ -3193,6 +3195,7 @@ mod metadata_validation;
 mod native_dictionary;
 mod native_lookup;
 mod output_gather;
+mod output_projection;
 #[cfg(test)]
 mod row_ipc;
 mod sql_key_scratch;
@@ -3262,8 +3265,10 @@ impl StreamJoinOperator {
                 "output",
                 BatchKind::Table,
                 true,
-                Some(output_schema),
+                Some(Arc::clone(&output_schema)),
             )?],
+            logical_output_schema: output_schema,
+            output_columns: None,
             compiled,
             runtime: StreamRuntimeState::new(),
             state: StreamJoinState::default(),
@@ -4215,6 +4220,7 @@ impl StreamJoinOperator {
             schema: self.output_ports[0]
                 .schema()
                 .expect("compiled Join output schema"),
+            projection: self.output_columns.as_ref(),
             admitted: &prepared.admitted,
             opposite: if prepared.incoming_is_left {
                 &self.state.right
@@ -4232,34 +4238,16 @@ impl StreamJoinOperator {
             self.state.next_output_sequence,
             ranges.len(),
         )?;
-        for range in ranges {
-            context.check_cancelled()?;
-            let (record, funding) = match output_gather::materialize(
-                &materializer,
-                range.clone(),
+        materializer
+            .emit_ranges(
+                ranges,
                 runtime,
                 context,
+                output,
+                &mut self.state.next_output_sequence,
                 &mut self.compaction_cleanup,
             )
-            .await?
-            {
-                Some(gathered) => gathered,
-                None => (materializer.materialize(range)?, Vec::new()),
-            };
-            let metadata =
-                BatchMetadata::new(&self.name, self.state.next_output_sequence, BTreeMap::new())?;
-            let message = Batch::table(vec![record], metadata)?;
-            if message.estimated_bytes()? > context.output_budget().max_bytes {
-                return Err(operator_error(
-                    &self.name,
-                    "validated Join chunk exceeded its byte budget",
-                ));
-            }
-            output.emit("output", message).await?;
-            drop(funding);
-            self.state.next_output_sequence += 1;
-        }
-        Ok(())
+            .await
     }
 
     fn record_prepared_emitted(&mut self, rows: usize) -> Result<()> {
@@ -5283,6 +5271,7 @@ fn index_by_row_id(opposite: &[StoredRow]) -> BTreeMap<u64, usize> {
 /// Materializes one validated chunk of matched pairs into an independent record.
 ///
 /// Shared flat columns gather in matched-pair order; other columns concatenate row views.
+#[cfg(test)]
 fn materialize_output_record(
     output_schema: &SchemaRef,
     admitted: &[AdmittedRow],
@@ -5291,49 +5280,17 @@ fn materialize_output_record(
     incoming_is_left: bool,
     operator_id: &str,
 ) -> Result<RecordBatch> {
-    if matched.is_empty() {
-        return Ok(RecordBatch::new_empty(Arc::clone(output_schema)));
+    materialization::JoinOutput {
+        schema: output_schema,
+        projection: None,
+        admitted,
+        opposite,
+        matched,
+        incoming_is_left,
+        operator_id,
+        admitted_charges: None,
     }
-    let pair_records = |pair: &MatchedPair| {
-        let incoming = &admitted[pair.pos];
-        let candidate = &opposite[pair.opposite_index];
-        if incoming_is_left {
-            (&incoming.record, &candidate.record)
-        } else {
-            (&candidate.record, &incoming.record)
-        }
-    };
-    let (first_left, first_right) = pair_records(&matched[0]);
-    let left_width = first_left.num_columns();
-    let right_width = first_right.num_columns();
-    let left_gather =
-        output_gather::SideGather::new(matched.iter().map(|pair| pair_records(pair).0));
-    let right_gather =
-        output_gather::SideGather::new(matched.iter().map(|pair| pair_records(pair).1));
-    let mut columns = Vec::with_capacity(left_width + right_width);
-    for column_index in 0..left_width + right_width {
-        let (gather, payload_index) = if column_index < left_width {
-            (left_gather.as_ref(), column_index)
-        } else {
-            (right_gather.as_ref(), column_index - left_width)
-        };
-        let payloads = matched.iter().map(|pair| {
-            let (left, right) = pair_records(pair);
-            if column_index < left_width {
-                left
-            } else {
-                right
-            }
-        });
-        columns.push(output_gather::column(
-            gather,
-            payload_index,
-            output_schema.field(column_index).data_type(),
-            payloads,
-        )?);
-    }
-    RecordBatch::try_new(Arc::clone(output_schema), columns)
-        .map_err(|error| operator_error(operator_id, &format!("output projection failed: {error}")))
+    .materialize(0..matched.len())
 }
 
 fn concat_output_column(slices: &[&dyn Array]) -> Result<ArrayRef> {

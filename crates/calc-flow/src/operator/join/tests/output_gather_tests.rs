@@ -175,7 +175,7 @@ fn nested_dictionary(list: bool) -> ArrayRef {
 
 #[tokio::test]
 async fn test_nested_dictionary_output_discards_unused_values_under_same_budget() {
-    for list in [false, true] {
+    for (list, projected) in [(false, false), (true, false), (false, true), (true, true)] {
         let nested = nested_dictionary(list);
         let schema = Arc::new(Schema::new(vec![
             left_schema().field(0).clone(),
@@ -193,6 +193,9 @@ async fn test_nested_dictionary_output_discards_unused_values_under_same_budget(
         .unwrap();
         let mut operator =
             StreamJoinOperator::new("match", schema, right_schema(), spec()).unwrap();
+        if projected {
+            operator.set_output_projection(vec![2]).unwrap();
+        }
         let job = job();
         let context = StreamOperatorContext::new(&job, "match", None)
             .with_output_budget(EdgeBudget::new(1, 128).unwrap());
@@ -214,7 +217,9 @@ async fn test_nested_dictionary_output_discards_unused_values_under_same_budget(
         assert_eq!(messages.len(), 1);
         let batch = messages[0].as_data().unwrap();
         assert!(batch.estimated_bytes().unwrap() <= 128);
-        let nested = batch.table_payload().unwrap().batches()[0].column(2);
+        let output = &batch.table_payload().unwrap().batches()[0];
+        assert_eq!(output.num_columns(), if projected { 1 } else { 6 });
+        let nested = output.column(if projected { 0 } else { 2 });
         let dictionary = if list {
             nested
                 .as_any()

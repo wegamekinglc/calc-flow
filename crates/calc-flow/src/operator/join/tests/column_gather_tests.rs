@@ -132,6 +132,14 @@ async fn assert_concurrent_columns(service: &TestService) {
 }
 
 fn assert_literal_output(collector: &mut EdgeCollector, operator: &StreamJoinOperator) {
+    assert_selected_literal_output(collector, operator, false);
+}
+
+fn assert_selected_literal_output(
+    collector: &mut EdgeCollector,
+    operator: &StreamJoinOperator,
+    projected: bool,
+) {
     let output = collector.drain("output");
     assert_eq!(output.len(), 1);
     let batch = output[0].as_data().unwrap();
@@ -141,16 +149,18 @@ fn assert_literal_output(collector: &mut EdgeCollector, operator: &StreamJoinOpe
         record.schema_ref(),
         operator.output_ports[0].schema().unwrap()
     );
+    if !projected {
+        assert_eq!(
+            record.column(0).to_data(),
+            Int64Array::from(vec![7, 7]).to_data()
+        );
+    }
     assert_eq!(
-        record.column(0).to_data(),
-        Int64Array::from(vec![7, 7]).to_data()
-    );
-    assert_eq!(
-        record.column(2).to_data(),
+        record.column(if projected { 0 } else { 2 }).to_data(),
         Int64Array::from(vec![42, 42]).to_data()
     );
     assert_eq!(
-        record.column(5).to_data(),
+        record.column(if projected { 1 } else { 5 }).to_data(),
         StringArray::from(vec!["paid", "paid"]).to_data()
     );
 }

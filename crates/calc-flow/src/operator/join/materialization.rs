@@ -1,13 +1,16 @@
 //! Preflight matched-pair ranges before allocating independently owned output chunks.
 
+mod emission;
+
 use std::{
     collections::{BTreeMap, btree_map::Entry},
     ops::Range,
+    sync::Arc,
 };
 
 use datafusion::arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
 
-use super::{AdmittedRow, MatchedPair, StoredRow, materialize_output_record};
+use super::{AdmittedRow, MatchedPair, StoredRow, columnar::RowPayload};
 use crate::batch::checked_accumulate;
 use crate::operator::output_chunk::OutputChunkErrors;
 use crate::operator::row_cost::{Offsets, fixed_width, variable_offsets};
@@ -15,6 +18,7 @@ use crate::{Batch, BatchMetadata, CalcFlowError, EdgeBudget, Result};
 
 pub(super) struct JoinOutput<'a> {
     pub(super) schema: &'a SchemaRef,
+    pub(super) projection: Option<&'a Arc<[usize]>>,
     pub(super) admitted: &'a [AdmittedRow],
     pub(super) opposite: &'a [StoredRow],
     pub(super) matched: &'a [MatchedPair],
@@ -82,13 +86,37 @@ impl FlatChunk {
 
 impl JoinOutput<'_> {
     pub(super) fn materialize(&self, range: Range<usize>) -> Result<RecordBatch> {
-        materialize_output_record(
-            self.schema,
-            self.admitted,
-            self.opposite,
-            &self.matched[range],
-            self.incoming_is_left,
-            self.operator_id,
+        super::output_projection::materialize(self, range)
+    }
+
+    pub(super) fn logical_column(&self, ordinal: usize) -> usize {
+        self.projection.map_or(ordinal, |columns| columns[ordinal])
+    }
+
+    pub(super) fn records(&self, pair: &MatchedPair) -> (&RowPayload, &RowPayload) {
+        let incoming = &self.admitted[pair.pos].record;
+        let opposite = &self.opposite[pair.opposite_index].record;
+        if self.incoming_is_left {
+            (incoming, opposite)
+        } else {
+            (opposite, incoming)
+        }
+    }
+
+    fn side_columns(&self, incoming: bool) -> Option<Vec<(usize, usize)>> {
+        let projection = self.projection?;
+        let left_width = self
+            .matched
+            .first()
+            .map_or(0, |pair| self.records(pair).0.num_columns());
+        let left = incoming == self.incoming_is_left;
+        Some(
+            projection
+                .iter()
+                .enumerate()
+                .filter(|(_, index)| (**index < left_width) == left)
+                .map(|(ordinal, &index)| (if left { index } else { index - left_width }, ordinal))
+                .collect(),
         )
     }
 
@@ -133,6 +161,8 @@ impl JoinOutput<'_> {
     }
 
     fn flat_ranges(&self, budget: EdgeBudget) -> Result<Vec<Range<usize>>> {
+        let incoming_columns = self.side_columns(true);
+        let opposite_columns = self.side_columns(false);
         // Matched positions are dense indices into both sides, so per-row
         // costs cache in plain vectors instead of hashed maps.
         let mut incoming: Vec<Option<FlatRow>> = (0..self.admitted.len()).map(|_| None).collect();
@@ -142,12 +172,19 @@ impl JoinOutput<'_> {
         let mut chunk = FlatChunk::default();
         for (index, pair) in self.matched.iter().enumerate() {
             let record = &self.admitted[pair.pos].record;
-            let left = flat_row(&mut incoming, pair.pos, record, 0)?;
+            let left = flat_row(
+                &mut incoming,
+                pair.pos,
+                record,
+                0,
+                incoming_columns.as_deref(),
+            )?;
             let right = flat_row(
                 &mut opposite,
                 pair.opposite_index,
                 &self.opposite[pair.opposite_index].record,
                 record.num_columns(),
+                opposite_columns.as_deref(),
             )?;
             if !chunk.fits(left, right, budget) {
                 if start == index {
@@ -175,17 +212,23 @@ impl JoinOutput<'_> {
     }
 
     fn nested_ranges(&self, budget: EdgeBudget) -> Result<Vec<Range<usize>>> {
+        let incoming_columns = self.side_columns(true);
+        let opposite_columns = self.side_columns(false);
         let incoming = estimated_rows(
             self.matched
                 .iter()
                 .map(|pair| (pair.pos, &self.admitted[pair.pos].record)),
+            incoming_columns.as_deref(),
         )?;
-        let opposite = estimated_rows(self.matched.iter().map(|pair| {
-            (
-                pair.opposite_index,
-                &self.opposite[pair.opposite_index].record,
-            )
-        }))?;
+        let opposite = estimated_rows(
+            self.matched.iter().map(|pair| {
+                (
+                    pair.opposite_index,
+                    &self.opposite[pair.opposite_index].record,
+                )
+            }),
+            opposite_columns.as_deref(),
+        )?;
         let mut ranges = Vec::new();
         let mut start = 0;
         let mut bytes = 0_usize;
@@ -239,8 +282,9 @@ fn nested_range_is_full(
 fn flat_row<'a>(
     rows: &'a mut [Option<FlatRow>],
     index: usize,
-    record: &super::columnar::RowPayload,
+    record: &RowPayload,
     column_offset: usize,
+    projection: Option<&[(usize, usize)]>,
 ) -> Result<&'a FlatRow> {
     if rows[index].is_none() {
         #[cfg(test)]
@@ -248,19 +292,41 @@ fn flat_row<'a>(
         let mut bytes = 0;
         let mut nulls = Vec::new();
         let row = record.offset();
-        for (column_index, column) in record.columns().iter().enumerate() {
+        for (column_index, column) in row_columns(record, column_offset, projection) {
             let width = fixed_width(column.data_type()).expect("flat schema was checked");
             bytes = checked_accumulate(bytes, width, "batch")?;
             if let Some(offsets) = variable_offsets(column.as_ref()) {
                 bytes = checked_accumulate(bytes, selected_width(&offsets, row), "batch")?;
             }
             if column.nulls().is_some_and(|nulls| nulls.is_null(row)) {
-                nulls.push(column_offset + column_index);
+                nulls.push(column_index);
             }
         }
         rows[index] = Some(FlatRow { bytes, nulls });
     }
     Ok(rows[index].as_ref().expect("just populated"))
+}
+
+fn row_columns<'a>(
+    record: &'a RowPayload,
+    offset: usize,
+    projection: Option<&'a [(usize, usize)]>,
+) -> impl Iterator<Item = (usize, &'a datafusion::arrow::array::ArrayRef)> {
+    let full = record
+        .columns()
+        .iter()
+        .enumerate()
+        .take(if projection.is_some() {
+            0
+        } else {
+            record.num_columns()
+        })
+        .map(move |(index, column)| (offset + index, column));
+    let selected = projection
+        .into_iter()
+        .flatten()
+        .map(move |&(index, ordinal)| (ordinal, record.column(index)));
+    full.chain(selected)
 }
 
 fn selected_width(offsets: &Offsets<'_>, row: usize) -> usize {
@@ -273,15 +339,57 @@ fn selected_width(offsets: &Offsets<'_>, row: usize) -> usize {
 }
 
 fn estimated_rows<'a>(
-    records: impl Iterator<Item = (usize, &'a super::columnar::RowPayload)>,
+    records: impl Iterator<Item = (usize, &'a RowPayload)>,
+    projection: Option<&[(usize, usize)]>,
 ) -> Result<BTreeMap<usize, usize>> {
+    let mut records = records.peekable();
+    let projection = match (projection, records.peek()) {
+        (Some(columns), Some((_, record))) => Some(ProjectedRow::new(record, columns)),
+        _ => None,
+    };
     let mut rows = BTreeMap::new();
     for (index, record) in records {
         if let Entry::Vacant(entry) = rows.entry(index) {
-            entry.insert(estimated(&record.view())?);
+            let bytes = if let Some(projection) = &projection {
+                estimated(&projected_row(record, projection))?
+            } else {
+                estimated(&record.view())?
+            };
+            entry.insert(bytes);
         }
     }
     Ok(rows)
+}
+
+struct ProjectedRow {
+    indices: Vec<usize>,
+    schema: SchemaRef,
+}
+
+impl ProjectedRow {
+    fn new(record: &RowPayload, columns: &[(usize, usize)]) -> Self {
+        let indices = columns.iter().map(|&(index, _)| index).collect::<Vec<_>>();
+        let schema = Arc::new(
+            record
+                .schema_ref()
+                .project(&indices)
+                .expect("validated Join projection"),
+        );
+        Self { indices, schema }
+    }
+}
+
+fn projected_row(record: &RowPayload, projection: &ProjectedRow) -> RecordBatch {
+    RecordBatch::try_new_with_options(
+        Arc::clone(&projection.schema),
+        projection
+            .indices
+            .iter()
+            .map(|&index| record.column_view(index))
+            .collect(),
+        &datafusion::arrow::record_batch::RecordBatchOptions::new().with_row_count(Some(1)),
+    )
+    .expect("private Join payloads preserve canonical types")
 }
 
 fn estimated(record: &RecordBatch) -> Result<usize> {
@@ -390,6 +498,7 @@ mod tests {
         NESTED_VISITS.with(|count| count.set(0));
         let output = JoinOutput {
             schema: &schema,
+            projection: None,
             admitted: &admitted,
             opposite: &opposite,
             matched: &matched,
@@ -474,6 +583,7 @@ mod tests {
                 .collect::<Vec<_>>();
             let output = JoinOutput {
                 schema: &schema,
+                projection: None,
                 admitted: &admitted,
                 opposite: &opposite,
                 matched: &matched,
@@ -532,6 +642,7 @@ mod tests {
         let charges = vec![81_u64; 4];
         let output = JoinOutput {
             schema: &schema,
+            projection: None,
             admitted: &admitted,
             opposite: &opposite,
             matched: &matched,
@@ -551,6 +662,7 @@ mod tests {
 
     #[test]
     fn test_charge_fast_path_falls_back_when_the_bound_exceeds_the_budget() {
+        super::super::output_projection::tests::serial_columns_and_budgets();
         let column: ArrayRef = Arc::new(Int64Array::from(vec![7_i64; 4]));
         let field = Field::new("value", DataType::Int64, false);
         let record =
@@ -585,6 +697,7 @@ mod tests {
         let charges = vec![81_u64; 4];
         let output = JoinOutput {
             schema: &schema,
+            projection: None,
             admitted: &admitted,
             opposite: &opposite,
             matched: &matched,

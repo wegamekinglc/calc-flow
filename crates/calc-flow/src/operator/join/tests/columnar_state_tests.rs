@@ -438,6 +438,7 @@ async fn shared_flat_preflight_fanout(
             .collect::<Vec<_>>();
         let output = materialization::JoinOutput {
             schema,
+            projection: None,
             admitted: &admitted,
             opposite: &opposite,
             matched: &matched,
@@ -687,6 +688,7 @@ fn preflight_ranges(
 ) -> Vec<std::ops::Range<usize>> {
     materialization::JoinOutput {
         schema,
+        projection: None,
         admitted,
         opposite,
         matched,

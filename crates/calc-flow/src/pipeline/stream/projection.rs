@@ -1,20 +1,28 @@
-//! Physical ASOF output projections, after logical graph validation.
+//! Physical Join/ASOF output projections, after logical graph validation.
 
 use std::{collections::BTreeSet, sync::Arc};
 
 use crate::{NodeOperator, OperatorMetadata, PipelineBuilder, Result};
 
-struct AsofProjection {
+struct OutputProjection {
     node_id: String,
     columns: Vec<usize>,
     consumers: Vec<String>,
 }
 
-pub(super) fn push_asof_output_projections(builder: &mut PipelineBuilder) -> Result<()> {
+pub(super) fn push_output_projections(
+    builder: &mut PipelineBuilder,
+    table: Option<&super::TablePlanResources>,
+) -> Result<()> {
+    // Conversion registers the graph's selected UDFs into every expression
+    // runtime. Node-local lists cannot prove the resolved function identity.
+    let allow_join = table.is_none_or(|table| table.selected_udfs.is_empty());
     let projections = builder
         .nodes
         .iter()
-        .filter_map(|(node_id, definition)| asof_projection(builder, node_id, &definition.operator))
+        .filter_map(|(node_id, definition)| {
+            output_projection(builder, node_id, &definition.operator, allow_join)
+        })
         .collect::<Vec<_>>();
     for projection in projections {
         install_projection(builder, projection)?;
@@ -22,22 +30,20 @@ pub(super) fn push_asof_output_projections(builder: &mut PipelineBuilder) -> Res
     Ok(())
 }
 
-fn asof_projection(
+fn output_projection(
     builder: &PipelineBuilder,
     node_id: &str,
     operator: &NodeOperator,
-) -> Option<AsofProjection> {
-    let NodeOperator::StreamAsofJoin(asof) = operator else {
-        return None;
-    };
-    let schema = asof.output_ports()[0].schema()?;
+    allow_join: bool,
+) -> Option<OutputProjection> {
+    let (schema, expressions) = projection_schema(operator, allow_join)?;
     let consumers = builder
         .edges
         .iter()
         .filter(|edge| edge.source.node_id == node_id && edge.source.port == "output")
-        .map(|edge| projection_consumer(builder, edge, schema))
+        .map(|edge| projection_consumer(builder, edge, schema, expressions))
         .collect::<Option<Vec<_>>>()?;
-    // No consumers means the full ASOF port is an external graph output.
+    // No consumers means the full producer port is an external graph output.
     if consumers.is_empty() {
         return None;
     }
@@ -50,17 +56,31 @@ fn asof_projection(
     if columns.len() == schema.fields().len() {
         return None;
     }
-    Some(AsofProjection {
+    Some(OutputProjection {
         node_id: node_id.into(),
         columns,
         consumers: consumers.into_iter().map(|(node_id, _)| node_id).collect(),
     })
 }
 
+fn projection_schema(
+    operator: &NodeOperator,
+    allow_join: bool,
+) -> Option<(&datafusion::arrow::datatypes::SchemaRef, bool)> {
+    match operator {
+        NodeOperator::StreamAsofJoin(asof) => Some((asof.output_ports()[0].schema()?, false)),
+        NodeOperator::StreamJoin(join) if allow_join => {
+            Some((join.output_ports()[0].schema()?, true))
+        }
+        _ => None,
+    }
+}
+
 fn projection_consumer(
     builder: &PipelineBuilder,
     edge: &crate::Edge,
     schema: &datafusion::arrow::datatypes::SchemaRef,
+    expressions: bool,
 ) -> Option<(String, Vec<usize>)> {
     if edge.target.port != "input" {
         return None;
@@ -71,23 +91,31 @@ fn projection_consumer(
     if expression.input_ports()[0].schema() != Some(schema) {
         return None;
     }
-    Some((
-        edge.target.node_id.clone(),
-        expression.stream_projection_columns()?,
-    ))
+    let columns = if expressions {
+        expression.stream_required_columns()?
+    } else {
+        expression.stream_projection_columns()?
+    };
+    Some((edge.target.node_id.clone(), columns))
 }
 
-fn install_projection(builder: &mut PipelineBuilder, projection: AsofProjection) -> Result<()> {
-    let NodeOperator::StreamAsofJoin(asof) = &mut builder
+fn install_projection(builder: &mut PipelineBuilder, projection: OutputProjection) -> Result<()> {
+    let operator = &mut builder
         .nodes
         .get_mut(&projection.node_id)
-        .expect("validated ASOF node")
-        .operator
-    else {
-        unreachable!()
+        .expect("validated Join/ASOF node")
+        .operator;
+    let schema = match operator {
+        NodeOperator::StreamAsofJoin(asof) => {
+            asof.set_output_projection(projection.columns)?;
+            Arc::clone(asof.output_ports()[0].schema().expect("exact ASOF schema"))
+        }
+        NodeOperator::StreamJoin(join) => {
+            join.set_output_projection(projection.columns)?;
+            Arc::clone(join.output_ports()[0].schema().expect("exact Join schema"))
+        }
+        _ => unreachable!(),
     };
-    asof.set_output_projection(projection.columns)?;
-    let schema = Arc::clone(asof.output_ports()[0].schema().expect("exact ASOF schema"));
     for consumer in projection.consumers {
         let NodeOperator::Expression(expression) = &mut builder
             .nodes
@@ -104,6 +132,8 @@ fn install_projection(builder: &mut PipelineBuilder, projection: AsofProjection)
 
 #[cfg(test)]
 mod tests {
+    mod join;
+
     use std::{sync::Arc, time::Duration};
 
     use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
@@ -198,6 +228,7 @@ mod tests {
 
     #[test]
     fn asof_materializes_only_columns_required_by_every_projection_consumer() {
+        join::exact_consumers_prune_join_output();
         assert_eq!(
             physical_fields(graph(&[
                 &["right__value AS price", "left__seq"],
@@ -209,6 +240,7 @@ mod tests {
 
     #[test]
     fn arithmetic_consumer_requires_full_asof_output() {
+        join::arithmetic_consumers_prune_join_output();
         assert_eq!(
             physical_fields(graph(&[&["left__seq"], &["right__value + 1 AS price"],])).len(),
             8
@@ -342,6 +374,7 @@ mod tests {
         };
         use datafusion::arrow::array::{Array, Int64Array};
 
+        join::execution_and_restore().await;
         for right_only in [false, true] {
             let selections: &[&[&str]] = if right_only {
                 &[&["right__value AS price"]]

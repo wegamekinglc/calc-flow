@@ -22,6 +22,7 @@ struct Columns {
     left: OwnedSide,
     right: OwnedSide,
     schema: SchemaRef,
+    projection: Option<Arc<[usize]>>,
     name: Arc<str>,
     #[cfg(test)]
     hook: Option<super::test_support::Hook>,
@@ -46,10 +47,14 @@ impl ParallelCpuWork for Columns {
         #[cfg(test)]
         let _observation = super::test_support::observe(self.hook.clone(), ordinal);
         let left_width = self.left.width();
-        let (side, index) = if ordinal < left_width {
-            (&self.left, ordinal)
+        let index = self
+            .projection
+            .as_ref()
+            .map_or(ordinal, |columns| columns[ordinal]);
+        let (side, index) = if index < left_width {
+            (&self.left, index)
         } else {
-            (&self.right, ordinal - left_width)
+            (&self.right, index - left_width)
         };
         let array = side.column(index, &self.input_credit, &self.name)?;
         stop.check()?;
@@ -79,7 +84,8 @@ fn records<'a>(output: &'a JoinOutput<'_>, pair: &MatchedPair) -> (&'a RowPayloa
 }
 
 fn supports_capture(output: &JoinOutput<'_>, range: &Range<usize>) -> bool {
-    if !profitable(range.len(), output.schema.fields().len())
+    if output.schema.fields().is_empty()
+        || !profitable(range.len(), output.schema.fields().len())
         || !output
             .schema
             .fields()
@@ -127,6 +133,7 @@ async fn capture(
         left,
         right,
         schema: Arc::clone(output.schema),
+        projection: output.projection.cloned(),
         name: Arc::from(output.operator_id),
         #[cfg(test)]
         hook: super::test_support::hook(),

@@ -16,6 +16,9 @@ use datafusion::{
 
 use crate::{Batch, CalcFlowError, Result};
 
+mod dependencies;
+pub(super) use dependencies::required_columns;
+
 #[derive(Clone, Debug)]
 pub(super) struct ColumnProjection {
     columns: Vec<(String, String)>,

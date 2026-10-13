@@ -8,13 +8,16 @@ use std::{
 
 #[test]
 fn test_join_column_gather_owns_chunk_buffers_and_preserves_nullable_order() {
+    output_projection::tests::owned_columns_and_funding();
     let service = TestService::new(2, 1).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
     for incoming_left in [false, true] {
-        runtime.block_on(assert_owned_output(&service, incoming_left));
+        for projected in [false, true] {
+            runtime.block_on(assert_owned_output(&service, incoming_left, projected));
+        }
     }
     drop(runtime);
     service.shutdown();
@@ -45,9 +48,12 @@ fn inputs() -> (Batch, Batch) {
     )
 }
 
-async fn assert_owned_output(service: &TestService, incoming_left: bool) {
+async fn assert_owned_output(service: &TestService, incoming_left: bool, projected: bool) {
     let mut operator =
         StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+    if projected {
+        operator.set_output_projection(vec![5, 1, 4, 2, 5]).unwrap();
+    }
     let job = job().with_gather_owner(service.owner("owned-join-column-output".into()));
     let context = StreamOperatorContext::new(&job, "match", None)
         .with_output_budget(EdgeBudget::new(2, 8 << 20).unwrap());
@@ -82,7 +88,10 @@ async fn assert_owned_output(service: &TestService, incoming_left: bool) {
         .unwrap();
     let messages = collector.drain("output");
     assert_eq!(messages.len(), 3);
-    assert_eq!(calls.load(Ordering::SeqCst), 18);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        if projected { 15 } else { 18 }
+    );
     let schema = operator.output_ports[0].schema().unwrap().clone();
     let mut prior = input_buffers;
     for (sequence, message) in messages.iter().enumerate() {
@@ -113,7 +122,7 @@ async fn assert_owned_output(service: &TestService, incoming_left: bool) {
     assert!(job.gather_owner().close_and_drain().await.is_empty());
     drop(job);
     assert_eq!(pool.reserved(), 0);
-    assert_literals(&messages, incoming_left);
+    assert_literals(&messages, incoming_left, projected);
 }
 
 fn buffers(batch: &Batch) -> Vec<Range<usize>> {
@@ -143,7 +152,7 @@ fn append_buffers(data: &ArrayData, result: &mut Vec<Range<usize>>) {
     }
 }
 
-fn assert_literals(messages: &[StreamMessage], incoming_left: bool) {
+fn assert_literals(messages: &[StreamMessage], incoming_left: bool, projected: bool) {
     let records = messages.iter().map(|message| {
         &message
             .as_data()
@@ -156,6 +165,13 @@ fn assert_literals(messages: &[StreamMessage], incoming_left: bool) {
     let mut right = Vec::new();
     let mut amounts = Vec::new();
     for record in records {
+        if projected {
+            assert_eq!(record.column(0).to_data(), record.column(4).to_data());
+            assert_eq!(
+                record.column(0).to_data(),
+                StringArray::from(vec!["paid", "paid"]).to_data()
+            );
+        }
         left.extend_from_slice(
             record
                 .column(1)
@@ -166,7 +182,7 @@ fn assert_literals(messages: &[StreamMessage], incoming_left: bool) {
         );
         right.extend_from_slice(
             record
-                .column(4)
+                .column(if projected { 2 } else { 4 })
                 .as_any()
                 .downcast_ref::<TimestampMicrosecondArray>()
                 .unwrap()
@@ -174,7 +190,7 @@ fn assert_literals(messages: &[StreamMessage], incoming_left: bool) {
         );
         amounts.extend(
             record
-                .column(2)
+                .column(if projected { 3 } else { 2 })
                 .as_any()
                 .downcast_ref::<Int64Array>()
                 .unwrap()
