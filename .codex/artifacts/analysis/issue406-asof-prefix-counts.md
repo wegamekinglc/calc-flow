@@ -1,10 +1,11 @@
 # Issue 406: ASOF prefix dictionary counting
 
 This increment follows the independently reviewed admission optimization in
-PR #413. Its source base is main `8f890f28`; reconcile with merged main before
-publishing new release comparisons. The complete eight-target objective remains
-active. The [specification](../specs/issue406-asof-prefix-counts.md) records the
-profile selection, scratch constraints and verification scope.
+PR #413, merged as `5fef1a31abb67dacc4d3e243241090e177396b89` after all 38 checks
+passed. Its initial source base was `8f890f28`; it is now rebased onto that exact
+merged main. The complete eight-target objective remains active. The
+[specification](../specs/issue406-asof-prefix-counts.md) records the profile
+selection, scratch constraints and verification scope.
 
 ## Implementation and regression evidence
 
@@ -41,8 +42,22 @@ allocation assertions do not establish an elapsed-time improvement. Preserve
 PR #413's original measured binaries and its interrupted ON result separately.
 Current-main release comparisons must retain true OFF, LOW and advancing-epoch
 ON distinctions, fixed paired counts, all correctness/lifecycle checks and the
-inclusive acquisition budget. The independently running complete benchmark for
-PR #413 retains all 22 shards and is unaffected by these separate worktree edits.
+inclusive acquisition budget. The [complete benchmark for PR #413](https://github.com/wegamekinglc/calc-flow/actions/runs/38254036436)
+finished all 26 jobs and 22 shards. Its 809 unique results have no errors or
+confirmed regressions, retaining all 154 inconclusive and three informational
+slowdown results. Final independent evidence review is Approve. Its exact
+products remain main `8f890f28` and candidate `09894223`; the measured binaries
+are not relabeled as the later squash or newer main dependencies. The new
+comparison will rebuild both arms from merged main and the prefix candidate.
+
+The [October 13 06:00 scheduled run](https://github.com/wegamekinglc/calc-flow/actions/runs/38314145431)
+also succeeds at exact head `748eec89`, before the PR #413 merge. Its 24 jobs
+cover all 20 shards in main's maintained post-Studio-split catalog, with 802
+unique successful results, zero errors and zero confirmed regressions. The
+independent Studio split removed its two frontend shards from this repository;
+the received shard set exactly matches the current catalog. All 156 inconclusive
+and five informational slowdown results remain visible. This is complete-suite
+operability evidence, not a prefix-candidate or true-OFF acceptance measurement.
 
 | Original workload               | Single-thread target         | Parallel target | This increment |
 |---------------------------------|------------------------------|-----------------|----------------|

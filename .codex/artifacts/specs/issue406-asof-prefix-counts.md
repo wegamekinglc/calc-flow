@@ -3,8 +3,10 @@
 The complete eight-target performance objective remains active. This increment
 addresses ASOF output matching after the independently reviewed admission work
 in PR #413; it does not alter that PR or certify the remaining target inventory.
-Its initial source base is exact main `8f890f28`. Reconcile it with main after
-PR #413 merges before publishing a new comparison.
+Its initial source base was exact main `8f890f28`. PR #413 merged as `5fef1a31`;
+this increment is rebased onto that exact main before a new comparison. Main
+also includes independent Runtime API, dependency-security and Studio-split
+changes. Build both comparison arms from their exact current sources.
 
 ## Evidence and selection
 
