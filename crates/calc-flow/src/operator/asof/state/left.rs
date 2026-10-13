@@ -876,6 +876,7 @@ impl LeftState {
 
     /// Matching uses time/key and encoding owners. Integer sequence bytes
     /// remain in their owned column until a comparator actually needs them.
+    #[cfg(test)]
     pub fn output_iter(&self) -> impl Iterator<Item = (OutputIdentity<'_>, RowRef)> {
         self.output_runs().flat_map(|run| run.rows(run.len()))
     }

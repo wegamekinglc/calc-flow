@@ -11,6 +11,8 @@ use std::{collections::HashMap, sync::Arc};
 mod tests;
 
 type Matches = Vec<(usize, Option<state::RowRef>)>;
+type Route = (usize, usize);
+type Routes<'a> = HashMap<&'a state::Encoding, Route, RandomState>;
 
 #[derive(Default)]
 struct Shard {
@@ -129,26 +131,89 @@ async fn capture(
         _input_credit: input_credit,
     };
     let mut routes = HashMap::with_capacity_and_hasher(keys, RandomState::new());
-    for (position, (key, _)) in operator.state.left.output_iter().take(count).enumerate() {
-        check_match_progress(position, context).await?;
-        let route = if let Some(route) = routes.get(key.1) {
-            Some(*route)
-        } else if let Some(bucket) = operator.state.right.owned_bucket(key.1) {
-            let shard = state::key_shard(key.1) % workers;
-            let target = &mut work.shards[shard];
-            let index = target.buckets.len();
-            target.buckets.push(bucket);
-            routes.insert(key.1, (shard, index));
-            Some((shard, index))
-        } else {
-            None
-        };
-        if let Some((shard, bucket)) = route {
-            work.shards[shard].rows.push((position, *key.0, bucket));
+    let mut position = 0;
+    for run in operator.state.left.output_runs() {
+        if position == count {
+            break;
         }
+        let amount = run.len().min(count - position);
+        capture_run(
+            operator,
+            run,
+            amount,
+            position,
+            &mut work,
+            &mut routes,
+            context,
+        )
+        .await?;
+        position += amount;
     }
     work.shards.retain(|shard| !shard.rows.is_empty());
     Ok((work, credit))
+}
+
+async fn capture_run<'a>(
+    operator: &StreamAsofJoinOperator,
+    run: state::OutputRun<'a>,
+    count: usize,
+    position: usize,
+    work: &mut ProbeWork,
+    routes: &mut Routes<'a>,
+    context: &StreamOperatorContext<'_>,
+) -> Result<()> {
+    check_match_progress(position, context).await?;
+    if let Some((keys, mut rows)) = run.keyed_rows(count) {
+        let mut cached = [None; 64];
+        for (route, key) in cached.iter_mut().zip(keys) {
+            *route = key
+                .as_ref()
+                .and_then(|key| capture_route(operator, key, work, routes));
+        }
+        let (time, key, _) = rows.next().expect("nonempty ASOF capture run");
+        append_route(work, cached[key], position, time);
+        for (offset, (time, key, _)) in rows.enumerate() {
+            let index = position + offset + 1;
+            check_match_progress(index, context).await?;
+            append_route(work, cached[key], index, time);
+        }
+    } else {
+        let mut rows = run.rows(count);
+        let (key, _) = rows.next().expect("nonempty ASOF capture run");
+        let route = capture_route(operator, key.1, work, routes);
+        append_route(work, route, position, *key.0);
+        for (offset, (key, _)) in rows.enumerate() {
+            let index = position + offset + 1;
+            check_match_progress(index, context).await?;
+            let route = capture_route(operator, key.1, work, routes);
+            append_route(work, route, index, *key.0);
+        }
+    }
+    Ok(())
+}
+
+fn capture_route<'a>(
+    operator: &StreamAsofJoinOperator,
+    key: &'a state::Encoding,
+    work: &mut ProbeWork,
+    routes: &mut Routes<'a>,
+) -> Option<Route> {
+    if let Some(route) = routes.get(key) {
+        return Some(*route);
+    }
+    let bucket = operator.state.right.owned_bucket(key)?;
+    let shard = state::key_shard(key) % work.shards.len();
+    let target = &mut work.shards[shard];
+    let index = target.buckets.len();
+    target.buckets.push(bucket);
+    routes.insert(key, (shard, index));
+    Some((shard, index))
+}
+
+fn append_route(work: &mut ProbeWork, route: Option<Route>, position: usize, time: i64) {
+    if let Some((shard, bucket)) = route {
+        work.shards[shard].rows.push((position, time, bucket));
+    }
 }
 
 fn input_credit(

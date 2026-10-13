@@ -516,7 +516,9 @@ impl<'a> IntoIterator for &'a LegacyLeftState {
 }
 
 mod left;
-pub(super) use left::{ChunkData, LeftState, LeftView, PreparedLeftChunk, PreparedLeftDrain};
+pub(super) use left::{
+    ChunkData, LeftState, LeftView, OutputRun, PreparedLeftChunk, PreparedLeftDrain,
+};
 
 mod capacity;
 pub(super) use capacity::CapacitySnapshot;
