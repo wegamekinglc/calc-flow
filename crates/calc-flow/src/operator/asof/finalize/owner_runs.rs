@@ -1,6 +1,8 @@
 //! Differential and complexity checks for finalized prefix ownership.
 
 use super::*;
+
+mod key_routes;
 use crate::{
     AsofJoinSide, AsofStateLimits, CancellationToken, StreamAsofJoinSpec, StreamJobContext,
 };
@@ -438,6 +440,7 @@ fn shared_key_and_sequence_buffer_removals_preserve_partial_counts() {
 
 #[tokio::test]
 async fn matching_aggregates_batch_key_and_shared_sequence_owners_by_run() {
+    key_routes::check_matching_routes().await;
     let key = Arc::new(StringArray::from(vec!["a long shared key encoding"; 512])) as ArrayRef;
     let sequence = Arc::new(StringArray::from_iter_values(
         (0..512).map(|i| format!("long sequence encoding {i:04}")),
