@@ -284,6 +284,8 @@ pub struct WindowAggregateOperator {
     state: WindowState,
     state_budget: StateBudget,
     max_delta_segments: usize,
+    #[cfg(test)]
+    encoded_segments: std::sync::atomic::AtomicUsize,
 }
 
 #[derive(Clone)]
@@ -888,6 +890,8 @@ impl WindowAggregateOperator {
             state: WindowState::default(),
             state_budget: StateBudget::default(),
             max_delta_segments: MAX_WINDOW_DELTA_SEGMENTS,
+            #[cfg(test)]
+            encoded_segments: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -1123,6 +1127,9 @@ impl WindowAggregateOperator {
         if operations.is_empty() {
             return Ok(None);
         }
+        #[cfg(test)]
+        self.encoded_segments
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let spec = self.spec.clone();
         let compiled = self.compiled.clone();
         let pipeline_fingerprint = self.state_pipeline_fingerprint()?.to_owned();
@@ -1142,6 +1149,9 @@ impl WindowAggregateOperator {
     }
 
     fn encode_operations_sync(&self, operations: &[StateOperationRow]) -> Result<Vec<u8>> {
+        #[cfg(test)]
+        self.encoded_segments
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         encode_state_segment(
             operations,
             &self.spec,
@@ -3345,10 +3355,6 @@ fn state_fields_for_version(
     fields
 }
 
-#[cfg(test)]
-static ENCODED_STATE_SEGMENTS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-
 fn encode_state_segment(
     operations: &[StateOperationRow],
     spec: &WindowSpec,
@@ -3356,8 +3362,6 @@ fn encode_state_segment(
     pipeline_fingerprint: &str,
     operator_id: &str,
 ) -> Result<Vec<u8>> {
-    #[cfg(test)]
-    ENCODED_STATE_SEGMENTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     validate_state_operations(operations)?;
     let schema = state_schema(spec, compiled, pipeline_fingerprint, operator_id);
     let mut arrays = state_key_arrays(operations);
@@ -5048,10 +5052,15 @@ mod tests {
             .process_data("input", budget_test_batch(&[1]), &context, &mut output)
             .await
             .unwrap();
-        ENCODED_STATE_SEGMENTS.store(0, std::sync::atomic::Ordering::SeqCst);
+        let before = operator
+            .encoded_segments
+            .load(std::sync::atomic::Ordering::SeqCst);
         operator.prepare_checkpoint_async(&context).await.unwrap();
         assert_eq!(
-            ENCODED_STATE_SEGMENTS.load(std::sync::atomic::Ordering::SeqCst),
+            operator
+                .encoded_segments
+                .load(std::sync::atomic::Ordering::SeqCst)
+                - before,
             1,
             "compaction encodes one replacement base"
         );
@@ -5059,7 +5068,10 @@ mod tests {
             .checkpoint(crate::Epoch::INITIAL.next().unwrap())
             .unwrap();
         assert_eq!(
-            ENCODED_STATE_SEGMENTS.load(std::sync::atomic::Ordering::SeqCst),
+            operator
+                .encoded_segments
+                .load(std::sync::atomic::Ordering::SeqCst)
+                - before,
             1,
             "capture must reuse the prepared base, not re-encode it"
         );
