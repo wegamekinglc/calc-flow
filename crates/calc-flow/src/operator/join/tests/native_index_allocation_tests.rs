@@ -407,7 +407,7 @@ fn probe_array_rows(
         .collect()
 }
 
-fn assert_probe_fallback(rows: &[AdmittedRow], layout: Option<ArenaLayout>) {
+fn assert_probe_fallback(rows: &Vec<AdmittedRow>, layout: Option<ArenaLayout>) {
     let expected = canonical_probe_frames(rows);
     let charge = probe_key_charge(rows, &[0]).unwrap();
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(charge));
@@ -429,7 +429,7 @@ fn test_string_probe_keeps_empty_null_parent_and_nonfitting_fallbacks() {
 
     let empty = ArenaLayout::measure(&[], &[0]).unwrap().unwrap();
     assert!(!empty.fits(0, 1));
-    assert_probe_fallback(&[], Some(empty));
+    assert_probe_fallback(&Vec::new(), Some(empty));
 
     let null_parent = probe_array_rows(
         Arc::new(StringArray::from(vec![Some("kept"), None])),

@@ -196,6 +196,7 @@ async fn legacy_projection_migration(layout: u64) {
         migration_checkpoint(&mut projected, &snapshot, &schema, &context).await;
         legacy_tail_controls(&mut projected, &snapshot).await;
     }
+    post_restore_gap(&mut managed, &mut legacy, &schema, &job).await;
     let source_pool = legacy.runtime.runtime().unwrap().incremental_memory_pool();
     let target_pool = projected
         .runtime
@@ -232,6 +233,42 @@ async fn legacy_projection_migration(layout: u64) {
         escaping_funded,
         "escaping migrated buffers must retain credit"
     );
+}
+
+async fn post_restore_gap(
+    restored: &mut StreamJoinOperator,
+    full: &mut StreamJoinOperator,
+    schema: &Arc<Schema>,
+    job: &StreamJobContext,
+) {
+    let template = input(
+        Arc::new(Int64Array::from(vec![10, 20, 30])),
+        Arc::new(Int64Array::from(vec![7, 8, 9])),
+    );
+    let valid = template.table_payload().unwrap().batches()[0].slice(0, 1);
+    let mut columns = valid.columns().to_vec();
+    columns[2] = Arc::new(TimestampMicrosecondArray::from(vec![99]).with_timezone("UTC"));
+    let late = RecordBatch::try_new(Arc::clone(schema), columns).unwrap();
+    let source = Batch::table(vec![late, valid], BatchMetadata::default()).unwrap();
+    let original = source.table_payload().unwrap().batches().to_vec();
+    let context = worker::mixed_context(job, true);
+    let mut actual = EdgeCollector::new(restored.output_ports().to_vec());
+    let mut expected = EdgeCollector::new(full.output_ports().to_vec());
+    restored
+        .process_data("left", source.clone(), &context, &mut actual)
+        .await
+        .unwrap();
+    full.process_data("left", source.clone(), &context, &mut expected)
+        .await
+        .unwrap();
+    assert_eq!(restored.status(), full.status());
+    assert_eq!(restored.state.left[0].row_id, 1);
+    assert_eq!(restored.state.next_left_row_id, 2);
+    assert_eq!(restored.state.left[0].charge, full.state.left[0].charge);
+    assert_eq!(restored.state.metrics.left.late_rows, 1);
+    assert_eq!(restored.state.next_output_sequence, 1);
+    compare_output(&mut actual, &mut expected);
+    assert_eq!(source.table_payload().unwrap().batches(), original);
 }
 
 async fn legacy_tail_controls(

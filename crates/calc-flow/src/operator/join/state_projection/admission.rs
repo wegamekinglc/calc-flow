@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use super::super::{
-    AdmittedRow, StoredRow, StreamJoinOperator,
-    columnar::{CopySelection, Quantum, RowPayload, SelectedRow},
+    AdmittedBatch, StoredRow, StreamJoinOperator,
+    columnar::{OwnedSelection, Quantum, RowPayload, SelectedRows},
     operator_error,
 };
 use crate::{Result, StreamOperatorContext};
@@ -11,7 +11,7 @@ use datafusion::arrow::record_batch::RecordBatch;
 impl StreamJoinOperator {
     pub(in crate::operator::join) async fn project_admitted(
         &mut self,
-        admitted: &mut [AdmittedRow],
+        admitted: &mut AdmittedBatch,
         retained: &mut [StoredRow],
         side: usize,
         context: &StreamOperatorContext<'_>,
@@ -20,22 +20,26 @@ impl StreamJoinOperator {
             return Ok(());
         }
         let mut quantum = Quantum::default();
-        let mut start = 0;
-        while start < admitted.len() {
-            let end = parent_end(admitted, start, context, &mut quantum).await?;
-            self.project_group(&mut admitted[start..end], side, context, &mut quantum)
+        for index in 0..admitted.record_count() {
+            let range = admitted.group_range(index);
+            if range.is_empty() {
+                continue;
+            }
+            let rows = super::super::admitted::AdmittedGroup::new(admitted, range);
+            let payload = self
+                .project_group(rows, side, context, &mut quantum)
                 .await?;
-            start = end;
+            admitted.replace(index, payload);
         }
         let mut selected = retained.iter_mut();
-        for source in admitted {
+        for source in admitted.iter() {
             quantum.step(context, 8, 0).await?;
             if source.retain {
                 let row = selected
                     .next()
                     .expect("retained rows preserve admission order");
                 debug_assert_eq!(row.row_id, source.row_id);
-                row.record = source.record.clone();
+                row.record = source.record.owned();
             }
         }
         context.check_cancelled()
@@ -43,47 +47,25 @@ impl StreamJoinOperator {
 
     async fn project_group(
         &mut self,
-        rows: &mut [AdmittedRow],
+        rows: super::super::admitted::AdmittedGroup<'_>,
         side: usize,
         context: &StreamOperatorContext<'_>,
         quantum: &mut Quantum,
-    ) -> Result<()> {
-        let selected = self.select_projected_rows(rows, context, quantum).await?;
+    ) -> Result<RowPayload> {
         let controls = self.projected_column_credit(side)?;
-        let record = self.project_payload(&rows[0].record, side)?;
-        let payload = if let Some(chunk) = self
-            .owned_payload_columns(record.columns(), side, &selected.rows, context, quantum)
+        let record = self.project_payload(rows.row(0).record, side)?;
+        let selection = SelectedRows::Admitted(rows);
+        if let Some(chunk) = self
+            .owned_payload_columns(record.columns(), side, selection, context, quantum)
             .await?
         {
-            RowPayload::Shared { chunk, row: 0 }
-        } else {
-            let chunk = self
-                .copy_projected_payload(record, selected, controls, context)
-                .await?;
-            RowPayload::RestoredV2 { chunk, row: 0 }
-        };
-        assign_payload(rows, &payload, context, quantum).await
-    }
-
-    async fn select_projected_rows(
-        &mut self,
-        rows: &[AdmittedRow],
-        context: &StreamOperatorContext<'_>,
-        quantum: &mut Quantum,
-    ) -> Result<CopySelection> {
-        let mut selected = CopySelection::reserve(self, rows.len())?.ok_or_else(|| {
-            operator_error(&self.name, "retained selection credit admission failed")
-        })?;
-        for row in rows {
-            quantum.step(context, 8, 0).await?;
-            selected.rows.push(SelectedRow {
-                source: row.record.offset(),
-                row_id: row.row_id,
-                time: row.event_time,
-                retain: row.retain,
-            });
+            return Ok(RowPayload::Shared { chunk, row: 0 });
         }
-        Ok(selected)
+        let selected = OwnedSelection::from_group(self, rows, context, quantum).await?;
+        let chunk = self
+            .copy_projected_payload(record, selected, controls, context)
+            .await?;
+        Ok(RowPayload::RestoredV2 { chunk, row: 0 })
     }
 
     fn projected_column_credit(
@@ -99,7 +81,11 @@ impl StreamJoinOperator {
             .ok_or_else(|| operator_error(&self.name, "retained column credit admission failed"))
     }
 
-    fn project_payload(&self, source: &RowPayload, side: usize) -> Result<RecordBatch> {
+    fn project_payload(
+        &self,
+        source: super::super::PayloadRef<'_>,
+        side: usize,
+    ) -> Result<RecordBatch> {
         let layout = self
             .payload_projection
             .as_ref()
@@ -118,50 +104,4 @@ impl StreamJoinOperator {
             operator_error(&self.name, &format!("retained projection failed: {error}"))
         })
     }
-}
-
-async fn assign_payload(
-    rows: &mut [AdmittedRow],
-    payload: &RowPayload,
-    context: &StreamOperatorContext<'_>,
-    quantum: &mut Quantum,
-) -> Result<()> {
-    for (index, row) in rows.iter_mut().enumerate() {
-        quantum.step(context, 8, 0).await?;
-        row.record = match payload {
-            RowPayload::Shared { chunk, .. } => RowPayload::Shared {
-                chunk: Arc::clone(chunk),
-                row: index,
-            },
-            RowPayload::RestoredV2 { chunk, .. } => RowPayload::RestoredV2 {
-                chunk: Arc::clone(chunk),
-                row: index,
-            },
-            _ => unreachable!("projected admission owns a funded selected payload"),
-        };
-    }
-    Ok(())
-}
-
-async fn parent_end(
-    rows: &[AdmittedRow],
-    start: usize,
-    context: &StreamOperatorContext<'_>,
-    quantum: &mut Quantum,
-) -> Result<usize> {
-    let columns = rows[start]
-        .record
-        .shared_columns()
-        .expect("full admission parent");
-    for (index, row) in rows.iter().enumerate().skip(start) {
-        quantum.step(context, 8, 0).await?;
-        if row
-            .record
-            .shared_columns()
-            .is_none_or(|other| !std::ptr::eq(columns, other))
-        {
-            return Ok(index);
-        }
-    }
-    Ok(rows.len())
 }

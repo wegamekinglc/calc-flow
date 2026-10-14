@@ -140,7 +140,9 @@ async fn test_single_capture_batches_quantum_work() {
     let _observation = Observation::new(None);
     reset_join_work();
 
-    let captured = OwnedSide::capture(payloads.iter(), &context).await.unwrap();
+    let captured = OwnedSide::capture(payloads.iter().map(Into::into), &context)
+        .await
+        .unwrap();
     let work = join_work();
 
     let OwnedSide::Single { source, rows } = &captured else {
@@ -214,7 +216,9 @@ async fn test_capture_promotes_boundary_prefixes_without_losing_order_or_bounded
         let _observation = Observation::new(None);
         reset_join_work();
 
-        let captured = OwnedSide::capture(payloads.iter(), &context).await.unwrap();
+        let captured = OwnedSide::capture(payloads.iter().map(Into::into), &context)
+            .await
+            .unwrap();
         let work = join_work();
 
         let OwnedSide::Multiple { sources, rows } = &captured else {
@@ -260,7 +264,7 @@ async fn assert_cancelled_capture(prefix: usize, tail: usize, cancel_after: usiz
     let _observation = Observation::new(Some((job.cancellation().clone(), cancel_after)));
     reset_join_work();
 
-    let result = OwnedSide::capture(payloads.iter(), &context).await;
+    let result = OwnedSide::capture(payloads.iter().map(Into::into), &context).await;
     assert!(matches!(
         result,
         Err(crate::CalcFlowError::Cancelled { .. })

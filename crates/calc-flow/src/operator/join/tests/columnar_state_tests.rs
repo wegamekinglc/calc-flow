@@ -114,11 +114,15 @@ fn measure_owned_metadata_history(entries: usize) {
         source: 0,
         row_id: 0,
         time: EventTime::from_micros(10),
-        retain: true,
     }];
     let mut quantum = columnar::Quantum::default();
-    let (chunk, measured) =
-        measure_copy_future(operator.owned_payload(&record, 0, &selected, &context, &mut quantum));
+    let (chunk, measured) = measure_copy_future(operator.owned_payload(
+        &record,
+        0,
+        (&selected).into(),
+        &context,
+        &mut quantum,
+    ));
     let chunk = chunk.unwrap().unwrap();
     let payload = columnar::RowPayload::at(&record, Some(&chunk), 0);
     let paid = payload.funded_owner().unwrap().1;
@@ -369,10 +373,9 @@ async fn copied_test_chunk_with_context(
             source,
             row_id: source as u64,
             time: EventTime::from_micros(i64::try_from(source).unwrap()),
-            retain: true,
         }));
     operator
-        .owned_payload(record, port, &selected.rows, context, &mut quantum)
+        .owned_payload(record, port, (&selected.rows).into(), context, &mut quantum)
         .await
         .unwrap()
 }
@@ -553,13 +556,18 @@ fn measure_shared_owner_controls(columns: usize) {
             source,
             row_id: u64::try_from(source).unwrap(),
             time: EventTime::from_micros(i64::try_from(source).unwrap()),
-            retain: true,
         })
         .collect::<Vec<_>>();
     let record = source.as_ref().unwrap();
     let mut warm_quantum = columnar::Quantum::default();
     let warm = runtime
-        .block_on(operator.owned_payload(record, 0, &selected, &context, &mut warm_quantum))
+        .block_on(operator.owned_payload(
+            record,
+            0,
+            (&selected).into(),
+            &context,
+            &mut warm_quantum,
+        ))
         .unwrap()
         .unwrap();
     drop(warm);
@@ -572,7 +580,7 @@ fn measure_shared_owner_controls(columns: usize) {
         let record = source.as_ref().unwrap();
         let mut quantum = columnar::Quantum::default();
         let shared = runtime
-            .block_on(operator.owned_payload(record, 0, &selected, &context, &mut quantum))
+            .block_on(operator.owned_payload(record, 0, (&selected).into(), &context, &mut quantum))
             .unwrap()
             .unwrap();
         payload = Some(columnar::RowPayload::at(record, Some(&shared), 0));
@@ -681,7 +689,7 @@ async fn test_shared_payload_does_not_borrow_positive_capacity_opaque_bytes_owne
 
 fn preflight_ranges(
     schema: &SchemaRef,
-    admitted: &[AdmittedRow],
+    admitted: &Vec<AdmittedRow>,
     opposite: &[StoredRow],
     matched: &[MatchedPair],
     budget: EdgeBudget,

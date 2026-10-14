@@ -74,6 +74,7 @@ pub(super) async fn retained_sparse_repair() {
             .with_ingress_progress(progressed.ingress_progress()),
         projected.status(),
     );
+    post_restore_gap(&mut restored, &mut full, &original, &progressed).await;
     let pools = [&mut projected, &mut full, &mut restored].map(|operator| {
         operator
             .runtime
@@ -98,6 +99,43 @@ pub(super) async fn retained_sparse_repair() {
         Some(1023),
         "sparse repair must publish the handler ingress progress"
     );
+}
+
+async fn post_restore_gap(
+    restored: &mut StreamJoinOperator,
+    full: &mut StreamJoinOperator,
+    original: &RecordBatch,
+    context: &StreamOperatorContext<'_>,
+) {
+    let source = Batch::table(
+        vec![original.slice(0, 1), original.slice(1023, 1)],
+        BatchMetadata::default(),
+    )
+    .unwrap();
+    let mut actual = EdgeCollector::new(restored.output_ports().to_vec());
+    let mut expected = EdgeCollector::new(full.output_ports().to_vec());
+    restored
+        .process_data("right", source.clone(), context, &mut actual)
+        .await
+        .unwrap();
+    full.process_data("right", source, context, &mut expected)
+        .await
+        .unwrap();
+    assert_eq!(restored.status(), full.status());
+    assert_eq!(
+        restored
+            .state
+            .right
+            .iter()
+            .map(|row| row.row_id)
+            .collect::<Vec<_>>(),
+        [0, 2]
+    );
+    assert_eq!(restored.state.next_right_row_id, 3);
+    assert_eq!(restored.state.metrics.right.late_rows, 1);
+    assert_eq!(restored.state.next_output_sequence, 2);
+    assert_eq!(restored.state.right[1].charge, full.state.right[1].charge);
+    compare_output(&mut actual, &mut expected);
 }
 
 fn progress(job: &StreamJobContext) -> StreamOperatorContext<'_> {

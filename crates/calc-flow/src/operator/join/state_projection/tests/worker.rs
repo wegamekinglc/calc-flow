@@ -51,7 +51,8 @@ impl Drop for Release {
 
 pub(super) async fn lifecycle_controls(service: &TestService) {
     for (copied, cancel) in [(false, true), (false, false), (true, true)] {
-        Box::pin(stopped(service, copied, cancel)).await;
+        Box::pin(stopped(service, copied, cancel, false)).await;
+        Box::pin(stopped(service, copied, cancel, true)).await;
     }
     for (stage, cancel) in [
         (AdmissionStage::Attempt, false),
@@ -60,6 +61,49 @@ pub(super) async fn lifecycle_controls(service: &TestService) {
     ] {
         Box::pin(refused(service, stage, cancel)).await;
     }
+}
+
+fn mixed_input() -> Batch {
+    let template = super::input(
+        Arc::new(Int64Array::from(vec![10, 20, 30])),
+        Arc::new(Int64Array::from(vec![7, 8, 9])),
+    );
+    let schema = template.table_payload().unwrap().batches()[0].schema();
+    let records = [(0, false), (101, false), (102, true), (103, false)]
+        .into_iter()
+        .map(|(time, nullable)| {
+            RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![
+                    Arc::new(StringArray::from(vec!["omitted"; 2])) as ArrayRef,
+                    Arc::new(Int64Array::from(vec![7, 8])),
+                    Arc::new(TimestampMicrosecondArray::from(vec![time; 2]).with_timezone("UTC")),
+                    Arc::new(Int64Array::from(vec![Some(10), (!nullable).then_some(20)])),
+                ],
+            )
+            .unwrap()
+        })
+        .collect();
+    Batch::table(records, BatchMetadata::default()).unwrap()
+}
+
+pub(super) fn mixed_context(job: &StreamJobContext, mixed: bool) -> StreamOperatorContext<'_> {
+    let progress = mixed.then_some(crate::EventTime::from_micros(100));
+    StreamOperatorContext::with_ingress_progress(
+        job,
+        "selected-state",
+        None,
+        crate::IngressProgressSnapshot::new(std::collections::BTreeMap::from([
+            (
+                "left".into(),
+                crate::IngressProgress::new(crate::IngressState::Active, progress),
+            ),
+            (
+                "right".into(),
+                crate::IngressProgress::new(crate::IngressState::Active, None),
+            ),
+        ])),
+    )
 }
 
 fn input() -> Batch {
@@ -90,17 +134,27 @@ fn job(service: &TestService) -> StreamJobContext {
     .with_gather_owner(service.owner("selected-copy-worker".into()))
 }
 
-async fn stopped(service: &TestService, copied: bool, cancel: bool) {
-    let input = input();
+async fn stopped(service: &TestService, copied: bool, cancel: bool, mixed: bool) {
+    let input = if mixed { mixed_input() } else { input() };
     let original = input.table_payload().unwrap().batches().to_vec();
-    let retained = Arc::downgrade(original[0].column(3));
-    let unused = Arc::downgrade(original[0].column(0));
+    let selected = if mixed { 2 } else { 0 };
+    let retained = Arc::downgrade(original[selected].column(3));
+    let unused = original
+        .iter()
+        .map(|record| Arc::downgrade(record.column(0)))
+        .collect::<Vec<_>>();
+    let others = original
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != selected)
+        .map(|(_, record)| Arc::downgrade(record.column(3)))
+        .collect::<Vec<_>>();
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 30));
     let mut operator = operator(&input, &pool);
     let before = operator.status();
     let writer = operator.v2_writer.observation_for_test();
     let job = job(service);
-    let context = StreamOperatorContext::new(&job, "selected-state", None);
+    let context = mixed_context(&job, mixed);
     let mut output = EdgeCollector::new(operator.output_ports().to_vec());
     let release = Release(Arc::new(Gate::default()));
     let gate = Arc::clone(&release.0);
@@ -151,8 +205,12 @@ async fn stopped(service: &TestService, copied: bool, cancel: bool) {
         "paused copy lost its selected input"
     );
     assert!(
-        unused.upgrade().is_none(),
+        unused.iter().all(|unused| unused.upgrade().is_none()),
         "copy worker retained an omitted full parent"
+    );
+    assert!(
+        others.iter().all(|other| other.upgrade().is_none()),
+        "worker retained dropped, copied or pending record parents"
     );
     assert!(pool.reserved() > 0);
     let mut drain = Box::pin(job.gather_owner().close_and_drain());
@@ -244,6 +302,10 @@ fn check_refusal(error: &CalcFlowError, cancel: bool) {
 
 fn check_input(input: &Batch, original: &[RecordBatch]) {
     assert_eq!(input.table_payload().unwrap().batches(), original);
+    if original.len() == 4 {
+        check_mixed_input(input);
+        return;
+    }
     let values = input
         .table_payload()
         .unwrap()
@@ -259,4 +321,34 @@ fn check_input(input: &Batch, original: &[RecordBatch]) {
         })
         .collect::<Vec<_>>();
     assert_eq!(values, [Some(1.5), None, Some(3.5)]);
+}
+
+fn check_mixed_input(input: &Batch) {
+    let values = input
+        .table_payload()
+        .unwrap()
+        .batches()
+        .iter()
+        .flat_map(|record| {
+            record
+                .column(3)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .iter()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        values,
+        [
+            Some(10),
+            Some(20),
+            Some(10),
+            Some(20),
+            Some(10),
+            None,
+            Some(10),
+            Some(20)
+        ]
+    );
 }

@@ -1,5 +1,5 @@
 use super::super::{
-    AdmittedRow, JoinTimeBounds, StoredRow,
+    AdmittedBatch, JoinTimeBounds, StoredRow,
     checkpoint_v2::ContainerFunding,
     native_lookup::{NativeIndex, NativeKeys},
 };
@@ -7,7 +7,7 @@ use datafusion::execution::memory_pool::MemoryReservation;
 use std::sync::Arc;
 
 pub(super) struct ProbeInputs {
-    pub(super) admitted: Vec<AdmittedRow>,
+    pub(super) admitted: AdmittedBatch,
     pub(super) keys: Option<NativeKeys>,
     pub(super) slots: Vec<Option<u32>>,
     pub(super) opposite: Option<Arc<Vec<StoredRow>>>,
@@ -32,7 +32,7 @@ impl ProbeInputs {
         super::super::native_lookup::time_range(
             self.bounds,
             self.incoming_is_left,
-            self.admitted[position].event_time,
+            self.admitted.row(position).event_time,
         )
     }
 

@@ -1,6 +1,6 @@
 # Issue 406: Join batch admission
 
-Status: clarified proposal, before implementation. Base: `bb142320062995aeb318ad406c901288537fd766`.
+Status: implementation in progress; final source review pending. Base: `bb142320062995aeb318ad406c901288537fd766`.
 
 This increment addresses phase 1.1. It supplies the batch ownership and selection
 boundary needed by phase 1.2, but does not claim that persistent dense key IDs,
@@ -101,6 +101,18 @@ Do not retain the whole mixed table in a background owner as a fallback. Release
 the temporary table immediately when all segments have replacement owners.
 The existing `StoredRow` boundary must receive an independently owned/funded or
 existing legacy record parent, never a temporary whole-table owner.
+
+The existing legacy `Rowed` parent remains its original state-ownership contract.
+Base admission already creates one `Arc<RecordBatch>` and cloned column vector
+per record without a separate workspace reservation, then shares that parent
+with retained rows. Moving the same allocation to the retained-state boundary,
+only for records requiring it, does not introduce a funded-state promise or a
+second parent allocation. New batch metadata and owned-transfer controls still
+require their checked funding. A transfer reservation covers worker ownership;
+an existing legacy parent subsequently kept by `StoredRow` retains the original
+legacy contract. Do not label that parent as funded state. Independently funded
+selected/narrow payloads keep their existing lifetime funding. State-owner
+redesign remains phase 1.3, rather than an implicit new payload variant here.
 
 Preserve the existing one-row zero-headroom SQL acceptance controls and add
 mandatory metadata-refusal controls. Include inline-owner size in owned worker

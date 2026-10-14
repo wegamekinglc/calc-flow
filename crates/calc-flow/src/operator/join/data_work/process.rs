@@ -1,5 +1,5 @@
 use super::super::{
-    AdmittedRow, MatchedPair, PreparedMatches, SidePlan, StreamJoinOperator, enforce_match_limit,
+    AdmittedBatch, MatchedPair, PreparedMatches, SidePlan, StreamJoinOperator, enforce_match_limit,
     native_lookup::{NativeKeys, eligible, scratch_error},
 };
 use super::{
@@ -16,30 +16,45 @@ use crate::{Result, StreamJobContext, StreamOperatorContext};
 use parking_lot::Mutex;
 use std::sync::Arc;
 
-enum Capture {
-    Declined(Vec<AdmittedRow>, Option<NativeKeys>),
-    Ready(Arc<ProbeInputs>),
+struct Capture {
+    declined: Option<(AdmittedBatch, Option<NativeKeys>)>,
+    ready: Option<Arc<ProbeInputs>>,
+}
+impl Capture {
+    fn declined(admitted: AdmittedBatch, keys: Option<NativeKeys>) -> Self {
+        Self {
+            declined: Some((admitted, keys)),
+            ready: None,
+        }
+    }
+    fn ready(inputs: Arc<ProbeInputs>) -> Self {
+        Self {
+            declined: None,
+            ready: Some(inputs),
+        }
+    }
 }
 
 impl StreamJoinOperator {
     pub(in crate::operator::join) async fn owned_native_matches(
         &mut self,
         plan: &SidePlan,
-        admitted: Vec<AdmittedRow>,
+        admitted: AdmittedBatch,
         context: &StreamOperatorContext<'_>,
-    ) -> (ProbeAttempt, Vec<AdmittedRow>) {
-        let inputs = match self.capture_probe(plan, admitted) {
-            Ok(Capture::Declined(admitted, keys)) => {
-                return (ProbeAttempt::Serial(keys), admitted);
-            }
-            Ok(Capture::Ready(inputs)) => inputs,
-            Err(error) => return (ProbeAttempt::Complete(Err(error)), Vec::new()),
+    ) -> (ProbeAttempt, AdmittedBatch) {
+        let captured = match self.capture_probe(plan, admitted) {
+            Ok(captured) => captured,
+            Err(error) => return (ProbeAttempt::Complete(Err(error)), AdmittedBatch::default()),
         };
+        if let Some((admitted, keys)) = captured.declined {
+            return (ProbeAttempt::Serial(keys), admitted);
+        }
+        let inputs = captured.ready.expect("captured probe inputs");
         let result = self.dispatch_native_probe(&inputs, context).await;
         let recovered = self.recover_probe(inputs, context).await;
         let (admitted, keys) = match recovered {
             Ok(recovered) => recovered,
-            Err(error) => return (ProbeAttempt::Complete(Err(error)), Vec::new()),
+            Err(error) => return (ProbeAttempt::Complete(Err(error)), AdmittedBatch::default()),
         };
         let attempt = match result {
             Ok(None) => ProbeAttempt::Serial(Some(keys)),
@@ -53,17 +68,29 @@ impl StreamJoinOperator {
         (attempt, admitted)
     }
 
-    fn capture_probe(&mut self, plan: &SidePlan, admitted: Vec<AdmittedRow>) -> Result<Capture> {
+    fn capture_probe(&mut self, plan: &SidePlan, admitted: AdmittedBatch) -> Result<Capture> {
         if !self.probe_ready(plan, admitted.len())? {
-            return Ok(Capture::Declined(admitted, None));
+            return Ok(Capture::declined(admitted, None));
         }
         let Some(keys) = self.native_probe_keys(plan, &admitted)? else {
-            return Ok(Capture::Declined(admitted, None));
+            return Ok(Capture::declined(admitted, None));
         };
+        self.capture_keyed_probe(plan, admitted, keys)
+    }
+
+    fn capture_keyed_probe(
+        &mut self,
+        plan: &SidePlan,
+        mut admitted: AdmittedBatch,
+        keys: NativeKeys,
+    ) -> Result<Capture> {
         let bytes = control::input_bytes(keys.keys.len(), admitted.len(), &self.name)?;
         let Some(credit) = self.optional_credit(bytes)? else {
-            return Ok(Capture::Declined(admitted, Some(keys)));
+            return Ok(Capture::declined(admitted, Some(keys)));
         };
+        if !admitted.detach(self)? {
+            return Ok(Capture::declined(admitted, Some(keys)));
+        }
         let control = Arc::new(credit);
         let opposite = if plan.incoming_is_left {
             &self.state.right
@@ -82,12 +109,12 @@ impl StreamJoinOperator {
             .map(|&id| index.run_len_by_id(id))
             .sum();
         if estimated_visits < super::probe_min_visits() {
-            return Ok(Capture::Declined(admitted, Some(keys)));
+            return Ok(Capture::declined(admitted, Some(keys)));
         }
         let (released, receiver) = tokio::sync::oneshot::channel();
         self.compaction_release = Some(receiver);
         self.probe_control = Some(Arc::clone(&control));
-        Ok(Capture::Ready(Arc::new(ProbeInputs {
+        Ok(Capture::ready(Arc::new(ProbeInputs {
             admitted,
             keys: Some(keys),
             slots,
@@ -229,7 +256,7 @@ impl StreamJoinOperator {
         &mut self,
         inputs: Arc<ProbeInputs>,
         context: &StreamOperatorContext<'_>,
-    ) -> Result<(Vec<AdmittedRow>, NativeKeys)> {
+    ) -> Result<(AdmittedBatch, NativeKeys)> {
         context.check_cancelled()?;
         self.await_probe_attempt(context).await?;
         let mut inputs =

@@ -240,6 +240,15 @@ including field order, names, types, nullability and metadata. Restore requires 
 compiled descriptor exactly, including for empty and terminal state; broader
 or narrower projected descriptors fail. Full-retention plans reject layout 3.
 
+Join validates ingress and input schema before reserving batch-admission
+metadata. Inputs with at most 64 physical rows and four record batches use
+inline metadata storage; larger inputs require a checked workspace reservation
+before row classification. Under an explicitly finite runtime memory pool,
+refusal reports a workspace error before row-level semantic errors, output or
+new retained-state commit. This is separate from state and match limits and
+does not increment their failure counters. The default runtime has no implicit
+memory-pool limit.
+
 Admission preserves null/late classification and computes retained rows' V1
 logical charges from the complete input before selecting columns. Layout 3
 carries those authoritative historical charges. Every historical row's charge

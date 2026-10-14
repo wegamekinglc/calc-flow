@@ -117,7 +117,6 @@ fn remap<K: ArrowDictionaryKeyType>(
                 source: key.as_usize(),
                 row_id: 0,
                 time: crate::EventTime::from_micros(0),
-                retain: true,
             });
             Ok(*entry.insert(index))
         }
@@ -134,7 +133,7 @@ fn selected_values(
     if selected.is_empty() {
         return empty_values(values.data_type(), workspace, funding, check);
     }
-    super::super::copy_column(values, selected, workspace, funding, check)
+    super::super::copy_column(values, selected.into(), workspace, funding, check)
 }
 
 fn empty_values(

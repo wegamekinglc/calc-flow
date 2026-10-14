@@ -135,7 +135,6 @@ fn selection(rows: &[StoredRow], check: &dyn Fn() -> Result<()>) -> Result<Vec<S
                 source: row.record.offset(),
                 row_id: row.row_id,
                 time: row.event_time,
-                retain: true,
             })
         })
         .collect()

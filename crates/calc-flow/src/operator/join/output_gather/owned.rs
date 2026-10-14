@@ -1,5 +1,5 @@
 use super::super::{
-    MatchedPair, canonical_column, columnar::RowPayload, materialization::JoinOutput,
+    MatchedPair, PayloadRef, canonical_column, columnar::RowPayload, materialization::JoinOutput,
     operator_error,
 };
 use crate::runtime::streaming::gather_work::{
@@ -73,9 +73,9 @@ fn profitable(rows: usize, columns: usize) -> bool {
     rows >= MIN_ROWS && columns >= MIN_COLUMNS
 }
 
-fn records<'a>(output: &'a JoinOutput<'_>, pair: &MatchedPair) -> (&'a RowPayload, &'a RowPayload) {
-    let incoming = &output.admitted[pair.pos].record;
-    let opposite = &output.opposite[pair.opposite_index].record;
+fn records<'a>(output: &'a JoinOutput<'_>, pair: &MatchedPair) -> (PayloadRef<'a>, PayloadRef<'a>) {
+    let incoming = output.admitted.row(pair.pos).record;
+    let opposite = (&output.opposite[pair.opposite_index].record).into();
     if output.incoming_is_left {
         (incoming, opposite)
     } else {
@@ -96,15 +96,18 @@ fn supports_capture(output: &JoinOutput<'_>, range: &Range<usize>) -> bool {
         return false;
     }
     let matched = &output.matched[range.clone()];
-    if matched.is_empty()
-        || !matched.iter().all(|pair| {
-            let (left, right) = records(output, pair);
-            left.shared_columns().is_some() && right.shared_columns().is_some()
-        })
-    {
+    if matched.is_empty() || !matched.iter().all(|pair| detached_pair(output, pair)) {
         return false;
     }
     true
+}
+
+fn detached_pair(output: &JoinOutput<'_>, pair: &MatchedPair) -> bool {
+    let (left, right) = records(output, pair);
+    left.shared_columns().is_some()
+        && right.shared_columns().is_some()
+        && left.owner().is_some()
+        && right.owner().is_some()
 }
 
 async fn capture(

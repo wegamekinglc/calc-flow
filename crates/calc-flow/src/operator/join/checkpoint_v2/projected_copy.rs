@@ -13,7 +13,7 @@ use datafusion::{
 
 use super::super::{
     StreamJoinOperator, canonical_column,
-    columnar::{CopySelection, SelectedRow},
+    columnar::{OwnedSelection, SelectedRow, SelectedRows},
     concat_output_column, output_gather,
 };
 use super::{
@@ -76,7 +76,6 @@ pub(in crate::operator::join) fn assert_selected_copy_budget() {
             source,
             row_id: u64::try_from(source).unwrap(),
             time: crate::EventTime::from_micros(100),
-            retain: true,
         })
         .collect::<Vec<_>>();
     let copied = copy(
@@ -120,7 +119,6 @@ fn assert_sparse_copy(
             source,
             row_id: u64::try_from(source).unwrap(),
             time: crate::EventTime::from_micros(100),
-            retain: true,
         })
         .collect::<Vec<_>>();
     let indices = UInt64Array::from(
@@ -160,7 +158,7 @@ fn assert_sparse_copy(
 
 struct CopyWork {
     record: RecordBatch,
-    rows: CopySelection,
+    rows: OwnedSelection,
     schemas: [SchemaRef; 2],
     retirement: Option<RetirementGuard>,
     input_controls: MemoryReservation,
@@ -181,9 +179,9 @@ impl OwnedCpuWork for CopyWork {
     fn run(self, stop: &GatherStop) -> Result<Self::Output> {
         #[cfg(not(test))]
         {
-            copy(
+            copy_selected(
                 &self.record,
-                &self.rows.rows,
+                self.rows.rows(),
                 self.schemas.clone(),
                 &self.input_controls,
                 self.retirement,
@@ -194,9 +192,9 @@ impl OwnedCpuWork for CopyWork {
         {
             let hook = self.hook.clone();
             test_support::note(hook.as_ref(), false);
-            let result = copy(
+            let result = copy_selected(
                 &self.record,
-                &self.rows.rows,
+                self.rows.rows(),
                 self.schemas.clone(),
                 &self.input_controls,
                 self.retirement,
@@ -214,7 +212,7 @@ impl StreamJoinOperator {
     pub(in crate::operator::join) async fn copy_projected_payload(
         &mut self,
         record: RecordBatch,
-        rows: CopySelection,
+        rows: OwnedSelection,
         input_controls: MemoryReservation,
         context: &StreamOperatorContext<'_>,
     ) -> Result<Arc<OwnedPayload>> {
@@ -288,9 +286,22 @@ impl StreamJoinOperator {
     }
 }
 
+#[cfg(test)]
 pub(super) fn copy(
     record: &RecordBatch,
     rows: &[SelectedRow],
+    schemas: [SchemaRef; 2],
+    credit: &MemoryReservation,
+    retirement: Option<RetirementGuard>,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<Arc<OwnedPayload>> {
+    check()?;
+    copy_selected(record, rows.into(), schemas, credit, retirement, check)
+}
+
+fn copy_selected(
+    record: &RecordBatch,
+    rows: SelectedRows<'_>,
     schemas: [SchemaRef; 2],
     credit: &MemoryReservation,
     retirement: Option<RetirementGuard>,
@@ -323,12 +334,12 @@ pub(super) fn copy_shared(
         ])?,
     )?;
     let funding = Funding::shared(schemas, resident, retirement);
-    copy_funded(record, rows, &workspace, &funding, check)
+    copy_funded(record, rows.into(), &workspace, &funding, check)
 }
 
 fn copy_funded(
     record: &RecordBatch,
-    rows: &[SelectedRow],
+    rows: SelectedRows<'_>,
     workspace: &MemoryReservation,
     funding: &Arc<Funding>,
     check: &dyn Fn() -> Result<()>,
@@ -355,7 +366,7 @@ fn seed(schema: &SchemaRef) -> Result<usize> {
 
 fn copy_column(
     array: &ArrayRef,
-    rows: &[SelectedRow],
+    rows: SelectedRows<'_>,
     workspace: &MemoryReservation,
     funding: &Arc<Funding>,
     check: &dyn Fn() -> Result<()>,
@@ -371,7 +382,7 @@ fn copy_column(
 
 fn selected_slices(
     array: &ArrayRef,
-    rows: &[SelectedRow],
+    rows: SelectedRows<'_>,
     slices_credit: &MemoryReservation,
     check: &dyn Fn() -> Result<()>,
 ) -> Result<Vec<ArrayRef>> {
@@ -380,10 +391,10 @@ fn selected_slices(
     slice_runs(array, rows, runs, check)
 }
 
-fn contiguous_runs(rows: &[SelectedRow], check: &dyn Fn() -> Result<()>) -> Result<usize> {
+fn contiguous_runs(rows: SelectedRows<'_>, check: &dyn Fn() -> Result<()>) -> Result<usize> {
     let mut runs = 0;
     let mut previous: Option<usize> = None;
-    for row in rows {
+    for row in rows.iter() {
         check()?;
         if previous.is_none_or(|previous| previous.checked_add(1) != Some(row.source)) {
             runs = add(runs, 1)?;
@@ -395,7 +406,7 @@ fn contiguous_runs(rows: &[SelectedRow], check: &dyn Fn() -> Result<()>) -> Resu
 
 fn slice_runs(
     array: &ArrayRef,
-    rows: &[SelectedRow],
+    rows: SelectedRows<'_>,
     runs: usize,
     check: &dyn Fn() -> Result<()>,
 ) -> Result<Vec<ArrayRef>> {
@@ -404,17 +415,17 @@ fn slice_runs(
     while start < rows.len() {
         check()?;
         let end = run_end(rows, start, check)?;
-        slices.push(array.slice(rows[start].source, end - start));
+        slices.push(array.slice(rows.at(start).source, end - start));
         start = end;
     }
     debug_assert_eq!(slices.len(), runs);
     Ok(slices)
 }
 
-fn run_end(rows: &[SelectedRow], start: usize, check: &dyn Fn() -> Result<()>) -> Result<usize> {
+fn run_end(rows: SelectedRows<'_>, start: usize, check: &dyn Fn() -> Result<()>) -> Result<usize> {
     for index in start + 1..rows.len() {
         check()?;
-        if rows[index - 1].source.checked_add(1) != Some(rows[index].source) {
+        if rows.at(index - 1).source.checked_add(1) != Some(rows.at(index).source) {
             return Ok(index);
         }
     }

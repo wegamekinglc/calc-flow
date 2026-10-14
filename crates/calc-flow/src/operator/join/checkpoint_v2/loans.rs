@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use super::super::{AdmittedRow, SidePlan, SqlKeyOwners, StreamJoinOperator, decode_key_pairs};
+use super::super::{AdmittedBatch, SidePlan, SqlKeyOwners, StreamJoinOperator, decode_key_pairs};
 use super::ContainerFunding;
 use crate::Result;
 use crate::datafusion::owned;
@@ -21,7 +21,7 @@ impl V2SqlOwners {
         }
     }
 
-    fn finish(self) -> Vec<AdmittedRow> {
+    fn finish(self) -> AdmittedBatch {
         let Self {
             inner,
             _containers: containers,
@@ -37,7 +37,7 @@ impl StreamJoinOperator {
         &mut self,
         plan: &SidePlan,
         input: owned::Input<V2SqlOwners>,
-    ) -> (Result<Vec<(u64, u64)>>, Vec<AdmittedRow>) {
+    ) -> (Result<Vec<(u64, u64)>>, AdmittedBatch) {
         let result = self
             .runtime
             .runtime()
@@ -57,7 +57,7 @@ impl StreamJoinOperator {
         &mut self,
         plan: &SidePlan,
         failure: owned::Failure<V2SqlOwners>,
-    ) -> (Result<Vec<(u64, u64)>>, Vec<AdmittedRow>) {
+    ) -> (Result<Vec<(u64, u64)>>, AdmittedBatch) {
         let retry = failure
             .error
             .retry_legacy(failure.input.owner().inner.scratch.is_some());

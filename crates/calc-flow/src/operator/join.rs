@@ -2281,6 +2281,11 @@ struct JoinWork {
     generic_fast_rows: usize,
     admission_grants: usize,
     admitted_row_records: usize,
+    admission_segment_lookups: usize,
+    sql_probe_segment_selects: usize,
+    output_row_batch_views: usize,
+    sparse_index_writes: usize,
+    sparse_prefix_promoted: usize,
     quantum_steps: usize,
     quantum_boundaries: usize,
     borrowed_key_hashes: usize,
@@ -2302,7 +2307,7 @@ thread_local! {
         output_source_lookups: 0,
         native_key_lookups: 0,
         scalar_admissions: 0, generic_fast_rows: 0, admission_grants: 0,
-        admitted_row_records: 0,
+        admitted_row_records: 0, admission_segment_lookups: 0, sql_probe_segment_selects: 0, output_row_batch_views: 0, sparse_index_writes: 0, sparse_prefix_promoted: 0,
         quantum_steps: 0, quantum_boundaries: 0,
         borrowed_key_hashes: 0, borrowed_key_equalities: 0,
         key_type_resolutions: 0, arena_frames: 0,
@@ -2794,12 +2799,12 @@ struct CachedRetainedKeys {
 
 struct SqlKeyOwners {
     _retained: Arc<Vec<StoredRow>>,
-    admitted: Vec<AdmittedRow>,
+    admitted: AdmittedBatch,
     scratch: Option<Arc<sql_key_scratch::ScratchFunding>>,
 }
 
 impl SqlKeyOwners {
-    fn finish(self) -> Vec<AdmittedRow> {
+    fn finish(self) -> AdmittedBatch {
         let Self {
             _retained: retained,
             admitted,
@@ -2832,6 +2837,7 @@ const PROBE_POS_COLUMN: &str = "__cf_join_pos";
 const STATE_RID_COLUMN: &str = "__cf_join_row_id";
 
 /// One incoming row that passed null-key, null-event-time, and lateness admission.
+#[cfg(test)]
 struct AdmittedRow {
     record: columnar::RowPayload,
     event_time: EventTime,
@@ -2844,10 +2850,7 @@ struct AdmissionBundle {
     quantum: columnar::Quantum,
     next_row_id: u64,
     metrics: SideMetrics,
-    admitted: Vec<AdmittedRow>,
-    /// Source row offsets of admitted rows, aligning charge vectors with
-    /// `admitted` when admission drops rows.
-    admitted_source_rows: Vec<usize>,
+    admitted: AdmittedBatch,
     had_late: bool,
 }
 
@@ -3186,6 +3189,8 @@ mod benchmark_checkpoint;
 pub(crate) use benchmark_checkpoint::run_checkpoint_history_diagnostic;
 
 mod admission_masks;
+mod admitted;
+use admitted::{AdmittedBatch, AdmittedRows, PayloadRef};
 mod borrowed_key;
 mod checkpoint_compaction;
 mod checkpoint_v2;
@@ -3223,7 +3228,7 @@ impl PreparedMatches {
 
 struct PreparedJoinBatch {
     output: Vec<MatchedPair>,
-    admitted: Vec<AdmittedRow>,
+    admitted: AdmittedBatch,
     incoming_is_left: bool,
     retained: Vec<StoredRow>,
     next_row_id: u64,
@@ -3495,31 +3500,36 @@ impl StreamJoinOperator {
         context: &StreamOperatorContext<'_>,
     ) -> Result<PreparedJoinBatch> {
         let plan = self.begin_batch(ingress, batch)?;
-        let mut bundle = self.admission_bundle(&plan);
+        let mut bundle = self.admission_bundle(&plan, batch)?;
+        let charges = self
+            .admit_batch_records(ingress, batch, &plan, context, &mut bundle)
+            .await?;
+        bundle.finish(&self.name)?;
+        let matches = self
+            .evaluate_matches(&plan, &mut bundle.admitted, context)
+            .await?;
+        let admitted_charges = admitted_charge_cache(charges, &bundle.admitted);
+        self.finish_prepared(&plan, bundle, matches, admitted_charges, context)
+            .await
+    }
+
+    async fn admit_batch_records(
+        &mut self,
+        ingress: &str,
+        batch: &Batch,
+        plan: &SidePlan,
+        context: &StreamOperatorContext<'_>,
+        bundle: &mut AdmissionBundle,
+    ) -> Result<Option<Vec<u64>>> {
         let mut charges: Option<Vec<u64>> = Some(Vec::new());
         let mut source_row_base = 0_usize;
         for record in batch.table_payload()?.batches() {
             append_admission_charges(&mut charges, record)?;
-            self.admit_record(
-                record,
-                &plan,
-                ingress,
-                context,
-                &mut bundle,
-                source_row_base,
-            )
-            .await?;
+            self.admit_record(record, plan, ingress, context, bundle, source_row_base)
+                .await?;
             source_row_base += record.num_rows();
         }
-        bundle.finish(&self.name)?;
-        let (matches, admitted) = self
-            .evaluate_matches(&plan, std::mem::take(&mut bundle.admitted), context)
-            .await;
-        bundle.admitted = admitted;
-        let matches = matches?;
-        let admitted_charges = admitted_charge_cache(charges, &bundle.admitted_source_rows);
-        self.finish_prepared(&plan, bundle, matches, admitted_charges, context)
-            .await
+        Ok(charges)
     }
 
     async fn finish_prepared(
@@ -3530,6 +3540,7 @@ impl StreamJoinOperator {
         admitted_charges: Option<Vec<u64>>,
         context: &StreamOperatorContext<'_>,
     ) -> Result<PreparedJoinBatch> {
+        bundle.admitted.prepare_retained_parents();
         let mut retained = retained_rows(
             &bundle.admitted,
             &plan.key_indices,
@@ -3592,7 +3603,7 @@ impl StreamJoinOperator {
         }
     }
 
-    fn admission_bundle(&self, plan: &SidePlan) -> AdmissionBundle {
+    fn admission_bundle(&mut self, plan: &SidePlan, batch: &Batch) -> Result<AdmissionBundle> {
         let (next_row_id, metrics) = if plan.incoming_is_left {
             (self.state.next_left_row_id, self.state.metrics.left.clone())
         } else {
@@ -3601,14 +3612,13 @@ impl StreamJoinOperator {
                 self.state.metrics.right.clone(),
             )
         };
-        AdmissionBundle {
+        Ok(AdmissionBundle {
             quantum: columnar::Quantum::default(),
             next_row_id,
             metrics,
-            admitted: Vec::new(),
-            admitted_source_rows: Vec::new(),
+            admitted: AdmittedBatch::reserve(self, batch)?,
             had_late: false,
-        }
+        })
     }
 
     async fn admit_record(
@@ -3641,41 +3651,34 @@ impl StreamJoinOperator {
         quantum: &mut columnar::Quantum,
     ) -> Result<()> {
         let (record, plan, ingress, source_row_base) = source;
-        if self
+        let index = bundle
+            .admitted
+            .begin_record(bundle.next_row_id, source_row_base);
+        let copy = self
             .can_copy_admitted_payload(record, plan, context, quantum)
-            .await?
-            && let Some(mut selection) = columnar::CopySelection::reserve(self, record.num_rows())?
-        {
-            self.select_copy_rows(
-                (record, plan, ingress),
-                context,
-                bundle,
-                &mut selection,
-                quantum,
-            )
             .await?;
-            let shared = self
-                .owned_payload(record, plan.port_index, &selection.rows, context, quantum)
-                .await?;
-            bundle
-                .append_copy_rows(
+        self.admit_legacy_record((record, plan, ingress, index), context, bundle, quantum)
+            .await?;
+        let range = bundle.admitted.group_range(index);
+        if copy && !range.is_empty() {
+            let rows = admitted::AdmittedGroup::new(&bundle.admitted, range);
+            if let Some(chunk) = self
+                .owned_payload(
                     record,
-                    shared.as_ref(),
-                    &selection.rows,
+                    plan.port_index,
+                    columnar::SelectedRows::Admitted(rows),
                     context,
-                    source_row_base,
                     quantum,
                 )
-                .await?;
-            return Ok(());
+                .await?
+            {
+                bundle
+                    .admitted
+                    .replace(index, columnar::RowPayload::Shared { chunk, row: 0 });
+            }
         }
-        self.admit_legacy_record(
-            (record, plan, ingress, source_row_base),
-            context,
-            bundle,
-            quantum,
-        )
-        .await
+        bundle.admitted.complete_record();
+        Ok(())
     }
 
     fn admission_mask_context<'a>(
@@ -3693,40 +3696,6 @@ impl StreamJoinOperator {
         }
     }
 
-    async fn select_copy_rows(
-        &self,
-        source: (&RecordBatch, &SidePlan, &str),
-        context: &StreamOperatorContext<'_>,
-        bundle: &mut AdmissionBundle,
-        selection: &mut columnar::CopySelection,
-        quantum: &mut columnar::Quantum,
-    ) -> Result<()> {
-        let (record, plan, ingress) = source;
-        let times = BatchEventTimes::new(
-            record.column(plan.event_time_index).as_ref(),
-            &self.name,
-            ingress,
-        )?;
-        let config = self.admission_mask_context(source, context);
-        for start in (0..record.num_rows()).step_by(64) {
-            let length = (record.num_rows() - start).min(64);
-            let masks = admission_masks::AdmissionMasks::new(
-                &config, &times, start, length, context, quantum,
-            )
-            .await?;
-            self.select_masked_rows(
-                (plan, ingress),
-                (start, length, &masks),
-                context,
-                bundle,
-                selection,
-                quantum,
-            )
-            .await?;
-        }
-        Ok(())
-    }
-
     fn masked_row(
         &self,
         masks: &admission_masks::AdmissionMasks,
@@ -3738,33 +3707,6 @@ impl StreamJoinOperator {
         note_join_work(|work| work.scalar_admissions += 1);
         let row_id = bundle.reserve_row_id(&self.name)?;
         Ok((row_id, masks.at(offset, &self.name, ingress)?))
-    }
-
-    async fn select_masked_rows(
-        &self,
-        source: (&SidePlan, &str),
-        block: (usize, usize, &admission_masks::AdmissionMasks),
-        context: &StreamOperatorContext<'_>,
-        bundle: &mut AdmissionBundle,
-        selection: &mut columnar::CopySelection,
-        quantum: &mut columnar::Quantum,
-    ) -> Result<()> {
-        let (_, ingress) = source;
-        let (start, length, masks) = block;
-        for offset in 0..length {
-            quantum.step(context, 4, 16).await?;
-            let (row_id, admission) = self.masked_row(masks, offset, ingress, bundle)?;
-            match admission {
-                RowAdmission::Dropped(kind) => bundle.note_dropped(kind, &self.name)?,
-                RowAdmission::Admitted(time) => selection.rows.push(columnar::SelectedRow {
-                    source: start + offset,
-                    row_id,
-                    time,
-                    retain: masks.retain(offset),
-                }),
-            }
-        }
-        Ok(())
     }
 
     async fn admit_legacy_record(
@@ -3780,7 +3722,6 @@ impl StreamJoinOperator {
             &self.name,
             ingress,
         )?;
-        let parent = Arc::new(record.clone());
         let config = self.admission_mask_context((record, plan, ingress), context);
         for start in (0..record.num_rows()).step_by(64) {
             let length = (record.num_rows() - start).min(64);
@@ -3789,7 +3730,7 @@ impl StreamJoinOperator {
             )
             .await?;
             self.append_masked_rows(
-                (&parent, plan, ingress, source_row_base),
+                (record, plan, ingress, source_row_base),
                 (start, length, &masks),
                 context,
                 bundle,
@@ -3802,50 +3743,61 @@ impl StreamJoinOperator {
 
     async fn append_masked_rows(
         &self,
-        source: (&Arc<RecordBatch>, &SidePlan, &str, usize),
+        source: (&RecordBatch, &SidePlan, &str, usize),
         block: (usize, usize, &admission_masks::AdmissionMasks),
         context: &StreamOperatorContext<'_>,
         bundle: &mut AdmissionBundle,
         quantum: &mut columnar::Quantum,
     ) -> Result<()> {
-        let (parent, _, ingress, source_row_base) = source;
+        let (_, _, ingress, record_index) = source;
         let (start, length, masks) = block;
         if masks.all_admitted(length) && bundle.next_row_id.checked_add(length as u64).is_some() {
-            return Self::append_proven_rows(
-                (parent, source_row_base),
-                block,
+            return Self::append_proven_rows(record_index, block, context, bundle, quantum).await;
+        }
+        for offset in 0..length {
+            quantum.step(context, 4, 16).await?;
+            let (_, admission) = self.masked_row(masks, offset, ingress, bundle)?;
+            self.append_classified_row(
+                (
+                    record_index,
+                    start + offset,
+                    admission,
+                    masks.retain(offset),
+                ),
                 context,
                 bundle,
                 quantum,
             )
-            .await;
+            .await?;
         }
-        for offset in 0..length {
-            quantum.step(context, 4, 16).await?;
-            let (row_id, admission) = self.masked_row(masks, offset, ingress, bundle)?;
-            match admission {
-                RowAdmission::Dropped(kind) => bundle.note_dropped(kind, &self.name)?,
-                RowAdmission::Admitted(event_time) => {
-                    bundle.push_admitted(AdmittedRow {
-                        record: columnar::RowPayload::Rowed {
-                            parent: Arc::clone(parent),
-                            row: start + offset,
-                        },
-                        event_time,
-                        row_id,
-                        retain: masks.retain(offset),
-                    });
-                    bundle
-                        .admitted_source_rows
-                        .push(source_row_base + start + offset);
-                }
+        Ok(())
+    }
+
+    async fn append_classified_row(
+        &self,
+        row: (usize, usize, RowAdmission, bool),
+        context: &StreamOperatorContext<'_>,
+        bundle: &mut AdmissionBundle,
+        quantum: &mut columnar::Quantum,
+    ) -> Result<()> {
+        let (record_index, physical, admission, retain) = row;
+        match admission {
+            RowAdmission::Dropped(kind) => bundle.note_dropped(kind, &self.name)?,
+            RowAdmission::Admitted(event_time) => {
+                bundle
+                    .admitted
+                    .ensure_selection(record_index, physical, context, quantum)
+                    .await?;
+                bundle
+                    .admitted
+                    .push_ready(record_index, physical, event_time, retain);
             }
         }
         Ok(())
     }
 
     async fn append_proven_rows(
-        source: (&Arc<RecordBatch>, usize),
+        source: usize,
         block: (usize, usize, &admission_masks::AdmissionMasks),
         context: &StreamOperatorContext<'_>,
         bundle: &mut AdmissionBundle,
@@ -3855,10 +3807,16 @@ impl StreamJoinOperator {
         let mut offset = 0;
         while offset < length {
             let grant = quantum.grant_admission(context, length - offset).await?;
-            let first_id = bundle.next_row_id;
             // The immutable whole-block check proves every chunk's ID range fits.
             bundle.next_row_id += grant as u64;
-            bundle.append_granted_rows(source, (start, offset..offset + grant, masks), first_id);
+            bundle
+                .append_granted_rows(
+                    source,
+                    (start, offset..offset + grant, masks),
+                    context,
+                    quantum,
+                )
+                .await?;
             offset += grant;
         }
         Ok(())
@@ -3867,71 +3825,65 @@ impl StreamJoinOperator {
     async fn evaluate_matches(
         &mut self,
         plan: &SidePlan,
-        admitted: Vec<AdmittedRow>,
+        admitted: &mut AdmittedBatch,
         context: &StreamOperatorContext<'_>,
-    ) -> (Result<PreparedMatches>, Vec<AdmittedRow>) {
+    ) -> Result<PreparedMatches> {
         let opposite = if plan.incoming_is_left {
             &self.state.right
         } else {
             &self.state.left
         };
         if admitted.is_empty() {
-            return (Ok(PreparedMatches::legacy(Vec::new())), admitted);
+            return Ok(PreparedMatches::legacy(Vec::new()));
         }
         if opposite.is_empty() {
-            let keys = self.native_probe_keys(plan, &admitted);
-            return (
-                keys.map(|keys| PreparedMatches {
+            return self
+                .native_probe_keys(plan, admitted)
+                .map(|keys| PreparedMatches {
                     pairs: Vec::new(),
                     keys,
                     credit: None,
-                }),
-                admitted,
-            );
+                });
         }
-        let (owned, admitted) = self.owned_native_matches(plan, admitted, context).await;
+        let (owned, recovered) = self
+            .owned_native_matches(plan, std::mem::take(admitted), context)
+            .await;
+        *admitted = recovered;
         let keys = match owned {
-            data_work::ProbeAttempt::Complete(result) => return (result, admitted),
+            data_work::ProbeAttempt::Complete(result) => return result,
             data_work::ProbeAttempt::Serial(keys) => keys,
         };
-        match self.native_matches(plan, &admitted, keys) {
+        match self.native_matches(plan, admitted, keys) {
             Ok(Some(native)) => {
-                return (
-                    Ok(PreparedMatches {
-                        pairs: native.pairs,
-                        keys: Some(native.keys),
-                        credit: Some(native.credit),
-                    }),
-                    admitted,
-                );
+                return Ok(PreparedMatches {
+                    pairs: native.pairs,
+                    keys: Some(native.keys),
+                    credit: Some(native.credit),
+                });
             }
-            Err(error) => return (Err(error), admitted),
+            Err(error) => return Err(error),
             Ok(None) => {}
         }
-        let (matched, admitted) = self.legacy_matches(plan, admitted, context).await;
-        (matched.map(PreparedMatches::legacy), admitted)
+        self.legacy_matches(plan, admitted, context)
+            .await
+            .map(PreparedMatches::legacy)
     }
 
     async fn legacy_matches(
         &mut self,
         plan: &SidePlan,
-        admitted: Vec<AdmittedRow>,
+        admitted: &mut AdmittedBatch,
         context: &StreamOperatorContext<'_>,
-    ) -> (Result<Vec<MatchedPair>>, Vec<AdmittedRow>) {
-        let state_keys = match self.owned_state_keys(plan, context).await {
-            Ok(keys) => keys,
-            Err(error) => return (Err(error), admitted),
-        };
-        let (equal_pairs, admitted) = self.sql_key_pairs_owned(plan, admitted, state_keys).await;
-        let matched =
-            equal_pairs.and_then(|pairs| self.ordered_sql_matches(plan, &admitted, pairs));
-        (matched, admitted)
+    ) -> Result<Vec<MatchedPair>> {
+        let state_keys = self.owned_state_keys(plan, context).await?;
+        let pairs = self.sql_key_pairs_owned(plan, admitted, state_keys).await?;
+        self.ordered_sql_matches(plan, admitted, pairs)
     }
 
     fn ordered_sql_matches(
         &mut self,
         plan: &SidePlan,
-        admitted: &[AdmittedRow],
+        admitted: &dyn AdmittedRows,
         equal_pairs: Vec<(u64, u64)>,
     ) -> Result<Vec<MatchedPair>> {
         let opposite = if plan.incoming_is_left {
@@ -3953,7 +3905,7 @@ impl StreamJoinOperator {
     async fn sql_key_pairs(
         &mut self,
         plan: &SidePlan,
-        admitted: &[AdmittedRow],
+        admitted: &dyn AdmittedRows,
         state_keys: RecordBatch,
     ) -> Result<Vec<(u64, u64)>> {
         let probe = probe_key_batch(
@@ -3973,16 +3925,12 @@ impl StreamJoinOperator {
     async fn sql_key_pairs_owned(
         &mut self,
         plan: &SidePlan,
-        admitted: Vec<AdmittedRow>,
+        admitted: &mut AdmittedBatch,
         state_keys: sql_key_scratch::KeyBatch,
-    ) -> (Result<Vec<(u64, u64)>>, Vec<AdmittedRow>) {
-        let runtime = match self.runtime.runtime() {
-            Ok(runtime) => runtime,
-            Err(error) => return (Err(error), admitted),
-        };
-        if !runtime.serial_owned_sql() {
+    ) -> Result<Vec<(u64, u64)>> {
+        if !self.runtime.runtime()?.serial_owned_sql() || !admitted.detach(self)? {
             drop(state_keys);
-            return self.legacy_key_retry(plan, admitted).await;
+            return self.legacy_key_retry_borrowed(plan, admitted).await;
         }
         let retained = if plan.incoming_is_left {
             &self.state.right.0
@@ -3991,30 +3939,45 @@ impl StreamJoinOperator {
         };
         let owner = SqlKeyOwners {
             _retained: Arc::clone(retained),
-            admitted,
+            admitted: std::mem::take(admitted),
             scratch: state_keys.funding,
         };
         let tables = probe_key_batch(&owner.admitted, &plan.key_indices, None)
             .and_then(|probe| equality_tables(probe, state_keys.batch));
         let tables = match tables {
             Ok(tables) => tables,
-            Err(error) => return (Err(error), owner.finish()),
+            Err(error) => {
+                *admitted = owner.finish();
+                return Err(error);
+            }
         };
-        if let Some(containers) = &self.v2_containers {
+        let (pairs, recovered) = if let Some(containers) = &self.v2_containers {
             let owner = checkpoint_v2::V2SqlOwners::new(owner, Arc::clone(containers));
             self.run_v2_owned_key_query(plan, crate::datafusion::owned::Input::new(tables, owner))
                 .await
         } else {
             self.run_owned_key_query(plan, crate::datafusion::owned::Input::new(tables, owner))
                 .await
-        }
+        };
+        *admitted = recovered;
+        pairs
+    }
+
+    async fn legacy_key_retry_borrowed(
+        &mut self,
+        plan: &SidePlan,
+        admitted: &mut AdmittedBatch,
+    ) -> Result<Vec<(u64, u64)>> {
+        let (result, recovered) = self.legacy_key_retry(plan, std::mem::take(admitted)).await;
+        *admitted = recovered;
+        result
     }
 
     async fn run_owned_key_query(
         &mut self,
         plan: &SidePlan,
         input: crate::datafusion::owned::Input<SqlKeyOwners>,
-    ) -> (Result<Vec<(u64, u64)>>, Vec<AdmittedRow>) {
+    ) -> (Result<Vec<(u64, u64)>>, AdmittedBatch) {
         let result = self
             .runtime
             .runtime()
@@ -4034,7 +3997,7 @@ impl StreamJoinOperator {
         &mut self,
         plan: &SidePlan,
         failure: crate::datafusion::owned::Failure<SqlKeyOwners>,
-    ) -> (Result<Vec<(u64, u64)>>, Vec<AdmittedRow>) {
+    ) -> (Result<Vec<(u64, u64)>>, AdmittedBatch) {
         let retry = failure
             .error
             .retry_legacy(failure.input.owner().scratch.is_some());
@@ -4066,8 +4029,8 @@ impl StreamJoinOperator {
     async fn legacy_key_retry(
         &mut self,
         plan: &SidePlan,
-        admitted: Vec<AdmittedRow>,
-    ) -> (Result<Vec<(u64, u64)>>, Vec<AdmittedRow>) {
+        admitted: AdmittedBatch,
+    ) -> (Result<Vec<(u64, u64)>>, AdmittedBatch) {
         self.discard_paid_key_cache(plan);
         let result = match self.opposite_state_keys(plan) {
             Ok(keys) => self.sql_key_pairs(plan, &admitted, keys).await,
@@ -4918,63 +4881,35 @@ impl SidePlan {
 }
 
 impl AdmissionBundle {
-    async fn append_copy_rows(
+    async fn append_granted_rows(
         &mut self,
-        record: &RecordBatch,
-        shared: Option<&Arc<columnar::PayloadChunk>>,
-        rows: &[columnar::SelectedRow],
-        context: &StreamOperatorContext<'_>,
-        source_row_base: usize,
-        quantum: &mut columnar::Quantum,
-    ) -> Result<()> {
-        for (offset, row) in rows.iter().enumerate() {
-            quantum.step(context, 1, 0).await?;
-            self.push_admitted(AdmittedRow {
-                record: columnar::RowPayload::at(
-                    record,
-                    shared,
-                    if shared.is_some() { offset } else { row.source },
-                ),
-                event_time: row.time,
-                row_id: row.row_id,
-                retain: row.retain,
-            });
-            self.admitted_source_rows.push(source_row_base + row.source);
-        }
-        Ok(())
-    }
-
-    fn append_granted_rows(
-        &mut self,
-        source: (&Arc<RecordBatch>, usize),
+        record_index: usize,
         block: (
             usize,
             std::ops::Range<usize>,
             &admission_masks::AdmissionMasks,
         ),
-        first_id: u64,
-    ) {
-        let (parent, source_row_base) = source;
+        context: &StreamOperatorContext<'_>,
+        quantum: &mut columnar::Quantum,
+    ) -> Result<()> {
         let (start, offsets, masks) = block;
-        let first_offset = offsets.start;
+        self.admitted
+            .ensure_selection(record_index, start + offsets.start, context, quantum)
+            .await?;
         #[cfg(test)]
         note_join_work(|work| {
             work.admission_grants += 1;
             work.generic_fast_rows += offsets.len();
         });
         for offset in offsets {
-            self.push_admitted(AdmittedRow {
-                record: columnar::RowPayload::Rowed {
-                    parent: Arc::clone(parent),
-                    row: start + offset,
-                },
-                event_time: masks.admitted_time(offset),
-                row_id: first_id + (offset - first_offset) as u64,
-                retain: masks.retain(offset),
-            });
-            self.admitted_source_rows
-                .push(source_row_base + start + offset);
+            self.admitted.push_ready(
+                record_index,
+                start + offset,
+                masks.admitted_time(offset),
+                masks.retain(offset),
+            );
         }
+        Ok(())
     }
 
     fn reserve_row_id(&mut self, operator_id: &str) -> Result<u64> {
@@ -5012,12 +4947,6 @@ impl AdmissionBundle {
             }
         }
         Ok(())
-    }
-
-    fn push_admitted(&mut self, row: AdmittedRow) {
-        #[cfg(test)]
-        note_join_work(|work| work.admitted_row_records += 1);
-        self.admitted.push(row);
     }
 
     fn finish(&mut self, operator_id: &str) -> Result<()> {
@@ -5108,7 +5037,7 @@ fn state_row_count(rows: &[StoredRow], operator_id: &str) -> Result<u64> {
 }
 
 fn retained_rows(
-    admitted: &[AdmittedRow],
+    admitted: &dyn AdmittedRows,
     key_indices: &[usize],
     operator_id: &str,
     native_keys: Option<&native_lookup::NativeKeys>,
@@ -5137,7 +5066,7 @@ fn retained_rows(
             )?;
             Ok(StoredRow {
                 encoded_key,
-                record: row.record.clone(),
+                record: row.record.owned(),
                 event_time: row.event_time,
                 row_id: row.row_id,
                 charge,
@@ -5146,8 +5075,12 @@ fn retained_rows(
         .collect()
 }
 
-fn admitted_charge_cache(charges: Option<Vec<u64>>, rows: &[usize]) -> Option<Vec<u64>> {
-    charges.map(|charges| rows.iter().map(|row| charges[*row]).collect())
+fn admitted_charge_cache(charges: Option<Vec<u64>>, rows: &dyn AdmittedRows) -> Option<Vec<u64>> {
+    charges.map(|charges| {
+        (0..rows.len())
+            .map(|row| charges[rows.source_index(row)])
+            .collect()
+    })
 }
 
 fn append_admission_charges(charges: &mut Option<Vec<u64>>, record: &RecordBatch) -> Result<()> {
@@ -5180,23 +5113,58 @@ fn enforce_match_limit(
 
 /// Builds the admitted-row scratch table with renamed key columns.
 fn probe_key_batch(
-    admitted: &[AdmittedRow],
+    admitted: &dyn AdmittedRows,
     key_indices: &[usize],
     declared: Option<&Schema>,
 ) -> Result<RecordBatch> {
-    let records = admitted
+    let first = admitted.row(0);
+    let schema = declared.unwrap_or(first.record.schema_ref());
+    let mut fields = Vec::with_capacity(key_indices.len() + 1);
+    let mut columns = Vec::with_capacity(key_indices.len() + 1);
+    for (position, &key_index) in key_indices.iter().enumerate() {
+        let field = schema.field(key_index);
+        fields.push(Field::new(
+            format!("{KEY_COLUMN_PREFIX}{position}"),
+            field.data_type().clone(),
+            field.is_nullable(),
+        ));
+        let selected = admitted
+            .groups()
+            .map(|group| selected_probe_column(group, key_index))
+            .collect::<Result<Vec<_>>>()?;
+        let references = selected.iter().map(AsRef::as_ref).collect::<Vec<_>>();
+        columns.push(canonical_column(
+            concat_column(&references)?,
+            field.data_type(),
+        ));
+    }
+    fields.push(Field::new(PROBE_POS_COLUMN, DataType::UInt64, false));
+    columns.push(Arc::new(UInt64Array::from_iter_values(
+        (0..admitted.len()).map(|index| index as u64),
+    )));
+    RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).map_err(|error| {
+        CalcFlowError::Internal {
+            message: format!("stream Join equality probe assembly failed: {error}"),
+        }
+    })
+}
+
+fn selected_probe_column(group: admitted::AdmittedGroup<'_>, key_index: usize) -> Result<ArrayRef> {
+    let first = group.row(0).record;
+    let contiguous = group
         .iter()
-        .map(|row| row.record.view())
-        .collect::<Vec<_>>();
-    let positions = UInt64Array::from_iter_values(
-        (0..admitted.len()).map(|index| u64::try_from(index).expect("row count fits u64")),
-    );
-    key_probe_batch(
-        &records,
-        key_indices,
-        PROBE_POS_COLUMN,
-        &positions,
-        declared,
+        .enumerate()
+        .all(|(index, row)| row.record.offset() == first.offset() + index);
+    #[cfg(test)]
+    note_join_work(|work| work.sql_probe_segment_selects += 1);
+    if contiguous {
+        return Ok(first.column(key_index).slice(first.offset(), group.len()));
+    }
+    let indices = UInt64Array::from_iter_values(group.iter().map(|row| row.record.offset() as u64));
+    datafusion::arrow::compute::take(first.column(key_index).as_ref(), &indices, None).map_err(
+        |error| CalcFlowError::Internal {
+            message: format!("stream Join selected key column failed: {error}"),
+        },
     )
 }
 
@@ -5309,7 +5277,7 @@ fn u64_column<'a>(
 fn filter_and_order_pairs(
     bounds: &JoinTimeBounds,
     plan: &SidePlan,
-    admitted: &[AdmittedRow],
+    admitted: &dyn AdmittedRows,
     opposite: &[StoredRow],
     equal_pairs: Vec<(u64, u64)>,
 ) -> Vec<MatchedPair> {
@@ -5321,7 +5289,7 @@ fn filter_and_order_pairs(
             let opposite_index = *row_id_index
                 .get(&rid)
                 .expect("state row ids index retained rows");
-            let incoming = &admitted[pos];
+            let incoming = admitted.row(pos);
             let candidate = &opposite[opposite_index];
             let in_bounds = if plan.incoming_is_left {
                 bounds.contains_pair(
@@ -5361,7 +5329,7 @@ fn index_by_row_id(opposite: &[StoredRow]) -> BTreeMap<u64, usize> {
 #[cfg(test)]
 fn materialize_output_record(
     output_schema: &SchemaRef,
-    admitted: &[AdmittedRow],
+    admitted: &dyn AdmittedRows,
     opposite: &[StoredRow],
     matched: &[MatchedPair],
     incoming_is_left: bool,

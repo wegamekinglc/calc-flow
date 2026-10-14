@@ -987,7 +987,7 @@ stronger delivery still
 requires the [complete route proof](#delivery-requirements). Durable recovery
 follows the physical state-layout contract below.
 
-The working set includes retained state, admitted input references,
+The working set includes retained state, admitted input references and metadata,
 `O(matches)` pair descriptors, equality-probe scratch space, preflight
 allocations, the current output chunk, and chunks held by edges or sinks.
 Funded native matching interns repeated keys in each admitted batch and uses

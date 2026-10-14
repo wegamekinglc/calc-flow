@@ -155,9 +155,9 @@ async fn admitted_probe(
     ingress: &str,
     batch: &Batch,
     context: &StreamOperatorContext<'_>,
-) -> (SidePlan, Vec<AdmittedRow>) {
+) -> (SidePlan, AdmittedBatch) {
     let plan = operator.begin_batch(ingress, batch).unwrap();
-    let mut bundle = operator.admission_bundle(&plan);
+    let mut bundle = operator.admission_bundle(&plan, batch).unwrap();
     operator
         .admit_record(
             &batch.table_payload().unwrap().batches()[0],
@@ -179,8 +179,8 @@ async fn assert_reference(
     batch: &Batch,
     context: &StreamOperatorContext<'_>,
 ) {
-    let (plan, admitted) = admitted_probe(operator, ingress, batch, context).await;
-    let (reference, admitted) = operator.legacy_matches(&plan, admitted, context).await;
+    let (plan, mut admitted) = admitted_probe(operator, ingress, batch, context).await;
+    let reference = operator.legacy_matches(&plan, &mut admitted, context).await;
     let reference = reference.unwrap();
     reset_join_work();
     let native = operator
@@ -240,7 +240,7 @@ async fn compare_key_case(key: &ArrayRef, incoming_is_left: bool) {
 async fn test_native_key_types_match_sql_order_in_both_directions() {
     for key in key_cases() {
         for incoming_is_left in [false, true] {
-            compare_key_case(&key, incoming_is_left).await;
+            Box::pin(compare_key_case(&key, incoming_is_left)).await;
         }
     }
     assert_native_arena_all_key_types_preserve_exact_v1_frames().await;
@@ -562,13 +562,12 @@ async fn assert_native_arena_composite_frames_use_shared_rowed_and_legacy_offset
     let job = job();
     let context = StreamOperatorContext::new(&job, "match", None);
     let (mut plan, mut admitted) = admitted_probe(&mut operator, "right", &source, &context).await;
-    assert!(
-        admitted
-            .iter()
-            .all(|row| matches!(row.record, columnar::RowPayload::Shared { .. }))
-    );
+    assert!(admitted.iter().all(|row| matches!(
+        row.record.owner(),
+        Some(columnar::RowPayload::Shared { .. })
+    )));
     plan.key_indices = vec![0, 2];
-    admitted.push(AdmittedRow {
+    admitted.push_fixture(AdmittedRow {
         record: columnar::RowPayload::Rowed {
             parent: Arc::new(record.slice(1, 2)),
             row: 1,
@@ -577,7 +576,7 @@ async fn assert_native_arena_composite_frames_use_shared_rowed_and_legacy_offset
         row_id: 4,
         retain: false,
     });
-    admitted.push(AdmittedRow {
+    admitted.push_fixture(AdmittedRow {
         record: record.slice(3, 1).into(),
         event_time: EventTime::from_micros(0),
         row_id: 5,
@@ -778,7 +777,7 @@ async fn native_index_budget_denial(service: &crate::runtime::streaming::gather_
     operator.restore(&captured).unwrap();
     let (plan, admitted) =
         admitted_probe(&mut operator, "right", &right_batch(vec![1]), &context).await;
-    let admitted_paid = payload_funding(admitted.iter().map(|row| &row.record));
+    let admitted_paid = payload_funding(admitted.iter().filter_map(|row| row.record.owner()));
     let before = operator.status();
     let runtime = operator.runtime.runtime().unwrap();
     let pool = runtime.incremental_memory_pool();
@@ -791,7 +790,10 @@ async fn native_index_budget_denial(service: &crate::runtime::streaming::gather_
             .is_none()
     );
     reset_join_work();
-    let (matches, admitted) = operator.evaluate_matches(&plan, admitted, &context).await;
+    let mut admitted = admitted;
+    let matches = operator
+        .evaluate_matches(&plan, &mut admitted, &context)
+        .await;
     let failure = matches.err().unwrap();
     assert!(matches!(failure, CalcFlowError::DataFusion { .. }));
     assert_eq!(join_work().sql_probe_table_builds, 1);
@@ -875,7 +877,7 @@ async fn empty_native_result_credit(service: &crate::runtime::streaming::gather_
         .incremental_memory_pool();
     let paid = pool.reserved();
     let key_capacity = native.keys.keys.capacity();
-    let admitted_paid = payload_funding(admitted.iter().map(|row| &row.record));
+    let admitted_paid = payload_funding(admitted.iter().filter_map(|row| row.record.owner()));
     let state_paid = state_funding(&operator);
     let (home, generation, attempt) = job.gather_owner().funding();
     assert_eq!(attempt, 0);
@@ -937,7 +939,10 @@ async fn native_fallback_index_refund(
         .try_grow((1 << 30) - pool.reserved() - headroom)
         .unwrap();
     reset_join_work();
-    let (reference, admitted) = operator.legacy_matches(&plan, admitted, &context).await;
+    let mut admitted = admitted;
+    let reference = operator
+        .legacy_matches(&plan, &mut admitted, &context)
+        .await;
     let reference = reference.expect("original SQL must accept the identical pressure budget");
     let reference_builds = join_work().sql_probe_table_builds;
     assert!(reference_builds > 0);
@@ -945,7 +950,10 @@ async fn native_fallback_index_refund(
     assert!(operator.state.left.1.is_none());
     assert_eq!(pool.reserved(), (1 << 30) - headroom);
     reset_join_work();
-    let (actual, admitted) = operator.evaluate_matches(&plan, admitted, &context).await;
+    let mut admitted = admitted;
+    let actual = operator
+        .evaluate_matches(&plan, &mut admitted, &context)
+        .await;
     let actual = actual.expect("declined native scratch must refund unused index before SQL");
     let pairs = |rows: &[MatchedPair]| {
         rows.iter()

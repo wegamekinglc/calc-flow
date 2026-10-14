@@ -1,4 +1,6 @@
 #[cfg(test)]
+use super::AdmittedRow;
+#[cfg(test)]
 use super::StoredRow;
 use super::borrowed_key::KeyHashState;
 use super::borrowed_key::framed_hash;
@@ -7,7 +9,7 @@ use super::key_arena::{ArenaLayout, visit_key_frames, visit_string_values};
 use super::native_dictionary::BASE_BYTES;
 pub(super) use super::native_dictionary::{AppendCredit, NativeIndex};
 use super::{
-    AdmittedRow, CompiledJoin, JoinTimeBounds, MatchedPair, SidePlan, StreamJoinOperator,
+    AdmittedRows, CompiledJoin, JoinTimeBounds, MatchedPair, SidePlan, StreamJoinOperator,
     enforce_match_limit,
 };
 use crate::{CalcFlowError, EventTime, Result};
@@ -291,7 +293,7 @@ impl ProbeKeyInterner {
 }
 
 fn intern_probe_keys(
-    admitted: &[AdmittedRow],
+    admitted: &dyn AdmittedRows,
     indices: &[usize],
     credit: Arc<MemoryReservation>,
     name: &str,
@@ -323,7 +325,7 @@ fn intern_probe_keys(
 
 #[cfg(test)]
 pub(super) fn colliding_probe_keys(
-    admitted: &[AdmittedRow],
+    admitted: &dyn AdmittedRows,
     indices: &[usize],
     credit: MemoryReservation,
 ) -> Result<NativeKeys> {
@@ -355,7 +357,7 @@ impl StreamJoinOperator {
     pub(super) fn native_matches(
         &mut self,
         plan: &SidePlan,
-        admitted: &[AdmittedRow],
+        admitted: &dyn AdmittedRows,
         keys: Option<NativeKeys>,
     ) -> Result<Option<NativeMatches>> {
         if !eligible(&self.compiled, self.input_schema(0)) {
@@ -379,7 +381,7 @@ impl StreamJoinOperator {
     fn probe_native_index(
         &mut self,
         plan: &SidePlan,
-        admitted: &[AdmittedRow],
+        admitted: &dyn AdmittedRows,
         keys: Option<NativeKeys>,
     ) -> Result<Option<NativeMatches>> {
         let keys = match keys {
@@ -395,7 +397,7 @@ impl StreamJoinOperator {
     pub(super) fn native_probe_keys(
         &mut self,
         plan: &SidePlan,
-        admitted: &[AdmittedRow],
+        admitted: &dyn AdmittedRows,
     ) -> Result<Option<NativeKeys>> {
         if !eligible(&self.compiled, self.input_schema(0)) {
             return Ok(None);
@@ -415,7 +417,7 @@ impl StreamJoinOperator {
     fn collect_native_pairs(
         &mut self,
         plan: &SidePlan,
-        admitted: &[AdmittedRow],
+        admitted: &dyn AdmittedRows,
         keys: NativeKeys,
     ) -> Result<Option<NativeMatches>> {
         let opposite = if plan.incoming_is_left {
@@ -545,7 +547,7 @@ pub(super) fn time_range(
     )
 }
 
-pub(super) fn probe_key_charge(admitted: &[AdmittedRow], indices: &[usize]) -> Result<usize> {
+pub(super) fn probe_key_charge(admitted: &dyn AdmittedRows, indices: &[usize]) -> Result<usize> {
     let extra = admitted
         .len()
         .checked_mul(size_of::<u32>() + size_of::<Option<u32>>())
@@ -582,7 +584,7 @@ pub(super) fn scratch_error(name: &str) -> CalcFlowError {
 
 fn count_pairs(
     windows: &ProbeWindows<'_>,
-    admitted: &[AdmittedRow],
+    admitted: &dyn AdmittedRows,
     bounds: JoinTimeBounds,
     plan: &SidePlan,
     limit: u64,

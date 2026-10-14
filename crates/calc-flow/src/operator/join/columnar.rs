@@ -8,11 +8,13 @@ use std::{ops::Deref, sync::Arc};
 mod metadata;
 mod owned_copy;
 pub(super) mod restored;
+mod selection;
 mod sparse;
 pub(super) use metadata::schema_inventory;
-pub(super) use owned_copy::{CopySelection, Quantum, SelectedRow};
+pub(super) use owned_copy::{CopySelection, Quantum, SelectedRow, reservation_control};
 #[cfg(test)]
 pub(super) use owned_copy::{observe_string_allocations, take_string_allocations};
+pub(super) use selection::{OwnedSelection, SelectedRows};
 pub(super) use sparse::SparseQueue;
 
 #[derive(Clone)]
@@ -106,6 +108,23 @@ impl From<RecordBatch> for RowPayload {
 }
 
 impl RowPayload {
+    pub(super) fn with_offset(&self, offset: usize) -> Self {
+        match self {
+            Self::Legacy(record) => Self::Legacy(record.slice(offset, 1)),
+            Self::Rowed { parent, .. } => Self::Rowed {
+                parent: Arc::clone(parent),
+                row: offset,
+            },
+            Self::Shared { chunk, .. } => Self::Shared {
+                chunk: Arc::clone(chunk),
+                row: offset,
+            },
+            Self::RestoredV2 { chunk, .. } => Self::RestoredV2 {
+                chunk: Arc::clone(chunk),
+                row: offset,
+            },
+        }
+    }
     #[cfg(test)]
     pub(super) fn is_unfunded_legacy(&self) -> bool {
         matches!(self, Self::Legacy(_) | Self::Rowed { .. })
@@ -189,6 +208,7 @@ impl RowPayload {
         &self.columns()[index]
     }
 
+    #[cfg(test)]
     pub(super) fn column_view(&self, index: usize) -> ArrayRef {
         #[cfg(test)]
         super::note_join_work(|work| work.output_column_views += 1);
@@ -212,6 +232,7 @@ impl RowPayload {
             .sum()
     }
 
+    #[cfg(test)]
     pub(super) fn at(record: &RecordBatch, shared: Option<&Arc<PayloadChunk>>, row: usize) -> Self {
         shared.map_or_else(
             || Self::Legacy(record.slice(row, 1)),

@@ -1,4 +1,4 @@
-use super::{canonical_column, columnar::RowPayload, concat_output_column};
+use super::{PayloadRef, canonical_column, concat_output_column};
 use crate::Result;
 use datafusion::arrow::{
     array::{ArrayRef, UInt64Array},
@@ -25,7 +25,7 @@ pub(super) enum SideGather<'a> {
 }
 
 impl<'a> SideGather<'a> {
-    pub(super) fn new(mut payloads: impl Iterator<Item = &'a RowPayload>) -> Option<Self> {
+    pub(super) fn new(mut payloads: impl Iterator<Item = PayloadRef<'a>>) -> Option<Self> {
         let first = payloads.next()?;
         let columns = first.shared_columns()?;
         let mut rows = Vec::with_capacity(payloads.size_hint().0 + 1);
@@ -45,7 +45,7 @@ impl<'a> SideGather<'a> {
     fn multiple(
         first_columns: &'a [ArrayRef],
         first_rows: Vec<u64>,
-        payloads: impl Iterator<Item = &'a RowPayload>,
+        payloads: impl Iterator<Item = PayloadRef<'a>>,
     ) -> Option<Self> {
         let mut columns = vec![first_columns];
         let mut previous = ((first_columns.as_ptr(), first_columns.len()), 0);
@@ -119,7 +119,7 @@ pub(super) fn column<'a>(
     gather: Option<&SideGather<'_>>,
     index: usize,
     canonical: &DataType,
-    payloads: impl Iterator<Item = &'a RowPayload>,
+    payloads: impl Iterator<Item = PayloadRef<'a>>,
 ) -> Result<ArrayRef> {
     #[cfg(test)]
     let _observation = test_support::observe(test_support::hook(), index);

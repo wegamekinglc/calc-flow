@@ -179,8 +179,8 @@ async fn production_fallback_case(nonserial: bool) {
         .unwrap()
         .incremental_memory_pool();
     let plan = operator.side_plan("right").unwrap();
-    let mut bundle = operator.admission_bundle(&plan);
     let input = right_batch(vec![0]);
+    let mut bundle = operator.admission_bundle(&plan, &input).unwrap();
     operator
         .admit_record(
             &input.table_payload().unwrap().batches()[0],
@@ -213,9 +213,10 @@ async fn production_fallback_case(nonserial: bool) {
     }
     let before = operator.status();
     crate::datafusion::owned::observe_legacy_inputs();
-    let (pairs, admitted) = operator
-        .sql_key_pairs_owned(&plan, std::mem::take(&mut bundle.admitted), keys)
+    let pairs = operator
+        .sql_key_pairs_owned(&plan, &mut bundle.admitted, keys)
         .await;
+    let admitted = std::mem::take(&mut bundle.admitted);
     assert_eq!(pairs.unwrap(), vec![(0, 0)]);
     assert_eq!(operator.status(), before);
     let mut records = crate::datafusion::owned::take_legacy_inputs();
@@ -253,12 +254,12 @@ async fn production_fallback_case(nonserial: bool) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_unproved_production_fallback_uses_true_legacy_schema() {
-    production_fallback_case(false).await;
+    Box::pin(production_fallback_case(false)).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_nonserial_production_fallback_uses_true_legacy_schema() {
-    production_fallback_case(true).await;
+    Box::pin(production_fallback_case(true)).await;
 }
 
 async fn collected_output_case(cancelled: bool) {
@@ -665,7 +666,10 @@ async fn test_closed_scratch_home_falls_back_without_spurious_cancel() {
         row_id: 0,
         retain: true,
     }];
-    let (matched, admitted) = operator.legacy_matches(&plan, admitted, &context).await;
+    let mut admitted: AdmittedBatch = admitted.into();
+    let matched = operator
+        .legacy_matches(&plan, &mut admitted, &context)
+        .await;
     assert_eq!(matched.unwrap().len(), 3);
     assert_eq!(operator.status(), before);
     assert_eq!(
@@ -736,8 +740,8 @@ async fn paid_key_pressure_case(
     .await;
     let context = StreamOperatorContext::new(&job, "match", None);
     let plan = operator.side_plan("right").unwrap();
-    let mut bundle = operator.admission_bundle(&plan);
     let input = right_batch(vec![0]);
+    let mut bundle = operator.admission_bundle(&plan, &input).unwrap();
     operator
         .admit_record(
             &input.table_payload().unwrap().batches()[0],
@@ -781,10 +785,9 @@ async fn paid_key_pressure_case(
         "the accepted baseline must be compared with an admitted paid copy"
     );
     crate::datafusion::owned::observe_legacy_inputs();
-    let (actual, admitted) = operator
-        .legacy_matches(&plan, std::mem::take(&mut bundle.admitted), &context)
+    let actual = operator
+        .legacy_matches(&plan, &mut bundle.admitted, &context)
         .await;
-    bundle.admitted = admitted;
     let retried = crate::datafusion::owned::take_legacy_inputs();
     assert_eq!(retried.len(), if headroom == 0 { 2 } else { 0 });
     drop(retried);
@@ -826,7 +829,7 @@ async fn string_budget_case(
     let plan = operator.side_plan("right").unwrap();
     let input = right_batch(vec![0]);
     let original = input.table_payload().unwrap().batches()[0].clone();
-    let mut baseline = operator.admission_bundle(&plan);
+    let mut baseline = operator.admission_bundle(&plan, &input).unwrap();
     operator.payload_native_eligible = false;
     operator
         .admit_record(&original, &plan, "right", &context, &mut baseline, 0)
@@ -845,7 +848,7 @@ async fn string_budget_case(
         .unwrap()
         .incremental_memory_pool();
     let probe = AdmissionProbe::install(job.gather_owner(), stage, Arc::clone(&pool), 1 << 30);
-    let mut actual = operator.admission_bundle(&plan);
+    let mut actual = operator.admission_bundle(&plan, &input).unwrap();
     operator
         .admit_record(&original, &plan, "right", &context, &mut actual, 0)
         .await
@@ -856,10 +859,10 @@ async fn string_budget_case(
     assert_eq!(event.stage, stage);
     assert_eq!(event.operator, "stream-join-owned-string");
     assert_eq!(event.available + 1, event.fee);
-    assert!(matches!(
-        actual.admitted[0].record,
-        columnar::RowPayload::Legacy(_)
-    ));
+    assert!(
+        actual.admitted.row(0).record.owner().is_none(),
+        "declined copy keeps a borrowed segment"
+    );
     let raw = operator.opposite_state_keys(&plan).unwrap();
     assert_eq!(
         operator
@@ -902,7 +905,7 @@ async fn test_nonbudget_sql_error_does_not_retry_legacy() {
     let context = StreamOperatorContext::new(&job, "match", None);
     let plan = operator.side_plan("right").unwrap();
     let input = right_batch(vec![0]);
-    let mut bundle = operator.admission_bundle(&plan);
+    let mut bundle = operator.admission_bundle(&plan, &input).unwrap();
     operator
         .admit_record(
             &input.table_payload().unwrap().batches()[0],
@@ -921,9 +924,10 @@ async fn test_nonbudget_sql_error_does_not_retry_legacy() {
     .unwrap();
     let before = operator.status();
     crate::datafusion::owned::observe_legacy_inputs();
-    let (result, admitted) = operator
-        .sql_key_pairs_owned(&plan, std::mem::take(&mut bundle.admitted), keys)
+    let result = operator
+        .sql_key_pairs_owned(&plan, &mut bundle.admitted, keys)
         .await;
+    let admitted = std::mem::take(&mut bundle.admitted);
     assert!(
         result
             .unwrap_err()

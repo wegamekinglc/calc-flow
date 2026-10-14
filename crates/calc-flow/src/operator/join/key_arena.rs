@@ -1,4 +1,7 @@
-use super::{AdmittedRow, charge_overflow, key_type_tag, native_dictionary::BASE_BYTES};
+use super::{
+    AdmittedRows, admitted::AdmittedGroup, charge_overflow, key_type_tag,
+    native_dictionary::BASE_BYTES,
+};
 use crate::Result;
 use datafusion::arrow::{
     array::{Array, BooleanArray, LargeStringArray, PrimitiveArray, StringArray},
@@ -22,7 +25,7 @@ fn err() -> crate::CalcFlowError {
 }
 
 impl ArenaLayout {
-    pub(super) fn measure(rows: &[AdmittedRow], indices: &[usize]) -> Result<Option<Self>> {
+    pub(super) fn measure(rows: &dyn AdmittedRows, indices: &[usize]) -> Result<Option<Self>> {
         let Some(extra) = rows
             .len()
             .checked_mul(size_of::<u32>() + size_of::<Option<u32>>())
@@ -44,58 +47,40 @@ impl ArenaLayout {
         Ok(Some(layout))
     }
 
-    fn measure_group(&mut self, rows: &[AdmittedRow], indices: &[usize]) -> Result<bool> {
+    fn measure_group(&mut self, rows: AdmittedGroup<'_>, indices: &[usize]) -> Result<bool> {
         let mut maximum = 0_usize;
         for &index in indices {
-            let Some(column) = KeyColumn::bind(rows[0].record.column(index).as_ref()) else {
+            let Some(column) = KeyColumn::bind(rows.row(0).record.column(index).as_ref()) else {
                 return Ok(false);
             };
-            if column.array.null_count() > 0 {
-                // A null key cell keeps the exact per-row framing path away.
+            let Some((sum, largest)) = column_extent(&column, rows) else {
                 return Ok(false);
-            }
+            };
             self.single_string &=
                 matches!(column.values, KeyValues::Utf8(_) | KeyValues::LargeUtf8(_));
-            if u32::try_from(column.timezone.len()).is_err() {
-                return Ok(false);
-            }
-            let Some((sum_len, max_len)) = column.values.extent(rows) else {
-                return Ok(false);
-            };
-            if u32::try_from(max_len).is_err() {
-                return Ok(false);
-            }
-            let row_count = rows.len();
-            // One frame per cell: tag+timezone+length prefix (9 bytes) plus the
-            // value; one charge unit: 4 * (value + value length prefix + 1 +
-            // timezone + 64), exactly as the per-cell walk computed.
-            let frame_const = column
-                .timezone
-                .len()
-                .checked_add(9)
-                .ok_or_else(|| super::native_lookup::scratch_error("join"))?;
-            self.bytes = sum_len
-                .checked_add(row_count.checked_mul(frame_const).ok_or_else(err)?)
-                .and_then(|bytes| self.bytes.checked_add(bytes))
-                .ok_or_else(err)?;
-            let charge_per_row = column
-                .timezone
-                .len()
-                .checked_add(column.values.prefix())
-                .and_then(|n| n.checked_add(65))
-                .ok_or_else(err)?;
-            self.charge = row_count
-                .checked_mul(charge_per_row)
-                .and_then(|n| n.checked_add(sum_len))
-                .and_then(|n| n.checked_mul(4))
-                .and_then(|n| self.charge.checked_add(n))
-                .ok_or_else(err)?;
-            maximum = maximum
-                .checked_add(max_len.checked_add(frame_const).ok_or_else(err)?)
-                .ok_or_else(err)?;
+            let size = self.measure_column(rows.len(), &column, sum, largest)?;
+            maximum = maximum.checked_add(size).ok_or_else(err)?;
         }
         self.row_bytes = self.row_bytes.max(maximum);
         Ok(true)
+    }
+
+    fn measure_column(
+        &mut self,
+        count: usize,
+        column: &KeyColumn<'_>,
+        sum: usize,
+        largest: usize,
+    ) -> Result<usize> {
+        let frame = column.timezone.len().checked_add(9).ok_or_else(err)?;
+        self.bytes = count
+            .checked_mul(frame)
+            .and_then(|bytes| bytes.checked_add(sum))
+            .and_then(|bytes| self.bytes.checked_add(bytes))
+            .ok_or_else(err)?;
+        let charge = column_charge(count, column, sum)?;
+        self.charge = self.charge.checked_add(charge).ok_or_else(err)?;
+        largest.checked_add(frame).ok_or_else(err)
     }
 
     pub(super) fn fits(self, rows: usize, columns: usize) -> bool {
@@ -106,6 +91,28 @@ impl ArenaLayout {
     pub(super) fn peak(self, rows: usize, columns: usize) -> Option<usize> {
         probe_peak(self.bytes, self.row_bytes, rows, columns)
     }
+}
+
+fn column_extent(column: &KeyColumn<'_>, rows: AdmittedGroup<'_>) -> Option<(usize, usize)> {
+    if column.array.null_count() > 0 || u32::try_from(column.timezone.len()).is_err() {
+        return None;
+    }
+    let extent = column.values.extent(rows)?;
+    u32::try_from(extent.1).ok()?;
+    Some(extent)
+}
+
+fn column_charge(count: usize, column: &KeyColumn<'_>, sum: usize) -> Result<usize> {
+    let fixed = column
+        .timezone
+        .len()
+        .checked_add(column.values.prefix())
+        .and_then(|bytes| bytes.checked_add(65));
+    fixed
+        .and_then(|fixed| count.checked_mul(fixed))
+        .and_then(|bytes| bytes.checked_add(sum))
+        .and_then(|bytes| bytes.checked_mul(4))
+        .ok_or_else(err)
 }
 
 fn probe_peak(bytes: usize, row_bytes: usize, rows: usize, columns: usize) -> Option<usize> {
@@ -145,19 +152,19 @@ fn table_peak(rows: usize) -> Option<usize> {
         .checked_mul(2)
 }
 
-fn parent_groups(rows: &[AdmittedRow]) -> impl Iterator<Item = &[AdmittedRow]> {
-    rows.chunk_by(|a, b| std::ptr::eq(a.record.columns(), b.record.columns()))
+fn parent_groups(rows: &dyn AdmittedRows) -> impl Iterator<Item = AdmittedGroup<'_>> {
+    rows.groups()
 }
 
 pub(super) fn visit_string_values(
-    rows: &[AdmittedRow],
+    rows: &dyn AdmittedRows,
     index: usize,
     mut visit: impl FnMut(u8, &[u8]) -> Result<()>,
 ) -> Result<()> {
     for group in parent_groups(rows) {
-        let column = KeyColumn::bind(group[0].record.column(index).as_ref())
+        let column = KeyColumn::bind(group.row(0).record.column(index).as_ref())
             .expect("readonly sizing validated a string key column");
-        for row in group {
+        for row in group.iter() {
             let value = match &column.values {
                 KeyValues::Utf8(values) => values.value(row.record.offset()),
                 KeyValues::LargeUtf8(values) => values.value(row.record.offset()),
@@ -170,7 +177,7 @@ pub(super) fn visit_string_values(
 }
 
 pub(super) fn visit_key_frames(
-    rows: &[AdmittedRow],
+    rows: &dyn AdmittedRows,
     indices: &[usize],
     layout: ArenaLayout,
     mut visit: impl FnMut(&[u8]) -> Result<()>,
@@ -180,11 +187,11 @@ pub(super) fn visit_key_frames(
     for group in parent_groups(rows) {
         writers.clear();
         for &index in indices {
-            let column = KeyColumn::bind(group[0].record.column(index).as_ref())
+            let column = KeyColumn::bind(group.row(0).record.column(index).as_ref())
                 .expect("readonly typed sizing validated key column");
             writers.push(KeyWriter::new(column));
         }
-        for row in group {
+        for row in group.iter() {
             buffer.clear();
             for writer in &writers {
                 writer.write(row.record.offset(), &mut buffer)?;
@@ -297,7 +304,7 @@ impl<'a> KeyValues<'a> {
 
     /// Summed and largest value length over the group's rows; `None` when a
     /// length cannot be framed. Fixed-width columns resolve in O(1).
-    fn extent(&self, rows: &[AdmittedRow]) -> Option<(usize, usize)> {
+    fn extent(&self, rows: AdmittedGroup<'_>) -> Option<(usize, usize)> {
         match self {
             Self::Boolean(_) => Some((rows.len(), 1)),
             Self::Signed(values) => Some((rows.len().checked_mul(values.width())?, values.width())),
@@ -307,7 +314,7 @@ impl<'a> KeyValues<'a> {
             Self::Utf8(_) | Self::LargeUtf8(_) => {
                 let mut sum = 0_usize;
                 let mut max = 0_usize;
-                for row in rows {
+                for row in rows.iter() {
                     let len = self.len(row.record.offset());
                     sum = sum.checked_add(len)?;
                     max = max.max(len);

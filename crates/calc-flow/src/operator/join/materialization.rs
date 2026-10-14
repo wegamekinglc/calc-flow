@@ -10,7 +10,9 @@ use std::{
 
 use datafusion::arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
 
-use super::{AdmittedRow, MatchedPair, StoredRow, columnar::RowPayload};
+#[cfg(test)]
+use super::AdmittedRow;
+use super::{AdmittedRows, MatchedPair, PayloadRef, StoredRow};
 use crate::batch::checked_accumulate;
 use crate::operator::output_chunk::OutputChunkErrors;
 use crate::operator::row_cost::{Offsets, fixed_width, variable_offsets};
@@ -19,7 +21,7 @@ use crate::{Batch, BatchMetadata, CalcFlowError, EdgeBudget, Result};
 pub(super) struct JoinOutput<'a> {
     pub(super) schema: &'a SchemaRef,
     pub(super) projection: Option<&'a Arc<[usize]>>,
-    pub(super) admitted: &'a [AdmittedRow],
+    pub(super) admitted: &'a dyn AdmittedRows,
     pub(super) opposite: &'a [StoredRow],
     pub(super) matched: &'a [MatchedPair],
     pub(super) incoming_is_left: bool,
@@ -93,9 +95,9 @@ impl JoinOutput<'_> {
         self.projection.map_or(ordinal, |columns| columns[ordinal])
     }
 
-    pub(super) fn records(&self, pair: &MatchedPair) -> (&RowPayload, &RowPayload) {
-        let incoming = &self.admitted[pair.pos].record;
-        let opposite = &self.opposite[pair.opposite_index].record;
+    pub(super) fn records(&self, pair: &MatchedPair) -> (PayloadRef<'_>, PayloadRef<'_>) {
+        let incoming = self.admitted.row(pair.pos).record;
+        let opposite = (&self.opposite[pair.opposite_index].record).into();
         if self.incoming_is_left {
             (incoming, opposite)
         } else {
@@ -171,7 +173,7 @@ impl JoinOutput<'_> {
         let mut start = 0;
         let mut chunk = FlatChunk::default();
         for (index, pair) in self.matched.iter().enumerate() {
-            let record = &self.admitted[pair.pos].record;
+            let record = self.admitted.row(pair.pos).record;
             let left = flat_row(
                 &mut incoming,
                 pair.pos,
@@ -182,7 +184,7 @@ impl JoinOutput<'_> {
             let right = flat_row(
                 &mut opposite,
                 pair.opposite_index,
-                &self.opposite[pair.opposite_index].record,
+                (&self.opposite[pair.opposite_index].record).into(),
                 record.num_columns(),
                 opposite_columns.as_deref(),
             )?;
@@ -217,14 +219,14 @@ impl JoinOutput<'_> {
         let incoming = estimated_rows(
             self.matched
                 .iter()
-                .map(|pair| (pair.pos, &self.admitted[pair.pos].record)),
+                .map(|pair| (pair.pos, self.admitted.row(pair.pos).record)),
             incoming_columns.as_deref(),
         )?;
         let opposite = estimated_rows(
             self.matched.iter().map(|pair| {
                 (
                     pair.opposite_index,
-                    &self.opposite[pair.opposite_index].record,
+                    (&self.opposite[pair.opposite_index].record).into(),
                 )
             }),
             opposite_columns.as_deref(),
@@ -282,7 +284,7 @@ fn nested_range_is_full(
 fn flat_row<'a>(
     rows: &'a mut [Option<FlatRow>],
     index: usize,
-    record: &RowPayload,
+    record: PayloadRef<'_>,
     column_offset: usize,
     projection: Option<&[(usize, usize)]>,
 ) -> Result<&'a FlatRow> {
@@ -308,7 +310,7 @@ fn flat_row<'a>(
 }
 
 fn row_columns<'a>(
-    record: &'a RowPayload,
+    record: PayloadRef<'a>,
     offset: usize,
     projection: Option<&'a [(usize, usize)]>,
 ) -> impl Iterator<Item = (usize, &'a datafusion::arrow::array::ArrayRef)> {
@@ -339,57 +341,37 @@ fn selected_width(offsets: &Offsets<'_>, row: usize) -> usize {
 }
 
 fn estimated_rows<'a>(
-    records: impl Iterator<Item = (usize, &'a RowPayload)>,
+    records: impl Iterator<Item = (usize, PayloadRef<'a>)>,
     projection: Option<&[(usize, usize)]>,
 ) -> Result<BTreeMap<usize, usize>> {
-    let mut records = records.peekable();
-    let projection = match (projection, records.peek()) {
-        (Some(columns), Some((_, record))) => Some(ProjectedRow::new(record, columns)),
-        _ => None,
-    };
     let mut rows = BTreeMap::new();
     for (index, record) in records {
         if let Entry::Vacant(entry) = rows.entry(index) {
-            let bytes = if let Some(projection) = &projection {
-                estimated(&projected_row(record, projection))?
-            } else {
-                estimated(&record.view())?
-            };
-            entry.insert(bytes);
+            entry.insert(estimated_row(record, projection)?);
         }
     }
     Ok(rows)
 }
 
-struct ProjectedRow {
-    indices: Vec<usize>,
-    schema: SchemaRef,
-}
-
-impl ProjectedRow {
-    fn new(record: &RowPayload, columns: &[(usize, usize)]) -> Self {
-        let indices = columns.iter().map(|&(index, _)| index).collect::<Vec<_>>();
-        let schema = Arc::new(
-            record
-                .schema_ref()
-                .project(&indices)
-                .expect("validated Join projection"),
-        );
-        Self { indices, schema }
-    }
-}
-
-fn projected_row(record: &RowPayload, projection: &ProjectedRow) -> RecordBatch {
-    RecordBatch::try_new_with_options(
-        Arc::clone(&projection.schema),
-        projection
-            .indices
-            .iter()
-            .map(|&index| record.column_view(index))
-            .collect(),
-        &datafusion::arrow::record_batch::RecordBatchOptions::new().with_row_count(Some(1)),
-    )
-    .expect("private Join payloads preserve canonical types")
+fn estimated_row(record: PayloadRef<'_>, projection: Option<&[(usize, usize)]>) -> Result<usize> {
+    #[cfg(test)]
+    tests::NESTED_VISITS.with(|count| count.set(count.get() + 1));
+    row_columns(record, 0, projection).try_fold(0_usize, |total, (_, column)| {
+        let bytes = column
+            .to_data()
+            .slice(record.offset(), 1)
+            .get_slice_memory_size()
+            .map_err(|error| CalcFlowError::InvalidArgument {
+                field: "batch".into(),
+                message: format!("Arrow slice memory could not be measured: {error}"),
+            })?;
+        total
+            .checked_add(bytes)
+            .ok_or_else(|| CalcFlowError::InvalidArgument {
+                field: "batch".into(),
+                message: "size sum overflowed usize".into(),
+            })
+    })
 }
 
 fn estimated(record: &RecordBatch) -> Result<usize> {
