@@ -785,13 +785,18 @@ def _row_local_conditional_field(
     if operation == "where":
         return Field(
             name,
-            children[1].data_type,
+            children[1].data_type
+            if children[1].data_type != "null"
+            else children[2].data_type,
             nullable=_where_result_is_nullable(node, children),
         )
     if operation == "coalesce":
         return Field(
             name,
-            children[0].data_type,
+            next(
+                (field.data_type for field in children if field.data_type != "null"),
+                "null",
+            ),
             nullable=all(field.nullable for field in children),
         )
     return Field(name, children[0].data_type, nullable=nullable)

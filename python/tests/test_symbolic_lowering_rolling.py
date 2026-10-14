@@ -436,6 +436,58 @@ def test_row_local_rolling_operands_execute_across_scalar_shapes() -> None:
     assert values["previous_filled"] == [None, None, 10.0, 30.0]
 
 
+@pytest.mark.parametrize("operation", ["coalesce", "where"])
+@pytest.mark.parametrize("typed_null", [False, True])
+def test_leading_null_rolling_operand_analyzes_and_collects(
+    operation: str, typed_null: bool
+) -> None:
+    schema = pa.schema(
+        [
+            pa.field("ts", pa.timestamp("us", tz="UTC"), nullable=False),
+            pa.field("symbol", pa.string(), nullable=False),
+            pa.field("seq", pa.uint64(), nullable=False),
+            pa.field("x", pa.float64(), nullable=False),
+        ]
+    )
+    data = pa.table(
+        {
+            "ts": [1, 2, 3],
+            "symbol": ["a"] * 3,
+            "seq": [1, 2, 3],
+            "x": [1.0, 2.0, 3.0],
+        },
+        schema=schema,
+    )
+    source = table_input(
+        "input",
+        schema=schema,
+        entity_by=["symbol"],
+        event_time="ts",
+        sequence_by=["seq"],
+    )
+    null = row.cast(None, "float64") if typed_null else None
+    operand = (
+        row.coalesce(null, source["x"])
+        if operation == "coalesce"
+        else row.where(source["x"] < 0.0, null, source["x"])
+    )
+    program = Program(
+        "leading-null-rolling",
+        engine="sql",
+        outputs={"output": source.select(value=ts.lag(operand))},
+    )
+
+    assert program.analyze().issues == ()
+    actual = program.collect({"input": data})["output"]
+
+    assert actual.schema == pa.schema([pa.field("value", pa.float64())])
+    assert actual.to_pydict() == {"value": [None, 1.0, 2.0]}
+    document = lower_program_document(program, Runtime(), "batch")
+    staged = document["graph"]["nodes"][0]["output_ports"][0]["schema"][-1]
+    assert staged["data_type"] == "float64"
+    assert staged["nullable"] is (operation == "where")
+
+
 def test_materialized_rolling_input_collision_is_rejected() -> None:
     quotes = _ordered()
     program = _program(
