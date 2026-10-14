@@ -1759,7 +1759,7 @@ class _Analyzer:
             )
             return ColumnFacts(None, True, anchor, states)
         return ColumnFacts(
-            left.data_type,
+            left.data_type if left.data_type is not None else right.data_type,
             left.nullable or right.nullable,
             anchor,
             states,
@@ -1771,12 +1771,15 @@ class _Analyzer:
             node.args,
             tuple(f"{role}.values[{index}]" for index in range(len(node.args))),
         )
-        first = operands[0]
+        data_type = next(
+            (facts.data_type for facts in operands if facts.data_type is not None),
+            None,
+        )
         for index, facts in enumerate(operands[1:], start=1):
             if (
-                first.data_type is not None
+                data_type is not None
                 and facts.data_type is not None
-                and facts.data_type != first.data_type
+                and facts.data_type != data_type
             ):
                 self.issue(
                     f"{role}.values[{index}].dtype",
@@ -1790,7 +1793,7 @@ class _Analyzer:
                     _column_state_union(operands),
                 )
         return ColumnFacts(
-            first.data_type,
+            data_type,
             all(facts.nullable for facts in operands),
             self._running_anchor(operands),
             _column_state_union(operands),
