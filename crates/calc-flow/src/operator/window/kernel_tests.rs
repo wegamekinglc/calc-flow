@@ -327,3 +327,174 @@ fn numeric_failures_preserve_first_aggregate_and_partial_scratch_state() {
         assert_eq!(state(&actual), state(&expected));
     }
 }
+
+/// The columnar two-pass fast path must reproduce the row-wise reference
+/// kernel bit for bit: same keys, same accumulator states (including
+/// compensated float bits), same logical usage.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the equivalence harness owns its wide input matrix inline"
+)]
+#[test]
+fn columnar_fast_path_matches_row_reference_bitwise() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(
+            "time",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            true,
+        ),
+        Field::new("group", DataType::Utf8, true),
+        Field::new("signed", DataType::Int64, true),
+        Field::new("unsigned", DataType::UInt64, true),
+        Field::new("float", DataType::Float64, true),
+        Field::new("small", DataType::Float32, true),
+    ]));
+    let spec = WindowSpec::hopping("time", Duration::from_micros(30), Duration::from_micros(10))
+        .unwrap()
+        .group_by(["group"])
+        .unwrap()
+        .aggregate(AggregateFunction::Count, "float", "count_float")
+        .unwrap()
+        .aggregate(AggregateFunction::Sum, "signed", "sum_signed")
+        .unwrap()
+        .aggregate(AggregateFunction::Sum, "unsigned", "sum_unsigned")
+        .unwrap()
+        .aggregate(AggregateFunction::Sum, "float", "sum_float")
+        .unwrap()
+        .aggregate(AggregateFunction::Min, "signed", "min_signed")
+        .unwrap()
+        .aggregate(AggregateFunction::Max, "float", "max_float")
+        .unwrap()
+        .aggregate(AggregateFunction::Avg, "float", "avg_float")
+        .unwrap()
+        .aggregate(AggregateFunction::Avg, "small", "avg_small")
+        .unwrap();
+
+    // Deterministic pseudo-random rows: out-of-order times, repeats, nulls in
+    // every column, late rows against the advanced watermark, extreme floats.
+    let groups = ["alpha", "beta", "gamma"];
+    let floats = [
+        0.5,
+        -1.25,
+        1e16,
+        -1e16,
+        f64::from_bits(0x7ff8_0000_0000_abcd),
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        -0.0,
+    ];
+    let mut times = Vec::new();
+    let mut group_column = Vec::new();
+    let mut signed = Vec::new();
+    let mut unsigned = Vec::new();
+    let mut float_column = Vec::new();
+    let mut small = Vec::new();
+    let mut seed = 0x1234_5678_9abc_def0_u64;
+    let mut next = || {
+        seed = seed
+            .wrapping_mul(0x6364_2364_6905)
+            .wrapping_add(1_441_269_409);
+        seed >> 11
+    };
+    for _ in 0..512 {
+        let roll = next();
+        times.push(match roll % 8 {
+            0 => None,
+            _ => Some(i64::try_from(roll % 45).unwrap() - 5),
+        });
+        group_column.push(match roll % 11 {
+            0 => None,
+            value => Some(groups[(value % 3) as usize]),
+        });
+        signed.push(match roll % 5 {
+            0 => None,
+            _ => Some(i64::try_from(roll % 2001).unwrap() - 1000),
+        });
+        unsigned.push(match roll % 7 {
+            0 => None,
+            _ => Some(roll % 10_000),
+        });
+        float_column.push(match roll % 6 {
+            0 => None,
+            _ => Some(floats[usize::try_from(roll / 6).unwrap() % floats.len()]),
+        });
+        small.push(match roll % 4 {
+            0 => None,
+            _ => Some(f32::from(u16::try_from(roll % 1000).unwrap()) * 0.25 - 100.0),
+        });
+    }
+    let record = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(TimestampMicrosecondArray::from(times)),
+            Arc::new(StringArray::from(group_column)),
+            Arc::new(Int64Array::from(signed)),
+            Arc::new(UInt64Array::from(unsigned)),
+            Arc::new(Float64Array::from(float_column)),
+            Arc::new(Float32Array::from(small)),
+        ],
+    )
+    .unwrap();
+
+    let job = crate::StreamJobContext::new(
+        1,
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        JsonMap::new(),
+        None,
+        crate::CancellationToken::new(),
+    );
+    let mut fast = WindowAggregateOperator::new("window", record.schema(), spec.clone()).unwrap();
+    let mut rowwise = WindowAggregateOperator::new("window", record.schema(), spec).unwrap();
+    rowwise.force_rowwise = true;
+    let batch = Batch::table(
+        vec![
+            record.slice(0, 300),
+            record.slice(300, record.num_rows() - 300),
+        ],
+        crate::BatchMetadata::default(),
+    )
+    .unwrap();
+    // Two batches cross the live-state seeding path; the later watermark
+    // admits some late rows on the second pass.
+    let first = StreamOperatorContext::new(&job, "window", None);
+    let later = StreamOperatorContext::new(&job, "window", Some(EventTime::from_micros(21)));
+    for context in [&first, &later] {
+        let fast_update = fast.prepare_input_batch(&batch, context).unwrap();
+        let reference_update = rowwise.prepare_input_batch(&batch, context).unwrap();
+        assert_eq!(
+            format!("{:?}", fast_update.metrics),
+            format!("{:?}", reference_update.metrics),
+            "late metrics diverged"
+        );
+        assert_eq!(
+            fast_update.usage.rows, reference_update.usage.rows,
+            "logical row charge diverged"
+        );
+        assert_eq!(
+            fast_update.usage.bytes, reference_update.usage.bytes,
+            "logical byte charge diverged"
+        );
+        let mut fast_keys = fast_update.accumulators.keys().collect::<Vec<_>>();
+        let mut reference_keys = reference_update.accumulators.keys().collect::<Vec<_>>();
+        fast_keys.sort();
+        reference_keys.sort();
+        assert_eq!(fast_keys, reference_keys, "key sets diverged");
+        for key in fast_keys {
+            let left = &fast_update.accumulators[key];
+            let right = &reference_update.accumulators[key];
+            assert_eq!(
+                format!("{:?}", left.group_values),
+                format!("{:?}", right.group_values),
+                "group values diverged at {key:?}"
+            );
+            assert_eq!(
+                state(left),
+                state(right),
+                "accumulator bits diverged at {key:?}"
+            );
+        }
+        let metrics = fast_update.metrics;
+        fast.install_input_update(fast_update, metrics, false, context);
+        rowwise.install_input_update(reference_update, metrics, false, context);
+    }
+}

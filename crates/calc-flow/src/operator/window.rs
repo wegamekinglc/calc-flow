@@ -284,6 +284,8 @@ pub struct WindowAggregateOperator {
     state: WindowState,
     state_budget: StateBudget,
     max_delta_segments: usize,
+    #[cfg(test)]
+    force_rowwise: bool,
 }
 
 #[derive(Clone)]
@@ -512,6 +514,109 @@ struct CachedWindowSlot {
 
 type ScratchMap<K, V> = HashMap<K, V, ahash::RandomState>;
 
+/// Columnar accumulator storage for the numeric fast path: one dense vector
+/// per declared aggregate, indexed by scratch slot. Per-slot updates apply in
+/// row order, so compensated float state matches the row-wise reference bit
+/// for bit.
+enum SlotColumn {
+    Count(Vec<u64>),
+    SignedSum(Vec<Option<i128>>),
+    UnsignedSum(Vec<Option<u128>>),
+    FloatSum(Vec<Option<CompensatedSum>>),
+    Min(Vec<Option<ScalarValue>>),
+    Max(Vec<Option<ScalarValue>>),
+    SignedAverage(Vec<(i128, u64)>),
+    UnsignedAverage(Vec<(u128, u64)>),
+    FloatAverage(Vec<(CompensatedSum, u64)>),
+}
+
+impl SlotColumn {
+    fn new(function: AggregateFunction, compiled: &CompiledAggregate) -> Self {
+        match function {
+            AggregateFunction::Count => Self::Count(Vec::new()),
+            AggregateFunction::Sum => match compiled.output_type {
+                DataType::Int64 => Self::SignedSum(Vec::new()),
+                DataType::UInt64 => Self::UnsignedSum(Vec::new()),
+                DataType::Float64 => Self::FloatSum(Vec::new()),
+                _ => unreachable!("aggregate matrix validated at construction"),
+            },
+            AggregateFunction::Min => Self::Min(Vec::new()),
+            AggregateFunction::Max => Self::Max(Vec::new()),
+            AggregateFunction::Avg => match compiled.input_type {
+                DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => {
+                    Self::SignedAverage(Vec::new())
+                }
+                DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
+                    Self::UnsignedAverage(Vec::new())
+                }
+                DataType::Float32 | DataType::Float64 => Self::FloatAverage(Vec::new()),
+                _ => unreachable!("average input matrix validated at construction"),
+            },
+        }
+    }
+
+    fn push_default(&mut self) {
+        match self {
+            Self::Count(values) => values.push(0),
+            Self::SignedSum(values) => values.push(None),
+            Self::UnsignedSum(values) => values.push(None),
+            Self::FloatSum(values) => values.push(None),
+            Self::Min(values) | Self::Max(values) => values.push(None),
+            Self::SignedAverage(values) => values.push((0, 0)),
+            Self::UnsignedAverage(values) => values.push((0, 0)),
+            Self::FloatAverage(values) => values.push((CompensatedSum::new(0.0), 0)),
+        }
+    }
+
+    /// Seeds one slot from its live-state accumulator; the variants match by
+    /// construction against the compiled aggregate matrix.
+    fn push_seeded(&mut self, value: &AccumulatorValue) {
+        match (self, value) {
+            (Self::Count(values), AccumulatorValue::Count(value)) => values.push(*value),
+            (Self::SignedSum(values), AccumulatorValue::SignedSum(value)) => values.push(*value),
+            (Self::UnsignedSum(values), AccumulatorValue::UnsignedSum(value)) => {
+                values.push(*value);
+            }
+            (Self::FloatSum(values), AccumulatorValue::FloatSum(value)) => values.push(*value),
+            (Self::Min(values), AccumulatorValue::Min(value))
+            | (Self::Max(values), AccumulatorValue::Max(value)) => values.push(value.clone()),
+            (Self::SignedAverage(values), AccumulatorValue::SignedAverage { sum, count }) => {
+                values.push((*sum, *count));
+            }
+            (Self::UnsignedAverage(values), AccumulatorValue::UnsignedAverage { sum, count }) => {
+                values.push((*sum, *count));
+            }
+            (Self::FloatAverage(values), AccumulatorValue::FloatAverage { sum, count }) => {
+                values.push((*sum, *count));
+            }
+            _ => unreachable!("compiled aggregate accumulator type mismatch"),
+        }
+    }
+
+    fn take(&mut self, index: usize) -> AccumulatorValue {
+        match self {
+            Self::Count(values) => AccumulatorValue::Count(values[index]),
+            Self::SignedSum(values) => AccumulatorValue::SignedSum(values[index]),
+            Self::UnsignedSum(values) => AccumulatorValue::UnsignedSum(values[index]),
+            Self::FloatSum(values) => AccumulatorValue::FloatSum(values[index]),
+            Self::Min(values) => AccumulatorValue::Min(std::mem::take(&mut values[index])),
+            Self::Max(values) => AccumulatorValue::Max(std::mem::take(&mut values[index])),
+            Self::SignedAverage(values) => {
+                let (sum, count) = values[index];
+                AccumulatorValue::SignedAverage { sum, count }
+            }
+            Self::UnsignedAverage(values) => {
+                let (sum, count) = values[index];
+                AccumulatorValue::UnsignedAverage { sum, count }
+            }
+            Self::FloatAverage(values) => {
+                let (sum, count) = values[index];
+                AccumulatorValue::FloatAverage { sum, count }
+            }
+        }
+    }
+}
+
 /// Per-batch accumulator scratch: hashed while rows stream in, then sorted
 /// once into the deterministic window-key order installs and encodes observe.
 struct BatchScratch<'a> {
@@ -524,6 +629,10 @@ struct BatchScratch<'a> {
     slot_cache: [Option<CachedWindowSlot>; 64],
     slot_cache_ways: usize,
     entries: Vec<(WindowKey, AccumulatorRow)>,
+    // Columnar fast path: per-aggregate dense accumulators aligned with
+    // `entries`, and the per-record (slot, row) pair buffer of pass one.
+    columns: Vec<SlotColumn>,
+    pairs: Vec<(u32, u32)>,
     // Reused by the general composite-key path, without owned row scalars.
     encoded_group: Vec<u8>,
     // Previous-row reuse: the window slide interval and the resolved groups
@@ -552,6 +661,8 @@ impl<'a> BatchScratch<'a> {
             slot_cache: [None; 64],
             slot_cache_ways,
             entries: Vec::new(),
+            columns: Vec::new(),
+            pairs: Vec::new(),
             encoded_group: Vec::new(),
             assignment_cache: None,
             last_integer_group: None,
@@ -620,9 +731,24 @@ impl<'a> BatchScratch<'a> {
         Ok(group)
     }
 
-    fn into_update(self) -> InputBatchUpdate {
+    fn into_update(mut self) -> InputBatchUpdate {
+        let accumulators = self
+            .entries
+            .into_iter()
+            .enumerate()
+            .map(|(index, (key, mut row))| {
+                if !self.columns.is_empty() {
+                    row.aggregates = self
+                        .columns
+                        .iter_mut()
+                        .map(|column| column.take(index))
+                        .collect();
+                }
+                (key, row)
+            })
+            .collect();
         InputBatchUpdate {
-            accumulators: self.entries.into_iter().collect(),
+            accumulators,
             usage: self.usage,
             metrics: self.metrics.into_delta(),
         }
@@ -766,19 +892,32 @@ fn aggregate_dynamic_bytes(entry: &AccumulatorRow) -> u64 {
 }
 
 fn window_entry_bytes(key_bytes: u64, entry: &AccumulatorRow) -> u64 {
-    let group_bytes = logical_length(entry.group_values.len())
+    entry_bytes_of_parts(
+        key_bytes,
+        &entry.group_values,
+        entry.aggregates.len(),
+        aggregate_dynamic_bytes(entry),
+    )
+}
+
+fn entry_bytes_of_parts(
+    key_bytes: u64,
+    group_values: &[Option<ScalarValue>],
+    aggregate_count: usize,
+    aggregate_dynamic: u64,
+) -> u64 {
+    let group_bytes = logical_length(group_values.len())
         .saturating_mul(WINDOW_GROUP_VALUE_BYTES)
         .saturating_add(
-            entry
-                .group_values
+            group_values
                 .iter()
                 .flatten()
                 .map(scalar_dynamic_bytes)
                 .fold(0_u64, u64::saturating_add),
         );
-    let aggregate_bytes = logical_length(entry.aggregates.len())
+    let aggregate_bytes = logical_length(aggregate_count)
         .saturating_mul(WINDOW_AGGREGATE_BYTES)
-        .saturating_add(aggregate_dynamic_bytes(entry));
+        .saturating_add(aggregate_dynamic);
     WINDOW_ENTRY_BASE_BYTES
         .saturating_add(key_bytes)
         .saturating_add(group_bytes)
@@ -888,7 +1027,19 @@ impl WindowAggregateOperator {
             state: WindowState::default(),
             state_budget: StateBudget::default(),
             max_delta_segments: MAX_WINDOW_DELTA_SEGMENTS,
+            #[cfg(test)]
+            force_rowwise: false,
         })
+    }
+
+    /// The row-major reference path remains for aggregates whose dynamic
+    /// bytes change per row (string min/max); tests can force it directly.
+    fn use_rowwise_kernel(&self) -> bool {
+        #[cfg(test)]
+        if self.force_rowwise {
+            return true;
+        }
+        self.compiled.tracks_dynamic_bytes
     }
 
     /// Overrides the retained-delta compaction threshold; soak tests use a
@@ -952,16 +1103,166 @@ impl WindowAggregateOperator {
             },
             self.compiled.geometry.overlap,
         );
+        if self.use_rowwise_kernel() {
+            for record in table.batches() {
+                let columns =
+                    RecordColumns::new(record, &self.spec, &self.compiled, context.operator_id())?;
+                for row in 0..record.num_rows() {
+                    self.prepare_row(&columns, row, context, &mut scratch)?;
+                }
+            }
+            return Ok(scratch.into_update());
+        }
 
+        // Columnar fast path: pass one resolves each row's slots, pass two
+        // runs one tight loop per aggregate over the (slot, row) pairs.
+        scratch.columns = self
+            .spec
+            .aggregates
+            .iter()
+            .zip(&self.compiled.aggregates)
+            .map(|(aggregate, compiled)| SlotColumn::new(aggregate.function, compiled))
+            .collect();
         for record in table.batches() {
             let columns =
                 RecordColumns::new(record, &self.spec, &self.compiled, context.operator_id())?;
+            let mut pairs = std::mem::take(&mut scratch.pairs);
+            pairs.clear();
             for row in 0..record.num_rows() {
-                self.prepare_row(&columns, row, context, &mut scratch)?;
+                self.prepare_row_slots(&columns, row, context, &mut scratch, &mut pairs)?;
+            }
+            for (ordinal, (column, _)) in columns.aggregates.iter().enumerate() {
+                kernels::update_column(&mut scratch.columns[ordinal], column, &pairs).map_err(
+                    |message| {
+                        operator_error(
+                            context.operator_id(),
+                            &format!("window.aggregates[{ordinal}] update failed: {message}"),
+                        )
+                    },
+                )?;
+            }
+            scratch.pairs = pairs;
+        }
+        Ok(scratch.into_update())
+    }
+
+    /// Pass one of the columnar path: resolve the row's open assignments into
+    /// scratch slots and record each (slot, row) pair.
+    fn prepare_row_slots<'a>(
+        &self,
+        columns: &RecordColumns<'a>,
+        row: usize,
+        context: &StreamOperatorContext<'_>,
+        scratch: &mut BatchScratch<'a>,
+        pairs: &mut Vec<(u32, u32)>,
+    ) -> Result<()> {
+        let operator_id = context.operator_id();
+        let Some(event_time) =
+            columns
+                .event_time
+                .at(row, operator_id, &self.spec.event_time_column)?
+        else {
+            return record_null_event_time(&mut scratch.metrics, operator_id);
+        };
+        let latest_start = latest_window_start(
+            event_time,
+            self.compiled.geometry,
+            &mut scratch.assignment_cache,
+        );
+        let assignments = assignments_from_latest(latest_start, self.compiled.geometry)
+            .map_err(|message| operator_error(operator_id, &message))?;
+        let watermark = context.input_watermark();
+        if !record_late_assignments(
+            assignments.clone(),
+            watermark,
+            &mut scratch.metrics,
+            operator_id,
+        )? {
+            return Ok(());
+        }
+        let group = scratch.intern_group(columns, row, operator_id, &self.spec.group_by)?;
+        assignments
+            .filter(|&(_, end)| is_open_assignment(end, watermark))
+            .try_for_each(|(start, end)| {
+                let slot = WindowSlot { start, end, group };
+                let index = self.slot_index_columnar(scratch, slot, columns, row, operator_id)?;
+                pairs.push((
+                    u32::try_from(index)
+                        .map_err(|_| internal_error("window slot index does not fit u32"))?,
+                    u32::try_from(row)
+                        .map_err(|_| internal_error("window input row index does not fit u32"))?,
+                ));
+                Ok(())
+            })
+    }
+
+    /// Finds or creates the batch scratch slot for one assignment in the
+    /// columnar fast path, seeding its accumulator columns from live state.
+    /// Only keys new to state are charged, at creation.
+    fn slot_index_columnar(
+        &self,
+        scratch: &mut BatchScratch<'_>,
+        slot: WindowSlot,
+        columns: &RecordColumns<'_>,
+        row: usize,
+        operator_id: &str,
+    ) -> Result<usize> {
+        let slot_key = (slot.start.as_micros(), slot.group);
+        if let Some(index) = scratch.cached_slot(slot_key) {
+            return Ok(index);
+        }
+        #[cfg(test)]
+        group_tests::SLOT_LOOKUPS.with(|calls| calls.set(calls.get() + 1));
+        if let Some(&index) = scratch.slots.get(&slot_key) {
+            scratch.cache_slot(slot_key, index);
+            return Ok(index);
+        }
+        let key = WindowKey {
+            start: slot.start,
+            end: slot.end,
+            stable_group_key: Arc::clone(&scratch.group_keys[slot.group]),
+        };
+        let existing = self.state.accumulators.get(&key);
+        let group_values = match existing {
+            Some(entry) => entry.group_values.clone(),
+            None => columns
+                .groups
+                .iter()
+                .map(|(column, _)| column.scalar_at(row))
+                .collect(),
+        };
+        if existing.is_none() {
+            let next = WindowStateUsage {
+                rows: scratch.usage.rows.saturating_add(1),
+                bytes: scratch.usage.bytes.saturating_add(entry_bytes_of_parts(
+                    logical_length(key.stable_group_key.len()),
+                    &group_values,
+                    scratch.columns.len(),
+                    0,
+                )),
+            };
+            if !self.state_budget.allows(next.rows, next.bytes) {
+                return Err(operator_error(operator_id, "window state budget exceeded"));
+            }
+            scratch.usage = next;
+        }
+        let index = scratch.entries.len();
+        scratch.entries.push((
+            key,
+            AccumulatorRow {
+                group_values,
+                aggregates: Vec::new(),
+            },
+        ));
+        for (ordinal, column) in scratch.columns.iter_mut().enumerate() {
+            match existing {
+                Some(entry) => column.push_seeded(&entry.aggregates[ordinal]),
+                None => column.push_default(),
             }
         }
-
-        Ok(scratch.into_update())
+        scratch.slots.insert(slot_key, index);
+        scratch.cache_slot(slot_key, index);
+        Ok(index)
     }
 
     fn prepare_row<'a>(
