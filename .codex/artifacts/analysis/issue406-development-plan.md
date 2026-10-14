@@ -18,8 +18,9 @@ repeated stream expression execution: cached row-local DataFusion physical
 expressions avoid per-batch plan rebinding while preserving SQL semantics,
 caller ownership, collection limits and cancellation. Its
 [focused evidence](issue406-compiled-expressions.md) records RED/GREEN, boundary
-and eight adjacent controls, scoped Clippy and unchanged contracts; final local
-specialist review remains pending. This separate local increment starts from
+and eight adjacent controls, scoped Clippy and unchanged contracts;
+[final local review](../reviews/issue406-compiled-expressions.md) approves
+`33e9a184c39a05b14f07770f51de337c5ac313e6`. This local increment starts from
 e884adc3; no performance result is attributed to it.
 Remaining phase 0/1/3/4/5 requirements and all eight absolute acceptance rows
 remain in scope. Historical stopped attempts stay sealed and will not be retried

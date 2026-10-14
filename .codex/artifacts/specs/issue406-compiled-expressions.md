@@ -2,7 +2,8 @@
 
 Status: implemented with recorded RED/GREEN and focused boundary controls;
 formatting, scoped Clippy and source provenance pass. Final specialist review
-is pending. No performance/CI or whole-issue acceptance is claimed.
+approves `33e9a184c39a05b14f07770f51de337c5ac313e6`.
+No performance/CI or whole-issue acceptance is claimed.
 
 ## Scope
 

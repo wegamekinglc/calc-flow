@@ -3,7 +3,8 @@
 Base source is e884adc362ac8f8d03c1364d0dfdb4e205407696; the Join phase 2.2
 review/documentation-only follow-up is carried by d83e68ff. Phase 2.3 is in
 progress: implementation and focused verification pass; final specialist review
-is pending. No performance claim, remote CI or release build belongs to this
+approves `33e9a184c39a05b14f07770f51de337c5ac313e6`.
+No performance claim, remote CI or release build belongs to this
 increment. All eight original acceptance targets and other phases remain active.
 
 Current review candidate source is frozen across six Rust files, 40 changed/new
@@ -13,7 +14,9 @@ The final augmented runtime/component registration and default-feature core
 lib/test Clippy pass after the defensive Arrow-envelope follow-up. Older
 running/pending notes below describe their historical stage and are superseded
 by later results. The component failure deliberately bypasses a schema invariant
-and does not demonstrate a legal-input SQL regression. Final review is pending.
+and does not demonstrate a legal-input SQL regression. Final review approves
+`33e9a184c39a05b14f07770f51de337c5ac313e6`; see the
+[review report](../reviews/issue406-compiled-expressions.md).
 
 ## Expected regression RED
 
@@ -176,3 +179,17 @@ exact-unchanged baseline omissions. Current source digest:
 complexity-before-comments.json/complexity-comments-only.json. Final specialist
 approval remains pending; no release build, new native Python integration,
 performance acquisition/retry, remote operation or full CI ran.
+
+## Final local specialist approval
+
+cf-reviewer approves phase2.3 implementation at
+`33e9a184c39a05b14f07770f51de337c5ac313e6`, with no remaining local blocker.
+The reviewer independently verified six committed/worktree/manifest Rust hashes
+and the aggregate94c6c1919367193c933556cc0830a5d58901ac62e964239913290873c15d713e,
+including40changed-new functions/maxCCN8. The
+[report](../reviews/issue406-compiled-expressions.md) accounts for exact
+component-only error scope, actual filter projection/remapping and final
+default-feature core lib/test Clippy. No passing check was repeated by review.
+This approves local phase2.3 only; full CI, combined90%coverage, release/native
+Python integration, performance and issue406all-eight acceptance remain
+unproven. Other phases remain active. No remote mutation has been performed.
