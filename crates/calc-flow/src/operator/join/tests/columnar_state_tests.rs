@@ -1452,13 +1452,16 @@ async fn retained_codec_key_behavior(key: ArrayRef) {
     assert_eq!(retained.status().right.retained_bytes, fee);
     assert!(collector.drain("output").is_empty());
     let legacy = retained.checkpoint_v1(Epoch::INITIAL).unwrap();
-    retained.prepare_checkpoint_async(&active).await.unwrap();
-    let current = retained.checkpoint(Epoch::new(2).unwrap()).unwrap();
+    let mut migrated = StreamJoinOperator::new("match", left, right, spec()).unwrap();
+    migrated.restore(&legacy).unwrap();
+    migrated.prepare_checkpoint_async(&active).await.unwrap();
+    let current = migrated.checkpoint(Epoch::new(2).unwrap()).unwrap();
     assert_eq!(legacy.inline_metadata["layout_version"], 1);
     assert_eq!(current.inline_metadata["layout_version"], 2);
     for snapshot in [legacy, current] {
         assert_codec_key_restore(&snapshot, key.clone(), &job, fee).await;
     }
+    drop(migrated);
     drop(retained);
     drop(operator);
     drop(context);
@@ -1531,7 +1534,7 @@ async fn assert_codec_key_restore(
     assert_eq!(restored.status().right.retained_bytes, fee);
 }
 
-fn assert_v1_codec_values(array: ArrayRef, tag: u8, values: &[&[u8]]) {
+fn assert_v1_codec_values(array: &dyn Array, tag: u8, values: &[&[u8]]) {
     let sliced = array.slice(1, values.len());
     for (row, value) in values.iter().enumerate() {
         let mut expected = vec![tag, 0, 0, 0, 0];
@@ -1549,7 +1552,7 @@ fn assert_v1_codec_values(array: ArrayRef, tag: u8, values: &[&[u8]]) {
 #[test]
 fn test_int8_v1_key_codec_preserves_signed_bytes() {
     assert_v1_codec_values(
-        Arc::new(Int8Array::from(vec![42, i8::MIN, -1, 0, i8::MAX, 42])),
+        &Int8Array::from(vec![42, i8::MIN, -1, 0, i8::MAX, 42]),
         2,
         &[&[0x80], &[0xff], &[0], &[0x7f]],
     );
@@ -1558,7 +1561,7 @@ fn test_int8_v1_key_codec_preserves_signed_bytes() {
 #[test]
 fn test_date32_v1_key_codec_preserves_day_bytes() {
     assert_v1_codec_values(
-        Arc::new(Date32Array::from(vec![42, i32::MIN, -1, 0, i32::MAX, 42])),
+        &Date32Array::from(vec![42, i32::MIN, -1, 0, i32::MAX, 42]),
         12,
         &[
             &[0, 0, 0, 0x80],
@@ -1572,7 +1575,7 @@ fn test_date32_v1_key_codec_preserves_day_bytes() {
 #[test]
 fn test_date64_v1_key_codec_preserves_millisecond_bytes() {
     assert_v1_codec_values(
-        Arc::new(Date64Array::from(vec![42, i64::MIN, -1, 0, i64::MAX, 42])),
+        &Date64Array::from(vec![42, i64::MIN, -1, 0, i64::MAX, 42]),
         13,
         &[
             &[0, 0, 0, 0, 0, 0, 0, 0x80],

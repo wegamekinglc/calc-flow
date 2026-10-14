@@ -2237,8 +2237,8 @@ use datafusion::arrow::{
     },
     compute::concat,
     datatypes::{
-        ArrowPrimitiveType, DataType, Field, Int8Type, Int16Type, Int32Type, Int64Type,
-        IntervalUnit, Schema, SchemaRef, TimeUnit, TimestampMicrosecondType,
+        ArrowPrimitiveType, DataType, Date32Type, Date64Type, Field, Int8Type, Int16Type,
+        Int32Type, Int64Type, IntervalUnit, Schema, SchemaRef, TimeUnit, TimestampMicrosecondType,
         TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType, UInt8Type,
         UInt16Type, UInt32Type, UInt64Type,
     },
@@ -7313,37 +7313,56 @@ fn key_type_tag(data_type: &DataType) -> Result<u8> {
 }
 
 fn key_value_bytes(array: &dyn Array, row_index: usize) -> Result<Vec<u8>> {
-    let data_type = array.data_type().clone();
-    if let DataType::Timestamp(unit, _) = &data_type {
-        return timestamp_key_bytes(array, row_index, *unit);
-    }
-    Ok(match &data_type {
+    match array.data_type() {
+        DataType::Timestamp(unit, _) => timestamp_key_bytes(array, row_index, *unit),
         DataType::Boolean => {
             let typed = array
                 .as_any()
                 .downcast_ref::<BooleanArray>()
                 .ok_or_else(|| charge_type_mismatch("Boolean"))?;
-            vec![u8::from(typed.value(row_index))]
+            Ok(vec![u8::from(typed.value(row_index))])
         }
-        DataType::Int8 => {
-            let typed = primitive::<Int8Type>(array)?;
-            vec![
-                u8::try_from(typed.value(row_index)).map_err(|_| CalcFlowError::Internal {
-                    message: "int8 key does not fit u8".into(),
-                })?,
-            ]
+        DataType::Int8
+        | DataType::Int16
+        | DataType::Int32
+        | DataType::Int64
+        | DataType::Date32
+        | DataType::Date64 => signed_key_bytes(array, row_index),
+        DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
+            unsigned_key_bytes(array, row_index)
         }
-        DataType::UInt8 => vec![primitive::<UInt8Type>(array)?.value(row_index)],
-        DataType::Int16 => little_endian_key_bytes::<Int16Type>(array, row_index)?,
-        DataType::Int32 | DataType::Date32 => {
-            little_endian_key_bytes::<Int32Type>(array, row_index)?
-        }
-        DataType::Int64 | DataType::Date64 => {
-            little_endian_key_bytes::<Int64Type>(array, row_index)?
-        }
-        DataType::UInt16 => little_endian_key_bytes::<UInt16Type>(array, row_index)?,
-        DataType::UInt32 => little_endian_key_bytes::<UInt32Type>(array, row_index)?,
-        DataType::UInt64 => little_endian_key_bytes::<UInt64Type>(array, row_index)?,
+        DataType::Utf8 | DataType::LargeUtf8 => string_key_bytes(array, row_index),
+        data_type => Err(key_encoding_type_error(data_type)),
+    }
+}
+
+fn signed_key_bytes(array: &dyn Array, row_index: usize) -> Result<Vec<u8>> {
+    match array.data_type() {
+        DataType::Int8 => Ok(primitive::<Int8Type>(array)?
+            .value(row_index)
+            .to_le_bytes()
+            .to_vec()),
+        DataType::Int16 => little_endian_key_bytes::<Int16Type>(array, row_index),
+        DataType::Int32 => little_endian_key_bytes::<Int32Type>(array, row_index),
+        DataType::Int64 => little_endian_key_bytes::<Int64Type>(array, row_index),
+        DataType::Date32 => little_endian_key_bytes::<Date32Type>(array, row_index),
+        DataType::Date64 => little_endian_key_bytes::<Date64Type>(array, row_index),
+        data_type => Err(key_encoding_type_error(data_type)),
+    }
+}
+
+fn unsigned_key_bytes(array: &dyn Array, row_index: usize) -> Result<Vec<u8>> {
+    match array.data_type() {
+        DataType::UInt8 => Ok(vec![primitive::<UInt8Type>(array)?.value(row_index)]),
+        DataType::UInt16 => little_endian_key_bytes::<UInt16Type>(array, row_index),
+        DataType::UInt32 => little_endian_key_bytes::<UInt32Type>(array, row_index),
+        DataType::UInt64 => little_endian_key_bytes::<UInt64Type>(array, row_index),
+        data_type => Err(key_encoding_type_error(data_type)),
+    }
+}
+
+fn string_key_bytes(array: &dyn Array, row_index: usize) -> Result<Vec<u8>> {
+    Ok(match array.data_type() {
         DataType::Utf8 => array
             .as_any()
             .downcast_ref::<StringArray>()
@@ -7358,12 +7377,14 @@ fn key_value_bytes(array: &dyn Array, row_index: usize) -> Result<Vec<u8>> {
             .value(row_index)
             .as_bytes()
             .to_vec(),
-        _ => {
-            return Err(CalcFlowError::Internal {
-                message: format!("join key type {data_type} has no version-1 encoding"),
-            });
-        }
+        data_type => return Err(key_encoding_type_error(data_type)),
     })
+}
+
+fn key_encoding_type_error(data_type: &DataType) -> CalcFlowError {
+    CalcFlowError::Internal {
+        message: format!("join key type {data_type} has no version-1 encoding"),
+    }
 }
 
 /// Little-endian key encoding shared by the fixed-width join key natives.

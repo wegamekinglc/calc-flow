@@ -9,6 +9,11 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-15: Fix streaming Join retention and checkpoint recovery for negative
+  `Int8` keys and `Date32`/`Date64` keys. Valid keys no longer fail signed-byte
+  conversion or date-array type checks. V1 key tags and logical charges,
+  checkpoint layouts, schemas and versions remain unchanged.
+
 - 2026-10-14: Retain required streaming Join payload dependencies plus identity
   and event-time fields when all consumers qualify for compiler projection.
   Preserve complete input-schema validation, V1 logical state charges and graph
