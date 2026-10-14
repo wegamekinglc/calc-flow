@@ -1,6 +1,8 @@
 use super::{
-    AccumulatorValue, AggregateFunction, DataType, Ordering, ScalarColumn, ScalarValue,
-    TypedValues, update_accumulator, update_count, update_extreme,
+    AccumulatorValue, AggregateFunction, CompensatedSum, DataType, Ordering, ScalarColumn,
+    ScalarValue, SlotColumn, TypedValues, increment_average_count, scalar_total_cmp,
+    update_accumulator, update_count, update_extreme, update_signed_average, update_signed_sum,
+    update_unsigned_average, update_unsigned_sum,
 };
 
 pub(super) type UpdateKernel =
@@ -140,5 +142,308 @@ pub(super) fn select(function: AggregateFunction, data_type: &DataType) -> Updat
             AggregateFunction::Max => scalar_extreme::<MAX>,
             _ => unreachable!("aggregate matrix validated at construction"),
         },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Columnar fast path: pass one resolves (slot, row) pairs; these loops run
+// once per aggregate with dense per-slot accumulators. Per-slot updates apply
+// in row order and reuse the row-wise scalar helpers, so accumulator state is
+// bit-identical to the reference path.
+// ---------------------------------------------------------------------------
+
+/// One tight loop per aggregate over the (slot, row) pairs pass one resolved.
+pub(super) fn update_column(
+    column: &mut SlotColumn,
+    values: &ScalarColumn<'_>,
+    pairs: &[(u32, u32)],
+) -> Result<(), String> {
+    match column {
+        SlotColumn::Count(counts) => update_count_column(counts, values, pairs),
+        SlotColumn::SignedSum(sums) => update_signed_sum_column(sums, values, pairs),
+        SlotColumn::UnsignedSum(sums) => update_unsigned_sum_column(sums, values, pairs),
+        SlotColumn::FloatSum(sums) => update_float_sum_column(sums, values, pairs),
+        SlotColumn::Min(extremes) => {
+            update_extreme_column(extremes, values, pairs, Ordering::Less);
+            Ok(())
+        }
+        SlotColumn::Max(extremes) => {
+            update_extreme_column(extremes, values, pairs, Ordering::Greater);
+            Ok(())
+        }
+        SlotColumn::SignedAverage(entries) => update_signed_average_column(entries, values, pairs),
+        SlotColumn::UnsignedAverage(entries) => {
+            update_unsigned_average_column(entries, values, pairs)
+        }
+        SlotColumn::FloatAverage(entries) => update_float_average_column(entries, values, pairs),
+    }
+}
+
+fn update_count_column(
+    counts: &mut [u64],
+    values: &ScalarColumn<'_>,
+    pairs: &[(u32, u32)],
+) -> Result<(), String> {
+    for &(slot, row) in pairs {
+        if values.is_null(row as usize) {
+            continue;
+        }
+        let count = &mut counts[slot as usize];
+        *count = count
+            .checked_add(1)
+            .ok_or_else(|| "count overflowed UInt64".to_string())?;
+    }
+    Ok(())
+}
+
+/// Tight numeric loop over typed arrays: the type match is hoisted out of the
+/// pair loop, and the per-slot update reuses the row-wise scalar helper.
+macro_rules! signed_column_loop {
+    ($values:expr, $pairs:expr, $variant:ident, $convert:expr, $body:expr) => {{
+        let TypedValues::$variant(array) = $values.values else {
+            return Err("compiled aggregate column type mismatch".into());
+        };
+        for &(slot, row) in $pairs {
+            if $values.is_null(row as usize) {
+                continue;
+            }
+            $body(slot, ($convert)(array.value(row as usize)))?;
+        }
+        Ok::<(), String>(())
+    }};
+}
+
+fn update_signed_sum_column(
+    sums: &mut [Option<i128>],
+    values: &ScalarColumn<'_>,
+    pairs: &[(u32, u32)],
+) -> Result<(), String> {
+    match values.values {
+        TypedValues::Int8(_) => {
+            signed_column_loop!(values, pairs, Int8, i64::from, |slot, value| {
+                update_signed_sum(&mut sums[slot as usize], &ScalarValue::Signed(value))
+            })
+        }
+        TypedValues::Int16(_) => {
+            signed_column_loop!(values, pairs, Int16, i64::from, |slot, value| {
+                update_signed_sum(&mut sums[slot as usize], &ScalarValue::Signed(value))
+            })
+        }
+        TypedValues::Int32(_) => {
+            signed_column_loop!(values, pairs, Int32, i64::from, |slot, value| {
+                update_signed_sum(&mut sums[slot as usize], &ScalarValue::Signed(value))
+            })
+        }
+        TypedValues::Int64(_) => {
+            signed_column_loop!(
+                values,
+                pairs,
+                Int64,
+                std::convert::identity,
+                |slot, value| {
+                    update_signed_sum(&mut sums[slot as usize], &ScalarValue::Signed(value))
+                }
+            )
+        }
+        _ => Err("compiled aggregate column type mismatch".into()),
+    }
+}
+
+fn update_unsigned_sum_column(
+    sums: &mut [Option<u128>],
+    values: &ScalarColumn<'_>,
+    pairs: &[(u32, u32)],
+) -> Result<(), String> {
+    match values.values {
+        TypedValues::UInt8(_) => {
+            signed_column_loop!(values, pairs, UInt8, u64::from, |slot, value| {
+                update_unsigned_sum(&mut sums[slot as usize], &ScalarValue::Unsigned(value))
+            })
+        }
+        TypedValues::UInt16(_) => {
+            signed_column_loop!(values, pairs, UInt16, u64::from, |slot, value| {
+                update_unsigned_sum(&mut sums[slot as usize], &ScalarValue::Unsigned(value))
+            })
+        }
+        TypedValues::UInt32(_) => {
+            signed_column_loop!(values, pairs, UInt32, u64::from, |slot, value| {
+                update_unsigned_sum(&mut sums[slot as usize], &ScalarValue::Unsigned(value))
+            })
+        }
+        TypedValues::UInt64(_) => {
+            signed_column_loop!(
+                values,
+                pairs,
+                UInt64,
+                std::convert::identity,
+                |slot, value| {
+                    update_unsigned_sum(&mut sums[slot as usize], &ScalarValue::Unsigned(value))
+                }
+            )
+        }
+        _ => Err("compiled aggregate column type mismatch".into()),
+    }
+}
+
+fn update_float_sum_column(
+    sums: &mut [Option<CompensatedSum>],
+    values: &ScalarColumn<'_>,
+    pairs: &[(u32, u32)],
+) -> Result<(), String> {
+    match values.values {
+        TypedValues::Float32(_) => {
+            signed_column_loop!(values, pairs, Float32, f64::from, |slot, value| {
+                sums[slot as usize]
+                    .get_or_insert(CompensatedSum::new(0.0))
+                    .add(value);
+                Ok::<(), String>(())
+            })
+        }
+        TypedValues::Float64(_) => {
+            signed_column_loop!(
+                values,
+                pairs,
+                Float64,
+                std::convert::identity,
+                |slot, value| {
+                    sums[slot as usize]
+                        .get_or_insert(CompensatedSum::new(0.0))
+                        .add(value);
+                    Ok::<(), String>(())
+                }
+            )
+        }
+        _ => Err("compiled aggregate column type mismatch".into()),
+    }
+}
+
+fn update_extreme_column(
+    extremes: &mut [Option<ScalarValue>],
+    values: &ScalarColumn<'_>,
+    pairs: &[(u32, u32)],
+    ordering: Ordering,
+) {
+    for &(slot, row) in pairs {
+        if values.is_null(row as usize) {
+            continue;
+        }
+        let value = values.value(row as usize);
+        let current = &mut extremes[slot as usize];
+        if current
+            .as_ref()
+            .is_none_or(|current| scalar_total_cmp(&value, current) == ordering)
+        {
+            *current = Some(value);
+        }
+    }
+}
+
+fn update_signed_average_column(
+    entries: &mut [(i128, u64)],
+    values: &ScalarColumn<'_>,
+    pairs: &[(u32, u32)],
+) -> Result<(), String> {
+    match values.values {
+        TypedValues::Int8(_) => {
+            signed_column_loop!(values, pairs, Int8, i64::from, |slot, value| {
+                let (sum, count) = &mut entries[slot as usize];
+                update_signed_average(sum, count, &ScalarValue::Signed(value))
+            })
+        }
+        TypedValues::Int16(_) => {
+            signed_column_loop!(values, pairs, Int16, i64::from, |slot, value| {
+                let (sum, count) = &mut entries[slot as usize];
+                update_signed_average(sum, count, &ScalarValue::Signed(value))
+            })
+        }
+        TypedValues::Int32(_) => {
+            signed_column_loop!(values, pairs, Int32, i64::from, |slot, value| {
+                let (sum, count) = &mut entries[slot as usize];
+                update_signed_average(sum, count, &ScalarValue::Signed(value))
+            })
+        }
+        TypedValues::Int64(_) => {
+            signed_column_loop!(
+                values,
+                pairs,
+                Int64,
+                std::convert::identity,
+                |slot, value| {
+                    let (sum, count) = &mut entries[slot as usize];
+                    update_signed_average(sum, count, &ScalarValue::Signed(value))
+                }
+            )
+        }
+        _ => Err("compiled aggregate column type mismatch".into()),
+    }
+}
+
+fn update_unsigned_average_column(
+    entries: &mut [(u128, u64)],
+    values: &ScalarColumn<'_>,
+    pairs: &[(u32, u32)],
+) -> Result<(), String> {
+    match values.values {
+        TypedValues::UInt8(_) => {
+            signed_column_loop!(values, pairs, UInt8, u64::from, |slot, value| {
+                let (sum, count) = &mut entries[slot as usize];
+                update_unsigned_average(sum, count, &ScalarValue::Unsigned(value))
+            })
+        }
+        TypedValues::UInt16(_) => {
+            signed_column_loop!(values, pairs, UInt16, u64::from, |slot, value| {
+                let (sum, count) = &mut entries[slot as usize];
+                update_unsigned_average(sum, count, &ScalarValue::Unsigned(value))
+            })
+        }
+        TypedValues::UInt32(_) => {
+            signed_column_loop!(values, pairs, UInt32, u64::from, |slot, value| {
+                let (sum, count) = &mut entries[slot as usize];
+                update_unsigned_average(sum, count, &ScalarValue::Unsigned(value))
+            })
+        }
+        TypedValues::UInt64(_) => {
+            signed_column_loop!(
+                values,
+                pairs,
+                UInt64,
+                std::convert::identity,
+                |slot, value| {
+                    let (sum, count) = &mut entries[slot as usize];
+                    update_unsigned_average(sum, count, &ScalarValue::Unsigned(value))
+                }
+            )
+        }
+        _ => Err("compiled aggregate column type mismatch".into()),
+    }
+}
+
+fn update_float_average_column(
+    entries: &mut [(CompensatedSum, u64)],
+    values: &ScalarColumn<'_>,
+    pairs: &[(u32, u32)],
+) -> Result<(), String> {
+    match values.values {
+        TypedValues::Float32(_) => {
+            signed_column_loop!(values, pairs, Float32, f64::from, |slot, value| {
+                let (sum, count) = &mut entries[slot as usize];
+                sum.add(value);
+                increment_average_count(count)
+            })
+        }
+        TypedValues::Float64(_) => {
+            signed_column_loop!(
+                values,
+                pairs,
+                Float64,
+                std::convert::identity,
+                |slot, value| {
+                    let (sum, count) = &mut entries[slot as usize];
+                    sum.add(value);
+                    increment_average_count(count)
+                }
+            )
+        }
+        _ => Err("compiled aggregate column type mismatch".into()),
     }
 }

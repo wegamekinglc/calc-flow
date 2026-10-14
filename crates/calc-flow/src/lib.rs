@@ -24,6 +24,12 @@
 //! }
 //! ```
 
+// Test builds hit a spanless false positive in clippy's `large_stack_arrays`
+// (rust-lang/rust-clippy#12586): its stateful `vec!` suppression cache flips
+// with unrelated test additions, reporting a phantom array at the crate root.
+// Production targets keep the lint.
+#![cfg_attr(test, allow(clippy::large_stack_arrays))]
+
 mod batch;
 mod config;
 mod connector;
