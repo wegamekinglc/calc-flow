@@ -1409,7 +1409,7 @@ fn right_key_batch(schema: SchemaRef, key: ArrayRef) -> Batch {
     Batch::table(vec![record], BatchMetadata::default()).unwrap()
 }
 
-async fn legacy_key_behavior(key: ArrayRef) {
+async fn retained_codec_key_behavior(key: ArrayRef) {
     let left = schema_with_key(&left_schema(), key.data_type());
     let right = schema_with_key(&right_schema(), key.data_type());
     let mut operator =
@@ -1433,32 +1433,154 @@ async fn legacy_key_behavior(key: ArrayRef) {
     assert_eq!(operator.state.next_right_row_id, 1);
     assert_eq!(operator.status().right.retained_rows, 0);
     assert!(collector.drain("output").is_empty());
-    let mut retained = StreamJoinOperator::new("match", left, right.clone(), spec()).unwrap();
+    let mut retained =
+        StreamJoinOperator::new("match", left.clone(), right.clone(), spec()).unwrap();
     let active = StreamOperatorContext::new(&job, "match", None);
-    let error = retained
+    retained
         .process_data(
             "right",
-            right_key_batch(right, key),
+            right_key_batch(right.clone(), key.clone()),
             &active,
             &mut collector,
         )
         .await
-        .unwrap_err();
-    assert!(matches!(error, CalcFlowError::Internal { .. }));
-    assert_eq!(retained.state.next_right_row_id, 0);
-    assert_eq!(retained.status().right.retained_rows, 0);
+        .unwrap();
+    let width = u64::try_from(key.data_type().primitive_width().unwrap()).unwrap();
+    let fee = STREAM_JOIN_STATE_ROW_OVERHEAD_BYTES_V1 + 44 + 2 * width;
+    assert_eq!(retained.state.next_right_row_id, 1);
+    assert_eq!(retained.status().right.retained_rows, 1);
+    assert_eq!(retained.status().right.retained_bytes, fee);
+    assert!(collector.drain("output").is_empty());
+    let legacy = retained.checkpoint_v1(Epoch::INITIAL).unwrap();
+    retained.prepare_checkpoint_async(&active).await.unwrap();
+    let current = retained.checkpoint(Epoch::new(2).unwrap()).unwrap();
+    assert_eq!(legacy.inline_metadata["layout_version"], 1);
+    assert_eq!(current.inline_metadata["layout_version"], 2);
+    for snapshot in [legacy, current] {
+        assert_codec_key_restore(&snapshot, key.clone(), &job, fee).await;
+    }
+    drop(retained);
+    drop(operator);
+    drop(context);
+    drop(active);
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
 }
 
 #[tokio::test]
-async fn test_legacy_int8_and_date_codec_behavior_stays_on_fallback() {
+async fn test_signed_int8_and_date_keys_retain_restore_and_match() {
     let keys: Vec<ArrayRef> = vec![
         Arc::new(Int8Array::from(vec![-1])),
-        Arc::new(Date32Array::from(vec![0])),
-        Arc::new(Date64Array::from(vec![0])),
+        Arc::new(Date32Array::from(vec![-1])),
+        Arc::new(Date64Array::from(vec![-86_400_000])),
     ];
     for key in keys {
-        legacy_key_behavior(key).await;
+        retained_codec_key_behavior(key).await;
     }
+}
+
+async fn assert_codec_key_restore(
+    snapshot: &OperatorStateSnapshot,
+    key: ArrayRef,
+    job: &StreamJobContext,
+    fee: u64,
+) {
+    let left = schema_with_key(&left_schema(), key.data_type());
+    let right = schema_with_key(&right_schema(), key.data_type());
+    let mut restored =
+        StreamJoinOperator::new("match", left.clone(), right.clone(), spec()).unwrap();
+    restored.restore(snapshot).unwrap();
+    assert_eq!(restored.status().right.retained_bytes, fee);
+    assert_eq!(restored.state.next_right_row_id, 1);
+    let left_record = RecordBatch::try_new(
+        left,
+        vec![
+            key.clone(),
+            Arc::new(TimestampMicrosecondArray::from(vec![0]).with_timezone("UTC")),
+            Arc::new(Int64Array::from(vec![42])),
+        ],
+    )
+    .unwrap();
+    let right_batch = right_key_batch(right, key);
+    let expected = RecordBatch::try_new(
+        restored.output_ports()[0].schema().unwrap().clone(),
+        left_record
+            .columns()
+            .iter()
+            .chain(right_batch.table_payload().unwrap().batches()[0].columns())
+            .cloned()
+            .collect(),
+    )
+    .unwrap();
+    let context = StreamOperatorContext::new(job, "match", None);
+    let mut collector = EdgeCollector::new(restored.output_ports().to_vec());
+    restored
+        .process_data(
+            "left",
+            Batch::table(vec![left_record], BatchMetadata::default()).unwrap(),
+            &context,
+            &mut collector,
+        )
+        .await
+        .unwrap();
+    let output = collector.drain("output");
+    assert_eq!(output.len(), 1);
+    let batch = output[0].as_data().unwrap();
+    assert_eq!(batch.table_payload().unwrap().batches(), &[expected]);
+    assert_eq!(batch.metadata().sequence(), 0);
+    assert_eq!(restored.status().emitted_match_rows, 1);
+    assert_eq!(restored.status().right.retained_bytes, fee);
+}
+
+fn assert_v1_codec_values(array: ArrayRef, tag: u8, values: &[&[u8]]) {
+    let sliced = array.slice(1, values.len());
+    for (row, value) in values.iter().enumerate() {
+        let mut expected = vec![tag, 0, 0, 0, 0];
+        expected.extend_from_slice(&u32::try_from(value.len()).unwrap().to_le_bytes());
+        expected.extend_from_slice(value);
+        assert_eq!(
+            encode_join_key_columns_v1(std::slice::from_ref(&sliced), row, &[0]).unwrap(),
+            expected,
+            "sliced {:?} row {row}",
+            sliced.data_type()
+        );
+    }
+}
+
+#[test]
+fn test_int8_v1_key_codec_preserves_signed_bytes() {
+    assert_v1_codec_values(
+        Arc::new(Int8Array::from(vec![42, i8::MIN, -1, 0, i8::MAX, 42])),
+        2,
+        &[&[0x80], &[0xff], &[0], &[0x7f]],
+    );
+}
+
+#[test]
+fn test_date32_v1_key_codec_preserves_day_bytes() {
+    assert_v1_codec_values(
+        Arc::new(Date32Array::from(vec![42, i32::MIN, -1, 0, i32::MAX, 42])),
+        12,
+        &[
+            &[0, 0, 0, 0x80],
+            &[0xff; 4],
+            &[0; 4],
+            &[0xff, 0xff, 0xff, 0x7f],
+        ],
+    );
+}
+
+#[test]
+fn test_date64_v1_key_codec_preserves_millisecond_bytes() {
+    assert_v1_codec_values(
+        Arc::new(Date64Array::from(vec![42, i64::MIN, -1, 0, i64::MAX, 42])),
+        13,
+        &[
+            &[0, 0, 0, 0, 0, 0, 0, 0x80],
+            &[0xff; 8],
+            &[0; 8],
+            &[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f],
+        ],
+    );
 }
 
 fn opaque_time_record() -> (RecordBatch, std::sync::Weak<()>) {
