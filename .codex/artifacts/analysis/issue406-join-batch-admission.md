@@ -150,7 +150,8 @@ fixture allocations, outside the engine and its measured allocation controls.
 
 - `focused-final.log` and `focused-final.json`: all 38 selected tests passed,
   with 2,011 filtered out. Compilation took 4 minutes 18 seconds; execution took
-  2.22 seconds; total command time was 262.034 seconds. The ownership refactor
+  2.22 seconds; recorded subprocess elapsed time was 262.014580329 seconds.
+  The ownership refactor
   directly affected the earlier passing controls, which justified this final
   rerun. Added controls cover metadata capacity one byte short and exact credit,
   V1 native framing and composite keys, unchanged legacy Int8/date codec
