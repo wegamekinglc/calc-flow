@@ -1,7 +1,8 @@
 # Issue 406: signed and date key codec prerequisite
 
-Status: seven focused behavior controls and scoped Clippy pass; final specialist
-review is pending.
+Status: seven focused behavior controls and scoped Clippy pass. Final specialist
+[review](../reviews/issue406-signed-date-key-codec.md) approves source
+`c27db37e5ec5389143e875c40e746d7ea1d719e5`.
 The tests were prepared at `b7768684` on `bb142320`, then rebased unchanged to
 `e549f5a43d02d53350de905d355d20eb4144525b` on the stable batch-admission
 commit `327a6bbfaa162bddddc97f08ce312b99e393bd6a`. Final specialist batch
