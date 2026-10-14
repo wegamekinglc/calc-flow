@@ -13,11 +13,14 @@ lifecycle results, compatibility limits, and outstanding CI/performance gates.
 The following October 13 section and older stages retain their historical
 revision-specific observations.
 
-The complete eight-workload objective remains active. Phase 2.3 now targets
+The complete eight-workload objective remains active. Phase 2.3 now implements
 repeated stream expression execution: cached row-local DataFusion physical
-expressions should avoid per-batch plan rebinding while preserving SQL semantics,
-caller ownership, collection limits and cancellation. This is a separate local
-increment, starting from e884adc3; no performance result is attributed to it.
+expressions avoid per-batch plan rebinding while preserving SQL semantics,
+caller ownership, collection limits and cancellation. Its
+[focused evidence](issue406-compiled-expressions.md) records RED/GREEN, boundary
+and eight adjacent controls, scoped Clippy and unchanged contracts; final local
+specialist review remains pending. This separate local increment starts from
+e884adc3; no performance result is attributed to it.
 Remaining phase 0/1/3/4/5 requirements and all eight absolute acceptance rows
 remain in scope. Historical stopped attempts stay sealed and will not be retried
 or filled in. Remote CI, 90% coverage and a final current-source complete

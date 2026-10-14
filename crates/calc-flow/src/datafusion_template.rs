@@ -8,7 +8,10 @@
 //! registering, and planning again. Rebuilding every ancestor of the scan also
 //! gives each run fresh execution metrics.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, OnceLock},
+};
 
 use datafusion::{
     arrow::{datatypes::SchemaRef, record_batch::RecordBatch},
@@ -25,6 +28,9 @@ use parking_lot::Mutex;
 
 use crate::Batch;
 
+mod compiled;
+pub(crate) use compiled::CompiledExpression;
+
 /// Bounded so a runtime planning many distinct queries keeps constant memory.
 const MAX_TEMPLATES: usize = 8;
 
@@ -36,9 +42,16 @@ pub(crate) struct QueryTemplate {
     plan: Arc<dyn ExecutionPlan>,
     pub(crate) logical_plan: String,
     pub(crate) physical_plan_text: String,
+    compiled: OnceLock<Option<Arc<CompiledExpression>>>,
 }
 
 impl QueryTemplate {
+    pub(crate) fn compiled_expression(&self) -> Option<Arc<CompiledExpression>> {
+        self.compiled
+            .get_or_init(|| CompiledExpression::try_new(&self.plan).map(Arc::new))
+            .clone()
+    }
+
     /// Returns a fresh plan tree reading `batches` in the template's scan.
     pub(crate) fn bind(&self, batches: &[RecordBatch]) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
         Arc::clone(&self.plan)
@@ -154,6 +167,7 @@ fn template_for(candidate: &TemplateCandidate<'_>) -> Option<QueryTemplate> {
         plan,
         logical_plan: candidate.logical_plan.to_owned(),
         physical_plan_text: candidate.physical_plan_text.to_owned(),
+        compiled: OnceLock::new(),
     })
 }
 

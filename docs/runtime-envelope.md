@@ -877,8 +877,19 @@ watermark, lateness, duplicate, null, output-budget, and recovery semantics
 are enforced on both paths.
 
 Column-only stream projections reuse Arrow arrays without SQL planning.
-Arithmetic, filters, unsupported projections, and their errors retain the SQL
-path. The Python connector bridge dispatches ready callbacks through one
+Other eligible single-input, row-local stream expressions first execute through
+SQL. Later batches with the same query, alias and exact Arrow schema, including
+metadata, reuse compiled immutable DataFusion expressions for arithmetic and
+filtering. Evaluation uses the planned output schema and SQL visible-slice
+collection limits. The cache holds at most eight templates and no input rows;
+filter buffers belong to each call. Selected UDFs, non-immutable functions,
+non-row-local plans, limits, ordered scans and unsupported templates retain the
+SQL path. Compiled evaluation checks cancellation/deadlines at record boundaries
+and before emission, yielding between multiple input record batches. Private
+stream SQL-query metrics describe only SQL fallback calls. Runner callback
+metrics cover both execution paths.
+
+The Python connector bridge dispatches ready callbacks through one
 job-scoped wakeup, yielding after at most 64 requests. Native coroutines may
 start eagerly on the captured Python loop when no custom task factory is
 installed; arbitrary awaitables and custom factories keep their scheduling
