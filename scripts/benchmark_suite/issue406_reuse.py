@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shlex
+import tomllib
 import zipfile
 from pathlib import Path
 
@@ -318,7 +319,8 @@ def validate_ordinary_audit(release: dict, build: dict, sealed: dict) -> list:
     }
     if any(audit.get(key) != value for key, value in expected.items()):
         raise ValueError("ordinary dependency audit artifact identities differ")
-    _validate_ordinary_invocations(audit, build, paths["build_log"])
+    codegen = _ordinary_release_codegen(build, sealed)
+    _validate_ordinary_invocations(audit, build, paths["build_log"], codegen)
     artifacts = _wheel_artifact_identity(
         {"build_source": build["source"], "product_source": build["source"]},
         compiled,
@@ -360,13 +362,20 @@ def _validate_ordinary_profiles(artifacts: list) -> None:
             raise ValueError("ordinary wheel core or binding profile differs")
 
 
-def _ordinary_invocation(line: str, crate: str, features: set) -> None:
+def _ordinary_invocation(
+    line: str, crate: str, features: set, expected_codegen: dict | None = None
+) -> None:
     tokens = shlex.split(
         line[line.index("Running `") + len("Running `") : line.rindex("`")]
     )
     _reject_attached_options(tokens)
     cfg, actual = _ordinary_cfg(tokens)
     normalized = _ordinary_codegen(tokens)
+    expected_codegen = (
+        {"opt-level": "3", "embed-bitcode": "no", "strip": "debuginfo"}
+        if expected_codegen is None
+        else expected_codegen
+    )
     expected_cfg = _ordinary_expected_cfg(crate, features)
     if (
         tokens[tokens.index("--crate-name") + 1] != crate
@@ -374,12 +383,14 @@ def _ordinary_invocation(line: str, crate: str, features: set) -> None:
         or set(cfg) != expected_cfg
         or "--test" in tokens
         or "--target" in tokens
-        or normalized != {"opt-level": "3", "embed-bitcode": "no", "strip": "debuginfo"}
+        or normalized != expected_codegen
     ):
         raise ValueError("ordinary compiler invocation configuration differs")
 
 
-def _validate_ordinary_invocations(audit: dict, build: dict, log: Path) -> None:
+def _validate_ordinary_invocations(
+    audit: dict, build: dict, log: Path, codegen: dict
+) -> None:
     lines = log.read_text().splitlines()
     for key, crate, features in (
         ("actual_core_invocation", "calc_flow", set()),
@@ -396,7 +407,7 @@ def _validate_ordinary_invocations(audit: dict, build: dict, log: Path) -> None:
         ]
         if len(found) != 1 or found[0] != audit.get(key):
             raise ValueError("ordinary compiler invocation differs from build log")
-        _ordinary_invocation(found[0], crate, features)
+        _ordinary_invocation(found[0], crate, features, codegen[crate])
     _validate_maturin_invocation(lines, build, audit)
 
 
@@ -549,17 +560,58 @@ def _ordinary_cfg(tokens):
 
 
 def _ordinary_codegen(tokens):
-    codegen = dict(
-        tokens[index + 1].split("=", 1)
-        for index, argument in enumerate(tokens)
-        if argument == "-C"
-    )
+    pairs = []
+    for index, argument in enumerate(tokens):
+        if argument == "-C":
+            if index + 1 == len(tokens):
+                raise ValueError(
+                    "ordinary compiler invocation has an incomplete option"
+                )
+            key, separator, value = tokens[index + 1].partition("=")
+            pairs.append((key, value if separator else None))
+    codegen = dict(pairs)
+    if len(codegen) != len(pairs):
+        raise ValueError("ordinary compiler invocation has duplicate codegen options")
     normalized = {
         key: value
         for key, value in codegen.items()
         if key not in ("metadata", "extra-filename")
     }
     return normalized
+
+
+def _ordinary_release_codegen(build: dict, sealed: dict) -> dict:
+    manifest = Path(build["source"]) / "Cargo.toml"
+    original = build.get("source_files_sha256", {}).get("Cargo.toml")
+    if not original or sealed.get(str(manifest)) != original:
+        raise ValueError("ordinary release profile manifest is not sealed")
+    if not manifest.is_file() or sha256_file(manifest) != original:
+        raise ValueError("ordinary release profile manifest changed")
+    profile = _ordinary_release_profile(manifest)
+    common = {"opt-level": "3", "strip": "debuginfo"}
+    if not profile:
+        defaults = {**common, "embed-bitcode": "no"}
+        return {"calc_flow": defaults, "calc_flow_python": dict(defaults)}
+    if (
+        profile != {"lto": "thin", "codegen-units": 1}
+        or type(profile.get("codegen-units")) is not int
+    ):
+        raise ValueError("ordinary release profile configuration differs")
+    common = {**common, "codegen-units": "1"}
+    return {
+        "calc_flow": {**common, "linker-plugin-lto": None},
+        "calc_flow_python": {**common, "lto": "thin"},
+    }
+
+
+def _ordinary_release_profile(manifest: Path) -> dict:
+    profiles = tomllib.loads(manifest.read_text()).get("profile", {})
+    if not isinstance(profiles, dict):
+        raise ValueError("ordinary release profile table is invalid")
+    release = profiles.get("release", {})
+    if not isinstance(release, dict):
+        raise ValueError("ordinary release profile table is invalid")
+    return release
 
 
 def _ordinary_expected_cfg(crate, features):
