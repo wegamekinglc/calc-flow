@@ -1225,6 +1225,11 @@ impl WindowAggregateOperator {
     /// grows past its threshold.
     fn plan_pending_encoding(&self) -> Result<Option<PendingEncoding>> {
         let operations = self.pending_operations();
+        if operations.is_empty() && self.state.replace_retained_on_checkpoint {
+            // A prepared replacement base already supersedes the inventory;
+            // re-planning would re-encode the same live state at capture.
+            return Ok(None);
+        }
         if self.compaction_due(!operations.is_empty())? {
             let operations = self
                 .state
@@ -1351,14 +1356,14 @@ impl WindowAggregateOperator {
     /// identical to an operator that never attempted the close.
     async fn emit_closed(
         &mut self,
-        mut closed: BTreeMap<WindowKey, AccumulatorRow>,
+        closed: BTreeMap<WindowKey, AccumulatorRow>,
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<Vec<(WindowKey, AccumulatorRow)>> {
         if closed.is_empty() {
             return Ok(Vec::new());
         }
-        let record = build_output_record(
+        let built = build_output_record(
             &closed,
             &self.spec,
             &self.compiled,
@@ -1366,16 +1371,24 @@ impl WindowAggregateOperator {
                 .schema()
                 .expect("window output always has an exact schema"),
             context.operator_id(),
-        )?;
-        let batches = chunk_output_record(
-            &record,
-            context.operator_id(),
-            self.state.next_output_sequence,
-            context.output_budget(),
-        )?;
+        )
+        .and_then(|record| {
+            chunk_output_record(
+                &record,
+                context.operator_id(),
+                self.state.next_output_sequence,
+                context.output_budget(),
+            )
+        });
+        let batches = match built {
+            Ok(batches) => batches,
+            Err(error) => {
+                self.restore_closed_prefix(closed);
+                return Err(error);
+            }
+        };
         if let Err(error) = self.emit_chunks(batches, output).await {
-            closed.append(&mut self.state.accumulators);
-            self.state.accumulators = closed;
+            self.restore_closed_prefix(closed);
             return Err(error);
         }
         // Accepted windows leave live state and its budget here; the caller
@@ -1391,6 +1404,13 @@ impl WindowAggregateOperator {
         }
         self.state.accumulator_bytes = self.state.accumulator_bytes.saturating_sub(released);
         Ok(removed)
+    }
+
+    /// Merges an un-emitted closed prefix back into live state, restoring the
+    /// exact pre-close contents.
+    fn restore_closed_prefix(&mut self, mut closed: BTreeMap<WindowKey, AccumulatorRow>) {
+        closed.append(&mut self.state.accumulators);
+        self.state.accumulators = closed;
     }
 
     async fn emit_chunks(
@@ -3325,6 +3345,10 @@ fn state_fields_for_version(
     fields
 }
 
+#[cfg(test)]
+static ENCODED_STATE_SEGMENTS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 fn encode_state_segment(
     operations: &[StateOperationRow],
     spec: &WindowSpec,
@@ -3332,6 +3356,8 @@ fn encode_state_segment(
     pipeline_fingerprint: &str,
     operator_id: &str,
 ) -> Result<Vec<u8>> {
+    #[cfg(test)]
+    ENCODED_STATE_SEGMENTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     validate_state_operations(operations)?;
     let schema = state_schema(spec, compiled, pipeline_fingerprint, operator_id);
     let mut arrays = state_key_arrays(operations);
@@ -4955,6 +4981,88 @@ mod tests {
         assert_eq!(record.table_payload().unwrap().batches()[0].num_rows(), 3);
         assert!(operator.state.accumulators.is_empty());
         assert_eq!(operator.state.accumulator_bytes, 0);
+    }
+
+    /// A chunking failure happens before any emission, so the closed prefix
+    /// must be merged back: accumulators, budget charge, watermark, and
+    /// pending checkpoint marks stay retryable.
+    #[tokio::test]
+    async fn failed_output_chunking_restores_the_closed_prefix() {
+        let mut operator = checkpoint_segment_operator();
+        let job = budget_test_job();
+        let context = StreamOperatorContext::new(&job, "window", None);
+        let tiny = StreamOperatorContext::new(&job, "window", None)
+            .with_output_budget(crate::EdgeBudget::new(1, 8).unwrap());
+        let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data("input", budget_test_batch(&[0, 1]), &context, &mut output)
+            .await
+            .unwrap();
+        let before_bytes = operator.state.accumulator_bytes;
+
+        let error = operator
+            .on_watermark(EventTime::from_micros(60_000_000), &tiny, &mut output)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("byte budget"), "{error}");
+        assert_eq!(operator.state.accumulators.len(), 1);
+        assert_eq!(operator.state.accumulator_bytes, before_bytes);
+        assert!(operator.state.last_input_watermark.is_none());
+        assert!(operator.state.prepared_segments.is_empty());
+        assert!(
+            operator
+                .state
+                .checkpoint_marks
+                .values()
+                .all(|mark| mark.closed_group_values.is_none()),
+            "a failed close must not mark tombstones"
+        );
+
+        operator
+            .on_watermark(EventTime::from_micros(60_000_000), &context, &mut output)
+            .await
+            .unwrap();
+        assert_eq!(output.drain("output")[0].as_data().unwrap().num_rows(), 1);
+        assert!(operator.state.accumulators.is_empty());
+        assert_eq!(operator.state.accumulator_bytes, 0);
+    }
+
+    /// The runtime awaits `prepare_checkpoint_async` immediately before
+    /// `checkpoint`; a compacting epoch must encode its replacement base
+    /// exactly once across both steps.
+    #[tokio::test]
+    async fn prepared_compaction_is_not_reencoded_at_capture() {
+        let mut operator = checkpoint_segment_operator();
+        operator.set_delta_compaction_threshold(1);
+        let job = budget_test_job();
+        let context = StreamOperatorContext::new(&job, "window", None);
+        let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data("input", budget_test_batch(&[0]), &context, &mut output)
+            .await
+            .unwrap();
+        operator.prepare_checkpoint_async(&context).await.unwrap();
+        operator.checkpoint(crate::Epoch::INITIAL).unwrap();
+
+        operator
+            .process_data("input", budget_test_batch(&[1]), &context, &mut output)
+            .await
+            .unwrap();
+        ENCODED_STATE_SEGMENTS.store(0, std::sync::atomic::Ordering::SeqCst);
+        operator.prepare_checkpoint_async(&context).await.unwrap();
+        assert_eq!(
+            ENCODED_STATE_SEGMENTS.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "compaction encodes one replacement base"
+        );
+        operator
+            .checkpoint(crate::Epoch::INITIAL.next().unwrap())
+            .unwrap();
+        assert_eq!(
+            ENCODED_STATE_SEGMENTS.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "capture must reuse the prepared base, not re-encode it"
+        );
     }
 
     #[tokio::test]
