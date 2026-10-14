@@ -68,4 +68,7 @@ is not evidence for this branch. The documentation specialist updated only
 `docs/getting-started.md` under build-from-source, covering the configured release
 profile and its wheel/bench applicability. All 24 inspected local links/anchors,
 whitespace and final newline checks pass; no changelog entry qualifies. Final
-specialist review remains pending at this writing.
+[specialist review](../reviews/issue406-release-profile.md) is Approve at
+`b7c0abeb8e00848ee7f9dbb0b19be56ffef8b589`. The narrow compiler-alias correction
+resolves its sole concrete finding. This is a local source/configuration approval;
+the wheel, cross-platform, CI, coverage and performance gates above remain pending.
