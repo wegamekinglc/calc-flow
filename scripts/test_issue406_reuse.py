@@ -79,6 +79,10 @@ class HistoricalReuseTests(unittest.TestCase):
             line[:-1] + " -C opt-level=3`",
             line[:-1] + " -C`",
             line[:-1] + " -C hidden`",
+            line[:-1] + " --codegen opt-level=2`",
+            line[:-1] + " --codegen=lto=off`",
+            line[:-1] + " -g`",
+            line[:-1] + " -O`",
         ):
             with (
                 self.subTest(line=altered),

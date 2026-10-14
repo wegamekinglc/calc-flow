@@ -45,6 +45,12 @@ All retained logs are under `target/issue406-release-profile-20261014/`.
 - `ordinary-profile-boundaries.log`: three new controls pass (runner 0.115s,
   test 0.003s), covering source seals/tampering, seven unsupported profile
   configurations, and duplicate/dangling/unknown codegen options.
+- Specialist review found that long codegen aliases and debug/optimization
+  shortcuts could bypass the short-form parser. `codegen-alias-red.log` records
+  four expected false-acceptance failures (one test, four subcases, 0.004s).
+  The exact Cargo-shape audit now refuses `--codegen`, `--codegen=...`, `-g`
+  and `-O`; `codegen-alias-green.log` records the alias control and both
+  default/Thin-LTO complete audit fixtures passing after this correction.
 - `cargo-profile-fixture.log` and `cargo-codegen-witness.json`: real Rust1.88
   compilation of two tiny dependency-free fixture crates succeeds. The library
   receives linker-plugin LTO and one codegen unit; the cdylib receives Thin LTO

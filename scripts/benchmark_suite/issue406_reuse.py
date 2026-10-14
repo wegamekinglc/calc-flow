@@ -537,12 +537,13 @@ def _ordinary_profile_matches(artifacts, package, name, kind):
 
 def _reject_attached_options(tokens):
     if any(
-        argument.startswith(("--cfg=", "--target="))
+        argument in ("--codegen", "-g", "-O")
+        or argument.startswith(("--cfg=", "--target=", "--codegen="))
         or argument.startswith("-C")
         and argument != "-C"
         for argument in tokens
     ):
-        raise ValueError("ordinary compiler invocation has attached options")
+        raise ValueError("ordinary compiler invocation has unsupported option spelling")
 
 
 def _ordinary_cfg(tokens):
