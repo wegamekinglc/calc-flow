@@ -6,6 +6,15 @@ progress: implementation and focused verification pass; final specialist review
 is pending. No performance claim, remote CI or release build belongs to this
 increment. All eight original acceptance targets and other phases remain active.
 
+Current review candidate source is frozen across six Rust files, 40 changed/new
+functions, maximum CCN8 and no changed/new parser omissions. Its source digest
+is `94c6c1919367193c933556cc0830a5d58901ac62e964239913290873c15d713e`.
+The final augmented runtime/component registration and default-feature core
+lib/test Clippy pass after the defensive Arrow-envelope follow-up. Older
+running/pending notes below describe their historical stage and are superseded
+by later results. The component failure deliberately bypasses a schema invariant
+and does not demonstrate a legal-input SQL regression. Final review is pending.
+
 ## Expected regression RED
 
 The existing stream_computed_and_filtered_projections_keep_sql_semantics
@@ -104,3 +113,66 @@ doc writer verified27local links/anchors, whitespace/newline/tables and schema
 no-drift, with prior phase2.2 wording untouched. Final local specialist review
 remains required; remote CI/90%coverage/release integration and all eight
 performance targets remain unproven.
+
+## Final review source-comment follow-up
+
+The reviewer found no behavior/ownership blocker in the first pass and requested
+two stale module descriptions be reconciled. datafusion_template now separates
+ordinary SQL plan rebinding from eligible compiled stream expression evaluation;
+expression/projection describes its column-only Arrow responsibility. Both
+changes contain only module comments; removing //! lines yields byte-identical
+source against fe5ca7b2. No unchanged passing runtime/lint check is repeated.
+The earlier five-file seal is preserved as complexity-before-comments.json.
+Current complexity-final.json covers6Rust files/38changed-new functions/maxCCN8,
+no changed/new parser omissions; sorted source digest:
+`ee5df0226340b4113e05499fc33b23f4eba33c244256c5e4df0923fd7e927dde`. The same two baseline parser omissions remain exact unchanged
+source excerpts. Actual final specialist approval is still pending.
+
+## Defensive Arrow error-envelope control
+
+The reviewer identified a narrow diagnostic consistency issue: the direct
+path wrapped raw RecordBatch projection/Arrow filtering errors without the
+DataFusionError::ArrowError conversion used by MemoryStream/FilterExecStream.
+No validated exact-schema built-in SQL input triggering that invariant failure
+has been demonstrated. The new component control deliberately bypasses cache
+schema matching and compares a real RecordBatch projection failure with a
+real MemoryStream failure. It must not be presented as a legal-input production
+SQL regression.
+
+The first compiled-arrow-envelope-component-red.log is a fixture compiler
+error (9.917s): an Arc<DataSourceExec> reference needed explicit coercion to
+Arc<dyn ExecutionPlan>. The fixture now supplies that type; no product change
+is included. The corresponding cfg(test) reexport is present on current disk.
+The corrected component RED is now running, before normalization.
+
+compiled-arrow-envelope-component-corrected-red.log records the expected
+component differential failure (1m32s compilation,0.33s execution,
+runner93.571s): the direct message lacked the MemoryStream Arrow error prefix.
+This fixture intentionally violates the internal cache/schema invariant and
+does not reproduce a legal-input SQL failure. Only the three raw Arrow error
+branches now convert through DataFusionError::from; PhysicalExpr/DataFusion
+errors and bounded collection behavior are untouched.
+
+A separate minimal coverage control evaluates upper(symbol) with a Price
+predicate over repeated different batches. Its first SQL diagnostic must
+show FilterExec projecting only symbol, proving the predicate column is
+removed after predicate evaluation and downstream expression indices remap.
+This constrains already-correct source order; it is not a newly discovered bug.
+
+compiled-arrow-envelope-component-green.log PASSes (1m47s compilation,
+0.18s execution, runner107.643s), including the new component envelope and
+filter-only-output control and all existing selected runtime controls. The
+first SQL physical diagnostic actually contains FilterExec projection=[symbol@...],
+so Price is absent from that node's output and later upper(symbol) uses the
+remapped index. Final core default-feature lib/test Clippy PASSes in
+compiled-expressions-clippy-final.log (29.44s tool time, runner29.577s). The
+command is cargo clippy -p calc-flow --lib --tests -- -D warnings; it does
+not cover all features or the workspace. All owned handles are settled.
+
+Final complexity-final.json covers6Rust files/40changed-new
+functions, maxCCN8, no changed/new parser omissions and two
+exact-unchanged baseline omissions. Current source digest:
+`94c6c1919367193c933556cc0830a5d58901ac62e964239913290873c15d713e`. Earlier c14b9e.../ee5df... manifests remain archived as
+complexity-before-comments.json/complexity-comments-only.json. Final specialist
+approval remains pending; no release build, new native Python integration,
+performance acquisition/retry, remote operation or full CI ran.

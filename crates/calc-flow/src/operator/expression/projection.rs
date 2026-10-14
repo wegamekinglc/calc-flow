@@ -1,4 +1,4 @@
-//! Precompiled column-only projections; arithmetic and relational work stay in SQL.
+//! Precompiled column-only projections over read-only Arrow arrays.
 
 use std::{collections::BTreeSet, sync::Arc};
 

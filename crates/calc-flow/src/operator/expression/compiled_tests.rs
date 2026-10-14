@@ -53,11 +53,17 @@ pub(super) async fn repeated_stream_batches_skip_plan_rebinding() {
     }
     constants_preserve_zero_column_input_rows().await;
     chunks_and_schema_changes().await;
+    predicate_column_is_removed_after_filtering().await;
     retained_input_buffers_are_released().await;
     evaluation_errors_leave_the_cache_usable().await;
     unsupported_queries_keep_sql_execution().await;
     selected_udfs_keep_sql_execution().await;
     cancellation_and_abandonment_release_call_state().await;
+    let job = job(CancellationToken::new());
+    crate::datafusion_template::check_arrow_error_envelope(&StreamOperatorContext::new(
+        &job, "compiled", None,
+    ))
+    .await;
 }
 
 fn shifted_input(shift: f64) -> Batch {
@@ -270,6 +276,24 @@ async fn constants_preserve_zero_column_input_rows() {
             .metrics()
             .len(),
         1
+    );
+}
+
+async fn predicate_column_is_removed_after_filtering() {
+    let job = job(CancellationToken::new());
+    let mut operator = operator(&["upper(symbol) AS ticker"], Some(r#""Price" > 15"#));
+    let mut reference = operator.clone();
+    for shift in [20.0, 0.0, 40.0] {
+        compare(&mut operator, &mut reference, shifted_input(shift), &job).await;
+    }
+    let metrics = operator.stream_state.runtime.as_ref().unwrap().metrics();
+    assert_eq!(metrics.len(), 1);
+    let physical = &metrics[0].physical_plan;
+    assert!(
+        physical
+            .lines()
+            .any(|line| line.contains("FilterExec") && line.contains("projection=[symbol@")),
+        "{physical}"
     );
 }
 

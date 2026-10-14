@@ -4,9 +4,10 @@
 //! planned physical tree contains only data-independent row-local nodes over
 //! one in-memory scan, and every function is immutable, the plan is kept as a
 //! template. Later batches with the same query text, alias, and exact schema
-//! bind their rows into a fresh copy of the tree instead of parsing,
-//! registering, and planning again. Rebuilding every ancestor of the scan also
-//! gives each run fresh execution metrics.
+//! reuse the template instead of parsing, registering, and planning again.
+//! Ordinary SQL queries bind rows into a fresh plan tree with fresh execution
+//! metrics. Eligible stream expressions compile the template into immutable
+//! expression steps with filtering state owned by each evaluation.
 
 use std::{
     collections::BTreeMap,
@@ -30,6 +31,8 @@ use crate::Batch;
 
 mod compiled;
 pub(crate) use compiled::CompiledExpression;
+#[cfg(test)]
+pub(crate) use compiled::check_arrow_error_envelope;
 
 /// Bounded so a runtime planning many distinct queries keeps constant memory.
 const MAX_TEMPLATES: usize = 8;

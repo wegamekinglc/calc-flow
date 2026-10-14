@@ -163,7 +163,7 @@ fn push(
         Step::Columns(indices) => {
             let record = record
                 .project(indices)
-                .map_err(|error| datafusion_error(Some(node_id), error))?;
+                .map_err(|error| datafusion_error(Some(node_id), DataFusionError::from(error)))?;
             push(tail, record, output, node_id, context)
         }
         Step::Project(projector) => {
@@ -192,7 +192,7 @@ fn filter_record(filter: &Filter, record: RecordBatch, node_id: &str) -> Result<
     let projected = match &filter.projection {
         Some(indices) => record
             .project(indices)
-            .map_err(|error| datafusion_error(Some(node_id), error))?,
+            .map_err(|error| datafusion_error(Some(node_id), DataFusionError::from(error)))?,
         None => record,
     };
     let mask = as_boolean_array(&mask).map_err(|_| {
@@ -203,7 +203,8 @@ fn filter_record(filter: &Filter, record: RecordBatch, node_id: &str) -> Result<
             ),
         )
     })?;
-    filter_record_batch(&projected, mask).map_err(|error| datafusion_error(Some(node_id), error))
+    filter_record_batch(&projected, mask)
+        .map_err(|error| datafusion_error(Some(node_id), DataFusionError::from(error)))
 }
 
 fn flush(
@@ -235,4 +236,43 @@ fn drain(
         push(tail, record, output, node_id, context)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+pub(crate) async fn check_arrow_error_envelope(context: &StreamOperatorContext<'_>) {
+    use datafusion::{
+        arrow::{
+            datatypes::{DataType, Field, Schema},
+            record_batch::RecordBatchOptions,
+        },
+        datasource::memory::{DataSourceExec, MemorySourceConfig},
+        physical_plan::memory::MemoryStream,
+    };
+    use futures::StreamExt;
+    let schema = Arc::new(Schema::new(vec![Field::new(
+        "value",
+        DataType::Int64,
+        true,
+    )]));
+    let source = MemorySourceConfig::try_new(&[vec![]], schema.clone(), Some(vec![0])).unwrap();
+    let plan: Arc<dyn ExecutionPlan> = DataSourceExec::from_data_source(source);
+    let compiled = CompiledExpression::try_new(&plan).unwrap();
+    let record = RecordBatch::try_new_with_options(
+        Arc::new(Schema::empty()),
+        vec![],
+        &RecordBatchOptions::new().with_row_count(Some(1)),
+    )
+    .unwrap();
+    let input = Batch::table(vec![record.clone()], crate::BatchMetadata::default()).unwrap();
+    // Deliberately bypass cache schema matching to exercise an invariant error.
+    let mut reference = MemoryStream::try_new(vec![record], schema, Some(vec![0])).unwrap();
+    let expected = reference.next().await.unwrap().unwrap_err();
+    let actual = compiled
+        .evaluate(&input, "compiled", context)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        actual.to_string(),
+        datafusion_error(Some("compiled"), expected).to_string()
+    );
 }
