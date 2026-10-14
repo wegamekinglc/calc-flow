@@ -27,6 +27,14 @@ remain in scope. Historical stopped attempts stay sealed and will not be retried
 or filled in. Remote CI, 90% coverage and a final current-source complete
 acceptance comparison are still required.
 
+The reviewed increments are locally integrated with published main
+`fb14646b713eee5cc64e0625175c7d65f60166e7` on
+`feature/issue406-second-stage`. The
+[integration evidence](issue406-second-stage-integration.md) and
+[bounded review](../reviews/issue406-second-stage-integration.md) preserve all
+issue/main Rust source bytes and both new stage seals; integrated core lib/test
+Clippy passes. This reviewed increment is unpushed and does not close406.
+
 ## Current stage, October 13, 2026
 
 The complete eight-workload objective remains active. PR #407's implementation
