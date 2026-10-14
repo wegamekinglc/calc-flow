@@ -1,5 +1,28 @@
 # Issue 406: development and acceptance status
 
+## Current local increments, October 14, 2026
+
+PR #421 is merged at `1606e516cffbf5448e4f2e60d904b9a5a1550c58`; its
+post-compaction diagnostics do not establish during-compaction acceptance.
+Phase 2.1 Join output projection is locally committed at `3cfe6c49`. Phase 2.2
+selected Join state ownership and layout-3 recovery are locally implemented and
+reviewed at `e884adc362ac8f8d03c1364d0dfdb4e205407696`. Its
+[review](../reviews/issue406-join-state-projection.md) and
+[evidence](issue406-join-state-projection.md) preserve focused correctness and
+lifecycle results, compatibility limits, and outstanding CI/performance gates.
+The following October 13 section and older stages retain their historical
+revision-specific observations.
+
+The complete eight-workload objective remains active. Phase 2.3 now targets
+repeated stream expression execution: cached row-local DataFusion physical
+expressions should avoid per-batch plan rebinding while preserving SQL semantics,
+caller ownership, collection limits and cancellation. This is a separate local
+increment, starting from e884adc3; no performance result is attributed to it.
+Remaining phase 0/1/3/4/5 requirements and all eight absolute acceptance rows
+remain in scope. Historical stopped attempts stay sealed and will not be retried
+or filled in. Remote CI, 90% coverage and a final current-source complete
+acceptance comparison are still required.
+
 ## Current stage, October 13, 2026
 
 The complete eight-workload objective remains active. PR #407's implementation

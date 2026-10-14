@@ -3,11 +3,12 @@
 Status: requirements/protocol accepted for implementation with the caveats in
 `.codex/artifacts/critiques/issue406-join-state-projection.md`; no remaining
 specification blocker. Implementation and focused local verification are
-complete; final specialist implementation review is pending.
+complete; final specialist implementation review approves
+`e884adc362ac8f8d03c1364d0dfdb4e205407696`.
 Base: reviewed local `3cfe6c49f8f962d9fa7ae7476b9f2f3e2f2c2a56`.
 Phase 2.1 output projection is implemented and locally reviewed. Phase 2.2 is
-awaiting final local review; all original eight targets and other acceleration phases remain
-active. No performance acquisition or retry belongs to this draft.
+locally reviewed; all original eight targets and other acceleration phases
+remain active. No performance acquisition or retry belongs to this increment.
 
 ## Required behavior
 

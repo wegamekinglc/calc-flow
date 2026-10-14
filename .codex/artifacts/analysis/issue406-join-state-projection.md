@@ -6,7 +6,8 @@ authentic V1/V2 migration, identity-bound incremental history and OFF rebuild.
 Focused runtime/recovery, nested-dictionary, actual native sparse and generic
 CopyWork lifecycle controls pass. Core lib/test Clippy passes. The doc writer
 has reconciled both normative guides and the qualifying changelog. Final local
-specialist implementation review is pending.
+specialist implementation review approves commit e884adc362ac8f8d03c1364d0dfdb4e205407696;
+see the [review report](../reviews/issue406-join-state-projection.md).
 
 Current Rust source is frozen in `complexity-phase22-review.json`: 50 Rust
 files, 293 changed/new functions, maximum CCN 8, no changed/new parser omissions.
@@ -743,3 +744,18 @@ scan of all 58 changed or untracked files. The manifest exactly matches all
 50 changed/new Rust files and every recorded content hash. No build or
 formatter handle remains live. This local candidate is ready for final
 specialist review; no remote CI exists for this unpushed increment.
+
+## Final local specialist review
+
+cf-reviewer approves the complete phase 2.2 implementation at
+`e884adc362ac8f8d03c1364d0dfdb4e205407696`, with no remaining blocking or style
+findings. The reviewer independently matched all 50 Rust source files between
+the committed tree, worktree and provenance manifest, including the aggregate
+`706257eb1a3e504deffe4b6dff91515a544aadae83330235bc254f21d8f00302`.
+The [report](../reviews/issue406-join-state-projection.md) records the focused
+evidence, old-native Python inventory limitation and unproven acceptance gates.
+No new builds, tests, benchmarks, CI polling or remote mutations were required
+for this read-only review. Phase 2.2 is locally reviewed and committed; remote
+required checks, combined 90% coverage, release/native Python integration and
+performance are still pending. This does not complete issue 406 or certify
+merge readiness. The full objective and other phases remain active.
