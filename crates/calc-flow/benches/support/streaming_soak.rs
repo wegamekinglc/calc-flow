@@ -776,12 +776,15 @@ struct CheckpointMatrixSource {
 
 fn checkpoint_matrix_batch(source_id: &str) -> Result<Batch> {
     let value = if source_id == "left" { 1 } else { 10 };
+    // The second row's far-future window stays open across every checkpoint,
+    // so the window operator always stages live state; only the near window
+    // closes at the source watermark.
     let record = RecordBatch::try_new(
         soak_schema(),
         vec![
-            Arc::new(TimestampMicrosecondArray::from(vec![0]).with_timezone("UTC")),
-            Arc::new(StringArray::from(vec![source_id])),
-            Arc::new(Int64Array::from(vec![value])),
+            Arc::new(TimestampMicrosecondArray::from(vec![0, 1_000_000]).with_timezone("UTC")),
+            Arc::new(StringArray::from(vec![source_id, source_id])),
+            Arc::new(Int64Array::from(vec![value, value])),
         ],
     )
     .map_err(|error| CalcFlowError::Internal {
@@ -957,12 +960,17 @@ fn checkpoint_restart_soak_batch(source_id: &str, sequence: u64) -> Result<Batch
         .ok_or_else(|| CalcFlowError::Internal {
             message: "checkpoint soak value exhausted i64".into(),
         })?;
+    // A far-future window per batch stays open across every checkpoint, so
+    // the window operator's durable state evidence does not depend on whether
+    // the latest close beat the barrier.
     let record = RecordBatch::try_new(
         soak_schema(),
         vec![
-            Arc::new(TimestampMicrosecondArray::from(vec![event_time]).with_timezone("UTC")),
-            Arc::new(StringArray::from(vec![source_id])),
-            Arc::new(Int64Array::from(vec![value])),
+            Arc::new(
+                TimestampMicrosecondArray::from(vec![event_time, 1_000_000]).with_timezone("UTC"),
+            ),
+            Arc::new(StringArray::from(vec![source_id, source_id])),
+            Arc::new(Int64Array::from(vec![value, value])),
         ],
     )
     .map_err(|error| CalcFlowError::Internal {
@@ -1853,7 +1861,11 @@ fn checkpoint_restart_soak_public_runner(
         ],
     )
     .unwrap();
-    let window = checkpoint_matrix_window();
+    // Net per-epoch deltas accumulate one segment per epoch, so the soak
+    // lowers the compaction threshold to keep compaction-across-restart
+    // coverage inside a smoke-scale epoch count.
+    let mut window = checkpoint_matrix_window();
+    window.set_delta_compaction_threshold(3);
     let window_fields = window.output_ports()[0]
         .schema()
         .unwrap()
@@ -1982,7 +1994,7 @@ struct CheckpointFaultMatrixReport {
     watermarks_restored: bool,
     final_source_sequences: BTreeMap<String, Option<u64>>,
     final_source_idle: BTreeMap<String, bool>,
-    window_state_restored: bool,
+    window_checkpoint_persisted: bool,
     visible_records: usize,
     duplicate_records: usize,
     missing_records: usize,
@@ -3031,7 +3043,7 @@ impl PrivateFullRunnerFixture {
                 .map(Vec::len)
                 .sum()
         };
-        assert_eq!(visible_records, 4);
+        assert_eq!(visible_records, 8);
         match self.mode {
             PrivateFullRunnerMode::NoCheckpoint => assert_eq!(manifest_count, 0),
             PrivateFullRunnerMode::CheckpointDisabled => assert_eq!(manifest_count, 1),
@@ -3401,10 +3413,13 @@ async fn run_checkpoint_restart_fault_case(
     let selected_before_restart = selected_before_restart_manifest
         .as_ref()
         .map(crate::CheckpointManifest::epoch);
-    let window_state_restored = selected_before_restart_manifest
+    // The window operator encodes net per-epoch deltas, so its entry may
+    // carry zero segments when every window opened and closed inside the
+    // epoch; the entry itself proves the window's epoch metadata persisted.
+    let window_checkpoint_persisted = selected_before_restart_manifest
         .as_ref()
         .and_then(|manifest| manifest.operators().get("window"))
-        .is_some_and(|entry| !entry.segments.is_empty());
+        .is_some();
     drop(first_job);
     assert_eq!(first_source_closed.load(Ordering::SeqCst), 2);
     assert_eq!(first_sink_closed.load(Ordering::SeqCst), 2);
@@ -3565,6 +3580,8 @@ async fn run_checkpoint_restart_fault_case(
             [
                 format!("{sink_id}|0|1|left|1"),
                 format!("{sink_id}|0|1|right|10"),
+                format!("{sink_id}|1000000|1000001|left|1"),
+                format!("{sink_id}|1000000|1000001|right|10"),
             ]
         })
         .collect::<BTreeSet<_>>();
@@ -3589,7 +3606,7 @@ async fn run_checkpoint_restart_fault_case(
         watermarks_restored,
         final_source_sequences,
         final_source_idle,
-        window_state_restored,
+        window_checkpoint_persisted,
         visible_records: observed.len(),
         duplicate_records,
         missing_records,
@@ -4436,13 +4453,20 @@ fn checkpoint_soak_expected_records(manifest: &crate::CheckpointManifest) -> BTr
         .into_iter()
         .flat_map(|sink_id| {
             cursors.iter().flat_map(move |(source_id, last)| {
-                (0..=*last).map(move |sequence| {
-                    format!(
-                        "{sink_id}|{sequence}|{}|{source_id}|{}",
-                        sequence + 1,
-                        sequence + 1
-                    )
-                })
+                // Every batch carries the far-future row, so the far window's
+                // terminal sum is the triangular number over the sequence.
+                let far_total = (last + 1) * (last + 2) / 2;
+                (0..=*last)
+                    .map(move |sequence| {
+                        format!(
+                            "{sink_id}|{sequence}|{}|{source_id}|{}",
+                            sequence + 1,
+                            sequence + 1
+                        )
+                    })
+                    .chain(std::iter::once(format!(
+                        "{sink_id}|1000000|1000001|{source_id}|{far_total}"
+                    )))
             })
         })
         .collect()
@@ -5208,8 +5232,8 @@ async fn private_benchmark_smoke_runs_twelve_honest_cases() {
             ("m5/private_path/barrier_cut_single_source", 1),
             ("m5/private_path/barrier_cut_two_source_fan_out", 4),
             ("m5/private_path/pass_through_two_input_alignment", 1),
-            ("m5/private_path/window_two_input_alignment", 3),
-            ("m5/private_path/dirty_window_state_stage", 2),
+            ("m5/private_path/window_two_input_alignment", 2),
+            ("m5/private_path/dirty_window_state_stage", 1),
             ("m5/private_path/non_empty_manifest_publication", 1),
             ("m5/private_path/retained_delta_compacted_base_restore", 3),
             ("m5/private_path/single_transactional_sink_commit", 1),
@@ -5228,7 +5252,7 @@ async fn private_benchmark_smoke_runs_twelve_honest_cases() {
             .await;
         assert_eq!(report.completed_jobs, 1);
         assert_eq!(report.failed_jobs, 0);
-        assert_eq!(report.visible_records, 4);
+        assert_eq!(report.visible_records, 8);
         if expected_manifests == 2 {
             assert!(report.manifest_count >= expected_manifests);
         } else {
@@ -5346,7 +5370,7 @@ async fn late_periodic_cut_promotes_the_same_epoch_to_terminal() {
             .values()
             .map(Vec::len)
             .sum::<usize>(),
-        4,
+        8,
     );
     assert_eq!(source_opens.lock().len(), 2);
     assert_eq!(source_closed.load(Ordering::SeqCst), 2);
@@ -5386,7 +5410,7 @@ async fn late_periodic_cut_promotes_the_same_epoch_to_terminal() {
             .values()
             .map(Vec::len)
             .sum::<usize>(),
-        4,
+        8,
     );
     drop(restart_job);
     restart_runner.shutdown().await.unwrap();
@@ -5756,7 +5780,7 @@ async fn public_parent_directory_sync_os_failure_requires_recovery() {
         assert_eq!(output_probe.transactional_aborts.load(Ordering::SeqCst), 0);
         assert_eq!(
             output_probe.ordinary_records.lock().len(),
-            if manifest_retained { 2 } else { 4 }
+            if manifest_retained { 4 } else { 6 }
         );
         assert_eq!(
             checkpoint_matrix_temporary_artifacts(&state_root, &manifest_root, &sink_root),
@@ -5999,10 +6023,10 @@ async fn assert_named_checkpoint_fault_case(
         "{case_id}: frozen source idle state"
     );
     assert_eq!(
-        report.window_state_restored, durable_before_restart,
-        "{case_id}: window restore evidence mismatch"
+        report.window_checkpoint_persisted, durable_before_restart,
+        "{case_id}: window checkpoint persistence mismatch"
     );
-    assert_eq!(report.visible_records, 4, "{case_id}: visible record count");
+    assert_eq!(report.visible_records, 8, "{case_id}: visible record count");
     assert_eq!(report.duplicate_records, 0, "{case_id}: duplicate records");
     assert_eq!(report.missing_records, 0, "{case_id}: missing records");
     assert_eq!(
@@ -6010,16 +6034,27 @@ async fn assert_named_checkpoint_fault_case(
         BTreeSet::from([
             "sink-a|0|1|left|1".into(),
             "sink-a|0|1|right|10".into(),
+            "sink-a|1000000|1000001|left|1".into(),
+            "sink-a|1000000|1000001|right|10".into(),
             "sink-b|0|1|left|1".into(),
             "sink-b|0|1|right|10".into(),
+            "sink-b|1000000|1000001|left|1".into(),
+            "sink-b|1000000|1000001|right|10".into(),
         ]),
         "{case_id}: transactional output oracle"
     );
     let mut ordinary_output = report.ordinary_output;
     ordinary_output.sort();
-    let mut expected_ordinary = vec!["0|1|left|1".to_owned(), "0|1|right|10".to_owned()];
+    let mut expected_ordinary = vec![
+        "0|1|left|1".to_owned(),
+        "0|1|right|10".to_owned(),
+        "1000000|1000001|left|1".to_owned(),
+        "1000000|1000001|right|10".to_owned(),
+    ];
     if !durable_before_restart {
-        expected_ordinary.extend(expected_ordinary.clone());
+        // The far windows never emitted before the restart, so replay only
+        // duplicates the near windows that closed pre-fault.
+        expected_ordinary.extend(["0|1|left|1".to_owned(), "0|1|right|10".to_owned()]);
         expected_ordinary.sort();
     }
     assert_eq!(

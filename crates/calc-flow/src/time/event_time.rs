@@ -52,6 +52,21 @@ impl EventTime {
                 ),
             });
         }
+        Self::import_timestamp_scaled(value, *unit, column)
+    }
+
+    /// Imports one Arrow timestamp value whose column type and timezone were
+    /// already validated, applying only the unit conversion (D1.3/D1.5).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CalcFlowError::InvalidArgument`] naming `column` when the
+    /// checked multiplication to microseconds overflows.
+    pub(crate) fn import_timestamp_unit(value: i64, unit: TimeUnit, column: &str) -> Result<Self> {
+        Self::import_timestamp_scaled(value, unit, column)
+    }
+
+    fn import_timestamp_scaled(value: i64, unit: TimeUnit, column: &str) -> Result<Self> {
         match unit {
             TimeUnit::Second => value
                 .checked_mul(1_000_000)

@@ -8,7 +8,8 @@ use calc_flow::{
 };
 use datafusion::arrow::{
     array::{
-        ArrayRef, Float64Array, Int64Array, StringArray, TimestampMicrosecondArray, UInt64Array,
+        ArrayRef, Float64Array, Int64Array, StringArray, TimestampMicrosecondArray, UInt8Array,
+        UInt64Array,
     },
     datatypes::{DataType, Field, Schema, TimeUnit},
     ipc::reader::FileReader,
@@ -74,6 +75,34 @@ fn job() -> StreamJobContext {
 
 fn digest(bytes: impl AsRef<[u8]>) -> String {
     hex::encode(Sha256::digest(bytes.as_ref()))
+}
+
+/// Decodes one state segment into `(operation, window_start, window_end)`
+/// rows; operation 1 is a tombstone.
+fn segment_operations(bytes: &[u8]) -> Vec<(u8, i64, i64)> {
+    let reader = FileReader::try_new(Cursor::new(bytes), None).unwrap();
+    let record = reader.into_iter().next().unwrap().unwrap();
+    let operations = record
+        .column_by_name("_operation")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<UInt8Array>()
+        .unwrap();
+    let starts = record
+        .column_by_name("window_start")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<TimestampMicrosecondArray>()
+        .unwrap();
+    let ends = record
+        .column_by_name("window_end")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<TimestampMicrosecondArray>()
+        .unwrap();
+    (0..record.num_rows())
+        .map(|row| (operations.value(row), starts.value(row), ends.value(row)))
+        .collect()
 }
 
 fn local_handle(
@@ -442,10 +471,11 @@ async fn compaction_between_checkpoints_keeps_only_unemitted_windows() {
             .collect::<Vec<_>>();
         assert_eq!(emitted, closed);
 
-        // Eighty deltas exceed the delta threshold, so the snapshot holds a
-        // base with the open window and none of the emitted ones.
+        // Closed-between-checkpoints windows cancel out of the delta stream,
+        // so the snapshot carries one small delta with the open window and no
+        // replacement base is ever needed.
         let snapshot = source.checkpoint(Epoch::new(epoch + 1).unwrap()).unwrap();
-        assert!(snapshot.segments.keys().any(|id| id.starts_with("base-")));
+        assert_eq!(snapshot.segments.len(), 1);
         let open = [(u64::try_from(STEPS).unwrap(), 100)];
         let context = StreamOperatorContext::new(&job, "window", watermark);
         let mut restored = operator();
@@ -776,4 +806,98 @@ async fn snapshot_segments_round_trip_through_the_validating_local_backend() {
     let mut output = EdgeCollector::new(restored.output_ports().to_vec());
     restored.on_end(&context, &mut output).await.unwrap();
     assert_eq!(first_output_sum(&mut output), (0, 5));
+}
+
+/// A window that opens and closes between two checkpoints never reaches
+/// durable state, so its upsert and tombstone cancel out and encode nothing.
+/// A persisted window closed in the same epoch still encodes its tombstone.
+#[tokio::test]
+async fn opened_and_closed_between_checkpoints_encode_no_operations() {
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "window", None);
+    let mut source = operator();
+    let mut output = EdgeCollector::new(source.output_ports().to_vec());
+    source
+        .process_data(
+            "input",
+            input_batch(vec![1, 1_000_001], vec!["a", "z"], vec![2, 100]),
+            &context,
+            &mut output,
+        )
+        .await
+        .unwrap();
+    let first = source.checkpoint(Epoch::new(1).unwrap()).unwrap();
+    assert_eq!(first.segments.len(), 1);
+
+    // "a" opens a new window and both "a" windows close inside epoch 2;
+    // the persisted [0, 10) window needs a tombstone, the new [10, 20)
+    // window cancels out. "z" is untouched and encodes nothing.
+    source
+        .process_data(
+            "input",
+            input_batch(vec![11], vec!["a"], vec![3]),
+            &context,
+            &mut output,
+        )
+        .await
+        .unwrap();
+    source
+        .on_watermark(EventTime::from_micros(20), &context, &mut output)
+        .await
+        .unwrap();
+    assert_eq!(drain_output_sums(&mut output), [(0, 2), (0, 3)]);
+
+    let second = source.checkpoint(Epoch::new(2).unwrap()).unwrap();
+    assert_eq!(second.segments.len(), 2);
+    let (segment_id, delta) = second
+        .segments
+        .iter()
+        .find(|(segment_id, _)| !first.segments.contains_key(*segment_id))
+        .unwrap();
+    assert!(segment_id.starts_with("delta-"));
+    assert_eq!(segment_operations(delta.bytes()), [(1, 0, 10)]);
+
+    let mut restored = operator();
+    restored.restore(&second).unwrap();
+    restored.on_end(&context, &mut output).await.unwrap();
+    assert_eq!(drain_output_sums(&mut output), [(1, 100)]);
+}
+
+/// One epoch with many batches encodes a single net delta segment holding
+/// only the latest value of each live key.
+#[tokio::test]
+async fn multi_batch_epoch_encodes_one_delta_with_latest_values() {
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "window", None);
+    let mut source = operator();
+    let mut ignored = EdgeCollector::new(source.output_ports().to_vec());
+    for (event_time, group, value) in [(1, "a", 2), (2, "a", 3), (1, "b", 5)] {
+        source
+            .process_data(
+                "input",
+                input_batch(vec![event_time], vec![group], vec![value]),
+                &context,
+                &mut ignored,
+            )
+            .await
+            .unwrap();
+    }
+
+    let snapshot = source.checkpoint(Epoch::new(1).unwrap()).unwrap();
+    assert_eq!(snapshot.segments.len(), 1);
+    let delta = snapshot.segments.values().next().unwrap();
+    assert_eq!(segment_operations(delta.bytes()), [(0, 0, 10), (0, 0, 10)]);
+    let reader = FileReader::try_new(Cursor::new(delta.bytes()), None).unwrap();
+    let record = reader.into_iter().next().unwrap().unwrap();
+    let sums = record
+        .column(5)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    assert_eq!(
+        (0..record.num_rows())
+            .map(|row| sums.value(row))
+            .collect::<Vec<_>>(),
+        [5, 5]
+    );
 }
