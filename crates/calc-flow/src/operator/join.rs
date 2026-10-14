@@ -2280,6 +2280,7 @@ struct JoinWork {
     scalar_admissions: usize,
     generic_fast_rows: usize,
     admission_grants: usize,
+    admitted_row_records: usize,
     quantum_steps: usize,
     quantum_boundaries: usize,
     borrowed_key_hashes: usize,
@@ -2301,6 +2302,7 @@ thread_local! {
         output_source_lookups: 0,
         native_key_lookups: 0,
         scalar_admissions: 0, generic_fast_rows: 0, admission_grants: 0,
+        admitted_row_records: 0,
         quantum_steps: 0, quantum_boundaries: 0,
         borrowed_key_hashes: 0, borrowed_key_equalities: 0,
         key_type_resolutions: 0, arena_frames: 0,
@@ -5013,6 +5015,8 @@ impl AdmissionBundle {
     }
 
     fn push_admitted(&mut self, row: AdmittedRow) {
+        #[cfg(test)]
+        note_join_work(|work| work.admitted_row_records += 1);
         self.admitted.push(row);
     }
 

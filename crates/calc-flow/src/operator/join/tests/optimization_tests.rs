@@ -151,6 +151,40 @@ fn generic_records() -> Vec<RecordBatch> {
 }
 
 #[tokio::test]
+async fn test_batch_admission_does_not_stage_owned_rows() {
+    let mut operator =
+        StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+    operator.set_stream_resources(
+        DataFusionConfig {
+            target_partitions: 2,
+            ..DataFusionConfig::default()
+        },
+        UdfRegistrySnapshot::default(),
+    );
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "match", None);
+    let source = Batch::table(generic_records(), BatchMetadata::default()).unwrap();
+    let plan = operator.begin_batch("left", &source).unwrap();
+    let mut bundle = operator.admission_bundle(&plan);
+    reset_join_work();
+    let mut source_base = 0;
+    for record in source.table_payload().unwrap().batches() {
+        operator
+            .admit_record(record, &plan, "left", &context, &mut bundle, source_base)
+            .await
+            .unwrap();
+        source_base += record.num_rows();
+    }
+    assert_eq!(bundle.admitted.len(), 130);
+    assert_eq!(bundle.next_row_id, 130);
+    assert_eq!(
+        join_work().admitted_row_records,
+        0,
+        "incoming admission must own record segments rather than one descriptor per admitted row"
+    );
+}
+
+#[tokio::test]
 async fn test_all_admitted_generic_blocks_charge_only_remaining_metadata_work() {
     tokio::spawn(assert_all_admitted_generic_blocks_charge_only_remaining_metadata_work())
         .await
