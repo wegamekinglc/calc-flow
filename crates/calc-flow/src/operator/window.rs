@@ -1095,27 +1095,48 @@ impl WindowAggregateOperator {
                 "received data after end-of-input",
             ));
         }
-        let table = batch.table_payload()?;
-        let mut scratch = BatchScratch::new(
+        if self.use_rowwise_kernel() {
+            return self.prepare_input_batch_rowwise(batch, context);
+        }
+        self.prepare_input_batch_columnar(batch, context)
+    }
+
+    fn new_scratch<'a>(&self) -> BatchScratch<'a> {
+        BatchScratch::new(
             WindowStateUsage {
                 rows: logical_length(self.state.accumulators.len()),
                 bytes: self.state.accumulator_bytes,
             },
             self.compiled.geometry.overlap,
-        );
-        if self.use_rowwise_kernel() {
-            for record in table.batches() {
-                let columns =
-                    RecordColumns::new(record, &self.spec, &self.compiled, context.operator_id())?;
-                for row in 0..record.num_rows() {
-                    self.prepare_row(&columns, row, context, &mut scratch)?;
-                }
-            }
-            return Ok(scratch.into_update());
-        }
+        )
+    }
 
-        // Columnar fast path: pass one resolves each row's slots, pass two
-        // runs one tight loop per aggregate over the (slot, row) pairs.
+    fn prepare_input_batch_rowwise(
+        &self,
+        batch: &Batch,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<InputBatchUpdate> {
+        let table = batch.table_payload()?;
+        let mut scratch = self.new_scratch();
+        for record in table.batches() {
+            let columns =
+                RecordColumns::new(record, &self.spec, &self.compiled, context.operator_id())?;
+            for row in 0..record.num_rows() {
+                self.prepare_row(&columns, row, context, &mut scratch)?;
+            }
+        }
+        Ok(scratch.into_update())
+    }
+
+    /// Columnar fast path: pass one resolves each row's slots, pass two runs
+    /// one tight loop per aggregate over the (slot, row) pairs.
+    fn prepare_input_batch_columnar(
+        &self,
+        batch: &Batch,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<InputBatchUpdate> {
+        let table = batch.table_payload()?;
+        let mut scratch = self.new_scratch();
         scratch.columns = self
             .spec
             .aggregates

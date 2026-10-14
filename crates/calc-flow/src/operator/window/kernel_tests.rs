@@ -328,15 +328,7 @@ fn numeric_failures_preserve_first_aggregate_and_partial_scratch_state() {
     }
 }
 
-/// The columnar two-pass fast path must reproduce the row-wise reference
-/// kernel bit for bit: same keys, same accumulator states (including
-/// compensated float bits), same logical usage.
-#[allow(
-    clippy::too_many_lines,
-    reason = "the equivalence harness owns its wide input matrix inline"
-)]
-#[test]
-fn columnar_fast_path_matches_row_reference_bitwise() {
+fn columnar_equivalence_record() -> RecordBatch {
     let schema = Arc::new(Schema::new(vec![
         Field::new(
             "time",
@@ -349,27 +341,6 @@ fn columnar_fast_path_matches_row_reference_bitwise() {
         Field::new("float", DataType::Float64, true),
         Field::new("small", DataType::Float32, true),
     ]));
-    let spec = WindowSpec::hopping("time", Duration::from_micros(30), Duration::from_micros(10))
-        .unwrap()
-        .group_by(["group"])
-        .unwrap()
-        .aggregate(AggregateFunction::Count, "float", "count_float")
-        .unwrap()
-        .aggregate(AggregateFunction::Sum, "signed", "sum_signed")
-        .unwrap()
-        .aggregate(AggregateFunction::Sum, "unsigned", "sum_unsigned")
-        .unwrap()
-        .aggregate(AggregateFunction::Sum, "float", "sum_float")
-        .unwrap()
-        .aggregate(AggregateFunction::Min, "signed", "min_signed")
-        .unwrap()
-        .aggregate(AggregateFunction::Max, "float", "max_float")
-        .unwrap()
-        .aggregate(AggregateFunction::Avg, "float", "avg_float")
-        .unwrap()
-        .aggregate(AggregateFunction::Avg, "small", "avg_small")
-        .unwrap();
-
     // Deterministic pseudo-random rows: out-of-order times, repeats, nulls in
     // every column, late rows against the advanced watermark, extreme floats.
     let groups = ["alpha", "beta", "gamma"];
@@ -404,7 +375,7 @@ fn columnar_fast_path_matches_row_reference_bitwise() {
         });
         group_column.push(match roll % 11 {
             0 => None,
-            value => Some(groups[(value % 3) as usize]),
+            value => Some(groups[usize::try_from(value % 3).unwrap()]),
         });
         signed.push(match roll % 5 {
             0 => None,
@@ -423,7 +394,7 @@ fn columnar_fast_path_matches_row_reference_bitwise() {
             _ => Some(f32::from(u16::try_from(roll % 1000).unwrap()) * 0.25 - 100.0),
         });
     }
-    let record = RecordBatch::try_new(
+    RecordBatch::try_new(
         schema,
         vec![
             Arc::new(TimestampMicrosecondArray::from(times)),
@@ -434,8 +405,74 @@ fn columnar_fast_path_matches_row_reference_bitwise() {
             Arc::new(Float32Array::from(small)),
         ],
     )
-    .unwrap();
+    .unwrap()
+}
 
+fn columnar_equivalence_spec() -> WindowSpec {
+    WindowSpec::hopping("time", Duration::from_micros(30), Duration::from_micros(10))
+        .unwrap()
+        .group_by(["group"])
+        .unwrap()
+        .aggregate(AggregateFunction::Count, "float", "count_float")
+        .unwrap()
+        .aggregate(AggregateFunction::Sum, "signed", "sum_signed")
+        .unwrap()
+        .aggregate(AggregateFunction::Sum, "unsigned", "sum_unsigned")
+        .unwrap()
+        .aggregate(AggregateFunction::Sum, "float", "sum_float")
+        .unwrap()
+        .aggregate(AggregateFunction::Min, "signed", "min_signed")
+        .unwrap()
+        .aggregate(AggregateFunction::Max, "float", "max_float")
+        .unwrap()
+        .aggregate(AggregateFunction::Avg, "float", "avg_float")
+        .unwrap()
+        .aggregate(AggregateFunction::Avg, "small", "avg_small")
+        .unwrap()
+}
+
+fn assert_same_update(actual: &InputBatchUpdate, reference: &InputBatchUpdate) {
+    assert_eq!(
+        format!("{:?}", actual.metrics),
+        format!("{:?}", reference.metrics),
+        "late metrics diverged"
+    );
+    assert_eq!(
+        actual.usage.rows, reference.usage.rows,
+        "logical row charge diverged"
+    );
+    assert_eq!(
+        actual.usage.bytes, reference.usage.bytes,
+        "logical byte charge diverged"
+    );
+    let mut actual_keys = actual.accumulators.keys().collect::<Vec<_>>();
+    let mut reference_keys = reference.accumulators.keys().collect::<Vec<_>>();
+    actual_keys.sort();
+    reference_keys.sort();
+    assert_eq!(actual_keys, reference_keys, "key sets diverged");
+    for key in actual_keys {
+        let left = &actual.accumulators[key];
+        let right = &reference.accumulators[key];
+        assert_eq!(
+            format!("{:?}", left.group_values),
+            format!("{:?}", right.group_values),
+            "group values diverged at {key:?}"
+        );
+        assert_eq!(
+            state(left),
+            state(right),
+            "accumulator bits diverged at {key:?}"
+        );
+    }
+}
+
+/// The columnar two-pass fast path must reproduce the row-wise reference
+/// kernel bit for bit: same keys, same accumulator states (including
+/// compensated float bits), same logical usage.
+#[test]
+fn columnar_fast_path_matches_row_reference_bitwise() {
+    let record = columnar_equivalence_record();
+    let spec = columnar_equivalence_spec();
     let job = crate::StreamJobContext::new(
         1,
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
@@ -461,38 +498,7 @@ fn columnar_fast_path_matches_row_reference_bitwise() {
     for context in [&first, &later] {
         let fast_update = fast.prepare_input_batch(&batch, context).unwrap();
         let reference_update = rowwise.prepare_input_batch(&batch, context).unwrap();
-        assert_eq!(
-            format!("{:?}", fast_update.metrics),
-            format!("{:?}", reference_update.metrics),
-            "late metrics diverged"
-        );
-        assert_eq!(
-            fast_update.usage.rows, reference_update.usage.rows,
-            "logical row charge diverged"
-        );
-        assert_eq!(
-            fast_update.usage.bytes, reference_update.usage.bytes,
-            "logical byte charge diverged"
-        );
-        let mut fast_keys = fast_update.accumulators.keys().collect::<Vec<_>>();
-        let mut reference_keys = reference_update.accumulators.keys().collect::<Vec<_>>();
-        fast_keys.sort();
-        reference_keys.sort();
-        assert_eq!(fast_keys, reference_keys, "key sets diverged");
-        for key in fast_keys {
-            let left = &fast_update.accumulators[key];
-            let right = &reference_update.accumulators[key];
-            assert_eq!(
-                format!("{:?}", left.group_values),
-                format!("{:?}", right.group_values),
-                "group values diverged at {key:?}"
-            );
-            assert_eq!(
-                state(left),
-                state(right),
-                "accumulator bits diverged at {key:?}"
-            );
-        }
+        assert_same_update(&fast_update, &reference_update);
         let metrics = fast_update.metrics;
         fast.install_input_update(fast_update, metrics, false, context);
         rowwise.install_input_update(reference_update, metrics, false, context);
