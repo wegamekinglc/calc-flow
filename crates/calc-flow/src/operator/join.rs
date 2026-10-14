@@ -2740,6 +2740,8 @@ pub struct StreamJoinOperator {
     output_ports: [Port; 1],
     logical_output_schema: SchemaRef,
     output_columns: Option<Arc<[usize]>>,
+    payload_projection: Option<Arc<state_projection::Layout>>,
+    checkpoint_identity: checkpoint_v2::HistoryIdentity,
     compiled: CompiledJoin,
     payload_schema_bytes: [Option<usize>; 2],
     payload_native_eligible: bool,
@@ -3199,6 +3201,7 @@ mod output_projection;
 #[cfg(test)]
 mod row_ipc;
 mod sql_key_scratch;
+mod state_projection;
 
 struct PreparedMatches {
     pairs: Vec<MatchedPair>,
@@ -3248,6 +3251,8 @@ impl StreamJoinOperator {
         validate_payload_charge_support(&right_schema, "right")?;
         let (output_schema, compiled) = compile_schemas(&left_schema, &right_schema, &spec)?;
         let payload_native_eligible = native_lookup::eligible(&compiled, &left_schema);
+        let checkpoint_identity =
+            checkpoint_v2::HistoryIdentity::full([&left_schema, &right_schema]);
         let payload_schema_bytes = [
             columnar::schema_inventory(&left_schema),
             columnar::schema_inventory(&right_schema),
@@ -3269,6 +3274,8 @@ impl StreamJoinOperator {
             )?],
             logical_output_schema: output_schema,
             output_columns: None,
+            payload_projection: None,
+            checkpoint_identity,
             compiled,
             runtime: StreamRuntimeState::new(),
             state: StreamJoinState::default(),
@@ -3282,7 +3289,7 @@ impl StreamJoinOperator {
             #[cfg(test)]
             probe_unit_test_hook: None,
             v2_containers: None,
-            v2_writer: checkpoint_v2::WriterState::default(),
+            v2_writer: checkpoint_v2::WriterState::with_identity(checkpoint_identity),
             #[cfg(test)]
             checkpoint_gate: None,
             #[cfg(test)]
@@ -3509,17 +3516,19 @@ impl StreamJoinOperator {
         bundle.admitted = admitted;
         let matches = matches?;
         let admitted_charges = admitted_charge_cache(charges, &bundle.admitted_source_rows);
-        self.finish_prepared(&plan, bundle, matches, admitted_charges)
+        self.finish_prepared(&plan, bundle, matches, admitted_charges, context)
+            .await
     }
 
-    fn finish_prepared(
+    async fn finish_prepared(
         &mut self,
         plan: &SidePlan,
-        bundle: AdmissionBundle,
+        mut bundle: AdmissionBundle,
         matches: PreparedMatches,
         admitted_charges: Option<Vec<u64>>,
+        context: &StreamOperatorContext<'_>,
     ) -> Result<PreparedJoinBatch> {
-        let retained = retained_rows(
+        let mut retained = retained_rows(
             &bundle.admitted,
             &plan.key_indices,
             &self.name,
@@ -3527,6 +3536,13 @@ impl StreamJoinOperator {
         )?;
         self.validate_state_admission(plan.incoming_is_left, &retained)?;
         let native_append = self.reserve_native_append(plan.incoming_is_left, retained.len())?;
+        self.project_admitted(
+            &mut bundle.admitted,
+            &mut retained,
+            plan.port_index,
+            context,
+        )
+        .await?;
         Ok(PreparedJoinBatch {
             output: matches.pairs,
             admitted: bundle.admitted,
@@ -3624,7 +3640,7 @@ impl StreamJoinOperator {
     ) -> Result<()> {
         let (record, plan, ingress, source_row_base) = source;
         if self
-            .can_copy_payload(record, plan, context, quantum)
+            .can_copy_admitted_payload(record, plan, context, quantum)
             .await?
             && let Some(mut selection) = columnar::CopySelection::reserve(self, record.num_rows())?
         {
@@ -4059,7 +4075,8 @@ impl StreamJoinOperator {
     }
 
     fn opposite_state_keys(&mut self, plan: &SidePlan) -> Result<RecordBatch> {
-        let declared = Arc::clone(self.input_schema(1 - plan.port_index));
+        let declared = Arc::clone(self.retained_schema(1 - plan.port_index));
+        let compiled = self.retained_compiled().clone();
         let (opposite, cached) = if plan.incoming_is_left {
             (&self.state.right, &mut self.retained_key_cache.right)
         } else {
@@ -4075,7 +4092,7 @@ impl StreamJoinOperator {
         {
             return Ok(existing.batch.clone());
         }
-        let batch = state_key_batch(opposite, &self.compiled, plan, Some(&declared))?;
+        let batch = state_key_batch(opposite, &compiled, plan, Some(&declared))?;
         let bytes = batch
             .columns()
             .iter()
@@ -4098,16 +4115,20 @@ impl StreamJoinOperator {
         plan: &SidePlan,
         context: &StreamOperatorContext<'_>,
     ) -> Result<sql_key_scratch::KeyBatch> {
+        let compiled = self
+            .payload_projection
+            .as_ref()
+            .map_or(&self.compiled, |layout| &layout.compiled);
         let (rows, indices, cached) = if plan.incoming_is_left {
             (
                 &self.state.right,
-                &self.compiled.right_key_indices,
+                &compiled.right_key_indices,
                 &mut self.retained_key_cache.right,
             )
         } else {
             (
                 &self.state.left,
-                &self.compiled.left_key_indices,
+                &compiled.left_key_indices,
                 &mut self.retained_key_cache.left,
             )
         };
@@ -4211,9 +4232,9 @@ impl StreamJoinOperator {
         prepared: &PreparedJoinBatch,
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
-    ) -> Result<()> {
+    ) -> Result<u64> {
         if prepared.output.is_empty() {
-            return Ok(());
+            return Ok(self.state.metrics.emitted_match_rows);
         }
         let runtime = self.runtime.runtime()?;
         let materializer = materialization::JoinOutput {
@@ -4238,6 +4259,11 @@ impl StreamJoinOperator {
             self.state.next_output_sequence,
             ranges.len(),
         )?;
+        let emitted = Self::prepared_emitted_count(
+            self.state.metrics.emitted_match_rows,
+            prepared.output.len(),
+            &self.name,
+        )?;
         materializer
             .emit_ranges(
                 ranges,
@@ -4247,19 +4273,14 @@ impl StreamJoinOperator {
                 &mut self.state.next_output_sequence,
                 &mut self.compaction_cleanup,
             )
-            .await
+            .await?;
+        Ok(emitted)
     }
 
-    fn record_prepared_emitted(&mut self, rows: usize) -> Result<()> {
+    fn prepared_emitted_count(current: u64, rows: usize, operator_id: &str) -> Result<u64> {
         let emitted =
-            u64::try_from(rows).map_err(|_| counter_overflow(&self.name, "emitted rows"))?;
-        self.state.metrics.emitted_match_rows = checked_metric(
-            self.state.metrics.emitted_match_rows,
-            emitted,
-            &self.name,
-            "emitted_match_rows",
-        )?;
-        Ok(())
+            u64::try_from(rows).map_err(|_| counter_overflow(operator_id, "emitted rows"))?;
+        checked_metric(current, emitted, operator_id, "emitted_match_rows")
     }
 
     fn commit_prepared(
@@ -4473,6 +4494,77 @@ impl fmt::Debug for StreamJoinOperator {
     }
 }
 
+impl StreamJoinOperator {
+    async fn begin_data(&mut self, context: &StreamOperatorContext<'_>) -> Result<()> {
+        context.check_cancelled()?;
+        self.await_compaction_release(context).await?;
+        if !context.job().checkpointing() {
+            self.v2_writer.invalidate_history()?;
+        }
+        Ok(())
+    }
+
+    async fn prepare_data_append(
+        &mut self,
+        ingress: &str,
+        batch: &Batch,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<(PreparedJoinBatch, expiration::AppendPlan)> {
+        let prepared = self.prepare_batch(ingress, batch, context).await?;
+        let expirations = if prepared.incoming_is_left {
+            &self.state.left_expirations
+        } else {
+            &self.state.right_expirations
+        };
+        let expiration_append = expirations
+            .prepare_append(prepared.retained.len(), context)
+            .await?;
+        if context.job().checkpointing() {
+            self.v2_writer.changed(true)?;
+        }
+        Ok((prepared, expiration_append))
+    }
+
+    async fn finish_data(
+        &mut self,
+        ingress: &str,
+        prepared: PreparedJoinBatch,
+        expiration_append: expiration::AppendPlan,
+        context: &StreamOperatorContext<'_>,
+        output: &mut dyn StreamCollector,
+    ) -> Result<()> {
+        let emitted = self.emit_prepared(&prepared, context, output).await?;
+        self.state.metrics.emitted_match_rows = emitted;
+        self.commit_prepared(
+            ingress,
+            prepared,
+            context.job().checkpointing(),
+            expiration_append,
+        )?;
+        if self.has_sparse_candidates() {
+            return self.repair_sparse_chunks(context).await;
+        }
+        self.ingress_progress = context.ingress_progress().clone();
+        Ok(())
+    }
+
+    async fn await_progress_release(&mut self, context: &StreamOperatorContext<'_>) -> Result<()> {
+        if self.compaction_release.is_none() && self.compaction_cleanup.is_none() {
+            context.check_cancelled()
+        } else {
+            self.await_compaction_release(context).await
+        }
+    }
+
+    fn note_checkpoint_mutation(&mut self, checkpointing: bool) -> Result<()> {
+        if checkpointing {
+            self.v2_writer.changed(true)
+        } else {
+            self.v2_writer.invalidate_history()
+        }
+    }
+}
+
 impl OperatorMetadata for StreamJoinOperator {
     fn name(&self) -> &str {
         &self.name
@@ -4505,36 +4597,11 @@ impl StreamOperator for StreamJoinOperator {
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
-        context.check_cancelled()?;
-        self.await_compaction_release(context).await?;
-        if !context.job().checkpointing() {
-            self.v2_writer.invalidate_history();
-        }
-        let prepared = self.prepare_batch(ingress, &batch, context).await?;
-        let expirations = if prepared.incoming_is_left {
-            &self.state.left_expirations
-        } else {
-            &self.state.right_expirations
-        };
-        let expiration_append = expirations
-            .prepare_append(prepared.retained.len(), context)
-            .await?;
-        if context.job().checkpointing() {
-            self.v2_writer.changed(true)?;
-        }
-        self.emit_prepared(&prepared, context, output).await?;
-        self.record_prepared_emitted(prepared.output.len())?;
-        self.commit_prepared(
-            ingress,
-            prepared,
-            context.job().checkpointing(),
-            expiration_append,
-        )?;
-        if self.has_sparse_candidates() {
-            return self.repair_sparse_chunks(context).await;
-        }
-        self.ingress_progress = context.ingress_progress().clone();
-        Ok(())
+        self.begin_data(context).await?;
+        let (prepared, expiration_append) =
+            self.prepare_data_append(ingress, &batch, context).await?;
+        self.finish_data(ingress, prepared, expiration_append, context, output)
+            .await
     }
 
     async fn on_ingress_progress(
@@ -4543,16 +4610,8 @@ impl StreamOperator for StreamJoinOperator {
         context: &StreamOperatorContext<'_>,
     ) -> Result<()> {
         let progress = self.required_progress(ingress, context)?;
-        if self.compaction_release.is_none() && self.compaction_cleanup.is_none() {
-            context.check_cancelled()?;
-        } else {
-            self.await_compaction_release(context).await?;
-        }
-        if context.job().checkpointing() {
-            self.v2_writer.changed(true)?;
-        } else {
-            self.v2_writer.invalidate_history();
-        }
+        self.await_progress_release(context).await?;
+        self.note_checkpoint_mutation(context.job().checkpointing())?;
         self.evict_progress(ingress, progress, context.job().checkpointing())?;
         if self.has_sparse_candidates() {
             return self.repair_sparse_chunks(context).await;
@@ -4591,7 +4650,7 @@ impl StreamOperator for StreamJoinOperator {
                 right_identities,
             );
         } else {
-            self.v2_writer.invalidate_history();
+            self.v2_writer.invalidate_history()?;
         }
         self.state.left.clear();
         self.state.right.clear();
@@ -4622,6 +4681,7 @@ impl StreamOperator for StreamJoinOperator {
     ) -> Result<()> {
         #[cfg(test)]
         if self.checkpoint_v1_test_producer {
+            self.check_v1_test_layout()?;
             return self.prepare_compaction(context).await;
         }
         self.prepare_v2_checkpoint_automatic(context).await
@@ -4640,7 +4700,9 @@ impl StreamOperator for StreamJoinOperator {
             .inline_metadata
             .get("layout_version")
             .and_then(Value::as_u64)
-            == Some(2)
+            .is_some_and(|layout| {
+                matches!(layout, 2 | 3) || layout == 1 && self.payload_projection.is_some()
+            })
         {
             return self.restore_v2_snapshot(snapshot);
         }
@@ -4651,7 +4713,18 @@ impl StreamOperator for StreamJoinOperator {
 
 impl StreamJoinOperator {
     #[cfg(test)]
+    fn check_v1_test_layout(&self) -> Result<()> {
+        if self.payload_projection.is_some() {
+            return Err(CalcFlowError::CheckpointMismatch {
+                message: "legacy V1 test producer requires full retained payloads".into(),
+            });
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
     fn checkpoint_v1(&mut self, epoch: Epoch) -> Result<OperatorStateSnapshot> {
+        self.check_v1_test_layout()?;
         if self
             .state
             .last_checkpoint_epoch
@@ -4691,6 +4764,20 @@ impl StreamJoinOperator {
         for ((segment_epoch, side), segment) in &self.state.deltas.segments {
             segments.insert(format!("{side}-delta-{segment_epoch}"), segment.clone());
         }
+        self.capture_v1_pending(epoch, &mut segments)?;
+        self.state.last_checkpoint_epoch = Some(epoch);
+        Ok(OperatorStateSnapshot {
+            inline_metadata: inline_metadata.into_iter().collect(),
+            segments,
+        })
+    }
+
+    #[cfg(test)]
+    fn capture_v1_pending(
+        &mut self,
+        epoch: Epoch,
+        segments: &mut BTreeMap<String, StateSegment>,
+    ) -> Result<()> {
         if !self.state.deltas.pending.is_empty() {
             for (side, bytes) in encode_pending_delta(&self.state, epoch, &self.name)? {
                 let segment = StateSegment::new(bytes);
@@ -4709,11 +4796,7 @@ impl StreamJoinOperator {
                 self.state.deltas.needs_compaction = true;
             }
         }
-        self.state.last_checkpoint_epoch = Some(epoch);
-        Ok(OperatorStateSnapshot {
-            inline_metadata: inline_metadata.into_iter().collect(),
-            segments,
-        })
+        Ok(())
     }
 
     fn parse_restore_metadata(

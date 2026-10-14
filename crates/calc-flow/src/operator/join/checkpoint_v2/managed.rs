@@ -13,11 +13,13 @@ impl StreamJoinOperator {
         task: Option<TaskId>,
     ) -> Result<()> {
         job.check_cancelled()?;
-        if snapshot
+        if !snapshot
             .inline_metadata
             .get("layout_version")
             .and_then(serde_json::Value::as_u64)
-            != Some(2)
+            .is_some_and(|layout| {
+                matches!(layout, 2 | 3) || layout == 1 && self.payload_projection.is_some()
+            })
         {
             return self.restore_managed_metadata(snapshot, job, task).await;
         }

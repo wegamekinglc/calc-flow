@@ -132,6 +132,7 @@ fn admit_input(
 
 fn copy_config(operator: &StreamJoinOperator) -> OwnedConfig {
     OwnedConfig {
+        projection: operator.payload_projection.clone(),
         name: String::from(operator.name.as_str()),
         spec: operator.spec.clone(),
         schemas: [

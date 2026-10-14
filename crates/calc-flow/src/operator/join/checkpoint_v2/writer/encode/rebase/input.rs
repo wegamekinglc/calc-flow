@@ -37,7 +37,11 @@ fn eligible_base<'a>(
     let writer = &operator.v2_writer;
     let epoch = operator.state.last_checkpoint_epoch?;
     let base = writer.base.as_ref()?;
-    if !context.job().checkpointing() || !writer.history_trusted || writer.migration_required {
+    if !context.job().checkpointing()
+        || !writer.history_trusted
+        || writer.migration_required
+        || !operator.v2_history_matches()
+    {
         return None;
     }
     Some((base, epoch.as_u64()))
@@ -247,6 +251,7 @@ fn allocate_history(
     let expected = expectations(operator)?;
     accounting::reserve(workspace, funding::inputs(indexes, base.payloads.len())?)?;
     let history = HistoryInput {
+        identity: operator.checkpoint_identity,
         indexes: funding::vector(indexes)?,
         payloads: funding::vector(base.payloads.len())?,
         expected,

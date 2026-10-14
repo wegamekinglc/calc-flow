@@ -202,6 +202,7 @@ async fn test_pending_rebase_install_preserves_stale_pending_and_history() {
         "captured_epoch",
         "revision",
         "dirty_revision",
+        "identity",
         "trust",
         "off",
     ] {
@@ -222,19 +223,11 @@ async fn test_pending_rebase_install_preserves_stale_pending_and_history() {
             &|| Ok(()),
         )
         .unwrap();
-        let submitted = join
+        let mut submitted = join
             .v2_writer
             .tracker
             .snapshot(join.state.last_checkpoint_epoch);
-        match invalid {
-            "generation" => join.v2_writer.tracker = join.v2_writer.tracker.next_owner().unwrap(),
-            "captured_epoch" => join.state.last_checkpoint_epoch = Epoch::new(5),
-            "revision" => join.v2_writer.changed(false).unwrap(),
-            "dirty_revision" => join.v2_writer.tracker.dirty_revision += 1,
-            "trust" => join.v2_writer.invalidate_history(),
-            "off" => {}
-            _ => unreachable!(),
-        }
+        invalidate_pending_rebase(&mut join, &mut submitted, invalid);
         let before = edge_tests::image(&join);
         join.install_v2_writer_base(
             base,
@@ -254,6 +247,26 @@ async fn test_pending_rebase_install_preserves_stale_pending_and_history() {
     assert!(pools.iter().all(|pool| pool.reserved() == 0));
 }
 
+fn invalidate_pending_rebase(
+    join: &mut StreamJoinOperator,
+    submitted: &mut cut::Cut,
+    invalid: &str,
+) {
+    match invalid {
+        "generation" => join.v2_writer.tracker = join.v2_writer.tracker.next_owner().unwrap(),
+        "captured_epoch" => join.state.last_checkpoint_epoch = Epoch::new(5),
+        "revision" => join.v2_writer.changed(false).unwrap(),
+        "dirty_revision" => join.v2_writer.tracker.dirty_revision += 1,
+        "trust" => join.v2_writer.invalidate_history().unwrap(),
+        "identity" => {
+            submitted.identity = different_identity(join.checkpoint_identity);
+            join.v2_writer.tracker.identity = submitted.identity;
+        }
+        "off" => {}
+        _ => unreachable!(),
+    }
+}
+
 #[tokio::test]
 async fn test_pending_rebase_rejects_unique_ids_before_captured_history() {
     let enabled = job();
@@ -266,6 +279,7 @@ async fn test_pending_rebase_rejects_unique_ids_before_captured_history() {
     let mut join = operator();
     join.restore(&snapshot).unwrap();
     admit_left(&mut join, &context).await;
+    reject_pending_identity(&join, &context).await;
     let first = join
         .state
         .deltas
@@ -435,4 +449,36 @@ async fn test_pending_rebase_abandonment_and_cancel_retain_owners_until_drain() 
         drop(enabled);
         assert_eq!(pool.reserved(), 0);
     }
+}
+
+async fn reject_pending_identity(join: &StreamJoinOperator, context: &StreamOperatorContext<'_>) {
+    let runtime = join.runtime.runtime.as_ref().unwrap();
+    let pool = runtime.incremental_memory_pool();
+    let baseline = pool.reserved();
+    let workspace = runtime.incremental_reservation("pending-identity-test");
+    let history = encode::rebase::copy(join, &workspace, context)
+        .await
+        .unwrap();
+    let mut pending = encode::rebase::PendingInput::copy(join, &workspace, context)
+        .await
+        .unwrap();
+    pending.identity = different_identity(join.checkpoint_identity);
+    let before = edge_tests::image(join);
+    let error = encode::rebase::encode_pending(
+        history,
+        pending,
+        &[schema(), schema()],
+        &workspace,
+        &|| Ok(()),
+    )
+    .err()
+    .unwrap();
+    assert!(
+        error
+            .to_string()
+            .contains("pending layout differs from history")
+    );
+    assert_eq!(edge_tests::image(join), before);
+    drop(workspace);
+    assert_eq!(pool.reserved(), baseline);
 }

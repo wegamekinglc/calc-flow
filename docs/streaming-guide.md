@@ -937,16 +937,28 @@ without a Join node report an empty mapping.
 Watermarks are the last accepted ingress frontier, initially `None`; idle
 preserves that frontier and does not imply EOF. A non-terminal managed restart
 exposes restored progress before the running job's startup acknowledgement.
-Terminal-manifest recovery completes without restoring per-Join observations.
+Terminal-manifest recovery validates each Join and publishes its restored ended
+ingress observations before operator entry, without starting data-plane
+handlers, reopening sources, or repeating `on_end` and final emission.
 Rust/Python retain exact integer microseconds.
 
 ### Join output materialization and recovery
 
 Join retains admitted rows and compact descriptors for all matched pairs.
+When every direct consumer qualifies for compiler projection, materialization
+uses the union of their required columns, including dependencies of aliases,
+arithmetic and filters. Retained state adds keys and event-time fields. Narrowed
+state owns independent selected buffers, including nested, dictionary and view
+data; unread payload columns do not remain reachable through input slices.
+Logical declarations and complete input-schema validation remain the same.
+Unconsumed Join outputs, full-input or unqualified consumers, and graphs with
+selected UDFs keep complete retained payloads.
+
 Before the first output from an input batch, it validates retained-state and
 match admission, every output range's row/byte budget, and the complete output
-sequence range. It then materializes each validated range into independently
-owned output payload buffers, awaits emission, and proceeds to the next range.
+sequence range, then checks the cumulative emitted-row counter. It materializes
+each validated range into independently owned output payload buffers, awaits
+emission, and proceeds to the next range.
 Matching, duplicate-row behavior, and deterministic output order are preserved.
 
 Preflight computes and caches row costs only for distinct indices referenced
@@ -962,14 +974,15 @@ allocation ceiling. Unreferenced dictionary values are excluded from the
 materialized payload.
 
 A single output row that cannot fit fails before any output from that input
-batch, even when earlier matched rows would fit. Cancellation or a failed send
-after some chunks have escaped instead aborts the job. New input state is
-committed only after all its chunks are emitted; output already accepted by a
-sink cannot be rolled back. Resume through a fresh compatible job from the last
-durable checkpoint, replaying input from that cut rather than retrying the live
-callback. Ordinary sinks may see repeated writes; stronger delivery still
-requires the [complete route proof](#delivery-requirements). State and
-checkpoint formats are unchanged.
+batch, even when earlier matched rows would fit. A later materialization error,
+cancellation, or failed send can leave some chunks delivered and aborts the job.
+New input state is committed only after all its chunks are emitted; output
+already accepted by a sink cannot be rolled back. Resume through a fresh
+compatible job from the last durable checkpoint, replaying input from that cut
+rather than retrying the live callback. Ordinary sinks may see repeated writes;
+stronger delivery still
+requires the [complete route proof](#delivery-requirements). Durable recovery
+follows the physical state-layout contract below.
 
 The working set includes retained state, admitted input references,
 `O(matches)` pair descriptors, equality-probe scratch space, preflight
@@ -1001,6 +1014,31 @@ Per-side state limits and `max_matches_per_input_batch` remain separate from
 the edge's logical row/byte limits. Chunking removes the need to hold one
 complete materialized output, but neither bounds total process RSS by
 `EdgeBudget.max_bytes` nor limits results retained by application code.
+
+Only actually narrowed retained state uses inner checkpoint layout 3 with
+frame/inventory codec 2; full-retention state keeps layout 2 and rejects layout 3.
+The semantic checkpoint state version remains 1, and project format 3, manifest
+v3 and graph fingerprints remain unchanged. Layout 3 binds exact sorted logical
+indices and full logical/physical schema digests, including for empty or
+terminal state. Its `charge_mode: "v1_admission"` carries the original
+complete-input V1 admission charges. Status byte gauges and state limits keep
+that logical meaning; they do not measure selected Arrow allocation sizes.
+Restore checks every historical charge against the retained-cell lower bound
+and per-side byte cap, validates historical identities/keys/event times and
+inventory, and checks live charge sums, metrics and limits. Integrity checksums
+do not authenticate original admission values.
+
+Legacy full layouts 1 and 2 undergo complete schema, history and exact V1 charge
+validation before independently funded selected live copies replace their
+payload owners. No full legacy history is retained. A new narrow base must be
+prepared before the first capture, including clean, empty or terminal state;
+subsequent dirty captures and rebase remain incremental. A mismatched retained
+layout fails before state installation. Processing without checkpointing
+invalidates reusable recovery history and prepared cuts; successful live-base
+preparation restores trusted continuation. See the
+[checkpoint representation](runtime-envelope.md#the-operator-emission-boundary)
+for the exact recovery contract.
+
 See [Join materialization measurements](benchmark-suite.md#join-materialization-measurements)
 for the maintained wide-payload, fan-out and slow-sink workloads.
 

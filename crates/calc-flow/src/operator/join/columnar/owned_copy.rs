@@ -310,6 +310,19 @@ fn supported(array: &dyn Array) -> bool {
 }
 
 impl StreamJoinOperator {
+    pub(in crate::operator::join) async fn can_copy_admitted_payload(
+        &self,
+        record: &RecordBatch,
+        plan: &SidePlan,
+        context: &StreamOperatorContext<'_>,
+        quantum: &mut Quantum,
+    ) -> Result<bool> {
+        if self.payload_projection.is_some() {
+            return Ok(false);
+        }
+        self.can_copy_payload(record, plan, context, quantum).await
+    }
+
     fn serial_payload_sql(&self) -> bool {
         if let Some(runtime) = &self.runtime.runtime {
             return runtime.serial_owned_sql();
@@ -362,6 +375,12 @@ impl StreamJoinOperator {
         context: &StreamOperatorContext<'_>,
         quantum: &mut Quantum,
     ) -> Result<Option<Arc<PayloadChunk>>> {
+        if !self
+            .projected_copy_supported(columns, context, quantum)
+            .await?
+        {
+            return Ok(None);
+        }
         let Some((mut owners, funding)) = self
             .prepare_payload_copy(columns, port, rows, context, quantum)
             .await?
@@ -402,11 +421,29 @@ impl StreamJoinOperator {
         }
         copy_inventory(columns, rows, &mut owners.inventory, context, quantum).await?;
         let Some(funding) =
-            initialize_funding(self.input_schema(port), &mut owners, context, quantum).await?
+            initialize_funding(self.retained_schema(port), &mut owners, context, quantum).await?
         else {
             return Ok(None);
         };
         Ok(Some((owners, funding)))
+    }
+
+    async fn projected_copy_supported(
+        &self,
+        columns: &[ArrayRef],
+        context: &StreamOperatorContext<'_>,
+        quantum: &mut Quantum,
+    ) -> Result<bool> {
+        if self.payload_projection.is_none() {
+            return Ok(true);
+        }
+        for column in columns {
+            quantum.step(context, 8, 0).await?;
+            if !supported(column.as_ref()) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     fn payload_construction(
@@ -418,7 +455,13 @@ impl StreamJoinOperator {
         if rows.is_empty() {
             return Ok(None);
         }
-        let Some(metadata) = self.payload_schema_bytes[port] else {
+        let Some(metadata) = self
+            .payload_projection
+            .as_ref()
+            .map_or(self.payload_schema_bytes[port], |layout| {
+                layout.schema_bytes[port]
+            })
+        else {
             return Ok(None);
         };
         let Some(control) = controls(columns, metadata, rows.len()) else {

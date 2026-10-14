@@ -159,6 +159,7 @@ fn buffers_overlap(left: &Buffer, right: &Buffer) -> bool {
 }
 
 pub(in crate::operator::join) fn serial_columns_and_budgets() {
+    retained_state_projects_unused_payloads();
     let counter = Arc::new(AtomicUsize::new(0));
     let _configuration = output_gather::test_support::configure(false, Some(observer(&counter)));
     for incoming_left in [true, false] {
@@ -185,6 +186,117 @@ pub(in crate::operator::join) fn serial_columns_and_budgets() {
         selected_ranges(&fixture, incoming_left);
         counter.store(0, Ordering::SeqCst);
     }
+}
+
+fn retained_state_projects_unused_payloads() {
+    let service = crate::runtime::streaming::gather_work::TestService::new(1, 1).unwrap();
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    executor.block_on(async {
+        retained_state_projection().await;
+        super::super::state_projection::tests::selected_payload_cases(&service).await;
+    });
+    drop(executor);
+    service.shutdown();
+}
+
+async fn retained_state_projection() {
+    use crate::{
+        JoinStateLimits, JoinTimeBounds, OperatorMetadata, StreamJoinSpec, StreamOperator,
+    };
+    use datafusion::arrow::{
+        array::TimestampMicrosecondArray,
+        datatypes::{DataType, TimeUnit},
+    };
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("key", DataType::Int64, false),
+        Field::new(
+            "time",
+            DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+            false,
+        ),
+        Field::new("value", DataType::Int64, false),
+        Field::new("unused", DataType::Utf8, false),
+    ]));
+    let record = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(Int64Array::from(vec![7])) as ArrayRef,
+            Arc::new(TimestampMicrosecondArray::from(vec![100]).with_timezone("UTC")),
+            Arc::new(Int64Array::from(vec![42])),
+            Arc::new(StringArray::from_iter_values([
+                "unused-payload".repeat(1024)
+            ])),
+        ],
+    )
+    .unwrap();
+    let original = record.clone();
+    let input = crate::Batch::table(vec![record], crate::BatchMetadata::default()).unwrap();
+    let spec = StreamJoinSpec::inner(
+        ["key"],
+        ["key"],
+        "time",
+        "time",
+        JoinTimeBounds::new(std::time::Duration::ZERO, std::time::Duration::ZERO).unwrap(),
+        JoinStateLimits::new(100, 1_000_000, 1_000).unwrap(),
+    )
+    .unwrap();
+    let mut projected = StreamJoinOperator::new(
+        "projected-state",
+        Arc::clone(&schema),
+        Arc::clone(&schema),
+        spec.clone(),
+    )
+    .unwrap();
+    projected.set_output_projection(vec![2, 6]).unwrap();
+    let mut full =
+        StreamJoinOperator::new("projected-state", Arc::clone(&schema), schema, spec).unwrap();
+    let job = StreamJobContext::new(
+        1,
+        "retained-projection",
+        JsonMap::new(),
+        None,
+        CancellationToken::new(),
+    );
+    let context = StreamOperatorContext::new(&job, "projected-state", None);
+    let mut collector = crate::EdgeCollector::new(projected.output_ports().to_vec());
+    projected
+        .process_data("right", input.clone(), &context, &mut collector)
+        .await
+        .unwrap();
+    let mut full_collector = crate::EdgeCollector::new(full.output_ports().to_vec());
+    full.process_data("right", input.clone(), &context, &mut full_collector)
+        .await
+        .unwrap();
+    assert_eq!(
+        projected.status(),
+        full.status(),
+        "projection must preserve authentic V1 row/state charges"
+    );
+    assert_eq!(input.table_payload().unwrap().batches()[0], original);
+    let retained = projected.state.right[0]
+        .record
+        .schema_ref()
+        .fields()
+        .iter()
+        .map(|field| field.name().clone())
+        .collect::<Vec<_>>();
+    let pool = projected
+        .runtime
+        .runtime()
+        .unwrap()
+        .incremental_memory_pool();
+    drop((projected, full, context));
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop(job);
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(
+        retained,
+        vec!["key", "time", "value"],
+        "unread large payloads must not stay in retained state"
+    );
 }
 
 fn selected_ranges(fixture: &Fixture, incoming_left: bool) {

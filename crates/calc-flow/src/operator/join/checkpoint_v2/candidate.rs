@@ -19,10 +19,13 @@ use super::{ipc, metadata, row};
 use crate::runtime::streaming::gather_work::RetirementGuard;
 use crate::{Epoch, Result};
 
+mod legacy;
+mod migration;
 #[cfg(test)]
 mod test_controls;
 
 pub(super) struct Config<'a> {
+    pub(super) projection: Option<&'a super::super::state_projection::Layout>,
     pub(super) name: &'a str,
     pub(super) spec: &'a StreamJoinSpec,
     pub(super) schemas: [SchemaRef; 2],
@@ -57,6 +60,7 @@ pub(super) struct Decoder<'a, 'c> {
     verifier: ipc::VerifierCredit,
     retirements: Vec<RetirementGuard>,
     check: &'c dyn Fn() -> Result<()>,
+    projected: bool,
 }
 
 impl<'a, 'c> Decoder<'a, 'c> {
@@ -76,6 +80,11 @@ impl<'a, 'c> Decoder<'a, 'c> {
         let verifier = ipc::VerifierCredit::new(credit.new_empty())?;
         check()?;
         Ok(Self {
+            projected: snapshot
+                .inline_metadata
+                .get("layout_version")
+                .and_then(serde_json::Value::as_u64)
+                == Some(3),
             config,
             snapshot,
             workspace,
@@ -87,6 +96,15 @@ impl<'a, 'c> Decoder<'a, 'c> {
     }
 
     pub(super) fn decode(mut self) -> Result<Prepared> {
+        if self
+            .snapshot
+            .inline_metadata
+            .get("layout_version")
+            .and_then(serde_json::Value::as_u64)
+            == Some(1)
+        {
+            return self.decode_legacy();
+        }
         let (inventory, geometry) = self.inspect()?;
         let metadata = self.decode_metadata()?;
         let history = History::new(self.snapshot, &geometry, &self.workspace, self.check)?;
@@ -99,7 +117,11 @@ impl<'a, 'c> Decoder<'a, 'c> {
     }
 
     fn inspect(&self) -> Result<(Inventory<'a>, Geometry)> {
-        let inventory = Inventory::decode(self.snapshot, self.check)?;
+        let inventory = if self.projected {
+            Inventory::decode_projected(self.snapshot, self.check)?
+        } else {
+            Inventory::decode(self.snapshot, self.check)?
+        };
         (self.check)()?;
         let geometry = Geometry::inspect(self.snapshot, &inventory, self.check)?;
         Ok((inventory, geometry))
@@ -111,10 +133,16 @@ impl<'a, 'c> Decoder<'a, 'c> {
             hook(Some(&self.workspace), false);
             hook(Some(&self.workspace), true);
         }
-        let metadata = checked(metadata::decode(
-            self.snapshot.inline_metadata.clone(),
-            self.config.spec,
-        ))?;
+        let values = self.snapshot.inline_metadata.clone();
+        let metadata = checked(if self.projected {
+            metadata::projected::decode(
+                values,
+                self.config.spec,
+                self.config.projection.map(|layout| &layout.descriptor),
+            )
+        } else {
+            metadata::decode(values, self.config.spec)
+        })?;
         (self.check)()?;
         Ok(metadata)
     }
@@ -151,7 +179,11 @@ impl<'a, 'c> Decoder<'a, 'c> {
         let workspace = self.workspace.new_empty();
         let credit = self.containers.credit.new_empty();
         reserve(&credit, budget::payload_seed()?)?;
-        let funding = Funding::new(self.config.schemas.clone(), credit, self.retirements.pop());
+        let schemas = [
+            Arc::clone(self.payload_schema(0)),
+            Arc::clone(self.payload_schema(1)),
+        ];
+        let funding = Funding::new(schemas, credit, self.retirements.pop());
         let index = side_index(side);
         #[cfg(test)]
         if let Some(hook) = self.config.decoded_hook {
@@ -159,7 +191,7 @@ impl<'a, 'c> Decoder<'a, 'c> {
         }
         let owner = ipc::decode(
             frame.ipc,
-            Arc::clone(&self.config.schemas[index]),
+            Arc::clone(self.payload_schema(index)),
             frame.rows,
             &ipc::Admission {
                 workspace: &workspace,
@@ -255,14 +287,49 @@ impl<'a, 'c> Decoder<'a, 'c> {
         workspace: &'b MemoryReservation,
     ) -> row::ValidationContext<'b> {
         let index = side_index(side);
+        let layout = self.decoded_layout();
+        let keys = layout.map_or(self.config.keys[index], |layout| {
+            if index == 0 {
+                layout.compiled.left_key_indices.as_slice()
+            } else {
+                layout.compiled.right_key_indices.as_slice()
+            }
+        });
+        let time = layout.map_or(self.config.time_indices[index], |layout| {
+            if index == 0 {
+                layout.compiled.left_event_time_index
+            } else {
+                layout.compiled.right_event_time_index
+            }
+        });
         row::ValidationContext {
-            key_indices: self.config.keys[index],
-            event_time_index: self.config.time_indices[index],
+            key_indices: keys,
+            event_time_index: time,
+            charge: layout.map_or(row::ChargeProof::Exact, |layout| {
+                row::ChargeProof::Admission {
+                    omitted: self.config.schemas[index].fields().len()
+                        - layout.columns[index].len(),
+                    limit: self.config.spec.limits().max_state_bytes_per_side,
+                }
+            }),
             name: self.config.name,
             side,
             workspace,
             check: self.check,
         }
+    }
+
+    fn decoded_layout(&self) -> Option<&super::super::state_projection::Layout> {
+        if self.projected {
+            self.config.projection
+        } else {
+            None
+        }
+    }
+
+    fn payload_schema(&self, side: usize) -> &SchemaRef {
+        self.decoded_layout()
+            .map_or(&self.config.schemas[side], |layout| &layout.schemas[side])
     }
 
     fn summaries(
@@ -340,14 +407,24 @@ impl<'a, 'c> Decoder<'a, 'c> {
     }
 
     fn prepare(
-        self,
+        mut self,
         metadata: ValidatedMetadata,
-        [left, right]: [Vec<StoredRow>; 2],
+        mut rows: [Vec<StoredRow>; 2],
         inventory: &Inventory<'_>,
     ) -> Result<Prepared> {
-        self.validate_retained_metrics(&metadata, [&left, &right])?;
-        let writer =
-            super::WriterState::restored(self.snapshot, inventory, &self.workspace, self.check)?;
+        self.validate_retained_metrics(&metadata, [&rows[0], &rows[1]])?;
+        let migrated = self.migrate_legacy(&mut rows)?;
+        let writer = self.prepared_writer(migrated, inventory)?;
+        self.assemble(metadata, rows, writer)
+    }
+
+    fn assemble(
+        self,
+        metadata: ValidatedMetadata,
+        rows: [Vec<StoredRow>; 2],
+        writer: super::WriterState,
+    ) -> Result<Prepared> {
+        let [left, right] = rows;
         let state = StreamJoinState {
             left_expirations: ExpirationIndex::restored_funded(&left, &self.workspace, self.check)?,
             right_expirations: ExpirationIndex::restored_funded(
@@ -386,6 +463,17 @@ impl<'a, 'c> Decoder<'a, 'c> {
             }
         }
         Ok(())
+    }
+
+    fn prepared_writer(
+        &self,
+        migrated: bool,
+        inventory: &Inventory<'_>,
+    ) -> Result<super::WriterState> {
+        if migrated {
+            return Ok(super::WriterState::migration());
+        }
+        super::WriterState::restored(self.snapshot, inventory, &self.workspace, self.check)
     }
 
     fn validate_retained_metrics(

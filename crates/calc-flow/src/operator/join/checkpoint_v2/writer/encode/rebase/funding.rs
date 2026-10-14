@@ -4,6 +4,7 @@ use crate::Result;
 
 pub(super) fn inputs(indexes: usize, payloads: usize) -> Result<usize> {
     super::accounting::sum(&[
+        size_of::<HistoryInput>(),
         bulk_bytes::<IndexInput>(indexes)?,
         bulk_bytes::<PayloadInput>(payloads)?,
         super::accounting::product(super::accounting::add(indexes, payloads)?, 64)?,

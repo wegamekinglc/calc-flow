@@ -16,6 +16,7 @@ impl StreamJoinOperator {
             .runtime()?
             .incremental_reservation("stream-join-v2-restore");
         let config = Config {
+            projection: self.payload_projection.as_deref(),
             name: &self.name,
             spec: &self.spec,
             schemas: [
@@ -48,7 +49,9 @@ impl StreamJoinOperator {
         check: &dyn Fn() -> Result<()>,
     ) -> Result<()> {
         check()?;
-        prepared.writer.bind_owner(&self.v2_writer)?;
+        prepared
+            .writer
+            .bind_owner(&self.v2_writer, self.checkpoint_identity)?;
         let Prepared {
             state,
             writer,

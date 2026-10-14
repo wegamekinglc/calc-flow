@@ -1,9 +1,10 @@
 use crate::{Epoch, Result};
 
-use super::buffer::error;
+use super::{HistoryIdentity, buffer::error};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct Cut {
+    pub(super) identity: HistoryIdentity,
     pub(super) generation: u64,
     pub(super) captured_epoch: Option<Epoch>,
     pub(super) revision: u64,
@@ -12,6 +13,7 @@ pub(super) struct Cut {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct Tracker {
+    pub(super) identity: HistoryIdentity,
     pub(super) generation: u64,
     pub(super) revision: u64,
     pub(super) dirty_revision: u64,
@@ -20,6 +22,7 @@ pub(super) struct Tracker {
 impl Tracker {
     pub(super) fn snapshot(self, captured_epoch: Option<Epoch>) -> Cut {
         Cut {
+            identity: self.identity,
             generation: self.generation,
             captured_epoch,
             revision: self.revision,
@@ -44,6 +47,7 @@ impl Tracker {
             generation: increment(self.generation)?,
             revision: 0,
             dirty_revision: 0,
+            ..self
         })
     }
 }

@@ -1,4 +1,4 @@
-//! Physical output columns, with full retained-state schemas and charges.
+//! Physical output columns composed with retained payload layouts.
 
 use std::{ops::Range, sync::Arc};
 
@@ -16,19 +16,47 @@ use crate::{BatchKind, Port, Result};
 pub(super) mod tests;
 
 impl StreamJoinOperator {
-    /// Installs physical output columns after logical graph validation, keeping
-    /// retained schemas, frozen V1 charges and checkpoint formats unchanged.
+    /// Installs physical columns after logical validation; admission keeps its
+    /// complete input schemas and frozen V1 logical charges.
     pub(crate) fn set_output_projection(&mut self, columns: Vec<usize>) -> Result<()> {
+        let output = self.projection_port(&columns)?;
+        let layout = super::state_projection::Layout::new(self, &columns)?;
+        if layout.is_some() {
+            self.validate_fresh_projection()?;
+        }
+        let physical = if let Some(layout) = &layout {
+            layout.output_columns(&columns, self.input_schema(0).fields().len())
+        } else {
+            columns
+        };
+        self.rebind_checkpoint_layout(layout.as_ref())?;
+        self.output_ports[0] = output;
+        self.output_columns = Some(physical.into());
+        self.payload_projection = layout.map(Arc::new);
+        Ok(())
+    }
+
+    fn projection_port(&self, columns: &[usize]) -> Result<Port> {
         let schema = self
             .logical_output_schema
-            .project(&columns)
+            .project(columns)
             .map_err(|error| {
                 operator_error(&self.name, &format!("output projection failed: {error}"))
             })?;
-        let output =
-            Port::with_schema_ref("output", BatchKind::Table, true, Some(Arc::new(schema)))?;
-        self.output_ports[0] = output;
-        self.output_columns = Some(columns.into());
+        Port::with_schema_ref("output", BatchKind::Table, true, Some(Arc::new(schema)))
+    }
+
+    pub(super) fn validate_fresh_projection(&self) -> Result<()> {
+        if self.state.next_left_row_id != 0
+            || self.state.next_right_row_id != 0
+            || self.state.last_checkpoint_epoch.is_some()
+            || self.state.ended
+        {
+            return Err(operator_error(
+                &self.name,
+                "retained projection requires a fresh Join",
+            ));
+        }
         Ok(())
     }
 }

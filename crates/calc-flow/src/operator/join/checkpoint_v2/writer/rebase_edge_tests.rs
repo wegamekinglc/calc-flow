@@ -30,6 +30,8 @@ pub(super) fn image(join: &StreamJoinOperator) -> serde_json::Value {
     });
     serde_json::json!({
         "cut": format!("{:?}", cut(join)), "trust": writer.history_trusted,
+        "identity": format!("{:?}", join.checkpoint_identity),
+        "history_identity": format!("{:?}", writer.history_identity),
         "status": join.status(), "base_epoch": writer.base_epoch,
         "deltas": writer.deltas, "payloads": base.payloads,
         "dirty_epochs": writer.dirty_epochs, "migration": writer.migration_required,
@@ -61,17 +63,21 @@ async fn test_rebase_install_rejects_stale_cut_untrusted_history_and_off_context
     let disabled = job().with_checkpointing(false);
     let off = StreamOperatorContext::new(&disabled, "prepared-reuse", None);
     let mut pools = Vec::new();
-    for invalid in ["cut", "trust", "off"] {
+    for invalid in ["cut", "trust", "off", "identity"] {
         let (mut join, old) = checkpointed(&context).await;
         let workspace = join.v2_writer_workspace().unwrap();
         let history = encode::rebase::copy(&join, &workspace, &context)
             .await
             .unwrap();
         let base = encode::rebase::encode(&history, &workspace, &|| Ok(())).unwrap();
-        let submitted = cut(&join);
+        let mut submitted = cut(&join);
         match invalid {
             "cut" => join.v2_writer.changed(false).unwrap(),
-            "trust" => join.v2_writer.invalidate_history(),
+            "trust" => join.v2_writer.invalidate_history().unwrap(),
+            "identity" => {
+                submitted.identity = different_identity(join.checkpoint_identity);
+                join.v2_writer.tracker.identity = submitted.identity;
+            }
             "off" => {}
             _ => unreachable!(),
         }

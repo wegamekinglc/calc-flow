@@ -2,6 +2,7 @@ use datafusion::execution::memory_pool::MemoryReservation;
 use serde::Serialize;
 use serde_json::Value;
 
+use super::super::super::state_projection::checkpoint::{CHARGE_MODE, Descriptor};
 use super::super::super::{JoinMetrics, StreamJoinOperator, StreamJoinSpec, StreamJoinType};
 use super::super::{
     budget,
@@ -30,6 +31,10 @@ struct Metadata<'a> {
     ended: bool,
     epoch: u64,
     v2_inventory: Inventory<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    charge_mode: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retained_payloads: Option<&'a Descriptor>,
 }
 
 #[derive(Serialize)]
@@ -50,6 +55,19 @@ const METADATA_FIELDS: &[&str] = &[
     "ended",
     "epoch",
     "v2_inventory",
+];
+const PROJECTED_FIELDS: &[&str] = &[
+    "layout_version",
+    "spec",
+    "next_left_row_id",
+    "next_right_row_id",
+    "next_output_sequence",
+    "metrics",
+    "ended",
+    "epoch",
+    "v2_inventory",
+    "charge_mode",
+    "retained_payloads",
 ];
 const SPEC_FIELDS: &[&str] = &[
     "join_type",
@@ -88,10 +106,14 @@ pub(super) fn encode(
     payloads: &[PayloadEntry],
     credit: &MemoryReservation,
 ) -> Result<JsonMap> {
-    let bytes = metadata_bytes(&operator.spec, deltas, payloads)?;
+    let descriptor = operator
+        .payload_projection
+        .as_ref()
+        .map(|layout| &layout.descriptor);
+    let bytes = metadata_bytes(&operator.spec, deltas, payloads, descriptor)?;
     ensure(credit, add(credit.size(), bytes)?)?;
     let metadata = Metadata {
-        layout_version: 2,
+        layout_version: if descriptor.is_some() { 3 } else { 2 },
         spec: &operator.spec,
         next_left_row_id: operator.state.next_left_row_id,
         next_right_row_id: operator.state.next_right_row_id,
@@ -105,6 +127,8 @@ pub(super) fn encode(
             deltas,
             payloads,
         },
+        charge_mode: descriptor.map(|_| CHARGE_MODE),
+        retained_payloads: descriptor,
     };
     let Value::Object(metadata) = serde_json::to_value(metadata)
         .map_err(|_| error("V2 checkpoint metadata encoding failed"))?
@@ -118,21 +142,42 @@ fn metadata_bytes(
     spec: &StreamJoinSpec,
     deltas: &[DeltaEntry],
     payloads: &[PayloadEntry],
+    descriptor: Option<&Descriptor>,
 ) -> Result<usize> {
     sum(&[
-        root_bytes()?,
+        root_bytes(descriptor.is_some())?,
         spec_bytes(spec)?,
         metrics_bytes()?,
         inventory_bytes(deltas, payloads)?,
+        descriptor.map_or(Ok(0), descriptor_bytes)?,
     ])
 }
 
-fn root_bytes() -> Result<usize> {
+fn root_bytes(projected: bool) -> Result<usize> {
+    let fields = if projected {
+        PROJECTED_FIELDS
+    } else {
+        METADATA_FIELDS
+    };
     // The serde root, collector Vec and final JsonMap can overlap; values move.
     sum(&[
-        object_bytes(METADATA_FIELDS)?,
-        vector_peak::<(String, Value)>(METADATA_FIELDS.len())?,
-        budget::tree::<String, Value>(METADATA_FIELDS.len())?,
+        object_bytes(fields)?,
+        vector_peak::<(String, Value)>(fields.len())?,
+        budget::tree::<String, Value>(fields.len())?,
+    ])
+}
+
+fn descriptor_bytes(descriptor: &Descriptor) -> Result<usize> {
+    let arrays = sum(&[
+        array_bytes(6)?,
+        array_bytes(descriptor.columns[0].len())?,
+        array_bytes(descriptor.columns[1].len())?,
+    ])?;
+    sum(&[
+        object_bytes(&["columns", "logical_schema_digests", "schema_digests"])?,
+        arrays,
+        4 * 64,
+        CHARGE_MODE.len(),
     ])
 }
 

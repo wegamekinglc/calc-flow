@@ -8,6 +8,8 @@ use crate::json::JsonMap;
 
 type Result<T> = std::result::Result<T, InvalidFrame>;
 
+pub(super) mod projected;
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Metadata {

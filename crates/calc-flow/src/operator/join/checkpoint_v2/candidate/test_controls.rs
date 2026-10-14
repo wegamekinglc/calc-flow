@@ -3,6 +3,7 @@ use crate::operator::join::StreamJoinOperator;
 
 fn config(operator: &StreamJoinOperator) -> Config<'_> {
     Config {
+        projection: operator.payload_projection.as_deref(),
         name: &operator.name,
         spec: &operator.spec,
         schemas: [
@@ -100,5 +101,82 @@ impl StreamJoinOperator {
         assert_eq!(buffer.as_slice(), expected_buffer);
         drop(buffer);
         assert_eq!(pool.reserved(), baseline);
+    }
+}
+
+impl StreamJoinOperator {
+    pub(in crate::operator::join) async fn assert_legacy_assembly_cancel_for_test(
+        &mut self,
+        snapshot: &OperatorStateSnapshot,
+    ) {
+        use std::cell::Cell;
+        let job = crate::StreamJobContext::new(
+            1,
+            "legacy-assembly-cancel",
+            crate::JsonMap::new(),
+            None,
+            crate::CancellationToken::new(),
+        );
+        let pool = self.runtime.runtime().unwrap().incremental_memory_pool();
+        let baseline = pool.reserved();
+        let status = self.status();
+        let epoch = self.state.last_checkpoint_epoch;
+        let checks = Cell::new(0);
+        let prepared = self
+            .legacy_decode_for_test(snapshot, &job, &|| {
+                checks.set(checks.get() + 1);
+                Ok(())
+            })
+            .unwrap();
+        let count = checks.get();
+        assert!(count > 3);
+        drop(prepared);
+        for cancel_at in count - 2..=count + 1 {
+            checks.set(0);
+            let check = || {
+                checks.set(checks.get() + 1);
+                if checks.get() == cancel_at {
+                    Err(crate::CalcFlowError::Cancelled {
+                        run_id: "legacy-assembly-cancel".into(),
+                    })
+                } else {
+                    Ok(())
+                }
+            };
+            let result = self
+                .legacy_decode_for_test(snapshot, &job, &check)
+                .and_then(|prepared| self.install_v2(prepared, &check));
+            assert!(matches!(
+                result,
+                Err(crate::CalcFlowError::Cancelled { .. })
+            ));
+            assert_eq!(self.status(), status);
+            assert_eq!(self.state.last_checkpoint_epoch, epoch);
+            assert_eq!(pool.reserved(), baseline);
+        }
+        assert!(job.gather_owner().close_and_drain().await.is_empty());
+        drop(job);
+        assert_eq!(pool.reserved(), baseline);
+    }
+
+    fn legacy_decode_for_test(
+        &self,
+        snapshot: &OperatorStateSnapshot,
+        job: &crate::StreamJobContext,
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<Prepared> {
+        let runtime = self
+            .runtime
+            .runtime
+            .as_ref()
+            .expect("initialized legacy fixture");
+        let credit = runtime.incremental_reservation("legacy-tail-test");
+        reserve(&credit, ipc::accounting::vector_peak::<RetirementGuard>(2)?)?;
+        let retirements = vec![
+            job.gather_owner().retain_retirement()?,
+            job.gather_owner().retain_retirement()?,
+        ];
+        let config = config(self);
+        Decoder::new(snapshot, &config, &credit, retirements, check)?.decode()
     }
 }

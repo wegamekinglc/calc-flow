@@ -9,6 +9,18 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-14: Retain required streaming Join payload dependencies plus identity
+  and event-time fields when all consumers qualify for compiler projection.
+  Preserve complete input-schema validation, V1 logical state charges and graph
+  fingerprints. Actually narrowed state uses strict inner layout 3/codec 2,
+  exact logical/physical schema descriptors and carried V1 admission charges.
+  Legacy layout 1/2 migration establishes a fresh narrow base before incremental
+  deltas and rebase; semantic state version 1, project format 3 and manifest v3
+  remain unchanged. The Python inventory reports layouts `(1, 2, 3)`.
+  Rebuild checkpoint history after checkpoint-disabled updates, and reject
+  emitted-row counter overflow before sending output from the input batch.
+  See [Join recovery](docs/streaming-guide.md#join-output-materialization-and-recovery).
+
 - 2026-10-13: Move the workspace crates and Python core to calendar version
   `2026.10.13` for the `calc-flow-python` release. It is the first release
   with the public `Runtime` registration methods and the first tagged after

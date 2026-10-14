@@ -191,16 +191,10 @@ async fn continuation(selects: &[&[&str]], filter: Option<&str>, v1: bool) {
     let right = super::super::input(Arc::clone(&schema), true);
     let left = left_input(schema);
     let untouched = record(&left).clone();
-    let snapshot = captured(join(&mut plan), &right, &job, v1).await;
-    let full_snapshot = captured(join(&mut full), &right, &job, v1).await;
-    assert_eq!(snapshot.inline_metadata, full_snapshot.inline_metadata);
-    assert_eq!(snapshot.segments, full_snapshot.segments);
+    let (snapshot, full_snapshot) = snapshots(&mut plan, &mut full, &right, &job, v1).await;
     assert_eq!(join(&mut plan).status(), join(&mut full).status());
-
     let mut cold = compiled(selects, filter);
-    join(&mut cold).restore(&full_snapshot).unwrap();
-    join(&mut full).reset().unwrap();
-    join(&mut full).restore(&snapshot).unwrap();
+    let migrated = recovery_pair(&mut cold, &mut full, &snapshot, &full_snapshot, &job).await;
     let narrowed = process(join(&mut cold), left.clone(), "left", &job).await;
     let reference = process(join(&mut full), left.clone(), "left", &job).await;
     assert_eq!(narrowed.len(), 1);
@@ -224,8 +218,89 @@ async fn continuation(selects: &[&[&str]], filter: Option<&str>, v1: bool) {
             assert!(!value.is_null(0));
         }
     }
-    drop((plan, cold, full));
+    let pools = [&mut plan, &mut cold, &mut full]
+        .map(|plan| join(plan).checkpoint_preload_test_pool().unwrap());
+    drop((
+        plan,
+        cold,
+        full,
+        snapshot,
+        full_snapshot,
+        migrated,
+        narrowed,
+        reference,
+        right,
+        left,
+    ));
     assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop(job);
+    assert!(pools.iter().all(|pool| pool.reserved() == 0));
+}
+
+async fn snapshots(
+    projected: &mut StreamExecutionPlan,
+    full: &mut StreamExecutionPlan,
+    right: &Batch,
+    job: &StreamJobContext,
+    v1: bool,
+) -> (OperatorStateSnapshot, OperatorStateSnapshot) {
+    let snapshot = captured(join(projected), right, job, false).await;
+    let legacy = captured(join(full), right, job, v1).await;
+    assert_eq!(snapshot.inline_metadata["layout_version"], 3);
+    assert_eq!(
+        legacy.inline_metadata["layout_version"],
+        if v1 { 1 } else { 2 }
+    );
+    for field in [
+        "spec",
+        "next_left_row_id",
+        "next_right_row_id",
+        "next_output_sequence",
+        "metrics",
+        "ended",
+        "epoch",
+    ] {
+        assert_eq!(
+            snapshot.inline_metadata[field], legacy.inline_metadata[field],
+            "logical checkpoint field: {field}"
+        );
+    }
+    (snapshot, legacy)
+}
+
+async fn recovery_pair(
+    cold: &mut StreamExecutionPlan,
+    full: &mut StreamExecutionPlan,
+    snapshot: &OperatorStateSnapshot,
+    legacy: &OperatorStateSnapshot,
+    job: &StreamJobContext,
+) -> OperatorStateSnapshot {
+    let before = join(full).status();
+    assert!(
+        join(full).restore(snapshot).is_err(),
+        "full state cannot restore omitted columns"
+    );
+    assert_eq!(join(full).status(), before);
+    join(cold).restore(legacy).unwrap();
+    assert_eq!(join(cold).status(), before);
+    join(full).reset().unwrap();
+    join(full).restore(legacy).unwrap();
+    let epoch = Epoch::new(2).unwrap();
+    assert!(join(cold).checkpoint(epoch).is_err());
+    join(cold)
+        .prepare_checkpoint_async(&StreamOperatorContext::new(job, "asof", None))
+        .await
+        .unwrap();
+    let migrated = join(cold).checkpoint(epoch).unwrap();
+    assert_eq!(migrated.inline_metadata["layout_version"], 3);
+    assert!(
+        migrated.inline_metadata["v2_inventory"]["deltas"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    join(cold).restore(&migrated).unwrap();
+    migrated
 }
 
 pub(in crate::pipeline) async fn execution_and_restore() {

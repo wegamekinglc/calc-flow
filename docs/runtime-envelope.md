@@ -222,29 +222,60 @@ segment paths, lengths, and checksums during staging, reusing the
 already-committed handle for segment content that is unchanged since the
 current session committed it.
 
-Streaming Join writes columnar physical V2 checkpoints and accepts physical
-V1 and V2 state on restore. Its Python capability inventory lists layouts
-`(1, 2)` with semantic state version `1`. V2 separates immutable payload batches
-from row indexes. Checkpoint preparation builds a replacement base on owned native
-workers under the configured memory budget. Capture carries that base and
-historical segments, adding only later dirty operations. Clean captures share
-unchanged segment allocations. Four dirty checkpoint epochs arm base
-compaction; payloads referenced by carried history remain reachable until
-that history is replaced.
+Streaming Join keeps semantic checkpoint state version `1`. Its Python
+capability inventory lists physical layouts `(1, 2, 3)`. Full retained payloads
+use columnar layout 2. When compiler projection actually narrows either side's
+retained schema, Join writes strict inner layout 3. Retained columns include
+consumer dependencies plus keys and event-time fields. Their independent
+buffers, sparse compaction and checkpoint IPC use the selected schemas.
+Complete logical input schemas, configuration and graph fingerprints remain
+unchanged. Project format 3 and the managed manifest v3 remain unchanged.
 
-Preparation installs only a candidate for the exact state cut it observed.
-If a fresh operator changes before its first capture, capture records its
-pending operations against empty bases. Restoring V1 requires successful
-asynchronous preparation before a V2 capture; failure preserves the old state
-and pending operations. Restoring V2 preserves its validated base, deltas and
-shared payloads for subsequent captures.
+Layout 3 reuses frame/inventory codec 2 and adds
+`charge_mode: "v1_admission"` and an exact `retained_payloads` descriptor. Its
+only fields are `columns`, `logical_schema_digests` and `schema_digests`, each
+with left/right entries. Selected logical indices are sorted and unique;
+canonical digests bind both complete logical and retained physical schemas,
+including field order, names, types, nullability and metadata. Restore requires the
+compiled descriptor exactly, including for empty and terminal state; broader
+or narrower projected descriptors fail. Full-retention plans reject layout 3.
 
-V2 validation checks the complete segment inventory, payload schemas,
-historical row identities, keys, event times and logical charges before
-replacing either side. Managed recovery validates and decodes on owned native
-workers under the configured memory budget; invalid V2 state fails recovery.
-These physical formats are distinct from the runtime capability envelope
-under [checkpoint coordination](#checkpoint-coordination).
+Admission preserves null/late classification and computes retained rows' V1
+logical charges from the complete input before selecting columns. Layout 3
+carries those authoritative historical charges. Every historical row's charge
+must meet a checked lower bound and the configured per-side byte cap. The bound
+includes V1 row overhead, encoded-key length, the existing 16-byte term,
+retained logical-cell charges and one validity byte per omitted logical column.
+Restore validates historical identities, keys, event times and inventory, sums
+live charges exactly into retained metrics, and reapplies live row/byte limits.
+It cannot recompute charges for discarded values. Checksums verify segment
+integrity; they do not authenticate original admission history. Logical state
+charges and limits retain their complete-input meaning. Physical payload and
+temporary work reservations separately fund actual storage.
+
+Checkpoint preparation builds a replacement base on owned native workers under
+the configured memory budget. Capture carries immutable payload batches and
+row indexes, adding later dirty operations; clean captures share unchanged
+segment allocations. Four dirty checkpoint epochs arm base compaction.
+History, prepared cuts and worker inputs bind the compiled physical layout and
+charge mode. Processing with checkpointing disabled invalidates reusable
+history and prepared cuts; a later capture requires successful preparation of
+a live base. Successful live-base preparation restores trusted incremental
+continuation and rebase.
+
+Legacy layouts 1 and 2 remain readable. Projected restore validates their full
+payload schemas, every historical upsert's key, event time and exact V1 charge,
+identities, inventory and live metrics before independently copying selected
+live payloads. It preserves no full legacy payload history. The first subsequent
+capture requires asynchronous preparation of a new narrow base, including clean,
+empty and terminal state; later captures use narrow deltas and rebase. Matching
+layout-3 restore preserves validated narrow history. Full-retention plans
+restoring layout 1 also require asynchronous base preparation before layout-2
+capture; matching layout-2 restore preserves validated full history. A refused,
+cancelled or invalid restore leaves the installed state unchanged, with
+temporary owners kept alive through actual cleanup. These physical formats
+remain distinct from the runtime capability envelope under
+[checkpoint coordination](#checkpoint-coordination).
 
 The built-in window operator prepares immutable Arrow IPC deltas through a
 blocking worker while processing data and control events. Its synchronous
@@ -664,8 +695,11 @@ After the data-plane end cut, the coordinator allocates a terminal epoch out
 of band. Operators capture post-`on_end` state and sinks pre-commit final output
 without any post-end barrier. A terminal manifest is recognized only when all
 source and operator ingress entries are ended. Recovery from it opens only
-sinks, completes any commit, closes resources, and returns natural completion;
-it does not reopen sources or repeat `on_end`/final-window emission.
+sinks after strictly restoring each Join and validating its native ended,
+empty state. Restored ended-ingress observations publish before operator
+entry. Recovery completes any sink commit, closes resources, and returns
+natural completion without starting data-plane handlers, reopening sources,
+or repeating `on_end`/final-window emission.
 
 ## Cancellation and ownership
 
@@ -717,10 +751,12 @@ metric label. Epoch values remain status fields rather than metric labels.
 Inner Join status includes each ingress's last accepted watermark, idle state,
 and permanent end state. These observations come from runtime-owned progress;
 non-terminal managed restore publishes them before entry acknowledgement.
-Terminal-manifest recovery completes before operator entry without restoring
-these per-Join observations. They add no
-operator checkpoint fields or layout version. A standalone restored Join
-operator has no ingress progress until a new handler context supplies it.
+Terminal-manifest recovery validates and restores each Join before operator
+entry, then publishes its restored ingress observations with ended status.
+It does not start data-plane handlers, reopen sources, or repeat `on_end` and
+final emission. These observations add no operator checkpoint fields or layout
+version. A standalone restored Join operator has no ingress progress until a
+new handler context supplies it.
 
 Operator `processing_duration` includes successful Data and watermark handlers,
 including collector waits inside those handlers. The additional

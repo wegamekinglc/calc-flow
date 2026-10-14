@@ -206,7 +206,7 @@ async fn finish_gather(
     Ok(columns)
 }
 
-async fn cancelled(job: &StreamJobContext) {
+pub(in crate::operator::join) async fn cancelled(job: &StreamJobContext) {
     let deadline = async {
         match job.deadline() {
             Some(deadline) => {

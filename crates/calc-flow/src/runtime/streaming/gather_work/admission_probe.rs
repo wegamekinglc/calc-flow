@@ -26,6 +26,7 @@ pub(crate) struct AdmissionProbe {
     limit: usize,
     fired: AtomicBool,
     event: Mutex<Option<AdmissionEvent>>,
+    cancel: Mutex<Option<crate::CancellationToken>>,
 }
 
 impl AdmissionProbe {
@@ -41,12 +42,17 @@ impl AdmissionProbe {
             limit,
             fired: AtomicBool::new(false),
             event: Mutex::new(None),
+            cancel: Mutex::new(None),
         });
         owner.0.home.state.lock().admission_probe = Some(probe.clone());
         probe
     }
     pub(crate) fn take_event(&self) -> Option<AdmissionEvent> {
         self.event.lock().take()
+    }
+
+    pub(crate) fn cancel_on_refusal(&self, cancellation: crate::CancellationToken) {
+        *self.cancel.lock() = Some(cancellation);
     }
 }
 
@@ -82,5 +88,8 @@ pub(super) fn before(
         fee,
         available,
     });
+    if let Some(cancellation) = probe.cancel.lock().take() {
+        cancellation.cancel();
+    }
     Ok(Some(pressure))
 }
