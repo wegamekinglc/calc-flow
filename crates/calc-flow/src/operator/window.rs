@@ -488,6 +488,8 @@ struct WindowSnapshotMetadata {
 
 struct InputBatchUpdate {
     accumulators: BTreeMap<WindowKey, AccumulatorRow>,
+    // Whether each key, in `accumulators` order, was new to live state.
+    created: Vec<bool>,
     usage: WindowStateUsage,
     metrics: LateMetricDelta,
 }
@@ -506,10 +508,27 @@ struct WindowSlot {
     group: usize,
 }
 
+/// The interned group of one scratch entry and whether live state lacked it.
+#[derive(Clone, Copy)]
+struct EntryOrigin {
+    group: usize,
+    created: bool,
+}
+
 #[derive(Clone, Copy)]
 struct CachedWindowSlot {
-    key: (i64, usize),
+    start: i64,
     index: usize,
+}
+
+/// The open window assignments of one latest window start, resolved once per
+/// slide interval: rows sharing a start share every assignment and, under the
+/// batch-constant watermark, their late classification too.
+#[derive(Default)]
+struct AssignmentPlan {
+    latest_start: Option<i128>,
+    open: Vec<(EventTime, EventTime)>,
+    late: PreparedInputMetrics,
 }
 
 type ScratchMap<K, V> = HashMap<K, V, ahash::RandomState>;
@@ -523,53 +542,43 @@ enum SlotColumn {
     SignedSum(Vec<Option<i128>>),
     UnsignedSum(Vec<Option<u128>>),
     FloatSum(Vec<Option<CompensatedSum>>),
-    Min(Vec<Option<ScalarValue>>),
-    Max(Vec<Option<ScalarValue>>),
+    Min(ExtremeColumn),
+    Max(ExtremeColumn),
     SignedAverage(Vec<(i128, u64)>),
     UnsignedAverage(Vec<(u128, u64)>),
     FloatAverage(Vec<(CompensatedSum, u64)>),
 }
 
+/// Per-slot min/max witnesses. Numeric witnesses keep their native
+/// representation (floats as bits) so the update loops compare without
+/// scalar dispatch; other types keep the generic scalar order.
+enum ExtremeColumn {
+    Signed(Vec<Option<i64>>),
+    Unsigned(Vec<Option<u64>>),
+    Float32(Vec<Option<u32>>),
+    Float64(Vec<Option<u64>>),
+    Scalar(Vec<Option<ScalarValue>>),
+}
+
 impl SlotColumn {
-    fn new(function: AggregateFunction, compiled: &CompiledAggregate) -> Self {
-        match function {
-            AggregateFunction::Count => Self::Count(Vec::new()),
-            AggregateFunction::Sum => match compiled.output_type {
-                DataType::Int64 => Self::SignedSum(Vec::new()),
-                DataType::UInt64 => Self::UnsignedSum(Vec::new()),
-                DataType::Float64 => Self::FloatSum(Vec::new()),
-                _ => unreachable!("aggregate matrix validated at construction"),
-            },
-            AggregateFunction::Min => Self::Min(Vec::new()),
-            AggregateFunction::Max => Self::Max(Vec::new()),
-            AggregateFunction::Avg => match compiled.input_type {
-                DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => {
-                    Self::SignedAverage(Vec::new())
-                }
-                DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
-                    Self::UnsignedAverage(Vec::new())
-                }
-                DataType::Float32 | DataType::Float64 => Self::FloatAverage(Vec::new()),
-                _ => unreachable!("average input matrix validated at construction"),
-            },
+    /// Mirrors the default accumulator `new_accumulator_row` compiles, so the
+    /// aggregate matrix has one source of truth.
+    fn new(default: &AccumulatorValue, input_type: &DataType) -> Self {
+        match default {
+            AccumulatorValue::Count(_) => Self::Count(Vec::new()),
+            AccumulatorValue::SignedSum(_) => Self::SignedSum(Vec::new()),
+            AccumulatorValue::UnsignedSum(_) => Self::UnsignedSum(Vec::new()),
+            AccumulatorValue::FloatSum(_) => Self::FloatSum(Vec::new()),
+            AccumulatorValue::Min(_) => Self::Min(ExtremeColumn::new(input_type)),
+            AccumulatorValue::Max(_) => Self::Max(ExtremeColumn::new(input_type)),
+            AccumulatorValue::SignedAverage { .. } => Self::SignedAverage(Vec::new()),
+            AccumulatorValue::UnsignedAverage { .. } => Self::UnsignedAverage(Vec::new()),
+            AccumulatorValue::FloatAverage { .. } => Self::FloatAverage(Vec::new()),
         }
     }
 
-    fn push_default(&mut self) {
-        match self {
-            Self::Count(values) => values.push(0),
-            Self::SignedSum(values) => values.push(None),
-            Self::UnsignedSum(values) => values.push(None),
-            Self::FloatSum(values) => values.push(None),
-            Self::Min(values) | Self::Max(values) => values.push(None),
-            Self::SignedAverage(values) => values.push((0, 0)),
-            Self::UnsignedAverage(values) => values.push((0, 0)),
-            Self::FloatAverage(values) => values.push((CompensatedSum::new(0.0), 0)),
-        }
-    }
-
-    /// Seeds one slot from its live-state accumulator; the variants match by
-    /// construction against the compiled aggregate matrix.
+    /// Seeds one slot from its live-state or default accumulator; the
+    /// variants match by construction against the compiled aggregate matrix.
     fn push_seeded(&mut self, value: &AccumulatorValue) {
         match (self, value) {
             (Self::Count(values), AccumulatorValue::Count(value)) => values.push(*value),
@@ -579,7 +588,7 @@ impl SlotColumn {
             }
             (Self::FloatSum(values), AccumulatorValue::FloatSum(value)) => values.push(*value),
             (Self::Min(values), AccumulatorValue::Min(value))
-            | (Self::Max(values), AccumulatorValue::Max(value)) => values.push(value.clone()),
+            | (Self::Max(values), AccumulatorValue::Max(value)) => values.push(value.as_ref()),
             (Self::SignedAverage(values), AccumulatorValue::SignedAverage { sum, count }) => {
                 values.push((*sum, *count));
             }
@@ -599,8 +608,8 @@ impl SlotColumn {
             Self::SignedSum(values) => AccumulatorValue::SignedSum(values[index]),
             Self::UnsignedSum(values) => AccumulatorValue::UnsignedSum(values[index]),
             Self::FloatSum(values) => AccumulatorValue::FloatSum(values[index]),
-            Self::Min(values) => AccumulatorValue::Min(std::mem::take(&mut values[index])),
-            Self::Max(values) => AccumulatorValue::Max(std::mem::take(&mut values[index])),
+            Self::Min(values) => AccumulatorValue::Min(values.take(index)),
+            Self::Max(values) => AccumulatorValue::Max(values.take(index)),
             Self::SignedAverage(values) => {
                 let (sum, count) = values[index];
                 AccumulatorValue::SignedAverage { sum, count }
@@ -617,6 +626,48 @@ impl SlotColumn {
     }
 }
 
+impl ExtremeColumn {
+    fn new(input_type: &DataType) -> Self {
+        match input_type {
+            DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => {
+                Self::Signed(Vec::new())
+            }
+            DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
+                Self::Unsigned(Vec::new())
+            }
+            DataType::Float32 => Self::Float32(Vec::new()),
+            DataType::Float64 => Self::Float64(Vec::new()),
+            _ => Self::Scalar(Vec::new()),
+        }
+    }
+
+    fn push(&mut self, value: Option<&ScalarValue>) {
+        match (self, value) {
+            (Self::Signed(values), Some(ScalarValue::Signed(value))) => values.push(Some(*value)),
+            (Self::Unsigned(values), Some(ScalarValue::Unsigned(value)))
+            | (Self::Float64(values), Some(ScalarValue::Float64(value))) => {
+                values.push(Some(*value));
+            }
+            (Self::Float32(values), Some(ScalarValue::Float32(value))) => values.push(Some(*value)),
+            (Self::Signed(values), None) => values.push(None),
+            (Self::Unsigned(values) | Self::Float64(values), None) => values.push(None),
+            (Self::Float32(values), None) => values.push(None),
+            (Self::Scalar(values), value) => values.push(value.cloned()),
+            _ => unreachable!("compiled extreme scalar type mismatch"),
+        }
+    }
+
+    fn take(&mut self, index: usize) -> Option<ScalarValue> {
+        match self {
+            Self::Signed(values) => values[index].map(ScalarValue::Signed),
+            Self::Unsigned(values) => values[index].map(ScalarValue::Unsigned),
+            Self::Float32(values) => values[index].map(ScalarValue::Float32),
+            Self::Float64(values) => values[index].map(ScalarValue::Float64),
+            Self::Scalar(values) => std::mem::take(&mut values[index]),
+        }
+    }
+}
+
 /// Per-batch accumulator scratch: hashed while rows stream in, then sorted
 /// once into the deterministic window-key order installs and encodes observe.
 struct BatchScratch<'a> {
@@ -626,18 +677,23 @@ struct BatchScratch<'a> {
     group_keys: Vec<Arc<[u8]>>,
     // Keyed by (window start, group); the fixed geometry determines the end.
     slots: ScratchMap<(i64, usize), usize>,
-    slot_cache: [Option<CachedWindowSlot>; 64],
+    // `slot_cache_ways` cached slots per interned group, indexed by group, so
+    // distinct groups never evict each other's windows.
+    slot_cache: Vec<Option<CachedWindowSlot>>,
     slot_cache_ways: usize,
     entries: Vec<(WindowKey, AccumulatorRow)>,
+    origins: Vec<EntryOrigin>,
     // Columnar fast path: per-aggregate dense accumulators aligned with
     // `entries`, and the per-record (slot, row) pair buffer of pass one.
     columns: Vec<SlotColumn>,
+    column_defaults: Vec<AccumulatorValue>,
     pairs: Vec<(u32, u32)>,
     // Reused by the general composite-key path, without owned row scalars.
     encoded_group: Vec<u8>,
     // Previous-row reuse: the window slide interval and the resolved groups
     // of the last row, so adjacent rows skip the division and the hash.
     assignment_cache: Option<(i128, i128)>,
+    assignment_plan: AssignmentPlan,
     last_integer_group: Option<(keys::IntegerKey, usize)>,
     last_string_group: Option<(Option<&'a str>, usize)>,
     usage: WindowStateUsage,
@@ -658,13 +714,16 @@ impl<'a> BatchScratch<'a> {
             integer_group_ids: ScratchMap::default(),
             group_keys: Vec::new(),
             slots: ScratchMap::default(),
-            slot_cache: [None; 64],
+            slot_cache: Vec::new(),
             slot_cache_ways,
             entries: Vec::new(),
+            origins: Vec::new(),
             columns: Vec::new(),
+            column_defaults: Vec::new(),
             pairs: Vec::new(),
             encoded_group: Vec::new(),
             assignment_cache: None,
+            assignment_plan: AssignmentPlan::default(),
             last_integer_group: None,
             last_string_group: None,
             usage,
@@ -731,12 +790,29 @@ impl<'a> BatchScratch<'a> {
         Ok(group)
     }
 
+    /// Orders entries by window start and the byte rank of their group key,
+    /// which matches `WindowKey` order because every window shares one size,
+    /// so the sort compares integers instead of key bytes.
     fn into_update(mut self) -> InputBatchUpdate {
-        let accumulators = self
+        let ranks = group_ranks(&self.group_keys);
+        let mut order = self
             .entries
-            .into_iter()
+            .iter()
+            .zip(&self.origins)
             .enumerate()
-            .map(|(index, (key, mut row))| {
+            .map(|(index, ((key, _), origin))| (key.start, ranks[origin.group], index))
+            .collect::<Vec<_>>();
+        order.sort_unstable();
+        let mut entries = std::mem::take(&mut self.entries)
+            .into_iter()
+            .map(Some)
+            .collect::<Vec<_>>();
+        let (sorted, created): (Vec<_>, Vec<_>) = order
+            .into_iter()
+            .map(|(_, _, index)| {
+                let (key, mut row) = entries[index]
+                    .take()
+                    .expect("every scratch entry moves once");
                 if !self.columns.is_empty() {
                     row.aggregates = self
                         .columns
@@ -744,59 +820,68 @@ impl<'a> BatchScratch<'a> {
                         .map(|column| column.take(index))
                         .collect();
                 }
-                (key, row)
+                ((key, row), self.origins[index].created)
             })
-            .collect();
+            .unzip();
+        // `created` stays aligned with map order only while the rank order
+        // equals `WindowKey` order.
+        debug_assert!(sorted.windows(2).all(|pair| pair[0].0 < pair[1].0));
         InputBatchUpdate {
-            accumulators,
+            accumulators: sorted.into_iter().collect(),
+            created,
             usage: self.usage,
             metrics: self.metrics.into_delta(),
         }
     }
 
-    fn cached_slot(&self, key: (i64, usize)) -> Option<usize> {
-        if self.slot_cache_ways == 0 {
+    fn cached_slot(&self, (start, group): (i64, usize)) -> Option<usize> {
+        let ways = self.slot_cache_ways;
+        if ways == 0 {
             return None;
         }
-        let position = key.1.wrapping_mul(self.slot_cache_ways) & (self.slot_cache.len() - 1);
-        let cached = self.slot_cache[position]
-            .filter(|entry| {
-                #[cfg(test)]
-                group_tests::CACHE_KEY_COMPARISONS.with(|calls| calls.set(calls.get() + 1));
-                entry.key == key
-            })
-            .map(|entry| entry.index);
-        if cached.is_some() || self.slot_cache_ways == 1 {
-            return cached;
-        }
-        self.slot_cache[position + 1..position + self.slot_cache_ways]
+        let base = group * ways;
+        self.slot_cache
+            .get(base..base + ways)?
             .iter()
             .flatten()
             .find(|entry| {
                 #[cfg(test)]
                 group_tests::CACHE_KEY_COMPARISONS.with(|calls| calls.set(calls.get() + 1));
-                entry.key == key
+                entry.start == start
             })
             .map(|entry| entry.index)
     }
 
-    fn cache_slot(&mut self, key: (i64, usize), index: usize) {
-        if self.slot_cache_ways == 0 {
+    /// Caches one slot in its group's ways, replacing an empty way first and
+    /// otherwise the way holding the oldest scratch slot.
+    fn cache_slot(&mut self, (start, group): (i64, usize), index: usize) {
+        let ways = self.slot_cache_ways;
+        if ways == 0 {
             return;
         }
-        let position = key.1.wrapping_mul(self.slot_cache_ways) & (self.slot_cache.len() - 1);
-        let offset = if self.slot_cache_ways == 1 {
-            0
-        } else {
-            self.slot_cache[position..position + self.slot_cache_ways]
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, entry)| entry.map(|entry| entry.index))
-                .map(|(offset, _)| offset)
-                .unwrap_or_default()
-        };
-        self.slot_cache[position + offset] = Some(CachedWindowSlot { key, index });
+        let base = group * ways;
+        if self.slot_cache.len() < base + ways {
+            self.slot_cache.resize(base + ways, None);
+        }
+        let entries = &mut self.slot_cache[base..base + ways];
+        let offset = entries
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, entry)| entry.map(|entry| entry.index))
+            .map_or(0, |(offset, _)| offset);
+        entries[offset] = Some(CachedWindowSlot { start, index });
     }
+}
+
+/// The position of every interned group key in byte order.
+fn group_ranks(keys: &[Arc<[u8]>]) -> Vec<usize> {
+    let mut order = (0..keys.len()).collect::<Vec<_>>();
+    order.sort_unstable_by(|&left, &right| keys[left].cmp(&keys[right]));
+    let mut ranks = vec![0; keys.len()];
+    for (rank, group) in order.into_iter().enumerate() {
+        ranks[group] = rank;
+    }
+    ranks
 }
 
 /// Input columns of one record, downcast once so per-row reads skip dynamic
@@ -922,6 +1007,22 @@ fn entry_bytes_of_parts(
         .saturating_add(key_bytes)
         .saturating_add(group_bytes)
         .saturating_add(aggregate_bytes)
+}
+
+/// Merges one batch's accumulators into live state. `append` rebuilds both
+/// trees in `O(live + batch)`, which beats `batch` logarithmic inserts once
+/// the batch is large relative to live state.
+fn merge_accumulators(
+    live: &mut BTreeMap<WindowKey, AccumulatorRow>,
+    mut batch: BTreeMap<WindowKey, AccumulatorRow>,
+) {
+    let insert_cost =
+        logical_length(batch.len()).saturating_mul(u64::from(live.len().max(2).ilog2()));
+    if insert_cost >= logical_length(live.len() + batch.len()) {
+        live.append(&mut batch);
+    } else {
+        live.extend(batch);
+    }
 }
 
 /// Charges one updated accumulator against the running usage: a new key adds
@@ -1098,7 +1199,10 @@ impl WindowAggregateOperator {
         if self.use_rowwise_kernel() {
             return self.prepare_input_batch_rowwise(batch, context);
         }
+        // The columnar passes visit rows aggregate by aggregate, so a rejected
+        // batch replays row-wise to report the reference path's first error.
         self.prepare_input_batch_columnar(batch, context)
+            .or_else(|_| self.prepare_input_batch_rowwise(batch, context))
     }
 
     fn new_scratch<'a>(&self) -> BatchScratch<'a> {
@@ -1137,18 +1241,20 @@ impl WindowAggregateOperator {
     ) -> Result<InputBatchUpdate> {
         let table = batch.table_payload()?;
         let mut scratch = self.new_scratch();
-        scratch.columns = self
-            .spec
-            .aggregates
+        scratch.column_defaults =
+            new_accumulator_row(&self.spec, &self.compiled, Vec::new()).aggregates;
+        scratch.columns = scratch
+            .column_defaults
             .iter()
             .zip(&self.compiled.aggregates)
-            .map(|(aggregate, compiled)| SlotColumn::new(aggregate.function, compiled))
+            .map(|(default, compiled)| SlotColumn::new(default, &compiled.input_type))
             .collect();
         for record in table.batches() {
             let columns =
                 RecordColumns::new(record, &self.spec, &self.compiled, context.operator_id())?;
             let mut pairs = std::mem::take(&mut scratch.pairs);
             pairs.clear();
+            pairs.reserve(record.num_rows());
             for row in 0..record.num_rows() {
                 self.prepare_row_slots(&columns, row, context, &mut scratch, &mut pairs)?;
             }
@@ -1177,44 +1283,61 @@ impl WindowAggregateOperator {
         scratch: &mut BatchScratch<'a>,
         pairs: &mut Vec<(u32, u32)>,
     ) -> Result<()> {
+        let Some(group) = self.resolve_row(columns, row, context, scratch)? else {
+            return Ok(());
+        };
+        let pair_row = u32::try_from(row)
+            .map_err(|_| internal_error("window input row index does not fit u32"))?;
+        for ordinal in 0..scratch.assignment_plan.open.len() {
+            let (start, end) = scratch.assignment_plan.open[ordinal];
+            let slot = WindowSlot { start, end, group };
+            let index =
+                self.slot_index_columnar(scratch, slot, columns, row, context.operator_id())?;
+            let index = u32::try_from(index)
+                .map_err(|_| internal_error("window slot index does not fit u32"))?;
+            pairs.push((index, pair_row));
+        }
+        Ok(())
+    }
+
+    /// Resolves one row into the scratch assignment plan and interns its
+    /// group, recording null event times and late assignments on the way.
+    /// `None` means the row opens no window.
+    fn resolve_row<'a>(
+        &self,
+        columns: &RecordColumns<'a>,
+        row: usize,
+        context: &StreamOperatorContext<'_>,
+        scratch: &mut BatchScratch<'a>,
+    ) -> Result<Option<usize>> {
         let operator_id = context.operator_id();
         let Some(event_time) =
             columns
                 .event_time
                 .at(row, operator_id, &self.spec.event_time_column)?
         else {
-            return record_null_event_time(&mut scratch.metrics, operator_id);
+            record_null_event_time(&mut scratch.metrics, operator_id)?;
+            return Ok(None);
         };
         let latest_start = latest_window_start(
             event_time,
             self.compiled.geometry,
             &mut scratch.assignment_cache,
         );
-        let assignments = assignments_from_latest(latest_start, self.compiled.geometry)
-            .map_err(|message| operator_error(operator_id, &message))?;
-        let watermark = context.input_watermark();
-        if !record_late_assignments(
-            assignments.clone(),
-            watermark,
-            &mut scratch.metrics,
+        plan_assignments(
+            &mut scratch.assignment_plan,
+            latest_start,
+            self.compiled.geometry,
+            context.input_watermark(),
             operator_id,
-        )? {
-            return Ok(());
+        )?;
+        record_planned_late(&mut scratch.metrics, &scratch.assignment_plan, operator_id)?;
+        if scratch.assignment_plan.open.is_empty() {
+            return Ok(None);
         }
-        let group = scratch.intern_group(columns, row, operator_id, &self.spec.group_by)?;
-        assignments
-            .filter(|&(_, end)| is_open_assignment(end, watermark))
-            .try_for_each(|(start, end)| {
-                let slot = WindowSlot { start, end, group };
-                let index = self.slot_index_columnar(scratch, slot, columns, row, operator_id)?;
-                pairs.push((
-                    u32::try_from(index)
-                        .map_err(|_| internal_error("window slot index does not fit u32"))?,
-                    u32::try_from(row)
-                        .map_err(|_| internal_error("window input row index does not fit u32"))?,
-                ));
-                Ok(())
-            })
+        scratch
+            .intern_group(columns, row, operator_id, &self.spec.group_by)
+            .map(Some)
     }
 
     /// Finds or creates the batch scratch slot for one assignment in the
@@ -1275,11 +1398,15 @@ impl WindowAggregateOperator {
                 aggregates: Vec::new(),
             },
         ));
-        for (ordinal, column) in scratch.columns.iter_mut().enumerate() {
-            match existing {
-                Some(entry) => column.push_seeded(&entry.aggregates[ordinal]),
-                None => column.push_default(),
-            }
+        scratch.origins.push(EntryOrigin {
+            group: slot.group,
+            created: existing.is_none(),
+        });
+        let seeds = existing.map_or(scratch.column_defaults.as_slice(), |entry| {
+            entry.aggregates.as_slice()
+        });
+        for (column, seed) in scratch.columns.iter_mut().zip(seeds) {
+            column.push_seeded(seed);
         }
         scratch.slots.insert(slot_key, index);
         scratch.cache_slot(slot_key, index);
@@ -1293,37 +1420,15 @@ impl WindowAggregateOperator {
         context: &StreamOperatorContext<'_>,
         scratch: &mut BatchScratch<'a>,
     ) -> Result<()> {
-        let operator_id = context.operator_id();
-        let Some(event_time) =
-            columns
-                .event_time
-                .at(row, operator_id, &self.spec.event_time_column)?
-        else {
-            return record_null_event_time(&mut scratch.metrics, operator_id);
-        };
-        let latest_start = latest_window_start(
-            event_time,
-            self.compiled.geometry,
-            &mut scratch.assignment_cache,
-        );
-        let assignments = assignments_from_latest(latest_start, self.compiled.geometry)
-            .map_err(|message| operator_error(operator_id, &message))?;
-        let watermark = context.input_watermark();
-        if !record_late_assignments(
-            assignments.clone(),
-            watermark,
-            &mut scratch.metrics,
-            operator_id,
-        )? {
+        let Some(group) = self.resolve_row(columns, row, context, scratch)? else {
             return Ok(());
+        };
+        for ordinal in 0..scratch.assignment_plan.open.len() {
+            let (start, end) = scratch.assignment_plan.open[ordinal];
+            let slot = WindowSlot { start, end, group };
+            self.prepare_assignment(columns, row, slot, scratch, context.operator_id())?;
         }
-        let group = scratch.intern_group(columns, row, operator_id, &self.spec.group_by)?;
-        assignments
-            .filter(|&(_, end)| is_open_assignment(end, watermark))
-            .try_for_each(|(start, end)| {
-                let slot = WindowSlot { start, end, group };
-                self.prepare_assignment(columns, row, slot, scratch, operator_id)
-            })
+        Ok(())
     }
 
     fn prepare_assignment(
@@ -1398,6 +1503,10 @@ impl WindowAggregateOperator {
         });
         let index = scratch.entries.len();
         scratch.entries.push((key, entry));
+        scratch.origins.push(EntryOrigin {
+            group: slot.group,
+            created: existing.is_none(),
+        });
         scratch.slots.insert(slot_key, index);
         scratch.cache_slot(slot_key, index);
         (index, previous_dynamic_bytes)
@@ -1674,8 +1783,9 @@ impl WindowAggregateOperator {
     }
 
     /// Emits the closed prefix in one pass and releases it on success. A
-    /// rejected emission merges the untouched prefix back, leaving state
-    /// identical to an operator that never attempted the close.
+    /// rejected emission merges the prefix back into live state; output
+    /// sequences of chunks already accepted before the rejection stay
+    /// consumed.
     async fn emit_closed(
         &mut self,
         closed: BTreeMap<WindowKey, AccumulatorRow>,
@@ -2091,12 +2201,21 @@ impl WindowAggregateOperator {
         self.install_context_identity(context);
         self.state.metrics = next_metrics;
         self.state.accumulator_bytes = update.usage.bytes;
+        let InputBatchUpdate {
+            accumulators,
+            created,
+            ..
+        } = update;
+        debug_assert_eq!(accumulators.len(), created.len());
         if checkpointing {
-            for key in update.accumulators.keys() {
-                if self.state.checkpoint_marks.contains_key(key) {
+            self.state.checkpoint_marks.reserve(accumulators.len());
+            for (key, created) in accumulators.keys().zip(created) {
+                if let Some(mark) = self.state.checkpoint_marks.get_mut(key) {
+                    // A persisted close re-opened by a lagging context
+                    // watermark is live again: it owes its latest value.
+                    mark.closed_group_values = None;
                     continue;
                 }
-                let created = !self.state.accumulators.contains_key(key);
                 self.state.checkpoint_marks.insert(
                     key.clone(),
                     CheckpointMark {
@@ -2106,7 +2225,7 @@ impl WindowAggregateOperator {
                 );
             }
         }
-        self.state.accumulators.extend(update.accumulators);
+        merge_accumulators(&mut self.state.accumulators, accumulators);
     }
 
     fn decode_snapshot_segments(
@@ -2243,26 +2362,51 @@ fn record_null_event_time(metrics: &mut PreparedInputMetrics, operator_id: &str)
     Ok(())
 }
 
-/// Records every late assignment and reports whether any assignment is open.
-fn record_late_assignments(
-    assignments: impl Iterator<Item = (EventTime, EventTime)>,
+/// Resolves the open assignments and late metrics of `latest_start` unless
+/// the plan already holds them; the watermark is constant for one batch.
+fn plan_assignments(
+    plan: &mut AssignmentPlan,
+    latest_start: i128,
+    geometry: CompiledWindowGeometry,
     watermark: Option<EventTime>,
-    metrics: &mut PreparedInputMetrics,
     operator_id: &str,
-) -> Result<bool> {
-    let mut any_open = false;
-    for (_, end) in assignments {
+) -> Result<()> {
+    if plan.latest_start == Some(latest_start) {
+        return Ok(());
+    }
+    plan.latest_start = None;
+    plan.open.clear();
+    plan.late = PreparedInputMetrics::default();
+    let assignments = assignments_from_latest(latest_start, geometry)
+        .map_err(|message| operator_error(operator_id, &message))?;
+    for (start, end) in assignments {
         if let Some(closing_watermark) = watermark.filter(|value| end <= *value) {
-            record_late_assignment(metrics, closing_watermark, end, operator_id)?;
+            record_late_assignment(&mut plan.late, closing_watermark, end, operator_id)?;
         } else {
-            any_open = true;
+            plan.open.push((start, end));
         }
     }
-    Ok(any_open)
+    plan.latest_start = Some(latest_start);
+    Ok(())
 }
 
-fn is_open_assignment(end: EventTime, watermark: Option<EventTime>) -> bool {
-    watermark.is_none_or(|value| end > value)
+/// Adds one row's planned late assignments to the batch metrics.
+fn record_planned_late(
+    metrics: &mut PreparedInputMetrics,
+    plan: &AssignmentPlan,
+    operator_id: &str,
+) -> Result<()> {
+    if plan.late.late_rows == 0 {
+        return Ok(());
+    }
+    metrics.late_rows = metrics
+        .late_rows
+        .checked_add(plan.late.late_rows)
+        .ok_or_else(|| operator_error(operator_id, "late row counter overflowed"))?;
+    metrics.max_lateness_micros = metrics
+        .max_lateness_micros
+        .max(plan.late.max_lateness_micros);
+    Ok(())
 }
 
 fn record_late_assignment(
@@ -5341,6 +5485,98 @@ mod tests {
         assert_eq!(output.drain("output")[0].as_data().unwrap().num_rows(), 1);
         assert!(operator.state.accumulators.is_empty());
         assert_eq!(operator.state.accumulator_bytes, 0);
+    }
+
+    /// Bulk append and per-key insert must merge a batch into live state
+    /// identically, with batch values replacing the live ones they share.
+    #[test]
+    fn merging_batch_accumulators_matches_per_key_insert() {
+        let key = |start: i64| WindowKey {
+            start: EventTime::from_micros(start),
+            end: EventTime::from_micros(start + 10),
+            stable_group_key: Arc::from([]),
+        };
+        let entry = |total: i64| AccumulatorRow {
+            group_values: vec![],
+            aggregates: vec![AccumulatorValue::SignedSum(Some(i128::from(total)))],
+        };
+        let summary = |accumulators: &BTreeMap<WindowKey, AccumulatorRow>| {
+            accumulators
+                .iter()
+                .map(|(key, entry)| {
+                    let total = finalize_accumulator(&entry.aggregates[0]).unwrap();
+                    (key.start, format!("{total:?}"))
+                })
+                .collect::<Vec<_>>()
+        };
+        // Empty live state and a large batch append; small batches insert.
+        for (live, batch) in [(0, 5), (64, 40), (64, 1), (3, 64)] {
+            let state = (0..live)
+                .map(|start| (key(start * 10), entry(start)))
+                .collect::<BTreeMap<_, _>>();
+            let update = (0..batch)
+                .map(|start| (key(start * 5), entry(-start)))
+                .collect::<BTreeMap<_, _>>();
+            let mut expected = state.clone();
+            expected.extend(update.clone());
+            let mut merged = state;
+            merge_accumulators(&mut merged, update);
+            assert_eq!(
+                summary(&merged),
+                summary(&expected),
+                "live={live} batch={batch}"
+            );
+        }
+    }
+
+    /// A persisted window that closes and is then re-opened inside the same
+    /// epoch, by a row whose context watermark lags the last close, is live
+    /// again: the next checkpoint owes its latest value, not the tombstone.
+    #[tokio::test]
+    async fn reopened_persisted_window_survives_the_next_checkpoint() {
+        let mut operator = checkpoint_segment_operator();
+        let job = budget_test_job();
+        let context = StreamOperatorContext::new(&job, "window", None);
+        let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data("input", budget_test_batch(&[0]), &context, &mut output)
+            .await
+            .unwrap();
+        operator.checkpoint(crate::Epoch::INITIAL).unwrap();
+        operator
+            .on_watermark(EventTime::from_micros(60_000_000), &context, &mut output)
+            .await
+            .unwrap();
+        assert_eq!(output.drain("output").len(), 1);
+        operator
+            .process_data("input", budget_test_batch(&[1, 2]), &context, &mut output)
+            .await
+            .unwrap();
+        let snapshot = operator.checkpoint(crate::Epoch::new(2).unwrap()).unwrap();
+
+        let mut restored = checkpoint_segment_operator();
+        restored.restore(&snapshot).unwrap();
+        let live = |operator: &WindowAggregateOperator| {
+            operator
+                .state
+                .accumulators
+                .iter()
+                .map(|(key, entry)| {
+                    let finals = entry
+                        .aggregates
+                        .iter()
+                        .map(|value| finalize_accumulator(value).unwrap())
+                        .collect::<Vec<_>>();
+                    (key.clone(), format!("{finals:?}"))
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(live(&restored), live(&operator));
+        assert_eq!(restored.state.accumulators.len(), 1);
+        assert_eq!(
+            restored.state.accumulator_bytes,
+            operator.state.accumulator_bytes
+        );
     }
 
     #[tokio::test]

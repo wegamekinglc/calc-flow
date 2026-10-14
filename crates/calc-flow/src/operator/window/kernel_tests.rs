@@ -460,35 +460,48 @@ fn assert_same_update(actual: &InputBatchUpdate, reference: &InputBatchUpdate) {
     }
 }
 
-/// The columnar two-pass fast path must reproduce the row-wise reference
-/// kernel bit for bit: same keys, same accumulator states (including
-/// compensated float bits), same logical usage.
-#[test]
-fn columnar_fast_path_matches_row_reference_bitwise() {
-    let record = columnar_equivalence_record();
-    let spec = columnar_equivalence_spec();
-    let job = crate::StreamJobContext::new(
+fn equivalence_job() -> crate::StreamJobContext {
+    crate::StreamJobContext::new(
         1,
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         JsonMap::new(),
         None,
         crate::CancellationToken::new(),
-    );
-    let mut fast = WindowAggregateOperator::new("window", record.schema(), spec.clone()).unwrap();
-    let mut rowwise = WindowAggregateOperator::new("window", record.schema(), spec).unwrap();
+    )
+}
+
+/// The default columnar operator and its forced row-wise reference twin.
+fn operator_pair(
+    schema: SchemaRef,
+    spec: WindowSpec,
+) -> (WindowAggregateOperator, WindowAggregateOperator) {
+    let fast = WindowAggregateOperator::new("window", Arc::clone(&schema), spec.clone()).unwrap();
+    let mut rowwise = WindowAggregateOperator::new("window", schema, spec).unwrap();
     rowwise.force_rowwise = true;
+    (fast, rowwise)
+}
+
+/// Feeds one two-record batch through both kernels twice: the second pass
+/// crosses the live-state seeding path under a watermark that makes some
+/// rows late.
+fn assert_columnar_matches_reference(
+    record: &RecordBatch,
+    spec: WindowSpec,
+    split: usize,
+    watermark: i64,
+) {
+    let job = equivalence_job();
+    let (mut fast, mut rowwise) = operator_pair(record.schema(), spec);
     let batch = Batch::table(
         vec![
-            record.slice(0, 300),
-            record.slice(300, record.num_rows() - 300),
+            record.slice(0, split),
+            record.slice(split, record.num_rows() - split),
         ],
         crate::BatchMetadata::default(),
     )
     .unwrap();
-    // Two batches cross the live-state seeding path; the later watermark
-    // admits some late rows on the second pass.
     let first = StreamOperatorContext::new(&job, "window", None);
-    let later = StreamOperatorContext::new(&job, "window", Some(EventTime::from_micros(21)));
+    let later = StreamOperatorContext::new(&job, "window", Some(EventTime::from_micros(watermark)));
     for context in [&first, &later] {
         let fast_update = fast.prepare_input_batch(&batch, context).unwrap();
         let reference_update = rowwise.prepare_input_batch(&batch, context).unwrap();
@@ -496,5 +509,233 @@ fn columnar_fast_path_matches_row_reference_bitwise() {
         let metrics = fast_update.metrics;
         fast.install_input_update(fast_update, metrics, false, context);
         rowwise.install_input_update(reference_update, metrics, false, context);
+    }
+}
+
+/// The columnar two-pass fast path must reproduce the row-wise reference
+/// kernel bit for bit: same keys, same accumulator states (including
+/// compensated float bits), same logical usage.
+#[test]
+fn columnar_fast_path_matches_row_reference_bitwise() {
+    assert_columnar_matches_reference(
+        &columnar_equivalence_record(),
+        columnar_equivalence_spec(),
+        300,
+        21,
+    );
+}
+
+fn xorshift_rolls(count: usize) -> Vec<u64> {
+    let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+    (0..count)
+        .map(|_| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        })
+        .collect()
+}
+
+/// One nullable column drawn from independent bits of each roll.
+fn nullable<T>(
+    rolls: &[u64],
+    shift: u32,
+    null_nth: u64,
+    value: impl Fn(u64) -> T,
+) -> Vec<Option<T>> {
+    rolls
+        .iter()
+        .map(|&roll| pick(roll >> shift, null_nth, &value))
+        .collect()
+}
+
+fn offset(modulus: u64, shift: i64) -> impl Fn(u64) -> i64 {
+    move |roll| i64::try_from(roll % modulus).unwrap() - shift
+}
+
+/// Every non-string input type the columnar kernels dispatch on, plus
+/// integer and string group columns, with nulls in every column except
+/// `dense`, which takes the null-free loops.
+fn wide_equivalence_record() -> RecordBatch {
+    let rolls = xorshift_rolls(600);
+    let small_floats = [1.5_f32, -2.25, 3.0e7, -3.0e7, f32::NAN, f32::INFINITY, -0.0];
+    let fields = [
+        ("time", DataType::Timestamp(TimeUnit::Microsecond, None)),
+        ("g_int", DataType::Int32),
+        ("g_str", DataType::Utf8),
+        ("i8", DataType::Int8),
+        ("i32", DataType::Int32),
+        ("u16", DataType::UInt16),
+        ("u32", DataType::UInt32),
+        ("f32", DataType::Float32),
+        ("d32", DataType::Date32),
+        ("ts", DataType::Timestamp(TimeUnit::Microsecond, None)),
+        ("flag", DataType::Boolean),
+        ("s", DataType::Utf8),
+        ("dense", DataType::Int64),
+    ];
+    let schema = Schema::new(
+        fields
+            .map(|(name, data_type)| Field::new(name, data_type, name != "dense"))
+            .to_vec(),
+    );
+    let columns: Vec<ArrayRef> = vec![
+        Arc::new(TimestampMicrosecondArray::from(nullable(
+            &rolls,
+            3,
+            13,
+            offset(70, 10),
+        ))),
+        Arc::new(Int32Array::from(nullable(&rolls, 5, 9, |r| {
+            i32::try_from(r % 4).unwrap()
+        }))),
+        Arc::new(StringArray::from(nullable(&rolls, 7, 9, |r| {
+            ["x", "y", "z"][usize::try_from(r % 3).unwrap()]
+        }))),
+        Arc::new(Int8Array::from(nullable(&rolls, 9, 5, |r| {
+            i8::try_from(offset(256, 128)(r)).unwrap()
+        }))),
+        Arc::new(Int32Array::from(nullable(&rolls, 11, 6, |r| {
+            i32::try_from(offset(100_000, 50_000)(r)).unwrap()
+        }))),
+        Arc::new(UInt16Array::from(nullable(&rolls, 13, 7, |r| {
+            u16::try_from(r % 60_000).unwrap()
+        }))),
+        Arc::new(UInt32Array::from(nullable(&rolls, 15, 4, |r| {
+            u32::try_from(r % 4_000_000_000).unwrap()
+        }))),
+        Arc::new(Float32Array::from(nullable(&rolls, 17, 5, |r| {
+            small_floats[usize::try_from(r % 7).unwrap()]
+        }))),
+        Arc::new(Date32Array::from(nullable(&rolls, 19, 5, |r| {
+            i32::try_from(offset(1000, 500)(r)).unwrap()
+        }))),
+        Arc::new(TimestampMicrosecondArray::from(nullable(
+            &rolls,
+            21,
+            5,
+            offset(1000, 500),
+        ))),
+        Arc::new(BooleanArray::from(nullable(&rolls, 23, 5, |r| r % 2 == 0))),
+        Arc::new(StringArray::from(nullable(&rolls, 25, 5, |r| {
+            ["p", "q"][usize::try_from(r % 2).unwrap()]
+        }))),
+        Arc::new(Int64Array::from(
+            rolls
+                .iter()
+                .map(|&r| offset(2001, 1000)(r >> 27))
+                .collect::<Vec<_>>(),
+        )),
+    ];
+    RecordBatch::try_new(Arc::new(schema), columns).unwrap()
+}
+
+fn wide_equivalence_spec(groups: &[&str]) -> WindowSpec {
+    let spec =
+        WindowSpec::hopping("time", Duration::from_micros(20), Duration::from_micros(5)).unwrap();
+    let spec = if groups.is_empty() {
+        spec
+    } else {
+        spec.group_by(groups.iter().copied()).unwrap()
+    };
+    [
+        (AggregateFunction::Sum, "i8"),
+        (AggregateFunction::Sum, "u32"),
+        (AggregateFunction::Sum, "f32"),
+        (AggregateFunction::Avg, "i32"),
+        (AggregateFunction::Avg, "u16"),
+        (AggregateFunction::Avg, "i8"),
+        (AggregateFunction::Min, "d32"),
+        (AggregateFunction::Max, "ts"),
+        (AggregateFunction::Min, "flag"),
+        (AggregateFunction::Max, "u16"),
+        (AggregateFunction::Count, "s"),
+        (AggregateFunction::Min, "f32"),
+        (AggregateFunction::Sum, "dense"),
+        (AggregateFunction::Max, "dense"),
+        (AggregateFunction::Avg, "dense"),
+        (AggregateFunction::Count, "dense"),
+    ]
+    .into_iter()
+    .enumerate()
+    .fold(spec, |spec, (ordinal, (function, column))| {
+        spec.aggregate(function, column, &format!("result_{ordinal}"))
+            .unwrap()
+    })
+}
+
+/// Small integer, unsigned average, temporal and boolean extreme kernels
+/// under no-group, integer-group, and composite-group keys, across an
+/// overlap-4 hopping geometry.
+#[test]
+fn columnar_fast_path_matches_row_reference_across_types_and_keys() {
+    let record = wide_equivalence_record();
+    for groups in [&[][..], &["g_int"][..], &["g_int", "g_str"][..]] {
+        assert_columnar_matches_reference(&record, wide_equivalence_spec(groups), 250, 15);
+    }
+}
+
+fn two_sum_batch(a: [i64; 3], b: [i64; 3], times: [i64; 3]) -> Batch {
+    let schema = Schema::new(vec![
+        Field::new(
+            "time",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            false,
+        ),
+        Field::new("a", DataType::Int64, false),
+        Field::new("b", DataType::Int64, false),
+    ]);
+    let record = RecordBatch::try_new(
+        Arc::new(schema),
+        vec![
+            Arc::new(TimestampMicrosecondArray::from(times.to_vec())),
+            Arc::new(Int64Array::from(a.to_vec())),
+            Arc::new(Int64Array::from(b.to_vec())),
+        ],
+    )
+    .unwrap();
+    Batch::table(vec![record], crate::BatchMetadata::default()).unwrap()
+}
+
+/// The columnar passes visit rows aggregate by aggregate, yet a failing batch
+/// must report the row-wise reference error: the first failing row, and
+/// within it the first failing aggregate, ahead of later budget checks.
+#[test]
+fn columnar_failures_report_the_row_reference_error() {
+    let job = equivalence_job();
+    let context = StreamOperatorContext::new(&job, "window", None);
+    let spec = WindowSpec::tumbling("time", Duration::from_micros(10))
+        .unwrap()
+        .aggregate(AggregateFunction::Sum, "a", "sum_a")
+        .unwrap()
+        .aggregate(AggregateFunction::Sum, "b", "sum_b")
+        .unwrap();
+    // Row 1 overflows aggregates[1] before row 2 overflows aggregates[0];
+    // row 1 overflows aggregates[0] before row 2 opens a key past a one-row
+    // budget.
+    for (batch, max_rows) in [
+        (
+            two_sum_batch([0, i64::MAX, 1], [i64::MAX, 1, 0], [0, 0, 0]),
+            8,
+        ),
+        (two_sum_batch([i64::MAX, 1, 0], [0, 0, 0], [0, 0, 20]), 1),
+    ] {
+        let schema = batch.table_payload().unwrap().batches()[0].schema();
+        let (mut fast, mut rowwise) = operator_pair(schema, spec.clone());
+        for operator in [&mut fast, &mut rowwise] {
+            operator
+                .set_state_budget(StateBudget::new(max_rows, 1 << 20).unwrap())
+                .unwrap();
+        }
+        let expected = rowwise
+            .prepare_input_batch(&batch, &context)
+            .err()
+            .expect("the reference rejects the batch");
+        let actual = fast
+            .prepare_input_batch(&batch, &context)
+            .err()
+            .expect("the columnar path rejects the batch");
+        assert_eq!(actual.to_string(), expected.to_string());
     }
 }
