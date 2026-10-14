@@ -1,5 +1,41 @@
 # Issue 406: development and acceptance status
 
+## Current local increments, October 15, 2026
+
+The [Join batch-admission increment](issue406-join-batch-admission.md) is locally
+implemented and [reviewed](../reviews/issue406-join-batch-admission.md) at
+`327a6bbfaa162bddddc97f08ce312b99e393bd6a`. Incoming native/SQL processing,
+selected copies and output routing share record segments and borrowed row
+access, dense ranges, lazy sparse indices and packed retention bits. Its 38
+focused controls and core lib/test Clippy pass. The finite-pool workspace
+preflight and old legacy Rowed funding boundary are explicit. Offset-derived
+charges remain unfinished phase 1.1 work; retained rows, match descriptors and
+row-level checkpoint operations remain separate later work.
+
+The [signed/date key prerequisite](issue406-signed-date-key-codec.md) is
+[reviewed](../reviews/issue406-signed-date-key-codec.md) at
+`c27db37e5ec5389143e875c40e746d7ea1d719e5`. Negative Int8 and Date32/Date64
+now encode with their concrete Arrow types, preserving previously valid V1
+bytes and fees. Four genuine REDs, seven distinct passing controls, authentic
+V1-to-V2 migration and scoped Clippy are recorded with the diagnosed fixture
+error and final test-only borrow correction. No runtime timing is inferred.
+
+These increments, their reviews and the reviewed release profile are integrated
+at `71c9e3475672858e2a00f4cf09892d7808a26794` on
+`feature/issue406-join-key-dictionary`. Rust bytes equal the reviewed codec
+parent; the release-profile source files equal their reviewed parent. The next
+[persistent key dictionary](../specs/issue406-join-key-dictionary.md) has a
+[Proceed-with-caveats critique](../critiques/issue406-join-key-dictionary.md),
+including explicit codec/rank boundaries, lifetime funding and refused-route
+coverage obligations. This integration starts no performance acquisition.
+
+The earlier delivery branch remains frozen at `bb142320`. Explicit publication
+authority was received, but `git push` was rejected before process creation
+because approval was required while `AskForApproval=Never`. No new PR or CI
+was created. PR #421 is already merged. All eight original acceptance rows,
+remaining phases, required CI, 90% coverage and current-source performance
+verification remain active; none is certified by these local increments.
+
 ## Current local increments, October 14, 2026
 
 PR #421 is merged at `1606e516cffbf5448e4f2e60d904b9a5a1550c58`; its

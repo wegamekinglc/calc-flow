@@ -1,7 +1,8 @@
 # Issue 406: Join persistent key dictionary - Specification
 
 Status: critic Proceed with caveats at `1901e458`; bounded specification
-clarifications incorporated. Implementation evidence and final review are pending.
+clarifications incorporated. Source prerequisites are reviewed; implementation
+evidence and final specialist source review remain pending.
 
 ## Source and integration basis
 
@@ -12,17 +13,25 @@ clarifications incorporated. Implementation evidence and final review are pendin
 - Rules: [AGENTS.md](../../../AGENTS.md#verification),
   [code-style](../../../.agents/skills/code-style/SKILL.md), and
   [specialist delivery policy](../../agents/README.md#shared-delivery-policy).
-- Inspected committed base: `bb142320062995aeb318ad406c901288537fd766`.
-  The sibling `feature/issue406-join-batch-admission` worktree contains the
-  provisional `AdmittedBatch` integration surface; its
-  `.codex/artifacts/specs/issue406-join-batch-admission.md` specification in
-  that sibling worktree is authoritative
-  for incoming ownership, selection coordinates and workspace preflight.
-  Start implementation only after that source has a tested, committed and
-  reviewed integration head; record that head in the implementation evidence.
-- An independently reviewed codec correction described below is a prerequisite.
-  Its final head must also be recorded; this specification does not silently
-  treat the correction as existing behavior.
+- Original inspected base: `bb142320062995aeb318ad406c901288537fd766`.
+  Batch-admission source is now reviewed at
+  `327a6bbfaa162bddddc97f08ce312b99e393bd6a`; its
+  [specification](issue406-join-batch-admission.md) and
+  [final review](../reviews/issue406-join-batch-admission.md) define incoming
+  ownership, selection coordinates and workspace preflight.
+- The independently reviewed codec prerequisite is complete at
+  `c27db37e5ec5389143e875c40e746d7ea1d719e5`, with focused
+  [evidence](../analysis/issue406-signed-date-key-codec.md) and
+  [final review](../reviews/issue406-signed-date-key-codec.md).
+- These sources, their evidence, the reviewed release profile and this design
+  are integrated locally at `71c9e3475672858e2a00f4cf09892d7808a26794` on
+  `feature/issue406-join-key-dictionary`. Every Rust file equals the reviewed
+  codec source; release-profile source files equal their reviewed parent.
+  Record the eventual implementation base in its evidence. No new native
+  package, CI, performance or whole-issue result follows from integration.
+- The [critic](../critiques/issue406-join-key-dictionary.md) returns Proceed with
+  caveats on the frozen proposal; these requirements include its bounded
+  ownership, refusal, encoding and restore clarifications.
 
 ## Problem statement
 
@@ -64,13 +73,13 @@ Do not mark the complete shared foundation or #406 complete from this delivery.
 
 ## Required codec prerequisite
 
-Construction currently accepts Int8, Date32 and Date64, but the committed
-`key_value_bytes` implementation rejects negative Int8 through `u8::try_from`
-and downcasts date arrays using Int32Type/Int64Type. The test
+At the original inspected base, construction accepted Int8, Date32 and Date64,
+but `key_value_bytes` rejected negative Int8 through `u8::try_from`
+and downcast date arrays using Int32Type/Int64Type. The former test
 `test_legacy_int8_and_date_codec_behavior_stays_on_fallback` deliberately
-records those retained-row `Internal` errors. They are accidental errors to
-correct in a separate focused change, rather than an excuse to exclude three
-accepted types from this increment.
+recorded those retained-row `Internal` errors. The separately reviewed codec
+correction fixes those accidental errors; they do not exclude three accepted
+types from this increment. The following boundaries describe that prerequisite.
 
 Keep each V1 block as tag, u32 little-endian timezone length, timezone bytes,
 u32 little-endian value length, raw value bytes. Int8 retains tag 2 and length 1,
