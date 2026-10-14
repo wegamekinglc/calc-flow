@@ -1,6 +1,7 @@
 # Issue 406: Join persistent key dictionary - Specification
 
-Status: ready for critic; implementation and final specialist review pending.
+Status: critic Proceed with caveats at `1901e458`; bounded specification
+clarifications incorporated. Implementation evidence and final review are pending.
 
 ## Source and integration basis
 
@@ -46,6 +47,12 @@ when slots are freed, restored, or observed by an owned worker.
 - Establish one crate-private key-identity foundation suitable for later ASOF
   adoption. ASOF's existing right-state dictionary is evidence, not an API to
   adopt unchanged: it also owns right buckets, expiration heaps and ASOF state.
+
+The reusable boundary concerns identity, ownership and leases. Equality codecs,
+canonical bytes, byte ordering, sortable ranks and checkpoint formats remain
+operator-specific. Join's V1 little-endian frames are neither ASOF's Arrow-row
+identity encoding nor its sortable key rank; opaque arrival IDs are not ranks.
+No ASOF migration or unused generic codec adapter belongs to this increment.
 
 This increment changes Rust internals. It adds no public API, `BatchKind`, port,
 configuration field, provider, Python stub, checkpoint layout or project schema.
@@ -114,8 +121,9 @@ no user algorithm decision is needed.
   a key-column loop repeated inside every row's framed encoder. Fixed-width
   single keys and short strings must avoid a per-row framed buffer; wide strings
   and composite keys must hash/compare selected typed columns without first
-  rebuilding the complete V1 frame for each row. The critic chooses concrete
-  table/encoder representations; this requirement does not mandate a hasher.
+  rebuilding the complete V1 frame for each row. The implementer chooses concrete
+  table/encoder representations within these reviewed constraints; this
+  requirement does not mandate a hasher.
 - **FR5 - Read-only probe.** Probing returns a known handle or an explicit
   unknown result per admitted position. Unknown probe-only keys create no live
   entry, canonical frame, retained reference, free-list entry or persistent
@@ -170,6 +178,19 @@ name each retained exception and its existing maintained workload coverage;
 unexplained fallback is blocking. Non-budget errors, cancellation and deadlines
 must propagate rather than trigger a grant-refusal retry.
 
+The legacy exception inventory starts with `join.rs::retained_rows`'s absent-
+native-key branch: `encode_join_key_columns_v1` allocates a Vec, converted through
+`columnar.rs::FramedKey::from` and wrapped in an Arc without independent workspace
+funding. It exempts only that existing canonical-owner allocation under genuine
+grant refusal, not new dictionaries, handle tables, lease owners or row adapters.
+Record final helper names, allocation sites and framing counters after integration.
+The existing `paid_key_pressure_case` control matches through SQL but does not
+commit retained rows; it alone cannot establish production retention parity.
+No maintained suite case exercising this refusal exception has been identified
+by this specification. Identify one with an actual refusal witness, or supply
+a bounded correctness/counter variant in the maintained harness before claiming
+acceptance; a normal funded case or unit test alone does not close that gap.
+
 ### Transactions, lifetimes and recycling
 
 - **FR10 - Prepare, then commit.** New keys, canonical owners, retained-count
@@ -220,7 +241,13 @@ must propagate rather than trigger a grant-refusal retry.
   allocation remains live. Rollback restores the prior committed view and
   refunds owned temporary credit after actual worker retirement. Preserve the
   existing legacy state-parent contract; this increment does not claim that
-  old Rowed payloads suddenly become funded state.
+  old Rowed payloads suddenly become funded state. FR9's specifically inventoried
+  legacy canonical allocation is also exempt from a new mandatory grant.
+  State which reservation covers each canonical allocation separately from
+  table/handle backing and scratch. Canonical credit follows its byte owner
+  through retained rows and pending history, even after its entry or namespace
+  retires; slot recycling cannot refund live canonical bytes or pin unrelated
+  scratch. Observe intermediate retirement, not only final pool zero.
 - **FR15 - Bounded work and errors.** Cooperative checks/yields must cover key
   binding, selected-value hashing, collision chains, wide values, new canonical
   construction and rebuild/restore work. Charge actual visited rows/columns/
@@ -317,13 +344,17 @@ adapter.
   reason, batched SQL result parity, preserved known canonical owners, no partial
   live-key coverage exposed to native lookup, and existing one-row zero-headroom
   acceptance. Genuine cancellation/deadline/non-budget failure does not retry.
-  Name/count every surviving legacy framing exception and its maintained case.
+  Add an actual production preparation/emission/retention-commit control under
+  dictionary refusal with exact fees and cleanup. Name/count every surviving
+  legacy framing exception and its maintained case, closing the FR9 coverage gap.
 - [ ] **AC7 - Publication boundary.** Cancel or drop the future during new-key
   preparation, while an actual owned probe is held at its input gate, and at its
   result-release gate. Fail a collector after an emitted chunk. Committed rows,
   key entries/counts and pending additions remain unchanged by the failed
   operation; already escaped chunks follow the existing job-abort contract.
   Retry on a fresh healthy operation produces the same identities/fees/results.
+  Exercise cancellation during a long single key value and a forced collision
+  chain, rather than demonstrating cooperative work only on many short rows.
 - [ ] **AC8 - Eviction and leases.** Keep the same key on both sides, evict either
   side first, then the last row. Retained counts follow actual rows; a worker
   holding the old identity cannot observe a newly recycled key. Hold a byte-only
@@ -335,6 +366,8 @@ adapter.
   unreachable at the expected boundary. Allocation/credit observations cover
   transient replacement peaks and surviving canonical owners; after dropping
   the operator and settling owned work, all owned pool credit returns to zero.
+  The cross-batch shared-owner control also observes credit retirement after
+  each batch expiry, byte-only history release and actual worker result release.
 - [ ] **AC10 - Exhaustion.** A reduced test ID/refcount/generation domain and
   checked-size fixtures reach each overflow without huge allocation. No sentinel
   alias, false match, panic, wrapped count, output or partial publication occurs;
@@ -343,7 +376,13 @@ adapter.
   migration retain strict historical validation. Duplicate live keys across
   restored sides coalesce safely; a subsequent sparse physical-ID-gap batch
   matches correctly. Corrupt a historical key later tombstoned and still reject
-  it. Cancel/refuse an optional dictionary rebuild and preserve prior state.
+  it. Use different old and candidate rows to distinguish three assertions:
+  cancelled/invalid restore preserves the old installed rows, dictionary,
+  writer/history identity and pending operations; successful validated restore
+  with refused optional acceleration installs the candidate's rows/fees and
+  writer/history/pending state on the SQL route; a later refused re-enable
+  preserves that installed restored state. No assertion may substitute the old
+  rows for a successfully installed SQL-only candidate.
   Capture/rebase/release/retry with old canonical owners across slot reuse does
   not serialize private IDs or alter history identity/wire contracts.
 - [ ] **AC12 - Shared boundary.** The final review identifies one reusable
@@ -390,6 +429,13 @@ Read-only source inspection covered these paths on the committed base:
 - `crates/calc-flow/src/operator/asof/state/key_dictionary.rs`,
   `state/key_dictionary/entries.rs` and `state/string_keys.rs`: existing
   ASOF-specific dense storage, compaction/funding integration and string batching.
+- `crates/calc-flow/src/operator/asof/{identity,identity_compare}.rs`:
+  operator-specific Arrow-row identities and sign-adjusted big-endian values.
+
+A bounded static search of `benches/stream_join_perf.rs`,
+`benches/stream_join_materialization.rs` and their `scripts/benchmark_suite/`
+adapters did not identify a witnessed optional-dictionary-refusal suite control;
+this is a coverage gap to resolve, not evidence that every harness lacks one.
 
 Provisional sibling inspection additionally covered `join/admitted.rs`,
 `join/key_arena.rs`, `join/data_work/inputs.rs` and the phase 1.1 specification.
@@ -398,10 +444,11 @@ admission head; these reads do not approve its current work in progress.
 
 ## Open decisions and gates
 
-There is no unresolved user-facing API choice. `cf-critic` should next resolve
-the concrete shared internal boundary, the handle/lease recycling proof, and
-the exact inventory of grant-refused legacy framing exceptions against FR9.
-These are implementation/design choices constrained above, not permission to
+There is no unresolved user-facing API choice. The bounded critic verdict is
+Proceed with caveats. The implementer records the concrete shared internal
+boundary, handle/lease recycling proof, per-owner reservation inventory and
+grant-refused legacy framing coverage against FR9; final source review verifies
+that evidence. These are implementation choices constrained above, not permission to
 exclude accepted types or introduce an unreported row route. Implementation
 handoff is gated on the reviewed phase 1.1 and codec prerequisite heads; final
 phase 1.2 acceptance remains gated on the focused evidence and specialist review.
