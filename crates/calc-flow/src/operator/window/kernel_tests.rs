@@ -328,6 +328,15 @@ fn numeric_failures_preserve_first_aggregate_and_partial_scratch_state() {
     }
 }
 
+/// Picks a column value, nulling every `null_nth`-th roll.
+fn pick<T>(roll: u64, null_nth: u64, choose: impl Fn(u64) -> T) -> Option<T> {
+    if roll.is_multiple_of(null_nth) {
+        None
+    } else {
+        Some(choose(roll))
+    }
+}
+
 fn columnar_equivalence_record() -> RecordBatch {
     let schema = Arc::new(Schema::new(vec![
         Field::new(
@@ -367,38 +376,17 @@ fn columnar_equivalence_record() -> RecordBatch {
             .wrapping_add(1_441_269_409);
         seed >> 11
     };
-    for _ in 0..512 {
-        let roll = next();
-        times.push(if roll.is_multiple_of(8) {
-            None
-        } else {
-            Some(i64::try_from(roll % 45).unwrap() - 5)
-        });
-        group_column.push(if roll.is_multiple_of(11) {
-            None
-        } else {
-            Some(groups[usize::try_from(roll % 3).unwrap()])
-        });
-        signed.push(if roll.is_multiple_of(5) {
-            None
-        } else {
-            Some(i64::try_from(roll % 2001).unwrap() - 1000)
-        });
-        unsigned.push(if roll.is_multiple_of(7) {
-            None
-        } else {
-            Some(roll % 10_000)
-        });
-        float_column.push(if roll.is_multiple_of(6) {
-            None
-        } else {
-            Some(floats[usize::try_from(roll / 6).unwrap() % floats.len()])
-        });
-        small.push(if roll.is_multiple_of(4) {
-            None
-        } else {
-            Some(f32::from(u16::try_from(roll % 1000).unwrap()) * 0.25 - 100.0)
-        });
+    for roll in (0..512).map(|_| next()) {
+        times.push(pick(roll, 8, |r| i64::try_from(r % 45).unwrap() - 5));
+        group_column.push(pick(roll, 11, |r| groups[usize::try_from(r % 3).unwrap()]));
+        signed.push(pick(roll, 5, |r| i64::try_from(r % 2001).unwrap() - 1000));
+        unsigned.push(pick(roll, 7, |r| r % 10_000));
+        float_column.push(pick(roll, 6, |r| {
+            floats[usize::try_from(r / 6).unwrap() % floats.len()]
+        }));
+        small.push(pick(roll, 4, |r| {
+            f32::from(u16::try_from(r % 1000).unwrap()) * 0.25 - 100.0
+        }));
     }
     RecordBatch::try_new(
         schema,
