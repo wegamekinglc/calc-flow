@@ -154,7 +154,7 @@ async fn copy_boundary(job: &StreamJobContext) -> Result<()> {
 }
 
 impl StreamJoinOperator {
-    pub(crate) async fn restore_managed_metadata(
+    pub(super) async fn restore_managed_metadata_inner(
         &mut self,
         snapshot: &OperatorStateSnapshot,
         job: &StreamJobContext,
@@ -289,13 +289,8 @@ impl StreamJoinOperator {
     ) -> Result<()> {
         match admission {
             Ok(ticket) => {
-                let output = ticket.finish().await?;
-                output.install(|decision| match decision {
-                    Some(metadata) => self
-                        .install_restored_metadata(snapshot, metadata, &|| job.check_cancelled()),
-                    None => self.restore_metadata_legacy(snapshot, job),
-                })?;
-                self.wait_metadata_cleanup(stop, job).await
+                self.finish_metadata_ticket(ticket, snapshot, job, stop)
+                    .await
             }
             Err(
                 AdmissionFailure::Budget { .. }
@@ -306,6 +301,29 @@ impl StreamJoinOperator {
                 self.restore_metadata_legacy(snapshot, job)
             }
             Err(AdmissionFailure::Runtime(error)) => Err(error),
+        }
+    }
+
+    async fn finish_metadata_ticket(
+        &mut self,
+        ticket: ObservedTicket<Decision>,
+        snapshot: &OperatorStateSnapshot,
+        job: &StreamJobContext,
+        stop: &GatherStop,
+    ) -> Result<()> {
+        let output = ticket.finish().await?;
+        let mut decision = None;
+        output.install(|value| {
+            decision = Some(value);
+            Ok(())
+        })?;
+        self.wait_metadata_cleanup(stop, job).await?;
+        job.check_cancelled()?;
+        match decision.expect("observed metadata decision") {
+            Some(metadata) => {
+                self.install_restored_metadata(snapshot, metadata, &|| job.check_cancelled())
+            }
+            None => self.restore_metadata_legacy(snapshot, job),
         }
     }
 

@@ -885,17 +885,17 @@ async fn string_budget_case(
 
 #[tokio::test]
 async fn test_string_attempt_budget_refusal_preserves_legacy_acceptance() {
-    string_budget_case(
+    Box::pin(string_budget_case(
         crate::runtime::streaming::gather_work::admission_probe::AdmissionStage::Attempt,
-    )
+    ))
     .await;
 }
 
 #[tokio::test]
 async fn test_string_generation_budget_refusal_preserves_legacy_acceptance() {
-    string_budget_case(
+    Box::pin(string_budget_case(
         crate::runtime::streaming::gather_work::admission_probe::AdmissionStage::Generation,
-    )
+    ))
     .await;
 }
 

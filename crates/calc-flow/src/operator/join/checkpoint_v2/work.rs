@@ -18,6 +18,7 @@ pub(super) struct OwnedConfig {
     pub(super) schemas: [SchemaRef; 2],
     pub(super) keys: [Vec<usize>; 2],
     pub(super) time_indices: [usize; 2],
+    pub(super) dictionary_credit: MemoryReservation,
     #[cfg(test)]
     pub(super) metadata_hook: Option<super::super::MetadataTestHook>,
     #[cfg(test)]
@@ -33,6 +34,7 @@ impl OwnedConfig {
             schemas: self.schemas.clone(),
             keys: [&self.keys[0], &self.keys[1]],
             time_indices: self.time_indices,
+            dictionary_credit: self.dictionary_credit.new_empty(),
             #[cfg(test)]
             metadata_hook: self.metadata_hook.as_ref(),
             #[cfg(test)]

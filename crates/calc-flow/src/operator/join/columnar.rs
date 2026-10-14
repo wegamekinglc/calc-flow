@@ -1,4 +1,6 @@
+#[cfg(test)]
 use super::encode_join_key_columns_v1;
+#[cfg(test)]
 use crate::Result;
 use crate::runtime::streaming::gather_work::RetirementGuard;
 use datafusion::arrow::{array::ArrayRef, datatypes::SchemaRef, record_batch::RecordBatch};
@@ -247,6 +249,13 @@ impl RowPayload {
 pub(super) struct FramedKey {
     bytes: Vec<u8>,
     _credit: Option<Arc<MemoryReservation>>,
+    address: Option<super::super::key_identity::KeyAddress>,
+}
+
+impl FramedKey {
+    pub(super) fn address(&self) -> Option<super::super::key_identity::KeyAddress> {
+        self.address
+    }
 }
 
 #[cfg(test)]
@@ -266,6 +275,7 @@ impl From<Vec<u8>> for FramedKey {
         Self {
             bytes,
             _credit: None,
+            address: None,
         }
     }
 }
@@ -298,6 +308,7 @@ impl Ord for FramedKey {
     }
 }
 
+#[cfg(test)]
 pub(super) fn funded_key(
     columns: &[ArrayRef],
     row: usize,
@@ -307,6 +318,7 @@ pub(super) fn funded_key(
     Ok(Arc::new(FramedKey {
         bytes: encode_join_key_columns_v1(columns, row, indices)?,
         _credit: Some(credit),
+        address: None,
     }))
 }
 
@@ -314,5 +326,18 @@ pub(super) fn funded_encoded_key(bytes: Vec<u8>, credit: Arc<MemoryReservation>)
     Arc::new(FramedKey {
         bytes,
         _credit: Some(credit),
+        address: None,
+    })
+}
+
+pub(super) fn identified_key(
+    bytes: Vec<u8>,
+    credit: Arc<MemoryReservation>,
+    address: super::super::key_identity::KeyAddress,
+) -> Arc<FramedKey> {
+    Arc::new(FramedKey {
+        bytes,
+        _credit: Some(credit),
+        address: Some(address),
     })
 }

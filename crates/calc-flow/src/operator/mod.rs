@@ -6,6 +6,7 @@ mod checkpoint;
 mod cross_section;
 mod expression;
 mod join;
+mod key_identity;
 pub(crate) mod late_output;
 mod output_chunk;
 mod retained_columns;
@@ -127,7 +128,7 @@ impl StreamRuntimeState {
         self.runtime.is_some()
     }
 
-    #[cfg(any(test, feature = "benchmark-checkpoint-diagnostic"))]
+    #[cfg(any(test, feature = "benchmark-internals"))]
     fn initialize_benchmark_pool(
         &mut self,
         pool: Arc<dyn datafusion::execution::memory_pool::MemoryPool>,

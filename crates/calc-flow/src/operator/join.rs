@@ -1821,12 +1821,18 @@ mod tests {
     mod columnar_state_tests;
     mod empty_checkpoint_tests;
     mod j2a_dictionary_tests;
-    mod native_lookup_tests;
+    pub(super) mod native_lookup_tests;
     mod optimization_tests;
     mod ordered_probe_tests;
     mod output_gather_tests;
     mod owned_probe_tests;
+    mod persistent_dictionary_cooperation_tests;
+    mod persistent_dictionary_exhaustion_tests;
+    mod persistent_dictionary_refusal_tests;
+    mod persistent_dictionary_restore_tests;
+    mod persistent_dictionary_semantics_tests;
     mod persistent_dictionary_tests;
+    mod persistent_dictionary_worker_tests;
     mod sql_key_scratch_tests;
 
     async fn v1_fixture_captures() -> Vec<OperatorStateSnapshot> {
@@ -2259,6 +2265,17 @@ use crate::{
 
 use super::{OperatorMetadata, StreamRuntimeState, is_portable_identifier, validate_operator_name};
 
+#[derive(Default)]
+struct KeyDiagnostics {
+    dictionary_grant_refusals: u64,
+    needs_rebuild_routes: u64,
+    legacy_key_encodings: u64,
+    sql_probe_table_builds: u64,
+    rebuild_attempts: u64,
+    rebuild_completions: u64,
+    closed_restore_routes: u64,
+}
+
 #[cfg(test)]
 #[derive(Clone, Copy, Default)]
 struct JoinWork {
@@ -2278,6 +2295,11 @@ struct JoinWork {
     output_column_interleaves: usize,
     output_source_lookups: usize,
     native_key_lookups: usize,
+    native_content_hashes: usize,
+    dictionary_snapshot_visits: usize,
+    dictionary_capacity_replacements: usize,
+    dictionary_reference_visits: usize,
+    dictionary_unlink_visits: usize,
     scalar_admissions: usize,
     generic_fast_rows: usize,
     admission_grants: usize,
@@ -2307,6 +2329,7 @@ thread_local! {
         output_column_views: 0, output_column_takes: 0, output_column_interleaves: 0,
         output_source_lookups: 0,
         native_key_lookups: 0,
+        native_content_hashes: 0, dictionary_snapshot_visits: 0, dictionary_capacity_replacements: 0, dictionary_reference_visits: 0, dictionary_unlink_visits: 0,
         scalar_admissions: 0, generic_fast_rows: 0, admission_grants: 0,
         admitted_row_records: 0, admission_segment_lookups: 0, sql_probe_segment_selects: 0, output_row_batch_views: 0, sparse_index_writes: 0, sparse_prefix_promoted: 0,
         quantum_steps: 0, quantum_boundaries: 0,
@@ -2756,6 +2779,11 @@ pub struct StreamJoinOperator {
     runtime: StreamRuntimeState,
     state: StreamJoinState,
     retained_key_cache: RetainedKeyCache,
+    key_dictionary: key_dictionary::Dictionary,
+    key_bindings: key_dictionary::Bindings,
+    key_work: KeyDiagnostics,
+    key_dictionary_needs_rebuild: bool,
+    legacy_restore_capture: Option<key_restore::Capture>,
     ingress_progress: IngressProgressSnapshot,
     compaction_release: Option<tokio::sync::oneshot::Receiver<()>>,
     compaction_cleanup: Option<crate::runtime::streaming::gather_work::AttemptCleanup>,
@@ -2764,6 +2792,10 @@ pub struct StreamJoinOperator {
     probe_test_hook: Option<data_work::TestHook>,
     #[cfg(test)]
     probe_unit_test_hook: Option<data_work::UnitTestHook>,
+    #[cfg(test)]
+    probe_result_test_gate: Option<Arc<data_work::ResultTestGate>>,
+    #[cfg(test)]
+    key_restore_test_hook: Option<key_restore::TestHook>,
     v2_containers: Option<Arc<checkpoint_v2::ContainerFunding>>,
     v2_writer: checkpoint_v2::WriterState,
     #[cfg(test)]
@@ -3080,28 +3112,42 @@ impl From<Vec<StoredRow>> for RetainedRows {
 }
 
 impl RetainedRows {
-    fn extend(&mut self, rows: Vec<StoredRow>) {
+    fn extend(&mut self, rows: Vec<StoredRow>, dictionary: &key_dictionary::Dictionary) {
         for row in &rows {
             self.2.enqueue_if_due(&row.record);
         }
         if let Some(index) = &mut self.1 {
             Arc::get_mut(index)
                 .expect("native probe released before retained append")
-                .append(self.0.len(), &rows);
+                .append_identified(self.0.len(), &rows, dictionary);
         }
         std::ops::DerefMut::deref_mut(self).extend(rows);
     }
 
+    #[cfg(test)]
     fn swap_remove(&mut self, index: usize) -> StoredRow {
+        self.swap_remove_bound(index, &key_dictionary::SideBindings::default())
+    }
+
+    fn swap_remove_bound(
+        &mut self,
+        index: usize,
+        bindings: &key_dictionary::SideBindings,
+    ) -> StoredRow {
         let row = std::ops::DerefMut::deref_mut(self).swap_remove(index);
         if let Some(moved) = self.0.get(index) {
             moved.record.mark_live(index);
         }
         if let Some(native) = &mut self.1 {
             let native = Arc::get_mut(native).expect("native probe released before eviction");
-            native.remove(&row, self.0.get(index).map(|row| (row, index)), |dense| {
-                &self.0[dense].encoded_key
-            });
+            native.remove_resolved(
+                &row,
+                bindings.canonical(&row),
+                self.0
+                    .get(index)
+                    .map(|row| (row, bindings.canonical(row), index)),
+                |dense| bindings.canonical(&self.0[dense]),
+            );
         }
         row
     }
@@ -3172,6 +3218,7 @@ type DecodedRowTestHook = Arc<
 #[derive(Clone, Copy)]
 struct RestoreSchema<'a> {
     schema: &'a Schema,
+    historical: Option<historical_validation::Validation<'a>>,
     #[cfg(test)]
     hook: Option<&'a SchemaTestHook>,
     #[cfg(test)]
@@ -3199,7 +3246,13 @@ mod columnar;
 mod data_work;
 mod expiration;
 use expiration::ExpirationIndex;
+#[cfg(feature = "benchmark-internals")]
+mod benchmark_dictionary;
+mod historical_validation;
 mod key_arena;
+mod key_dictionary;
+mod key_lifecycle;
+mod key_restore;
 mod materialization;
 mod metadata_validation;
 mod native_dictionary;
@@ -3210,6 +3263,7 @@ mod output_projection;
 mod row_ipc;
 mod sql_key_scratch;
 mod state_projection;
+mod typed_key;
 
 struct PreparedMatches {
     pairs: Vec<MatchedPair>,
@@ -3238,6 +3292,8 @@ struct PreparedJoinBatch {
     /// chunk fast path; `None` keeps the generic measured planning.
     admitted_charges: Option<Vec<u64>>,
     native_append: Option<native_lookup::AppendCredit>,
+    dictionary: Option<key_dictionary::Pending>,
+    legacy_key_references: bool,
     _native_scratch: Option<datafusion::execution::memory_pool::MemoryReservation>,
 }
 
@@ -3288,6 +3344,11 @@ impl StreamJoinOperator {
             runtime: StreamRuntimeState::new(),
             state: StreamJoinState::default(),
             retained_key_cache: RetainedKeyCache::default(),
+            key_dictionary: key_dictionary::Dictionary::default(),
+            key_bindings: key_dictionary::Bindings::default(),
+            key_work: KeyDiagnostics::default(),
+            key_dictionary_needs_rebuild: false,
+            legacy_restore_capture: None,
             ingress_progress: IngressProgressSnapshot::default(),
             compaction_release: None,
             compaction_cleanup: None,
@@ -3296,6 +3357,10 @@ impl StreamJoinOperator {
             probe_test_hook: None,
             #[cfg(test)]
             probe_unit_test_hook: None,
+            #[cfg(test)]
+            probe_result_test_gate: None,
+            #[cfg(test)]
+            key_restore_test_hook: None,
             v2_containers: None,
             v2_writer: checkpoint_v2::WriterState::with_identity(checkpoint_identity),
             #[cfg(test)]
@@ -3510,7 +3575,7 @@ impl StreamJoinOperator {
             .evaluate_matches(&plan, &mut bundle.admitted, context)
             .await?;
         let admitted_charges = admitted_charge_cache(charges, &bundle.admitted);
-        self.finish_prepared(&plan, bundle, matches, admitted_charges, context)
+        self.finish_prepared(&plan, &mut bundle, matches, admitted_charges, context)
             .await
     }
 
@@ -3536,7 +3601,7 @@ impl StreamJoinOperator {
     async fn finish_prepared(
         &mut self,
         plan: &SidePlan,
-        mut bundle: AdmissionBundle,
+        bundle: &mut AdmissionBundle,
         matches: PreparedMatches,
         admitted_charges: Option<Vec<u64>>,
         context: &StreamOperatorContext<'_>,
@@ -3547,9 +3612,27 @@ impl StreamJoinOperator {
             &plan.key_indices,
             &self.name,
             matches.keys.as_ref(),
-        )?;
+            &self.key_dictionary,
+            context,
+            &mut self.key_work,
+        )
+        .await?;
+        let legacy_key_references = matches.keys.is_none();
+        if legacy_key_references {
+            self.key_dictionary
+                .validate_known_references(&retained, context, &self.name)
+                .await?;
+        }
         self.validate_state_admission(plan.incoming_is_left, &retained)?;
-        let native_append = self.reserve_native_append(plan.incoming_is_left, retained.len())?;
+        let native_append = if retained
+            .iter()
+            .all(|row| row.encoded_key.address().is_some())
+        {
+            self.reserve_native_append(plan.incoming_is_left, retained.len())?
+        } else {
+            self.drop_native_index(plan.incoming_is_left);
+            None
+        };
         self.project_admitted(
             &mut bundle.admitted,
             &mut retained,
@@ -3559,13 +3642,15 @@ impl StreamJoinOperator {
         .await?;
         Ok(PreparedJoinBatch {
             output: matches.pairs,
-            admitted: bundle.admitted,
+            admitted: std::mem::take(&mut bundle.admitted),
             incoming_is_left: plan.incoming_is_left,
             retained,
             next_row_id: bundle.next_row_id,
-            metrics: bundle.metrics,
+            metrics: std::mem::take(&mut bundle.metrics),
             admitted_charges,
             native_append,
+            dictionary: matches.keys.and_then(|keys| keys.dictionary),
+            legacy_key_references,
             _native_scratch: matches.credit,
         })
     }
@@ -3837,37 +3922,53 @@ impl StreamJoinOperator {
         if admitted.is_empty() {
             return Ok(PreparedMatches::legacy(Vec::new()));
         }
-        if opposite.is_empty() {
-            return self
-                .native_probe_keys(plan, admitted)
-                .map(|keys| PreparedMatches {
-                    pairs: Vec::new(),
-                    keys,
-                    credit: None,
-                });
+        let opposite_empty = opposite.is_empty();
+        let keys = self
+            .prepare_key_identities(plan, admitted, Some(context))
+            .await?;
+        if opposite_empty {
+            return Ok(PreparedMatches {
+                pairs: Vec::new(),
+                keys,
+                credit: None,
+            });
         }
-        let (owned, recovered) = self
-            .owned_native_matches(plan, std::mem::take(admitted), context)
+        let owned = self
+            .owned_native_matches(plan, admitted, keys, context)
             .await;
-        *admitted = recovered;
         let keys = match owned {
             data_work::ProbeAttempt::Complete(result) => return result,
             data_work::ProbeAttempt::Serial(keys) => keys,
         };
-        match self.native_matches(plan, admitted, keys) {
-            Ok(Some(native)) => {
-                return Ok(PreparedMatches {
-                    pairs: native.pairs,
-                    keys: Some(native.keys),
-                    credit: Some(native.credit),
-                });
-            }
-            Err(error) => return Err(error),
-            Ok(None) => {}
+        self.serial_matches(plan, admitted, keys, context).await
+    }
+
+    async fn serial_matches(
+        &mut self,
+        plan: &SidePlan,
+        admitted: &mut AdmittedBatch,
+        keys: Option<native_lookup::NativeKeys>,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<PreparedMatches> {
+        let Some(keys) = keys else {
+            return self
+                .legacy_matches(plan, admitted, context)
+                .await
+                .map(PreparedMatches::legacy);
+        };
+        if let Some(native) = self.native_pairs(plan, admitted, &keys)? {
+            return Ok(PreparedMatches {
+                pairs: native.pairs,
+                keys: Some(keys),
+                credit: Some(native.credit),
+            });
         }
-        self.legacy_matches(plan, admitted, context)
-            .await
-            .map(PreparedMatches::legacy)
+        let pairs = self.legacy_matches(plan, admitted, context).await?;
+        Ok(PreparedMatches {
+            pairs,
+            keys: Some(keys),
+            credit: None,
+        })
     }
 
     async fn legacy_matches(
@@ -3914,7 +4015,7 @@ impl StreamJoinOperator {
             &plan.key_indices,
             Some(self.input_schema(plan.port_index)),
         )?;
-        let tables = equality_tables(probe, state_keys)?;
+        let tables = self.sql_equality_tables(probe, state_keys)?;
         let result = self
             .runtime
             .runtime()?
@@ -3931,7 +4032,7 @@ impl StreamJoinOperator {
     ) -> Result<Vec<(u64, u64)>> {
         if !self.runtime.runtime()?.serial_owned_sql() || !admitted.detach(self)? {
             drop(state_keys);
-            return self.legacy_key_retry_borrowed(plan, admitted).await;
+            return self.legacy_key_retry(plan, admitted).await;
         }
         let retained = if plan.incoming_is_left {
             &self.state.right.0
@@ -3944,7 +4045,7 @@ impl StreamJoinOperator {
             scratch: state_keys.funding,
         };
         let tables = probe_key_batch(&owner.admitted, &plan.key_indices, None)
-            .and_then(|probe| equality_tables(probe, state_keys.batch));
+            .and_then(|probe| self.sql_equality_tables(probe, state_keys.batch));
         let tables = match tables {
             Ok(tables) => tables,
             Err(error) => {
@@ -3952,33 +4053,30 @@ impl StreamJoinOperator {
                 return Err(error);
             }
         };
-        let (pairs, recovered) = if let Some(containers) = &self.v2_containers {
+        if let Some(containers) = &self.v2_containers {
             let owner = checkpoint_v2::V2SqlOwners::new(owner, Arc::clone(containers));
-            self.run_v2_owned_key_query(plan, crate::datafusion::owned::Input::new(tables, owner))
-                .await
+            self.run_v2_owned_key_query(
+                plan,
+                crate::datafusion::owned::Input::new(tables, owner),
+                admitted,
+            )
+            .await
         } else {
-            self.run_owned_key_query(plan, crate::datafusion::owned::Input::new(tables, owner))
-                .await
-        };
-        *admitted = recovered;
-        pairs
-    }
-
-    async fn legacy_key_retry_borrowed(
-        &mut self,
-        plan: &SidePlan,
-        admitted: &mut AdmittedBatch,
-    ) -> Result<Vec<(u64, u64)>> {
-        let (result, recovered) = self.legacy_key_retry(plan, std::mem::take(admitted)).await;
-        *admitted = recovered;
-        result
+            self.run_owned_key_query(
+                plan,
+                crate::datafusion::owned::Input::new(tables, owner),
+                admitted,
+            )
+            .await
+        }
     }
 
     async fn run_owned_key_query(
         &mut self,
         plan: &SidePlan,
         input: crate::datafusion::owned::Input<SqlKeyOwners>,
-    ) -> (Result<Vec<(u64, u64)>>, AdmittedBatch) {
+        admitted: &mut AdmittedBatch,
+    ) -> Result<Vec<(u64, u64)>> {
         let result = self
             .runtime
             .runtime()
@@ -3988,29 +4086,31 @@ impl StreamJoinOperator {
         match result {
             Ok(result) => {
                 let pairs = decode_key_pairs(result.batch());
-                (pairs, result.finish().finish())
+                *admitted = result.finish().finish();
+                pairs
             }
-            Err(failure) => self.finish_owned_key_failure(plan, failure).await,
+            Err(failure) => {
+                self.finish_owned_key_failure(failure, admitted)?;
+                self.legacy_key_retry(plan, admitted).await
+            }
         }
     }
 
-    async fn finish_owned_key_failure(
+    fn finish_owned_key_failure(
         &mut self,
-        plan: &SidePlan,
         failure: crate::datafusion::owned::Failure<SqlKeyOwners>,
-    ) -> (Result<Vec<(u64, u64)>>, AdmittedBatch) {
+        admitted: &mut AdmittedBatch,
+    ) -> Result<()> {
         let retry = failure
             .error
             .retry_legacy(failure.input.owner().scratch.is_some());
         let (error, input) = failure.into_parts(Some(&self.name));
-        let admitted = input.finish().finish();
+        *admitted = input.finish().finish();
         if retry {
-            return self.legacy_key_retry(plan, admitted).await;
+            Ok(())
+        } else {
+            Err(error.expect("non-retry failure keeps its source"))
         }
-        (
-            Err(error.expect("non-retry failure keeps its source")),
-            admitted,
-        )
     }
 
     fn discard_paid_key_cache(&mut self, plan: &SidePlan) {
@@ -4030,14 +4130,13 @@ impl StreamJoinOperator {
     async fn legacy_key_retry(
         &mut self,
         plan: &SidePlan,
-        admitted: AdmittedBatch,
-    ) -> (Result<Vec<(u64, u64)>>, AdmittedBatch) {
+        admitted: &AdmittedBatch,
+    ) -> Result<Vec<(u64, u64)>> {
         self.discard_paid_key_cache(plan);
-        let result = match self.opposite_state_keys(plan) {
-            Ok(keys) => self.sql_key_pairs(plan, &admitted, keys).await,
+        match self.opposite_state_keys(plan) {
+            Ok(keys) => self.sql_key_pairs(plan, admitted, keys).await,
             Err(error) => Err(error),
-        };
-        (result, admitted)
+        }
     }
 
     fn opposite_state_keys(&mut self, plan: &SidePlan) -> Result<RecordBatch> {
@@ -4269,7 +4368,72 @@ impl StreamJoinOperator {
         } else {
             self.state.right.len()
         };
-        for (offset, row) in prepared.retained.iter().enumerate() {
+        self.commit_key_references(
+            prepared.dictionary,
+            prepared.legacy_key_references,
+            &prepared.retained,
+        );
+        self.mark_retained_rows(&prepared.retained, side, retained_offset, checkpointing);
+        if side == JoinSide::Left {
+            self.state.next_left_row_id = prepared.next_row_id;
+            if !prepared.retained.is_empty() {
+                self.retained_key_cache.left = None;
+            }
+            self.state.left_expirations.append(
+                &self.state.left,
+                &prepared.retained,
+                expiration_append,
+            );
+            self.state
+                .left
+                .extend(prepared.retained, &self.key_dictionary);
+            self.state.metrics.left = metrics;
+        } else {
+            self.state.next_right_row_id = prepared.next_row_id;
+            if !prepared.retained.is_empty() {
+                self.retained_key_cache.right = None;
+            }
+            self.state.right_expirations.append(
+                &self.state.right,
+                &prepared.retained,
+                expiration_append,
+            );
+            self.state
+                .right
+                .extend(prepared.retained, &self.key_dictionary);
+            self.state.metrics.right = metrics;
+        }
+        if let Some(credit) = prepared.native_append {
+            credit.commit();
+        }
+        Ok(())
+    }
+
+    fn commit_key_references(
+        &mut self,
+        dictionary: Option<key_dictionary::Pending>,
+        legacy: bool,
+        retained: &[StoredRow],
+    ) {
+        if let Some(dictionary) = dictionary {
+            self.key_dictionary.commit(dictionary);
+        }
+        if legacy {
+            self.key_dictionary.commit_known_references(retained);
+        }
+        self.key_dictionary_needs_rebuild |= retained
+            .iter()
+            .any(|row| self.key_dictionary.lease(&row.encoded_key).is_none());
+    }
+
+    fn mark_retained_rows(
+        &mut self,
+        retained: &[StoredRow],
+        side: JoinSide,
+        retained_offset: usize,
+        checkpointing: bool,
+    ) {
+        for (offset, row) in retained.iter().enumerate() {
             row.record.mark_live(retained_offset + offset);
             if checkpointing {
                 self.state.deltas.pending.push(PendingOp::Upsert {
@@ -4282,35 +4446,6 @@ impl StreamJoinOperator {
                 });
             }
         }
-        if side == JoinSide::Left {
-            self.state.next_left_row_id = prepared.next_row_id;
-            if !prepared.retained.is_empty() {
-                self.retained_key_cache.left = None;
-            }
-            self.state.left_expirations.append(
-                &self.state.left,
-                &prepared.retained,
-                expiration_append,
-            );
-            self.state.left.extend(prepared.retained);
-            self.state.metrics.left = metrics;
-        } else {
-            self.state.next_right_row_id = prepared.next_row_id;
-            if !prepared.retained.is_empty() {
-                self.retained_key_cache.right = None;
-            }
-            self.state.right_expirations.append(
-                &self.state.right,
-                &prepared.retained,
-                expiration_append,
-            );
-            self.state.right.extend(prepared.retained);
-            self.state.metrics.right = metrics;
-        }
-        if let Some(credit) = prepared.native_append {
-            credit.commit();
-        }
-        Ok(())
     }
 
     fn evict_progress(
@@ -4325,6 +4460,10 @@ impl StreamJoinOperator {
                 evict_opposite(
                     &mut self.state.right,
                     &mut self.state.right_expirations,
+                    key_lifecycle::Retirement {
+                        dictionary: &mut self.key_dictionary,
+                        bindings: &mut self.key_bindings.right,
+                    },
                     progress,
                     &mut self.state.metrics.right,
                     checkpointing.then_some(&mut self.state.deltas.pending),
@@ -4343,6 +4482,10 @@ impl StreamJoinOperator {
                 evict_opposite(
                     &mut self.state.left,
                     &mut self.state.left_expirations,
+                    key_lifecycle::Retirement {
+                        dictionary: &mut self.key_dictionary,
+                        bindings: &mut self.key_bindings.left,
+                    },
                     progress,
                     &mut self.state.metrics.left,
                     checkpointing.then_some(&mut self.state.deltas.pending),
@@ -4383,11 +4526,22 @@ impl StreamJoinOperator {
         &self,
         snapshot: &OperatorStateSnapshot,
         schemas: Option<&metadata_validation::schema::OwnedExpectedSchemas>,
+        issue: &historical_validation::Issue,
     ) -> Result<(Vec<StoredRow>, Vec<StoredRow>)> {
+        let mut left = self.restore_schema(schemas, 0);
+        let mut right = self.restore_schema(schemas, 1);
+        left.historical = Some(historical_validation::Validation {
+            event_index: self.compiled.left_event_time_index,
+            issue,
+        });
+        right.historical = Some(historical_validation::Validation {
+            event_index: self.compiled.right_event_time_index,
+            issue,
+        });
         restore_sides_from_segments(
             snapshot,
-            self.restore_schema(schemas, 0),
-            self.restore_schema(schemas, 1),
+            left,
+            right,
             &self.compiled.left_key_indices,
             &self.compiled.right_key_indices,
             &self.name,
@@ -4400,6 +4554,7 @@ impl StreamJoinOperator {
         side: usize,
     ) -> RestoreSchema<'a> {
         RestoreSchema {
+            historical: None,
             schema: schemas.map_or_else(
                 || self.input_schema(side).as_ref(),
                 |schemas| schemas.schema(side),
@@ -4579,6 +4734,7 @@ impl StreamOperator for StreamJoinOperator {
         self.await_progress_release(context).await?;
         self.note_checkpoint_mutation(context.job().checkpointing())?;
         self.evict_progress(ingress, progress, context.job().checkpointing())?;
+        self.rebuild_key_identities(context).await?;
         if self.has_sparse_candidates() {
             return self.repair_sparse_chunks(context).await;
         }
@@ -4620,6 +4776,9 @@ impl StreamOperator for StreamJoinOperator {
         }
         self.state.left.clear();
         self.state.right.clear();
+        self.key_dictionary = key_dictionary::Dictionary::default();
+        self.key_bindings = key_dictionary::Bindings::default();
+        self.key_dictionary_needs_rebuild = false;
         self.state.left_expirations = ExpirationIndex::default();
         self.state.right_expirations = ExpirationIndex::default();
         self.retained_key_cache = RetainedKeyCache::default();
@@ -4634,6 +4793,9 @@ impl StreamOperator for StreamJoinOperator {
     fn reset(&mut self) -> Result<()> {
         let writer = self.v2_writer.next_owner(false)?;
         self.state = StreamJoinState::default();
+        self.key_dictionary = key_dictionary::Dictionary::default();
+        self.key_bindings = key_dictionary::Bindings::default();
+        self.key_dictionary_needs_rebuild = false;
         self.retained_key_cache = RetainedKeyCache::default();
         self.ingress_progress = IngressProgressSnapshot::default();
         self.v2_containers = None;
@@ -4805,13 +4967,14 @@ impl StreamJoinOperator {
         schemas: Option<&metadata_validation::schema::OwnedExpectedSchemas>,
         check: &dyn Fn() -> Result<()>,
     ) -> Result<()> {
+        let issue = historical_validation::Issue::default();
         let (left, right) =
             if snapshot.segments.is_empty() && empty_retained_metrics(&metadata.metrics) {
                 (Vec::new(), Vec::new())
             } else {
-                self.decode_restored_sides(snapshot, schemas)?
+                self.decode_restored_sides(snapshot, schemas, &issue)?
             };
-        self.install_restored_rows(snapshot, metadata, left, right, check)
+        self.install_restored_rows(snapshot, metadata, left, right, issue.into_inner(), check)
     }
 
     fn install_restored_rows(
@@ -4820,8 +4983,26 @@ impl StreamJoinOperator {
         metadata: metadata_validation::ValidatedMetadata,
         left: Vec<StoredRow>,
         right: Vec<StoredRow>,
+        historical_error: Option<CalcFlowError>,
         check: &dyn Fn() -> Result<()>,
     ) -> Result<()> {
+        let state = self.prepare_restored_state(snapshot, metadata, left, right)?;
+        mark_restored_rows([&state.left, &state.right]);
+        check()?;
+        let writer = self.v2_writer.next_owner(true)?;
+        if let Some(error) = historical_error {
+            return Err(error);
+        }
+        self.install_legacy_keys(state, writer, check)
+    }
+
+    fn prepare_restored_state(
+        &self,
+        snapshot: &OperatorStateSnapshot,
+        metadata: metadata_validation::ValidatedMetadata,
+        left: Vec<StoredRow>,
+        right: Vec<StoredRow>,
+    ) -> Result<StreamJoinState> {
         self.validate_restored_join_rows(&metadata, &left, &right)?;
         restored_retained_metrics_match(&metadata.metrics, &left, &right, &self.name)?;
         self.validate_restored_limits(&left, &right)?;
@@ -4829,7 +5010,7 @@ impl StreamJoinOperator {
         let base = carried_base_segments(snapshot);
         let segments_since_base =
             u32::try_from(carried.len()).map_err(|_| counter_overflow(&self.name, "segments"))?;
-        let state = StreamJoinState {
+        Ok(StreamJoinState {
             left_expirations: ExpirationIndex::restored(&left)?,
             right_expirations: ExpirationIndex::restored(&right)?,
             left: left.into(),
@@ -4846,20 +5027,15 @@ impl StreamJoinOperator {
                 segments_since_base,
                 ..DeltaTracking::default()
             },
-        };
-        for rows in [&state.left, &state.right] {
-            for (dense, row) in rows.iter().enumerate() {
-                row.record.mark_live(dense);
-            }
+        })
+    }
+}
+
+fn mark_restored_rows(rows: [&RetainedRows; 2]) {
+    for rows in rows {
+        for (dense, row) in rows.iter().enumerate() {
+            row.record.mark_live(dense);
         }
-        check()?;
-        let writer = self.v2_writer.next_owner(true)?;
-        self.state = state;
-        self.retained_key_cache = RetainedKeyCache::default();
-        self.ingress_progress = IngressProgressSnapshot::default();
-        self.v2_containers = None;
-        self.v2_writer = writer;
-        Ok(())
     }
 }
 
@@ -5037,43 +5213,65 @@ fn state_row_count(rows: &[StoredRow], operator_id: &str) -> Result<u64> {
     u64::try_from(rows.len()).map_err(|_| counter_overflow(operator_id, "state rows"))
 }
 
-fn retained_rows(
+async fn retained_rows(
     admitted: &dyn AdmittedRows,
     key_indices: &[usize],
     operator_id: &str,
     native_keys: Option<&native_lookup::NativeKeys>,
+    dictionary: &key_dictionary::Dictionary,
+    context: &StreamOperatorContext<'_>,
+    work: &mut KeyDiagnostics,
 ) -> Result<Vec<StoredRow>> {
-    admitted
-        .iter()
-        .enumerate()
-        .filter(|(_, row)| row.retain)
-        .map(|(index, row)| {
-            let encoded_key = match native_keys {
-                Some(keys) => Arc::clone(keys.key(index)),
-                None => Arc::new(
-                    encode_join_key_columns_v1(
-                        row.record.columns(),
-                        row.record.offset(),
-                        key_indices,
-                    )?
-                    .into(),
-                ),
-            };
-            let charge = state_columns_charge_with_key(
-                row.record.columns(),
-                row.record.offset(),
-                encoded_key.len(),
-                operator_id,
-            )?;
-            Ok(StoredRow {
-                encoded_key,
-                record: row.record.owned(),
-                event_time: row.event_time,
-                row_id: row.row_id,
-                charge,
-            })
-        })
-        .collect()
+    let mut retained = Vec::new();
+    let mut flow = typed_key::KeyFlow::new(Some(context));
+    for (index, row) in admitted.iter().enumerate().filter(|(_, row)| row.retain) {
+        flow.step(1, 0).await?;
+        let encoded_key = match native_keys {
+            Some(keys) => Arc::clone(keys.key(index)),
+            None => {
+                legacy_retained_key(
+                    row.record,
+                    key_indices,
+                    dictionary,
+                    operator_id,
+                    work,
+                    &mut flow,
+                )
+                .await?
+            }
+        };
+        let charge = state_columns_charge_with_key(
+            row.record.columns(),
+            row.record.offset(),
+            encoded_key.len(),
+            operator_id,
+        )?;
+        retained.push(StoredRow {
+            encoded_key,
+            record: row.record.owned(),
+            event_time: row.event_time,
+            row_id: row.row_id,
+            charge,
+        });
+    }
+    Ok(retained)
+}
+
+async fn legacy_retained_key(
+    record: PayloadRef<'_>,
+    key_indices: &[usize],
+    dictionary: &key_dictionary::Dictionary,
+    name: &str,
+    work: &mut KeyDiagnostics,
+    flow: &mut typed_key::KeyFlow<'_, '_>,
+) -> Result<Arc<columnar::FramedKey>> {
+    let next = checked_metric(work.legacy_key_encodings, 1, name, "legacy_key_encodings")?;
+    let bytes = encode_join_key_columns_v1(record.columns(), record.offset(), key_indices)?;
+    work.legacy_key_encodings = next;
+    Ok(dictionary
+        .canonical_bytes(&bytes, flow)
+        .await?
+        .unwrap_or_else(|| Arc::new(bytes.into())))
 }
 
 fn admitted_charge_cache(charges: Option<Vec<u64>>, rows: &dyn AdmittedRows) -> Option<Vec<u64>> {
@@ -6220,13 +6418,17 @@ fn decode_delta_upsert(
             "delta upsert key does not match its record",
         ));
     }
-    Ok(StoredRow {
+    let row = StoredRow {
         record: record.into(),
         event_time: header.event_time,
         row_id: header.row_id,
         charge,
         encoded_key: Arc::new(header.key.into()),
-    })
+    };
+    if let Some(validation) = schema.historical {
+        validation.record(&row, key_indices, name, side);
+    }
+    Ok(row)
 }
 
 fn read_ipc_record(
@@ -6404,19 +6606,33 @@ fn decode_stored_row(
     let record = read_ipc_record(bytes, offset, expected_schema, operator_id, side)?;
     let encoded_key = Arc::new(encode_join_key_v1(&record, 0, key_indices)?.into());
     let record: columnar::RowPayload = record.into();
-    #[cfg(test)]
-    if let Some(hook) = expected_schema.decoded_row_hook
-        && expected_schema.decoded_row_credit.is_none()
-    {
-        hook(None, record.funded_owner(), true, false);
-    }
-    Ok(StoredRow {
+    let row = StoredRow {
         record,
         event_time,
         row_id,
         charge,
         encoded_key,
-    })
+    };
+    observe_restored_row(&row, expected_schema, key_indices, operator_id, side);
+    Ok(row)
+}
+
+fn observe_restored_row(
+    row: &StoredRow,
+    expected_schema: RestoreSchema<'_>,
+    key_indices: &[usize],
+    operator_id: &str,
+    side: &str,
+) {
+    #[cfg(test)]
+    if let Some(hook) = expected_schema.decoded_row_hook
+        && expected_schema.decoded_row_credit.is_none()
+    {
+        hook(None, row.record.funded_owner(), true, false);
+    }
+    if let Some(validation) = expected_schema.historical {
+        validation.record(row, key_indices, operator_id, side);
+    }
 }
 
 fn decode_ipc_row(
@@ -6569,6 +6785,40 @@ struct EvictionPolicy<'a> {
 fn evict_opposite(
     rows: &mut RetainedRows,
     expirations: &mut ExpirationIndex,
+    retirement: key_lifecycle::Retirement<'_>,
+    progress: IngressProgress,
+    metrics: &mut SideMetrics,
+    pending: Option<&mut PendingLog>,
+    policy: EvictionPolicy<'_>,
+) -> Result<()> {
+    if pending.is_none() && expires_all(expirations, progress, policy.extension_micros) {
+        return evict_all(rows, expirations, retirement, metrics, policy.operator_id);
+    }
+    evict_expired(
+        rows,
+        expirations,
+        retirement,
+        progress,
+        metrics,
+        pending,
+        policy,
+    )
+}
+
+fn expires_all(expirations: &ExpirationIndex, progress: IngressProgress, extension: u64) -> bool {
+    expirations.last_time().is_some_and(|time| {
+        progress.state() == crate::IngressState::Ended
+            || progress.watermark().is_some_and(|watermark| {
+                i128::from(time.as_micros()) + i128::from(extension)
+                    < i128::from(watermark.as_micros())
+            })
+    })
+}
+
+fn evict_expired(
+    rows: &mut RetainedRows,
+    expirations: &mut ExpirationIndex,
+    mut retirement: key_lifecycle::Retirement<'_>,
     progress: IngressProgress,
     metrics: &mut SideMetrics,
     pending: Option<&mut PendingLog>,
@@ -6576,25 +6826,21 @@ fn evict_opposite(
 ) -> Result<()> {
     let EvictionPolicy {
         extension_micros,
-        side,
         operator_id,
+        ..
     } = policy;
-    if pending.is_none()
-        && expirations.last_time().is_some_and(|time| {
-            progress.state() == crate::IngressState::Ended
-                || progress.watermark().is_some_and(|watermark| {
-                    i128::from(time.as_micros()) + i128::from(extension_micros)
-                        < i128::from(watermark.as_micros())
-                })
-        })
-    {
-        return evict_all(rows, expirations, metrics, operator_id);
-    }
     let mut evicted = Vec::new();
     let mut count = 0_u64;
     let mut bytes = 0_u64;
-    while let Some((ordinal, row)) = take_expired(rows, expirations, progress, extension_micros) {
+    while let Some((ordinal, row)) = take_expired(
+        rows,
+        expirations,
+        retirement.bindings,
+        progress,
+        extension_micros,
+    ) {
         rows.2.remove(&row.record);
+        retirement.retire(&row, operator_id)?;
         bytes = bytes
             .checked_add(row.charge)
             .ok_or_else(|| counter_overflow(operator_id, "evicted bytes"))?;
@@ -6605,6 +6851,17 @@ fn evict_opposite(
             evicted.push((ordinal, row));
         }
     }
+    finish_eviction(metrics, pending, evicted, count, bytes, policy)
+}
+
+fn finish_eviction(
+    metrics: &mut SideMetrics,
+    pending: Option<&mut PendingLog>,
+    mut evicted: Vec<(u128, StoredRow)>,
+    count: u64,
+    bytes: u64,
+    policy: EvictionPolicy<'_>,
+) -> Result<()> {
     if count == 0 {
         return Ok(());
     }
@@ -6612,19 +6869,20 @@ fn evict_opposite(
         evicted.sort_by_key(|(ordinal, _)| *ordinal);
         record_tombstones(
             pending,
-            side,
+            policy.side,
             evicted
                 .into_iter()
                 .map(|(_, row)| (row.row_id, row.event_time, row.encoded_key))
                 .collect(),
         );
     }
-    update_evicted_metrics(metrics, count, bytes, operator_id)
+    update_evicted_metrics(metrics, count, bytes, policy.operator_id)
 }
 
 fn evict_all(
     rows: &mut RetainedRows,
     expirations: &mut ExpirationIndex,
+    mut retirement: key_lifecycle::Retirement<'_>,
     metrics: &mut SideMetrics,
     operator_id: &str,
 ) -> Result<()> {
@@ -6637,8 +6895,10 @@ fn evict_all(
     })?;
     let mut next_metrics = metrics.clone();
     update_evicted_metrics(&mut next_metrics, count, bytes, operator_id)?;
+    rows.1 = None;
     for row in rows.0.iter() {
         rows.2.remove(&row.record);
+        retirement.retire(row, operator_id)?;
     }
     rows.clear();
     expirations.clear();
@@ -6667,6 +6927,7 @@ fn update_evicted_metrics(
 fn take_expired(
     rows: &mut RetainedRows,
     expirations: &mut ExpirationIndex,
+    bindings: &key_dictionary::SideBindings,
     progress: IngressProgress,
     extension: u64,
 ) -> Option<(u128, StoredRow)> {
@@ -6681,7 +6942,7 @@ fn take_expired(
     let (index, ordinal) = expirations.pop(rows).expect("expiration prefix exists");
     #[cfg(test)]
     note_join_work(|work| work.retained_visits += 1);
-    let row = rows.swap_remove(index);
+    let row = rows.swap_remove_bound(index, bindings);
     Some((ordinal, row))
 }
 

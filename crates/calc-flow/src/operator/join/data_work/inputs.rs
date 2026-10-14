@@ -25,7 +25,10 @@ pub(super) struct ProbeInputs {
 
 impl ProbeInputs {
     pub(super) fn slot(&self, position: usize) -> Option<u32> {
-        self.slots[self.keys.as_ref().expect("owned probe keys").id(position) as usize]
+        self.slots
+            .get(self.keys.as_ref().expect("owned probe keys").id(position) as usize)
+            .copied()
+            .flatten()
     }
 
     pub(super) fn range(&self, position: usize) -> (crate::EventTime, crate::EventTime) {

@@ -1,17 +1,18 @@
-use super::{
-    AdmittedRows, admitted::AdmittedGroup, charge_overflow, key_type_tag,
-    native_dictionary::BASE_BYTES,
-};
+#[cfg(test)]
+use super::{AdmittedRows, admitted::AdmittedGroup, native_dictionary::BASE_BYTES};
+use super::{borrowed_key::CellValue, charge_overflow, key_type_tag};
 use crate::Result;
 use datafusion::arrow::{
     array::{Array, BooleanArray, LargeStringArray, PrimitiveArray, StringArray},
     datatypes::{
-        ArrowPrimitiveType, DataType, Int16Type, Int32Type, Int64Type, TimeUnit,
-        TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
-        TimestampSecondType, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
+        ArrowPrimitiveType, DataType, Date32Type, Date64Type, Int8Type, Int16Type, Int32Type,
+        Int64Type, TimeUnit, TimestampMicrosecondType, TimestampMillisecondType,
+        TimestampNanosecondType, TimestampSecondType, UInt8Type, UInt16Type, UInt32Type,
+        UInt64Type,
     },
 };
 
+#[cfg(test)]
 #[derive(Clone, Copy)]
 pub(super) struct ArenaLayout {
     pub(super) charge: usize,
@@ -20,10 +21,12 @@ pub(super) struct ArenaLayout {
     row_bytes: usize,
 }
 
+#[cfg(test)]
 fn err() -> crate::CalcFlowError {
     super::native_lookup::scratch_error("join")
 }
 
+#[cfg(test)]
 impl ArenaLayout {
     pub(super) fn measure(rows: &dyn AdmittedRows, indices: &[usize]) -> Result<Option<Self>> {
         let Some(extra) = rows
@@ -93,8 +96,9 @@ impl ArenaLayout {
     }
 }
 
+#[cfg(test)]
 fn column_extent(column: &KeyColumn<'_>, rows: AdmittedGroup<'_>) -> Option<(usize, usize)> {
-    if column.array.null_count() > 0 || u32::try_from(column.timezone.len()).is_err() {
+    if u32::try_from(column.timezone.len()).is_err() {
         return None;
     }
     let extent = column.values.extent(rows)?;
@@ -102,6 +106,7 @@ fn column_extent(column: &KeyColumn<'_>, rows: AdmittedGroup<'_>) -> Option<(usi
     Some(extent)
 }
 
+#[cfg(test)]
 fn column_charge(count: usize, column: &KeyColumn<'_>, sum: usize) -> Result<usize> {
     let fixed = column
         .timezone
@@ -115,6 +120,7 @@ fn column_charge(count: usize, column: &KeyColumn<'_>, sum: usize) -> Result<usi
         .ok_or_else(err)
 }
 
+#[cfg(test)]
 fn probe_peak(bytes: usize, row_bytes: usize, rows: usize, columns: usize) -> Option<usize> {
     if rows == 0 {
         return None;
@@ -131,6 +137,7 @@ fn probe_peak(bytes: usize, row_bytes: usize, rows: usize, columns: usize) -> Op
     .try_fold(BASE_BYTES, |total, bytes| total.checked_add(bytes?))
 }
 
+#[cfg(test)]
 fn interner_vector_peak(rows: usize) -> Option<usize> {
     let capacity = rows.checked_next_power_of_two()?.max(4);
     let key = size_of::<std::sync::Arc<super::columnar::FramedKey>>();
@@ -140,6 +147,7 @@ fn interner_vector_peak(rows: usize) -> Option<usize> {
         .checked_add((capacity / 2).checked_mul(key.max(hash))?)
 }
 
+#[cfg(test)]
 fn table_peak(rows: usize) -> Option<usize> {
     let buckets = rows
         .checked_mul(8)?
@@ -152,10 +160,12 @@ fn table_peak(rows: usize) -> Option<usize> {
         .checked_mul(2)
 }
 
+#[cfg(test)]
 fn parent_groups(rows: &dyn AdmittedRows) -> impl Iterator<Item = AdmittedGroup<'_>> {
     rows.groups()
 }
 
+#[cfg(test)]
 pub(super) fn visit_string_values(
     rows: &dyn AdmittedRows,
     index: usize,
@@ -176,6 +186,7 @@ pub(super) fn visit_string_values(
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn visit_key_frames(
     rows: &dyn AdmittedRows,
     indices: &[usize],
@@ -206,7 +217,6 @@ pub(super) fn visit_key_frames(
 }
 
 struct KeyColumn<'a> {
-    array: &'a dyn Array,
     values: KeyValues<'a>,
     tag: u8,
     timezone: &'a [u8],
@@ -223,7 +233,6 @@ impl<'a> KeyColumn<'a> {
         #[cfg(test)]
         super::note_join_work(|work| work.key_type_resolutions += 1);
         Some(Self {
-            array,
             values,
             tag,
             timezone,
@@ -231,13 +240,19 @@ impl<'a> KeyColumn<'a> {
     }
 }
 
-struct KeyWriter<'a> {
+pub(super) struct KeyWriter<'a> {
     values: KeyValues<'a>,
     prefix: Option<[u8; 5]>,
     timezone: &'a [u8],
 }
 
 impl<'a> KeyWriter<'a> {
+    pub(super) fn bind(array: &'a dyn Array) -> Result<Self> {
+        KeyColumn::bind(array)
+            .map(Self::new)
+            .ok_or_else(|| super::charge_type_mismatch("Join key column"))
+    }
+
     fn new(column: KeyColumn<'a>) -> Self {
         let prefix = u32::try_from(column.timezone.len()).ok().map(|length| {
             let length = length.to_le_bytes();
@@ -250,15 +265,45 @@ impl<'a> KeyWriter<'a> {
         }
     }
 
+    #[cfg(test)]
     fn write(&self, row: usize, bytes: &mut Vec<u8>) -> Result<()> {
-        let prefix = self
-            .prefix
-            .ok_or_else(|| charge_overflow("key timezone length"))?;
-        bytes.extend_from_slice(&prefix);
-        bytes.extend_from_slice(self.timezone);
-        bytes.extend_from_slice(&framed_length(self.values.len(row), "key value length")?);
-        self.values.write(row, bytes);
+        self.visit(row, |part| bytes.extend_from_slice(part))
+    }
+
+    pub(super) fn parts(&self, row: usize) -> Result<KeyParts<'a>> {
+        Ok(KeyParts {
+            prefix: self
+                .prefix
+                .ok_or_else(|| charge_overflow("key timezone length"))?,
+            timezone: self.timezone,
+            length: framed_length(self.values.len(row), "key value length")?,
+            value: self.values.cell(row),
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn visit(&self, row: usize, mut visitor: impl FnMut(&[u8])) -> Result<()> {
+        for part in self.parts(row)?.slices() {
+            visitor(part);
+        }
         Ok(())
+    }
+}
+
+pub(super) struct KeyParts<'a> {
+    prefix: [u8; 5],
+    timezone: &'a [u8],
+    length: [u8; 4],
+    value: CellValue<'a>,
+}
+impl KeyParts<'_> {
+    pub(super) fn slices(&self) -> [&[u8]; 4] {
+        [
+            &self.prefix,
+            self.timezone,
+            &self.length,
+            self.value.bytes(),
+        ]
     }
 }
 
@@ -279,15 +324,19 @@ enum KeyValues<'a> {
 impl<'a> KeyValues<'a> {
     fn bind(array: &'a dyn Array) -> Option<Self> {
         match array.data_type() {
-            DataType::Boolean => Some(Self::Boolean(array.as_any().downcast_ref()?)),
-            DataType::Int16 | DataType::Int32 | DataType::Int64 | DataType::Timestamp(..) => {
-                SignedValues::bind(array).map(Self::Signed)
-            }
+            DataType::Boolean => array.as_any().downcast_ref().map(Self::Boolean),
+            DataType::Int8
+            | DataType::Int16
+            | DataType::Int32
+            | DataType::Int64
+            | DataType::Date32
+            | DataType::Date64
+            | DataType::Timestamp(..) => SignedValues::bind(array).map(Self::Signed),
             DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
                 UnsignedValues::bind(array).map(Self::Unsigned)
             }
-            DataType::Utf8 => Some(Self::Utf8(array.as_any().downcast_ref()?)),
-            DataType::LargeUtf8 => Some(Self::LargeUtf8(array.as_any().downcast_ref()?)),
+            DataType::Utf8 => array.as_any().downcast_ref().map(Self::Utf8),
+            DataType::LargeUtf8 => array.as_any().downcast_ref().map(Self::LargeUtf8),
             _ => None,
         }
     }
@@ -304,6 +353,7 @@ impl<'a> KeyValues<'a> {
 
     /// Summed and largest value length over the group's rows; `None` when a
     /// length cannot be framed. Fixed-width columns resolve in O(1).
+    #[cfg(test)]
     fn extent(&self, rows: AdmittedGroup<'_>) -> Option<(usize, usize)> {
         match self {
             Self::Boolean(_) => Some((rows.len(), 1)),
@@ -324,6 +374,7 @@ impl<'a> KeyValues<'a> {
         }
     }
 
+    #[cfg(test)]
     fn prefix(&self) -> usize {
         match self {
             Self::Utf8(_) => 4,
@@ -332,18 +383,19 @@ impl<'a> KeyValues<'a> {
         }
     }
 
-    fn write(&self, row: usize, bytes: &mut Vec<u8>) {
+    fn cell(&self, row: usize) -> CellValue<'a> {
         match self {
-            Self::Boolean(values) => bytes.push(u8::from(values.value(row))),
-            Self::Signed(values) => values.write(row, bytes),
-            Self::Unsigned(values) => values.write(row, bytes),
-            Self::Utf8(values) => bytes.extend_from_slice(values.value(row).as_bytes()),
-            Self::LargeUtf8(values) => bytes.extend_from_slice(values.value(row).as_bytes()),
+            Self::Boolean(values) => CellValue::inline([u8::from(values.value(row))]),
+            Self::Signed(values) => values.cell(row),
+            Self::Unsigned(values) => values.cell(row),
+            Self::Utf8(values) => CellValue::Borrowed((*values).value(row).as_bytes()),
+            Self::LargeUtf8(values) => CellValue::Borrowed((*values).value(row).as_bytes()),
         }
     }
 }
 
 enum SignedValues<'a> {
+    I8(&'a [i8]),
     I16(&'a [i16]),
     I32(&'a [i32]),
     I64(&'a [i64]),
@@ -352,10 +404,20 @@ enum SignedValues<'a> {
 impl<'a> SignedValues<'a> {
     fn bind(array: &'a dyn Array) -> Option<Self> {
         match array.data_type() {
-            DataType::Int16 => Some(Self::I16(primitive_values::<Int16Type>(array)?)),
-            DataType::Int32 => Some(Self::I32(primitive_values::<Int32Type>(array)?)),
-            DataType::Int64 => Some(Self::I64(primitive_values::<Int64Type>(array)?)),
+            DataType::Int8 => primitive_values::<Int8Type>(array).map(Self::I8),
+            DataType::Int16 => primitive_values::<Int16Type>(array).map(Self::I16),
+            DataType::Int32 => primitive_values::<Int32Type>(array).map(Self::I32),
+            DataType::Int64 => primitive_values::<Int64Type>(array).map(Self::I64),
             DataType::Timestamp(unit, _) => Self::timestamp(array, *unit),
+            DataType::Date32 | DataType::Date64 => Self::date(array),
+            _ => None,
+        }
+    }
+
+    fn date(array: &'a dyn Array) -> Option<Self> {
+        match array.data_type() {
+            DataType::Date32 => Some(Self::I32(primitive_values::<Date32Type>(array)?)),
+            DataType::Date64 => Some(Self::I64(primitive_values::<Date64Type>(array)?)),
             _ => None,
         }
     }
@@ -372,17 +434,19 @@ impl<'a> SignedValues<'a> {
 
     fn width(&self) -> usize {
         match self {
+            Self::I8(_) => 1,
             Self::I16(_) => 2,
             Self::I32(_) => 4,
             Self::I64(_) => 8,
         }
     }
 
-    fn write(&self, row: usize, bytes: &mut Vec<u8>) {
+    fn cell(&self, row: usize) -> CellValue<'static> {
         match self {
-            Self::I16(values) => bytes.extend_from_slice(&values[row].to_le_bytes()),
-            Self::I32(values) => bytes.extend_from_slice(&values[row].to_le_bytes()),
-            Self::I64(values) => bytes.extend_from_slice(&values[row].to_le_bytes()),
+            Self::I8(values) => CellValue::inline(values[row].to_le_bytes()),
+            Self::I16(values) => CellValue::inline(values[row].to_le_bytes()),
+            Self::I32(values) => CellValue::inline(values[row].to_le_bytes()),
+            Self::I64(values) => CellValue::inline(values[row].to_le_bytes()),
         }
     }
 }
@@ -414,12 +478,12 @@ impl<'a> UnsignedValues<'a> {
         }
     }
 
-    fn write(&self, row: usize, bytes: &mut Vec<u8>) {
+    fn cell(&self, row: usize) -> CellValue<'static> {
         match self {
-            Self::U8(values) => bytes.push(values[row]),
-            Self::U16(values) => bytes.extend_from_slice(&values[row].to_le_bytes()),
-            Self::U32(values) => bytes.extend_from_slice(&values[row].to_le_bytes()),
-            Self::U64(values) => bytes.extend_from_slice(&values[row].to_le_bytes()),
+            Self::U8(values) => CellValue::inline(values[row].to_le_bytes()),
+            Self::U16(values) => CellValue::inline(values[row].to_le_bytes()),
+            Self::U32(values) => CellValue::inline(values[row].to_le_bytes()),
+            Self::U64(values) => CellValue::inline(values[row].to_le_bytes()),
         }
     }
 }

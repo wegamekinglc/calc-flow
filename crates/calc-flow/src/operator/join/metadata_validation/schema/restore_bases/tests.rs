@@ -12,7 +12,8 @@ use crate::{
     CancellationToken, Epoch, JsonMap, OperatorStateSnapshot, StreamJobContext, StreamOperator,
     operator::join::{
         JoinStateLimits, JoinTimeBounds, StreamJoinOperator, StreamJoinSpec, encode_join_key_v1,
-        encode_side, state_row_charge, with_one_gib_pool,
+        encode_side, key_restore::capture_control_bytes, state_row_charge,
+        tests::native_lookup_tests::identity_funding, with_one_gib_pool,
     },
     runtime::streaming::gather_work::TestService,
 };
@@ -529,12 +530,12 @@ fn old_route_probe(target: &mut StreamJoinOperator) -> Arc<AtomicUsize> {
 }
 
 async fn finish_refusal(
-    target: &mut StreamJoinOperator,
+    mut target: StreamJoinOperator,
     snapshot: &OperatorStateSnapshot,
     job: StreamJobContext,
     parses: &AtomicUsize,
 ) {
-    let pool = pool(target);
+    let pool = pool(&target);
     target
         .restore_managed_metadata(snapshot, &job, None)
         .await
@@ -545,6 +546,10 @@ async fn finish_refusal(
     assert!(target.compaction_cleanup.is_none());
     job.gather_owner().close_and_drain().await;
     drop(job);
+    let identities = identity_funding(&target);
+    assert!(identities > 0);
+    assert_eq!(pool.reserved(), identities);
+    drop(target);
     assert_eq!(pool.reserved(), 0);
 }
 
@@ -586,9 +591,16 @@ async fn check_resident_refusal(service: &TestService) {
     assert!(target.compaction_cleanup.is_none());
     let (home, generation, attempt) = job.gather_owner().funding();
     assert_eq!(attempt, 0);
-    assert_eq!(pool.reserved(), pressure.size() + home + generation);
+    let identities = identity_funding(&target);
+    assert!(identities > 0);
+    assert_eq!(
+        pool.reserved(),
+        pressure.size() + home + generation + identities
+    );
     job.gather_owner().close_and_drain().await;
     drop(job);
+    assert_eq!(pool.reserved(), pressure.size() + identities);
+    drop(target);
     assert_eq!(pool.reserved(), pressure.size());
     drop(pressure);
     assert_eq!(pool.reserved(), 0);
@@ -611,7 +623,7 @@ async fn check_attempt_refusal(service: &TestService) {
         limit,
     );
     let parses = old_route_probe(&mut target);
-    finish_refusal(&mut target, &snapshot, job, &parses).await;
+    finish_refusal(target, &snapshot, job, &parses).await;
     let event = probe.take_event().unwrap();
     assert_eq!(event.stage, AdmissionStage::Attempt);
     assert_eq!(event.available + 1, event.fee);
@@ -687,6 +699,7 @@ fn healthy_close_probe(
             assert_eq!(
                 pool.reserved(),
                 home + super::super::super::inventory::caller_controls("match").unwrap()
+                    + capture_control_bytes()
             );
             observed_parses.fetch_add(1, Ordering::Relaxed);
         }
@@ -745,6 +758,21 @@ async fn check_post_install_close(service: &TestService) {
     assert_eq!(target.status().left.retained_rows, 3);
     assert_eq!(target.status().right.retained_rows, 1);
     assert_eq!(target.state.last_checkpoint_epoch, Epoch::new(7));
+    assert_eq!(target.key_work.closed_restore_routes, 1);
+    assert_eq!(target.key_work.dictionary_grant_refusals, 0);
+    assert!(target.key_dictionary_needs_rebuild);
+    assert_eq!(target.key_dictionary.inventory().0, 0);
+    assert_eq!(target.status().left.retained_bytes, 3 * 115);
+    assert_eq!(target.status().right.retained_bytes, 115);
+    for row in target.state.left.iter().chain(target.state.right.iter()) {
+        assert_eq!(row.charge, 115);
+    }
+    for side in ["left", "right"] {
+        let retained = &target.state.deltas.base[side];
+        let original = &snapshot.segments[&format!("{side}-base")];
+        assert_eq!(retained.bytes(), original.bytes());
+        assert!(Arc::ptr_eq(&retained.bytes_arc(), &original.bytes_arc()));
+    }
     job.gather_owner().close_and_drain().await;
     assert_home_credit(&job, &pool);
     assert_home_credit(&blocker_job, &blocker_pool);

@@ -132,6 +132,12 @@ fn admit_input(
 
 fn copy_config(operator: &StreamJoinOperator) -> OwnedConfig {
     OwnedConfig {
+        dictionary_credit: operator
+            .runtime
+            .runtime
+            .as_ref()
+            .expect("configured restore runtime")
+            .incremental_reservation("stream-join-dictionary"),
         projection: operator.payload_projection.clone(),
         name: String::from(operator.name.as_str()),
         spec: operator.spec.clone(),
