@@ -960,12 +960,17 @@ fn checkpoint_restart_soak_batch(source_id: &str, sequence: u64) -> Result<Batch
         .ok_or_else(|| CalcFlowError::Internal {
             message: "checkpoint soak value exhausted i64".into(),
         })?;
+    // A far-future window per batch stays open across every checkpoint, so
+    // the window operator's durable state evidence does not depend on whether
+    // the latest close beat the barrier.
     let record = RecordBatch::try_new(
         soak_schema(),
         vec![
-            Arc::new(TimestampMicrosecondArray::from(vec![event_time]).with_timezone("UTC")),
-            Arc::new(StringArray::from(vec![source_id])),
-            Arc::new(Int64Array::from(vec![value])),
+            Arc::new(
+                TimestampMicrosecondArray::from(vec![event_time, 1_000_000]).with_timezone("UTC"),
+            ),
+            Arc::new(StringArray::from(vec![source_id, source_id])),
+            Arc::new(Int64Array::from(vec![value, value])),
         ],
     )
     .map_err(|error| CalcFlowError::Internal {
@@ -4448,13 +4453,20 @@ fn checkpoint_soak_expected_records(manifest: &crate::CheckpointManifest) -> BTr
         .into_iter()
         .flat_map(|sink_id| {
             cursors.iter().flat_map(move |(source_id, last)| {
-                (0..=*last).map(move |sequence| {
-                    format!(
-                        "{sink_id}|{sequence}|{}|{source_id}|{}",
-                        sequence + 1,
-                        sequence + 1
-                    )
-                })
+                // Every batch carries the far-future row, so the far window's
+                // terminal sum is the triangular number over the sequence.
+                let far_total = (last + 1) * (last + 2) / 2;
+                (0..=*last)
+                    .map(move |sequence| {
+                        format!(
+                            "{sink_id}|{sequence}|{}|{source_id}|{}",
+                            sequence + 1,
+                            sequence + 1
+                        )
+                    })
+                    .chain(std::iter::once(format!(
+                        "{sink_id}|1000000|1000001|{source_id}|{far_total}"
+                    )))
             })
         })
         .collect()
