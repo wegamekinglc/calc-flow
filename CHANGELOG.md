@@ -9,6 +9,23 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-14: Cut per-row and per-batch cost in `WindowAggregateOperator`
+  input processing. Rows in the same slide interval share one resolved set of
+  window assignments and late classification; scratch slots are cached per
+  interned group, so high-cardinality batches no longer evict each other's
+  windows; numeric min/max compare native values and null-free columns skip
+  per-row validity checks; batch entries sort by window start and group-key
+  rank; and live state merges a large batch in one pass. Accumulator state,
+  checkpoint segments, output rows, and late metrics are unchanged. Two
+  regressions from the unreleased columnar kernel and net-delta checkpoint
+  work are fixed: a rejected batch reports the same first error as the
+  row-wise reference path, and a persisted window re-opened by a lagging
+  context watermark within one epoch keeps its upsert instead of a tombstone.
+  In three interleaved local runs of `stream_window_groups` (100,000 rows per
+  case, 20 samples), median case time fell to 0.54-0.69 of the previous main
+  across all 24 cases, for example `integer_8192_hopping_five` from 22.78 to
+  12.89 ms and `string_4_tumbling_sum` from 3.46 to 2.39 ms.
+
 - 2026-10-13: Release a closed event-time window from
   `WindowAggregateOperator` state when its close is emitted, in every
   checkpoint mode. With checkpointing enabled, the default, an emitted window
