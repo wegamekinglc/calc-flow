@@ -1366,6 +1366,7 @@ impl CrossSectionOperator {
     fn assemble(&self, rows: Vec<BufferedRow>, node_id: &str) -> Result<Groups> {
         let mut groups = Groups::new();
         let mut identities = BTreeSet::new();
+        let mut bucket_cache = None;
         for row in rows {
             let event_time = row.identity.event_time;
             if !identities.insert(row.identity.clone()) {
@@ -1374,7 +1375,9 @@ impl CrossSectionOperator {
                     &format!("duplicate row identity at event_time_micros={event_time}"),
                 ));
             }
-            let group = self.compiled.group_key(&row, node_id)?;
+            let group = self
+                .compiled
+                .group_key_cached(&row, &mut bucket_cache, node_id)?;
             groups
                 .entry(group)
                 .or_default()
@@ -1399,9 +1402,12 @@ impl CrossSectionOperator {
         // Staged identities are unique per logical input (SCE-00 D4): a
         // duplicate is rejected across partition groups, not only within one.
         let mut staged: BTreeSet<RowIdentity> = BTreeSet::new();
+        let mut bucket_cache = None;
         for (row_index, row) in rows.into_iter().enumerate() {
             let event_time = row.identity.event_time;
-            let group = self.compiled.group_key(&row, node_id)?;
+            let group = self
+                .compiled
+                .group_key_cached(&row, &mut bucket_cache, node_id)?;
             if self.is_late(&group, watermark, row_index, event_time, node_id)? {
                 record_late_row(&mut metrics, watermark, event_time, node_id)?;
                 continue;
@@ -2274,6 +2280,23 @@ impl CompiledCrossSectionSpec {
         Ok(GroupKey { base, partition })
     }
 
+    /// [`Self::group_key`] with a cache over consecutive rows: rows landing in
+    /// the previous row's bucket skip the division entirely.
+    fn group_key_cached(
+        &self,
+        row: &BufferedRow,
+        bucket_cache: &mut Option<(i64, i64)>,
+        node_id: &str,
+    ) -> Result<GroupKey> {
+        let base = self.group_base_cached(row.identity.event_time, bucket_cache, node_id)?;
+        let partition = self
+            .partition_columns
+            .iter()
+            .map(|column| KeyValue::from_nullable_scalar(&row.values[column.index], node_id))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(GroupKey { base, partition })
+    }
+
     fn group_base(&self, event_time: i64, node_id: &str) -> Result<i64> {
         let base = match self.grouping {
             CrossSectionGroupingSpec::ExactTime => event_time,
@@ -2287,6 +2310,30 @@ impl CompiledCrossSectionSpec {
                     })?
             }
         };
+        Ok(base)
+    }
+
+    /// [`Self::group_base`] reusing the cached bucket interval
+    /// `[base, base + width)` while consecutive rows land inside it.
+    fn group_base_cached(
+        &self,
+        event_time: i64,
+        cache: &mut Option<(i64, i64)>,
+        node_id: &str,
+    ) -> Result<i64> {
+        if let Some((base, next)) = cache
+            && event_time >= *base
+            && event_time < *next
+        {
+            return Ok(*base);
+        }
+        let base = self.group_base(event_time, node_id)?;
+        if let CrossSectionGroupingSpec::FixedBucket { width_micros } = self.grouping {
+            let width = bucket_width(width_micros, node_id)?;
+            if let Some(next) = base.checked_add(width) {
+                *cache = Some((base, next));
+            }
+        }
         Ok(base)
     }
 
@@ -5027,6 +5074,44 @@ mod tests {
         compiled.grouping = CrossSectionGroupingSpec::FixedBucket { width_micros: 1 };
         compiled.allowed_lateness_micros = 0;
         assert!(compiled.group_closing(&group, "cross_section").is_err());
+    }
+
+    /// The bucket cache must reproduce the uncached division exactly, across
+    /// repeats, bucket crossings in both directions, and the i64 extremes.
+    #[test]
+    fn cached_bucket_base_matches_the_uncached_division() {
+        let mut compiled = compiled_spec();
+        compiled.grouping = CrossSectionGroupingSpec::FixedBucket { width_micros: 10 };
+        let mut cache = None;
+        for time in [
+            0_i64,
+            0,
+            5,
+            9,
+            10,
+            10,
+            19,
+            20,
+            15,
+            9,
+            -1,
+            -10,
+            -11,
+            -1,
+            0,
+            7,
+            i64::MIN + 5,
+            i64::MAX - 5,
+            42,
+        ] {
+            let eager = compiled.group_base(time, "cross_section");
+            let cached = compiled.group_base_cached(time, &mut cache, "cross_section");
+            match (eager, cached) {
+                (Ok(left), Ok(right)) => assert_eq!(left, right, "time {time}"),
+                (Err(_), Err(_)) => {}
+                _ => panic!("cached bucket base diverged at time {time}"),
+            }
+        }
     }
 
     fn descriptor_fixture(

@@ -698,8 +698,11 @@ let plan = PipelineBuilder::new("orders")?
 ```
 
 The window operator bounds retained accumulators by default to one million
-window groups and 256 MiB of logical charge. Rust callers can adjust this
-with `WindowAggregateOperator::set_state_budget` before graph compilation;
+window groups and 256 MiB of logical charge. A window group stops counting
+once its close is emitted, with checkpointing enabled or disabled, so the
+budget bounds open window groups regardless of the checkpoint interval. Rust
+callers can adjust the budget with
+`WindowAggregateOperator::set_state_budget` before graph compilation;
 recovery rejects a snapshot that exceeds the selected budget. The budget does
 not include checkpoint segment copies or process RSS.
 

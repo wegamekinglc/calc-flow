@@ -327,3 +327,174 @@ fn numeric_failures_preserve_first_aggregate_and_partial_scratch_state() {
         assert_eq!(state(&actual), state(&expected));
     }
 }
+
+/// Picks a column value, nulling every `null_nth`-th roll.
+fn pick<T>(roll: u64, null_nth: u64, choose: impl Fn(u64) -> T) -> Option<T> {
+    if roll.is_multiple_of(null_nth) {
+        None
+    } else {
+        Some(choose(roll))
+    }
+}
+
+fn columnar_equivalence_record() -> RecordBatch {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(
+            "time",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            true,
+        ),
+        Field::new("group", DataType::Utf8, true),
+        Field::new("signed", DataType::Int64, true),
+        Field::new("unsigned", DataType::UInt64, true),
+        Field::new("float", DataType::Float64, true),
+        Field::new("small", DataType::Float32, true),
+    ]));
+    // Deterministic pseudo-random rows: out-of-order times, repeats, nulls in
+    // every column, late rows against the advanced watermark, extreme floats.
+    let groups = ["alpha", "beta", "gamma"];
+    let floats = [
+        0.5,
+        -1.25,
+        1e16,
+        -1e16,
+        f64::from_bits(0x7ff8_0000_0000_abcd),
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        -0.0,
+    ];
+    let mut times = Vec::new();
+    let mut group_column = Vec::new();
+    let mut signed = Vec::new();
+    let mut unsigned = Vec::new();
+    let mut float_column = Vec::new();
+    let mut small = Vec::new();
+    let mut seed = 0x1234_5678_9abc_def0_u64;
+    let mut next = || {
+        seed = seed
+            .wrapping_mul(0x6364_2364_6905)
+            .wrapping_add(1_441_269_409);
+        seed >> 11
+    };
+    for roll in (0..512).map(|_| next()) {
+        times.push(pick(roll, 8, |r| i64::try_from(r % 45).unwrap() - 5));
+        group_column.push(pick(roll, 11, |r| groups[usize::try_from(r % 3).unwrap()]));
+        signed.push(pick(roll, 5, |r| i64::try_from(r % 2001).unwrap() - 1000));
+        unsigned.push(pick(roll, 7, |r| r % 10_000));
+        float_column.push(pick(roll, 6, |r| {
+            floats[usize::try_from(r / 6).unwrap() % floats.len()]
+        }));
+        small.push(pick(roll, 4, |r| {
+            f32::from(u16::try_from(r % 1000).unwrap()) * 0.25 - 100.0
+        }));
+    }
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(TimestampMicrosecondArray::from(times)),
+            Arc::new(StringArray::from(group_column)),
+            Arc::new(Int64Array::from(signed)),
+            Arc::new(UInt64Array::from(unsigned)),
+            Arc::new(Float64Array::from(float_column)),
+            Arc::new(Float32Array::from(small)),
+        ],
+    )
+    .unwrap()
+}
+
+fn columnar_equivalence_spec() -> WindowSpec {
+    WindowSpec::hopping("time", Duration::from_micros(30), Duration::from_micros(10))
+        .unwrap()
+        .group_by(["group"])
+        .unwrap()
+        .aggregate(AggregateFunction::Count, "float", "count_float")
+        .unwrap()
+        .aggregate(AggregateFunction::Sum, "signed", "sum_signed")
+        .unwrap()
+        .aggregate(AggregateFunction::Sum, "unsigned", "sum_unsigned")
+        .unwrap()
+        .aggregate(AggregateFunction::Sum, "float", "sum_float")
+        .unwrap()
+        .aggregate(AggregateFunction::Min, "signed", "min_signed")
+        .unwrap()
+        .aggregate(AggregateFunction::Max, "float", "max_float")
+        .unwrap()
+        .aggregate(AggregateFunction::Avg, "float", "avg_float")
+        .unwrap()
+        .aggregate(AggregateFunction::Avg, "small", "avg_small")
+        .unwrap()
+}
+
+fn assert_same_update(actual: &InputBatchUpdate, reference: &InputBatchUpdate) {
+    assert_eq!(
+        format!("{:?}", actual.metrics),
+        format!("{:?}", reference.metrics),
+        "late metrics diverged"
+    );
+    assert_eq!(
+        actual.usage.rows, reference.usage.rows,
+        "logical row charge diverged"
+    );
+    assert_eq!(
+        actual.usage.bytes, reference.usage.bytes,
+        "logical byte charge diverged"
+    );
+    let mut actual_keys = actual.accumulators.keys().collect::<Vec<_>>();
+    let mut reference_keys = reference.accumulators.keys().collect::<Vec<_>>();
+    actual_keys.sort();
+    reference_keys.sort();
+    assert_eq!(actual_keys, reference_keys, "key sets diverged");
+    for key in actual_keys {
+        let left = &actual.accumulators[key];
+        let right = &reference.accumulators[key];
+        assert_eq!(
+            format!("{:?}", left.group_values),
+            format!("{:?}", right.group_values),
+            "group values diverged at {key:?}"
+        );
+        assert_eq!(
+            state(left),
+            state(right),
+            "accumulator bits diverged at {key:?}"
+        );
+    }
+}
+
+/// The columnar two-pass fast path must reproduce the row-wise reference
+/// kernel bit for bit: same keys, same accumulator states (including
+/// compensated float bits), same logical usage.
+#[test]
+fn columnar_fast_path_matches_row_reference_bitwise() {
+    let record = columnar_equivalence_record();
+    let spec = columnar_equivalence_spec();
+    let job = crate::StreamJobContext::new(
+        1,
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        JsonMap::new(),
+        None,
+        crate::CancellationToken::new(),
+    );
+    let mut fast = WindowAggregateOperator::new("window", record.schema(), spec.clone()).unwrap();
+    let mut rowwise = WindowAggregateOperator::new("window", record.schema(), spec).unwrap();
+    rowwise.force_rowwise = true;
+    let batch = Batch::table(
+        vec![
+            record.slice(0, 300),
+            record.slice(300, record.num_rows() - 300),
+        ],
+        crate::BatchMetadata::default(),
+    )
+    .unwrap();
+    // Two batches cross the live-state seeding path; the later watermark
+    // admits some late rows on the second pass.
+    let first = StreamOperatorContext::new(&job, "window", None);
+    let later = StreamOperatorContext::new(&job, "window", Some(EventTime::from_micros(21)));
+    for context in [&first, &later] {
+        let fast_update = fast.prepare_input_batch(&batch, context).unwrap();
+        let reference_update = rowwise.prepare_input_batch(&batch, context).unwrap();
+        assert_same_update(&fast_update, &reference_update);
+        let metrics = fast_update.metrics;
+        fast.install_input_update(fast_update, metrics, false, context);
+        rowwise.install_input_update(reference_update, metrics, false, context);
+    }
+}

@@ -277,13 +277,18 @@ temporary owners kept alive through actual cleanup. These physical formats
 remain distinct from the runtime capability envelope under
 [checkpoint coordination](#checkpoint-coordination).
 
-The built-in window operator prepares immutable Arrow IPC deltas through a
-blocking worker while processing data and control events. Its synchronous
-checkpoint only assigns deterministic segment IDs, moves prepared buffers,
-and captures bounded metadata. Restore validates every metadata field, Arrow
+The built-in window operator only marks touched, created, and closed window
+keys while processing data and control events, then encodes the net operations
+as one immutable Arrow IPC delta on a blocking worker during asynchronous
+checkpoint preparation. A window that opens and closes between two checkpoints
+cancels out of the delta entirely; a closed window that earlier checkpoints
+persisted owes the next checkpoint one tombstone. Its synchronous checkpoint
+encodes the same pending operations as a compatibility fallback for direct
+callers, then assigns deterministic segment IDs, moves prepared buffers, and
+captures bounded metadata. Restore validates every metadata field, Arrow
 schema, group-key encoding, row order, and accumulator shape on a worker
 before replacing live state. More than 32 retained deltas prepares one
-replacement base before the next capture; old immutable segments remain live
+replacement base at the next capture; old immutable segments remain live
 until manifest reachability collection can remove them.
 
 `StreamCollector` is the only way a stream operator emits. `emit(port,

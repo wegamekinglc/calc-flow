@@ -21,6 +21,28 @@ measurements. Use the current guides for supported behavior.
   emitted-row counter overflow before sending output from the input batch.
   See [Join recovery](docs/streaming-guide.md#join-output-materialization-and-recovery).
 
+- 2026-10-13: Release a closed event-time window from
+  `WindowAggregateOperator` state when its close is emitted, in every
+  checkpoint mode. With checkpointing enabled, the default, an emitted window
+  previously stayed in live state until the next checkpoint: it held memory,
+  kept counting against the window `StateBudget`, and was rescanned by every
+  watermark and delta compaction. A job that closed more windows between two
+  checkpoints than the budget allows, one million windows and 256 MiB by
+  default, failed with `window state budget exceeded` although those windows
+  were already emitted, and per-watermark cost grew with the windows closed
+  since the last checkpoint. The budget now bounds open windows only. Jobs
+  with checkpointing disabled already released at emission and are
+  unaffected. Runtime-driven jobs emit the same rows in the same order with
+  the same sequence numbers; late-row classification, the checkpoint segment
+  format, restore compatibility, and the public API are unchanged. In paired,
+  correctness-checked local runs of the engine-suite `window_sum` case
+  (ten-second tumbling windows, 64,000-row batches, checkpointing enabled with
+  no checkpoint inside the timed region), the ready-enqueue-to-Arrow median
+  fell from 9,161 to 1,616 ms at 10 million rows and from 269 to 176 ms at
+  1 million; a 10,000,640-row run that exceeded the default budget before now
+  completes in 1,559 ms. The change first ships in the release after
+  `2026.10.13`.
+
 - 2026-10-13: Move the workspace crates and Python core to calendar version
   `2026.10.13` for the `calc-flow-python` release. It is the first release
   with the public `Runtime` registration methods and the first tagged after

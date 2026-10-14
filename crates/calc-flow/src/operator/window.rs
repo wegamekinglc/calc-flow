@@ -1,6 +1,6 @@
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, hash_map::Entry},
     fmt,
     io::Cursor,
     sync::Arc,
@@ -283,6 +283,9 @@ pub struct WindowAggregateOperator {
     compiled: CompiledWindowSpec,
     state: WindowState,
     state_budget: StateBudget,
+    max_delta_segments: usize,
+    #[cfg(test)]
+    force_rowwise: bool,
 }
 
 #[derive(Clone)]
@@ -291,6 +294,9 @@ struct CompiledWindowSpec {
     group_columns: Vec<CompiledGroupColumn>,
     aggregates: Vec<CompiledAggregate>,
     geometry: CompiledWindowGeometry,
+    // True when a string min/max aggregate can grow an existing entry's
+    // dynamic byte charge; numeric-only aggregates never change it.
+    tracks_dynamic_bytes: bool,
     #[allow(
         dead_code,
         reason = "the M4 persistence work package records the compiled configuration hash"
@@ -323,8 +329,6 @@ struct CompiledWindowGeometry {
 struct WindowState {
     accumulators: BTreeMap<WindowKey, AccumulatorRow>,
     accumulator_bytes: u64,
-    dirty: BTreeSet<WindowKey>,
-    emitted_pending_snapshot: BTreeSet<WindowKey>,
     last_input_watermark: Option<EventTime>,
     next_output_sequence: u64,
     ended: bool,
@@ -336,9 +340,21 @@ struct WindowState {
     last_checkpoint_epoch: Option<crate::Epoch>,
     pipeline_fingerprint: Option<String>,
     operator_id: Option<String>,
+    // Checkpoint delta bookkeeping: keys are only marked while batches and
+    // watermarks stream by; the net operations encode once per checkpoint.
+    checkpoint_marks: HashMap<WindowKey, CheckpointMark, ahash::RandomState>,
 }
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+/// Per-key delta bookkeeping between checkpoints: `created` tracks whether
+/// the key opened since the last checkpoint (so an open-close pair cancels),
+/// and `closed_group_values` carries the tombstone payload of an emitted
+/// close that earlier checkpoints persisted.
+struct CheckpointMark {
+    created: bool,
+    closed_group_values: Option<Vec<Option<ScalarValue>>>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 struct WindowKey {
     start: EventTime,
     end: EventTime,
@@ -423,6 +439,29 @@ struct PreparedStateSegment {
     bytes: Vec<u8>,
 }
 
+/// One pending checkpoint encoding step: either the net per-epoch delta or
+/// one compaction base replacing the whole retained inventory.
+enum PendingEncoding {
+    Delta(Vec<StateOperationRow>),
+    Base(Vec<StateOperationRow>),
+    EmptyBase,
+}
+
+#[derive(Clone, Copy)]
+enum PendingEncodingKind {
+    Delta,
+    Base,
+}
+
+impl PendingEncoding {
+    fn kind(&self) -> PendingEncodingKind {
+        match self {
+            Self::Delta(_) => PendingEncodingKind::Delta,
+            Self::Base(_) | Self::EmptyBase => PendingEncodingKind::Base,
+        }
+    }
+}
+
 struct PreparedSnapshotSegments {
     descriptors: Vec<SegmentDescriptor>,
     bytes: BTreeMap<String, crate::StateSegment>,
@@ -475,6 +514,109 @@ struct CachedWindowSlot {
 
 type ScratchMap<K, V> = HashMap<K, V, ahash::RandomState>;
 
+/// Columnar accumulator storage for the numeric fast path: one dense vector
+/// per declared aggregate, indexed by scratch slot. Per-slot updates apply in
+/// row order, so compensated float state matches the row-wise reference bit
+/// for bit.
+enum SlotColumn {
+    Count(Vec<u64>),
+    SignedSum(Vec<Option<i128>>),
+    UnsignedSum(Vec<Option<u128>>),
+    FloatSum(Vec<Option<CompensatedSum>>),
+    Min(Vec<Option<ScalarValue>>),
+    Max(Vec<Option<ScalarValue>>),
+    SignedAverage(Vec<(i128, u64)>),
+    UnsignedAverage(Vec<(u128, u64)>),
+    FloatAverage(Vec<(CompensatedSum, u64)>),
+}
+
+impl SlotColumn {
+    fn new(function: AggregateFunction, compiled: &CompiledAggregate) -> Self {
+        match function {
+            AggregateFunction::Count => Self::Count(Vec::new()),
+            AggregateFunction::Sum => match compiled.output_type {
+                DataType::Int64 => Self::SignedSum(Vec::new()),
+                DataType::UInt64 => Self::UnsignedSum(Vec::new()),
+                DataType::Float64 => Self::FloatSum(Vec::new()),
+                _ => unreachable!("aggregate matrix validated at construction"),
+            },
+            AggregateFunction::Min => Self::Min(Vec::new()),
+            AggregateFunction::Max => Self::Max(Vec::new()),
+            AggregateFunction::Avg => match compiled.input_type {
+                DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => {
+                    Self::SignedAverage(Vec::new())
+                }
+                DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
+                    Self::UnsignedAverage(Vec::new())
+                }
+                DataType::Float32 | DataType::Float64 => Self::FloatAverage(Vec::new()),
+                _ => unreachable!("average input matrix validated at construction"),
+            },
+        }
+    }
+
+    fn push_default(&mut self) {
+        match self {
+            Self::Count(values) => values.push(0),
+            Self::SignedSum(values) => values.push(None),
+            Self::UnsignedSum(values) => values.push(None),
+            Self::FloatSum(values) => values.push(None),
+            Self::Min(values) | Self::Max(values) => values.push(None),
+            Self::SignedAverage(values) => values.push((0, 0)),
+            Self::UnsignedAverage(values) => values.push((0, 0)),
+            Self::FloatAverage(values) => values.push((CompensatedSum::new(0.0), 0)),
+        }
+    }
+
+    /// Seeds one slot from its live-state accumulator; the variants match by
+    /// construction against the compiled aggregate matrix.
+    fn push_seeded(&mut self, value: &AccumulatorValue) {
+        match (self, value) {
+            (Self::Count(values), AccumulatorValue::Count(value)) => values.push(*value),
+            (Self::SignedSum(values), AccumulatorValue::SignedSum(value)) => values.push(*value),
+            (Self::UnsignedSum(values), AccumulatorValue::UnsignedSum(value)) => {
+                values.push(*value);
+            }
+            (Self::FloatSum(values), AccumulatorValue::FloatSum(value)) => values.push(*value),
+            (Self::Min(values), AccumulatorValue::Min(value))
+            | (Self::Max(values), AccumulatorValue::Max(value)) => values.push(value.clone()),
+            (Self::SignedAverage(values), AccumulatorValue::SignedAverage { sum, count }) => {
+                values.push((*sum, *count));
+            }
+            (Self::UnsignedAverage(values), AccumulatorValue::UnsignedAverage { sum, count }) => {
+                values.push((*sum, *count));
+            }
+            (Self::FloatAverage(values), AccumulatorValue::FloatAverage { sum, count }) => {
+                values.push((*sum, *count));
+            }
+            _ => unreachable!("compiled aggregate accumulator type mismatch"),
+        }
+    }
+
+    fn take(&mut self, index: usize) -> AccumulatorValue {
+        match self {
+            Self::Count(values) => AccumulatorValue::Count(values[index]),
+            Self::SignedSum(values) => AccumulatorValue::SignedSum(values[index]),
+            Self::UnsignedSum(values) => AccumulatorValue::UnsignedSum(values[index]),
+            Self::FloatSum(values) => AccumulatorValue::FloatSum(values[index]),
+            Self::Min(values) => AccumulatorValue::Min(std::mem::take(&mut values[index])),
+            Self::Max(values) => AccumulatorValue::Max(std::mem::take(&mut values[index])),
+            Self::SignedAverage(values) => {
+                let (sum, count) = values[index];
+                AccumulatorValue::SignedAverage { sum, count }
+            }
+            Self::UnsignedAverage(values) => {
+                let (sum, count) = values[index];
+                AccumulatorValue::UnsignedAverage { sum, count }
+            }
+            Self::FloatAverage(values) => {
+                let (sum, count) = values[index];
+                AccumulatorValue::FloatAverage { sum, count }
+            }
+        }
+    }
+}
+
 /// Per-batch accumulator scratch: hashed while rows stream in, then sorted
 /// once into the deterministic window-key order installs and encodes observe.
 struct BatchScratch<'a> {
@@ -487,8 +629,17 @@ struct BatchScratch<'a> {
     slot_cache: [Option<CachedWindowSlot>; 64],
     slot_cache_ways: usize,
     entries: Vec<(WindowKey, AccumulatorRow)>,
+    // Columnar fast path: per-aggregate dense accumulators aligned with
+    // `entries`, and the per-record (slot, row) pair buffer of pass one.
+    columns: Vec<SlotColumn>,
+    pairs: Vec<(u32, u32)>,
     // Reused by the general composite-key path, without owned row scalars.
     encoded_group: Vec<u8>,
+    // Previous-row reuse: the window slide interval and the resolved groups
+    // of the last row, so adjacent rows skip the division and the hash.
+    assignment_cache: Option<(i128, i128)>,
+    last_integer_group: Option<(keys::IntegerKey, usize)>,
+    last_string_group: Option<(Option<&'a str>, usize)>,
     usage: WindowStateUsage,
     metrics: PreparedInputMetrics,
 }
@@ -510,14 +661,20 @@ impl<'a> BatchScratch<'a> {
             slot_cache: [None; 64],
             slot_cache_ways,
             entries: Vec::new(),
+            columns: Vec::new(),
+            pairs: Vec::new(),
             encoded_group: Vec::new(),
+            assignment_cache: None,
+            last_integer_group: None,
+            last_string_group: None,
             usage,
             metrics: PreparedInputMetrics::default(),
         }
     }
 
     /// Borrow single string keys directly from Arrow. Canonical keys are
-    /// created only for a distinct batch group.
+    /// created only for a distinct batch group. A row equal to the previous
+    /// row's group reuses its index without hashing.
     fn intern_group(
         &mut self,
         columns: &RecordColumns<'a>,
@@ -526,19 +683,31 @@ impl<'a> BatchScratch<'a> {
         names: &[String],
     ) -> Result<usize> {
         let integer_key = keys::IntegerKey::read(columns, row);
-        if let Some(key) = integer_key
-            && let Some(&group) = self.integer_group_ids.get(&key)
-        {
-            return Ok(group);
+        if let Some(key) = integer_key {
+            if let Some((last_key, group)) = self.last_integer_group
+                && last_key == key
+            {
+                return Ok(group);
+            }
+            if let Some(&group) = self.integer_group_ids.get(&key) {
+                self.last_integer_group = Some((key, group));
+                return Ok(group);
+            }
         }
         let string_key = match columns.groups.as_slice() {
             [(column, _)] => column.borrowed_string(row),
             _ => BorrowedString::Other,
         };
-        if let BorrowedString::Value(key) = string_key
-            && let Some(&group) = self.string_group_ids.get(&key)
-        {
-            return Ok(group);
+        if let BorrowedString::Value(key) = string_key {
+            if let Some((last_key, group)) = self.last_string_group
+                && last_key == key
+            {
+                return Ok(group);
+            }
+            if let Some(&group) = self.string_group_ids.get(&key) {
+                self.last_string_group = Some((key, group));
+                return Ok(group);
+            }
         }
         encode_group_key(columns, row, operator_id, names, &mut self.encoded_group)?;
         if integer_key.is_none()
@@ -552,17 +721,34 @@ impl<'a> BatchScratch<'a> {
         self.group_keys.push(Arc::clone(&key));
         if let Some(value) = integer_key {
             self.integer_group_ids.insert(value, group);
+            self.last_integer_group = Some((value, group));
         } else if let BorrowedString::Value(value) = string_key {
             self.string_group_ids.insert(value, group);
+            self.last_string_group = Some((value, group));
         } else {
             self.group_ids.insert(key, group);
         }
         Ok(group)
     }
 
-    fn into_update(self) -> InputBatchUpdate {
+    fn into_update(mut self) -> InputBatchUpdate {
+        let accumulators = self
+            .entries
+            .into_iter()
+            .enumerate()
+            .map(|(index, (key, mut row))| {
+                if !self.columns.is_empty() {
+                    row.aggregates = self
+                        .columns
+                        .iter_mut()
+                        .map(|column| column.take(index))
+                        .collect();
+                }
+                (key, row)
+            })
+            .collect();
         InputBatchUpdate {
-            accumulators: self.entries.into_iter().collect(),
+            accumulators,
             usage: self.usage,
             metrics: self.metrics.into_delta(),
         }
@@ -706,19 +892,32 @@ fn aggregate_dynamic_bytes(entry: &AccumulatorRow) -> u64 {
 }
 
 fn window_entry_bytes(key_bytes: u64, entry: &AccumulatorRow) -> u64 {
-    let group_bytes = logical_length(entry.group_values.len())
+    entry_bytes_of_parts(
+        key_bytes,
+        &entry.group_values,
+        entry.aggregates.len(),
+        aggregate_dynamic_bytes(entry),
+    )
+}
+
+fn entry_bytes_of_parts(
+    key_bytes: u64,
+    group_values: &[Option<ScalarValue>],
+    aggregate_count: usize,
+    aggregate_dynamic: u64,
+) -> u64 {
+    let group_bytes = logical_length(group_values.len())
         .saturating_mul(WINDOW_GROUP_VALUE_BYTES)
         .saturating_add(
-            entry
-                .group_values
+            group_values
                 .iter()
                 .flatten()
                 .map(scalar_dynamic_bytes)
                 .fold(0_u64, u64::saturating_add),
         );
-    let aggregate_bytes = logical_length(entry.aggregates.len())
+    let aggregate_bytes = logical_length(aggregate_count)
         .saturating_mul(WINDOW_AGGREGATE_BYTES)
-        .saturating_add(aggregate_dynamic_bytes(entry));
+        .saturating_add(aggregate_dynamic);
     WINDOW_ENTRY_BASE_BYTES
         .saturating_add(key_bytes)
         .saturating_add(group_bytes)
@@ -827,14 +1026,36 @@ impl WindowAggregateOperator {
             compiled,
             state: WindowState::default(),
             state_budget: StateBudget::default(),
+            max_delta_segments: MAX_WINDOW_DELTA_SEGMENTS,
+            #[cfg(test)]
+            force_rowwise: false,
         })
+    }
+
+    /// The row-major reference path remains for aggregates whose dynamic
+    /// bytes change per row (string min/max); tests can force it directly.
+    fn use_rowwise_kernel(&self) -> bool {
+        #[cfg(test)]
+        if self.force_rowwise {
+            return true;
+        }
+        self.compiled.tracks_dynamic_bytes
+    }
+
+    /// Overrides the retained-delta compaction threshold; soak tests use a
+    /// small value so compaction across restarts is exercised in a few
+    /// epochs instead of the production 32.
+    #[cfg(test)]
+    pub(crate) fn set_delta_compaction_threshold(&mut self, threshold: usize) {
+        self.max_delta_segments = threshold;
     }
 
     /// Sets the logical row and byte limit for retained window accumulators.
     ///
     /// The default is one million windows and 256 MiB of logical charge.
-    /// Existing state must fit the replacement budget. Checkpoint segment
-    /// copies and process RSS are outside this limit.
+    /// A window stops counting once its close is emitted. Existing state must
+    /// fit the replacement budget. Checkpoint segment copies and process RSS
+    /// are outside this limit.
     ///
     /// # Errors
     ///
@@ -874,15 +1095,29 @@ impl WindowAggregateOperator {
                 "received data after end-of-input",
             ));
         }
-        let table = batch.table_payload()?;
-        let mut scratch = BatchScratch::new(
+        if self.use_rowwise_kernel() {
+            return self.prepare_input_batch_rowwise(batch, context);
+        }
+        self.prepare_input_batch_columnar(batch, context)
+    }
+
+    fn new_scratch<'a>(&self) -> BatchScratch<'a> {
+        BatchScratch::new(
             WindowStateUsage {
                 rows: logical_length(self.state.accumulators.len()),
                 bytes: self.state.accumulator_bytes,
             },
             self.compiled.geometry.overlap,
-        );
+        )
+    }
 
+    fn prepare_input_batch_rowwise(
+        &self,
+        batch: &Batch,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<InputBatchUpdate> {
+        let table = batch.table_payload()?;
+        let mut scratch = self.new_scratch();
         for record in table.batches() {
             let columns =
                 RecordColumns::new(record, &self.spec, &self.compiled, context.operator_id())?;
@@ -890,8 +1125,165 @@ impl WindowAggregateOperator {
                 self.prepare_row(&columns, row, context, &mut scratch)?;
             }
         }
-
         Ok(scratch.into_update())
+    }
+
+    /// Columnar fast path: pass one resolves each row's slots, pass two runs
+    /// one tight loop per aggregate over the (slot, row) pairs.
+    fn prepare_input_batch_columnar(
+        &self,
+        batch: &Batch,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<InputBatchUpdate> {
+        let table = batch.table_payload()?;
+        let mut scratch = self.new_scratch();
+        scratch.columns = self
+            .spec
+            .aggregates
+            .iter()
+            .zip(&self.compiled.aggregates)
+            .map(|(aggregate, compiled)| SlotColumn::new(aggregate.function, compiled))
+            .collect();
+        for record in table.batches() {
+            let columns =
+                RecordColumns::new(record, &self.spec, &self.compiled, context.operator_id())?;
+            let mut pairs = std::mem::take(&mut scratch.pairs);
+            pairs.clear();
+            for row in 0..record.num_rows() {
+                self.prepare_row_slots(&columns, row, context, &mut scratch, &mut pairs)?;
+            }
+            for (ordinal, (column, _)) in columns.aggregates.iter().enumerate() {
+                kernels::update_column(&mut scratch.columns[ordinal], column, &pairs).map_err(
+                    |message| {
+                        operator_error(
+                            context.operator_id(),
+                            &format!("window.aggregates[{ordinal}] update failed: {message}"),
+                        )
+                    },
+                )?;
+            }
+            scratch.pairs = pairs;
+        }
+        Ok(scratch.into_update())
+    }
+
+    /// Pass one of the columnar path: resolve the row's open assignments into
+    /// scratch slots and record each (slot, row) pair.
+    fn prepare_row_slots<'a>(
+        &self,
+        columns: &RecordColumns<'a>,
+        row: usize,
+        context: &StreamOperatorContext<'_>,
+        scratch: &mut BatchScratch<'a>,
+        pairs: &mut Vec<(u32, u32)>,
+    ) -> Result<()> {
+        let operator_id = context.operator_id();
+        let Some(event_time) =
+            columns
+                .event_time
+                .at(row, operator_id, &self.spec.event_time_column)?
+        else {
+            return record_null_event_time(&mut scratch.metrics, operator_id);
+        };
+        let latest_start = latest_window_start(
+            event_time,
+            self.compiled.geometry,
+            &mut scratch.assignment_cache,
+        );
+        let assignments = assignments_from_latest(latest_start, self.compiled.geometry)
+            .map_err(|message| operator_error(operator_id, &message))?;
+        let watermark = context.input_watermark();
+        if !record_late_assignments(
+            assignments.clone(),
+            watermark,
+            &mut scratch.metrics,
+            operator_id,
+        )? {
+            return Ok(());
+        }
+        let group = scratch.intern_group(columns, row, operator_id, &self.spec.group_by)?;
+        assignments
+            .filter(|&(_, end)| is_open_assignment(end, watermark))
+            .try_for_each(|(start, end)| {
+                let slot = WindowSlot { start, end, group };
+                let index = self.slot_index_columnar(scratch, slot, columns, row, operator_id)?;
+                pairs.push((
+                    u32::try_from(index)
+                        .map_err(|_| internal_error("window slot index does not fit u32"))?,
+                    u32::try_from(row)
+                        .map_err(|_| internal_error("window input row index does not fit u32"))?,
+                ));
+                Ok(())
+            })
+    }
+
+    /// Finds or creates the batch scratch slot for one assignment in the
+    /// columnar fast path, seeding its accumulator columns from live state.
+    /// Only keys new to state are charged, at creation.
+    fn slot_index_columnar(
+        &self,
+        scratch: &mut BatchScratch<'_>,
+        slot: WindowSlot,
+        columns: &RecordColumns<'_>,
+        row: usize,
+        operator_id: &str,
+    ) -> Result<usize> {
+        let slot_key = (slot.start.as_micros(), slot.group);
+        if let Some(index) = scratch.cached_slot(slot_key) {
+            return Ok(index);
+        }
+        #[cfg(test)]
+        group_tests::SLOT_LOOKUPS.with(|calls| calls.set(calls.get() + 1));
+        if let Some(&index) = scratch.slots.get(&slot_key) {
+            scratch.cache_slot(slot_key, index);
+            return Ok(index);
+        }
+        let key = WindowKey {
+            start: slot.start,
+            end: slot.end,
+            stable_group_key: Arc::clone(&scratch.group_keys[slot.group]),
+        };
+        let existing = self.state.accumulators.get(&key);
+        let group_values = match existing {
+            Some(entry) => entry.group_values.clone(),
+            None => columns
+                .groups
+                .iter()
+                .map(|(column, _)| column.scalar_at(row))
+                .collect(),
+        };
+        if existing.is_none() {
+            let next = WindowStateUsage {
+                rows: scratch.usage.rows.saturating_add(1),
+                bytes: scratch.usage.bytes.saturating_add(entry_bytes_of_parts(
+                    logical_length(key.stable_group_key.len()),
+                    &group_values,
+                    scratch.columns.len(),
+                    0,
+                )),
+            };
+            if !self.state_budget.allows(next.rows, next.bytes) {
+                return Err(operator_error(operator_id, "window state budget exceeded"));
+            }
+            scratch.usage = next;
+        }
+        let index = scratch.entries.len();
+        scratch.entries.push((
+            key,
+            AccumulatorRow {
+                group_values,
+                aggregates: Vec::new(),
+            },
+        ));
+        for (ordinal, column) in scratch.columns.iter_mut().enumerate() {
+            match existing {
+                Some(entry) => column.push_seeded(&entry.aggregates[ordinal]),
+                None => column.push_default(),
+            }
+        }
+        scratch.slots.insert(slot_key, index);
+        scratch.cache_slot(slot_key, index);
+        Ok(index)
     }
 
     fn prepare_row<'a>(
@@ -909,7 +1301,12 @@ impl WindowAggregateOperator {
         else {
             return record_null_event_time(&mut scratch.metrics, operator_id);
         };
-        let assignments = window_assignments(event_time, self.compiled.geometry)
+        let latest_start = latest_window_start(
+            event_time,
+            self.compiled.geometry,
+            &mut scratch.assignment_cache,
+        );
+        let assignments = assignments_from_latest(latest_start, self.compiled.geometry)
             .map_err(|message| operator_error(operator_id, &message))?;
         let watermark = context.input_watermark();
         if !record_late_assignments(
@@ -940,6 +1337,11 @@ impl WindowAggregateOperator {
         let (index, previous_dynamic_bytes) = self.accumulator_slot(scratch, slot, columns, row);
         let (key, accumulator) = &mut scratch.entries[index];
         update_accumulators(accumulator, columns, row, &self.spec, operator_id)?;
+        // An existing entry's charge only changes when a string min/max
+        // payload grows; numeric aggregates keep the entry's bytes constant.
+        if !self.compiled.tracks_dynamic_bytes && previous_dynamic_bytes.is_some() {
+            return Ok(());
+        }
         let next = charge_accumulator(
             scratch.usage,
             previous_dynamic_bytes,
@@ -1039,15 +1441,14 @@ impl WindowAggregateOperator {
     async fn encode_operations(
         &self,
         operations: Vec<StateOperationRow>,
-        context: &StreamOperatorContext<'_>,
     ) -> Result<Option<Vec<u8>>> {
         if operations.is_empty() {
             return Ok(None);
         }
         let spec = self.spec.clone();
         let compiled = self.compiled.clone();
-        let pipeline_fingerprint = context.job().fingerprint().to_owned();
-        let operator_id = context.operator_id().to_owned();
+        let pipeline_fingerprint = self.state_pipeline_fingerprint()?.to_owned();
+        let operator_id = self.state_operator_id()?.to_owned();
         tokio::task::spawn_blocking(move || {
             encode_state_segment(
                 &operations,
@@ -1062,32 +1463,66 @@ impl WindowAggregateOperator {
         .map(Some)
     }
 
-    fn upsert_operations(update: &InputBatchUpdate) -> Vec<StateOperationRow> {
-        update
-            .accumulators
-            .iter()
-            .map(|(key, entry)| StateOperationRow {
-                key: key.clone(),
-                entry: entry.clone(),
-                tombstone: false,
-            })
-            .collect()
+    fn encode_operations_sync(&self, operations: &[StateOperationRow]) -> Result<Vec<u8>> {
+        encode_state_segment(
+            operations,
+            &self.spec,
+            &self.compiled,
+            self.state_pipeline_fingerprint()?,
+            self.state_operator_id()?,
+        )
     }
 
-    fn tombstone_operations(&self, keys: &[WindowKey]) -> Vec<StateOperationRow> {
-        keys.iter()
-            .map(|key| StateOperationRow {
-                key: key.clone(),
-                entry: self.state.accumulators[key].clone(),
-                tombstone: true,
-            })
-            .collect()
+    fn state_pipeline_fingerprint(&self) -> Result<&str> {
+        self.state
+            .pipeline_fingerprint
+            .as_deref()
+            .ok_or_else(|| internal_error("window state is missing its pipeline fingerprint"))
     }
 
-    async fn compact_prepared_if_needed(
-        &mut self,
-        context: &StreamOperatorContext<'_>,
-    ) -> Result<()> {
+    fn state_operator_id(&self) -> Result<&str> {
+        self.state
+            .operator_id
+            .as_deref()
+            .ok_or_else(|| internal_error("window state is missing its operator identity"))
+    }
+
+    /// Collects the net state operations since the last checkpoint: the
+    /// latest value of every touched live key plus a tombstone for every
+    /// closed key that earlier checkpoints persisted. Keys created and closed
+    /// inside one epoch cancel out and encode nothing.
+    fn pending_operations(&self) -> Vec<StateOperationRow> {
+        let mut operations = Vec::with_capacity(self.state.checkpoint_marks.len());
+        for (key, mark) in &self.state.checkpoint_marks {
+            if let Some(group_values) = &mark.closed_group_values {
+                operations.push(StateOperationRow {
+                    key: key.clone(),
+                    entry: new_accumulator_row(&self.spec, &self.compiled, group_values.clone()),
+                    tombstone: true,
+                });
+            } else if let Some(entry) = self.state.accumulators.get(key) {
+                operations.push(StateOperationRow {
+                    key: key.clone(),
+                    entry: entry.clone(),
+                    tombstone: false,
+                });
+            }
+        }
+        operations.sort_unstable_by(|left, right| left.key.cmp(&right.key));
+        operations
+    }
+
+    fn compaction_due(&self, pending_operations: bool) -> Result<bool> {
+        if self
+            .state
+            .retained_inventory
+            .needs_compaction(self.max_delta_segments, crate::MAX_MANIFEST_DOCUMENT_BYTES)?
+        {
+            return Ok(true);
+        }
+        if !pending_operations {
+            return Ok(false);
+        }
         let retained_delta_count = self
             .state
             .retained_inventory
@@ -1101,67 +1536,210 @@ impl WindowAggregateOperator {
             .iter()
             .filter(|segment| segment.kind == SegmentKind::Delta)
             .count();
-        let retained_requires_compaction = self.state.retained_inventory.needs_compaction(
-            MAX_WINDOW_DELTA_SEGMENTS,
-            crate::MAX_MANIFEST_DOCUMENT_BYTES,
-        )?;
-        if !retained_requires_compaction
-            && retained_delta_count
-                .checked_add(prepared_delta_count)
-                .is_some_and(|count| count <= MAX_WINDOW_DELTA_SEGMENTS)
-        {
-            return Ok(());
-        }
+        Ok(retained_delta_count
+            .saturating_add(prepared_delta_count)
+            .saturating_add(1)
+            > self.max_delta_segments)
+    }
 
-        let operations = self
-            .state
-            .accumulators
-            .iter()
-            .filter(|(key, _)| !self.state.emitted_pending_snapshot.contains(*key))
-            .map(|(key, entry)| StateOperationRow {
-                key: key.clone(),
-                entry: entry.clone(),
-                tombstone: false,
-            })
-            .collect();
-        let compacted = self.encode_operations(operations, context).await?;
-        self.state.prepared_segments = compacted
-            .map(|bytes| {
-                vec![PreparedStateSegment {
-                    kind: SegmentKind::Base,
-                    bytes,
-                }]
-            })
-            .unwrap_or_default();
-        self.state.replace_retained_on_checkpoint = true;
+    /// Plans the next checkpoint encoding: one net delta, or one compaction
+    /// base covering all live accumulators once the retained delta chain
+    /// grows past its threshold.
+    fn plan_pending_encoding(&self) -> Result<Option<PendingEncoding>> {
+        let operations = self.pending_operations();
+        if operations.is_empty() && self.state.replace_retained_on_checkpoint {
+            // A prepared replacement base already supersedes the inventory;
+            // re-planning would re-encode the same live state at capture.
+            return Ok(None);
+        }
+        if self.compaction_due(!operations.is_empty())? {
+            let operations = self
+                .state
+                .accumulators
+                .iter()
+                .map(|(key, entry)| StateOperationRow {
+                    key: key.clone(),
+                    entry: entry.clone(),
+                    tombstone: false,
+                })
+                .collect::<Vec<_>>();
+            return Ok(Some(if operations.is_empty() {
+                PendingEncoding::EmptyBase
+            } else {
+                PendingEncoding::Base(operations)
+            }));
+        }
+        Ok((!operations.is_empty()).then_some(PendingEncoding::Delta(operations)))
+    }
+
+    /// Synchronously encodes pending operations; direct `checkpoint` callers
+    /// that skipped `prepare_checkpoint_async` rely on this fallback.
+    fn prepare_pending_encoding_sync(&mut self) -> Result<()> {
+        let Some(encoding) = self.plan_pending_encoding()? else {
+            return Ok(());
+        };
+        let kind = encoding.kind();
+        let bytes = match encoding {
+            PendingEncoding::EmptyBase => None,
+            PendingEncoding::Delta(operations) | PendingEncoding::Base(operations) => {
+                Some(self.encode_operations_sync(&operations)?)
+            }
+        };
+        self.finish_pending_encoding(kind, bytes);
         Ok(())
     }
 
-    async fn emit_keys(
+    /// Installs encoded bytes as prepared segments and clears the delta
+    /// bookkeeping: the bytes now carry everything the marked keys held.
+    fn finish_pending_encoding(&mut self, kind: PendingEncodingKind, bytes: Option<Vec<u8>>) {
+        match kind {
+            PendingEncodingKind::Delta => {
+                let bytes = bytes.expect("non-empty delta operations always encode");
+                self.state.prepared_segments.push(PreparedStateSegment {
+                    kind: SegmentKind::Delta,
+                    bytes,
+                });
+            }
+            PendingEncodingKind::Base => {
+                self.state.prepared_segments = bytes
+                    .map(|bytes| {
+                        vec![PreparedStateSegment {
+                            kind: SegmentKind::Base,
+                            bytes,
+                        }]
+                    })
+                    .unwrap_or_default();
+                self.state.replace_retained_on_checkpoint = true;
+            }
+        }
+        self.state.checkpoint_marks.clear();
+    }
+
+    /// Folds emitted windows into the pending checkpoint operations: a window
+    /// created in the same epoch cancels its upsert; any other closed window
+    /// owes the next checkpoint a tombstone.
+    fn mark_closed(&mut self, removed: Vec<(WindowKey, AccumulatorRow)>) {
+        for (key, entry) in removed {
+            match self.state.checkpoint_marks.entry(key) {
+                Entry::Occupied(slot) if slot.get().created => {
+                    slot.remove();
+                }
+                Entry::Occupied(mut slot) => {
+                    slot.get_mut().closed_group_values = Some(entry.group_values);
+                }
+                Entry::Vacant(slot) => {
+                    slot.insert(CheckpointMark {
+                        created: false,
+                        closed_group_values: Some(entry.group_values),
+                    });
+                }
+            }
+        }
+    }
+
+    /// Splits the closed prefix off the ordered state in one operation: every
+    /// key with `end <= watermark` sorts before the split key because all
+    /// windows share the fixed geometry (`end == start + size`).
+    fn take_closed(&mut self, watermark: EventTime) -> BTreeMap<WindowKey, AccumulatorRow> {
+        let Some(split) = self.closed_prefix_split_key(watermark) else {
+            // Degenerate geometry arithmetic falls back to per-key extraction.
+            let keys = self
+                .state
+                .accumulators
+                .keys()
+                .filter(|key| key.end <= watermark)
+                .cloned()
+                .collect::<Vec<_>>();
+            return keys
+                .iter()
+                .filter_map(|key| self.state.accumulators.remove_entry(key))
+                .collect();
+        };
+        let tail = self.state.accumulators.split_off(&split);
+        debug_assert!(tail.first_key_value().is_none_or(|(key, _)| {
+            key.end.as_micros() - key.start.as_micros()
+                == i64::try_from(self.compiled.geometry.size_micros).unwrap()
+        }));
+        std::mem::replace(&mut self.state.accumulators, tail)
+    }
+
+    fn closed_prefix_split_key(&self, watermark: EventTime) -> Option<WindowKey> {
+        let size = i64::try_from(self.compiled.geometry.size_micros).ok()?;
+        let threshold = watermark.as_micros().checked_sub(size)?.checked_add(1)?;
+        Some(WindowKey {
+            start: EventTime::from_micros(threshold),
+            end: EventTime::from_micros(i64::MIN),
+            stable_group_key: Arc::from([]),
+        })
+    }
+
+    /// Emits the closed prefix in one pass and releases it on success. A
+    /// rejected emission merges the untouched prefix back, leaving state
+    /// identical to an operator that never attempted the close.
+    async fn emit_closed(
         &mut self,
-        keys: &[WindowKey],
+        closed: BTreeMap<WindowKey, AccumulatorRow>,
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
-    ) -> Result<()> {
-        if keys.is_empty() {
-            return Ok(());
+    ) -> Result<Vec<(WindowKey, AccumulatorRow)>> {
+        if closed.is_empty() {
+            return Ok(Vec::new());
         }
-        let record = build_output_record(
-            keys,
-            &self.state.accumulators,
+        let built = build_output_record(
+            &closed,
             &self.spec,
             &self.compiled,
             self.output_ports[0]
                 .schema()
                 .expect("window output always has an exact schema"),
             context.operator_id(),
-        )?;
-        let batches = chunk_output_record(
-            &record,
-            context.operator_id(),
-            self.state.next_output_sequence,
-            context.output_budget(),
-        )?;
+        )
+        .and_then(|record| {
+            chunk_output_record(
+                &record,
+                context.operator_id(),
+                self.state.next_output_sequence,
+                context.output_budget(),
+            )
+        });
+        let batches = match built {
+            Ok(batches) => batches,
+            Err(error) => {
+                self.restore_closed_prefix(closed);
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.emit_chunks(batches, output).await {
+            self.restore_closed_prefix(closed);
+            return Err(error);
+        }
+        // Accepted windows leave live state and its budget here; the caller
+        // folds the removed entries into the checkpoint delta bookkeeping.
+        let mut released = 0_u64;
+        let mut removed = Vec::with_capacity(closed.len());
+        for (key, entry) in closed {
+            released = released.saturating_add(window_entry_bytes(
+                logical_length(key.stable_group_key.len()),
+                &entry,
+            ));
+            removed.push((key, entry));
+        }
+        self.state.accumulator_bytes = self.state.accumulator_bytes.saturating_sub(released);
+        Ok(removed)
+    }
+
+    /// Merges an un-emitted closed prefix back into live state, restoring the
+    /// exact pre-close contents.
+    fn restore_closed_prefix(&mut self, mut closed: BTreeMap<WindowKey, AccumulatorRow>) {
+        closed.append(&mut self.state.accumulators);
+        self.state.accumulators = closed;
+    }
+
+    async fn emit_chunks(
+        &mut self,
+        batches: Vec<Batch>,
+        output: &mut dyn StreamCollector,
+    ) -> Result<()> {
         for batch in batches {
             output.emit("output", batch).await?;
             self.state.next_output_sequence = self
@@ -1169,23 +1747,6 @@ impl WindowAggregateOperator {
                 .next_output_sequence
                 .checked_add(1)
                 .expect("all output sequences were prevalidated");
-        }
-        if context.job().checkpointing() {
-            self.state
-                .emitted_pending_snapshot
-                .extend(keys.iter().cloned());
-        } else {
-            for key in keys {
-                if let Some(entry) = self.state.accumulators.remove(key) {
-                    self.state.accumulator_bytes =
-                        self.state
-                            .accumulator_bytes
-                            .saturating_sub(window_entry_bytes(
-                                logical_length(key.stable_group_key.len()),
-                                &entry,
-                            ));
-                }
-            }
         }
         Ok(())
     }
@@ -1236,21 +1797,14 @@ impl StreamOperator for WindowAggregateOperator {
         _output: &mut dyn StreamCollector,
     ) -> Result<()> {
         self.validate_process_input(ingress, &batch, context)?;
-        self.compact_prepared_if_needed(context).await?;
         let update = self.prepare_input_batch(&batch, context)?;
         let next_metrics = accumulate_late_metrics(self.state.metrics, update.metrics)?;
-        let encoded = if context.job().checkpointing() {
-            self.encode_operations(Self::upsert_operations(&update), context)
-                .await?
-        } else {
-            None
-        };
         context.record_window_metrics(
             update.metrics.late_rows,
             update.metrics.max_lateness_micros,
             update.metrics.null_event_time_rows,
         )?;
-        self.install_input_update(update, next_metrics, encoded, context);
+        self.install_input_update(update, next_metrics, context.job().checkpointing(), context);
         Ok(())
     }
 
@@ -1271,28 +1825,10 @@ impl StreamOperator for WindowAggregateOperator {
                 "input watermark did not advance strictly",
             ));
         }
-        self.compact_prepared_if_needed(context).await?;
-        let keys = self
-            .state
-            .accumulators
-            .keys()
-            .filter(|key| {
-                key.end <= watermark && !self.state.emitted_pending_snapshot.contains(*key)
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        let tombstones = if context.job().checkpointing() {
-            self.encode_operations(self.tombstone_operations(&keys), context)
-                .await?
-        } else {
-            None
-        };
-        self.emit_keys(&keys, context, output).await?;
-        if let Some(tombstones) = tombstones {
-            self.state.prepared_segments.push(PreparedStateSegment {
-                kind: SegmentKind::Delta,
-                bytes: tombstones,
-            });
+        let closed = self.take_closed(watermark);
+        let removed = self.emit_closed(closed, context, output).await?;
+        if context.job().checkpointing() {
+            self.mark_closed(removed);
         }
         self.install_context_identity(context);
         self.state.last_input_watermark = Some(watermark);
@@ -1308,29 +1844,36 @@ impl StreamOperator for WindowAggregateOperator {
         if self.state.ended {
             return Ok(());
         }
-        self.compact_prepared_if_needed(context).await?;
-        let keys = self
-            .state
-            .accumulators
-            .keys()
-            .filter(|key| !self.state.emitted_pending_snapshot.contains(*key))
-            .cloned()
-            .collect::<Vec<_>>();
-        let tombstones = if context.job().checkpointing() {
-            self.encode_operations(self.tombstone_operations(&keys), context)
-                .await?
-        } else {
-            None
-        };
-        self.emit_keys(&keys, context, output).await?;
-        if let Some(tombstones) = tombstones {
-            self.state.prepared_segments.push(PreparedStateSegment {
-                kind: SegmentKind::Delta,
-                bytes: tombstones,
-            });
+        let closed = std::mem::take(&mut self.state.accumulators);
+        let removed = self.emit_closed(closed, context, output).await?;
+        if context.job().checkpointing() {
+            self.mark_closed(removed);
         }
         self.install_context_identity(context);
         self.state.ended = true;
+        Ok(())
+    }
+
+    async fn prepare_checkpoint_async(
+        &mut self,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<()> {
+        context.check_cancelled()?;
+        if !context.job().checkpointing() {
+            return Ok(());
+        }
+        self.install_context_identity(context);
+        let Some(encoding) = self.plan_pending_encoding()? else {
+            return Ok(());
+        };
+        let kind = encoding.kind();
+        let bytes = match encoding {
+            PendingEncoding::EmptyBase => None,
+            PendingEncoding::Delta(operations) | PendingEncoding::Base(operations) => {
+                self.encode_operations(operations).await?
+            }
+        };
+        self.finish_pending_encoding(kind, bytes);
         Ok(())
     }
 
@@ -1344,6 +1887,7 @@ impl StreamOperator for WindowAggregateOperator {
                 "window checkpoint epoch did not advance strictly",
             ));
         }
+        self.prepare_pending_encoding_sync()?;
         let prepared = self.prepare_snapshot_segments(epoch)?;
         let retained_inventory = self.next_snapshot_inventory(prepared.descriptors)?;
         let retained_segments = self.next_snapshot_segments(&retained_inventory, prepared.bytes)?;
@@ -1368,19 +1912,6 @@ impl StreamOperator for WindowAggregateOperator {
             ));
         };
         self.state.prepared_segments.clear();
-        for key in std::mem::take(&mut self.state.emitted_pending_snapshot) {
-            if let Some(entry) = self.state.accumulators.remove(&key) {
-                self.state.accumulator_bytes =
-                    self.state
-                        .accumulator_bytes
-                        .saturating_sub(window_entry_bytes(
-                            logical_length(key.stable_group_key.len()),
-                            &entry,
-                        ));
-            }
-            self.state.dirty.remove(&key);
-        }
-        self.state.dirty.clear();
         self.state.retained_inventory = retained_inventory;
         self.state.retained_segments = retained_segments.clone();
         self.state.replace_retained_on_checkpoint = false;
@@ -1554,24 +2085,28 @@ impl WindowAggregateOperator {
         &mut self,
         update: InputBatchUpdate,
         next_metrics: LateMetricDelta,
-        encoded: Option<Vec<u8>>,
+        checkpointing: bool,
         context: &StreamOperatorContext<'_>,
     ) {
         self.install_context_identity(context);
         self.state.metrics = next_metrics;
         self.state.accumulator_bytes = update.usage.bytes;
-        for (key, accumulator) in update.accumulators {
-            if context.job().checkpointing() {
-                self.state.dirty.insert(key.clone());
+        if checkpointing {
+            for key in update.accumulators.keys() {
+                if self.state.checkpoint_marks.contains_key(key) {
+                    continue;
+                }
+                let created = !self.state.accumulators.contains_key(key);
+                self.state.checkpoint_marks.insert(
+                    key.clone(),
+                    CheckpointMark {
+                        created,
+                        closed_group_values: None,
+                    },
+                );
             }
-            self.state.accumulators.insert(key, accumulator);
         }
-        if let Some(encoded) = encoded {
-            self.state.prepared_segments.push(PreparedStateSegment {
-                kind: SegmentKind::Delta,
-                bytes: encoded,
-            });
-        }
+        self.state.accumulators.extend(update.accumulators);
     }
 
     fn decode_snapshot_segments(
@@ -1652,7 +2187,9 @@ impl WindowAggregateOperator {
             last_checkpoint_epoch: Some(metadata.epoch),
             pipeline_fingerprint: metadata.pipeline_fingerprint,
             operator_id: metadata.operator_id,
-            ..WindowState::default()
+            // The restored content is exactly what durable checkpoints
+            // persist, so no operation is pending afterwards.
+            checkpoint_marks: HashMap::default(),
         };
         Ok(())
     }
@@ -1753,7 +2290,7 @@ fn record_late_assignment(
 /// stores `i64` values.
 struct EventTimeColumn<'a> {
     array: &'a dyn Array,
-    data_type: &'a DataType,
+    unit: TimeUnit,
     values: &'a [i64],
 }
 
@@ -1761,45 +2298,59 @@ impl<'a> EventTimeColumn<'a> {
     fn new(record: &'a RecordBatch, index: usize, operator_id: &str) -> Result<Self> {
         let array = record.column(index).as_ref();
         let data_type = record.schema_ref().field(index).data_type();
-        let values = match data_type {
-            DataType::Timestamp(TimeUnit::Second, _) => downcast_array::<TimestampSecondArray>(
+        let unit = match data_type {
+            DataType::Timestamp(TimeUnit::Second, timezone) => {
+                validate_event_time_timezone(timezone.as_deref(), operator_id)?;
+                TimeUnit::Second
+            }
+            DataType::Timestamp(TimeUnit::Millisecond, timezone) => {
+                validate_event_time_timezone(timezone.as_deref(), operator_id)?;
+                TimeUnit::Millisecond
+            }
+            DataType::Timestamp(TimeUnit::Microsecond, timezone) => {
+                validate_event_time_timezone(timezone.as_deref(), operator_id)?;
+                TimeUnit::Microsecond
+            }
+            DataType::Timestamp(TimeUnit::Nanosecond, timezone) => {
+                validate_event_time_timezone(timezone.as_deref(), operator_id)?;
+                TimeUnit::Nanosecond
+            }
+            _ => {
+                return Err(operator_error(
+                    operator_id,
+                    "compiled event-time column is not a timestamp",
+                ));
+            }
+        };
+        let values = match unit {
+            TimeUnit::Second => downcast_array::<TimestampSecondArray>(
                 array,
                 operator_id,
                 "event-time timestamp(second)",
             )
             .map(|array| array.values().as_ref()),
-            DataType::Timestamp(TimeUnit::Millisecond, _) => {
-                downcast_array::<TimestampMillisecondArray>(
-                    array,
-                    operator_id,
-                    "event-time timestamp(millisecond)",
-                )
-                .map(|array| array.values().as_ref())
-            }
-            DataType::Timestamp(TimeUnit::Microsecond, _) => {
-                downcast_array::<TimestampMicrosecondArray>(
-                    array,
-                    operator_id,
-                    "event-time timestamp(microsecond)",
-                )
-                .map(|array| array.values().as_ref())
-            }
-            DataType::Timestamp(TimeUnit::Nanosecond, _) => {
-                downcast_array::<TimestampNanosecondArray>(
-                    array,
-                    operator_id,
-                    "event-time timestamp(nanosecond)",
-                )
-                .map(|array| array.values().as_ref())
-            }
-            _ => Err(operator_error(
+            TimeUnit::Millisecond => downcast_array::<TimestampMillisecondArray>(
+                array,
                 operator_id,
-                "compiled event-time column is not a timestamp",
-            )),
+                "event-time timestamp(millisecond)",
+            )
+            .map(|array| array.values().as_ref()),
+            TimeUnit::Microsecond => downcast_array::<TimestampMicrosecondArray>(
+                array,
+                operator_id,
+                "event-time timestamp(microsecond)",
+            )
+            .map(|array| array.values().as_ref()),
+            TimeUnit::Nanosecond => downcast_array::<TimestampNanosecondArray>(
+                array,
+                operator_id,
+                "event-time timestamp(nanosecond)",
+            )
+            .map(|array| array.values().as_ref()),
         }?;
         Ok(Self {
             array,
-            data_type,
+            unit,
             values,
         })
     }
@@ -1808,7 +2359,7 @@ impl<'a> EventTimeColumn<'a> {
         if self.array.is_null(row) {
             return Ok(None);
         }
-        EventTime::import_timestamp(self.values[row], self.data_type, column)
+        EventTime::import_timestamp_unit(self.values[row], self.unit, column)
             .map(Some)
             .map_err(|error| {
                 operator_error(
@@ -1819,18 +2370,74 @@ impl<'a> EventTimeColumn<'a> {
     }
 }
 
+/// Validates the timezone once per record column; compilation already pins
+/// it, so this is the defensive duplicate of `validate_event_time_type`.
+fn validate_event_time_timezone(timezone: Option<&str>, operator_id: &str) -> Result<()> {
+    if let Some(timezone) = timezone
+        && timezone != "UTC"
+    {
+        return Err(operator_error(
+            operator_id,
+            &format!(
+                "event-time columns must be timezone-naive (UTC) or \"UTC\", found {timezone:?}"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Returns the event's window assignments, earliest window first, without
 /// allocating. Starts and ends grow monotonically with the window, so
 /// validating the two extremes up front validates every assignment and keeps
 /// the eager error precedence.
+#[cfg(test)]
 fn window_assignments(
     event_time: EventTime,
     geometry: CompiledWindowGeometry,
 ) -> std::result::Result<impl Iterator<Item = (EventTime, EventTime)> + Clone, String> {
-    let time = i128::from(event_time.as_micros());
+    let slide = i128::from(geometry.slide_micros);
+    let latest_start = i128::from(event_time.as_micros()).div_euclid(slide) * slide;
+    assignments_from_latest(latest_start, geometry)
+}
+
+/// Resolves the latest window start for one event time, computing in `i64`
+/// and reusing the cached slide interval while consecutive rows land in the
+/// same one; degenerate arithmetic falls back to `i128` so error behavior is
+/// unchanged.
+fn latest_window_start(
+    event_time: EventTime,
+    geometry: CompiledWindowGeometry,
+    cache: &mut Option<(i128, i128)>,
+) -> i128 {
+    let micros = i128::from(event_time.as_micros());
+    if let Some((start, next)) = cache
+        && micros >= *start
+        && micros < *next
+    {
+        return *start;
+    }
+    let slide = i128::from(geometry.slide_micros);
+    let start = match i64::try_from(geometry.slide_micros) {
+        Ok(slide64) => match event_time
+            .as_micros()
+            .div_euclid(slide64)
+            .checked_mul(slide64)
+        {
+            Some(start) => i128::from(start),
+            None => micros.div_euclid(slide) * slide,
+        },
+        Err(_) => micros.div_euclid(slide) * slide,
+    };
+    *cache = Some((start, start + slide));
+    start
+}
+
+fn assignments_from_latest(
+    latest_start: i128,
+    geometry: CompiledWindowGeometry,
+) -> std::result::Result<impl Iterator<Item = (EventTime, EventTime)> + Clone, String> {
     let size = i128::from(geometry.size_micros);
     let slide = i128::from(geometry.slide_micros);
-    let latest_start = time.div_euclid(slide) * slide;
     let assignment = move |offset| window_assignment(latest_start, slide, size, offset);
     assignment(geometry.overlap - 1)?;
     assignment(0)?;
@@ -2309,19 +2916,18 @@ fn increment_average_count(count: &mut u64) -> std::result::Result<(), String> {
 }
 
 fn build_output_record(
-    keys: &[WindowKey],
-    state: &BTreeMap<WindowKey, AccumulatorRow>,
+    entries: &BTreeMap<WindowKey, AccumulatorRow>,
     spec: &WindowSpec,
     compiled: &CompiledWindowSpec,
     schema: &SchemaRef,
     operator_id: &str,
 ) -> Result<RecordBatch> {
-    let starts = keys
-        .iter()
+    let starts = entries
+        .keys()
         .map(|key| key.start.as_micros())
         .collect::<Vec<_>>();
-    let ends = keys
-        .iter()
+    let ends = entries
+        .keys()
         .map(|key| key.end.as_micros())
         .collect::<Vec<_>>();
     let mut arrays: Vec<ArrayRef> = vec![
@@ -2330,18 +2936,19 @@ fn build_output_record(
     ];
 
     for (ordinal, group) in compiled.group_columns.iter().enumerate() {
-        let values = keys
-            .iter()
-            .map(|key| state[key].group_values[ordinal].clone())
-            .collect::<Vec<_>>();
-        arrays.push(scalar_array(&group.data_type, &values, operator_id)?);
+        arrays.push(group_output_array(
+            entries,
+            ordinal,
+            &group.data_type,
+            operator_id,
+        )?);
     }
     for (ordinal, (aggregate, compiled_aggregate)) in
         spec.aggregates.iter().zip(&compiled.aggregates).enumerate()
     {
-        let values = keys
-            .iter()
-            .map(|key| finalize_accumulator(&state[key].aggregates[ordinal]))
+        let values = entries
+            .values()
+            .map(|entry| finalize_accumulator(&entry.aggregates[ordinal]))
             .collect::<Result<Vec<_>>>()?;
         arrays.push(scalar_array(
             &compiled_aggregate.output_type,
@@ -2361,6 +2968,47 @@ fn build_output_record(
             &format!("window output RecordBatch construction failed: {error}"),
         )
     })
+}
+
+/// Builds one group column straight from owned entries: string values are
+/// borrowed into the Arrow builder, skipping the per-cell `String` clone.
+fn group_output_array(
+    entries: &BTreeMap<WindowKey, AccumulatorRow>,
+    ordinal: usize,
+    data_type: &DataType,
+    operator_id: &str,
+) -> Result<ArrayRef> {
+    match data_type {
+        DataType::Utf8 => {
+            let values = entries
+                .values()
+                .map(|entry| borrowed_group_string(entry, ordinal))
+                .collect::<Result<Vec<_>>>()?;
+            Ok(Arc::new(StringArray::from(values)))
+        }
+        DataType::LargeUtf8 => {
+            let values = entries
+                .values()
+                .map(|entry| borrowed_group_string(entry, ordinal))
+                .collect::<Result<Vec<_>>>()?;
+            Ok(Arc::new(LargeStringArray::from(values)))
+        }
+        _ => {
+            let values = entries
+                .values()
+                .map(|entry| entry.group_values[ordinal].clone())
+                .collect::<Vec<_>>();
+            scalar_array(data_type, &values, operator_id)
+        }
+    }
+}
+
+fn borrowed_group_string(entry: &AccumulatorRow, ordinal: usize) -> Result<Option<&str>> {
+    match &entry.group_values[ordinal] {
+        Some(ScalarValue::String(value)) => Ok(Some(value.as_str())),
+        None => Ok(None),
+        Some(_) => Err(internal_error("string output scalar type mismatch")),
+    }
 }
 
 fn finalize_accumulator(accumulator: &AccumulatorValue) -> Result<Option<ScalarValue>> {
@@ -2787,12 +3435,23 @@ fn compile_spec(
     let group_columns = compile_group_columns(input_schema, spec)?;
     let aggregates = compile_aggregates(input_schema, spec)?;
     let geometry = compile_geometry(spec.geometry);
+    let tracks_dynamic_bytes =
+        spec.aggregates
+            .iter()
+            .zip(&aggregates)
+            .any(|(aggregate, compiled)| {
+                matches!(
+                    aggregate.function,
+                    AggregateFunction::Min | AggregateFunction::Max
+                ) && matches!(compiled.input_type, DataType::Utf8 | DataType::LargeUtf8)
+            });
     let canonical = canonical_json(&Value::Object(configuration.clone().into_iter().collect()))?;
     let mut compiled = CompiledWindowSpec {
         event_time_index,
         group_columns,
         aggregates,
         geometry,
+        tracks_dynamic_bytes,
         configuration_hash: hex::encode(Sha256::digest(canonical.as_bytes())),
         state_schema_fingerprint: String::new(),
     };
@@ -4230,6 +4889,70 @@ mod tests {
         }
     }
 
+    /// The slide-interval cache must reproduce the eager assignment path
+    /// exactly, across repeats, interval crossings in both directions, and
+    /// the i64 extremes.
+    #[test]
+    fn cached_latest_window_start_matches_eager_assignments() {
+        let geometries = [
+            (1, 1),
+            (100, 100),
+            (100, 10),
+            (1_024, 1),
+            (1 << 62, 1 << 52),
+            (1 << 63, 1 << 63),
+            (1 << 63, 1 << 54),
+            (u64::MAX, u64::MAX),
+        ];
+        let times = [
+            0_i64,
+            0,
+            1,
+            99,
+            100,
+            100,
+            101,
+            99,
+            0,
+            -1,
+            -100,
+            -101,
+            -100,
+            -1,
+            0,
+            1,
+            99,
+            100,
+            i64::MIN,
+            i64::MIN + 1,
+            i64::MIN + 99,
+            i64::MAX - 1_023,
+            i64::MAX - 1,
+            i64::MAX,
+            7,
+            7,
+        ];
+        for (size_micros, slide_micros) in geometries {
+            let geometry = CompiledWindowGeometry {
+                size_micros,
+                slide_micros,
+                overlap: size_micros / slide_micros,
+            };
+            let mut cache = None;
+            for time in times {
+                let event_time = EventTime::from_micros(time);
+                let latest = latest_window_start(event_time, geometry, &mut cache);
+                let cached =
+                    assignments_from_latest(latest, geometry).map(Iterator::collect::<Vec<_>>);
+                assert_eq!(
+                    cached,
+                    eager_window_assignments(event_time, geometry),
+                    "size={size_micros} slide={slide_micros} time={time}"
+                );
+            }
+        }
+    }
+
     fn budget_test_batch(times: &[i64]) -> Batch {
         let schema = Arc::new(Schema::new(vec![
             Field::new(
@@ -4280,16 +5003,17 @@ mod tests {
         )
     }
 
+    struct RejectOutput;
+
+    #[async_trait]
+    impl StreamCollector for RejectOutput {
+        async fn emit(&mut self, _port: &str, _batch: Batch) -> Result<()> {
+            Err(operator_error("window", "output rejected"))
+        }
+    }
+
     #[tokio::test]
     async fn test_checkpoint_disabled_window_releases_only_accepted_output() {
-        struct RejectOutput;
-        #[async_trait]
-        impl StreamCollector for RejectOutput {
-            async fn emit(&mut self, _port: &str, _batch: Batch) -> Result<()> {
-                Err(operator_error("window", "output rejected"))
-            }
-        }
-
         let mut operator = checkpoint_segment_operator();
         operator
             .set_state_budget(StateBudget::new(1, 1_048_576).unwrap())
@@ -4304,7 +5028,6 @@ mod tests {
         assert_eq!(operator.state.accumulators.len(), 1);
         assert!(operator.state.accumulator_bytes > 0);
         assert!(operator.state.prepared_segments.is_empty());
-        assert!(operator.state.dirty.is_empty());
         let before_bytes = operator.state.accumulator_bytes;
         let error = operator
             .on_watermark(
@@ -4318,7 +5041,6 @@ mod tests {
         assert_eq!(operator.state.accumulators.len(), 1);
         assert_eq!(operator.state.accumulator_bytes, before_bytes);
         assert!(operator.state.last_input_watermark.is_none());
-        assert!(operator.state.emitted_pending_snapshot.is_empty());
         operator
             .on_watermark(EventTime::from_micros(60_000_000), &context, &mut output)
             .await
@@ -4327,7 +5049,6 @@ mod tests {
         assert_eq!(emitted[0].as_data().unwrap().num_rows(), 1);
         assert!(operator.state.accumulators.is_empty());
         assert_eq!(operator.state.accumulator_bytes, 0);
-        assert!(operator.state.emitted_pending_snapshot.is_empty());
         assert!(operator.state.prepared_segments.is_empty());
         operator
             .process_data(
@@ -4342,7 +5063,6 @@ mod tests {
         assert_eq!(output.drain("output")[0].as_data().unwrap().num_rows(), 1);
         assert!(operator.state.accumulators.is_empty());
         assert_eq!(operator.state.accumulator_bytes, 0);
-        assert!(operator.state.emitted_pending_snapshot.is_empty());
         assert!(operator.state.prepared_segments.is_empty());
     }
 
@@ -4486,7 +5206,145 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn window_state_budget_releases_closed_groups_after_checkpoint() {
+    async fn checkpointing_window_releases_only_accepted_output() {
+        let mut operator = checkpoint_segment_operator();
+        let job = budget_test_job();
+        let context = StreamOperatorContext::new(&job, "window", None);
+        let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data("input", budget_test_batch(&[0, 1]), &context, &mut output)
+            .await
+            .unwrap();
+        let before_bytes = operator.state.accumulator_bytes;
+        let error = operator
+            .on_watermark(
+                EventTime::from_micros(60_000_000),
+                &context,
+                &mut RejectOutput,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("output rejected"));
+        assert_eq!(operator.state.accumulators.len(), 1);
+        assert_eq!(operator.state.accumulator_bytes, before_bytes);
+        assert!(operator.state.last_input_watermark.is_none());
+        assert!(operator.state.prepared_segments.is_empty());
+
+        operator
+            .on_watermark(EventTime::from_micros(60_000_000), &context, &mut output)
+            .await
+            .unwrap();
+        assert_eq!(output.drain("output")[0].as_data().unwrap().num_rows(), 1);
+        assert!(operator.state.accumulators.is_empty());
+        assert_eq!(operator.state.accumulator_bytes, 0);
+        // The window opened and closed inside one epoch, so its upsert and
+        // tombstone cancel out: the checkpoint carries no segments at all.
+        assert!(operator.state.prepared_segments.is_empty());
+        let snapshot = operator.checkpoint(crate::Epoch::INITIAL).unwrap();
+        assert!(snapshot.segments.is_empty());
+    }
+
+    /// A rejected close must leave the complete window state — accumulators,
+    /// budget charge, watermark, output sequence, and pending checkpoint
+    /// operations — bit-identical to an operator that never attempted it.
+    #[tokio::test]
+    async fn rejected_prefix_close_preserves_state_identically() {
+        let job = budget_test_job();
+        let context = StreamOperatorContext::new(&job, "window", None);
+        let batches = [
+            budget_test_batch(&[0, 1, 60_000_000]),
+            budget_test_batch(&[120_000_000, 2]),
+        ];
+
+        let mut pristine = checkpoint_segment_operator();
+        let mut ignored = crate::EdgeCollector::new(pristine.output_ports().to_vec());
+        for batch in batches.iter().cloned() {
+            pristine
+                .process_data("input", batch, &context, &mut ignored)
+                .await
+                .unwrap();
+        }
+        let before = pristine.checkpoint(crate::Epoch::INITIAL).unwrap();
+
+        let mut operator = checkpoint_segment_operator();
+        let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+        for batch in batches {
+            operator
+                .process_data("input", batch, &context, &mut output)
+                .await
+                .unwrap();
+        }
+        let error = operator
+            .on_watermark(
+                EventTime::from_micros(180_000_000),
+                &context,
+                &mut RejectOutput,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("output rejected"));
+        let after = operator.checkpoint(crate::Epoch::INITIAL).unwrap();
+        assert_eq!(before.inline_metadata, after.inline_metadata);
+        assert_eq!(before.segments, after.segments);
+
+        operator
+            .on_watermark(EventTime::from_micros(180_000_000), &context, &mut output)
+            .await
+            .unwrap();
+        let emitted = output.drain("output");
+        assert_eq!(emitted.len(), 1);
+        let record = emitted[0].as_data().unwrap();
+        assert_eq!(record.table_payload().unwrap().batches()[0].num_rows(), 3);
+        assert!(operator.state.accumulators.is_empty());
+        assert_eq!(operator.state.accumulator_bytes, 0);
+    }
+
+    /// A chunking failure happens before any emission, so the closed prefix
+    /// must be merged back: accumulators, budget charge, watermark, and
+    /// pending checkpoint marks stay retryable.
+    #[tokio::test]
+    async fn failed_output_chunking_restores_the_closed_prefix() {
+        let mut operator = checkpoint_segment_operator();
+        let job = budget_test_job();
+        let context = StreamOperatorContext::new(&job, "window", None);
+        let tiny = StreamOperatorContext::new(&job, "window", None)
+            .with_output_budget(crate::EdgeBudget::new(1, 8).unwrap());
+        let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data("input", budget_test_batch(&[0, 1]), &context, &mut output)
+            .await
+            .unwrap();
+        let before_bytes = operator.state.accumulator_bytes;
+
+        let error = operator
+            .on_watermark(EventTime::from_micros(60_000_000), &tiny, &mut output)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("byte budget"), "{error}");
+        assert_eq!(operator.state.accumulators.len(), 1);
+        assert_eq!(operator.state.accumulator_bytes, before_bytes);
+        assert!(operator.state.last_input_watermark.is_none());
+        assert!(operator.state.prepared_segments.is_empty());
+        assert!(
+            operator
+                .state
+                .checkpoint_marks
+                .values()
+                .all(|mark| mark.closed_group_values.is_none()),
+            "a failed close must not mark tombstones"
+        );
+
+        operator
+            .on_watermark(EventTime::from_micros(60_000_000), &context, &mut output)
+            .await
+            .unwrap();
+        assert_eq!(output.drain("output")[0].as_data().unwrap().num_rows(), 1);
+        assert!(operator.state.accumulators.is_empty());
+        assert_eq!(operator.state.accumulator_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn window_state_budget_releases_closed_groups_when_emitted() {
         let mut operator = checkpoint_segment_operator();
         operator
             .set_state_budget(StateBudget::new(1, 1_048_576).unwrap())
@@ -4503,8 +5361,6 @@ mod tests {
             .on_watermark(EventTime::from_micros(60_000_000), &context, &mut output)
             .await
             .unwrap();
-        assert_eq!(operator.state.accumulators.len(), 1);
-        operator.checkpoint(crate::Epoch::INITIAL).unwrap();
         assert!(operator.state.accumulators.is_empty());
         assert_eq!(operator.state.accumulator_bytes, 0);
 
@@ -4518,6 +5374,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(operator.state.accumulators.len(), 1);
+        let open_bytes = operator.state.accumulator_bytes;
+        operator.checkpoint(crate::Epoch::INITIAL).unwrap();
+        assert_eq!(operator.state.accumulators.len(), 1);
+        assert_eq!(operator.state.accumulator_bytes, open_bytes);
     }
 
     #[tokio::test]

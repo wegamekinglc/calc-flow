@@ -43,7 +43,7 @@ TITLES = {
     2: "Sealed-dimension Join, 10M quotes",
     3: "Fully retained Join, 1M to 4M scaling",
     4: "Join snapshot and restore, 1M resident rows",
-    5: "500-row Join handler after compaction, 1M resident rows",
+    5: "500-row Join handler during compaction, 1M resident rows",
     6: "ASOF, 1M rows per side",
     7: "ASOF instrumented harness overhead, 1M per side / 1024-row messages",
     8: "Join callback, 1M quotes / 1024-row messages",
@@ -330,7 +330,8 @@ def _compaction_target(cases: list[dict]) -> dict:
         else None
     )
     baseline = {
-        "ratio_of_p50": base_ratio,
+        "ratio_of_p50": None,
+        "post_compaction_ratio_of_p50": base_ratio,
         "armed": armed["baseline"],
         "steady": steady["baseline"],
         "status": "diagnostic"
@@ -348,15 +349,17 @@ def _compaction_target(cases: list[dict]) -> dict:
         "mode": "intrinsically-enabled",
         "baseline": baseline,
         "off": "not-applicable: compaction is absent",
-        "ratio_of_p50": ratio,
+        "ratio_of_p50": None,
+        "post_compaction_ratio_of_p50": ratio,
+        "timing_scope": "post-compaction-handler",
         "target": 2.0,
-        "target_status": _target_status(ratio, 2.0),
+        "target_status": "unmeasured",
         "armed": armed["candidate"],
         "steady": steady["candidate"],
         "uncertainty": (
-            "Armed/steady phases share each physical invocation; the displayed "
-            "target is the ratio of their group medians. Revision AB/BA is a "
-            "separate comparison."
+            "Preparation completes before either handler; no overlapping "
+            "compaction execution is measured. Post-compaction diagnostic ratios "
+            "use group medians; revision AB/BA is a separate comparison."
         ),
     }
 
@@ -494,8 +497,9 @@ def _target_cell(target: dict) -> str:
         )
     if row == 5:
         return (
-            f"Enabled ratio of p50 {_number(target['ratio_of_p50'])} "
-            f"(≤2: {target['target_status']})"
+            "During-compaction target unmeasured (≤2); "
+            "post-compaction handler ratio of p50 "
+            f"{_number(target['post_compaction_ratio_of_p50'])} (diagnostic)"
         )
     return "; ".join(
         f"{item['side']}/{item['mode']}: "
@@ -525,8 +529,9 @@ def _main_cell(target: dict) -> str:
     if target["row"] == 5:
         baseline = target["baseline"]
         return (
-            f"Enabled ratio of p50 {_number(baseline['ratio_of_p50'])} "
-            f"({baseline['status']}); "
+            "Post-compaction handler ratio of p50 "
+            f"{_number(baseline['post_compaction_ratio_of_p50'])} "
+            f"(diagnostic; lifecycle {baseline['status']}); "
             f"armed {_stat_cell(baseline['armed']['statistics'])} s; "
             f"steady {_stat_cell(baseline['steady']['statistics'])} s"
         )

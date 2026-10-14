@@ -591,9 +591,12 @@ aggregates. `WindowAggregateOperator` is stream-only: it updates incremental
 state, classifies late row-window assignments against the current input
 watermark, emits closed windows in deterministic order, and snapshots retained
 Arrow IPC deltas. Retained accumulators have a default budget of one million
-windows and 256 MiB of logical charge. Rust callers can set a smaller limit
-through `WindowAggregateOperator::set_state_budget(StateBudget::new(...))`
-before adding the operator to a graph. Admission and restore reject state that
+windows and 256 MiB of logical charge. A window stops counting once its close
+is emitted, with checkpointing enabled or disabled, so the budget bounds open
+windows regardless of the checkpoint interval. Rust callers can set a
+different limit through
+`WindowAggregateOperator::set_state_budget(StateBudget::new(...))` before
+adding the operator to a graph. Admission and restore reject state that
 exceeds the budget; checkpoint segment copies and process RSS are separate.
 The complete
 [`windowed_streaming.rs`](../crates/calc-flow/examples/windowed_streaming.rs)
