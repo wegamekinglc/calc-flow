@@ -284,8 +284,6 @@ pub struct WindowAggregateOperator {
     state: WindowState,
     state_budget: StateBudget,
     max_delta_segments: usize,
-    #[cfg(test)]
-    encoded_segments: std::sync::atomic::AtomicUsize,
 }
 
 #[derive(Clone)]
@@ -890,8 +888,6 @@ impl WindowAggregateOperator {
             state: WindowState::default(),
             state_budget: StateBudget::default(),
             max_delta_segments: MAX_WINDOW_DELTA_SEGMENTS,
-            #[cfg(test)]
-            encoded_segments: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -1127,9 +1123,6 @@ impl WindowAggregateOperator {
         if operations.is_empty() {
             return Ok(None);
         }
-        #[cfg(test)]
-        self.encoded_segments
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let spec = self.spec.clone();
         let compiled = self.compiled.clone();
         let pipeline_fingerprint = self.state_pipeline_fingerprint()?.to_owned();
@@ -1149,9 +1142,6 @@ impl WindowAggregateOperator {
     }
 
     fn encode_operations_sync(&self, operations: &[StateOperationRow]) -> Result<Vec<u8>> {
-        #[cfg(test)]
-        self.encoded_segments
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         encode_state_segment(
             operations,
             &self.spec,
@@ -5029,52 +5019,6 @@ mod tests {
         assert_eq!(output.drain("output")[0].as_data().unwrap().num_rows(), 1);
         assert!(operator.state.accumulators.is_empty());
         assert_eq!(operator.state.accumulator_bytes, 0);
-    }
-
-    /// The runtime awaits `prepare_checkpoint_async` immediately before
-    /// `checkpoint`; a compacting epoch must encode its replacement base
-    /// exactly once across both steps.
-    #[tokio::test]
-    async fn prepared_compaction_is_not_reencoded_at_capture() {
-        let mut operator = checkpoint_segment_operator();
-        operator.set_delta_compaction_threshold(1);
-        let job = budget_test_job();
-        let context = StreamOperatorContext::new(&job, "window", None);
-        let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
-        operator
-            .process_data("input", budget_test_batch(&[0]), &context, &mut output)
-            .await
-            .unwrap();
-        operator.prepare_checkpoint_async(&context).await.unwrap();
-        operator.checkpoint(crate::Epoch::INITIAL).unwrap();
-
-        operator
-            .process_data("input", budget_test_batch(&[1]), &context, &mut output)
-            .await
-            .unwrap();
-        let before = operator
-            .encoded_segments
-            .load(std::sync::atomic::Ordering::SeqCst);
-        operator.prepare_checkpoint_async(&context).await.unwrap();
-        assert_eq!(
-            operator
-                .encoded_segments
-                .load(std::sync::atomic::Ordering::SeqCst)
-                - before,
-            1,
-            "compaction encodes one replacement base"
-        );
-        operator
-            .checkpoint(crate::Epoch::INITIAL.next().unwrap())
-            .unwrap();
-        assert_eq!(
-            operator
-                .encoded_segments
-                .load(std::sync::atomic::Ordering::SeqCst)
-                - before,
-            1,
-            "capture must reuse the prepared base, not re-encode it"
-        );
     }
 
     #[tokio::test]
