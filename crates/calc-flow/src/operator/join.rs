@@ -1826,6 +1826,7 @@ mod tests {
     mod ordered_probe_tests;
     mod output_gather_tests;
     mod owned_probe_tests;
+    mod persistent_dictionary_tests;
     mod sql_key_scratch_tests;
 
     async fn v1_fixture_captures() -> Vec<OperatorStateSnapshot> {
