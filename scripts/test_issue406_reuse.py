@@ -15,6 +15,81 @@ from scripts.benchmark_suite.issue406_reuse import (
 
 
 class HistoricalReuseTests(unittest.TestCase):
+    def test_ordinary_release_profile_requires_matching_source_seals(self):
+        from scripts.benchmark_suite.issue406_reuse import _ordinary_release_codegen
+        from scripts.toolkit import sha256_file
+
+        with TemporaryDirectory() as raw:
+            source = Path(raw)
+            manifest = source / "Cargo.toml"
+            manifest.write_text('[profile.release]\nlto="thin"\ncodegen-units=1\n')
+            digest = sha256_file(manifest)
+            build = {
+                "source": raw,
+                "source_files_sha256": {"Cargo.toml": digest},
+            }
+            sealed = {str(manifest): digest}
+            actual = _ordinary_release_codegen(build, sealed)
+            self.assertEqual(actual["calc_flow"]["linker-plugin-lto"], None)
+            self.assertEqual(actual["calc_flow_python"]["lto"], "thin")
+            self.assertEqual(actual["calc_flow"]["codegen-units"], "1")
+            with self.assertRaisesRegex(ValueError, "sealed"):
+                _ordinary_release_codegen(build, {})
+            with self.assertRaisesRegex(ValueError, "sealed"):
+                _ordinary_release_codegen({"source": raw}, sealed)
+            manifest.write_text("[workspace]\n")
+            with self.assertRaisesRegex(ValueError, "changed"):
+                _ordinary_release_codegen(build, sealed)
+
+    def test_ordinary_release_profile_rejects_other_codegen_policies(self):
+        from scripts.benchmark_suite.issue406_reuse import _ordinary_release_codegen
+        from scripts.toolkit import sha256_file
+
+        with TemporaryDirectory() as raw:
+            manifest = Path(raw) / "Cargo.toml"
+            for source in (
+                "profile=false\n",
+                "[profile]\nrelease=false\n",
+                '[profile.release]\nlto="fat"\ncodegen-units=1\n',
+                '[profile.release]\nlto="thin"\ncodegen-units=true\n',
+                '[profile.release]\nlto="thin"\ncodegen-units=16\n',
+                '[profile.release]\nlto="thin"\ncodegen-units=1\nopt-level=2\n',
+                "[profile.release.package.calc-flow]\ncodegen-units=1\n",
+            ):
+                manifest.write_text(source)
+                digest = sha256_file(manifest)
+                build = {
+                    "source": raw,
+                    "source_files_sha256": {"Cargo.toml": digest},
+                }
+                with (
+                    self.subTest(source=source),
+                    self.assertRaisesRegex(ValueError, "profile"),
+                ):
+                    _ordinary_release_codegen(build, {str(manifest): digest})
+
+    def test_ordinary_invocation_rejects_ambiguous_codegen_options(self):
+        from scripts.benchmark_suite.issue406_reuse import _ordinary_invocation
+
+        line = (
+            "Running `rustc --crate-name calc_flow -C opt-level=3 "
+            "-C embed-bitcode=no -C strip=debuginfo`"
+        )
+        for altered in (
+            line[:-1] + " -C opt-level=3`",
+            line[:-1] + " -C`",
+            line[:-1] + " -C hidden`",
+            line[:-1] + " --codegen opt-level=2`",
+            line[:-1] + " --codegen=lto=off`",
+            line[:-1] + " -g`",
+            line[:-1] + " -O`",
+        ):
+            with (
+                self.subTest(line=altered),
+                self.assertRaisesRegex(ValueError, "invocation"),
+            ):
+                _ordinary_invocation(altered, "calc_flow", set())
+
     def test_ordinary_binding_requires_exact_python_313_cfgs(self):
         from scripts.benchmark_suite.issue406_reuse import _ordinary_invocation
 
@@ -36,12 +111,25 @@ class HistoricalReuseTests(unittest.TestCase):
                 _ordinary_invocation(altered, "calc_flow_python", features)
 
     def test_ordinary_audit_binds_fresh_inventory_and_actual_release_invocations(self):
+        self._assert_ordinary_audit(False)
+
+    def test_ordinary_thin_lto_audit_requires_the_sealed_release_profile(self):
+        self._assert_ordinary_audit(True)
+
+    def _assert_ordinary_audit(self, thin_lto):
         from scripts.benchmark_suite.issue406_reuse import validate_ordinary_audit
         from scripts.toolkit import fingerprint_json, sha256_file, write_json
 
         with TemporaryDirectory() as raw:
             root = Path(raw)
             source = root / "source"
+            source.mkdir()
+            manifest = source / "Cargo.toml"
+            manifest.write_text(
+                '[profile.release]\nlto = "thin"\ncodegen-units = 1\n'
+                if thin_lto
+                else "[workspace]\n"
+            )
             descriptor = {
                 "build_metadata": str(root / "build.json"),
                 "native_sha256": "a" * 64,
@@ -110,6 +198,13 @@ class HistoricalReuseTests(unittest.TestCase):
                 "--cfg Py_3_7 --cfg Py_3_8 --cfg Py_3_9 --cfg Py_3_10 "
                 "--cfg Py_3_11 --cfg Py_3_12 --cfg Py_3_13`"
             )
+            if thin_lto:
+                core = core.replace(
+                    "-C embed-bitcode=no", "-C linker-plugin-lto -C codegen-units=1"
+                )
+                binding = binding.replace(
+                    "-C embed-bitcode=no", "-C lto=thin -C codegen-units=1"
+                )
             log = root / "candidate-build.log"
             log.write_text(
                 core
@@ -138,8 +233,12 @@ class HistoricalReuseTests(unittest.TestCase):
             }
             path = root / "wheel-audit.json"
             write_json(path, audit)
-            sealed = {str(p): sha256_file(p) for p in (path, replay, log)}
-            build = {"source": str(source), "python": "python"}
+            sealed = {str(p): sha256_file(p) for p in (path, replay, log, manifest)}
+            build = {
+                "source": str(source),
+                "python": "python",
+                "source_files_sha256": {"Cargo.toml": sha256_file(manifest)},
+            }
             with patch(
                 "scripts.benchmark_suite.issue406_reuse._wheel_artifact_identity",
                 return_value=artifacts,

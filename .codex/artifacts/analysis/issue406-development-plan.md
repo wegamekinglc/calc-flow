@@ -35,6 +35,18 @@ The reviewed increments are locally integrated with published main
 issue/main Rust source bytes and both new stage seals; integrated core lib/test
 Clippy passes. This reviewed increment is unpushed and does not close406.
 
+The independent phase 0.5/D8 release-profile increment is locally reviewed at
+`b7c0abeb8e00848ee7f9dbb0b19be56ffef8b589`: workspace release builds use Thin
+LTO and one codegen unit, and ordinary compiler-audit validation selects exact
+flags from the sealed source manifest. Its
+[evidence](issue406-release-profile.md) and
+[final review](../reviews/issue406-release-profile.md) retain the focused
+configuration/validator tests and real tiny compiler-fixture witness. No
+calc-flow wheel, cross-platform artifact, paired timing or new target verdict
+is established. The separate incoming Join batch-admission work is in progress;
+its TDD failures and clarified ownership/funding spec precede implementation.
+All eight targets and remaining phases remain active.
+
 ## Current stage, October 13, 2026
 
 The complete eight-workload objective remains active. PR #407's implementation

@@ -104,6 +104,11 @@ runtime and extension authors can find crate installation and examples in the
 The source build writes release artifacts and tool caches beneath `target/`.
 The final environment contains a non-editable core wheel installation.
 
+Workspace release builds, including Python wheels, use Thin LTO and one codegen
+unit, configured as `lto = "thin"` and `codegen-units = 1` in
+[Cargo.toml](../Cargo.toml). Cargo's `bench` profile inherits these settings;
+ordinary development and test builds use their default profiles.
+
 ### Linux and WSL
 
 ```bash
