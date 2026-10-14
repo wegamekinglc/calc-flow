@@ -369,29 +369,35 @@ fn columnar_equivalence_record() -> RecordBatch {
     };
     for _ in 0..512 {
         let roll = next();
-        times.push(match roll % 8 {
-            0 => None,
-            _ => Some(i64::try_from(roll % 45).unwrap() - 5),
+        times.push(if roll.is_multiple_of(8) {
+            None
+        } else {
+            Some(i64::try_from(roll % 45).unwrap() - 5)
         });
-        group_column.push(match roll % 11 {
-            0 => None,
-            value => Some(groups[usize::try_from(value % 3).unwrap()]),
+        group_column.push(if roll.is_multiple_of(11) {
+            None
+        } else {
+            Some(groups[usize::try_from(roll % 3).unwrap()])
         });
-        signed.push(match roll % 5 {
-            0 => None,
-            _ => Some(i64::try_from(roll % 2001).unwrap() - 1000),
+        signed.push(if roll.is_multiple_of(5) {
+            None
+        } else {
+            Some(i64::try_from(roll % 2001).unwrap() - 1000)
         });
-        unsigned.push(match roll % 7 {
-            0 => None,
-            _ => Some(roll % 10_000),
+        unsigned.push(if roll.is_multiple_of(7) {
+            None
+        } else {
+            Some(roll % 10_000)
         });
-        float_column.push(match roll % 6 {
-            0 => None,
-            _ => Some(floats[usize::try_from(roll / 6).unwrap() % floats.len()]),
+        float_column.push(if roll.is_multiple_of(6) {
+            None
+        } else {
+            Some(floats[usize::try_from(roll / 6).unwrap() % floats.len()])
         });
-        small.push(match roll % 4 {
-            0 => None,
-            _ => Some(f32::from(u16::try_from(roll % 1000).unwrap()) * 0.25 - 100.0),
+        small.push(if roll.is_multiple_of(4) {
+            None
+        } else {
+            Some(f32::from(u16::try_from(roll % 1000).unwrap()) * 0.25 - 100.0)
         });
     }
     RecordBatch::try_new(
