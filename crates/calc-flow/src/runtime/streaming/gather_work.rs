@@ -348,6 +348,8 @@ pub(crate) struct GatherStop {
     cancellation: CancellationToken,
     deadline: Option<DateTime<Utc>>,
     abandoned: Arc<AtomicBool>,
+    #[cfg(test)]
+    check_hook: Option<Arc<dyn Fn(bool) + Send + Sync>>,
 }
 
 impl GatherStop {
@@ -357,10 +359,16 @@ impl GatherStop {
             cancellation: job.cancellation().clone(),
             deadline: job.deadline().copied(),
             abandoned: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            check_hook: None,
         }
     }
 
     pub(crate) fn check(&self) -> Result<()> {
+        #[cfg(test)]
+        if let Some(hook) = &self.check_hook {
+            hook(false);
+        }
         if self.abandoned.load(Ordering::Acquire)
             || self.cancellation.is_cancelled()
             || self.deadline.is_some_and(|deadline| Utc::now() >= deadline)
@@ -370,8 +378,33 @@ impl GatherStop {
         Ok(())
     }
 
+    /// Polls only the attempt's shared stop flag. The ticket owner must drive
+    /// cancellation/deadline waiting and drop the ticket on stop; admission and
+    /// result settlement must still use `check`.
+    pub(crate) fn check_abandoned(&self) -> Result<()> {
+        #[cfg(test)]
+        if let Some(hook) = &self.check_hook {
+            hook(true);
+        }
+        if self.abandoned.load(Ordering::Acquire) {
+            return Err(cancelled(&self.run_id));
+        }
+        Ok(())
+    }
+
     fn abandon(&self) {
         self.abandoned.store(true, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_check_hook(mut self, hook: Arc<dyn Fn(bool) + Send + Sync>) -> Self {
+        self.check_hook = Some(hook);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn abandon_for_test(&self) {
+        self.abandon();
     }
 
     async fn wait(&self) {

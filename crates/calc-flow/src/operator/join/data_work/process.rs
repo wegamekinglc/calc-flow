@@ -16,6 +16,10 @@ use crate::{Result, StreamJobContext, StreamOperatorContext};
 use parking_lot::Mutex;
 use std::sync::Arc;
 
+#[cfg(test)]
+#[path = "../tests/probe_stop_tests.rs"]
+mod probe_stop_tests;
+
 struct Capture {
     declined: Option<(AdmittedBatch, Option<NativeKeys>)>,
     ready: Option<Arc<ProbeInputs>>,
@@ -303,6 +307,8 @@ async fn finish_probe_ticket<T: Send + 'static, U>(
     install: impl FnOnce(Vec<T>) -> Result<U>,
     #[cfg(test)] gate: Option<&super::ResultTestGate>,
 ) -> Result<U> {
+    // Grouped workers poll abandonment only. Keep this stop waiter active until
+    // settlement so cancellation/deadline drops the ticket and sets that flag.
     let output = tokio::select! {
         biased;
         () = probe_stop(context.job()) => {

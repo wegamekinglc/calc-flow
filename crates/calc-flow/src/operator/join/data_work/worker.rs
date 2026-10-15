@@ -10,6 +10,30 @@ use crate::{
 };
 use std::sync::Arc;
 
+const STOP_GROUP_ITEMS: usize = 4_096;
+
+/// A position pays for its first match (or miss); additional matches consume
+/// the same budget so neither long runs nor repeated short runs delay stopping.
+struct ProbeQuantum<'a> {
+    stop: &'a GatherStop,
+    remaining: usize,
+}
+
+impl<'a> ProbeQuantum<'a> {
+    fn new(stop: &'a GatherStop) -> Self {
+        Self { stop, remaining: 0 }
+    }
+
+    fn step(&mut self) -> Result<()> {
+        if self.remaining == 0 {
+            self.stop.check_abandoned()?;
+            self.remaining = STOP_GROUP_ITEMS;
+        }
+        self.remaining -= 1;
+        Ok(())
+    }
+}
+
 pub(super) struct CountWork {
     pub(super) inputs: Arc<ProbeInputs>,
     pub(super) limit: u64,
@@ -41,8 +65,9 @@ impl CountWork {
     fn count_range(&self, ordinal: usize, stop: &GatherStop) -> Result<usize> {
         let mut count = 0usize;
         let sentinel = partition::sentinel(self.limit);
+        let mut quantum = ProbeQuantum::new(stop);
         for position in partition::range(self.inputs.admitted.len(), ordinal) {
-            stop.check()?;
+            quantum.step()?;
             count = partition::add_count(count, self.inputs.count(position), self.limit)?;
             if Some(count) == sentinel {
                 break;
@@ -74,11 +99,12 @@ impl ParallelCpuWork for FillWork {
         stop.check()?;
         let credit = self.funding.unit();
         let mut pairs = Vec::with_capacity(self.counts.rows[ordinal]);
+        let mut quantum = ProbeQuantum::new(stop);
         for position in partition::range(self.inputs.admitted.len(), ordinal) {
-            stop.check()?;
+            quantum.step()?;
             for (ordinal, opposite_index) in self.inputs.matches(position).enumerate() {
-                if ordinal.is_multiple_of(256) {
-                    stop.check()?;
+                if ordinal > 0 {
+                    quantum.step()?;
                 }
                 pairs.push(MatchedPair {
                     pos: position,
