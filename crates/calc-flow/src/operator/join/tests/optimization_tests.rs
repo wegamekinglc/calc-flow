@@ -24,19 +24,8 @@ async fn assert_native_probe_resolves_each_distinct_key_once_before_both_window_
     let job = job();
     let context = StreamOperatorContext::new(&job, "match", None);
     let left = with_keys(&left_batch(vec![1, 0]), vec![7, 8]);
-    let prepared = operator
-        .prepare_batch("left", &left, &context)
-        .await
-        .unwrap();
-    let expiration_append = operator
-        .state
-        .left_expirations
-        .prepare_append(
-            &prepared.retained,
-            &prepared.chunks.indices,
-            &context,
-            false,
-        )
+    let (prepared, expiration_append) = operator
+        .prepare_data_append("left", &left, &context)
         .await
         .unwrap();
     operator

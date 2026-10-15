@@ -333,10 +333,12 @@ async fn probe_stop(job: &StreamJobContext) {
     let deadline = async {
         match job.deadline() {
             Some(deadline) => {
-                let delay = (*deadline - chrono::Utc::now())
-                    .to_std()
-                    .unwrap_or_default();
-                tokio::time::sleep(delay).await;
+                while chrono::Utc::now() < *deadline {
+                    let delay = (*deadline - chrono::Utc::now())
+                        .to_std()
+                        .unwrap_or_default();
+                    tokio::time::sleep(delay).await;
+                }
             }
             None => std::future::pending().await,
         }
