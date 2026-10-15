@@ -4,6 +4,7 @@ mod tests {
     mod columnar_charge_tests;
     mod complete_expiry_tests;
     mod expiration_heap_tests;
+    mod morsel_tests;
 
     use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
@@ -3325,6 +3326,7 @@ struct PreparedMatches {
     pairs: matches::Selection,
     keys: Option<native_lookup::NativeKeys>,
     credit: Option<datafusion::execution::memory_pool::MemoryReservation>,
+    deferred: Option<Box<data_work::DeferredProbe>>,
 }
 
 impl PreparedMatches {
@@ -3333,12 +3335,15 @@ impl PreparedMatches {
             pairs: pairs.into(),
             keys: None,
             credit: None,
+            deferred: None,
         }
     }
 }
 
 struct PreparedJoinBatch {
     output: matches::Selection,
+    deferred: Option<Box<data_work::DeferredProbe>>,
+    gathered: Option<data_work::GatheredOutput>,
     admitted: AdmittedBatch,
     incoming_is_left: bool,
     retained: Vec<StoredRow>,
@@ -3659,7 +3664,7 @@ impl StreamJoinOperator {
         &mut self,
         plan: &SidePlan,
         bundle: &mut AdmissionBundle,
-        matches: PreparedMatches,
+        mut matches: PreparedMatches,
         admitted_charges: Option<Vec<u64>>,
         context: &StreamOperatorContext<'_>,
     ) -> Result<PreparedJoinBatch> {
@@ -3696,9 +3701,18 @@ impl StreamJoinOperator {
                 context,
             )
             .await?;
+        let dictionary = matches
+            .keys
+            .as_mut()
+            .and_then(|keys| keys.dictionary.take());
+        if let Some(deferred) = &mut matches.deferred {
+            deferred.attach_keys(matches.keys.take());
+        }
         Ok(PreparedJoinBatch {
             chunks,
             output: matches.pairs,
+            deferred: matches.deferred,
+            gathered: None,
             admitted: std::mem::take(&mut bundle.admitted),
             incoming_is_left: plan.incoming_is_left,
             retained,
@@ -3706,7 +3720,7 @@ impl StreamJoinOperator {
             metrics: std::mem::take(&mut bundle.metrics),
             admitted_charges,
             native_append: None,
-            dictionary: matches.keys.and_then(|keys| keys.dictionary),
+            dictionary,
             legacy_key_references,
             _native_scratch: matches.credit,
         })
@@ -4024,6 +4038,7 @@ impl StreamJoinOperator {
                 pairs: Vec::new().into(),
                 keys,
                 credit: None,
+                deferred: None,
             });
         }
         let owned = self
@@ -4054,6 +4069,7 @@ impl StreamJoinOperator {
                 pairs: native.pairs,
                 keys: Some(keys),
                 credit: Some(native.credit),
+                deferred: None,
             });
         }
         let pairs = self.legacy_matches(plan, admitted, context).await?;
@@ -4061,6 +4077,7 @@ impl StreamJoinOperator {
             pairs: pairs.into(),
             keys: Some(keys),
             credit: None,
+            deferred: None,
         })
     }
 
@@ -4393,6 +4410,31 @@ impl StreamJoinOperator {
     /// and job convergence discards the run's state, so no resumption observes
     /// the emitted-but-uncommitted gap.
     async fn emit_prepared(
+        &mut self,
+        prepared: &PreparedJoinBatch,
+        context: &StreamOperatorContext<'_>,
+        output: &mut dyn StreamCollector,
+    ) -> Result<u64> {
+        if let Some(gathered) = &prepared.gathered {
+            let emitted = Self::prepared_emitted_count(
+                self.state.metrics.emitted_match_rows,
+                gathered.rows(),
+                &self.name,
+            )?;
+            gathered
+                .emit(
+                    &self.name,
+                    context,
+                    output,
+                    &mut self.state.next_output_sequence,
+                )
+                .await?;
+            return Ok(emitted);
+        }
+        self.emit_matched(prepared, context, output).await
+    }
+
+    async fn emit_matched(
         &mut self,
         prepared: &PreparedJoinBatch,
         context: &StreamOperatorContext<'_>,
@@ -4754,11 +4796,12 @@ impl StreamJoinOperator {
     async fn finish_data(
         &mut self,
         ingress: &str,
-        prepared: PreparedJoinBatch,
+        mut prepared: PreparedJoinBatch,
         expiration_append: expiration::AppendPlan,
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
+        self.finish_morsels(&mut prepared, context).await?;
         let emitted = self.emit_prepared(&prepared, context, output).await?;
         self.state.metrics.emitted_match_rows = emitted;
         self.commit_prepared(

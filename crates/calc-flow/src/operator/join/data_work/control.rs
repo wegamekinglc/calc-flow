@@ -78,5 +78,7 @@ pub(super) fn input_bytes(keys: usize, rows: usize, name: &str) -> Result<usize>
         caller,
         registration,
         registration,
+        // Deferred count snapshot, fallback lease and fused work descriptors.
+        4096,
     ])
 }

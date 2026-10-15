@@ -3,6 +3,10 @@ use std::sync::Arc;
 
 mod control;
 mod inputs;
+mod morsel;
+#[cfg(test)]
+pub(super) use morsel::configure_for_test;
+pub(super) use morsel::{DeferredProbe, GatheredOutput};
 mod pairs;
 mod partition;
 mod process;
@@ -15,10 +19,9 @@ pub(super) enum ProbeAttempt {
 
 const MIN_PROBE_ROWS: usize = 8_192;
 
-/// Estimated key-run visits a batch must promise before the owned parallel
-/// probe pays for its two gather dispatches. A live runtime round trip costs
-/// roughly 10 ms per submission while the serial probe handles about
-/// 8 ms per 64k one-to-one rows, so thin one-to-one shapes must stay serial.
+/// Minimum estimated key-run visits for parallel work. Empty observed dispatch
+/// medians were 45/88 us at one/four units on the D7 development runner. Keep
+/// thin one-to-one batches serial until release crossover evidence warrants it.
 pub(in crate::operator::join) const PARALLEL_PROBE_MIN_VISITS: usize = 320_000;
 
 #[cfg(test)]

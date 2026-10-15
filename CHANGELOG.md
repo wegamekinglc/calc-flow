@@ -9,6 +9,11 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-16: Add bounded Join probe/gather morsels on the existing native pool.
+  Large eligible batches use up to four stable input ranges, with global match
+  limits and state admission before output work. Keep funded serial fallbacks,
+  cancellation cleanup, V1 charges and checkpoint formats unchanged.
+
 - 2026-10-16: Merge general ASOF integer-sequence batches into reserved columns
   by key, preserving unordered input positions and duplicate identity history.
   Finalization caches each key's latest Arrow payload route and advances

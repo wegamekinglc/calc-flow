@@ -24,6 +24,14 @@ struct Capture {
     declined: Option<(AdmittedBatch, Option<NativeKeys>)>,
     ready: Option<Arc<ProbeInputs>>,
 }
+
+enum ProbeOutput {
+    Pairs(PairOutput),
+    Counted(
+        Counts,
+        datafusion::execution::memory_pool::MemoryReservation,
+    ),
+}
 impl Capture {
     fn declined(admitted: AdmittedBatch, keys: Option<NativeKeys>) -> Self {
         Self {
@@ -58,7 +66,15 @@ impl StreamJoinOperator {
             }
             captured.ready.expect("captured probe inputs")
         };
-        let result = self.dispatch_native_probe(&inputs, context).await;
+        let result = match self.dispatch_native_probe(&inputs, context).await {
+            Ok(Some(ProbeOutput::Counted(counts, credit))) => {
+                return ProbeAttempt::Complete(
+                    self.defer_probe(inputs, admitted, counts, credit, context)
+                        .await,
+                );
+            }
+            other => other,
+        };
         let recovered = self.recover_probe(inputs, admitted, context).await;
         let keys = match recovered {
             Ok(recovered) => recovered,
@@ -66,11 +82,13 @@ impl StreamJoinOperator {
         };
         match result {
             Ok(None) => ProbeAttempt::Serial(Some(keys)),
-            Ok(Some(output)) => ProbeAttempt::Complete(Ok(PreparedMatches {
+            Ok(Some(ProbeOutput::Pairs(output))) => ProbeAttempt::Complete(Ok(PreparedMatches {
                 pairs: output.pairs,
                 keys: Some(keys),
                 credit: Some(output.credit),
+                deferred: None,
             })),
+            Ok(Some(ProbeOutput::Counted(..))) => unreachable!("counted probe deferred above"),
             Err(error) => ProbeAttempt::Complete(Err(error)),
         }
     }
@@ -115,11 +133,11 @@ impl StreamJoinOperator {
             .iter()
             .map(|key| key.as_ref().and_then(|key| index.key_id(key)))
             .collect::<Vec<_>>();
-        let estimated_visits: usize = slots
-            .iter()
-            .flatten()
-            .map(|&id| index.run_len_by_id(id))
-            .sum();
+        let estimated_visits = (0..admitted.len())
+            .filter_map(|position| slots[keys.id(position) as usize])
+            .fold(0usize, |total, id| {
+                total.saturating_add(index.run_len_by_id(id))
+            });
         if estimated_visits < super::probe_min_visits() {
             return Ok(Capture::declined(admitted, Some(keys)));
         }
@@ -155,7 +173,7 @@ impl StreamJoinOperator {
         &mut self,
         inputs: &Arc<ProbeInputs>,
         context: &StreamOperatorContext<'_>,
-    ) -> Result<Option<PairOutput>> {
+    ) -> Result<Option<ProbeOutput>> {
         let limit = self.spec.limits.max_matches_per_input_batch;
         let work = Arc::new(CountWork {
             inputs: Arc::clone(inputs),
@@ -179,6 +197,35 @@ impl StreamJoinOperator {
             self.spec.limits.max_matches_per_input_batch,
             &self.name,
         )?;
+        if let Some(credit) = self.deferred_credit(counts, inputs.admitted.len())? {
+            return Ok(Some(ProbeOutput::Counted(counts, credit)));
+        }
+        self.fill_probe(inputs, counts, context)
+            .await
+            .map(|output| output.map(ProbeOutput::Pairs))
+    }
+
+    fn deferred_credit(
+        &mut self,
+        counts: Counts,
+        rows: usize,
+    ) -> Result<Option<datafusion::execution::memory_pool::MemoryReservation>> {
+        if counts.total == 0 || !super::morsel::eligible(self, rows) {
+            return Ok(None);
+        }
+        let bytes = counts
+            .total
+            .checked_mul(size_of::<MatchedPair>() + 256)
+            .ok_or_else(|| scratch_error(&self.name))?;
+        self.optional_credit(bytes)
+    }
+
+    pub(super) async fn fill_probe(
+        &mut self,
+        inputs: &Arc<ProbeInputs>,
+        counts: Counts,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<Option<PairOutput>> {
         let Some((funding, credit)) = self.admit_fill(counts)? else {
             return Ok(None);
         };
@@ -228,7 +275,7 @@ impl StreamJoinOperator {
         )))
     }
 
-    async fn run_probe_units<W: ParallelCpuWork, T>(
+    pub(super) async fn run_probe_units<W: ParallelCpuWork, T>(
         &mut self,
         work: Arc<W>,
         context: &StreamOperatorContext<'_>,
@@ -275,7 +322,10 @@ impl StreamJoinOperator {
         result
     }
 
-    async fn await_probe_attempt(&mut self, context: &StreamOperatorContext<'_>) -> Result<()> {
+    pub(super) async fn await_probe_attempt(
+        &mut self,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<()> {
         if let Some(cleanup) = &self.compaction_cleanup {
             cleanup.wait(&GatherStop::from_job(context.job())).await?;
         }
@@ -283,7 +333,7 @@ impl StreamJoinOperator {
         context.check_cancelled()
     }
 
-    async fn recover_probe(
+    pub(super) async fn recover_probe(
         &mut self,
         inputs: Arc<ProbeInputs>,
         admitted: &mut AdmittedBatch,
