@@ -106,7 +106,7 @@ fn assert_map_rows(operator: &StreamJoinOperator) {
     .into_iter()
     .enumerate()
     {
-        let row = &operator.state.left[index];
+        let row = &operator.state.left.at(index);
         assert_eq!(
             (row.row_id, row.event_time.as_micros(), row.charge),
             (u64::try_from(index).unwrap(), time, charge)
@@ -206,7 +206,8 @@ fn test_v2_reader_behavior_restores_map_dictionary_deltas() {
     assert_bad_map_schema_is_atomic(&mut operator, &initial, &final_batch);
     assert_eq!(snapshot.inline_metadata, original.inline_metadata);
     assert_eq!(snapshot.segments, original.segments);
-    let record = operator.state.left[1].record.view();
+    let retained_row = operator.state.left.at(1);
+    let record = retained_row.record.view();
     let (values, _) = selected_map_values(&record);
     let buffer = values
         .column(0)
@@ -218,6 +219,7 @@ fn test_v2_reader_behavior_restores_map_dictionary_deltas() {
         .unwrap()
         .clone();
     drop(record);
+    drop(retained_row);
     let pool = operator.checkpoint_preload_test_pool().unwrap();
     let containers = Arc::downgrade(operator.v2_containers.as_ref().unwrap());
     drop(operator);

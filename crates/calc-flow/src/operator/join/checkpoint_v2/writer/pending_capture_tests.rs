@@ -1,4 +1,5 @@
 use super::*;
+use crate::operator::join::StoredRow;
 use crate::{StateSegment, operator::join::PendingLog};
 use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryLimit, MemoryPool};
 use serde_json::{Value, json};
@@ -208,7 +209,7 @@ fn capture_image(join: &StreamJoinOperator) -> Value {
         json!({
             "owner": Arc::as_ptr(&rows.0) as usize,
             "index": rows.1.as_ref().map(|index| Arc::as_ptr(index) as usize),
-            "rows": rows.iter().map(row_image).collect::<Vec<_>>(),
+            "rows": rows.iter().map(|row| row_image(&row)).collect::<Vec<_>>(),
         })
     });
     json!({

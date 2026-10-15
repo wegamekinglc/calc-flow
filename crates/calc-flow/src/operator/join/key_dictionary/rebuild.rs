@@ -1,8 +1,8 @@
+use crate::operator::join::retained::Rows;
 use std::sync::Arc;
 
 use datafusion::execution::memory_pool::MemoryReservation;
 
-use super::super::StoredRow;
 use super::{
     Bindings, BirthBudget, Dictionary, Entry, KeyFlow, Lease, NamespaceLease, SideBindings,
     canonical_credit, counter_overflow, grant, table_bytes,
@@ -26,7 +26,7 @@ struct Builder<'a> {
 impl Dictionary {
     pub(in crate::operator::join) async fn rebuild(
         &self,
-        rows: [&[StoredRow]; 2],
+        rows: [&dyn Rows; 2],
         master: MemoryReservation,
         context: Option<&crate::StreamOperatorContext<'_>>,
         name: &str,
@@ -37,7 +37,7 @@ impl Dictionary {
 
     pub(in crate::operator::join) fn rebuild_checked(
         &self,
-        rows: [&[StoredRow]; 2],
+        rows: [&dyn Rows; 2],
         master: &MemoryReservation,
         name: &str,
         check: &dyn Fn() -> Result<()>,
@@ -48,7 +48,7 @@ impl Dictionary {
 
     async fn build_rebuilt<C: Fn() -> Result<()>>(
         &self,
-        rows: [&[StoredRow]; 2],
+        rows: [&dyn Rows; 2],
         master: &MemoryReservation,
         name: &str,
         flow: &mut KeyFlow<'_, '_, C>,
@@ -72,7 +72,7 @@ impl Dictionary {
 impl<'a> Builder<'a> {
     async fn prepare<C: Fn() -> Result<()>>(
         source: &Dictionary,
-        rows: [&[StoredRow]; 2],
+        rows: [&dyn Rows; 2],
         master: &'a MemoryReservation,
         name: &'a str,
         flow: &mut KeyFlow<'_, '_, C>,
@@ -103,16 +103,16 @@ impl<'a> Builder<'a> {
 
     async fn visit_rows<C: Fn() -> Result<()>>(
         &mut self,
-        rows: [&[StoredRow]; 2],
+        rows: [&dyn Rows; 2],
         flow: &mut KeyFlow<'_, '_, C>,
     ) -> Result<bool> {
         for (side, rows) in rows.into_iter().enumerate() {
-            for row in rows {
+            for reference in rows.references() {
                 flow.step(1, 0).await?;
-                let Some(id) = self.resolve(&row.encoded_key, flow).await? else {
+                let Some(id) = self.resolve(rows.key(reference), flow).await? else {
                     return Ok(false);
                 };
-                self.record(side, id, row)?;
+                self.record(side, id, rows.key(reference))?;
             }
         }
         Ok(true)
@@ -233,13 +233,13 @@ impl<'a> Builder<'a> {
         Ok(true)
     }
 
-    fn record(&mut self, side: usize, id: u32, row: &StoredRow) -> Result<()> {
+    fn record(&mut self, side: usize, id: u32, key: &Arc<super::FramedKey>) -> Result<()> {
         let entry = self.dictionary.slots[id as usize].as_mut().unwrap();
         entry.provisional = entry
             .provisional
             .checked_add(1)
             .ok_or_else(|| counter_overflow(self.name, "key_references"))?;
-        if !Arc::ptr_eq(entry.lease.owner(), &row.encoded_key) {
+        if !Arc::ptr_eq(entry.lease.owner(), key) {
             self.counts[side] = self.counts[side]
                 .checked_add(1)
                 .ok_or_else(|| counter_overflow(self.name, "key_bindings"))?;
@@ -250,7 +250,7 @@ impl<'a> Builder<'a> {
 
     async fn finish<C: Fn() -> Result<()>>(
         mut self,
-        rows: [&[StoredRow]; 2],
+        rows: [&dyn Rows; 2],
         flow: &mut KeyFlow<'_, '_, C>,
     ) -> Result<Option<Rebuilt>> {
         self.finish_counts(flow).await?;
@@ -266,14 +266,14 @@ impl<'a> Builder<'a> {
             (&mut bindings.left, rows[0]),
             (&mut bindings.right, rows[1]),
         ] {
-            for row in rows {
+            for reference in rows.references() {
                 flow.step(1, 0).await?;
                 let lease = &self.dictionary.slots[*ids.next().unwrap() as usize]
                     .as_ref()
                     .unwrap()
                     .lease;
-                if !Arc::ptr_eq(lease.owner(), &row.encoded_key) {
-                    side.insert(row.row_id, lease.clone());
+                if !Arc::ptr_eq(lease.owner(), rows.key(reference)) {
+                    side.insert(rows.identity(reference).1, lease.clone());
                 }
             }
         }

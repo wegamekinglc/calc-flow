@@ -395,7 +395,7 @@ fn assert_composite_rows(operator: &StreamJoinOperator) {
     .into_iter()
     .enumerate()
     {
-        let row = &operator.state.left[index];
+        let row = &operator.state.left.at(index);
         assert_eq!(
             (row.row_id, row.event_time.as_micros(), row.charge),
             (u64::try_from(index).unwrap(), time, charge)
@@ -493,7 +493,8 @@ fn assert_schema_rejection(
 }
 
 fn last_value_buffer(operator: &StreamJoinOperator) -> Buffer {
-    let record = operator.state.left[1].record.view();
+    let retained_row = operator.state.left.at(1);
+    let record = retained_row.record.view();
     let dictionary = record
         .column(2)
         .as_any()

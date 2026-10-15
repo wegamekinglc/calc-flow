@@ -949,7 +949,10 @@ Rust/Python retain exact integer microseconds.
 
 ### Join output materialization and recovery
 
-Join retains admitted rows and compact descriptors for all matched pairs.
+Join retains payload chunks with columnar row metadata and stable chunk/row
+references. Expiration advances sorted run heads without relocating surviving
+rows. Native matching stores opposite row references plus incoming identity
+ranges or fan-out runs.
 When every direct consumer qualifies for compiler projection, materialization
 uses the union of their required columns, including dependencies of aliases,
 arithmetic and filters. Retained state adds keys and event-time fields. Narrowed
@@ -990,7 +993,8 @@ requires the [complete route proof](#delivery-requirements). Durable recovery
 follows the physical state-layout contract below.
 
 The working set includes retained state, admitted input references and metadata,
-`O(matches)` pair descriptors, equality-probe scratch space, preflight
+`O(matches)` opposite row references and incoming selection runs,
+equality-probe scratch space, preflight
 allocations, the current output chunk, and chunks held by edges or sinks.
 Funded native matching shares persistent key identities across batches and both
 inputs through one dictionary per Join operator. Keys used only for probing

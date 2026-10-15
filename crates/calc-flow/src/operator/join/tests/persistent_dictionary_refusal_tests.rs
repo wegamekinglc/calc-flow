@@ -109,7 +109,7 @@ async fn test_dictionary_refusal_mixed_legacy_state_matches_until_explicit_rebui
         .process_data("right", keyed_batch(false, 7), &context, &mut output)
         .await
         .unwrap();
-    let known = Arc::clone(&operator.state.right[0].encoded_key);
+    let known = Arc::clone(operator.state.right.key_at(0));
     pool.mode.store(1, Ordering::SeqCst);
     operator
         .process_data("left", keyed_batch(true, 8), &context, &mut output)
@@ -130,7 +130,7 @@ async fn test_dictionary_refusal_mixed_legacy_state_matches_until_explicit_rebui
         (operator.state.left.len(), operator.state.right.len()),
         (1, 2)
     );
-    assert!(Arc::ptr_eq(&known, &operator.state.right[0].encoded_key));
+    assert!(Arc::ptr_eq(&known, operator.state.right.key_at(0)));
     assert_eq!(
         pool.refusals.load(Ordering::SeqCst),
         1,
@@ -156,16 +156,16 @@ async fn test_dictionary_refusal_mixed_legacy_state_matches_until_explicit_rebui
             operator
                 .key_bindings
                 .left
-                .canonical(&operator.state.left[0]),
+                .canonical(&operator.state.left.at(0)),
             operator
                 .key_bindings
                 .right
-                .canonical(&operator.state.right[1])
+                .canonical(&operator.state.right.at(1))
         ),
         "explicit funded progress rebuild must coalesce all live legacy keys"
     );
     assert!(
-        Arc::ptr_eq(&known, &operator.state.right[0].encoded_key),
+        Arc::ptr_eq(&known, operator.state.right.key_at(0)),
         "rebuild must preserve active known identities"
     );
     assert_eq!(operator.key_dictionary.inventory().1, 3);
@@ -222,7 +222,7 @@ async fn assert_rebuilt_known_append_and_expiry(
         .unwrap();
     assert_eq!(operator.state.left.len(), 1);
     assert_eq!(
-        operator.state.left[0].event_time,
+        operator.state.left.at(0).event_time,
         EventTime::from_micros(10)
     );
     assert_eq!(operator.key_dictionary.inventory().1, 3);
@@ -240,7 +240,7 @@ async fn test_dictionary_refusal_preserves_known_canonical_owner_and_references(
         .process_data("right", right_batch(vec![0]), &context, &mut output)
         .await
         .unwrap();
-    let canonical = Arc::clone(&operator.state.right[0].encoded_key);
+    let canonical = Arc::clone(operator.state.right.key_at(0));
     pool.mode.store(1, Ordering::SeqCst);
     operator
         .process_data("left", left_batch(vec![0]), &context, &mut output)
@@ -249,7 +249,7 @@ async fn test_dictionary_refusal_preserves_known_canonical_owner_and_references(
     assert_eq!(operator.status().emitted_match_rows, 1);
     assert!(pool.refusals.load(Ordering::SeqCst) > 0);
     assert!(
-        Arc::ptr_eq(&canonical, &operator.state.left[0].encoded_key),
+        Arc::ptr_eq(&canonical, operator.state.left.key_at(0)),
         "genuine optional refusal must preserve known canonical owners"
     );
     assert_eq!(operator.key_dictionary.inventory().1, 2);
@@ -313,7 +313,7 @@ async fn test_dictionary_refusal_commits_batched_sql_retention_with_full_fees() 
             .sum::<u64>(),
         fees[0] + fees[1]
     );
-    assert_eq!(operator.state.right[0].charge, fees[2]);
+    assert_eq!(operator.state.right.at(0).charge, fees[2]);
     assert_eq!(operator.status().emitted_match_rows, 2);
     assert_eq!(join_work().key_encodings, 3);
     assert!(join_work().sql_probe_table_builds > 0);
@@ -338,7 +338,7 @@ async fn test_native_budget_refusal_reuses_prepared_keys_through_sql_commit() {
         .process_data("right", right_batch(vec![0]), &context, &mut output)
         .await
         .unwrap();
-    let known = Arc::clone(&operator.state.right[0].encoded_key);
+    let known = Arc::clone(operator.state.right.key_at(0));
     pool.mode.store(3, Ordering::SeqCst);
     let input = keyed_values(true, vec![7, 8, 7]);
     let record = &input.table_payload().unwrap().batches()[0];
@@ -364,8 +364,8 @@ async fn test_native_budget_refusal_reuses_prepared_keys_through_sql_commit() {
             .collect::<Vec<_>>(),
         charges
     );
-    assert!(Arc::ptr_eq(&known, &operator.state.left[0].encoded_key));
-    assert!(Arc::ptr_eq(&known, &operator.state.left[2].encoded_key));
+    assert!(Arc::ptr_eq(&known, operator.state.left.key_at(0)));
+    assert!(Arc::ptr_eq(&known, operator.state.left.key_at(2)));
     assert!(pool.refusals.load(Ordering::SeqCst) > 0);
     assert!(join_work().sql_probe_table_builds > 0);
     assert_eq!(

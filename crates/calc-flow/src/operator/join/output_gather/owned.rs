@@ -75,7 +75,7 @@ fn profitable(rows: usize, columns: usize) -> bool {
 
 fn records<'a>(output: &'a JoinOutput<'_>, pair: &MatchedPair) -> (PayloadRef<'a>, PayloadRef<'a>) {
     let incoming = output.admitted.row(pair.pos).record;
-    let opposite = (&output.opposite[pair.opposite_index].record).into();
+    let opposite = output.opposite.payload(pair.opposite_index);
     if output.incoming_is_left {
         (incoming, opposite)
     } else {
@@ -90,13 +90,14 @@ fn supports_capture(output: &JoinOutput<'_>, range: &Range<usize>) -> bool {
             .schema
             .fields()
             .iter()
-            .all(|field| super::independently_compact(field.data_type()))
+            .all(|field| super::flat_owned_type(field.data_type()))
         || output.admitted_charges.is_none()
     {
         return false;
     }
-    let matched = &output.matched[range.clone()];
-    if matched.is_empty() || !matched.iter().all(|pair| detached_pair(output, pair)) {
+    let selected = output.matched.slice(range.clone());
+    let matched: &dyn super::super::matches::Matches = &selected;
+    if matched.is_empty() || !matched.iter().all(|pair| detached_pair(output, &pair)) {
         return false;
     }
     true
@@ -119,7 +120,8 @@ async fn capture(
     if !supports_capture(output, &range) {
         return Ok(None);
     }
-    let matched = &output.matched[range];
+    let selected = output.matched.slice(range);
+    let matched: &dyn super::super::matches::Matches = &selected;
     let input_credit = runtime.incremental_reservation("stream-join-gather");
     let output_credit = input_credit.new_empty();
     let input_bytes = funding::input_bytes(matched.len(), output.schema, output.operator_id)?;
@@ -129,9 +131,9 @@ async fn capture(
         return Ok(None);
     }
     let left =
-        OwnedSide::capture(matched.iter().map(|pair| records(output, pair).0), context).await?;
+        OwnedSide::capture(matched.iter().map(|pair| records(output, &pair).0), context).await?;
     let right =
-        OwnedSide::capture(matched.iter().map(|pair| records(output, pair).1), context).await?;
+        OwnedSide::capture(matched.iter().map(|pair| records(output, &pair).1), context).await?;
     Ok(Some(Arc::new(Columns {
         left,
         right,

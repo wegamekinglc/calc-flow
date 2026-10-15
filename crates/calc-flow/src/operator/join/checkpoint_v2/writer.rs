@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use datafusion::{arrow::datatypes::SchemaRef, execution::memory_pool::MemoryReservation};
 
-use super::super::{PendingOp, StoredRow, StreamJoinOperator};
+use super::super::{PendingOp, StreamJoinOperator};
 use super::{
     budget as restore_budget,
     ipc::accounting::{self, sum},
@@ -159,7 +159,7 @@ impl WriterState {
 }
 
 struct Inputs {
-    rows: [Option<Arc<Vec<StoredRow>>>; 2],
+    rows: [Option<Arc<crate::operator::join::StateRows>>; 2],
     pending: Option<Vec<PendingOp>>,
     rebase_pending: Option<encode::rebase::PendingInput>,
     history: Option<encode::rebase::HistoryInput>,
@@ -271,11 +271,10 @@ impl WriterWork {
                 &|| stop.check(),
             );
         }
-        let sides = self
-            .inputs
-            .rows
-            .each_ref()
-            .map(|rows| rows.as_ref().expect("owned V2 checkpoint input").as_slice());
+        let sides = self.inputs.rows.each_ref().map(|rows| {
+            rows.as_ref().expect("owned V2 checkpoint input").as_ref()
+                as &dyn crate::operator::join::Rows
+        });
         #[cfg(test)]
         if let Some(hook) = &self.base_hook {
             hook(&self.workspace);

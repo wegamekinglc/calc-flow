@@ -78,8 +78,8 @@ async fn duplicate_snapshot(
     let mut valid = operator(false);
     valid.restore(&snapshot).unwrap();
     assert_eq!(valid.state.left.len(), 2);
-    assert_eq!(valid.state.left[0].row_id, 0);
-    assert_eq!(valid.state.left[1].row_id, 1);
+    assert_eq!(valid.state.left.at(0).row_id, 0);
+    assert_eq!(valid.state.left.at(1).row_id, 1);
     assert_fees(&valid, 2, 0);
     let pool = valid.runtime.runtime().unwrap().incremental_memory_pool();
     drop(valid);

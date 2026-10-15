@@ -55,13 +55,13 @@ fn native_type(data_type: &DataType) -> bool {
 
 #[cfg(test)]
 pub(super) struct NativeMatches {
-    pub(super) pairs: Vec<MatchedPair>,
+    pub(super) pairs: crate::operator::join::matches::Selection,
     pub(super) keys: NativeKeys,
     pub(super) _credit: MemoryReservation,
 }
 
 pub(super) struct NativePairs {
-    pub(super) pairs: Vec<MatchedPair>,
+    pub(super) pairs: crate::operator::join::matches::Selection,
     pub(super) credit: MemoryReservation,
 }
 
@@ -535,7 +535,7 @@ impl StreamJoinOperator {
         let Some(credit) = super::key_dictionary::grant(&credit, bytes, &self.name)? else {
             return Ok(None);
         };
-        let mut pairs = Vec::with_capacity(count);
+        let mut pairs = super::matches::Selection::with_capacity(count, admitted.len());
         for (pos, row) in admitted.iter().enumerate() {
             pairs.extend(
                 windows

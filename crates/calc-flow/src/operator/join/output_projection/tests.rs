@@ -1,4 +1,5 @@
 use super::*;
+use crate::operator::join::MatchedPair;
 use crate::{
     CancellationToken, DataFusionConfig, DataFusionRuntime, EdgeBudget, EventTime, JsonMap,
     StreamJobContext, StreamOperatorContext,
@@ -276,7 +277,10 @@ async fn retained_state_projection() {
         "projection must preserve authentic V1 row/state charges"
     );
     assert_eq!(input.table_payload().unwrap().batches()[0], original);
-    let retained = projected.state.right[0]
+    let retained = projected
+        .state
+        .right
+        .at(0)
         .record
         .schema_ref()
         .fields()

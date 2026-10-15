@@ -157,7 +157,7 @@ fn mixed_snapshot() -> OperatorStateSnapshot {
     let mut source = operator();
     source.restore(&base).unwrap();
     let added = row(&source, 3, "猫🙃🙂");
-    let mut left = source.state.left.iter().cloned().collect::<Vec<_>>();
+    let mut left = source.state.left.iter().collect::<Vec<_>>();
     left.push(added.clone());
     source.state.left = left.into();
     source.state.next_left_row_id = 4;
@@ -359,6 +359,7 @@ async fn check_mixed_last_buffers(target: StreamJoinOperator, job: StreamJobCont
     assert_eq!(values.as_slice(), "猫🙃🙂".as_bytes());
     drop(data);
     drop(view);
+    drop(row);
     drop(target);
     assert_eq!(pool.reserved(), paid);
     {

@@ -106,8 +106,9 @@ pub(super) fn registration_bytes() -> Result<usize> {
 
 pub(super) fn containers(rows: usize) -> Result<usize> {
     sum(&[
-        product(rows, size_of::<StoredRow>())?,
-        product(2, arc::<Vec<StoredRow>>()?)?,
+        product(rows, size_of::<StoredRow>() + 128)?,
+        product(rows.div_ceil(1024), 16_384)?,
+        product(2, arc::<super::super::StateRows>()?)?,
         sql_loan_controls()?,
     ])
 }
@@ -118,15 +119,32 @@ pub(in crate::operator::join) fn expiration_credit(
     controls: usize,
 ) -> Result<MemoryReservation> {
     let credit = workspace.new_empty();
-    reserve(
-        &credit,
-        sum(&[
-            product(capacity, 2 * size_of::<usize>() + size_of::<u128>())?,
-            controls,
-            registration_bytes()?,
-        ])?,
-    )?;
+    reserve(&credit, expiration_bytes(capacity, controls)?)?;
     Ok(credit)
+}
+
+pub(in crate::operator::join) fn optional_expiration_credit(
+    workspace: &MemoryReservation,
+    capacity: usize,
+    controls: usize,
+) -> Result<Option<MemoryReservation>> {
+    let credit = workspace.new_empty();
+    match credit.try_grow(expiration_bytes(capacity, controls)?) {
+        Ok(()) => Ok(Some(credit)),
+        Err(datafusion::common::DataFusionError::ResourcesExhausted(_)) => Ok(None),
+        Err(error) => Err(crate::CalcFlowError::DataFusion {
+            node_id: None,
+            message: error.to_string(),
+        }),
+    }
+}
+
+fn expiration_bytes(capacity: usize, controls: usize) -> Result<usize> {
+    sum(&[
+        product(capacity, 2 * size_of::<usize>() + size_of::<u128>())?,
+        controls,
+        registration_bytes()?,
+    ])
 }
 
 pub(super) fn tree<K, V>(count: usize) -> Result<usize> {

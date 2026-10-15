@@ -79,10 +79,18 @@ fn test_v2_restore_merges_gapped_epochs_and_interleaved_both_side_ids() {
         (operator.state.left.len(), operator.state.right.len()),
         (2, 1)
     );
-    assert_row(&operator.state.left[0], 1, 97, 135, "新", "green", None);
-    assert_row(&operator.state.left[1], 4, 98, 141, "ok", "red", Some(&[9]));
+    assert_row(&operator.state.left.at(0), 1, 97, 135, "新", "green", None);
     assert_row(
-        &operator.state.right[0],
+        &operator.state.left.at(1),
+        4,
+        98,
+        141,
+        "ok",
+        "red",
+        Some(&[9]),
+    );
+    assert_row(
+        &operator.state.right.at(0),
         4,
         100,
         141,

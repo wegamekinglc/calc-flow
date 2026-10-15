@@ -1,4 +1,4 @@
-use super::super::super::{columnar::Quantum, concat_output_column, native_lookup::scratch_error};
+use super::super::super::columnar::Quantum;
 use super::{ArrayRef, MemoryReservation, PayloadRef, Result, RowPayload, StreamOperatorContext};
 use datafusion::arrow::{
     array::UInt64Array,
@@ -136,7 +136,7 @@ impl OwnedSide {
     pub(super) fn column(
         &self,
         index: usize,
-        origin: &MemoryReservation,
+        _origin: &MemoryReservation,
         name: &str,
     ) -> Result<ArrayRef> {
         let result = match self {
@@ -149,52 +149,10 @@ impl OwnedSide {
                 interleave(&columns, rows)
             }
         };
-        result
-            .or_else(|_| self.concat(index, origin, name))
-            .map_err(|error| crate::CalcFlowError::DataFusion {
-                node_id: Some(name.to_owned()),
-                message: format!("Join column gather failed: {error}"),
-            })
-    }
-
-    fn concat(
-        &self,
-        index: usize,
-        origin: &MemoryReservation,
-        name: &str,
-    ) -> std::result::Result<ArrayRef, datafusion::arrow::error::ArrowError> {
-        let rows = match self {
-            Self::Single { rows, .. } => rows.len(),
-            Self::Multiple { rows, .. } => rows.len(),
-        };
-        let bytes = rows
-            .checked_mul(512)
-            .and_then(|bytes| bytes.checked_add(4096))
-            .ok_or_else(|| {
-                datafusion::arrow::error::ArrowError::ComputeError(scratch_error(name).to_string())
-            })?;
-        let scratch = origin.new_empty();
-        scratch.try_grow(bytes).map_err(|error| {
-            datafusion::arrow::error::ArrowError::ComputeError(error.to_string())
-        })?;
-        let slices = match self {
-            Self::Single { source, rows } => rows
-                .values()
-                .iter()
-                .map(|&row| {
-                    source
-                        .column(index)
-                        .slice(usize::try_from(row).expect("source offset fits usize"), 1)
-                })
-                .collect::<Vec<_>>(),
-            Self::Multiple { sources, rows } => rows
-                .iter()
-                .map(|&(source, row)| sources[source].column(index).slice(row, 1))
-                .collect::<Vec<_>>(),
-        };
-        let references = slices.iter().map(AsRef::as_ref).collect::<Vec<_>>();
-        concat_output_column(&references)
-            .map_err(|error| datafusion::arrow::error::ArrowError::ComputeError(error.to_string()))
+        result.map_err(|error| crate::CalcFlowError::DataFusion {
+            node_id: Some(name.to_owned()),
+            message: format!("Join column gather failed: {error}"),
+        })
     }
 }
 

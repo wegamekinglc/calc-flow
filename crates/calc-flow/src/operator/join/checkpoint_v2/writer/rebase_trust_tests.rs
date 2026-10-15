@@ -77,8 +77,8 @@ async fn test_off_same_charge_replacement_invalidates_history_until_full_rebuild
         cut
     );
     assert!(join.state.deltas.pending.is_empty());
-    assert_eq!(join.state.left[0].event_time.as_micros(), 1_095);
-    assert_eq!(join.state.left[0].row_id, 8);
+    assert_eq!(join.state.left.at(0).event_time.as_micros(), 1_095);
+    assert_eq!(join.state.left.at(0).row_id, 8);
     assert!(join.checkpoint(Epoch::new(5).unwrap()).is_err());
     let bases = count_base(&mut join);
     join.prepare_checkpoint_async(&context).await.unwrap();

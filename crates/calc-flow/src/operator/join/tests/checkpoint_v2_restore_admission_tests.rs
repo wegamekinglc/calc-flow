@@ -102,8 +102,8 @@ fn fixture() -> (
 }
 
 struct Previous {
-    left: Arc<Vec<StoredRow>>,
-    right: Arc<Vec<StoredRow>>,
+    left: Arc<StateRows>,
+    right: Arc<StateRows>,
     containers: Arc<checkpoint_v2::ContainerFunding>,
     metrics: StreamJoinStatus,
     paid: usize,
@@ -222,10 +222,18 @@ fn assert_sql_candidate(operator: &StreamJoinOperator) {
         (operator.state.left.len(), operator.state.right.len()),
         (2, 1)
     );
-    assert_row(&operator.state.left[0], 1, 97, 135, "新", "green", None);
-    assert_row(&operator.state.left[1], 4, 98, 141, "ok", "red", Some(&[9]));
+    assert_row(&operator.state.left.at(0), 1, 97, 135, "新", "green", None);
     assert_row(
-        &operator.state.right[0],
+        &operator.state.left.at(1),
+        4,
+        98,
+        141,
+        "ok",
+        "red",
+        Some(&[9]),
+    );
+    assert_row(
+        &operator.state.right.at(0),
         4,
         100,
         141,
@@ -360,7 +368,7 @@ fn test_v2_restore_cancels_at_every_check_without_replacing_old_state() {
         previous.assert_retained(&operator, &pool);
     }
     operator.restore(&target).unwrap();
-    assert_eq!(operator.state.left[0].row_id, 1);
+    assert_eq!(operator.state.left.at(0).row_id, 1);
     println!("cancelled and refunded all {checks} restore checks");
     drop((previous, operator, target, original));
     assert_eq!(pool.reserved(), 0);

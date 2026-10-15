@@ -26,7 +26,7 @@ fn assert_v1_rows(restored: &StreamJoinOperator) {
         (2, 1)
     );
     assert_row(
-        &restored.state.left[0],
+        &restored.state.left.at(0),
         7,
         96,
         148,
@@ -34,9 +34,9 @@ fn assert_v1_rows(restored: &StreamJoinOperator) {
         "blue",
         Some(&[2, 3]),
     );
-    assert_row(&restored.state.left[1], 9, 97, 135, "新", "green", None);
+    assert_row(&restored.state.left.at(1), 9, 97, 135, "新", "green", None);
     assert_row(
-        &restored.state.right[0],
+        &restored.state.right.at(0),
         4,
         100,
         141,

@@ -191,14 +191,21 @@ pub(in crate::operator::join::metadata_validation::schema) fn installation_bytes
     let indexes = expiration_bytes(sides[0])?.checked_add(expiration_bytes(sides[1])?)?;
     checked_sum(&[
         indexes,
-        arc::<Vec<StoredRow>>()?.checked_mul(2)?,
-        rows.checked_mul(size_of::<StoredRow>())?,
+        state_containers(rows)?,
         tree::<&'static str, StateSegment>(2)?,
         "left-base".len() + "right-base".len() + 2 * 64,
         4 * size_of::<(&str, crate::operator::join::SegmentKind)>(),
         8 * size_of::<(&str, &crate::operator::join::SegmentKind, &StateSegment)>(),
         2 * "right-base".len(),
         size_of::<StreamJoinState>(),
+    ])
+}
+
+fn state_containers(rows: usize) -> Option<usize> {
+    checked_sum(&[
+        arc::<crate::operator::join::StateRows>()?.checked_mul(2)?,
+        rows.checked_mul(size_of::<StoredRow>() + 128)?,
+        rows.div_ceil(1024).checked_mul(16_384)?,
     ])
 }
 

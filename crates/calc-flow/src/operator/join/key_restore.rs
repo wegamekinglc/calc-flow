@@ -3,7 +3,7 @@ use std::sync::Arc;
 use datafusion::execution::memory_pool::MemoryReservation;
 
 use super::{
-    OperatorStateSnapshot, RetainedKeyCache, StoredRow, StreamJoinOperator, StreamJoinState,
+    OperatorStateSnapshot, RetainedKeyCache, StreamJoinOperator, StreamJoinState,
     checkpoint_v2::WriterState,
     key_dictionary::{Dictionary, Rebuilt, grant},
 };
@@ -47,10 +47,10 @@ impl Drop for CaptureGuard<'_> {
 }
 
 #[cfg(test)]
-pub(super) type TestHook = Arc<dyn Fn(&[StoredRow]) + Send + Sync>;
+pub(super) type TestHook = Arc<dyn Fn(&super::StateRows) + Send + Sync>;
 
 struct DerivedWork {
-    rows: [Arc<Vec<StoredRow>>; 2],
+    rows: [Arc<super::StateRows>; 2],
     name: String,
     #[cfg(test)]
     hook: Option<TestHook>,

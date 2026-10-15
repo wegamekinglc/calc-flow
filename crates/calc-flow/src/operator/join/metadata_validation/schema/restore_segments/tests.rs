@@ -104,22 +104,18 @@ fn snapshot(operator: &mut StreamJoinOperator) -> OperatorStateSnapshot {
         ("left", &operator.state.left),
         ("right", &operator.state.right),
     ] {
+        let selected = rows
+            .iter()
+            .take(if side == "left" { 3 } else { usize::MAX })
+            .collect::<Vec<_>>();
         snapshot.segments.insert(
             format!("{side}-base"),
-            StateSegment::new(
-                encode_side(
-                    if side == "left" { &rows[..3] } else { rows },
-                    &operator.name,
-                    side,
-                    &|| Ok(()),
-                )
-                .unwrap(),
-            ),
+            StateSegment::new(encode_side(&selected, &operator.name, side, &|| Ok(())).unwrap()),
         );
     }
     snapshot.segments.insert(
         "left-delta-9".into(),
-        StateSegment::new(delta(&[upsert(&operator.state.left[3])])),
+        StateSegment::new(delta(&[upsert(&operator.state.left.at(3))])),
     );
     snapshot
 }

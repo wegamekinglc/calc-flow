@@ -64,6 +64,14 @@ impl SideBindings {
         self.get(row.row_id).map_or(&row.encoded_key, Lease::owner)
     }
 
+    pub(in crate::operator::join) fn canonical_key<'a>(
+        &'a self,
+        row_id: u64,
+        key: &'a Arc<super::FramedKey>,
+    ) -> &'a Arc<super::FramedKey> {
+        self.get(row_id).map_or(key, Lease::owner)
+    }
+
     pub(in crate::operator::join) fn remove(
         &mut self,
         row_id: u64,

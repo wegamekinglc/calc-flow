@@ -1,3 +1,4 @@
+use super::retained::Rows;
 use super::{
     StoredRow,
     columnar::FramedKey,
@@ -94,6 +95,8 @@ impl KeyRun {
     }
 
     fn move_dense(&mut self, identity: (EventTime, u64), dense: usize) {
+        #[cfg(test)]
+        super::note_join_work(|work| work.native_dense_repairs += 1);
         let position = self.start
             + self
                 .active()
@@ -153,7 +156,7 @@ impl NativeIndex {
     }
 
     pub(super) fn new_identified(
-        rows: &[StoredRow],
+        rows: &dyn Rows,
         dictionary: &Dictionary,
         bindings: &SideBindings,
         credit: MemoryReservation,
@@ -163,12 +166,16 @@ impl NativeIndex {
                 >= Self::build_charge(rows.len()).expect("funded identity index capacity")
         );
         let mut index = Self::empty(credit);
-        index.append_resolved(
-            0,
-            rows,
-            |row| bindings.canonical(row),
-            |key| dictionary.lease(key),
-        );
+        for position in rows.references() {
+            let (time, row_id) = rows.identity(position);
+            let key = bindings.canonical_key(row_id, rows.key(position));
+            index.append_identity(position, time, row_id, key, |key| dictionary.lease(key));
+        }
+        index.rows = rows.len();
+        index
+            .funding
+            .resident
+            .store(index.resident_bytes(), Ordering::Relaxed);
         index.refund();
         index
     }
@@ -253,26 +260,7 @@ impl NativeIndex {
         self.append_resolved(offset, rows, |row| &row.encoded_key, |_| None);
     }
 
-    pub(super) fn append_identified(
-        &mut self,
-        offset: usize,
-        rows: &[StoredRow],
-        dictionary: &Dictionary,
-    ) {
-        self.append_resolved(
-            offset,
-            rows,
-            |row| &row.encoded_key,
-            |key| {
-                Some(
-                    dictionary
-                        .lease(key)
-                        .expect("committed live canonical identity"),
-                )
-            },
-        );
-    }
-
+    #[cfg(test)]
     fn append_resolved<'a>(
         &mut self,
         offset: usize,
@@ -290,24 +278,74 @@ impl NativeIndex {
                     .expect("funded append capacity")
         );
         for (position, row) in rows.iter().enumerate() {
-            let key = key_for(row);
-            let hash = Self::hash(key);
-            let id = self
-                .find(hash, key)
-                .unwrap_or_else(|| self.insert_key(hash, key, resolve(key)));
-            let run = self.slots[id as usize].as_mut().expect("live key ID");
-            let old_capacity = run.rows.capacity();
-            run.insert(RunEntry {
-                time: row.event_time,
-                row_id: row.row_id,
-                dense: offset + position,
-            });
-            self.run_backing_bytes += (run.rows.capacity() - old_capacity) * size_of::<RunEntry>();
+            self.append_entry(offset + position, row, key_for(row), &resolve);
         }
         self.rows += rows.len();
         self.funding
             .resident
             .store(self.resident_bytes(), Ordering::Relaxed);
+    }
+
+    fn append_entry(
+        &mut self,
+        index: usize,
+        row: &StoredRow,
+        key: &Arc<FramedKey>,
+        resolve: impl Fn(&Arc<FramedKey>) -> Option<Lease>,
+    ) {
+        self.append_identity(index, row.event_time, row.row_id, key, resolve);
+    }
+
+    fn append_identity(
+        &mut self,
+        index: usize,
+        time: EventTime,
+        row_id: u64,
+        key: &Arc<FramedKey>,
+        resolve: impl Fn(&Arc<FramedKey>) -> Option<Lease>,
+    ) {
+        let hash = Self::hash(key);
+        let id = self
+            .find(hash, key)
+            .unwrap_or_else(|| self.insert_key(hash, key, resolve(key)));
+        let run = self.slots[id as usize].as_mut().expect("live key ID");
+        let old_capacity = run.rows.capacity();
+        run.insert(RunEntry {
+            time,
+            row_id,
+            dense: index,
+        });
+        self.run_backing_bytes += (run.rows.capacity() - old_capacity) * size_of::<RunEntry>();
+    }
+
+    pub(super) fn append_identified_indices(
+        &mut self,
+        indices: &[usize],
+        rows: &[StoredRow],
+        dictionary: &Dictionary,
+    ) {
+        for (&index, row) in indices.iter().zip(rows) {
+            self.append_entry(index, row, &row.encoded_key, |key| {
+                Some(
+                    dictionary
+                        .lease(key)
+                        .expect("committed live canonical identity"),
+                )
+            });
+        }
+        self.rows += rows.len();
+        self.funding
+            .resident
+            .store(self.resident_bytes(), Ordering::Relaxed);
+    }
+
+    pub(super) fn remove_stable<'a>(
+        &mut self,
+        row: &StoredRow,
+        key: &Arc<FramedKey>,
+        key_at: impl FnOnce(usize) -> &'a Arc<FramedKey>,
+    ) {
+        self.remove_resolved(row, key, None, key_at);
     }
 
     fn insert_key(&mut self, hash: u64, key: &Arc<FramedKey>, identity: Option<Lease>) -> u32 {

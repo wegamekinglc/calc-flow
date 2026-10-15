@@ -217,7 +217,7 @@ impl StreamJoinOperator {
         }
         let bytes = counts
             .total
-            .checked_mul(size_of::<MatchedPair>())
+            .checked_mul(3 * size_of::<usize>())
             .ok_or_else(|| scratch_error(&self.name))?;
         let Some(fragments) = self.optional_credit(bytes)? else {
             return Ok(None);
@@ -333,10 +333,12 @@ async fn probe_stop(job: &StreamJobContext) {
     let deadline = async {
         match job.deadline() {
             Some(deadline) => {
-                let delay = (*deadline - chrono::Utc::now())
-                    .to_std()
-                    .unwrap_or_default();
-                tokio::time::sleep(delay).await;
+                while chrono::Utc::now() < *deadline {
+                    let delay = (*deadline - chrono::Utc::now())
+                        .to_std()
+                        .unwrap_or_default();
+                    tokio::time::sleep(delay).await;
+                }
             }
             None => std::future::pending().await,
         }

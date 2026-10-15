@@ -12,7 +12,7 @@ fn assert_recaptured_rows(operator: &StreamJoinOperator) {
         (2, 1)
     );
     assert_row(
-        &operator.state.left[0],
+        &operator.state.left.at(0),
         7,
         96,
         148,
@@ -20,9 +20,9 @@ fn assert_recaptured_rows(operator: &StreamJoinOperator) {
         "blue",
         Some(&[2, 3]),
     );
-    assert_row(&operator.state.left[1], 9, 97, 135, "新", "green", None);
+    assert_row(&operator.state.left.at(1), 9, 97, 135, "新", "green", None);
     assert_row(
-        &operator.state.right[0],
+        &operator.state.right.at(0),
         4,
         100,
         141,

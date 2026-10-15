@@ -1,7 +1,7 @@
-use super::{PayloadRef, canonical_column, concat_output_column};
+use super::{PayloadRef, canonical_column, concat_output_column, operator_error};
 use crate::Result;
 use datafusion::arrow::{
-    array::{ArrayRef, UInt64Array},
+    array::{Array, ArrayRef, BinaryViewArray, StringViewArray, UInt64Array, make_array},
     compute::{interleave, take},
     datatypes::DataType,
 };
@@ -27,11 +27,11 @@ pub(super) enum SideGather<'a> {
 impl<'a> SideGather<'a> {
     pub(super) fn new(mut payloads: impl Iterator<Item = PayloadRef<'a>>) -> Option<Self> {
         let first = payloads.next()?;
-        let columns = first.shared_columns()?;
+        let columns = first.columns();
         let mut rows = Vec::with_capacity(payloads.size_hint().0 + 1);
         rows.push(u64::try_from(first.offset()).ok()?);
         for payload in payloads.by_ref() {
-            if !std::ptr::eq(columns, payload.shared_columns()?) {
+            if !std::ptr::eq(columns, payload.columns()) {
                 return Self::multiple(columns, rows, std::iter::once(payload).chain(payloads));
             }
             rows.push(u64::try_from(payload.offset()).ok()?);
@@ -55,7 +55,7 @@ impl<'a> SideGather<'a> {
             rows.push((0, usize::try_from(row).ok()?));
         }
         for payload in payloads {
-            let source = payload.shared_columns()?;
+            let source = payload.columns();
             let identity = (source.as_ptr(), source.len());
             if identity != previous.0 {
                 #[cfg(test)]
@@ -72,36 +72,50 @@ impl<'a> SideGather<'a> {
         Some(Self::Multiple { columns, rows })
     }
 
-    fn column(&self, index: usize) -> Option<ArrayRef> {
-        let source = match self {
-            Self::Single { columns, .. } => &columns[index],
-            Self::Multiple { columns, .. } => &columns[0][index],
-        };
-        if !independently_compact(source.data_type()) {
-            return None;
-        }
+    fn column(&self, index: usize) -> Result<ArrayRef> {
+        #[cfg(test)]
         match self {
-            Self::Single { rows, .. } => {
-                let taken = take(source.as_ref(), rows, None).ok()?;
-                #[cfg(test)]
-                super::note_join_work(|work| work.output_column_takes += 1);
-                Some(taken)
+            Self::Single { .. } => super::note_join_work(|work| work.output_column_takes += 1),
+            Self::Multiple { .. } => {
+                super::note_join_work(|work| work.output_column_interleaves += 1);
             }
+        }
+        self.selected_column(index)
+    }
+
+    pub(super) fn selected_column(&self, index: usize) -> Result<ArrayRef> {
+        let result = match self {
+            Self::Single { columns, rows } => take(columns[index].as_ref(), rows, None),
             Self::Multiple { columns, rows } => {
                 let sources = columns
                     .iter()
                     .map(|source| source[index].as_ref())
                     .collect::<Vec<_>>();
-                let interleaved = interleave(&sources, rows).ok()?;
-                #[cfg(test)]
-                super::note_join_work(|work| work.output_column_interleaves += 1);
-                Some(interleaved)
+                interleave(&sources, rows)
             }
-        }
+        };
+        result.map_err(|error| {
+            operator_error("Join output", &format!("column gather failed: {error}"))
+        })
     }
 }
 
-fn independently_compact(data_type: &DataType) -> bool {
+pub(super) fn column(
+    gather: Option<&SideGather<'_>>,
+    index: usize,
+    canonical: &DataType,
+) -> Result<ArrayRef> {
+    #[cfg(test)]
+    let _observation = test_support::observe(test_support::hook(), index);
+    let gather =
+        gather.ok_or_else(|| operator_error("Join output", "missing nonempty gather selection"))?;
+    Ok(canonical_column(
+        compact_gather(gather.column(index)?)?,
+        canonical,
+    ))
+}
+
+fn flat_owned_type(data_type: &DataType) -> bool {
     data_type.is_primitive()
         || matches!(
             data_type,
@@ -115,23 +129,38 @@ fn independently_compact(data_type: &DataType) -> bool {
         )
 }
 
-pub(super) fn column<'a>(
-    gather: Option<&SideGather<'_>>,
-    index: usize,
-    canonical: &DataType,
-    payloads: impl Iterator<Item = PayloadRef<'a>>,
-) -> Result<ArrayRef> {
-    #[cfg(test)]
-    let _observation = test_support::observe(test_support::hook(), index);
-    if let Some(taken) = gather.and_then(|gather| gather.column(index)) {
-        return Ok(canonical_column(taken, canonical));
+fn compact_gather(column: ArrayRef) -> Result<ArrayRef> {
+    if flat_owned_type(column.data_type()) {
+        return Ok(column);
     }
-    let slices = payloads
-        .map(|payload| payload.column_view(index))
-        .collect::<Vec<_>>();
-    let references = slices.iter().map(AsRef::as_ref).collect::<Vec<_>>();
-    Ok(canonical_column(
-        concat_output_column(&references)?,
-        canonical,
-    ))
+    // Bulk compaction detaches encoded children and discards unused dictionary values.
+    detach_views(concat_output_column(&[column.as_ref()])?)
+}
+
+fn detach_views(column: ArrayRef) -> Result<ArrayRef> {
+    if let Some(values) = column.as_any().downcast_ref::<StringViewArray>() {
+        return Ok(std::sync::Arc::new(values.gc()));
+    }
+    if let Some(values) = column.as_any().downcast_ref::<BinaryViewArray>() {
+        return Ok(std::sync::Arc::new(values.gc()));
+    }
+    let data = column.to_data();
+    if data.child_data().is_empty() {
+        return Ok(column);
+    }
+    let children = data
+        .child_data()
+        .iter()
+        .map(|child| detach_views(make_array(child.clone())).map(|child| child.to_data()))
+        .collect::<Result<Vec<_>>>()?;
+    data.into_builder()
+        .child_data(children)
+        .build()
+        .map(make_array)
+        .map_err(|error| {
+            operator_error(
+                "Join output",
+                &format!("gather child compaction failed: {error}"),
+            )
+        })
 }

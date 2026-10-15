@@ -158,7 +158,7 @@ async fn test_persistent_dictionary_expired_unique_owner_retires_independently()
         .process_data("left", left_batch(vec![0]), &context, &mut output)
         .await
         .unwrap();
-    let expired = Arc::downgrade(&operator.state.right[1].encoded_key);
+    let expired = Arc::downgrade(operator.state.right.key_at(1));
     let pool = operator
         .runtime
         .runtime()
@@ -195,7 +195,7 @@ async fn test_persistent_dictionary_history_bytes_do_not_lease_recycled_namespac
         .process_data("left", left_batch(vec![0]), &context, &mut output)
         .await
         .unwrap();
-    let canonical = Arc::clone(&operator.state.left[0].encoded_key);
+    let canonical = Arc::clone(operator.state.left.key_at(0));
     let lease = operator.key_dictionary.lease(&canonical).unwrap();
     let old_address = lease.address();
     let old_bytes = canonical.to_vec();
@@ -222,7 +222,7 @@ async fn test_persistent_dictionary_history_bytes_do_not_lease_recycled_namespac
         .unwrap();
     let current = operator
         .key_dictionary
-        .lease(&operator.state.left[0].encoded_key)
+        .lease(operator.state.left.key_at(0))
         .unwrap();
     assert_ne!(
         current.address(),
@@ -253,8 +253,11 @@ async fn test_persistent_dictionary_history_bytes_do_not_lease_recycled_namespac
         StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
     restored.restore(&after).unwrap();
     assert_eq!(restored.state.left.len(), 1);
-    assert_eq!(restored.state.left[0].event_time.as_micros(), 1_000_000_000);
-    assert_eq!(restored.state.left[0].encoded_key.as_slice(), old_bytes);
+    assert_eq!(
+        restored.state.left.at(0).event_time.as_micros(),
+        1_000_000_000
+    );
+    assert_eq!(restored.state.left.at(0).encoded_key.as_slice(), old_bytes);
     drop((
         operator, restored, current, canonical, before, after, context, output,
     ));
@@ -439,8 +442,8 @@ async fn assert_typed_key_reuse(key: ArrayRef) {
         assert_eq!(row.encoded_key.as_slice(), bytes);
     }
     assert!(Arc::ptr_eq(
-        &operator.state.left[0].encoded_key,
-        &operator.state.right[0].encoded_key
+        operator.state.left.key_at(0),
+        operator.state.right.key_at(0)
     ));
     assert_eq!(operator.status().emitted_match_rows, 8);
 }
@@ -492,7 +495,7 @@ async fn assert_cross_batch_keys(check_frames: bool) {
         .await
         .unwrap();
     assert_eq!(join_work().key_encodings, 2);
-    let canonical = Arc::clone(&operator.state.right[0].encoded_key);
+    let canonical = Arc::clone(operator.state.right.key_at(0));
     operator
         .process_data(
             "left",
@@ -522,7 +525,7 @@ async fn assert_cross_batch_keys(check_frames: bool) {
         );
     } else {
         assert!(
-            Arc::ptr_eq(&canonical, &operator.state.left[0].encoded_key),
+            Arc::ptr_eq(&canonical, operator.state.left.key_at(0)),
             "equal retained keys on both sides must alias one persistent canonical owner"
         );
     }
@@ -651,14 +654,14 @@ async fn test_persistent_dictionary_failed_growth_keeps_committed_backing() {
         .await
         .unwrap();
     let before = operator.key_dictionary.inventory();
-    let original = Arc::clone(&operator.state.left[0].encoded_key);
+    let original = Arc::clone(operator.state.left.key_at(0));
     let error = operator
         .process_data("left", input(vec![4, 5]), &context, &mut output)
         .await
         .unwrap_err();
     assert!(error.to_string().contains("retained state limit exceeded"));
     assert_eq!(operator.state.left.len(), 4);
-    assert!(Arc::ptr_eq(&original, &operator.state.left[0].encoded_key));
+    assert!(Arc::ptr_eq(&original, operator.state.left.key_at(0)));
     assert_eq!(
         operator.key_dictionary.inventory(),
         before,
@@ -697,7 +700,7 @@ async fn test_persistent_dictionary_reclaims_retired_slots_with_a_live_hot_key()
             .unwrap();
         let held = operator
             .key_dictionary
-            .lease(&operator.state.left[1].encoded_key)
+            .lease(operator.state.left.key_at(1))
             .unwrap();
         operator
             .evict_progress(

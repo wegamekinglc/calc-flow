@@ -327,7 +327,7 @@ async fn derived_worker_boundary(
         let (entered, wait) = gate.lock().unwrap().take().unwrap();
         entered
             .send((
-                Arc::downgrade(rows[0].record.column(0)),
+                Arc::downgrade(rows.at(0).record.column(0)),
                 std::thread::current().id(),
             ))
             .unwrap();
@@ -575,7 +575,7 @@ fn canonical_right(operator: &StreamJoinOperator) -> Arc<columnar::FramedKey> {
         operator
             .key_bindings
             .right
-            .canonical(&operator.state.right[0]),
+            .canonical(&operator.state.right.at(0)),
     )
 }
 
@@ -594,7 +594,7 @@ fn assert_shared_current(operator: &StreamJoinOperator, references: u64) {
         (&operator.key_bindings.right, &operator.state.right),
     ] {
         for row in rows.iter() {
-            let current = bindings.canonical(row);
+            let current = bindings.canonical(&row);
             assert_eq!(
                 operator.key_dictionary.lease(current).unwrap().address(),
                 lease.address()
@@ -705,7 +705,7 @@ fn state_observation(operator: &StreamJoinOperator) -> impl PartialEq + fmt::Deb
     )
 }
 
-fn rows_observation(rows: &[StoredRow]) -> impl PartialEq + fmt::Debug + use<> {
+fn rows_observation(rows: &dyn Rows) -> impl PartialEq + fmt::Debug + use<> {
     rows.iter()
         .map(|row| {
             (

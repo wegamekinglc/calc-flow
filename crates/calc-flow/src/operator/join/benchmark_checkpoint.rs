@@ -387,7 +387,7 @@ fn validate_retained_row<'a>(
     Ok(values)
 }
 
-fn validate_side(rows: &[StoredRow], expected: usize, left: bool) -> Result<(String, u64)> {
+fn validate_side(rows: &dyn super::Rows, expected: usize, left: bool) -> Result<(String, u64)> {
     require(
         rows.len() == expected,
         "row3 oracle retained row count differs",
@@ -404,7 +404,7 @@ fn validate_side(rows: &[StoredRow], expected: usize, left: bool) -> Result<(Str
     let mut charged = 0;
     for (index, stored) in rows.iter().enumerate() {
         let (time, sequence, key, value) =
-            validate_retained_row(stored, index, left, &schema, &keys, &encoded)?;
+            validate_retained_row(&stored, index, left, &schema, &keys, &encoded)?;
         update_digest(&mut digest, time, sequence, key, value);
         charged += stored.charge;
     }

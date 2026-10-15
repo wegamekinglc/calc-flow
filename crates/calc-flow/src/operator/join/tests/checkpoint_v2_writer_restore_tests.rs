@@ -18,11 +18,27 @@ fn assert_history_rows(join: &StreamJoinOperator, epoch: Epoch, continued: bool)
         (2, 283, 10, 6, 5)
     };
     assert_eq!((join.state.left.len(), join.state.right.len()), (rows, 1));
-    assert_row(&join.state.left[0], 7, 96, 148, "猫", "blue", Some(&[2, 3]));
-    assert_row(&join.state.left[1], 9, 97, 135, "新", "green", None);
-    assert_row(&join.state.right[0], 4, 100, 141, "ok", "red", Some(&[9]));
+    assert_row(
+        &join.state.left.at(0),
+        7,
+        96,
+        148,
+        "猫",
+        "blue",
+        Some(&[2, 3]),
+    );
+    assert_row(&join.state.left.at(1), 9, 97, 135, "新", "green", None);
+    assert_row(
+        &join.state.right.at(0),
+        4,
+        100,
+        141,
+        "ok",
+        "red",
+        Some(&[9]),
+    );
     if continued {
-        assert_row(&join.state.left[2], 10, 98, 141, "ok", "red", Some(&[9]));
+        assert_row(&join.state.left.at(2), 10, 98, 141, "ok", "red", Some(&[9]));
     }
     assert_eq!(
         (

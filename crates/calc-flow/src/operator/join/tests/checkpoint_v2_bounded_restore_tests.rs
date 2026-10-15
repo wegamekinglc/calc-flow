@@ -93,7 +93,7 @@ fn test_v2_restore_4096_rows_fits_fixed_four_mib_workspace() {
     );
     for (index, row) in operator.state.left.iter().enumerate() {
         assert_row(
-            row,
+            &row,
             u64::try_from(index).unwrap(),
             95,
             141,
@@ -102,7 +102,7 @@ fn test_v2_restore_4096_rows_fits_fixed_four_mib_workspace() {
             Some(&[9]),
         );
     }
-    assert_eq!(operator.state.right[0].row_id, 4);
+    assert_eq!(operator.state.right.at(0).row_id, 4);
     assert_eq!(snapshot.inline_metadata, original.inline_metadata);
     assert_eq!(snapshot.segments, original.segments);
     drop((operator, snapshot, original, pressure));

@@ -34,7 +34,13 @@ pub(super) fn payload_funding<'a>(
 }
 
 pub(super) fn state_funding(operator: &StreamJoinOperator) -> usize {
-    let rows = operator.state.left.iter().chain(&*operator.state.right);
+    let owned = operator
+        .state
+        .left
+        .iter()
+        .chain(operator.state.right.iter())
+        .collect::<Vec<_>>();
+    let rows = owned.iter();
     let pending = operator
         .state
         .deltas
@@ -56,7 +62,11 @@ pub(super) fn state_funding(operator: &StreamJoinOperator) -> usize {
         .chain(operator.key_dictionary.canonical_owners())
         .filter_map(|key| key.funded_owner())
         .collect::<BTreeMap<_, _>>();
-    index_funding(operator)
+    operator.state.left.funded_bytes()
+        + operator.state.right.funded_bytes()
+        + operator.state.left_expirations.funded_bytes()
+        + operator.state.right_expirations.funded_bytes()
+        + index_funding(operator)
         + payloads
         + keys.values().sum::<usize>()
         + operator.key_dictionary.funded_controls()
@@ -208,7 +218,7 @@ async fn assert_reference(
         .unwrap()
         .expect("eligible native key");
     assert_eq!(join_work().sql_probe_table_builds, 0);
-    let identities = |pairs: &[MatchedPair]| {
+    let identities = |pairs: &dyn matches::Matches| {
         pairs
             .iter()
             .map(|pair| (pair.pos, pair.opposite_index))
@@ -220,7 +230,7 @@ async fn assert_reference(
     } else {
         &operator.state.left
     };
-    let materialize = |pairs: &[MatchedPair]| {
+    let materialize = |pairs: &dyn matches::Matches| {
         materialize_output_record(
             operator.output_ports()[0].schema().unwrap(),
             &admitted,
@@ -971,7 +981,7 @@ async fn native_fallback_index_refund(
         .evaluate_matches(&plan, &mut admitted, &context)
         .await;
     let actual = actual.expect("declined native scratch must refund unused index before SQL");
-    let pairs = |rows: &[MatchedPair]| {
+    let pairs = |rows: &dyn matches::Matches| {
         rows.iter()
             .map(|pair| (pair.pos, pair.opposite_index))
             .collect::<Vec<_>>()

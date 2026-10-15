@@ -43,9 +43,9 @@ fn assert_writer_rows(operator: &StreamJoinOperator) {
         (operator.state.left.len(), operator.state.right.len()),
         (2, 1)
     );
-    assert_null_row(&operator.state.left[0]);
+    assert_null_row(&operator.state.left.at(0));
     assert_row(
-        &operator.state.left[1],
+        &operator.state.left.at(1),
         1,
         96,
         148,
@@ -54,7 +54,7 @@ fn assert_writer_rows(operator: &StreamJoinOperator) {
         Some(&[2, 3]),
     );
     assert_row(
-        &operator.state.right[0],
+        &operator.state.right.at(0),
         0,
         100,
         141,
@@ -414,6 +414,7 @@ async fn mixed_prepared_capture() -> (
         operator
             .state
             .left
+            .to_vec()
             .windows(2)
             .all(|pair| { !Arc::ptr_eq(pair[0].record.column(0), pair[1].record.column(0)) }),
         "the fixture must reach more than 1,024 independent selection runs"
@@ -429,7 +430,7 @@ async fn mixed_prepared_capture() -> (
     restored.restore(&snapshot).unwrap();
     assert_eq!(restored.status(), operator.status());
     for (index, &(parent, row)) in selection.iter().enumerate() {
-        let restored_row = &restored.state.left[index];
+        let restored_row = &restored.state.left.at(index);
         assert_eq!(restored_row.row_id, u64::try_from(index).unwrap());
         assert_eq!(*restored_row.record.view(), parents[parent].slice(row, 1));
     }
