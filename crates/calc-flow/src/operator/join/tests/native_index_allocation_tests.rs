@@ -435,8 +435,30 @@ fn test_string_probe_keeps_empty_null_parent_and_nonfitting_fallbacks() {
         Arc::new(StringArray::from(vec![Some("kept"), None])),
         &[0, 0],
     );
-    assert!(ArenaLayout::measure(&null_parent, &[0]).unwrap().is_none());
-    assert_probe_fallback(&null_parent, None);
+    let expected = canonical_probe_frames(&null_parent);
+    let layout = ArenaLayout::measure(&null_parent, &[0]).unwrap().unwrap();
+    assert!(layout.fits(null_parent.len(), 1));
+    assert_eq!(layout.charge, probe_key_charge(&null_parent, &[0]).unwrap());
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(layout.charge));
+    let credit = MemoryConsumer::new("selected-nonnull-string").register(&pool);
+    credit.try_grow(layout.charge).unwrap();
+    super::super::reset_join_work();
+    let keys = intern_probe_keys(
+        &null_parent,
+        &[0],
+        Arc::new(credit),
+        "selected-nonnull-string",
+        Some(layout),
+    )
+    .unwrap();
+    assert_probe_frame_identity(&keys, &expected);
+    let work = super::super::join_work();
+    assert_eq!(work.key_encodings, 1);
+    assert_eq!(work.arena_frames, 1);
+    assert!(null_parent[0].record.columns()[0].is_null(1));
+    assert_eq!(canonical_probe_frames(&null_parent), expected);
+    drop(keys);
+    assert_eq!(pool.reserved(), 0);
 
     let tiny = probe_array_rows(Arc::new(StringArray::from(vec![""])), &[0]);
     let layout = ArenaLayout::measure(&tiny, &[0]).unwrap().unwrap();

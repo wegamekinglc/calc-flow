@@ -10,6 +10,7 @@ import shutil
 import signal
 import time
 from contextlib import suppress
+from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 
@@ -23,6 +24,16 @@ from benchmarks.checkpoint_cycles import (
 from benchmarks.engine_lifecycle import run_with_completion
 from benchmarks.sustained_join import checkpoint_windows
 from scripts.benchmark_suite.issue406_acceptance import checkpoint_settings
+
+
+@dataclass(frozen=True, slots=True)
+class AcceptanceBindings:
+    """Owned I/O resources for one running acceptance sample."""
+
+    job: object
+    sources: dict
+    sink: object
+    streams: dict
 
 
 def runtime_config_arguments(mode: str) -> dict:
@@ -139,11 +150,17 @@ def _dispatch_trace(value: str, case: dict, status: dict, frontier: int, sink) -
 
 
 async def measure_acceptance_job(
-    job, sources, sink, streams, *, case: dict, state_root: Path
+    bindings: AcceptanceBindings, *, case: dict, state_root: Path
 ) -> tuple:
     """Retain processing evidence even when baseline EOF has a known failure."""
     from benchmarks import engine_stream as stream
 
+    job, sources, sink, streams = (
+        bindings.job,
+        bindings.sources,
+        bindings.sink,
+        bindings.streams,
+    )
     evidence = {"checkpoint_observations": []}
     observations = evidence["checkpoint_observations"]
     stop = asyncio.Event()
@@ -213,14 +230,22 @@ async def measure_acceptance_job(
         )
     failure = cancellation or cleanup_error or failure
     _require_acceptance_outcome(failure, observer_failure, table, evidence, case)
+    return table, _record_acceptance_result(evidence, failure, cleanup_started)
+
+
+def _record_acceptance_result(
+    evidence: dict, failure: BaseException | None, cleanup_started: int
+) -> dict:
     evidence["lifecycle"] = "completed" if failure is None else "failed"
     if failure is not None:
         evidence["lifecycle_error"] = evidence["terminal_error"]
     evidence["terminal_seconds"] = (
         cleanup_started - evidence["terminal_started_ns"]
     ) / 1e9
-    evidence.update(_processing_checkpoint_evidence(observations, evidence))
-    return table, evidence
+    evidence.update(
+        _processing_checkpoint_evidence(evidence["checkpoint_observations"], evidence)
+    )
+    return evidence
 
 
 def acceptance_checkpoint_evidence(
@@ -483,10 +508,7 @@ class AcceptanceEngineCase:
         ).start_async()
         startup_seconds = (time.perf_counter_ns() - startup_started) / 1e9
         table, evidence = await measure_acceptance_job(
-            job,
-            sources,
-            sink,
-            timed,
+            AcceptanceBindings(job=job, sources=sources, sink=sink, streams=timed),
             case={**self.case, "dispatch_output_node_id": self.output_node_id},
             state_root=state_root,
         )

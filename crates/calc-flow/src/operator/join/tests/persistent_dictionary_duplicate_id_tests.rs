@@ -176,9 +176,7 @@ impl FundingObservation {
 
 fn unchanged_funding(route: Route, before: FundingObservation, after: FundingObservation) -> bool {
     let controls = if matches!(route, Route::Closed) {
-        before.controls.1 > 0
-            && before.controls.2 == 0
-            && after.controls == (before.controls.0, 0, 0)
+        before.controls.2 == 0 && after.controls == (before.controls.0, 0, 0)
     } else {
         before.controls == after.controls
     };
@@ -205,6 +203,7 @@ async fn reject_duplicate_snapshot(
         .store(matches!(route, Route::Refused), Ordering::SeqCst);
     if matches!(route, Route::Closed) {
         owner.gather_owner().close_admission();
+        owner.gather_owner().wait_closed_generation_for_test().await;
     }
     let baseline = FundingObservation::observe(&target, &pool, &owner);
     let mut candidate = snapshot.clone();

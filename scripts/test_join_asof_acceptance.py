@@ -470,6 +470,24 @@ class AcceptanceRuntimePolicyTests(unittest.TestCase):
 
 class AcceptanceLifecycleTests(unittest.IsolatedAsyncioTestCase):
     @staticmethod
+    def measurement_engine():
+        from datetime import datetime
+        from types import ModuleType
+
+        engine = ModuleType("benchmarks.engine_stream")
+        engine.BASE = datetime(2000, 1, 1, tzinfo=UTC)
+        engine.BASE_MICROS = 0
+        engine._require_ready_sources = Mock()
+        engine._measure_ready_clock = AsyncMock(
+            return_value=(
+                object(),
+                0.0000001,
+                {"processing_started_ns": 100, "processing_ended_ns": 200},
+            )
+        )
+        return engine
+
+    @staticmethod
     def trace_inner(trace, failure, row):
         if row == 6:
             return SimpleNamespace()
@@ -487,10 +505,12 @@ class AcceptanceLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self, *, observer_fails=False, asof=False, trace_failure=None, row=7, mode="low"
     ):
         import asyncio
-        from datetime import datetime, timedelta
-        from types import ModuleType
+        from datetime import timedelta
 
-        from benchmarks.join_asof_acceptance_runtime import measure_acceptance_job
+        from benchmarks.join_asof_acceptance_runtime import (
+            AcceptanceBindings,
+            measure_acceptance_job,
+        )
 
         done = asyncio.Event()
         checkpoint = {
@@ -568,17 +588,7 @@ class AcceptanceLifecycleTests(unittest.IsolatedAsyncioTestCase):
             return {"frontier": micros}
 
         job.wait_async = wait
-        engine = ModuleType("benchmarks.engine_stream")
-        engine.BASE = datetime(2000, 1, 1, tzinfo=UTC)
-        engine.BASE_MICROS = 0
-        engine._require_ready_sources = Mock()
-        engine._measure_ready_clock = AsyncMock(
-            return_value=(
-                object(),
-                0.0000001,
-                {"processing_started_ns": 100, "processing_ended_ns": 200},
-            )
-        )
+        engine = self.measurement_engine()
 
         async def snapshot(root, status):
             self.assertEqual(root, Path("sample-state"))
@@ -621,14 +631,16 @@ class AcceptanceLifecycleTests(unittest.IsolatedAsyncioTestCase):
         ):
             try:
                 result = await measure_acceptance_job(
-                    job,
-                    {"source": SimpleNamespace(push=push, ready=ready)},
-                    SimpleNamespace(
-                        rows=1,
-                        expected_rows=1,
-                        tables=[pa.table({"value": [1.0]})],
+                    AcceptanceBindings(
+                        job=job,
+                        sources={"source": SimpleNamespace(push=push, ready=ready)},
+                        sink=SimpleNamespace(
+                            rows=1,
+                            expected_rows=1,
+                            tables=[pa.table({"value": [1.0]})],
+                        ),
+                        streams=streams,
                     ),
-                    streams,
                     case={
                         "row": row,
                         "mode": mode,

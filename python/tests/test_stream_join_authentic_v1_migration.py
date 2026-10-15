@@ -608,7 +608,7 @@ def test_authentic_v1_migrates_to_v2_and_recovers_on_a_fresh_process(migrated_ro
         if item.kind == "stream_join"
     )
     assert capability.state_version == 1
-    assert capability.state_layouts == (1, 2)
+    assert capability.state_layouts == (1, 2, 3)
 
 
 def test_authentic_v1_selected_udf_version_fails_before_connectors_open(tmp_path):
