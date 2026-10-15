@@ -80,3 +80,59 @@ target/debug/deps/calc_flow-71dd66c0d944c938 --test-threads=1 \
 
 Full regression, cross-platform and the Rust 90% coverage gate belong to existing
 CI. No performance target acceptance or merge-readiness verdict is claimed.
+
+## Codacy follow-up
+
+The follow-up starts at PR #447 head
+`7a497ebc85c2ee75c71d830a58319bbc315f3e45`; freshly fetched `origin/main`
+remains `aaf793a3259b3e3d2e18e30eb5e13e06b1141665`.
+Codacy check run `116493748987` reports cyclomatic complexity above its limit
+of 8 in `range_sum` (14), `view` (11), and `encoded` (9).
+
+Extract the validity-block accumulation, list-view child range sum, and union
+child sum into private helpers. The existing checked additions, validity-byte
+accumulator, child coordinates and scalar-error replay remain in place. No
+check configuration, exemptions, thresholds, state layout or public API changes.
+
+Lizard 1.23.0 reproduces all three original warnings. After the refactor,
+`range_sum` is 8, `view` is 6, and `encoded` is 8; the extracted helpers are
+7, 4, and 2 respectively. All functions in both affected files satisfy the
+unchanged limit:
+
+```bash
+lizard -C 8 crates/calc-flow/src/operator/join/admission_charge.rs \
+  crates/calc-flow/src/operator/join/admission_charge/nested.rs
+```
+
+This is a behavior-preserving refactor. Reuse the broader original validation
+above; no additional benchmark collection or performance claim is needed.
+
+With the same Rust 1.88.0 build settings as the original implementation:
+
+```bash
+CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
+  cargo test --locked -p calc-flow --lib columnar_charge -- --test-threads=1
+
+target/debug/deps/calc_flow-71dd66c0d944c938 --test-threads=1 \
+  operator::join::tests::output_gather_tests::test_batch_admission_metric_and_conversion_keep_first_row_error \
+  operator::join::tests::output_gather_tests::test_earlier_timestamp_error_precedes_later_row_id_overflow
+```
+
+The rebuilt candidate passes 10/10 fee tests and 2/2 error-priority controls.
+The fee tests include sliced nested/view/union/dictionary payloads, frozen V1
+parity, zero-allocation/prefix counters, byte-limit and overflow refusal, null
+and sparse selections, and cancellation/abandonment. No duplicate tests were
+added for the extracted helpers.
+
+The focused Clippy check and static checks also pass:
+
+```bash
+CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
+  cargo clippy --locked -p calc-flow --lib --tests -- -D warnings
+cargo fmt --all --check
+git diff --check
+git diff --exit-code -- schemas/project-v3.schema.json
+```
+
+New-head remote Codacy/CI and review status is recorded in the PR handoff;
+the original head's CI/review evidence is not a verdict on the repaired head.

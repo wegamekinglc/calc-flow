@@ -263,7 +263,7 @@ fn range_sum(array: &dyn Array, range: Range<usize>) -> Result<u64> {
     #[cfg(test)]
     super::note_join_work(|work| work.charge_range_sums += 1);
     let column = Column::new(array)?;
-    let mut total = range.len() as u64;
+    let total = range.len() as u64;
     let count = array.nulls().map_or(range.len(), |nulls| {
         nulls
             .inner()
@@ -284,6 +284,15 @@ fn range_sum(array: &dyn Array, range: Range<usize>) -> Result<u64> {
             _ => {}
         }
     }
+    sum_valid_ranges(array, column, range, total)
+}
+
+fn sum_valid_ranges(
+    array: &dyn Array,
+    column: Column<'_>,
+    range: Range<usize>,
+    mut total: u64,
+) -> Result<u64> {
     for start in range.clone().step_by(BLOCK) {
         let length = (range.end - start).min(BLOCK);
         let valid = valid_bits(array, start, length);

@@ -43,32 +43,37 @@ fn offsets<O: Copy + TryInto<usize>>(
 }
 
 fn view(array: &dyn Array, row: usize) -> Result<u64> {
-    let (child, start, length, prefix) = match array.data_type() {
+    match array.data_type() {
         DataType::ListView(_) => {
             let list = typed::<ListViewArray>(array)?;
-            (
-                list.values(),
-                index(list.value_offset(row))?,
-                index(list.value_size(row))?,
+            view_sum(
+                list.values().as_ref(),
+                list.value_offset(row),
+                list.value_size(row),
                 8,
             )
         }
         DataType::LargeListView(_) => {
             let list = typed::<LargeListViewArray>(array)?;
-            (
-                list.values(),
-                index(list.value_offset(row))?,
-                index(list.value_size(row))?,
+            view_sum(
+                list.values().as_ref(),
+                list.value_offset(row),
+                list.value_size(row),
                 16,
             )
         }
         _ => {
             let list = typed::<FixedSizeListArray>(array)?;
             let length = index(list.value_length())?;
-            (list.values(), row * length, length, 0)
+            view_sum(list.values().as_ref(), row * length, length, 0)
         }
-    };
-    add(prefix, range_sum(child.as_ref(), start..start + length)?)
+    }
+}
+
+fn view_sum<O: TryInto<usize>>(child: &dyn Array, start: O, length: O, prefix: u64) -> Result<u64> {
+    let start = index(start)?;
+    let length = index(length)?;
+    add(prefix, range_sum(child, start..start + length)?)
 }
 
 fn encoded(array: &dyn Array, row: usize) -> Result<u64> {
@@ -77,14 +82,7 @@ fn encoded(array: &dyn Array, row: usize) -> Result<u64> {
             .columns()
             .iter()
             .try_fold(0, |total, child| add(total, cell_sum(child.as_ref(), row)?)),
-        DataType::Union(..) => {
-            let union = typed::<UnionArray>(array)?;
-            let offset = union.value_offset(row);
-            add(
-                1,
-                cell_sum(union.child(union.type_id(row)).as_ref(), offset)?,
-            )
-        }
+        DataType::Union(..) => union_sum(typed::<UnionArray>(array)?, row),
         DataType::Dictionary(..) => {
             // V1 downcasts only Int32 physical keys. Keep all other
             // key widths on its original, tested type-mismatch path.
@@ -99,6 +97,14 @@ fn encoded(array: &dyn Array, row: usize) -> Result<u64> {
         }
         _ => Err(super::super::unsupported_payload_type(array.data_type())),
     }
+}
+
+fn union_sum(union: &UnionArray, row: usize) -> Result<u64> {
+    let offset = union.value_offset(row);
+    add(
+        1,
+        cell_sum(union.child(union.type_id(row)).as_ref(), offset)?,
+    )
 }
 
 fn index<T: TryInto<usize>>(value: T) -> Result<usize> {
