@@ -210,7 +210,9 @@ events = cf.table_input(
 calculation = events.with_columns(avg=cf.ts.mean(events["x"], window=cf.rows(2)))
 routed = cf.with_late_output(calculation)
 program = cf.Program(
-    "late-demo", engine="streaming", outputs={"normal": routed.output, "late": routed.late}
+    "late-demo",
+    engine="streaming",
+    outputs={"normal": routed.output, "late": routed.late},
 )
 
 
