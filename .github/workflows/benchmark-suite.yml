@@ -89,6 +89,7 @@ jobs:
           scripts.test_issue406_fresh_report
           scripts.test_issue406_harness
           scripts.test_issue406_report
+          scripts.test_issue406_measurement
           scripts.test_issue406_reuse
           scripts.test_native_memory_profile
           scripts.test_native_slow_sink_diagnostics

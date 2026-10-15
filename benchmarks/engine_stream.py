@@ -10,7 +10,11 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from benchmarks.engine_lifecycle import interleaved_events, run_with_completion
+from benchmarks.engine_lifecycle import (
+    AcceptanceBindings,
+    interleaved_events,
+    run_with_completion,
+)
 from benchmarks.warm_stream import BASE, BASE_MICROS, _InteractiveSource
 from calc_flow import (
     AsofStateLimits,
@@ -503,7 +507,8 @@ async def _measure_ready(
     static_join: bool = False,
 ) -> tuple[pa.Table, float]:
     table, seconds, _clocks = await _measure_ready_clock(
-        sources, sink, streams, job, join_mode="sealed" if static_join else None
+        AcceptanceBindings(job=job, sources=sources, sink=sink, streams=streams),
+        join_mode="sealed" if static_join else None,
     )
     return table, seconds
 
@@ -543,15 +548,19 @@ async def _push_processing_events(
 
 
 async def _measure_ready_clock(
-    sources: dict[str, _ReadySource],
-    sink: _CollectSink,
-    streams: dict[str, tuple],
-    job,
+    bindings: AcceptanceBindings,
     *,
     join_mode: str | None = None,
+    phase_clock=None,
 ) -> tuple[pa.Table, float, dict]:
     if join_mode not in (None, "sealed", "retained"):
         raise ValueError("unknown Join measurement mode")
+    sources, sink, streams, job = (
+        bindings.sources,
+        bindings.sink,
+        bindings.streams,
+        bindings.job,
+    )
     static_join, retained_join = join_mode == "sealed", join_mode == "retained"
     await asyncio.wait_for(
         asyncio.gather(*(source.ready.wait() for source in sources.values())),
@@ -563,6 +572,7 @@ async def _measure_ready_clock(
         pending, dimension_rows = await _preload_join_dimension(
             sources, streams, job, static_join
         )
+    resources = None if phase_clock is None else phase_clock("processing")
     started = time.perf_counter_ns()
     await _push_processing_events(sources, streams, sink, pending)
     await asyncio.wait_for(sink.complete.wait(), timeout=600)
@@ -570,6 +580,7 @@ async def _measure_ready_clock(
         raise RuntimeError("stream output row count differs from the timed workload")
     table = pa.concat_tables(sink.tables)
     ended = time.perf_counter_ns()
+    cpu_evidence = None if resources is None else resources.finish()
     seconds = (ended - started) / 1e9
     if static_join:
         await asyncio.wait_for(
@@ -585,6 +596,7 @@ async def _measure_ready_clock(
         {
             "processing_started_ns": started,
             "processing_ended_ns": ended,
+            **({"cpu_evidence": cpu_evidence} if cpu_evidence is not None else {}),
         },
     )
 

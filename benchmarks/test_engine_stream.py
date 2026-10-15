@@ -346,10 +346,12 @@ def test_retained_join_preloads_without_sealing_and_records_processing_cut():
             }
 
         output, seconds, clocks = await engine_stream._measure_ready_clock(
-            {name: Source(name) for name in ("left", "right")},
-            sink,
-            {name: (data, watermark) for name in ("left", "right")},
-            SimpleNamespace(status=status),
+            engine_stream.AcceptanceBindings(
+                job=SimpleNamespace(status=status),
+                sources={name: Source(name) for name in ("left", "right")},
+                sink=sink,
+                streams={name: (data, watermark) for name in ("left", "right")},
+            ),
             join_mode="retained",
         )
         assert output.equals(batch.to_pyarrow())

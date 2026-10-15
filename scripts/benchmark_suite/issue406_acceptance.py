@@ -45,6 +45,20 @@ class AcceptanceCase:
             "asof_operator": "processing_seconds",
         }.get(self.workload, "processing_seconds")
 
+    @property
+    def cpu_scope(self) -> str:
+        return {
+            "join_capture": "snapshot",
+            "join_restore": "restore",
+            "join_handler_compacting": "handler",
+            "join_handler_steady": "handler",
+        }.get(
+            self.workload,
+            "settled_processing"
+            if self.row == 7 and self.workload == "asof"
+            else "processing",
+        )
+
 
 def acceptance_inventory() -> tuple[AcceptanceCase, ...]:
     """List each selected size, mode, thread setting, and necessary control."""
@@ -133,6 +147,17 @@ def validate_observation(case: AcceptanceCase, side: str, sample: dict) -> None:
         raise ValueError(f"{case.id}: unsupported revision arm")
     _validate_sample_metric(case, side, sample)
     _validate_lifecycle(case, side, sample)
+    if "cpu_evidence" in sample:
+        from scripts.benchmark_suite.issue406_measurement import (
+            sample_cpu_evidence,
+            validate_cpu_evidence,
+        )
+
+        validate_cpu_evidence(
+            sample_cpu_evidence(sample, scope=case.cpu_scope),
+            threads=case.threads,
+            budget=sample.get("cpu_budget"),
+        )
     if case.workload not in ("join_sealed", "join_retained", "asof", "projection"):
         return
     _validate_runtime_observation(case, side, sample)

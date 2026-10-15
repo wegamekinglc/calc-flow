@@ -81,7 +81,15 @@ class AcceptanceDriverTests(unittest.IsolatedAsyncioTestCase):
                 if case.workload == "join_capture"
             )
             control = AsyncMock(return_value=dictionary_refusal_observation())
+            from scripts.test_issue406_measurement import layout_control_observation
+
+            layouts = AsyncMock(return_value=layout_control_observation())
             with (
+                patch.object(
+                    runner,
+                    "_run_native_control",
+                    layouts,
+                ),
                 patch.object(
                     runner, "_run_dictionary_refusal_control", control, create=True
                 ),
@@ -96,6 +104,13 @@ class AcceptanceDriverTests(unittest.IsolatedAsyncioTestCase):
                 ):
                     await runner.prepare((case,), side, round_index)
             self.assertEqual(control.await_count, 1)
+            self.assertEqual(layouts.await_count, 1)
+            self.assertEqual(
+                json.loads(
+                    (root / "correctness" / "join-layout-controls.json").read_text()
+                )["control"],
+                layout_control_observation(),
+            )
             observation = json.loads(
                 (root / "correctness" / "join-dictionary-refusal.json").read_text()
             )

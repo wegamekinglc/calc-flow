@@ -4,10 +4,21 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Iterator
+from dataclasses import dataclass
 from itertools import zip_longest
 from typing import Any, TypeVar
 
 _T = TypeVar("_T")
+
+
+@dataclass(frozen=True, slots=True)
+class AcceptanceBindings:
+    """Owned I/O resources for one running acceptance sample."""
+
+    job: object
+    sources: dict
+    sink: object
+    streams: dict
 
 
 def interleaved_events(streams: dict[str, tuple]) -> Iterator[tuple[str, object]]:

@@ -2,6 +2,8 @@
 
 mod dispatch_trace;
 pub use dispatch_trace::DispatchTraceOwner;
+mod resources;
+pub use resources::PhaseClock;
 
 use std::{
     collections::{BTreeMap, BTreeSet},

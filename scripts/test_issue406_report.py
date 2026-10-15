@@ -49,6 +49,41 @@ def report(records):
 
 
 class AcceptanceReportTests(unittest.TestCase):
+    def test_callback_percentiles_share_microsecond_units_without_mutating_input(self):
+        from scripts.benchmark_suite.issue406_report import (
+            render_acceptance_markdown,
+            summarize_acceptance,
+        )
+
+        off = selected(8, "join_small_batch", mode="off")
+        enabled = selected(8, "join_small_batch", mode="enabled")
+        raw = report(
+            [
+                record(off, 50e-6),
+                record(enabled, 50e-6),
+                record(enabled, 75e-6, side="baseline"),
+            ]
+        )
+        original = copy.deepcopy(raw)
+        summary = summarize_acceptance(raw)
+        off_target, enabled_target = summary["targets"][7]["absolute"]
+        self.assertEqual(off_target["unit"], "microseconds/full-batch callback")
+        self.assertEqual(enabled_target["unit"], off_target["unit"])
+        for arm, expected in (
+            (off_target["candidate"], 50),
+            (enabled_target["candidate"], 50),
+            (enabled_target["baseline"], 75),
+        ):
+            for percentile in ("p50", "p95", "p99"):
+                self.assertAlmostEqual(arm[percentile], expected)
+            self.assertEqual(
+                (arm["median_interval"]["low"], arm["median_interval"]["high"]),
+                (expected, expected),
+            )
+        markdown = render_acceptance_markdown(summary)
+        self.assertIn("p99 50 [50, 50] microseconds/full-batch callback", markdown)
+        self.assertEqual(raw, original)
+
     def test_post_compaction_handlers_cannot_establish_during_compaction_target(self):
         from scripts.benchmark_suite.issue406_report import (
             render_acceptance_markdown,
