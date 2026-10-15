@@ -9,6 +9,12 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-16: Merge general ASOF integer-sequence batches into reserved columns
+  by key, preserving unordered input positions and duplicate identity history.
+  Finalization caches each key's latest Arrow payload route and advances
+  identity-history cursors across ordered and normalized unordered input.
+  Public schemas, frozen state charges, and checkpoint layouts remain unchanged.
+
 - 2026-10-16: Store streaming Join state in chunks with stable row references
   and sorted expiration run heads. Native match selection uses incoming identity
   ranges or fan-out runs; output columns use Arrow take/interleave with bulk

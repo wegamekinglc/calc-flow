@@ -11,6 +11,8 @@ use datafusion::arrow::{
 };
 use std::{cmp::Ordering, collections::HashMap};
 
+mod duplicates;
+
 #[cfg(test)]
 #[derive(Default, Debug, PartialEq, Eq)]
 pub(super) struct Work {
@@ -44,6 +46,7 @@ pub(super) struct Record {
 pub(in super::super) struct Columns {
     records: Vec<Record>,
     order: Vec<(usize, u32)>,
+    key_rows: Vec<Vec<(usize, u32)>>,
 }
 
 pub(super) struct Plan {
@@ -130,13 +133,9 @@ pub(super) fn plan(
     let mut columns = Columns {
         records,
         order: Vec::new(),
+        key_rows: Vec::new(),
     };
     columns.prove_order(&ranks, context)?;
-    // Reuse the delivered ordered left constructor rather than replacing it.
-    let ordered_append = columns.is_ordered_append(operator, input.index, &keys);
-    if operator.columnar_left_input(batch, input, columns.order.len(), ordered_append) {
-        return Ok(None);
-    }
     let duplicates = columns.duplicates(operator, input.index, &keys, &ranks, context)?;
     Ok(Some(Plan {
         columns,
@@ -519,6 +518,31 @@ impl Columns {
         kind: state::SequenceKind,
         cancelled: &dyn Fn() -> Result<()>,
     ) -> Result<Vec<state::PreparedLeftChunk>> {
+        #[cfg(not(test))]
+        {
+            self.prepare_chunks(keys, batches, kind, cancelled)
+        }
+        #[cfg(test)]
+        {
+            let mut result = None;
+            let allocation = allocation_counter::measure(|| {
+                result = Some(self.prepare_chunks(keys, batches, kind, cancelled));
+            });
+            let mut chunks = result.expect("measured ASOF chunk construction")?;
+            if let Some(first) = chunks.first_mut() {
+                first.record_preparation_allocation(allocation);
+            }
+            Ok(chunks)
+        }
+    }
+
+    fn prepare_chunks(
+        &self,
+        keys: &InputKeys,
+        batches: &[Arc<state::PayloadBatch>],
+        kind: state::SequenceKind,
+        cancelled: &dyn Fn() -> Result<()>,
+    ) -> Result<Vec<state::PreparedLeftChunk>> {
         self.records
             .iter()
             .zip(batches)
@@ -551,93 +575,6 @@ impl Columns {
         context.check_cancelled()
     }
 
-    fn duplicates(
-        &mut self,
-        operator: &StreamAsofJoinOperator,
-        side: usize,
-        keys: &InputKeys,
-        ranks: &[u32],
-        context: &StreamOperatorContext<'_>,
-    ) -> Result<u64> {
-        let mut sorted = self.order.clone();
-        let compare = |a: &(usize, u32), b: &(usize, u32)| {
-            self.records[a.0].compare(a.1 as usize, &self.records[b.0], b.1 as usize, ranks)
-        };
-        if !sorted.windows(2).all(|p| compare(&p[0], &p[1]).is_le()) {
-            sorted.sort_unstable_by(compare);
-            #[cfg(test)]
-            WORK.with_borrow_mut(|work| work.sorted_rows += sorted.len());
-        }
-        let skip_resident = sorted.first().is_none_or(|&(batch, row)| {
-            let record = &self.records[batch];
-            let identity = (
-                record.times.value(row as usize),
-                keys.values[record.keys[row as usize] as usize]
-                    .encoding
-                    .clone(),
-                record.sequences.row(row as usize),
-            );
-            super::identities_are_after_state(&operator.state, side, std::iter::once(&identity))
-        });
-        let mut duplicates = 0;
-        let mut previous = None;
-        for (ordinal, &(batch, row)) in sorted.iter().enumerate() {
-            check_input_cancellation(ordinal, context)?;
-            let record = &self.records[batch];
-            let identity = (
-                record.times.value(row as usize),
-                keys.values[record.keys[row as usize] as usize]
-                    .encoding
-                    .clone(),
-                record.sequences.row(row as usize),
-            );
-            if previous.is_some_and(|last| compare(&last, &(batch, row)).is_eq())
-                || (!skip_resident && operator.state.contains_identity(side, &identity))
-            {
-                duplicates += 1;
-            }
-            previous = Some((batch, row));
-        }
-        context.check_cancelled()?;
-        // Reuse the global proof as the right installation permutation, so
-        // independently reversed records cannot cause repeated vector shifts.
-        self.order = sorted;
-        Ok(duplicates)
-    }
-
-    fn is_ordered_append(
-        &self,
-        operator: &StreamAsofJoinOperator,
-        side: usize,
-        keys: &InputKeys,
-    ) -> bool {
-        if side != 0 || self.records.iter().any(|r| r.order.is_some()) {
-            return false;
-        }
-        let mut previous = operator
-            .state
-            .left
-            .last_key_value()
-            .map(|((t, k, s), _)| (*t, k.clone(), s.into_owned()));
-        for record in &self.records {
-            let first = (
-                record.times.value(0),
-                keys.values[record.keys[0] as usize].encoding.clone(),
-                record.sequences.row(0),
-            );
-            if previous.as_ref().is_some_and(|last| last >= &first) {
-                return false;
-            }
-            let row = record.keys.len() - 1;
-            previous = Some((
-                record.times.value(row),
-                keys.values[record.keys[row] as usize].encoding.clone(),
-                record.sequences.row(row),
-            ));
-        }
-        true
-    }
-
     pub(super) fn identities<'a>(
         &'a self,
         keys: &'a [(state::Encoding, usize)],
@@ -656,21 +593,16 @@ impl Columns {
     }
 
     pub(super) fn install(
-        self,
+        &self,
         state: &mut state::RightState,
         handles: &[u32],
         payloads: &[state::RowRef],
     ) {
-        for (batch, row) in self.order {
-            let record = &self.records[batch];
-            state.insert_reserved(
-                handles[record.keys[row as usize] as usize],
-                (
-                    record.times.value(row as usize),
-                    record.sequences.row(row as usize),
-                ),
-                payloads[batch].with_row(row),
-            );
+        for (key, &handle) in handles.iter().enumerate() {
+            state
+                .reserved_bucket(handle)
+                .merge_admitted(self.rows_for_key(key, payloads), &|| Ok(()))
+                .expect("infallible ASOF admission commit");
         }
     }
 }
@@ -693,9 +625,9 @@ impl Plan {
             _payload: payload,
             _keys: self.keys.workspace.take(),
         };
-        // The canonical owner ledger and right installer still accept row
-        // descriptors. Materialize only at that compatibility boundary; all
-        // selection, encoding, ranks and duplicate proofs above remain batched.
+        // Canonical sequences retain the existing owner-ledger boundary.
+        // Integer sequences stay columnar through duplicate proofs, workers,
+        // and installation.
         let canonical = operator.state.sequence_kinds[input.index].width().is_none();
         let rows = self
             .columns
@@ -709,7 +641,7 @@ impl Plan {
             (
                 None,
                 super::admitted_right_capacities(self.keys.values, 1),
-                (!canonical).then_some(super::right::Columns::General(self.columns)),
+                (!canonical).then_some(super::right::Columns::General(Arc::new(self.columns))),
                 workspace,
             )
         };

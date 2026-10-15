@@ -382,6 +382,12 @@ impl RightState {
             .insert_admitted(order, row);
     }
 
+    pub fn reserved_bucket(&mut self, id: u32) -> &mut RightBucket {
+        #[cfg(test)]
+        super::RESERVED_BUCKET_ACCESSES.with(|visits| visits.set(visits.get() + 1));
+        Arc::get_mut(&mut self.entries[id as usize].bucket).expect("reserved ASOF admission bucket")
+    }
+
     pub fn push_reserved_unsigned(&mut self, id: u32, time: i64, sequence: u64, row: RowRef) {
         #[cfg(test)]
         super::RESERVED_BUCKET_ACCESSES.with(|visits| visits.set(visits.get() + 1));

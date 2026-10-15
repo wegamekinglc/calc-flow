@@ -197,8 +197,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--lib-skip",
         type=_non_empty_str,
+        action="append",
         default=None,
-        help="skip calc-flow tests whose full names contain this substring",
+        help="skip calc-flow tests matching this substring (repeatable)",
     )
     return parser
 
@@ -207,10 +208,14 @@ def _run_cargo_tests(
     cargo: str,
     *,
     no_run: bool,
-    lib_skip: str | None,
+    lib_skip: Sequence[str] | None,
 ) -> int:
     compile_arguments = ["--no-run"] if no_run else []
-    skip_arguments = ["--", "--skip", lib_skip] if lib_skip and not no_run else []
+    skip_arguments = (
+        ["--", *(argument for skip in lib_skip for argument in ("--skip", skip))]
+        if lib_skip and not no_run
+        else []
+    )
     commands = (
         [
             "-p",

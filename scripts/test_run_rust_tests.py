@@ -19,6 +19,16 @@ HARNESS = ROOT / "scripts/run_rust_tests.py"
 WINDOWS_WORKFLOW = ROOT / ".github/workflows/ci-windows.yml"
 LINUX_WORKFLOW = ROOT / ".github/workflows/ci-linux.yml"
 WINDOWS_SOAK_FILTER = "runtime::streaming::soak::"
+WINDOWS_CHECKPOINT_REGRESSIONS = (
+    "runtime::streaming::operator_task::tests::asof_tests::"
+    "test_asof_idle_never_forwards_with_or_without_pending_left",
+    "runtime::streaming::operator_task::tests::asof_tests::"
+    "test_asof_minimum_watermark_has_no_underflow_and_maximum_requires_eof",
+    "runtime::streaming::runner::tests::asof_tests::"
+    "test_asof_collector_backpressure_cancellation_restores_last_published_pending_cut",
+    "runtime::streaming::runner::tests::"
+    "ac5_checkpoint_restore_preserves_the_join_window_result",
+)
 
 
 def _write_python_command(directory: Path, name: str, source: str) -> Path:
@@ -214,7 +224,7 @@ if arguments[:3] == ["test", "-p", "calc-flow-python"]:
                 [["--test-threads=1"], ["--test-threads=1"]],
             )
 
-    def test_lib_skip_appends_a_skip_filter_to_the_calc_flow_leg_only(self) -> None:
+    def test_lib_skip_appends_every_filter_to_the_calc_flow_leg_only(self) -> None:
         with tempfile.TemporaryDirectory() as raw_directory:
             cargo, cargo_log, _ = self._fake_cargo(Path(raw_directory))
 
@@ -223,6 +233,8 @@ if arguments[:3] == ["test", "-p", "calc-flow-python"]:
                 cargo_log,
                 "--lib-skip",
                 "checkpoint_restart_soak_smoke",
+                "--lib-skip",
+                WINDOWS_CHECKPOINT_REGRESSIONS[0],
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -245,6 +257,8 @@ if arguments[:3] == ["test", "-p", "calc-flow-python"]:
                         "--",
                         "--skip",
                         "checkpoint_restart_soak_smoke",
+                        "--skip",
+                        WINDOWS_CHECKPOINT_REGRESSIONS[0],
                     ],
                     [
                         "test",
@@ -275,6 +289,8 @@ if arguments[:3] == ["test", "-p", "calc-flow-python"]:
                 "--no-run",
                 "--lib-skip",
                 "checkpoint_restart_soak_smoke",
+                "--lib-skip",
+                WINDOWS_CHECKPOINT_REGRESSIONS[0],
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -632,6 +648,35 @@ class WindowsCheckpointSoakIsolationTests(unittest.TestCase):
 
     def test_windows_parallel_suite_defers_all_checkpoint_soak_cases(self) -> None:
         self.assertIn(f"--lib-skip {WINDOWS_SOAK_FILTER}", self._rust_tests_job())
+
+    def test_windows_runs_every_deferred_checkpoint_regression_serially(self) -> None:
+        job = self._rust_tests_job()
+        parallel, serial = job.split(
+            "      - name: Run checkpoint regressions serially\n", 1
+        )
+        serial = serial.split("      - name:", 1)[0]
+        skips = parallel.split("--lib-skip ")[1:]
+        self.assertEqual(
+            [skip.split()[0] for skip in skips],
+            [WINDOWS_SOAK_FILTER, *WINDOWS_CHECKPOINT_REGRESSIONS],
+        )
+        arguments = serial.split("run: >-\n", 1)[1].split()
+        self.assertEqual(
+            arguments,
+            [
+                "cargo",
+                "test",
+                "--locked",
+                "-p",
+                "calc-flow",
+                "--lib",
+                "--all-features",
+                "--",
+                *WINDOWS_CHECKPOINT_REGRESSIONS,
+                "--exact",
+                "--test-threads=1",
+            ],
+        )
 
     def test_windows_runs_the_same_checkpoint_soak_cases_serially(
         self,

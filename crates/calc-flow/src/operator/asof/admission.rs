@@ -1110,6 +1110,13 @@ fn identities_are_after_state<'a>(
 }
 
 impl Admission {
+    fn general_right_columns(&self) -> Option<&Arc<batch::Columns>> {
+        match &self.right_columns {
+            Some(right::Columns::General(columns)) => Some(columns),
+            _ => None,
+        }
+    }
+
     pub fn permits_parallel_right(&self) -> bool {
         self.right_columns
             .as_ref()

@@ -52,6 +52,7 @@ struct SideBuilder<'a> {
     span: Option<Span>,
     run: Option<SourceRun>,
     raw: u64,
+    #[cfg(test)]
     right: bool,
 }
 
@@ -107,8 +108,34 @@ impl<'a> OutputPlanBuilder<'a> {
         name: &str,
     ) -> Result<()> {
         self.left.record_span(source, row, name)?;
-        if let Some(right) = right {
-            self.right.push(right, workspace, name)?;
+        let right = right
+            .map(|right| {
+                self.right
+                    .source(right, workspace, name)
+                    .map(|source| (source, right.row))
+            })
+            .transpose()?;
+        self.push_right_source(right, name)
+    }
+
+    pub fn right_source(
+        &mut self,
+        right: PayloadView<'_>,
+        workspace: &mut MemoryReservation,
+        name: &str,
+    ) -> Result<usize> {
+        self.right.source(right, workspace, name)
+    }
+
+    pub fn left_position(&mut self, source: usize, row: usize, name: &str) -> Result<()> {
+        self.left.record_span(source, row, name)
+    }
+
+    pub fn push_right_source(&mut self, right: Option<(usize, usize)>, name: &str) -> Result<()> {
+        if let Some((source, row)) = right {
+            let end = row + 1;
+            self.right.record_range(source, row..end, name)?;
+            self.right.rows.positions.push((source + 1, row));
             self.matched += 1;
         } else {
             self.right.rows.positions.push((0, 0));
@@ -205,6 +232,7 @@ impl<'a> SideBuilder<'a> {
             span: None,
             run: None,
             raw: 0,
+            #[cfg(test)]
             right,
         }
     }
@@ -273,21 +301,6 @@ impl<'a> SideBuilder<'a> {
             types,
         )?;
         checked(name, metadata, checked(name, heads, backing)?)
-    }
-
-    fn push(
-        &mut self,
-        row: PayloadView<'_>,
-        workspace: &mut MemoryReservation,
-        name: &str,
-    ) -> Result<()> {
-        let source = self.source(row, workspace, name)?;
-        let end = row.row + 1;
-        self.record_range(source, row.row..end, name)?;
-        self.rows
-            .positions
-            .push((source + usize::from(self.right), row.row));
-        Ok(())
     }
 
     fn record_span(&mut self, source: usize, row: usize, name: &str) -> Result<()> {

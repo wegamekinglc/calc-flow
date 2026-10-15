@@ -86,11 +86,27 @@ jobs:
       # before reaching the injected fault. The same module's generation forks
       # also amplify contention (DAL-255/DAL-261). Run this module serially
       # after the parallel suite, preserving every test and its deadlines.
+      # The four bounded checkpoint regressions below also stage durable
+      # files before acknowledgement. Isolate their exact names while
+      # retaining the original five/ten-second deadlines and assertions.
       - name: Run Rust tests
         timeout-minutes: 50
         run: >-
           python scripts/run_rust_tests.py --python-stress-runs 1
           --lib-skip runtime::streaming::soak::
+          --lib-skip runtime::streaming::operator_task::tests::asof_tests::test_asof_idle_never_forwards_with_or_without_pending_left
+          --lib-skip runtime::streaming::operator_task::tests::asof_tests::test_asof_minimum_watermark_has_no_underflow_and_maximum_requires_eof
+          --lib-skip runtime::streaming::runner::tests::asof_tests::test_asof_collector_backpressure_cancellation_restores_last_published_pending_cut
+          --lib-skip runtime::streaming::runner::tests::ac5_checkpoint_restore_preserves_the_join_window_result
+      - name: Run checkpoint regressions serially
+        timeout-minutes: 5
+        run: >-
+          cargo test --locked -p calc-flow --lib --all-features --
+          runtime::streaming::operator_task::tests::asof_tests::test_asof_idle_never_forwards_with_or_without_pending_left
+          runtime::streaming::operator_task::tests::asof_tests::test_asof_minimum_watermark_has_no_underflow_and_maximum_requires_eof
+          runtime::streaming::runner::tests::asof_tests::test_asof_collector_backpressure_cancellation_restores_last_published_pending_cut
+          runtime::streaming::runner::tests::ac5_checkpoint_restore_preserves_the_join_window_result
+          --exact --test-threads=1
       - name: Run checkpoint soak tests serially
         timeout-minutes: 10
         shell: pwsh

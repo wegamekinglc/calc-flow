@@ -293,7 +293,9 @@ pub(super) type RightOrder = (i64, Encoding);
 pub(super) type BatchKey = (u8, u64);
 
 mod right;
-pub(super) use right::RightBucket;
+#[cfg(test)]
+pub(super) use right::take_column_moves;
+pub(super) use right::{RightBucket, RightCursor};
 
 pub(super) struct PayloadBatch {
     pub key: BatchKey,

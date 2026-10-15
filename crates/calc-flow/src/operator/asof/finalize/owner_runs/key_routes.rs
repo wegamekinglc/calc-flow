@@ -152,7 +152,7 @@ fn keyed_operator(keys: usize, overlap: bool) -> StreamAsofJoinOperator {
 }
 
 async fn routed_and_fallback_cuts_preserve_matches_after_partial_consumption() {
-    for keys in [1, 63, 64, 65] {
+    for keys in [1, 63, 64, 65, 129] {
         for overlap in [false, true] {
             let mut operator = keyed_operator(keys, overlap);
             for consumed in [0, 1, 17] {
@@ -222,9 +222,11 @@ async fn generic_cursors_catch_up_between_routed_runs() {
     assert_cut_matches_binary_search(&operator, 522).await;
 }
 
-async fn monotonic_matching_hashes_chunk_keys_instead_of_each_row() {
+async fn monotonic_matching_hashes_chunk_keys_instead_of_each_row(distinct: usize) {
     let count = 1_024;
-    let key = Arc::new(StringArray::from(vec!["shared output key"; count])) as ArrayRef;
+    let key = Arc::new(StringArray::from_iter_values(
+        (0..count).map(|i| format!("shared output key {}", i % distinct)),
+    )) as ArrayRef;
     let sequence = Arc::new(Int64Array::from_iter_values(
         0..i64::try_from(count).unwrap(),
     )) as ArrayRef;
@@ -257,12 +259,58 @@ async fn monotonic_matching_hashes_chunk_keys_instead_of_each_row() {
     assert_eq!(plan.len, count);
     assert_eq!(plan.matched, 0);
     assert_eq!(plan.right.positions, vec![(0, 0); count]);
-    assert!(hashes <= 24, "one-key output prefix hashed {hashes} times");
+    let bound = (distinct * 4).max(24);
+    assert!(
+        hashes <= bound,
+        "{distinct}-key output prefix hashed {hashes} times; limit {bound}"
+    );
 }
 
 pub(super) async fn check_matching_routes() {
-    monotonic_matching_hashes_chunk_keys_instead_of_each_row().await;
+    for distinct in [1, 65, 129] {
+        monotonic_matching_hashes_chunk_keys_instead_of_each_row(distinct).await;
+    }
     routed_and_fallback_cuts_preserve_matches_after_partial_consumption().await;
     legacy_output_keeps_generic_matching().await;
     generic_cursors_catch_up_between_routed_runs().await;
+    latest_payload_slot_is_resolved_once_per_key().await;
+}
+
+async fn latest_payload_slot_is_resolved_once_per_key() {
+    let count = 1_024;
+    let mut keys = vec!["shared output key"; count];
+    keys[count - 1] = "unmatched";
+    let key = Arc::new(StringArray::from(keys)) as ArrayRef;
+    let sequence = Arc::new(Int64Array::from_iter_values(
+        0..i64::try_from(count).unwrap(),
+    )) as ArrayRef;
+    let mut operator = operator(key, sequence, std::slice::from_ref(&(0..count)));
+    operator.spec = StreamAsofJoinSpec::new(
+        operator.spec.left().clone(),
+        operator.spec.right().clone(),
+        Duration::from_micros(1_024),
+        operator.spec.limits(),
+    )
+    .unwrap();
+    let ((time, key, sequence), left) = operator.state.left.iter().next().unwrap();
+    let order = (*time, key.clone(), sequence.into_owned());
+    let owner = operator.state.batches.view(left).batch;
+    let owner = Arc::new(state::PayloadBatch {
+        key: (1, 0),
+        record: owner.record.clone(),
+        encoded: OnceLock::new(),
+        encoded_charge_bytes: 0,
+        body_bytes: 0,
+    });
+    let row = operator.state.attach(&state::RowPayload {
+        batch: owner,
+        row: left.row as usize,
+    });
+    let mut bucket = state::RightBucket::with_sequence_kind(state::SequenceKind::Signed(8));
+    bucket.insert((order.0, order.2), Some(row));
+    operator.state.right.insert(order.1, bucket);
+    operator.state.rebuild_encoding_owners();
+    merge::take_payload_resolutions();
+    assert_cut_matches_binary_search(&operator, count).await;
+    assert_eq!(merge::take_payload_resolutions(), 1);
 }

@@ -55,6 +55,35 @@ fn bulk_admission_preserves_retired_prefix_and_identity_history() {
             expected.insert_admitted(order.clone(), *row);
         }
         let merged = bucket.with_admitted(&rows, &|| Ok(())).unwrap();
+        let mut in_place = bucket.clone();
+        in_place.reserve_payloads(rows.len());
+        let allocation = allocation_counter::measure(|| {
+            in_place
+                .merge_admitted(
+                    rows.iter()
+                        .map(|((time, sequence), row)| (*time, sequence.clone(), *row)),
+                    &|| Ok(()),
+                )
+                .unwrap();
+        });
+        assert_eq!(
+            allocation.count_total, 0,
+            "reserved merge allocated row intermediates: {allocation:?}"
+        );
+        assert_eq!(wire(&in_place), wire(&expected));
+        eprintln!("reserved per-key merge {kind:?}: {allocation:?}");
+        let columnar = bucket
+            .with_admitted_columns(
+                rows.iter()
+                    .map(|((time, sequence), row)| (*time, sequence.clone(), *row)),
+                &|| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(wire(&columnar), wire(&expected));
+        assert_eq!(
+            columnar.checkpoint_capacities(),
+            expected.checkpoint_capacities()
+        );
         assert_eq!(wire(&merged), wire(&expected));
         assert_eq!(
             merged.checkpoint_capacities(),
@@ -65,6 +94,24 @@ fn bulk_admission_preserves_retired_prefix_and_identity_history() {
             bucket.projected_admission_bytes(rows.len())
         );
         for tolerance in [0, 5, 1_000] {
+            let expected_matches = (-20..1_200)
+                .map(|time| merged.candidate(time, tolerance).copied())
+                .collect::<Vec<_>>();
+            GENERAL_SEARCHES.replace(0);
+            let mut cursor = merged.cursor_at(-20);
+            let actual = (-20..1_200)
+                .map(|time| {
+                    merged
+                        .candidate_monotonic(time, tolerance, &mut cursor)
+                        .copied()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected_matches);
+            assert_eq!(
+                GENERAL_SEARCHES.replace(0),
+                0,
+                "merge repeatedly searched identity history"
+            );
             for time in -20..1_200 {
                 assert_eq!(
                     merged.candidate(time, tolerance),
@@ -95,6 +142,26 @@ fn cancelled_bulk_admission_preserves_original_bucket() {
             Ok(())
         }
     });
+    assert!(matches!(error, Err(CalcFlowError::Cancelled { .. })));
+    assert_eq!(wire(&bucket), before);
+    checks.set(0);
+    let error = bucket.with_admitted_columns(
+        std::iter::once((
+            2_000,
+            sequence(SequenceKind::Canonical, 1),
+            RowRef::fixture(900),
+        )),
+        &|| {
+            checks.set(checks.get() + 1);
+            if checks.get() == 2 {
+                Err(CalcFlowError::Cancelled {
+                    run_id: "columnar-merge".into(),
+                })
+            } else {
+                Ok(())
+            }
+        },
+    );
     assert!(matches!(error, Err(CalcFlowError::Cancelled { .. })));
     assert_eq!(wire(&bucket), before);
 }

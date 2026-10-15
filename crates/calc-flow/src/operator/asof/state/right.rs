@@ -15,10 +15,11 @@ type ExpiredRow<'a> = (i64, Option<&'a Encoding>, Option<&'a RowRef>);
 #[cfg(test)]
 thread_local! {
     static COLUMN_MOVES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static GENERAL_SEARCHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
-pub(super) fn take_column_moves() -> usize {
+pub(in super::super) fn take_column_moves() -> usize {
     COLUMN_MOVES.with(|moves| moves.replace(0))
 }
 
@@ -303,9 +304,33 @@ impl<V: RunValues> RightRun<V> {
 }
 
 #[derive(Default)]
-pub(in super::super) struct RightCursor {
+pub(in super::super) struct RightCursor<'a> {
     payload: usize,
     identity: usize,
+    general: Option<btree_set::Range<'a, RightOrder>>,
+    next_general: Option<&'a RightOrder>,
+    latest_general: Option<&'a RightOrder>,
+}
+
+impl<'a> RightCursor<'a> {
+    fn general_candidate(&mut self, bucket: &'a RightBucket, time: i64) -> Option<OrderRef<'a>> {
+        if self.general.is_none() {
+            let start = (time, Encoding::from_slice(&[]));
+            self.latest_general = bucket.general_identities.range(..start.clone()).next_back();
+            let mut general = bucket.general_identities.range(start..);
+            self.next_general = general.next();
+            self.general = Some(general);
+        }
+        while self.next_general.is_some_and(|order| order.0 <= time) {
+            self.latest_general = self.next_general;
+            self.next_general = self
+                .general
+                .as_mut()
+                .expect("initialized ASOF cursor")
+                .next();
+        }
+        self.latest_general.map(order_ref)
+    }
 }
 
 impl RightBucket {
@@ -524,6 +549,63 @@ impl RightBucket {
         run.values.push(Some(payload));
     }
 
+    /// Merge a proven per-key permutation backwards into reserved columns.
+    /// Each displaced resident slot moves once; identity-only history is untouched.
+    pub fn merge_admitted(
+        &mut self,
+        rows: impl DoubleEndedIterator<Item = (i64, Encoding, RowRef)> + ExactSizeIterator,
+        cancelled: &dyn Fn() -> crate::Result<()>,
+    ) -> crate::Result<()> {
+        let run = self
+            .payloads
+            .as_mut()
+            .expect("reserved ASOF payload columns");
+        let mut resident = run.times.len();
+        let end = resident + rows.len();
+        run.times.resize(end, 0);
+        run.sequences.resize(end);
+        run.values.resize(end, None);
+        let mut rows = rows.rev().peekable();
+        let mut target = end;
+        while let Some((time, sequence, _)) = rows.peek() {
+            if target.is_multiple_of(128) {
+                cancelled()?;
+            }
+            target -= 1;
+            let later = resident > run.head
+                && (
+                    run.times[resident - 1],
+                    run.sequences.get(resident - 1).unwrap().as_ref(),
+                ) > (*time, sequence);
+            if later {
+                resident -= 1;
+                run.times[target] = run.times[resident];
+                run.sequences.copy_row(resident, target);
+                run.values[target] = run.values[resident];
+                #[cfg(test)]
+                COLUMN_MOVES.with(|moves| moves.set(moves.get() + 1));
+            } else {
+                let (time, sequence, row) = rows.next().expect("remaining admitted row");
+                run.times[target] = time;
+                run.sequences.set(target, sequence);
+                run.values[target] = Some(row);
+            }
+        }
+        cancelled()
+    }
+
+    pub fn with_admitted_columns(
+        &self,
+        rows: impl DoubleEndedIterator<Item = (i64, Encoding, RowRef)> + ExactSizeIterator,
+        cancelled: &dyn Fn() -> crate::Result<()>,
+    ) -> crate::Result<Self> {
+        cancelled()?;
+        let mut bucket = self.clone();
+        bucket.reserve_payloads(rows.len());
+        bucket.merge_admitted(rows, cancelled)?;
+        Ok(bucket)
+    }
+
     pub fn with_admitted(
         &self,
         rows: &[(RightOrder, RowRef)],
@@ -668,19 +750,20 @@ impl RightBucket {
             .then(|| payloads.values.get(index))
     }
 
-    pub fn cursor_at(&self, time: i64) -> RightCursor {
+    pub fn cursor_at(&self, time: i64) -> RightCursor<'_> {
         RightCursor {
             payload: self.payloads().head + self.payloads().prefix_len(|value| value < time),
             identity: self.identities.head + self.identities.prefix_len(|value| value < time),
+            ..RightCursor::default()
         }
     }
 
-    pub fn candidate_monotonic(
-        &self,
+    pub fn candidate_monotonic<'a>(
+        &'a self,
         time: i64,
         tolerance: u64,
-        next: &mut RightCursor,
-    ) -> Option<&RowRef> {
+        next: &mut RightCursor<'a>,
+    ) -> Option<&'a RowRef> {
         if self.identities.len() == 0 && self.general_identities.is_empty() {
             let index = self.payloads().advance_index(time, &mut next.payload)?;
             return self.payload_candidate(index, time, tolerance);
@@ -689,7 +772,7 @@ impl RightBucket {
             self.identities
                 .advance(time, &mut next.identity)
                 .map(|(order, ())| order),
-            self.general_candidate(time),
+            next.general_candidate(self, time),
         );
         bounded_candidate(
             merge_row(
@@ -911,6 +994,8 @@ impl RightBucket {
     }
 
     fn general_candidate(&self, time: i64) -> Option<OrderRef<'_>> {
+        #[cfg(test)]
+        GENERAL_SEARCHES.set(GENERAL_SEARCHES.get() + 1);
         let row = if time == i64::MAX {
             self.general_identities.last()
         } else {
