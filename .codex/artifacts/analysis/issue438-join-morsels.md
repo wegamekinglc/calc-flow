@@ -41,8 +41,8 @@ introduced. Fixed extra funding caps: 512 MiB scratch per batch and 16 MiB
 result funding per unit (at most 64 MiB total). These are optional acceleration
 ceilings inside the unchanged runtime pool, not larger runtime budgets.
 The process clock has 10ms resolution (one-unit aggregate quantized to zero);
-surviving per-thread scheduler runtime was also recorded. Raw observations:
-`target/issue438-roundtrip.log` (runtime-local verification log).
+surviving per-thread scheduler runtime was also recorded. Raw observations and
+thread identities are in the [resource receipt](issue438-join-morsels-resources.json).
 
 Use deterministic contiguous incoming ranges, at most four units. Keep the
 existing small-input and estimated-probe-cost gates. Count/limit precedes state
@@ -60,3 +60,98 @@ left separately funded. Otherwise deferral declines. The split and deferred
 paths reserve exactly the same total at the end of state/expiration preparation;
 the dedicated finite-pool ledger regression verifies that equality and complete
 refund. The pending dictionary already shares its key/ID scratch reservation.
+
+## Verified source and checks
+
+Final Rust source: `e5987c9cb1ebe826834a980178451481fde8d751`.
+`f49f89ef6f954d38bb2dacf03a322bdf1f4fb1a7` introduces the kernel; the final
+source commit adds the state-admission budget fix and its ledger regression.
+The subsequent results commit changes only this report and the JSON receipt.
+
+All Rust builds used Rust 1.88.0, `CARGO_BUILD_JOBS=2`,
+`CARGO_PROFILE_DEV_DEBUG=0` and `CARGO_PROFILE_TEST_DEBUG=0`; Cargo.lock was
+unchanged. Exact source, lockfile and executable hashes are in the receipt.
+
+Actual focused commands and results on final Rust source:
+
+```bash
+cargo test --locked -p calc-flow --features benchmark-checkpoint-diagnostic \
+  --lib test_morsel_deferred_snapshot_keeps_split_state_admission_budget \
+  -- --test-threads=1
+target/debug/deps/calc_flow-abab16b2e36df81b operator::join:: --test-threads=1
+cargo test --locked -p calc-flow --test stream_join_properties \
+  --test stream_join_state --test stream_join_spec -- --test-threads=1
+cargo clippy --locked -p calc-flow --lib --tests --benches --all-features -- -D warnings
+cargo fmt --all --check
+git diff HEAD --check
+```
+
+- Dedicated budget ledger: one passed. Full Join module on the same executable:
+  **396 passed**, two ignored (the explicit paired diagnostic and existing broad
+  4M-row experiment). Property/state/spec integration: **20 passed**.
+- **30 gather lifecycle tests passed**, including generation retirement,
+  abandonment, deadline, launch/join failures and real ownership refunds. This
+  evidence is reused: pool code, these tests and their dependencies were
+  unchanged by the later Join-only fixes. The empty diagnostic was run explicitly.
+- Final Clippy, format and whitespace checks passed. Lizard 1.23.0 receipt:
+  **90 changed/new functions, maximum CCN 8**, with changed Rust file hashes.
+- New tests verify worker-local gather before settlement, uneven sliced input
+  ranges on both sides, literal tie/row order, retained projection, checkpoint
+  restore, input immutability, match/state/row/sequence/counter preflight,
+  scratch/result/worker refusal, cancellation/deadline/abandonment/reset,
+  worker panic, and output funding through a blocked/failing collector.
+
+Before implementation the new worker-gather regression observed no fill units
+instead of four: the old cost estimate counted distinct keys only. Correcting
+that estimate exposed the separate fill/gather path. The final regression
+requires actual column take work on each probe worker before it settles.
+
+Full workspace, cross-platform and total 90% coverage checks remain CI gates.
+No binding, schema, dependency or checkpoint format changed.
+
+## Paired development diagnostic
+
+Executed the same final-source test executable with
+`test_morsel_paired_resources --ignored --nocapture --test-threads=1`.
+The foreground process had a 595-second timeout inside the 600-second total
+collection allowance and finished in **137.61 seconds**, including fixtures,
+all row oracles and owned cleanup. The earlier empty diagnostic took 0.05 seconds.
+No samples were retried or added. Builds were separate.
+
+Each case has two rounds of ten alternating AB/BA pairs: **40 observations per
+case, 120 total**, all with complete row oracles outside handler timing. The
+64k cases emit 512k matches against eight unordered opposite rows with ties;
+the incoming batch has two sliced records. Full output has six columns;
+projection selects right status and narrows retained left payload. The 1,024-row
+control stays on the serial path in both modes. The switch selects the existing
+split path inside the same candidate, including common cost-gate/range fixes;
+it does not represent unmodified main. Timing includes fresh-job native worker
+startup; it excludes dimension preload and output-oracle time. No CPU affinity
+reservation was made; observed affinity was CPUs 0–31.
+
+Medians across both rounds, milliseconds:
+
+| Case                 | Mode  | Wall     | Process CPU | All thread runtime | Native thread runtime |
+| -------------------- | ----- | -------- | ----------- | ------------------ | --------------------- |
+| 64k full             | split | 1,945.98 | 2,100       | 2,095.25           | 197.53                |
+| 64k full             | fused | 1,071.06 | 2,520       | 2,514.29           | 1,945.58              |
+| 64k projected        | split | 1,950.31 | 2,110       | 2,106.17           | 205.56                |
+| 64k projected        | fused | 1,087.75 | 2,545       | 2,544.73           | 1,966.71              |
+| 1,024 serial control | split | 18.78    | 20          | 19.46              | 0.04                  |
+| 1,024 serial control | fused | 18.71    | 20          | 19.09              | 0.02                  |
+
+Fused handler process CPU is about **20% higher** for full output and **21%
+higher** for projection. The lower wall observations do not erase that cost.
+Aggregate process CPU/wall ratios are 2.35/2.34 for fused full/projected, below
+the predeclared five-CPU budget; split is 1.08. Serial controls are 0.97–1.04,
+below two. Per-thread totals corroborate these ratios. Every individual sample
+also stays within its declared CPU budget; no threshold was relaxed.
+
+These are unoptimized development observations with a 10ms process CPU clock,
+not sealed release main/candidate speedup, equivalence or final acceptance.
+The serial control isolates dispatch eligibility inside this candidate and
+does not establish a small-batch regression verdict against unmodified main.
+The 50µs full callback target, release crossover and all eight formal targets
+remain unmeasured here and belong to #443/R16. Raw per-round samples, actual
+thread identities/runtime, CPU budget checks and build provenance are retained
+in the resource receipt.
