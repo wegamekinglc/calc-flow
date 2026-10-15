@@ -417,7 +417,7 @@ impl<'a, 'c> Decoder<'a, 'c> {
         self.validate_retained_metrics(&metadata, [&rows[0], &rows[1]])?;
         let migrated = self.migrate_legacy(&mut rows)?;
         let writer = self.prepared_writer(migrated, inventory)?;
-        self.assemble(metadata, rows, writer)
+        self.assemble(metadata, rows, writer, [false; 2])
     }
 
     fn assemble(
@@ -425,6 +425,7 @@ impl<'a, 'c> Decoder<'a, 'c> {
         metadata: ValidatedMetadata,
         rows: [Vec<StoredRow>; 2],
         writer: super::WriterState,
+        repeated_ids: [bool; 2],
     ) -> Result<Prepared> {
         let [left, right] = rows;
         let state = StreamJoinState {
@@ -449,6 +450,7 @@ impl<'a, 'c> Decoder<'a, 'c> {
         };
         self.mark_live(&state)?;
         (self.check)()?;
+        super::super::validate_restored_row_ids(repeated_ids, self.config.name)?;
         let keys = super::super::key_dictionary::Dictionary::default().rebuild_checked(
             [&state.left, &state.right],
             &self.config.dictionary_credit,

@@ -460,10 +460,58 @@ closed before source handoff.
 
 ## Outstanding evidence
 
-Documentation integration, final specialist review and required CI checks remain
-pending. No local result substitutes for those gates.
+Documentation is integrated in the delivery branch. Final specialist review and
+required CI checks remain pending. No local result substitutes for those gates.
 Phase 1.1 offset-derived fees, retained chunks, pairs, journals and all eight
 original performance targets remain unfinished. The user's narrowed delivery
 scope freezes their further development; this task only finishes the current
 persistent dictionary and its required review/delivery work. No performance
 acquisition, native package build or full matrix is part of this implementation.
+
+## Final review B1: repeated live row IDs
+
+Formal review found that the V1 live-identity check rejected only repeated
+(event time, row ID) pairs. Two live rows on one side with the same row ID but
+different valid times could reach the new sidecar's uniqueness assertion. The
+authentic two-row checkpoint changes only its second row-ID header; both times,
+payloads and full fees remain valid. Direct and projected restore panic, managed
+restore reports TaskPanicked, and a dictionary-refused route incorrectly accepts
+it in the initial acquisition. Its closed-home fixture self-wait was interrupted
+and recorded separately; it is not a completed group result.
+
+The fix reuses each existing 16-byte pair tree ordered by (row ID, event time).
+The original per-row validation loop latches repeated IDs through a bounded
+same-ID range. Inline per-side facts are reported only after original payload,
+metrics, limit, writer and deferred historical checks, before optional dictionary
+work. There is no second tree, additional full-state tail scan, changed row order
+or new checkpoint format. Existing V2/V3 history already rejects reused row IDs.
+
+The final changed control passes all five direct, managed, projected, configured
+refusal and healthy closed-admission routes. It proves typed mismatch, unchanged
+old state/writer/history/canonical owner, healthy continuation, no dictionary
+grant attempt and final pool zero. Independent state and writer reservations
+plus actual home/generation/attempt controls exactly account for the pool. The
+projected writer's 8,873 bytes come from actual Base and segment reservation
+owners, deduplicated by reservation pointer. Closing admission legitimately
+retires one 16,384-byte generation reservation while the state remains 15,896
+bytes. The test-only segment accessor and writer helper deliberately require
+fresh direct segment owners rather than claiming a general restored-owner ledger.
+
+Prior-payload-error priority and authentic-layout continuation controls passed
+in the preceding focused acquisition. Their production restore bytes are exactly
+unchanged in the final fix; only the failed main control's test-only accounting
+was subsequently corrected. No passing unrelated controls were repeated.
+`validation-review-fix.json` records these revisions, logs and source equality.
+The original 141-control run and maintained non-cfg(test) diagnostic remain
+evidence for ca3de78c; their binaries and source aggregates are not relabeled as
+new builds. This bounded restore-only delta leaves the diagnostic/process_data
+paths unchanged.
+
+The final B1 changed control passes in `duplicate-id-root-green.log` (1m55s
+build/startup, 0.02s test runtime). Final scoped Clippy passes in 1m30s;
+formatting, generated-schema no-drift and whitespace checks pass. Final inventory
+contains 58 changed Rust paths and 464 changed/new functions, maximum CCN 8 with
+no changed parser omissions. Its exact sorted-path seal is
+`1add6adfb5b2acb0a04a50e2fc4b2ae8f7d031f93201eb2ccc7120a856eaa8e6`.
+All build and test handles are closed. Formal final approval and required GitHub
+CI remain separate delivery gates.

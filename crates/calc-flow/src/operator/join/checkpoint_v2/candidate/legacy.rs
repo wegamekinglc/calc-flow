@@ -44,12 +44,18 @@ impl Decoder<'_, '_> {
         let retirement = self.shared_retirement()?;
         let inventory = self.legacy_inventory(metadata.epoch)?;
         Self::validate_legacy_inventory(&inventory, &metadata)?;
-        let mut rows = self.legacy_rows(&inventory, &metadata, retirement.as_ref())?;
+        let (mut rows, repeated_ids) =
+            self.legacy_rows(&inventory, &metadata, retirement.as_ref())?;
         drop(inventory);
         self.validate_retained_metrics(&metadata, [&rows[0], &rows[1]])?;
         self.narrow_legacy_rows(&mut rows, retirement.as_ref())?;
         drop(retirement);
-        self.assemble(metadata, rows, super::super::WriterState::migration())
+        self.assemble(
+            metadata,
+            rows,
+            super::super::WriterState::migration(),
+            repeated_ids,
+        )
     }
 
     fn narrow_legacy_rows(
@@ -134,7 +140,7 @@ impl Decoder<'_, '_> {
         inventory: &Inventory<'_>,
         metadata: &ValidatedMetadata,
         retirement: Option<&Arc<RetirementGuard>>,
-    ) -> Result<[Vec<StoredRow>; 2]> {
+    ) -> Result<([Vec<StoredRow>; 2], [bool; 2])> {
         let mut folded = [Fold::new(), Fold::new()];
         for segment in inventory.values() {
             let next_id = if side_index(segment.side) == 0 {
@@ -149,10 +155,9 @@ impl Decoder<'_, '_> {
                 retirement,
             )?;
         }
-        Ok([
-            self.finish_legacy_side(std::mem::take(&mut folded[0]))?,
-            self.finish_legacy_side(std::mem::take(&mut folded[1]))?,
-        ])
+        let (left, left_repeats) = self.finish_legacy_side(std::mem::take(&mut folded[0]))?;
+        let (right, right_repeats) = self.finish_legacy_side(std::mem::take(&mut folded[1]))?;
+        Ok(([left, right], [left_repeats, right_repeats]))
     }
 
     fn fold_legacy_segment(
@@ -294,19 +299,21 @@ impl Decoder<'_, '_> {
         )
     }
 
-    fn finish_legacy_side(&self, folded: Fold) -> Result<Vec<StoredRow>> {
+    fn finish_legacy_side(&self, folded: Fold) -> Result<(Vec<StoredRow>, bool)> {
         let count = folded.len();
-        reserve(&self.workspace, budget::tree::<(i64, u64), ()>(count)?)?;
+        reserve(&self.workspace, budget::tree::<(u64, i64), ()>(count)?)?;
         let mut identities = BTreeSet::new();
         let mut rows = self.empty_legacy_rows(count)?;
+        let mut repeated = false;
         for row in folded.into_values() {
             (self.check)()?;
-            if !identities.insert((row.event_time.as_micros(), row.row_id)) {
+            if !identities.insert((row.row_id, row.event_time.as_micros())) {
                 return Err(invalid("legacy live rows repeat an event-time identity"));
             }
+            repeated |= super::super::super::restored_row_id_repeats(&identities, row.row_id);
             rows.push(row);
         }
-        Ok(rows)
+        Ok((rows, repeated))
     }
     fn empty_legacy_rows(&self, count: usize) -> Result<Vec<StoredRow>> {
         self.containers.grow(budget::containers(count)?)?;

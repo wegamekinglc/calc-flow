@@ -66,6 +66,29 @@ struct PreparedBase {
 
 impl WriterState {
     #[cfg(test)]
+    pub(in crate::operator::join) fn base_funding_for_test(&self) -> usize {
+        assert!(self.prepared.is_none() && self.prepared_delta.is_none());
+        let Some(base) = self.base.as_ref() else {
+            return 0;
+        };
+        let mut owners: std::collections::BTreeMap<usize, usize> = base
+            .test_owners()
+            .into_iter()
+            .map(|owner| {
+                let owner = owner.upgrade().expect("live base control reservation");
+                (Arc::as_ptr(&owner) as usize, owner.size())
+            })
+            .collect();
+        for segment in base.segments.values() {
+            let owner = segment
+                .owner_for_test::<MemoryReservation>()
+                .expect("fresh base segment reservation");
+            owners.insert(std::ptr::from_ref(owner) as usize, owner.size());
+        }
+        owners.values().sum()
+    }
+
+    #[cfg(test)]
     pub(in crate::operator::join) fn observation_for_test(
         &self,
     ) -> impl Eq + std::fmt::Debug + use<> {
