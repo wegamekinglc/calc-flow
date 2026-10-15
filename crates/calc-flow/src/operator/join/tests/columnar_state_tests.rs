@@ -1924,8 +1924,9 @@ async fn test_owned_copy_selected_identity_gaps_and_dirty_only_funding() {
         .runtime()
         .unwrap()
         .incremental_memory_pool();
-    let chunk = operator.state.left.at(0).record.funded_owner().unwrap().1;
-    let columnar::RowPayload::Shared { chunk: payload, .. } = &operator.state.left.at(0).record
+    let chunk = operator.state.left.payload_at(0).funded_owner().unwrap().1;
+    let Some(columnar::RowPayload::Shared { chunk: payload, .. }) =
+        operator.state.left.payload_at(0).owner()
     else {
         panic!("selected rows must retain their independently funded copied payload");
     };
@@ -2058,20 +2059,24 @@ fn assert_empty_index_refund(
 ) {
     let empty_index = native_lookup_tests::index_funding(operator);
     assert!(empty_index > 0);
+    let expiration_credit = operator.state.left_expirations.funded_bytes()
+        + operator.state.right_expirations.funded_bytes();
     let before_index_drop = pool.reserved();
     assert_eq!(
         before_index_drop,
-        chunk
-            + key_credit
-            + empty_index
-            + operator.state.left_expirations.funded_bytes()
-            + operator.state.right_expirations.funded_bytes()
+        chunk + key_credit + empty_index + expiration_credit
     );
     eprintln!(
         "dirty owner funding: payload={chunk}, canonical={key_credit}, empty_index={empty_index}"
     );
     operator.state.left.1 = None;
     assert_eq!(before_index_drop - pool.reserved(), empty_index);
+    operator.state.left_expirations = ExpirationIndex::default();
+    operator.state.right_expirations = ExpirationIndex::default();
+    assert_eq!(
+        before_index_drop - pool.reserved(),
+        empty_index + expiration_credit
+    );
 }
 
 fn nullable_admission_schema(unit: TimeUnit) -> SchemaRef {
