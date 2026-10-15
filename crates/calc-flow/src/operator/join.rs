@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
     mod column_gather_tests;
+    mod columnar_charge_tests;
     mod complete_expiry_tests;
     mod expiration_heap_tests;
 
@@ -2317,6 +2318,14 @@ struct JoinWork {
     arena_frames: usize,
     normalized_time_visits: usize,
     temporal_mask_visits: usize,
+    scalar_charge_cells: usize,
+    charge_column_resolutions: usize,
+    charge_bitmap_words: usize,
+    charge_sparse_validity_visits: usize,
+    charge_offset_reads: usize,
+    charge_range_sums: usize,
+    charge_nested_rows: usize,
+    charge_scalar_fallbacks: usize,
 }
 
 #[cfg(test)]
@@ -2336,6 +2345,10 @@ thread_local! {
         borrowed_key_hashes: 0, borrowed_key_equalities: 0,
         key_type_resolutions: 0, arena_frames: 0,
         normalized_time_visits: 0, temporal_mask_visits: 0,
+        scalar_charge_cells: 0,
+        charge_column_resolutions: 0, charge_bitmap_words: 0,
+        charge_sparse_validity_visits: 0, charge_offset_reads: 0,
+        charge_range_sums: 0, charge_nested_rows: 0, charge_scalar_fallbacks: 0,
     }) };
 }
 
@@ -3236,6 +3249,7 @@ mod benchmark_checkpoint;
 #[cfg(feature = "benchmark-checkpoint-diagnostic")]
 pub(crate) use benchmark_checkpoint::run_checkpoint_history_diagnostic;
 
+mod admission_charge;
 mod admission_masks;
 mod admitted;
 use admitted::{AdmittedBatch, AdmittedRows, PayloadRef};
@@ -5229,35 +5243,49 @@ async fn retained_rows(
 ) -> Result<Vec<StoredRow>> {
     let mut retained = Vec::new();
     let mut flow = typed_key::KeyFlow::new(Some(context));
-    for (index, row) in admitted.iter().enumerate().filter(|(_, row)| row.retain) {
-        flow.step(1, 0).await?;
-        let encoded_key = match native_keys {
-            Some(keys) => Arc::clone(keys.key(index)),
-            None => {
-                legacy_retained_key(
+    let mut quantum = columnar::Quantum::default();
+    let mut group_start = 0;
+    for group in admitted.groups() {
+        for start in (0..group.len()).step_by(64) {
+            let end = (start + 64).min(group.len());
+            let charges =
+                admission_charge::PayloadCharges::new(group, start..end, context, &mut quantum)
+                    .await?;
+            for (index, row) in (start..end)
+                .map(|index| (index, group.row(index)))
+                .filter(|(_, row)| row.retain)
+            {
+                flow.step(1, 0).await?;
+                let encoded_key = match native_keys {
+                    Some(keys) => Arc::clone(keys.key(group_start + index)),
+                    None => {
+                        legacy_retained_key(
+                            row.record,
+                            key_indices,
+                            dictionary,
+                            operator_id,
+                            work,
+                            &mut flow,
+                        )
+                        .await?
+                    }
+                };
+                let charge = charges.state_charge(
+                    index - start,
                     row.record,
-                    key_indices,
-                    dictionary,
+                    encoded_key.len(),
                     operator_id,
-                    work,
-                    &mut flow,
-                )
-                .await?
+                )?;
+                retained.push(StoredRow {
+                    encoded_key,
+                    record: row.record.owned(),
+                    event_time: row.event_time,
+                    row_id: row.row_id,
+                    charge,
+                });
             }
-        };
-        let charge = state_columns_charge_with_key(
-            row.record.columns(),
-            row.record.offset(),
-            encoded_key.len(),
-            operator_id,
-        )?;
-        retained.push(StoredRow {
-            encoded_key,
-            record: row.record.owned(),
-            event_time: row.event_time,
-            row_id: row.row_id,
-            charge,
-        });
+        }
+        group_start += group.len();
     }
     Ok(retained)
 }
@@ -7201,6 +7229,8 @@ fn state_columns_charge_with_key(
 /// Logical charge of one non-null cell under the frozen V1 accounting table,
 /// including its validity byte.
 fn logical_cell_charge(array: &dyn Array, row_index: usize) -> Result<u64> {
+    #[cfg(test)]
+    note_join_work(|work| work.scalar_charge_cells += 1);
     if array.is_null(row_index) {
         return Ok(1);
     }
