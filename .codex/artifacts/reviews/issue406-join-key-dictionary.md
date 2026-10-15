@@ -1,15 +1,23 @@
 # Issue 406: Join persistent key dictionary review
 
-**Verdict: Approve — final local specialist source review.**
+**Verdict: Approve — local specialist source review, including the CI-fix addendum.**
+
+**Latest reviewed delivery source:**
+`87468713a3dba3c8f89e51d399eb69a41478e15a`, with the CI-fix delta against
+`322b11b6d54bd7ffe7d6c6c170b64930eb921de9`. The addendum below records its
+separate source seals and verification. Required new-head CI remains pending.
+
+The implementation review below retains its original heads and evidence; the
+final addendum extends the local approval to the latest delivery source.
 
 **Feature:** `feature/issue406-join-key-dictionary` at
 `dcaef75486c10c3eef91e1f2a47b9f1f00f8d08e`, against
 `798a97ee44b701b00bb89196a6483b01c62e16bf`.
-**Delivery:** `feature/issue406-key-dictionary-delivery` at
+**Implementation delivery snapshot:** `feature/issue406-key-dictionary-delivery` at
 `db4f5ec7bc6be28dc7f2f973d3342aa092710dda`, including main
 `dac0eb1a868452be81f18a3dd12f0318d40db379`, documentation commit
 `10a9c89f04c1c00ba8444e18a8e77ea3375a691d` and the final restore fix.
-**Changed Rust seal:**
+**Implementation snapshot Rust seal:**
 `1add6adfb5b2acb0a04a50e2fc4b2ae8f7d031f93201eb2ccc7120a856eaa8e6`.
 
 ## Summary
@@ -186,3 +194,112 @@ cross-platform verification, combined 90% coverage, release/new-native Python
 proof, later phases and all eight issue
 performance targets remain unproven. This report grants no push, merge or
 whole-issue acceptance authority.
+
+## PR 427 CI-fix Addendum
+
+**Reviewed source:** `87468713a3dba3c8f89e51d399eb69a41478e15a` against
+`322b11b6d54bd7ffe7d6c6c170b64930eb921de9`.
+**Ten-file aggregate:**
+`23ddab7dfdeb89cdc46b35b77de0ab78281c556eac5f335eed28792155c4225a`.
+**Seven-file Rust delta seal:**
+`e50d5367a5d21a3e7c9950073afb7ea8bca781a18f1ea96757da902ac5c9b5af`.
+
+### Summary and Source Scope
+
+The initial PR 427 Windows Rust run failed with 2,018 passed and 11 failed.
+The correction updates stale test assumptions about selected nulls, Rowed legacy
+backing, persistent key reuse, optional dictionary grants and real owner lifetime.
+It also removes three acceptance-harness complexity-gate violations through a
+resource container and helper extraction, and synchronizes the strict Python
+Join capability assertion with supported layouts `(1, 2, 3)`.
+
+The Rust delta contains six test files and one helper in an existing `cfg(test)`
+implementation. Removing that helper reproduces the base `gather_work.rs`
+byte-for-byte. Production Rust matching, admission, recovery, ownership and
+checkpoint protocols are unchanged. The Python benchmark runtime now receives
+one frozen, slotted `AcceptanceBindings` for the same job/source/sink/stream
+references; both callers are migrated. Result-recording extraction preserves
+the processing clocks, checkpoint snapshot, observer settlement, failure
+precedence and awaited cleanup. No performance acquisition was performed.
+
+### Verification and Failure History
+
+The reviewer independently verified all ten file hashes, both aggregates and
+the exact changed-path inventory. `ci-fix-complexity-final.json` records 26
+changed/new Rust functions, maximum CCN 8 and no changed parser omissions.
+The final columnar helper extraction matches the reviewed source hash and
+preserves assertion and release order.
+
+`ci-fix-validation.json` and raw logs establish 11 distinct passing regressions:
+
+- The allocation control passed in `ci-fix-focused-cleanup-hang.log` before a
+  later test-held SQL-cache retirement guard prevented drain. That acquisition
+  was interrupted and is not reported as an all-green run. Its passing control
+  source remained unchanged.
+- Nine controls passed in `ci-fix-focused-partial.log`. That acquisition remains
+  **9 passed, 1 failed**; its dirty-owner failure is superseded by the final
+  isolated run, not erased.
+- `ci-fix-dirty-owner-green.log` passes the final changed control, **1 passed,
+  0 failed**, with 81.249s recorded command elapsed. Its command was
+  `cargo test -p calc-flow --lib --features benchmark-internals operator::join::tests::columnar_state_tests::test_owned_copy_selected_identity_gaps_and_dirty_only_funding -- --exact --nocapture --test-threads=1`.
+
+Earlier test-only compilation errors, the cleanup interruption, intermediate
+owner-oracle failures and the 148-line Clippy failure remain historical
+evidence. The final three assertion helpers resolve the length violation without
+an allowance. Final core lib/test Clippy with `benchmark-internals` and warnings
+denied passes in 91.053s (`ci-fix-clippy.log`); formatting, schema no-drift and
+whitespace checks pass, including the recorded staged checks.
+
+Nine existing acceptance lifecycle/plan-ownership Python controls passed in
+0.047s. Those results, the complexity ratchet and harness Ruff checks have
+captured tool output, without retained raw logs. The migration test has strict
+catalog/AST source-contract and Ruff evidence only; actual execution with the
+new native package remains a CI requirement.
+
+### Contract and Ownership Findings
+
+No blocker remains in this delta. The restore admission control identifies the
+actual reservation consumer and witnesses 56 mandatory rejections preserving
+old state/history/owners/credit, plus six genuine dictionary rejections installing
+complete validated SQL candidates. It checks literal rows/fees, writer/history,
+incomplete native coverage and actual ordered SQL continuation. Each injected
+failure uses a fresh fixture; optional acceptance cannot change the next case's
+baseline. The continuation returns its owning job, allowing the outer test to
+drop live state and the retained SQL scratch cache before awaited drain.
+
+The Int8 loan control now establishes a real dictionary-refused SQL route and
+checks SQL dispatch counters. It preserves the queued container loan, cancellation
+request, future abandonment, source release, non-budget error without retry,
+unchanged status/output and escaping-buffer ownership proofs. V1 replacement
+still proves old row/container owners disappear; its nonzero live credit is
+exactly the fresh dictionary/binding funding, followed by reset/drop pool zero.
+
+Closed admission now awaits actual generation cleanup before taking the strict
+ledger baseline. The helper releases the mutex before await and waits only for
+generation retirement, not old-state retirement guards. Both observed generations
+are zero; no contract requires their refund to occur after the baseline.
+
+The dirty-owner control preserves real eviction, physical IDs, full fees and IPC
+parity. It independently accounts for and refunds the empty index, then releases
+dirty canonical credit. Weak observations prove the remaining payload belongs to
+the sparse queue; real `repair_sparse_chunks` releases it before actor drop and
+job drain. The final recorded decomposition is 3,186 payload bytes, 1,058 canonical
+bytes and 1,144 empty-index bytes. These are observed reservation sizes, not new
+hard-coded expectations or residual allowances.
+
+### Documentation and Verdict
+
+The Python capability assertion now matches the already documented layouts and
+retains semantic state version 1. These corrections do not change public APIs,
+wire formats or product contracts; no further product documentation change is
+required for this delta.
+
+**Approve** for the local CI-fix source at `87468713` and the seals above.
+The original 141 controls and dev diagnostic remain attributed to `ca3de78c`;
+the earlier B1 evidence remains attributed to `dcaef754`. No old binary or
+aggregate is relabeled as a new-head build. Initial failed CI has been diagnosed
+and the affected local controls corrected, but required new-head CI remains
+pending and merge remains blocked until it is green. Combined 90% coverage,
+cross-platform/native-package verification, performance and complete issue 406
+acceptance are not certified by this local addendum. The reviewer ran no builds,
+tests, benchmarks or remote actions.
