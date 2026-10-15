@@ -919,7 +919,7 @@ async fn later_admission_reuses_the_resident_right_key_bytes() {
     let validated = op.validate_admission("right", &batch).unwrap();
     let admission = op.prepare_admission(validated, &batch, &cx).await.unwrap();
     assert_eq!(
-        admission.rows[0].0.1.as_slice().as_ptr(),
+        admission.right_capacities[0].0.as_slice().as_ptr(),
         resident,
         "each canonical key buffer must be owned once across batches"
     );

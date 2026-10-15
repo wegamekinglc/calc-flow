@@ -9,14 +9,15 @@ use super::{
     admitted_right_capacities, check_input_cancellation, direct, reason, state, times,
 };
 
-struct RecordColumns {
+pub(in super::super) struct RecordColumns {
     times: TimestampMicrosecondArray,
     sequences: UInt64Array,
     keys: Vec<u32>,
 }
 
-pub(in super::super) struct Columns {
-    records: Vec<RecordColumns>,
+pub(in super::super) enum Columns {
+    Ordered(Vec<RecordColumns>),
+    General(super::batch::Columns),
 }
 
 pub(super) struct Plan {
@@ -48,7 +49,7 @@ pub(super) fn plan(
     }
     context.check_cancelled()?;
     Ok(Some(Plan {
-        columns: Columns { records: columns },
+        columns: Columns::Ordered(columns),
         capacities: admitted_right_capacities(keys.values, 1),
     }))
 }
@@ -205,6 +206,10 @@ impl Columns {
         payloads: &[state::RowRef],
     ) {
         const STACK_BUCKETS: usize = 64;
+        if let Self::General(columns) = self {
+            columns.install(state, handles, payloads);
+            return;
+        }
         if handles.len() <= STACK_BUCKETS {
             // COW and capacity preparation already made these buckets unique.
             // Keep their borrows on the stack without new workspace charges.
@@ -227,7 +232,10 @@ impl Columns {
         payloads: &[state::RowRef],
         mut install: impl FnMut(u32, i64, u64, state::RowRef),
     ) {
-        for (record, payload) in self.records.into_iter().zip(payloads) {
+        let Self::Ordered(records) = self else {
+            unreachable!("ordered right columns")
+        };
+        for (record, payload) in records.into_iter().zip(payloads) {
             for (row, key) in record.keys.into_iter().enumerate() {
                 install(
                     key,
@@ -243,7 +251,15 @@ impl Columns {
         &'a self,
         keys: &'a [(state::Encoding, usize)],
     ) -> impl Iterator<Item = (LeftOrder, AdmissionRef)> + 'a {
-        self.records
+        let records = match self {
+            Self::Ordered(records) => records.as_slice(),
+            Self::General(_) => &[],
+        };
+        let general = match self {
+            Self::General(columns) => Some(columns),
+            Self::Ordered(_) => None,
+        };
+        records
             .iter()
             .enumerate()
             .flat_map(move |(batch_index, record)| {
@@ -262,6 +278,11 @@ impl Columns {
                     )
                 })
             })
+            .chain(
+                general
+                    .into_iter()
+                    .flat_map(move |columns| columns.identities(keys)),
+            )
     }
 }
 

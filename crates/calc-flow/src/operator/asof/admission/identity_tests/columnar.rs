@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 mod descriptors;
 pub(in super::super) mod direct;
+mod general;
 pub(in super::super) mod right_keys;
 
 #[derive(Debug)]
@@ -392,7 +393,7 @@ fn utf8_empty_non_ascii_and_record_cuts_match_legacy() {
 }
 
 #[test]
-fn reversed_and_string_sequence_shapes_keep_legacy_preparation() {
+fn reversed_rows_and_string_sequences_keep_canonical_order_and_owners() {
     let ordered = key_batch(1024, 64, false);
     let indices = datafusion::arrow::array::UInt32Array::from_iter_values((0..1024).rev());
     let reversed = datafusion::arrow::compute::take_record_batch(
@@ -408,8 +409,8 @@ fn reversed_and_string_sequence_shapes_keep_legacy_preparation() {
         vec![0; 4],
     );
     check_batches(vec![
-        (batch(vec![reversed]), false),
-        (batch(vec![strings]), false),
+        (batch(vec![reversed]), true),
+        (batch(vec![strings]), true),
     ]);
 }
 
@@ -673,7 +674,7 @@ async fn boundary_fallback(service: &TestService) {
     let snapshot = operator.checkpoint(crate::Epoch::INITIAL).unwrap();
     restored.restore(&snapshot).unwrap();
     for candidate in [&mut operator, &mut restored] {
-        for (time, sequence, eligible) in [(50, 2, false), (100, 1, true)] {
+        for (time, sequence, eligible) in [(50, 2, true), (100, 1, true)] {
             let input = batch(vec![record(
                 &schema,
                 Arc::new(StringArray::from(vec!["key"])),
@@ -727,7 +728,7 @@ fn restored_and_disordered_live_maximum_guards_overlap_and_duplicates() {
 }
 
 #[test]
-fn mixed_late_input_uses_legacy_after_payload_compaction() {
+fn mixed_late_input_keeps_batch_selection_after_payload_compaction() {
     let service = TestService::new(1, 1).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -748,7 +749,7 @@ fn mixed_late_input_uses_legacy_after_payload_compaction() {
             Arc::new(Int64Array::from(vec![0, 1, 2])),
             vec![0, 50, 100],
         )]);
-        differential_input(&mut operator, &input, &service, false).await;
+        differential_input(&mut operator, &input, &service, true).await;
         assert_eq!(operator.status.left.late_rows, 1);
         assert_eq!(operator.status.left.accepted_rows, 0);
     });
@@ -795,7 +796,7 @@ fn full_projected_zero_column_and_oversized_slices_keep_payload_owners() {
 }
 
 #[test]
-fn composite_keys_and_sequences_keep_validated_legacy_ranges() {
+fn composite_keys_and_sequences_keep_canonical_ranks_and_owners() {
     let service = TestService::new(1, 1).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -829,7 +830,7 @@ fn composite_keys_and_sequences_keep_validated_legacy_ranges() {
             (vec!["key".into()], vec!["seq".into(), "extra".into()]),
         ] {
             let mut operator = shaped_fixture(&schema, &keys, &sequence, AsofLatePolicy::Error);
-            differential_input(&mut operator, &input, &service, false).await;
+            differential_input(&mut operator, &input, &service, true).await;
         }
     });
     drop(runtime);
