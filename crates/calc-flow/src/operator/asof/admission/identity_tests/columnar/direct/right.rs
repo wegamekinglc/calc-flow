@@ -376,12 +376,8 @@ async fn compare(
     for (op, old) in [(&mut fast, false), (&mut legacy, true)] {
         CANONICAL_ROWS.set(0);
         let (admission, _) = prepared(op, input, validated, &context, old).await;
-        assert_eq!(
-            admission.rows.is_empty(),
-            direct && !old,
-            "unexpected admission path"
-        );
-        assert_eq!(CANONICAL_ROWS.replace(0) == 0, direct && !old);
+        assert_eq!(admission.rows.is_empty(), !old, "unexpected admission path");
+        assert_eq!(CANONICAL_ROWS.replace(0) == 0, !old);
         let keys = admission.right_capacities.len();
         state::take_reserved_bucket_accesses();
         op.install_admission("right", admission, validated, &context)

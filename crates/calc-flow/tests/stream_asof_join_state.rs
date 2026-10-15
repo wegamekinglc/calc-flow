@@ -648,32 +648,39 @@ fn schema_metadata_is_reserved_before_encoding_and_after_duplicate_validation() 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
-    let allocations = allocation_counter::measure(|| {
+    for ingress in ["left", "right"] {
+        let input = input.clone();
+        let allocations = allocation_counter::measure(|| {
+            let error = runtime
+                .block_on(op.process_data(ingress, input, &cx, &mut out))
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                CalcFlowError::OperatorReason {
+                    reason_code: StreamingFailureReason::AsofWorkspaceLimitExceeded,
+                    ..
+                }
+            ));
+        });
+        assert!(
+            allocations.bytes_max < 1024 * 1024,
+            "{ingress} schema metadata copied before reservation: {allocations:?}"
+        );
         let error = runtime
-            .block_on(op.process_data("right", input, &cx, &mut out))
+            .block_on(op.process_data(ingress, duplicate.clone(), &cx, &mut out))
             .unwrap_err();
         assert!(matches!(
             error,
             CalcFlowError::OperatorReason {
-                reason_code: StreamingFailureReason::AsofWorkspaceLimitExceeded,
+                reason_code: StreamingFailureReason::AsofDuplicateIdentity,
                 ..
             }
         ));
-    });
-    assert!(
-        allocations.bytes_max < 1024 * 1024,
-        "schema FlatBuffer allocated before reservation: {allocations:?}"
-    );
-    let error = runtime
-        .block_on(op.process_data("right", duplicate, &cx, &mut out))
-        .unwrap_err();
-    assert!(matches!(
-        error,
-        CalcFlowError::OperatorReason {
-            reason_code: StreamingFailureReason::AsofDuplicateIdentity,
-            ..
-        }
-    ));
+        assert_eq!(op.status().state_rows, 0);
+        assert_eq!(op.status().left.accepted_rows, 0);
+        assert_eq!(op.status().right.accepted_rows, 0);
+        assert!(out.drain("output").is_empty());
+    }
 }
 
 #[tokio::test]

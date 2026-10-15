@@ -224,7 +224,7 @@ fn test_direct_left_dictionary_boundaries_and_fallback_match_legacy() {
                 vec![3, 1, 2],
             )]),
             None,
-            false,
+            true,
         ),
         (
             batch(vec![unsigned_record(
@@ -234,7 +234,7 @@ fn test_direct_left_dictionary_boundaries_and_fallback_match_legacy() {
                 vec![9, 10, 11],
             )]),
             Some(10),
-            false,
+            true,
         ),
     ];
     let service = TestService::new(1, 1).unwrap();
@@ -277,7 +277,7 @@ async fn restored_boundary(service: &TestService) {
     restored.restore(&snapshot).unwrap();
     for candidate in [&mut operator, &mut restored] {
         assert_eq!(candidate.status.left.accepted_rows, 2);
-        for (time, sequence, direct) in [(50, 2, false), (100, 2, true)] {
+        for (time, sequence, direct) in [(50, 2, true), (100, 2, true)] {
             let input = batch(vec![unsigned_record(
                 &schema,
                 vec!["k"],

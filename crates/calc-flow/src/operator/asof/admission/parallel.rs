@@ -87,7 +87,7 @@ pub(in super::super) async fn prepare(
     admission: &Admission,
     context: &StreamOperatorContext<'_>,
 ) -> Result<Option<PreparedAdmission>> {
-    let units = (admission.rows.len() / 4_096)
+    let units = (admission.len() / 4_096)
         .min(admission.right_capacities.len())
         .min(state::KEY_SHARDS);
     if units < 2 {
@@ -133,7 +133,7 @@ fn appends_after_state(
         return Ok(false);
     }
     let mut earliest = i64::MAX;
-    for (ordinal, (identity, _)) in admission.rows.iter().enumerate() {
+    for (ordinal, (identity, _)) in admission.right_identities().enumerate() {
         if ordinal.is_multiple_of(1_024) {
             context.check_cancelled()?;
         }
@@ -166,14 +166,14 @@ fn follows_key_tails(
     context: &StreamOperatorContext<'_>,
 ) -> Result<bool> {
     let mut previous = None;
-    for (ordinal, (identity, _)) in admission.rows.iter().enumerate() {
+    for (ordinal, (identity, payload)) in admission.right_identities().enumerate() {
         if ordinal.is_multiple_of(1_024) {
             context.check_cancelled()?;
         }
-        if previous == Some(&identity.1) {
+        if previous == Some(payload.key_index) {
             continue;
         }
-        previous = Some(&identity.1);
+        previous = Some(payload.key_index);
         if operator
             .state
             .right
@@ -196,7 +196,7 @@ pub(super) async fn capture(
     context: &StreamOperatorContext<'_>,
 ) -> Result<(AdmissionWork, Vec<state::RowRef>, MemoryReservation)> {
     let name = &operator.name;
-    let scratch = admission.rows.len() as u64 * 128
+    let scratch = admission.len() as u64 * 128
         + admission.right_capacities.len() as u64 * 512
         + admission.batches.len() as u64 * 128
         + 8_192;
@@ -260,7 +260,7 @@ async fn encoding_buffers(
     let name = &operator.name;
     let mut buffers = operator.state.encoding_owner_allocation().0;
     let mut owners = BTreeSet::new();
-    for (ordinal, (identity, _)) in admission.rows.iter().enumerate() {
+    for (ordinal, (identity, _)) in admission.right_identities().enumerate() {
         cooperate(ordinal, context).await?;
         for encoding in [&identity.1, &identity.2] {
             if let Some((address, bytes)) = encoding.allocation() {
@@ -299,13 +299,18 @@ async fn fill_rows(
     routes: &[(usize, usize)],
     context: &StreamOperatorContext<'_>,
 ) -> Result<()> {
-    for (ordinal, (identity, payload)) in admission.rows.iter().enumerate() {
+    for (ordinal, (identity, payload)) in admission.right_identities().enumerate() {
         cooperate(ordinal, context).await?;
         let (shard, bucket) = routes[payload.key_index as usize];
         let row = references[payload.batch_index].with_row(payload.row);
+        let time = identity.0;
+        let sequence = match identity {
+            std::borrow::Cow::Owned((_, _, sequence)) => sequence,
+            std::borrow::Cow::Borrowed((_, _, sequence)) => sequence.clone(),
+        };
         work.shards[shard][bucket]
             .rows
-            .push(((identity.0, identity.2.clone()), row));
+            .push(((time, sequence), row));
     }
     Ok(())
 }
