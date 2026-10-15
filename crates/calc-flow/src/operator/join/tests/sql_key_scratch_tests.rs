@@ -264,7 +264,7 @@ async fn test_nonserial_production_fallback_uses_true_legacy_schema() {
 
 async fn collected_output_case(cancelled: bool) {
     let (mut operator, job) = scratch_fixture(1).await;
-    let private_timezone = match operator.state.left[0].record.column(1).data_type() {
+    let private_timezone = match operator.state.left.at(0).record.column(1).data_type() {
         DataType::Timestamp(_, Some(timezone)) => Arc::downgrade(timezone),
         _ => panic!("fixture carries a privately owned timezone"),
     };
@@ -516,7 +516,7 @@ async fn test_background_sql_configuration_keeps_payload_and_scratch_legacy() {
         .await
         .unwrap();
     assert!(
-        operator.state.left[0].record.is_unfunded_legacy(),
+        operator.state.left.at(0).record.is_unfunded_legacy(),
         "unproved background SQL must not retain a paid Shared schema whose consumers cannot carry its lease"
     );
     let plan = operator.side_plan("right").unwrap();
@@ -802,7 +802,7 @@ async fn paid_key_pressure_case(
         .map(|pair| {
             (
                 u64::try_from(pair.pos).unwrap(),
-                operator.state.left[pair.opposite_index].row_id,
+                operator.state.left.row(pair.opposite_index).row_id,
             )
         })
         .collect::<Vec<_>>();
@@ -949,7 +949,7 @@ async fn test_nonbudget_sql_error_does_not_retry_legacy() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_payload_buffers_keep_credit_until_real_consumer_cleanup() {
     let (mut operator, job) = scratch_fixture(1).await;
-    let payload = operator.state.left[0].record.clone();
+    let payload = operator.state.left.at(0).record.clone();
     let paid = payload.funded_owner().unwrap().1;
     let view = payload.view();
     let record = (*view).clone();
@@ -1050,7 +1050,7 @@ async fn string_consumer_case(
 ) {
     use datafusion::arrow::array::LargeStringArray;
     let (mut operator, job) = string_payload_fixture(large, service).await;
-    let payload = operator.state.right[0].record.clone();
+    let payload = operator.state.right.at(0).record.clone();
     let paid = payload.funded_owner().unwrap().1;
     let column = payload.column_view(2);
     let array = Arc::downgrade(&column);
@@ -1151,7 +1151,13 @@ async fn test_sql_producer_keeps_funding_until_real_cancel_cleanup() {
         )
         .await
         .unwrap();
-    operator.state.left = operator.state.left[..1].to_vec().into();
+    operator.state.left = operator
+        .state
+        .left
+        .iter()
+        .take(1)
+        .collect::<Vec<_>>()
+        .into();
     let plan = operator.side_plan("right").unwrap();
     let keys = operator.owned_state_keys(&plan, &context).await.unwrap();
     let array = Arc::downgrade(keys.column(0));

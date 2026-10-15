@@ -319,7 +319,15 @@ async fn test_v2_reader_behavior_keeps_sql_loans_until_actual_release() {
     assert_sql_error(&mut operator, &context).await;
     assert_pending_loan(&mut operator, &job, &context).await;
     assert_eq!(containers.strong_count(), 1);
-    let last_buffer = operator.state.left[0].record.column(0).to_data().buffers()[0].clone();
+    let last_buffer = operator
+        .state
+        .left
+        .at(0)
+        .record
+        .column(0)
+        .to_data()
+        .buffers()[0]
+        .clone();
     operator.reset().unwrap();
     assert!(containers.upgrade().is_none());
     drop(operator);

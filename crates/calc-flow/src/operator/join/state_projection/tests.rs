@@ -184,8 +184,19 @@ async fn legacy_projection_migration(layout: u64) {
         .await
         .unwrap();
     assert_eq!(managed.status(), legacy.status());
-    let escaping = managed.state.right[0].record.column(0).to_data().buffers()[0].clone();
-    let fields = projected.state.right[0]
+    let escaping = managed
+        .state
+        .right
+        .at(0)
+        .record
+        .column(0)
+        .to_data()
+        .buffers()[0]
+        .clone();
+    let fields = projected
+        .state
+        .right
+        .at(0)
         .record
         .schema_ref()
         .fields()
@@ -262,9 +273,12 @@ async fn post_restore_gap(
         .await
         .unwrap();
     assert_eq!(restored.status(), full.status());
-    assert_eq!(restored.state.left[0].row_id, 1);
+    assert_eq!(restored.state.left.at(0).row_id, 1);
     assert_eq!(restored.state.next_left_row_id, 2);
-    assert_eq!(restored.state.left[0].charge, full.state.left[0].charge);
+    assert_eq!(
+        restored.state.left.at(0).charge,
+        full.state.left.at(0).charge
+    );
     assert_eq!(restored.state.metrics.left.late_rows, 1);
     assert_eq!(restored.state.next_output_sequence, 1);
     compare_output(&mut actual, &mut expected);

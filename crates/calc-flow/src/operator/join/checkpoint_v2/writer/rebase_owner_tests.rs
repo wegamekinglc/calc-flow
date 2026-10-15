@@ -18,8 +18,8 @@ async fn test_rebase_cancel_retains_only_serialized_inputs_until_actual_drain() 
     let (mut join, old) = checkpointed(&context).await;
     let pool = join.runtime.runtime().unwrap().incremental_memory_pool();
     let rows = Arc::downgrade(&join.state.left.0);
-    let key = Arc::downgrade(&join.state.left[0].encoded_key);
-    let column = Arc::downgrade(join.state.left[0].record.column(0));
+    let key = Arc::downgrade(join.state.left.key_at(0));
+    let column = Arc::downgrade(join.state.left.at(0).record.column(0));
     let segments = old
         .segments
         .values()

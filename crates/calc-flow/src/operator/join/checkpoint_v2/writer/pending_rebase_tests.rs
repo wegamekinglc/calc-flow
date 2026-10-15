@@ -394,7 +394,7 @@ async fn test_pending_rebase_abandonment_and_cancel_retain_owners_until_drain() 
         admit_left(&mut join, &context).await;
         let before = edge_tests::image(&join);
         let rows = Arc::downgrade(&join.state.left.0);
-        let old_column = Arc::downgrade(join.state.left[0].record.column(0));
+        let old_column = Arc::downgrade(join.state.left.at(0).record.column(0));
         let pending_column = Arc::downgrade(join.state.left.last().unwrap().record.column(0));
         let segments = old
             .segments

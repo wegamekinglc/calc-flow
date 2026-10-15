@@ -1,4 +1,5 @@
 //! Preflight matched-pair ranges before allocating independently owned output chunks.
+use crate::operator::join::retained::Rows;
 
 mod emission;
 
@@ -11,8 +12,8 @@ use std::{
 use datafusion::arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
 
 #[cfg(test)]
-use super::AdmittedRow;
-use super::{AdmittedRows, MatchedPair, PayloadRef, StoredRow};
+use super::{AdmittedRow, StoredRow};
+use super::{AdmittedRows, MatchedPair, PayloadRef};
 use crate::batch::checked_accumulate;
 use crate::operator::output_chunk::OutputChunkErrors;
 use crate::operator::row_cost::{Offsets, fixed_width, variable_offsets};
@@ -22,8 +23,8 @@ pub(super) struct JoinOutput<'a> {
     pub(super) schema: &'a SchemaRef,
     pub(super) projection: Option<&'a Arc<[usize]>>,
     pub(super) admitted: &'a dyn AdmittedRows,
-    pub(super) opposite: &'a [StoredRow],
-    pub(super) matched: &'a [MatchedPair],
+    pub(super) opposite: &'a dyn Rows,
+    pub(super) matched: &'a dyn super::matches::Matches,
     pub(super) incoming_is_left: bool,
     pub(super) operator_id: &'a str,
     /// Conservative per-admitted-row logical byte charges aligned with
@@ -97,7 +98,7 @@ impl JoinOutput<'_> {
 
     pub(super) fn records(&self, pair: &MatchedPair) -> (PayloadRef<'_>, PayloadRef<'_>) {
         let incoming = self.admitted.row(pair.pos).record;
-        let opposite = (&self.opposite[pair.opposite_index].record).into();
+        let opposite = self.opposite.payload(pair.opposite_index);
         if self.incoming_is_left {
             (incoming, opposite)
         } else {
@@ -110,7 +111,7 @@ impl JoinOutput<'_> {
         let left_width = self
             .matched
             .first()
-            .map_or(0, |pair| self.records(pair).0.num_columns());
+            .map_or(0, |pair| self.records(&pair).0.num_columns());
         let left = incoming == self.incoming_is_left;
         Some(
             projection
@@ -151,9 +152,9 @@ impl JoinOutput<'_> {
         }
         let limit = budget.max_bytes as u128;
         let mut total = 0_u128;
-        for pair in self.matched {
+        for pair in self.matched.iter() {
             let incoming = charges[pair.pos];
-            let opposite = self.opposite[pair.opposite_index].charge;
+            let opposite = self.opposite.charge(pair.opposite_index);
             total += u128::from(incoming) + u128::from(opposite);
             if total > limit {
                 return false;
@@ -165,10 +166,9 @@ impl JoinOutput<'_> {
     fn flat_ranges(&self, budget: EdgeBudget) -> Result<Vec<Range<usize>>> {
         let incoming_columns = self.side_columns(true);
         let opposite_columns = self.side_columns(false);
-        // Matched positions are dense indices into both sides, so per-row
-        // costs cache in plain vectors instead of hashed maps.
-        let mut incoming: Vec<Option<FlatRow>> = (0..self.admitted.len()).map(|_| None).collect();
-        let mut opposite: Vec<Option<FlatRow>> = (0..self.opposite.len()).map(|_| None).collect();
+        // Cache only matched references; retained chunk coordinates can have gaps.
+        let mut incoming = BTreeMap::new();
+        let mut opposite = BTreeMap::new();
         let mut ranges = Vec::new();
         let mut start = 0;
         let mut chunk = FlatChunk::default();
@@ -184,7 +184,7 @@ impl JoinOutput<'_> {
             let right = flat_row(
                 &mut opposite,
                 pair.opposite_index,
-                (&self.opposite[pair.opposite_index].record).into(),
+                self.opposite.payload(pair.opposite_index),
                 record.num_columns(),
                 opposite_columns.as_deref(),
             )?;
@@ -226,7 +226,7 @@ impl JoinOutput<'_> {
             self.matched.iter().map(|pair| {
                 (
                     pair.opposite_index,
-                    (&self.opposite[pair.opposite_index].record).into(),
+                    self.opposite.payload(pair.opposite_index),
                 )
             }),
             opposite_columns.as_deref(),
@@ -282,13 +282,13 @@ fn nested_range_is_full(
 }
 
 fn flat_row<'a>(
-    rows: &'a mut [Option<FlatRow>],
+    rows: &'a mut BTreeMap<usize, FlatRow>,
     index: usize,
     record: PayloadRef<'_>,
     column_offset: usize,
     projection: Option<&[(usize, usize)]>,
 ) -> Result<&'a FlatRow> {
-    if rows[index].is_none() {
+    if let Entry::Vacant(entry) = rows.entry(index) {
         #[cfg(test)]
         tests::FLAT_VISITS.with(|count| count.set(count.get() + 1));
         let mut bytes = 0;
@@ -304,9 +304,9 @@ fn flat_row<'a>(
                 nulls.push(column_index);
             }
         }
-        rows[index] = Some(FlatRow { bytes, nulls });
+        entry.insert(FlatRow { bytes, nulls });
     }
-    Ok(rows[index].as_ref().expect("just populated"))
+    Ok(&rows[&index])
 }
 
 fn row_columns<'a>(

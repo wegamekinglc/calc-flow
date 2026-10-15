@@ -648,8 +648,8 @@ fn assert_flat_nullable_gather_matches_old_concat_for_each_supported_shape() {
         reset_join_work();
         let output = materialize_parent_column(column, &[2, 0, 1, 2]);
         assert_eq!(output.column(0).to_data(), expected.to_data());
-        assert_eq!(join_work().output_column_takes, 1);
-        assert_eq!(join_work().output_column_views, 4);
+        assert_eq!(join_work().output_column_takes, 2);
+        assert_eq!(join_work().output_column_views, 0);
     }
 }
 
@@ -701,13 +701,13 @@ fn test_multi_parent_flat_nullable_gather_matches_concat_with_one_interleave() {
             reset_join_work();
             let output = materialize_parent_columns(vec![Arc::clone(&column), column], &selections);
             assert_eq!(output.column(0).to_data(), expected.to_data());
-            assert_eq!(join_work().output_column_takes, 0);
+            assert_eq!(join_work().output_column_takes, 1);
             assert_eq!(join_work().output_column_interleaves, 1);
             assert_eq!(join_work().output_source_lookups, source_lookups);
             assert_eq!(
                 join_work().output_column_views,
-                selections.len(),
-                "only legacy right payloads use row views"
+                0,
+                "both sides use batched gather"
             );
         }
     }
@@ -732,11 +732,11 @@ fn test_multi_parent_gather_discards_unselected_string_backing() {
     assert_eq!(strings.value_data().len(), 17);
     assert!(output.column(0).get_array_memory_size() < 512);
     assert_eq!(join_work().output_column_interleaves, 1);
-    assert_eq!(join_work().output_column_views, 3);
+    assert_eq!(join_work().output_column_views, 0);
 }
 
 #[test]
-fn test_multi_parent_nested_dictionary_fallback_discards_unused_values() {
+fn test_multi_parent_nested_dictionary_interleave_discards_unused_values() {
     for list in [false, true] {
         reset_join_work();
         let output = materialize_parent_columns(
@@ -765,8 +765,8 @@ fn test_multi_parent_nested_dictionary_fallback_discards_unused_values() {
         let values = values.as_any().downcast_ref::<StringArray>().unwrap();
         assert_eq!(values.iter().collect::<Vec<_>>(), [Some("paid")]);
         assert_eq!(values.value_data().len(), 4);
-        assert_eq!(join_work().output_column_interleaves, 0);
-        assert_eq!(join_work().output_column_views, 4);
+        assert_eq!(join_work().output_column_interleaves, 1);
+        assert_eq!(join_work().output_column_views, 0);
     }
 }
 
@@ -777,8 +777,8 @@ fn assert_gather_offsets_above_u32_remain_lossless_without_large_allocation() {
     let output = materialize_parent_column(Arc::new(NullArray::new(offset + 1)), &[offset]);
     assert_eq!(output.num_rows(), 1);
     assert_eq!(output.column(0).logical_null_count(), 1);
-    assert_eq!(join_work().output_column_takes, 1);
-    assert_eq!(join_work().output_column_views, 1);
+    assert_eq!(join_work().output_column_takes, 2);
+    assert_eq!(join_work().output_column_views, 0);
 }
 
 #[test]
@@ -796,5 +796,5 @@ fn test_multi_parent_gather_offsets_above_u32_remain_lossless() {
     assert_eq!(output.num_rows(), 2);
     assert_eq!(output.column(0).logical_null_count(), 2);
     assert_eq!(join_work().output_column_interleaves, 1);
-    assert_eq!(join_work().output_column_views, 2);
+    assert_eq!(join_work().output_column_views, 0);
 }

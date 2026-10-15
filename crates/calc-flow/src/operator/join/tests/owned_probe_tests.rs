@@ -205,7 +205,7 @@ async fn assert_abandoned_probe(
         .runtime()
         .unwrap()
         .incremental_memory_pool();
-    let weak = Arc::downgrade(operator.state.right[0].record.column(0));
+    let weak = Arc::downgrade(operator.state.right.at(0).record.column(0));
     let rows_pointer = operator.state.right.as_ptr() as usize;
     let index_pointer = Arc::as_ptr(operator.state.right.1.as_ref().unwrap()) as usize;
     let ProbeGate { started, release } = probe_gate(&mut operator, phase);

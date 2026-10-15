@@ -67,7 +67,7 @@ fn assert_dirty(snapshot: &OperatorStateSnapshot, epoch: u64, id: u64, deltas: u
         .iter()
         .find(|row| row.row_id == id)
         .unwrap();
-    assert_row(added, id, 97, 141, "ok", "red", Some(&[9]));
+    assert_row(&added, id, 97, 141, "ok", "red", Some(&[9]));
     assert_eq!(restored.state.metrics.emitted_match_rows, id + 1);
 }
 
@@ -78,7 +78,7 @@ fn assert_compacted_rows(snapshot: &OperatorStateSnapshot) {
         (restored.state.left.len(), restored.state.right.len()),
         (6, 1)
     );
-    let first = &restored.state.left[0];
+    let first = &restored.state.left.at(0);
     assert_eq!(
         (first.row_id, first.event_time.as_micros(), first.charge),
         (0, 95, 136)
@@ -86,7 +86,7 @@ fn assert_compacted_rows(snapshot: &OperatorStateSnapshot) {
     assert_eq!(first.encoded_key.as_slice(), KEY);
     assert!(first.record.view().column(2).is_null(0));
     assert_row(
-        &restored.state.left[1],
+        &restored.state.left.at(1),
         1,
         96,
         148,
@@ -94,11 +94,11 @@ fn assert_compacted_rows(snapshot: &OperatorStateSnapshot) {
         "blue",
         Some(&[2, 3]),
     );
-    for (row, id) in restored.state.left[2..].iter().zip(2..6) {
-        assert_row(row, id, 97, 141, "ok", "red", Some(&[9]));
+    for (row, id) in restored.state.left.iter().skip(2).zip(2..6) {
+        assert_row(&row, id, 97, 141, "ok", "red", Some(&[9]));
     }
     assert_row(
-        &restored.state.right[0],
+        &restored.state.right.at(0),
         0,
         100,
         141,

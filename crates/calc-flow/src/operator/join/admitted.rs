@@ -463,11 +463,6 @@ impl<'a> PayloadRef<'a> {
     pub(super) fn num_columns(self) -> usize {
         self.columns().len()
     }
-    pub(super) fn column_view(self, index: usize) -> ArrayRef {
-        #[cfg(test)]
-        super::note_join_work(|work| work.output_column_views += 1);
-        self.column(index).slice(self.offset(), 1)
-    }
     #[cfg(test)]
     pub(super) fn view(self) -> RecordBatch {
         #[cfg(test)]

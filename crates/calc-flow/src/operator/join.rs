@@ -1518,6 +1518,10 @@ mod tests {
             .unwrap();
         let work = join_work();
         assert_eq!(work.retained_visits, 0);
+        assert_eq!(work.retained_chunk_visits, 0);
+        assert_eq!(work.retained_descriptor_views, 0);
+        assert_eq!(work.expiration_head_steps, 0);
+        assert_eq!(work.native_dense_repairs, 0);
         assert_eq!(work.pending_visits, 0);
         assert_eq!(operator.status().left.retained_rows, 80);
     }
@@ -1547,6 +1551,10 @@ mod tests {
             .unwrap();
         let work = join_work();
         assert_eq!(work.retained_visits, 2);
+        assert_eq!(work.retained_chunk_visits, 2);
+        assert_eq!(work.retained_descriptor_views, 2);
+        assert_eq!(work.expiration_head_steps, 2);
+        assert_eq!(work.native_dense_repairs, 0);
         assert_eq!(work.pending_visits, 2);
         assert_eq!(operator.status().left.retained_rows, 78);
         assert_eq!(operator.status().left.evicted_rows, 2);
@@ -1575,7 +1583,7 @@ mod tests {
             .unwrap();
         assert_eq!(join_work().key_encodings, 1);
         assert_eq!(operator.state.left.len(), 3);
-        let key = &operator.state.left[0].encoded_key;
+        let key = operator.state.left.key_at(0);
         for row in operator.state.left.iter() {
             assert!(Arc::ptr_eq(&row.encoded_key, key));
             assert_eq!(
@@ -2281,6 +2289,10 @@ struct KeyDiagnostics {
 #[derive(Clone, Copy, Default)]
 struct JoinWork {
     retained_visits: usize,
+    retained_chunk_visits: usize,
+    retained_descriptor_views: usize,
+    expiration_head_steps: usize,
+    native_dense_repairs: usize,
     pending_visits: usize,
     key_encodings: usize,
     time_decoders: usize,
@@ -2331,7 +2343,7 @@ struct JoinWork {
 #[cfg(test)]
 thread_local! {
     static JOIN_WORK: std::cell::Cell<JoinWork> = const { std::cell::Cell::new(JoinWork {
-        retained_visits: 0, pending_visits: 0, key_encodings: 0, time_decoders: 0,
+        retained_visits: 0, retained_chunk_visits: 0, retained_descriptor_views: 0, expiration_head_steps: 0, native_dense_repairs: 0, pending_visits: 0, key_encodings: 0, time_decoders: 0,
         sql_probe_table_builds: 0, native_range_visits: 0, native_boundary_visits: 0,
         admission_mask_blocks: 0, native_shifted_entries: 0,
         native_eviction_comparisons: 0, native_funding_refunds: 0,
@@ -2844,7 +2856,7 @@ struct CachedRetainedKeys {
 }
 
 struct SqlKeyOwners {
-    _retained: Arc<Vec<StoredRow>>,
+    _retained: Arc<StateRows>,
     admitted: AdmittedBatch,
     scratch: Option<Arc<sql_key_scratch::ScratchFunding>>,
 }
@@ -2915,6 +2927,7 @@ enum RowAdmission {
 }
 
 /// One time-qualified key-equal pair, ordered for emission.
+#[derive(Clone, Copy)]
 struct MatchedPair {
     pos: usize,
     opposite_index: usize,
@@ -3113,54 +3126,44 @@ struct StreamJoinState {
 
 #[derive(Default)]
 struct RetainedRows(
-    Arc<Vec<StoredRow>>,
+    Arc<StateRows>,
     Option<Arc<native_lookup::NativeIndex>>,
     columnar::SparseQueue,
 );
 
 impl From<Vec<StoredRow>> for RetainedRows {
     fn from(rows: Vec<StoredRow>) -> Self {
-        Self(Arc::new(rows), None, columnar::SparseQueue::default())
+        let mut state = StateRows::default();
+        state.append(rows);
+        Self(Arc::new(state), None, columnar::SparseQueue::default())
     }
 }
 
 impl RetainedRows {
-    fn extend(&mut self, rows: Vec<StoredRow>, dictionary: &key_dictionary::Dictionary) {
-        for row in &rows {
+    fn extend(
+        &mut self,
+        rows: &[StoredRow],
+        chunks: retained::Append,
+        dictionary: &key_dictionary::Dictionary,
+    ) {
+        for row in rows {
             self.2.enqueue_if_due(&row.record);
         }
         if let Some(index) = &mut self.1 {
             Arc::get_mut(index)
                 .expect("native probe released before retained append")
-                .append_identified(self.0.len(), &rows, dictionary);
+                .append_identified_indices(&chunks.indices, rows, dictionary);
         }
-        std::ops::DerefMut::deref_mut(self).extend(rows);
+        std::ops::DerefMut::deref_mut(self).commit(chunks);
     }
 
-    #[cfg(test)]
-    fn swap_remove(&mut self, index: usize) -> StoredRow {
-        self.swap_remove_bound(index, &key_dictionary::SideBindings::default())
-    }
-
-    fn swap_remove_bound(
-        &mut self,
-        index: usize,
-        bindings: &key_dictionary::SideBindings,
-    ) -> StoredRow {
-        let row = std::ops::DerefMut::deref_mut(self).swap_remove(index);
-        if let Some(moved) = self.0.get(index) {
-            moved.record.mark_live(index);
-        }
+    fn remove_bound(&mut self, index: usize, bindings: &key_dictionary::SideBindings) -> StoredRow {
+        let row = std::ops::DerefMut::deref_mut(self).remove(index);
         if let Some(native) = &mut self.1 {
             let native = Arc::get_mut(native).expect("native probe released before eviction");
-            native.remove_resolved(
-                &row,
-                bindings.canonical(&row),
-                self.0
-                    .get(index)
-                    .map(|row| (row, bindings.canonical(row), index)),
-                |dense| bindings.canonical(&self.0[dense]),
-            );
+            native.remove_stable(&row, bindings.canonical(&row), |index| {
+                bindings.canonical_key(self.0.row_id(index), self.0.key(index))
+            });
         }
         row
     }
@@ -3173,8 +3176,7 @@ impl RetainedRows {
 }
 
 impl std::ops::Deref for RetainedRows {
-    type Target = Vec<StoredRow>;
-
+    type Target = StateRows;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
@@ -3183,6 +3185,43 @@ impl std::ops::Deref for RetainedRows {
 impl std::ops::DerefMut for RetainedRows {
     fn deref_mut(&mut self) -> &mut Self::Target {
         Arc::get_mut(&mut self.0).expect("compaction input released before retained mutation")
+    }
+}
+
+#[cfg(test)]
+impl IntoIterator for RetainedRows {
+    type Item = StoredRow;
+    type IntoIter = std::vec::IntoIter<StoredRow>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter().collect::<Vec<_>>().into_iter()
+    }
+}
+
+impl Rows for RetainedRows {
+    fn references(&self) -> Box<dyn Iterator<Item = usize> + Send + '_> {
+        self.0.references()
+    }
+
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+    fn row(&self, index: usize) -> StoredRow {
+        self.0.row(index)
+    }
+    fn charge(&self, index: usize) -> u64 {
+        self.0.charge(index)
+    }
+    fn identity(&self, index: usize) -> (EventTime, u64) {
+        self.0.identity(index)
+    }
+    fn payload(&self, index: usize) -> PayloadRef<'_> {
+        self.0.payload(index)
+    }
+    fn key(&self, index: usize) -> &Arc<columnar::FramedKey> {
+        self.0.key(index)
+    }
+    fn indexed(&self) -> Box<dyn Iterator<Item = (usize, StoredRow)> + Send + '_> {
+        self.0.indexed()
     }
 }
 
@@ -3259,7 +3298,10 @@ mod checkpoint_v2;
 mod columnar;
 mod data_work;
 mod expiration;
+mod matches;
+mod retained;
 use expiration::ExpirationIndex;
+use retained::{Rows, StateRows};
 #[cfg(feature = "benchmark-internals")]
 mod benchmark_dictionary;
 mod historical_validation;
@@ -3280,7 +3322,7 @@ mod state_projection;
 mod typed_key;
 
 struct PreparedMatches {
-    pairs: Vec<MatchedPair>,
+    pairs: matches::Selection,
     keys: Option<native_lookup::NativeKeys>,
     credit: Option<datafusion::execution::memory_pool::MemoryReservation>,
 }
@@ -3288,7 +3330,7 @@ struct PreparedMatches {
 impl PreparedMatches {
     fn legacy(pairs: Vec<MatchedPair>) -> Self {
         Self {
-            pairs,
+            pairs: pairs.into(),
             keys: None,
             credit: None,
         }
@@ -3296,10 +3338,11 @@ impl PreparedMatches {
 }
 
 struct PreparedJoinBatch {
-    output: Vec<MatchedPair>,
+    output: matches::Selection,
     admitted: AdmittedBatch,
     incoming_is_left: bool,
     retained: Vec<StoredRow>,
+    chunks: retained::Append,
     next_row_id: u64,
     metrics: SideMetrics,
     /// Conservative per-admitted-row logical charges enabling the single
@@ -3638,15 +3681,6 @@ impl StreamJoinOperator {
                 .await?;
         }
         self.validate_state_admission(plan.incoming_is_left, &retained)?;
-        let native_append = if retained
-            .iter()
-            .all(|row| row.encoded_key.address().is_some())
-        {
-            self.reserve_native_append(plan.incoming_is_left, retained.len())?
-        } else {
-            self.drop_native_index(plan.incoming_is_left);
-            None
-        };
         self.project_admitted(
             &mut bundle.admitted,
             &mut retained,
@@ -3654,7 +3688,16 @@ impl StreamJoinOperator {
             context,
         )
         .await?;
+        let chunks = self
+            .prepare_chunk_state(
+                plan.incoming_is_left,
+                &retained,
+                legacy_key_references,
+                context,
+            )
+            .await?;
         Ok(PreparedJoinBatch {
+            chunks,
             output: matches.pairs,
             admitted: std::mem::take(&mut bundle.admitted),
             incoming_is_left: plan.incoming_is_left,
@@ -3662,11 +3705,47 @@ impl StreamJoinOperator {
             next_row_id: bundle.next_row_id,
             metrics: std::mem::take(&mut bundle.metrics),
             admitted_charges,
-            native_append,
+            native_append: None,
             dictionary: matches.keys.and_then(|keys| keys.dictionary),
             legacy_key_references,
             _native_scratch: matches.credit,
         })
+    }
+
+    fn reserve_retained_append(
+        &mut self,
+        incoming_is_left: bool,
+        retained: &[StoredRow],
+    ) -> Result<Option<native_lookup::AppendCredit>> {
+        if retained
+            .iter()
+            .all(|row| row.encoded_key.address().is_some())
+        {
+            return self.reserve_native_append(incoming_is_left, retained.len());
+        }
+        self.drop_native_index(incoming_is_left);
+        Ok(None)
+    }
+
+    async fn prepare_chunk_state(
+        &mut self,
+        incoming_is_left: bool,
+        retained: &[StoredRow],
+        legacy: bool,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<retained::Append> {
+        let master = self
+            .runtime
+            .runtime()?
+            .incremental_reservation("stream-join-state-chunks");
+        let current = if incoming_is_left {
+            &self.state.left
+        } else {
+            &self.state.right
+        };
+        current
+            .prepare_append(retained, &master, context, legacy)
+            .await
     }
 
     /// Validates the ingress and port contract before any admission work.
@@ -3942,7 +4021,7 @@ impl StreamJoinOperator {
             .await?;
         if opposite_empty {
             return Ok(PreparedMatches {
-                pairs: Vec::new(),
+                pairs: Vec::new().into(),
                 keys,
                 credit: None,
             });
@@ -3979,7 +4058,7 @@ impl StreamJoinOperator {
         }
         let pairs = self.legacy_matches(plan, admitted, context).await?;
         Ok(PreparedMatches {
-            pairs,
+            pairs: pairs.into(),
             keys: Some(keys),
             credit: None,
         })
@@ -4003,9 +4082,9 @@ impl StreamJoinOperator {
         equal_pairs: Vec<(u64, u64)>,
     ) -> Result<Vec<MatchedPair>> {
         let opposite = if plan.incoming_is_left {
-            self.state.right.as_slice()
+            &self.state.right as &dyn Rows
         } else {
-            self.state.left.as_slice()
+            &self.state.left as &dyn Rows
         };
         let matched =
             filter_and_order_pairs(&self.spec.bounds, plan, admitted, opposite, equal_pairs);
@@ -4166,8 +4245,12 @@ impl StreamJoinOperator {
             && existing
                 .row_ids
                 .iter()
-                .zip(opposite.iter())
-                .all(|(row_id, row)| *row_id == row.row_id)
+                .zip(
+                    opposite
+                        .references()
+                        .map(|index| opposite.identity(index).1),
+                )
+                .all(|(row_id, actual)| *row_id == actual)
         {
             return Ok(existing.batch.clone());
         }
@@ -4182,7 +4265,10 @@ impl StreamJoinOperator {
         *cached = bytes
             .filter(|&bytes| bytes <= MAX_RETAINED_KEY_CACHE_BYTES_PER_SIDE)
             .map(|_| CachedRetainedKeys {
-                row_ids: opposite.iter().map(|row| row.row_id).collect(),
+                row_ids: opposite
+                    .references()
+                    .map(|index| opposite.identity(index).1)
+                    .collect(),
                 batch: batch.clone(),
                 scratch_funding: None,
             });
@@ -4217,7 +4303,7 @@ impl StreamJoinOperator {
                 .row_ids
                 .iter()
                 .copied()
-                .eq(rows.iter().map(|row| row.row_id))
+                .eq(rows.references().map(|index| rows.identity(index).1))
         {
             return Ok(sql_key_scratch::KeyBatch {
                 batch: existing.batch.clone(),
@@ -4377,44 +4463,36 @@ impl StreamJoinOperator {
         } else {
             JoinSide::Right
         };
-        let retained_offset = if side == JoinSide::Left {
-            self.state.left.len()
-        } else {
-            self.state.right.len()
-        };
         self.commit_key_references(
             prepared.dictionary,
             prepared.legacy_key_references,
             &prepared.retained,
         );
-        self.mark_retained_rows(&prepared.retained, side, retained_offset, checkpointing);
+        self.mark_retained_rows(
+            &prepared.retained,
+            side,
+            &prepared.chunks.indices,
+            checkpointing,
+        );
         if side == JoinSide::Left {
             self.state.next_left_row_id = prepared.next_row_id;
             if !prepared.retained.is_empty() {
                 self.retained_key_cache.left = None;
             }
-            self.state.left_expirations.append(
-                &self.state.left,
-                &prepared.retained,
-                expiration_append,
-            );
+            self.state.left_expirations.append(expiration_append);
             self.state
                 .left
-                .extend(prepared.retained, &self.key_dictionary);
+                .extend(&prepared.retained, prepared.chunks, &self.key_dictionary);
             self.state.metrics.left = metrics;
         } else {
             self.state.next_right_row_id = prepared.next_row_id;
             if !prepared.retained.is_empty() {
                 self.retained_key_cache.right = None;
             }
-            self.state.right_expirations.append(
-                &self.state.right,
-                &prepared.retained,
-                expiration_append,
-            );
+            self.state.right_expirations.append(expiration_append);
             self.state
                 .right
-                .extend(prepared.retained, &self.key_dictionary);
+                .extend(&prepared.retained, prepared.chunks, &self.key_dictionary);
             self.state.metrics.right = metrics;
         }
         if let Some(credit) = prepared.native_append {
@@ -4444,11 +4522,11 @@ impl StreamJoinOperator {
         &mut self,
         retained: &[StoredRow],
         side: JoinSide,
-        retained_offset: usize,
+        retained_indices: &[usize],
         checkpointing: bool,
     ) {
         for (offset, row) in retained.iter().enumerate() {
-            row.record.mark_live(retained_offset + offset);
+            row.record.mark_live(retained_indices[offset]);
             if checkpointing {
                 self.state.deltas.pending.push(PendingOp::Upsert {
                     side,
@@ -4646,15 +4724,27 @@ impl StreamJoinOperator {
         batch: &Batch,
         context: &StreamOperatorContext<'_>,
     ) -> Result<(PreparedJoinBatch, expiration::AppendPlan)> {
-        let prepared = self.prepare_batch(ingress, batch, context).await?;
+        let mut prepared = self.prepare_batch(ingress, batch, context).await?;
+        let master = self
+            .runtime
+            .runtime()?
+            .incremental_reservation("stream-join-expiration");
         let expirations = if prepared.incoming_is_left {
-            &self.state.left_expirations
+            &mut self.state.left_expirations
         } else {
-            &self.state.right_expirations
+            &mut self.state.right_expirations
         };
+        expirations.fund_origin(&master);
         let expiration_append = expirations
-            .prepare_append(prepared.retained.len(), context)
+            .prepare_append(
+                &prepared.retained,
+                &prepared.chunks.indices,
+                context,
+                prepared.chunks.is_unfunded(),
+            )
             .await?;
+        prepared.native_append =
+            self.reserve_retained_append(prepared.incoming_is_left, &prepared.retained)?;
         if context.job().checkpointing() {
             self.v2_writer.changed(true)?;
         }
@@ -5052,7 +5142,7 @@ impl StreamJoinOperator {
 
 fn mark_restored_rows(rows: [&RetainedRows; 2]) {
     for rows in rows {
-        for (dense, row) in rows.iter().enumerate() {
+        for (dense, row) in rows.indexed() {
             row.record.mark_live(dense);
         }
     }
@@ -5402,7 +5492,7 @@ fn selected_probe_column(group: admitted::AdmittedGroup<'_>, key_index: usize) -
 
 /// Builds the retained-state scratch table with renamed key columns and row ids.
 fn state_key_batch(
-    opposite: &[StoredRow],
+    opposite: &dyn Rows,
     compiled: &CompiledJoin,
     plan: &SidePlan,
     declared: Option<&Schema>,
@@ -5412,46 +5502,30 @@ fn state_key_batch(
     } else {
         &compiled.left_key_indices
     };
-    let records = opposite
-        .iter()
-        .map(|row| row.record.view())
-        .collect::<Vec<_>>();
-    let row_ids = UInt64Array::from_iter_values(opposite.iter().map(|row| row.row_id));
-    key_probe_batch(&records, key_indices, STATE_RID_COLUMN, &row_ids, declared)
-}
-
-fn key_probe_batch(
-    records: &[columnar::RowView<'_>],
-    key_indices: &[usize],
-    extra_name: &str,
-    extra: &UInt64Array,
-    declared: Option<&Schema>,
-) -> Result<RecordBatch> {
-    let first = records
-        .first()
-        .expect("join probe batches always have at least one row");
-    let source_schema = first.schema();
-    let source_schema = declared.unwrap_or(&source_schema);
+    let references = opposite.references().collect::<Vec<_>>();
+    let first = opposite.payload(references[0]);
+    let schema = declared.unwrap_or(first.schema_ref());
+    let gather =
+        output_gather::SideGather::new(references.iter().map(|&index| opposite.payload(index)));
     let mut fields = Vec::with_capacity(key_indices.len() + 1);
     let mut columns = Vec::with_capacity(key_indices.len() + 1);
-    for (position, &key_index) in key_indices.iter().enumerate() {
-        let source = source_schema.field(key_index);
+    for (position, &index) in key_indices.iter().enumerate() {
+        let field = schema.field(index);
         fields.push(Field::new(
             format!("{KEY_COLUMN_PREFIX}{position}"),
-            source.data_type().clone(),
-            source.is_nullable(),
+            field.data_type().clone(),
+            field.is_nullable(),
         ));
-        let slices = records
-            .iter()
-            .map(|record| record.column(key_index).as_ref())
-            .collect::<Vec<_>>();
-        columns.push(canonical_column(
-            concat_column(&slices)?,
-            source.data_type(),
-        ));
+        let column = gather
+            .as_ref()
+            .expect("nonempty state selection")
+            .selected_column(index)?;
+        columns.push(canonical_column(column, field.data_type()));
     }
-    fields.push(Field::new(extra_name, DataType::UInt64, false));
-    columns.push(Arc::new(extra.clone()));
+    fields.push(Field::new(STATE_RID_COLUMN, DataType::UInt64, false));
+    columns.push(Arc::new(UInt64Array::from_iter_values(
+        references.iter().map(|&index| opposite.identity(index).1),
+    )));
     RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).map_err(|error| {
         CalcFlowError::Internal {
             message: format!("stream Join equality probe assembly failed: {error}"),
@@ -5510,7 +5584,7 @@ fn filter_and_order_pairs(
     bounds: &JoinTimeBounds,
     plan: &SidePlan,
     admitted: &dyn AdmittedRows,
-    opposite: &[StoredRow],
+    opposite: &dyn Rows,
     equal_pairs: Vec<(u64, u64)>,
 ) -> Vec<MatchedPair> {
     let row_id_index = index_by_row_id(opposite);
@@ -5522,17 +5596,11 @@ fn filter_and_order_pairs(
                 .get(&rid)
                 .expect("state row ids index retained rows");
             let incoming = admitted.row(pos);
-            let candidate = &opposite[opposite_index];
+            let candidate_time = opposite.identity(opposite_index).0;
             let in_bounds = if plan.incoming_is_left {
-                bounds.contains_pair(
-                    incoming.event_time.as_micros(),
-                    candidate.event_time.as_micros(),
-                )
+                bounds.contains_pair(incoming.event_time.as_micros(), candidate_time.as_micros())
             } else {
-                bounds.contains_pair(
-                    candidate.event_time.as_micros(),
-                    incoming.event_time.as_micros(),
-                )
+                bounds.contains_pair(candidate_time.as_micros(), incoming.event_time.as_micros())
             };
             in_bounds.then_some(MatchedPair {
                 pos,
@@ -5541,29 +5609,28 @@ fn filter_and_order_pairs(
         })
         .collect::<Vec<_>>();
     matched.sort_by_key(|pair| {
-        let row = &opposite[pair.opposite_index];
-        (pair.pos, row.event_time, row.row_id)
+        let (time, row_id) = opposite.identity(pair.opposite_index);
+        (pair.pos, time, row_id)
     });
     matched
 }
 
-fn index_by_row_id(opposite: &[StoredRow]) -> BTreeMap<u64, usize> {
+fn index_by_row_id(opposite: &dyn Rows) -> BTreeMap<u64, usize> {
     opposite
-        .iter()
-        .enumerate()
-        .map(|(index, row)| (row.row_id, index))
+        .references()
+        .map(|index| (opposite.identity(index).1, index))
         .collect()
 }
 
 /// Materializes one validated chunk of matched pairs into an independent record.
 ///
-/// Shared flat columns gather in matched-pair order; other columns concatenate row views.
+/// Columns use take/interleave in matched-pair order and detach encoded children.
 #[cfg(test)]
 fn materialize_output_record(
     output_schema: &SchemaRef,
     admitted: &dyn AdmittedRows,
-    opposite: &[StoredRow],
-    matched: &[MatchedPair],
+    opposite: &dyn Rows,
+    matched: &dyn matches::Matches,
     incoming_is_left: bool,
     operator_id: &str,
 ) -> Result<RecordBatch> {
@@ -6483,7 +6550,7 @@ fn read_ipc_record(
 
 #[cfg(test)]
 fn encode_side(
-    rows: &[StoredRow],
+    rows: &dyn Rows,
     operator_id: &str,
     side: &str,
     check: &impl Fn() -> Result<()>,
@@ -6499,21 +6566,21 @@ fn encode_side(
     let mut ipc_encoder = row_ipc::RowIpcEncoder::default();
     for row in ordered {
         check()?;
-        append_stored_row(&mut output, row, &mut ipc_encoder, operator_id, side)?;
+        append_stored_row(&mut output, &row, &mut ipc_encoder, operator_id, side)?;
     }
     check()?;
     Ok(output)
 }
 
 #[cfg(test)]
-fn ordered_checkpoint_rows<'a>(
-    rows: &'a [StoredRow],
+fn ordered_checkpoint_rows(
+    rows: &dyn Rows,
     check: &impl Fn() -> Result<()>,
-) -> Result<Vec<&'a StoredRow>> {
+) -> Result<Vec<StoredRow>> {
     check()?;
     let mut ordered = rows.iter().collect::<Vec<_>>();
     check()?;
-    ordered.sort_by(|a, b| identity_order(a, b));
+    ordered.sort_by(identity_order);
     check()?;
     Ok(ordered)
 }
@@ -6943,17 +7010,13 @@ fn evict_all(
 ) -> Result<()> {
     let count =
         u64::try_from(rows.len()).map_err(|_| counter_overflow(operator_id, "evicted rows"))?;
-    let bytes = rows.iter().try_fold(0_u64, |bytes, row| {
-        bytes
-            .checked_add(row.charge)
-            .ok_or_else(|| counter_overflow(operator_id, "evicted bytes"))
-    })?;
+    let bytes = metrics.retained_bytes;
     let mut next_metrics = metrics.clone();
     update_evicted_metrics(&mut next_metrics, count, bytes, operator_id)?;
     rows.1 = None;
     for row in rows.0.iter() {
         rows.2.remove(&row.record);
-        retirement.retire(row, operator_id)?;
+        retirement.retire(&row, operator_id)?;
     }
     rows.clear();
     expirations.clear();
@@ -6997,7 +7060,7 @@ fn take_expired(
     let (index, ordinal) = expirations.pop(rows).expect("expiration prefix exists");
     #[cfg(test)]
     note_join_work(|work| work.retained_visits += 1);
-    let row = rows.swap_remove_bound(index, bindings);
+    let row = rows.remove_bound(index, bindings);
     Some((ordinal, row))
 }
 

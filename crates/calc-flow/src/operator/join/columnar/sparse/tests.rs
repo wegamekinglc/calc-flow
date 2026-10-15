@@ -72,7 +72,7 @@ fn shared(payload: &RowPayload) -> (Arc<PayloadChunk>, usize) {
 
 fn check_positions(join: &StreamJoinOperator) {
     for port in 0..2 {
-        for (dense, row) in join.sparse_rows(port).iter().enumerate() {
+        for (dense, row) in join.sparse_rows(port).indexed() {
             let (chunk, source) = shared(&row.record);
             assert_eq!(chunk.inventory[source].dense.load(Ordering::Relaxed), dense);
             assert_eq!(join.sparse_position(port, &chunk, source), Some(dense));
@@ -95,11 +95,11 @@ async fn test_complete_expiry_marks_shared_offsets_dead_and_preserves_alias_fund
     let mut join = operator();
     feed(&mut join, "left", vec![2, 0, 3, 1], &context).await;
     feed(&mut join, "right", vec![2], &context).await;
-    let payload = &join.state.left[0].record;
+    let payload = join.state.left.payload_at(0).owner().unwrap();
     let payload_credit = payload.funded_owner().unwrap().1;
     let (old_chunk, _) = shared(payload);
     let buffer = payload.column(2).to_data().buffers()[0].clone();
-    let key = Arc::clone(&join.state.left[0].encoded_key);
+    let key = Arc::clone(join.state.left.key_at(0));
     let key_credit = key.funded_owner().unwrap().1;
     let pool = join.runtime.runtime().unwrap().incremental_memory_pool();
     join.evict_progress(
@@ -146,7 +146,7 @@ async fn test_dense_sparse_hints_reject_wrong_offsets_and_retired_aliases() {
         feed(&mut join, side, vec![2, 0, 3, 1], &context).await;
     }
     check_positions(&join);
-    let (old_chunk, _) = shared(&join.state.left[0].record);
+    let (old_chunk, _) = shared(&join.state.left.at(0).record);
     join.evict_progress(
         "right",
         IngressProgress::new(IngressState::Active, Some(EventTime::from_micros(1))),
@@ -154,17 +154,19 @@ async fn test_dense_sparse_hints_reject_wrong_offsets_and_retired_aliases() {
     )
     .unwrap();
     check_positions(&join);
-    assert_eq!(join.state.left[1].row_id, 3);
-    assert_eq!(join.sparse_position(0, &old_chunk, 3), Some(1));
+    assert_eq!(join.state.left.at(2).row_id, 3);
+    assert_eq!(join.sparse_position(0, &old_chunk, 3), Some(3));
     assert_eq!(join.sparse_position(0, &old_chunk, 1), None);
-    let original = join.state.left[0].record.clone();
-    join.state.left[0].record = join.state.left[1].record.clone();
+    let original = join.state.left.at(0).record.clone();
+    let reference = join.state.left.indexed().next().unwrap().0;
+    let replacement = join.state.left.at(1).record;
+    join.state.left.replace_payload(reference, replacement);
     assert_eq!(
         join.sparse_position(0, &old_chunk, 0),
         None,
         "same chunk with wrong source offset is stale"
     );
-    join.state.left[0].record = original;
+    join.state.left.replace_payload(reference, original);
     join.reset().unwrap();
     feed(&mut join, "left", vec![2, 0, 3, 1], &context).await;
     for source in 0..old_chunk.inventory.len() {
@@ -201,19 +203,19 @@ async fn check_replacement_and_restore(service: &TestService) {
     let context = StreamOperatorContext::new(&job, "dense-sparse", None);
     let mut join = operator();
     feed(&mut join, "left", (0..1_024).collect(), &context).await;
-    let (old_chunk, _) = shared(&join.state.left[0].record);
+    let (old_chunk, _) = shared(&join.state.left.at(0).record);
     join.evict_progress(
         "right",
         IngressProgress::new(IngressState::Active, Some(EventTime::from_micros(1_023))),
         true,
     )
     .unwrap();
-    assert_eq!(join.sparse_position(0, &old_chunk, 1_023), Some(0));
+    assert_eq!(join.sparse_position(0, &old_chunk, 1_023), Some(1_023));
     join.repair_sparse_chunks(&context).await.unwrap();
-    let (new_chunk, new_source) = shared(&join.state.left[0].record);
+    let (new_chunk, new_source) = shared(&join.state.left.at(0).record);
     assert!(!Arc::ptr_eq(&old_chunk, &new_chunk));
     assert_eq!(join.sparse_position(0, &old_chunk, 1_023), None);
-    assert_eq!(join.sparse_position(0, &new_chunk, new_source), Some(0));
+    assert_eq!(join.sparse_position(0, &new_chunk, new_source), Some(1_023));
     let upsert = join
         .state
         .deltas

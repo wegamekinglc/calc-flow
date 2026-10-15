@@ -93,7 +93,7 @@ fn assert_pending(join: &StreamJoinOperator) {
 fn assert_uninstalled(
     join: &StreamJoinOperator,
     previous: &StreamJoinStatus,
-    rows: *const Vec<StoredRow>,
+    rows: *const StateRows,
 ) {
     assert_eq!(join.status(), *previous);
     assert_eq!(Arc::as_ptr(&join.state.left.0), rows);
@@ -120,7 +120,7 @@ async fn cancelled_writer(service: &crate::runtime::streaming::gather_work::Test
     let pool = join.runtime.runtime().unwrap().incremental_memory_pool();
     let previous = join.status();
     let rows = Arc::downgrade(&join.state.left.0);
-    let column = Arc::downgrade(join.state.left[0].record.column(0));
+    let column = Arc::downgrade(join.state.left.at(0).record.column(0));
     let WriterGate {
         hook,
         entered,
@@ -209,7 +209,7 @@ async fn seed_dirty(
 fn assert_dirty_uninstalled(
     join: &StreamJoinOperator,
     previous: &StreamJoinStatus,
-    rows: *const Vec<StoredRow>,
+    rows: *const StateRows,
 ) {
     assert_eq!(join.status(), *previous);
     assert_eq!(Arc::as_ptr(&join.state.left.0), rows);
@@ -247,10 +247,10 @@ fn assert_dirty_uninstalled(
         encoded_key.as_slice(),
         encode_join_key_v1(&dirty_record(), 0, &[0]).unwrap()
     );
-    assert!(Arc::ptr_eq(encoded_key, &join.state.left[1].encoded_key));
+    assert!(Arc::ptr_eq(encoded_key, join.state.left.key_at(1)));
     assert!(Arc::ptr_eq(
         record.column(0),
-        join.state.left[1].record.column(0)
+        join.state.left.at(1).record.column(0)
     ));
     assert!(pending.next().is_none());
 }
@@ -262,15 +262,15 @@ async fn cancelled_delta_writer(service: &crate::runtime::streaming::gather_work
     let pool = join.runtime.runtime().unwrap().incremental_memory_pool();
     let previous = join.status();
     let rows = Arc::downgrade(&join.state.left.0);
-    let column = Arc::downgrade(join.state.left[1].record.column(0));
-    let key = Arc::downgrade(&join.state.left[1].encoded_key);
+    let column = Arc::downgrade(join.state.left.at(1).record.column(0));
+    let key = Arc::downgrade(join.state.left.key_at(1));
     assert!(!Arc::ptr_eq(
-        join.state.left[0].record.column(0),
-        join.state.left[1].record.column(0)
+        join.state.left.at(0).record.column(0),
+        join.state.left.at(1).record.column(0)
     ));
     assert!(!Arc::ptr_eq(
-        &join.state.left[0].encoded_key,
-        &join.state.left[1].encoded_key
+        join.state.left.key_at(0),
+        join.state.left.key_at(1)
     ));
     let segments = first
         .segments

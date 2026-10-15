@@ -232,7 +232,7 @@ async fn assert_exact_legacy_metadata(schema: SchemaRef) {
         )
         .await
         .unwrap();
-    let payload = &operator.state.left[0].record;
+    let payload = operator.state.left.payload_at(0).owner().unwrap();
     assert!(payload.is_unfunded_legacy());
     assert_eq!(payload.funded_owner(), None);
     assert!(Arc::ptr_eq(payload.schema_ref(), &schema));
@@ -286,7 +286,7 @@ async fn test_shared_payload_releases_equal_caller_schema_and_type_owners() {
         .process_data("left", batch.clone(), &context, &mut collector)
         .await
         .unwrap();
-    let payload = &operator.state.left[0].record;
+    let payload = operator.state.left.payload_at(0).owner().unwrap();
     assert!(matches!(payload, columnar::RowPayload::Shared { .. }));
     assert!(payload.funded_owner().unwrap().1 < (1 << 20));
     assert_eq!(payload.schema_ref().clone(), caller);
@@ -321,10 +321,10 @@ async fn test_shared_payload_releases_equal_caller_schema_and_type_owners() {
     assert!(field_owner.upgrade().is_none());
     assert!(type_owner.upgrade().is_none());
     assert!(!Arc::ptr_eq(
-        operator.state.left[0].record.schema_ref(),
+        operator.state.left.at(0).record.schema_ref(),
         &canonical
     ));
-    assert_eq!(operator.state.left[0].record.schema_ref(), &canonical);
+    assert_eq!(operator.state.left.at(0).record.schema_ref(), &canonical);
     let pool = operator
         .runtime
         .runtime()
@@ -475,6 +475,7 @@ async fn shared_flat_preflight_fanout(
         .runtime()
         .unwrap()
         .incremental_memory_pool();
+    let opposite_owned = opposite.iter().collect::<Vec<_>>();
     native_lookup_tests::assert_resident_and_gather_funding(
         pool.as_ref(),
         &job,
@@ -482,9 +483,10 @@ async fn shared_flat_preflight_fanout(
             admitted
                 .iter()
                 .map(|row| &row.record)
-                .chain(opposite.iter().map(|row| &row.record)),
+                .chain(opposite_owned.iter().map(|row| &row.record)),
         ),
     );
+    drop(opposite_owned);
     drop(admitted);
     drop(opposite);
     drop(operator);
@@ -691,8 +693,8 @@ async fn test_shared_payload_does_not_borrow_positive_capacity_opaque_bytes_owne
 fn preflight_ranges(
     schema: &SchemaRef,
     admitted: &Vec<AdmittedRow>,
-    opposite: &[StoredRow],
-    matched: &[MatchedPair],
+    opposite: &dyn Rows,
+    matched: &dyn matches::Matches,
     budget: EdgeBudget,
 ) -> Vec<std::ops::Range<usize>> {
     materialization::JoinOutput {
@@ -1033,7 +1035,7 @@ async fn test_known_large_slice_bounds_backing_and_keeps_v1_row_ipc() {
             .ends_with(&legacy_ipc)
     );
     assert_eq!(operator.status().left.retained_rows, 1);
-    assert!(operator.state.left[0].record.get_array_memory_size() <= 4_096);
+    assert!(operator.state.left.at(0).record.get_array_memory_size() <= 4_096);
 }
 
 #[tokio::test]
@@ -1087,7 +1089,7 @@ async fn test_progress_sparse_chunk_bounds_backing_and_keeps_v1_row_ipc() {
             .bytes()
             .ends_with(&legacy_ipc)
     );
-    let bytes = operator.state.left[0].record.get_array_memory_size();
+    let bytes = operator.state.left.at(0).record.get_array_memory_size();
     assert!(
         bytes <= 4_096,
         "one post-eviction row retains {bytes} bytes"
@@ -1127,7 +1129,7 @@ async fn test_sparse_chunk_refusal_retries_after_actual_credit_release() {
             true,
         )
         .unwrap();
-    let original = operator.state.left[0].record.clone();
+    let original = operator.state.left.at(0).record.clone();
     let owner = original.funded_owner().unwrap();
     let status = operator.status();
     let captured = operator.checkpoint_v1(Epoch::new(1).unwrap()).unwrap();
@@ -1139,19 +1141,19 @@ async fn test_sparse_chunk_refusal_retries_after_actual_credit_release() {
         .on_ingress_progress("right", &progress)
         .await
         .unwrap();
-    assert_eq!(operator.state.left[0].record.funded_owner(), Some(owner));
+    assert_eq!(operator.state.left.at(0).record.funded_owner(), Some(owner));
     assert_eq!(operator.status().left, status.left);
     drop(pressure);
     operator
         .on_ingress_progress("right", &progress)
         .await
         .unwrap();
-    let replacement = operator.state.left[0].record.funded_owner().unwrap();
+    let replacement = operator.state.left.at(0).record.funded_owner().unwrap();
     assert_ne!(
         replacement.0, owner.0,
         "a refused candidate must survive to retry"
     );
-    assert!(operator.state.left[0].record.get_array_memory_size() <= 4_096);
+    assert!(operator.state.left.at(0).record.get_array_memory_size() <= 4_096);
     assert_eq!(operator.status().left, status.left);
     assert_eq!(
         operator
@@ -1217,14 +1219,14 @@ async fn test_sparse_chunk_variable_width_keeps_only_surviving_value_backing() {
         .unwrap();
     assert_eq!(operator.status().right.retained_rows, 1);
     assert_eq!(operator.status().right.evicted_rows, 31);
-    assert_eq!(operator.state.right[0].row_id, 31);
+    assert_eq!(operator.state.right.at(0).row_id, 31);
     assert_eq!(
         row_ipc::RowIpcEncoder::default()
-            .encode(&operator.state.right[0].record.view(), "match", "right")
+            .encode(&operator.state.right.at(0).record.view(), "match", "right")
             .unwrap(),
         ipc
     );
-    let bytes = operator.state.right[0].record.get_array_memory_size();
+    let bytes = operator.state.right.at(0).record.get_array_memory_size();
     assert!(bytes <= 4_096, "surviving short value keeps {bytes} bytes");
     let pool = operator
         .runtime
@@ -1338,7 +1340,7 @@ async fn sparse_interrupted_copy(cancelled: bool) {
             true,
         )
         .unwrap();
-    let original = operator.state.left[0].record.funded_owner();
+    let original = operator.state.left.at(0).record.funded_owner();
     let status = operator.status();
     let pool = operator
         .runtime
@@ -1361,7 +1363,7 @@ async fn sparse_interrupted_copy(cancelled: bool) {
         ));
     }
     drop(copy);
-    assert_eq!(operator.state.left[0].record.funded_owner(), original);
+    assert_eq!(operator.state.left.at(0).record.funded_owner(), original);
     assert_eq!(operator.status().left, status.left);
     assert_eq!(pool.reserved(), paid);
     if !cancelled {
@@ -1369,7 +1371,7 @@ async fn sparse_interrupted_copy(cancelled: bool) {
             .on_ingress_progress("right", &progress)
             .await
             .unwrap();
-        assert!(operator.state.left[0].record.get_array_memory_size() <= 4_096);
+        assert!(operator.state.left.at(0).record.get_array_memory_size() <= 4_096);
     }
     drop(operator);
     assert!(job.gather_owner().close_and_drain().await.is_empty());
@@ -1642,7 +1644,7 @@ async fn test_owned_ingress_copy_releases_opaque_caller_owner() {
         .await
         .unwrap();
     assert!(matches!(
-        operator.state.left[0].record,
+        operator.state.left.at(0).record,
         columnar::RowPayload::Shared { .. }
     ));
     assert!(
@@ -1849,11 +1851,11 @@ async fn close_home_during_string_copy(cancelled: bool) {
         assert!(operator.state.right.is_empty());
     } else {
         future.await.unwrap();
-        let payload = &operator.state.right[0].record;
+        let payload = operator.state.right.payload_at(0).owner().unwrap();
         assert!(payload.is_unfunded_legacy());
         assert_eq!(payload.funded_owner(), None);
         assert!(Arc::ptr_eq(payload.schema_ref(), &schema));
-        assert_eq!(operator.state.right[0].row_id, 0);
+        assert_eq!(operator.state.right.at(0).row_id, 0);
         assert_eq!(operator.state.next_right_row_id, 1);
         assert_eq!(operator.status().right.retained_rows, 1);
         assert_eq!(operator.status().right.retained_bytes, charge);
@@ -1922,12 +1924,14 @@ async fn test_owned_copy_selected_identity_gaps_and_dirty_only_funding() {
         .runtime()
         .unwrap()
         .incremental_memory_pool();
-    let chunk = operator.state.left[0].record.funded_owner().unwrap().1;
-    let columnar::RowPayload::Shared { chunk: payload, .. } = &operator.state.left[0].record else {
+    let chunk = operator.state.left.payload_at(0).funded_owner().unwrap().1;
+    let Some(columnar::RowPayload::Shared { chunk: payload, .. }) =
+        operator.state.left.payload_at(0).owner()
+    else {
         panic!("selected rows must retain their independently funded copied payload");
     };
     let payload_owner = Arc::downgrade(payload);
-    let key_owner = Arc::downgrade(&operator.state.left[0].encoded_key);
+    let key_owner = Arc::downgrade(operator.state.left.key_at(0));
     let keys = operator
         .state
         .deltas
@@ -2055,13 +2059,24 @@ fn assert_empty_index_refund(
 ) {
     let empty_index = native_lookup_tests::index_funding(operator);
     assert!(empty_index > 0);
+    let expiration_credit = operator.state.left_expirations.funded_bytes()
+        + operator.state.right_expirations.funded_bytes();
     let before_index_drop = pool.reserved();
-    assert_eq!(before_index_drop, chunk + key_credit + empty_index);
+    assert_eq!(
+        before_index_drop,
+        chunk + key_credit + empty_index + expiration_credit
+    );
     eprintln!(
         "dirty owner funding: payload={chunk}, canonical={key_credit}, empty_index={empty_index}"
     );
     operator.state.left.1 = None;
     assert_eq!(before_index_drop - pool.reserved(), empty_index);
+    operator.state.left_expirations = ExpirationIndex::default();
+    operator.state.right_expirations = ExpirationIndex::default();
+    assert_eq!(
+        before_index_drop - pool.reserved(),
+        empty_index + expiration_credit
+    );
 }
 
 fn nullable_admission_schema(unit: TimeUnit) -> SchemaRef {
@@ -2496,7 +2511,7 @@ async fn test_owned_copy_private_schema_remains_funded_when_payload_outlives_ope
         )
         .await
         .unwrap();
-    let payload = operator.state.left[0].record.clone();
+    let payload = operator.state.left.at(0).record.clone();
     let paid = payload.funded_owner().unwrap().1;
     assert!(
         i64::try_from(paid).unwrap() < allocated.bytes_current,
@@ -2602,7 +2617,13 @@ async fn test_owned_copy_key_scratch_does_not_borrow_whole_chunk_backing() {
         .await
         .unwrap();
     let plan = operator.side_plan("right").unwrap();
-    operator.state.left = operator.state.left[..1].to_vec().into();
+    operator.state.left = operator
+        .state
+        .left
+        .iter()
+        .take(1)
+        .collect::<Vec<_>>()
+        .into();
     let keys = operator.owned_state_keys(&plan, &context).await.unwrap();
     assert_eq!(
         keys.column(0)

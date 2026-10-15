@@ -251,7 +251,8 @@ fn check_packed_reader() {
 fn check_null_original(job: &StreamJobContext) {
     let mut source = boolean_operator(true, false);
     let snapshot = boolean_snapshot(&mut source, BooleanArray::from(vec![None::<bool>]));
-    let record = source.state.left[0].record.view();
+    let retained_row = source.state.left.at(0);
+    let record = retained_row.record.view();
     assert!(inspector::inspect(&row_ipc(&record), record.schema_ref()).is_none());
     let mut target = boolean_operator(true, false);
     let pool = pool(&target);
@@ -268,9 +269,9 @@ fn check_null_original(job: &StreamJobContext) {
     original.restore(&snapshot).unwrap();
     assert_eq!(target.status(), original.status());
     for rows in [&target.state.left, &target.state.right] {
-        assert!(rows[0].record.funded_owner().is_none());
-        assert_eq!(rows[0].record.view().column(2).null_count(), 1);
-        assert_eq!(row_ipc(&rows[0].record.view()), row_ipc(&record));
+        assert!(rows.at(0).record.funded_owner().is_none());
+        assert_eq!(rows.at(0).record.view().column(2).null_count(), 1);
+        assert_eq!(row_ipc(&rows.at(0).record.view()), row_ipc(&record));
     }
     assert_eq!(
         encode_side(&target.state.left, "match", "left", &|| Ok(())).unwrap(),
@@ -290,7 +291,10 @@ fn check_boolean_key_original(job: &StreamJobContext) {
     target.restore(&snapshot).unwrap();
     assert_eq!(target.status().left.retained_rows, 1);
     assert!(
-        target.state.left[0]
+        target
+            .state
+            .left
+            .at(0)
             .record
             .view()
             .column(0)
@@ -299,7 +303,7 @@ fn check_boolean_key_original(job: &StreamJobContext) {
             .unwrap()
             .value(0)
     );
-    assert!(target.state.left[0].record.funded_owner().is_none());
+    assert!(target.state.left.at(0).record.funded_owner().is_none());
     assert_eq!(
         encode_side(&target.state.left, "match", "left", &|| Ok(())).unwrap(),
         snapshot.segments["left-base"].bytes()
@@ -338,7 +342,7 @@ fn invalid_values_ipc(record: &RecordBatch) -> Vec<u8> {
 fn check_malformed_original(job: &StreamJobContext) {
     let mut source = boolean_operator(false, false);
     let mut snapshot = boolean_snapshot(&mut source, BooleanArray::from(vec![true]));
-    let bad = invalid_values_ipc(&source.state.left[0].record.view());
+    let bad = invalid_values_ipc(&source.state.left.at(0).record.view());
     assert!(inspector::inspect(&bad, source.input_schema(0)).is_none());
     let original = snapshot.segments["left-base"].bytes();
     let mut base = original[..40].to_vec();
@@ -406,7 +410,7 @@ fn mixed_boolean_snapshot() -> OperatorStateSnapshot {
     source.state.metrics.left.retained_rows = 3;
     source.state.metrics.left.retained_bytes = source.state.left.iter().map(|row| row.charge).sum();
     source.state.metrics.right.retained_rows = 1;
-    source.state.metrics.right.retained_bytes = source.state.right[0].charge;
+    source.state.metrics.right.retained_bytes = source.state.right.at(0).charge;
     source.state.next_left_row_id = 3;
     source.state.next_right_row_id = 1;
     let mut base = source.checkpoint_v1(Epoch::new(7).unwrap()).unwrap();
@@ -418,7 +422,7 @@ fn mixed_boolean_snapshot() -> OperatorStateSnapshot {
     }
     source.restore(&base).unwrap();
     let added = mixed_boolean_row(&source, 3, 13, 0xfe);
-    let mut left = source.state.left.iter().cloned().collect::<Vec<_>>();
+    let mut left = source.state.left.iter().collect::<Vec<_>>();
     left.push(added.clone());
     source.state.left = left.into();
     source.state.next_left_row_id = 4;
@@ -589,6 +593,7 @@ async fn check_mixed_boolean_last_buffer(target: StreamJoinOperator, job: Stream
     let values = view.column(2).to_data().buffers()[0].clone();
     assert_eq!(values.as_slice(), [0xfe]);
     drop(view);
+    drop(row);
     drop(target);
     let (home, generation, attempt) = job.gather_owner().funding();
     assert_eq!(attempt, 0);

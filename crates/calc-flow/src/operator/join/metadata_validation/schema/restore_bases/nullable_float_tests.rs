@@ -173,7 +173,7 @@ async fn check_restore(service: &TestService) {
     let mut original = nullable_operator();
     original.restore(&snapshot).unwrap();
     let facts = inspector::inspect(
-        &row_ipc(&original.state.left[0].record.view()),
+        &row_ipc(&original.state.left.at(0).record.view()),
         original.input_schema(0),
     )
     .unwrap();
@@ -196,14 +196,14 @@ async fn check_restore(service: &TestService) {
         target.state.last_checkpoint_epoch,
         Some(Epoch::new(7).unwrap())
     );
-    assert_nullable_row(&target.state.left[0], &original.state.left[0]);
-    assert_nullable_row(&target.state.right[0], &original.state.right[0]);
+    assert_nullable_row(&target.state.left.at(0), &original.state.left.at(0));
+    assert_nullable_row(&target.state.right.at(0), &original.state.right.at(0));
     assert_eq!(snapshot.inline_metadata, unchanged.inline_metadata);
     assert_eq!(snapshot.segments, unchanged.segments);
     println!(
         "scalar full-base NULL: 2 native paid readers, 2 paid post-copy rows, 1 parse; hidden bits {HIDDEN_BITS:#x}"
     );
-    let payload = &target.state.left[0].record;
+    let payload = target.state.left.payload_at(0).owner().unwrap();
     let weak = Arc::downgrade(payload.schema_ref());
     let paid = payload.funded_owner().unwrap().1;
     let data = payload.columns()[2].to_data();

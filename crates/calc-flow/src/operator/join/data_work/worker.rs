@@ -98,7 +98,10 @@ impl ParallelCpuWork for FillWork {
             .observe_unit(super::ProbePhase::Fill, ordinal, false);
         stop.check()?;
         let credit = self.funding.unit();
-        let mut pairs = Vec::with_capacity(self.counts.rows[ordinal]);
+        let mut pairs = super::super::matches::Selection::with_capacity(
+            self.counts.rows[ordinal],
+            partition::range(self.inputs.admitted.len(), ordinal).len(),
+        );
         let mut quantum = ProbeQuantum::new(stop);
         for position in partition::range(self.inputs.admitted.len(), ordinal) {
             quantum.step()?;

@@ -71,7 +71,7 @@ fn assert_seed_state(operator: &StreamJoinOperator) {
         (1, 1)
     );
     assert_row(
-        &operator.state.left[0],
+        &operator.state.left.at(0),
         0,
         96,
         148,
@@ -80,7 +80,7 @@ fn assert_seed_state(operator: &StreamJoinOperator) {
         Some(&[2, 3]),
     );
     assert_row(
-        &operator.state.right[0],
+        &operator.state.right.at(0),
         0,
         100,
         141,

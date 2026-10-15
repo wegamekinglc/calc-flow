@@ -46,7 +46,7 @@ async fn assert_cancelled_columns(service: &TestService, cancel: bool, projected
         .runtime()
         .unwrap()
         .incremental_memory_pool();
-    let retained = Arc::downgrade(operator.state.right[0].record.column(0));
+    let retained = Arc::downgrade(operator.state.right.at(0).record.column(0));
     let gates = ReleaseGates(vec![Arc::new(Gate::default())]);
     let worker_gate = Arc::clone(&gates.0[0]);
     let (started, mut observed) = tokio::sync::mpsc::unbounded_channel();

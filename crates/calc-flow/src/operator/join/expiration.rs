@@ -1,106 +1,56 @@
-use std::sync::Arc;
+//! One expiration head per sorted incoming run, using stable chunk coordinates.
 
-use datafusion::execution::memory_pool::MemoryReservation;
-
-use super::{StoredRow, checkpoint_v2, columnar};
+use super::{StoredRow, checkpoint_v2, retained::Rows};
 use crate::{CalcFlowError, EventTime, Result, StreamOperatorContext};
+use datafusion::execution::memory_pool::MemoryReservation;
+use std::{
+    cmp::Reverse,
+    collections::{BTreeMap, BinaryHeap},
+    sync::Arc,
+};
 
-// Arrays die before the reservation, including partial construction and replacement.
-#[derive(Default)]
-struct Storage {
-    heap: Vec<usize>,
-    positions: Vec<usize>,
-    ordinals: Vec<u128>,
-    maximum: Option<EventTime>,
-    credit: Option<MemoryReservation>,
+#[derive(Clone, Copy)]
+struct Entry {
+    index: usize,
+    ordinal: u128,
 }
+
+struct Run {
+    entries: Vec<Entry>,
+    start: usize,
+    _credit: Option<MemoryReservation>,
+}
+
+type Head = Reverse<(EventTime, u64, usize)>;
 
 #[derive(Default)]
 pub(super) struct ExpirationIndex {
-    storage: Storage,
+    runs: BTreeMap<usize, Run>,
+    heads: BinaryHeap<Head>,
+    next_run: usize,
     next_ordinal: u128,
+    maximum: Option<EventTime>,
+    origin: Option<MemoryReservation>,
+    heap_credit: Option<MemoryReservation>,
+    restored: bool,
 }
 
 pub(super) struct AppendPlan {
-    replacement: Option<Storage>,
+    entries: Vec<Entry>,
+    credit: Option<MemoryReservation>,
     next_ordinal: u128,
-}
-
-struct Rows<'a> {
-    old: &'a [StoredRow],
-    incoming: &'a [StoredRow],
-}
-
-impl Rows<'_> {
-    fn key(&self, index: usize) -> (EventTime, u64) {
-        let row = if index < self.old.len() {
-            &self.old[index]
-        } else {
-            &self.incoming[index - self.old.len()]
-        };
-        (row.event_time, row.row_id)
-    }
-}
-
-impl Storage {
-    fn new(capacity: usize, origin: Option<&MemoryReservation>) -> Result<Self> {
-        let credit = origin
-            .map(|credit| checkpoint_v2::expiration_credit(credit, capacity, size_of::<Self>()))
-            .transpose()?;
-        let mut storage = Self {
-            credit,
-            ..Self::default()
-        };
-        allocate(&mut storage.heap, capacity)?;
-        allocate(&mut storage.positions, capacity)?;
-        allocate(&mut storage.ordinals, capacity)?;
-        Ok(storage)
-    }
-
-    fn swap(&mut self, left: usize, right: usize) {
-        self.heap.swap(left, right);
-        self.positions[self.heap[left]] = left;
-        self.positions[self.heap[right]] = right;
-    }
-
-    fn sift_up(&mut self, mut index: usize, rows: &Rows<'_>) {
-        while index > 0 {
-            let parent = (index - 1) / 2;
-            if rows.key(self.heap[parent]) <= rows.key(self.heap[index]) {
-                break;
-            }
-            self.swap(parent, index);
-            index = parent;
-        }
-    }
-
-    fn sift_down(&mut self, mut index: usize, rows: &Rows<'_>) {
-        while index < self.heap.len() / 2 {
-            let left = index * 2 + 1;
-            let right = left + 1;
-            let child = if right < self.heap.len()
-                && rows.key(self.heap[right]) < rows.key(self.heap[left])
-            {
-                right
-            } else {
-                left
-            };
-            if rows.key(self.heap[index]) <= rows.key(self.heap[child]) {
-                break;
-            }
-            self.swap(index, child);
-            index = child;
-        }
-    }
+    first: Option<(EventTime, u64)>,
+    maximum: Option<EventTime>,
+    heap: Option<(BinaryHeap<Head>, Option<MemoryReservation>)>,
 }
 
 impl ExpirationIndex {
-    pub(super) fn restored(rows: &[StoredRow]) -> Result<Self> {
+    pub(super) fn restored(rows: &dyn Rows) -> Result<Self> {
         Self::restore(rows, None, &|| Ok(()))
     }
 
     pub(super) fn restored_funded(
-        rows: &[StoredRow],
+        rows: &dyn Rows,
         credit: &MemoryReservation,
         check: &dyn Fn() -> Result<()>,
     ) -> Result<Self> {
@@ -108,190 +58,239 @@ impl ExpirationIndex {
     }
 
     fn restore(
-        rows: &[StoredRow],
+        rows: &dyn Rows,
         credit: Option<&MemoryReservation>,
         check: &dyn Fn() -> Result<()>,
     ) -> Result<Self> {
         check()?;
-        let mut storage = Storage::new(rows.len(), credit)?;
-        for (index, row) in rows.iter().enumerate() {
-            check()?;
-            storage.heap.push(index);
-            storage.positions.push(index);
-            storage.ordinals.push(index as u128);
-            storage.maximum = storage.maximum.max(Some(row.event_time));
-        }
-        let view = Rows {
-            old: rows,
-            incoming: &[],
+        let mut index = Self {
+            origin: credit.map(MemoryReservation::new_empty),
+            restored: credit.is_some(),
+            ..Self::default()
         };
-        for index in (0..rows.len() / 2).rev() {
+        index.heap_credit = credit
+            .map(|credit| checkpoint_v2::expiration_credit(credit, 0, size_of::<Self>()))
+            .transpose()?;
+        let mut plan = index.plan(rows.len(), false)?;
+        for (ordinal, position) in rows.references().enumerate() {
             check()?;
-            storage.sift_down(index, &view);
+            plan.entries.push(Entry {
+                index: position,
+                ordinal: ordinal as u128,
+            });
+            index.maximum = index.maximum.max(Some(rows.identity(position).0));
         }
+        index.install(plan, rows);
         check()?;
-        Ok(Self {
-            storage,
-            next_ordinal: rows.len() as u128,
-        })
+        Ok(index)
     }
 
-    pub(super) async fn prepare_append(
-        &self,
-        count: usize,
-        context: &StreamOperatorContext<'_>,
-    ) -> Result<AppendPlan> {
-        context.check_cancelled()?;
-        let required = self
-            .storage
-            .heap
-            .len()
-            .checked_add(count)
-            .ok_or_else(overflow)?;
+    fn plan(&mut self, count: usize, legacy: bool) -> Result<AppendPlan> {
         let next_ordinal = self
             .next_ordinal
             .checked_add(count as u128)
             .ok_or_else(overflow)?;
-        let replacement = if required <= self.storage.heap.capacity() {
+        let credit = if count == 0 {
             None
         } else {
-            let replacement = self.copy_storage(required, context).await?;
-            Some(replacement)
+            self.reserve(count, size_of::<Run>() + 256, legacy)?
         };
-        context.check_cancelled()?;
+        let mut entries = Vec::new();
+        entries.try_reserve_exact(count).map_err(|_| overflow())?;
+        let heap = self.prepare_heads(count, legacy)?;
         Ok(AppendPlan {
-            replacement,
+            entries,
+            credit,
             next_ordinal,
+            first: None,
+            maximum: None,
+            heap,
         })
     }
 
-    async fn copy_storage(
+    pub(super) fn fund_origin(&mut self, master: &MemoryReservation) {
+        if self.origin.is_none() {
+            self.origin = Some(master.new_empty());
+        }
+    }
+
+    fn prepare_heads(
         &self,
-        required: usize,
-        context: &StreamOperatorContext<'_>,
-    ) -> Result<Storage> {
+        count: usize,
+        legacy: bool,
+    ) -> Result<Option<(BinaryHeap<Head>, Option<MemoryReservation>)>> {
+        let required = self
+            .heads
+            .len()
+            .checked_add(usize::from(count != 0))
+            .ok_or_else(overflow)?;
+        if required <= self.heads.capacity() {
+            return Ok(None);
+        }
         let capacity = required
             .max(4)
             .checked_next_power_of_two()
             .ok_or_else(overflow)?;
-        let mut replacement = Storage::new(capacity, self.storage.credit.as_ref())?;
-        replacement.maximum = self.storage.maximum;
-        let mut quantum = columnar::Quantum::default();
-        for start in (0..self.storage.heap.len()).step_by(64) {
-            let end = (start + 64).min(self.storage.heap.len());
-            quantum
-                .step(context, end - start, (end - start) * 32)
-                .await?;
-            replacement
-                .heap
-                .extend_from_slice(&self.storage.heap[start..end]);
-            replacement
-                .positions
-                .extend_from_slice(&self.storage.positions[start..end]);
-            replacement
-                .ordinals
-                .extend_from_slice(&self.storage.ordinals[start..end]);
-        }
-        Ok(replacement)
+        let credit = self.reserve(capacity, size_of::<Self>(), legacy)?;
+        let mut heads = BinaryHeap::with_capacity(capacity);
+        heads.extend(self.heads.iter().copied());
+        Ok(Some((heads, credit)))
     }
 
-    pub(super) fn append(&mut self, old: &[StoredRow], incoming: &[StoredRow], plan: AppendPlan) {
-        if let Some(replacement) = plan.replacement {
-            self.storage = replacement;
+    fn reserve(
+        &self,
+        capacity: usize,
+        controls: usize,
+        legacy: bool,
+    ) -> Result<Option<MemoryReservation>> {
+        let Some(origin) = &self.origin else {
+            return Ok(None);
+        };
+        if legacy && !self.restored {
+            return checkpoint_v2::optional_expiration_credit(origin, capacity, controls);
         }
-        debug_assert_eq!(old.len(), self.storage.heap.len());
-        let view = Rows { old, incoming };
-        for (offset, row) in incoming.iter().enumerate() {
-            let dense = old.len() + offset;
-            self.storage.heap.push(dense);
-            self.storage.positions.push(dense);
-            self.storage
-                .ordinals
-                .push(self.next_ordinal + offset as u128);
-            self.storage.maximum = self.storage.maximum.max(Some(row.event_time));
-            self.storage.sift_up(dense, &view);
+        checkpoint_v2::expiration_credit(origin, capacity, controls).map(Some)
+    }
+
+    fn install_heads(&mut self, heap: Option<(BinaryHeap<Head>, Option<MemoryReservation>)>) {
+        if let Some((heads, credit)) = heap {
+            let previous = std::mem::replace(&mut self.heads, heads);
+            let old_credit = std::mem::replace(&mut self.heap_credit, credit);
+            drop((previous, old_credit));
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn funded_bytes(&self) -> usize {
+        self.heap_credit.as_ref().map_or(0, MemoryReservation::size)
+            + self
+                .runs
+                .values()
+                .filter_map(|run| {
+                    let Run {
+                        _credit: credit, ..
+                    } = run;
+                    credit.as_ref()
+                })
+                .map(MemoryReservation::size)
+                .sum::<usize>()
+    }
+
+    pub(super) async fn prepare_append(
+        &mut self,
+        incoming: &[StoredRow],
+        indices: &[usize],
+        context: &StreamOperatorContext<'_>,
+        legacy: bool,
+    ) -> Result<AppendPlan> {
+        context.check_cancelled()?;
+        let mut plan = self.plan(incoming.len(), legacy)?;
+        let mut quantum = super::columnar::Quantum::default();
+        for (offset, &index) in indices.iter().enumerate() {
+            quantum.step(context, 1, size_of::<Entry>()).await?;
+            plan.entries.push(Entry {
+                index,
+                ordinal: self.next_ordinal + offset as u128,
+            });
+        }
+        plan.entries.sort_unstable_by_key(|entry| {
+            let row = &incoming[(entry.ordinal - self.next_ordinal) as usize];
+            (row.event_time, row.row_id)
+        });
+        plan.first = plan.entries.first().map(|entry| {
+            let row = &incoming[(entry.ordinal - self.next_ordinal) as usize];
+            (row.event_time, row.row_id)
+        });
+        plan.maximum = incoming.iter().map(|row| row.event_time).max();
+        context.check_cancelled()?;
+        Ok(plan)
+    }
+
+    pub(super) fn append(&mut self, mut plan: AppendPlan) {
+        self.install_heads(plan.heap.take());
+        self.maximum = self.maximum.max(plan.maximum);
         self.next_ordinal = plan.next_ordinal;
+        if let Some((time, row_id)) = plan.first {
+            self.install_sorted(plan, time, row_id);
+        }
     }
 
-    pub(super) fn first_time(&self, rows: &[StoredRow]) -> Option<EventTime> {
-        self.storage
-            .heap
-            .first()
-            .map(|index| rows[*index].event_time)
+    fn install(&mut self, mut plan: AppendPlan, rows: &dyn Rows) {
+        self.install_heads(plan.heap.take());
+        plan.entries
+            .sort_unstable_by_key(|entry| rows.identity(entry.index));
+        self.next_ordinal = plan.next_ordinal;
+        if let Some(entry) = plan.entries.first() {
+            let (time, row_id) = rows.identity(entry.index);
+            self.install_sorted(plan, time, row_id);
+        }
+    }
+
+    fn install_sorted(&mut self, plan: AppendPlan, time: EventTime, row_id: u64) {
+        let id = self.next_run;
+        self.next_run += 1;
+        self.runs.insert(
+            id,
+            Run {
+                entries: plan.entries,
+                start: 0,
+                _credit: plan.credit,
+            },
+        );
+        self.heads.push(Reverse((time, row_id, id)));
+    }
+
+    pub(super) fn first_time(&self, _rows: &dyn Rows) -> Option<EventTime> {
+        self.heads.peek().map(|head| head.0.0)
     }
 
     pub(super) fn last_time(&self) -> Option<EventTime> {
-        self.storage.maximum
+        self.maximum
     }
 
     pub(super) fn clear(&mut self) {
-        self.storage.heap.clear();
-        self.storage.positions.clear();
-        self.storage.ordinals.clear();
-        self.storage.maximum = None;
+        self.heads.clear();
+        self.runs.clear();
+        self.maximum = None;
     }
 
-    // The caller immediately performs the corresponding dense row swap_remove.
-    pub(super) fn pop(&mut self, rows: &[StoredRow]) -> Option<(usize, u128)> {
-        let dense = *self.storage.heap.first()?;
-        let ordinal = self.storage.ordinals[dense];
-        self.storage.heap.swap_remove(0);
-        if self.storage.heap.is_empty() {
-            self.storage.maximum = None;
+    pub(super) fn pop(&mut self, rows: &dyn Rows) -> Option<(usize, u128)> {
+        let Reverse((_, _, id)) = self.heads.pop()?;
+        #[cfg(test)]
+        super::note_join_work(|work| work.expiration_head_steps += 1);
+        let run = self.runs.get_mut(&id).expect("live expiration run");
+        let entry = run.entries[run.start];
+        run.start += 1;
+        if let Some(next) = run.entries.get(run.start) {
+            let (time, row_id) = rows.identity(next.index);
+            self.heads.push(Reverse((time, row_id, id)));
+        } else {
+            self.runs.remove(&id);
         }
-        if let Some(&first) = self.storage.heap.first() {
-            self.storage.positions[first] = 0;
-            self.storage.sift_down(
-                0,
-                &Rows {
-                    old: rows,
-                    incoming: &[],
-                },
-            );
+        if self.heads.is_empty() {
+            self.maximum = None;
         }
-        self.storage.positions.swap_remove(dense);
-        self.storage.ordinals.swap_remove(dense);
-        if let Some(&position) = self.storage.positions.get(dense) {
-            self.storage.heap[position] = dense;
-        }
-        Some((dense, ordinal))
+        Some((entry.index, entry.ordinal))
     }
 
     pub(super) fn identities(
         &self,
-        rows: &[StoredRow],
-    ) -> Vec<(u64, EventTime, Arc<columnar::FramedKey>)> {
+        rows: &dyn Rows,
+    ) -> Vec<(u64, EventTime, Arc<super::columnar::FramedKey>)> {
         let mut ordered = self
-            .storage
-            .ordinals
-            .iter()
-            .copied()
-            .enumerate()
+            .runs
+            .values()
+            .flat_map(|run| run.entries[run.start..].iter())
             .collect::<Vec<_>>();
-        ordered.sort_unstable_by_key(|(_, ordinal)| *ordinal);
+        ordered.sort_unstable_by_key(|entry| entry.ordinal);
         ordered
             .into_iter()
-            .map(|(index, _)| {
-                let row = &rows[index];
-                (row.row_id, row.event_time, Arc::clone(&row.encoded_key))
+            .map(|entry| {
+                let (time, row_id) = rows.identity(entry.index);
+                (row_id, time, Arc::clone(rows.key(entry.index)))
             })
             .collect()
     }
-}
-
-fn allocate<T>(values: &mut Vec<T>, capacity: usize) -> Result<()> {
-    values
-        .try_reserve_exact(capacity)
-        .map_err(|_| CalcFlowError::Internal {
-            message: "Join expiration array allocation failed".into(),
-        })?;
-    if values.capacity() > capacity {
-        return Err(CalcFlowError::Internal {
-            message: "Join expiration allocation exceeds admitted capacity".into(),
-        });
-    }
-    Ok(())
 }
 
 fn overflow() -> CalcFlowError {

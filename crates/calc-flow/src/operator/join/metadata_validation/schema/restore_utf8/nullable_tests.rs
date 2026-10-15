@@ -455,8 +455,8 @@ fn check_partial_refusal(job: &StreamJobContext) {
     target
         .install_utf8_fallback(decision, &snapshot, job)
         .unwrap();
-    assert!(target.state.left[0].record.funded_owner().is_none());
-    assert!(target.state.right[0].record.funded_owner().is_none());
+    assert!(target.state.left.at(0).record.funded_owner().is_none());
+    assert!(target.state.right.at(0).record.funded_owner().is_none());
     let mut original = nullable_operator(true);
     original.restore(&snapshot).unwrap();
     assert_eq!(target.status(), original.status());

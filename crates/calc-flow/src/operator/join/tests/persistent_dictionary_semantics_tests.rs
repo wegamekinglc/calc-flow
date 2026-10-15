@@ -326,7 +326,7 @@ async fn test_persistent_dictionary_partial_emit_failure_does_not_publish_keys_o
         .process_data("right", right_batch(vec![0]), &context, &mut output)
         .await
         .unwrap();
-    let canonical = Arc::clone(&operator.state.right[0].encoded_key);
+    let canonical = Arc::clone(operator.state.right.key_at(0));
     let inventory = operator.key_dictionary.inventory();
     let pending = operator.state.deltas.pending.iter().count();
     let mut failed = FailSecond {
@@ -360,7 +360,7 @@ async fn test_persistent_dictionary_partial_emit_failure_does_not_publish_keys_o
         .unwrap();
     assert_eq!(operator.key_dictionary.inventory().1, 4);
     assert_eq!(operator.state.left.len(), 3);
-    assert!(Arc::ptr_eq(&canonical, &operator.state.left[0].encoded_key));
+    assert!(Arc::ptr_eq(&canonical, operator.state.left.key_at(0)));
     assert!(operator.state.left.iter().all(|row| row.charge == 124));
     let messages = output.drain("output");
     assert_eq!(
