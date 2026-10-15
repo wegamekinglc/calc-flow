@@ -4,6 +4,9 @@ use datafusion::execution::memory_pool::{
 };
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+#[path = "persistent_dictionary_duplicate_id_tests.rs"]
+mod duplicate_id_tests;
+
 #[test]
 fn test_persistent_dictionary_historical_diagnostic_overlap_is_funded() {
     let observations = [340, 600, 1024].map(|name_bytes| {

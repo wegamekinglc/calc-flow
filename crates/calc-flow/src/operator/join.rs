@@ -4583,8 +4583,8 @@ impl StreamJoinOperator {
         metadata: &metadata_validation::ValidatedMetadata,
         left: &[StoredRow],
         right: &[StoredRow],
-    ) -> Result<()> {
-        validate_restored_rows(
+    ) -> Result<[bool; 2]> {
+        let left_repeats = validate_restored_rows(
             left,
             metadata.next_left_row_id,
             self.compiled.left_event_time_index,
@@ -4592,14 +4592,15 @@ impl StreamJoinOperator {
             &self.name,
             "left",
         )?;
-        validate_restored_rows(
+        let right_repeats = validate_restored_rows(
             right,
             metadata.next_right_row_id,
             self.compiled.right_event_time_index,
             &self.compiled.right_key_indices,
             &self.name,
             "right",
-        )
+        )?;
+        Ok([left_repeats, right_repeats])
     }
 }
 
@@ -4986,13 +4987,14 @@ impl StreamJoinOperator {
         historical_error: Option<CalcFlowError>,
         check: &dyn Fn() -> Result<()>,
     ) -> Result<()> {
-        let state = self.prepare_restored_state(snapshot, metadata, left, right)?;
+        let (state, repeated_ids) = self.prepare_restored_state(snapshot, metadata, left, right)?;
         mark_restored_rows([&state.left, &state.right]);
         check()?;
         let writer = self.v2_writer.next_owner(true)?;
         if let Some(error) = historical_error {
             return Err(error);
         }
+        validate_restored_row_ids(repeated_ids, &self.name)?;
         self.install_legacy_keys(state, writer, check)
     }
 
@@ -5002,32 +5004,35 @@ impl StreamJoinOperator {
         metadata: metadata_validation::ValidatedMetadata,
         left: Vec<StoredRow>,
         right: Vec<StoredRow>,
-    ) -> Result<StreamJoinState> {
-        self.validate_restored_join_rows(&metadata, &left, &right)?;
+    ) -> Result<(StreamJoinState, [bool; 2])> {
+        let repeated_ids = self.validate_restored_join_rows(&metadata, &left, &right)?;
         restored_retained_metrics_match(&metadata.metrics, &left, &right, &self.name)?;
         self.validate_restored_limits(&left, &right)?;
         let carried = carried_delta_segments(snapshot, &self.name)?;
         let base = carried_base_segments(snapshot);
         let segments_since_base =
             u32::try_from(carried.len()).map_err(|_| counter_overflow(&self.name, "segments"))?;
-        Ok(StreamJoinState {
-            left_expirations: ExpirationIndex::restored(&left)?,
-            right_expirations: ExpirationIndex::restored(&right)?,
-            left: left.into(),
-            right: right.into(),
-            next_left_row_id: metadata.next_left_row_id,
-            next_right_row_id: metadata.next_right_row_id,
-            next_output_sequence: metadata.next_output_sequence,
-            metrics: metadata.metrics,
-            ended: metadata.ended,
-            last_checkpoint_epoch: Epoch::new(metadata.epoch),
-            deltas: DeltaTracking {
-                base,
-                segments: carried,
-                segments_since_base,
-                ..DeltaTracking::default()
+        Ok((
+            StreamJoinState {
+                left_expirations: ExpirationIndex::restored(&left)?,
+                right_expirations: ExpirationIndex::restored(&right)?,
+                left: left.into(),
+                right: right.into(),
+                next_left_row_id: metadata.next_left_row_id,
+                next_right_row_id: metadata.next_right_row_id,
+                next_output_sequence: metadata.next_output_sequence,
+                metrics: metadata.metrics,
+                ended: metadata.ended,
+                last_checkpoint_epoch: Epoch::new(metadata.epoch),
+                deltas: DeltaTracking {
+                    base,
+                    segments: carried,
+                    segments_since_base,
+                    ..DeltaTracking::default()
+                },
             },
-        })
+            repeated_ids,
+        ))
     }
 }
 
@@ -6722,23 +6727,45 @@ fn validate_restored_rows(
     key_indices: &[usize],
     operator_id: &str,
     side: &str,
-) -> Result<()> {
+) -> Result<bool> {
     let mut identities = BTreeSet::new();
+    let mut repeated = false;
     for row in rows {
         validate_restored_row_identity(row, &mut identities, next_row_id, operator_id, side)?;
         validate_restored_row_payload(row, event_index, key_indices, operator_id, side)?;
+        repeated |= restored_row_id_repeats(&identities, row.row_id);
+    }
+    Ok(repeated)
+}
+
+fn restored_row_id_repeats(identities: &BTreeSet<(u64, i64)>, row_id: u64) -> bool {
+    identities
+        .range((row_id, i64::MIN)..=(row_id, i64::MAX))
+        .nth(1)
+        .is_some()
+}
+
+fn validate_restored_row_ids(repeated: [bool; 2], operator_id: &str) -> Result<()> {
+    for (side, repeated) in ["left", "right"].into_iter().zip(repeated) {
+        if repeated {
+            return Err(checkpoint_error(
+                operator_id,
+                side,
+                "live row ID is duplicated",
+            ));
+        }
     }
     Ok(())
 }
 
 fn validate_restored_row_identity(
     row: &StoredRow,
-    identities: &mut BTreeSet<(EventTime, u64)>,
+    identities: &mut BTreeSet<(u64, i64)>,
     next_row_id: u64,
     operator_id: &str,
     side: &str,
 ) -> Result<()> {
-    if row.row_id >= next_row_id || !identities.insert((row.event_time, row.row_id)) {
+    if row.row_id >= next_row_id || !identities.insert((row.row_id, row.event_time.as_micros())) {
         return Err(checkpoint_error(
             operator_id,
             side,
