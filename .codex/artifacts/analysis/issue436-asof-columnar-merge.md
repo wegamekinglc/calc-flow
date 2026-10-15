@@ -128,3 +128,76 @@ cross-platform, or paired release performance result is claimed.
 
 The final `CARGO_BUILD_JOBS=2 cargo clippy --locked -p calc-flow --lib --tests -- -D warnings`
 and `cargo fmt --all --check` both passed on the delivered product and test source.
+
+## Windows checkpoint isolation follow-up
+
+Product source remains at `3318a3d61d259d1c9064f105a0e43dcb56f1d475`.
+The follow-up changes only the Windows test schedule, its Python harness,
+the harness/workflow checks, and this evidence record.
+
+The [failed Windows job](https://github.com/wegamekinglc/calc-flow/actions/runs/38786091579/job/116598420211)
+ran the all-features library suite in parallel: 2,044 passed, four failed,
+four ignored. Two ASOF operator fixtures expired their five-second barrier
+ACK waits. The collector recovery fixture expired epoch 1 in `SourcesCut`;
+the Join-to-Window recovery fixture expired epoch 2 and correctly reported
+`RecoveryRequired` instead of claiming completion. These runtime tests,
+the Join/Window implementations, and checkpoint coordinator were unchanged
+by the product commit.
+
+`SourcesCut` means all source ACKs have arrived and operator ACKs remain
+outstanding (`checkpoint/coordinator.rs`, `next_advancement`). Operator ACKs
+follow state staging (`operator_task.rs`, `capture_operator_checkpoint`),
+including blocking-worker file `sync_all` in `state/local.rs`. Thus these
+waits include durable local I/O, rather than only watermark processing.
+The Windows workflow already isolates checkpoint soak tests for this reason.
+The [exact base Windows job](https://github.com/wegamekinglc/calc-flow/actions/runs/38777032052/job/116578428023)
+at `718ab62ff5ad562994a694a20102b89991fc6b2b` passed the same 2,052-test
+selection (2,048 passed, four ignored), including all four affected tests.
+
+This evidence points to Windows parallel checkpoint progress/I/O contention;
+the old logs do not identify the stalled syscall or prove a specific host
+cause. Linux did not reproduce the deadline failures. No semantic product
+failure or confirmed flaky-test classification is claimed. The new Windows
+CI run remains necessary to validate isolation.
+
+Only the four exact test names move from the Windows parallel leg into one
+serial all-features library invocation. The harness now accepts repeated
+`--lib-skip` options without replacing an earlier filter. The original
+five/ten-second deadlines, fixture code, and all assertions remain intact:
+Idle suppression/reactivation, extreme watermarks and EOF, checkpoint cuts,
+backpressure cancellation, released edge charges, and restored Join/Window
+results are still exercised. Source/operator/sink tasks inside each job
+retain their asynchronous concurrency. Other suites keep their schedules.
+
+Validation on Linux, Rust 1.88.0, existing checkout and debug profile:
+
+```bash
+CARGO_BUILD_JOBS=2 cargo test --locked -p calc-flow --lib -- \
+  test_asof_idle_never_forwards_with_or_without_pending_left \
+  test_asof_minimum_watermark_has_no_underflow_and_maximum_requires_eof \
+  test_asof_collector_backpressure_cancellation_restores_last_published_pending_cut \
+  ac5_checkpoint_restore_preserves_the_join_window_result \
+  --test-threads=1 --nocapture
+# 4 passed; 2,111 filtered out.
+
+CARGO_BUILD_JOBS=2 cargo test --locked -p calc-flow --lib --all-features -- \
+  runtime::streaming::operator_task::tests::asof_tests::test_asof_idle_never_forwards_with_or_without_pending_left \
+  runtime::streaming::operator_task::tests::asof_tests::test_asof_minimum_watermark_has_no_underflow_and_maximum_requires_eof \
+  runtime::streaming::runner::tests::asof_tests::test_asof_collector_backpressure_cancellation_restores_last_published_pending_cut \
+  runtime::streaming::runner::tests::ac5_checkpoint_restore_preserves_the_join_window_result \
+  --exact --test-threads=1 --nocapture
+# 4 passed; 2,123 filtered out. This verifies the full names and CI feature set.
+
+python -m unittest \
+  scripts.test_run_rust_tests.RustTestHarnessTests.test_lib_skip_appends_every_filter_to_the_calc_flow_leg_only \
+  scripts.test_run_rust_tests.RustTestHarnessTests.test_lib_skip_is_ignored_by_compile_only_runs \
+  scripts.test_run_rust_tests.RustTestHarnessTests.test_lib_skip_rejects_an_empty_filter \
+  scripts.test_run_rust_tests.WindowsCheckpointSoakIsolationTests
+# 8 passed. Checks preserve all skip filters, compile-only behavior,
+# the exact four serial selections, and existing soak/exit-status handling.
+```
+
+Ruff lint/format, safe YAML parsing, whitespace, and schema-drift checks passed.
+Lizard 1.23.0 reports complexity 8 for the changed `_run_cargo_tests` function.
+Existing product correctness, Clippy, format, and resource evidence above
+remain valid; no product source changed and none of those suites were rerun.
