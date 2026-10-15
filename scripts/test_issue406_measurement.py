@@ -12,30 +12,33 @@ def layout_control_observation():
         "schema": "calc-flow.join-layout-controls.v1",
         "check_only": True,
         "controls": [
-            {
-                "operator": operator,
-                "layout": layout,
-                "data_callbacks": 2,
-                "input_rows": 48,
-                "output_rows": 144
-                if layout == "unordered" and operator == "join"
-                else 24,
-                "event_record_batch_rows": [[7, 9, 8], [7, 9, 8]]
-                if layout == "multi_record"
-                else [[24], [24]],
-                "event_record_batch_count": 3 if layout == "multi_record" else 1,
-                "timestamp_descents_per_event": 23 if layout == "unordered" else 0,
-                "per_key_timestamp_descents": 20 if layout == "unordered" else 0,
-                "unique_keys": 4 if layout == "unordered" else 24,
-                "key_bytes_per_event": 24 * (1024 if layout == "wide_key" else 8),
-                "max_key_bytes": 1024 if layout == "wide_key" else 8,
-                "validated_all_rows": True,
-                "input_unchanged": True,
-                "owned_cleanup_complete": True,
-            }
+            _layout_control_record(operator, layout)
             for operator in ("join", "asof")
             for layout in ("single_record", "multi_record", "unordered", "wide_key")
         ],
+    }
+
+
+def _layout_control_record(operator: str, layout: str) -> dict:
+    geometry = [[7, 9, 8], [7, 9, 8]] if layout == "multi_record" else [[24], [24]]
+    key_width = 1024 if layout == "wide_key" else 8
+    unordered = layout == "unordered"
+    return {
+        "operator": operator,
+        "layout": layout,
+        "data_callbacks": 2,
+        "input_rows": 48,
+        "output_rows": 144 if unordered and operator == "join" else 24,
+        "event_record_batch_rows": geometry,
+        "event_record_batch_count": len(geometry[0]),
+        "timestamp_descents_per_event": 23 if unordered else 0,
+        "per_key_timestamp_descents": 20 if unordered else 0,
+        "unique_keys": 4 if unordered else 24,
+        "key_bytes_per_event": 24 * key_width,
+        "max_key_bytes": key_width,
+        "validated_all_rows": True,
+        "input_unchanged": True,
+        "owned_cleanup_complete": True,
     }
 
 

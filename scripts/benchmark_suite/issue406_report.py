@@ -190,6 +190,7 @@ def _scaled(stats: dict | None, factor: float) -> dict | None:
         **stats,
         "p50": stats["p50"] * factor,
         "p95": stats["p95"] * factor,
+        "p99": stats["p99"] * factor,
         "median_interval": None
         if interval is None
         else {

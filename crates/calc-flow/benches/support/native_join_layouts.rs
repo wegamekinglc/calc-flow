@@ -179,6 +179,34 @@ fn validate_output(
     asof: bool,
     layout: &str,
 ) -> usize {
+    let (seen, actual_keys) = validated_output_rows(output);
+    let expected_keys = input_rows
+        .iter()
+        .map(|(key, _, _)| key.clone())
+        .collect::<Vec<_>>();
+    let expected_pairs = expected_keys
+        .iter()
+        .zip(input_rows.iter().map(|(_, time, _)| time))
+        .flat_map(|(left, left_time)| {
+            expected_keys
+                .iter()
+                .zip(input_rows.iter().map(|(_, time, _)| time))
+                .filter(move |(right, right_time)| {
+                    left == *right && (!asof || left_time == *right_time)
+                })
+                .map(move |(_, right_time)| (left.clone(), *left_time, *right_time))
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(seen, expected_pairs);
+    if !asof && layout != "unordered" {
+        assert_eq!(actual_keys, expected_keys);
+    }
+    seen.len()
+}
+
+fn validated_output_rows(
+    output: &mut EdgeCollector,
+) -> (BTreeSet<(String, i64, i64)>, Vec<String>) {
     let mut seen = BTreeSet::new();
     let mut actual_keys = Vec::new();
     for message in output.drain("output") {
@@ -223,28 +251,7 @@ fn validate_output(
             }
         }
     }
-    let expected_keys = input_rows
-        .iter()
-        .map(|(key, _, _)| key.clone())
-        .collect::<Vec<_>>();
-    let expected_pairs = expected_keys
-        .iter()
-        .zip(input_rows.iter().map(|(_, time, _)| time))
-        .flat_map(|(left, left_time)| {
-            expected_keys
-                .iter()
-                .zip(input_rows.iter().map(|(_, time, _)| time))
-                .filter(move |(right, right_time)| {
-                    left == *right && (!asof || left_time == *right_time)
-                })
-                .map(move |(_, right_time)| (left.clone(), *left_time, *right_time))
-        })
-        .collect::<BTreeSet<_>>();
-    assert_eq!(seen, expected_pairs);
-    if !asof && layout != "unordered" {
-        assert_eq!(actual_keys, expected_keys);
-    }
-    seen.len()
+    (seen, actual_keys)
 }
 
 fn input_values(input: &Batch) -> Vec<(String, i64, i64)> {

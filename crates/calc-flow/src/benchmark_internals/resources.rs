@@ -111,40 +111,56 @@ fn thread_runtimes() -> Result<BTreeMap<String, ThreadRuntime>> {
     let mut result = BTreeMap::new();
     for entry in entries {
         let entry = entry.map_err(|error| invalid(error.to_string()))?;
-        let path = entry.path();
-        let read = || -> std::io::Result<_> {
-            Ok((
-                std::fs::read_to_string(path.join("stat"))?,
-                std::fs::read_to_string(path.join("schedstat"))?,
-                std::fs::read_to_string(path.join("comm"))?,
-            ))
-        };
-        let (stat, schedstat, name) = match read() {
-            Ok(values) => values,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(invalid(error.to_string())),
-        };
-        let birth_ticks = field(&stat_fields(&stat)?, 19)?;
-        let tid = entry
-            .file_name()
-            .to_string_lossy()
-            .parse::<u32>()
-            .map_err(|error| invalid(error.to_string()))?;
-        let runtime_ns = schedstat
-            .split_whitespace()
-            .next()
-            .and_then(|value| value.parse().ok())
-            .ok_or_else(|| invalid("invalid thread schedstat"))?;
-        result.insert(
-            format!("{tid}/{birth_ticks}"),
-            ThreadRuntime {
-                runtime_ns,
-                name: name.trim().to_owned(),
-                tid,
-            },
-        );
+        if let Some((identity, runtime)) = read_thread_runtime(&entry)? {
+            result.insert(identity, runtime);
+        }
     }
     Ok(result)
+}
+
+fn read_thread_files(path: &std::path::Path) -> std::io::Result<(String, String, String)> {
+    Ok((
+        std::fs::read_to_string(path.join("stat"))?,
+        std::fs::read_to_string(path.join("schedstat"))?,
+        std::fs::read_to_string(path.join("comm"))?,
+    ))
+}
+
+fn read_thread_runtime(entry: &std::fs::DirEntry) -> Result<Option<(String, ThreadRuntime)>> {
+    match read_thread_files(&entry.path()) {
+        Ok((stat, schedstat, name)) => {
+            parse_thread_runtime(entry, &stat, &schedstat, &name).map(Some)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(invalid(error.to_string())),
+    }
+}
+
+fn parse_thread_runtime(
+    entry: &std::fs::DirEntry,
+    stat: &str,
+    schedstat: &str,
+    name: &str,
+) -> Result<(String, ThreadRuntime)> {
+    let birth_ticks = field(&stat_fields(stat)?, 19)?;
+    let tid = entry
+        .file_name()
+        .to_string_lossy()
+        .parse::<u32>()
+        .map_err(|error| invalid(error.to_string()))?;
+    let runtime_ns = schedstat
+        .split_whitespace()
+        .next()
+        .and_then(|value| value.parse().ok())
+        .ok_or_else(|| invalid("invalid thread schedstat"))?;
+    Ok((
+        format!("{tid}/{birth_ticks}"),
+        ThreadRuntime {
+            runtime_ns,
+            name: name.trim().to_owned(),
+            tid,
+        },
+    ))
 }
 
 fn ticks_per_second() -> Option<u32> {

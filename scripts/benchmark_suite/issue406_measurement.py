@@ -93,29 +93,51 @@ def validate_cpu_evidence(
 ) -> None:
     """Reject invalid clocks and excess CPU using the explicitly frozen budget."""
     budget = validate_cpu_budget(threads=threads, budget=budget)
+    _validate_cpu_header(evidence)
+    _validate_cpu_clocks(evidence)
+    _validate_cpu_threads(evidence)
+    if evidence["process_cpu_seconds"] > budget * evidence["wall_seconds"]:
+        raise ValueError("process CPU budget exceeded")
+
+
+def _validate_cpu_header(evidence: dict) -> None:
     if (
         not isinstance(evidence, dict)
         or evidence.get("schema") != "calc-flow.phase-resources.v1"
         or evidence.get("status") != "measured"
-        or not _finite(evidence.get("wall_seconds"))
+    ):
+        raise ValueError("missing measured process CPU/per-thread runtime evidence")
+
+
+def _validate_cpu_clocks(evidence: dict) -> None:
+    if (
+        not _finite(evidence.get("wall_seconds"))
         or evidence["wall_seconds"] <= 0
         or not _finite(evidence.get("process_cpu_seconds"))
         or evidence["process_cpu_seconds"] < 0
-        or not isinstance(evidence.get("threads"), list)
+    ):
+        raise ValueError("missing measured process CPU/per-thread runtime evidence")
+
+
+def _validate_cpu_threads(evidence: dict) -> None:
+    if (
+        not isinstance(evidence.get("threads"), list)
         or not evidence["threads"]
         or not isinstance(evidence.get("departed_threads"), list)
     ):
         raise ValueError("missing measured process CPU/per-thread runtime evidence")
     for thread in evidence["threads"]:
-        if (
-            not isinstance(thread, dict)
-            or type(thread.get("tid")) is not int
-            or not _finite(thread.get("runtime_seconds"))
-            or thread["runtime_seconds"] < 0
-        ):
-            raise ValueError("invalid per-thread runtime evidence")
-    if evidence["process_cpu_seconds"] > budget * evidence["wall_seconds"]:
-        raise ValueError("process CPU budget exceeded")
+        _validate_thread_runtime(thread)
+
+
+def _validate_thread_runtime(thread: dict) -> None:
+    if (
+        not isinstance(thread, dict)
+        or type(thread.get("tid")) is not int
+        or not _finite(thread.get("runtime_seconds"))
+        or thread["runtime_seconds"] < 0
+    ):
+        raise ValueError("invalid per-thread runtime evidence")
 
 
 def sample_cpu_evidence(sample: dict, *, scope: str) -> dict:

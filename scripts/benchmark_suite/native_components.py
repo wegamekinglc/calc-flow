@@ -258,19 +258,7 @@ def _validate_compaction(observation: dict) -> dict:
     ):
         raise ValueError("missing native compaction equivalence proof")
     for mode in ("armed", "steady"):
-        sample = observation.get(mode)
-        _validate_compaction_rows(sample)
-        _validate_lifecycle(sample)
-        for field in ("preparation_seconds", "handler_seconds", "combined_seconds"):
-            _positive_seconds(sample, field)
-        if (
-            sample["combined_seconds"] + 1e-12
-            < sample["preparation_seconds"] + sample["handler_seconds"]
-        ):
-            raise ValueError("combined compaction clock omits work")
-        _validate_compaction_witness(sample, mode)
-        if "schedule" in sample:
-            validate_serial_compaction_schedule(sample)
+        _validate_compaction_sample(observation.get(mode), mode)
     return {
         **observation,
         "handler_ratio": observation["armed"]["handler_seconds"]
@@ -278,11 +266,43 @@ def _validate_compaction(observation: dict) -> dict:
     }
 
 
+def _validate_compaction_sample(sample: dict, mode: str) -> None:
+    _validate_compaction_rows(sample)
+    _validate_lifecycle(sample)
+    for field in ("preparation_seconds", "handler_seconds", "combined_seconds"):
+        _positive_seconds(sample, field)
+    if (
+        sample["combined_seconds"] + 1e-12
+        < sample["preparation_seconds"] + sample["handler_seconds"]
+    ):
+        raise ValueError("combined compaction clock omits work")
+    _validate_compaction_witness(sample, mode)
+    if "schedule" in sample:
+        validate_serial_compaction_schedule(sample)
+
+
 def validate_serial_compaction_schedule(sample: dict) -> None:
     """Check real preparation polling and serialized dispatch, never infer overlap."""
     schedule = sample.get("schedule", {})
     if not isinstance(schedule, dict):
         raise ValueError("invalid serialized compaction schedule")
+    _validate_serial_compaction_owner(schedule)
+    times = _serial_compaction_times(schedule)
+    _validate_serial_compaction_clocks(sample, times)
+
+
+def _validate_serial_compaction_owner(schedule: dict) -> None:
+    if (
+        schedule.get("owner") != "single-exclusive-operator"
+        or schedule.get("during_compaction_status") != "unmeasured"
+        or type(schedule.get("preparation_first_poll_pending")) is not bool
+        or not isinstance(schedule.get("reason"), str)
+        or not schedule["reason"]
+    ):
+        raise ValueError("invalid serialized compaction schedule")
+
+
+def _serial_compaction_times(schedule: dict) -> list[int]:
     fields = (
         "preparation_started_ns",
         "handler_ready_ns",
@@ -291,18 +311,14 @@ def validate_serial_compaction_schedule(sample: dict) -> None:
         "handler_completed_ns",
     )
     times = [schedule.get(field) for field in fields]
-    if (
-        schedule.get("owner") != "single-exclusive-operator"
-        or schedule.get("during_compaction_status") != "unmeasured"
-        or type(schedule.get("preparation_first_poll_pending")) is not bool
-        or not isinstance(schedule.get("reason"), str)
-        or not schedule["reason"]
-        or any(type(value) is not int or value < 0 for value in times)
-        or times != sorted(times)
-        or times[0] != 0
-        or times[3] == times[4]
-    ):
+    if any(type(value) is not int or value < 0 for value in times):
         raise ValueError("invalid serialized compaction schedule")
+    if times != sorted(times) or times[0] != 0 or times[3] == times[4]:
+        raise ValueError("invalid serialized compaction schedule")
+    return times
+
+
+def _validate_serial_compaction_clocks(sample: dict, times: list[int]) -> None:
     queue = sample.get("queue_seconds")
     if (
         type(queue) not in (float, int)
@@ -315,6 +331,20 @@ def validate_serial_compaction_schedule(sample: dict) -> None:
 
 def validate_join_layout_controls(observation: dict) -> dict:
     """Require each actual Join/ASOF layout execution and its full oracle."""
+    expected, controls = _layout_control_inventory(observation)
+    seen = set()
+    for control in controls:
+        if not isinstance(control, dict):
+            raise ValueError("invalid native layout control")
+        identity = (control.get("operator"), control.get("layout"))
+        if identity not in expected or identity in seen:
+            raise ValueError("unexpected or repeated native layout control")
+        seen.add(identity)
+        _require_refusal_fields(control, _expected_layout_counts(*identity))
+    return dict(observation)
+
+
+def _layout_control_inventory(observation: dict) -> tuple[set[tuple[str, str]], list]:
     expected = {
         (operator, layout)
         for operator in ("join", "asof")
@@ -328,37 +358,28 @@ def validate_join_layout_controls(observation: dict) -> dict:
         or len(controls) != len(expected)
     ):
         raise ValueError("missing native layout control inventory")
-    seen = set()
-    for control in controls:
-        if not isinstance(control, dict):
-            raise ValueError("invalid native layout control")
-        identity = (control.get("operator"), control.get("layout"))
-        if identity not in expected or identity in seen:
-            raise ValueError("unexpected or repeated native layout control")
-        seen.add(identity)
-        layout = identity[1]
-        geometry = [7, 9, 8] if layout == "multi_record" else [24]
-        _require_refusal_fields(
-            control,
-            {
-                "data_callbacks": 2,
-                "input_rows": 48,
-                "output_rows": 144
-                if layout == "unordered" and identity[0] == "join"
-                else 24,
-                "event_record_batch_rows": [geometry, geometry],
-                "event_record_batch_count": len(geometry),
-                "timestamp_descents_per_event": 23 if layout == "unordered" else 0,
-                "per_key_timestamp_descents": 20 if layout == "unordered" else 0,
-                "unique_keys": 4 if layout == "unordered" else 24,
-                "key_bytes_per_event": 24 * (1024 if layout == "wide_key" else 8),
-                "max_key_bytes": 1024 if layout == "wide_key" else 8,
-                "validated_all_rows": True,
-                "input_unchanged": True,
-                "owned_cleanup_complete": True,
-            },
-        )
-    return dict(observation)
+    return expected, controls
+
+
+def _expected_layout_counts(operator: str, layout: str) -> dict:
+    geometry = [7, 9, 8] if layout == "multi_record" else [24]
+    key_width = 1024 if layout == "wide_key" else 8
+    unordered = layout == "unordered"
+    return {
+        "data_callbacks": 2,
+        "input_rows": 48,
+        "output_rows": 144 if unordered and operator == "join" else 24,
+        "event_record_batch_rows": [geometry, geometry],
+        "event_record_batch_count": len(geometry),
+        "timestamp_descents_per_event": 23 if unordered else 0,
+        "per_key_timestamp_descents": 20 if unordered else 0,
+        "unique_keys": 4 if unordered else 24,
+        "key_bytes_per_event": 24 * key_width,
+        "max_key_bytes": key_width,
+        "validated_all_rows": True,
+        "input_unchanged": True,
+        "owned_cleanup_complete": True,
+    }
 
 
 def _validate_lifecycle(observation: dict) -> None:
