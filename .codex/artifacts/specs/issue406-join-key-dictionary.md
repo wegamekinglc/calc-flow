@@ -174,6 +174,17 @@ no user algorithm decision is needed.
   complete admitted native view, or rebuild a complete view under a later grant.
   Rebuild/re-enable work is explicit, funded, bounded by the scheduling contract
   and separately counted, not silently repeated on every ordinary batch.
+  In managed full-layout V1 restore only, an already closed gather home may
+  decline the new optional derived-identity work at scope/admission with
+  `Cancelled`. Treat this as a capability decline only after
+  `job.check_cancelled()` succeeds, confirming no job cancellation or expired
+  deadline. Preserve complete validation and installation of the new candidate's
+  rows, full fees, writer, history and pending state on SQL, with incomplete
+  native coverage disabled until explicit funded rebuild. Count this separately
+  as `closed_restore_routes`; do not increment `dictionary_grant_refusals` or
+  claim an actual grant failure. This exception does not cover worker-execution
+  errors or other non-budget failures. Real job cancellation/deadline and all
+  other non-budget errors propagate and preserve the prior installed state.
 
 The ordinary funded route must cover all FR3 types without a type/nullable/
 multi-record cutoff. A grant-refused compatibility route must have an explicit
@@ -184,14 +195,17 @@ an explicitly recorded compatibility exception, not evidence of the new path's
 structural acceptance. A claim that this exception is eliminated requires its
 own funded vectorized implementation and tests. The implementation report must
 name each retained exception and its existing maintained workload coverage;
-unexplained fallback is blocking. Non-budget errors, cancellation and deadlines
+unexplained fallback is blocking. Apart from the narrowly defined healthy-closed
+managed restore capability above, non-budget errors, cancellation and deadlines
 must propagate rather than trigger a grant-refusal retry.
 
 The legacy exception inventory starts with `join.rs::retained_rows`'s absent-
 native-key branch: `encode_join_key_columns_v1` allocates a Vec, converted through
 `columnar.rs::FramedKey::from` and wrapped in an Arc without independent workspace
 funding. It exempts only that existing canonical-owner allocation under genuine
-grant refusal, not new dictionaries, handle tables, lease owners or row adapters.
+grant refusal and its resulting incomplete state, or SQL-only state installed
+through the narrowly defined healthy-closed managed restore capability above,
+not new dictionaries, handle tables, lease owners or row adapters.
 Record final helper names, allocation sites and framing counters after integration.
 The existing `paid_key_pressure_case` control matches through SQL but does not
 commit retained rows; it alone cannot establish production retention parity.
@@ -352,7 +366,16 @@ adapter.
   owned capture and later submission independently. Assert the explicit decline
   reason, batched SQL result parity, preserved known canonical owners, no partial
   live-key coverage exposed to native lookup, and existing one-row zero-headroom
-  acceptance. Genuine cancellation/deadline/non-budget failure does not retry.
+  acceptance. Genuine job cancellation/deadline and other non-budget failures
+  propagate without SQL retry. Independently close gather admission during a
+  healthy managed full-layout V1 restore: after `job.check_cancelled()` succeeds,
+  the fully validated new SQL candidate retains its rows/full fees and
+  writer/history/pending state, native coverage remains disabled pending explicit
+  funded rebuild, `closed_restore_routes` increases and
+  `dictionary_grant_refusals` does not. Exercise the existing
+  `test_restore_bases_final_cancel_and_post_install_home_close_preserve_state`
+  control; actual job cancellation/deadline and worker-execution errors must
+  propagate and preserve the prior state rather than select this exception.
   Add an actual production preparation/emission/retention-commit control under
   dictionary refusal with exact fees and cleanup. Name/count every surviving
   legacy framing exception and its maintained case, closing the FR9 coverage gap.

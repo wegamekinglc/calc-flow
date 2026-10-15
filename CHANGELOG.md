@@ -9,6 +9,12 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-15: Validate event times and complete V1 logical charges for every
+  historical row when restoring full layout-1 Join checkpoints, including
+  overwritten and tombstoned rows. Reject invalid history before replacing
+  installed state while preserving existing error priority. Checkpoint layouts,
+  versions and recovery compatibility for valid checkpoints remain unchanged.
+
 - 2026-10-15: Fix streaming Join retention and checkpoint recovery for negative
   `Int8` keys and `Date32`/`Date64` keys. Valid keys no longer fail signed-byte
   conversion or date-array type checks. V1 key tags and logical charges,

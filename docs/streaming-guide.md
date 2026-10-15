@@ -992,8 +992,10 @@ follows the physical state-layout contract below.
 The working set includes retained state, admitted input references and metadata,
 `O(matches)` pair descriptors, equality-probe scratch space, preflight
 allocations, the current output chunk, and chunks held by edges or sinks.
-Funded native matching interns repeated keys in each admitted batch and uses
-a hash dictionary to find each key's time-ordered state. Two binary searches
+Funded native matching shares persistent key identities across batches and both
+inputs through one dictionary per Join operator. Keys used only for probing
+create no persistent entries. Each retained row keeps its full V1 logical
+charge. Two binary searches
 bound each inclusive time window before match materialization. Batch admission
 masks preserve null and late-drop rules. Native index capacity remains funded
 until its storage is released, including capacity retained after eviction.
@@ -1009,6 +1011,11 @@ Cancellation or an abandoned handler retains those owners until cleanup;
 subsequent state changes wait for their release. Small batches run inline.
 If worker admission is refused, matching resumes through the existing serial
 native and DataFusion paths after the attempted work has been released.
+
+If optional workspace admission for the dictionary or native index is refused,
+matching uses the existing batched DataFusion equality path. Incomplete
+dictionary coverage keeps later batches on SQL until a complete funded rebuild
+succeeds. Cancellation, deadline expiry and other errors propagate.
 
 When native matching is unavailable, the existing DataFusion equality path
 reuses an unchanged opposite side's assembled key batch. This cache retains
@@ -1034,7 +1041,8 @@ inventory, and checks live charge sums, metrics and limits. Integrity checksums
 do not authenticate original admission values.
 
 Legacy full layouts 1 and 2 undergo complete schema, history and exact V1 charge
-validation before independently funded selected live copies replace their
+validation, including event times and charges of overwritten or tombstoned
+rows, before independently funded selected live copies replace their
 payload owners. No full legacy history is retained. A new narrow base must be
 prepared before the first capture, including clean, empty or terminal state;
 subsequent dirty captures and rebase remain incremental. A mismatched retained
