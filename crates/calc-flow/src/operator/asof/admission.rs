@@ -361,12 +361,94 @@ struct InputIdentities<'a> {
     ordered_append: bool,
 }
 
+pub(crate) struct IngressFacts {
+    watermark: Option<crate::EventTime>,
+    late: u64,
+    pub(in crate::operator) ordered: Option<bool>,
+}
+
+impl IngressFacts {
+    pub(in crate::operator) fn watermark(&self) -> Option<i64> {
+        self.watermark.map(crate::EventTime::as_micros)
+    }
+}
+
+pub(crate) struct IngressPlan {
+    node: String,
+    ingress: String,
+    port: crate::Port,
+    side: AsofJoinSide,
+}
+
+impl IngressPlan {
+    pub(crate) async fn prepare(
+        &self,
+        batch: &Batch,
+        watermark: Option<crate::EventTime>,
+    ) -> Result<IngressFacts> {
+        self.port.validate(batch, &self.ingress)?;
+        let batches = batch.table_payload()?.batches();
+        validate_nulls(batches, &self.side, &self.node, &self.ingress)?;
+        let mut late = 0;
+        for record in batches {
+            for values in times(record, &self.side).values().chunks(4096) {
+                if let Some(watermark) = watermark {
+                    late += values
+                        .iter()
+                        .filter(|time| **time < watermark.as_micros())
+                        .count() as u64;
+                }
+                tokio::task::yield_now().await;
+            }
+        }
+        let ordered = direct::prepare_order_proof(batches, &self.side, watermark).await;
+        Ok(IngressFacts {
+            watermark,
+            late,
+            ordered,
+        })
+    }
+}
+
 impl StreamAsofJoinOperator {
+    pub(crate) fn ingress_plan(&self, ingress: &str) -> Result<IngressPlan> {
+        let index = ingress_index(ingress, &self.name)?;
+        Ok(IngressPlan {
+            node: self.name.clone(),
+            ingress: ingress.into(),
+            port: self.inputs[index].clone(),
+            side: if index == 0 {
+                self.spec.left()
+            } else {
+                self.spec.right()
+            }
+            .clone(),
+        })
+    }
+
+    #[cfg(test)]
     pub(super) fn validate_admission(
         &mut self,
         ingress: &str,
         batch: &Batch,
     ) -> Result<ValidatedInput> {
+        self.validate_admission_with_facts(ingress, batch, None)
+    }
+
+    pub(super) fn validate_admission_with_facts(
+        &mut self,
+        ingress: &str,
+        batch: &Batch,
+        prepared: Option<Result<IngressFacts>>,
+    ) -> Result<ValidatedInput> {
+        let input = self.admission_input(ingress, batch)?;
+        let batches = batch.table_payload()?.batches();
+        let late = self.admission_late_count(batches, input, ingress, prepared)?;
+        self.validate_late_count(late, input)?;
+        Ok(input)
+    }
+
+    fn admission_input(&mut self, ingress: &str, batch: &Batch) -> Result<ValidatedInput> {
         let index = ingress_index(ingress, &self.name)?;
         self.inputs[index].validate(batch, ingress).map_err(|_| {
             reason(
@@ -383,18 +465,27 @@ impl StreamAsofJoinOperator {
                 "input received data after end-of-input",
             ));
         }
-        let input = ValidatedInput {
+        Ok(ValidatedInput {
             index,
             watermark: status.watermark_micros.map(crate::EventTime::as_micros),
-        };
-        let batches = batch.table_payload()?.batches();
-        validate_nulls(batches, input.side(&self.spec), &self.name, ingress)?;
-        self.validate_late_rows(batches, input)?;
-        Ok(input)
+        })
     }
 
-    fn validate_late_rows(&mut self, batches: &[RecordBatch], input: ValidatedInput) -> Result<()> {
-        let late = batches
+    fn admission_late_count(
+        &self,
+        batches: &[RecordBatch],
+        input: ValidatedInput,
+        ingress: &str,
+        prepared: Option<Result<IngressFacts>>,
+    ) -> Result<u64> {
+        if let Some(facts) = prepared
+            .transpose()?
+            .filter(|facts| facts.watermark() == input.watermark)
+        {
+            return Ok(facts.late);
+        }
+        validate_nulls(batches, input.side(&self.spec), &self.name, ingress)?;
+        Ok(batches
             .iter()
             .map(|batch| {
                 times(batch, input.side(&self.spec))
@@ -403,7 +494,10 @@ impl StreamAsofJoinOperator {
                     .filter(|time| input.is_late(**time))
                     .count() as u64
             })
-            .sum();
+            .sum())
+    }
+
+    fn validate_late_count(&mut self, late: u64, input: ValidatedInput) -> Result<()> {
         let status = side_status(&mut self.status, input.index);
         status.late_rows = super::checked(&self.name, status.late_rows, late)?;
         if late > 0 && self.spec.late_policy() == AsofLatePolicy::Error {

@@ -259,6 +259,7 @@ pub struct StreamOperatorContext<'a> {
     rolling_metrics: Option<RollingMetricsRecorder>,
     entity_work: Option<ScopedEntityWorkClient>,
     task_id: Option<crate::runtime::streaming::gather_work::TaskId>,
+    ingress_preparation: Option<&'a super::ingress::Preparation>,
 }
 
 impl<'a> StreamOperatorContext<'a> {
@@ -277,6 +278,7 @@ impl<'a> StreamOperatorContext<'a> {
             rolling_metrics: self.rolling_metrics.clone(),
             entity_work: self.entity_work.clone(),
             task_id: self.task_id,
+            ingress_preparation: self.ingress_preparation,
         }
     }
 
@@ -296,6 +298,7 @@ impl<'a> StreamOperatorContext<'a> {
             rolling_metrics: None,
             entity_work: None,
             task_id: None,
+            ingress_preparation: None,
         }
     }
 
@@ -316,6 +319,7 @@ impl<'a> StreamOperatorContext<'a> {
             rolling_metrics: None,
             entity_work: None,
             task_id: None,
+            ingress_preparation: None,
         }
     }
 
@@ -337,12 +341,25 @@ impl<'a> StreamOperatorContext<'a> {
             rolling_metrics: None,
             entity_work: None,
             task_id: None,
+            ingress_preparation: None,
         }
     }
 
     pub(crate) fn with_rolling_metrics(mut self, metrics: RollingMetricsRecorder) -> Self {
         self.rolling_metrics = Some(metrics);
         self
+    }
+
+    pub(crate) fn with_ingress_preparation(
+        mut self,
+        preparation: Option<&'a super::ingress::Preparation>,
+    ) -> Self {
+        self.ingress_preparation = preparation;
+        self
+    }
+
+    pub(crate) fn ingress_preparation(&self) -> Option<&super::ingress::Preparation> {
+        self.ingress_preparation
     }
 
     pub(crate) fn rolling_metrics(&self) -> Option<&RollingMetricsRecorder> {

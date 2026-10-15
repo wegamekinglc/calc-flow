@@ -3250,7 +3250,7 @@ mod benchmark_checkpoint;
 pub(crate) use benchmark_checkpoint::run_checkpoint_history_diagnostic;
 
 mod admission_charge;
-mod admission_masks;
+pub(crate) mod admission_masks;
 mod admitted;
 use admitted::{AdmittedBatch, AdmittedRows, PayloadRef};
 mod borrowed_key;

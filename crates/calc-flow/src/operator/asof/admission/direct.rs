@@ -124,32 +124,99 @@ pub(super) fn strictly_ordered(
     input: ValidatedInput,
     context: &StreamOperatorContext<'_>,
 ) -> Result<bool> {
+    if let Some(ordered) = context
+        .ingress_preparation()
+        .and_then(|preparation| preparation.asof_order(input.watermark))
+    {
+        context.check_cancelled()?;
+        return Ok(ordered);
+    }
     let mut previous = None;
     for record in records {
-        let keys = record
-            .column_by_name(&side.keys()[0])
-            .expect("validated key")
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .expect("direct Utf8 key");
-        let sequences = record
-            .column_by_name(&side.sequence_by()[0])
-            .expect("validated sequence")
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .expect("direct unsigned sequence");
-        let times = times(record, side);
-        for row in 0..record.num_rows() {
-            check_input_cancellation(row, context)?;
-            let identity = (times.value(row), keys.value(row), sequences.value(row));
-            if input.is_late(identity.0) || previous.is_some_and(|last| last >= identity) {
+        for start in (0..record.num_rows()).step_by(4096) {
+            check_input_cancellation(start, context)?;
+            if !ordered_block(record, side, input.watermark, start, &mut previous) {
                 return Ok(false);
             }
-            previous = Some(identity);
         }
     }
     context.check_cancelled()?;
     Ok(true)
+}
+
+/// The independent within-batch proof uses canonical string order. Comparing
+/// the first identity with resident state remains on the operator task.
+pub(super) async fn prepare_order_proof(
+    records: &[RecordBatch],
+    side: &AsofJoinSide,
+    watermark: Option<crate::EventTime>,
+) -> Option<bool> {
+    if !order_proof_eligible(&records.first()?.schema(), side) {
+        return None;
+    }
+    let mut previous = None;
+    for record in records {
+        for start in (0..record.num_rows()).step_by(4096) {
+            if !ordered_block(
+                record,
+                side,
+                watermark.map(crate::EventTime::as_micros),
+                start,
+                &mut previous,
+            ) {
+                return Some(false);
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+    Some(true)
+}
+
+fn order_proof_eligible(
+    schema: &datafusion::arrow::datatypes::Schema,
+    side: &AsofJoinSide,
+) -> bool {
+    let ([key], [sequence]) = (side.keys(), side.sequence_by()) else {
+        return false;
+    };
+    schema
+        .field_with_name(key)
+        .is_ok_and(|field| field.data_type() == &DataType::Utf8)
+        && schema
+            .field_with_name(sequence)
+            .is_ok_and(|field| field.data_type() == &DataType::UInt64)
+}
+
+fn ordered_block<'a>(
+    record: &'a RecordBatch,
+    side: &AsofJoinSide,
+    watermark: Option<i64>,
+    start: usize,
+    previous: &mut Option<(i64, &'a str, u64)>,
+) -> bool {
+    let keys = record
+        .column_by_name(&side.keys()[0])
+        .expect("validated key")
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("direct Utf8 key");
+    let sequences = record
+        .column_by_name(&side.sequence_by()[0])
+        .expect("validated sequence")
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .expect("direct unsigned sequence");
+    let times = times(record, side);
+    for row in start..(start + 4096).min(record.num_rows()) {
+        let identity = (times.value(row), keys.value(row), sequences.value(row));
+        if watermark.is_some_and(|watermark| identity.0 < watermark)
+            || previous.is_some_and(|last| last >= identity)
+        {
+            return false;
+        }
+        *previous = Some(identity);
+    }
+    true
 }
 
 pub(super) struct ChunkWork {

@@ -1,5 +1,5 @@
 //! Native backward ASOF state and bounded Arrow finalization.
-mod admission;
+pub(crate) mod admission;
 mod checkpoint;
 mod codec;
 mod copy;
@@ -97,7 +97,15 @@ impl StreamAsofJoinOperator {
         batch: &Batch,
         context: &StreamOperatorContext<'_>,
     ) -> Result<()> {
-        let validated = self.validate_admission(ingress, batch)?;
+        let prepared = match context.ingress_preparation() {
+            Some(preparation) => {
+                let facts = preparation.asof().await;
+                context.check_cancelled()?;
+                Some(facts)
+            }
+            None => None,
+        };
+        let validated = self.validate_admission_with_facts(ingress, batch, prepared)?;
         let admission = self
             .prepare_admission(validated, batch, context)
             .await
