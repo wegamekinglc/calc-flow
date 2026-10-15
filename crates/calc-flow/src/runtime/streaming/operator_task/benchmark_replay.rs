@@ -13,7 +13,7 @@ use datafusion::arrow::{
 use serde_json::{Value, json};
 
 use crate::benchmark_internals::{
-    EventKind, Fixture, FixtureEvent, fingerprint, invalid, settle_job,
+    EventKind, Fixture, FixtureEvent, PhaseClock, fingerprint, invalid, settle_job,
 };
 use crate::pipeline::{
     CompiledStreamOperator, RuntimeConsumer, RuntimeProducer, RuntimeStreamNode,
@@ -965,7 +965,7 @@ async fn run_owned(
     let preload_node_callbacks = replay.audit.node_callbacks.clone();
     dispatch::start(replay, fixture)?;
     let setup_seconds = setup_start.elapsed().as_secs_f64();
-    let (assembled, processing_seconds, dispatch_trace, post_processing_status) =
+    let (assembled, processing_seconds, dispatch_trace, post_processing_status, cpu_evidence) =
         processing_phase(replay, fixture).await?;
     let processing_callbacks = callback_delta(&replay.audit.callbacks, &preload_callbacks);
     let processing_node_callbacks =
@@ -983,6 +983,10 @@ async fn run_owned(
         "checkpoint_enabled":manifest["checkpoint_enabled"],"nonterminal_epochs":0,
         "rows_per_side":manifest["rows_per_side"],"rows":manifest["rows"],"dimension_rows":manifest["dimension_rows"],"batch_rows":manifest["batch_rows"],
         "handler_samples":replay.audit.handler_samples,
+        "cpu_evidence":cpu_evidence,
+        "event_record_batches":fixture.processing.iter().filter_map(|event|match &event.kind {
+            EventKind::Data(batch)=>Some(json!({"event_id":event.id,"input":event.input,"rows":batch.num_rows(),"record_batch_rows":batch.table_payload().expect("table fixture").batches().iter().map(RecordBatch::num_rows).collect::<Vec<_>>()})), _=>None
+        }).collect::<Vec<_>>(),
         "output_budget":{"max_rows":replay.budget.max_rows,"max_bytes":replay.budget.max_bytes},
         "setup_seconds":setup_seconds,"processing_seconds":processing_seconds,"terminal_seconds":terminal_seconds,"oracle_seconds":oracle_seconds,
         "output_rows":processing_rows,"validated_all_rows":true,
@@ -1013,12 +1017,14 @@ async fn process_fixture(replay: &mut Replay, fixture: &Fixture) -> Result<()> {
 async fn processing_phase(
     replay: &mut Replay,
     fixture: &Fixture,
-) -> Result<(Batch, f64, Option<Value>, Value)> {
+) -> Result<(Batch, f64, Option<Value>, Value, Value)> {
     replay.audit.collect_handlers = fixture.manifest["scenario"] == "join_sealed";
+    let resources = PhaseClock::start("processing");
     let processing_start = Instant::now();
     process_fixture(replay, fixture).await?;
     let assembled = Batch::table(replay.output.clone(), BatchMetadata::default())?;
     let processing_seconds = processing_start.elapsed().as_secs_f64();
+    let cpu_evidence = resources.finish();
     let dispatch_trace = dispatch::finish(replay, fixture)?;
     replay.audit.collect_handlers = false;
     let post_processing_status = replay.status()?;
@@ -1027,6 +1033,7 @@ async fn processing_phase(
         processing_seconds,
         dispatch_trace,
         post_processing_status,
+        cpu_evidence,
     ))
 }
 

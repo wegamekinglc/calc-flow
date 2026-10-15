@@ -154,6 +154,7 @@ async def measure_acceptance_job(
 ) -> tuple:
     """Retain processing evidence even when baseline EOF has a known failure."""
     from benchmarks import engine_stream as stream
+    from scripts.benchmark_suite.issue406_measurement import PhaseClock
 
     job, sources, sink, streams = (
         bindings.job,
@@ -165,10 +166,16 @@ async def measure_acceptance_job(
     observations = evidence["checkpoint_observations"]
     stop = asyncio.Event()
     observer = None
+    processing_clock = None
     table = None
     outcome = None
     started = time.perf_counter_ns()
     cpu_started = time.process_time_ns()
+
+    def start_processing_clock(scope):
+        nonlocal processing_clock
+        processing_clock = PhaseClock(scope)
+        return processing_clock
 
     async def process_and_end():
         nonlocal table, observer
@@ -187,11 +194,14 @@ async def measure_acceptance_job(
             join_mode={"join_sealed": "sealed", "join_retained": "retained"}.get(
                 case["workload"]
             ),
+            phase_clock=start_processing_clock,
         )
         evidence.update(clocks)
         evidence["processing_seconds"] = seconds
         if capture_trace:
-            await _finish_processing_trace(job, streams, sink, case, evidence)
+            await _finish_processing_trace(
+                job, streams, sink, case, evidence, phase_clock=processing_clock
+            )
         observations.append(checkpoint_observation(job))
         if not capture_trace:
             evidence["before_eof"] = job.status()
@@ -440,6 +450,9 @@ class AcceptanceEngineCase:
             if self.scenario == "asof_join"
             else {"input": events}
         )
+        from scripts.benchmark_suite.issue406_measurement import event_layout
+
+        self.event_layout = event_layout(self.streams)
         self.program = stream.stream_program(
             self.scenario,
             self.data.table,
@@ -541,6 +554,10 @@ class AcceptanceEngineCase:
             evidence["fixture"] = self.fixture
             evidence["cpu_affinity"] = sorted(os.sched_getaffinity(0))
             evidence["mode"] = self.case["mode"]
+            evidence["event_layout"] = self.event_layout
+            evidence["cpu_budget"] = self.case.get(
+                "cpu_budget", 2.0 if self.case.get("threads", 1) == 1 else None
+            )
             evidence["product_commit"] = self.case.get("product_commit")
             if self.fixture is not None:
                 from scripts.benchmark_suite.issue406_acceptance import (
@@ -597,7 +614,7 @@ async def _start_processing_trace(job, sources, sink, case: dict) -> float:
 
 
 async def _finish_processing_trace(
-    job, streams, sink, case: dict, evidence: dict
+    job, streams, sink, case: dict, evidence: dict, *, phase_clock=None
 ) -> None:
     from benchmarks import engine_stream as stream
     from benchmarks.join_asof_acceptance import await_asof_frontier
@@ -620,6 +637,12 @@ async def _finish_processing_trace(
     ) / 1e9
     evidence["settled_processing_ended_ns"] = settled
     evidence["processing_settled"] = True
+    if phase_clock is not None:
+        evidence["processing_cpu_evidence"] = evidence["cpu_evidence"]
+        evidence["cpu_evidence"] = {
+            **phase_clock.finish(),
+            "scope": "settled_processing",
+        }
     capture_started = time.perf_counter_ns()
     evidence["dispatch_trace_capture_started_ns"] = capture_started
     raw_trace = job._inner._benchmark_take_dispatch_trace()

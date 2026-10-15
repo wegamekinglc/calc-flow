@@ -536,6 +536,60 @@ leaving the supplied checkouts unchanged. Provenance retains the original bench
 digest, the effective measured harness digest, both product and harness revisions,
 and compiled dependencies. The former pure-handler case IDs are retired.
 
+### Join/ASOF acceptance measurement controls (#428)
+
+The maintained `join_asof_acceptance` / `issue406_*` collectors retain the
+original eight targets and raw observations. Processing, snapshot, restore,
+preparation, handler and combined phases now carry process CPU and individual
+Linux task scheduler runtimes. Runtime processing excludes dimension preload;
+the instrumented ASOF cut additionally records CPU through the completed output
+frontier, before trace serialization. Event inventories retain each data
+message's RecordBatch row counts without coalescing inputs.
+
+Serial samples exceeding process CPU = 2× their target phase wall time are
+invalid. Parallel cases require explicit `cpu_budgets[case_id]` in the frozen
+collection plan, at most the assigned CPU count. Python uses `process_time_ns`;
+native components read process `utime + stime` with `getconf CLK_TCK` resolution.
+Both retain per-thread `schedstat` runtime and TID/start-time identity. Exited
+threads' CPU remains in the process total, with departed identities explicit.
+Thread endpoint snapshots bracket the process interval and are attribution
+diagnostics, not a replacement process clock. A native interval whose CPU plus
+two resolution ticks cannot establish its budget remains inconclusive, including
+zero-tick short callbacks. Missing CPU evidence cannot complete acceptance.
+
+The native check-only `join_layout_controls` component executes production Join
+and ASOF callbacks for single-record, sliced multi-record `[7, 9, 8]`, recurring
+keys with decreasing timestamps, and 1024-byte Utf8 keys. It validates every
+output tuple, input immutability and owned cleanup. It records callback/row,
+RecordBatch, key-byte, distinct-key and timestamp-descent counts. Candidate Join
+preflight seals these controls with the product SHA and binary digest once per
+collection. They establish coverage, not performance samples. Run the focused
+regressions without collecting the eight-target matrix:
+
+```bash
+cargo test --locked -p calc-flow --features benchmark-internals \
+  --test native_join_components --test native_matched_fixture
+python -m unittest scripts.test_issue406_measurement scripts.test_issue406_report
+```
+
+The compaction component polls actual preparation once, then marks its prepared
+incoming batch ready. It records readiness, preparation completion and handler
+start/end on one monotonic timeline. Preparation exclusively borrows the same
+operator through worker completion and installation, so handler dispatch is
+serialized. `queue_seconds` measures benchmark readiness to dispatch, not a
+production edge queue. Preparation, handler, queue and combined p50/p95/p99 stay
+separate; queue time overlaps preparation and must not be added again. Base/delta
+replacement and a pending first poll do not prove handler overlap. The original
+during-compaction ≤2× target remains **unmeasured** for this architecture, with
+its reason and the post-compaction diagnostic preserved.
+
+This instrumentation changes the measured harness identity. Build it against
+both exact product revisions through the maintained overlay; old binaries and
+historical samples cannot inherit these clocks or controls. Final eight-target
+acceptance (#443) requires a separately frozen milestone, B/C SHAs, sealed
+release builds, sample inventory and budget. These controls make no performance
+claim and do not resume historical stopped collections.
+
 Rust workload fingerprints are scoped per bench target: each case's
 `workload_fingerprint` covers only its own `crates/calc-flow/benches/<target>.rs`
 bytes, so editing one bench source removes timing classification from that

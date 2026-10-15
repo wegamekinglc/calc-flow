@@ -953,6 +953,9 @@ fn run_native_component(arguments: &[String]) {
                 native_join_components::Component::Compaction => {
                     native_join_components::compaction(rows, if check { 4 } else { 500 }).await
                 }
+                native_join_components::Component::LayoutControls => {
+                    native_join_components::layout_controls().await
+                }
                 native_join_components::Component::DictionaryRefusalRetention => {
                     calc_flow::benchmark_internals::join_dictionary_refusal_retention_evidence()
                         .await

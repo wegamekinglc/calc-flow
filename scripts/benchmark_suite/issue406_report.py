@@ -14,6 +14,10 @@ from scripts.benchmark_suite.issue406_acceptance import (
     validate_complete_results,
     validate_observation,
 )
+from scripts.benchmark_suite.issue406_measurement import (
+    cpu_evidence_status,
+    sample_cpu_evidence,
+)
 from scripts.benchmark_suite.report import ROUNDS, SAMPLES, comparison, table
 from scripts.benchmark_suite.statistics import _median_ranks
 from scripts.toolkit import linear_percentile
@@ -30,6 +34,7 @@ PHASES = (
     "restore_seconds",
     "handler_seconds",
     "combined_seconds",
+    "queue_seconds",
     "startup_seconds",
     "terminal_seconds",
     "cleanup_seconds",
@@ -72,6 +77,7 @@ def _stats(values: list[float]) -> dict | None:
         "samples": len(values),
         "p50": statistics.median(values),
         "p95": linear_percentile(values, 0.95),
+        "p99": linear_percentile(values, 0.99),
         "median_interval": interval,
     }
 
@@ -105,7 +111,30 @@ def _arm(case, side: str, record: dict | None) -> dict:
         ),
         "measured_samples": len(samples),
         "checkpoint_bytes": _arm_checkpoint_bytes(samples),
+        "cpu_evidence_status": dict(
+            Counter(_sample_cpu_status(case, sample) for sample in samples)
+        ),
+        "cpu_process_seconds": _stats(
+            [
+                sample["cpu_evidence"]["process_cpu_seconds"]
+                for sample in samples
+                if isinstance(sample.get("cpu_evidence"), dict)
+                and _finite(sample["cpu_evidence"].get("process_cpu_seconds"))
+            ]
+        ),
     }
+
+
+def _sample_cpu_status(case, sample):
+    if "cpu_evidence" not in sample:
+        return "unmeasured"
+    try:
+        evidence = sample_cpu_evidence(sample, scope=case.cpu_scope)
+    except ValueError:
+        return "invalid"
+    return cpu_evidence_status(
+        evidence, threads=case.threads, budget=sample.get("cpu_budget")
+    )
 
 
 def _revision(case, base: dict, head: dict, records: dict, assessment: dict) -> dict:
@@ -422,9 +451,16 @@ def summarize_acceptance(report: dict) -> dict:
         )
     targets = _acceptance_targets(cases, records, report)
     validation_errors, complete = _summary_completeness(report, cases, known)
+    cpu_complete = all(
+        arm.get("cpu_evidence_status") == {"verified": ROUNDS * SAMPLES}
+        for case in cases
+        for side in known[case["case"]].sides
+        for arm in (case[side],)
+    )
     return {
         "schema": "calc-flow.issue406-summary.v1",
-        "evidence_complete": complete,
+        "evidence_complete": complete and cpu_complete,
+        "cpu_evidence_complete": cpu_complete,
         "assessment": assessment,
         "targets": targets,
         "cases": cases,
@@ -476,7 +512,8 @@ def _stat_cell(stats: dict | None, factor=1.0) -> str:
     )
     return (
         f"p50 {_number(stats['p50'], factor)}, "
-        f"p95 {_number(stats['p95'], factor)}{bounds}"
+        f"p95 {_number(stats['p95'], factor)}, "
+        f"p99 {_number(stats['p99'], factor)}{bounds}"
     )
 
 
@@ -596,6 +633,54 @@ def render_acceptance_markdown(summary: dict) -> str:
         "",
     ]
     modes = _mode_rows(summary)
+    phase_rows = [
+        [case["case"], side, phase, _stat_cell(stats, 1000)]
+        for case in summary["cases"]
+        for side in ("baseline", "candidate")
+        for phase, stats in case[side].get("phases", {}).items()
+        if phase
+        in (
+            "preparation_seconds",
+            "handler_seconds",
+            "queue_seconds",
+            "combined_seconds",
+        )
+    ]
+    if phase_rows:
+        parts.extend(
+            [
+                table(
+                    ["Case", "Revision", "Phase", "p50/p95/p99 [median interval], ms"],
+                    phase_rows,
+                ),
+                "",
+            ]
+        )
+    parts.extend(
+        [
+            "CPU evidence is required for acceptance: serial process CPU ≤2×wall; "
+            "parallel cases require plan.cpu_budgets[case_id]. Linux native process "
+            "ticks retain their resolution; a short interval whose upper CPU bound "
+            "exceeds its budget stays inconclusive. Thread scheduler runtimes cover "
+            "surviving/new threads; exited workers remain in the process total.",
+            "",
+            table(
+                ["Case", "Revision", "CPU evidence", "Process CPU p50/p95/p99, s"],
+                [
+                    [
+                        case["case"],
+                        side,
+                        str(case[side].get("cpu_evidence_status", {})),
+                        _stat_cell(case[side].get("cpu_process_seconds")),
+                    ]
+                    for case in summary["cases"]
+                    for side in ("baseline", "candidate")
+                    if case[side].get("measured_samples")
+                ],
+            ),
+            "",
+        ]
+    )
     parts.extend(
         [
             table(

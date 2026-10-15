@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use calc_flow::benchmark_internals::PhaseClock;
 use calc_flow::{
     Batch, BatchMetadata, CancellationToken, EdgeCollector, Epoch, JoinStateLimits, JoinTimeBounds,
     JsonMap, OperatorMetadata, OperatorStateSnapshot, StreamJobContext, StreamJoinOperator,
@@ -16,11 +17,16 @@ use sha2::{Digest, Sha256};
 const STAMP: i64 = 100_000_000;
 const BATCH_ROWS: usize = 64_000;
 
+#[path = "native_join_layouts.rs"]
+mod layouts;
+pub(crate) use layouts::layout_controls;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Component {
     CaptureRestore,
     Compaction,
     DictionaryRefusalRetention,
+    LayoutControls,
     #[cfg(feature = "benchmark-checkpoint-diagnostic")]
     CheckpointHistory,
 }
@@ -47,6 +53,11 @@ fn approved_component(name: &str, check: bool) -> Result<Component, &'static str
     match name {
         "join_capture_restore_1m" => Ok(Component::CaptureRestore),
         "join_compaction_1m" => Ok(Component::Compaction),
+        "join_layout_controls" => check_only_component(
+            Component::LayoutControls,
+            check,
+            "layout controls require --check",
+        ),
         "join_dictionary_refusal_retention" => check_only_component(
             Component::DictionaryRefusalRetention,
             check,
@@ -266,6 +277,7 @@ pub(crate) async fn capture_restore_batched(rows: usize, batch_rows: usize) -> V
     assert_eq!(resident_rows, rows as u64);
     let context = StreamOperatorContext::new(&job, "match", None);
     let setup_seconds = setup_start.elapsed().as_secs_f64();
+    let snapshot_resources = PhaseClock::start("snapshot");
     let start = Instant::now();
     original.prepare_checkpoint_async(&context).await.unwrap();
     let preparation_seconds = start.elapsed().as_secs_f64();
@@ -273,10 +285,13 @@ pub(crate) async fn capture_restore_batched(rows: usize, batch_rows: usize) -> V
     let snapshot = original.checkpoint(Epoch::INITIAL).unwrap();
     let capture_seconds = capture_start.elapsed().as_secs_f64();
     let snapshot_seconds = start.elapsed().as_secs_f64();
+    let snapshot_resources = snapshot_resources.finish();
     let mut restored = operator();
+    let restore_resources = PhaseClock::start("restore");
     let restore_start = Instant::now();
     restored.restore(&snapshot).unwrap();
     let restore_seconds = restore_start.elapsed().as_secs_f64();
+    let restore_resources = restore_resources.finish();
     let oracle_start = Instant::now();
     let segments = segment_inventory(&snapshot);
     let restored_live_rows = retained(&restored);
@@ -301,6 +316,7 @@ pub(crate) async fn capture_restore_batched(rows: usize, batch_rows: usize) -> V
         "captured_dirty_rows": resident_rows,
         "restored_live_rows": restored_live_rows,
         "snapshot_seconds": snapshot_seconds,
+        "resource_phases": {"snapshot":snapshot_resources,"restore":restore_resources},
         "preparation_seconds": preparation_seconds,
         "capture_seconds": capture_seconds,
         "restore_seconds": restore_seconds,
@@ -416,16 +432,7 @@ async fn compaction_sample(
     let incoming_batch = batch(&new_keys);
     let mut output = EdgeCollector::new(operator.output_ports().to_vec());
     let setup_seconds = setup_start.elapsed().as_secs_f64();
-    let combined_start = Instant::now();
-    operator.prepare_checkpoint_async(&context).await.unwrap();
-    let preparation_seconds = combined_start.elapsed().as_secs_f64();
-    let handler_start = Instant::now();
-    operator
-        .process_data("left", incoming_batch, &context, &mut output)
-        .await
-        .unwrap();
-    let handler_seconds = handler_start.elapsed().as_secs_f64();
-    let combined_seconds = combined_start.elapsed().as_secs_f64();
+    let clocks = measure_serial_handler(&mut operator, &context, incoming_batch, &mut output).await;
     let oracle_start = Instant::now();
     assert!(output.drain("output").is_empty());
     let status = operator.status();
@@ -469,11 +476,9 @@ async fn compaction_sample(
         .await
         .unwrap();
     let cleanup_seconds = cleanup_start.elapsed().as_secs_f64();
-    (
+    let mut sample = clocks;
+    sample.as_object_mut().unwrap().extend(
         json!({
-            "preparation_seconds": preparation_seconds,
-            "handler_seconds": handler_seconds,
-            "combined_seconds": combined_seconds,
             "pre_handler_retained_rows": pre_handler_retained_rows,
             "post_handler_retained_rows": post_handler_retained_rows,
             "replay_output_rows": rows + incoming,
@@ -492,10 +497,76 @@ async fn compaction_sample(
                 "before_deltas": before_deltas,
                 "after_deltas": after_deltas,
             }
-        }),
-        original_output,
-        status,
-    )
+        }).as_object().unwrap().clone()
+    );
+    (sample, original_output, status)
+}
+
+async fn measure_serial_handler(
+    operator: &mut StreamJoinOperator,
+    context: &StreamOperatorContext<'_>,
+    incoming_batch: Batch,
+    output: &mut EdgeCollector,
+) -> Value {
+    let combined_resources = PhaseClock::start("combined");
+    let preparation_resources = PhaseClock::start("preparation");
+    let combined_start = Instant::now();
+    // Poll real preparation once before declaring the handler ready. The same
+    // operator stays exclusively borrowed until preparation completes.
+    let (first_poll_pending, handler_ready_ns) = {
+        let preparation = operator.prepare_checkpoint_async(context);
+        tokio::pin!(preparation);
+        let first_poll_pending = match futures::poll!(&mut preparation) {
+            std::task::Poll::Pending => true,
+            std::task::Poll::Ready(result) => {
+                result.unwrap();
+                false
+            }
+        };
+        let ready = combined_start.elapsed().as_nanos();
+        if first_poll_pending {
+            preparation.await.unwrap();
+        }
+        (first_poll_pending, ready)
+    };
+    let preparation_completed_ns = combined_start.elapsed().as_nanos();
+    let preparation_seconds = combined_start.elapsed().as_secs_f64();
+    let preparation_resources = preparation_resources.finish();
+    let handler_resources = PhaseClock::start("handler");
+    let handler_started_ns = combined_start.elapsed().as_nanos();
+    let queue_seconds =
+        Duration::from_nanos(u64::try_from(handler_started_ns - handler_ready_ns).unwrap())
+            .as_secs_f64();
+    let handler_start = Instant::now();
+    operator
+        .process_data("left", incoming_batch, context, output)
+        .await
+        .unwrap();
+    let handler_seconds = handler_start.elapsed().as_secs_f64();
+    let handler_completed_ns = combined_start.elapsed().as_nanos();
+    let handler_resources = handler_resources.finish();
+    let combined_seconds = combined_start.elapsed().as_secs_f64();
+    let combined_resources = combined_resources.finish();
+    json!({
+        "preparation_seconds": preparation_seconds,
+        "handler_seconds": handler_seconds,
+        "combined_seconds": combined_seconds,
+        "queue_seconds": queue_seconds,
+        "resource_phases": {"preparation":preparation_resources,"handler":handler_resources,"combined":combined_resources},
+        "schedule": {
+            "clock":"monotonic-ns-from-preparation-start",
+            "owner":"single-exclusive-operator",
+            "preparation_started_ns":0,
+            "preparation_first_poll_pending":first_poll_pending,
+            "handler_ready_ns":handler_ready_ns,
+            "preparation_completed_ns":preparation_completed_ns,
+            "handler_started_ns":handler_started_ns,
+            "handler_completed_ns":handler_completed_ns,
+            "during_compaction_status":"unmeasured",
+            "reason":"prepare_checkpoint_async exclusively borrows this operator through worker completion and installation; handler dispatch is serialized",
+            "queue_scope":"benchmark handler readiness after first preparation poll to handler start; not a production edge-queue clock",
+        },
+    })
 }
 
 pub(crate) async fn compaction(rows: usize, incoming: usize) -> Value {
@@ -519,8 +590,6 @@ pub(crate) async fn compaction(rows: usize, incoming: usize) -> Value {
 
 #[cfg(test)]
 mod dictionary_arguments {
-    use super::parse_arguments;
-
     #[test]
     fn test_dictionary_refusal_requires_the_registered_check_only_case() {
         let arguments = [
@@ -528,11 +597,15 @@ mod dictionary_arguments {
             "join_dictionary_refusal_retention".into(),
             "--check".into(),
         ];
-        assert!(parse_arguments(&arguments).unwrap().unwrap().1);
-        assert!(parse_arguments(&arguments[..2]).is_err());
-        assert!(parse_arguments(&["--check".into()]).unwrap().is_none());
+        assert!(super::parse_arguments(&arguments).unwrap().unwrap().1);
+        assert!(super::parse_arguments(&arguments[..2]).is_err());
+        assert!(
+            super::parse_arguments(&["--check".into()])
+                .unwrap()
+                .is_none()
+        );
         let mut extra = arguments.to_vec();
         extra.extend(["--rows".into(), "3".into()]);
-        assert!(parse_arguments(&extra).is_err());
+        assert!(super::parse_arguments(&extra).is_err());
     }
 }

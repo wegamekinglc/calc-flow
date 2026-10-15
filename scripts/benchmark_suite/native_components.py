@@ -269,11 +269,96 @@ def _validate_compaction(observation: dict) -> dict:
         ):
             raise ValueError("combined compaction clock omits work")
         _validate_compaction_witness(sample, mode)
+        if "schedule" in sample:
+            validate_serial_compaction_schedule(sample)
     return {
         **observation,
         "handler_ratio": observation["armed"]["handler_seconds"]
         / observation["steady"]["handler_seconds"],
     }
+
+
+def validate_serial_compaction_schedule(sample: dict) -> None:
+    """Check real preparation polling and serialized dispatch, never infer overlap."""
+    schedule = sample.get("schedule", {})
+    if not isinstance(schedule, dict):
+        raise ValueError("invalid serialized compaction schedule")
+    fields = (
+        "preparation_started_ns",
+        "handler_ready_ns",
+        "preparation_completed_ns",
+        "handler_started_ns",
+        "handler_completed_ns",
+    )
+    times = [schedule.get(field) for field in fields]
+    if (
+        schedule.get("owner") != "single-exclusive-operator"
+        or schedule.get("during_compaction_status") != "unmeasured"
+        or type(schedule.get("preparation_first_poll_pending")) is not bool
+        or not isinstance(schedule.get("reason"), str)
+        or not schedule["reason"]
+        or any(type(value) is not int or value < 0 for value in times)
+        or times != sorted(times)
+        or times[0] != 0
+        or times[3] == times[4]
+    ):
+        raise ValueError("invalid serialized compaction schedule")
+    queue = sample.get("queue_seconds")
+    if (
+        type(queue) not in (float, int)
+        or not math.isfinite(queue)
+        or not math.isclose(queue, (times[3] - times[1]) / 1e9, abs_tol=1e-12)
+        or sample["combined_seconds"] < times[4] / 1e9
+    ):
+        raise ValueError("compaction queue/combined clocks disagree with schedule")
+
+
+def validate_join_layout_controls(observation: dict) -> dict:
+    """Require each actual Join/ASOF layout execution and its full oracle."""
+    expected = {
+        (operator, layout)
+        for operator in ("join", "asof")
+        for layout in ("single_record", "multi_record", "unordered", "wide_key")
+    }
+    controls = observation.get("controls")
+    if (
+        observation.get("schema") != "calc-flow.join-layout-controls.v1"
+        or observation.get("check_only") is not True
+        or not isinstance(controls, list)
+        or len(controls) != len(expected)
+    ):
+        raise ValueError("missing native layout control inventory")
+    seen = set()
+    for control in controls:
+        if not isinstance(control, dict):
+            raise ValueError("invalid native layout control")
+        identity = (control.get("operator"), control.get("layout"))
+        if identity not in expected or identity in seen:
+            raise ValueError("unexpected or repeated native layout control")
+        seen.add(identity)
+        layout = identity[1]
+        geometry = [7, 9, 8] if layout == "multi_record" else [24]
+        _require_refusal_fields(
+            control,
+            {
+                "data_callbacks": 2,
+                "input_rows": 48,
+                "output_rows": 144
+                if layout == "unordered" and identity[0] == "join"
+                else 24,
+                "event_record_batch_rows": [geometry, geometry],
+                "event_record_batch_count": len(geometry),
+                "timestamp_descents_per_event": 23 if layout == "unordered" else 0,
+                "per_key_timestamp_descents": 20 if layout == "unordered" else 0,
+                "unique_keys": 4 if layout == "unordered" else 24,
+                "key_bytes_per_event": 24 * (1024 if layout == "wide_key" else 8),
+                "max_key_bytes": 1024 if layout == "wide_key" else 8,
+                "validated_all_rows": True,
+                "input_unchanged": True,
+                "owned_cleanup_complete": True,
+            },
+        )
+    return dict(observation)
 
 
 def _validate_lifecycle(observation: dict) -> None:
@@ -313,6 +398,7 @@ def validate_small_batch(observation: dict) -> dict:
         "handler_seconds": median(seconds),
         "handler_median_us": median(seconds) * 1_000_000,
         "handler_p95_us": linear_percentile(seconds, 0.95) * 1_000_000,
+        "handler_p99_us": linear_percentile(seconds, 0.99) * 1_000_000,
         "full_handler_samples": samples[:-1],
         "partial_handler_samples": samples[-1:],
     }

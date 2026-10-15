@@ -2,6 +2,13 @@
   "schema": "calc-flow.rust-workload-migrations.v1",
   "migrations": [
     {
+      "target": "stream_join_perf",
+      "baseline_sha256": "718d6aacdab004ed0e06ecf4f66d7e7e25896ff8c0d2acf3b5a34525e77084e6",
+      "candidate_sha256": "0aa67fed5b67f03fb84fbf688749a2263edd253d160ab8d01d06bec332a5fb95",
+      "reason": "Harness-only CLI extension: register the check-only Join/ASOF layout control under benchmark-internals. Default Criterion workloads, inputs and clocks are unchanged. The separate acceptance overlay copies the new resource/layout helpers to both exact product revisions; its instrumented component observations cannot reuse historical timing samples.",
+      "reference": "Issue #428 / DAL-338"
+    },
+    {
       "target": "sql_datafusion_performance",
       "baseline_sha256": "f1a5b299e9af7d8b8af6717e9bd76638bdb4de89bb08e4e7372259d6876d4ae0",
       "candidate_sha256": "05bdd01473ee3dcbf773368402eee46998b34ba2a0f971aa0ba78538b74620ce",

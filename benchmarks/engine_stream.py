@@ -549,6 +549,7 @@ async def _measure_ready_clock(
     job,
     *,
     join_mode: str | None = None,
+    phase_clock=None,
 ) -> tuple[pa.Table, float, dict]:
     if join_mode not in (None, "sealed", "retained"):
         raise ValueError("unknown Join measurement mode")
@@ -563,6 +564,7 @@ async def _measure_ready_clock(
         pending, dimension_rows = await _preload_join_dimension(
             sources, streams, job, static_join
         )
+    resources = None if phase_clock is None else phase_clock("processing")
     started = time.perf_counter_ns()
     await _push_processing_events(sources, streams, sink, pending)
     await asyncio.wait_for(sink.complete.wait(), timeout=600)
@@ -570,6 +572,7 @@ async def _measure_ready_clock(
         raise RuntimeError("stream output row count differs from the timed workload")
     table = pa.concat_tables(sink.tables)
     ended = time.perf_counter_ns()
+    cpu_evidence = None if resources is None else resources.finish()
     seconds = (ended - started) / 1e9
     if static_join:
         await asyncio.wait_for(
@@ -585,6 +588,7 @@ async def _measure_ready_clock(
         {
             "processing_started_ns": started,
             "processing_ended_ns": ended,
+            **({"cpu_evidence": cpu_evidence} if cpu_evidence is not None else {}),
         },
     )
 

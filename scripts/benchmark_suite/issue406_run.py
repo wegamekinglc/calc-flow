@@ -407,6 +407,7 @@ class AcceptanceRunner:
                 "observation_id": observation_id,
                 "raw_observation_sha256": raw_digest,
                 "group_member_ids": [member.id for member in group],
+                "cpu_budget": self._cpu_budget(case),
             }
             for key, value in mapped.items()
         }
@@ -418,6 +419,14 @@ class AcceptanceRunner:
                 normalized[member.id],
             )
         return normalized
+
+    def _cpu_budget(self, case):
+        from scripts.benchmark_suite.issue406_measurement import validate_cpu_budget
+
+        budget = self.plan.get("cpu_budgets", {}).get(
+            case.id, 2.0 if case.threads == 1 else None
+        )
+        return validate_cpu_budget(threads=case.threads, budget=budget)
 
     def _validate_runtime_product(self, case, raw, product):
         if (
@@ -435,7 +444,15 @@ class AcceptanceRunner:
 
         raw = validate_native_component(raw)
         if group[0].row == 4:
-            mapped = {member.id: raw for member in group}
+            mapped = {
+                member.id: {
+                    **raw,
+                    "cpu_evidence": raw.get("resource_phases", {}).get(
+                        "restore" if member.workload == "join_restore" else "snapshot"
+                    ),
+                }
+                for member in group
+            }
         else:
             mapped = {
                 member.id: {
@@ -443,6 +460,12 @@ class AcceptanceRunner:
                     **raw[
                         "armed" if member.workload.endswith("compacting") else "steady"
                     ],
+                    "cpu_evidence": raw.get(
+                        "armed" if member.workload.endswith("compacting") else "steady",
+                        {},
+                    )
+                    .get("resource_phases", {})
+                    .get("handler"),
                 }
                 for member in group
             }
@@ -452,6 +475,7 @@ class AcceptanceRunner:
                 "oracle_passed": True,
                 "cleanup_complete": True,
                 "lifecycle": "completed",
+                "cpu_budget": 2.0,
             }
             for key, value in mapped.items()
         }
@@ -491,6 +515,7 @@ class AcceptanceRunner:
 
     async def prepare(self, group, side, round_index):
         case = group[0]
+        cpu_budget = self._cpu_budget(case)
         if side == "candidate" and case.workload.startswith("join"):
             await self._dictionary_refusal_preflight(case)
         if case.workload not in RUNTIME_WORKLOADS:
@@ -523,6 +548,7 @@ class AcceptanceRunner:
             "family": "join-asof-acceptance",
             "side": side,
             "product_commit": self.release(case, side)["product_commit"],
+            "cpu_budget": cpu_budget,
             "fixture_root": str(self.fixture_root(side, case.mode, round_index)),
         }
         self.prepared_cases[(case.id, side, round_index)] = specification
@@ -536,6 +562,7 @@ class AcceptanceRunner:
     async def _dictionary_refusal_preflight(self, case):
         from scripts.benchmark_suite.native_components import (
             validate_join_dictionary_refusal,
+            validate_join_layout_controls,
         )
 
         if self.dictionary_refusal_checked:
@@ -555,14 +582,29 @@ class AcceptanceRunner:
             },
         )
         validate_join_dictionary_refusal(observed)
+        layouts = await self._run_native_control(case, binary, "join_layout_controls")
+        write_json(
+            self.output / "correctness" / "join-layout-controls.json",
+            {
+                "product_commit": self.release(case, "candidate")["product_commit"],
+                "binary_sha256": binary["sha256"],
+                "control": layouts,
+            },
+        )
+        validate_join_layout_controls(layouts)
         self.dictionary_refusal_checked = True
 
     async def _run_dictionary_refusal_control(self, case, binary):
-        destination = self.output / "correctness" / "join-dictionary-refusal"
+        return await self._run_native_control(
+            case, binary, "join_dictionary_refusal_retention"
+        )
+
+    async def _run_native_control(self, case, binary, component):
+        destination = self.output / "correctness" / component
         destination.mkdir(parents=True, exist_ok=True)
         arguments = [
             "--native-component",
-            "join_dictionary_refusal_retention",
+            component,
             "--check",
         ]
         with (destination / "stderr.log").open("wb") as log:
@@ -593,7 +635,7 @@ class AcceptanceRunner:
         else:
             self.processes.pop(process.pid)
         if process.returncode:
-            raise RuntimeError(f"dictionary refusal control failed; see {destination}")
+            raise RuntimeError(f"native {component} control failed; see {destination}")
         observed = json.loads(stdout)
         self._validate_native_environment(case, observed)
         return observed

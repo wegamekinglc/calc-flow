@@ -142,6 +142,22 @@ async fn test_compaction_proves_replacement_and_preserves_actual_rows() {
         assert_eq!(sample["post_handler_retained_rows"], 28);
         assert_eq!(sample["replay_output_rows"], 28);
         let witness = &sample["compaction_witness"];
+        let schedule = &sample["schedule"];
+        assert_eq!(schedule["during_compaction_status"], "unmeasured");
+        assert!(
+            schedule["handler_started_ns"].as_u64().unwrap()
+                >= schedule["preparation_completed_ns"].as_u64().unwrap()
+        );
+        assert!(
+            schedule["preparation_completed_ns"].as_u64().unwrap()
+                >= schedule["handler_ready_ns"].as_u64().unwrap()
+        );
+        assert!(sample["queue_seconds"].as_f64().unwrap() >= 0.0);
+        for phase in ["preparation", "handler", "combined"] {
+            assert_eq!(sample["resource_phases"][phase]["scope"], phase);
+            #[cfg(target_os = "linux")]
+            assert_eq!(sample["resource_phases"][phase]["status"], "measured");
+        }
         assert_eq!(witness["setup_dirty_epochs"], 4);
         if mode == "armed" {
             assert_ne!(witness["before_base_sha256"], witness["after_base_sha256"]);
@@ -157,5 +173,37 @@ async fn test_compaction_proves_replacement_and_preserves_actual_rows() {
                 >= sample["preparation_seconds"].as_f64().unwrap()
                     + sample["handler_seconds"].as_f64().unwrap()
         );
+    }
+}
+
+#[tokio::test]
+async fn test_layout_controls_execute_both_joins_with_exact_batch_geometry() {
+    let result = native_join_components::layout_controls().await;
+    let controls = result["controls"].as_array().unwrap();
+    assert_eq!(controls.len(), 8);
+    for sample in controls {
+        let expected_rows = if sample["operator"] == "join" && sample["layout"] == "unordered" {
+            144
+        } else {
+            24
+        };
+        assert_eq!(sample["output_rows"], expected_rows);
+        assert_eq!(sample["validated_all_rows"], true);
+        assert_eq!(sample["input_unchanged"], true);
+        assert_eq!(sample["owned_cleanup_complete"], true);
+        match sample["layout"].as_str().unwrap() {
+            "multi_record" => assert_eq!(
+                sample["event_record_batch_rows"],
+                serde_json::json!([[7, 9, 8], [7, 9, 8]])
+            ),
+            "unordered" => {
+                assert_eq!(sample["timestamp_descents_per_event"], 23);
+                assert_eq!(sample["per_key_timestamp_descents"], 20);
+                assert_eq!(sample["unique_keys"], 4);
+            }
+            "wide_key" => assert_eq!(sample["key_bytes_per_event"], 24 * 1024),
+            "single_record" => assert_eq!(sample["event_record_batch_count"], 1),
+            _ => panic!("unexpected layout"),
+        }
     }
 }
