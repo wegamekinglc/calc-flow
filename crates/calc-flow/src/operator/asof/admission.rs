@@ -361,6 +361,7 @@ struct InputIdentities<'a> {
     ordered_append: bool,
 }
 
+#[derive(Clone, Copy)]
 pub(crate) struct IngressFacts {
     watermark: Option<crate::EventTime>,
     late: u64,

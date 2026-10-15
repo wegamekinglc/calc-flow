@@ -28,7 +28,7 @@ pub(crate) enum Preparation {
     Join(Mutex<mpsc::Receiver<Result<PureMasks>>>),
     Asof {
         receiver: Mutex<mpsc::Receiver<Result<AsofFacts>>>,
-        order: std::sync::OnceLock<(Option<i64>, Option<bool>)>,
+        facts: std::sync::OnceLock<AsofFacts>,
     },
 }
 
@@ -46,7 +46,7 @@ impl Preparation {
             Sender::Asof(sender),
             Self::Asof {
                 receiver: Mutex::new(receiver),
-                order: std::sync::OnceLock::new(),
+                facts: std::sync::OnceLock::new(),
             },
         )
     }
@@ -60,23 +60,28 @@ impl Preparation {
 
     pub(crate) async fn asof(&self) -> Result<AsofFacts> {
         match self {
-            Self::Asof { receiver, order } => {
-                let facts = receive(receiver).await?;
-                let _ = order.set((facts.watermark(), facts.ordered));
-                Ok(facts)
+            Self::Asof { receiver, facts } => {
+                // Replay pressure can retry admission with the same context.
+                // Immutable facts belong to the envelope, not to one attempt.
+                if let Some(prepared) = facts.get() {
+                    return Ok(*prepared);
+                }
+                let prepared = receive(receiver).await?;
+                let _ = facts.set(prepared);
+                Ok(prepared)
             }
             Self::Join(_) => Err(kind_mismatch()),
         }
     }
 
     pub(crate) fn asof_order(&self, watermark: Option<i64>) -> Option<bool> {
-        let Self::Asof { order, .. } = self else {
+        let Self::Asof { facts, .. } = self else {
             return None;
         };
-        order
+        facts
             .get()
-            .filter(|(prepared, _)| *prepared == watermark)
-            .and_then(|(_, ordered)| *ordered)
+            .filter(|prepared| prepared.watermark() == watermark)
+            .and_then(|prepared| prepared.ordered)
     }
 }
 

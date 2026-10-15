@@ -134,3 +134,57 @@ CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
 The two new regression modules also have no complexity violations at limit 8.
 Remote CI, Codacy and review status are recorded with the exact pushed head in
 the PR/issue handoff; local checks do not establish merge readiness.
+
+## Replay capacity fallback repair
+
+Repair starts at PR #451 head
+`e16e5db88da88d7c033963eee034b0f61af19d7b`. The independent review supplied
+`replay-pressure-regression.patch` and `replay-pressure-checks.txt` as Multica
+attachments. Its unchanged-head reproduction failed at max_state_bytes 65,536
+and 64 rows: serial admission accepted both sides, while prepared admission
+consumed its facts again after stopping replay and failed with a closed-channel
+Internal error. That reviewed failure is reused without repeating an unchanged
+failing build.
+
+Cache the successfully received ASOF facts in the envelope's existing OnceLock,
+replacing the order-only cache. The facts are a fixed-size Copy value, so retries
+reuse the same immutable classification and proof without another channel read
+or allocation. Owner validation still checks current schema, protocol, watermark,
+resident identity boundaries and counters on every attempt. The replay/status
+rollback, publication and cleanup paths are unchanged.
+
+The supplied combination regression is retained under its original test name.
+It reuses the existing pressure-pair helper for all 15 supplied limit/row
+combinations. Both prepared and serial controls compare acceptance, full status,
+finalization and state fees; only explicitly measured replay-log bytes are
+subtracted for comparison. The 65,536-byte / 64-row case asserts that replay was
+actually dropped. Current inventory accounting is checked and every pool must
+return to zero after reset/drop and awaited gather drain.
+
+The repaired combination regression passes 1/1 (2,126 filtered), covering all
+15 supplied combinations in 0.61 s after a 3 minute 55 second rebuild. Eight
+additional affected replay/admission/cleanup tests pass (2,119 filtered) in
+0.87 s using the same rebuilt binary:
+
+```bash
+CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
+  cargo test --locked -p calc-flow --lib \
+  test_review_ingress_facts_preserve_replay_pressure_fallback \
+  -- --test-threads=1 --nocapture
+
+target/debug/deps/calc_flow-71dd66c0d944c938 --test-threads=1 \
+  operator::asof::tests::source_replay::replay_ \
+  operator::asof::admission::identity_tests::columnar::ingress:: \
+  runtime::streaming::operator_task::ingress_admission::tests::test_ingress_admission_panic_cleanup_joins_every_worker \
+  runtime::streaming::operator_task::tests::ingress_admission_tests::test_ingress_admission_joins_workers_waiting_for_input
+```
+
+The unaffected parts of the original 68-check evidence remain valid; no full
+regression or performance collection is repeated. Lizard at complexity limit
+8 reports no warnings in either changed ingress or replay-test module. Format,
+whitespace and unchanged project-schema checks pass.
+
+The repair also passes `cargo clippy --locked -p calc-flow --lib --tests -- -D warnings`
+with the same build settings above. No public interface, checkpoint layout,
+limit, lint threshold or exemption changed. The repaired head's remote
+CI/Codacy/review snapshot is recorded in the follow-up handoff.
