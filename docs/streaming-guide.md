@@ -1040,6 +1040,7 @@ and per-side byte cap, validates historical identities/keys/event times and
 inventory, and checks live charge sums, metrics and limits. Integrity checksums
 do not authenticate original admission values.
 
+Live row IDs must be unique within each input side.
 Legacy full layouts 1 and 2 undergo complete schema, history and exact V1 charge
 validation, including event times and charges of overwritten or tombstoned
 rows, before independently funded selected live copies replace their
