@@ -66,6 +66,21 @@ struct SchemaWork {
     hook: Option<super::super::SchemaTestHook>,
 }
 
+impl SchemaWork {
+    fn event_indices(&self) -> [usize; 2] {
+        let find = |side: usize, name: &str| {
+            self.plans[side]
+                .iter()
+                .position(|field| field.name() == name)
+                .expect("compiled event-time field in owned schema plan")
+        };
+        [
+            find(0, &self.metadata.expected.left_event_time),
+            find(1, &self.metadata.expected.right_event_time),
+        ]
+    }
+}
+
 impl OwnedCpuWork for SchemaWork {
     type Output = SchemaDecision;
 
@@ -296,8 +311,14 @@ impl StreamJoinOperator {
         stop: &GatherStop,
     ) -> Result<bool> {
         let output = ticket.finish().await?;
-        output.install(|decision| self.install_schema_decision(decision, snapshot, job))?;
+        let mut decision = None;
+        output.install(|value| {
+            decision = Some(value);
+            Ok(())
+        })?;
         self.wait_metadata_cleanup(stop, job).await?;
+        job.check_cancelled()?;
+        self.install_schema_decision(decision.expect("observed schema decision"), snapshot, job)?;
         Ok(true)
     }
 

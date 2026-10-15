@@ -31,6 +31,7 @@ pub(super) struct Config<'a> {
     pub(super) schemas: [SchemaRef; 2],
     pub(super) keys: [&'a [usize]; 2],
     pub(super) time_indices: [usize; 2],
+    pub(super) dictionary_credit: MemoryReservation,
     #[cfg(test)]
     pub(super) metadata_hook: Option<&'a super::super::MetadataTestHook>,
     #[cfg(test)]
@@ -45,6 +46,7 @@ pub(super) struct Prepared {
     pub(super) writer: super::WriterState,
     pub(super) containers: Arc<ContainerFunding>,
     pub(super) workspace: MemoryReservation,
+    pub(super) keys: Option<super::super::key_dictionary::Rebuilt>,
 }
 
 struct Decoded<'a> {
@@ -447,11 +449,19 @@ impl<'a, 'c> Decoder<'a, 'c> {
         };
         self.mark_live(&state)?;
         (self.check)()?;
+        let keys = super::super::key_dictionary::Dictionary::default().rebuild_checked(
+            [&state.left, &state.right],
+            &self.config.dictionary_credit,
+            self.config.name,
+            self.check,
+        )?;
+        (self.check)()?;
         Ok(Prepared {
             state,
             writer,
             containers: self.containers,
             workspace: self.workspace,
+            keys,
         })
     }
 

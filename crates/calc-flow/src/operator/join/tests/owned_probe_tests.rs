@@ -390,9 +390,10 @@ pub(super) async fn assert_refused_process_data(service: &TestService) {
     assert_eq!(join_work().sql_probe_table_builds, 0);
     assert_eq!(
         join_work().arena_frames,
-        PROBE_ROWS,
+        0,
         "refused worker admission must reuse recovered probe keys"
     );
+    assert_eq!(join_work().key_encodings, 0);
     assert_eq!(operator.state.next_left_row_id, 8_193);
     assert_eq!(operator.state.metrics.emitted_match_rows, 8_193);
     assert_eq!(operator.state.deltas.pending.iter().count(), 8_194);

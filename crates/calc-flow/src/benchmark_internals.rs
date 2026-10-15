@@ -133,6 +133,18 @@ pub async fn settle_job(job: &crate::StreamJobContext) -> Result<()> {
     }
 }
 
+/// Checks retained Join rows after a genuine optional dictionary grant refusal.
+///
+/// This fixed three-row control reports correctness and owned cleanup evidence.
+/// It does not collect performance measurements.
+///
+/// # Errors
+/// Returns an error if construction, production admission, validation or owned
+/// gather cleanup fails.
+pub async fn join_dictionary_refusal_retention_evidence() -> Result<Value> {
+    crate::StreamJoinOperator::benchmark_dictionary_refusal_retention().await
+}
+
 /// Checks the fixed retained Join checkpoint lifecycle with four million quotes.
 ///
 /// This correctness-only diagnostic observes reservations and refunds in the

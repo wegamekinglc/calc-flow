@@ -123,12 +123,12 @@ fn add_unreferenced_payload(base: &mut encode::Base) {
 
 #[tokio::test]
 async fn test_rebase_rejects_malformed_selected_history_without_mutating_state() {
-    check_malformed_history(false).await;
+    Box::pin(check_malformed_history(false)).await;
 }
 
 #[tokio::test]
 async fn test_pending_rebase_rejects_malformed_selected_history_without_mutating_state() {
-    check_malformed_history(true).await;
+    Box::pin(check_malformed_history(true)).await;
 }
 
 async fn check_malformed_history(with_pending: bool) {

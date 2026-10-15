@@ -20,6 +20,7 @@ const BATCH_ROWS: usize = 64_000;
 pub(crate) enum Component {
     CaptureRestore,
     Compaction,
+    DictionaryRefusalRetention,
     #[cfg(feature = "benchmark-checkpoint-diagnostic")]
     CheckpointHistory,
 }
@@ -30,21 +31,43 @@ pub(crate) fn parse_arguments(
     if arguments.first().map(String::as_str) != Some("--native-component") {
         return Ok(None);
     }
-    let (name, check) = match arguments {
-        [_, name] => (name, false),
-        [_, name, check] if check == "--check" => (name, true),
-        _ => return Err("native component accepts one approved case and optional --check"),
-    };
-    let component = match name.as_str() {
-        "join_capture_restore_1m" => Component::CaptureRestore,
-        "join_compaction_1m" => Component::Compaction,
+    let (name, check) = component_arguments(arguments)?;
+    Ok(Some((approved_component(name, check)?, check)))
+}
+
+fn component_arguments(arguments: &[String]) -> Result<(&str, bool), &'static str> {
+    match arguments {
+        [_, name] => Ok((name, false)),
+        [_, name, check] if check == "--check" => Ok((name, true)),
+        _ => Err("native component accepts one approved case and optional --check"),
+    }
+}
+
+fn approved_component(name: &str, check: bool) -> Result<Component, &'static str> {
+    match name {
+        "join_capture_restore_1m" => Ok(Component::CaptureRestore),
+        "join_compaction_1m" => Ok(Component::Compaction),
+        "join_dictionary_refusal_retention" => check_only_component(
+            Component::DictionaryRefusalRetention,
+            check,
+            "dictionary refusal retention requires --check",
+        ),
         #[cfg(feature = "benchmark-checkpoint-diagnostic")]
-        "join_checkpoint_history_4m" if check => Component::CheckpointHistory,
-        #[cfg(feature = "benchmark-checkpoint-diagnostic")]
-        "join_checkpoint_history_4m" => return Err("checkpoint history requires --check"),
-        _ => return Err("unknown native component"),
-    };
-    Ok(Some((component, check)))
+        "join_checkpoint_history_4m" => check_only_component(
+            Component::CheckpointHistory,
+            check,
+            "checkpoint history requires --check",
+        ),
+        _ => Err("unknown native component"),
+    }
+}
+
+fn check_only_component(
+    component: Component,
+    check: bool,
+    error: &'static str,
+) -> Result<Component, &'static str> {
+    check.then_some(component).ok_or(error)
 }
 
 fn schema() -> Arc<Schema> {
@@ -492,4 +515,24 @@ pub(crate) async fn compaction(rows: usize, incoming: usize) -> Value {
         "state_equal": true,
         "restore_output_equivalent": true,
     })
+}
+
+#[cfg(test)]
+mod dictionary_arguments {
+    use super::parse_arguments;
+
+    #[test]
+    fn test_dictionary_refusal_requires_the_registered_check_only_case() {
+        let arguments = [
+            "--native-component".into(),
+            "join_dictionary_refusal_retention".into(),
+            "--check".into(),
+        ];
+        assert!(parse_arguments(&arguments).unwrap().unwrap().1);
+        assert!(parse_arguments(&arguments[..2]).is_err());
+        assert!(parse_arguments(&["--check".into()]).unwrap().is_none());
+        let mut extra = arguments.to_vec();
+        extra.extend(["--rows".into(), "3".into()]);
+        assert!(parse_arguments(&extra).is_err());
+    }
 }

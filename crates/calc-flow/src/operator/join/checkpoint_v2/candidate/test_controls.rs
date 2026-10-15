@@ -3,6 +3,12 @@ use crate::operator::join::StreamJoinOperator;
 
 fn config(operator: &StreamJoinOperator) -> Config<'_> {
     Config {
+        dictionary_credit: operator
+            .runtime
+            .runtime
+            .as_ref()
+            .expect("configured test restore runtime")
+            .incremental_reservation("stream-join-dictionary"),
         projection: operator.payload_projection.as_deref(),
         name: &operator.name,
         spec: &operator.spec,

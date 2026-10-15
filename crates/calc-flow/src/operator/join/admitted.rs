@@ -545,6 +545,7 @@ impl AdmittedRows for AdmittedBatch {
 }
 
 impl dyn AdmittedRows + '_ {
+    #[cfg(test)]
     pub(super) fn is_empty(&self) -> bool {
         self.len() == 0
     }

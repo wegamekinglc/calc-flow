@@ -47,6 +47,10 @@ pub(super) fn timezone(source: &DataType) -> Option<&str> {
 }
 
 impl FieldPlan {
+    pub(super) fn name(&self) -> &str {
+        &self.name
+    }
+
     fn empty(source: &Field) -> Self {
         Self {
             name: String::with_capacity(source.name().len()),

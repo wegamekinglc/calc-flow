@@ -79,3 +79,10 @@ impl inputs::ProbeInputs {
         }
     }
 }
+
+#[cfg(test)]
+#[derive(Default)]
+pub(super) struct ResultTestGate {
+    pub(super) entered: tokio::sync::Notify,
+    pub(super) release: tokio::sync::Notify,
+}

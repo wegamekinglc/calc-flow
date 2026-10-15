@@ -6,6 +6,129 @@ from copy import deepcopy
 from scripts.benchmark_suite.native_components import validate_native_component
 
 
+def dictionary_refusal_observation():
+    return {
+        "schema": "calc-flow.join-dictionary-refusal.v1",
+        "case": "join_dictionary_refusal_retention",
+        "check_only": True,
+        "admission_batch_rows": [2, 1],
+        "left_retained_rows": 2,
+        "right_retained_rows": 1,
+        "left_retained_bytes": 228,
+        "right_retained_bytes": 114,
+        "full_v1_row_charges": [114, 114, 114],
+        "output_keys": [["a", "a"]],
+        "state_limit_failures": 0,
+        "match_limit_failures": 0,
+        "dictionary_grant_refusals": 1,
+        "needs_rebuild_routes": 1,
+        "legacy_key_encodings": 3,
+        "sql_probe_table_builds": 1,
+        "rebuild_attempts": 0,
+        "rebuild_completions": 0,
+        "pool": {
+            "failed_dictionary_grows": 1,
+            "successful_sql_grows": 1,
+            "last_rejected_consumer": "sql-incremental:stream-join-dictionary",
+            "last_rejected_bytes": 1024,
+            "reserved_bytes": 0,
+        },
+        "owned_cleanup_complete": True,
+    }
+
+
+class DictionaryRefusalComponentTests(unittest.TestCase):
+    def test_dictionary_refusal_requires_exact_route_and_rebuild_counters(self):
+        from scripts.benchmark_suite.native_components import (
+            validate_join_dictionary_refusal,
+        )
+
+        observation = dictionary_refusal_observation()
+        for field, expected in (
+            ("dictionary_grant_refusals", 1),
+            ("needs_rebuild_routes", 1),
+            ("rebuild_attempts", 0),
+            ("rebuild_completions", 0),
+        ):
+            for value in (None, True, -1, expected + 1):
+                invalid = {**observation, field: value}
+                if field == "dictionary_grant_refusals":
+                    invalid["pool"] = {
+                        **observation["pool"],
+                        "failed_dictionary_grows": value,
+                    }
+                with (
+                    self.subTest(field=field, value=value),
+                    self.assertRaises(ValueError),
+                ):
+                    validate_join_dictionary_refusal(invalid)
+
+    def test_dictionary_refusal_rejects_boolean_pool_counts(self):
+        from scripts.benchmark_suite.native_components import (
+            validate_join_dictionary_refusal,
+        )
+
+        observation = dictionary_refusal_observation()
+        for field in (
+            "failed_dictionary_grows",
+            "successful_sql_grows",
+            "last_rejected_bytes",
+            "reserved_bytes",
+        ):
+            invalid = deepcopy(observation)
+            invalid["pool"][field] = field != "reserved_bytes"
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                validate_join_dictionary_refusal(invalid)
+
+    def test_dictionary_refusal_requires_retention_and_actual_pool_witness(self):
+        from scripts.benchmark_suite import native_components
+
+        observation = dictionary_refusal_observation()
+        original = deepcopy(observation)
+        result = native_components.validate_join_dictionary_refusal(observation)
+        self.assertEqual(result, original)
+        self.assertEqual(observation, original)
+        changes = (
+            ("check_only", False),
+            ("admission_batch_rows", [2, True]),
+            ("left_retained_rows", 0),
+            ("right_retained_bytes", 113),
+            ("full_v1_row_charges", [113, 114, 114]),
+            ("output_keys", []),
+            ("state_limit_failures", 1),
+            ("dictionary_grant_refusals", 0),
+            ("legacy_key_encodings", 0),
+            ("sql_probe_table_builds", 0),
+            ("owned_cleanup_complete", False),
+        )
+        for field, value in changes:
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                native_components.validate_join_dictionary_refusal(
+                    {**observation, field: value}
+                )
+
+    def test_dictionary_refusal_rejects_missing_or_forged_pool_evidence(self):
+        from scripts.benchmark_suite import native_components
+
+        observation = dictionary_refusal_observation()
+        for field, value in (
+            ("failed_dictionary_grows", 0),
+            ("successful_sql_grows", 0),
+            ("last_rejected_consumer", "forced-sql-flag"),
+            ("last_rejected_bytes", 0),
+            ("reserved_bytes", 1),
+        ):
+            invalid = deepcopy(observation)
+            invalid["pool"][field] = value
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                native_components.validate_join_dictionary_refusal(invalid)
+        for field in ("pool", "dictionary_grant_refusals", "full_v1_row_charges"):
+            invalid = deepcopy(observation)
+            invalid.pop(field)
+            with self.subTest(missing=field), self.assertRaises(ValueError):
+                native_components.validate_join_dictionary_refusal(invalid)
+
+
 def capture_observation():
     return {
         "schema": "calc-flow.native-component.v1",

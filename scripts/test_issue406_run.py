@@ -9,7 +9,7 @@ from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from scripts.benchmark_suite.issue406_acceptance import acceptance_inventory
 from scripts.benchmark_suite.issue406_run import (
@@ -53,6 +53,56 @@ async def settle_fixture_runner(runner, task):
 
 
 class AcceptanceDriverTests(unittest.IsolatedAsyncioTestCase):
+    async def test_candidate_join_preflight_records_refusal_control_once(self):
+        from scripts.test_benchmark_native_acceptance import (
+            dictionary_refusal_observation,
+        )
+        from scripts.toolkit import sha256_file
+
+        with TemporaryDirectory() as raw:
+            root = Path(raw)
+            binary = root / "native"
+            binary.write_bytes(b"sealed candidate binary fixture")
+            identity = {"path": str(binary), "sha256": sha256_file(binary)}
+            runner = AcceptanceRunner(
+                {
+                    "cpus": [0],
+                    "releases": {"candidate": {"product_commit": "c" * 40}},
+                    "native_binaries": {
+                        "candidate": {"stream_join_perf/enabled": identity}
+                    },
+                },
+                root,
+                0,
+            )
+            case = next(
+                case
+                for case in acceptance_inventory()
+                if case.workload == "join_capture"
+            )
+            control = AsyncMock(return_value=dictionary_refusal_observation())
+            with (
+                patch.object(
+                    runner, "_run_dictionary_refusal_control", control, create=True
+                ),
+                patch.object(
+                    runner, "sample", AsyncMock(return_value={"warmup": True})
+                ),
+            ):
+                for side, round_index in (
+                    ("candidate", 0),
+                    ("candidate", 1),
+                    ("baseline", 0),
+                ):
+                    await runner.prepare((case,), side, round_index)
+            self.assertEqual(control.await_count, 1)
+            observation = json.loads(
+                (root / "correctness" / "join-dictionary-refusal.json").read_text()
+            )
+            self.assertEqual(observation["product_commit"], "c" * 40)
+            self.assertEqual(observation["binary_sha256"], identity["sha256"])
+            self.assertEqual(observation["control"], dictionary_refusal_observation())
+
     def test_native_replay_uses_the_exact_source_sample_trace(self):
         with TemporaryDirectory() as raw_root:
             runner = AcceptanceRunner({}, Path(raw_root), 0)

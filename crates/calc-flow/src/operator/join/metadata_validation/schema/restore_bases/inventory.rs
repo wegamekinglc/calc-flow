@@ -209,11 +209,13 @@ fn expiration_bytes(rows: usize) -> Option<usize> {
 }
 
 pub(in crate::operator::join) fn diagnostic_bytes(name: &str) -> Option<usize> {
-    checked_sum(&[
+    let peaks = [
         checkpoint_diagnostic(name)?,
         time_diagnostic()?,
         reason_diagnostic(name)?,
-    ])
+    ];
+    let retained_historical = peaks.into_iter().max()?;
+    checked_sum(&peaks)?.checked_add(retained_historical)
 }
 
 fn checkpoint_diagnostic(name: &str) -> Option<usize> {

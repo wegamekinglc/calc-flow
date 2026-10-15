@@ -244,6 +244,7 @@ class AcceptanceRunner:
         self.environments = {}
         self.resources = []
         self.stop = asyncio.Event()
+        self.dictionary_refusal_checked = False
 
     async def register_process(self, creation):
         self.creations.add(creation)
@@ -490,6 +491,8 @@ class AcceptanceRunner:
 
     async def prepare(self, group, side, round_index):
         case = group[0]
+        if side == "candidate" and case.workload.startswith("join"):
+            await self._dictionary_refusal_preflight(case)
         if case.workload not in RUNTIME_WORKLOADS:
             if case.row == 8:
                 worker = await self._start_worker(case, side, round_index)
@@ -529,6 +532,71 @@ class AcceptanceRunner:
         if response["case"] != specification:
             raise ValueError("worker prepared a different acceptance workload")
         return self._persist(group, side, round_index, None, response["warmup"])
+
+    async def _dictionary_refusal_preflight(self, case):
+        from scripts.benchmark_suite.native_components import (
+            validate_join_dictionary_refusal,
+        )
+
+        if self.dictionary_refusal_checked:
+            return
+        binary = self.plan["native_binaries"]["candidate"]["stream_join_perf/enabled"]
+        if sha256_file(Path(binary["path"])) != binary["sha256"]:
+            raise ValueError("dictionary refusal control binary changed")
+        observed = await self._run_dictionary_refusal_control(case, binary)
+        destination = self.output / "correctness" / "join-dictionary-refusal.json"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        write_json(
+            destination,
+            {
+                "product_commit": self.release(case, "candidate")["product_commit"],
+                "binary_sha256": binary["sha256"],
+                "control": observed,
+            },
+        )
+        validate_join_dictionary_refusal(observed)
+        self.dictionary_refusal_checked = True
+
+    async def _run_dictionary_refusal_control(self, case, binary):
+        destination = self.output / "correctness" / "join-dictionary-refusal"
+        destination.mkdir(parents=True, exist_ok=True)
+        arguments = [
+            "--native-component",
+            "join_dictionary_refusal_retention",
+            "--check",
+        ]
+        with (destination / "stderr.log").open("wb") as log:
+            creation = asyncio.create_task(
+                asyncio.create_subprocess_exec(
+                    *_taskset(self.cpus(case), [binary["path"], *arguments]),
+                    cwd=ROOT,
+                    env=_child_environment(None, self.cpus(case)),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=log,
+                    start_new_session=self.fresh,
+                )
+            )
+            process = await self.register_process(creation)
+            stdout, _ = await process.communicate()
+        (destination / "stdout.log").write_bytes(stdout)
+        write_json(
+            destination / "process.json",
+            {
+                "pid": process.pid,
+                "returncode": process.returncode,
+                "argv": [binary["path"], *arguments],
+                "binary_sha256": binary["sha256"],
+            },
+        )
+        if self.fresh:
+            await self.retire_process(process.pid)
+        else:
+            self.processes.pop(process.pid)
+        if process.returncode:
+            raise RuntimeError(f"dictionary refusal control failed; see {destination}")
+        observed = json.loads(stdout)
+        self._validate_native_environment(case, observed)
+        return observed
 
     def _persist(self, group, side, round_index, index, raw):
         destination = self.destination(group, side, round_index, index)

@@ -51,7 +51,7 @@ async fn assert_native_probe_resolves_each_distinct_key_once_before_both_window_
             .collect::<Vec<_>>(),
         [(0, 0), (2, 0), (3, 1), (5, 1)]
     );
-    assert_eq!(join_work().key_encodings, 3);
+    assert_eq!(join_work().key_encodings, 1);
     assert_eq!(join_work().sql_probe_table_builds, 0);
     assert_eq!(join_work().native_key_lookups, 3);
 }
@@ -80,9 +80,9 @@ async fn assert_repeated_probe_keeps_only_one_canonical_owner_per_distinct_key()
         .unwrap()
         .unwrap();
     assert_eq!(
-        Arc::strong_count(&keys.keys[0]),
-        1,
-        "repeated probe positions must borrow one canonical owner without Arc cloning"
+        Arc::strong_count(keys.keys[0].as_ref().unwrap()),
+        2,
+        "one dictionary lease and one distinct probe owner must serve every repeated position"
     );
     assert_eq!(keys.keys.len(), 3);
     assert_probe_encodes_contiguous_frames_without_per_row_type_resolution().await;
@@ -126,11 +126,11 @@ async fn assert_probe_encodes_contiguous_frames_without_per_row_type_resolution(
     );
     assert_eq!(join_work().borrowed_key_hashes, 0);
     assert_eq!(join_work().borrowed_key_equalities, 0);
-    assert_eq!(join_work().arena_frames, 129);
+    assert_eq!(join_work().arena_frames, 0);
     assert_eq!(join_work().key_encodings, 1);
     assert!(join_work().key_type_resolutions <= 2);
     assert_eq!(keys.keys.len(), 1);
-    assert_eq!(Arc::strong_count(&keys.keys[0]), 1);
+    assert_eq!(Arc::strong_count(keys.keys[0].as_ref().unwrap()), 2);
 }
 
 fn generic_records() -> Vec<RecordBatch> {
@@ -215,8 +215,7 @@ async fn assert_sparse_generic_sql_has_no_owned_admission_rows() {
     let left = generic_sql_schema(&left_schema());
     let right = generic_sql_schema(&right_schema());
     let record = generic_sql_record;
-    let mut operator =
-        StreamJoinOperator::new("match", Arc::clone(&left), Arc::clone(&right), spec()).unwrap();
+    let (mut operator, pool) = generic_sql_operator(&left, &right);
     let job = job();
     let context = StreamOperatorContext::new(&job, "match", None);
     let opposite = Batch::table(
@@ -261,8 +260,9 @@ async fn assert_sparse_generic_sql_has_no_owned_admission_rows() {
     assert_eq!(
         join_work().sql_probe_table_builds,
         1,
-        "Int8 equality must actually execute generic SQL"
+        "real native grant refusal must execute generic SQL for accepted Int8 keys"
     );
+    assert!(pool.refusals.load(std::sync::atomic::Ordering::SeqCst) > 0);
     assert_eq!(
         prepared
             .output
@@ -310,6 +310,24 @@ async fn assert_sparse_generic_sql_has_no_owned_admission_rows() {
         &context,
     ))
     .await;
+}
+
+fn generic_sql_operator(
+    left: &SchemaRef,
+    right: &SchemaRef,
+) -> (
+    StreamJoinOperator,
+    Arc<persistent_dictionary_refusal_tests::DictionaryPool>,
+) {
+    let mut operator =
+        StreamJoinOperator::new("match", Arc::clone(left), Arc::clone(right), spec()).unwrap();
+    let pool = Arc::new(persistent_dictionary_refusal_tests::DictionaryPool::default());
+    operator
+        .runtime
+        .initialize_benchmark_pool(pool.clone())
+        .unwrap();
+    pool.mode.store(3, std::sync::atomic::Ordering::SeqCst);
+    (operator, pool)
 }
 
 fn generic_sql_schema(schema: &SchemaRef) -> SchemaRef {
@@ -549,7 +567,17 @@ async fn test_batch_admission_mixed_records_copy_and_borrow() {
     );
     assert_eq!(bundle.next_row_id, 6);
     bundle.admitted.prepare_retained_parents();
-    let retained = retained_rows(&bundle.admitted, &plan.key_indices, "match", None).unwrap();
+    let retained = retained_rows(
+        &bundle.admitted,
+        &plan.key_indices,
+        "match",
+        None,
+        &operator.key_dictionary,
+        &context,
+        &mut operator.key_work,
+    )
+    .await
+    .unwrap();
     for (index, row) in retained.iter().enumerate() {
         let original = &records[index / 3];
         let key =

@@ -953,6 +953,11 @@ fn run_native_component(arguments: &[String]) {
                 native_join_components::Component::Compaction => {
                     native_join_components::compaction(rows, if check { 4 } else { 500 }).await
                 }
+                native_join_components::Component::DictionaryRefusalRetention => {
+                    calc_flow::benchmark_internals::join_dictionary_refusal_retention_evidence()
+                        .await
+                        .unwrap()
+                }
                 #[cfg(feature = "benchmark-checkpoint-diagnostic")]
                 native_join_components::Component::CheckpointHistory => {
                     calc_flow::benchmark_internals::join_checkpoint_history_4m()
