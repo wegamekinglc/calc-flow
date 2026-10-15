@@ -6,8 +6,34 @@ use crate::{
 use datafusion::execution::memory_pool::MemoryReservation;
 use std::{collections::BTreeSet, sync::Arc};
 
-type Rows = Vec<(state::RightOrder, state::RowRef)>;
 type Buckets = Vec<(state::Encoding, Arc<state::RightBucket>)>;
+
+enum Rows {
+    Canonical(Vec<(state::RightOrder, state::RowRef)>),
+    Columns {
+        columns: Arc<super::batch::Columns>,
+        key: usize,
+        references: Arc<[state::RowRef]>,
+    },
+}
+
+impl Rows {
+    fn merge(
+        &self,
+        previous: &state::RightBucket,
+        stop: &GatherStop,
+    ) -> Result<state::RightBucket> {
+        match self {
+            Self::Canonical(rows) => previous.with_admitted(rows, &|| stop.check()),
+            Self::Columns {
+                columns,
+                key,
+                references,
+            } => previous
+                .with_admitted_columns(columns.rows_for_key(*key, references), &|| stop.check()),
+        }
+    }
+}
 
 struct InputBucket {
     key: state::Encoding,
@@ -42,7 +68,7 @@ impl ParallelCpuWork for AdmissionWork {
                 stop.check()?;
                 let empty = state::RightBucket::with_sequence_kind(self.kind);
                 let previous = input.previous.as_deref().unwrap_or(&empty);
-                let bucket = previous.with_admitted(&input.rows, &|| stop.check())?;
+                let bucket = input.rows.merge(previous, stop)?;
                 Ok((input.key.clone(), Arc::new(bucket)))
             })
             .collect()
@@ -51,6 +77,17 @@ impl ParallelCpuWork for AdmissionWork {
 
 #[cfg(test)]
 impl AdmissionWork {
+    pub(super) fn canonical_rows(&self) -> usize {
+        self.shards
+            .iter()
+            .flatten()
+            .map(|input| match &input.rows {
+                Rows::Canonical(rows) => rows.len(),
+                Rows::Columns { .. } => 0,
+            })
+            .sum()
+    }
+
     pub(super) fn key_units(&self) -> std::collections::BTreeMap<state::Encoding, usize> {
         self.shards
             .iter()
@@ -132,6 +169,18 @@ fn appends_after_state(
         context.check_cancelled()?;
         return Ok(false);
     }
+    if let Some(columns) = admission.general_right_columns() {
+        context.check_cancelled()?;
+        return columns.appends_after_state(operator, &admission.right_capacities, context);
+    }
+    legacy_appends_after_state(operator, admission, context)
+}
+
+fn legacy_appends_after_state(
+    operator: &StreamAsofJoinOperator,
+    admission: &Admission,
+    context: &StreamOperatorContext<'_>,
+) -> Result<bool> {
     let mut earliest = i64::MAX;
     for (ordinal, (identity, _)) in admission.right_identities().enumerate() {
         if ordinal.is_multiple_of(1_024) {
@@ -209,6 +258,7 @@ pub(super) async fn capture(
         .state
         .batches
         .admission_references(&admission.batches);
+    let column_references: Arc<[state::RowRef]> = references.clone().into();
     let mut work = AdmissionWork {
         shards: (0..units).map(|_| Vec::new()).collect(),
         kind,
@@ -216,19 +266,39 @@ pub(super) async fn capture(
         hook: operator.admission_hook.clone(),
         _input_credit: input_credit,
     };
+    let routes = capture_buckets(operator, admission, units, &column_references, &mut work);
+    if admission.general_right_columns().is_none() {
+        fill_rows(&mut work, admission, &references, &routes, context).await?;
+    }
+    Ok((work, references, credit))
+}
+
+fn capture_buckets(
+    operator: &StreamAsofJoinOperator,
+    admission: &Admission,
+    units: usize,
+    column_references: &Arc<[state::RowRef]>,
+    work: &mut AdmissionWork,
+) -> Vec<(usize, usize)> {
     let mut routes = Vec::with_capacity(admission.right_capacities.len());
-    for (key, count) in &admission.right_capacities {
+    for (id, (key, count)) in admission.right_capacities.iter().enumerate() {
         let shard = state::key_shard(key) % units;
         let target = &mut work.shards[shard];
         routes.push((shard, target.len()));
         target.push(InputBucket {
             key: key.clone(),
             previous: operator.state.right.owned_bucket(key),
-            rows: Vec::with_capacity(*count),
+            rows: admission.general_right_columns().map_or_else(
+                || Rows::Canonical(Vec::with_capacity(*count)),
+                |columns| Rows::Columns {
+                    columns: columns.clone(),
+                    key: id,
+                    references: column_references.clone(),
+                },
+            ),
         });
     }
-    fill_rows(&mut work, admission, &references, &routes, context).await?;
-    Ok((work, references, credit))
+    routes
 }
 
 fn admission_extents(
@@ -260,6 +330,9 @@ async fn encoding_buffers(
     let name = &operator.name;
     let mut buffers = operator.state.encoding_owner_allocation().0;
     let mut owners = BTreeSet::new();
+    if admission.general_right_columns().is_some() {
+        return column_encoding_buffers(operator, admission, context);
+    }
     for (ordinal, (identity, _)) in admission.right_identities().enumerate() {
         cooperate(ordinal, context).await?;
         for encoding in [&identity.1, &identity.2] {
@@ -270,6 +343,25 @@ async fn encoding_buffers(
             }
         }
     }
+    Ok(buffers)
+}
+
+fn column_encoding_buffers(
+    operator: &StreamAsofJoinOperator,
+    admission: &Admission,
+    context: &StreamOperatorContext<'_>,
+) -> Result<u64> {
+    let mut buffers = operator.state.encoding_owner_allocation().0;
+    let mut owners = BTreeSet::new();
+    for (ordinal, (key, _)) in admission.right_capacities.iter().enumerate() {
+        super::check_input_cancellation(ordinal, context)?;
+        if let Some((address, bytes)) = key.allocation() {
+            if owners.insert(address) {
+                buffers = super::super::checked(&operator.name, buffers, bytes)?;
+            }
+        }
+    }
+    context.check_cancelled()?;
     Ok(buffers)
 }
 
@@ -308,9 +400,10 @@ async fn fill_rows(
             std::borrow::Cow::Owned((_, _, sequence)) => sequence,
             std::borrow::Cow::Borrowed((_, _, sequence)) => sequence.clone(),
         };
-        work.shards[shard][bucket]
-            .rows
-            .push(((time, sequence), row));
+        let Rows::Canonical(rows) = &mut work.shards[shard][bucket].rows else {
+            unreachable!("columnar admission borrows its permutation")
+        };
+        rows.push(((time, sequence), row));
     }
     Ok(())
 }

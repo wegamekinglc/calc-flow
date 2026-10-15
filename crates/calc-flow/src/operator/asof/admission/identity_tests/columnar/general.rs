@@ -57,6 +57,10 @@ async fn test_general_batch_admission_avoids_canonical_row_descriptors() {
         }
     }
     assert_eq!(operator.runtime.pool.reserved(), 0);
+    for ingress in ["left", "right"] {
+        check_unordered_merge(ingress).await;
+    }
+    check_left_cursor_budget_fallback().await;
     // Preserve the original 4096-row/128KiB inline bound for ordered general
     // keys; introducing worker registration would change tight pool admission.
     let schema = super::schema(DataType::Boolean, DataType::Int64);
@@ -88,6 +92,106 @@ async fn test_general_batch_admission_avoids_canonical_row_descriptors() {
         0,
         "bounded ordered admission must not register a worker"
     );
+}
+
+async fn check_unordered_merge(ingress: &str) {
+    let schema = schema(DataType::Int64, DataType::Int64);
+    let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new())
+        .with_checkpointing(false);
+    let context = StreamOperatorContext::new(&job, "asof", None);
+    let seed = batch(vec![integer_record(
+        &schema,
+        0,
+        (0..512).map(|i| i * 2 + 1).collect(),
+    )]);
+    let incoming = batch(vec![integer_record(
+        &schema,
+        512,
+        (0..512).rev().map(|i| i * 2).collect(),
+    )]);
+    let mut operator = fixture(&schema);
+    install(&mut operator, &seed, ingress, &context, false).await;
+    state::take_identity_probes();
+    state::take_column_moves();
+    state::take_reserved_bucket_accesses();
+    install(&mut operator, &incoming, ingress, &context, false).await;
+    assert_eq!(
+        state::take_identity_probes(),
+        0,
+        "right duplicate proof must merge identities per key"
+    );
+    assert!(
+        state::take_column_moves() <= 512,
+        "right installation repeatedly shifted resident columns"
+    );
+    assert!(
+        state::take_reserved_bucket_accesses() <= 1,
+        "right installation must borrow each bucket once"
+    );
+    let mut legacy = fixture(&schema);
+    install(&mut legacy, &seed, ingress, &context, true).await;
+    install(&mut legacy, &incoming, ingress, &context, true).await;
+    assert_eq!(operator.status, legacy.status);
+    if ingress == "right" {
+        assert_eq!(
+            operator
+                .state
+                .right
+                .values()
+                .next()
+                .unwrap()
+                .checkpoint_capacities(),
+            legacy
+                .state
+                .right
+                .values()
+                .next()
+                .unwrap()
+                .checkpoint_capacities()
+        );
+    }
+    operator.prepare_checkpoint_async(&context).await.unwrap();
+    legacy.prepare_checkpoint_async(&context).await.unwrap();
+    let actual = operator.checkpoint(crate::Epoch::INITIAL).unwrap();
+    let expected = legacy.checkpoint(crate::Epoch::INITIAL).unwrap();
+    assert_eq!(actual.inline_metadata, expected.inline_metadata);
+    assert_eq!(actual.segments, expected.segments);
+    drop((operator, legacy, context));
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+}
+
+async fn check_left_cursor_budget_fallback() {
+    let schema = schema(DataType::Int64, DataType::Int64);
+    let mut operator = fixture(&schema);
+    let pool = operator.runtime.pool.clone();
+    let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new())
+        .with_checkpointing(false);
+    let context = StreamOperatorContext::new(&job, "asof", None);
+    let seed = batch(vec![integer_record(&schema, 0, vec![20; 512])]);
+    install(&mut operator, &seed, "left", &context, false).await;
+    let before = operator.status.clone();
+    let incoming = batch(vec![integer_record(&schema, 512, (0..512).rev().collect())]);
+    let input = ValidatedInput {
+        index: 0,
+        watermark: None,
+    };
+    let identity = operator.identity_workspace(&incoming, input).unwrap();
+    let hold = operator
+        .reserve_workspace(operator.spec.limits().max_state_bytes() - pool.reserved() as u64)
+        .unwrap();
+    state::take_identity_probes();
+    let plan = batch::plan(&operator, &incoming, input, &context).unwrap();
+    assert!(plan.is_some());
+    assert_eq!(
+        state::take_identity_probes(),
+        512,
+        "unfunded cursor must retain scalar duplicate checks"
+    );
+    assert_eq!(operator.status, before);
+    drop((plan, hold, identity, operator, context));
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop(job);
+    assert_eq!(pool.reserved(), 0);
 }
 
 fn integer_record(schema: &SchemaRef, start: i64, times: Vec<i64>) -> RecordBatch {
@@ -310,6 +414,26 @@ async fn test_general_rejection_duplicate_priority_cancellation_and_refunds() {
     }
 }
 
+fn assert_dictionary_payload_rejected(schema: &SchemaRef, operator: &StreamAsofJoinOperator) {
+    // Dictionary payloads remain outside the existing flat ASOF contract.
+    let mut fields = schema.fields().to_vec();
+    fields.push(Arc::new(Field::new(
+        "payload",
+        DataType::Dictionary(Box::new(DataType::Int8), Box::new(DataType::Utf8)),
+        true,
+    )));
+    let dictionary = Arc::new(Schema::new(fields));
+    assert!(
+        StreamAsofJoinOperator::new(
+            "asof",
+            dictionary.clone(),
+            dictionary,
+            operator.spec.clone()
+        )
+        .is_err()
+    );
+}
+
 fn assert_general_rejection(
     error: &crate::CalcFlowError,
     operator: &StreamAsofJoinOperator,
@@ -401,6 +525,7 @@ async fn test_general_types_and_explicit_fallbacks() {
     .await;
     assert_eq!(admission.rows.len(), 2);
     assert_eq!(batch::take_work().sequence_fallbacks, 1);
+    assert_dictionary_payload_rejected(&schema, &operator);
     for data_type in [DataType::Float64, DataType::Binary] {
         assert!(
             StreamAsofJoinOperator::new(

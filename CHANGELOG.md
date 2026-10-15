@@ -9,6 +9,12 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-16: Merge general ASOF integer-sequence batches into reserved columns
+  by key, preserving unordered input positions and duplicate identity history.
+  Finalization caches each key's latest Arrow payload route and advances
+  identity-history cursors across ordered and normalized unordered input.
+  Public schemas, frozen state charges, and checkpoint layouts remain unchanged.
+
 - 2026-10-15: Reject duplicate live row IDs when restoring layout-1 Join
   checkpoints. Validate event times and complete V1 logical charges for every
   historical row in full layout-1 checkpoints, including overwritten and

@@ -441,9 +441,11 @@ async fn allocation_pair(rows: usize, service: &TestService) -> (u64, u64) {
     assert_eq!(legacy_thread, fast_thread);
     assert_eq!(fast_thread == std::thread::current().id(), rows <= 4096);
     assert_eq!(legacy_chunk.count_total, fast_chunk.count_total + 1);
-    assert_eq!(
-        legacy_chunk.bytes_total - fast_chunk.bytes_total,
-        (rows * size_of::<(&LeftOrder, u32)>()) as u64
+    // Integer key IDs also reduce the per-key map's bytes. Preserve at least
+    // the original saving from removing the borrowed row-descriptor vector.
+    assert!(
+        fast_chunk.bytes_total + (rows * size_of::<(&LeftOrder, u32)>()) as u64
+            <= legacy_chunk.bytes_total
     );
     assert!(
         fast_chunk.count_total <= 128,
@@ -1086,13 +1088,18 @@ fn eligible_prepare(rows: usize) -> usize {
             )
             .await
             .unwrap();
-        assert_eq!(admitted.rows.len(), rows);
+        assert_eq!(admitted.len(), rows);
         assert!(
-            admitted
-                .rows
-                .iter()
-                .all(|(_, reference)| reference.key_index == 0)
+            admitted.rows.is_empty(),
+            "eligible admission retained canonical row descriptors"
         );
+        assert!(admitted.left_chunks.as_ref().unwrap().iter().all(|chunk| {
+            let counts = chunk
+                .key_counts()
+                .map(|(_, count)| count)
+                .collect::<Vec<_>>();
+            counts == [chunk.len()]
+        }));
         let borrowed = admitted
             .left_chunks
             .as_ref()

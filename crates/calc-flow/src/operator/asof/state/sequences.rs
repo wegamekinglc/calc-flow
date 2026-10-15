@@ -216,6 +216,35 @@ impl SequenceColumn {
         values.extend_from_slice(&value.to_le_bytes());
     }
 
+    pub fn resize(&mut self, len: usize) {
+        let width = self.element_bytes();
+        match &mut self.storage {
+            Storage::Canonical(values) => values.resize(len, Encoding::from_slice(&[])),
+            Storage::Integer(values) => values.resize(len * width, 0),
+        }
+    }
+
+    pub fn set(&mut self, index: usize, value: Encoding) {
+        let width = self.element_bytes();
+        match &mut self.storage {
+            Storage::Canonical(values) => values[index] = value,
+            Storage::Integer(values) => {
+                let bytes = self.kind.integer_bytes(&value);
+                values[index * width..(index + 1) * width].copy_from_slice(&bytes[..width]);
+            }
+        }
+    }
+
+    pub fn copy_row(&mut self, source: usize, target: usize) {
+        let width = self.element_bytes();
+        match &mut self.storage {
+            Storage::Canonical(values) => values[target] = values[source].clone(),
+            Storage::Integer(values) => {
+                values.copy_within(source * width..(source + 1) * width, target * width);
+            }
+        }
+    }
+
     pub fn insert(&mut self, index: usize, value: Encoding) {
         self.reserve(1);
         let raw = self

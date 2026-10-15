@@ -543,6 +543,13 @@ impl PreparedLeftChunk {
     ) -> Option<(std::thread::ThreadId, allocation_counter::AllocationInfo)> {
         self.preparation_allocation
     }
+    #[cfg(test)]
+    pub fn record_preparation_allocation(
+        &mut self,
+        allocation: allocation_counter::AllocationInfo,
+    ) {
+        self.preparation_allocation = Some((std::thread::current().id(), allocation));
+    }
     pub fn batch_key(&self) -> BatchKey {
         self.owner.key
     }
@@ -1314,7 +1321,16 @@ impl<'a> OutputRun<'a> {
         })
     }
 
+    #[cfg(test)]
     pub fn keyed_rows(
+        self,
+        count: usize,
+    ) -> Option<KeyedRows<'a, impl Iterator<Item = (i64, usize, RowRef)> + 'a>> {
+        let result = self.dictionary_rows(count)?;
+        (result.0.len() <= 64).then_some(result)
+    }
+
+    pub fn dictionary_rows(
         self,
         count: usize,
     ) -> Option<KeyedRows<'a, impl Iterator<Item = (i64, usize, RowRef)> + 'a>> {
@@ -1322,7 +1338,7 @@ impl<'a> OutputRun<'a> {
             return None;
         };
         let data = &run.chunk.data;
-        if data.keys.len() > 64 || data.keys.len() > count / 4 {
+        if data.keys.len() > count / 4 {
             return None;
         }
         debug_assert!(count <= self.len());

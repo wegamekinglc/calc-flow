@@ -17,7 +17,7 @@ pub(in super::super) struct RecordColumns {
 
 pub(in super::super) enum Columns {
     Ordered(Vec<RecordColumns>),
-    General(super::batch::Columns),
+    General(super::Arc<super::batch::Columns>),
 }
 
 pub(super) struct Plan {

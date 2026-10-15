@@ -128,7 +128,7 @@ async fn compare_preparation(
     operator: &mut StreamAsofJoinOperator,
     input: &Batch,
     watermark: Option<i64>,
-    direct: bool,
+    descriptor_free: bool,
     service: &TestService,
 ) {
     let pool = operator.runtime.pool.clone();
@@ -144,17 +144,14 @@ async fn compare_preparation(
     let (mut fast, _) = prepared(operator, input, validated, &context, false).await;
     assert_eq!(fast.len(), legacy.len());
     assert_eq!(fast.accepted, legacy.accepted);
-    assert_eq!(fast.rows.is_empty(), direct || legacy.rows.is_empty());
-    if !direct {
-        let identities = |admission: &Admission| {
-            admission
-                .rows
-                .iter()
-                .map(|(order, row)| (order.clone(), row.batch_index, row.row, row.key_index))
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(identities(&fast), identities(&legacy));
-    }
+    assert!(
+        fast.rows.is_empty(),
+        "integer-sequence admission retained row descriptors"
+    );
+    assert_eq!(
+        fast.rows.is_empty(),
+        descriptor_free || legacy.rows.is_empty()
+    );
     let fast_chunks = fast.left_chunks.take().unwrap();
     let legacy_chunks = legacy.left_chunks.take().unwrap();
     assert_eq!(fast_chunks.len(), legacy_chunks.len());
@@ -214,7 +211,7 @@ fn test_direct_left_dictionary_boundaries_and_fallback_match_legacy() {
                 vec![1, 2, 3],
             )]),
             None,
-            false,
+            true,
         ),
         (
             batch(vec![unsigned_record(

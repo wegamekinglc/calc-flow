@@ -163,8 +163,10 @@ async fn capture_run<'a>(
     context: &StreamOperatorContext<'_>,
 ) -> Result<()> {
     check_match_progress(position, context).await?;
-    if let Some((keys, mut rows)) = run.keyed_rows(count) {
-        let mut cached = [None; 64];
+    if let Some((keys, mut rows)) = run.dictionary_rows(count) {
+        let mut inline = [None; 64];
+        let mut heap = Vec::new();
+        let cached = super::merge::route_slots(keys.len(), &mut inline, &mut heap);
         for (route, key) in cached.iter_mut().zip(keys) {
             *route = key
                 .as_ref()

@@ -74,6 +74,11 @@ async fn parallel_key_routes_do_not_hash_each_row() {
     let (work, references, credit) = parallel::capture(&operator, &admission, 2, &context)
         .await
         .unwrap();
+    assert_eq!(
+        work.canonical_rows(),
+        0,
+        "parallel admission expanded row descriptors"
+    );
     assert!(
         state::take_encoding_hashes() <= admission.right_capacities.len() * 2,
         "parallel routing must reuse handles instead of hashing each row"

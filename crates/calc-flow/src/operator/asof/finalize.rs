@@ -19,6 +19,7 @@ use datafusion::execution::memory_pool::MemoryReservation;
 use std::collections::BTreeMap;
 use std::{collections::HashMap, sync::Arc};
 
+mod merge;
 #[cfg(test)]
 mod output_ranges;
 #[cfg(test)]
@@ -370,7 +371,12 @@ impl StreamAsofJoinOperator {
             return Ok(None);
         }
         // One hash slot, key, cursor, and allocator slack per right bucket.
-        let charge = right_keys as u64 * 128 + 256;
+        let route_keys = cursor_route_keys(&self.state.left, count);
+        let charge = checked(
+            &self.name,
+            right_keys as u64 * 320 + 256,
+            route_keys as u64 * 192,
+        )?;
         match self.reserve_workspace(charge) {
             Ok(reservation) => Ok(Some(reservation)),
             Err(error) if retryable(&error) => Ok(None),
@@ -391,6 +397,22 @@ impl StreamAsofJoinOperator {
         }
         Ok(batch)
     }
+}
+
+fn cursor_route_keys(left: &state::LeftState, count: usize) -> usize {
+    let mut remaining = count;
+    let mut keys = 0;
+    for run in left.output_runs() {
+        let amount = run.len().min(remaining);
+        if let Some((dictionary, _)) = run.dictionary_rows(amount) {
+            keys = keys.max(dictionary.len());
+        }
+        remaining -= amount;
+        if remaining == 0 {
+            break;
+        }
+    }
+    keys
 }
 
 async fn match_output_prefix(
@@ -525,25 +547,9 @@ async fn monotonic_candidate_rows(
     let mut index = 0;
     for run in state.left.output_runs() {
         let amount = run.len().min(count - index);
-        if let Some((keys, rows)) = run.keyed_rows(amount) {
-            let first_time = *run.rows(1).next().expect("nonempty ASOF run").0.0;
-            let mut routes = std::array::from_fn::<_, 64, _>(|_| None);
-            for (id, key) in keys.iter().enumerate() {
-                routes[id] = key
-                    .as_ref()
-                    .and_then(|key| cursors.get(key))
-                    .map(|(bucket, _)| (*bucket, bucket.cursor_at(first_time)));
-            }
-            append_monotonic_run(
-                rows.map(|(time, id, left)| ((time, id), left)),
-                |(time, id)| {
-                    routes[id]
-                        .as_mut()
-                        .and_then(|(bucket, next)| {
-                            bucket.candidate_monotonic(time, operator.spec.tolerance_micros(), next)
-                        })
-                        .copied()
-                },
+        if let Some((keys, rows)) = run.dictionary_rows(amount) {
+            merge::append_dictionary_run(
+                (keys, rows),
                 operator,
                 context,
                 plan,
