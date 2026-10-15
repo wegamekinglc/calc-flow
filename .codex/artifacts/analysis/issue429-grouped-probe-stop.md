@@ -52,3 +52,25 @@ exhausted the existing 32 MiB process-infrastructure budget and aborted under
 concurrent test services. Serial execution of the same binary passed all 28
 tests. No infrastructure limit or assertion was changed. Full regression,
 cross-platform and workspace coverage gates remain CI work.
+
+## Codacy follow-up
+
+The cancellation-boundary test now enumerates its four executed cases directly
+instead of using a nested product and skipping two count cases that cannot reach
+a second position group. Case order, fixture operations, cancellation bounds,
+poll/visit counts and refund assertions are unchanged. Production code and gate
+configuration are unchanged.
+
+Lizard 1.23.0 reproduced the original CCN 9 warning and now reports CCN 6 for
+`test_probe_stops_at_the_next_position_or_match_group`; the entire file has zero
+warnings at the existing threshold 8. The earlier 58-test evidence at
+`ee1cf390ec3da38fbcc4b650d2c24daca23557a6` remains valid for the unchanged behavior.
+The affected test alone was rebuilt and rerun: 1 passed.
+Scoped Clippy and formatting checks passed.
+
+```bash
+cargo test --locked -p calc-flow --lib operator::join::data_work::process::probe_stop_tests::test_probe_stops_at_the_next_position_or_match_group -j 2 -- --exact --test-threads=1
+lizard -C 8 -w crates/calc-flow/src/operator/join/tests/probe_stop_tests.rs
+cargo fmt --all --check
+cargo clippy --locked -p calc-flow --lib --tests -j 2 -- -D warnings
+```

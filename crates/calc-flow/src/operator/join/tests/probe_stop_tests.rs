@@ -149,57 +149,57 @@ async fn test_probe_stop_checks_scale_with_groups_and_units() {
 
 #[tokio::test]
 async fn test_probe_stops_at_the_next_position_or_match_group() {
-    for (rows, opposite) in [(8_193, 1), (1, 8_193), (3, 4_095)] {
-        for fill_pass in [false, true] {
-            if !fill_pass && rows < GROUP {
-                continue;
+    for (rows, opposite, fill_pass) in [
+        (8_193, 1, false),
+        (8_193, 1, true),
+        (1, 8_193, true),
+        (3, 4_095, true),
+    ] {
+        let (mut operator, inputs, job) = fixture(rows, opposite).await;
+        let count = CountWork {
+            inputs: inputs.clone(),
+            limit: 1_000_000,
+        };
+        let plain = GatherStop::from_job(&job);
+        let counts = Counts::ordered(vec![count.run(0, &plain).unwrap()], 1_000_000).unwrap();
+        let (funding, credit) = operator.admit_fill(counts).unwrap().unwrap();
+        let fill = FillWork {
+            inputs: inputs.clone(),
+            counts,
+            funding,
+        };
+        let polls = Arc::new(AtomicUsize::new(0));
+        let observed = polls.clone();
+        let signal = plain.clone();
+        let stop = plain.with_check_hook(Arc::new(move |atomic_only| {
+            if atomic_only && observed.fetch_add(1, Ordering::SeqCst) == 1 {
+                signal.abandon_for_test();
             }
-            let (mut operator, inputs, job) = fixture(rows, opposite).await;
-            let count = CountWork {
-                inputs: inputs.clone(),
-                limit: 1_000_000,
-            };
-            let plain = GatherStop::from_job(&job);
-            let counts = Counts::ordered(vec![count.run(0, &plain).unwrap()], 1_000_000).unwrap();
-            let (funding, credit) = operator.admit_fill(counts).unwrap().unwrap();
-            let fill = FillWork {
-                inputs: inputs.clone(),
-                counts,
-                funding,
-            };
-            let polls = Arc::new(AtomicUsize::new(0));
-            let observed = polls.clone();
-            let signal = plain.clone();
-            let stop = plain.with_check_hook(Arc::new(move |atomic_only| {
-                if atomic_only && observed.fetch_add(1, Ordering::SeqCst) == 1 {
-                    signal.abandon_for_test();
-                }
-            }));
-            reset_join_work();
-            let cancelled = if fill_pass {
-                fill.run(0, &stop).map(|_| ())
-            } else {
-                count.run(0, &stop).map(|_| ())
-            };
-            assert!(matches!(
-                cancelled,
-                Err(crate::CalcFlowError::Cancelled { .. })
-            ));
-            assert_eq!(polls.load(Ordering::SeqCst), 2);
-            if fill_pass {
-                // The iterator can fetch one match before the next group poll.
-                assert!(join_work().native_range_visits <= GROUP + 1);
-            } else {
-                assert_eq!(join_work().native_boundary_visits, 2 * GROUP);
-            }
-            let pool = operator
-                .runtime
-                .runtime()
-                .unwrap()
-                .incremental_memory_pool();
-            drop((fill, credit, count, inputs, operator, stop, job));
-            assert_eq!(pool.reserved(), 0);
+        }));
+        reset_join_work();
+        let cancelled = if fill_pass {
+            fill.run(0, &stop).map(|_| ())
+        } else {
+            count.run(0, &stop).map(|_| ())
+        };
+        assert!(matches!(
+            cancelled,
+            Err(crate::CalcFlowError::Cancelled { .. })
+        ));
+        assert_eq!(polls.load(Ordering::SeqCst), 2);
+        if fill_pass {
+            // The iterator can fetch one match before the next group poll.
+            assert!(join_work().native_range_visits <= GROUP + 1);
+        } else {
+            assert_eq!(join_work().native_boundary_visits, 2 * GROUP);
         }
+        let pool = operator
+            .runtime
+            .runtime()
+            .unwrap()
+            .incremental_memory_pool();
+        drop((fill, credit, count, inputs, operator, stop, job));
+        assert_eq!(pool.reserved(), 0);
     }
 }
 
