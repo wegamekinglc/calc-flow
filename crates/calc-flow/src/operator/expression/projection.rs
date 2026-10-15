@@ -1,4 +1,4 @@
-//! Precompiled column-only projections; arithmetic and relational work stay in SQL.
+//! Precompiled column-only projections over read-only Arrow arrays.
 
 use std::{collections::BTreeSet, sync::Arc};
 
@@ -15,6 +15,9 @@ use datafusion::{
 };
 
 use crate::{Batch, CalcFlowError, Result};
+
+mod dependencies;
+pub(super) use dependencies::required_columns;
 
 #[derive(Clone, Debug)]
 pub(super) struct ColumnProjection {

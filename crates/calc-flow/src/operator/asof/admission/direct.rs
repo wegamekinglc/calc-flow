@@ -10,6 +10,9 @@ use super::{
 };
 use datafusion::arrow::{array::StringArray, datatypes::DataType};
 
+mod compact;
+use compact::compact_complete_record;
+
 #[cfg(test)]
 mod tests;
 
@@ -290,20 +293,4 @@ pub(super) fn encode_complete_payloads_for(
             Ok(payload)
         })
         .collect()
-}
-
-fn compact_complete_record(record: &RecordBatch) -> Result<RecordBatch> {
-    if can_share_batch(record)? {
-        return Ok(record.clone());
-    }
-    let indices = UInt64Array::from_iter_values(0..record.num_rows() as u64);
-    let columns = record
-        .columns()
-        .iter()
-        .map(|column| {
-            take(column, &indices, None).map_err(|error| super::super::arrow_error(&error))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    RecordBatch::try_new(record.schema(), columns)
-        .map_err(|error| super::super::arrow_error(&error))
 }

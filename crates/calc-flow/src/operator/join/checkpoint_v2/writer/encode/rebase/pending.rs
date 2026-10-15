@@ -9,6 +9,8 @@ use crate::Epoch;
 use crate::operator::join::{PendingOp, checkpoint_v2::ContainerFunding, columnar::Quantum};
 
 pub(in crate::operator::join::checkpoint_v2::writer) struct PendingInput {
+    pub(in crate::operator::join::checkpoint_v2::writer) identity:
+        super::super::super::HistoryIdentity,
     rows: Vec<PendingOp>,
     _containers: Option<Arc<ContainerFunding>>,
     funding: MemoryReservation,
@@ -29,6 +31,7 @@ impl PendingInput {
             ])?,
         )?;
         let pending = Self {
+            identity: operator.checkpoint_identity,
             rows: funding::vector(count)?,
             _containers: operator.v2_containers.clone(),
             funding: credit,
@@ -78,6 +81,9 @@ pub(super) fn encode(
     check: &dyn Fn() -> Result<()>,
 ) -> Result<Base> {
     check()?;
+    if pending.identity != history.identity {
+        return Err(error("checkpoint pending layout differs from history"));
+    }
     let dirty = pending_owned(&pending.rows, schemas, Epoch::INITIAL, workspace, check)?;
     drop(pending);
     check()?;
@@ -125,6 +131,7 @@ fn allocate_combined(
     let (indexes, payloads) = combined_counts(&history, dirty)?;
     accounting::reserve(workspace, funding::inputs(indexes, payloads)?)?;
     let mut combined = HistoryInput {
+        identity: history.identity,
         indexes: funding::vector(indexes)?,
         payloads: funding::vector(payloads)?,
         expected: history.expected,

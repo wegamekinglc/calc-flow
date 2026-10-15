@@ -102,6 +102,11 @@ impl StateSegment {
         self.owner.is_some()
     }
 
+    #[cfg(test)]
+    pub(crate) fn owner_for_test<T: std::any::Any>(&self) -> Option<&T> {
+        self.owner.as_ref()?.downcast_ref()
+    }
+
     pub(crate) fn with_owner(mut self, owner: Arc<dyn std::any::Any + Send + Sync>) -> Self {
         self.owner = Some(match self.owner.take() {
             None => owner,

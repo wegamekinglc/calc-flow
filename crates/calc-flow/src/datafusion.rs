@@ -38,8 +38,8 @@ use crate::{
     validate_selected_udfs,
 };
 
-const MAX_SQL_RESULT_ROWS: usize = 100_000_000;
-const MAX_SQL_RESULT_BYTES: usize = 1 << 30;
+pub(crate) const MAX_SQL_RESULT_ROWS: usize = 100_000_000;
+pub(crate) const MAX_SQL_RESULT_BYTES: usize = 1 << 30;
 
 #[path = "datafusion_owned.rs"]
 pub(crate) mod owned;
@@ -243,7 +243,7 @@ impl DataFusionRuntime {
         Self::new_with_pool(config, Arc::new(UnboundedMemoryPool::default()), started)
     }
 
-    #[cfg(any(test, feature = "benchmark-checkpoint-diagnostic"))]
+    #[cfg(any(test, feature = "benchmark-internals"))]
     pub(crate) fn with_benchmark_pool(
         config: DataFusionConfig,
         pool: Arc<dyn datafusion::execution::memory_pool::MemoryPool>,
@@ -527,6 +527,24 @@ impl DataFusionRuntime {
         #[cfg(test)]
         owned::note_legacy_inputs(tables);
         self.execute_query(query, 0, tables, node_id).await
+    }
+
+    pub(crate) async fn stream_expression(
+        &self,
+        query: &ValidatedQuery,
+        tables: &BTreeMap<String, Batch>,
+        node_id: &str,
+        context: &crate::operator::StreamOperatorContext<'_>,
+    ) -> Result<Batch> {
+        self.ensure_open()?;
+        if self.selected_udfs.is_empty()
+            && let Some((template, _)) = self.templates.find(query.text(), tables)
+            && let Some(compiled) = template.compiled_expression()
+        {
+            let input = tables.values().next().expect("single-table template");
+            return compiled.evaluate(input, node_id, context).await;
+        }
+        self.sql_validated(query, tables, Some(node_id)).await
     }
 
     #[allow(
@@ -830,7 +848,7 @@ impl DataFusionRuntime {
     }
 }
 
-fn push_bounded_sql_batch(
+pub(crate) fn push_bounded_sql_batch(
     batches: &mut Vec<RecordBatch>,
     rows: &mut usize,
     bytes: &mut usize,
@@ -1353,7 +1371,10 @@ async fn physical_query_schema(
     Ok(plan.schema())
 }
 
-fn datafusion_error(node_id: Option<&str>, error: impl std::fmt::Display) -> CalcFlowError {
+pub(crate) fn datafusion_error(
+    node_id: Option<&str>,
+    error: impl std::fmt::Display,
+) -> CalcFlowError {
     CalcFlowError::DataFusion {
         node_id: node_id.map(str::to_owned),
         message: error.to_string(),

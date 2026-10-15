@@ -470,6 +470,24 @@ class AcceptanceRuntimePolicyTests(unittest.TestCase):
 
 class AcceptanceLifecycleTests(unittest.IsolatedAsyncioTestCase):
     @staticmethod
+    def measurement_engine():
+        from datetime import datetime
+        from types import ModuleType
+
+        engine = ModuleType("benchmarks.engine_stream")
+        engine.BASE = datetime(2000, 1, 1, tzinfo=UTC)
+        engine.BASE_MICROS = 0
+        engine._require_ready_sources = Mock()
+        engine._measure_ready_clock = AsyncMock(
+            return_value=(
+                object(),
+                0.0000001,
+                {"processing_started_ns": 100, "processing_ended_ns": 200},
+            )
+        )
+        return engine
+
+    @staticmethod
     def trace_inner(trace, failure, row):
         if row == 6:
             return SimpleNamespace()
@@ -484,13 +502,15 @@ class AcceptanceLifecycleTests(unittest.IsolatedAsyncioTestCase):
         return inner
 
     async def exercise(
-        self, *, observer_fails=False, asof=False, trace_failure=None, row=7
+        self, *, observer_fails=False, asof=False, trace_failure=None, row=7, mode="low"
     ):
         import asyncio
-        from datetime import datetime, timedelta
-        from types import ModuleType
+        from datetime import timedelta
 
-        from benchmarks.join_asof_acceptance_runtime import measure_acceptance_job
+        from benchmarks.join_asof_acceptance_runtime import (
+            AcceptanceBindings,
+            measure_acceptance_job,
+        )
 
         done = asyncio.Event()
         checkpoint = {
@@ -568,17 +588,15 @@ class AcceptanceLifecycleTests(unittest.IsolatedAsyncioTestCase):
             return {"frontier": micros}
 
         job.wait_async = wait
-        engine = ModuleType("benchmarks.engine_stream")
-        engine.BASE = datetime(2000, 1, 1, tzinfo=UTC)
-        engine.BASE_MICROS = 0
-        engine._require_ready_sources = Mock()
-        engine._measure_ready_clock = AsyncMock(
-            return_value=(
-                object(),
-                0.0000001,
-                {"processing_started_ns": 100, "processing_ended_ns": 200},
-            )
-        )
+        engine = self.measurement_engine()
+
+        async def snapshot(root, status):
+            self.assertEqual(root, Path("sample-state"))
+            self.assertEqual(status, checkpoint)
+            engine._measure_ready_clock.assert_awaited_once()
+            self.assertFalse(done.is_set())
+            return {"manifests": []}
+
         streams = {
             "quotes.input": (
                 SimpleNamespace(at=engine.BASE + timedelta(microseconds=10)),
@@ -606,26 +624,33 @@ class AcceptanceLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 "benchmarks.join_asof_acceptance_runtime.checkpoint_windows",
                 return_value=[],
             ) as windows,
+            patch(
+                "benchmarks.join_asof_acceptance_runtime._snapshot_processing_checkpoints",
+                new=AsyncMock(side_effect=snapshot),
+            ) as capture,
         ):
             try:
                 result = await measure_acceptance_job(
-                    job,
-                    {"source": SimpleNamespace(push=push, ready=ready)},
-                    SimpleNamespace(
-                        rows=1,
-                        expected_rows=1,
-                        tables=[pa.table({"value": [1.0]})],
+                    AcceptanceBindings(
+                        job=job,
+                        sources={"source": SimpleNamespace(push=push, ready=ready)},
+                        sink=SimpleNamespace(
+                            rows=1,
+                            expected_rows=1,
+                            tables=[pa.table({"value": [1.0]})],
+                        ),
+                        streams=streams,
                     ),
-                    streams,
                     case={
                         "row": row,
-                        "mode": "low",
+                        "mode": mode,
                         "workload": "asof" if asof else "projection",
                         "batch_rows": 1024,
                         "side": "candidate",
                         "rows": 1,
                         "dispatch_output_node_id": "result",
                     },
+                    state_root=Path("sample-state"),
                 )
             finally:
                 job.cancel_async.assert_awaited_once()
@@ -634,7 +659,16 @@ class AcceptanceLifecycleTests(unittest.IsolatedAsyncioTestCase):
         if asof and row == 7:
             job._inner._benchmark_start_dispatch_trace.assert_called_once_with(False)
             job._inner._benchmark_take_dispatch_trace.assert_called_once_with()
+        if mode == "on":
+            capture.assert_awaited_once()
+        else:
+            capture.assert_not_awaited()
         return result[1], windows
+
+    async def test_on_snapshot_precedes_eof_and_follows_processing_timer(self):
+        evidence, _windows = await self.exercise(asof=True, row=6, mode="on")
+        self.assertEqual(evidence["processing_seconds"], 0.0000001)
+        self.assertEqual(evidence["processing_checkpoint_snapshot"], {"manifests": []})
 
     async def test_row6_small_batches_run_without_internal_trace_hooks(self):
         evidence, _windows = await self.exercise(asof=True, row=6)
@@ -823,6 +857,173 @@ class AcceptanceSignalTests(unittest.IsolatedAsyncioTestCase):
 
 
 class AcceptanceCheckpointEvidenceTests(unittest.TestCase):
+    @staticmethod
+    def write_manifest(root, epoch, *, rows=1024, ended=False):
+        path = root / f"manifest-{epoch:020}.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "format_version": 3,
+                    "epoch": epoch,
+                    "sources": {
+                        "quotes.input": {
+                            "cursor": {"payload": {"rows": rows}},
+                            "ended": ended,
+                        }
+                    },
+                    "operators": {},
+                }
+            )
+        )
+        return path
+
+    def snapshot_fixture(self, root):
+        from benchmarks.join_asof_acceptance_runtime import (
+            _capture_processing_checkpoint_evidence,
+        )
+
+        path = self.write_manifest(root, 1)
+        with patch(
+            "benchmarks.join_asof_acceptance_runtime.time.perf_counter_ns",
+            side_effect=(210, 220),
+        ):
+            snapshot = _capture_processing_checkpoint_evidence(
+                root, {"last_completed_epoch": 1}
+            )
+        return path, {
+            "processing_started_ns": 100,
+            "processing_ended_ns": 200,
+            "terminal_started_ns": 230,
+            "completed_processing_epochs": [1],
+            "processing_checkpoint_snapshot": snapshot,
+        }
+
+    def test_pre_eof_manifest_proves_progress_after_terminal_retention(self):
+        from benchmarks.join_asof_acceptance_runtime import (
+            _advancing_processing_epochs,
+        )
+
+        with TemporaryDirectory() as raw:
+            root = Path(raw)
+            path, evidence = self.snapshot_fixture(root)
+            path.unlink()
+            self.write_manifest(root, 2)
+            self.write_manifest(root, 3, ended=True)
+            checkpoint = {
+                "count_scope": "retained_committed_manifests_only",
+                "manifests": [
+                    {"epoch": 2, "terminal": False, "sources": {}},
+                    {"epoch": 3, "terminal": True, "sources": {}},
+                ],
+            }
+            original = copy.deepcopy((checkpoint, evidence))
+            self.assertEqual(
+                _advancing_processing_epochs(checkpoint, evidence, "asof_join"), [1]
+            )
+            self.assertEqual((checkpoint, evidence), original)
+            self.assertEqual(len(checkpoint["manifests"]), 2)
+
+    def test_snapshot_does_not_promote_outside_window_or_empty_progress(self):
+        from benchmarks.join_asof_acceptance_runtime import (
+            _advancing_processing_epochs,
+            _capture_processing_checkpoint_evidence,
+        )
+
+        with TemporaryDirectory() as raw:
+            root = Path(raw)
+            path, evidence = self.snapshot_fixture(root)
+            outside = {**evidence, "completed_processing_epochs": []}
+            self.assertEqual(
+                _advancing_processing_epochs({"manifests": []}, outside, "asof_join"),
+                [],
+            )
+            path.unlink()
+            self.write_manifest(root, 1, rows=0)
+            with patch(
+                "benchmarks.join_asof_acceptance_runtime.time.perf_counter_ns",
+                side_effect=(210, 220),
+            ):
+                empty = _capture_processing_checkpoint_evidence(
+                    root, {"last_completed_epoch": 1}
+                )
+            self.assertEqual(
+                _advancing_processing_epochs(
+                    {"manifests": []},
+                    {**evidence, "processing_checkpoint_snapshot": empty},
+                    "asof_join",
+                ),
+                [],
+            )
+
+    def test_snapshot_rejects_modified_proof_and_invalid_capture_boundaries(self):
+        from benchmarks.join_asof_acceptance_runtime import (
+            _advancing_processing_epochs,
+        )
+
+        with TemporaryDirectory() as raw:
+            _path, evidence = self.snapshot_fixture(Path(raw))
+        altered = copy.deepcopy(evidence)
+        altered["processing_checkpoint_snapshot"]["manifests"][0]["sources"][
+            "quotes.input"
+        ]["rows"] += 1
+        with self.assertRaisesRegex(ValueError, "snapshot manifest"):
+            _advancing_processing_epochs({"manifests": []}, altered, "asof_join")
+        for field, value in (("started_ns", 199), ("ended_ns", 231)):
+            with self.subTest(field=field):
+                altered = copy.deepcopy(evidence)
+                altered["processing_checkpoint_snapshot"][field] = value
+                with self.assertRaisesRegex(ValueError, "snapshot boundary"):
+                    _advancing_processing_epochs(
+                        {"manifests": []}, altered, "asof_join"
+                    )
+
+    def test_concurrent_retirement_is_missing_evidence_and_not_retried(self):
+        from benchmarks.join_asof_acceptance_runtime import (
+            _capture_processing_checkpoint_evidence,
+        )
+
+        with TemporaryDirectory() as raw:
+            root = Path(raw)
+            path = self.write_manifest(root, 1)
+            with patch.object(
+                Path, "read_bytes", side_effect=FileNotFoundError
+            ) as read:
+                snapshot = _capture_processing_checkpoint_evidence(
+                    root, {"last_completed_epoch": 1}
+                )
+            self.assertEqual(snapshot["manifests"], [])
+            self.assertEqual(snapshot["missing_paths"], [path.name])
+            read.assert_called_once()
+
+    def test_uncommitted_and_terminal_manifests_cannot_prove_processing_progress(self):
+        from benchmarks.join_asof_acceptance_runtime import (
+            _advancing_processing_epochs,
+            _capture_processing_checkpoint_evidence,
+        )
+
+        with TemporaryDirectory() as raw:
+            root = Path(raw)
+            self.write_manifest(root, 1, ended=True)
+            self.write_manifest(root, 2)
+            with patch(
+                "benchmarks.join_asof_acceptance_runtime.time.perf_counter_ns",
+                side_effect=(210, 220),
+            ):
+                snapshot = _capture_processing_checkpoint_evidence(
+                    root, {"last_completed_epoch": 1}
+                )
+        self.assertEqual([item["epoch"] for item in snapshot["manifests"]], [1])
+        evidence = {
+            "processing_started_ns": 100,
+            "processing_ended_ns": 200,
+            "terminal_started_ns": 230,
+            "completed_processing_epochs": [1, 2],
+            "processing_checkpoint_snapshot": snapshot,
+        }
+        self.assertEqual(
+            _advancing_processing_epochs({"manifests": []}, evidence, "asof_join"), []
+        )
+
     def test_manifest_source_progress_is_retained_without_claiming_missing_epochs(self):
         from benchmarks.join_asof_acceptance_runtime import (
             acceptance_checkpoint_evidence,
@@ -856,6 +1057,34 @@ class AcceptanceCheckpointEvidenceTests(unittest.TestCase):
             self.assertEqual(source["rows"], 1024)
             self.assertEqual(len(source["cursor_sha256"]), 64)
             self.assertNotIn("sources", base["manifests"][0])
+
+
+class AcceptanceCheckpointSnapshotOwnershipTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cancellation_waits_for_the_owned_manifest_reader(self):
+        import asyncio
+
+        from benchmarks.join_asof_acceptance_runtime import (
+            _snapshot_processing_checkpoints,
+        )
+
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def read(*_args):
+            started.set()
+            await release.wait()
+            return {"manifests": []}
+
+        with patch("benchmarks.join_asof_acceptance_runtime.asyncio.to_thread", read):
+            task = asyncio.create_task(
+                _snapshot_processing_checkpoints(Path("state"), {})
+            )
+            await started.wait()
+            task.cancel()
+            await asyncio.sleep(0)
+            self.assertFalse(task.done())
+            release.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
 
 
 if __name__ == "__main__":

@@ -18,6 +18,9 @@ use super::{
 
 mod projection;
 
+#[cfg(test)]
+mod compiled_tests;
+
 use projection::ColumnProjection;
 
 /// A `DataFusion` expression or projection operator.
@@ -178,6 +181,22 @@ impl ExpressionOperator {
             .map(|(indices, _)| indices)
     }
 
+    pub(crate) fn stream_required_columns(&self) -> Option<Vec<usize>> {
+        if let Some(columns) = self.stream_projection_columns() {
+            return Some(columns);
+        }
+        if !self.udfs.is_empty()
+            || self
+                .stream_state
+                .resources
+                .as_ref()
+                .is_some_and(|(_, _, selected)| !selected.is_empty())
+        {
+            return None;
+        }
+        projection::required_columns(&self.query, self.input_ports[0].schema()?)
+    }
+
     pub(crate) fn source_replay_projection(&self) -> Option<Self> {
         let input = self.input_ports[0].schema()?;
         if !self.is_exact_column_projection(input, self.output_ports[0].schema()) {
@@ -268,16 +287,41 @@ impl ExpressionOperator {
     }
 
     async fn process_standalone(&mut self, batch: Batch) -> Result<Batch> {
-        self.input_ports[0].validate(&batch, &format!("{}.input", self.name))?;
-        if let Some(projection) = &self.column_projection
-            && let Some(projected) = projection.apply(&batch, &self.name)?
-        {
+        if let Some(projected) = self.project_columns(&batch)? {
             return Ok(projected);
         }
         let tables = BTreeMap::from([("input".into(), batch)]);
         let runtime = self.stream_state.runtime()?;
         runtime
             .sql_validated(&self.query, &tables, Some(&self.name))
+            .await
+    }
+
+    fn project_columns(&self, batch: &Batch) -> Result<Option<Batch>> {
+        self.input_ports[0].validate(batch, &format!("{}.input", self.name))?;
+        if let Some(projection) = &self.column_projection
+            && let Some(projected) = projection.apply(batch, &self.name)?
+        {
+            return Ok(Some(projected));
+        }
+        Ok(None)
+    }
+
+    async fn process_stream(
+        &mut self,
+        batch: Batch,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<Batch> {
+        if !self.udfs.is_empty() {
+            return self.process_standalone(batch).await;
+        }
+        if let Some(projected) = self.project_columns(&batch)? {
+            return Ok(projected);
+        }
+        let tables = BTreeMap::from([("input".into(), batch)]);
+        let runtime = self.stream_state.runtime()?;
+        runtime
+            .stream_expression(&self.query, &tables, &self.name, context)
             .await
     }
 }
@@ -357,7 +401,7 @@ impl StreamOperator for ExpressionOperator {
             });
         }
         context.check_cancelled()?;
-        let produced = self.process_standalone(batch).await?;
+        let produced = self.process_stream(batch, context).await?;
         context.check_cancelled()?;
         output.emit("output", produced).await
     }
@@ -423,7 +467,7 @@ mod tests {
     use super::*;
     use crate::BatchMetadata;
 
-    fn projection_input() -> Batch {
+    pub(super) fn projection_input() -> Batch {
         let schema = Arc::new(Schema::new(vec![
             Field::new("Price", DataType::Float64, true),
             Field::new("symbol", DataType::Utf8, false),
@@ -657,6 +701,7 @@ mod tests {
             assert!(result.num_rows() > 0);
             assert!(operator.stream_runtime_initialized());
         }
+        compiled_tests::repeated_stream_batches_skip_plan_rebinding().await;
     }
 
     #[tokio::test]

@@ -1,5 +1,165 @@
 # Issue 406: development and acceptance status
 
+## Current local increments, October 15, 2026
+
+The [Join batch-admission increment](issue406-join-batch-admission.md) is locally
+implemented and [reviewed](../reviews/issue406-join-batch-admission.md) at
+`327a6bbfaa162bddddc97f08ce312b99e393bd6a`. Incoming native/SQL processing,
+selected copies and output routing share record segments and borrowed row
+access, dense ranges, lazy sparse indices and packed retention bits. Its 38
+focused controls and core lib/test Clippy pass. The finite-pool workspace
+preflight and old legacy Rowed funding boundary are explicit. Offset-derived
+charges remain unfinished phase 1.1 work; retained rows, match descriptors and
+row-level checkpoint operations remain separate later work.
+
+The [signed/date key prerequisite](issue406-signed-date-key-codec.md) is
+[reviewed](../reviews/issue406-signed-date-key-codec.md) at
+`c27db37e5ec5389143e875c40e746d7ea1d719e5`. Negative Int8 and Date32/Date64
+now encode with their concrete Arrow types, preserving previously valid V1
+bytes and fees. Four genuine REDs, seven distinct passing controls, authentic
+V1-to-V2 migration and scoped Clippy are recorded with the diagnosed fixture
+error and final test-only borrow correction. No runtime timing is inferred.
+
+These increments, their reviews and the reviewed release profile are integrated
+at `71c9e3475672858e2a00f4cf09892d7808a26794` on
+`feature/issue406-join-key-dictionary`. Rust bytes equal the reviewed codec
+parent; the release-profile source files equal their reviewed parent. The next
+[persistent key dictionary](../specs/issue406-join-key-dictionary.md) has a
+[Proceed-with-caveats critique](../critiques/issue406-join-key-dictionary.md),
+including explicit codec/rank boundaries, lifetime funding and refused-route
+coverage obligations. This integration starts no performance acquisition.
+
+The earlier delivery branch remains frozen at `bb142320`. Explicit publication
+authority was received, but `git push` was rejected before process creation
+because approval was required while `AskForApproval=Never`. No new PR or CI
+was created. PR #421 is already merged. All eight original acceptance rows,
+remaining phases, required CI, 90% coverage and current-source performance
+verification remain active; none is certified by these local increments.
+
+## Current local increments, October 14, 2026
+
+PR #421 is merged at `1606e516cffbf5448e4f2e60d904b9a5a1550c58`; its
+post-compaction diagnostics do not establish during-compaction acceptance.
+Phase 2.1 Join output projection is locally committed at `3cfe6c49`. Phase 2.2
+selected Join state ownership and layout-3 recovery are locally implemented and
+reviewed at `e884adc362ac8f8d03c1364d0dfdb4e205407696`. Its
+[review](../reviews/issue406-join-state-projection.md) and
+[evidence](issue406-join-state-projection.md) preserve focused correctness and
+lifecycle results, compatibility limits, and outstanding CI/performance gates.
+The following October 13 section and older stages retain their historical
+revision-specific observations.
+
+The complete eight-workload objective remains active. Phase 2.3 now implements
+repeated stream expression execution: cached row-local DataFusion physical
+expressions avoid per-batch plan rebinding while preserving SQL semantics,
+caller ownership, collection limits and cancellation. Its
+[focused evidence](issue406-compiled-expressions.md) records RED/GREEN, boundary
+and eight adjacent controls, scoped Clippy and unchanged contracts;
+[final local review](../reviews/issue406-compiled-expressions.md) approves
+`33e9a184c39a05b14f07770f51de337c5ac313e6`. This local increment starts from
+e884adc3; no performance result is attributed to it.
+Remaining phase 0/1/3/4/5 requirements and all eight absolute acceptance rows
+remain in scope. Historical stopped attempts stay sealed and will not be retried
+or filled in. Remote CI, 90% coverage and a final current-source complete
+acceptance comparison are still required.
+
+The reviewed increments are locally integrated with published main
+`fb14646b713eee5cc64e0625175c7d65f60166e7` on
+`feature/issue406-second-stage`. The
+[integration evidence](issue406-second-stage-integration.md) and
+[bounded review](../reviews/issue406-second-stage-integration.md) preserve all
+issue/main Rust source bytes and both new stage seals; integrated core lib/test
+Clippy passes. This reviewed increment is unpushed and does not close406.
+
+The independent phase 0.5/D8 release-profile increment is locally reviewed at
+`b7c0abeb8e00848ee7f9dbb0b19be56ffef8b589`: workspace release builds use Thin
+LTO and one codegen unit, and ordinary compiler-audit validation selects exact
+flags from the sealed source manifest. Its
+[evidence](issue406-release-profile.md) and
+[final review](../reviews/issue406-release-profile.md) retain the focused
+configuration/validator tests and real tiny compiler-fixture witness. No
+calc-flow wheel, cross-platform artifact, paired timing or new target verdict
+is established. The separate incoming Join batch-admission work is in progress;
+its TDD failures and clarified ownership/funding spec precede implementation.
+All eight targets and remaining phases remain active.
+
+## Current stage, October 13, 2026
+
+The complete eight-workload objective remains active. PR #407's implementation
+and stabilization work has merged; PR #412 repaired the complete benchmark and
+PR #413 merged the ASOF admission improvement. The prefix-counting increment,
+PR #420, merged on October 13 at `ac5d7dff` after all 32 final checks passed,
+with no unresolved review threads. The complete candidate benchmark and
+independent evidence review have passed.
+Earlier statements below about an unmerged #407 or
+unresolved historical test/benchmark failures describe their recorded historical
+stage, rather than current merge readiness.
+
+Ordinary runtime memory remains unbounded. Explicit finite pools in refusal tests
+are test fixtures and do not reintroduce a runtime performance requirement.
+Checkpoint OFF, enabled LOW at 24 hours, and enabled ON at 100 ms remain distinct.
+ON acceptance requires verified advancing processing epochs. LOW/ON throughput
+targets are at least 90%/75% of the corresponding OFF goal, not of achieved timings.
+
+PR #420's exact 5fef1a31/b77cd8bf ordinary release comparison still misses both
+ASOF OFF absolute targets. All four cases and all eight targets remain in its
+analysis. The complete post-Studio-split benchmark contains 20 catalog shards
+and 802 cases; its four-CPU suite scopes do not establish one-/32-CPU acceptance.
+A completed full run demonstrates operability only with its exact revisions,
+retained errors, inconclusive verdicts and informational slowdowns.
+
+The PR #420 complete run compares exact main `5fef1a31` with measured candidate
+`b77cd8bf`: all 24 jobs, 20 catalog shards and 802 unique cases succeed, with zero
+errors or confirmed regressions. Fresh aggregation exactly matches the published
+summary. Preserve 145 inconclusive and 11 informational slowdown results; the
+independent final evidence review is Approve. Later documentation, test-fixture
+and registry fixes do not relabel those measured products. The final Join fixture
+fix at `e686dabd` passes all 315 focused Join tests, with one pre-existing ignored
+test, and scoped Clippy. All final CI checks on that exact head passed before
+the merge. Its measured binaries remain `5fef1a31` / `b77cd8bf`.
+
+The next implemented source increment routes eligible monotonic ASOF output by
+interned key IDs. Its allocation/hash and exact differential regressions, all
+341 ASOF tests and scoped Clippy pass; specialist source review is Approve.
+Performance remains unmeasured. This source is aligned onto exact merged main
+`ac5d7dff`, preserving the intervening release and Kafka-test updates; all five
+reviewed source/documentation patches are unchanged by rebase. Build and attest
+both ordinary releases, then run the fixed five-case
+comparison in the [routing analysis](issue406-asof-output-routing.md): OFF 64k
+at one/32 CPUs, OFF 1024 at one CPU, LOW 64k at one CPU and advancing ON 64k at
+one CPU. Each case has two rounds of ten adjacent pairs; all five cases share
+one 600-second total inclusive acquisition budget. Builds are accounted
+separately. Report each uncertainty and stop at the budget.
+
+Further increments must follow the measured residual bottlenecks. The latest
+ASOF profile identifies admission and output matching as diagnostic hotspots;
+its overlapping CPU shares do not establish a speedup. Join capture/restore,
+compaction callbacks, retained scaling and small-batch callback targets retain
+their original timing/retained-row definitions. Finish with a fresh complete
+eight-row comparison against then-current main and separate checkpoint modes.
+The final result must retain unmet targets and unsupported/invalid measurements.
+
+The original full-inventory controller freezes historical revisions and omits
+baseline OFF arms. That historical protocol is not a capability test of current
+main: the exact `5fef1a31` ordinary release has already completed verified true-OFF
+observations. The final current-main comparison must collect both revisions in
+true OFF where supported, rather than carrying forward the old unsupported-main
+label. Preserve historical artifacts and validate the new exact-revision plan
+before acquisition.
+
+A follow-up source audit identifies a row-5 measurement limitation. The maintained
+native `compaction_sample` awaits all checkpoint preparation, rebase installation
+and release cleanup before starting `process_data`. Its `handler_seconds` is
+therefore post-compaction handler latency; base/delta witnesses prove that rebase
+occurred, but not that compaction remained active during the handler. Keep its
+separate preparation, handler and combined diagnostics, without certifying the
+original during-compaction target from either mislabeled scope. Correct and
+validate this measurement path before the final eight-row acceptance; PR #420
+does not measure or claim completion of that target. This is a source-audit
+finding, with independent review, rather than a new timing result.
+
+## Recorded earlier implementation stages
+
 The user has removed the implicit 1 GiB runtime-pool constraint. The current
 candidate uses `UnboundedMemoryPool` in ordinary execution and primary checkpoint
 diagnostics, while retaining per-runtime reservation accounting and release tracking.
@@ -414,4 +574,6 @@ complete and reproducible eight-row evidence with separate checkpoint modes,
 and a PR #407 performance table comparing pinned main and current code. Targets
 that are missed, comparisons that are invalid, and unresolved CI checks must
 remain visible. Neither a local speedup nor finishing one increment completes
-the full objective or authorizes merging.
+the full objective. The user has authorized merging reviewed increments once all
+required checks are green; that authority does not certify the full performance
+objective.

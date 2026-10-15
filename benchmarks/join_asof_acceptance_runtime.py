@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import shutil
 import signal
 import time
 from contextlib import suppress
+from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 
@@ -22,6 +24,16 @@ from benchmarks.checkpoint_cycles import (
 from benchmarks.engine_lifecycle import run_with_completion
 from benchmarks.sustained_join import checkpoint_windows
 from scripts.benchmark_suite.issue406_acceptance import checkpoint_settings
+
+
+@dataclass(frozen=True, slots=True)
+class AcceptanceBindings:
+    """Owned I/O resources for one running acceptance sample."""
+
+    job: object
+    sources: dict
+    sink: object
+    streams: dict
 
 
 def runtime_config_arguments(mode: str) -> dict:
@@ -137,10 +149,18 @@ def _dispatch_trace(value: str, case: dict, status: dict, frontier: int, sink) -
     }
 
 
-async def measure_acceptance_job(job, sources, sink, streams, *, case: dict) -> tuple:
+async def measure_acceptance_job(
+    bindings: AcceptanceBindings, *, case: dict, state_root: Path
+) -> tuple:
     """Retain processing evidence even when baseline EOF has a known failure."""
     from benchmarks import engine_stream as stream
 
+    job, sources, sink, streams = (
+        bindings.job,
+        bindings.sources,
+        bindings.sink,
+        bindings.streams,
+    )
     evidence = {"checkpoint_observations": []}
     observations = evidence["checkpoint_observations"]
     stop = asyncio.Event()
@@ -175,6 +195,12 @@ async def measure_acceptance_job(job, sources, sink, streams, *, case: dict) -> 
         observations.append(checkpoint_observation(job))
         if not capture_trace:
             evidence["before_eof"] = job.status()
+        if case["mode"] == "on":
+            evidence[
+                "processing_checkpoint_snapshot"
+            ] = await _snapshot_processing_checkpoints(
+                state_root, job.status()["checkpoint"]
+            )
         evidence["terminal_started_ns"] = time.perf_counter_ns()
         await _end_acceptance_sources(sources, streams, case)
 
@@ -204,39 +230,124 @@ async def measure_acceptance_job(job, sources, sink, streams, *, case: dict) -> 
         )
     failure = cancellation or cleanup_error or failure
     _require_acceptance_outcome(failure, observer_failure, table, evidence, case)
+    return table, _record_acceptance_result(evidence, failure, cleanup_started)
+
+
+def _record_acceptance_result(
+    evidence: dict, failure: BaseException | None, cleanup_started: int
+) -> dict:
     evidence["lifecycle"] = "completed" if failure is None else "failed"
     if failure is not None:
         evidence["lifecycle_error"] = evidence["terminal_error"]
     evidence["terminal_seconds"] = (
         cleanup_started - evidence["terminal_started_ns"]
     ) / 1e9
-    evidence.update(_processing_checkpoint_evidence(observations, evidence))
-    return table, evidence
+    evidence.update(
+        _processing_checkpoint_evidence(evidence["checkpoint_observations"], evidence)
+    )
+    return evidence
 
 
 def acceptance_checkpoint_evidence(
     root: Path, status: dict, *, checkpointing: bool
 ) -> dict:
     """Retain exact source cursor progress for completed processing epochs."""
-    from scripts.toolkit import fingerprint_json
-
     evidence = checkpoint_evidence(root, status, checkpointing=checkpointing)
     manifests = []
     for item in evidence["manifests"]:
         document = json.loads((root / item["path"]).read_text())
-        sources = {}
-        for name, source in document["sources"].items():
-            cursor = source["cursor"]
-            rows = None if cursor is None else cursor["payload"].get("rows")
-            if rows is not None and (type(rows) is not int or rows < 0):
-                raise ValueError("acceptance source cursor has invalid cumulative rows")
-            sources[name] = {
-                "rows": rows,
-                "ended": source["ended"],
-                "cursor_sha256": fingerprint_json(cursor),
-            }
-        manifests.append({**item, "sources": sources})
+        manifests.append({**item, "sources": _manifest_source_progress(document)})
     return {**evidence, "manifests": manifests}
+
+
+def _manifest_source_progress(document: dict) -> dict:
+    from scripts.toolkit import fingerprint_json
+
+    sources = {}
+    for name, source in document["sources"].items():
+        cursor = source["cursor"]
+        rows = None if cursor is None else cursor["payload"].get("rows")
+        if rows is not None and (type(rows) is not int or rows < 0):
+            raise ValueError("acceptance source cursor has invalid cumulative rows")
+        sources[name] = {
+            "rows": rows,
+            "ended": source["ended"],
+            "cursor_sha256": fingerprint_json(cursor),
+        }
+    return sources
+
+
+def _snapshot_manifest(path: str, raw: str, last_completed: int | None) -> dict | None:
+    document = json.loads(raw)
+    epoch = document["epoch"]
+    if last_completed is None or epoch > last_completed:
+        return None
+    if document["format_version"] != 3 or not document["sources"]:
+        raise ValueError("checkpoint evidence requires a v3 source manifest")
+    return {
+        "path": path,
+        "sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+        "epoch": epoch,
+        "terminal": all(source["ended"] for source in document["sources"].values()),
+        "sources": _manifest_source_progress(document),
+        "document_json": raw,
+    }
+
+
+def _capture_processing_checkpoint_evidence(root: Path, status: dict) -> dict:
+    """Copy committed proofs before EOF can retire them; never retry a lost file."""
+    started = time.perf_counter_ns()
+    manifests, missing = [], []
+    for path in sorted(root.rglob("manifest-*.json")):
+        relative = str(path.relative_to(root))
+        try:
+            raw = path.read_bytes().decode("utf-8")
+        except FileNotFoundError:
+            missing.append(relative)
+            continue
+        item = _snapshot_manifest(relative, raw, status["last_completed_epoch"])
+        if item is not None:
+            manifests.append(item)
+    return {
+        "count_scope": "committed_manifests_observed_before_eof_only",
+        "started_ns": started,
+        "ended_ns": time.perf_counter_ns(),
+        "last_completed_epoch": status["last_completed_epoch"],
+        "manifests": manifests,
+        "missing_paths": missing,
+    }
+
+
+async def _snapshot_processing_checkpoints(root: Path, status: dict) -> dict:
+    reader = asyncio.create_task(
+        asyncio.to_thread(_capture_processing_checkpoint_evidence, root, status)
+    )
+    cancellation = await _settle_owned(reader)
+    if cancellation is not None:
+        raise cancellation
+    return reader.result()
+
+
+def _snapshot_manifests(evidence: dict) -> list:
+    snapshot = evidence.get("processing_checkpoint_snapshot")
+    if snapshot is None:
+        return []
+    end = evidence.get("settled_processing_ended_ns", evidence["processing_ended_ns"])
+    if not (
+        snapshot["count_scope"] == "committed_manifests_observed_before_eof_only"
+        and end
+        <= snapshot["started_ns"]
+        <= snapshot["ended_ns"]
+        <= evidence["terminal_started_ns"]
+    ):
+        raise ValueError("invalid processing checkpoint snapshot boundary")
+    for item in snapshot["manifests"]:
+        derived = _snapshot_manifest(
+            item["path"], item["document_json"], snapshot["last_completed_epoch"]
+        )
+        if item != derived:
+            raise ValueError("processing checkpoint snapshot manifest differs")
+    return snapshot["manifests"]
 
 
 async def _inspect_sample_checkpoints(
@@ -279,13 +390,15 @@ def _advancing_processing_epochs(
         if scenario == "asof_join"
         else "input"
     )
-    return [
-        item["epoch"]
-        for item in checkpoint["manifests"]
-        if item["epoch"] in evidence["completed_processing_epochs"]
-        and not item["terminal"]
-        and (item["sources"].get(quote_binding, {}).get("rows") or 0) > 0
-    ]
+    return sorted(
+        {
+            item["epoch"]
+            for item in [*checkpoint["manifests"], *_snapshot_manifests(evidence)]
+            if item["epoch"] in evidence["completed_processing_epochs"]
+            and not item["terminal"]
+            and (item["sources"].get(quote_binding, {}).get("rows") or 0) > 0
+        }
+    )
 
 
 class AcceptanceEngineCase:
@@ -395,11 +508,9 @@ class AcceptanceEngineCase:
         ).start_async()
         startup_seconds = (time.perf_counter_ns() - startup_started) / 1e9
         table, evidence = await measure_acceptance_job(
-            job,
-            sources,
-            sink,
-            timed,
+            AcceptanceBindings(job=job, sources=sources, sink=sink, streams=timed),
             case={**self.case, "dispatch_output_node_id": self.output_node_id},
+            state_root=state_root,
         )
         if self.fixture is not None and (
             evidence["dispatch_trace"]["compiled_plan_fingerprint"] != plan_fingerprint

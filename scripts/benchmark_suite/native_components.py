@@ -4,6 +4,73 @@ from __future__ import annotations
 
 import math
 
+
+def validate_join_dictionary_refusal(observation: dict) -> dict:
+    """Validate the bounded refusal control without performance denominators."""
+    _require_refusal_fields(
+        observation,
+        {
+            "schema": "calc-flow.join-dictionary-refusal.v1",
+            "case": "join_dictionary_refusal_retention",
+            "check_only": True,
+            "admission_batch_rows": [2, 1],
+            "left_retained_rows": 2,
+            "right_retained_rows": 1,
+            "left_retained_bytes": 228,
+            "right_retained_bytes": 114,
+            "full_v1_row_charges": [114, 114, 114],
+            "output_keys": [["a", "a"]],
+            "state_limit_failures": 0,
+            "match_limit_failures": 0,
+            "dictionary_grant_refusals": 1,
+            "needs_rebuild_routes": 1,
+            "legacy_key_encodings": 3,
+            "sql_probe_table_builds": 1,
+            "rebuild_attempts": 0,
+            "rebuild_completions": 0,
+            "owned_cleanup_complete": True,
+        },
+    )
+    pool = observation.get("pool")
+    _require_refusal_fields(
+        pool,
+        {
+            "last_rejected_consumer": "sql-incremental:stream-join-dictionary",
+            "failed_dictionary_grows": 1,
+            "reserved_bytes": 0,
+        },
+    )
+    for field in ("admission_batch_rows", "full_v1_row_charges"):
+        if any(type(value) is not int for value in observation[field]):
+            raise ValueError(f"invalid dictionary refusal integer list: {field}")
+    _positive_refusal_counts(
+        pool,
+        (
+            "successful_sql_grows",
+            "last_rejected_bytes",
+        ),
+    )
+    if observation["dictionary_grant_refusals"] != pool["failed_dictionary_grows"]:
+        raise ValueError("dictionary refusal counter lacks matching pool evidence")
+    return dict(observation)
+
+
+def _require_refusal_fields(observation: dict, expected: dict) -> None:
+    if not isinstance(observation, dict):
+        raise ValueError("missing dictionary refusal evidence")
+    for field, value in expected.items():
+        actual = observation.get(field)
+        if type(actual) is not type(value) or actual != value:
+            raise ValueError(f"invalid dictionary refusal evidence: {field}")
+
+
+def _positive_refusal_counts(observation: dict, fields: tuple[str, ...]) -> None:
+    for field in fields:
+        value = observation.get(field)
+        if type(value) is not int or value <= 0:
+            raise ValueError(f"missing dictionary refusal work: {field}")
+
+
 HISTORY_PHASES = (
     *(
         (name, "fresh")

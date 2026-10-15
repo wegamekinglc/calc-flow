@@ -1,5 +1,7 @@
+use super::super::persistent_dictionary_refusal_tests::DictionaryPool;
 use super::*;
 use datafusion::arrow::array::Int8Array;
+use std::sync::atomic::Ordering;
 
 const INT8_KEY: [u8; 10] = [2, 0, 0, 0, 0, 1, 0, 0, 0, 7];
 const ROW_CHARGE: u64 = 101;
@@ -161,11 +163,14 @@ async fn assert_sql_success(
     operator: &mut StreamJoinOperator,
     context: &StreamOperatorContext<'_>,
 ) {
+    let queries = operator.key_work.sql_probe_table_builds;
     let mut output = EdgeCollector::new(operator.output_ports().to_vec());
     operator
         .process_data("right", int8_batch(101), context, &mut output)
         .await
         .unwrap();
+    assert_eq!(operator.key_work.sql_probe_table_builds, queries + 1);
+    assert!(operator.key_dictionary_needs_rebuild);
     let messages = output.drain("output");
     assert_eq!(messages.len(), 1);
     let batch = messages[0].as_data().unwrap();
@@ -219,12 +224,15 @@ async fn assert_sql_error(operator: &mut StreamJoinOperator, context: &StreamOpe
     ))
     .unwrap();
     let before = operator.status();
+    let queries = operator.key_work.sql_probe_table_builds;
     let mut output = EdgeCollector::new(operator.output_ports().to_vec());
     crate::datafusion::owned::observe_legacy_inputs();
     let error = operator
         .process_data("right", int8_batch(102), context, &mut output)
         .await
         .unwrap_err();
+    assert_eq!(operator.key_work.sql_probe_table_builds, queries + 1);
+    assert!(operator.key_dictionary_needs_rebuild);
     assert!(
         error.to_string().contains("missing_ResourcesExhausted"),
         "{error}"
@@ -248,6 +256,7 @@ async fn assert_pending_loan(
     let pool = operator.checkpoint_preload_test_pool().unwrap();
     let before_bytes = pool.reserved();
     let before = operator.status();
+    let queries = operator.key_work.sql_probe_table_builds;
     let lock = operator.runtime.runtime().unwrap().owned_test_query_lock();
     let _guard = lock.lock_owned().await;
     let mut output = EdgeCollector::new(operator.output_ports().to_vec());
@@ -277,6 +286,8 @@ async fn assert_pending_loan(
         "abandoning the actual process_data future releases its SQL loan"
     );
     assert_eq!(pool.reserved(), before_bytes);
+    assert_eq!(operator.key_work.sql_probe_table_builds, queries + 1);
+    assert!(operator.key_dictionary_needs_rebuild);
     assert_eq!(operator.status(), before);
     assert!(output.drain("output").is_empty());
     assert_continued(operator);
@@ -285,7 +296,19 @@ async fn assert_pending_loan(
 #[tokio::test]
 async fn test_v2_reader_behavior_keeps_sql_loans_until_actual_release() {
     let mut operator = int8_operator();
+    let dictionary_pool = Arc::new(DictionaryPool::default());
+    dictionary_pool.mode.store(1, Ordering::SeqCst);
+    operator
+        .runtime
+        .initialize_benchmark_pool(dictionary_pool.clone())
+        .unwrap();
     operator.restore(&int8_snapshot(&operator)).unwrap();
+    assert!(dictionary_pool.refusals.load(Ordering::SeqCst) > 0);
+    assert!(operator.key_work.dictionary_grant_refusals > 0);
+    assert!(operator.key_dictionary_needs_rebuild);
+    assert_eq!(operator.key_dictionary.inventory(), (0, 0, 0, false));
+    assert!(operator.state.left.1.is_none());
+    assert!(operator.state.right.1.is_none());
     let containers = Arc::downgrade(operator.v2_containers.as_ref().unwrap());
     let pool = operator.checkpoint_preload_test_pool().unwrap();
     assert!(pool.reserved() > 0);

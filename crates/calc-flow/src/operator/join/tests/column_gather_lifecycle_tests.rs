@@ -16,18 +16,24 @@ fn assert_stopped_gather(cancel: bool) {
         .enable_all()
         .build()
         .unwrap();
-    let responsive = runtime.block_on(assert_cancelled_columns(&service, cancel));
+    let responsive = [false, true]
+        .into_iter()
+        .map(|projected| runtime.block_on(assert_cancelled_columns(&service, cancel, projected)))
+        .collect::<Vec<_>>();
     drop(runtime);
     service.shutdown();
     assert!(
-        responsive,
+        responsive.into_iter().all(|responsive| responsive),
         "cancellation must return before the native column is released"
     );
 }
 
-async fn assert_cancelled_columns(service: &TestService, cancel: bool) -> bool {
+async fn assert_cancelled_columns(service: &TestService, cancel: bool, projected: bool) -> bool {
     let mut operator =
         StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+    if projected {
+        operator.set_output_projection(vec![2, 5]).unwrap();
+    }
     let job = job().with_gather_owner(service.owner("join-cancel-columns".into()));
     let context = StreamOperatorContext::new(&job, "match", None);
     let mut collector = EdgeCollector::new(operator.output_ports().to_vec());

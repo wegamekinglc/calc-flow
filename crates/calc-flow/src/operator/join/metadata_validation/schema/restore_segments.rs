@@ -1,6 +1,6 @@
 use super::super::ValidatedMetadata;
 use super::{OwnedExpectedSchemas, SchemaConstruction, SchemaSuccess, SchemaWork};
-use crate::operator::join::{RestoreSchema, StoredRow, columnar};
+use crate::operator::join::{RestoreSchema, StoredRow, columnar, historical_validation};
 use crate::runtime::streaming::gather_work::{
     AdmissionFailure, AttemptCleanup, GatherOperatorId, GatherStop, ObservedTicket, OwnedCpuWork,
     TaskId, cleanup_control_bytes,
@@ -37,6 +37,7 @@ enum RestoreSegmentsDecision {
 struct PreparedSides {
     left: Vec<StoredRow>,
     right: Vec<StoredRow>,
+    historical_error: Option<crate::CalcFlowError>,
     _schemas: OwnedExpectedSchemas,
     metadata: ValidatedMetadata,
     _workspace: MemoryReservation,
@@ -54,14 +55,16 @@ impl OwnedCpuWork for RestoreSegmentsWork {
     }
 
     fn run(mut self, stop: &GatherStop) -> Result<RestoreSegmentsDecision> {
-        let Some(success) = self.schema.take().expect("owned schema input").run(stop)? else {
+        let schema = self.schema.take().expect("owned schema input");
+        let event_indices = schema.event_indices();
+        let Some(success) = schema.run(stop)? else {
             return Ok(RestoreSegmentsDecision::UseLegacy);
         };
         if !self.inspect_segments(&success.schemas, stop)? {
             return Ok(RestoreSegmentsDecision::Original(success));
         }
         self.populate_snapshot(stop)?;
-        self.prepare_rows(success, stop)
+        self.prepare_rows(success, event_indices, stop)
     }
 }
 
@@ -69,10 +72,11 @@ impl RestoreSegmentsWork {
     fn prepare_rows(
         &mut self,
         success: SchemaSuccess,
+        event_indices: [usize; 2],
         stop: &GatherStop,
     ) -> Result<RestoreSegmentsDecision> {
-        let rows = self.restore_sides(&success.schemas, stop);
-        let (left, right) = match rows {
+        let rows = self.restore_sides(&success.schemas, event_indices, stop);
+        let (left, right, historical_error) = match rows {
             Ok(rows) => rows,
             Err(error) => {
                 drop(error);
@@ -85,6 +89,7 @@ impl RestoreSegmentsWork {
         Ok(RestoreSegmentsDecision::Prepared(PreparedSides {
             left,
             right,
+            historical_error,
             _schemas: success.schemas,
             metadata: success.metadata,
             _workspace: self
@@ -141,10 +146,16 @@ impl RestoreSegmentsWork {
     fn restore_sides(
         &self,
         schemas: &OwnedExpectedSchemas,
+        event_indices: [usize; 2],
         stop: &GatherStop,
-    ) -> Result<(Vec<StoredRow>, Vec<StoredRow>)> {
+    ) -> Result<(Vec<StoredRow>, Vec<StoredRow>, Option<crate::CalcFlowError>)> {
+        let issue = historical_validation::Issue::default();
         let schema = |side| RestoreSchema {
             schema: schemas.schema(side),
+            historical: Some(historical_validation::Validation {
+                event_index: event_indices[side],
+                issue: &issue,
+            }),
             #[cfg(test)]
             hook: self.schema_hook.as_ref(),
             #[cfg(test)]
@@ -156,7 +167,7 @@ impl RestoreSegmentsWork {
             #[cfg(test)]
             decoded_owned_work: true,
         };
-        crate::operator::join::restore_sides_from_segments_checked(
+        let (left, right) = crate::operator::join::restore_sides_from_segments_checked(
             &self.input.snapshot,
             schema(0),
             schema(1),
@@ -164,7 +175,8 @@ impl RestoreSegmentsWork {
             &self.input.key_indices[1],
             &self.input.name,
             &|| stop.check(),
-        )
+        )?;
+        Ok((left, right, issue.into_inner()))
     }
 
     fn copy_rows(
@@ -547,8 +559,18 @@ impl crate::operator::join::StreamJoinOperator {
         stop: &GatherStop,
     ) -> Result<bool> {
         let output = ticket.finish().await?;
-        output.install(|decision| self.install_segments_decision(decision, snapshot, job))?;
+        let mut decision = None;
+        output.install(|prepared| {
+            decision = Some(prepared);
+            Ok(())
+        })?;
         self.wait_metadata_cleanup(stop, job).await?;
+        job.check_cancelled()?;
+        self.install_segments_decision(
+            decision.expect("observed segments decision"),
+            snapshot,
+            job,
+        )?;
         Ok(true)
     }
 
@@ -572,6 +594,7 @@ impl crate::operator::join::StreamJoinOperator {
                 prepared.metadata,
                 std::mem::take(&mut prepared.left),
                 std::mem::take(&mut prepared.right),
+                prepared.historical_error.take(),
                 &|| job.check_cancelled(),
             ),
         }

@@ -18,7 +18,9 @@ mod buffer;
 mod compact;
 mod cut;
 mod encode;
+mod identity;
 mod metadata;
+pub(in crate::operator::join) use identity::HistoryIdentity;
 mod row;
 
 #[cfg(test)]
@@ -29,6 +31,7 @@ pub(in crate::operator::join) type WriterTestHook = Arc<dyn Fn(&MemoryReservatio
 
 pub(in crate::operator::join) struct WriterState {
     tracker: cut::Tracker,
+    history_identity: Option<HistoryIdentity>,
     prepared: Option<PreparedBase>,
     prepared_delta: Option<PreparedBase>,
     deltas: Vec<metadata::DeltaEntry>,
@@ -43,6 +46,7 @@ impl Default for WriterState {
     fn default() -> Self {
         Self {
             tracker: cut::Tracker::default(),
+            history_identity: None,
             prepared: None,
             prepared_delta: None,
             deltas: Vec::new(),
@@ -61,6 +65,53 @@ struct PreparedBase {
 }
 
 impl WriterState {
+    #[cfg(test)]
+    pub(in crate::operator::join) fn base_funding_for_test(&self) -> usize {
+        assert!(self.prepared.is_none() && self.prepared_delta.is_none());
+        let Some(base) = self.base.as_ref() else {
+            return 0;
+        };
+        let mut owners: std::collections::BTreeMap<usize, usize> = base
+            .test_owners()
+            .into_iter()
+            .map(|owner| {
+                let owner = owner.upgrade().expect("live base control reservation");
+                (Arc::as_ptr(&owner) as usize, owner.size())
+            })
+            .collect();
+        for segment in base.segments.values() {
+            let owner = segment
+                .owner_for_test::<MemoryReservation>()
+                .expect("fresh base segment reservation");
+            owners.insert(std::ptr::from_ref(owner) as usize, owner.size());
+        }
+        owners.values().sum()
+    }
+
+    #[cfg(test)]
+    pub(in crate::operator::join) fn observation_for_test(
+        &self,
+    ) -> impl Eq + std::fmt::Debug + use<> {
+        (
+            self.tracker,
+            self.history_identity,
+            self.history_trusted,
+            self.migration_required,
+            self.base_epoch,
+            self.dirty_epochs,
+            self.prepared.as_ref().map(|prepared| prepared.cut),
+            self.prepared_delta.as_ref().map(|prepared| prepared.cut),
+        )
+    }
+
+    pub(in crate::operator::join::checkpoint_v2) fn migration() -> Self {
+        Self {
+            migration_required: true,
+            history_trusted: false,
+            ..Self::default()
+        }
+    }
+
     pub(super) fn restored(
         snapshot: &OperatorStateSnapshot,
         inventory: &super::inventory::Inventory<'_>,
@@ -77,8 +128,11 @@ impl WriterState {
         })
     }
 
-    pub(super) fn bind_owner(&mut self, previous: &Self) -> Result<()> {
-        self.tracker = previous.tracker.next_owner()?;
+    pub(super) fn bind_owner(&mut self, previous: &Self, identity: HistoryIdentity) -> Result<()> {
+        let mut tracker = previous.tracker.next_owner()?;
+        tracker.identity = identity;
+        self.tracker = tracker;
+        self.history_identity = self.base.as_ref().map(|_| identity);
         Ok(())
     }
 
@@ -87,8 +141,11 @@ impl WriterState {
         Ok(())
     }
 
-    pub(in crate::operator::join) fn invalidate_history(&mut self) {
+    pub(in crate::operator::join) fn invalidate_history(&mut self) -> Result<()> {
+        let tracker = self.tracker.advanced(true)?;
+        self.tracker = tracker;
         self.history_trusted = false;
+        Ok(())
     }
 
     pub(in crate::operator::join) fn next_owner(&self, migration_required: bool) -> Result<Self> {
@@ -133,6 +190,7 @@ struct SubmittedWriter {
 }
 
 struct WriterWork {
+    identity: HistoryIdentity,
     inputs: Inputs,
     schemas: [SchemaRef; 2],
     name: String,
@@ -182,6 +240,11 @@ impl WriterWork {
         history: encode::rebase::HistoryInput,
         stop: &GatherStop,
     ) -> Result<encode::Base> {
+        if history.identity != self.identity {
+            return Err(buffer::error(
+                "checkpoint rebase history layout differs from worker",
+            ));
+        }
         if let Some(pending) = self.inputs.rebase_pending.take() {
             encode::rebase::encode_pending(
                 history,
@@ -250,12 +313,11 @@ impl StreamJoinOperator {
     }
 
     fn v2_preparation_kind(&self) -> Option<Preparation> {
-        if self.fresh_v2_preparation_matches() {
+        if self.must_rebuild_v2_history() {
+            Some(Preparation::Base)
+        } else if self.fresh_v2_preparation_matches() {
             None
-        } else if self.state.last_checkpoint_epoch.is_none()
-            || self.v2_writer.migration_required
-            || self.v2_writer.dirty_epochs >= 4
-        {
+        } else if self.state.last_checkpoint_epoch.is_none() || self.v2_writer.dirty_epochs >= 4 {
             Some(Preparation::Base)
         } else if !self.state.deltas.pending.is_empty() {
             Some(Preparation::Delta)
@@ -307,12 +369,9 @@ impl StreamJoinOperator {
         kind: Preparation,
         context: &StreamOperatorContext<'_>,
     ) -> bool {
-        *cut != self
-            .v2_writer
-            .tracker
-            .snapshot(self.state.last_checkpoint_epoch)
+        !self.v2_cut_matches(cut)
             || (matches!(kind, Preparation::Rebase)
-                && (!context.job().checkpointing() || !self.v2_writer.history_trusted))
+                && (!context.job().checkpointing() || self.must_rebuild_v2_history()))
     }
 
     fn install_v2_writer_base(
@@ -334,6 +393,7 @@ impl StreamJoinOperator {
             let tracker = self.v2_writer.tracker.advanced(true)?;
             self.v2_writer.deltas = Vec::new();
             self.v2_writer.base = Some(base);
+            self.v2_writer.history_identity = Some(self.checkpoint_identity);
             self.v2_writer.base_epoch = epoch.as_u64();
             self.v2_writer.dirty_epochs = 0;
             self.v2_writer.prepared = None;
@@ -440,10 +500,11 @@ impl StreamJoinOperator {
         self.compaction_release = Some(receiver);
         inputs.released = Some(released);
         Ok(WriterWork {
+            identity: self.checkpoint_identity,
             inputs,
             schemas: [
-                Arc::clone(self.input_schema(0)),
-                Arc::clone(self.input_schema(1)),
+                Arc::clone(self.retained_schema(0)),
+                Arc::clone(self.retained_schema(1)),
             ],
             name: self.name.clone(),
             #[cfg(test)]
@@ -519,6 +580,7 @@ impl StreamJoinOperator {
             self.capture_v2_dirty(epoch, &credit)?
         };
         self.state.deltas.pending.clear();
+        self.v2_writer.history_identity = Some(self.checkpoint_identity);
         self.state.last_checkpoint_epoch = Some(epoch);
         self.v2_writer.tracker = tracker;
         self.v2_writer.prepared = None;
@@ -555,16 +617,22 @@ impl StreamJoinOperator {
                 "V2 checkpoint requires successful migration preparation",
             ));
         }
+        if !self.v2_writer.history_trusted || !self.v2_history_matches() {
+            return Err(buffer::error(
+                "V2 checkpoint requires live base preparation after history invalidation",
+            ));
+        }
         Ok(())
     }
 
     fn fresh_v2_preparation_matches(&self) -> bool {
         self.state.last_checkpoint_epoch.is_none()
+            && self.v2_writer.history_trusted
             && self
                 .v2_writer
                 .prepared
                 .as_ref()
-                .is_some_and(|prepared| prepared.cut == self.v2_writer.tracker.snapshot(None))
+                .is_some_and(|prepared| self.v2_cut_matches(&prepared.cut))
     }
 
     fn capture_initial_prepared(
@@ -604,8 +672,8 @@ impl StreamJoinOperator {
     ) -> Result<OperatorStateSnapshot> {
         let workspace = self.v2_writer_workspace()?;
         let schemas = [
-            Arc::clone(self.input_schema(0)),
-            Arc::clone(self.input_schema(1)),
+            Arc::clone(self.retained_schema(0)),
+            Arc::clone(self.retained_schema(1)),
         ];
         let empty = self.v2_empty_base(&schemas, &workspace)?;
         if self.state.deltas.pending.is_empty() {
@@ -692,15 +760,11 @@ impl StreamJoinOperator {
         epoch: Epoch,
         workspace: &MemoryReservation,
     ) -> Result<encode::Base> {
-        let cut = self
-            .v2_writer
-            .tracker
-            .snapshot(self.state.last_checkpoint_epoch);
         if self
             .v2_writer
             .prepared_delta
             .as_ref()
-            .is_some_and(|prepared| prepared.cut == cut)
+            .is_some_and(|prepared| self.v2_cut_matches(&prepared.cut))
         {
             let prepared = self
                 .v2_writer

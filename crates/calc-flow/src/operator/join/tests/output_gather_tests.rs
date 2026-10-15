@@ -50,7 +50,7 @@ async fn test_legacy_admission_keeps_one_parent_and_physical_row_offsets() {
             assert_eq!(row.record.offset(), offset, "physical parent row offset");
             assert!(std::ptr::eq(
                 row.record.columns(),
-                prepared.admitted[0].record.columns()
+                prepared.admitted.row(0).record.columns()
             ));
             assert_eq!(row.record.column(2).len(), 3);
             assert!(Arc::ptr_eq(row.record.column(2), record.column(2)));
@@ -175,7 +175,7 @@ fn nested_dictionary(list: bool) -> ArrayRef {
 
 #[tokio::test]
 async fn test_nested_dictionary_output_discards_unused_values_under_same_budget() {
-    for list in [false, true] {
+    for (list, projected) in [(false, false), (true, false), (false, true), (true, true)] {
         let nested = nested_dictionary(list);
         let schema = Arc::new(Schema::new(vec![
             left_schema().field(0).clone(),
@@ -193,10 +193,14 @@ async fn test_nested_dictionary_output_discards_unused_values_under_same_budget(
         .unwrap();
         let mut operator =
             StreamJoinOperator::new("match", schema, right_schema(), spec()).unwrap();
+        if projected {
+            operator.set_output_projection(vec![2]).unwrap();
+        }
         let job = job();
         let context = StreamOperatorContext::new(&job, "match", None)
             .with_output_budget(EdgeBudget::new(1, 128).unwrap());
         let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        reset_join_work();
         operator
             .process_data(
                 "left",
@@ -214,7 +218,9 @@ async fn test_nested_dictionary_output_discards_unused_values_under_same_budget(
         assert_eq!(messages.len(), 1);
         let batch = messages[0].as_data().unwrap();
         assert!(batch.estimated_bytes().unwrap() <= 128);
-        let nested = batch.table_payload().unwrap().batches()[0].column(2);
+        let output = &batch.table_payload().unwrap().batches()[0];
+        assert_eq!(output.num_columns(), if projected { 1 } else { 6 });
+        let nested = output.column(if projected { 0 } else { 2 });
         let dictionary = if list {
             nested
                 .as_any()
@@ -237,6 +243,11 @@ async fn test_nested_dictionary_output_discards_unused_values_under_same_budget(
         assert_eq!(values.len(), 1);
         assert_eq!(values.value(0), "paid");
         assert_eq!(values.value_data().len(), 4);
+        assert_eq!(
+            join_work().output_row_batch_views,
+            0,
+            "nested output costing must not stage one-row RecordBatch views"
+        );
     }
 }
 
@@ -282,6 +293,64 @@ async fn test_earlier_timestamp_error_precedes_later_row_id_overflow() {
     assert_eq!(operator.state.next_left_row_id, u64::MAX - 1);
     assert_eq!(operator.status(), before);
     assert!(collector.drain("output").is_empty());
+}
+
+#[tokio::test]
+async fn test_batch_admission_metric_and_conversion_keep_first_row_error() {
+    for null_first in [true, false] {
+        let schema = Arc::new(Schema::new(vec![
+            left_schema().field(0).clone(),
+            Field::new(
+                "authorized_at",
+                DataType::Timestamp(TimeUnit::Second, None),
+                true,
+            ),
+            left_schema().field(2).clone(),
+        ]));
+        let times = if null_first {
+            vec![None, Some(i64::MAX)]
+        } else {
+            vec![Some(i64::MAX), None]
+        };
+        let record = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int64Array::from(vec![7, 7])) as ArrayRef,
+                Arc::new(TimestampSecondArray::from(times)),
+                Arc::new(Int64Array::from(vec![None::<i64>; 2])),
+            ],
+        )
+        .unwrap();
+        let mut operator =
+            StreamJoinOperator::new("match", schema, right_schema(), spec()).unwrap();
+        operator.state.next_left_row_id = u64::MAX - 1;
+        operator.state.metrics.left.null_event_time_rows = u64::MAX;
+        let before = operator.status();
+        let job = job();
+        let context = StreamOperatorContext::new(&job, "match", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        let error = operator
+            .process_data(
+                "left",
+                Batch::table(vec![record], BatchMetadata::default()).unwrap(),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap_err();
+        let reason = if null_first {
+            crate::StreamingFailureReason::JoinCounterOverflow
+        } else {
+            crate::StreamingFailureReason::JoinTimeConversionFailed
+        };
+        assert_eq!(reason_of(&error), Some(reason));
+        if null_first {
+            assert!(error.to_string().contains("null_event_time_rows"));
+        }
+        assert_eq!(operator.status(), before);
+        assert_eq!(operator.state.next_left_row_id, u64::MAX - 1);
+        assert!(collector.drain("output").is_empty());
+    }
 }
 
 #[tokio::test]

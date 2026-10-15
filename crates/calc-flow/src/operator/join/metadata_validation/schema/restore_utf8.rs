@@ -1,6 +1,6 @@
 use super::super::ValidatedMetadata;
 use super::{OwnedExpectedSchemas, SchemaConstruction, SchemaSuccess, SchemaWork};
-use crate::operator::join::{RestoreSchema, StoredRow, columnar};
+use crate::operator::join::{RestoreSchema, StoredRow, columnar, historical_validation};
 use crate::runtime::streaming::gather_work::{
     AdmissionFailure, AttemptCleanup, GatherOperatorId, GatherStop, ObservedTicket, OwnedCpuWork,
     TaskId, cleanup_control_bytes,
@@ -38,6 +38,7 @@ enum RestoreUtf8Decision {
 struct PreparedSides {
     left: Vec<StoredRow>,
     right: Vec<StoredRow>,
+    historical_error: Option<crate::CalcFlowError>,
     _schemas: OwnedExpectedSchemas,
     metadata: ValidatedMetadata,
     _workspace: MemoryReservation,
@@ -55,7 +56,9 @@ impl OwnedCpuWork for RestoreUtf8Work {
     }
 
     fn run(mut self, stop: &GatherStop) -> Result<RestoreUtf8Decision> {
-        let Some(success) = self.schema.take().expect("owned schema input").run(stop)? else {
+        let schema = self.schema.take().expect("owned schema input");
+        let event_indices = schema.event_indices();
+        let Some(success) = schema.run(stop)? else {
             return Ok(RestoreUtf8Decision::UseLegacy);
         };
         let Some(facts) = self.inspect_segments(&success.schemas, stop)? else {
@@ -65,7 +68,7 @@ impl OwnedCpuWork for RestoreUtf8Work {
             return Ok(RestoreUtf8Decision::Original(success));
         }
         self.populate_snapshot(stop)?;
-        self.prepare_rows(success, stop)
+        self.prepare_rows(success, event_indices, stop)
     }
 }
 
@@ -73,10 +76,11 @@ impl RestoreUtf8Work {
     fn prepare_rows(
         &mut self,
         success: SchemaSuccess,
+        event_indices: [usize; 2],
         stop: &GatherStop,
     ) -> Result<RestoreUtf8Decision> {
-        let rows = self.restore_sides(&success.schemas, stop);
-        let (left, right) = match rows {
+        let rows = self.restore_sides(&success.schemas, event_indices, stop);
+        let (left, right, historical_error) = match rows {
             Ok(rows) => rows,
             Err(error) => {
                 drop(error);
@@ -97,6 +101,7 @@ impl RestoreUtf8Work {
         Ok(RestoreUtf8Decision::Prepared(PreparedSides {
             left,
             right,
+            historical_error,
             _schemas: success.schemas,
             metadata: success.metadata,
             _workspace: self
@@ -185,10 +190,16 @@ impl RestoreUtf8Work {
     fn restore_sides(
         &self,
         schemas: &OwnedExpectedSchemas,
+        event_indices: [usize; 2],
         stop: &GatherStop,
-    ) -> Result<(Vec<StoredRow>, Vec<StoredRow>)> {
+    ) -> Result<(Vec<StoredRow>, Vec<StoredRow>, Option<crate::CalcFlowError>)> {
+        let issue = historical_validation::Issue::default();
         let schema = |side| RestoreSchema {
             schema: schemas.schema(side),
+            historical: Some(historical_validation::Validation {
+                event_index: event_indices[side],
+                issue: &issue,
+            }),
             #[cfg(test)]
             hook: self.schema_hook.as_ref(),
             #[cfg(test)]
@@ -200,7 +211,7 @@ impl RestoreUtf8Work {
             #[cfg(test)]
             decoded_owned_work: true,
         };
-        crate::operator::join::restore_sides_from_segments_checked(
+        let (left, right) = crate::operator::join::restore_sides_from_segments_checked(
             &self.input.snapshot,
             schema(0),
             schema(1),
@@ -208,7 +219,8 @@ impl RestoreUtf8Work {
             &self.input.key_indices[1],
             &self.input.name,
             &|| stop.check(),
-        )
+        )?;
+        Ok((left, right, issue.into_inner()))
     }
 
     fn copy_rows(
@@ -587,13 +599,16 @@ impl crate::operator::join::StreamJoinOperator {
         stop: &GatherStop,
     ) -> Result<bool> {
         let output = ticket.finish().await?;
-        let mut fallback = None;
-        output.install(|decision| {
-            fallback = self.install_utf8_decision(decision, snapshot, job)?;
+        let mut decision = None;
+        output.install(|prepared| {
+            decision = Some(prepared);
             Ok(())
         })?;
         self.wait_metadata_cleanup(stop, job).await?;
-        if let Some(decision) = fallback {
+        job.check_cancelled()?;
+        if let Some(decision) =
+            self.install_utf8_decision(decision.expect("observed utf8 decision"), snapshot, job)?
+        {
             self.install_utf8_fallback(decision, snapshot, job)?;
         }
         Ok(true)
@@ -613,6 +628,7 @@ impl crate::operator::join::StreamJoinOperator {
                     prepared.metadata,
                     std::mem::take(&mut prepared.left),
                     std::mem::take(&mut prepared.right),
+                    prepared.historical_error.take(),
                     &|| job.check_cancelled(),
                 )
                 .map(|()| None),

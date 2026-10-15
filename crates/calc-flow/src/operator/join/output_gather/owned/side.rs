@@ -1,5 +1,5 @@
 use super::super::super::{columnar::Quantum, concat_output_column, native_lookup::scratch_error};
-use super::{ArrayRef, MemoryReservation, Result, RowPayload, StreamOperatorContext};
+use super::{ArrayRef, MemoryReservation, PayloadRef, Result, RowPayload, StreamOperatorContext};
 use datafusion::arrow::{
     array::UInt64Array,
     compute::{interleave, take},
@@ -19,12 +19,12 @@ pub(super) enum OwnedSide {
 
 impl OwnedSide {
     pub(super) async fn capture<'a>(
-        mut payloads: impl ExactSizeIterator<Item = &'a RowPayload>,
+        mut payloads: impl ExactSizeIterator<Item = PayloadRef<'a>>,
         context: &StreamOperatorContext<'_>,
     ) -> Result<Self> {
         let capacity = payloads.len();
         let first = payloads.next().expect("nonempty matched range");
-        let source = first.clone();
+        let source = first.owner().expect("detached owned gather input").clone();
         let identity = first.columns().as_ptr() as usize;
         let mut payloads = std::iter::once(first).chain(payloads);
         let mut rows = Vec::with_capacity(capacity);
@@ -61,8 +61,8 @@ impl OwnedSide {
     async fn capture_multiple<'a>(
         source: RowPayload,
         prefix: Vec<u64>,
-        transition: &'a RowPayload,
-        payloads: impl Iterator<Item = &'a RowPayload>,
+        transition: PayloadRef<'a>,
+        payloads: impl Iterator<Item = PayloadRef<'a>>,
         capacity: usize,
         quantum: &mut Quantum,
         context: &StreamOperatorContext<'_>,
@@ -88,7 +88,12 @@ impl OwnedSide {
                 if identity != previous.0 {
                     let index = *parents.entry(identity).or_insert_with(|| {
                         let index = sources.len();
-                        sources.push(payload.clone());
+                        sources.push(
+                            payload
+                                .owner()
+                                .expect("detached owned gather input")
+                                .clone(),
+                        );
                         index
                     });
                     previous = (identity, index);

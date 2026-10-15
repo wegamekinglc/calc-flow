@@ -203,6 +203,10 @@ fn test_restored_float_null_payload_keeps_original_reader_and_wire() {
         snapshot.segments["left-base"].bytes()
     );
     drop(construction);
+    let identities = identity_funding(&target);
+    assert!(identities > 0);
+    assert_eq!(pool.reserved(), identities);
+    drop(target);
     assert_eq!(pool.reserved(), 0);
     drop(entered);
     drop(runtime);

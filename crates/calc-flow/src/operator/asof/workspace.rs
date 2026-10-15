@@ -86,21 +86,24 @@ impl ColumnWorkspace {
     }
 
     pub(super) fn bytes(&self, row: usize, name: &str) -> Result<u64> {
-        self.fixed
-            .checked_add(variable_length(&self.column, row)?)
-            .ok_or_else(|| {
-                reason(
-                    name,
-                    StreamingFailureReason::AsofCounterOverflow,
-                    "ASOF column workspace arithmetic overflowed",
-                )
-            })
+        self.bytes_with_length(variable_length(&self.column, row)?, name)
+    }
+
+    fn bytes_with_length(&self, length: u64, name: &str) -> Result<u64> {
+        self.fixed.checked_add(length).ok_or_else(|| {
+            reason(
+                name,
+                StreamingFailureReason::AsofCounterOverflow,
+                "ASOF column workspace arithmetic overflowed",
+            )
+        })
     }
 }
 
 #[cfg(test)]
 thread_local! {
     static RANGE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static VARIABLE_LENGTH_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static OUTPUT_SOURCE_REGISTRATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static LEFT_OUTPUT_PLANNING: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
 }
@@ -235,6 +238,8 @@ fn variable_range_length(column: &ArrayRef, range: std::ops::Range<usize>) -> Re
 }
 
 fn variable_length(column: &ArrayRef, row: usize) -> Result<u64> {
+    #[cfg(test)]
+    VARIABLE_LENGTH_CALLS.with(|calls| calls.set(calls.get() + 1));
     let length = match column.data_type() {
         DataType::Utf8 => column
             .as_any()
@@ -693,16 +698,21 @@ fn identity_encoding_workspace(
     string: bool,
     name: &str,
 ) -> Result<u64> {
-    let slice = aligned(column.bytes(row, name)?);
+    let bytes = column.bytes(row, name)?;
     if string {
-        checked(
-            name,
-            checked(name, slice, slice / 32)?,
-            STRING_IDENTITY_FRAMING_BYTES,
-        )
+        string_identity_workspace(bytes, name)
     } else {
-        checked(name, slice, FIXED_IDENTITY_FRAMING_BYTES)
+        checked(name, aligned(bytes), FIXED_IDENTITY_FRAMING_BYTES)
     }
+}
+
+fn string_identity_workspace(bytes: u64, name: &str) -> Result<u64> {
+    let slice = aligned(bytes);
+    checked(
+        name,
+        checked(name, slice, slice / 32)?,
+        STRING_IDENTITY_FRAMING_BYTES,
+    )
 }
 
 /// Fixed-width identity columns have identical per-row framing and slice
@@ -729,18 +739,36 @@ fn identity_range_workspace(
 
 fn identity_column_range_workspace(
     column: &ColumnWorkspace,
-    mut range: std::ops::Range<usize>,
+    range: std::ops::Range<usize>,
     string: bool,
     name: &str,
 ) -> Result<u64> {
     if string {
-        range.try_fold(0, |total, row| {
-            checked(
+        match column.column.data_type() {
+            DataType::Utf8 => identity_offset_range_workspace(
+                column,
+                column
+                    .column
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .expect("validated string identity")
+                    .value_offsets(),
+                range,
                 name,
-                total,
-                identity_encoding_workspace(column, row, true, name)?,
-            )
-        })
+            ),
+            DataType::LargeUtf8 => identity_offset_range_workspace(
+                column,
+                column
+                    .column
+                    .as_any()
+                    .downcast_ref::<LargeStringArray>()
+                    .expect("validated string identity")
+                    .value_offsets(),
+                range,
+                name,
+            ),
+            _ => unreachable!("validated string identity"),
+        }
     } else {
         ipc_multiply(
             identity_encoding_workspace(column, range.start, false, name)?,
@@ -748,6 +776,25 @@ fn identity_column_range_workspace(
             name,
         )
     }
+}
+
+fn identity_offset_range_workspace<T: Copy + Into<i64>>(
+    column: &ColumnWorkspace,
+    offsets: &[T],
+    range: std::ops::Range<usize>,
+    name: &str,
+) -> Result<u64> {
+    offsets[range.start..=range.end]
+        .windows(2)
+        .try_fold(0, |total, pair| {
+            let length = u64::try_from(pair[1].into() - pair[0].into()).map_err(|_| {
+                CalcFlowError::Format {
+                    message: "negative ASOF variable-length value".into(),
+                }
+            })?;
+            let bytes = column.bytes_with_length(length, name)?;
+            checked(name, total, string_identity_workspace(bytes, name)?)
+        })
 }
 
 /// Aligns a buffer length to the IPC writer's alignment boundary.
@@ -766,6 +813,8 @@ fn column_workspace(column: &ArrayRef, row: usize) -> Result<u64> {
 
 #[cfg(test)]
 mod tests {
+    mod identity_ranges;
+
     use super::*;
     use crate::AsofJoinSide;
     use datafusion::arrow::{
@@ -1182,6 +1231,17 @@ mod tests {
                 );
             }
         }
+        let record = repro_record(4_096);
+        let columns = resolve_identity_columns(&record, &repro_side()).unwrap();
+        VARIABLE_LENGTH_CALLS.with(|calls| calls.set(0));
+        identity_range_workspace(&columns, 0..record.num_rows(), "asof").unwrap();
+        let calls = VARIABLE_LENGTH_CALLS.with(|calls| calls.replace(0));
+        assert!(
+            calls <= columns.len(),
+            "identity range performed {calls} scalar length dispatches for {} columns",
+            columns.len()
+        );
+        identity_ranges::check_string_ranges();
     }
 
     #[test]

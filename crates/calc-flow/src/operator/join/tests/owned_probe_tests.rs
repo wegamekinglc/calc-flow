@@ -37,8 +37,10 @@ fn assert_literal_output(collector: &mut EdgeCollector, rows: usize, sequence: u
 }
 
 pub(super) async fn assert_owned_process_data(service: &TestService) {
-    assert_abandoned_probe(service, data_work::ProbePhase::Count, false).await;
-    assert_abandoned_probe(service, data_work::ProbePhase::Fill, true).await;
+    for mixed in [false, true] {
+        assert_abandoned_probe(service, data_work::ProbePhase::Count, false, mixed).await;
+        assert_abandoned_probe(service, data_work::ProbePhase::Fill, true, mixed).await;
+    }
     let mut operator = probe_operator();
     let job = job().with_gather_owner(service.owner("owned-probe".into()));
     let context = StreamOperatorContext::new(&job, "match", None);
@@ -145,10 +147,54 @@ fn assert_probe_released(
     );
 }
 
-async fn assert_abandoned_probe(service: &TestService, phase: data_work::ProbePhase, cancel: bool) {
+fn mixed_probe_input() -> Batch {
+    let records = [
+        (1, -1, false),
+        (PROBE_ROWS / 2, 1, false),
+        (PROBE_ROWS / 2, 1, true),
+    ]
+    .into_iter()
+    .map(|(rows, time, nullable)| {
+        RecordBatch::try_new(
+            left_schema(),
+            vec![
+                Arc::new(Int64Array::from(vec![7; rows])) as ArrayRef,
+                Arc::new(TimestampMicrosecondArray::from(vec![time; rows]).with_timezone("UTC")),
+                Arc::new(Int64Array::from(vec![(!nullable).then_some(42); rows])),
+            ],
+        )
+        .unwrap()
+    })
+    .collect();
+    Batch::table(records, BatchMetadata::default()).unwrap()
+}
+
+async fn assert_abandoned_probe(
+    service: &TestService,
+    phase: data_work::ProbePhase,
+    cancel: bool,
+    mixed: bool,
+) {
     let mut operator = probe_operator();
     let job_context = job().with_gather_owner(service.owner("abandoned-probe".into()));
-    let context = StreamOperatorContext::new(&job_context, "match", None);
+    let context = StreamOperatorContext::with_ingress_progress(
+        &job_context,
+        "match",
+        None,
+        IngressProgressSnapshot::new(BTreeMap::from([
+            (
+                "left".into(),
+                IngressProgress::new(
+                    IngressState::Active,
+                    mixed.then_some(EventTime::from_micros(0)),
+                ),
+            ),
+            (
+                "right".into(),
+                IngressProgress::new(IngressState::Active, None),
+            ),
+        ])),
+    );
     let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
     operator
         .process_data("right", right_batch(vec![0]), &context, &mut collector)
@@ -163,12 +209,20 @@ async fn assert_abandoned_probe(service: &TestService, phase: data_work::ProbePh
     let rows_pointer = operator.state.right.as_ptr() as usize;
     let index_pointer = Arc::as_ptr(operator.state.right.1.as_ref().unwrap()) as usize;
     let ProbeGate { started, release } = probe_gate(&mut operator, phase);
-    let mut process = Box::pin(operator.process_data(
-        "left",
-        left_batch(vec![0; PROBE_ROWS]),
-        &context,
-        &mut collector,
-    ));
+    let input = if mixed {
+        mixed_probe_input()
+    } else {
+        left_batch(vec![0; PROBE_ROWS])
+    };
+    let inputs = input
+        .table_payload()
+        .unwrap()
+        .batches()
+        .iter()
+        .map(|record| Arc::downgrade(record.column(2)))
+        .collect::<Vec<_>>();
+    let mut process =
+        Box::pin(operator.process_data("left", input.clone(), &context, &mut collector));
     let (rows, index, thread) = tokio::select! {
         observed = started => observed.unwrap(),
         result = &mut process => panic!("probe completed before gate: {result:?}"),
@@ -183,11 +237,47 @@ async fn assert_abandoned_probe(service: &TestService, phase: data_work::ProbePh
         ));
     }
     drop(process);
+    drop(input);
+    if mixed {
+        assert!(
+            inputs[0].upgrade().is_none(),
+            "native worker retained dropped record"
+        );
+        assert!(
+            inputs[1].upgrade().is_none(),
+            "native worker retained replaced record"
+        );
+        assert!(
+            inputs[2].upgrade().is_some(),
+            "native worker lost detached required parent"
+        );
+    }
     assert_eq!(operator.state.next_left_row_id, 0);
     assert_eq!(operator.state.deltas.pending.iter().count(), 1);
     assert!(collector.drain("output").is_empty());
     assert!(job_context.gather_owner().funding().2 > 0);
     assert!(operator.probe_control.as_ref().unwrap().size() > 0);
+    drop(context);
+    resume_abandoned_probe(
+        operator,
+        job_context,
+        pool,
+        collector,
+        (weak, inputs),
+        release,
+    )
+    .await;
+}
+
+async fn resume_abandoned_probe(
+    mut operator: StreamJoinOperator,
+    job_context: StreamJobContext,
+    pool: Arc<dyn datafusion::execution::memory_pool::MemoryPool>,
+    mut collector: EdgeCollector,
+    observed: (std::sync::Weak<dyn Array>, Vec<std::sync::Weak<dyn Array>>),
+    release: std::sync::mpsc::Sender<()>,
+) {
+    let (weak, inputs) = observed;
     operator.reset().unwrap();
     assert!(
         weak.upgrade().is_some(),
@@ -206,6 +296,7 @@ async fn assert_abandoned_probe(service: &TestService, phase: data_work::ProbePh
         .await
         .unwrap();
     assert!(weak.upgrade().is_none());
+    assert!(inputs.iter().all(|input| input.upgrade().is_none()));
     assert_probe_released(&operator, &resumed_job, pool.as_ref());
     operator
         .process_data(
@@ -229,7 +320,7 @@ async fn assert_abandoned_probe(service: &TestService, phase: data_work::ProbePh
         native_lookup_tests::state_funding(&operator),
     );
     drop(operator);
-    drop((context, resumed));
+    drop(resumed);
     assert!(
         resumed_job
             .gather_owner()
@@ -299,9 +390,10 @@ pub(super) async fn assert_refused_process_data(service: &TestService) {
     assert_eq!(join_work().sql_probe_table_builds, 0);
     assert_eq!(
         join_work().arena_frames,
-        PROBE_ROWS,
+        0,
         "refused worker admission must reuse recovered probe keys"
     );
+    assert_eq!(join_work().key_encodings, 0);
     assert_eq!(operator.state.next_left_row_id, 8_193);
     assert_eq!(operator.state.metrics.emitted_match_rows, 8_193);
     assert_eq!(operator.state.deltas.pending.iter().count(), 8_194);

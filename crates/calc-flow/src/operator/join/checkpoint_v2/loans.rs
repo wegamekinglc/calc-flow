@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use super::super::{AdmittedRow, SidePlan, SqlKeyOwners, StreamJoinOperator, decode_key_pairs};
+use super::super::{AdmittedBatch, SidePlan, SqlKeyOwners, StreamJoinOperator, decode_key_pairs};
 use super::ContainerFunding;
 use crate::Result;
 use crate::datafusion::owned;
@@ -21,7 +21,7 @@ impl V2SqlOwners {
         }
     }
 
-    fn finish(self) -> Vec<AdmittedRow> {
+    fn finish(self) -> AdmittedBatch {
         let Self {
             inner,
             _containers: containers,
@@ -37,7 +37,8 @@ impl StreamJoinOperator {
         &mut self,
         plan: &SidePlan,
         input: owned::Input<V2SqlOwners>,
-    ) -> (Result<Vec<(u64, u64)>>, Vec<AdmittedRow>) {
+        admitted: &mut AdmittedBatch,
+    ) -> Result<Vec<(u64, u64)>> {
         let result = self
             .runtime
             .runtime()
@@ -47,28 +48,30 @@ impl StreamJoinOperator {
         match result {
             Ok(result) => {
                 let pairs = decode_key_pairs(result.batch());
-                (pairs, result.finish().finish())
+                *admitted = result.finish().finish();
+                pairs
             }
-            Err(failure) => self.finish_v2_owned_key_failure(plan, failure).await,
+            Err(failure) => {
+                self.finish_v2_owned_key_failure(failure, admitted)?;
+                self.legacy_key_retry(plan, admitted).await
+            }
         }
     }
 
-    async fn finish_v2_owned_key_failure(
+    fn finish_v2_owned_key_failure(
         &mut self,
-        plan: &SidePlan,
         failure: owned::Failure<V2SqlOwners>,
-    ) -> (Result<Vec<(u64, u64)>>, Vec<AdmittedRow>) {
+        admitted: &mut AdmittedBatch,
+    ) -> Result<()> {
         let retry = failure
             .error
             .retry_legacy(failure.input.owner().inner.scratch.is_some());
         let (error, input) = failure.into_parts(Some(&self.name));
-        let admitted = input.finish().finish();
+        *admitted = input.finish().finish();
         if retry {
-            return self.legacy_key_retry(plan, admitted).await;
+            Ok(())
+        } else {
+            Err(error.expect("non-retry failure keeps its source"))
         }
-        (
-            Err(error.expect("non-retry failure keeps its source")),
-            admitted,
-        )
     }
 }

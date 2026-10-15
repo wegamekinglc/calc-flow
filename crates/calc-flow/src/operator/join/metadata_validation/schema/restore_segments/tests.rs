@@ -3,7 +3,8 @@ use crate::{
     CancellationToken, Epoch, JsonMap, OperatorStateSnapshot, StreamJobContext, StreamOperator,
     operator::join::{
         JoinStateLimits, JoinTimeBounds, StreamJoinOperator, StreamJoinSpec, encode_join_key_v1,
-        encode_side, state_row_charge, with_one_gib_pool,
+        encode_side, state_row_charge, tests::native_lookup_tests::identity_funding,
+        with_one_gib_pool,
     },
     runtime::streaming::gather_work::TestService,
 };
@@ -397,12 +398,12 @@ fn old_route_probe(target: &mut StreamJoinOperator) -> Arc<AtomicUsize> {
 }
 
 async fn finish_refusal(
-    target: &mut StreamJoinOperator,
+    mut target: StreamJoinOperator,
     snapshot: &OperatorStateSnapshot,
     job: StreamJobContext,
     parses: &AtomicUsize,
 ) {
-    let pool = pool(target);
+    let pool = pool(&target);
     target
         .restore_managed_metadata(snapshot, &job, None)
         .await
@@ -413,6 +414,10 @@ async fn finish_refusal(
     assert!(target.compaction_cleanup.is_none());
     job.gather_owner().close_and_drain().await;
     drop(job);
+    let identities = identity_funding(&target);
+    assert!(identities > 0);
+    assert_eq!(pool.reserved(), identities);
+    drop(target);
     assert_eq!(pool.reserved(), 0);
 }
 
@@ -456,9 +461,16 @@ async fn check_resident_refusal(service: &TestService) {
     assert!(target.compaction_cleanup.is_none());
     let (home, generation, attempt) = job.gather_owner().funding();
     assert_eq!(attempt, 0);
-    assert_eq!(pool.reserved(), pressure.size() + home + generation);
+    let identities = identity_funding(&target);
+    assert!(identities > 0);
+    assert_eq!(
+        pool.reserved(),
+        pressure.size() + home + generation + identities
+    );
     job.gather_owner().close_and_drain().await;
     drop(job);
+    assert_eq!(pool.reserved(), pressure.size() + identities);
+    drop(target);
     assert_eq!(pool.reserved(), pressure.size());
     drop(pressure);
     assert_eq!(pool.reserved(), 0);
@@ -481,7 +493,7 @@ async fn check_attempt_refusal(service: &TestService) {
         limit,
     );
     let parses = old_route_probe(&mut target);
-    finish_refusal(&mut target, &snapshot, job, &parses).await;
+    finish_refusal(target, &snapshot, job, &parses).await;
     let event = probe.take_event().unwrap();
     assert_eq!(event.stage, AdmissionStage::Attempt);
     assert_eq!(event.available + 1, event.fee);

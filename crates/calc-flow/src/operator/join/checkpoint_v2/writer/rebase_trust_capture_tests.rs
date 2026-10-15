@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn test_off_mutation_keeps_cached_fresh_and_manual_captures_untrusted() {
+async fn test_off_mutation_requires_live_fresh_preparation_and_cold_parity() {
     let enabled = job();
     let context = StreamOperatorContext::new(&enabled, "prepared-reuse", None);
     let disabled = job().with_checkpointing(false);
@@ -10,42 +10,26 @@ async fn test_off_mutation_keeps_cached_fresh_and_manual_captures_untrusted() {
     let pool = join.runtime.runtime().unwrap().incremental_memory_pool();
     let bases = count_base(&mut join);
     join.prepare_checkpoint_async(&context).await.unwrap();
-    assert!(join.v2_writer.history_trusted);
-    let original = join.v2_writer.tracker.snapshot(None);
     admit_left(&mut join, &off).await;
-    assert_eq!(join.v2_writer.tracker.snapshot(None), original);
-    assert!(join.fresh_v2_preparation_matches());
-    assert!(!join.v2_writer.history_trusted);
     join.prepare_checkpoint_async(&context).await.unwrap();
-    assert_eq!(bases.load(Ordering::SeqCst), 1);
-    assert!(!join.v2_writer.history_trusted);
-    let cached = join.checkpoint(Epoch::INITIAL).unwrap();
-    assert!(!join.v2_writer.history_trusted);
-    let clean = join.checkpoint(Epoch::new(2).unwrap()).unwrap();
-    assert!(!join.v2_writer.history_trusted);
-    let mut invalid = cached.clone();
-    invalid
-        .inline_metadata
-        .insert("layout_version".into(), 999.into());
-    assert!(join.restore(&invalid).is_err());
-    assert!(!join.v2_writer.history_trusted);
-    join.prepare_v2_checkpoint(&context).await.unwrap();
-    assert_eq!(bases.load(Ordering::SeqCst), 2);
-    assert!(join.v2_writer.history_trusted);
-    let current = join.checkpoint(Epoch::new(3).unwrap()).unwrap();
+    let current = join.checkpoint(Epoch::INITIAL).unwrap();
     let mut restored = operator();
-    restored.restore(&current).unwrap();
-    assert_same_live(&join, &restored);
-    drop((join, restored, cached, clean, invalid, current));
-    drop((context, off));
+    let restore = restored.restore(&current);
+    if restore.is_ok() {
+        assert_same_live(&join, &restored);
+    }
+    let base_count = bases.load(Ordering::SeqCst);
+    drop((join, restored, current, context, off));
     assert!(enabled.gather_owner().close_and_drain().await.is_empty());
     assert!(disabled.gather_owner().close_and_drain().await.is_empty());
     drop((enabled, disabled));
     assert_eq!(pool.reserved(), 0);
+    restore.expect("ON preparation must replace a fresh base cached before OFF changes");
+    assert_eq!(base_count, 2);
 }
 
 #[tokio::test]
-async fn test_untrusted_history_survives_prepared_delta_capture() {
+async fn test_off_history_rejects_capture_until_live_base_preparation() {
     let enabled = job();
     let context = StreamOperatorContext::new(&enabled, "prepared-reuse", None);
     let disabled = job().with_checkpointing(false);
@@ -54,20 +38,29 @@ async fn test_untrusted_history_survives_prepared_delta_capture() {
     join.prepare_checkpoint_async(&context).await.unwrap();
     let initial = join.checkpoint(Epoch::INITIAL).unwrap();
     admit_left(&mut join, &off).await;
-    assert!(!join.v2_writer.history_trusted);
-    admit_left(&mut join, &context).await;
-    let bases = count_base(&mut join);
-    join.prepare_checkpoint_async(&context).await.unwrap();
-    assert!(join.v2_writer.prepared_delta.is_some());
-    assert_eq!(bases.load(Ordering::SeqCst), 0);
-    assert!(!join.v2_writer.history_trusted);
-    let delta = join.checkpoint(Epoch::new(2).unwrap()).unwrap();
-    assert!(!join.v2_writer.history_trusted);
+    let denied = join.checkpoint(Epoch::new(2).unwrap());
+    let refused = denied.is_err();
+    drop(denied);
+    if refused {
+        admit_left(&mut join, &context).await;
+        let bases = count_base(&mut join);
+        join.prepare_checkpoint_async(&context).await.unwrap();
+        assert!(join.v2_writer.prepared_delta.is_none());
+        assert!(join.v2_writer.history_trusted);
+        assert_eq!(bases.load(Ordering::SeqCst), 1);
+        let current = join.checkpoint(Epoch::new(2).unwrap()).unwrap();
+        let mut restored = operator();
+        restored.restore(&current).unwrap();
+        assert_same_live(&join, &restored);
+    }
     let pool = join.runtime.runtime().unwrap().incremental_memory_pool();
-    drop((join, initial, delta));
-    drop((context, off));
+    drop((join, initial, context, off));
     assert!(enabled.gather_owner().close_and_drain().await.is_empty());
     assert!(disabled.gather_owner().close_and_drain().await.is_empty());
     drop((enabled, disabled));
     assert_eq!(pool.reserved(), 0);
+    assert!(
+        refused,
+        "untrusted capture must require live base preparation"
+    );
 }

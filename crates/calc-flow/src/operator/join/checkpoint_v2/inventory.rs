@@ -21,6 +21,21 @@ pub(super) struct Payload {
 }
 
 impl<'a> Inventory<'a> {
+    pub(super) fn decode_projected(
+        snapshot: &'a OperatorStateSnapshot,
+        check: &dyn Fn() -> crate::Result<()>,
+    ) -> crate::Result<Self> {
+        check()?;
+        super::geometry::checked(super::metadata::projected::validate_root(
+            &snapshot.inline_metadata,
+        ))?;
+        let inventory = super::geometry::checked(Self::decode_fields(&snapshot.inline_metadata))?;
+        inventory.validate_deltas(check)?;
+        inventory.validate_payloads(check)?;
+        inventory.validate_segments(snapshot, check)?;
+        Ok(inventory)
+    }
+
     pub(super) fn decode(
         snapshot: &'a OperatorStateSnapshot,
         check: &dyn Fn() -> crate::Result<()>,

@@ -16,7 +16,23 @@ use crate::{CalcFlowError, Result};
 pub(in crate::operator::join) struct Funding {
     _schemas: [SchemaRef; 2],
     credit: Arc<MemoryReservation>,
-    _retirement: Option<RetirementGuard>,
+    retirement: Option<Retirement>,
+}
+
+enum Retirement {
+    Direct { _guard: RetirementGuard },
+    Shared { _guard: Arc<RetirementGuard> },
+}
+
+impl Drop for Funding {
+    fn drop(&mut self) {
+        self.retirement = match self.retirement.take() {
+            Some(Retirement::Shared { _guard: guard }) => {
+                Arc::into_inner(guard).map(|guard| Retirement::Direct { _guard: guard })
+            }
+            other => other,
+        };
+    }
 }
 
 impl Funding {
@@ -28,7 +44,19 @@ impl Funding {
         Arc::new(Self {
             _schemas: schemas,
             credit: Arc::new(credit),
-            _retirement: retirement,
+            retirement: retirement.map(|guard| Retirement::Direct { _guard: guard }),
+        })
+    }
+
+    pub(super) fn shared(
+        schemas: [SchemaRef; 2],
+        credit: MemoryReservation,
+        retirement: Option<Arc<RetirementGuard>>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            _schemas: schemas,
+            credit: Arc::new(credit),
+            retirement: retirement.map(|guard| Retirement::Shared { _guard: guard }),
         })
     }
 

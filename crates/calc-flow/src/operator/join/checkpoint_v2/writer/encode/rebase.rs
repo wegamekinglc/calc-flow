@@ -40,6 +40,7 @@ struct SideExpected {
 }
 
 pub(in crate::operator::join::checkpoint_v2::writer) struct HistoryInput {
+    pub(in crate::operator::join::checkpoint_v2::writer) identity: super::super::HistoryIdentity,
     indexes: Vec<IndexInput>,
     payloads: Vec<PayloadInput>,
     expected: [SideExpected; 2],

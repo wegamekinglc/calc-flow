@@ -1,20 +1,29 @@
 #[cfg(test)]
+use super::AdmittedRow;
+#[cfg(test)]
 use super::StoredRow;
+#[cfg(test)]
 use super::borrowed_key::KeyHashState;
+#[cfg(test)]
 use super::borrowed_key::framed_hash;
 use super::columnar::FramedKey;
+#[cfg(test)]
 use super::key_arena::{ArenaLayout, visit_key_frames, visit_string_values};
+#[cfg(test)]
 use super::native_dictionary::BASE_BYTES;
 pub(super) use super::native_dictionary::{AppendCredit, NativeIndex};
 use super::{
-    AdmittedRow, CompiledJoin, JoinTimeBounds, MatchedPair, SidePlan, StreamJoinOperator,
+    AdmittedRows, CompiledJoin, JoinTimeBounds, MatchedPair, SidePlan, StreamJoinOperator,
     enforce_match_limit,
 };
 use crate::{CalcFlowError, EventTime, Result};
 use datafusion::arrow::datatypes::{DataType, Schema};
 use datafusion::execution::memory_pool::MemoryReservation;
+#[cfg(test)]
 use hashbrown::HashTable;
-use std::{hash::BuildHasher, sync::Arc};
+#[cfg(test)]
+use std::hash::BuildHasher;
+use std::sync::Arc;
 
 #[cfg(test)]
 #[path = "tests/native_index_allocation_tests.rs"]
@@ -30,27 +39,38 @@ pub(super) fn eligible(compiled: &CompiledJoin, left: &Schema) -> bool {
 fn native_type(data_type: &DataType) -> bool {
     matches!(
         data_type,
-        DataType::Boolean | DataType::Int16 | DataType::Int32 | DataType::Int64
+        DataType::Boolean | DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64
     ) || matches!(
         data_type,
         DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64
     ) || matches!(
         data_type,
-        DataType::Utf8 | DataType::LargeUtf8 | DataType::Timestamp(..)
+        DataType::Utf8
+            | DataType::LargeUtf8
+            | DataType::Date32
+            | DataType::Date64
+            | DataType::Timestamp(..)
     )
 }
 
+#[cfg(test)]
 pub(super) struct NativeMatches {
     pub(super) pairs: Vec<MatchedPair>,
     pub(super) keys: NativeKeys,
+    pub(super) _credit: MemoryReservation,
+}
+
+pub(super) struct NativePairs {
+    pub(super) pairs: Vec<MatchedPair>,
     pub(super) credit: MemoryReservation,
 }
 
 pub(super) struct NativeKeys {
-    pub(super) keys: Vec<Arc<FramedKey>>,
+    pub(super) keys: Vec<Option<Arc<FramedKey>>>,
     ids: Vec<u32>,
     _credit: Arc<MemoryReservation>,
-    _scratch: MemoryReservation,
+    _scratch: Arc<MemoryReservation>,
+    pub(super) dictionary: Option<super::key_dictionary::Pending>,
 }
 
 impl NativeKeys {
@@ -59,12 +79,16 @@ impl NativeKeys {
     }
 
     pub(super) fn key(&self, position: usize) -> &Arc<FramedKey> {
-        &self.keys[self.ids[position] as usize]
+        self.keys[self.ids[position] as usize]
+            .as_ref()
+            .expect("retained key identity")
     }
 
     #[cfg(test)]
     pub(super) fn row_keys(&self) -> impl Iterator<Item = &Arc<FramedKey>> {
-        self.ids.iter().map(|&id| &self.keys[id as usize])
+        self.ids
+            .iter()
+            .map(|&id| self.keys[id as usize].as_ref().expect("known fixture key"))
     }
 }
 
@@ -78,7 +102,11 @@ struct ProbeWindows<'a> {
 impl<'a> ProbeWindows<'a> {
     fn new(index: &'a NativeIndex, keys: &'a NativeKeys) -> Self {
         let mut slots = Vec::with_capacity(keys.keys.len());
-        slots.extend(keys.keys.iter().map(|key| index.key_id(key)));
+        slots.extend(
+            keys.keys
+                .iter()
+                .map(|key| key.as_ref().and_then(|key| index.key_id(key))),
+        );
         Self {
             index,
             ids: &keys.ids,
@@ -87,16 +115,24 @@ impl<'a> ProbeWindows<'a> {
     }
 
     fn count(&self, pos: usize, range: (EventTime, EventTime)) -> usize {
-        self.slots[self.ids[pos] as usize].map_or(0, |id| self.index.count_window_by_id(id, range))
+        self.slots
+            .get(self.ids[pos] as usize)
+            .copied()
+            .flatten()
+            .map_or(0, |id| self.index.count_window_by_id(id, range))
     }
 
     fn range(&self, pos: usize, range: (EventTime, EventTime)) -> impl Iterator<Item = usize> + '_ {
-        self.slots[self.ids[pos] as usize]
+        self.slots
+            .get(self.ids[pos] as usize)
+            .copied()
+            .flatten()
             .into_iter()
             .flat_map(move |id| self.index.range_by_id(id, range))
     }
 }
 
+#[cfg(test)]
 struct ProbeKeyInterner {
     keys: Vec<Arc<FramedKey>>,
     ids: Vec<u32>,
@@ -105,6 +141,7 @@ struct ProbeKeyInterner {
     hasher: KeyHashState,
 }
 
+#[cfg(test)]
 impl ProbeKeyInterner {
     fn new(rows: usize) -> Self {
         Self {
@@ -282,16 +319,18 @@ impl ProbeKeyInterner {
         let scratch = credit.split(scratch);
         credit.shrink(credit.size() - retained);
         Ok(NativeKeys {
-            keys,
+            keys: keys.into_iter().map(Some).collect(),
             ids,
             _credit: credit,
-            _scratch: scratch,
+            _scratch: Arc::new(scratch),
+            dictionary: None,
         })
     }
 }
 
+#[cfg(test)]
 fn intern_probe_keys(
-    admitted: &[AdmittedRow],
+    admitted: &dyn AdmittedRows,
     indices: &[usize],
     credit: Arc<MemoryReservation>,
     name: &str,
@@ -323,7 +362,7 @@ fn intern_probe_keys(
 
 #[cfg(test)]
 pub(super) fn colliding_probe_keys(
-    admitted: &[AdmittedRow],
+    admitted: &dyn AdmittedRows,
     indices: &[usize],
     credit: MemoryReservation,
 ) -> Result<NativeKeys> {
@@ -349,37 +388,14 @@ impl StreamJoinOperator {
             .runtime
             .runtime()?
             .incremental_reservation("stream-join-native");
-        Ok(credit.try_grow(bytes).ok().map(|()| credit))
+        super::key_dictionary::grant(&credit, bytes, &self.name)
     }
 
+    #[cfg(test)]
     pub(super) fn native_matches(
         &mut self,
         plan: &SidePlan,
-        admitted: &[AdmittedRow],
-        keys: Option<NativeKeys>,
-    ) -> Result<Option<NativeMatches>> {
-        if !eligible(&self.compiled, self.input_schema(0)) {
-            return Ok(None);
-        }
-        if !self.ensure_native_index(!plan.incoming_is_left)? {
-            return Ok(None);
-        }
-        let matched = self.probe_native_index(plan, admitted, keys)?;
-        if matched.is_none() {
-            let opposite = if plan.incoming_is_left {
-                &mut self.state.right
-            } else {
-                &mut self.state.left
-            };
-            opposite.1 = None;
-        }
-        Ok(matched)
-    }
-
-    fn probe_native_index(
-        &mut self,
-        plan: &SidePlan,
-        admitted: &[AdmittedRow],
+        admitted: &dyn AdmittedRows,
         keys: Option<NativeKeys>,
     ) -> Result<Option<NativeMatches>> {
         let keys = match keys {
@@ -389,35 +405,101 @@ impl StreamJoinOperator {
         let Some(keys) = keys else {
             return Ok(None);
         };
-        self.collect_native_pairs(plan, admitted, keys)
+        Ok(self
+            .native_pairs(plan, admitted, &keys)?
+            .map(|output| NativeMatches {
+                pairs: output.pairs,
+                keys,
+                _credit: output.credit,
+            }))
     }
 
-    pub(super) fn native_probe_keys(
+    pub(super) fn native_pairs(
         &mut self,
         plan: &SidePlan,
-        admitted: &[AdmittedRow],
-    ) -> Result<Option<NativeKeys>> {
+        admitted: &dyn AdmittedRows,
+        keys: &NativeKeys,
+    ) -> Result<Option<NativePairs>> {
         if !eligible(&self.compiled, self.input_schema(0)) {
             return Ok(None);
         }
-        let layout = ArenaLayout::measure(admitted, &plan.key_indices)?;
-        let bytes = match layout {
-            Some(layout) => layout.charge,
-            None => probe_key_charge(admitted, &plan.key_indices)?,
-        };
-        let Some(credit) = self.optional_credit(bytes)? else {
+        if !self.ensure_native_index(!plan.incoming_is_left)? {
+            return Ok(None);
+        }
+        let matched = self.collect_native_pairs(plan, admitted, keys)?;
+        if matched.is_none() {
+            self.drop_native_index(!plan.incoming_is_left);
+        }
+        Ok(matched)
+    }
+
+    #[cfg(test)]
+    pub(super) fn native_probe_keys(
+        &mut self,
+        plan: &SidePlan,
+        admitted: &dyn AdmittedRows,
+    ) -> Result<Option<NativeKeys>> {
+        futures::executor::block_on(self.prepare_key_identities(plan, admitted, None))
+    }
+
+    pub(super) async fn prepare_key_identities(
+        &mut self,
+        plan: &SidePlan,
+        admitted: &dyn AdmittedRows,
+        context: Option<&crate::StreamOperatorContext<'_>>,
+    ) -> Result<Option<NativeKeys>> {
+        self.key_dictionary.reclaim_retired(context).await?;
+        if self.key_dictionary_needs_rebuild {
+            self.key_work.needs_rebuild_routes = super::checked_metric(
+                self.key_work.needs_rebuild_routes,
+                1,
+                &self.name,
+                "needs_rebuild_routes",
+            )?;
+            return Ok(None);
+        }
+        if !eligible(&self.compiled, self.input_schema(0)) {
+            return Err(super::charge_type_mismatch("Join key column"));
+        }
+        let master = self
+            .runtime
+            .runtime()?
+            .incremental_reservation("stream-join-dictionary");
+        let Some(prepared) = self
+            .key_dictionary
+            .prepare(admitted, &plan.key_indices, master, context, &self.name)
+            .await?
+        else {
+            self.key_work.dictionary_grant_refusals = super::checked_metric(
+                self.key_work.dictionary_grant_refusals,
+                1,
+                &self.name,
+                "dictionary_grant_refusals",
+            )?;
             return Ok(None);
         };
-        let shared = Arc::new(credit);
-        intern_probe_keys(admitted, &plan.key_indices, shared, &self.name, layout).map(Some)
+        let super::key_dictionary::PreparedKeys {
+            dictionary,
+            keys,
+            ids,
+            scratch,
+        } = prepared;
+        let credit = Arc::clone(&scratch);
+        Ok(Some(NativeKeys {
+            keys,
+            ids,
+            _credit: credit,
+            _scratch: scratch,
+            dictionary: Some(dictionary),
+        }))
     }
 
     fn collect_native_pairs(
         &mut self,
         plan: &SidePlan,
-        admitted: &[AdmittedRow],
-        keys: NativeKeys,
-    ) -> Result<Option<NativeMatches>> {
+        admitted: &dyn AdmittedRows,
+        keys: &NativeKeys,
+    ) -> Result<Option<NativePairs>> {
         let opposite = if plan.incoming_is_left {
             &self.state.right
         } else {
@@ -427,7 +509,7 @@ impl StreamJoinOperator {
             .1
             .as_ref()
             .expect("native index built before probing");
-        let windows = ProbeWindows::new(index, &keys);
+        let windows = ProbeWindows::new(index, keys);
         let count = count_pairs(
             &windows,
             admitted,
@@ -450,9 +532,9 @@ impl StreamJoinOperator {
             .as_ref()
             .expect("native probe initialized runtime")
             .incremental_reservation("stream-join-native");
-        if credit.try_grow(bytes).is_err() {
+        let Some(credit) = super::key_dictionary::grant(&credit, bytes, &self.name)? else {
             return Ok(None);
-        }
+        };
         let mut pairs = Vec::with_capacity(count);
         for (pos, row) in admitted.iter().enumerate() {
             pairs.extend(
@@ -468,11 +550,15 @@ impl StreamJoinOperator {
             );
         }
         drop(windows);
-        Ok(Some(NativeMatches {
-            pairs,
-            keys,
-            credit,
-        }))
+        Ok(Some(NativePairs { pairs, credit }))
+    }
+
+    pub(super) fn drop_native_index(&mut self, left: bool) {
+        if left {
+            self.state.left.1 = None;
+        } else {
+            self.state.right.1 = None;
+        }
     }
 
     pub(super) fn reserve_native_append(
@@ -495,7 +581,7 @@ impl StreamJoinOperator {
             .1
             .as_ref()
             .expect("native append index initialized")
-            .reserve(rows);
+            .reserve_checked(rows, &self.name)?;
         if credit.is_none() {
             retained.1 = None;
         }
@@ -511,6 +597,9 @@ impl StreamJoinOperator {
         if rows.1.is_some() {
             return Ok(true);
         }
+        if self.key_dictionary_needs_rebuild {
+            return Ok(false);
+        }
         let Some(bytes) = NativeIndex::build_charge(rows.len()) else {
             return Ok(false);
         };
@@ -522,7 +611,12 @@ impl StreamJoinOperator {
         } else {
             &mut self.state.right
         };
-        rows.1 = Some(Arc::new(NativeIndex::new(rows, credit)));
+        rows.1 = Some(Arc::new(NativeIndex::new_identified(
+            rows,
+            &self.key_dictionary,
+            self.key_bindings.side(left),
+            credit,
+        )));
         Ok(true)
     }
 }
@@ -545,7 +639,8 @@ pub(super) fn time_range(
     )
 }
 
-pub(super) fn probe_key_charge(admitted: &[AdmittedRow], indices: &[usize]) -> Result<usize> {
+#[cfg(test)]
+pub(super) fn probe_key_charge(admitted: &dyn AdmittedRows, indices: &[usize]) -> Result<usize> {
     let extra = admitted
         .len()
         .checked_mul(size_of::<u32>() + size_of::<Option<u32>>())
@@ -582,7 +677,7 @@ pub(super) fn scratch_error(name: &str) -> CalcFlowError {
 
 fn count_pairs(
     windows: &ProbeWindows<'_>,
-    admitted: &[AdmittedRow],
+    admitted: &dyn AdmittedRows,
     bounds: JoinTimeBounds,
     plan: &SidePlan,
     limit: u64,

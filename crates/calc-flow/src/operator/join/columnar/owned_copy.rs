@@ -1,4 +1,4 @@
-use super::{PayloadChunk, PayloadFunding, metadata};
+use super::{PayloadChunk, PayloadFunding, SelectedRows, metadata};
 use crate::operator::join::{SidePlan, StreamJoinOperator};
 use crate::runtime::streaming::gather_work::{
     AdmissionFailure, GatherOperatorId, GatherStop, OwnedCpuWork, RetirementGuard, WorkOutput,
@@ -36,7 +36,6 @@ pub(in crate::operator::join) struct SelectedRow {
     pub source: usize,
     pub row_id: u64,
     pub time: EventTime,
-    pub retain: bool,
 }
 
 pub(in crate::operator::join) struct CopySelection {
@@ -258,7 +257,7 @@ fn buffer_lease_control() -> usize {
         - 1
 }
 
-fn reservation_control() -> Option<usize> {
+pub(in crate::operator::join) fn reservation_control() -> Option<usize> {
     add(
         size_of::<MemoryConsumer>()
             + size_of::<Arc<dyn datafusion::execution::memory_pool::MemoryPool>>()
@@ -310,6 +309,19 @@ fn supported(array: &dyn Array) -> bool {
 }
 
 impl StreamJoinOperator {
+    pub(in crate::operator::join) async fn can_copy_admitted_payload(
+        &self,
+        record: &RecordBatch,
+        plan: &SidePlan,
+        context: &StreamOperatorContext<'_>,
+        quantum: &mut Quantum,
+    ) -> Result<bool> {
+        if self.payload_projection.is_some() {
+            return Ok(false);
+        }
+        self.can_copy_payload(record, plan, context, quantum).await
+    }
+
     fn serial_payload_sql(&self) -> bool {
         if let Some(runtime) = &self.runtime.runtime {
             return runtime.serial_owned_sql();
@@ -346,7 +358,7 @@ impl StreamJoinOperator {
         &mut self,
         record: &RecordBatch,
         port: usize,
-        rows: &[SelectedRow],
+        rows: SelectedRows<'_>,
         context: &StreamOperatorContext<'_>,
         quantum: &mut Quantum,
     ) -> Result<Option<Arc<PayloadChunk>>> {
@@ -358,10 +370,16 @@ impl StreamJoinOperator {
         &mut self,
         columns: &[ArrayRef],
         port: usize,
-        rows: &[SelectedRow],
+        rows: SelectedRows<'_>,
         context: &StreamOperatorContext<'_>,
         quantum: &mut Quantum,
     ) -> Result<Option<Arc<PayloadChunk>>> {
+        if !self
+            .projected_copy_supported(columns, context, quantum)
+            .await?
+        {
+            return Ok(None);
+        }
         let Some((mut owners, funding)) = self
             .prepare_payload_copy(columns, port, rows, context, quantum)
             .await?
@@ -390,7 +408,7 @@ impl StreamJoinOperator {
         &mut self,
         columns: &[ArrayRef],
         port: usize,
-        rows: &[SelectedRow],
+        rows: SelectedRows<'_>,
         context: &StreamOperatorContext<'_>,
         quantum: &mut Quantum,
     ) -> Result<Option<(Construction, Arc<PayloadFunding>)>> {
@@ -402,23 +420,47 @@ impl StreamJoinOperator {
         }
         copy_inventory(columns, rows, &mut owners.inventory, context, quantum).await?;
         let Some(funding) =
-            initialize_funding(self.input_schema(port), &mut owners, context, quantum).await?
+            initialize_funding(self.retained_schema(port), &mut owners, context, quantum).await?
         else {
             return Ok(None);
         };
         Ok(Some((owners, funding)))
     }
 
+    async fn projected_copy_supported(
+        &self,
+        columns: &[ArrayRef],
+        context: &StreamOperatorContext<'_>,
+        quantum: &mut Quantum,
+    ) -> Result<bool> {
+        if self.payload_projection.is_none() {
+            return Ok(true);
+        }
+        for column in columns {
+            quantum.step(context, 8, 0).await?;
+            if !supported(column.as_ref()) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     fn payload_construction(
         &mut self,
         columns: usize,
         port: usize,
-        rows: &[SelectedRow],
+        rows: SelectedRows<'_>,
     ) -> Result<Option<Construction>> {
         if rows.is_empty() {
             return Ok(None);
         }
-        let Some(metadata) = self.payload_schema_bytes[port] else {
+        let Some(metadata) = self
+            .payload_projection
+            .as_ref()
+            .map_or(self.payload_schema_bytes[port], |layout| {
+                layout.schema_bytes[port]
+            })
+        else {
             return Ok(None);
         };
         let Some(control) = controls(columns, metadata, rows.len()) else {
@@ -439,7 +481,7 @@ impl StreamJoinOperator {
 
 async fn reserve_backing(
     columns: &[ArrayRef],
-    rows: &[SelectedRow],
+    rows: SelectedRows<'_>,
     owners: &mut Construction,
     context: &StreamOperatorContext<'_>,
     quantum: &mut Quantum,
@@ -495,7 +537,7 @@ fn payload_retirement(context: &StreamOperatorContext<'_>) -> Result<Option<Reti
 
 async fn plan_capacities(
     columns: &[ArrayRef],
-    rows: &[SelectedRow],
+    rows: SelectedRows<'_>,
     capacities: &mut Vec<usize>,
     context: &StreamOperatorContext<'_>,
     quantum: &mut Quantum,
@@ -546,12 +588,12 @@ fn cell_bytes(array: &dyn Array, row: usize) -> usize {
 
 async fn copy_inventory(
     columns: &[ArrayRef],
-    rows: &[SelectedRow],
+    rows: SelectedRows<'_>,
     inventory: &mut Vec<super::sparse::ChunkRow>,
     context: &StreamOperatorContext<'_>,
     quantum: &mut Quantum,
 ) -> Result<()> {
-    for row in rows {
+    for row in rows.iter() {
         let mut bytes = 0;
         for column in columns {
             quantum.step(context, 8, 2 * size_of::<i64>()).await?;
@@ -569,7 +611,7 @@ async fn copy_inventory(
 
 async fn column_capacity(
     array: &dyn Array,
-    rows: &[SelectedRow],
+    rows: SelectedRows<'_>,
     context: &StreamOperatorContext<'_>,
     quantum: &mut Quantum,
 ) -> Result<usize> {
@@ -588,7 +630,7 @@ async fn column_capacity(
 
 async fn string_capacity<O: OffsetSizeTrait>(
     array: &dyn Array,
-    rows: &[SelectedRow],
+    rows: SelectedRows<'_>,
     context: &StreamOperatorContext<'_>,
     quantum: &mut Quantum,
 ) -> Result<usize> {
@@ -597,7 +639,7 @@ async fn string_capacity<O: OffsetSizeTrait>(
         .downcast_ref::<GenericStringArray<O>>()
         .expect("checked flat type");
     let mut values = 0_usize;
-    for row in rows {
+    for row in rows.iter() {
         quantum.step(context, 8, 2 * size_of::<O>()).await?;
         values = add(values, array.value(row.source).len())
             .ok_or_else(|| crate::operator::join::charge_overflow("owned string capacity"))?;
@@ -618,7 +660,7 @@ fn checked_string_capacity<O: OffsetSizeTrait>(rows: usize, values: usize) -> Re
 async fn copy_columns(
     columns: &[ArrayRef],
     funding: &Arc<PayloadFunding>,
-    rows: &[SelectedRow],
+    rows: SelectedRows<'_>,
     owners: &mut Construction,
     context: &StreamOperatorContext<'_>,
     quantum: &mut Quantum,
@@ -646,7 +688,7 @@ async fn copy_columns(
 async fn copy_column(
     array: &dyn Array,
     canonical: &DataType,
-    rows: &[SelectedRow],
+    rows: SelectedRows<'_>,
     capacity: usize,
     funding: &Arc<PayloadFunding>,
     context: &StreamOperatorContext<'_>,
@@ -678,7 +720,7 @@ async fn copy_column(
 async fn copy_signed(
     array: &dyn Array,
     canonical: &DataType,
-    rows: &[SelectedRow],
+    rows: SelectedRows<'_>,
     funding: &Arc<PayloadFunding>,
     context: &StreamOperatorContext<'_>,
     quantum: &mut Quantum,
@@ -700,7 +742,7 @@ async fn copy_signed(
 async fn copy_unsigned(
     array: &dyn Array,
     canonical: &DataType,
-    rows: &[SelectedRow],
+    rows: SelectedRows<'_>,
     funding: &Arc<PayloadFunding>,
     context: &StreamOperatorContext<'_>,
     quantum: &mut Quantum,
@@ -726,7 +768,7 @@ async fn copy_timestamp(
     array: &dyn Array,
     canonical: &DataType,
     unit: &TimeUnit,
-    rows: &[SelectedRow],
+    rows: SelectedRows<'_>,
     funding: &Arc<PayloadFunding>,
     context: &StreamOperatorContext<'_>,
     quantum: &mut Quantum,
@@ -760,7 +802,7 @@ async fn copy_timestamp(
 async fn copy_primitive<T: ArrowPrimitiveType>(
     array: &dyn Array,
     canonical: &DataType,
-    rows: &[SelectedRow],
+    rows: SelectedRows<'_>,
     funding: &Arc<PayloadFunding>,
     context: &StreamOperatorContext<'_>,
     quantum: &mut Quantum,
@@ -774,7 +816,7 @@ async fn copy_primitive<T: ArrowPrimitiveType>(
         builder: PrimitiveBuilder::<T>::with_capacity(rows.len()).with_data_type(canonical.clone()),
         funding: Arc::clone(funding),
     };
-    for row in rows {
+    for row in rows.iter() {
         quantum.step(context, 4, 2 * size_of::<T::Native>()).await?;
         owned.builder.append_value(array.value(row.source));
     }
@@ -796,7 +838,7 @@ fn string_prefix(value: &str) -> usize {
 
 async fn copy_string<O: OffsetSizeTrait>(
     array: &dyn Array,
-    rows: &[SelectedRow],
+    rows: SelectedRows<'_>,
     capacity: usize,
     funding: &Arc<PayloadFunding>,
     context: &StreamOperatorContext<'_>,
@@ -812,7 +854,7 @@ async fn copy_string<O: OffsetSizeTrait>(
         builder: GenericStringBuilder::<O>::with_capacity(rows.len(), capacity - offsets),
         funding: Arc::clone(funding),
     };
-    for row in rows {
+    for row in rows.iter() {
         quantum.step(context, 8, 2 * size_of::<O>()).await?;
         append_string(
             &mut owned.builder,

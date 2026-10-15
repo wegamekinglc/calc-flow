@@ -15,6 +15,8 @@ use std::{
     time::Duration,
 };
 
+mod key_routes;
+
 const ROWS: usize = 32_768;
 type Row = (String, i64, i64, u64);
 
@@ -51,6 +53,14 @@ async fn small_finalization_uses_serial_probe() {
 }
 
 fn fixture(narrow: bool, count: usize) -> (StreamAsofJoinOperator, Vec<Row>, Vec<Row>) {
+    fixture_with_keys(narrow, count, 16)
+}
+
+fn fixture_with_keys(
+    narrow: bool,
+    count: usize,
+    keys: usize,
+) -> (StreamAsofJoinOperator, Vec<Row>, Vec<Row>) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("key", DataType::Utf8, false),
         Field::new(
@@ -84,8 +94,8 @@ fn fixture(narrow: bool, count: usize) -> (StreamAsofJoinOperator, Vec<Row>, Vec
     let left = (0..count)
         .map(|index| {
             (
-                format!("key-{:02}-{}", index % 16, "x".repeat(32)),
-                i64::try_from(index / 16 * 3 + usize::from(index % 29 == 0) * 2).unwrap(),
+                format!("key-{:02}-{}", index % keys, "x".repeat(32)),
+                i64::try_from(index / keys * 3 + usize::from(index % 29 == 0) * 2).unwrap(),
                 i64::try_from(index).unwrap(),
                 f64::from(u32::try_from(index).unwrap()).to_bits(),
             )
@@ -94,9 +104,9 @@ fn fixture(narrow: bool, count: usize) -> (StreamAsofJoinOperator, Vec<Row>, Vec
     let right = left
         .iter()
         .enumerate()
-        .filter(|(index, _)| index % 16 < 14)
+        .filter(|(index, _)| index % keys < keys.saturating_sub(2))
         .flat_map(|(index, row)| {
-            let time = i64::try_from(index / 16 * 3).unwrap();
+            let time = i64::try_from(index / keys * 3).unwrap();
             let bits = if index % 31 == 0 {
                 0x7ff8_0000_0000_0001 + index as u64
             } else {
@@ -468,6 +478,8 @@ fn abandoned_matching_shards_keep_actual_buckets_funded_until_exit() {
 
 #[tokio::test]
 async fn key_shard_budget_rejection_refunds_and_preserves_input() {
+    capture_hashes_chunk_keys_instead_of_each_row().await;
+    key_routes::check_capture_routes().await;
     let (mut operator, left, right) = fixture(false, 128);
     let job = StreamJobContext::new(904, "asof", JsonMap::new(), None, CancellationToken::new());
     let context = test_context(&job);
@@ -503,6 +515,48 @@ async fn key_shard_budget_rejection_refunds_and_preserves_input() {
     }
     drop((work, credit));
     assert_eq!(operator.status, before);
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+}
+
+async fn capture_hashes_chunk_keys_instead_of_each_row() {
+    let (mut operator, left, right) = fixture(false, 1_024);
+    let job = StreamJobContext::new(906, "asof", JsonMap::new(), None, CancellationToken::new());
+    let context = test_context(&job);
+    let mut output = EdgeCollector::new(operator.output_ports().to_vec());
+    for (port, rows) in [("right", &right), ("left", &left)] {
+        operator
+            .process_data(port, input(&operator, rows), &context, &mut output)
+            .await
+            .unwrap();
+    }
+    assert!(
+        operator
+            .state
+            .left
+            .output_runs()
+            .all(|run| run.keyed_rows(run.len()).is_some())
+    );
+    let before = operator.status.clone();
+    let pool = operator.runtime.pool.clone();
+    let reserved = pool.reserved();
+    state::take_encoding_hashes();
+    let (work, credit) = capture(&operator, left.len(), 2, &context).await.unwrap();
+    let hashes = state::take_encoding_hashes();
+    let stop = GatherStop::from_job(&job);
+    let matches = (0..work.unit_count())
+        .map(|ordinal| work.run(ordinal, &stop).unwrap())
+        .collect();
+    let expected = operator
+        .state
+        .left
+        .output_iter()
+        .map(|(key, _)| operator.state.candidate(key.1, *key.0, 1).copied())
+        .collect::<Vec<_>>();
+    assert_eq!(restore_order(matches, left.len()), expected);
+    assert_eq!(operator.status, before);
+    drop((work, credit));
+    assert_eq!(pool.reserved(), reserved);
+    assert!(hashes <= 128, "16-key probe capture hashed {hashes} times");
     assert!(job.gather_owner().close_and_drain().await.is_empty());
 }
 

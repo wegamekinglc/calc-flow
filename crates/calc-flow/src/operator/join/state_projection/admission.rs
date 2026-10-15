@@ -1,0 +1,107 @@
+use std::sync::Arc;
+
+use super::super::{
+    AdmittedBatch, StoredRow, StreamJoinOperator,
+    columnar::{OwnedSelection, Quantum, RowPayload, SelectedRows},
+    operator_error,
+};
+use crate::{Result, StreamOperatorContext};
+use datafusion::arrow::record_batch::RecordBatch;
+
+impl StreamJoinOperator {
+    pub(in crate::operator::join) async fn project_admitted(
+        &mut self,
+        admitted: &mut AdmittedBatch,
+        retained: &mut [StoredRow],
+        side: usize,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<()> {
+        if self.payload_projection.is_none() {
+            return Ok(());
+        }
+        let mut quantum = Quantum::default();
+        for index in 0..admitted.record_count() {
+            let range = admitted.group_range(index);
+            if range.is_empty() {
+                continue;
+            }
+            let rows = super::super::admitted::AdmittedGroup::new(admitted, range);
+            let payload = self
+                .project_group(rows, side, context, &mut quantum)
+                .await?;
+            admitted.replace(index, payload);
+        }
+        let mut selected = retained.iter_mut();
+        for source in admitted.iter() {
+            quantum.step(context, 8, 0).await?;
+            if source.retain {
+                let row = selected
+                    .next()
+                    .expect("retained rows preserve admission order");
+                debug_assert_eq!(row.row_id, source.row_id);
+                row.record = source.record.owned();
+            }
+        }
+        context.check_cancelled()
+    }
+
+    async fn project_group(
+        &mut self,
+        rows: super::super::admitted::AdmittedGroup<'_>,
+        side: usize,
+        context: &StreamOperatorContext<'_>,
+        quantum: &mut Quantum,
+    ) -> Result<RowPayload> {
+        let controls = self.projected_column_credit(side)?;
+        let record = self.project_payload(rows.row(0).record, side)?;
+        let selection = SelectedRows::Admitted(rows);
+        if let Some(chunk) = self
+            .owned_payload_columns(record.columns(), side, selection, context, quantum)
+            .await?
+        {
+            return Ok(RowPayload::Shared { chunk, row: 0 });
+        }
+        let selected = OwnedSelection::from_group(self, rows, context, quantum).await?;
+        let chunk = self
+            .copy_projected_payload(record, selected, controls, context)
+            .await?;
+        Ok(RowPayload::RestoredV2 { chunk, row: 0 })
+    }
+
+    fn projected_column_credit(
+        &mut self,
+        side: usize,
+    ) -> Result<datafusion::execution::memory_pool::MemoryReservation> {
+        let width = self.retained_schema(side).fields().len();
+        let bytes = width
+            .checked_mul(size_of::<datafusion::arrow::array::ArrayRef>())
+            .and_then(|bytes| bytes.checked_add(size_of::<RecordBatch>()))
+            .ok_or_else(|| super::super::charge_overflow(&self.name))?;
+        self.optional_credit(bytes)?
+            .ok_or_else(|| operator_error(&self.name, "retained column credit admission failed"))
+    }
+
+    fn project_payload(
+        &self,
+        source: super::super::PayloadRef<'_>,
+        side: usize,
+    ) -> Result<RecordBatch> {
+        let layout = self
+            .payload_projection
+            .as_ref()
+            .expect("projected admission");
+        let columns = source
+            .shared_columns()
+            .expect("admission preserves full parent");
+        RecordBatch::try_new(
+            Arc::clone(&layout.schemas[side]),
+            layout.columns[side]
+                .iter()
+                .map(|&index| Arc::clone(&columns[index]))
+                .collect(),
+        )
+        .map_err(|error| {
+            operator_error(&self.name, &format!("retained projection failed: {error}"))
+        })
+    }
+}

@@ -121,6 +121,14 @@ fn count_writer(join: &mut StreamJoinOperator) -> Arc<AtomicUsize> {
 fn assert_restored(snapshot: &OperatorStateSnapshot, expected: &StreamJoinOperator) {
     let mut restored = operator();
     restored.restore(snapshot).unwrap();
+    assert_eq!(
+        restored.v2_writer.tracker.identity,
+        restored.checkpoint_identity
+    );
+    assert_eq!(
+        restored.v2_writer.history_identity,
+        Some(restored.checkpoint_identity)
+    );
     assert_eq!(restored.status(), expected.status());
     assert_eq!(restored.state.last_checkpoint_epoch, Some(Epoch::INITIAL));
     assert_eq!(restored.state.next_left_row_id, 2);
@@ -217,7 +225,13 @@ async fn test_fresh_preparation_rewrites_each_stale_cut_component() {
     let job = job();
     let context = StreamOperatorContext::new(&job, "prepared-reuse", None);
     let mut pools = Vec::new();
-    for field in ["generation", "captured_epoch", "revision", "dirty_revision"] {
+    for field in [
+        "generation",
+        "captured_epoch",
+        "revision",
+        "dirty_revision",
+        "identity",
+    ] {
         let mut join = seeded(&context).await;
         let writers = count_writer(&mut join);
         join.prepare_checkpoint_async(&context).await.unwrap();
@@ -226,25 +240,7 @@ async fn test_fresh_preparation_rewrites_each_stale_cut_component() {
         let prepared = join.v2_writer.prepared.as_mut().unwrap();
         let segments = prepared.base.segments.clone();
         let owner = std::ptr::from_ref(prepared.base.credit());
-        prepared.cut = match field {
-            "generation" => cut::Cut {
-                generation: prepared.cut.generation + 1,
-                ..prepared.cut
-            },
-            "captured_epoch" => cut::Cut {
-                captured_epoch: Some(Epoch::INITIAL),
-                ..prepared.cut
-            },
-            "revision" => cut::Cut {
-                revision: prepared.cut.revision + 1,
-                ..prepared.cut
-            },
-            "dirty_revision" => cut::Cut {
-                dirty_revision: prepared.cut.dirty_revision + 1,
-                ..prepared.cut
-            },
-            _ => unreachable!(),
-        };
+        prepared.cut = stale_cut(prepared.cut, field);
         assert!(!join.fresh_v2_preparation_matches(), "stale {field}");
         join.prepare_checkpoint_async(&context).await.unwrap();
         assert_eq!(writers.load(Ordering::SeqCst), 2, "stale {field}");
@@ -263,12 +259,41 @@ async fn test_fresh_preparation_rewrites_each_stale_cut_component() {
         }
         let snapshot = join.checkpoint(Epoch::INITIAL).unwrap();
         assert_restored(&snapshot, &join);
+        if field == "identity" {
+            assert_reset_identity(&mut join, &context).await;
+        }
         pools.push(join.runtime.runtime().unwrap().incremental_memory_pool());
     }
     drop(context);
     assert!(job.gather_owner().close_and_drain().await.is_empty());
     drop(job);
     assert!(pools.iter().all(|pool| pool.reserved() == 0));
+}
+
+fn stale_cut(original: cut::Cut, field: &str) -> cut::Cut {
+    match field {
+        "generation" => cut::Cut {
+            generation: original.generation + 1,
+            ..original
+        },
+        "captured_epoch" => cut::Cut {
+            captured_epoch: Some(Epoch::INITIAL),
+            ..original
+        },
+        "revision" => cut::Cut {
+            revision: original.revision + 1,
+            ..original
+        },
+        "identity" => cut::Cut {
+            identity: different_identity(original.identity),
+            ..original
+        },
+        "dirty_revision" => cut::Cut {
+            dirty_revision: original.dirty_revision + 1,
+            ..original
+        },
+        _ => unreachable!(),
+    }
 }
 
 #[test]
@@ -330,4 +355,72 @@ async fn assert_fresh_preparation_waits_and_rejects_cancellation(
     assert!(job.gather_owner().close_and_drain().await.is_empty());
     drop(job);
     assert_eq!(pool.reserved(), 0);
+}
+
+fn different_identity(identity: HistoryIdentity) -> HistoryIdentity {
+    let mut bytes = identity.0;
+    bytes[0] ^= 1;
+    HistoryIdentity(bytes)
+}
+
+async fn assert_reset_identity(join: &mut StreamJoinOperator, context: &StreamOperatorContext<'_>) {
+    join.reset().unwrap();
+    assert_eq!(join.v2_writer.tracker.identity, join.checkpoint_identity);
+    assert!(join.v2_writer.history_identity.is_none());
+    join.prepare_checkpoint_async(context).await.unwrap();
+    assert!(join.fresh_v2_preparation_matches());
+    let snapshot = join.checkpoint(Epoch::INITIAL).unwrap();
+    assert_eq!(
+        join.v2_writer.history_identity,
+        Some(join.checkpoint_identity)
+    );
+    let mut restored = operator();
+    restored.restore(&snapshot).unwrap();
+    assert_same_empty_identity(join, &restored);
+    assert_worker_identity_refusal(join, context).await;
+}
+
+fn assert_same_empty_identity(expected: &StreamJoinOperator, actual: &StreamJoinOperator) {
+    assert_eq!(actual.status(), expected.status());
+    assert_eq!(
+        actual.v2_writer.tracker.identity,
+        actual.checkpoint_identity
+    );
+    assert_eq!(
+        actual.v2_writer.history_identity,
+        Some(actual.checkpoint_identity)
+    );
+}
+
+async fn assert_worker_identity_refusal(
+    join: &mut StreamJoinOperator,
+    context: &StreamOperatorContext<'_>,
+) {
+    let pool = join.runtime.runtime().unwrap().incremental_memory_pool();
+    let baseline = pool.reserved();
+    let status = join.status();
+    let tracker = join.v2_writer.tracker;
+    let history_identity = join.v2_writer.history_identity;
+    let workspace = join.v2_writer_workspace().unwrap();
+    let mut work = join
+        .v2_writer_work(Preparation::Rebase, workspace.new_empty(), context)
+        .await
+        .unwrap();
+    work.inputs.history.as_mut().unwrap().identity = different_identity(work.identity);
+    let error = work
+        .encode(&GatherStop::from_job(context.job()))
+        .err()
+        .unwrap();
+    assert!(
+        error
+            .to_string()
+            .contains("rebase history layout differs from worker")
+    );
+    drop(work);
+    join.await_compaction_release(context).await.unwrap();
+    drop(workspace);
+    assert_eq!(join.status(), status);
+    assert_eq!(join.v2_writer.tracker, tracker);
+    assert_eq!(join.v2_writer.history_identity, history_identity);
+    assert_eq!(pool.reserved(), baseline);
 }

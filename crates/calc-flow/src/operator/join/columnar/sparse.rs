@@ -169,7 +169,6 @@ impl StreamJoinOperator {
                     source,
                     row_id: row.row_id,
                     time: row.time,
-                    retain: true,
                 });
             }
         }
@@ -223,7 +222,13 @@ impl StreamJoinOperator {
             return Ok(false);
         };
         let Some(replacement) = self
-            .owned_payload_columns(&chunk.columns, port, &selected.rows, context, &mut quantum)
+            .owned_payload_columns(
+                &chunk.columns,
+                port,
+                (&selected.rows).into(),
+                context,
+                &mut quantum,
+            )
             .await?
         else {
             return Ok(false);

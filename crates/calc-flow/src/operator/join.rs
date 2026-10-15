@@ -1821,11 +1821,18 @@ mod tests {
     mod columnar_state_tests;
     mod empty_checkpoint_tests;
     mod j2a_dictionary_tests;
-    mod native_lookup_tests;
+    pub(super) mod native_lookup_tests;
     mod optimization_tests;
     mod ordered_probe_tests;
     mod output_gather_tests;
     mod owned_probe_tests;
+    mod persistent_dictionary_cooperation_tests;
+    mod persistent_dictionary_exhaustion_tests;
+    mod persistent_dictionary_refusal_tests;
+    mod persistent_dictionary_restore_tests;
+    mod persistent_dictionary_semantics_tests;
+    mod persistent_dictionary_tests;
+    mod persistent_dictionary_worker_tests;
     mod sql_key_scratch_tests;
 
     async fn v1_fixture_captures() -> Vec<OperatorStateSnapshot> {
@@ -2237,8 +2244,8 @@ use datafusion::arrow::{
     },
     compute::concat,
     datatypes::{
-        ArrowPrimitiveType, DataType, Field, Int8Type, Int16Type, Int32Type, Int64Type,
-        IntervalUnit, Schema, SchemaRef, TimeUnit, TimestampMicrosecondType,
+        ArrowPrimitiveType, DataType, Date32Type, Date64Type, Field, Int8Type, Int16Type,
+        Int32Type, Int64Type, IntervalUnit, Schema, SchemaRef, TimeUnit, TimestampMicrosecondType,
         TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType, UInt8Type,
         UInt16Type, UInt32Type, UInt64Type,
     },
@@ -2257,6 +2264,17 @@ use crate::{
 };
 
 use super::{OperatorMetadata, StreamRuntimeState, is_portable_identifier, validate_operator_name};
+
+#[derive(Default)]
+struct KeyDiagnostics {
+    dictionary_grant_refusals: u64,
+    needs_rebuild_routes: u64,
+    legacy_key_encodings: u64,
+    sql_probe_table_builds: u64,
+    rebuild_attempts: u64,
+    rebuild_completions: u64,
+    closed_restore_routes: u64,
+}
 
 #[cfg(test)]
 #[derive(Clone, Copy, Default)]
@@ -2277,9 +2295,20 @@ struct JoinWork {
     output_column_interleaves: usize,
     output_source_lookups: usize,
     native_key_lookups: usize,
+    native_content_hashes: usize,
+    dictionary_snapshot_visits: usize,
+    dictionary_capacity_replacements: usize,
+    dictionary_reference_visits: usize,
+    dictionary_unlink_visits: usize,
     scalar_admissions: usize,
     generic_fast_rows: usize,
     admission_grants: usize,
+    admitted_row_records: usize,
+    admission_segment_lookups: usize,
+    sql_probe_segment_selects: usize,
+    output_row_batch_views: usize,
+    sparse_index_writes: usize,
+    sparse_prefix_promoted: usize,
     quantum_steps: usize,
     quantum_boundaries: usize,
     borrowed_key_hashes: usize,
@@ -2300,7 +2329,9 @@ thread_local! {
         output_column_views: 0, output_column_takes: 0, output_column_interleaves: 0,
         output_source_lookups: 0,
         native_key_lookups: 0,
+        native_content_hashes: 0, dictionary_snapshot_visits: 0, dictionary_capacity_replacements: 0, dictionary_reference_visits: 0, dictionary_unlink_visits: 0,
         scalar_admissions: 0, generic_fast_rows: 0, admission_grants: 0,
+        admitted_row_records: 0, admission_segment_lookups: 0, sql_probe_segment_selects: 0, output_row_batch_views: 0, sparse_index_writes: 0, sparse_prefix_promoted: 0,
         quantum_steps: 0, quantum_boundaries: 0,
         borrowed_key_hashes: 0, borrowed_key_equalities: 0,
         key_type_resolutions: 0, arena_frames: 0,
@@ -2738,12 +2769,21 @@ pub struct StreamJoinOperator {
     spec: StreamJoinSpec,
     input_ports: [Port; 2],
     output_ports: [Port; 1],
+    logical_output_schema: SchemaRef,
+    output_columns: Option<Arc<[usize]>>,
+    payload_projection: Option<Arc<state_projection::Layout>>,
+    checkpoint_identity: checkpoint_v2::HistoryIdentity,
     compiled: CompiledJoin,
     payload_schema_bytes: [Option<usize>; 2],
     payload_native_eligible: bool,
     runtime: StreamRuntimeState,
     state: StreamJoinState,
     retained_key_cache: RetainedKeyCache,
+    key_dictionary: key_dictionary::Dictionary,
+    key_bindings: key_dictionary::Bindings,
+    key_work: KeyDiagnostics,
+    key_dictionary_needs_rebuild: bool,
+    legacy_restore_capture: Option<key_restore::Capture>,
     ingress_progress: IngressProgressSnapshot,
     compaction_release: Option<tokio::sync::oneshot::Receiver<()>>,
     compaction_cleanup: Option<crate::runtime::streaming::gather_work::AttemptCleanup>,
@@ -2752,6 +2792,10 @@ pub struct StreamJoinOperator {
     probe_test_hook: Option<data_work::TestHook>,
     #[cfg(test)]
     probe_unit_test_hook: Option<data_work::UnitTestHook>,
+    #[cfg(test)]
+    probe_result_test_gate: Option<Arc<data_work::ResultTestGate>>,
+    #[cfg(test)]
+    key_restore_test_hook: Option<key_restore::TestHook>,
     v2_containers: Option<Arc<checkpoint_v2::ContainerFunding>>,
     v2_writer: checkpoint_v2::WriterState,
     #[cfg(test)]
@@ -2788,12 +2832,12 @@ struct CachedRetainedKeys {
 
 struct SqlKeyOwners {
     _retained: Arc<Vec<StoredRow>>,
-    admitted: Vec<AdmittedRow>,
+    admitted: AdmittedBatch,
     scratch: Option<Arc<sql_key_scratch::ScratchFunding>>,
 }
 
 impl SqlKeyOwners {
-    fn finish(self) -> Vec<AdmittedRow> {
+    fn finish(self) -> AdmittedBatch {
         let Self {
             _retained: retained,
             admitted,
@@ -2826,6 +2870,7 @@ const PROBE_POS_COLUMN: &str = "__cf_join_pos";
 const STATE_RID_COLUMN: &str = "__cf_join_row_id";
 
 /// One incoming row that passed null-key, null-event-time, and lateness admission.
+#[cfg(test)]
 struct AdmittedRow {
     record: columnar::RowPayload,
     event_time: EventTime,
@@ -2838,10 +2883,7 @@ struct AdmissionBundle {
     quantum: columnar::Quantum,
     next_row_id: u64,
     metrics: SideMetrics,
-    admitted: Vec<AdmittedRow>,
-    /// Source row offsets of admitted rows, aligning charge vectors with
-    /// `admitted` when admission drops rows.
-    admitted_source_rows: Vec<usize>,
+    admitted: AdmittedBatch,
     had_late: bool,
 }
 
@@ -3070,28 +3112,42 @@ impl From<Vec<StoredRow>> for RetainedRows {
 }
 
 impl RetainedRows {
-    fn extend(&mut self, rows: Vec<StoredRow>) {
+    fn extend(&mut self, rows: Vec<StoredRow>, dictionary: &key_dictionary::Dictionary) {
         for row in &rows {
             self.2.enqueue_if_due(&row.record);
         }
         if let Some(index) = &mut self.1 {
             Arc::get_mut(index)
                 .expect("native probe released before retained append")
-                .append(self.0.len(), &rows);
+                .append_identified(self.0.len(), &rows, dictionary);
         }
         std::ops::DerefMut::deref_mut(self).extend(rows);
     }
 
+    #[cfg(test)]
     fn swap_remove(&mut self, index: usize) -> StoredRow {
+        self.swap_remove_bound(index, &key_dictionary::SideBindings::default())
+    }
+
+    fn swap_remove_bound(
+        &mut self,
+        index: usize,
+        bindings: &key_dictionary::SideBindings,
+    ) -> StoredRow {
         let row = std::ops::DerefMut::deref_mut(self).swap_remove(index);
         if let Some(moved) = self.0.get(index) {
             moved.record.mark_live(index);
         }
         if let Some(native) = &mut self.1 {
             let native = Arc::get_mut(native).expect("native probe released before eviction");
-            native.remove(&row, self.0.get(index).map(|row| (row, index)), |dense| {
-                &self.0[dense].encoded_key
-            });
+            native.remove_resolved(
+                &row,
+                bindings.canonical(&row),
+                self.0
+                    .get(index)
+                    .map(|row| (row, bindings.canonical(row), index)),
+                |dense| bindings.canonical(&self.0[dense]),
+            );
         }
         row
     }
@@ -3162,6 +3218,7 @@ type DecodedRowTestHook = Arc<
 #[derive(Clone, Copy)]
 struct RestoreSchema<'a> {
     schema: &'a Schema,
+    historical: Option<historical_validation::Validation<'a>>,
     #[cfg(test)]
     hook: Option<&'a SchemaTestHook>,
     #[cfg(test)]
@@ -3180,6 +3237,8 @@ mod benchmark_checkpoint;
 pub(crate) use benchmark_checkpoint::run_checkpoint_history_diagnostic;
 
 mod admission_masks;
+mod admitted;
+use admitted::{AdmittedBatch, AdmittedRows, PayloadRef};
 mod borrowed_key;
 mod checkpoint_compaction;
 mod checkpoint_v2;
@@ -3187,15 +3246,24 @@ mod columnar;
 mod data_work;
 mod expiration;
 use expiration::ExpirationIndex;
+#[cfg(feature = "benchmark-internals")]
+mod benchmark_dictionary;
+mod historical_validation;
 mod key_arena;
+mod key_dictionary;
+mod key_lifecycle;
+mod key_restore;
 mod materialization;
 mod metadata_validation;
 mod native_dictionary;
 mod native_lookup;
 mod output_gather;
+mod output_projection;
 #[cfg(test)]
 mod row_ipc;
 mod sql_key_scratch;
+mod state_projection;
+mod typed_key;
 
 struct PreparedMatches {
     pairs: Vec<MatchedPair>,
@@ -3215,7 +3283,7 @@ impl PreparedMatches {
 
 struct PreparedJoinBatch {
     output: Vec<MatchedPair>,
-    admitted: Vec<AdmittedRow>,
+    admitted: AdmittedBatch,
     incoming_is_left: bool,
     retained: Vec<StoredRow>,
     next_row_id: u64,
@@ -3224,6 +3292,8 @@ struct PreparedJoinBatch {
     /// chunk fast path; `None` keeps the generic measured planning.
     admitted_charges: Option<Vec<u64>>,
     native_append: Option<native_lookup::AppendCredit>,
+    dictionary: Option<key_dictionary::Pending>,
+    legacy_key_references: bool,
     _native_scratch: Option<datafusion::execution::memory_pool::MemoryReservation>,
 }
 
@@ -3245,6 +3315,8 @@ impl StreamJoinOperator {
         validate_payload_charge_support(&right_schema, "right")?;
         let (output_schema, compiled) = compile_schemas(&left_schema, &right_schema, &spec)?;
         let payload_native_eligible = native_lookup::eligible(&compiled, &left_schema);
+        let checkpoint_identity =
+            checkpoint_v2::HistoryIdentity::full([&left_schema, &right_schema]);
         let payload_schema_bytes = [
             columnar::schema_inventory(&left_schema),
             columnar::schema_inventory(&right_schema),
@@ -3262,12 +3334,21 @@ impl StreamJoinOperator {
                 "output",
                 BatchKind::Table,
                 true,
-                Some(output_schema),
+                Some(Arc::clone(&output_schema)),
             )?],
+            logical_output_schema: output_schema,
+            output_columns: None,
+            payload_projection: None,
+            checkpoint_identity,
             compiled,
             runtime: StreamRuntimeState::new(),
             state: StreamJoinState::default(),
             retained_key_cache: RetainedKeyCache::default(),
+            key_dictionary: key_dictionary::Dictionary::default(),
+            key_bindings: key_dictionary::Bindings::default(),
+            key_work: KeyDiagnostics::default(),
+            key_dictionary_needs_rebuild: false,
+            legacy_restore_capture: None,
             ingress_progress: IngressProgressSnapshot::default(),
             compaction_release: None,
             compaction_cleanup: None,
@@ -3276,8 +3357,12 @@ impl StreamJoinOperator {
             probe_test_hook: None,
             #[cfg(test)]
             probe_unit_test_hook: None,
+            #[cfg(test)]
+            probe_result_test_gate: None,
+            #[cfg(test)]
+            key_restore_test_hook: None,
             v2_containers: None,
-            v2_writer: checkpoint_v2::WriterState::default(),
+            v2_writer: checkpoint_v2::WriterState::with_identity(checkpoint_identity),
             #[cfg(test)]
             checkpoint_gate: None,
             #[cfg(test)]
@@ -3481,56 +3566,91 @@ impl StreamJoinOperator {
         context: &StreamOperatorContext<'_>,
     ) -> Result<PreparedJoinBatch> {
         let plan = self.begin_batch(ingress, batch)?;
-        let mut bundle = self.admission_bundle(&plan);
+        let mut bundle = self.admission_bundle(&plan, batch)?;
+        let charges = self
+            .admit_batch_records(ingress, batch, &plan, context, &mut bundle)
+            .await?;
+        bundle.finish(&self.name)?;
+        let matches = self
+            .evaluate_matches(&plan, &mut bundle.admitted, context)
+            .await?;
+        let admitted_charges = admitted_charge_cache(charges, &bundle.admitted);
+        self.finish_prepared(&plan, &mut bundle, matches, admitted_charges, context)
+            .await
+    }
+
+    async fn admit_batch_records(
+        &mut self,
+        ingress: &str,
+        batch: &Batch,
+        plan: &SidePlan,
+        context: &StreamOperatorContext<'_>,
+        bundle: &mut AdmissionBundle,
+    ) -> Result<Option<Vec<u64>>> {
         let mut charges: Option<Vec<u64>> = Some(Vec::new());
         let mut source_row_base = 0_usize;
         for record in batch.table_payload()?.batches() {
             append_admission_charges(&mut charges, record)?;
-            self.admit_record(
-                record,
-                &plan,
-                ingress,
-                context,
-                &mut bundle,
-                source_row_base,
-            )
-            .await?;
+            self.admit_record(record, plan, ingress, context, bundle, source_row_base)
+                .await?;
             source_row_base += record.num_rows();
         }
-        bundle.finish(&self.name)?;
-        let (matches, admitted) = self
-            .evaluate_matches(&plan, std::mem::take(&mut bundle.admitted), context)
-            .await;
-        bundle.admitted = admitted;
-        let matches = matches?;
-        let admitted_charges = admitted_charge_cache(charges, &bundle.admitted_source_rows);
-        self.finish_prepared(&plan, bundle, matches, admitted_charges)
+        Ok(charges)
     }
 
-    fn finish_prepared(
+    async fn finish_prepared(
         &mut self,
         plan: &SidePlan,
-        bundle: AdmissionBundle,
+        bundle: &mut AdmissionBundle,
         matches: PreparedMatches,
         admitted_charges: Option<Vec<u64>>,
+        context: &StreamOperatorContext<'_>,
     ) -> Result<PreparedJoinBatch> {
-        let retained = retained_rows(
+        bundle.admitted.prepare_retained_parents();
+        let mut retained = retained_rows(
             &bundle.admitted,
             &plan.key_indices,
             &self.name,
             matches.keys.as_ref(),
-        )?;
+            &self.key_dictionary,
+            context,
+            &mut self.key_work,
+        )
+        .await?;
+        let legacy_key_references = matches.keys.is_none();
+        if legacy_key_references {
+            self.key_dictionary
+                .validate_known_references(&retained, context, &self.name)
+                .await?;
+        }
         self.validate_state_admission(plan.incoming_is_left, &retained)?;
-        let native_append = self.reserve_native_append(plan.incoming_is_left, retained.len())?;
+        let native_append = if retained
+            .iter()
+            .all(|row| row.encoded_key.address().is_some())
+        {
+            self.reserve_native_append(plan.incoming_is_left, retained.len())?
+        } else {
+            self.drop_native_index(plan.incoming_is_left);
+            None
+        };
+        self.project_admitted(
+            &mut bundle.admitted,
+            &mut retained,
+            plan.port_index,
+            context,
+        )
+        .await?;
         Ok(PreparedJoinBatch {
             output: matches.pairs,
-            admitted: bundle.admitted,
+            admitted: std::mem::take(&mut bundle.admitted),
             incoming_is_left: plan.incoming_is_left,
             retained,
             next_row_id: bundle.next_row_id,
-            metrics: bundle.metrics,
+            metrics: std::mem::take(&mut bundle.metrics),
             admitted_charges,
             native_append,
+            dictionary: matches.keys.and_then(|keys| keys.dictionary),
+            legacy_key_references,
             _native_scratch: matches.credit,
         })
     }
@@ -3569,7 +3689,7 @@ impl StreamJoinOperator {
         }
     }
 
-    fn admission_bundle(&self, plan: &SidePlan) -> AdmissionBundle {
+    fn admission_bundle(&mut self, plan: &SidePlan, batch: &Batch) -> Result<AdmissionBundle> {
         let (next_row_id, metrics) = if plan.incoming_is_left {
             (self.state.next_left_row_id, self.state.metrics.left.clone())
         } else {
@@ -3578,14 +3698,13 @@ impl StreamJoinOperator {
                 self.state.metrics.right.clone(),
             )
         };
-        AdmissionBundle {
+        Ok(AdmissionBundle {
             quantum: columnar::Quantum::default(),
             next_row_id,
             metrics,
-            admitted: Vec::new(),
-            admitted_source_rows: Vec::new(),
+            admitted: AdmittedBatch::reserve(self, batch)?,
             had_late: false,
-        }
+        })
     }
 
     async fn admit_record(
@@ -3618,41 +3737,34 @@ impl StreamJoinOperator {
         quantum: &mut columnar::Quantum,
     ) -> Result<()> {
         let (record, plan, ingress, source_row_base) = source;
-        if self
-            .can_copy_payload(record, plan, context, quantum)
-            .await?
-            && let Some(mut selection) = columnar::CopySelection::reserve(self, record.num_rows())?
-        {
-            self.select_copy_rows(
-                (record, plan, ingress),
-                context,
-                bundle,
-                &mut selection,
-                quantum,
-            )
+        let index = bundle
+            .admitted
+            .begin_record(bundle.next_row_id, source_row_base);
+        let copy = self
+            .can_copy_admitted_payload(record, plan, context, quantum)
             .await?;
-            let shared = self
-                .owned_payload(record, plan.port_index, &selection.rows, context, quantum)
-                .await?;
-            bundle
-                .append_copy_rows(
+        self.admit_legacy_record((record, plan, ingress, index), context, bundle, quantum)
+            .await?;
+        let range = bundle.admitted.group_range(index);
+        if copy && !range.is_empty() {
+            let rows = admitted::AdmittedGroup::new(&bundle.admitted, range);
+            if let Some(chunk) = self
+                .owned_payload(
                     record,
-                    shared.as_ref(),
-                    &selection.rows,
+                    plan.port_index,
+                    columnar::SelectedRows::Admitted(rows),
                     context,
-                    source_row_base,
                     quantum,
                 )
-                .await?;
-            return Ok(());
+                .await?
+            {
+                bundle
+                    .admitted
+                    .replace(index, columnar::RowPayload::Shared { chunk, row: 0 });
+            }
         }
-        self.admit_legacy_record(
-            (record, plan, ingress, source_row_base),
-            context,
-            bundle,
-            quantum,
-        )
-        .await
+        bundle.admitted.complete_record();
+        Ok(())
     }
 
     fn admission_mask_context<'a>(
@@ -3670,40 +3782,6 @@ impl StreamJoinOperator {
         }
     }
 
-    async fn select_copy_rows(
-        &self,
-        source: (&RecordBatch, &SidePlan, &str),
-        context: &StreamOperatorContext<'_>,
-        bundle: &mut AdmissionBundle,
-        selection: &mut columnar::CopySelection,
-        quantum: &mut columnar::Quantum,
-    ) -> Result<()> {
-        let (record, plan, ingress) = source;
-        let times = BatchEventTimes::new(
-            record.column(plan.event_time_index).as_ref(),
-            &self.name,
-            ingress,
-        )?;
-        let config = self.admission_mask_context(source, context);
-        for start in (0..record.num_rows()).step_by(64) {
-            let length = (record.num_rows() - start).min(64);
-            let masks = admission_masks::AdmissionMasks::new(
-                &config, &times, start, length, context, quantum,
-            )
-            .await?;
-            self.select_masked_rows(
-                (plan, ingress),
-                (start, length, &masks),
-                context,
-                bundle,
-                selection,
-                quantum,
-            )
-            .await?;
-        }
-        Ok(())
-    }
-
     fn masked_row(
         &self,
         masks: &admission_masks::AdmissionMasks,
@@ -3715,33 +3793,6 @@ impl StreamJoinOperator {
         note_join_work(|work| work.scalar_admissions += 1);
         let row_id = bundle.reserve_row_id(&self.name)?;
         Ok((row_id, masks.at(offset, &self.name, ingress)?))
-    }
-
-    async fn select_masked_rows(
-        &self,
-        source: (&SidePlan, &str),
-        block: (usize, usize, &admission_masks::AdmissionMasks),
-        context: &StreamOperatorContext<'_>,
-        bundle: &mut AdmissionBundle,
-        selection: &mut columnar::CopySelection,
-        quantum: &mut columnar::Quantum,
-    ) -> Result<()> {
-        let (_, ingress) = source;
-        let (start, length, masks) = block;
-        for offset in 0..length {
-            quantum.step(context, 4, 16).await?;
-            let (row_id, admission) = self.masked_row(masks, offset, ingress, bundle)?;
-            match admission {
-                RowAdmission::Dropped(kind) => bundle.note_dropped(kind, &self.name)?,
-                RowAdmission::Admitted(time) => selection.rows.push(columnar::SelectedRow {
-                    source: start + offset,
-                    row_id,
-                    time,
-                    retain: masks.retain(offset),
-                }),
-            }
-        }
-        Ok(())
     }
 
     async fn admit_legacy_record(
@@ -3757,7 +3808,6 @@ impl StreamJoinOperator {
             &self.name,
             ingress,
         )?;
-        let parent = Arc::new(record.clone());
         let config = self.admission_mask_context((record, plan, ingress), context);
         for start in (0..record.num_rows()).step_by(64) {
             let length = (record.num_rows() - start).min(64);
@@ -3766,7 +3816,7 @@ impl StreamJoinOperator {
             )
             .await?;
             self.append_masked_rows(
-                (&parent, plan, ingress, source_row_base),
+                (record, plan, ingress, source_row_base),
                 (start, length, &masks),
                 context,
                 bundle,
@@ -3779,50 +3829,61 @@ impl StreamJoinOperator {
 
     async fn append_masked_rows(
         &self,
-        source: (&Arc<RecordBatch>, &SidePlan, &str, usize),
+        source: (&RecordBatch, &SidePlan, &str, usize),
         block: (usize, usize, &admission_masks::AdmissionMasks),
         context: &StreamOperatorContext<'_>,
         bundle: &mut AdmissionBundle,
         quantum: &mut columnar::Quantum,
     ) -> Result<()> {
-        let (parent, _, ingress, source_row_base) = source;
+        let (_, _, ingress, record_index) = source;
         let (start, length, masks) = block;
         if masks.all_admitted(length) && bundle.next_row_id.checked_add(length as u64).is_some() {
-            return Self::append_proven_rows(
-                (parent, source_row_base),
-                block,
+            return Self::append_proven_rows(record_index, block, context, bundle, quantum).await;
+        }
+        for offset in 0..length {
+            quantum.step(context, 4, 16).await?;
+            let (_, admission) = self.masked_row(masks, offset, ingress, bundle)?;
+            self.append_classified_row(
+                (
+                    record_index,
+                    start + offset,
+                    admission,
+                    masks.retain(offset),
+                ),
                 context,
                 bundle,
                 quantum,
             )
-            .await;
+            .await?;
         }
-        for offset in 0..length {
-            quantum.step(context, 4, 16).await?;
-            let (row_id, admission) = self.masked_row(masks, offset, ingress, bundle)?;
-            match admission {
-                RowAdmission::Dropped(kind) => bundle.note_dropped(kind, &self.name)?,
-                RowAdmission::Admitted(event_time) => {
-                    bundle.push_admitted(AdmittedRow {
-                        record: columnar::RowPayload::Rowed {
-                            parent: Arc::clone(parent),
-                            row: start + offset,
-                        },
-                        event_time,
-                        row_id,
-                        retain: masks.retain(offset),
-                    });
-                    bundle
-                        .admitted_source_rows
-                        .push(source_row_base + start + offset);
-                }
+        Ok(())
+    }
+
+    async fn append_classified_row(
+        &self,
+        row: (usize, usize, RowAdmission, bool),
+        context: &StreamOperatorContext<'_>,
+        bundle: &mut AdmissionBundle,
+        quantum: &mut columnar::Quantum,
+    ) -> Result<()> {
+        let (record_index, physical, admission, retain) = row;
+        match admission {
+            RowAdmission::Dropped(kind) => bundle.note_dropped(kind, &self.name)?,
+            RowAdmission::Admitted(event_time) => {
+                bundle
+                    .admitted
+                    .ensure_selection(record_index, physical, context, quantum)
+                    .await?;
+                bundle
+                    .admitted
+                    .push_ready(record_index, physical, event_time, retain);
             }
         }
         Ok(())
     }
 
     async fn append_proven_rows(
-        source: (&Arc<RecordBatch>, usize),
+        source: usize,
         block: (usize, usize, &admission_masks::AdmissionMasks),
         context: &StreamOperatorContext<'_>,
         bundle: &mut AdmissionBundle,
@@ -3832,10 +3893,16 @@ impl StreamJoinOperator {
         let mut offset = 0;
         while offset < length {
             let grant = quantum.grant_admission(context, length - offset).await?;
-            let first_id = bundle.next_row_id;
             // The immutable whole-block check proves every chunk's ID range fits.
             bundle.next_row_id += grant as u64;
-            bundle.append_granted_rows(source, (start, offset..offset + grant, masks), first_id);
+            bundle
+                .append_granted_rows(
+                    source,
+                    (start, offset..offset + grant, masks),
+                    context,
+                    quantum,
+                )
+                .await?;
             offset += grant;
         }
         Ok(())
@@ -3844,71 +3911,81 @@ impl StreamJoinOperator {
     async fn evaluate_matches(
         &mut self,
         plan: &SidePlan,
-        admitted: Vec<AdmittedRow>,
+        admitted: &mut AdmittedBatch,
         context: &StreamOperatorContext<'_>,
-    ) -> (Result<PreparedMatches>, Vec<AdmittedRow>) {
+    ) -> Result<PreparedMatches> {
         let opposite = if plan.incoming_is_left {
             &self.state.right
         } else {
             &self.state.left
         };
         if admitted.is_empty() {
-            return (Ok(PreparedMatches::legacy(Vec::new())), admitted);
+            return Ok(PreparedMatches::legacy(Vec::new()));
         }
-        if opposite.is_empty() {
-            let keys = self.native_probe_keys(plan, &admitted);
-            return (
-                keys.map(|keys| PreparedMatches {
-                    pairs: Vec::new(),
-                    keys,
-                    credit: None,
-                }),
-                admitted,
-            );
+        let opposite_empty = opposite.is_empty();
+        let keys = self
+            .prepare_key_identities(plan, admitted, Some(context))
+            .await?;
+        if opposite_empty {
+            return Ok(PreparedMatches {
+                pairs: Vec::new(),
+                keys,
+                credit: None,
+            });
         }
-        let (owned, admitted) = self.owned_native_matches(plan, admitted, context).await;
+        let owned = self
+            .owned_native_matches(plan, admitted, keys, context)
+            .await;
         let keys = match owned {
-            data_work::ProbeAttempt::Complete(result) => return (result, admitted),
+            data_work::ProbeAttempt::Complete(result) => return result,
             data_work::ProbeAttempt::Serial(keys) => keys,
         };
-        match self.native_matches(plan, &admitted, keys) {
-            Ok(Some(native)) => {
-                return (
-                    Ok(PreparedMatches {
-                        pairs: native.pairs,
-                        keys: Some(native.keys),
-                        credit: Some(native.credit),
-                    }),
-                    admitted,
-                );
-            }
-            Err(error) => return (Err(error), admitted),
-            Ok(None) => {}
+        self.serial_matches(plan, admitted, keys, context).await
+    }
+
+    async fn serial_matches(
+        &mut self,
+        plan: &SidePlan,
+        admitted: &mut AdmittedBatch,
+        keys: Option<native_lookup::NativeKeys>,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<PreparedMatches> {
+        let Some(keys) = keys else {
+            return self
+                .legacy_matches(plan, admitted, context)
+                .await
+                .map(PreparedMatches::legacy);
+        };
+        if let Some(native) = self.native_pairs(plan, admitted, &keys)? {
+            return Ok(PreparedMatches {
+                pairs: native.pairs,
+                keys: Some(keys),
+                credit: Some(native.credit),
+            });
         }
-        let (matched, admitted) = self.legacy_matches(plan, admitted, context).await;
-        (matched.map(PreparedMatches::legacy), admitted)
+        let pairs = self.legacy_matches(plan, admitted, context).await?;
+        Ok(PreparedMatches {
+            pairs,
+            keys: Some(keys),
+            credit: None,
+        })
     }
 
     async fn legacy_matches(
         &mut self,
         plan: &SidePlan,
-        admitted: Vec<AdmittedRow>,
+        admitted: &mut AdmittedBatch,
         context: &StreamOperatorContext<'_>,
-    ) -> (Result<Vec<MatchedPair>>, Vec<AdmittedRow>) {
-        let state_keys = match self.owned_state_keys(plan, context).await {
-            Ok(keys) => keys,
-            Err(error) => return (Err(error), admitted),
-        };
-        let (equal_pairs, admitted) = self.sql_key_pairs_owned(plan, admitted, state_keys).await;
-        let matched =
-            equal_pairs.and_then(|pairs| self.ordered_sql_matches(plan, &admitted, pairs));
-        (matched, admitted)
+    ) -> Result<Vec<MatchedPair>> {
+        let state_keys = self.owned_state_keys(plan, context).await?;
+        let pairs = self.sql_key_pairs_owned(plan, admitted, state_keys).await?;
+        self.ordered_sql_matches(plan, admitted, pairs)
     }
 
     fn ordered_sql_matches(
         &mut self,
         plan: &SidePlan,
-        admitted: &[AdmittedRow],
+        admitted: &dyn AdmittedRows,
         equal_pairs: Vec<(u64, u64)>,
     ) -> Result<Vec<MatchedPair>> {
         let opposite = if plan.incoming_is_left {
@@ -3930,7 +4007,7 @@ impl StreamJoinOperator {
     async fn sql_key_pairs(
         &mut self,
         plan: &SidePlan,
-        admitted: &[AdmittedRow],
+        admitted: &dyn AdmittedRows,
         state_keys: RecordBatch,
     ) -> Result<Vec<(u64, u64)>> {
         let probe = probe_key_batch(
@@ -3938,7 +4015,7 @@ impl StreamJoinOperator {
             &plan.key_indices,
             Some(self.input_schema(plan.port_index)),
         )?;
-        let tables = equality_tables(probe, state_keys)?;
+        let tables = self.sql_equality_tables(probe, state_keys)?;
         let result = self
             .runtime
             .runtime()?
@@ -3950,14 +4027,10 @@ impl StreamJoinOperator {
     async fn sql_key_pairs_owned(
         &mut self,
         plan: &SidePlan,
-        admitted: Vec<AdmittedRow>,
+        admitted: &mut AdmittedBatch,
         state_keys: sql_key_scratch::KeyBatch,
-    ) -> (Result<Vec<(u64, u64)>>, Vec<AdmittedRow>) {
-        let runtime = match self.runtime.runtime() {
-            Ok(runtime) => runtime,
-            Err(error) => return (Err(error), admitted),
-        };
-        if !runtime.serial_owned_sql() {
+    ) -> Result<Vec<(u64, u64)>> {
+        if !self.runtime.runtime()?.serial_owned_sql() || !admitted.detach(self)? {
             drop(state_keys);
             return self.legacy_key_retry(plan, admitted).await;
         }
@@ -3968,22 +4041,33 @@ impl StreamJoinOperator {
         };
         let owner = SqlKeyOwners {
             _retained: Arc::clone(retained),
-            admitted,
+            admitted: std::mem::take(admitted),
             scratch: state_keys.funding,
         };
         let tables = probe_key_batch(&owner.admitted, &plan.key_indices, None)
-            .and_then(|probe| equality_tables(probe, state_keys.batch));
+            .and_then(|probe| self.sql_equality_tables(probe, state_keys.batch));
         let tables = match tables {
             Ok(tables) => tables,
-            Err(error) => return (Err(error), owner.finish()),
+            Err(error) => {
+                *admitted = owner.finish();
+                return Err(error);
+            }
         };
         if let Some(containers) = &self.v2_containers {
             let owner = checkpoint_v2::V2SqlOwners::new(owner, Arc::clone(containers));
-            self.run_v2_owned_key_query(plan, crate::datafusion::owned::Input::new(tables, owner))
-                .await
+            self.run_v2_owned_key_query(
+                plan,
+                crate::datafusion::owned::Input::new(tables, owner),
+                admitted,
+            )
+            .await
         } else {
-            self.run_owned_key_query(plan, crate::datafusion::owned::Input::new(tables, owner))
-                .await
+            self.run_owned_key_query(
+                plan,
+                crate::datafusion::owned::Input::new(tables, owner),
+                admitted,
+            )
+            .await
         }
     }
 
@@ -3991,7 +4075,8 @@ impl StreamJoinOperator {
         &mut self,
         plan: &SidePlan,
         input: crate::datafusion::owned::Input<SqlKeyOwners>,
-    ) -> (Result<Vec<(u64, u64)>>, Vec<AdmittedRow>) {
+        admitted: &mut AdmittedBatch,
+    ) -> Result<Vec<(u64, u64)>> {
         let result = self
             .runtime
             .runtime()
@@ -4001,29 +4086,31 @@ impl StreamJoinOperator {
         match result {
             Ok(result) => {
                 let pairs = decode_key_pairs(result.batch());
-                (pairs, result.finish().finish())
+                *admitted = result.finish().finish();
+                pairs
             }
-            Err(failure) => self.finish_owned_key_failure(plan, failure).await,
+            Err(failure) => {
+                self.finish_owned_key_failure(failure, admitted)?;
+                self.legacy_key_retry(plan, admitted).await
+            }
         }
     }
 
-    async fn finish_owned_key_failure(
+    fn finish_owned_key_failure(
         &mut self,
-        plan: &SidePlan,
         failure: crate::datafusion::owned::Failure<SqlKeyOwners>,
-    ) -> (Result<Vec<(u64, u64)>>, Vec<AdmittedRow>) {
+        admitted: &mut AdmittedBatch,
+    ) -> Result<()> {
         let retry = failure
             .error
             .retry_legacy(failure.input.owner().scratch.is_some());
         let (error, input) = failure.into_parts(Some(&self.name));
-        let admitted = input.finish().finish();
+        *admitted = input.finish().finish();
         if retry {
-            return self.legacy_key_retry(plan, admitted).await;
+            Ok(())
+        } else {
+            Err(error.expect("non-retry failure keeps its source"))
         }
-        (
-            Err(error.expect("non-retry failure keeps its source")),
-            admitted,
-        )
     }
 
     fn discard_paid_key_cache(&mut self, plan: &SidePlan) {
@@ -4043,18 +4130,18 @@ impl StreamJoinOperator {
     async fn legacy_key_retry(
         &mut self,
         plan: &SidePlan,
-        admitted: Vec<AdmittedRow>,
-    ) -> (Result<Vec<(u64, u64)>>, Vec<AdmittedRow>) {
+        admitted: &AdmittedBatch,
+    ) -> Result<Vec<(u64, u64)>> {
         self.discard_paid_key_cache(plan);
-        let result = match self.opposite_state_keys(plan) {
-            Ok(keys) => self.sql_key_pairs(plan, &admitted, keys).await,
+        match self.opposite_state_keys(plan) {
+            Ok(keys) => self.sql_key_pairs(plan, admitted, keys).await,
             Err(error) => Err(error),
-        };
-        (result, admitted)
+        }
     }
 
     fn opposite_state_keys(&mut self, plan: &SidePlan) -> Result<RecordBatch> {
-        let declared = Arc::clone(self.input_schema(1 - plan.port_index));
+        let declared = Arc::clone(self.retained_schema(1 - plan.port_index));
+        let compiled = self.retained_compiled().clone();
         let (opposite, cached) = if plan.incoming_is_left {
             (&self.state.right, &mut self.retained_key_cache.right)
         } else {
@@ -4070,7 +4157,7 @@ impl StreamJoinOperator {
         {
             return Ok(existing.batch.clone());
         }
-        let batch = state_key_batch(opposite, &self.compiled, plan, Some(&declared))?;
+        let batch = state_key_batch(opposite, &compiled, plan, Some(&declared))?;
         let bytes = batch
             .columns()
             .iter()
@@ -4093,16 +4180,20 @@ impl StreamJoinOperator {
         plan: &SidePlan,
         context: &StreamOperatorContext<'_>,
     ) -> Result<sql_key_scratch::KeyBatch> {
+        let compiled = self
+            .payload_projection
+            .as_ref()
+            .map_or(&self.compiled, |layout| &layout.compiled);
         let (rows, indices, cached) = if plan.incoming_is_left {
             (
                 &self.state.right,
-                &self.compiled.right_key_indices,
+                &compiled.right_key_indices,
                 &mut self.retained_key_cache.right,
             )
         } else {
             (
                 &self.state.left,
-                &self.compiled.left_key_indices,
+                &compiled.left_key_indices,
                 &mut self.retained_key_cache.left,
             )
         };
@@ -4206,15 +4297,16 @@ impl StreamJoinOperator {
         prepared: &PreparedJoinBatch,
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
-    ) -> Result<()> {
+    ) -> Result<u64> {
         if prepared.output.is_empty() {
-            return Ok(());
+            return Ok(self.state.metrics.emitted_match_rows);
         }
         let runtime = self.runtime.runtime()?;
         let materializer = materialization::JoinOutput {
             schema: self.output_ports[0]
                 .schema()
                 .expect("compiled Join output schema"),
+            projection: self.output_columns.as_ref(),
             admitted: &prepared.admitted,
             opposite: if prepared.incoming_is_left {
                 &self.state.right
@@ -4232,46 +4324,28 @@ impl StreamJoinOperator {
             self.state.next_output_sequence,
             ranges.len(),
         )?;
-        for range in ranges {
-            context.check_cancelled()?;
-            let (record, funding) = match output_gather::materialize(
-                &materializer,
-                range.clone(),
+        let emitted = Self::prepared_emitted_count(
+            self.state.metrics.emitted_match_rows,
+            prepared.output.len(),
+            &self.name,
+        )?;
+        materializer
+            .emit_ranges(
+                ranges,
                 runtime,
                 context,
+                output,
+                &mut self.state.next_output_sequence,
                 &mut self.compaction_cleanup,
             )
-            .await?
-            {
-                Some(gathered) => gathered,
-                None => (materializer.materialize(range)?, Vec::new()),
-            };
-            let metadata =
-                BatchMetadata::new(&self.name, self.state.next_output_sequence, BTreeMap::new())?;
-            let message = Batch::table(vec![record], metadata)?;
-            if message.estimated_bytes()? > context.output_budget().max_bytes {
-                return Err(operator_error(
-                    &self.name,
-                    "validated Join chunk exceeded its byte budget",
-                ));
-            }
-            output.emit("output", message).await?;
-            drop(funding);
-            self.state.next_output_sequence += 1;
-        }
-        Ok(())
+            .await?;
+        Ok(emitted)
     }
 
-    fn record_prepared_emitted(&mut self, rows: usize) -> Result<()> {
+    fn prepared_emitted_count(current: u64, rows: usize, operator_id: &str) -> Result<u64> {
         let emitted =
-            u64::try_from(rows).map_err(|_| counter_overflow(&self.name, "emitted rows"))?;
-        self.state.metrics.emitted_match_rows = checked_metric(
-            self.state.metrics.emitted_match_rows,
-            emitted,
-            &self.name,
-            "emitted_match_rows",
-        )?;
-        Ok(())
+            u64::try_from(rows).map_err(|_| counter_overflow(operator_id, "emitted rows"))?;
+        checked_metric(current, emitted, operator_id, "emitted_match_rows")
     }
 
     fn commit_prepared(
@@ -4294,7 +4368,72 @@ impl StreamJoinOperator {
         } else {
             self.state.right.len()
         };
-        for (offset, row) in prepared.retained.iter().enumerate() {
+        self.commit_key_references(
+            prepared.dictionary,
+            prepared.legacy_key_references,
+            &prepared.retained,
+        );
+        self.mark_retained_rows(&prepared.retained, side, retained_offset, checkpointing);
+        if side == JoinSide::Left {
+            self.state.next_left_row_id = prepared.next_row_id;
+            if !prepared.retained.is_empty() {
+                self.retained_key_cache.left = None;
+            }
+            self.state.left_expirations.append(
+                &self.state.left,
+                &prepared.retained,
+                expiration_append,
+            );
+            self.state
+                .left
+                .extend(prepared.retained, &self.key_dictionary);
+            self.state.metrics.left = metrics;
+        } else {
+            self.state.next_right_row_id = prepared.next_row_id;
+            if !prepared.retained.is_empty() {
+                self.retained_key_cache.right = None;
+            }
+            self.state.right_expirations.append(
+                &self.state.right,
+                &prepared.retained,
+                expiration_append,
+            );
+            self.state
+                .right
+                .extend(prepared.retained, &self.key_dictionary);
+            self.state.metrics.right = metrics;
+        }
+        if let Some(credit) = prepared.native_append {
+            credit.commit();
+        }
+        Ok(())
+    }
+
+    fn commit_key_references(
+        &mut self,
+        dictionary: Option<key_dictionary::Pending>,
+        legacy: bool,
+        retained: &[StoredRow],
+    ) {
+        if let Some(dictionary) = dictionary {
+            self.key_dictionary.commit(dictionary);
+        }
+        if legacy {
+            self.key_dictionary.commit_known_references(retained);
+        }
+        self.key_dictionary_needs_rebuild |= retained
+            .iter()
+            .any(|row| self.key_dictionary.lease(&row.encoded_key).is_none());
+    }
+
+    fn mark_retained_rows(
+        &mut self,
+        retained: &[StoredRow],
+        side: JoinSide,
+        retained_offset: usize,
+        checkpointing: bool,
+    ) {
+        for (offset, row) in retained.iter().enumerate() {
             row.record.mark_live(retained_offset + offset);
             if checkpointing {
                 self.state.deltas.pending.push(PendingOp::Upsert {
@@ -4307,35 +4446,6 @@ impl StreamJoinOperator {
                 });
             }
         }
-        if side == JoinSide::Left {
-            self.state.next_left_row_id = prepared.next_row_id;
-            if !prepared.retained.is_empty() {
-                self.retained_key_cache.left = None;
-            }
-            self.state.left_expirations.append(
-                &self.state.left,
-                &prepared.retained,
-                expiration_append,
-            );
-            self.state.left.extend(prepared.retained);
-            self.state.metrics.left = metrics;
-        } else {
-            self.state.next_right_row_id = prepared.next_row_id;
-            if !prepared.retained.is_empty() {
-                self.retained_key_cache.right = None;
-            }
-            self.state.right_expirations.append(
-                &self.state.right,
-                &prepared.retained,
-                expiration_append,
-            );
-            self.state.right.extend(prepared.retained);
-            self.state.metrics.right = metrics;
-        }
-        if let Some(credit) = prepared.native_append {
-            credit.commit();
-        }
-        Ok(())
     }
 
     fn evict_progress(
@@ -4350,6 +4460,10 @@ impl StreamJoinOperator {
                 evict_opposite(
                     &mut self.state.right,
                     &mut self.state.right_expirations,
+                    key_lifecycle::Retirement {
+                        dictionary: &mut self.key_dictionary,
+                        bindings: &mut self.key_bindings.right,
+                    },
                     progress,
                     &mut self.state.metrics.right,
                     checkpointing.then_some(&mut self.state.deltas.pending),
@@ -4368,6 +4482,10 @@ impl StreamJoinOperator {
                 evict_opposite(
                     &mut self.state.left,
                     &mut self.state.left_expirations,
+                    key_lifecycle::Retirement {
+                        dictionary: &mut self.key_dictionary,
+                        bindings: &mut self.key_bindings.left,
+                    },
                     progress,
                     &mut self.state.metrics.left,
                     checkpointing.then_some(&mut self.state.deltas.pending),
@@ -4408,11 +4526,22 @@ impl StreamJoinOperator {
         &self,
         snapshot: &OperatorStateSnapshot,
         schemas: Option<&metadata_validation::schema::OwnedExpectedSchemas>,
+        issue: &historical_validation::Issue,
     ) -> Result<(Vec<StoredRow>, Vec<StoredRow>)> {
+        let mut left = self.restore_schema(schemas, 0);
+        let mut right = self.restore_schema(schemas, 1);
+        left.historical = Some(historical_validation::Validation {
+            event_index: self.compiled.left_event_time_index,
+            issue,
+        });
+        right.historical = Some(historical_validation::Validation {
+            event_index: self.compiled.right_event_time_index,
+            issue,
+        });
         restore_sides_from_segments(
             snapshot,
-            self.restore_schema(schemas, 0),
-            self.restore_schema(schemas, 1),
+            left,
+            right,
             &self.compiled.left_key_indices,
             &self.compiled.right_key_indices,
             &self.name,
@@ -4425,6 +4554,7 @@ impl StreamJoinOperator {
         side: usize,
     ) -> RestoreSchema<'a> {
         RestoreSchema {
+            historical: None,
             schema: schemas.map_or_else(
                 || self.input_schema(side).as_ref(),
                 |schemas| schemas.schema(side),
@@ -4453,8 +4583,8 @@ impl StreamJoinOperator {
         metadata: &metadata_validation::ValidatedMetadata,
         left: &[StoredRow],
         right: &[StoredRow],
-    ) -> Result<()> {
-        validate_restored_rows(
+    ) -> Result<[bool; 2]> {
+        let left_repeats = validate_restored_rows(
             left,
             metadata.next_left_row_id,
             self.compiled.left_event_time_index,
@@ -4462,14 +4592,15 @@ impl StreamJoinOperator {
             &self.name,
             "left",
         )?;
-        validate_restored_rows(
+        let right_repeats = validate_restored_rows(
             right,
             metadata.next_right_row_id,
             self.compiled.right_event_time_index,
             &self.compiled.right_key_indices,
             &self.name,
             "right",
-        )
+        )?;
+        Ok([left_repeats, right_repeats])
     }
 }
 
@@ -4482,6 +4613,77 @@ impl fmt::Debug for StreamJoinOperator {
             .field("input_ports", &self.input_ports)
             .field("output_ports", &self.output_ports)
             .finish_non_exhaustive()
+    }
+}
+
+impl StreamJoinOperator {
+    async fn begin_data(&mut self, context: &StreamOperatorContext<'_>) -> Result<()> {
+        context.check_cancelled()?;
+        self.await_compaction_release(context).await?;
+        if !context.job().checkpointing() {
+            self.v2_writer.invalidate_history()?;
+        }
+        Ok(())
+    }
+
+    async fn prepare_data_append(
+        &mut self,
+        ingress: &str,
+        batch: &Batch,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<(PreparedJoinBatch, expiration::AppendPlan)> {
+        let prepared = self.prepare_batch(ingress, batch, context).await?;
+        let expirations = if prepared.incoming_is_left {
+            &self.state.left_expirations
+        } else {
+            &self.state.right_expirations
+        };
+        let expiration_append = expirations
+            .prepare_append(prepared.retained.len(), context)
+            .await?;
+        if context.job().checkpointing() {
+            self.v2_writer.changed(true)?;
+        }
+        Ok((prepared, expiration_append))
+    }
+
+    async fn finish_data(
+        &mut self,
+        ingress: &str,
+        prepared: PreparedJoinBatch,
+        expiration_append: expiration::AppendPlan,
+        context: &StreamOperatorContext<'_>,
+        output: &mut dyn StreamCollector,
+    ) -> Result<()> {
+        let emitted = self.emit_prepared(&prepared, context, output).await?;
+        self.state.metrics.emitted_match_rows = emitted;
+        self.commit_prepared(
+            ingress,
+            prepared,
+            context.job().checkpointing(),
+            expiration_append,
+        )?;
+        if self.has_sparse_candidates() {
+            return self.repair_sparse_chunks(context).await;
+        }
+        self.ingress_progress = context.ingress_progress().clone();
+        Ok(())
+    }
+
+    async fn await_progress_release(&mut self, context: &StreamOperatorContext<'_>) -> Result<()> {
+        if self.compaction_release.is_none() && self.compaction_cleanup.is_none() {
+            context.check_cancelled()
+        } else {
+            self.await_compaction_release(context).await
+        }
+    }
+
+    fn note_checkpoint_mutation(&mut self, checkpointing: bool) -> Result<()> {
+        if checkpointing {
+            self.v2_writer.changed(true)
+        } else {
+            self.v2_writer.invalidate_history()
+        }
     }
 }
 
@@ -4517,36 +4719,11 @@ impl StreamOperator for StreamJoinOperator {
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
-        context.check_cancelled()?;
-        self.await_compaction_release(context).await?;
-        if !context.job().checkpointing() {
-            self.v2_writer.invalidate_history();
-        }
-        let prepared = self.prepare_batch(ingress, &batch, context).await?;
-        let expirations = if prepared.incoming_is_left {
-            &self.state.left_expirations
-        } else {
-            &self.state.right_expirations
-        };
-        let expiration_append = expirations
-            .prepare_append(prepared.retained.len(), context)
-            .await?;
-        if context.job().checkpointing() {
-            self.v2_writer.changed(true)?;
-        }
-        self.emit_prepared(&prepared, context, output).await?;
-        self.record_prepared_emitted(prepared.output.len())?;
-        self.commit_prepared(
-            ingress,
-            prepared,
-            context.job().checkpointing(),
-            expiration_append,
-        )?;
-        if self.has_sparse_candidates() {
-            return self.repair_sparse_chunks(context).await;
-        }
-        self.ingress_progress = context.ingress_progress().clone();
-        Ok(())
+        self.begin_data(context).await?;
+        let (prepared, expiration_append) =
+            self.prepare_data_append(ingress, &batch, context).await?;
+        self.finish_data(ingress, prepared, expiration_append, context, output)
+            .await
     }
 
     async fn on_ingress_progress(
@@ -4555,17 +4732,10 @@ impl StreamOperator for StreamJoinOperator {
         context: &StreamOperatorContext<'_>,
     ) -> Result<()> {
         let progress = self.required_progress(ingress, context)?;
-        if self.compaction_release.is_none() && self.compaction_cleanup.is_none() {
-            context.check_cancelled()?;
-        } else {
-            self.await_compaction_release(context).await?;
-        }
-        if context.job().checkpointing() {
-            self.v2_writer.changed(true)?;
-        } else {
-            self.v2_writer.invalidate_history();
-        }
+        self.await_progress_release(context).await?;
+        self.note_checkpoint_mutation(context.job().checkpointing())?;
         self.evict_progress(ingress, progress, context.job().checkpointing())?;
+        self.rebuild_key_identities(context).await?;
         if self.has_sparse_candidates() {
             return self.repair_sparse_chunks(context).await;
         }
@@ -4603,10 +4773,13 @@ impl StreamOperator for StreamJoinOperator {
                 right_identities,
             );
         } else {
-            self.v2_writer.invalidate_history();
+            self.v2_writer.invalidate_history()?;
         }
         self.state.left.clear();
         self.state.right.clear();
+        self.key_dictionary = key_dictionary::Dictionary::default();
+        self.key_bindings = key_dictionary::Bindings::default();
+        self.key_dictionary_needs_rebuild = false;
         self.state.left_expirations = ExpirationIndex::default();
         self.state.right_expirations = ExpirationIndex::default();
         self.retained_key_cache = RetainedKeyCache::default();
@@ -4621,6 +4794,9 @@ impl StreamOperator for StreamJoinOperator {
     fn reset(&mut self) -> Result<()> {
         let writer = self.v2_writer.next_owner(false)?;
         self.state = StreamJoinState::default();
+        self.key_dictionary = key_dictionary::Dictionary::default();
+        self.key_bindings = key_dictionary::Bindings::default();
+        self.key_dictionary_needs_rebuild = false;
         self.retained_key_cache = RetainedKeyCache::default();
         self.ingress_progress = IngressProgressSnapshot::default();
         self.v2_containers = None;
@@ -4634,6 +4810,7 @@ impl StreamOperator for StreamJoinOperator {
     ) -> Result<()> {
         #[cfg(test)]
         if self.checkpoint_v1_test_producer {
+            self.check_v1_test_layout()?;
             return self.prepare_compaction(context).await;
         }
         self.prepare_v2_checkpoint_automatic(context).await
@@ -4652,7 +4829,9 @@ impl StreamOperator for StreamJoinOperator {
             .inline_metadata
             .get("layout_version")
             .and_then(Value::as_u64)
-            == Some(2)
+            .is_some_and(|layout| {
+                matches!(layout, 2 | 3) || layout == 1 && self.payload_projection.is_some()
+            })
         {
             return self.restore_v2_snapshot(snapshot);
         }
@@ -4663,7 +4842,18 @@ impl StreamOperator for StreamJoinOperator {
 
 impl StreamJoinOperator {
     #[cfg(test)]
+    fn check_v1_test_layout(&self) -> Result<()> {
+        if self.payload_projection.is_some() {
+            return Err(CalcFlowError::CheckpointMismatch {
+                message: "legacy V1 test producer requires full retained payloads".into(),
+            });
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
     fn checkpoint_v1(&mut self, epoch: Epoch) -> Result<OperatorStateSnapshot> {
+        self.check_v1_test_layout()?;
         if self
             .state
             .last_checkpoint_epoch
@@ -4703,6 +4893,20 @@ impl StreamJoinOperator {
         for ((segment_epoch, side), segment) in &self.state.deltas.segments {
             segments.insert(format!("{side}-delta-{segment_epoch}"), segment.clone());
         }
+        self.capture_v1_pending(epoch, &mut segments)?;
+        self.state.last_checkpoint_epoch = Some(epoch);
+        Ok(OperatorStateSnapshot {
+            inline_metadata: inline_metadata.into_iter().collect(),
+            segments,
+        })
+    }
+
+    #[cfg(test)]
+    fn capture_v1_pending(
+        &mut self,
+        epoch: Epoch,
+        segments: &mut BTreeMap<String, StateSegment>,
+    ) -> Result<()> {
         if !self.state.deltas.pending.is_empty() {
             for (side, bytes) in encode_pending_delta(&self.state, epoch, &self.name)? {
                 let segment = StateSegment::new(bytes);
@@ -4721,11 +4925,7 @@ impl StreamJoinOperator {
                 self.state.deltas.needs_compaction = true;
             }
         }
-        self.state.last_checkpoint_epoch = Some(epoch);
-        Ok(OperatorStateSnapshot {
-            inline_metadata: inline_metadata.into_iter().collect(),
-            segments,
-        })
+        Ok(())
     }
 
     fn parse_restore_metadata(
@@ -4768,13 +4968,14 @@ impl StreamJoinOperator {
         schemas: Option<&metadata_validation::schema::OwnedExpectedSchemas>,
         check: &dyn Fn() -> Result<()>,
     ) -> Result<()> {
+        let issue = historical_validation::Issue::default();
         let (left, right) =
             if snapshot.segments.is_empty() && empty_retained_metrics(&metadata.metrics) {
                 (Vec::new(), Vec::new())
             } else {
-                self.decode_restored_sides(snapshot, schemas)?
+                self.decode_restored_sides(snapshot, schemas, &issue)?
             };
-        self.install_restored_rows(snapshot, metadata, left, right, check)
+        self.install_restored_rows(snapshot, metadata, left, right, issue.into_inner(), check)
     }
 
     fn install_restored_rows(
@@ -4783,46 +4984,63 @@ impl StreamJoinOperator {
         metadata: metadata_validation::ValidatedMetadata,
         left: Vec<StoredRow>,
         right: Vec<StoredRow>,
+        historical_error: Option<CalcFlowError>,
         check: &dyn Fn() -> Result<()>,
     ) -> Result<()> {
-        self.validate_restored_join_rows(&metadata, &left, &right)?;
+        let (state, repeated_ids) = self.prepare_restored_state(snapshot, metadata, left, right)?;
+        mark_restored_rows([&state.left, &state.right]);
+        check()?;
+        let writer = self.v2_writer.next_owner(true)?;
+        if let Some(error) = historical_error {
+            return Err(error);
+        }
+        validate_restored_row_ids(repeated_ids, &self.name)?;
+        self.install_legacy_keys(state, writer, check)
+    }
+
+    fn prepare_restored_state(
+        &self,
+        snapshot: &OperatorStateSnapshot,
+        metadata: metadata_validation::ValidatedMetadata,
+        left: Vec<StoredRow>,
+        right: Vec<StoredRow>,
+    ) -> Result<(StreamJoinState, [bool; 2])> {
+        let repeated_ids = self.validate_restored_join_rows(&metadata, &left, &right)?;
         restored_retained_metrics_match(&metadata.metrics, &left, &right, &self.name)?;
         self.validate_restored_limits(&left, &right)?;
         let carried = carried_delta_segments(snapshot, &self.name)?;
         let base = carried_base_segments(snapshot);
         let segments_since_base =
             u32::try_from(carried.len()).map_err(|_| counter_overflow(&self.name, "segments"))?;
-        let state = StreamJoinState {
-            left_expirations: ExpirationIndex::restored(&left)?,
-            right_expirations: ExpirationIndex::restored(&right)?,
-            left: left.into(),
-            right: right.into(),
-            next_left_row_id: metadata.next_left_row_id,
-            next_right_row_id: metadata.next_right_row_id,
-            next_output_sequence: metadata.next_output_sequence,
-            metrics: metadata.metrics,
-            ended: metadata.ended,
-            last_checkpoint_epoch: Epoch::new(metadata.epoch),
-            deltas: DeltaTracking {
-                base,
-                segments: carried,
-                segments_since_base,
-                ..DeltaTracking::default()
+        Ok((
+            StreamJoinState {
+                left_expirations: ExpirationIndex::restored(&left)?,
+                right_expirations: ExpirationIndex::restored(&right)?,
+                left: left.into(),
+                right: right.into(),
+                next_left_row_id: metadata.next_left_row_id,
+                next_right_row_id: metadata.next_right_row_id,
+                next_output_sequence: metadata.next_output_sequence,
+                metrics: metadata.metrics,
+                ended: metadata.ended,
+                last_checkpoint_epoch: Epoch::new(metadata.epoch),
+                deltas: DeltaTracking {
+                    base,
+                    segments: carried,
+                    segments_since_base,
+                    ..DeltaTracking::default()
+                },
             },
-        };
-        for rows in [&state.left, &state.right] {
-            for (dense, row) in rows.iter().enumerate() {
-                row.record.mark_live(dense);
-            }
+            repeated_ids,
+        ))
+    }
+}
+
+fn mark_restored_rows(rows: [&RetainedRows; 2]) {
+    for rows in rows {
+        for (dense, row) in rows.iter().enumerate() {
+            row.record.mark_live(dense);
         }
-        check()?;
-        let writer = self.v2_writer.next_owner(true)?;
-        self.state = state;
-        self.retained_key_cache = RetainedKeyCache::default();
-        self.ingress_progress = IngressProgressSnapshot::default();
-        self.v2_containers = None;
-        self.v2_writer = writer;
-        Ok(())
     }
 }
 
@@ -4845,63 +5063,35 @@ impl SidePlan {
 }
 
 impl AdmissionBundle {
-    async fn append_copy_rows(
+    async fn append_granted_rows(
         &mut self,
-        record: &RecordBatch,
-        shared: Option<&Arc<columnar::PayloadChunk>>,
-        rows: &[columnar::SelectedRow],
-        context: &StreamOperatorContext<'_>,
-        source_row_base: usize,
-        quantum: &mut columnar::Quantum,
-    ) -> Result<()> {
-        for (offset, row) in rows.iter().enumerate() {
-            quantum.step(context, 1, 0).await?;
-            self.push_admitted(AdmittedRow {
-                record: columnar::RowPayload::at(
-                    record,
-                    shared,
-                    if shared.is_some() { offset } else { row.source },
-                ),
-                event_time: row.time,
-                row_id: row.row_id,
-                retain: row.retain,
-            });
-            self.admitted_source_rows.push(source_row_base + row.source);
-        }
-        Ok(())
-    }
-
-    fn append_granted_rows(
-        &mut self,
-        source: (&Arc<RecordBatch>, usize),
+        record_index: usize,
         block: (
             usize,
             std::ops::Range<usize>,
             &admission_masks::AdmissionMasks,
         ),
-        first_id: u64,
-    ) {
-        let (parent, source_row_base) = source;
+        context: &StreamOperatorContext<'_>,
+        quantum: &mut columnar::Quantum,
+    ) -> Result<()> {
         let (start, offsets, masks) = block;
-        let first_offset = offsets.start;
+        self.admitted
+            .ensure_selection(record_index, start + offsets.start, context, quantum)
+            .await?;
         #[cfg(test)]
         note_join_work(|work| {
             work.admission_grants += 1;
             work.generic_fast_rows += offsets.len();
         });
         for offset in offsets {
-            self.push_admitted(AdmittedRow {
-                record: columnar::RowPayload::Rowed {
-                    parent: Arc::clone(parent),
-                    row: start + offset,
-                },
-                event_time: masks.admitted_time(offset),
-                row_id: first_id + (offset - first_offset) as u64,
-                retain: masks.retain(offset),
-            });
-            self.admitted_source_rows
-                .push(source_row_base + start + offset);
+            self.admitted.push_ready(
+                record_index,
+                start + offset,
+                masks.admitted_time(offset),
+                masks.retain(offset),
+            );
         }
+        Ok(())
     }
 
     fn reserve_row_id(&mut self, operator_id: &str) -> Result<u64> {
@@ -4939,10 +5129,6 @@ impl AdmissionBundle {
             }
         }
         Ok(())
-    }
-
-    fn push_admitted(&mut self, row: AdmittedRow) {
-        self.admitted.push(row);
     }
 
     fn finish(&mut self, operator_id: &str) -> Result<()> {
@@ -5032,47 +5218,73 @@ fn state_row_count(rows: &[StoredRow], operator_id: &str) -> Result<u64> {
     u64::try_from(rows.len()).map_err(|_| counter_overflow(operator_id, "state rows"))
 }
 
-fn retained_rows(
-    admitted: &[AdmittedRow],
+async fn retained_rows(
+    admitted: &dyn AdmittedRows,
     key_indices: &[usize],
     operator_id: &str,
     native_keys: Option<&native_lookup::NativeKeys>,
+    dictionary: &key_dictionary::Dictionary,
+    context: &StreamOperatorContext<'_>,
+    work: &mut KeyDiagnostics,
 ) -> Result<Vec<StoredRow>> {
-    admitted
-        .iter()
-        .enumerate()
-        .filter(|(_, row)| row.retain)
-        .map(|(index, row)| {
-            let encoded_key = match native_keys {
-                Some(keys) => Arc::clone(keys.key(index)),
-                None => Arc::new(
-                    encode_join_key_columns_v1(
-                        row.record.columns(),
-                        row.record.offset(),
-                        key_indices,
-                    )?
-                    .into(),
-                ),
-            };
-            let charge = state_columns_charge_with_key(
-                row.record.columns(),
-                row.record.offset(),
-                encoded_key.len(),
-                operator_id,
-            )?;
-            Ok(StoredRow {
-                encoded_key,
-                record: row.record.clone(),
-                event_time: row.event_time,
-                row_id: row.row_id,
-                charge,
-            })
-        })
-        .collect()
+    let mut retained = Vec::new();
+    let mut flow = typed_key::KeyFlow::new(Some(context));
+    for (index, row) in admitted.iter().enumerate().filter(|(_, row)| row.retain) {
+        flow.step(1, 0).await?;
+        let encoded_key = match native_keys {
+            Some(keys) => Arc::clone(keys.key(index)),
+            None => {
+                legacy_retained_key(
+                    row.record,
+                    key_indices,
+                    dictionary,
+                    operator_id,
+                    work,
+                    &mut flow,
+                )
+                .await?
+            }
+        };
+        let charge = state_columns_charge_with_key(
+            row.record.columns(),
+            row.record.offset(),
+            encoded_key.len(),
+            operator_id,
+        )?;
+        retained.push(StoredRow {
+            encoded_key,
+            record: row.record.owned(),
+            event_time: row.event_time,
+            row_id: row.row_id,
+            charge,
+        });
+    }
+    Ok(retained)
 }
 
-fn admitted_charge_cache(charges: Option<Vec<u64>>, rows: &[usize]) -> Option<Vec<u64>> {
-    charges.map(|charges| rows.iter().map(|row| charges[*row]).collect())
+async fn legacy_retained_key(
+    record: PayloadRef<'_>,
+    key_indices: &[usize],
+    dictionary: &key_dictionary::Dictionary,
+    name: &str,
+    work: &mut KeyDiagnostics,
+    flow: &mut typed_key::KeyFlow<'_, '_>,
+) -> Result<Arc<columnar::FramedKey>> {
+    let next = checked_metric(work.legacy_key_encodings, 1, name, "legacy_key_encodings")?;
+    let bytes = encode_join_key_columns_v1(record.columns(), record.offset(), key_indices)?;
+    work.legacy_key_encodings = next;
+    Ok(dictionary
+        .canonical_bytes(&bytes, flow)
+        .await?
+        .unwrap_or_else(|| Arc::new(bytes.into())))
+}
+
+fn admitted_charge_cache(charges: Option<Vec<u64>>, rows: &dyn AdmittedRows) -> Option<Vec<u64>> {
+    charges.map(|charges| {
+        (0..rows.len())
+            .map(|row| charges[rows.source_index(row)])
+            .collect()
+    })
 }
 
 fn append_admission_charges(charges: &mut Option<Vec<u64>>, record: &RecordBatch) -> Result<()> {
@@ -5105,23 +5317,58 @@ fn enforce_match_limit(
 
 /// Builds the admitted-row scratch table with renamed key columns.
 fn probe_key_batch(
-    admitted: &[AdmittedRow],
+    admitted: &dyn AdmittedRows,
     key_indices: &[usize],
     declared: Option<&Schema>,
 ) -> Result<RecordBatch> {
-    let records = admitted
+    let first = admitted.row(0);
+    let schema = declared.unwrap_or(first.record.schema_ref());
+    let mut fields = Vec::with_capacity(key_indices.len() + 1);
+    let mut columns = Vec::with_capacity(key_indices.len() + 1);
+    for (position, &key_index) in key_indices.iter().enumerate() {
+        let field = schema.field(key_index);
+        fields.push(Field::new(
+            format!("{KEY_COLUMN_PREFIX}{position}"),
+            field.data_type().clone(),
+            field.is_nullable(),
+        ));
+        let selected = admitted
+            .groups()
+            .map(|group| selected_probe_column(group, key_index))
+            .collect::<Result<Vec<_>>>()?;
+        let references = selected.iter().map(AsRef::as_ref).collect::<Vec<_>>();
+        columns.push(canonical_column(
+            concat_column(&references)?,
+            field.data_type(),
+        ));
+    }
+    fields.push(Field::new(PROBE_POS_COLUMN, DataType::UInt64, false));
+    columns.push(Arc::new(UInt64Array::from_iter_values(
+        (0..admitted.len()).map(|index| index as u64),
+    )));
+    RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).map_err(|error| {
+        CalcFlowError::Internal {
+            message: format!("stream Join equality probe assembly failed: {error}"),
+        }
+    })
+}
+
+fn selected_probe_column(group: admitted::AdmittedGroup<'_>, key_index: usize) -> Result<ArrayRef> {
+    let first = group.row(0).record;
+    let contiguous = group
         .iter()
-        .map(|row| row.record.view())
-        .collect::<Vec<_>>();
-    let positions = UInt64Array::from_iter_values(
-        (0..admitted.len()).map(|index| u64::try_from(index).expect("row count fits u64")),
-    );
-    key_probe_batch(
-        &records,
-        key_indices,
-        PROBE_POS_COLUMN,
-        &positions,
-        declared,
+        .enumerate()
+        .all(|(index, row)| row.record.offset() == first.offset() + index);
+    #[cfg(test)]
+    note_join_work(|work| work.sql_probe_segment_selects += 1);
+    if contiguous {
+        return Ok(first.column(key_index).slice(first.offset(), group.len()));
+    }
+    let indices = UInt64Array::from_iter_values(group.iter().map(|row| row.record.offset() as u64));
+    datafusion::arrow::compute::take(first.column(key_index).as_ref(), &indices, None).map_err(
+        |error| CalcFlowError::Internal {
+            message: format!("stream Join selected key column failed: {error}"),
+        },
     )
 }
 
@@ -5234,7 +5481,7 @@ fn u64_column<'a>(
 fn filter_and_order_pairs(
     bounds: &JoinTimeBounds,
     plan: &SidePlan,
-    admitted: &[AdmittedRow],
+    admitted: &dyn AdmittedRows,
     opposite: &[StoredRow],
     equal_pairs: Vec<(u64, u64)>,
 ) -> Vec<MatchedPair> {
@@ -5246,7 +5493,7 @@ fn filter_and_order_pairs(
             let opposite_index = *row_id_index
                 .get(&rid)
                 .expect("state row ids index retained rows");
-            let incoming = &admitted[pos];
+            let incoming = admitted.row(pos);
             let candidate = &opposite[opposite_index];
             let in_bounds = if plan.incoming_is_left {
                 bounds.contains_pair(
@@ -5283,57 +5530,26 @@ fn index_by_row_id(opposite: &[StoredRow]) -> BTreeMap<u64, usize> {
 /// Materializes one validated chunk of matched pairs into an independent record.
 ///
 /// Shared flat columns gather in matched-pair order; other columns concatenate row views.
+#[cfg(test)]
 fn materialize_output_record(
     output_schema: &SchemaRef,
-    admitted: &[AdmittedRow],
+    admitted: &dyn AdmittedRows,
     opposite: &[StoredRow],
     matched: &[MatchedPair],
     incoming_is_left: bool,
     operator_id: &str,
 ) -> Result<RecordBatch> {
-    if matched.is_empty() {
-        return Ok(RecordBatch::new_empty(Arc::clone(output_schema)));
+    materialization::JoinOutput {
+        schema: output_schema,
+        projection: None,
+        admitted,
+        opposite,
+        matched,
+        incoming_is_left,
+        operator_id,
+        admitted_charges: None,
     }
-    let pair_records = |pair: &MatchedPair| {
-        let incoming = &admitted[pair.pos];
-        let candidate = &opposite[pair.opposite_index];
-        if incoming_is_left {
-            (&incoming.record, &candidate.record)
-        } else {
-            (&candidate.record, &incoming.record)
-        }
-    };
-    let (first_left, first_right) = pair_records(&matched[0]);
-    let left_width = first_left.num_columns();
-    let right_width = first_right.num_columns();
-    let left_gather =
-        output_gather::SideGather::new(matched.iter().map(|pair| pair_records(pair).0));
-    let right_gather =
-        output_gather::SideGather::new(matched.iter().map(|pair| pair_records(pair).1));
-    let mut columns = Vec::with_capacity(left_width + right_width);
-    for column_index in 0..left_width + right_width {
-        let (gather, payload_index) = if column_index < left_width {
-            (left_gather.as_ref(), column_index)
-        } else {
-            (right_gather.as_ref(), column_index - left_width)
-        };
-        let payloads = matched.iter().map(|pair| {
-            let (left, right) = pair_records(pair);
-            if column_index < left_width {
-                left
-            } else {
-                right
-            }
-        });
-        columns.push(output_gather::column(
-            gather,
-            payload_index,
-            output_schema.field(column_index).data_type(),
-            payloads,
-        )?);
-    }
-    RecordBatch::try_new(Arc::clone(output_schema), columns)
-        .map_err(|error| operator_error(operator_id, &format!("output projection failed: {error}")))
+    .materialize(0..matched.len())
 }
 
 fn concat_output_column(slices: &[&dyn Array]) -> Result<ArrayRef> {
@@ -6207,13 +6423,17 @@ fn decode_delta_upsert(
             "delta upsert key does not match its record",
         ));
     }
-    Ok(StoredRow {
+    let row = StoredRow {
         record: record.into(),
         event_time: header.event_time,
         row_id: header.row_id,
         charge,
         encoded_key: Arc::new(header.key.into()),
-    })
+    };
+    if let Some(validation) = schema.historical {
+        validation.record(&row, key_indices, name, side);
+    }
+    Ok(row)
 }
 
 fn read_ipc_record(
@@ -6391,19 +6611,33 @@ fn decode_stored_row(
     let record = read_ipc_record(bytes, offset, expected_schema, operator_id, side)?;
     let encoded_key = Arc::new(encode_join_key_v1(&record, 0, key_indices)?.into());
     let record: columnar::RowPayload = record.into();
-    #[cfg(test)]
-    if let Some(hook) = expected_schema.decoded_row_hook
-        && expected_schema.decoded_row_credit.is_none()
-    {
-        hook(None, record.funded_owner(), true, false);
-    }
-    Ok(StoredRow {
+    let row = StoredRow {
         record,
         event_time,
         row_id,
         charge,
         encoded_key,
-    })
+    };
+    observe_restored_row(&row, expected_schema, key_indices, operator_id, side);
+    Ok(row)
+}
+
+fn observe_restored_row(
+    row: &StoredRow,
+    expected_schema: RestoreSchema<'_>,
+    key_indices: &[usize],
+    operator_id: &str,
+    side: &str,
+) {
+    #[cfg(test)]
+    if let Some(hook) = expected_schema.decoded_row_hook
+        && expected_schema.decoded_row_credit.is_none()
+    {
+        hook(None, row.record.funded_owner(), true, false);
+    }
+    if let Some(validation) = expected_schema.historical {
+        validation.record(row, key_indices, operator_id, side);
+    }
 }
 
 fn decode_ipc_row(
@@ -6493,23 +6727,45 @@ fn validate_restored_rows(
     key_indices: &[usize],
     operator_id: &str,
     side: &str,
-) -> Result<()> {
+) -> Result<bool> {
     let mut identities = BTreeSet::new();
+    let mut repeated = false;
     for row in rows {
         validate_restored_row_identity(row, &mut identities, next_row_id, operator_id, side)?;
         validate_restored_row_payload(row, event_index, key_indices, operator_id, side)?;
+        repeated |= restored_row_id_repeats(&identities, row.row_id);
+    }
+    Ok(repeated)
+}
+
+fn restored_row_id_repeats(identities: &BTreeSet<(u64, i64)>, row_id: u64) -> bool {
+    identities
+        .range((row_id, i64::MIN)..=(row_id, i64::MAX))
+        .nth(1)
+        .is_some()
+}
+
+fn validate_restored_row_ids(repeated: [bool; 2], operator_id: &str) -> Result<()> {
+    for (side, repeated) in ["left", "right"].into_iter().zip(repeated) {
+        if repeated {
+            return Err(checkpoint_error(
+                operator_id,
+                side,
+                "live row ID is duplicated",
+            ));
+        }
     }
     Ok(())
 }
 
 fn validate_restored_row_identity(
     row: &StoredRow,
-    identities: &mut BTreeSet<(EventTime, u64)>,
+    identities: &mut BTreeSet<(u64, i64)>,
     next_row_id: u64,
     operator_id: &str,
     side: &str,
 ) -> Result<()> {
-    if row.row_id >= next_row_id || !identities.insert((row.event_time, row.row_id)) {
+    if row.row_id >= next_row_id || !identities.insert((row.row_id, row.event_time.as_micros())) {
         return Err(checkpoint_error(
             operator_id,
             side,
@@ -6556,6 +6812,40 @@ struct EvictionPolicy<'a> {
 fn evict_opposite(
     rows: &mut RetainedRows,
     expirations: &mut ExpirationIndex,
+    retirement: key_lifecycle::Retirement<'_>,
+    progress: IngressProgress,
+    metrics: &mut SideMetrics,
+    pending: Option<&mut PendingLog>,
+    policy: EvictionPolicy<'_>,
+) -> Result<()> {
+    if pending.is_none() && expires_all(expirations, progress, policy.extension_micros) {
+        return evict_all(rows, expirations, retirement, metrics, policy.operator_id);
+    }
+    evict_expired(
+        rows,
+        expirations,
+        retirement,
+        progress,
+        metrics,
+        pending,
+        policy,
+    )
+}
+
+fn expires_all(expirations: &ExpirationIndex, progress: IngressProgress, extension: u64) -> bool {
+    expirations.last_time().is_some_and(|time| {
+        progress.state() == crate::IngressState::Ended
+            || progress.watermark().is_some_and(|watermark| {
+                i128::from(time.as_micros()) + i128::from(extension)
+                    < i128::from(watermark.as_micros())
+            })
+    })
+}
+
+fn evict_expired(
+    rows: &mut RetainedRows,
+    expirations: &mut ExpirationIndex,
+    mut retirement: key_lifecycle::Retirement<'_>,
     progress: IngressProgress,
     metrics: &mut SideMetrics,
     pending: Option<&mut PendingLog>,
@@ -6563,25 +6853,21 @@ fn evict_opposite(
 ) -> Result<()> {
     let EvictionPolicy {
         extension_micros,
-        side,
         operator_id,
+        ..
     } = policy;
-    if pending.is_none()
-        && expirations.last_time().is_some_and(|time| {
-            progress.state() == crate::IngressState::Ended
-                || progress.watermark().is_some_and(|watermark| {
-                    i128::from(time.as_micros()) + i128::from(extension_micros)
-                        < i128::from(watermark.as_micros())
-                })
-        })
-    {
-        return evict_all(rows, expirations, metrics, operator_id);
-    }
     let mut evicted = Vec::new();
     let mut count = 0_u64;
     let mut bytes = 0_u64;
-    while let Some((ordinal, row)) = take_expired(rows, expirations, progress, extension_micros) {
+    while let Some((ordinal, row)) = take_expired(
+        rows,
+        expirations,
+        retirement.bindings,
+        progress,
+        extension_micros,
+    ) {
         rows.2.remove(&row.record);
+        retirement.retire(&row, operator_id)?;
         bytes = bytes
             .checked_add(row.charge)
             .ok_or_else(|| counter_overflow(operator_id, "evicted bytes"))?;
@@ -6592,6 +6878,17 @@ fn evict_opposite(
             evicted.push((ordinal, row));
         }
     }
+    finish_eviction(metrics, pending, evicted, count, bytes, policy)
+}
+
+fn finish_eviction(
+    metrics: &mut SideMetrics,
+    pending: Option<&mut PendingLog>,
+    mut evicted: Vec<(u128, StoredRow)>,
+    count: u64,
+    bytes: u64,
+    policy: EvictionPolicy<'_>,
+) -> Result<()> {
     if count == 0 {
         return Ok(());
     }
@@ -6599,19 +6896,20 @@ fn evict_opposite(
         evicted.sort_by_key(|(ordinal, _)| *ordinal);
         record_tombstones(
             pending,
-            side,
+            policy.side,
             evicted
                 .into_iter()
                 .map(|(_, row)| (row.row_id, row.event_time, row.encoded_key))
                 .collect(),
         );
     }
-    update_evicted_metrics(metrics, count, bytes, operator_id)
+    update_evicted_metrics(metrics, count, bytes, policy.operator_id)
 }
 
 fn evict_all(
     rows: &mut RetainedRows,
     expirations: &mut ExpirationIndex,
+    mut retirement: key_lifecycle::Retirement<'_>,
     metrics: &mut SideMetrics,
     operator_id: &str,
 ) -> Result<()> {
@@ -6624,8 +6922,10 @@ fn evict_all(
     })?;
     let mut next_metrics = metrics.clone();
     update_evicted_metrics(&mut next_metrics, count, bytes, operator_id)?;
+    rows.1 = None;
     for row in rows.0.iter() {
         rows.2.remove(&row.record);
+        retirement.retire(row, operator_id)?;
     }
     rows.clear();
     expirations.clear();
@@ -6654,6 +6954,7 @@ fn update_evicted_metrics(
 fn take_expired(
     rows: &mut RetainedRows,
     expirations: &mut ExpirationIndex,
+    bindings: &key_dictionary::SideBindings,
     progress: IngressProgress,
     extension: u64,
 ) -> Option<(u128, StoredRow)> {
@@ -6668,7 +6969,7 @@ fn take_expired(
     let (index, ordinal) = expirations.pop(rows).expect("expiration prefix exists");
     #[cfg(test)]
     note_join_work(|work| work.retained_visits += 1);
-    let row = rows.swap_remove(index);
+    let row = rows.swap_remove_bound(index, bindings);
     Some((ordinal, row))
 }
 
@@ -7301,37 +7602,56 @@ fn key_type_tag(data_type: &DataType) -> Result<u8> {
 }
 
 fn key_value_bytes(array: &dyn Array, row_index: usize) -> Result<Vec<u8>> {
-    let data_type = array.data_type().clone();
-    if let DataType::Timestamp(unit, _) = &data_type {
-        return timestamp_key_bytes(array, row_index, *unit);
-    }
-    Ok(match &data_type {
+    match array.data_type() {
+        DataType::Timestamp(unit, _) => timestamp_key_bytes(array, row_index, *unit),
         DataType::Boolean => {
             let typed = array
                 .as_any()
                 .downcast_ref::<BooleanArray>()
                 .ok_or_else(|| charge_type_mismatch("Boolean"))?;
-            vec![u8::from(typed.value(row_index))]
+            Ok(vec![u8::from(typed.value(row_index))])
         }
-        DataType::Int8 => {
-            let typed = primitive::<Int8Type>(array)?;
-            vec![
-                u8::try_from(typed.value(row_index)).map_err(|_| CalcFlowError::Internal {
-                    message: "int8 key does not fit u8".into(),
-                })?,
-            ]
+        DataType::Int8
+        | DataType::Int16
+        | DataType::Int32
+        | DataType::Int64
+        | DataType::Date32
+        | DataType::Date64 => signed_key_bytes(array, row_index),
+        DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
+            unsigned_key_bytes(array, row_index)
         }
-        DataType::UInt8 => vec![primitive::<UInt8Type>(array)?.value(row_index)],
-        DataType::Int16 => little_endian_key_bytes::<Int16Type>(array, row_index)?,
-        DataType::Int32 | DataType::Date32 => {
-            little_endian_key_bytes::<Int32Type>(array, row_index)?
-        }
-        DataType::Int64 | DataType::Date64 => {
-            little_endian_key_bytes::<Int64Type>(array, row_index)?
-        }
-        DataType::UInt16 => little_endian_key_bytes::<UInt16Type>(array, row_index)?,
-        DataType::UInt32 => little_endian_key_bytes::<UInt32Type>(array, row_index)?,
-        DataType::UInt64 => little_endian_key_bytes::<UInt64Type>(array, row_index)?,
+        DataType::Utf8 | DataType::LargeUtf8 => string_key_bytes(array, row_index),
+        data_type => Err(key_encoding_type_error(data_type)),
+    }
+}
+
+fn signed_key_bytes(array: &dyn Array, row_index: usize) -> Result<Vec<u8>> {
+    match array.data_type() {
+        DataType::Int8 => Ok(primitive::<Int8Type>(array)?
+            .value(row_index)
+            .to_le_bytes()
+            .to_vec()),
+        DataType::Int16 => little_endian_key_bytes::<Int16Type>(array, row_index),
+        DataType::Int32 => little_endian_key_bytes::<Int32Type>(array, row_index),
+        DataType::Int64 => little_endian_key_bytes::<Int64Type>(array, row_index),
+        DataType::Date32 => little_endian_key_bytes::<Date32Type>(array, row_index),
+        DataType::Date64 => little_endian_key_bytes::<Date64Type>(array, row_index),
+        data_type => Err(key_encoding_type_error(data_type)),
+    }
+}
+
+fn unsigned_key_bytes(array: &dyn Array, row_index: usize) -> Result<Vec<u8>> {
+    match array.data_type() {
+        DataType::UInt8 => Ok(vec![primitive::<UInt8Type>(array)?.value(row_index)]),
+        DataType::UInt16 => little_endian_key_bytes::<UInt16Type>(array, row_index),
+        DataType::UInt32 => little_endian_key_bytes::<UInt32Type>(array, row_index),
+        DataType::UInt64 => little_endian_key_bytes::<UInt64Type>(array, row_index),
+        data_type => Err(key_encoding_type_error(data_type)),
+    }
+}
+
+fn string_key_bytes(array: &dyn Array, row_index: usize) -> Result<Vec<u8>> {
+    Ok(match array.data_type() {
         DataType::Utf8 => array
             .as_any()
             .downcast_ref::<StringArray>()
@@ -7346,12 +7666,14 @@ fn key_value_bytes(array: &dyn Array, row_index: usize) -> Result<Vec<u8>> {
             .value(row_index)
             .as_bytes()
             .to_vec(),
-        _ => {
-            return Err(CalcFlowError::Internal {
-                message: format!("join key type {data_type} has no version-1 encoding"),
-            });
-        }
+        data_type => return Err(key_encoding_type_error(data_type)),
     })
+}
+
+fn key_encoding_type_error(data_type: &DataType) -> CalcFlowError {
+    CalcFlowError::Internal {
+        message: format!("join key type {data_type} has no version-1 encoding"),
+    }
 }
 
 /// Little-endian key encoding shared by the fixed-width join key natives.

@@ -18,12 +18,45 @@ use super::{geometry::invalid, history::Locator, ipc::accounting};
 use crate::{EventTime, Result};
 
 pub(super) struct ValidationContext<'a> {
+    pub(super) charge: ChargeProof,
     pub(super) key_indices: &'a [usize],
     pub(super) event_time_index: usize,
     pub(super) name: &'a str,
     pub(super) side: JoinSide,
     pub(super) workspace: &'a MemoryReservation,
     pub(super) check: &'a dyn Fn() -> Result<()>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum ChargeProof {
+    Exact,
+    Admission { omitted: usize, limit: u64 },
+}
+
+impl ChargeProof {
+    fn validate(self, physical: u64, carried: u64) -> Result<()> {
+        match self {
+            Self::Exact if physical == carried => Ok(()),
+            Self::Exact => Err(invalid("V2 historical charge differs from its payload")),
+            Self::Admission { omitted, limit } => {
+                admission_charge(physical, carried, omitted, limit)
+            }
+        }
+    }
+}
+
+fn admission_charge(physical: u64, carried: u64, omitted: usize, limit: u64) -> Result<()> {
+    let omitted =
+        u64::try_from(omitted).map_err(|_| invalid("projected omitted width exceeds u64"))?;
+    let lower = physical
+        .checked_add(omitted)
+        .ok_or_else(|| invalid("projected historical charge lower bound overflow"))?;
+    if carried < lower || carried > limit {
+        return Err(invalid(
+            "projected historical charge is outside its admission bounds",
+        ));
+    }
+    Ok(())
 }
 
 pub(super) struct ValidatedRow {
@@ -55,16 +88,54 @@ fn validated_key(
     locator: &Locator<'_>,
     context: &ValidationContext<'_>,
 ) -> Result<Vec<u8>> {
+    let key = decoded_key(record, row, context)?;
+    if key.as_slice() != locator.key {
+        return Err(invalid("V2 historical key differs from its payload"));
+    }
+    Ok(key)
+}
+
+fn decoded_key(
+    record: &RecordBatch,
+    row: usize,
+    context: &ValidationContext<'_>,
+) -> Result<Vec<u8>> {
     let (length, temporary) = key_layout(record, row, context)?;
     reserve_key(length, temporary, context)?;
     (context.check)()?;
     let key = encode_join_key_v1(record, row, context.key_indices)
         .map_err(|_| invalid("V2 historical key encoding failed"))?;
     (context.check)()?;
-    if key.as_slice() != locator.key {
-        return Err(invalid("V2 historical key differs from its payload"));
-    }
     Ok(key)
+}
+
+pub(super) fn validate_legacy(
+    record: &RecordBatch,
+    time: i64,
+    charge: u64,
+    expected_key: Option<&[u8]>,
+    context: &ValidationContext<'_>,
+) -> Result<ValidatedRow> {
+    accounting::reserve(context.workspace, diagnostic_credit(context.name)?)?;
+    let encoded_key = decoded_key(record, 0, context)?;
+    if expected_key.is_some_and(|key| key != encoded_key) {
+        return Err(invalid("legacy historical key differs from its payload"));
+    }
+    let locator = Locator {
+        row_id: 0,
+        time,
+        charge,
+        digest: [0; 32],
+        payload_row: 0,
+        key: &encoded_key,
+    };
+    let event_time = validated_time(record, 0, &locator, context)?;
+    validate_charge(record, 0, encoded_key.len(), &locator, context)?;
+    (context.check)()?;
+    Ok(ValidatedRow {
+        event_time,
+        encoded_key,
+    })
 }
 
 fn reserve_key(length: usize, temporary: usize, context: &ValidationContext<'_>) -> Result<()> {
@@ -154,10 +225,7 @@ fn validate_charge(
     let charge = state_row_charge_with_key(record, row, key_bytes, context.name)
         .map_err(|_| invalid("V2 historical charge decoding failed"))?;
     (context.check)()?;
-    if charge != locator.charge {
-        return Err(invalid("V2 historical charge differs from its payload"));
-    }
-    Ok(())
+    context.charge.validate(charge, locator.charge)
 }
 
 fn column(record: &RecordBatch, index: usize, row: usize) -> Result<&dyn Array> {

@@ -118,15 +118,20 @@ fn test_join_column_gather_capture_refusal_refunds_before_serial_fallback() {
         .build()
         .unwrap();
     for reject_at in [1, 2] {
-        runtime.block_on(assert_capture_refusal(&service, reject_at));
+        for projected in [false, true] {
+            runtime.block_on(assert_capture_refusal(&service, reject_at, projected));
+        }
     }
     drop(runtime);
     service.shutdown();
 }
 
-async fn assert_capture_refusal(service: &TestService, reject_at: usize) {
+async fn assert_capture_refusal(service: &TestService, reject_at: usize, projected: bool) {
     let pool = GatherPool::new(reject_at);
     let (mut operator, source_job) = preloaded(&pool).await;
+    if projected {
+        operator.set_output_projection(vec![2, 5]).unwrap();
+    }
     let job = job().with_gather_owner(service.owner("join-capture-refusal".into()));
     let context = StreamOperatorContext::new(&job, "match", None);
     let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
@@ -148,14 +153,14 @@ async fn assert_capture_refusal(service: &TestService, reject_at: usize) {
         .process_data("left", left_batch(vec![1, 2]), &context, &mut collector)
         .await
         .unwrap();
-    assert_eq!(calls.load(Ordering::SeqCst), 6);
+    assert_eq!(calls.load(Ordering::SeqCst), if projected { 2 } else { 6 });
     assert_eq!(pool.attempts.load(Ordering::SeqCst), reject_at);
     assert_eq!(pool.growth.lock().len(), reject_at - 1);
     assert_eq!(*pool.growth.lock(), *pool.refunds.lock());
     assert_eq!(job.gather_owner().funding(), (0, 0, 0));
     assert_eq!(operator.state.next_left_row_id, 2);
     assert_eq!(operator.state.next_output_sequence, 1);
-    assert_literal_output(&mut collector, &operator);
+    assert_selected_literal_output(&mut collector, &operator, projected);
     drop((operator, context));
     assert!(job.gather_owner().close_and_drain().await.is_empty());
     assert!(source_job.gather_owner().close_and_drain().await.is_empty());

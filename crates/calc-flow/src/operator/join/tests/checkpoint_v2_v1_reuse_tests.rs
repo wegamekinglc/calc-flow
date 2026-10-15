@@ -109,5 +109,30 @@ async fn test_join_v1_restore_releases_previous_v2_containers_atomically() {
         "V1 restore retained the previous V2 owner slot"
     );
     assert!(containers.upgrade().is_none());
+    let identities = native_lookup_tests::identity_funding(&restored);
+    assert!(identities > 0);
+    assert_eq!(pool.reserved(), identities);
+    assert_eq!(
+        (
+            restored.key_dictionary.inventory().0,
+            restored.key_dictionary.inventory().1
+        ),
+        (1, 3)
+    );
+    assert!(!restored.key_dictionary_needs_rebuild);
+    assert!(restored.state.left.1.is_none());
+    assert!(restored.state.right.1.is_none());
+    assert!(
+        restored
+            .state
+            .left
+            .iter()
+            .chain(&*restored.state.right)
+            .all(|row| row.record.funded_owner().is_none())
+    );
+    assert_eq!(restored.v2_writer.base_funding_for_test(), 0);
+    restored.reset().unwrap();
+    assert_eq!(pool.reserved(), 0);
+    drop(restored);
     assert_eq!(pool.reserved(), 0);
 }

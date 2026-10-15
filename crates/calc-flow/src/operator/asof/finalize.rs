@@ -525,21 +525,54 @@ async fn monotonic_candidate_rows(
     let mut index = 0;
     for run in state.left.output_runs() {
         let amount = run.len().min(count - index);
-        let mut source = 0;
-        for (offset, (key, left)) in run.rows(amount).enumerate() {
-            check_match_progress(index, context).await?;
-            source = left_run_source(source, offset, left, operator, plan, workspace)?;
-            let right = cursors.get_mut(key.1).and_then(|(bucket, next)| {
-                bucket.candidate_monotonic(*key.0, operator.spec.tolerance_micros(), next)
-            });
-            plan.push_reference(
-                source,
-                left.row as usize,
-                right.map(|row| state.batches.view(*row)),
+        if let Some((keys, rows)) = run.keyed_rows(amount) {
+            let first_time = *run.rows(1).next().expect("nonempty ASOF run").0.0;
+            let mut routes = std::array::from_fn::<_, 64, _>(|_| None);
+            for (id, key) in keys.iter().enumerate() {
+                routes[id] = key
+                    .as_ref()
+                    .and_then(|key| cursors.get(key))
+                    .map(|(bucket, _)| (*bucket, bucket.cursor_at(first_time)));
+            }
+            append_monotonic_run(
+                rows.map(|(time, id, left)| ((time, id), left)),
+                |(time, id)| {
+                    routes[id]
+                        .as_mut()
+                        .and_then(|(bucket, next)| {
+                            bucket.candidate_monotonic(time, operator.spec.tolerance_micros(), next)
+                        })
+                        .copied()
+                },
+                operator,
+                context,
+                plan,
                 workspace,
-                &operator.name,
-            )?;
-            index += 1;
+                &mut index,
+            )
+            .await?;
+        } else {
+            append_monotonic_run(
+                run.rows(amount),
+                |key| {
+                    cursors
+                        .get_mut(key.1)
+                        .and_then(|(bucket, next)| {
+                            bucket.candidate_monotonic(
+                                *key.0,
+                                operator.spec.tolerance_micros(),
+                                next,
+                            )
+                        })
+                        .copied()
+                },
+                operator,
+                context,
+                plan,
+                workspace,
+                &mut index,
+            )
+            .await?;
         }
         run.visit_prefix(amount, &mut prefix, &state.batches, &operator.name)?;
         if index == count {
@@ -547,6 +580,26 @@ async fn monotonic_candidate_rows(
         }
     }
     Ok(prefix)
+}
+
+async fn append_monotonic_run<T>(
+    rows: impl Iterator<Item = (T, state::RowRef)>,
+    mut candidate: impl FnMut(T) -> Option<state::RowRef>,
+    operator: &StreamAsofJoinOperator,
+    context: &StreamOperatorContext<'_>,
+    plan: &mut OutputPlanBuilder<'_>,
+    workspace: &mut MemoryReservation,
+    index: &mut usize,
+) -> Result<()> {
+    let mut source = 0;
+    for (offset, (identity, left)) in rows.enumerate() {
+        check_match_progress(*index, context).await?;
+        source = left_run_source(source, offset, left, operator, plan, workspace)?;
+        let right = candidate(identity).map(|row| operator.state.batches.view(row));
+        plan.push_reference(source, left.row as usize, right, workspace, &operator.name)?;
+        *index += 1;
+    }
+    Ok(())
 }
 
 fn left_run_source(

@@ -22,6 +22,7 @@ use std::{
 
 pub(in super::super) type LeftView<'a> = (&'a i64, &'a Encoding, SequenceRef<'a>);
 pub(in super::super) type OutputIdentity<'a> = (&'a i64, &'a Encoding, Option<&'a Encoding>);
+type KeyedRows<'a, I> = (&'a [Option<Encoding>], I);
 
 fn borrowed(order: &LeftOrder) -> LeftView<'_> {
     (&order.0, &order.1, Cow::Borrowed(&order.2))
@@ -875,6 +876,7 @@ impl LeftState {
 
     /// Matching uses time/key and encoding owners. Integer sequence bytes
     /// remain in their owned column until a comparator actually needs them.
+    #[cfg(test)]
     pub fn output_iter(&self) -> impl Iterator<Item = (OutputIdentity<'_>, RowRef)> {
         self.output_runs().flat_map(|run| run.rows(run.len()))
     }
@@ -1310,6 +1312,31 @@ impl<'a> OutputRun<'a> {
                 )
             }
         })
+    }
+
+    pub fn keyed_rows(
+        self,
+        count: usize,
+    ) -> Option<KeyedRows<'a, impl Iterator<Item = (i64, usize, RowRef)> + 'a>> {
+        let Self::Chunk(run) = self else {
+            return None;
+        };
+        let data = &run.chunk.data;
+        if data.keys.len() > 64 || data.keys.len() > count / 4 {
+            return None;
+        }
+        debug_assert!(count <= self.len());
+        Some((
+            &data.keys,
+            (0..count).map(move |offset| {
+                let ordinal = run.start + offset;
+                (
+                    data.times[ordinal],
+                    data.key_ids[ordinal] as usize,
+                    run.chunk.reference.with_row(data.position(ordinal)),
+                )
+            }),
+        ))
     }
 
     pub fn visit_prefix(

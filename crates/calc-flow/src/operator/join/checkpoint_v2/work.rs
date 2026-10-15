@@ -1,5 +1,6 @@
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::execution::memory_pool::MemoryReservation;
+use std::sync::Arc;
 
 use super::super::{OperatorStateSnapshot, StreamJoinSpec};
 use super::budget;
@@ -11,11 +12,13 @@ use crate::runtime::streaming::gather_work::{
 };
 
 pub(super) struct OwnedConfig {
+    pub(super) projection: Option<Arc<super::super::state_projection::Layout>>,
     pub(super) name: String,
     pub(super) spec: StreamJoinSpec,
     pub(super) schemas: [SchemaRef; 2],
     pub(super) keys: [Vec<usize>; 2],
     pub(super) time_indices: [usize; 2],
+    pub(super) dictionary_credit: MemoryReservation,
     #[cfg(test)]
     pub(super) metadata_hook: Option<super::super::MetadataTestHook>,
     #[cfg(test)]
@@ -25,11 +28,13 @@ pub(super) struct OwnedConfig {
 impl OwnedConfig {
     fn borrowed(&self) -> Config<'_> {
         Config {
+            projection: self.projection.as_deref(),
             name: &self.name,
             spec: &self.spec,
             schemas: self.schemas.clone(),
             keys: [&self.keys[0], &self.keys[1]],
             time_indices: self.time_indices,
+            dictionary_credit: self.dictionary_credit.new_empty(),
             #[cfg(test)]
             metadata_hook: self.metadata_hook.as_ref(),
             #[cfg(test)]

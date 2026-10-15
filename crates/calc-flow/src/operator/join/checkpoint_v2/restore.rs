@@ -16,6 +16,11 @@ impl StreamJoinOperator {
             .runtime()?
             .incremental_reservation("stream-join-v2-restore");
         let config = Config {
+            dictionary_credit: self
+                .runtime
+                .runtime()?
+                .incremental_reservation("stream-join-dictionary"),
+            projection: self.payload_projection.as_deref(),
             name: &self.name,
             spec: &self.spec,
             schemas: [
@@ -48,13 +53,19 @@ impl StreamJoinOperator {
         check: &dyn Fn() -> Result<()>,
     ) -> Result<()> {
         check()?;
-        prepared.writer.bind_owner(&self.v2_writer)?;
+        prepared
+            .writer
+            .bind_owner(&self.v2_writer, self.checkpoint_identity)?;
         let Prepared {
             state,
             writer,
             containers,
             workspace,
+            keys,
         } = prepared;
+        let refused = self.restored_key_refusals(keys.is_none())?;
+        self.install_restored_keys(keys, !state.left.is_empty() || !state.right.is_empty());
+        self.key_work.dictionary_grant_refusals = refused;
         let old_state = std::mem::replace(&mut self.state, state);
         let old_containers = self.v2_containers.replace(containers);
         let old_writer = std::mem::replace(&mut self.v2_writer, writer);

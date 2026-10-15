@@ -1,5 +1,8 @@
+#[cfg(test)]
 use super::{charge_overflow, charge_type_mismatch, key_type_tag, primitive};
+#[cfg(test)]
 use crate::Result;
+#[cfg(test)]
 use datafusion::arrow::{
     array::{Array, ArrayRef, BooleanArray, LargeStringArray, StringArray},
     datatypes::{
@@ -8,6 +11,7 @@ use datafusion::arrow::{
         UInt16Type, UInt32Type, UInt64Type,
     },
 };
+#[cfg(test)]
 use std::hash::{BuildHasher, Hasher};
 
 pub(super) type KeyHashState = hashbrown::DefaultHashBuilder;
@@ -16,6 +20,7 @@ pub(super) type KeyHashState = hashbrown::DefaultHashBuilder;
 #[path = "tests/hash_stream_tests.rs"]
 mod tests;
 
+#[cfg(test)]
 #[derive(Clone, Copy)]
 pub(super) struct BorrowedKey<'a> {
     pub(super) columns: &'a [ArrayRef],
@@ -23,6 +28,7 @@ pub(super) struct BorrowedKey<'a> {
     pub(super) indices: &'a [usize],
 }
 
+#[cfg(test)]
 impl BorrowedKey<'_> {
     pub(super) fn hash(&self, state: &KeyHashState) -> Result<u64> {
         #[cfg(test)]
@@ -81,14 +87,14 @@ impl BorrowedKey<'_> {
     }
 }
 
-struct CanonicalStream<F> {
+pub(super) struct CanonicalStream<F> {
     block: [u8; 64],
     used: usize,
     visitor: F,
 }
 
 impl<F: FnMut(&[u8])> CanonicalStream<F> {
-    fn new(visitor: F) -> Self {
+    pub(super) fn new(visitor: F) -> Self {
         Self {
             block: [0; 64],
             used: 0,
@@ -96,7 +102,7 @@ impl<F: FnMut(&[u8])> CanonicalStream<F> {
         }
     }
 
-    fn write(&mut self, mut bytes: &[u8]) {
+    pub(super) fn write(&mut self, mut bytes: &[u8]) {
         while !bytes.is_empty() {
             let length = bytes.len().min(self.block.len() - self.used);
             self.block[self.used..self.used + length].copy_from_slice(&bytes[..length]);
@@ -109,13 +115,14 @@ impl<F: FnMut(&[u8])> CanonicalStream<F> {
         }
     }
 
-    fn finish(mut self) {
+    pub(super) fn finish(mut self) {
         if self.used != 0 {
             (self.visitor)(&self.block[..self.used]);
         }
     }
 }
 
+#[cfg(test)]
 pub(super) fn framed_hash(state: &KeyHashState, bytes: &[u8]) -> u64 {
     let mut hasher = state.build_hasher();
     for block in bytes.chunks(64) {
@@ -125,12 +132,14 @@ pub(super) fn framed_hash(state: &KeyHashState, bytes: &[u8]) -> u64 {
     hasher.finish()
 }
 
+#[cfg(test)]
 fn framed_length(length: usize, field: &str) -> Result<[u8; 4]> {
     u32::try_from(length)
         .map(u32::to_le_bytes)
         .map_err(|_| charge_overflow(field))
 }
 
+#[cfg(test)]
 fn timezone(data_type: &DataType) -> &[u8] {
     match data_type {
         DataType::Timestamp(_, Some(timezone)) => timezone.as_bytes(),
@@ -138,19 +147,19 @@ fn timezone(data_type: &DataType) -> &[u8] {
     }
 }
 
-enum CellValue<'a> {
+pub(super) enum CellValue<'a> {
     Inline { bytes: [u8; 8], length: usize },
     Borrowed(&'a [u8]),
 }
 
 impl CellValue<'_> {
-    fn inline<const N: usize>(value: [u8; N]) -> Self {
+    pub(super) fn inline<const N: usize>(value: [u8; N]) -> Self {
         let mut bytes = [0; 8];
         bytes[..N].copy_from_slice(&value);
         Self::Inline { bytes, length: N }
     }
 
-    fn bytes(&self) -> &[u8] {
+    pub(super) fn bytes(&self) -> &[u8] {
         match self {
             Self::Inline { bytes, length } => &bytes[..*length],
             Self::Borrowed(bytes) => bytes,
@@ -158,6 +167,7 @@ impl CellValue<'_> {
     }
 }
 
+#[cfg(test)]
 fn cell_value(array: &dyn Array, row: usize) -> Result<CellValue<'_>> {
     match array.data_type() {
         DataType::Boolean => boolean_value(array, row),
@@ -186,6 +196,7 @@ fn cell_value(array: &dyn Array, row: usize) -> Result<CellValue<'_>> {
     }
 }
 
+#[cfg(test)]
 fn boolean_value(array: &dyn Array, row: usize) -> Result<CellValue<'_>> {
     let typed = array
         .as_any()
@@ -194,6 +205,7 @@ fn boolean_value(array: &dyn Array, row: usize) -> Result<CellValue<'_>> {
     Ok(CellValue::inline([u8::from(typed.value(row))]))
 }
 
+#[cfg(test)]
 fn signed_value(array: &dyn Array, row: usize) -> Result<CellValue<'_>> {
     Ok(match array.data_type() {
         DataType::Int16 => {
@@ -209,6 +221,7 @@ fn signed_value(array: &dyn Array, row: usize) -> Result<CellValue<'_>> {
     })
 }
 
+#[cfg(test)]
 fn unsigned_value(array: &dyn Array, row: usize) -> Result<CellValue<'_>> {
     Ok(match array.data_type() {
         DataType::UInt8 => {
@@ -227,6 +240,7 @@ fn unsigned_value(array: &dyn Array, row: usize) -> Result<CellValue<'_>> {
     })
 }
 
+#[cfg(test)]
 fn timestamp_value(array: &dyn Array, row: usize, unit: TimeUnit) -> Result<CellValue<'_>> {
     Ok(match unit {
         TimeUnit::Second => CellValue::inline(

@@ -9,6 +9,30 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-15: Reject duplicate live row IDs when restoring layout-1 Join
+  checkpoints. Validate event times and complete V1 logical charges for every
+  historical row in full layout-1 checkpoints, including overwritten and
+  tombstoned rows. Reject invalid history before replacing installed state while
+  preserving existing error priority. Checkpoint layouts, versions and recovery
+  compatibility for valid checkpoints remain unchanged.
+
+- 2026-10-15: Fix streaming Join retention and checkpoint recovery for negative
+  `Int8` keys and `Date32`/`Date64` keys. Valid keys no longer fail signed-byte
+  conversion or date-array type checks. V1 key tags and logical charges,
+  checkpoint layouts, schemas and versions remain unchanged.
+
+- 2026-10-14: Retain required streaming Join payload dependencies plus identity
+  and event-time fields when all consumers qualify for compiler projection.
+  Preserve complete input-schema validation, V1 logical state charges and graph
+  fingerprints. Actually narrowed state uses strict inner layout 3/codec 2,
+  exact logical/physical schema descriptors and carried V1 admission charges.
+  Legacy layout 1/2 migration establishes a fresh narrow base before incremental
+  deltas and rebase; semantic state version 1, project format 3 and manifest v3
+  remain unchanged. The Python inventory reports layouts `(1, 2, 3)`.
+  Rebuild checkpoint history after checkpoint-disabled updates, and reject
+  emitted-row counter overflow before sending output from the input batch.
+  See [Join recovery](docs/streaming-guide.md#join-output-materialization-and-recovery).
+
 - 2026-10-14: Cut per-row and per-batch cost in `WindowAggregateOperator`
   input processing. Rows in the same slide interval share one resolved set of
   window assignments and late classification; scratch slots are cached per

@@ -10,16 +10,21 @@ fn test_join_column_gather_admission_refusal_does_not_emit_or_commit() {
         .build()
         .unwrap();
     for stage in [AdmissionStage::Attempt, AdmissionStage::Generation] {
-        runtime.block_on(assert_refusal(&service, stage));
+        for projected in [false, true] {
+            runtime.block_on(assert_refusal(&service, stage, projected));
+        }
     }
     drop(runtime);
     service.shutdown();
 }
 
-async fn assert_refusal(service: &TestService, stage: AdmissionStage) {
+async fn assert_refusal(service: &TestService, stage: AdmissionStage, projected: bool) {
     let mut operator = with_one_gib_pool(
         StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap(),
     );
+    if projected {
+        operator.set_output_projection(vec![2, 5]).unwrap();
+    }
     let source_job = job();
     let source_context = StreamOperatorContext::new(&source_job, "match", None);
     let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
@@ -71,8 +76,8 @@ async fn assert_refusal(service: &TestService, stage: AdmissionStage) {
         .process_data("left", left_batch(vec![1, 2]), &context, &mut collector)
         .await
         .unwrap();
-    assert_literal_output(&mut collector, &operator);
-    assert_eq!(calls.load(Ordering::SeqCst), 6);
+    assert_selected_literal_output(&mut collector, &operator, projected);
+    assert_eq!(calls.load(Ordering::SeqCst), if projected { 2 } else { 6 });
     assert_eq!(operator.state.next_left_row_id, 2);
     assert_eq!(operator.state.next_output_sequence, 1);
     assert!(operator.compaction_cleanup.is_none());

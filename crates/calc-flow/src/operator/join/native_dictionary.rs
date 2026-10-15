@@ -1,7 +1,7 @@
 use super::{
     StoredRow,
-    borrowed_key::{KeyHashState, framed_hash},
     columnar::FramedKey,
+    key_dictionary::{Dictionary, Lease, SideBindings},
 };
 use crate::EventTime;
 use datafusion::execution::memory_pool::MemoryReservation;
@@ -29,6 +29,7 @@ impl RunEntry {
 struct KeyRun {
     key: Arc<FramedKey>,
     hash: u64,
+    _identity: Option<Lease>,
     rows: Vec<RunEntry>,
     start: usize,
 }
@@ -111,12 +112,9 @@ pub(super) struct NativeIndex {
     entries: HashTable<u32>,
     slots: Vec<Option<KeyRun>>,
     free: Vec<u32>,
-    hasher: KeyHashState,
     rows: usize,
     run_backing_bytes: usize,
     funding: Arc<Funding>,
-    #[cfg(test)]
-    hash_mask: u64,
 }
 
 impl NativeIndex {
@@ -132,7 +130,6 @@ impl NativeIndex {
             entries: HashTable::new(),
             slots: Vec::new(),
             free: Vec::new(),
-            hasher: KeyHashState::default(),
             rows: 0,
             run_backing_bytes: 0,
             funding: Arc::new(Funding {
@@ -141,11 +138,10 @@ impl NativeIndex {
                     BASE_BYTES + Self::owner_bytes().expect("index owner layout"),
                 ),
             }),
-            #[cfg(test)]
-            hash_mask: u64::MAX,
         }
     }
 
+    #[cfg(test)]
     pub(super) fn new(rows: &[StoredRow], credit: MemoryReservation) -> Self {
         assert!(
             credit.size() >= Self::build_charge(rows.len()).expect("funded dictionary capacity")
@@ -156,13 +152,33 @@ impl NativeIndex {
         index
     }
 
+    pub(super) fn new_identified(
+        rows: &[StoredRow],
+        dictionary: &Dictionary,
+        bindings: &SideBindings,
+        credit: MemoryReservation,
+    ) -> Self {
+        assert!(
+            credit.size()
+                >= Self::build_charge(rows.len()).expect("funded identity index capacity")
+        );
+        let mut index = Self::empty(credit);
+        index.append_resolved(
+            0,
+            rows,
+            |row| bindings.canonical(row),
+            |key| dictionary.lease(key),
+        );
+        index.refund();
+        index
+    }
+
     #[cfg(test)]
     pub(super) fn new_colliding(rows: &[StoredRow], credit: MemoryReservation) -> Self {
         assert!(
             credit.size() >= Self::build_charge(rows.len()).expect("funded dictionary capacity")
         );
         let mut index = Self::empty(credit);
-        index.hash_mask = 0;
         index.append(0, rows);
         index.refund();
         index
@@ -205,17 +221,65 @@ impl NativeIndex {
         ])
     }
 
+    #[cfg(test)]
     pub(super) fn reserve(&self, rows: usize) -> Option<AppendCredit> {
-        let total = self.append_charge(rows)?;
-        let bytes = total.checked_sub(self.funding.credit.size())?;
-        self.funding.credit.try_grow(bytes).ok()?;
-        Some(AppendCredit {
-            funding: Arc::clone(&self.funding),
-            bytes,
-        })
+        self.reserve_checked(rows, "native-test").unwrap()
     }
 
+    pub(super) fn reserve_checked(
+        &self,
+        rows: usize,
+        name: &str,
+    ) -> crate::Result<Option<AppendCredit>> {
+        let total = self
+            .append_charge(rows)
+            .ok_or_else(|| super::counter_overflow(name, "native_capacity"))?;
+        let bytes = total.saturating_sub(self.funding.credit.size());
+        match self.funding.credit.try_grow(bytes) {
+            Ok(()) => Ok(Some(AppendCredit {
+                funding: Arc::clone(&self.funding),
+                bytes,
+            })),
+            Err(datafusion::common::DataFusionError::ResourcesExhausted(_)) => Ok(None),
+            Err(error) => Err(crate::CalcFlowError::DataFusion {
+                node_id: Some(name.to_owned()),
+                message: error.to_string(),
+            }),
+        }
+    }
+
+    #[cfg(test)]
     pub(super) fn append(&mut self, offset: usize, rows: &[StoredRow]) {
+        self.append_resolved(offset, rows, |row| &row.encoded_key, |_| None);
+    }
+
+    pub(super) fn append_identified(
+        &mut self,
+        offset: usize,
+        rows: &[StoredRow],
+        dictionary: &Dictionary,
+    ) {
+        self.append_resolved(
+            offset,
+            rows,
+            |row| &row.encoded_key,
+            |key| {
+                Some(
+                    dictionary
+                        .lease(key)
+                        .expect("committed live canonical identity"),
+                )
+            },
+        );
+    }
+
+    fn append_resolved<'a>(
+        &mut self,
+        offset: usize,
+        rows: &'a [StoredRow],
+        key_for: impl Fn(&'a StoredRow) -> &'a Arc<FramedKey>,
+        resolve: impl Fn(&Arc<FramedKey>) -> Option<Lease>,
+    ) {
         if rows.is_empty() {
             return;
         }
@@ -226,10 +290,11 @@ impl NativeIndex {
                     .expect("funded append capacity")
         );
         for (position, row) in rows.iter().enumerate() {
-            let hash = self.hash(&row.encoded_key);
+            let key = key_for(row);
+            let hash = Self::hash(key);
             let id = self
-                .find(hash, &row.encoded_key)
-                .unwrap_or_else(|| self.insert_key(hash, &row.encoded_key));
+                .find(hash, key)
+                .unwrap_or_else(|| self.insert_key(hash, key, resolve(key)));
             let run = self.slots[id as usize].as_mut().expect("live key ID");
             let old_capacity = run.rows.capacity();
             run.insert(RunEntry {
@@ -245,10 +310,11 @@ impl NativeIndex {
             .store(self.resident_bytes(), Ordering::Relaxed);
     }
 
-    fn insert_key(&mut self, hash: u64, key: &Arc<FramedKey>) -> u32 {
+    fn insert_key(&mut self, hash: u64, key: &Arc<FramedKey>, identity: Option<Lease>) -> u32 {
         let run = Some(KeyRun {
             key: Arc::clone(key),
             hash,
+            _identity: identity,
             rows: Vec::new(),
             start: 0,
         });
@@ -277,21 +343,37 @@ impl NativeIndex {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn remove<'a>(
         &mut self,
         row: &StoredRow,
         moved: Option<(&StoredRow, usize)>,
         key_at: impl FnOnce(usize) -> &'a Arc<FramedKey>,
     ) {
-        let hash = self.hash(&row.encoded_key);
-        let id = self.find(hash, &row.encoded_key).expect("retained key ID");
+        self.remove_resolved(
+            row,
+            &row.encoded_key,
+            moved.map(|(row, dense)| (row, &row.encoded_key, dense)),
+            key_at,
+        );
+    }
+
+    pub(super) fn remove_resolved<'a>(
+        &mut self,
+        row: &StoredRow,
+        key: &Arc<FramedKey>,
+        moved: Option<(&StoredRow, &Arc<FramedKey>, usize)>,
+        key_at: impl FnOnce(usize) -> &'a Arc<FramedKey>,
+    ) {
+        let hash = Self::hash(key);
+        let id = self.find(hash, key).expect("retained key ID");
         let run = self.slots[id as usize].as_mut().expect("live key ID");
         let removed_key = run.remove((row.event_time, row.row_id));
         if removed_key {
             self.remove_key(hash, id);
         }
-        if let Some((row, dense)) = moved {
-            self.move_dense(row, dense);
+        if let Some((row, key, dense)) = moved {
+            self.move_dense(row, key, dense);
         }
         self.refresh_key_owner(id, key_at);
         self.rows -= 1;
@@ -332,9 +414,9 @@ impl NativeIndex {
         self.free.push(id);
     }
 
-    fn move_dense(&mut self, row: &StoredRow, dense: usize) {
+    fn move_dense(&mut self, row: &StoredRow, key: &Arc<FramedKey>, dense: usize) {
         let id = self
-            .find(self.hash(&row.encoded_key), &row.encoded_key)
+            .find(Self::hash(key), key)
             .expect("moved retained key ID");
         self.slots[id as usize]
             .as_mut()
@@ -342,11 +424,9 @@ impl NativeIndex {
             .move_dense((row.event_time, row.row_id), dense);
     }
 
-    fn hash(&self, key: &FramedKey) -> u64 {
-        let hash = framed_hash(&self.hasher, key);
-        #[cfg(test)]
-        let hash = hash & self.hash_mask;
-        hash
+    fn hash(key: &FramedKey) -> u64 {
+        key.address()
+            .map_or(0, super::super::key_identity::KeyAddress::hash)
     }
 
     fn find(&self, hash: u64, key: &FramedKey) -> Option<u32> {
@@ -354,18 +434,19 @@ impl NativeIndex {
         super::note_join_work(|work| work.native_key_lookups += 1);
         self.entries
             .find(hash, |id| {
-                self.slots[*id as usize]
-                    .as_ref()
-                    .expect("live key ID")
-                    .key
-                    .as_ref()
-                    == key
+                same_key(
+                    &self.slots[*id as usize]
+                        .as_ref()
+                        .expect("live identity run")
+                        .key,
+                    key,
+                )
             })
             .copied()
     }
 
     pub(super) fn key_id(&self, key: &FramedKey) -> Option<u32> {
-        self.find(self.hash(key), key)
+        self.find(Self::hash(key), key)
     }
 
     /// Length of one key's active run, as a probe-cost estimate input.
@@ -447,6 +528,15 @@ impl NativeIndex {
     #[cfg(test)]
     pub(super) fn row_count(&self) -> usize {
         self.rows
+    }
+}
+
+fn same_key(stored: &FramedKey, key: &FramedKey) -> bool {
+    match (stored.address(), key.address()) {
+        (Some(left), Some(right)) => left == right && std::ptr::eq(stored, key),
+        #[cfg(test)]
+        (None, None) => stored == key,
+        _ => false,
     }
 }
 

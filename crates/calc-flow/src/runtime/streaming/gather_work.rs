@@ -1144,6 +1144,15 @@ fn internal(message: &str) -> CalcFlowError {
 
 #[cfg(test)]
 impl JobGatherOwner {
+    pub(crate) async fn wait_closed_generation_for_test(&self) {
+        let generation = {
+            let state = self.0.home.state.lock();
+            assert!(!state.open);
+            state.generation
+        };
+        self.0.home.wait_generation_cleanup(generation).await;
+    }
+
     pub(crate) fn funding(&self) -> (usize, usize, usize) {
         let state = self.0.home.state.lock();
         let home = state.control.as_ref().map_or(0, MemoryReservation::size);
