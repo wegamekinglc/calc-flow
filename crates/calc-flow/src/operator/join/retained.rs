@@ -30,6 +30,7 @@ pub(super) trait Rows: Send + Sync {
     }
 }
 
+#[cfg(any(test, feature = "benchmark-internals"))]
 impl dyn Rows + '_ {
     pub(super) fn iter(&self) -> Box<dyn Iterator<Item = StoredRow> + Send + '_> {
         Box::new(self.indexed().map(|(_, row)| row))
