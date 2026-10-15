@@ -49,6 +49,7 @@ use super::{
     supervisor::{PreparedPair, TaskSupervisor},
 };
 
+mod ingress_admission;
 pub(in crate::runtime::streaming) mod join_checkpoint_credit;
 
 #[cfg(test)]
@@ -103,7 +104,8 @@ pub(crate) struct OperatorRestoreState {
 
 pub(crate) struct OperatorIngress {
     pub(crate) edge_id: String,
-    pub(crate) receiver: OperatorEdgeReceiver,
+    receiver: Option<OperatorEdgeReceiver>,
+    admission: Option<ingress_admission::Receiver>,
     saw_explicit_eof: bool,
 }
 
@@ -111,14 +113,34 @@ impl OperatorIngress {
     pub(crate) fn new(edge_id: String, receiver: impl Into<OperatorEdgeReceiver>) -> Self {
         Self {
             edge_id,
-            receiver: receiver.into(),
+            receiver: Some(receiver.into()),
+            admission: None,
             saw_explicit_eof: false,
+        }
+    }
+
+    async fn recv(&mut self) -> Result<Option<StreamMessage>> {
+        match &mut self.admission {
+            Some(admission) => admission.recv().await,
+            None => {
+                self.receiver
+                    .as_mut()
+                    .expect("unprepared ingress")
+                    .recv()
+                    .await
+            }
         }
     }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct OperatorProgressSnapshot {
+    #[cfg(test)]
+    prepared_ingresses: BTreeMap<String, u64>,
+    #[cfg(test)]
+    preparation_tasks_started: usize,
+    #[cfg(test)]
+    preparation_tasks_exited: usize,
     pub(crate) input_batches: u64,
     pub(crate) fully_fanned_out_batches: u64,
     pub(crate) datafusion_runtime_created: bool,
@@ -742,7 +764,7 @@ async fn run_after_operator_entry(
     if let Some(client) = &mut inputs.sql_recovery {
         client.activate(task_id);
     }
-    let result = run_operator_loop(inputs, input_progress, cooperation).await;
+    let result = ingress_admission::run(inputs, input_progress, cooperation).await;
     normalize_cancelled_result(inputs, result)
 }
 
@@ -1096,6 +1118,7 @@ async fn run_operator_loop(
             &mut barrier_alignment,
         )
         .await?;
+        ingress_admission::acknowledge(inputs, &ingress_name, &input_progress);
         handoff_due = cooperation.after_dispatch(kind, &mut skipped_data);
         if handoff_due
             && (cooperation != OperatorCooperation::BoundedData
@@ -1314,7 +1337,7 @@ async fn receive_ready(
         .filter(|(name, ingress)| !ingress.saw_explicit_eof && !barrier_alignment.is_blocked(name))
         .map(|(name, ingress)| {
             let name = name.clone();
-            Box::pin(async move { (name, ingress.receiver.recv().await) }) as ReceiveFuture<'_>
+            Box::pin(async move { (name, ingress.recv().await) }) as ReceiveFuture<'_>
         })
         .collect::<Vec<_>>();
     if start < receives.len() {
@@ -1877,6 +1900,11 @@ async fn dispatch_data(
     input_watermark: Option<EventTime>,
     ingress_progress: IngressProgressSnapshot,
 ) -> Result<()> {
+    let preparation = inputs
+        .ingresses
+        .get_mut(ingress_name)
+        .and_then(|ingress| ingress.admission.as_mut())
+        .and_then(ingress_admission::Receiver::take_preparation);
     let batch = message
         .as_data()
         .expect("data kind always carries a batch")
@@ -1907,6 +1935,7 @@ async fn dispatch_data(
     )
     .with_task_id(inputs.context.task_id());
     let context = attach_rolling_context(context, callback.as_ref());
+    let context = context.with_ingress_preparation(preparation.as_ref());
     let context = attach_entity_context(context, inputs.entity_work.as_ref());
     let mut collector = ChannelStreamCollector::new(
         &inputs.node_id,
@@ -2545,6 +2574,7 @@ pub(super) mod tests {
     #[cfg(feature = "benchmark-internals")]
     mod dispatch_trace_tests;
     mod error_propagation_tests;
+    mod ingress_admission_tests;
     mod join_checkpoint_owner_tests;
     mod segment_publication_tests;
 

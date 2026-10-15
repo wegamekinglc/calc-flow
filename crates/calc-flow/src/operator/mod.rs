@@ -5,6 +5,7 @@ mod batch;
 mod checkpoint;
 mod cross_section;
 mod expression;
+pub(crate) mod ingress;
 mod join;
 mod key_identity;
 pub(crate) mod late_output;
@@ -20,6 +21,7 @@ mod stream;
 mod union;
 mod window;
 
+pub(crate) use asof::admission::IngressPlan as AsofIngressPlan;
 pub(crate) use asof::schema_issues as asof_schema_issues;
 pub use asof::{
     AsofJoinSide, AsofLatePolicy, AsofStateLimits, StreamAsofJoinOperator,
@@ -32,6 +34,7 @@ pub use cross_section::{
     CrossSectionValuePolicy, NullPlacement, RankTieMethod, SortDirection,
 };
 pub use expression::ExpressionOperator;
+pub(crate) use join::admission_masks::IngressPlan as JoinIngressPlan;
 #[cfg(feature = "benchmark-checkpoint-diagnostic")]
 pub(crate) use join::run_checkpoint_history_diagnostic;
 pub(crate) use join::supported_key_type;

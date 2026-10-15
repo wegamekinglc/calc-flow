@@ -513,10 +513,23 @@ uses the progress driver's minimum and idle-epoch semantics. `on_end` runs
 exactly once after every ingress observes explicit end-of-input. A closed
 channel without an earlier explicit end is a failure, not synthetic EOF.
 
+Join and ASOF also own one preparation task per live ingress on the existing
+Tokio runtime. Each task stages at most one envelope; Join streams up to 64
+fixed-size classification blocks (4,096 rows), while ASOF sends one null/late
+summary and, for compatible typed keys, a batch-local order proof. Envelope
+readiness is published before preparation completes. The operator still selects
+ready inputs and alone validates current progress, resolves and publishes key
+identities, applies limits, emits, commits state, and aligns checkpoint cuts.
+ASOF rejects stale watermark facts and rechecks the boundary against resident
+identities; generic key ordering retains its existing canonical-byte path.
+Controls remain FIFO and require owner acknowledgement before preparation
+reads another envelope. All waits are cancellable; task exit, failure and panic
+join every preparation task before releasing the operator.
+
 In a checkpoint-enabled job, an operator removes only barrier-arrived
 ingresses from receive selection; their post-barrier traffic remains in the
-bounded edge while other live ingresses continue. Ended ingresses count as an
-out-of-band cut. When every required ingress reaches epoch E, the task awaits
+bounded edge or its bounded ingress preparation stage while other live ingresses
+continue. Ended ingresses count as an out-of-band cut. When every required ingress reaches epoch E, the task awaits
 checkpoint preparation, captures and stages operator state, acknowledges the
 coordinator, then forwards
 the barrier, and reopens its live ingresses. An identical repeated barrier is

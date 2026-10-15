@@ -25,7 +25,27 @@ fn replay_recording_pressure_preserves_admission_success() {
     runtime.block_on(async {
         for limit in [32 * 1024, 64 * 1024, 128 * 1024] {
             for count in [1, 4, 16, 64, 256] {
-                run_pressure_pair(&template, &schema, limit, count, &service).await;
+                run_pressure_pair(&template, &schema, limit, count, &service, false).await;
+            }
+        }
+    });
+    drop(runtime);
+    service.shutdown();
+}
+
+#[test]
+fn test_review_ingress_facts_preserve_replay_pressure_fallback() {
+    let (template, _) = fixture();
+    let schema = template.schemas[0].clone();
+    let service = TestService::new(8, 1).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        for limit in [32 * 1024, 64 * 1024, 128 * 1024] {
+            for count in [1, 4, 16, 64, 256] {
+                run_pressure_pair(&template, &schema, limit, count, &service, true).await;
             }
         }
     });
@@ -52,6 +72,7 @@ async fn run_pressure_pair(
     limit: u64,
     count: i32,
     service: &TestService,
+    prepare_ingress: bool,
 ) {
     let spec = StreamAsofJoinSpec::new(
         template.spec.left().clone(),
@@ -70,21 +91,41 @@ async fn run_pressure_pair(
         .map(|sequence| ("A", 100, i64::from(sequence)))
         .collect::<Vec<_>>();
     let batch = Batch::table(vec![indexed_input(schema, &rows)], BatchMetadata::default()).unwrap();
-    let baseline = run_pressure_operator(plain, &batch, false, service).await;
-    let candidate =
-        run_pressure_operator(recorded, &batch, limit == 128 * 1024 && count == 1, service).await;
+    let baseline = run_pressure_operator(plain, &batch, false, service, false).await;
+    let candidate = run_pressure_operator(
+        recorded,
+        &batch,
+        limit == 128 * 1024 && count == 1,
+        service,
+        prepare_ingress,
+    )
+    .await;
     assert_eq!(
         candidate.accepted, baseline.accepted,
         "limit={limit}, rows={count}"
     );
-    assert_status(&baseline.admitted, candidate.admitted);
+    if limit == 64 * 1024 && count == 64 {
+        assert_eq!(
+            candidate.admitted_replay_bytes, 0,
+            "regression must exercise replay fallback"
+        );
+    }
+    assert_status(
+        &baseline.admitted,
+        candidate.admitted,
+        candidate.admitted_replay_bytes,
+    );
     if baseline.finalized.is_ok() {
         assert!(
             candidate.finalized.is_ok(),
             "limit={limit}, rows={count}, finalization: {:?}",
             candidate.finalized
         );
-        assert_status(&baseline.finished, candidate.finished);
+        assert_status(
+            &baseline.finished,
+            candidate.finished,
+            candidate.finished_replay_bytes,
+        );
     }
 }
 
@@ -93,6 +134,8 @@ struct PressureOutcome {
     admitted: StreamAsofJoinStatus,
     finalized: crate::Result<()>,
     finished: StreamAsofJoinStatus,
+    admitted_replay_bytes: u64,
+    finished_replay_bytes: u64,
 }
 
 async fn run_pressure_operator(
@@ -100,6 +143,7 @@ async fn run_pressure_operator(
     batch: &Batch,
     keep_replay: bool,
     service: &TestService,
+    prepare_ingress: bool,
 ) -> PressureOutcome {
     let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new())
         .with_gather_owner(service.owner("asof-pressure".into()));
@@ -113,11 +157,19 @@ async fn run_pressure_operator(
         } else {
             batch.clone()
         };
+        let preparation = if prepare_ingress {
+            Some(prepare_pressure_ingress(&operator, side, &input).await)
+        } else {
+            None
+        };
+        let admission_context =
+            StreamOperatorContext::with_ingress_progress(&job, "asof", None, pressure_progress())
+                .with_ingress_preparation(preparation.as_ref());
         let result = operator
             .process_data(
                 side,
                 input,
-                &context,
+                &admission_context,
                 &mut EdgeCollector::new(operator.output_ports().to_vec()),
             )
             .await;
@@ -130,6 +182,14 @@ async fn run_pressure_operator(
         }
     }
     let admitted = operator.status();
+    let admitted_replay_bytes = operator.replay_bytes();
+    assert_eq!(
+        admitted.state_bytes,
+        operator
+            .current_inventory(operator.prepared.as_ref())
+            .unwrap()
+            .bytes
+    );
     let finalized = operator
         .on_end(
             &context,
@@ -137,6 +197,7 @@ async fn run_pressure_operator(
         )
         .await;
     let finished = operator.status();
+    let finished_replay_bytes = operator.replay_bytes();
     let pool = operator.runtime.pool.clone();
     assert!(job.gather_owner().close_and_drain().await.is_empty());
     operator.reset().unwrap();
@@ -149,11 +210,40 @@ async fn run_pressure_operator(
         admitted,
         finalized,
         finished,
+        admitted_replay_bytes,
+        finished_replay_bytes,
     }
 }
 
-fn assert_status(plain: &StreamAsofJoinStatus, mut recorded: StreamAsofJoinStatus) {
-    recorded.state_bytes = plain.state_bytes;
+async fn prepare_pressure_ingress(
+    operator: &StreamAsofJoinOperator,
+    side: &str,
+    input: &Batch,
+) -> crate::operator::ingress::Preparation {
+    use crate::operator::ingress::{Preparation, Sender};
+    let facts = operator
+        .ingress_plan(side)
+        .unwrap()
+        .prepare(input, None)
+        .await;
+    let (sender, preparation) = Preparation::asof_channel();
+    let Sender::Asof(sender) = sender else {
+        unreachable!()
+    };
+    sender
+        .send(facts)
+        .await
+        .unwrap_or_else(|_| panic!("live receiver"));
+    drop(sender);
+    preparation
+}
+
+fn assert_status(
+    plain: &StreamAsofJoinStatus,
+    mut recorded: StreamAsofJoinStatus,
+    replay_bytes: u64,
+) {
+    recorded.state_bytes = recorded.state_bytes.checked_sub(replay_bytes).unwrap();
     assert_eq!(&recorded, plain);
 }
 

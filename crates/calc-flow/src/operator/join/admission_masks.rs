@@ -4,7 +4,7 @@ use super::{
     BatchEventTimes, DropKind, IngressProgress, JoinTimeBounds, RowAdmission, SidePlan, columnar,
     counter_overflow, operator_reason,
 };
-use crate::{EventTime, Result, StreamOperatorContext};
+use crate::{Batch, EventTime, Port, Result, StreamJoinOperator, StreamOperatorContext};
 use datafusion::arrow::{
     array::Array, datatypes::TimeUnit, record_batch::RecordBatch,
     util::bit_chunk_iterator::BitChunks,
@@ -28,6 +28,93 @@ pub(super) struct AdmissionMasks {
     watermark: i128,
 }
 
+/// Fixed-size scratch, streamed through one bounded slot per ingress. Time
+/// conversion failures remain row bits until the owner reaches that row.
+pub(crate) struct PureMasks {
+    times: [i64; 64],
+    null_time: u64,
+    conversion_error: u64,
+    null_key: u64,
+}
+
+impl PureMasks {
+    fn new(
+        record: &RecordBatch,
+        keys: &[usize],
+        times: &BatchEventTimes<'_>,
+        start: usize,
+        length: usize,
+    ) -> Self {
+        let present = low_bits(length);
+        let valid_time = valid_bits(times.array, start, length);
+        let valid_key = keys.iter().fold(present, |bits, &column| {
+            bits & valid_bits(record.column(column).as_ref(), start, length)
+        });
+        let (times, conversion_error) =
+            normalize_times(&times.values[start..start + length], times.unit, valid_time);
+        Self {
+            times,
+            null_time: present & !valid_time,
+            conversion_error,
+            null_key: present & !valid_key,
+        }
+    }
+}
+
+pub(crate) struct IngressPlan {
+    name: String,
+    ingress: String,
+    port: Port,
+    plan: SidePlan,
+}
+
+impl StreamJoinOperator {
+    pub(crate) fn ingress_plan(&self, ingress: &str) -> Result<IngressPlan> {
+        let plan = self.side_plan(ingress)?;
+        Ok(IngressPlan {
+            name: self.name.clone(),
+            ingress: ingress.into(),
+            port: self.input_ports[plan.port_index].clone(),
+            plan,
+        })
+    }
+}
+
+impl IngressPlan {
+    pub(crate) async fn prepare(
+        &self,
+        batch: &Batch,
+        output: &tokio::sync::mpsc::Sender<Result<PureMasks>>,
+    ) -> Result<()> {
+        self.port.validate(batch, &self.ingress)?;
+        let mut blocks = 0;
+        for record in batch.table_payload()?.batches() {
+            let times = BatchEventTimes::new(
+                record.column(self.plan.event_time_index).as_ref(),
+                &self.name,
+                &self.ingress,
+            )?;
+            for start in (0..record.num_rows()).step_by(64) {
+                let facts = PureMasks::new(
+                    record,
+                    &self.plan.key_indices,
+                    &times,
+                    start,
+                    (record.num_rows() - start).min(64),
+                );
+                if output.send(Ok(facts)).await.is_err() {
+                    return Ok(());
+                }
+                blocks += 1;
+                if blocks % 64 == 0 {
+                    tokio::task::yield_now().await;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 impl AdmissionMasks {
     pub(super) async fn new(
         config: &AdmissionMaskContext<'_>,
@@ -46,24 +133,38 @@ impl AdmissionMasks {
         quantum
             .step(context, mask_visits(times.unit, watermark, threshold), 512)
             .await?;
-        let present = low_bits(length);
-        let valid_time = valid_bits(times.array, start, length);
-        let mut valid_key = present;
-        for &column in &config.plan.key_indices {
+        // Account the same logical work on the owner, regardless of where the
+        // pure facts were computed. Temporal decisions use current state only.
+        for _ in &config.plan.key_indices {
             quantum.step(context, 1, 0).await?;
-            valid_key &= valid_bits(config.record.column(column).as_ref(), start, length);
         }
-        let (times, conversion_error) =
-            normalize_times(&times.values[start..start + length], times.unit, valid_time);
-        let (late, retain) =
-            temporal_masks(&times, valid_time & !conversion_error, watermark, threshold);
+        let pure = match context.ingress_preparation() {
+            Some(preparation) => {
+                let facts = preparation.join().await;
+                context.check_cancelled()?;
+                facts?
+            }
+            None => PureMasks::new(
+                config.record,
+                &config.plan.key_indices,
+                times,
+                start,
+                length,
+            ),
+        };
+        let (late, retain) = temporal_masks(
+            &pure.times,
+            low_bits(length) & !pure.null_time & !pure.conversion_error,
+            watermark,
+            threshold,
+        );
         #[cfg(test)]
         note_join_work(|work| work.admission_mask_blocks += 1);
         Ok(Self {
-            times,
-            null_time: present & !valid_time,
-            conversion_error,
-            null_key: present & !valid_key,
+            times: pure.times,
+            null_time: pure.null_time,
+            conversion_error: pure.conversion_error,
+            null_key: pure.null_key,
             late,
             retain,
             watermark,
