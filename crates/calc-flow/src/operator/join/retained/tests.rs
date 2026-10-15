@@ -98,3 +98,25 @@ async fn test_chunk_admission_refusal_and_abandonment_preserve_state_and_refund_
     assert_eq!(pool.reserved(), 0);
     assert_eq!(state.len(), 2);
 }
+
+#[test]
+fn test_repeated_owner_replacement_reuses_one_spare_source_slot() {
+    for owners in [1, 4] {
+        let group = CHUNK_ROWS / owners;
+        let initial = (0..owners).flat_map(|_| rows(group)).collect::<Vec<_>>();
+        let mut state: StateRows = initial.into();
+        assert_eq!(state.chunks[&0].sources.capacity(), owners + 1);
+        for _ in 0..8 {
+            let replacements = (0..owners).flat_map(|_| rows(group)).collect::<Vec<_>>();
+            let work = allocation_counter::measure(|| {
+                for (index, row) in replacements.into_iter().enumerate() {
+                    state.replace_payload(index, row.record);
+                }
+            });
+            assert_eq!(work.count_total, 0, "source overlap uses prepaid slots");
+            assert_eq!(state.chunks[&0].sources.capacity(), owners + 1);
+            assert_eq!(state.chunks[&0].sources.iter().flatten().count(), owners);
+            assert_eq!(state.len(), CHUNK_ROWS);
+        }
+    }
+}

@@ -3681,7 +3681,6 @@ impl StreamJoinOperator {
                 .await?;
         }
         self.validate_state_admission(plan.incoming_is_left, &retained)?;
-        let native_append = self.reserve_retained_append(plan.incoming_is_left, &retained)?;
         self.project_admitted(
             &mut bundle.admitted,
             &mut retained,
@@ -3706,7 +3705,7 @@ impl StreamJoinOperator {
             next_row_id: bundle.next_row_id,
             metrics: std::mem::take(&mut bundle.metrics),
             admitted_charges,
-            native_append,
+            native_append: None,
             dictionary: matches.keys.and_then(|keys| keys.dictionary),
             legacy_key_references,
             _native_scratch: matches.credit,
@@ -4725,7 +4724,7 @@ impl StreamJoinOperator {
         batch: &Batch,
         context: &StreamOperatorContext<'_>,
     ) -> Result<(PreparedJoinBatch, expiration::AppendPlan)> {
-        let prepared = self.prepare_batch(ingress, batch, context).await?;
+        let mut prepared = self.prepare_batch(ingress, batch, context).await?;
         let master = self
             .runtime
             .runtime()?
@@ -4744,6 +4743,8 @@ impl StreamJoinOperator {
                 prepared.chunks.is_unfunded(),
             )
             .await?;
+        prepared.native_append =
+            self.reserve_retained_append(prepared.incoming_is_left, &prepared.retained)?;
         if context.job().checkpointing() {
             self.v2_writer.changed(true)?;
         }

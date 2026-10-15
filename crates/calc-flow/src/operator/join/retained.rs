@@ -82,7 +82,9 @@ impl Chunk {
 
     fn reserved(count: usize, sources: usize, credit: Option<MemoryReservation>) -> Self {
         Self {
-            sources: Vec::with_capacity(sources),
+            // Sparse repair replaces every live row of one payload owner together.
+            // One spare slot covers overlap until the previous owner retires.
+            sources: Vec::with_capacity(sources + 1),
             source_ids: Vec::with_capacity(count),
             offsets: Vec::with_capacity(count),
             times: Vec::with_capacity(count),
@@ -318,12 +320,7 @@ impl StateRows {
             let id = self.next;
             self.next += 1;
             let capacity = rows.len().min(CHUNK_ROWS);
-            let source_count = 1 + rows.as_slice()[..capacity]
-                .windows(2)
-                .filter(|pair| {
-                    pair[0].record.columns().as_ptr() != pair[1].record.columns().as_ptr()
-                })
-                .count();
+            let source_count = source_count(&rows.as_slice()[..capacity]);
             let mut chunk = Chunk::reserved(capacity, source_count, None);
             for row in rows.by_ref().take(CHUNK_ROWS) {
                 indices.push(id * CHUNK_ROWS + chunk.ids.len());
@@ -553,10 +550,7 @@ async fn prepare_chunk(
     legacy: bool,
 ) -> Result<Chunk> {
     context.check_cancelled()?;
-    let sources = 1 + rows
-        .windows(2)
-        .filter(|pair| pair[0].record.columns().as_ptr() != pair[1].record.columns().as_ptr())
-        .count();
+    let sources = source_count(rows);
     let credit = grant(master, chunk_bytes(rows)?, context.operator_id(), legacy)?;
     let mut chunk = Chunk::reserved(rows.len(), sources, credit);
     for row in rows {
@@ -566,17 +560,21 @@ async fn prepare_chunk(
     Ok(chunk)
 }
 
+fn source_count(rows: &[StoredRow]) -> usize {
+    1 + rows
+        .windows(2)
+        .filter(|pair| pair[0].record.columns().as_ptr() != pair[1].record.columns().as_ptr())
+        .count()
+}
+
 fn chunk_bytes(rows: &[StoredRow]) -> Result<usize> {
     let width = 2 * size_of::<usize>()
         + size_of::<EventTime>()
         + 2 * size_of::<u64>()
         + size_of::<Option<Arc<super::columnar::FramedKey>>>();
-    // Source slots may grow during funded sparse payload replacement.
-    let sources = rows
-        .len()
-        .max(4)
-        .checked_next_power_of_two()
-        .and_then(|count| count.checked_mul(2 * size_of::<Option<Source>>()));
+    let sources = source_count(rows)
+        .checked_add(1)
+        .and_then(|count| count.checked_mul(size_of::<Option<Source>>()));
     let fixed = rows
         .len()
         .checked_mul(width)

@@ -14,7 +14,9 @@ use datafusion::arrow::{
 use datafusion::execution::memory_pool::MemoryReservation;
 use serde::Serialize;
 
-use super::super::super::{JoinSide, StoredRow};
+use super::super::super::JoinSide;
+#[cfg(test)]
+use super::super::super::StoredRow;
 use super::super::{
     budget,
     ipc::accounting::{self, add, product, sum},
@@ -22,7 +24,7 @@ use super::super::{
 use super::{
     buffer::{PaidBuffer, ensure, error},
     compact,
-    row::{CheckpointRow, PendingUpsert},
+    row::{CheckpointRow, PendingUpsert, Reference},
 };
 use crate::{Result, StateSegment};
 
@@ -241,7 +243,7 @@ impl Encoder {
         workspace: &MemoryReservation,
         check: &dyn Fn() -> Result<()>,
     ) -> Result<()> {
-        let ordered = ordered_rows(rows, workspace, check)?;
+        let ordered = ordered_rows(&rows, workspace, check)?;
         let digest = if ordered.is_empty() {
             [0; 32]
         } else {
@@ -369,24 +371,21 @@ fn upsert(
     buffer.append(row.encoded_key)
 }
 
-fn ordered_rows(
-    rows: &dyn crate::operator::join::Rows,
+fn ordered_rows<'a>(
+    rows: &'a &'a dyn crate::operator::join::Rows,
     workspace: &MemoryReservation,
     check: &dyn Fn() -> Result<()>,
-) -> Result<Vec<StoredRow>> {
-    accounting::reserve(workspace, accounting::vector_peak::<StoredRow>(rows.len())?)?;
+) -> Result<Vec<Reference<'a>>> {
+    accounting::reserve(
+        workspace,
+        accounting::vector_peak::<Reference<'_>>(rows.len())?,
+    )?;
     let mut ordered = Vec::with_capacity(rows.len());
-    for reference in rows.references() {
+    for index in rows.references() {
         check()?;
-        admit_payload_clone(
-            rows.payload(reference)
-                .owner()
-                .expect("retained payload owner"),
-            workspace,
-        )?;
-        ordered.push(rows.row(reference));
+        ordered.push(Reference { rows, index });
     }
-    ordered.sort_unstable_by_key(|row| row.row_id);
+    ordered.sort_unstable_by_key(|row| rows.identity(row.index).1);
     Ok(ordered)
 }
 
