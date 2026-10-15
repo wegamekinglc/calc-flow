@@ -5,7 +5,10 @@ use super::{
     ReservedIdentities, Result, StreamAsofJoinOperator, StreamOperatorContext, UInt64Array,
     ValidatedInput, can_share_batch, check_input_cancellation, encode_payload, state, take, times,
 };
-use datafusion::arrow::array::{Array, TimestampMicrosecondArray};
+use datafusion::arrow::{
+    array::{Array, TimestampMicrosecondArray},
+    datatypes::Schema,
+};
 use std::{cmp::Ordering, collections::HashMap};
 
 #[cfg(test)]
@@ -344,12 +347,21 @@ fn select_identity(
                 .expect("validated ASOF identity column")
         })
         .collect::<Vec<_>>();
-    select(
-        &record
-            .project(&indices)
-            .map_err(|e| super::super::arrow_error(&e))?,
-        selection,
-    )
+    // Identity encoding needs fields and values, not payload schema metadata.
+    // Sharing fields avoids copying metadata before the payload reservation.
+    let schema = Schema::new(
+        indices
+            .iter()
+            .map(|&index| record.schema_ref().fields()[index].clone())
+            .collect::<Vec<_>>(),
+    );
+    let columns = indices
+        .iter()
+        .map(|&index| record.column(index).clone())
+        .collect();
+    let identity = RecordBatch::try_new(Arc::new(schema), columns)
+        .map_err(|e| super::super::arrow_error(&e))?;
+    select(&identity, selection)
 }
 
 fn select(record: &RecordBatch, selection: Option<&UInt64Array>) -> Result<RecordBatch> {

@@ -65,6 +65,12 @@ remains behind the existing final cancellation and capacity checks, so no
 fallible preparation publishes state or output. State layouts, retained-byte
 formulas, checkpoint writers and restore codecs are unchanged.
 
+The temporary identity projection shares Arrow fields and arrays without
+copying batch schema metadata. Arrow's general record projection deep-copies
+that metadata, which can exceed the identity reservation before payload
+admission. The payload keeps its original schema and existing reservation;
+duplicate validation still precedes a payload-workspace refusal.
+
 ## Validation
 
 The focused baseline reproduction compiled and failed because three accepted,
@@ -88,6 +94,17 @@ The final content also passes all eight property and three boundary tests with
 `cargo test --locked -p calc-flow --test stream_asof_join_properties --test stream_asof_join_boundaries -- --test-threads=1 --quiet`.
 The final admission rerun includes the ordered Boolean-key inline/refund control.
 All Cargo checks used Rust 1.88.0, two build jobs and the existing debug cache.
+
+The metadata reservation regression also reproduced on Linux at structural
+refactor commit `1cca5a713fa7b1dda677c31387288b21bc9ae1ed`: the unchanged
+`schema_metadata_is_reserved_before_encoding_and_after_duplicate_validation`
+test measured a 2,103,372-byte peak and failed its 1 MiB bound. Sharing fields
+and arrays in the temporary identity view fixes that allocation. The test now
+keeps the same bound on both inputs and checks duplicate priority plus rejected
+state/output atomicity. After this fix, six selected general/worker unit tests
+and six metadata/duplicate/workspace state integration tests pass; the earlier
+68 admission and 11 property/boundary results remain evidence for unchanged
+paths rather than a repeated full regression run.
 
 No timing or throughput claim is made. Sealed performance acceptance, complete
 regression, cross-platform and the Rust 90% coverage gate remain with their
