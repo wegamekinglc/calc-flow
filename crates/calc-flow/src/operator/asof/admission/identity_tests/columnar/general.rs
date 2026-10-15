@@ -286,27 +286,7 @@ async fn test_general_rejection_duplicate_priority_cancellation_and_refunds() {
                     .await
                     .unwrap_err();
                 drop(guard);
-                if cancelled {
-                    assert!(matches!(error, crate::CalcFlowError::Cancelled { .. }));
-                } else {
-                    let crate::CalcFlowError::OperatorReason { reason_code, .. } = error else {
-                        panic!("unexpected error: {error}")
-                    };
-                    assert_eq!(
-                        reason_code,
-                        if duplicate {
-                            StreamingFailureReason::AsofDuplicateIdentity
-                        } else {
-                            StreamingFailureReason::AsofWorkspaceLimitExceeded
-                        }
-                    );
-                    let status = if ingress == "left" {
-                        &operator.status.left
-                    } else {
-                        &operator.status.right
-                    };
-                    assert_eq!(status.duplicate_rows, if duplicate { 4 } else { 0 });
-                }
+                assert_general_rejection(&error, &operator, ingress, duplicate, cancelled);
                 assert_eq!(operator.status.state_rows, before.state_rows);
                 assert_eq!(
                     operator.status.left.accepted_rows,
@@ -327,6 +307,36 @@ async fn test_general_rejection_duplicate_priority_cancellation_and_refunds() {
                 assert_eq!(pool.reserved(), 0);
             }
         }
+    }
+}
+
+fn assert_general_rejection(
+    error: &crate::CalcFlowError,
+    operator: &StreamAsofJoinOperator,
+    ingress: &str,
+    duplicate: bool,
+    cancelled: bool,
+) {
+    if cancelled {
+        assert!(matches!(error, crate::CalcFlowError::Cancelled { .. }));
+    } else {
+        let crate::CalcFlowError::OperatorReason { reason_code, .. } = error else {
+            panic!("unexpected error: {error}")
+        };
+        assert_eq!(
+            *reason_code,
+            if duplicate {
+                StreamingFailureReason::AsofDuplicateIdentity
+            } else {
+                StreamingFailureReason::AsofWorkspaceLimitExceeded
+            }
+        );
+        let status = if ingress == "left" {
+            &operator.status.left
+        } else {
+            &operator.status.right
+        };
+        assert_eq!(status.duplicate_rows, if duplicate { 4 } else { 0 });
     }
 }
 

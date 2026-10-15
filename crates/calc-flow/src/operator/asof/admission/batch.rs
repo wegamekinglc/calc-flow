@@ -75,8 +75,13 @@ impl Sequences {
         if state::SequenceKind::for_side(&record.schema(), side)
             .width()
             .is_some()
-            || selected.num_rows() == record.num_rows()
         {
+            return Ok(Self(vec![(
+                0,
+                state::encode_columns(selected, side.sequence_by())?,
+            )]));
+        }
+        if selected.num_rows() == record.num_rows() {
             return Ok(Self(vec![(
                 0,
                 state::encode_columns(record, side.sequence_by())?,
@@ -117,13 +122,7 @@ pub(super) fn plan(
         return Ok(None);
     }
     let mut keys = InputKeys::default();
-    let mut records = Vec::new();
-    for (source, record) in batch.table_payload()?.batches().iter().enumerate() {
-        if let Some(record) = Record::prepare(operator, record, source, input, &mut keys, context)?
-        {
-            records.push(record);
-        }
-    }
+    let records = prepare_records(operator, batch, input, &mut keys, context)?;
     let ranks = canonical_ranks(&keys);
     let mut columns = Columns {
         records,
@@ -141,6 +140,22 @@ pub(super) fn plan(
         keys,
         duplicates,
     }))
+}
+
+fn prepare_records(
+    operator: &StreamAsofJoinOperator,
+    batch: &Batch,
+    input: ValidatedInput,
+    keys: &mut InputKeys,
+    context: &StreamOperatorContext<'_>,
+) -> Result<Vec<Record>> {
+    let mut records = Vec::new();
+    for (source, record) in batch.table_payload()?.batches().iter().enumerate() {
+        if let Some(record) = Record::prepare(operator, record, source, input, keys, context)? {
+            records.push(record);
+        }
+    }
+    Ok(records)
 }
 
 fn canonical_ranks(keys: &InputKeys) -> Vec<u32> {
@@ -192,20 +207,7 @@ impl Record {
             )
         })?;
         let selection = selection.filter(|rows| rows.len() != record.num_rows());
-        let indices = super::identity_column_names(side)
-            .map(|name| {
-                record
-                    .schema()
-                    .index_of(name)
-                    .expect("validated ASOF identity column")
-            })
-            .collect::<Vec<_>>();
-        let identity = select(
-            &record
-                .project(&indices)
-                .map_err(|e| super::super::arrow_error(&e))?,
-            selection.as_ref(),
-        )?;
+        let identity = select_identity(record, side, selection.as_ref())?;
         context.check_cancelled()?;
         let encoded = state::encode_key_columns(&identity, side.keys(), |bytes| {
             operator.reserve_workspace(bytes)
@@ -215,17 +217,7 @@ impl Record {
             source,
             selection,
             times: times(&identity, side).clone(),
-            sequences: if state::SequenceKind::for_side(&record.schema(), side)
-                .width()
-                .is_some()
-            {
-                Sequences(vec![(
-                    0,
-                    state::encode_columns(&identity, side.sequence_by())?,
-                )])
-            } else {
-                Sequences::prepare(record, &identity, input, side)?
-            },
+            sequences: Sequences::prepare(record, &identity, input, side)?,
             keys: key_ids,
             order: None,
         }))
@@ -337,6 +329,27 @@ fn key_ids(
             })
             .collect()
     }
+}
+
+fn select_identity(
+    record: &RecordBatch,
+    side: &super::AsofJoinSide,
+    selection: Option<&UInt64Array>,
+) -> Result<RecordBatch> {
+    let indices = super::identity_column_names(side)
+        .map(|name| {
+            record
+                .schema()
+                .index_of(name)
+                .expect("validated ASOF identity column")
+        })
+        .collect::<Vec<_>>();
+    select(
+        &record
+            .project(&indices)
+            .map_err(|e| super::super::arrow_error(&e))?,
+        selection,
+    )
 }
 
 fn select(record: &RecordBatch, selection: Option<&UInt64Array>) -> Result<RecordBatch> {
@@ -676,25 +689,10 @@ impl Plan {
             .columns
             .compatibility_rows(&self.keys, input.index, canonical);
         let (left_chunks, right_capacities, right_columns, workspace) = if input.index == 0 {
-            let kind = operator.state.sequence_kinds[0];
-            if self.columns.can_prepare_inline(&self.keys) {
-                let chunks = self
-                    .columns
-                    .chunks(&self.keys, &batches, kind, &|| context.check_cancelled())?;
-                (Some(chunks), Vec::new(), None, workspace)
-            } else {
-                let descriptor = operator.reserve_left_work(batches.len())?;
-                let work = ChunkWork {
-                    columns: self.columns,
-                    keys: self.keys,
-                    batches: batches.clone(),
-                    kind,
-                    workspace,
-                    _descriptor: descriptor,
-                };
-                let (_, chunks, workspace) = operator.run_cpu_work(work, context).await?;
-                (chunks, Vec::new(), None, workspace)
-            }
+            let (_, chunks, workspace) = self
+                .prepare_left(operator, &batches, workspace, context)
+                .await?;
+            (chunks, Vec::new(), None, workspace)
         } else {
             (
                 None,
@@ -714,6 +712,33 @@ impl Plan {
             right_columns,
             _workspace: workspace,
         })
+    }
+
+    async fn prepare_left(
+        self,
+        operator: &mut StreamAsofJoinOperator,
+        batches: &[Arc<state::PayloadBatch>],
+        workspace: AdmissionWorkspace,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<super::PreparedInput> {
+        let kind = operator.state.sequence_kinds[0];
+        if self.columns.can_prepare_inline(&self.keys) {
+            let chunks = self
+                .columns
+                .chunks(&self.keys, batches, kind, &|| context.check_cancelled())?;
+            Ok((Vec::new(), Some(chunks), workspace))
+        } else {
+            let descriptor = operator.reserve_left_work(batches.len())?;
+            let work = ChunkWork {
+                columns: self.columns,
+                keys: self.keys,
+                batches: batches.to_vec(),
+                kind,
+                workspace,
+                _descriptor: descriptor,
+            };
+            operator.run_cpu_work(work, context).await
+        }
     }
 }
 
