@@ -213,10 +213,14 @@ impl StreamJoinOperator {
         if counts.total == 0 || !super::morsel::eligible(self, rows) {
             return Ok(None);
         }
-        let bytes = counts
-            .total
-            .checked_mul(size_of::<MatchedPair>() + 256)
-            .ok_or_else(|| scratch_error(&self.name))?;
+        let pinned = self
+            .probe_control
+            .as_ref()
+            .expect("owned count controls")
+            .size();
+        let Some(bytes) = super::morsel::pair_credit_bytes(counts.total, pinned) else {
+            return Ok(None);
+        };
         self.optional_credit(bytes)
     }
 

@@ -250,3 +250,42 @@ async fn worker_refusal_case(service: &TestService, cancel: bool) {
     drop(job);
     assert_eq!(pool.reserved(), 0);
 }
+
+#[test]
+fn test_morsel_deferred_snapshot_keeps_split_state_admission_budget() {
+    let service = TestService::new(4, 1).unwrap();
+    let runtime = runtime();
+    let split = runtime.block_on(prepared_reservation(&service, true));
+    let fused = runtime.block_on(prepared_reservation(&service, false));
+    assert_eq!(
+        fused, split,
+        "deferral must not retain extra optional credit during mandatory state admission"
+    );
+    drop(runtime);
+    service.shutdown();
+}
+
+async fn prepared_reservation(service: &TestService, split: bool) -> usize {
+    let _mode = data_work::configure_for_test(split);
+    let pool = Pool::new(0);
+    let mut operator = operator(true);
+    operator
+        .runtime
+        .initialize_benchmark_pool(pool.clone())
+        .unwrap();
+    let job = job().with_gather_owner(service.owner("morsel-state-budget".into()));
+    preload(&mut operator, &job, true).await;
+    let context = StreamOperatorContext::new(&job, "match", None);
+    let (prepared, expiration) = operator
+        .prepare_data_append("left", &input(true, ROWS, false), &context)
+        .await
+        .unwrap();
+    assert_eq!(prepared.deferred.is_some(), !split);
+    let reserved = pool.reserved();
+    drop((prepared, expiration, operator));
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop(context);
+    drop(job);
+    assert_eq!(pool.reserved(), 0);
+    reserved
+}

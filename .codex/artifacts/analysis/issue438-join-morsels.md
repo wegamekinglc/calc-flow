@@ -53,3 +53,10 @@ after successful output and funded owners through cancellation and cleanup.
 
 Unsupported output shapes and optional-credit refusals retain the split or
 serial implementation. ASOF and public bindings remain unchanged.
+
+The deferred snapshot's control reservation is carved out of the existing pair
+allowance, with at least the worst-case three-usize-per-match selection storage
+left separately funded. Otherwise deferral declines. The split and deferred
+paths reserve exactly the same total at the end of state/expiration preparation;
+the dedicated finite-pool ledger regression verifies that equality and complete
+refund. The pending dictionary already shares its key/ID scratch reservation.

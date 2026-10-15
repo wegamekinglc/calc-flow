@@ -7,6 +7,18 @@ use crate::operator::join::{
 const MAX_SCRATCH: usize = 512 * 1024 * 1024;
 const MAX_UNIT_OUTPUT: usize = 16 * 1024 * 1024;
 
+pub(in crate::operator::join::data_work) fn pair_credit_bytes(
+    count: usize,
+    pinned: usize,
+) -> Option<usize> {
+    let bytes = count
+        .checked_mul(size_of::<crate::operator::join::MatchedPair>() + 256)?
+        .checked_sub(pinned)?;
+    // The retained snapshot uses part of the existing pair allowance. Preserve
+    // enough separate funding for both selection arrays in the serial fallback.
+    (bytes >= count.checked_mul(3 * size_of::<usize>())?).then_some(bytes)
+}
+
 pub(super) fn scratch_bytes(matches: usize, rows: usize, columns: usize) -> Option<usize> {
     // Selection/ranges, both take/interleave routes, source maps, flat-row cost
     // maps and null inventories. All units share this prepaid upper bound.

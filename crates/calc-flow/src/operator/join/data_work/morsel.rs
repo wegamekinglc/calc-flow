@@ -17,6 +17,7 @@ use crate::{Batch, BatchMetadata, EdgeBudget, Result, StreamCollector, StreamOpe
 
 mod fallback;
 mod funding;
+pub(super) use funding::pair_credit_bytes;
 
 pub(in crate::operator::join) struct DeferredProbe {
     inputs: ProbeInputs,
