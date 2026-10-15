@@ -64,7 +64,7 @@ async fn unchanged_failure(
         .unwrap();
     let original = operator
         .key_dictionary
-        .canonical(&operator.state.right[0].encoded_key)
+        .canonical(operator.state.right.key_at(0))
         .unwrap();
     let lease = operator.key_dictionary.lease(&original).unwrap();
     let address = lease.address();
@@ -103,7 +103,7 @@ async fn unchanged_failure(
     );
     let retry = operator
         .key_dictionary
-        .canonical(&operator.state.left[0].encoded_key)
+        .canonical(operator.state.left.key_at(0))
         .unwrap();
     assert_eq!(Arc::ptr_eq(&original, &retry), retry_matches == 1);
     operator
@@ -135,7 +135,7 @@ async fn test_persistent_dictionary_namespace_exhaustion_keeps_retired_lease_dis
         .unwrap();
     let original = operator
         .key_dictionary
-        .canonical(&operator.state.right[0].encoded_key)
+        .canonical(operator.state.right.key_at(0))
         .unwrap();
     let lease = operator.key_dictionary.lease(&original).unwrap();
     let address = lease.address();
@@ -178,7 +178,7 @@ async fn test_persistent_dictionary_namespace_exhaustion_keeps_retired_lease_dis
     assert!(output.drain("output").is_empty());
     let retry = operator
         .key_dictionary
-        .canonical(&operator.state.left[0].encoded_key)
+        .canonical(operator.state.left.key_at(0))
         .unwrap();
     let current = operator.key_dictionary.lease(&retry).unwrap();
     assert_ne!(current.address(), address);
@@ -293,7 +293,7 @@ impl Snapshot {
     }
 }
 
-fn assert_rows(actual: &[StoredRow], expected: &[StoredRow]) {
+fn assert_rows(actual: &dyn Rows, expected: &[StoredRow]) {
     assert_eq!(actual.len(), expected.len());
     for (actual, expected) in actual.iter().zip(expected) {
         assert_eq!(

@@ -49,7 +49,7 @@ fn assert_live(snapshot: &OperatorStateSnapshot, left_ids: &[u64], emitted: u64)
         assert_eq!(row.charge, if id % 2 == 0 { 136 } else { 148 });
     }
     assert_row(
-        &restored.state.right[0],
+        &restored.state.right.at(0),
         0,
         100,
         141,

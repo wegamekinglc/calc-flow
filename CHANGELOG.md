@@ -9,6 +9,12 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-16: Store streaming Join state in chunks with stable row references
+  and sorted expiration run heads. Native match selection uses incoming identity
+  ranges or fan-out runs; output columns use Arrow take/interleave with bulk
+  compaction for encoded payloads. Preserve V1 logical charges, deterministic
+  output order, output-before-state-commit semantics and checkpoint layouts 1–3.
+
 - 2026-10-15: Reject duplicate live row IDs when restoring layout-1 Join
   checkpoints. Validate event times and complete V1 logical charges for every
   historical row in full layout-1 checkpoints, including overwritten and

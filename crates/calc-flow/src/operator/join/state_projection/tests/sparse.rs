@@ -28,7 +28,7 @@ pub(super) async fn retained_sparse_repair() {
         .await
         .unwrap();
     assert_eq!(projected.status(), full.status());
-    let old = projected.state.left[0].record.clone();
+    let old = projected.state.left.at(0).record.clone();
     let alias = old.column(2).to_data().buffers()[0].clone();
     let progressed = progress(&job);
     projected
@@ -134,7 +134,10 @@ async fn post_restore_gap(
     assert_eq!(restored.state.next_right_row_id, 3);
     assert_eq!(restored.state.metrics.right.late_rows, 1);
     assert_eq!(restored.state.next_output_sequence, 2);
-    assert_eq!(restored.state.right[1].charge, full.state.right[1].charge);
+    assert_eq!(
+        restored.state.right.at(1).charge,
+        full.state.right.at(1).charge
+    );
     compare_output(&mut actual, &mut expected);
 }
 
@@ -202,7 +205,7 @@ fn operator(schema: &Arc<Schema>, projected: bool) -> StreamJoinOperator {
 
 fn check_replacement(join: &StreamJoinOperator, old: &RowPayload) {
     assert_eq!(join.state.left.len(), 1);
-    let row = &join.state.left[0];
+    let row = &join.state.left.at(0);
     assert_eq!((row.row_id, row.event_time.as_micros()), (1023, 1024));
     assert_eq!(row.record.num_columns(), 3);
     assert_eq!(row.record.offset(), 0);

@@ -29,7 +29,12 @@ use std::{collections::BTreeMap, sync::Arc};
 
 #[cfg(test)]
 impl TestGate {
-    fn wait_for_release(self, input: &[StoredRow], name: &str, stop: &GatherStop) -> Result<()> {
+    fn wait_for_release(
+        self,
+        input: &super::StateRows,
+        name: &str,
+        stop: &GatherStop,
+    ) -> Result<()> {
         self.entered
             .send((input.as_ptr() as usize, std::thread::current().id()))
             .map_err(|_| memory_error(name, "checkpoint test observer dropped"))?;
@@ -46,8 +51,8 @@ impl TestGate {
 
 #[cfg(test)]
 struct InputOwners {
-    left: Option<Arc<Vec<StoredRow>>>,
-    right: Option<Arc<Vec<StoredRow>>>,
+    left: Option<Arc<super::StateRows>>,
+    right: Option<Arc<super::StateRows>>,
     released: Option<tokio::sync::oneshot::Sender<()>>,
     #[cfg(test)]
     retirement_gate: Option<TestRetirementGate>,
@@ -135,7 +140,7 @@ impl OwnedCpuWork for BaseWork {
         let right = self.inputs.right.as_ref().expect("right compaction input");
         #[cfg(test)]
         if let Some(gate) = self.gate {
-            gate.wait_for_release(left, &self.name, stop)?;
+            gate.wait_for_release(left.as_ref(), &self.name, stop)?;
         }
         let left = encode_base_side(left, &self.name, "left", stop)?;
         let right = encode_base_side(right, &self.name, "right", stop)?;
@@ -145,7 +150,7 @@ impl OwnedCpuWork for BaseWork {
 
 #[cfg(test)]
 fn encode_base_side(
-    rows: &[StoredRow],
+    rows: &dyn super::Rows,
     name: &str,
     side: &str,
     stop: &GatherStop,

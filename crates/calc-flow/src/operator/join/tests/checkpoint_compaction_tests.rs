@@ -232,7 +232,7 @@ async fn abandoned_checkpoint_replacement(
         .runtime()
         .unwrap()
         .incremental_memory_pool();
-    let weak = Arc::downgrade(operator.state.left[0].record.column(0));
+    let weak = Arc::downgrade(operator.state.left.at(0).record.column(0));
     let original = operator.state.left.as_ptr() as usize;
     let CheckpointGateHarness {
         gate,
@@ -640,7 +640,7 @@ fn managed_close_drains_abandoned_compaction_after_operator_drop() {
                 .runtime()
                 .unwrap()
                 .incremental_memory_pool();
-            let weak = Arc::downgrade(operator.state.left[0].record.column(0));
+            let weak = Arc::downgrade(operator.state.left.at(0).record.column(0));
             let CheckpointGateHarness {
                 gate,
                 started,
@@ -851,7 +851,7 @@ fn checkpoint_observer_is_published_before_native_capacity_wait() {
                 .runtime()
                 .unwrap()
                 .incremental_reservation("queued-retirement-pressure");
-            let weak = Arc::downgrade(second.state.left[0].record.column(0));
+            let weak = Arc::downgrade(second.state.left.at(0).record.column(0));
             let (retired, owners_gone) = tokio::sync::oneshot::channel();
             let (refund, wait) = std::sync::mpsc::channel();
             second.checkpoint_retirement_gate = Some(std::sync::Mutex::new(

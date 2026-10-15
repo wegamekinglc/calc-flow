@@ -7,9 +7,7 @@ use datafusion::arrow::{
     record_batch::{RecordBatch, RecordBatchOptions},
 };
 
-use super::{
-    MatchedPair, StreamJoinOperator, materialization::JoinOutput, operator_error, output_gather,
-};
+use super::{StreamJoinOperator, materialization::JoinOutput, operator_error, output_gather};
 use crate::{BatchKind, Port, Result};
 
 #[cfg(test)]
@@ -62,7 +60,8 @@ impl StreamJoinOperator {
 }
 
 pub(super) fn materialize(output: &JoinOutput<'_>, range: Range<usize>) -> Result<RecordBatch> {
-    let matched = &output.matched[range];
+    let selected = output.matched.slice(range);
+    let matched: &dyn super::matches::Matches = &selected;
     if matched.is_empty() {
         return Ok(RecordBatch::new_empty(Arc::clone(output.schema)));
     }
@@ -84,12 +83,15 @@ pub(super) fn materialize(output: &JoinOutput<'_>, range: Range<usize>) -> Resul
     })
 }
 
-fn gather_columns(output: &JoinOutput<'_>, matched: &[MatchedPair]) -> Result<Vec<ArrayRef>> {
-    let left_width = output.records(&matched[0]).0.num_columns();
+fn gather_columns(
+    output: &JoinOutput<'_>,
+    matched: &dyn super::matches::Matches,
+) -> Result<Vec<ArrayRef>> {
+    let left_width = output.records(&matched.pair(0)).0.num_columns();
     let left_gather =
-        output_gather::SideGather::new(matched.iter().map(|pair| output.records(pair).0));
+        output_gather::SideGather::new(matched.iter().map(|pair| output.records(&pair).0));
     let right_gather =
-        output_gather::SideGather::new(matched.iter().map(|pair| output.records(pair).1));
+        output_gather::SideGather::new(matched.iter().map(|pair| output.records(&pair).1));
     output
         .schema
         .fields()
@@ -102,11 +104,7 @@ fn gather_columns(output: &JoinOutput<'_>, matched: &[MatchedPair]) -> Result<Ve
             } else {
                 (right_gather.as_ref(), index - left_width)
             };
-            let payloads = matched.iter().map(|pair| {
-                let (left, right) = output.records(pair);
-                if index < left_width { left } else { right }
-            });
-            output_gather::column(gather, payload_index, field.data_type(), payloads)
+            output_gather::column(gather, payload_index, field.data_type())
         })
         .collect()
 }

@@ -469,7 +469,7 @@ impl<'a, 'c> Decoder<'a, 'c> {
 
     fn mark_live(&self, state: &StreamJoinState) -> Result<()> {
         for rows in [&state.left, &state.right] {
-            for (dense, row) in rows.iter().enumerate() {
+            for (dense, row) in rows.indexed() {
                 (self.check)()?;
                 row.record.mark_live(dense);
             }

@@ -20,7 +20,7 @@ pub(super) fn image(join: &StreamJoinOperator) -> serde_json::Value {
                         row.row_id,
                         row.event_time.as_micros(),
                         row.charge,
-                        row.encoded_key.as_slice(),
+                        row.encoded_key.to_vec(),
                         row.record.columns().as_ptr() as usize,
                         row.record.offset(),
                     )

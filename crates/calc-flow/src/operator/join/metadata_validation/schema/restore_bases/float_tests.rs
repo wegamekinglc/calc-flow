@@ -181,7 +181,8 @@ fn test_restored_float_null_payload_keeps_original_reader_and_wire() {
     let job = job(&service, CancellationToken::new());
     let mut construction = construction(&target, &snapshot, &job);
     assert!(poll_copy(construction.copy(&target, &snapshot, &job)).unwrap());
-    let record = source.state.left[0].record.view();
+    let retained_row = source.state.left.at(0);
+    let record = retained_row.record.view();
     assert!(inspector::inspect(&row_ipc(&record), record.schema_ref()).is_none());
     let decision = work(&mut construction)
         .run(construction.schema.metadata.control.stop.as_ref().unwrap())
@@ -194,9 +195,9 @@ fn test_restored_float_null_payload_keeps_original_reader_and_wire() {
     original.restore(&snapshot).unwrap();
     assert_eq!(target.status(), original.status());
     for side in [&target.state.left, &target.state.right] {
-        assert!(side[0].record.funded_owner().is_none());
-        assert_eq!(side[0].record.view().column(2).null_count(), 1);
-        assert_eq!(row_ipc(&side[0].record.view()), row_ipc(&record));
+        assert!(side.at(0).record.funded_owner().is_none());
+        assert_eq!(side.at(0).record.view().column(2).null_count(), 1);
+        assert_eq!(row_ipc(&side.at(0).record.view()), row_ipc(&record));
     }
     assert_eq!(
         encode_side(&target.state.left, "match", "left", &|| Ok(())).unwrap(),

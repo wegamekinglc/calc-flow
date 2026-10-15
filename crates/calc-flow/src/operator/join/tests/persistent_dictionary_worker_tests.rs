@@ -84,10 +84,8 @@ async fn fixture(
 }
 
 fn proof(operator: &StreamJoinOperator) -> Proof {
-    let canonical = operator
-        .key_bindings
-        .right
-        .canonical(&operator.state.right[1]);
+    let retained = operator.state.right.at(1);
+    let canonical = operator.key_bindings.right.canonical(&retained);
     let history = operator
         .state
         .deltas
@@ -221,7 +219,7 @@ async fn replay(
         0,
         "actual input/result release retires its identity lease despite byte-only checkpoint history"
     );
-    let current = &operator.state.right[0].encoded_key;
+    let current = operator.state.right.key_at(0);
     assert_ne!(
         proof.address,
         operator.key_dictionary.lease(current).unwrap().address()

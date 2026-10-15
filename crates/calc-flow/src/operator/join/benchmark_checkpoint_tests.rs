@@ -155,16 +155,22 @@ async fn complete_state_oracle_rejects_identity_key_payload_and_counter_changes(
         .await
         .unwrap();
     let expected = validate_state(&operator, 3_072).unwrap();
-    let first = operator.state.left[0].clone();
-    operator.state.left[0].row_id += 1;
+    let first = operator.state.left.at(0).clone();
+    let mut changed = first.clone();
+    changed.row_id += 1;
+    operator.state.left.replace_at(0, changed);
     assert!(validate_state(&operator, 3_072).is_err());
-    operator.state.left[0] = first.clone();
-    operator.state.left[0].encoded_key = operator.state.left[1].encoded_key.clone();
+    operator.state.left.replace_at(0, first.clone());
+    let mut changed = first.clone();
+    changed.encoded_key = operator.state.left.key_at(1).clone();
+    operator.state.left.replace_at(0, changed);
     assert!(validate_state(&operator, 3_072).is_err());
-    operator.state.left[0] = first.clone();
-    operator.state.left[0].record = operator.state.left[64].record.clone();
+    operator.state.left.replace_at(0, first.clone());
+    let mut changed = first.clone();
+    changed.record = operator.state.left.at(64).record;
+    operator.state.left.replace_at(0, changed);
     assert!(validate_state(&operator, 3_072).is_err());
-    operator.state.left[0] = first;
+    operator.state.left.replace_at(0, first);
     operator.state.metrics.emitted_match_rows = 0;
     assert!(validate_state(&operator, 3_072).is_err());
     operator.state.metrics.emitted_match_rows = 3_072;
@@ -262,7 +268,7 @@ struct ScaledReplacementDiagnostic {
     alias_name: String,
     alias_digest: String,
     owners: Vec<(String, std::sync::Weak<Vec<u8>>, usize, bool)>,
-    row_owner: Option<std::sync::Weak<Vec<StoredRow>>>,
+    row_owner: Option<std::sync::Weak<crate::operator::join::StateRows>>,
     before_oracle: Option<Value>,
 }
 

@@ -1,4 +1,4 @@
-use super::super::super::{MatchedPair, materialization::JoinOutput, native_lookup::scratch_error};
+use super::super::super::{materialization::JoinOutput, native_lookup::scratch_error};
 use super::{ColumnResult, Columns, MemoryReservation, Result, RowPayload};
 use crate::runtime::streaming::gather_work::cleanup_control_bytes;
 use datafusion::arrow::datatypes::SchemaRef;
@@ -16,14 +16,17 @@ pub(super) fn input_bytes(rows: usize, schema: &SchemaRef, name: &str) -> Result
         .ok_or_else(|| scratch_error(name))
 }
 
-pub(super) fn output_bytes(output: &JoinOutput<'_>, matched: &[MatchedPair]) -> Result<usize> {
+pub(super) fn output_bytes(
+    output: &JoinOutput<'_>,
+    matched: &dyn crate::operator::join::matches::Matches,
+) -> Result<usize> {
     let charges = output.admitted_charges.expect("flat output eligibility");
     let bytes = matched
         .iter()
         .try_fold(0_u64, |total, pair| {
             total
                 .checked_add(charges[pair.pos])?
-                .checked_add(output.opposite[pair.opposite_index].charge)
+                .checked_add(output.opposite.charge(pair.opposite_index))
         })
         .and_then(|bytes| usize::try_from(bytes).ok());
     bytes

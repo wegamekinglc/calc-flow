@@ -31,7 +31,12 @@ async fn assert_native_probe_resolves_each_distinct_key_once_before_both_window_
     let expiration_append = operator
         .state
         .left_expirations
-        .prepare_append(prepared.retained.len(), &context)
+        .prepare_append(
+            &prepared.retained,
+            &prepared.chunks.indices,
+            &context,
+            false,
+        )
         .await
         .unwrap();
     operator
@@ -223,19 +228,7 @@ async fn assert_sparse_generic_sql_has_no_owned_admission_rows() {
         BatchMetadata::default(),
     )
     .unwrap();
-    let prepared = operator
-        .prepare_batch("right", &opposite, &context)
-        .await
-        .unwrap();
-    let expiration = operator
-        .state
-        .right_expirations
-        .prepare_append(prepared.retained.len(), &context)
-        .await
-        .unwrap();
-    operator
-        .commit_prepared("right", prepared, true, expiration)
-        .unwrap();
+    commit_generic_opposite(&mut operator, &opposite, &context).await;
     let source = Batch::table(
         vec![
             record(
@@ -298,7 +291,12 @@ async fn assert_sparse_generic_sql_has_no_owned_admission_rows() {
     let expiration = operator
         .state
         .left_expirations
-        .prepare_append(prepared.retained.len(), &context)
+        .prepare_append(
+            &prepared.retained,
+            &prepared.chunks.indices,
+            &context,
+            false,
+        )
         .await
         .unwrap();
     operator
@@ -310,6 +308,26 @@ async fn assert_sparse_generic_sql_has_no_owned_admission_rows() {
         &context,
     ))
     .await;
+}
+
+async fn commit_generic_opposite(
+    operator: &mut StreamJoinOperator,
+    opposite: &Batch,
+    context: &StreamOperatorContext<'_>,
+) {
+    let prepared = operator
+        .prepare_batch("right", opposite, context)
+        .await
+        .unwrap();
+    let expiration = operator
+        .state
+        .right_expirations
+        .prepare_append(&prepared.retained, &prepared.chunks.indices, context, false)
+        .await
+        .unwrap();
+    operator
+        .commit_prepared("right", prepared, true, expiration)
+        .unwrap();
 }
 
 fn generic_sql_operator(
@@ -395,7 +413,7 @@ async fn assert_generic_post_restore(
         .await
         .unwrap();
     assert_eq!(prepared.admitted.row(0).row_id, 7);
-    assert_eq!(prepared.output[0].pos, 0);
+    assert_eq!(matches::Matches::pair(&prepared.output, 0).pos, 0);
     assert_eq!(prepared.next_row_id, 8);
     assert_eq!(prepared.metrics.null_key_rows, 3);
     assert_generic_materialized(&restored, &prepared, 1);

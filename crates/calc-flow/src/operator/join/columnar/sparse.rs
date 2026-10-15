@@ -196,7 +196,8 @@ impl StreamJoinOperator {
                 row: offset,
             };
             payload.mark_live(index);
-            self.sparse_rows_mut(port)[index].record = payload.clone();
+            self.sparse_rows_mut(port)
+                .replace_payload(index, payload.clone());
             self.state
                 .deltas
                 .pending

@@ -186,7 +186,7 @@ struct Encoder {
 }
 
 pub(super) fn base(
-    sides: [&[StoredRow]; 2],
+    sides: [&dyn crate::operator::join::Rows; 2],
     schemas: &[SchemaRef; 2],
     workspace: &MemoryReservation,
     check: &dyn Fn() -> Result<()>,
@@ -235,13 +235,13 @@ impl Encoder {
 
     fn side(
         &mut self,
-        rows: &[StoredRow],
+        rows: &dyn crate::operator::join::Rows,
         schema: SchemaRef,
         side: JoinSide,
         workspace: &MemoryReservation,
         check: &dyn Fn() -> Result<()>,
     ) -> Result<()> {
-        let ordered = ordered_rows(rows, workspace)?;
+        let ordered = ordered_rows(rows, workspace, check)?;
         let digest = if ordered.is_empty() {
             [0; 32]
         } else {
@@ -369,27 +369,50 @@ fn upsert(
     buffer.append(row.encoded_key)
 }
 
-fn ordered_rows<'a>(
-    rows: &'a [StoredRow],
+fn ordered_rows(
+    rows: &dyn crate::operator::join::Rows,
     workspace: &MemoryReservation,
-) -> Result<Vec<&'a StoredRow>> {
-    accounting::reserve(
-        workspace,
-        accounting::vector_peak::<&StoredRow>(rows.len())?,
-    )?;
-    let mut ordered = rows.iter().collect::<Vec<_>>();
+    check: &dyn Fn() -> Result<()>,
+) -> Result<Vec<StoredRow>> {
+    accounting::reserve(workspace, accounting::vector_peak::<StoredRow>(rows.len())?)?;
+    let mut ordered = Vec::with_capacity(rows.len());
+    for reference in rows.references() {
+        check()?;
+        admit_payload_clone(
+            rows.payload(reference)
+                .owner()
+                .expect("retained payload owner"),
+            workspace,
+        )?;
+        ordered.push(rows.row(reference));
+    }
     ordered.sort_unstable_by_key(|row| row.row_id);
     Ok(ordered)
 }
 
 fn encode_index(
-    rows: &[&StoredRow],
+    rows: &[impl CheckpointRow],
     side: JoinSide,
     digest: &[u8; 32],
     credit: &MemoryReservation,
     retained: usize,
     check: &dyn Fn() -> Result<()>,
 ) -> Result<Vec<u8>> {
+    let mut index = start_index(rows, side, credit, retained, check)?;
+    for (position, row) in rows.iter().enumerate() {
+        check()?;
+        upsert(&mut index, row, digest, position)?;
+    }
+    index.into_bytes()
+}
+
+fn start_index<'a>(
+    rows: &[impl CheckpointRow],
+    side: JoinSide,
+    credit: &'a MemoryReservation,
+    retained: usize,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<PaidBuffer<'a>> {
     let capacity = add(32, upsert_bytes(rows, check)?)?;
     check()?;
     let mut index = PaidBuffer::exact(credit, retained, capacity)?;
@@ -397,11 +420,7 @@ fn encode_index(
     fixed[..16].copy_from_slice(&header(*BASE_MAGIC, side));
     fixed[16..24].copy_from_slice(&integer(rows.len())?);
     index.append(&fixed)?;
-    for (position, row) in rows.iter().enumerate() {
-        check()?;
-        upsert(&mut index, row, digest, position)?;
-    }
-    index.into_bytes()
+    Ok(index)
 }
 
 fn upsert_bytes(rows: &[impl CheckpointRow], check: &dyn Fn() -> Result<()>) -> Result<usize> {

@@ -1,5 +1,5 @@
 use super::super::{
-    AdmittedBatch, JoinTimeBounds, StoredRow,
+    AdmittedBatch, JoinTimeBounds,
     checkpoint_v2::ContainerFunding,
     native_lookup::{NativeIndex, NativeKeys},
 };
@@ -10,7 +10,7 @@ pub(super) struct ProbeInputs {
     pub(super) admitted: AdmittedBatch,
     pub(super) keys: Option<NativeKeys>,
     pub(super) slots: Vec<Option<u32>>,
-    pub(super) opposite: Option<Arc<Vec<StoredRow>>>,
+    pub(super) opposite: Option<Arc<crate::operator::join::StateRows>>,
     pub(super) index: Option<Arc<NativeIndex>>,
     pub(super) containers: Option<Arc<ContainerFunding>>,
     pub(super) bounds: JoinTimeBounds,

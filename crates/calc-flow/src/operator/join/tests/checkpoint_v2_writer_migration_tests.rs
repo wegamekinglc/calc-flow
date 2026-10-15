@@ -205,12 +205,20 @@ fn assert_final(join: &StreamJoinOperator) {
     let mut left = join.state.left.iter().collect::<Vec<_>>();
     left.sort_by_key(|row| row.row_id);
     assert_eq!(left.len(), 4);
-    assert_row(left[0], 1, 96, 148, "猫", "blue", Some(&[2, 3]));
-    assert_row(left[1], 2, 97, 135, "新", "green", None);
-    assert_row(left[2], 3, 97, 141, "ok", "red", Some(&[9]));
-    assert_row(left[3], 4, 98, 141, "ok", "red", Some(&[9]));
+    assert_row(&left[0], 1, 96, 148, "猫", "blue", Some(&[2, 3]));
+    assert_row(&left[1], 2, 97, 135, "新", "green", None);
+    assert_row(&left[2], 3, 97, 141, "ok", "red", Some(&[9]));
+    assert_row(&left[3], 4, 98, 141, "ok", "red", Some(&[9]));
     assert_eq!(join.state.right.len(), 1);
-    assert_row(&join.state.right[0], 0, 100, 141, "ok", "red", Some(&[9]));
+    assert_row(
+        &join.state.right.at(0),
+        0,
+        100,
+        141,
+        "ok",
+        "red",
+        Some(&[9]),
+    );
     assert_eq!(
         (
             join.state.next_left_row_id,

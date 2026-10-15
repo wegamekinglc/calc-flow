@@ -213,7 +213,7 @@ impl StreamJoinOperator {
         }
         let bytes = counts
             .total
-            .checked_mul(size_of::<MatchedPair>())
+            .checked_mul(3 * size_of::<usize>())
             .ok_or_else(|| scratch_error(&self.name))?;
         let Some(fragments) = self.optional_credit(bytes)? else {
             return Ok(None);

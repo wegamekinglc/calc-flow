@@ -1,7 +1,8 @@
 use super::{
     CachedRetainedKeys, KEY_COLUMN_PREFIX, MAX_RETAINED_KEY_CACHE_BYTES_PER_SIDE, STATE_RID_COLUMN,
-    StoredRow, columnar::Quantum,
+    columnar::Quantum,
 };
+use crate::operator::join::retained::Rows;
 use crate::runtime::streaming::gather_work::RetirementGuard;
 use crate::{DataFusionRuntime, Result, StreamOperatorContext};
 use datafusion::{
@@ -107,12 +108,12 @@ impl StateKeys {
     }
 }
 
-fn supported(rows: &[StoredRow], indices: &[usize]) -> bool {
+fn supported(rows: &dyn Rows, indices: &[usize]) -> bool {
     !rows.is_empty()
         && indices.len() <= 15
-        && rows.iter().all(|row| {
+        && rows.references().all(|reference| {
             indices.iter().all(|&index| {
-                let array = row.record.column(index);
+                let array = rows.payload(reference).column(index);
                 array.nulls().is_none()
                     && matches!(array.data_type(), DataType::Int64 | DataType::UInt64)
             })
@@ -153,7 +154,7 @@ fn controls(columns: usize, rows: usize) -> Option<usize> {
 }
 
 async fn scratch_schema(
-    rows: &[StoredRow],
+    rows: &dyn Rows,
     indices: &[usize],
     context: &StreamOperatorContext<'_>,
     quantum: &mut Quantum,
@@ -161,11 +162,12 @@ async fn scratch_schema(
     let mut fields = Vec::with_capacity(indices.len() + 1);
     for (position, &index) in indices.iter().enumerate() {
         quantum.step(context, 16, 0).await?;
-        let source = rows[0].record.column(index);
+        let first = rows.references().next().expect("nonempty state");
+        let source = rows.payload(first).column(index);
         fields.push(Arc::new(Field::new(
             format!("{KEY_COLUMN_PREFIX}{position}"),
             source.data_type().clone(),
-            rows[0].record.schema_ref().field(index).is_nullable(),
+            rows.payload(first).schema_ref().field(index).is_nullable(),
         )));
     }
     fields.push(Arc::new(Field::new(
@@ -185,22 +187,22 @@ fn wrap_buffer(buffer: Buffer, funding: &Arc<ScratchFunding>) -> Buffer {
 }
 
 async fn copy_column<T: ArrowPrimitiveType>(
-    rows: &[StoredRow],
+    rows: &dyn Rows,
     index: usize,
     funding: &Arc<ScratchFunding>,
     context: &StreamOperatorContext<'_>,
     quantum: &mut Quantum,
 ) -> Result<ArrayRef> {
     let mut builder = PrimitiveBuilder::<T>::with_capacity(rows.len());
-    for row in rows {
+    for reference in rows.references() {
         quantum.step(context, 4, 2 * size_of::<T::Native>()).await?;
+        let row = rows.payload(reference);
         let source = row
-            .record
             .column(index)
             .as_any()
             .downcast_ref::<PrimitiveArray<T>>()
             .expect("scratch eligibility checks exact primitive types");
-        builder.append_value(source.value(row.record.offset()));
+        builder.append_value(source.value(row.offset()));
     }
     let (data_type, values, _) = builder.finish().into_parts();
     let values = ScalarBuffer::new(wrap_buffer(values.into_inner(), funding), 0, rows.len());
@@ -210,13 +212,14 @@ async fn copy_column<T: ArrowPrimitiveType>(
 }
 
 async fn key_column(
-    rows: &[StoredRow],
+    rows: &dyn Rows,
     index: usize,
     funding: &Arc<ScratchFunding>,
     context: &StreamOperatorContext<'_>,
     quantum: &mut Quantum,
 ) -> Result<ArrayRef> {
-    match rows[0].record.column(index).data_type() {
+    let first = rows.references().next().expect("nonempty state");
+    match rows.payload(first).column(index).data_type() {
         DataType::Int64 => copy_column::<Int64Type>(rows, index, funding, context, quantum).await,
         DataType::UInt64 => copy_column::<UInt64Type>(rows, index, funding, context, quantum).await,
         _ => unreachable!("scratch eligibility checks exact primitive types"),
@@ -224,17 +227,18 @@ async fn key_column(
 }
 
 async fn row_ids(
-    rows: &[StoredRow],
+    rows: &dyn Rows,
     funding: &Arc<ScratchFunding>,
     context: &StreamOperatorContext<'_>,
     quantum: &mut Quantum,
 ) -> Result<(ArrayRef, Vec<u64>)> {
     let mut ids = Vec::with_capacity(rows.len());
     let mut copied = Vec::with_capacity(rows.len());
-    for row in rows {
+    for reference in rows.references() {
         quantum.step(context, 4, 24).await?;
-        ids.push(row.row_id);
-        copied.push(row.row_id);
+        let row_id = rows.identity(reference).1;
+        ids.push(row_id);
+        copied.push(row_id);
     }
     let buffer = wrap_buffer(Buffer::from_vec(copied), funding);
     let values = ScalarBuffer::new(buffer, 0, rows.len());
@@ -246,7 +250,7 @@ async fn row_ids(
 
 pub(super) async fn state_keys(
     runtime: &DataFusionRuntime,
-    rows: &[StoredRow],
+    rows: &dyn Rows,
     indices: &[usize],
     context: &StreamOperatorContext<'_>,
 ) -> Result<Option<StateKeys>> {
@@ -294,7 +298,7 @@ fn reserve(runtime: &DataFusionRuntime, columns: usize, rows: usize) -> Option<M
 }
 
 async fn finish_keys(
-    rows: &[StoredRow],
+    rows: &dyn Rows,
     mut columns: Vec<ArrayRef>,
     funding: Arc<ScratchFunding>,
     context: &StreamOperatorContext<'_>,

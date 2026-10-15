@@ -57,7 +57,7 @@ fn test_merged_capture_keeps_segment_backing_separate_from_control_owners() {
     let (rows, record) = fixture();
     let (pool, workspace) = reservation(16 << 20);
     let mut output = base(
-        [&rows[..1], &[]],
+        [&rows[..1].to_vec(), &[]],
         &[record.schema(), record.schema()],
         &workspace,
         &|| Ok(()),

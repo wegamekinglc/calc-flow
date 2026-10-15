@@ -514,7 +514,15 @@ fn test_base_index_exact_capacity_preserves_geometric_wire_bytes() {
     assert_eq!((pool.reserved(), reference_pool.reserved()), (0, 0));
 
     let (empty_pool, empty_credit) = reservation(32);
-    let empty = encode_index(&[], JoinSide::Left, &[0; 32], &empty_credit, 0, &|| Ok(())).unwrap();
+    let empty = encode_index(
+        &[] as &[StoredRow],
+        JoinSide::Left,
+        &[0; 32],
+        &empty_credit,
+        0,
+        &|| Ok(()),
+    )
+    .unwrap();
     assert_eq!((empty.len(), empty.capacity()), (32, 32));
     assert_eq!(&empty[..16], &header(*BASE_MAGIC, JoinSide::Left));
     assert_eq!(&empty[16..], &[0; 16]);
