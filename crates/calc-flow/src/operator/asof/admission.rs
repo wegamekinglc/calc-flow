@@ -18,6 +18,7 @@ use datafusion::execution::memory_pool::MemoryReservation;
 use hashbrown::HashTable;
 use std::{collections::HashSet, hash::BuildHasher, sync::Arc};
 
+mod batch;
 mod direct;
 pub(super) mod parallel;
 mod right;
@@ -470,6 +471,38 @@ impl StreamAsofJoinOperator {
         if let Some(plan) = right {
             return plan.prepare(self, batch, input, identity_workspace, context);
         }
+        let general = match batch::plan(self, batch, input, context) {
+            Err(error)
+                if matches!(
+                    &error,
+                    crate::CalcFlowError::OperatorReason {
+                        reason_code: StreamingFailureReason::AsofWorkspaceLimitExceeded,
+                        ..
+                    }
+                ) =>
+            {
+                self.validate_duplicates_without_workspace(batch, input, context)
+                    .await?;
+                return Err(error);
+            }
+            result => result?,
+        };
+        if let Some(plan) = general {
+            return plan
+                .prepare(self, batch, input, identity_workspace, context)
+                .await;
+        }
+        self.prepare_legacy_admission(input, batch, identity_workspace, context)
+            .await
+    }
+
+    async fn prepare_legacy_admission(
+        &mut self,
+        input: ValidatedInput,
+        batch: &Batch,
+        identity_workspace: ReservedIdentities,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<Admission> {
         let InputIdentities {
             rows,
             duplicates,
@@ -982,6 +1015,27 @@ fn identities_are_after_state<'a>(
 }
 
 impl Admission {
+    pub fn permits_parallel_right(&self) -> bool {
+        self.right_columns
+            .as_ref()
+            .is_none_or(|columns| matches!(columns, right::Columns::General(_)))
+    }
+
+    pub fn right_identities(
+        &self,
+    ) -> impl Iterator<Item = (std::borrow::Cow<'_, LeftOrder>, AdmissionRef)> + '_ {
+        self.right_columns
+            .as_ref()
+            .into_iter()
+            .flat_map(|columns| columns.identities(&self.right_capacities))
+            .map(|(identity, reference)| (std::borrow::Cow::Owned(identity), reference))
+            .chain(
+                self.rows.iter().map(|(identity, reference)| {
+                    (std::borrow::Cow::Borrowed(identity), *reference)
+                }),
+            )
+    }
+
     pub fn len(&self) -> usize {
         if self.right_columns.is_some() {
             return self.right_capacities.iter().map(|(_, count)| count).sum();

@@ -30,7 +30,7 @@ pub(super) trait Rows: Send + Sync {
     }
 }
 
-#[cfg(any(test, feature = "benchmark-internals"))]
+#[cfg(any(test, feature = "benchmark-checkpoint-diagnostic"))]
 impl dyn Rows + '_ {
     pub(super) fn iter(&self) -> Box<dyn Iterator<Item = StoredRow> + Send + '_> {
         Box::new(self.indexed().map(|(_, row)| row))
@@ -196,7 +196,7 @@ impl StateRows {
     pub(super) fn key_at(&self, ordinal: usize) -> &Arc<super::columnar::FramedKey> {
         self.key(self.reference(ordinal))
     }
-    #[cfg(all(test, feature = "benchmark-internals"))]
+    #[cfg(all(test, feature = "benchmark-checkpoint-diagnostic"))]
     pub(super) fn replace_at(&mut self, ordinal: usize, row: StoredRow) {
         let reference = self.reference(ordinal);
         self.replace_payload(reference, row.record);
