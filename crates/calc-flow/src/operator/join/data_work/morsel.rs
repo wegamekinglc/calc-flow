@@ -17,6 +17,9 @@ use crate::{Batch, BatchMetadata, EdgeBudget, Result, StreamCollector, StreamOpe
 
 mod fallback;
 mod funding;
+#[cfg(test)]
+#[path = "../tests/morsel_tests/physical_funding.rs"]
+mod funding_tests;
 pub(super) use funding::pair_credit_bytes;
 
 pub(in crate::operator::join) struct DeferredProbe {
@@ -82,7 +85,19 @@ pub(in crate::operator::join) struct GatheredOutput(Vec<FundedMorsel>);
 struct FundedMorsel {
     // Array backing is destroyed before its funding.
     records: Vec<RecordBatch>,
-    _credit: MemoryReservation,
+    credit: MemoryReservation,
+}
+
+impl FundedMorsel {
+    fn new(records: Vec<RecordBatch>, credit: MemoryReservation) -> Option<Self> {
+        let result = Self { records, credit };
+        // Check Arrow capacities while scratch is alive. A kernel allocation
+        // change must not escape with an insufficient result lease.
+        let backing = result.records.iter().try_fold(0usize, |bytes, record| {
+            bytes.checked_add(record.get_array_memory_size())
+        })?;
+        (backing <= result.credit.size()).then_some(result)
+    }
 }
 
 impl ParallelCpuWork for GatherWork {
@@ -125,26 +140,17 @@ impl GatherWork {
         }
         let ranges = output.ranges(self.budget)?;
         stop.check()?;
-        let Some(credit) = self.admit_output(&output, ranges.len())? else {
+        let Some(credit) = self.admit_output(&output, ranges.len()) else {
             return Ok(None);
         };
         let records = self.collect_records(&output, ranges, stop)?;
-        Ok(Some(FundedMorsel {
-            records,
-            _credit: credit,
-        }))
+        Ok(FundedMorsel::new(records, credit))
     }
 
-    fn admit_output(
-        &self,
-        output: &JoinOutput<'_>,
-        records: usize,
-    ) -> Result<Option<MemoryReservation>> {
-        let Some(bytes) = funding::output_bytes(output, records)? else {
-            return Ok(None);
-        };
+    fn admit_output(&self, output: &JoinOutput<'_>, records: usize) -> Option<MemoryReservation> {
+        let bytes = funding::output_bytes(output, records)?;
         let credit = self.scratch.new_empty();
-        Ok(credit.try_grow(bytes).is_ok().then_some(credit))
+        credit.try_grow(bytes).is_ok().then_some(credit)
     }
 
     fn collect_records(
@@ -295,6 +301,23 @@ impl StreamJoinOperator {
 }
 
 impl GatheredOutput {
+    #[cfg(test)]
+    pub(in crate::operator::join) fn funding_for_test(&self) -> Vec<(usize, usize)> {
+        self.0
+            .iter()
+            .map(|morsel| {
+                (
+                    morsel
+                        .records
+                        .iter()
+                        .map(RecordBatch::get_array_memory_size)
+                        .sum(),
+                    morsel.credit.size(),
+                )
+            })
+            .collect()
+    }
+
     pub(in crate::operator::join) fn rows(&self) -> usize {
         self.0
             .iter()

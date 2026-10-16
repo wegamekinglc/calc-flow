@@ -63,10 +63,13 @@ refund. The pending dictionary already shares its key/ID scratch reservation.
 
 ## Verified source and checks
 
-Final Rust source: `e5987c9cb1ebe826834a980178451481fde8d751`.
+Original validated Rust source: `e5987c9cb1ebe826834a980178451481fde8d751`.
 `f49f89ef6f954d38bb2dacf03a322bdf1f4fb1a7` introduces the kernel; the final
 source commit adds the state-admission budget fix and its ledger regression.
 The subsequent results commit changes only this report and the JSON receipt.
+The later [nullable result funding correction](issue438-nullable-result-funding.md)
+fixes the independent review's P1. The checks and timings below retain their
+original source provenance; the correction records its own focused validation.
 
 All Rust builds used Rust 1.88.0, `CARGO_BUILD_JOBS=2`,
 `CARGO_PROFILE_DEV_DEBUG=0` and `CARGO_PROFILE_TEST_DEBUG=0`; Cargo.lock was

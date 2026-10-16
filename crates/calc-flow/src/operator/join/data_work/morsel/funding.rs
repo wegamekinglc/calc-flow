@@ -1,8 +1,7 @@
 use super::{GatherStop, GatherWork, JoinOutput, Result};
-use crate::operator::join::{
-    PayloadRef, STREAM_JOIN_STATE_ROW_OVERHEAD_BYTES_V1, columnar::RowPayload,
-    native_lookup::scratch_error,
-};
+use crate::operator::join::{MatchedPair, PayloadRef, columnar::RowPayload};
+use crate::operator::row_cost::{Offsets, fixed_width, variable_offsets};
+use datafusion::arrow::datatypes::DataType;
 
 const MAX_SCRATCH: usize = 512 * 1024 * 1024;
 const MAX_UNIT_OUTPUT: usize = 16 * 1024 * 1024;
@@ -12,7 +11,7 @@ pub(in crate::operator::join::data_work) fn pair_credit_bytes(
     pinned: usize,
 ) -> Option<usize> {
     let bytes = count
-        .checked_mul(size_of::<crate::operator::join::MatchedPair>() + 256)?
+        .checked_mul(size_of::<MatchedPair>() + 256)?
         .checked_sub(pinned)?;
     // The retained snapshot uses part of the existing pair allowance. Preserve
     // enough separate funding for both selection arrays in the serial fallback.
@@ -50,29 +49,72 @@ pub(super) fn owned_payloads(output: &JoinOutput<'_>, stop: &GatherStop) -> Resu
     Ok(true)
 }
 
-pub(super) fn output_bytes(output: &JoinOutput<'_>, records: usize) -> Result<Option<usize>> {
-    let bytes = output.matched.iter().try_fold(0u64, |total, pair| {
-        total.checked_add(payload_bytes(output, &pair)?)
-    });
-    let bytes = bytes
-        .and_then(|bytes| usize::try_from(bytes).ok())
-        .and_then(|bytes| bytes.checked_mul(2))
-        .and_then(|bytes| {
-            bytes.checked_add(records.checked_mul(output.schema.fields().len().checked_mul(4096)?)?)
-        })
-        .ok_or_else(|| scratch_error(output.operator_id))?;
-    Ok((bytes <= MAX_UNIT_OUTPUT).then_some(bytes))
+pub(super) fn output_bytes(output: &JoinOutput<'_>, records: usize) -> Option<usize> {
+    let (fixed, variable) = schema_bytes(output)?;
+    let bytes = fixed
+        .checked_mul(output.matched.len())?
+        .checked_add(variable_bytes(output, &variable)?)?;
+    funded_bytes(bytes, records, output.schema.fields().len())
 }
 
-fn payload_bytes(
-    output: &JoinOutput<'_>,
-    pair: &crate::operator::join::MatchedPair,
-) -> Option<u64> {
-    // Neither retained row metadata nor canonical key storage is copied to
-    // output. Keep payload/null allowances, including unprojected columns.
-    let overhead = (2 * STREAM_JOIN_STATE_ROW_OVERHEAD_BYTES_V1 + 16)
-        .checked_add(u64::try_from(output.opposite.key(pair.opposite_index).len()).ok()?)?;
-    output.admitted_charges.expect("flat morsel charges")[pair.pos]
-        .checked_add(output.opposite.charge(pair.opposite_index))?
-        .checked_sub(overhead)
+fn funded_bytes(bytes: usize, records: usize, columns: usize) -> Option<usize> {
+    // Buffer growth headroom plus per-array controls, bitmap padding and the
+    // terminal byte-array offset in each chunk. This is physical funding, not V1.
+    bytes
+        .checked_mul(2)?
+        .checked_add(records.checked_mul(columns.checked_mul(4096)?)?)
+        .filter(|&bytes| bytes <= MAX_UNIT_OUTPUT)
+}
+
+fn schema_bytes(output: &JoinOutput<'_>) -> Option<(usize, Vec<usize>)> {
+    let mut fixed = 0usize;
+    let mut variable = Vec::new();
+    for (ordinal, field) in output.schema.fields().iter().enumerate() {
+        let data_type = field.data_type();
+        // Null fixed-width values still occupy their full values buffer. One
+        // validity byte per row also covers bitmap rounding conservatively.
+        fixed = fixed
+            .checked_add(physical_width(data_type)?)?
+            .checked_add(1)?;
+        if data_type.is_string() || matches!(data_type, DataType::Binary | DataType::LargeBinary) {
+            variable.push(output.logical_column(ordinal));
+        }
+    }
+    Some((fixed, variable))
+}
+
+fn physical_width(data_type: &DataType) -> Option<usize> {
+    match data_type {
+        DataType::FixedSizeBinary(width) => usize::try_from(*width).ok(),
+        _ => fixed_width(data_type),
+    }
+}
+
+fn variable_bytes(output: &JoinOutput<'_>, columns: &[usize]) -> Option<usize> {
+    if columns.is_empty() {
+        return Some(0);
+    }
+    output.matched.iter().try_fold(0usize, |total, pair| {
+        total.checked_add(selected_bytes(output, &pair, columns)?)
+    })
+}
+
+fn selected_bytes(output: &JoinOutput<'_>, pair: &MatchedPair, columns: &[usize]) -> Option<usize> {
+    let (left, right) = output.records(pair);
+    columns.iter().try_fold(0usize, |bytes, &index| {
+        let (payload, column) = if index < left.num_columns() {
+            (left, index)
+        } else {
+            (right, index - left.num_columns())
+        };
+        bytes.checked_add(value_bytes(payload, column)?)
+    })
+}
+
+fn value_bytes(payload: PayloadRef<'_>, column: usize) -> Option<usize> {
+    let row = payload.offset();
+    match variable_offsets(payload.columns()[column].as_ref())? {
+        Offsets::Narrow(offsets) => usize::try_from(offsets[row + 1] - offsets[row]).ok(),
+        Offsets::Wide(offsets) => usize::try_from(offsets[row + 1] - offsets[row]).ok(),
+    }
 }

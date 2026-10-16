@@ -1018,6 +1018,9 @@ independently of completion order, without merging pair fragments or dispatching
 another column-gather job. Output chunk boundaries follow these stable ranges.
 Optional extra scratch is capped at 512 MiB per batch and result reservations at
 16 MiB per unit (64 MiB total), inside the unchanged runtime pool. Result funding
+uses the projected physical schema and selected byte-array values, including
+fixed-width values for null rows and validity buffers. Actual Arrow allocation
+sizes must also fit the lease before results leave the worker. Result funding
 stays alive through collector acceptance. These workspace caps do not change V1
 state charges or turn edge byte budgets into process-memory ceilings.
 
