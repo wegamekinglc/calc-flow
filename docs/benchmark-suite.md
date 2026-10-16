@@ -563,13 +563,34 @@ message's RecordBatch row counts without coalescing inputs.
 Serial samples exceeding process CPU = 2× their target phase wall time are
 invalid. Parallel cases require explicit `cpu_budgets[case_id]` in the frozen
 collection plan, at most the assigned CPU count. Python uses `process_time_ns`;
-native components read process `utime + stime` with `getconf CLK_TCK` resolution.
+new native components use the safe `nix` wrapper for Linux
+`CLOCK_PROCESS_CPUTIME_ID`, reporting its actual `clock_getres` resolution in
+`calc-flow.phase-resources.v2`. This includes all process threads, including
+workers that exit before the final snapshot. Unavailable, backward or malformed
+process clocks and missing/zero resolution cannot produce measured evidence.
+Non-Linux native measurements remain unavailable. The optional, Linux-only
+`nix = 0.27.1` dependency is activated only by `benchmark-internals`.
 Both retain per-thread `schedstat` runtime and TID/start-time identity. Exited
 threads' CPU remains in the process total, with departed identities explicit.
 Thread endpoint snapshots bracket the process interval and are attribution
 diagnostics, not a replacement process clock. A native interval whose CPU plus
 two resolution ticks cannot establish its budget remains inconclusive, including
 zero-tick short callbacks. Missing CPU evidence cannot complete acceptance.
+
+Historical v1 `utime + stime`/`CLK_TCK` records remain unchanged: a 10ms tick
+cannot certify a shorter callback. Unknown clock names are rejected; v2 requires
+the process clock and a positive finite resolution. Thread sums cannot replace
+process totals, and the serial 2× gate is unchanged.
+
+The closed overlay adds only the existing pinned nix package to calc-flow's
+lock dependency list, seals the exact effective lock bytes, and retains the
+original product lock fingerprint. No package version or checksum is replaced.
+Both B/C overlays receive the same benchmark dependency. Existing instrumented
+binaries cannot be relabeled with the new clock: eight native artifacts and two
+traced wheels need new overlays, real builds and attestations. Ordinary wheels
+need new source/audit records under the shared build contract; helper changes
+alone do not establish a need to recompile their machine code. Cache hits must be
+real and installed bytes must still be checked.
 
 The native check-only `join_layout_controls` component executes production Join
 and ASOF callbacks for single-record, sliced multi-record `[7, 9, 8]`, recurring
@@ -623,6 +644,19 @@ and is compiled on both products, so historical pure-handler timings are never
 compared against checkpoint-preparation timings.
 
 ### Current-milestone Join/ASOF acquisition (#443)
+
+The October 16 frozen run compared B `aaf793a3` with C `c7e8657d`, using original
+build tool `9c513611` and execution tool `64bbc6a4` (the same tree as guarded
+main `8e26b190`, a different commit). It accepted 1,026 measured calls and 104
+warmups, rejected one measured call at the unchanged process CPU gate, and left
+849 planned calls unstarted. The rejected 1.371196ms handler reported 10ms CPU
+at 10ms resolution; it does not prove a real CPU regression. Preserve the
+rejection and earlier zero-tick inconclusive evidence. Join/ASOF and
+snapshot/restore absolute misses remain separate from that clock limitation.
+Row 5 is incomplete; genuine during-compaction, row 7/8, ASOF10M, interval1M,
+native OFF runtime evidence and allocation coverage remain outstanding. The
+ASOF single-CPU ON baseline advanced epochs in only 13/20 measured samples.
+No clock fix completes these targets or allows new samples to fill old indices.
 
 `calc-flow.issue406-milestone.v1` is the current acquisition policy in
 `scripts/benchmark_suite/issue406_milestone.py`. Historical v2/v3 plans,

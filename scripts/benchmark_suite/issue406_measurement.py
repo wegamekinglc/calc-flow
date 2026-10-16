@@ -52,6 +52,9 @@ class PhaseClock:
             "wall_seconds": wall,
             "process_cpu_seconds": cpu,
             "process_cpu_clock": "CLOCK_PROCESS_CPUTIME_ID",
+            "process_cpu_resolution_seconds": time.get_clock_info(
+                "process_time"
+            ).resolution,
             "thread_clock": "linux-task-schedstat-runtime-ns",
             "thread_boundary": "thread snapshots bracket the process CPU interval",
             "threads": [
@@ -103,13 +106,15 @@ def validate_cpu_evidence(
 def _validate_cpu_header(evidence: dict) -> None:
     if (
         not isinstance(evidence, dict)
-        or evidence.get("schema") != "calc-flow.phase-resources.v1"
+        or evidence.get("schema")
+        not in ("calc-flow.phase-resources.v1", "calc-flow.phase-resources.v2")
         or evidence.get("status") != "measured"
     ):
         raise ValueError("missing measured process CPU/per-thread runtime evidence")
 
 
 def _validate_cpu_clocks(evidence: dict) -> None:
+    _validate_clock_metadata(evidence)
     if (
         not _finite(evidence.get("wall_seconds"))
         or evidence["wall_seconds"] <= 0
@@ -117,6 +122,26 @@ def _validate_cpu_clocks(evidence: dict) -> None:
         or evidence["process_cpu_seconds"] < 0
     ):
         raise ValueError("missing measured process CPU/per-thread runtime evidence")
+
+
+def _validate_clock_metadata(evidence: dict) -> None:
+    clock = evidence.get("process_cpu_clock")
+    if clock is not None and clock not in (
+        "CLOCK_PROCESS_CPUTIME_ID",
+        "linux-proc-stat-utime-stime",
+    ):
+        raise ValueError("unknown process CPU clock")
+    if evidence["schema"] == "calc-flow.phase-resources.v2":
+        if clock != "CLOCK_PROCESS_CPUTIME_ID":
+            raise ValueError("v2 requires a high precision process CPU clock")
+        _validate_resolution(evidence.get("process_cpu_resolution_seconds"))
+    elif "process_cpu_resolution_seconds" in evidence:
+        _validate_resolution(evidence["process_cpu_resolution_seconds"])
+
+
+def _validate_resolution(resolution: object) -> None:
+    if not _finite(resolution) or resolution <= 0:
+        raise ValueError("invalid process CPU clock resolution")
 
 
 def _validate_cpu_threads(evidence: dict) -> None:

@@ -32,10 +32,21 @@ def commit(root: Path) -> None:
     )
 
 
+def clock_lock_fixture() -> str:
+    return (
+        'version = 4\n[[package]]\nname = "calc-flow"\nversion = "1"\n'
+        'dependencies = [\n "parking_lot",\n]\n'
+        '[[package]]\nname = "nix"\nversion = "0.27.1"\n'
+        'source = "registry+https://github.com/rust-lang/crates.io-index"\n'
+        'checksum = "2eb04e9c688eff1c89d72b407f168cf79b'
+        'b9e867a9d3323ed6c01519eb9cc053"\n'
+    )
+
+
 def fixtures(root: Path) -> tuple[Path, Path]:
     baseline, candidate = root / "baseline", root / "candidate"
     for source, label in ((baseline, "main"), (candidate, "candidate")):
-        checkout(source, b"old bench", lock="version = 4\npackage = []\n")
+        checkout(source, b"old bench", lock=clock_lock_fixture())
         for relative in harness.COPIED_FILES:
             path = source / relative
             path.parent.mkdir(parents=True, exist_ok=True)
