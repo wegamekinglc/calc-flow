@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import subprocess
+import sys
 import traceback
 import unittest
 from pathlib import Path
@@ -26,9 +26,15 @@ def _version_note(name: str) -> str:
 def _cargo_tree_output(arguments: list[str]) -> str:
     try:
         return command_output(arguments, cwd=ROOT)
-    except subprocess.CalledProcessError as error:
-        error.add_note(f"Cargo feature query stdout:\n{error.stdout or '<empty>'}")
-        error.add_note(f"Cargo feature query stderr:\n{error.stderr or '<empty>'}")
+    except Exception as error:
+        error.add_note(
+            "Cargo feature query stdout:\n"
+            f"{getattr(error, 'stdout', None) or '<empty>'}"
+        )
+        error.add_note(
+            "Cargo feature query stderr:\n"
+            f"{getattr(error, 'stderr', None) or '<empty>'}"
+        )
         error.add_note("\n".join(_version_note(name) for name in ("cargo", "rustc")))
         raise
 
@@ -67,14 +73,27 @@ class PythonConnectorFeatureTests(unittest.TestCase):
         self.assertLessEqual(KAFKA_PACKAGES, dependencies)
 
 
+def _failed_command(stdout: str, stderr: str) -> Exception:
+    try:
+        command_output(
+            [
+                sys.executable,
+                "-c",
+                "import sys; print(sys.argv[1]); "
+                "print(sys.argv[2], file=sys.stderr); sys.exit(101)",
+                stdout,
+                stderr,
+            ],
+            cwd=ROOT,
+        )
+    except Exception as error:
+        return error
+    raise AssertionError("failure fixture unexpectedly succeeded")
+
+
 class CargoFeatureDiagnosticsTests(unittest.TestCase):
     def test_failed_query_exposes_streams_and_versions_in_traceback(self) -> None:
-        error = subprocess.CalledProcessError(
-            101,
-            ["cargo", "tree"],
-            output="partial dependency graph",
-            stderr="registry unavailable",
-        )
+        error = _failed_command("partial dependency graph", "registry unavailable")
         with (
             patch(
                 f"{__name__}.require_executable",
@@ -84,7 +103,7 @@ class CargoFeatureDiagnosticsTests(unittest.TestCase):
                 f"{__name__}.command_output",
                 side_effect=[error, "cargo 1.88.0", "rustc 1.88.0"],
             ),
-            self.assertRaises(subprocess.CalledProcessError) as caught,
+            self.assertRaises(type(error)) as caught,
         ):
             _python_test_dependencies(
                 "--no-default-features", "--features", "connector-kafka"
@@ -98,9 +117,7 @@ class CargoFeatureDiagnosticsTests(unittest.TestCase):
         self.assertIn("rustc 1.88.0", rendered)
 
     def test_version_probe_failures_preserve_original_cargo_error(self) -> None:
-        error = subprocess.CalledProcessError(
-            101, ["cargo", "tree"], output="", stderr="original cargo failure"
-        )
+        error = _failed_command("", "original cargo failure")
         with (
             patch(
                 f"{__name__}.require_executable",
@@ -114,7 +131,7 @@ class CargoFeatureDiagnosticsTests(unittest.TestCase):
                     RuntimeError("rustc missing"),
                 ],
             ),
-            self.assertRaises(subprocess.CalledProcessError) as caught,
+            self.assertRaises(type(error)) as caught,
         ):
             _python_test_dependencies(
                 "--no-default-features", "--features", "connector-kafka"
