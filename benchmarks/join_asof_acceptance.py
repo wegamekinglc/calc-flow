@@ -488,6 +488,10 @@ def _validate_ordering_case(case: dict) -> None:
 def prepare_acceptance_fixture(case: dict, root: Path) -> dict:
     """Prepare sealed inputs and compiler identity without a job or warmup."""
     destination = Path(case.get("fixture_root", root / "matched-fixture"))
+    if case["workload"] == "interval_join":
+        from benchmarks.interval_acceptance import prepare_interval_fixture
+
+        return prepare_interval_fixture(case, destination)
     if case.get("ordering_proof"):
         _validate_ordering_case(case)
         manifest = export_ordering_fixture(

@@ -186,6 +186,12 @@ from a clean candidate checkout with the selected baseline prepared. Keep the
 raw pairs, command/build provenance, and failure records. Dependency-drift
 acknowledgement does not waive incompatibility.
 
+Final Join/ASOF target acquisition uses the separate
+[current-milestone policy](../docs/benchmark-suite.md#current-milestone-joinasof-acquisition-443):
+47 semantic cases, both sealed B/C arms including OFF, fixed preparation-aware
+budgeting, absolute LOW/ON goals and separate formal/planning reports. Historical
+stopped collections are not resumed by this policy.
+
 ## Array measurement scopes
 
 Array benchmarks use the same deterministic elementwise, reduction, matrix

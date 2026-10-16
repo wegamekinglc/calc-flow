@@ -9,6 +9,13 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-16: Add a current-milestone Join/ASOF acceptance controller with both
+  sealed revisions in OFF, LOW and ON modes, absolute mode thresholds, ASOF10M
+  and interval1M planning cases, and a full interval output oracle. Charge actual
+  preparation time inside the fixed acquisition budget and retain historical
+  policies separately. This tooling preparation makes no performance claim;
+  genuine during-compaction handler overlap remains unmeasured.
+
 - 2026-10-16: Retain Join/ASOF ingress receivers through supervised failure
   publication and cancellation. Preserve the underlying operator reason and
   detail when preparation workers stop; upstream edge-close errors remain

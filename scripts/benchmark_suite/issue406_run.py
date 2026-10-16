@@ -16,6 +16,7 @@ from dataclasses import asdict, replace
 from pathlib import Path
 
 from scripts.benchmark_suite import issue406_fresh_v3 as v3
+from scripts.benchmark_suite import issue406_milestone as milestone
 from scripts.benchmark_suite.issue406_acceptance import (
     acceptance_inventory,
     validate_complete_results,
@@ -41,15 +42,22 @@ from scripts.benchmark_suite.report import ROUNDS, SAMPLES
 from scripts.benchmark_suite.rust_harness import _clean_revision
 from scripts.toolkit import fingerprint_json, sha256_file, write_json
 
-RUNTIME_WORKLOADS = ("join_sealed", "join_retained", "asof", "projection")
+RUNTIME_WORKLOADS = (
+    "join_sealed",
+    "join_retained",
+    "asof",
+    "projection",
+    "interval_join",
+)
 WORKER_RESPONSE_LIMIT = 32 << 20
-FRESH_SCHEMAS = (FRESH_SCHEMA, v3.SCHEMA)
+FRESH_SCHEMAS = (FRESH_SCHEMA, v3.SCHEMA, milestone.SCHEMA)
+VERIFIED_SCHEMAS = (v3.SCHEMA, milestone.SCHEMA)
 
 
-def collection_groups() -> tuple[tuple, ...]:
+def collection_groups(cases=None) -> tuple[tuple, ...]:
     """Share native fixture invocations while retaining every target metric."""
     groups = {}
-    for case in acceptance_inventory():
+    for case in acceptance_inventory() if cases is None else cases:
         key = f"shared-native-row-{case.row}" if case.row in (4, 5) else case.id
         groups.setdefault(key, []).append(case)
     return tuple(tuple(group) for group in groups.values())
@@ -84,21 +92,29 @@ async def collect(runner, output: Path) -> dict:
         write_json(output / "partial.json", report)
 
 
-async def _collect_round(runner, output, group, round_index, records):
+async def _collect_round(runner, output, group, round_index, records, *, budget=None):
+    async def invoke(side, index):
+        async def operation():
+            return await _invoke_collection(
+                runner, output, group, side, (round_index, index)
+            )
+
+        return (
+            await operation()
+            if budget is None
+            else await budget.invoke(side, operation)
+        )
+
     try:
         for side in group[0].sides:
-            samples = await _invoke_collection(
-                runner, output, group, side, (round_index, None)
-            )
+            samples = await invoke(side, None)
             _record_collection(
                 records, output, group, (side, round_index, None), samples
             )
         for index in range(SAMPLES):
             for side in pair_order(index):
                 if side in group[0].sides:
-                    samples = await _invoke_collection(
-                        runner, output, group, side, (round_index, index)
-                    )
+                    samples = await invoke(side, index)
                     _record_collection(
                         records, output, group, (side, round_index, index), samples
                     )
@@ -176,7 +192,9 @@ def validate_plan(plan: dict) -> None:
 
 
 def _validate_release_policy(plan, files):
-    if plan.get("schema") == v3.SCHEMA:
+    if plan.get("schema") == milestone.SCHEMA:
+        milestone.validate_releases(plan, files)
+    elif plan.get("schema") == v3.SCHEMA:
         v3.validate_releases(plan, files)
     elif plan.get("schema") == FRESH_SCHEMA:
         _validate_fresh_releases(plan, files)
@@ -187,7 +205,7 @@ def _validate_release_policy(plan, files):
 
 
 def _plan_build_harnesses(plan, side):
-    if plan.get("schema") == v3.SCHEMA:
+    if plan.get("schema") in VERIFIED_SCHEMAS:
         harness = plan.get("build_harness_git_sha", plan["harness_git_sha"])
         return harness, harness
     if plan.get("schema") == FRESH_SCHEMA:
@@ -242,6 +260,7 @@ class AcceptanceRunner:
         self.prepared_cases = {}
         self.retired = {}
         self.environments = {}
+        self.interval_fixtures = {}
         self.resources = []
         self.stop = asyncio.Event()
         self.dictionary_refusal_checked = False
@@ -273,6 +292,8 @@ class AcceptanceRunner:
         return self.plan["cpus"][: case.threads]
 
     def release(self, case, side) -> dict:
+        if self.plan.get("schema") == milestone.SCHEMA and side not in milestone.SIDES:
+            raise ValueError("milestone release selection is restricted to B/C")
         if side == "previous":
             from scripts.benchmark_suite.issue406_fresh import retained_cases
 
@@ -348,7 +369,7 @@ class AcceptanceRunner:
         return worker
 
     def _record_worker_invocation(self, root, process, case, release):
-        if self.plan.get("schema") == v3.SCHEMA:
+        if self.plan.get("schema") in VERIFIED_SCHEMAS:
             write_json(
                 root / "invocation.json",
                 {
@@ -369,7 +390,7 @@ class AcceptanceRunner:
             )
 
     async def _worker_request(self, worker, **message):
-        if self.plan.get("schema") != v3.SCHEMA:
+        if self.plan.get("schema") not in VERIFIED_SCHEMAS:
             return await worker.request(**message)
         root = Path(worker.log.name).parent
         with (root / "requests.jsonl").open("a", encoding="utf-8") as stream:
@@ -418,6 +439,10 @@ class AcceptanceRunner:
                 "candidate" if side == "previous" else side,
                 normalized[member.id],
             )
+            if self.plan.get("schema") == milestone.SCHEMA:
+                milestone.validate_sample(
+                    member, side, normalized[member.id], self.plan
+                )
         return normalized
 
     def _cpu_budget(self, case):
@@ -438,6 +463,20 @@ class AcceptanceRunner:
             )
         ):
             raise ValueError("raw runtime product or affinity differs from its release")
+        if (
+            self.plan.get("schema") == milestone.SCHEMA
+            and case.workload == "interval_join"
+        ):
+            fixture = raw.get("fixture", {})
+            identity = {
+                key: value for key, value in fixture.items() if key != "manifest_sha256"
+            }
+            digest = fingerprint_json(identity)
+            if (
+                fixture.get("manifest_sha256") != digest
+                or self.interval_fixtures.setdefault(case.id, digest) != digest
+            ):
+                raise ValueError("paired interval fixture identity changed")
 
     def _component_observations(self, group, raw):
         from scripts.benchmark_suite.native_components import validate_native_component
@@ -644,7 +683,10 @@ class AcceptanceRunner:
         destination = self.destination(group, side, round_index, index)
         destination.mkdir(parents=True, exist_ok=True)
         write_json(destination / "observation.json", raw)
-        if self.plan.get("schema") == v3.SCHEMA and raw.get("lifecycle") == "failed":
+        if (
+            self.plan.get("schema") in VERIFIED_SCHEMAS
+            and raw.get("lifecycle") == "failed"
+        ):
             self._validate_runtime_product(
                 group[0], raw, self.release(group[0], side)["product_commit"]
             )
@@ -1142,6 +1184,11 @@ def _initial_report(plan):
         },
         "scheduling_proofs": plan.get("scheduling_proofs", {}),
         **(v3.report_identity(plan) if plan.get("schema") == v3.SCHEMA else {}),
+        **(
+            milestone.report_identity(plan)
+            if plan.get("schema") == milestone.SCHEMA
+            else {}
+        ),
     }
 
 
@@ -1151,7 +1198,9 @@ def _require_v3_samples(plan, samples):
 
 
 def _validate_collection(plan, report):
-    if plan.get("schema") == v3.SCHEMA:
+    if plan.get("schema") == milestone.SCHEMA:
+        milestone.validate_results(report)
+    elif plan.get("schema") == v3.SCHEMA:
         v3.validate_complete_results(report)
     else:
         validate_complete_results(report)
@@ -1161,16 +1210,24 @@ def _failed_run_state(report):
     return "incomplete" if report.get("state") == "incomplete" else "stopped"
 
 
-async def run(plan: dict, output: Path) -> dict:
-    """Execute once, charging setup, preflight, collection, cleanup and sealing."""
-    started = (
+def _acquisition_started(plan):
+    if plan.get("schema") == milestone.SCHEMA:
+        return milestone.acquisition_start(plan)
+    return (
         time.monotonic()
         - plan.get("precharged_seconds", 0)
         - plan.get("startup_allowance_seconds", 0)
     )
+
+
+async def run(plan: dict, output: Path) -> dict:
+    """Execute once, charging setup, preflight, collection, cleanup and sealing."""
+    started = _acquisition_started(plan)
     _prepare_collection_output(output)
     runner = AcceptanceRunner(plan, output, started)
     report = _initial_report(plan)
+    if plan.get("schema") == milestone.SCHEMA:
+        report["preparation_elapsed_seconds"] = time.monotonic() - started
     collection = guard = None
     parent = asyncio.current_task()
     loop = asyncio.get_running_loop()
@@ -1204,9 +1261,12 @@ async def run(plan: dict, output: Path) -> dict:
         guard = asyncio.create_task(runner.resources_guard())
         from scripts.benchmark_suite.issue406_fresh import collect_fresh
 
-        collection = asyncio.create_task(
-            (collect_fresh if runner.fresh else collect)(runner, output)
+        collector = (
+            milestone.collect
+            if plan.get("schema") == milestone.SCHEMA
+            else (collect_fresh if runner.fresh else collect)
         )
+        collection = asyncio.create_task(collector(runner, output))
         report = await _await_collection_result(report, collection, guard, remaining)
         report["assessment"]["environment_suitable"] = True
         _validate_collection(plan, report)
@@ -1226,11 +1286,7 @@ async def run(plan: dict, output: Path) -> dict:
 
 async def _run_cli(plan: dict, output: Path) -> dict:
     """Prevent the dedicated controller's final asyncio sweep from hanging."""
-    started = (
-        time.monotonic()
-        - plan.get("precharged_seconds", 0)
-        - plan.get("startup_allowance_seconds", 0)
-    )
+    started = _acquisition_started(plan)
     report = await run(plan, output)
     pending = {
         task
@@ -1289,10 +1345,22 @@ def main() -> int:
     import argparse
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("plan", type=Path)
-    parser.add_argument("output", type=Path)
-    parser.add_argument("--plan-sha256", required=True)
+    parser.add_argument("plan", type=Path, nargs="?")
+    parser.add_argument("output", type=Path, nargs="?")
+    parser.add_argument("--plan-sha256")
+    parser.add_argument("--begin-preparation", type=Path)
     args = parser.parse_args()
+    if args.begin_preparation is not None:
+        if (
+            args.plan is not None
+            or args.output is not None
+            or args.plan_sha256 is not None
+        ):
+            parser.error("preparation anchor creation cannot execute a collection")
+        milestone.begin_preparation(args.begin_preparation)
+        return 0
+    if args.plan is None or args.output is None or args.plan_sha256 is None:
+        parser.error("collection requires plan, output and --plan-sha256")
     if sha256_file(args.plan) != args.plan_sha256:
         raise ValueError("execution plan differs from the reviewed seal")
     report = asyncio.run(_run_cli(json.loads(args.plan.read_text()), args.output))
@@ -1375,15 +1443,18 @@ def _validate_plan_binaries(
     build_harness: str,
     enabled_builds: dict,
 ) -> None:
-    expected_binaries = _plan_binary_inventory(side)
+    expected_binaries = _plan_binary_inventory(
+        side, current=plan.get("schema") == milestone.SCHEMA
+    )
     if set(plan["native_binaries"][side]) != expected_binaries:
         raise ValueError("native binary inventory omits or adds an acceptance arm")
     for name in plan["native_binaries"][side]:
         target, mode, build = _validate_plan_binary(
             plan, side, name, files, build_harness
         )
-        if mode == "enabled":
-            previous = enabled_builds.setdefault(target, build["artifacts"])
+        if mode == "enabled" or plan.get("schema") == milestone.SCHEMA:
+            key = (target, mode) if plan.get("schema") == milestone.SCHEMA else target
+            previous = enabled_builds.setdefault(key, build["artifacts"])
             if previous != build["artifacts"]:
                 raise ValueError("paired compiled dependency/profile inventory differs")
 
@@ -1494,7 +1565,11 @@ def _seal_fresh_report(plan, output, started, report, resources):
     report.update(
         elapsed_seconds=time.monotonic() - started,
         budget_seconds=plan["budget_seconds"],
-        precharged_seconds=plan.get("precharged_seconds", 0),
+        **(
+            {"precharged_seconds": plan.get("precharged_seconds", 0)}
+            if plan.get("schema") != milestone.SCHEMA
+            else {}
+        ),
         startup_allowance_seconds=plan["startup_allowance_seconds"],
         final_seal_allowance_seconds=allowance,
         budget_satisfied=time.monotonic() < deadline,
@@ -1550,6 +1625,10 @@ def _write_fresh_summary(output, report, deadline):
         )
 
         summarize_acceptance, render_acceptance_markdown = summarize_v3, render_v3
+    elif report.get("execution_schema") == milestone.SCHEMA:
+        from scripts.benchmark_suite.issue406_milestone_report import render, summarize
+
+        summarize_acceptance, render_acceptance_markdown = summarize, render
     if time.monotonic() >= deadline:
         _expire_fresh_report(output, report)
         return False
@@ -1571,6 +1650,16 @@ def _expire_fresh_report(output, report):
         budget_satisfied=False,
     )
     report["assessment"]["environment_suitable"] = False
+    if report.get("execution_schema") == milestone.SCHEMA:
+        from scripts.benchmark_suite.issue406_milestone_report import (
+            aborted_summary,
+            render,
+        )
+
+        summary = aborted_summary(report)
+        write_json(output / "summary.json", summary)
+        (output / "performance.md").write_text(render(summary), encoding="utf-8")
+        return
     if report.get("execution_schema") == v3.SCHEMA:
         _write_aborted_v3(output, report)
         return
@@ -1772,7 +1861,9 @@ def _validate_plan_cpus(plan):
 
 
 def _validate_plan_envelope(plan):
-    if plan.get("schema") == v3.SCHEMA:
+    if plan.get("schema") == milestone.SCHEMA:
+        milestone.validate_envelope(plan)
+    elif plan.get("schema") == v3.SCHEMA:
         v3.validate_envelope(plan)
     elif plan.get("schema") == FRESH_SCHEMA:
         from scripts.benchmark_suite.issue406_fresh import validate_envelope
@@ -1820,7 +1911,7 @@ def _validate_plan_traced_installation(traced, files):
 
 
 def _validate_plan_reconstruction(plan, side, reconstruction):
-    if plan.get("schema") == v3.SCHEMA and reconstruction is not None:
+    if plan.get("schema") in VERIFIED_SCHEMAS and reconstruction is not None:
         raise ValueError("v3 forbids historical helper reconstruction")
     if plan.get("schema") == FRESH_SCHEMA:
         from scripts.benchmark_suite.issue406_reuse import helper_reconstruction
@@ -1870,7 +1961,7 @@ def _validate_plan_binary(plan, side, name, files, build_harness):
     if files.get(descriptor["path"]) != descriptor["sha256"]:
         raise ValueError("native benchmark is missing from the sealed inventory")
     target, mode = name.split("/")
-    if side == "baseline" and mode == "off":
+    if side == "baseline" and mode == "off" and plan.get("schema") != milestone.SCHEMA:
         raise ValueError("main does not support checkpoint-off")
     record = _validate_source_attestation(
         plan,
@@ -1905,7 +1996,7 @@ def _plan_native_compatibility(plan, side):
 def _validate_source_attestation(
     plan, output, target, *, compatibility=None, reconstruction=None
 ):
-    if plan.get("schema") == v3.SCHEMA:
+    if plan.get("schema") in VERIFIED_SCHEMAS:
         if compatibility is not None or reconstruction is not None:
             raise ValueError("v3 forbids historical source exceptions")
         source = plan.get("build_harness_source")
@@ -1928,11 +2019,13 @@ def _plan_python_sources():
     } | {str(ROOT / "scripts/toolkit.py")}
 
 
-def _plan_binary_inventory(side):
+def _plan_binary_inventory(side, *, current=False):
     return {
         f"{target}/{mode}"
         for target in ("stream_join_perf", "stream_asof_e2e")
-        for mode in (("enabled",) if side == "baseline" else ("enabled", "off"))
+        for mode in (
+            ("enabled",) if side == "baseline" and not current else ("enabled", "off")
+        )
     }
 
 

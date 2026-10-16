@@ -608,6 +608,90 @@ when replacing an older source. Its revised timing boundary uses new case IDs
 and is compiled on both products, so historical pure-handler timings are never
 compared against checkpoint-preparation timings.
 
+### Current-milestone Join/ASOF acquisition (#443)
+
+`calc-flow.issue406-milestone.v1` is the current acquisition policy in
+`scripts/benchmark_suite/issue406_milestone.py`. Historical v2/v3 plans,
+their exact revisions, third-product retained controls, recognized failures and
+stopped observations remain historical. The new policy uses only its sealed
+baseline and candidate for every pair, including all twelve formerly missing
+baseline OFF arms. Both products require enabled and OFF builds of
+`stream_join_perf` and `stream_asof_e2e`, plus ordinary and traced wheels with
+the existing source, compiler, dependency, installed-member and artifact audits.
+The build, execution and harness SHA fields must identify one clean tool commit;
+no historical compatibility or controller-repair exception applies.
+
+After this tooling change is integrated, freeze new exact B/C and tool SHAs;
+the preflight's `6ad1e957` is not automatically a future then-main. Sealed ordinary
+wheels must record the build tool's `harness_git_sha` in their audited metadata.
+All supplied descriptors and installed native/binary bytes remain hash checked.
+An OFF sample requires successful cleanup and disabled checkpoint evidence;
+source support for the switch alone is not proof of true OFF execution.
+
+The inventory contains the original 38 semantic cases plus ASOF 10M per side
+on one CPU in three checkpoint modes and interval Join 1M per side on one/32
+CPUs in three modes. The interval path reuses the maintained workload and graph,
+seals both Arrow inputs, project, submission order and full output oracle, and
+checks both sequence identities, multiplicities, types and values. Its processing
+clock submits interleaved events without the ASOF one-output-per-input barrier.
+New workload observations use the same process/per-thread CPU, resource guard,
+release provenance and lifecycle validation as the original runtime cases.
+
+The fixed counts are **47 semantic cases / 45 physical groups / 94 semantic
+arms / 90 physical arms**. Row 4's capture/restore metrics and row 5's two handler
+metrics each share a physical observation. Two rounds of ten adjacent AB/BA
+pairs, with one discarded warmup per arm per round, yield **1,800 measured calls
+and 180 warmups, or 1,980 physical calls**. These are not process-start counts;
+fixture preparation, correctness controls and preflight operations are additional
+work inside the same total budget. No historical `cff` control is added.
+
+Builds are separate. Before any collection preparation, create a new accounting
+anchor, then prepare and seal the plan and its artifact inventory:
+
+```bash
+python -m scripts.benchmark_suite.issue406_run \
+  --begin-preparation target/issue443/preparation.json
+# Prepare and review plan.json using the milestone ENVELOPE, inventory(),
+# cpu_budgets(), exact B/C release descriptors and sealed_files.
+python -m scripts.benchmark_suite.issue406_run \
+  target/issue443/plan.json target/issue443/results \
+  --plan-sha256 <sealed-plan-sha256>
+```
+
+The plan's `preparation_anchor` contains the anchor's path and SHA-256, also in
+`sealed_files`. The controller requires the same kernel boot and monotonic clock,
+and charges all elapsed time since that anchor: plan/fixture preparation,
+preflight, startup, oracle, warmup, collection, cleanup, analysis and sealing.
+It records actual `preparation_elapsed_seconds`; `precharged_seconds`, including
+an asserted zero, is forbidden. Creating an anchor cannot overwrite an old one
+or execute a collection. Never reset an anchor to recover spent collection time.
+
+The envelope is 5,400 seconds total, with collection cutoff at 4,800, settlement
+deadline at 5,100, a 300-second settlement reserve and five-second startup/seal
+allowances. Row 5 retains cumulative 360-second arm / 720-second group limits.
+Serial CPU is limited to 2× target wall time; every 32-CPU case explicitly
+declares 32×. Owned RSS must stay at most 24 GiB, available memory at least 4 GiB,
+output at most 20 GiB and free disk at least 10 GiB. Missing sources, inventory,
+CPU evidence, ownership cleanup or exhausted resources/budget stops acquisition.
+There is no retry, sample expansion, third product or automatic budget extension.
+
+Reports retain all eight formal conditions and separately list the tighter
+planning targets, including ASOF10M, interval1M and runtime 0.1 ms per actual
+input data batch. LOW and ON limits are the corresponding absolute OFF goal
+divided by 0.90 and 0.75, respectively. For example, Join1M single-CPU LOW/ON
+limits are 66.67/80 ms even when measured OFF takes 200 ms. ON also requires
+completed, advancing nonterminal epochs; a fast finite run without them remains
+unmeasured for periodic impact. The runtime floor divides each projection sample
+by its recorded input data-event count, checked against RecordBatch geometry.
+
+The paired revision gate remains two rounds with ten AB/BA pairs and the
+maintained median confidence intervals; cross-mode, cross-size and component
+medians are not temporal pairs. Row 5 remains unmeasured for genuine overlap:
+post-compaction, preparation, queue and combined clocks are diagnostics. Tool
+regressions and CI/90% coverage do not establish a performance result. This
+preparatory change starts neither release builds nor formal acquisition and
+does not close #443 or #406.
+
 ## Standalone paired measurements
 
 The optional `python -m scripts.release_performance` command measures ordinary
