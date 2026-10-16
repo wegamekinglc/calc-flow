@@ -9,6 +9,11 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-16: Retain Join/ASOF ingress receivers through supervised failure
+  publication and cancellation. Preserve the underlying operator reason and
+  detail when preparation workers stop; upstream edge-close errors remain
+  secondary to that failure.
+
 - 2026-10-16: Add bounded Join probe/gather morsels on the existing native pool.
   Large eligible batches use up to four stable input ranges, with global match
   limits and state admission before output work. Keep funded serial fallbacks,

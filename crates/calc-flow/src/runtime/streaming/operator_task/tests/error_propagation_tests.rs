@@ -288,3 +288,105 @@ async fn failed_single_operator_retains_endpoints_until_convergence() {
 async fn panicking_single_operator_retains_endpoints_until_convergence() {
     assert_single_operator_retains_endpoints(true).await;
 }
+
+fn limited_asof() -> (CompiledStreamOperator, Batch, Port) {
+    use crate::{AsofJoinSide, AsofStateLimits, StreamAsofJoinOperator, StreamAsofJoinSpec};
+    use datafusion::arrow::{
+        array::{Int64Array, TimestampMicrosecondArray, UInt64Array},
+        record_batch::RecordBatch,
+    };
+    let record = RecordBatch::try_from_iter([
+        (
+            "key",
+            Arc::new(Int64Array::from(vec![1, 1])) as datafusion::arrow::array::ArrayRef,
+        ),
+        (
+            "ts",
+            Arc::new(TimestampMicrosecondArray::from(vec![105, 106]).with_timezone("UTC")),
+        ),
+        ("sequence", Arc::new(UInt64Array::from(vec![0, 1]))),
+    ])
+    .unwrap();
+    let side = |prefix: &str| {
+        AsofJoinSide::new(
+            vec!["key".into()],
+            "ts".into(),
+            vec!["sequence".into()],
+            prefix.into(),
+        )
+        .unwrap()
+    };
+    let operator = StreamAsofJoinOperator::new(
+        "asof",
+        record.schema(),
+        record.schema(),
+        StreamAsofJoinSpec::new(
+            side("left"),
+            side("right"),
+            Duration::from_micros(10),
+            AsofStateLimits::new(1, 8_000_000).unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let output = operator.output_ports()[0].clone();
+    (
+        CompiledStreamOperator::StreamAsofJoin(Box::new(operator)),
+        Batch::table(vec![record], BatchMetadata::default()).unwrap(),
+        output,
+    )
+}
+
+#[tokio::test]
+async fn test_asof_admission_cleanup_preserves_reason_before_upstream_edge_close() {
+    let cancellation = CancellationToken::new();
+    let mut supervisor = TaskSupervisor::new(cancellation.clone());
+    let (ack, _acks) = mpsc::unbounded_channel();
+    let environment = TaskEnvironment {
+        job: StreamJobContext::new(7, "fingerprint", JsonMap::new(), None, cancellation.clone()),
+        ack,
+    };
+    let (operator, data, port) = limited_asof();
+    let budget = EdgeBudget::new(2, 1024).unwrap();
+    let (mut left, receiver) = crate::edge_channel("trades->asof", budget).unwrap();
+    let (_right, right_receiver) = crate::edge_channel("quotes->asof", budget).unwrap();
+    let (sink_output, mut sink) = crate::edge_channel("asof->sink", budget).unwrap();
+    left.send(StreamMessage::data(data.clone())).await.unwrap();
+    supervisor.spawn("operator:trades", async move {
+        left.send(StreamMessage::data(data.clone())).await?;
+        left.send(StreamMessage::data(data)).await
+    });
+    let (placeholder, _) = routed_operator(None);
+    let mut inputs = environment.inputs("asof", receiver, sink_output, placeholder);
+    inputs.operator = operator;
+    inputs.output_ports = BTreeMap::from([("output".into(), port)]);
+    let left = inputs.ingresses.remove("input").unwrap();
+    inputs.ingresses = BTreeMap::from([
+        ("left".into(), left),
+        (
+            "right".into(),
+            OperatorIngress::new("quotes->asof".into(), right_receiver),
+        ),
+    ]);
+    spawn_operator_task(&mut supervisor, inputs);
+    let report = tokio::time::timeout(Duration::from_secs(1), supervisor.join_all())
+        .await
+        .unwrap();
+    assert_eq!(report.primary_errors().len(), 1, "{report:?}");
+    assert_eq!(report.errors[0].task_id, TaskId::new(1), "{report:?}");
+    assert!(
+        matches!(&report.errors[0].error, CalcFlowError::OperatorReason {
+        reason_code: StreamingFailureReason::AsofStateLimitExceeded, message, ..
+        } if message == "stream_asof_join.limits.max_state_rows exceeded"),
+        "{report:?}"
+    );
+    assert!(matches!(
+        &report.errors[1].error,
+        CalcFlowError::EdgeClosed { .. }
+    ));
+    assert_eq!(supervisor.task_count(), 0);
+    assert!(
+        sink.recv().await.unwrap().is_none(),
+        "failed admission emits no match"
+    );
+}

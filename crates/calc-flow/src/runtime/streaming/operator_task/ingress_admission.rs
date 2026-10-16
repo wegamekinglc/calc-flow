@@ -5,9 +5,10 @@
 #[cfg(test)]
 use super::OperatorProgress;
 use super::{
-    AssertUnwindSafe, Batch, CalcFlowError, CancellationToken, CompiledStreamOperator, EventTime,
-    FutureExt, IngressProgress, OperatorCooperation, OperatorEdgeReceiver, OperatorInputProgress,
-    OperatorTaskInputs, Result, StreamMessage, StreamMessageKind, TaskId, mpsc, run_operator_loop,
+    AssertUnwindSafe, BTreeMap, Batch, CalcFlowError, CancellationToken, CompiledStreamOperator,
+    EventTime, FutureExt, IngressProgress, OperatorCooperation, OperatorEdgeReceiver,
+    OperatorIngress, OperatorInputProgress, OperatorTaskInputs, Result, StreamMessage,
+    StreamMessageKind, TaskId, contain_task_panic, mpsc, run_operator_loop,
 };
 use crate::operator::{
     AsofIngressPlan, JoinIngressPlan,
@@ -83,7 +84,7 @@ impl Receiver {
 }
 
 async fn prepare_ingress(
-    mut source: OperatorEdgeReceiver,
+    source: &mut OperatorEdgeReceiver,
     plan: Plan,
     ready: mpsc::Sender<Result<Envelope>>,
     mut watermark: Option<EventTime>,
@@ -139,7 +140,13 @@ async fn prepare_data(plan: &Plan, batch: &Batch, watermark: Option<EventTime>, 
 
 struct Tasks {
     stop: CancellationToken,
-    tasks: JoinSet<()>,
+    tasks: JoinSet<Completion>,
+}
+
+struct Completion {
+    name: String,
+    source: OperatorEdgeReceiver,
+    result: Result<()>,
 }
 
 #[cfg(test)]
@@ -198,7 +205,7 @@ impl Tasks {
         for (name, plan) in plans {
             let Some(plan) = plan else { continue };
             let ingress = inputs.ingresses.get_mut(&name).expect("planned ingress");
-            let source = ingress.receiver.take().expect("unprepared ingress");
+            let mut source = ingress.receiver.take().expect("unprepared ingress");
             let (sender, ready) = mpsc::channel(1);
             ingress.admission = Some(Receiver {
                 ready,
@@ -208,31 +215,53 @@ impl Tasks {
             let stop = stop.clone();
             let cancellation = inputs.context.job().cancellation().clone();
             let watermark = progress.get(&name).and_then(IngressProgress::watermark);
+            let task_id = inputs.context.task_id().unwrap_or(TaskId::new(0));
             #[cfg(test)]
             let observation_progress = inputs.progress.clone();
             tasks.spawn(async move {
                 #[cfg(test)]
-                let observation = Observation::new(name, observation_progress);
-                tokio::select! {
-                    biased;
-                    () = stop.cancelled() => {},
-                    () = cancellation.cancelled() => {},
-                    () = prepare_ingress(source, plan, sender, watermark, #[cfg(test)] &observation) => {},
-                }
+                let observation = Observation::new(name.clone(), observation_progress);
+                let result = contain_task_panic(task_id, async {
+                    tokio::select! {
+                        biased;
+                        () = stop.cancelled() => {},
+                        () = cancellation.cancelled() => {},
+                        () = prepare_ingress(&mut source, plan, sender, watermark, #[cfg(test)] &observation) => {},
+                    }
+                }).await;
+                Completion { name, source, result }
             });
         }
         Ok(Self { stop, tasks })
     }
 
-    async fn finish(mut self, task_id: Option<TaskId>) -> Result<()> {
+    async fn finish(
+        mut self,
+        ingresses: &mut BTreeMap<String, OperatorIngress>,
+        task_id: Option<TaskId>,
+    ) -> Result<()> {
         self.stop.cancel();
         let mut failure = None;
         while let Some(result) = self.tasks.join_next().await {
-            if let Err(error) = result {
-                failure.get_or_insert_with(|| CalcFlowError::TaskPanicked {
+            let result = match result {
+                Ok(Completion {
+                    name,
+                    source,
+                    result,
+                }) => {
+                    // Restore endpoints to the retained operator frame before
+                    // its failure is published. Teardown cannot create an
+                    // upstream EdgeClosed that races the original reason.
+                    ingresses.get_mut(&name).expect("prepared ingress").receiver = Some(source);
+                    result
+                }
+                Err(error) => Err(CalcFlowError::TaskPanicked {
                     task_id: task_id.map_or(0, TaskId::as_u64),
                     message: error.to_string(),
-                });
+                }),
+            };
+            if let Err(error) = result {
+                failure.get_or_insert(error);
             }
         }
         failure.map_or(Ok(()), Err)
@@ -254,7 +283,8 @@ pub(super) async fn run(
     let result = AssertUnwindSafe(run_operator_loop(inputs, progress, cooperation))
         .catch_unwind()
         .await;
-    let cleanup = tasks.finish(inputs.context.task_id()).await;
+    let task_id = inputs.context.task_id();
+    let cleanup = tasks.finish(&mut inputs.ingresses, task_id).await;
     match result {
         Ok(result) => cleanup.and(result),
         Err(payload) => std::panic::resume_unwind(payload),
@@ -282,7 +312,10 @@ pub(super) fn acknowledge(
 
 #[cfg(test)]
 mod tests {
-    use super::{CalcFlowError, CancellationToken, JoinSet, Tasks, oneshot};
+    use super::{
+        BTreeMap, CalcFlowError, CancellationToken, Completion, JoinSet, OperatorIngress, Tasks,
+        oneshot,
+    };
 
     #[tokio::test]
     async fn test_ingress_admission_panic_cleanup_joins_every_worker() {
@@ -290,14 +323,31 @@ mod tests {
         let waiting = stop.clone();
         let mut tasks = JoinSet::new();
         tasks.spawn(async { panic!("prepare worker failed") });
+        let (mut sender, receiver) =
+            crate::edge_channel("held", crate::EdgeBudget::default()).unwrap();
+        let mut ingress = OperatorIngress::new("held".into(), receiver);
+        let source = ingress.receiver.take().unwrap();
+        let mut ingresses = BTreeMap::from([("held".into(), ingress)]);
         let (exited, done) = oneshot::channel();
         tasks.spawn(async move {
             waiting.cancelled().await;
             exited.send(()).unwrap();
+            Completion {
+                name: "held".into(),
+                source,
+                result: Ok(()),
+            }
         });
-        let result = Tasks { stop, tasks }.finish(None).await;
+        let result = Tasks { stop, tasks }.finish(&mut ingresses, None).await;
         assert!(matches!(result, Err(CalcFlowError::TaskPanicked { .. })));
         done.await
             .expect("other workers must be joined before reporting panic");
+        let message = || crate::StreamMessage::watermark(crate::EventTime::from_micros(1));
+        sender.send(message()).await.unwrap();
+        drop(ingresses);
+        assert!(matches!(
+            sender.send(message()).await,
+            Err(CalcFlowError::EdgeClosed { .. })
+        ));
     }
 }
