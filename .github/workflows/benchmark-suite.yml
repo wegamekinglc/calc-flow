@@ -83,6 +83,7 @@ jobs:
           scripts.test_checkpoint_cycles
           scripts.test_issue406_acceptance
           scripts.test_issue406_build_identity
+          scripts.test_issue406_clock
           scripts.test_issue406_failures
           scripts.test_issue406_fresh
           scripts.test_issue406_fresh_harness
@@ -249,6 +250,7 @@ jobs:
             scripts.test_issue406_fresh_runner scripts.test_issue406_fresh_v3 \
             scripts.test_issue406_run scripts.test_issue406_groupby_diagnostic \
             scripts.test_issue406_measurement scripts.test_issue406_milestone \
+            scripts.test_issue406_sources \
             scripts.test_interval_acceptance
           PYTHONPATH=target/adapter-site:. JAX_PLATFORMS=cpu \
             target/benchmark-venv/bin/python -m pytest benchmarks/test_warm_stream.py -q
