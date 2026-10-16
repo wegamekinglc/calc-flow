@@ -77,7 +77,7 @@ class SourcePolicyTests(unittest.TestCase):
             **plan(),
             "source_policy": "calc-flow.issue406-build-execution.v1",
             "build_harness_git_sha": "e" * 40,
-            "build_harness_source": "/original/build-source",
+            "build_harness_source": str(Path.cwd() / "original/build-source"),
             "build_execution_diff": {"path": "sources.patch", "sha256": "f" * 64},
             "preparation_main_git_sha": "c" * 40,
         }
