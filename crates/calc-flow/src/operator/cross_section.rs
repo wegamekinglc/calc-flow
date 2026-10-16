@@ -5249,7 +5249,7 @@ mod tests {
         assert!(
             snapshot_segments(
                 &crate::OperatorStateSnapshot::default(),
-                &[descriptor.clone()]
+                std::slice::from_ref(&descriptor)
             )
             .is_err()
         );
@@ -5258,7 +5258,7 @@ mod tests {
             inline_metadata: JsonMap::new(),
             segments: BTreeMap::from([(segment_id.clone(), crate::StateSegment::new(vec![1]))]),
         };
-        assert!(snapshot_segments(&short, &[descriptor.clone()]).is_err());
+        assert!(snapshot_segments(&short, std::slice::from_ref(&descriptor)).is_err());
         let corrupt = crate::OperatorStateSnapshot {
             inline_metadata: JsonMap::new(),
             segments: BTreeMap::from([(
@@ -5266,7 +5266,7 @@ mod tests {
                 crate::StateSegment::new(vec![3, 2, 1]),
             )]),
         };
-        assert!(snapshot_segments(&corrupt, &[descriptor.clone()]).is_err());
+        assert!(snapshot_segments(&corrupt, std::slice::from_ref(&descriptor)).is_err());
         let valid = crate::OperatorStateSnapshot {
             inline_metadata: JsonMap::new(),
             segments: BTreeMap::from([(segment_id, segment)]),

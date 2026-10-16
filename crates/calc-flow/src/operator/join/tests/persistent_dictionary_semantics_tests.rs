@@ -409,11 +409,10 @@ impl MemoryPool for PublicationPool {
             .consumer()
             .name()
             .ends_with(":stream-join-dictionary")
+            && let Some(cancel) = self.cancel.lock().unwrap().take()
         {
-            if let Some(cancel) = self.cancel.lock().unwrap().take() {
-                self.cancellations.fetch_add(1, Ordering::SeqCst);
-                cancel.cancel();
-            }
+            self.cancellations.fetch_add(1, Ordering::SeqCst);
+            cancel.cancel();
         }
     }
     fn reserved(&self) -> usize {

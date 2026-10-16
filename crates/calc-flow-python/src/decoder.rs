@@ -136,10 +136,10 @@ impl PythonKafkaDecoder {
             .schema_plan
             .lock()
             .expect("the schema plan lock is never poisoned by planning");
-        if let Some((cached_spec, plan)) = &*cached {
-            if cached_spec.as_slice() == spec {
-                return Ok(Some(Arc::clone(plan)));
-            }
+        if let Some((cached_spec, plan)) = &*cached
+            && cached_spec.as_slice() == spec
+        {
+            return Ok(Some(Arc::clone(plan)));
         }
         let plan = schema_from_spec(spec).map_err(|error| self.failure(&error.to_string()))?;
         *cached = Some((spec.to_vec(), Arc::clone(&plan)));

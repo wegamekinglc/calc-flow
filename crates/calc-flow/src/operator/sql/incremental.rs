@@ -3140,7 +3140,8 @@ mod tests {
         assert_eq!(fields[1].data_type(), &DataType::Decimal256(60, 2));
         let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
         let reservation = MemoryConsumer::new("decimal-avg-partial").register(&pool);
-        let mut partial = PartialGroups::new(&[expression.clone()], reservation, "totals").unwrap();
+        let mut partial =
+            PartialGroups::new(std::slice::from_ref(&expression), reservation, "totals").unwrap();
         for slot in 0..1024 {
             partial.add_slot(slot, "totals").unwrap();
         }

@@ -1368,14 +1368,14 @@ async fn dispatch_message(
     )
     .await;
     #[cfg(feature = "benchmark-internals")]
-    if result.is_ok() {
-        if let Some(watermark) = benchmark_watermark {
-            inputs
-                .context
-                .job()
-                .dispatch_trace()
-                .complete_watermark(&inputs.node_id, watermark.as_micros());
-        }
+    if result.is_ok()
+        && let Some(watermark) = benchmark_watermark
+    {
+        inputs
+            .context
+            .job()
+            .dispatch_trace()
+            .complete_watermark(&inputs.node_id, watermark.as_micros());
     }
     observe_join_status(inputs, input_progress)?;
     observe_asof_status(inputs, input_progress.output_frontier);

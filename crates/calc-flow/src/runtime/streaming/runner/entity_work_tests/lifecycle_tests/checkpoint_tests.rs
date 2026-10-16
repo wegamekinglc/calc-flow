@@ -59,10 +59,9 @@ impl StreamSource for ResumedSource {
     async fn next(&mut self) -> Result<Option<SourceEvent>> {
         if self.source.source.0.front().is_some_and(
             |event| matches!(event, SourceEvent::Data { cursor, .. } if cursor.order() == [4]),
-        ) {
-            if let Some(gate) = self.second_batch.take() {
-                gate.notified().await;
-            }
+        ) && let Some(gate) = self.second_batch.take()
+        {
+            gate.notified().await;
         }
         self.source.next().await
     }

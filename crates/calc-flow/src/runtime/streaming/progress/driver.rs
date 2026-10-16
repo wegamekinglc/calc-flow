@@ -3813,13 +3813,12 @@ mod tests {
                 trace_records: 0,
             };
 
-            let error = match StreamProgressDriver::restore_durable(
+            let Err(error) = StreamProgressDriver::restore_durable(
                 &prepared,
                 ManualClock::new(LogicalInstant::ZERO),
                 &restored,
-            ) {
-                Ok(_) => panic!("noncanonical durable cursor unexpectedly restored"),
-                Err(error) => error,
+            ) else {
+                panic!("noncanonical durable cursor unexpectedly restored");
             };
 
             assert!(matches!(
@@ -4874,7 +4873,7 @@ mod tests {
         logical_clock_trace.push(LogicalInstant(next_instant));
         driver.drain_ready().unwrap();
 
-        let binding_order = if seed % 2 == 0 {
+        let binding_order = if seed.is_multiple_of(2) {
             ["left", "right"]
         } else {
             ["right", "left"]

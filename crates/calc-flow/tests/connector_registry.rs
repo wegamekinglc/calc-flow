@@ -397,9 +397,8 @@ fn sink_factory_resolves_and_default_transactional_open_is_none() {
 #[test]
 fn unknown_connector_fails_resolution_before_construction() {
     let snapshot = registry_with_file_connector().snapshot();
-    let error = match snapshot.resolve_source(&identity("kafka")) {
-        Ok(_) => panic!("unknown identity must fail"),
-        Err(error) => error,
+    let Err(error) = snapshot.resolve_source(&identity("kafka")) else {
+        panic!("unknown identity must fail");
     };
     match error {
         CalcFlowError::NotFound { resource, key } => {
@@ -562,7 +561,7 @@ impl SecretResolver for StaticResolver {
         } else {
             Err(CalcFlowError::NotFound {
                 resource: "secret".into(),
-                key: reference.key.to_string(),
+                key: reference.key.clone(),
             })
         }
     }

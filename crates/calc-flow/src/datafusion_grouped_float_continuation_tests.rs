@@ -142,7 +142,7 @@ fn seed(accumulator: &mut dyn GroupsAccumulator, dtype: &DataType, state: &Array
         .merge_batch(&[array(dtype, &reset)], &ranks, count)
         .unwrap();
     accumulator
-        .merge_batch(&[state.clone()], &ranks, count)
+        .merge_batch(std::slice::from_ref(state), &ranks, count)
         .unwrap();
 }
 

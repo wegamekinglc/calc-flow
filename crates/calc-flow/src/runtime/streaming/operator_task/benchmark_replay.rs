@@ -1005,10 +1005,10 @@ async fn run_owned(
 async fn process_fixture(replay: &mut Replay, fixture: &Fixture) -> Result<()> {
     for event in &fixture.processing {
         replay.event(event).await?;
-        if let Some(rows) = fixture.barriers.get(&event.id) {
-            if replay.output_rows() != *rows {
-                return Err(invalid("native rendezvous output count mismatch"));
-            }
+        if let Some(rows) = fixture.barriers.get(&event.id)
+            && replay.output_rows() != *rows
+        {
+            return Err(invalid("native rendezvous output count mismatch"));
         }
     }
     Ok(())

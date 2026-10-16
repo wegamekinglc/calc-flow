@@ -166,7 +166,10 @@ async fn collection_removes_every_unreachable_segment_and_preserves_retained_sta
     publish(lineage.as_ref(), &newer, b"newer").await;
 
     assert_eq!(
-        lineage.collect_orphans(&[retained.clone()]).await.unwrap(),
+        lineage
+            .collect_orphans(std::slice::from_ref(&retained))
+            .await
+            .unwrap(),
         2
     );
     assert_eq!(lineage.load_segment(&retained).await.unwrap(), b"retained");
@@ -195,7 +198,12 @@ async fn collection_stops_on_a_symbolic_link_without_deleting_valid_state() {
     let lineage_root = directory.path().join("committed").join(lineage_hash(&key));
     symlink(directory.path(), lineage_root.join("unexpected-link")).unwrap();
 
-    assert!(lineage.collect_orphans(&[retained.clone()]).await.is_err());
+    assert!(
+        lineage
+            .collect_orphans(std::slice::from_ref(&retained))
+            .await
+            .is_err()
+    );
     assert_eq!(lineage.load_segment(&retained).await.unwrap(), b"retained");
 }
 

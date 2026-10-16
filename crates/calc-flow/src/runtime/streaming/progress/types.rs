@@ -344,7 +344,7 @@ mod tests {
             binding_ordinal: BindingOrdinal::new(binding),
             local_sequence: LocalSequence(local),
         };
-        let mut keys = vec![
+        let mut keys = [
             key(ReadyClass::IdleTimer, 0, 0),
             key(ReadyClass::WatermarkTimer, 1, 0),
             key(ReadyClass::InputOrControl, 1, 1),

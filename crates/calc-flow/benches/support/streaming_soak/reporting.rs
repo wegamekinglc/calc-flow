@@ -169,7 +169,7 @@ pub(super) fn median_kib(values: &[u64]) -> Option<u64> {
     let mut sorted = values.to_vec();
     sorted.sort_unstable();
     let middle = sorted.len() / 2;
-    if sorted.len() % 2 == 0 {
+    if sorted.len().is_multiple_of(2) {
         Some(sorted[middle - 1].saturating_add(sorted[middle]) / 2)
     } else {
         Some(sorted[middle])
@@ -612,7 +612,7 @@ pub(super) fn publish_checkpoint_soak_evidence(
     )
 }
 
-const _: () = assert!(CHECKPOINT_RSS_STABLE_WINDOW_SAMPLES % 2 == 0);
+const _: () = assert!(CHECKPOINT_RSS_STABLE_WINDOW_SAMPLES.is_multiple_of(2));
 const _: () = assert!(
     CHECKPOINT_RSS_PROCESS_WARMUP_SAMPLES + CHECKPOINT_RSS_STABLE_WINDOW_SAMPLES
         == CHECKPOINT_SOAK_PROCESS_SAMPLE_COUNT

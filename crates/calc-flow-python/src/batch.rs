@@ -749,9 +749,9 @@ mod tests {
         Python::attach(|py| {
             let object = PyList::empty(py).unbind().into_any();
             let metadata = PyDict::new(py);
-            let error = match PyBatch::_from_external(object, String::new(), 0, metadata.as_any()) {
-                Ok(_) => panic!("an empty backend must be rejected"),
-                Err(error) => error,
+            let Err(error) = PyBatch::_from_external(object, String::new(), 0, metadata.as_any())
+            else {
+                panic!("an empty backend must be rejected");
             };
             assert!(error.is_instance_of::<crate::error::ConfigError>(py));
         });
@@ -879,15 +879,14 @@ mod tests {
                 .unwrap_err();
             assert!(error.is_instance_of::<PyValueError>(py));
 
-            let error = match PyBatch::_from_owned_array(
+            let Err(error) = PyBatch::_from_owned_array(
                 py,
                 output,
                 "numpy".into(),
                 Some(token.bind(py).borrow()),
                 metadata.as_any(),
-            ) {
-                Ok(_) => panic!("an ownership token must be one-use"),
-                Err(error) => error,
+            ) else {
+                panic!("an ownership token must be one-use");
             };
             assert_eq!(
                 error.value(py).to_string(),
