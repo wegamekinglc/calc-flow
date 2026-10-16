@@ -7,7 +7,8 @@ use super::OperatorProgress;
 use super::{
     AssertUnwindSafe, Batch, CalcFlowError, CancellationToken, CompiledStreamOperator, EventTime,
     FutureExt, IngressProgress, OperatorCooperation, OperatorEdgeReceiver, OperatorInputProgress,
-    OperatorTaskInputs, Result, StreamMessage, StreamMessageKind, TaskId, mpsc, run_operator_loop,
+    OperatorTaskInputs, Result, StreamMessage, StreamMessageKind, TaskFailureSignal, TaskId, mpsc,
+    run_operator_loop,
 };
 use crate::operator::{
     AsofIngressPlan, JoinIngressPlan,
@@ -243,6 +244,7 @@ pub(super) async fn run(
     inputs: &mut OperatorTaskInputs,
     progress: OperatorInputProgress,
     cooperation: OperatorCooperation,
+    failure_signal: Option<&TaskFailureSignal>,
 ) -> Result<()> {
     if !matches!(
         inputs.operator,
@@ -254,6 +256,13 @@ pub(super) async fn run(
     let result = AssertUnwindSafe(run_operator_loop(inputs, progress, cooperation))
         .catch_unwind()
         .await;
+    if !matches!(&result, Ok(Ok(())))
+        && let Some(signal) = failure_signal
+    {
+        // Preparation workers own the upstream receivers. Publish failure
+        // and cancel siblings before cleanup can close those edges.
+        signal.converge_after_failure().await;
+    }
     let cleanup = tasks.finish(inputs.context.task_id()).await;
     match result {
         Ok(result) => cleanup.and(result),
