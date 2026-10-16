@@ -9,6 +9,15 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-17: Fix the 2.1–2.2× streaming interval-join regression introduced
+  by PR #452 (chunked Join state and batch selections). Whole-selection match
+  iteration now walks a sequential cursor over runs in O(pairs + runs)
+  instead of binary-searching per pair, and output preflight caches row costs
+  by dense bounded indexing instead of per-pair `BTreeMap` nodes, restoring
+  the DAL-303 dense-cache bound with a gap-safe fallback. In interleaved A/B
+  runs of `engines/1000000/calc-flow-stream/interval_join`, timings fell
+  from 5086/5007 ms to 2042/2236 ms (2.3×), better than the pre-#452
+  parent's 2261–2518 ms; the 1:1 streaming join case is unchanged.
 - 2026-10-17: Anchor scheduled complete-benchmark baselines at the newest
   reachable `calc-flow-python-v*` release tag, falling back to the first
   parent only when no tag is reachable or the release commit is the head. The

@@ -89,9 +89,9 @@ fn gather_columns(
 ) -> Result<Vec<ArrayRef>> {
     let left_width = output.records(&matched.pair(0)).0.num_columns();
     let left_gather =
-        output_gather::SideGather::new(matched.iter().map(|pair| output.records(&pair).0));
+        output_gather::SideGather::new(matched.iter().map(|pair| output.side_record(&pair, true)));
     let right_gather =
-        output_gather::SideGather::new(matched.iter().map(|pair| output.records(&pair).1));
+        output_gather::SideGather::new(matched.iter().map(|pair| output.side_record(&pair, false)));
     output
         .schema
         .fields()
