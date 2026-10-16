@@ -78,12 +78,7 @@ def _revision(value) -> bool:
     return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}", value) is not None
 
 
-def validate_envelope(plan: dict) -> None:
-    """Reject drift in sources, modes, inventory, CPU limits or the fixed budget."""
-    if plan.get("schema") != SCHEMA or any(
-        plan.get(key) != value for key, value in ENVELOPE.items()
-    ):
-        raise ValueError("milestone acquisition differs from its fixed envelope")
+def _validate_revisions(plan: dict) -> list[str]:
     revisions = [plan.get(f"{side}_product_commit") for side in SIDES]
     harness = plan.get("harness_git_sha")
     if (
@@ -95,16 +90,19 @@ def validate_envelope(plan: dict) -> None:
         raise ValueError(
             "milestone requires exact distinct B/C and one sealed tool SHA"
         )
+    return revisions
+
+
+def _validate_release_revisions(plan: dict, revisions: list[str]) -> None:
     releases = plan.get("releases", {})
     if set(releases) != set(SIDES) or any(
         releases[side].get("product_commit") != revision
         for side, revision in zip(SIDES, revisions, strict=True)
     ):
         raise ValueError("milestone release differs from its sealed product revision")
-    if plan.get("cases") != [asdict(case) for case in inventory()]:
-        raise ValueError("milestone inventory must contain exactly 47 semantic cases")
-    if plan.get("cpu_budgets") != cpu_budgets():
-        raise ValueError("milestone requires serial 2x and explicit parallel 32x CPU")
+
+
+def _validate_milestone_exceptions(plan: dict) -> None:
     forbidden = {
         "retained_control",
         "native_harness_reuse",
@@ -119,13 +117,31 @@ def validate_envelope(plan: dict) -> None:
         raise ValueError(
             "milestone forbids third products and historical/precharge exceptions"
         )
-    anchor = plan.get("preparation_anchor", {})
+
+
+def _validate_anchor_descriptor(anchor: dict) -> None:
     if (
         not isinstance(anchor.get("path"), str)
         or not anchor["path"]
         or re.fullmatch(r"[0-9a-f]{64}", str(anchor.get("sha256"))) is None
     ):
         raise ValueError("milestone requires a sealed preparation anchor")
+
+
+def validate_envelope(plan: dict) -> None:
+    """Reject drift in sources, modes, inventory, CPU limits or the fixed budget."""
+    if plan.get("schema") != SCHEMA or any(
+        plan.get(key) != value for key, value in ENVELOPE.items()
+    ):
+        raise ValueError("milestone acquisition differs from its fixed envelope")
+    revisions = _validate_revisions(plan)
+    _validate_release_revisions(plan, revisions)
+    if plan.get("cases") != [asdict(case) for case in inventory()]:
+        raise ValueError("milestone inventory must contain exactly 47 semantic cases")
+    if plan.get("cpu_budgets") != cpu_budgets():
+        raise ValueError("milestone requires serial 2x and explicit parallel 32x CPU")
+    _validate_milestone_exceptions(plan)
+    _validate_anchor_descriptor(plan.get("preparation_anchor", {}))
 
 
 def begin_preparation(path: Path) -> None:
@@ -142,8 +158,7 @@ def begin_preparation(path: Path) -> None:
         stream.write("\n")
 
 
-def acquisition_start(plan: dict) -> float:
-    """Charge all elapsed preparation on the same kernel boot; never assert zero."""
+def _sealed_preparation_anchor(plan: dict) -> dict:
     descriptor = plan["preparation_anchor"]
     path = Path(descriptor["path"])
     digest = sha256_file(path)
@@ -160,6 +175,12 @@ def acquisition_start(plan: dict) -> float:
         != Path("/proc/sys/kernel/random/boot_id").read_text().strip()
     ):
         raise ValueError("preparation anchor clock or boot differs")
+    return anchor
+
+
+def acquisition_start(plan: dict) -> float:
+    """Charge all elapsed preparation on the same kernel boot; never assert zero."""
+    anchor = _sealed_preparation_anchor(plan)
     started = anchor.get("started_monotonic")
     if (
         type(started) not in (int, float)
@@ -212,6 +233,63 @@ def validate_releases(plan: dict, files: dict) -> None:
             )
 
 
+def _expected_input_rows(case) -> dict[str, int]:
+    if case.workload in ("asof", "interval_join"):
+        return {"reference.input": case.rows, "quotes.input": case.rows}
+    if case.workload == "projection":
+        return {"input": case.rows}
+    return {"left": case.rows, "right": 64}
+
+
+def _validate_event_geometry(event: dict) -> None:
+    rows = event.get("record_batch_rows", [])
+    if (
+        not rows
+        or any(type(value) is not int or value <= 0 for value in rows)
+        or sum(rows) != event.get("rows")
+        or len(rows) != event.get("record_batch_count")
+    ):
+        raise ValueError("runtime event RecordBatch geometry differs")
+
+
+def _observed_input_rows(layout: list[dict]) -> dict[str, int]:
+    observed = {}
+    for event in layout:
+        _validate_event_geometry(event)
+        observed[event["input"]] = observed.get(event["input"], 0) + event["rows"]
+    return observed
+
+
+def _validate_interval_fixture(case, fixture: dict) -> None:
+    if (
+        fixture.get("schema") != "calc-flow.interval-acceptance-fixture.v1"
+        or fixture.get("rows_per_side") != case.rows
+        or fixture.get("batch_rows") != case.batch_rows
+        or fixture.get("checkpoint_enabled") is not (case.mode != "off")
+    ):
+        raise ValueError("interval sample fixture differs from the declared workload")
+
+
+def _validate_runtime_sample(case, sample: dict) -> None:
+    layout = sample.get("event_layout", {}).get("data_events", [])
+    if (
+        not layout
+        or type(sample.get("runtime_input_data_batches")) is not int
+        or sample["runtime_input_data_batches"] != len(layout)
+    ):
+        raise ValueError("missing actual runtime input batch denominator")
+    if _observed_input_rows(layout) != _expected_input_rows(case):
+        raise ValueError(
+            "runtime fixture input row counts differ from the declared workload"
+        )
+    if not set(sample.get("advancing_processing_epochs", [])).issubset(
+        sample.get("completed_processing_epochs", [])
+    ):
+        raise ValueError("advancing epochs were not completed during processing")
+    if case.workload == "interval_join":
+        _validate_interval_fixture(case, sample.get("fixture", {}))
+
+
 def validate_sample(case, side: str, sample: dict, identity: dict) -> None:
     """Require B/C ownership, complete lifecycle, CPU and real OFF evidence."""
     validate_observation(case, side, sample)
@@ -234,50 +312,7 @@ def validate_sample(case, side: str, sample: dict, identity: dict) -> None:
         "projection",
         "interval_join",
     ):
-        layout = sample.get("event_layout", {}).get("data_events", [])
-        if (
-            not layout
-            or type(sample.get("runtime_input_data_batches")) is not int
-            or sample["runtime_input_data_batches"] != len(layout)
-        ):
-            raise ValueError("missing actual runtime input batch denominator")
-        expected = (
-            {"reference.input": case.rows, "quotes.input": case.rows}
-            if case.workload in ("asof", "interval_join")
-            else {"input": case.rows}
-            if case.workload == "projection"
-            else {"left": case.rows, "right": 64}
-        )
-        observed = {}
-        for event in layout:
-            rows = event.get("record_batch_rows", [])
-            if (
-                not rows
-                or any(type(value) is not int or value <= 0 for value in rows)
-                or sum(rows) != event.get("rows")
-                or len(rows) != event.get("record_batch_count")
-            ):
-                raise ValueError("runtime event RecordBatch geometry differs")
-            observed[event["input"]] = observed.get(event["input"], 0) + event["rows"]
-        if observed != expected:
-            raise ValueError(
-                "runtime fixture input row counts differ from the declared workload"
-            )
-        if not set(sample.get("advancing_processing_epochs", [])).issubset(
-            sample.get("completed_processing_epochs", [])
-        ):
-            raise ValueError("advancing epochs were not completed during processing")
-        if case.workload == "interval_join":
-            fixture = sample.get("fixture", {})
-            if (
-                fixture.get("schema") != "calc-flow.interval-acceptance-fixture.v1"
-                or fixture.get("rows_per_side") != case.rows
-                or fixture.get("batch_rows") != case.batch_rows
-                or fixture.get("checkpoint_enabled") is not (case.mode != "off")
-            ):
-                raise ValueError(
-                    "interval sample fixture differs from the declared workload"
-                )
+        _validate_runtime_sample(case, sample)
     elif case.mode == "off" and sample.get("checkpoint_enabled") is not False:
         raise ValueError("native OFF sample did not disable checkpointing")
 

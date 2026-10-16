@@ -270,49 +270,157 @@ class MilestoneCollectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runner.closed, 1)
 
 
+def _runtime_inputs(case):
+    if case.workload == "projection":
+        return {"input": case.rows}
+    if case.workload in ("asof", "interval_join"):
+        return {"reference.input": case.rows, "quotes.input": case.rows}
+    return {"left": case.rows, "right": 64}
+
+
+def _runtime_sample(case, seconds, side, epochs, sample, round_index, index):
+    inputs = _runtime_inputs(case)
+    return {
+        **sample,
+        "product_commit": ("a" if side == "baseline" else "b") * 40,
+        "cpu_budget": 2.0 if case.threads == 1 else 32.0,
+        "cpu_evidence": {
+            "schema": "calc-flow.phase-resources.v1",
+            "scope": "processing",
+            "status": "measured",
+            "wall_seconds": seconds,
+            "process_cpu_seconds": seconds,
+            "threads": [{"tid": 1, "runtime_seconds": seconds}],
+            "departed_threads": [],
+        },
+        "completed_processing_epochs": list(epochs),
+        "observation_id": f"{case.id}/{side}/{round_index}/{index}",
+        "raw_observation_sha256": "d" * 64,
+        "group_member_ids": [case.id],
+        "event_layout": {
+            "data_events": [
+                {
+                    "input": name,
+                    "rows": rows,
+                    "record_batch_rows": [rows],
+                    "record_batch_count": 1,
+                }
+                for name, rows in inputs.items()
+            ]
+        },
+        "runtime_input_data_batches": len(inputs),
+    }
+
+
 def runtime_record(case, seconds, *, side="candidate", epochs=()):
     from scripts.test_issue406_report import record
 
     result = record(case, seconds, side=side, epochs=list(epochs))
-    inputs = (
-        {"input": case.rows}
-        if case.workload == "projection"
-        else {"reference.input": case.rows, "quotes.input": case.rows}
-        if case.workload in ("asof", "interval_join")
-        else {"left": case.rows, "right": 64}
-    )
-    for round_index, group in enumerate(result["rounds"]):
-        for index, sample in enumerate(group):
-            sample.update(
-                product_commit=("a" if side == "baseline" else "b") * 40,
-                cpu_budget=2.0 if case.threads == 1 else 32.0,
-                cpu_evidence={
-                    "schema": "calc-flow.phase-resources.v1",
-                    "scope": "processing",
-                    "status": "measured",
-                    "wall_seconds": seconds,
-                    "process_cpu_seconds": seconds,
-                    "threads": [{"tid": 1, "runtime_seconds": seconds}],
-                    "departed_threads": [],
-                },
-                completed_processing_epochs=list(epochs),
-                observation_id=f"{case.id}/{side}/{round_index}/{index}",
-                raw_observation_sha256="d" * 64,
-                group_member_ids=[case.id],
-                event_layout={
-                    "data_events": [
-                        {
-                            "input": name,
-                            "rows": rows,
-                            "record_batch_rows": [rows],
-                            "record_batch_count": 1,
-                        }
-                        for name, rows in inputs.items()
-                    ]
-                },
-                runtime_input_data_batches=len(inputs),
-            )
-    result["warmups"] = [copy.deepcopy(group[0]) for group in result["rounds"]]
+    rounds = [
+        [
+            _runtime_sample(case, seconds, side, epochs, sample, round_index, index)
+            for index, sample in enumerate(group)
+        ]
+        for round_index, group in enumerate(result["rounds"])
+    ]
+    return {
+        **result,
+        "rounds": rounds,
+        "warmups": [copy.deepcopy(group[0]) for group in rounds],
+    }
+
+
+def _interval_fixture(case):
+    return {
+        "schema": "calc-flow.interval-acceptance-fixture.v1",
+        "rows_per_side": case.rows,
+        "batch_rows": case.batch_rows,
+        "checkpoint_enabled": case.mode != "off",
+    }
+
+
+def _ledger_sample(case, side, members, physical, round_index, slot, sample):
+    result = {
+        **sample,
+        "observation_id": f"{physical}/{side}/{round_index}/{slot}",
+        "group_member_ids": members,
+        "checkpoint_enabled": case.mode != "off",
+        "cpu_evidence": {**sample["cpu_evidence"], "scope": case.cpu_scope},
+    }
+    if case.row == 7 and case.workload == "asof":
+        result.update(
+            processing_settled=True,
+            match_identity={},
+            dispatch_trace={"schema": "calc-flow.asof-dispatch-trace.v1"},
+        )
+    if case.row == 10:
+        result.update(
+            oracle={**sample["oracle"], "input_rows": case.rows},
+            fixture=_interval_fixture(case),
+        )
+    return result
+
+
+def _ledger_record(case, side, members, physical):
+    record = runtime_record(case, 0.1, side=side)
+    return {
+        **record,
+        "warmups": [
+            _ledger_sample(case, side, members, physical, index, "warmup", sample)
+            for index, sample in enumerate(record["warmups"])
+        ],
+        "rounds": [
+            [
+                _ledger_sample(case, side, members, physical, round_index, slot, sample)
+                for slot, sample in enumerate(group)
+            ]
+            for round_index, group in enumerate(record["rounds"])
+        ],
+    }
+
+
+def _complete_ledger():
+    cases = milestone.inventory()
+    records = []
+    for case in cases:
+        members = (
+            sorted(item.id for item in cases if item.row == case.row)
+            if case.row in (4, 5)
+            else [case.id]
+        )
+        physical = f"row-{case.row}" if case.row in (4, 5) else case.id
+        records.extend(
+            _ledger_record(case, side, members, physical) for side in milestone.SIDES
+        )
+    return {**milestone.report_identity(plan()), "measurements": records}
+
+
+def _serial_mode_records(row, seconds):
+    cases = [
+        case for case in milestone.inventory() if case.row == row and case.threads == 1
+    ]
+    return [
+        runtime_record(case, value, epochs=(1,) if case.mode == "on" else ())
+        for case, value in zip(cases, seconds, strict=True)
+    ]
+
+
+def _projection_batch_record(case, seconds, batches):
+    result = runtime_record(case, seconds)
+    for sample in [
+        *result["warmups"],
+        *(item for group in result["rounds"] for item in group),
+    ]:
+        sample["event_layout"]["data_events"] = [
+            {
+                "input": "input",
+                "rows": case.rows // batches,
+                "record_batch_rows": [case.rows // batches],
+                "record_batch_count": 1,
+            }
+            for _ in range(batches)
+        ]
+        sample["runtime_input_data_batches"] = batches
     return result
 
 
@@ -338,52 +446,13 @@ class MilestoneReportTests(unittest.TestCase):
             self.assertFalse(report["budget_satisfied"])
 
     def test_complete_ledger_requires_every_baseline_off_and_shared_reference(self):
-        cases = milestone.inventory()
-        records = []
-        for case in cases:
-            members = (
-                sorted(item.id for item in cases if item.row == case.row)
-                if case.row in (4, 5)
-                else [case.id]
-            )
-            physical = f"row-{case.row}" if case.row in (4, 5) else case.id
-            for side in milestone.SIDES:
-                record = runtime_record(case, 0.1, side=side)
-                for round_index in range(2):
-                    for slot, sample in [
-                        ("warmup", record["warmups"][round_index]),
-                        *enumerate(record["rounds"][round_index]),
-                    ]:
-                        sample.update(
-                            observation_id=f"{physical}/{side}/{round_index}/{slot}",
-                            group_member_ids=members,
-                            checkpoint_enabled=case.mode != "off",
-                        )
-                        sample["cpu_evidence"]["scope"] = case.cpu_scope
-                        if case.row == 7 and case.workload == "asof":
-                            sample.update(
-                                processing_settled=True,
-                                match_identity={},
-                                dispatch_trace={
-                                    "schema": "calc-flow.asof-dispatch-trace.v1"
-                                },
-                            )
-                        if case.row == 10:
-                            sample["oracle"]["input_rows"] = case.rows
-                            sample["fixture"] = {
-                                "schema": "calc-flow.interval-acceptance-fixture.v1",
-                                "rows_per_side": case.rows,
-                                "batch_rows": case.batch_rows,
-                                "checkpoint_enabled": case.mode != "off",
-                            }
-                records.append(record)
-        complete = {**milestone.report_identity(plan()), "measurements": records}
+        complete = _complete_ledger()
         milestone.validate_results(complete)
         without_baseline_off = {
             **complete,
             "measurements": [
                 record
-                for record in records
+                for record in complete["measurements"]
                 if not ("/off/" in record["case"] and record["side"] == "baseline")
             ],
         }
@@ -400,12 +469,7 @@ class MilestoneReportTests(unittest.TestCase):
                 sample = runtime_record(case, 0.1, side=side)["rounds"][0][0]
                 if case.row == 10:
                     sample["oracle"]["input_rows"] = case.rows
-                    sample["fixture"] = {
-                        "schema": "calc-flow.interval-acceptance-fixture.v1",
-                        "rows_per_side": case.rows,
-                        "batch_rows": case.batch_rows,
-                        "checkpoint_enabled": case.mode != "off",
-                    }
+                    sample["fixture"] = _interval_fixture(case)
                 milestone.validate_sample(case, side, sample, plan())
                 altered = copy.deepcopy(sample)
                 altered["event_layout"]["data_events"][0]["rows"] -= 1
@@ -418,17 +482,9 @@ class MilestoneReportTests(unittest.TestCase):
     def test_slow_off_cannot_relax_low_on_formal_or_planning_goals(self):
         from scripts.benchmark_suite.issue406_milestone_report import summarize
 
-        cases = [
-            case
-            for case in milestone.inventory()
-            if case.row == 1 and case.threads == 1
-        ]
         data = {
             **milestone.report_identity(plan()),
-            "measurements": [
-                runtime_record(case, seconds, epochs=(1,) if case.mode == "on" else ())
-                for case, seconds in zip(cases, (0.200, 0.210, 0.250), strict=True)
-            ],
+            "measurements": _serial_mode_records(1, (0.200, 0.210, 0.250)),
         }
         original = copy.deepcopy(data)
         summary = summarize(data)
@@ -482,21 +538,7 @@ class MilestoneReportTests(unittest.TestCase):
             for case in milestone.inventory()
             if case.workload == "projection" and case.mode == "off"
         )
-        arm = runtime_record(case, 0.001)
-        for sample in [
-            *arm["warmups"],
-            *(item for group in arm["rounds"] for item in group),
-        ]:
-            sample["event_layout"]["data_events"] = [
-                {
-                    "input": "input",
-                    "rows": 100_000,
-                    "record_batch_rows": [100_000],
-                    "record_batch_count": 1,
-                }
-                for _ in range(10)
-            ]
-            sample["runtime_input_data_batches"] = 10
+        arm = _projection_batch_record(case, 0.001, 10)
         summary = summarize(
             {**milestone.report_identity(plan()), "measurements": [arm]}
         )

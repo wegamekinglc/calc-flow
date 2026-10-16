@@ -32,18 +32,10 @@ def validate_interval_output(
     }
 
 
-def export_interval_fixture(
-    root: Path, program, streams: dict, expected: pa.Table, case: dict
-) -> dict:
-    """Seal both input streams and their real interleaving without ASOF barriers."""
-    from benchmarks import engine_stream as stream
+def _interval_events(streams: dict) -> tuple[dict, list[dict]]:
     from benchmarks.engine_lifecycle import interleaved_events
-    from benchmarks.join_asof_acceptance import _runtime_event_fields, _write_ipc
+    from benchmarks.join_asof_acceptance import _runtime_event_fields
 
-    if root.exists() and any(root.iterdir()):
-        raise ValueError("interval fixture requires an empty destination")
-    if set(streams) != {"reference.input", "quotes.input"}:
-        raise ValueError("interval fixture requires both maintained source bindings")
     inputs = {name: [] for name in streams}
     events = []
     for name, event in interleaved_events(
@@ -55,15 +47,42 @@ def export_interval_fixture(
         if batches is not None:
             inputs[name].extend(batches)
         events.append({"input": name, **fields})
+    return inputs, events
+
+
+def _validate_interval_sources(streams: dict, inputs: dict, rows: int) -> None:
     if any(
-        sum(batch.num_rows for batch in batches) != case["rows"]
-        for batches in inputs.values()
+        sum(batch.num_rows for batch in batches) != rows for batches in inputs.values()
     ):
         raise ValueError(
             "interval fixture does not contain the declared rows on both sides"
         )
     if any(values[-1] is not None for values in streams.values()):
         raise ValueError("interval fixture must end each source")
+
+
+def _write_interval_inputs(root: Path, inputs: dict) -> dict:
+    from benchmarks.join_asof_acceptance import _write_ipc
+
+    return {
+        name: _write_ipc(root / f"input-{index}.arrow", batches)
+        for index, (name, batches) in enumerate(sorted(inputs.items()))
+    }
+
+
+def export_interval_fixture(
+    root: Path, program, streams: dict, expected: pa.Table, case: dict
+) -> dict:
+    """Seal both input streams and their real interleaving without ASOF barriers."""
+    from benchmarks import engine_stream as stream
+    from benchmarks.join_asof_acceptance import _write_ipc
+
+    if root.exists() and any(root.iterdir()):
+        raise ValueError("interval fixture requires an empty destination")
+    if set(streams) != {"reference.input", "quotes.input"}:
+        raise ValueError("interval fixture requires both maintained source bindings")
+    inputs, events = _interval_events(streams)
+    _validate_interval_sources(streams, inputs, case["rows"])
     root.mkdir(parents=True, exist_ok=True)
     project = root / "project.json"
     write_json(project, program.to_project().model_dump(mode="json"))
@@ -78,10 +97,7 @@ def export_interval_fixture(
         "compiled_plan_fingerprint": program.compile_stream(
             stream.Runtime()
         ).fingerprint,
-        "inputs": {
-            name: _write_ipc(root / f"input-{index}.arrow", batches)
-            for index, (name, batches) in enumerate(sorted(inputs.items()))
-        },
+        "inputs": _write_interval_inputs(root, inputs),
         "expected_output": _write_ipc(root / "expected.arrow", expected.to_batches()),
         "events_sha256": sha256_file(root / "events.json"),
         "submission_policy": "interleaved-source-events-without-output-count-barriers",

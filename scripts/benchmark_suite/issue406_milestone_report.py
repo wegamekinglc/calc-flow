@@ -42,29 +42,38 @@ def mode_target(arm: dict, mode: str, off_goal: float) -> dict:
     }
 
 
-def _validated_arm(case, side, arm, record, report):
-    if record is None:
-        return arm
-    errors = list(arm["validation_errors"])
+def _sample_errors(case, side, record, report):
+    errors = []
     samples = [*record.get("warmups", []), *report_tools._samples(record)]
     for sample in samples:
         try:
             policy.validate_sample(case, side, sample, report)
         except (ValueError, KeyError, TypeError) as error:
             errors.append(str(error))
+    return errors
+
+
+def _validated_status(status, errors, complete, cpu):
+    if errors:
+        return "invalid"
+    if not complete:
+        return "incomplete"
+    if not cpu:
+        return "inconclusive"
+    return status
+
+
+def _validated_arm(case, side, arm, record, report):
+    if record is None:
+        return arm
+    errors = [*arm["validation_errors"], *_sample_errors(case, side, record, report)]
     complete = arm["complete"] and len(record.get("warmups", [])) == ROUNDS
     cpu = arm.get("cpu_evidence_status") == {"verified": ROUNDS * SAMPLES}
     return {
         **arm,
         "validation_errors": sorted(set(errors)),
         "complete": complete and not errors,
-        "status": "invalid"
-        if errors
-        else "incomplete"
-        if not complete
-        else "inconclusive"
-        if not cpu
-        else arm["status"],
+        "status": _validated_status(arm["status"], errors, complete, cpu),
     }
 
 
@@ -104,29 +113,36 @@ def _overhead(cases, records, report):
     return result
 
 
+def _absolute_target(row, cases, modes):
+    return {
+        "mode_effects": [
+            item for item in modes if item["case"].startswith(f"row-{row}/")
+        ],
+        "fresh_main": [
+            {"mode": case["mode"], "threads": case["threads"], **case["baseline"]}
+            for case in cases
+            if case["row"] == row
+        ],
+    }
+
+
+def _formal_target(target, cases, records, report, modes):
+    row = target["row"]
+    # Historical mode ratios remain available only in historical summaries.
+    current = {key: value for key, value in target.items() if key != "mode_effects"}
+    if row in FORMAL:
+        current.update(_absolute_target(row, cases, modes))
+    if row == 3:
+        current["scaling"] = _scaling(cases)
+    if row == 7:
+        current["overhead"] = _overhead(cases, records, report)
+    return current
+
+
 def _formal_targets(cases, records, report):
     targets = report_tools._acceptance_targets(cases, records, report)
     modes = _absolute_modes(cases, FORMAL)
-    result = []
-    for target in targets:
-        row = target["row"]
-        # Historical mode ratios remain available only in historical summaries.
-        current = {key: value for key, value in target.items() if key != "mode_effects"}
-        if row in FORMAL:
-            current["mode_effects"] = [
-                item for item in modes if item["case"].startswith(f"row-{row}/")
-            ]
-            current["fresh_main"] = [
-                {"mode": case["mode"], "threads": case["threads"], **case["baseline"]}
-                for case in cases
-                if case["row"] == row
-            ]
-        if row == 3:
-            current["scaling"] = _scaling(cases)
-        if row == 7:
-            current["overhead"] = _overhead(cases, records, report)
-        result.append(current)
-    return result
+    return [_formal_target(target, cases, records, report, modes) for target in targets]
 
 
 def _scaling(cases):
@@ -162,39 +178,41 @@ def _scaling(cases):
     return result
 
 
+def _runtime_batch_values(samples):
+    return [
+        item["processing_seconds"] / item["runtime_input_data_batches"]
+        for item in samples
+        if type(item.get("runtime_input_data_batches")) is int
+        and item["runtime_input_data_batches"] > 0
+    ]
+
+
+def _runtime_floor_arm(case, side, record):
+    samples = report_tools._samples(record)
+    values = _runtime_batch_values(samples)
+    arm = {**case[side], "statistics": report_tools._stats(values)}
+    if len(values) != ROUNDS * SAMPLES:
+        arm = {**arm, "status": "incomplete"}
+    return {
+        "case": case["case"],
+        "side": side,
+        "unit": "seconds/actual-input-data-batch",
+        "batch_counts": [item.get("runtime_input_data_batches") for item in samples],
+        **mode_target(arm, case["mode"], 0.0001),
+    }
+
+
 def _runtime_floor(report, cases):
     records = {
         (record["case"], record["side"]): record
         for record in report.get("measurements", [])
     }
-    result = []
-    for case in cases:
-        if case["row"] != 7 or case["workload"] != "projection":
-            continue
-        for side in policy.SIDES:
-            samples = report_tools._samples(records.get((case["case"], side)))
-            values = [
-                item["processing_seconds"] / item["runtime_input_data_batches"]
-                for item in samples
-                if type(item.get("runtime_input_data_batches")) is int
-                and item["runtime_input_data_batches"] > 0
-            ]
-            stats = report_tools._stats(values)
-            arm = {**case[side], "statistics": stats}
-            if len(values) != ROUNDS * SAMPLES:
-                arm = {**arm, "status": "incomplete"}
-            result.append(
-                {
-                    "case": case["case"],
-                    "side": side,
-                    "unit": "seconds/actual-input-data-batch",
-                    "batch_counts": [
-                        item.get("runtime_input_data_batches") for item in samples
-                    ],
-                    **mode_target(arm, case["mode"], 0.0001),
-                }
-            )
-    return result
+    return [
+        _runtime_floor_arm(case, side, records.get((case["case"], side)))
+        for case in cases
+        if case["row"] == 7 and case["workload"] == "projection"
+        for side in policy.SIDES
+    ]
 
 
 def summarize(report: dict) -> dict:
@@ -282,6 +300,143 @@ def aborted_summary(report):
     }
 
 
+def _case_table(cases):
+    return table(
+        [
+            "Case",
+            "B evidence",
+            "B p50/p95/p99 [median CI], ms",
+            "C evidence",
+            "C p50/p95/p99 [median CI], ms",
+            "Two-round paired verdict",
+        ],
+        [
+            [
+                case["case"],
+                case["baseline"]["status"],
+                report_tools._stat_cell(case["baseline"]["statistics"], 1000),
+                case["candidate"]["status"],
+                report_tools._stat_cell(case["candidate"]["statistics"], 1000),
+                case["revision_comparison"]["verdict"],
+            ]
+            for case in cases
+        ],
+    )
+
+
+def _absolute_component_row(row, item, side, by_case):
+    stats = item[side]
+    value = stats["p50"] if stats is not None else None
+    return [
+        row,
+        item["metric"],
+        side,
+        item["mode"],
+        item["target"],
+        value,
+        item["unit"],
+        item["target_status"]
+        if side == "candidate"
+        else report_tools._target_status(
+            value if by_case[item["case"]][side]["status"] == "ok" else None,
+            item["target"],
+        ),
+    ]
+
+
+def _scaling_component_rows(target):
+    return [
+        [
+            target["row"],
+            "retained 1M to 4M",
+            item["side"],
+            item["mode"],
+            item["target"],
+            item["ratio_of_p50"],
+            "ratio",
+            item["target_status"],
+        ]
+        for item in target.get("scaling", [])
+    ]
+
+
+def _overhead_component_rows(target):
+    return [
+        [
+            target["row"],
+            "matched residual",
+            item["side"],
+            item["mode"],
+            item.get("target_seconds"),
+            item.get("overhead_seconds"),
+            "seconds",
+            item["target_status"],
+        ]
+        for item in target.get("overhead", [])
+    ]
+
+
+def _target_component_rows(target, by_case):
+    row = target["row"]
+    if row in (4, 8):
+        return [
+            _absolute_component_row(row, item, side, by_case)
+            for item in target.get("absolute", [])
+            for side in policy.SIDES
+        ]
+    if row == 3:
+        return _scaling_component_rows(target)
+    if row == 5:
+        return [
+            [
+                row,
+                "genuinely during compaction",
+                "both",
+                "enabled",
+                2,
+                None,
+                "ratio",
+                "unmeasured",
+            ]
+        ]
+    if row == 7:
+        return _overhead_component_rows(target)
+    return []
+
+
+def _component_table(summary):
+    by_case = {case["case"]: case for case in summary["cases"]}
+    return table(
+        ["Row", "Metric", "Side", "Mode", "Limit", "Observed p50", "Unit", "Result"],
+        [
+            row
+            for target in summary["targets"]
+            for row in _target_component_rows(target, by_case)
+        ],
+    )
+
+
+def _goal_section(label, entries):
+    return [
+        f"## {label}",
+        "",
+        table(
+            ["Case", "Side", "Mode", "Limit, ms", "Target result"],
+            [
+                [
+                    item.get("case", f"row-{item.get('row')}"),
+                    item.get("side", "both"),
+                    item.get("mode", "off"),
+                    1000 * item.get("limit_seconds", item.get("off_goal_seconds", 0)),
+                    item["target_status"],
+                ]
+                for item in entries
+            ],
+        ),
+        "",
+    ]
+
+
 def render(summary):
     """Render current B/C arms without historical unsupported-mode claims."""
     lines = [
@@ -302,128 +457,13 @@ def render(summary):
         "LOW/ON limits derive from absolute goals; ON also needs advancing "
         "nonterminal epochs.",
         "",
+        _case_table(summary["cases"]),
+        "",
+        "## Formal scaling and component targets",
+        "",
+        _component_table(summary),
+        "",
     ]
-    rows = []
-    for case in summary["cases"]:
-        rows.append(
-            [
-                case["case"],
-                case["baseline"]["status"],
-                report_tools._stat_cell(case["baseline"]["statistics"], 1000),
-                case["candidate"]["status"],
-                report_tools._stat_cell(case["candidate"]["statistics"], 1000),
-                case["revision_comparison"]["verdict"],
-            ]
-        )
-    lines.extend(
-        [
-            table(
-                [
-                    "Case",
-                    "B evidence",
-                    "B p50/p95/p99 [median CI], ms",
-                    "C evidence",
-                    "C p50/p95/p99 [median CI], ms",
-                    "Two-round paired verdict",
-                ],
-                rows,
-            ),
-            "",
-        ]
-    )
-    components = []
-    by_case = {case["case"]: case for case in summary["cases"]}
-    for target in summary["targets"]:
-        row = target["row"]
-        if row in (4, 8):
-            for item in target.get("absolute", []):
-                for side in policy.SIDES:
-                    stats = item[side]
-                    value = stats["p50"] if stats is not None else None
-                    components.append(
-                        [
-                            row,
-                            item["metric"],
-                            side,
-                            item["mode"],
-                            item["target"],
-                            value,
-                            item["unit"],
-                            item["target_status"]
-                            if side == "candidate"
-                            else report_tools._target_status(
-                                value
-                                if by_case[item["case"]][side]["status"] == "ok"
-                                else None,
-                                item["target"],
-                            ),
-                        ]
-                    )
-        if row == 3:
-            components.extend(
-                [
-                    [
-                        row,
-                        "retained 1M to 4M",
-                        item["side"],
-                        item["mode"],
-                        item["target"],
-                        item["ratio_of_p50"],
-                        "ratio",
-                        item["target_status"],
-                    ]
-                    for item in target.get("scaling", [])
-                ]
-            )
-        if row == 5:
-            components.append(
-                [
-                    row,
-                    "genuinely during compaction",
-                    "both",
-                    "enabled",
-                    2,
-                    None,
-                    "ratio",
-                    "unmeasured",
-                ]
-            )
-        if row == 7:
-            components.extend(
-                [
-                    [
-                        row,
-                        "matched residual",
-                        item["side"],
-                        item["mode"],
-                        item.get("target_seconds"),
-                        item.get("overhead_seconds"),
-                        "seconds",
-                        item["target_status"],
-                    ]
-                    for item in target.get("overhead", [])
-                ]
-            )
-    lines.extend(
-        [
-            "## Formal scaling and component targets",
-            "",
-            table(
-                [
-                    "Row",
-                    "Metric",
-                    "Side",
-                    "Mode",
-                    "Limit",
-                    "Observed p50",
-                    "Unit",
-                    "Result",
-                ],
-                components,
-            ),
-            "",
-        ]
-    )
     goals = [
         item for target in summary["targets"] for item in target.get("mode_effects", [])
     ]
@@ -432,29 +472,7 @@ def render(summary):
         ("Stricter planning goals", summary["planning_targets"]),
         ("Runtime planning floor per actual input batch", summary["runtime_floor"]),
     ):
-        lines.extend(
-            [
-                f"## {label}",
-                "",
-                table(
-                    ["Case", "Side", "Mode", "Limit, ms", "Target result"],
-                    [
-                        [
-                            item.get("case", f"row-{item.get('row')}"),
-                            item.get("side", "both"),
-                            item.get("mode", "off"),
-                            1000
-                            * item.get(
-                                "limit_seconds", item.get("off_goal_seconds", 0)
-                            ),
-                            item["target_status"],
-                        ]
-                        for item in entries
-                    ],
-                ),
-                "",
-            ]
-        )
+        lines.extend(_goal_section(label, entries))
     lines.extend(
         [
             "Raw JSON retains phase clocks, CPU/thread evidence, checkpoint "

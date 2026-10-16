@@ -1220,6 +1220,14 @@ def _acquisition_started(plan):
     )
 
 
+def _collector(runner):
+    from scripts.benchmark_suite.issue406_fresh import collect_fresh
+
+    if runner.plan.get("schema") == milestone.SCHEMA:
+        return milestone.collect
+    return collect_fresh if runner.fresh else collect
+
+
 async def run(plan: dict, output: Path) -> dict:
     """Execute once, charging setup, preflight, collection, cleanup and sealing."""
     started = _acquisition_started(plan)
@@ -1259,14 +1267,7 @@ async def run(plan: dict, output: Path) -> dict:
         if remaining <= 0:
             raise TimeoutError("collection budget exhausted during preflight")
         guard = asyncio.create_task(runner.resources_guard())
-        from scripts.benchmark_suite.issue406_fresh import collect_fresh
-
-        collector = (
-            milestone.collect
-            if plan.get("schema") == milestone.SCHEMA
-            else (collect_fresh if runner.fresh else collect)
-        )
-        collection = asyncio.create_task(collector(runner, output))
+        collection = asyncio.create_task(_collector(runner)(runner, output))
         report = await _await_collection_result(report, collection, guard, remaining)
         report["assessment"]["environment_suitable"] = True
         _validate_collection(plan, report)
