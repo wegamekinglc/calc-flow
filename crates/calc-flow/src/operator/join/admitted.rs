@@ -521,6 +521,17 @@ pub(super) trait AdmittedRows: Sync {
     fn row(&self, index: usize) -> AdmittedRef<'_>;
     fn group_end(&self, start: usize) -> usize;
     fn source_index(&self, index: usize) -> usize;
+    /// why: key identity reads only (offset, retain), so a group can resolve
+    /// its segment once instead of re-walking `row` per row
+    fn key_offsets(
+        &self,
+        range: Range<usize>,
+    ) -> Box<dyn Iterator<Item = (usize, bool)> + Send + '_> {
+        Box::new(range.map(|index| {
+            let row = self.row(index);
+            (row.record.offset(), row.retain)
+        }))
+    }
 }
 
 impl AdmittedRows for AdmittedBatch {
@@ -536,6 +547,28 @@ impl AdmittedRows for AdmittedBatch {
     fn source_index(&self, index: usize) -> usize {
         let segment = self.segments.get(self.segment_index(index));
         segment.source_base + self.physical(segment, index)
+    }
+    fn key_offsets(
+        &self,
+        range: Range<usize>,
+    ) -> Box<dyn Iterator<Item = (usize, bool)> + Send + '_> {
+        if range.is_empty() {
+            return Box::new(std::iter::empty());
+        }
+        let segment = self.segments.get(self.segment_index(range.start));
+        let base = segment.range.start;
+        let dense = segment.first;
+        let sparse = segment.sparse_start;
+        let payload = segment.payload_base;
+        Box::new(range.map(move |position| {
+            let ordinal = position - base;
+            let physical = sparse.map_or_else(
+                || dense + ordinal,
+                |start| self.indices.get(start + ordinal),
+            );
+            let offset = payload.map_or(physical, |origin| origin + ordinal);
+            (offset, self.retained.get(position))
+        }))
     }
 }
 
@@ -616,6 +649,9 @@ impl<'a> AdmittedGroup<'a> {
     }
     pub(super) fn iter(&self) -> RowIter<'a> {
         RowIter::new(self.rows, self.start..self.end)
+    }
+    pub(super) fn key_offsets(&self) -> Box<dyn Iterator<Item = (usize, bool)> + Send + '_> {
+        self.rows.key_offsets(self.start..self.end)
     }
 }
 pub(super) struct GroupIter<'a> {

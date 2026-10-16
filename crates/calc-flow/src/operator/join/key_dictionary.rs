@@ -343,8 +343,15 @@ impl Dictionary {
             .entries
             .find(hash, |head| head.hash == hash)
             .map(|head| head.id);
+        // why: a small key's single row charge covers this walk's first
+        // comparison; the same row can reach both the pending and dictionary
+        // walks, so at most two uncharged first comparisons share that charge
+        let mut charged = key.small().is_some();
         while let Some(id) = candidate {
-            flow.step(1, 0).await?;
+            if !charged {
+                flow.step(1, 0).await?;
+            }
+            charged = false;
             #[cfg(test)]
             super::typed_key::note(super::typed_key::KeyPhase::Comparison, 0);
             let entry = self.slots[id as usize].as_ref().unwrap();
@@ -669,15 +676,12 @@ impl Pending {
                 flow.step(1, 0).await?;
                 columns.push(KeyWriter::bind(group.row(0).record.column(index).as_ref())?);
             }
-            for row in group.iter() {
+            for (offset, retain) in group.key_offsets() {
                 let key = TypedKey {
                     columns: &columns,
-                    row: row.record.offset(),
+                    row: offset,
                 };
-                let Some(id) = self
-                    .resolve(dictionary, key, row.retain, budget, flow)
-                    .await?
-                else {
+                let Some(id) = self.resolve(dictionary, key, retain, budget, flow).await? else {
                     return Ok(false);
                 };
                 self.ids.push(id);
@@ -694,7 +698,17 @@ impl Pending {
         budget: &BirthBudget<'_>,
         flow: &mut KeyFlow<'_, '_>,
     ) -> Result<Option<u32>> {
-        let hash = key.hash(&dictionary.hasher, flow).await?;
+        let small = key.small();
+        let hash = match small.as_ref() {
+            Some(small) => {
+                let (visits, bytes) = small.charge();
+                flow.step(visits, bytes).await?;
+                #[cfg(test)]
+                super::typed_key::note(super::typed_key::KeyPhase::Hash, bytes);
+                small.hash(&dictionary.hasher)?
+            }
+            None => key.hash(&dictionary.hasher, flow).await?,
+        };
         #[cfg(test)]
         let hash = if dictionary.force_collisions { 0 } else { hash };
         let Some(id) = self
@@ -749,8 +763,15 @@ impl Pending {
             .heads
             .find(hash, |head| head.hash == hash)
             .map(|head| head.id);
+        // why: a small key's single row charge covers this walk's first
+        // comparison; the same row can reach both the pending and dictionary
+        // walks, so at most two uncharged first comparisons share that charge
+        let mut charged = key.small().is_some();
         while let Some(id) = candidate {
-            flow.step(1, 0).await?;
+            if !charged {
+                flow.step(1, 0).await?;
+            }
+            charged = false;
             #[cfg(test)]
             super::typed_key::note(super::typed_key::KeyPhase::Comparison, 0);
             let change = &self.changes[id as usize];

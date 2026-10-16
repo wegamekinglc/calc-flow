@@ -13,7 +13,9 @@ pub(super) mod restored;
 mod selection;
 mod sparse;
 pub(super) use metadata::schema_inventory;
-pub(super) use owned_copy::{CopySelection, Quantum, SelectedRow, reservation_control};
+pub(super) use owned_copy::{
+    COPY_BYTES, COPY_VISITS, CopySelection, Quantum, SelectedRow, reservation_control,
+};
 #[cfg(test)]
 pub(super) use owned_copy::{observe_string_allocations, take_string_allocations};
 pub(super) use selection::{OwnedSelection, SelectedRows};

@@ -176,3 +176,102 @@ async fn test_persistent_dictionary_collision_tail_eviction_has_bounded_unlink_w
     drop(job);
     assert_eq!(pool.reserved(), 0);
 }
+
+#[tokio::test]
+async fn test_persistent_dictionary_small_keys_hash_once_without_per_chunk_quantum_futures() {
+    let short = prepare_small_keys(256).await;
+    let long = prepare_small_keys(512).await;
+    for work in [&short, &long] {
+        assert_eq!(
+            work.hashed, work.frames,
+            "each small key is charged and hashed once with its whole frame"
+        );
+        assert!(
+            work.boundaries * 16 <= work.frames.len(),
+            "small-key cooperation stays amortized per quantum, observed {} boundaries",
+            work.boundaries
+        );
+    }
+    let extra = long.frames.len() - short.frames.len();
+    assert!(
+        long.steps - short.steps <= extra + 4,
+        "known small keys must pay at most one cooperative step per row, observed {} steps for {extra} extra rows",
+        long.steps - short.steps
+    );
+}
+
+struct SmallKeyWork {
+    frames: Vec<usize>,
+    hashed: Vec<usize>,
+    steps: usize,
+    boundaries: usize,
+}
+
+async fn prepare_small_keys(count: usize) -> SmallKeyWork {
+    use datafusion::execution::memory_pool::{MemoryConsumer, MemoryPool, UnboundedMemoryPool};
+
+    let wide = "x".repeat(100);
+    let values = (0..count)
+        .map(|row| match row % 4 {
+            0 => Some(""),
+            1 => Some("AAPL"),
+            2 => Some(wide.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let schema = Arc::new(Schema::new(vec![Field::new("key", DataType::Utf8, true)]));
+    let parent =
+        Arc::new(RecordBatch::try_new(schema, vec![Arc::new(StringArray::from(values))]).unwrap());
+    let encoded = (0..count)
+        .map(|row| encode_join_key_columns_v1(parent.columns(), row, &[0]).unwrap())
+        .collect::<Vec<_>>();
+    let rows = (0..count)
+        .map(|row| AdmittedRow {
+            record: columnar::RowPayload::Rowed {
+                parent: Arc::clone(&parent),
+                row,
+            },
+            event_time: EventTime::from_micros(0),
+            row_id: row as u64,
+            retain: true,
+        })
+        .collect::<Vec<_>>();
+    let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
+    let master = MemoryConsumer::new("small-keys").register(&pool);
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "match", None);
+    let mut dictionary = key_dictionary::Dictionary::default();
+    let hashed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed = Arc::clone(&hashed);
+    let hook = typed_key::observe(Arc::new(move |phase, bytes| {
+        if phase == typed_key::KeyPhase::Hash {
+            observed.lock().unwrap().push(bytes);
+        }
+    }));
+    reset_join_work();
+    let prepared = dictionary
+        .prepare(&rows, &[0], master, Some(&context), "match")
+        .await
+        .unwrap()
+        .unwrap();
+    let work = join_work();
+    drop(hook);
+    for (row, &id) in prepared.ids.iter().enumerate() {
+        let key = prepared.keys[id as usize].as_ref().unwrap();
+        assert_eq!(key.as_slice(), encoded[row], "row {row} identity");
+    }
+    dictionary.commit(prepared.dictionary);
+    for frame in &encoded {
+        assert!(
+            dictionary.canonical(frame).is_some(),
+            "stored hashes must equal the canonical framed hash"
+        );
+    }
+    let hashed = hashed.lock().unwrap().clone();
+    SmallKeyWork {
+        frames: encoded.iter().map(Vec::len).collect(),
+        hashed,
+        steps: work.quantum_steps,
+        boundaries: work.quantum_boundaries,
+    }
+}

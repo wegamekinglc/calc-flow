@@ -2,9 +2,14 @@ use std::hash::{BuildHasher, Hasher};
 
 use super::{
     borrowed_key::{CanonicalStream, KeyHashState},
+    columnar::{COPY_BYTES, COPY_VISITS},
     key_arena::KeyWriter,
 };
 use crate::Result;
+
+#[cfg(test)]
+#[path = "tests/typed_key_tests.rs"]
+mod tests;
 
 #[cfg(test)]
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -41,6 +46,69 @@ pub(super) fn note(phase: KeyPhase, bytes: usize) {
 pub(super) struct TypedKey<'a, 'b> {
     pub(super) columns: &'a [KeyWriter<'b>],
     pub(super) row: usize,
+}
+
+/// Synchronous identity for a row whose whole framed key fits one copy quantum.
+pub(super) struct SmallKey<'a, 'b> {
+    columns: &'a [KeyWriter<'b>],
+    row: usize,
+    bytes: usize,
+}
+
+impl<'a, 'b> TypedKey<'a, 'b> {
+    /// why: small keys cooperate once per row instead of once per column/chunk;
+    /// rows that cannot be charged in one step keep the chunked path
+    pub(super) fn small(self) -> Option<SmallKey<'a, 'b>> {
+        let mut bytes = 0_usize;
+        for column in self.columns {
+            for part in column.parts(self.row).ok()?.slices() {
+                bytes = bytes.checked_add(part.len())?;
+            }
+        }
+        (bytes <= COPY_BYTES && self.columns.len() < COPY_VISITS).then_some(SmallKey {
+            columns: self.columns,
+            row: self.row,
+            bytes,
+        })
+    }
+}
+
+impl SmallKey<'_, '_> {
+    /// One cooperative charge covering the column visits, the framed key bytes
+    /// and the first candidate comparison of the row.
+    pub(super) fn charge(&self) -> (usize, usize) {
+        (self.columns.len() + 1, self.bytes)
+    }
+
+    pub(super) fn hash(&self, state: &KeyHashState) -> Result<u64> {
+        let mut hasher = state.build_hasher();
+        let mut length = 0_u64;
+        let mut stream = CanonicalStream::new(|bytes: &[u8]| {
+            hasher.write(bytes);
+        });
+        for column in self.columns {
+            for part in column.parts(self.row)?.slices() {
+                length = next_length(length, part.len())?;
+                stream.write(part);
+            }
+        }
+        stream.finish();
+        hasher.write_u64(length);
+        Ok(hasher.finish())
+    }
+
+    pub(super) fn equals(&self, bytes: &[u8]) -> Result<bool> {
+        let mut remaining = bytes;
+        for column in self.columns {
+            for part in column.parts(self.row)?.slices() {
+                if !remaining.starts_with(part) {
+                    return Ok(false);
+                }
+                remaining = &remaining[part.len()..];
+            }
+        }
+        Ok(remaining.is_empty())
+    }
 }
 
 pub(super) struct KeyFlow<'c, 'j, C = fn() -> Result<()>> {
@@ -103,6 +171,9 @@ impl TypedKey<'_, '_> {
     }
 
     pub(super) async fn equals(self, bytes: &[u8], flow: &mut KeyFlow<'_, '_>) -> Result<bool> {
+        if let Some(small) = self.small() {
+            return small.equals(bytes);
+        }
         let mut remaining = bytes;
         for column in self.columns {
             flow.step(1, 0).await?;

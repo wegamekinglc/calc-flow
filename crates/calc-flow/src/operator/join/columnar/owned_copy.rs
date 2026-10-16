@@ -28,8 +28,8 @@ use tokio_util::bytes::Bytes;
 const ARC_HEADER: usize = 2 * size_of::<usize>();
 // Locked Arrow 59.3 Bytes: ptr + len + three-word Deallocation, plus Arc header.
 const BUFFER_OWNER: usize = 5 * size_of::<usize>() + ARC_HEADER;
-const COPY_BYTES: usize = 4096;
-const COPY_VISITS: usize = 64;
+pub(in crate::operator::join) const COPY_BYTES: usize = 4096;
+pub(in crate::operator::join) const COPY_VISITS: usize = 64;
 
 #[derive(Clone, Copy)]
 pub(in crate::operator::join) struct SelectedRow {
