@@ -2376,7 +2376,7 @@ fn stress_schedule(seed: u64) -> Vec<StressGate> {
         let swap = usize::try_from(state % u64::try_from(index + 1).unwrap()).unwrap();
         gates.swap(index, swap);
     }
-    if seed % 3 != 0 {
+    if !seed.is_multiple_of(3) {
         let terminal = gates
             .iter()
             .position(|gate| matches!(gate, StressGate::Drain | StressGate::Cancel))
@@ -7497,9 +7497,8 @@ async fn exactly_once_start_without_checkpoint_fails_before_lifecycle_work() {
     };
     let mut runner = ContinuousRunner::new();
 
-    let failure = match runner.start(spec).await {
-        Ok(_) => panic!("exactly-once start unexpectedly ran without checkpoint ownership"),
-        Err(failure) => failure,
+    let Err(failure) = runner.start(spec).await else {
+        panic!("exactly-once start unexpectedly ran without checkpoint ownership");
     };
 
     assert!(matches!(
@@ -7613,9 +7612,8 @@ async fn checkpointed_start_rejects_cross_output_sink_id_collisions_before_open(
     .unwrap();
     let mut runner = ContinuousRunner::new();
 
-    let failure = match runner.start_checkpointed(spec, checkpoint).await {
-        Ok(_) => panic!("duplicate sink IDs unexpectedly entered lifecycle work"),
-        Err(failure) => failure,
+    let Err(failure) = runner.start_checkpointed(spec, checkpoint).await else {
+        panic!("duplicate sink IDs unexpectedly entered lifecycle work");
     };
 
     assert!(

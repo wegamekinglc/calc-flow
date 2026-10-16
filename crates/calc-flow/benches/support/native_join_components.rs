@@ -257,7 +257,7 @@ pub(crate) async fn capture_restore(rows: usize) -> Value {
 
 pub(crate) async fn capture_restore_batched(rows: usize, batch_rows: usize) -> Value {
     let setup_start = Instant::now();
-    assert!(rows >= 2 && rows % 2 == 0);
+    assert!(rows >= 2 && rows.is_multiple_of(2));
     let job = job();
     let keys = keys(rows);
     let (left, right) = keys.split_at(rows / 2);
@@ -338,7 +338,7 @@ async fn armed(
     rows: usize,
     job: &StreamJobContext,
 ) -> (StreamJoinOperator, OperatorStateSnapshot, Vec<usize>) {
-    assert!(rows >= 8 && rows % 2 == 0);
+    assert!(rows >= 8 && rows.is_multiple_of(2));
     let keys = keys(rows);
     let (left, right) = keys.split_at(rows / 2);
     let mut operator = operator();

@@ -729,7 +729,7 @@ impl State {
 
 /// Canonical row encodings for one identity column set. Single non-null i64
 /// and u64 columns encode directly; other shapes use one Arrow `RowConverter`
-/// per batch. Both paths produce Arrow 58 row bytes independently per row.
+/// per batch. Both paths produce Arrow 59 row bytes independently per row.
 pub(super) enum EncodedColumns {
     Rows(Arc<EncodedBatch>),
     Binary(Arc<EncodedBatch>),

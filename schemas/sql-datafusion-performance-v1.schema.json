@@ -85,7 +85,7 @@
           "$ref": "#/$defs/digest"
         },
         "datafusion_version": {
-          "const": "54.0.0"
+          "const": "55.0.0"
         },
         "arrow_version": {
           "type": "string",

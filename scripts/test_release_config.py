@@ -247,7 +247,7 @@ class ReleaseConfigTests(unittest.TestCase):
         action_count = workflow.count("uses: PyO3/maturin-action@")
         self.assertEqual(action_count, 3)
         self.assertEqual(workflow.count("maturin-version: v1.14.1"), action_count)
-        self.assertEqual(workflow.count('rust-toolchain: "1.88.0"'), action_count)
+        self.assertEqual(workflow.count('rust-toolchain: "1.94.0"'), action_count)
         self.assertIn("--find-interpreter --features pyo3/abi3-py313", workflow)
         self.assertIn("--find-interpreter --features legacy-python", workflow)
 

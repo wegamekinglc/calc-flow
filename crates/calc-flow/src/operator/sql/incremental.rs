@@ -1,3 +1,4 @@
+use datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext;
 use std::{borrow::Cow, mem::size_of, sync::Arc};
 
 use ahash::RandomState;
@@ -255,6 +256,7 @@ struct PartialGroups {
     sequential: Vec<bool>,
     seeded: usize,
     base_bytes: usize,
+    empty_bytes: usize,
     group_bytes: usize,
     state_fields: usize,
     variable_bytes: usize,
@@ -276,12 +278,21 @@ impl PartialGroups {
             .iter()
             .map(|expr| grouped_sum::PartialAccumulator::new(expr, name))
             .collect::<Result<Vec<_>>>()?;
+        let empty_bytes = accumulators.iter().try_fold(0, |bytes, accumulator| {
+            checked_bytes(bytes, [(accumulator.size(), 1)], name)
+        })?;
+        ensure_reservation(
+            &reservation,
+            checked_bytes(base_bytes, [(empty_bytes, 1)], name)?,
+            name,
+        )?;
         Ok(Self {
             accumulators,
             slots: Vec::new(),
             sequential: vec![false; aggregates.len()],
             seeded: 0,
             base_bytes,
+            empty_bytes,
             group_bytes,
             state_fields,
             variable_bytes: 0,
@@ -328,6 +339,7 @@ impl PartialGroups {
         checked_bytes(
             self.base_bytes,
             [
+                (self.empty_bytes, 1),
                 (capacity, self.group_bytes),
                 (bitmap_bytes, bitmap_copies),
                 (self.variable_bytes, variable_extrema::STATE_STRING_FACTOR),
@@ -522,7 +534,7 @@ fn native_grouped_result(
         .create_groups_accumulator()
         .map_err(|error| df_error(name, error))?;
     native
-        .merge_batch(&arrays, &[0], None, 1)
+        .merge_batch(&arrays, &[0], 1)
         .map_err(|error| df_error(name, error))?;
     let result = native
         .evaluate(EmitTo::All)
@@ -2821,7 +2833,16 @@ fn physical_plan(
     let Ok(lowered) = aggregate
         .aggr_expr
         .iter()
-        .map(|expr| LoweredAggregateBuilder::new(expr, &input, schema, &props).build())
+        .map(|expr| {
+            LoweredAggregateBuilder::new(
+                expr,
+                &input,
+                schema,
+                &props,
+                &PhysicalPlanningContext::default(),
+            )
+            .build()
+        })
         .collect::<datafusion::error::Result<Vec<_>>>()
     else {
         return None;
@@ -2835,7 +2856,14 @@ fn physical_plan(
     let Ok(projection) = projection
         .expr
         .iter()
-        .map(|expr| create_physical_expr(expr, &aggregate.schema, &props))
+        .map(|expr| {
+            create_physical_expr(
+                expr,
+                &aggregate.schema,
+                &props,
+                &PhysicalPlanningContext::default(),
+            )
+        })
         .collect::<datafusion::error::Result<Vec<_>>>()
     else {
         return None;
@@ -2938,9 +2966,15 @@ fn bind_post_filter(
     props: &ExecutionProps,
 ) -> Option<BoundPostFilter> {
     let post_filter = match projection.input.as_ref() {
-        LogicalPlan::Filter(filter) => {
-            Some(create_physical_expr(&filter.predicate, &aggregate.schema, props).ok()?)
-        }
+        LogicalPlan::Filter(filter) => Some(
+            create_physical_expr(
+                &filter.predicate,
+                &aggregate.schema,
+                props,
+                &PhysicalPlanningContext::default(),
+            )
+            .ok()?,
+        ),
         _ => None,
     };
     if post_filter.as_ref().is_some_and(|expression| {
@@ -3114,10 +3148,11 @@ mod tests {
         let expression = decimal_avg_expression().await;
         let fields = expression.state_fields().unwrap();
         assert_eq!(fields[0].data_type(), &DataType::UInt64);
-        assert_eq!(fields[1].data_type(), &DataType::Decimal256(60, 2));
+        assert_eq!(fields[1].data_type(), &DataType::Decimal256(76, 2));
         let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
         let reservation = MemoryConsumer::new("decimal-avg-partial").register(&pool);
-        let mut partial = PartialGroups::new(&[expression.clone()], reservation, "totals").unwrap();
+        let mut partial =
+            PartialGroups::new(std::slice::from_ref(&expression), reservation, "totals").unwrap();
         for slot in 0..1024 {
             partial.add_slot(slot, "totals").unwrap();
         }
@@ -3178,6 +3213,41 @@ mod tests {
         assert_eq!(pool.reserved(), 0);
     }
 
+    #[tokio::test]
+    async fn test_sql_empty_partial_accumulator_prepays_fixed_native_bytes_and_refunds_refusal() {
+        use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryConsumer, MemoryPool};
+        let expression = decimal_avg_expression().await;
+        let native = expression.create_groups_accumulator().unwrap();
+        let required = 4096 + 512 + native.size();
+        assert!(native.size() > 0);
+        for (limit, accepted) in [(required, true), (required - 1, false)] {
+            let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(limit));
+            let result = PartialGroups::new(
+                std::slice::from_ref(&expression),
+                MemoryConsumer::new("empty-partial").register(&pool),
+                "totals",
+            );
+            assert_eq!(result.is_ok(), accepted);
+            if let Ok(mut partial) = result {
+                partial
+                    .update(
+                        &[vec![datafusion::arrow::array::new_empty_array(
+                            &DataType::Decimal256(60, 2),
+                        )]],
+                        &[],
+                        &[],
+                        0,
+                        "totals",
+                    )
+                    .unwrap();
+                assert_eq!(partial.reservation.size(), required);
+                assert!(partial.slots.is_empty());
+                assert_eq!(pool.reserved(), required);
+            }
+            assert_eq!(pool.reserved(), 0);
+        }
+    }
+
     #[derive(Debug, PartialEq)]
     enum BoundaryResult {
         Value(ScalarValue),
@@ -3223,6 +3293,9 @@ mod tests {
         sum: &ScalarValue,
     ) -> BoundaryResult {
         let expression = &plan.aggregates[0];
+        let sum = sum
+            .cast_to(expression.state_fields().unwrap()[1].data_type())
+            .unwrap();
         let arrays = vec![
             ScalarValue::UInt64(count).to_array().unwrap(),
             sum.to_array().unwrap(),
@@ -3235,7 +3308,7 @@ mod tests {
                     scalar.evaluate().map_err(|error| df_error("totals", error))
                 } else {
                     let mut native = expression.create_groups_accumulator().unwrap();
-                    native.merge_batch(&arrays, &[0], None, 1).unwrap();
+                    native.merge_batch(&arrays, &[0], 1).unwrap();
                     let result = native
                         .evaluate(EmitTo::All)
                         .map_err(|error| df_error("totals", error))?;
@@ -3260,6 +3333,9 @@ mod tests {
             Some((arrays.as_slice(), 0))
         };
         let mut candidate = plan.candidate(None, &[0], keys, "totals").unwrap();
+        let sum = sum
+            .cast_to(plan.aggregates[0].state_fields().unwrap()[1].data_type())
+            .unwrap();
         candidate.accumulators[0]
             .as_mut()
             .unwrap()
@@ -3464,6 +3540,9 @@ mod tests {
 
     fn native_finalizer_peak(expression: &AggregateFunctionExpr, sum: &ScalarValue) -> usize {
         let count = ScalarValue::UInt64(if sum.is_null() { None } else { Some(1) });
+        let sum = sum
+            .cast_to(expression.state_fields().unwrap()[1].data_type())
+            .unwrap();
         let arrays = vec![count.to_array().unwrap(), sum.to_array().unwrap()];
         let seed_bytes = arrays
             .iter()
@@ -3472,7 +3551,7 @@ mod tests {
             + arrays.capacity() * size_of::<ArrayRef>();
         let mut native = expression.create_groups_accumulator().unwrap();
         let owner_bytes = size_of_val(native.as_ref());
-        native.merge_batch(&arrays, &[0], None, 1).unwrap();
+        native.merge_batch(&arrays, &[0], 1).unwrap();
         let state = native.state(EmitTo::All).unwrap();
         let state_bytes = state
             .iter()
@@ -3480,7 +3559,7 @@ mod tests {
             .sum::<usize>()
             + state.capacity() * size_of::<ArrayRef>();
         let mut result_owner = expression.create_groups_accumulator().unwrap();
-        result_owner.merge_batch(&arrays, &[0], None, 1).unwrap();
+        result_owner.merge_batch(&arrays, &[0], 1).unwrap();
         let result = result_owner.evaluate(EmitTo::All).unwrap();
         seed_bytes + state_bytes + 2 * owner_bytes + result.get_array_memory_size()
     }

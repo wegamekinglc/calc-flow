@@ -215,7 +215,7 @@ async fn test_global_float_filters_refusal_preserves_state_and_once_retry() {
         let mut state = filtered_operator(&dtype, FILTERED).with_one_gib_pool_for_test();
         let first = finite_arrivals(false).remove(0);
         let initial = process(&mut state, filtered_input(&dtype, &first, 0), &context).await;
-        let prefix = oracle(&initial, &dtype, FILTERED, &[first.clone()]).await;
+        let prefix = oracle(&initial, &dtype, FILTERED, std::slice::from_ref(&first)).await;
         let before = capture(&mut state, FILTERED, &prefix).await;
         let pool = state
             .stream_state

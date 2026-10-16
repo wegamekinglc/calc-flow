@@ -3,6 +3,7 @@ use super::{
     SchemaRef, StreamOperatorContext, checked_bytes, create_physical_expr, df_error,
     ensure_reservation,
 };
+use datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext;
 use datafusion::{
     arrow::compute::{SortColumn, SortOptions, concat_batches, lexsort_to_indices, take},
     logical_expr::{FetchType, Projection, SkipType, Sort},
@@ -112,8 +113,13 @@ impl OutputOrder {
             .map(|sort| {
                 expression_work(&sort.expr, &shape.projection.schema)?;
                 Some(Key {
-                    expression: create_physical_expr(&sort.expr, &shape.projection.schema, &props)
-                        .ok()?,
+                    expression: create_physical_expr(
+                        &sort.expr,
+                        &shape.projection.schema,
+                        &props,
+                        &PhysicalPlanningContext::default(),
+                    )
+                    .ok()?,
                     options: SortOptions {
                         descending: !sort.asc,
                         nulls_first: sort.nulls_first,

@@ -90,7 +90,7 @@ const EDGE_BUDGET: EdgeBudget = EdgeBudget {
 // source admission; otherwise the lossless M3 trace can outrun backpressure.
 
 const CHECKPOINT_SOAK_MAX_RETAINED_EPOCHS: usize = 64;
-const _: () = assert!(CHECKPOINT_SOAK_SAMPLE_COUNT % CHECKPOINT_SOAK_GENERATIONS == 0);
+const _: () = assert!(CHECKPOINT_SOAK_SAMPLE_COUNT.is_multiple_of(CHECKPOINT_SOAK_GENERATIONS));
 
 // This bounds the OS/test-harness startup omitted by the child-local clock,
 // plus report publication and parent polling after the child finishes.
@@ -4037,10 +4037,10 @@ async fn checkpoint_manifest_documents(root: &Path) -> Vec<crate::CheckpointMani
     };
     while let Some(entry) = entries.next_entry().await.unwrap() {
         let name = entry.file_name();
-        if name.to_string_lossy().starts_with("manifest-") {
-            if let Some(manifest) = read_checkpoint_manifest_document(&entry.path()).await {
-                manifests.push(manifest);
-            }
+        if name.to_string_lossy().starts_with("manifest-")
+            && let Some(manifest) = read_checkpoint_manifest_document(&entry.path()).await
+        {
+            manifests.push(manifest);
         }
     }
     manifests.sort_by_key(crate::CheckpointManifest::epoch);

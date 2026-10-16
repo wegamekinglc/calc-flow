@@ -213,7 +213,7 @@ async fn test_single_publication_preserves_validation_and_strict_repeat_contract
 
     let store = backend.store.lock();
     assert_eq!(store.calls, [Call::Load("one".into())]);
-    assert_eq!(store.published, [segment.clone()]);
+    assert_eq!(store.published.as_slice(), std::slice::from_ref(&segment));
     assert_eq!(store.committed[segment.relative_path()], b"state");
     assert!(store.staged.is_empty());
 }
@@ -341,7 +341,7 @@ async fn test_previous_session_committed_handles_need_no_staging_in_mixed_public
 
     let store = backend.store.lock();
     assert_eq!(handles, original);
-    assert_eq!(store.published, [new.clone()]);
+    assert_eq!(store.published.as_slice(), std::slice::from_ref(&new));
     assert_eq!(
         store.calls,
         [

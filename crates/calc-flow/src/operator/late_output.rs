@@ -140,21 +140,20 @@ pub(crate) fn validate_policy(policy: LatePolicySpec, kind: &str) -> Result<()> 
 }
 
 pub(crate) fn validate_input(policy: LatePolicySpec, input: &Schema, kind: &str) -> Result<()> {
-    if matches!(policy, LatePolicySpec::SideOutput { .. }) {
-        if let Some((index, field)) = input
+    if matches!(policy, LatePolicySpec::SideOutput { .. })
+        && let Some((index, field)) = input
             .fields()
             .iter()
             .enumerate()
             .find(|(_, field)| field.name().starts_with("_cf_late_"))
-        {
-            return Err(CalcFlowError::InvalidArgument {
-                field: format!("{kind}.input_schema[{index}].name"),
-                message: format!(
-                    "input field {:?} is reserved by late schema version 1",
-                    field.name()
-                ),
-            });
-        }
+    {
+        return Err(CalcFlowError::InvalidArgument {
+            field: format!("{kind}.input_schema[{index}].name"),
+            message: format!(
+                "input field {:?} is reserved by late schema version 1",
+                field.name()
+            ),
+        });
     }
     Ok(())
 }

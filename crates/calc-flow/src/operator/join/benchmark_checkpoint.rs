@@ -218,7 +218,7 @@ fn fixture_number(value: usize) -> f64 {
 
 fn fixture_operator(rows: usize) -> Result<StreamJoinOperator> {
     require(
-        (2_560..=FULL_ROWS).contains(&rows) && rows % ENTITIES == 0,
+        (2_560..=FULL_ROWS).contains(&rows) && rows.is_multiple_of(ENTITIES),
         "checkpoint fixture must preserve the maintained 64-key domain",
     )?;
     let capacity = (ENTITIES + rows.max(BATCH_ROWS)) as u64;

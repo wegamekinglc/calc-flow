@@ -354,7 +354,7 @@ fn finish(
         state_layout: 3,
         state_accounting: 3,
         native_semantics: 1,
-        datafusion_version: "54.0.0".into(),
+        datafusion_version: datafusion::DATAFUSION_VERSION.into(),
         state_policy: parts.policy,
         coalescer: parts.coalescer.as_ref().map_or(
             incremental::global_record::coalescer::Inventory::None,

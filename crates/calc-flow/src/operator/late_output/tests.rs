@@ -137,8 +137,8 @@ fn collector(batch: &Batch) -> EdgeCollector {
 #[tokio::test]
 async fn test_late_plan_budget_chunks_exact_arrow_charges_with_nulls() {
     let batch = input(&[&[Some("0123456789"), None], &[Some("0123456789")]]);
-    // One non-null row costs 93 bytes; the null row costs 84 (including bitmap).
-    let budget = EdgeBudget::new(3, 177).unwrap();
+    // One non-null row costs 113 bytes; the null row costs 104 (including bitmap).
+    let budget = EdgeBudget::new(3, 217).unwrap();
     let mut plan = LateOutputPlan::new(
         &batch,
         "roll",
@@ -162,8 +162,8 @@ async fn test_late_plan_budget_chunks_exact_arrow_charges_with_nulls() {
         .map(|message| message.as_data().unwrap())
         .collect::<Vec<_>>();
     assert_eq!(batches.len(), 2);
-    assert_eq!(batches[0].estimated_bytes().unwrap(), 177);
-    assert_eq!(batches[1].estimated_bytes().unwrap(), 93);
+    assert_eq!(batches[0].estimated_bytes().unwrap(), 217);
+    assert_eq!(batches[1].estimated_bytes().unwrap(), 113);
     assert_eq!(batches[1].metadata().sequence(), 8);
 }
 
@@ -193,7 +193,7 @@ fn test_late_plan_budget_preflights_later_oversize_row_and_exact_one_byte_limit(
     assert!(error.to_string().contains("row_index=1"), "{error}");
 
     let batch = input(&[&[Some("0123456789")]]);
-    for (bytes, accepted) in [(93, true), (92, false)] {
+    for (bytes, accepted) in [(113, true), (112, false)] {
         let mut plan = LateOutputPlan::new(
             &batch,
             "roll",
@@ -240,7 +240,7 @@ fn test_late_plan_diagnostic_base_bytes_derive_from_shared_constants() {
     assert_eq!(
         plan::DIAGNOSTIC_BASE_BYTES,
         5 * size_of::<u64>()
-            + 4 * size_of::<i32>()
+            + 4 * size_of::<[i32; 2]>()
             + plan::DIAGNOSTIC_INPUT_PORT.len()
             + plan::DIAGNOSTIC_REASON.len()
     );

@@ -10,8 +10,8 @@ use crate::{
 };
 use ahash::RandomState;
 use datafusion::arrow::{
-    array::{Array, TimestampMicrosecondArray, UInt64Array},
-    compute::take,
+    array::{Array, ArrayRef, TimestampMicrosecondArray, UInt64Array, make_array},
+    datatypes::DataType,
     record_batch::RecordBatch,
 };
 use datafusion::execution::memory_pool::MemoryReservation;
@@ -1404,6 +1404,33 @@ fn encode_rows(
     Ok((result, batches))
 }
 
+fn take_column(column: &ArrayRef, indices: &UInt64Array) -> Result<ArrayRef> {
+    if column.data_type() != &DataType::FixedSizeBinary(0) {
+        return datafusion::arrow::compute::take(column, indices, None)
+            .map_err(|error| super::arrow_error(&error));
+    }
+    // Arrow 59 take infers zero rows from the empty values buffer for this type.
+    let data = column.to_data();
+    let mut copied = arrow_data::transform::MutableArrayData::new(
+        vec![&data],
+        indices.null_count() != 0,
+        indices.len(),
+    );
+    for index in indices {
+        if let Some(index) = index {
+            let index = usize::try_from(index).expect("admission row index fits the address space");
+            copied
+                .try_extend(0, index, index + 1)
+                .map_err(|error| super::arrow_error(&error))?;
+        } else {
+            copied
+                .try_extend_nulls(1)
+                .map_err(|error| super::arrow_error(&error))?;
+        }
+    }
+    Ok(make_array(copied.freeze()))
+}
+
 fn compact_accepted_rows(rows: &[InputRow<'_>], batch: &RecordBatch) -> Result<RecordBatch> {
     if rows.len() == batch.num_rows() && can_share_batch(batch)? {
         return Ok(batch.clone());
@@ -1416,7 +1443,7 @@ fn compact_accepted_rows(rows: &[InputRow<'_>], batch: &RecordBatch) -> Result<R
     let columns = batch
         .columns()
         .iter()
-        .map(|column| take(column, &indices, None).map_err(|error| super::arrow_error(&error)))
+        .map(|column| take_column(column, &indices))
         .collect::<Result<Vec<_>>>()?;
     RecordBatch::try_new(batch.schema(), columns).map_err(|error| super::arrow_error(&error))
 }

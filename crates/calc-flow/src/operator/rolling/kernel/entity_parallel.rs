@@ -205,7 +205,7 @@ impl ScratchPlan {
         outputs: usize,
         name_bytes: usize,
     ) -> Self {
-        // Arrow 58.3 Float64Builder uses an exactly reserved Vec<f64>.
+        // Arrow 59.2 Float64Builder uses an exactly reserved Vec<f64>.
         // Its lazy validity buffer rounds to 64 bytes. Reserve two rounded
         // validity allocations per output, plus fixed Arrow/Arc/builder metadata.
         // The original typed input Vec, entity_ids, one touched-state clone and
@@ -776,7 +776,7 @@ impl<'a, const GROUPS: usize> NumericLaneContext<'a, GROUPS> {
         local: usize,
         progress: &mut LaneProgress,
     ) -> std::result::Result<LaneRow, NumericLaneStop> {
-        if rows.len() % 256 == 0 {
+        if rows.len().is_multiple_of(256) {
             check_cancelled(self.cancellation, progress)?;
         }
         let row = LaneRow {

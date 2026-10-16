@@ -103,7 +103,7 @@ pub(super) fn soak_schema() -> Arc<Schema> {
 }
 
 pub(super) fn soak_batch(source_id: &str, sequence: u64) -> Result<Batch> {
-    let (event_times, groups, values) = if sequence % 4 == 0 {
+    let (event_times, groups, values) = if sequence.is_multiple_of(4) {
         (Vec::new(), Vec::new(), Vec::new())
     } else {
         let value = i64::try_from(sequence)

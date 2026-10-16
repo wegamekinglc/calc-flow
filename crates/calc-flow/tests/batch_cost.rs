@@ -4,9 +4,9 @@ use std::{any::Any, sync::Arc};
 
 use calc_flow::{Batch, BatchMetadata, ExternalPayload};
 use datafusion::arrow::{
-    array::{Array, ArrayRef, Int64Array, ListArray},
+    array::{Array, ArrayRef, Int64Array, ListArray, StringArray},
     buffer::{OffsetBuffer, ScalarBuffer},
-    datatypes::{DataType, Field, Schema},
+    datatypes::{DataType, Field, Int64Type, Schema},
     record_batch::RecordBatch,
 };
 
@@ -57,17 +57,43 @@ fn table_batch_estimates_the_visible_slice_bytes_of_every_column_and_record() {
 
 #[test]
 fn table_batch_estimates_zero_rows_as_zero_bytes() {
-    let schema = Arc::new(Schema::new(vec![Field::new(
-        "value",
-        DataType::Int64,
-        false,
-    )]));
-    let record = RecordBatch::new_empty(schema);
+    let record = RecordBatch::try_from_iter([
+        (
+            "integer",
+            Arc::new(Int64Array::from(vec![1, 2])) as ArrayRef,
+        ),
+        (
+            "string",
+            Arc::new(StringArray::from(vec!["one", "two"])) as ArrayRef,
+        ),
+        (
+            "list",
+            Arc::new(ListArray::from_iter_primitive::<Int64Type, _, _>([
+                Some(vec![Some(1)]),
+                Some(vec![Some(2), Some(3)]),
+            ])) as ArrayRef,
+        ),
+    ])
+    .unwrap();
 
-    let batch = Batch::table(vec![record], BatchMetadata::default()).unwrap();
+    for empty in [RecordBatch::new_empty(record.schema()), record.slice(1, 0)] {
+        let batch = Batch::table(vec![empty.clone()], BatchMetadata::default()).unwrap();
+        assert_eq!(batch.num_rows(), 0);
+        assert_eq!(batch.estimated_bytes().unwrap(), 0);
 
-    assert_eq!(batch.num_rows(), 0);
-    assert_eq!(batch.estimated_bytes().unwrap(), 0);
+        let expected = record
+            .columns()
+            .iter()
+            .map(|column| column.to_data().get_slice_memory_size().unwrap())
+            .sum::<usize>();
+        let mixed = Batch::table(
+            vec![empty.clone(), record.clone(), empty],
+            BatchMetadata::default(),
+        )
+        .unwrap();
+        assert_eq!(mixed.num_rows(), record.num_rows());
+        assert_eq!(mixed.estimated_bytes().unwrap(), expected);
+    }
 }
 
 #[test]

@@ -726,9 +726,8 @@ async fn test_asof_direct_runner_rejects_disabled_reachable_watermark_before_sou
         let mut scenario = Scenario::new(false);
         scenario.disabled_side = Some(index);
         let spec = scenario.spec(40);
-        let error = match crate::runtime::streaming::job::preflight_job(spec) {
-            Ok(_) => panic!("disabled {side} source must fail ASOF preflight"),
-            Err(error) => error,
+        let Err(error) = crate::runtime::streaming::job::preflight_job(spec) else {
+            panic!("disabled {side} source must fail ASOF preflight");
         };
         assert!(matches!(error, CalcFlowError::InvalidArgument { .. }));
         assert!(

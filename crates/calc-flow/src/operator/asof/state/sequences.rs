@@ -100,7 +100,7 @@ impl SequenceColumn {
     pub fn from_integer_slice(values: &[u8], capacity: usize, kind: SequenceKind) -> Self {
         let width = kind.width().expect("integer sequence column");
         assert!(
-            values.len() % width == 0 && values.len() / width <= capacity,
+            values.len().is_multiple_of(width) && values.len() / width <= capacity,
             "preflighted sequence column"
         );
         let mut bytes = Vec::with_capacity(capacity * width);

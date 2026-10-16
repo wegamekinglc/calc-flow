@@ -308,7 +308,7 @@ fn capture_state(
         state_layout: 3,
         state_accounting: 3,
         native_semantics: 1,
-        datafusion_version: "54.0.0".into(),
+        datafusion_version: datafusion::DATAFUSION_VERSION.into(),
         state_policy: incremental::grouped_float::Policy::ExactNumericV1,
         identity,
         ledger,

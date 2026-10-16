@@ -1005,9 +1005,8 @@ fn runner_shape_validation_is_safe_and_side_effect_free() {
         ManagedCheckpointRuntime::new(&root).unwrap(),
     );
 
-    let error = match result {
-        Ok(_) => panic!("missing sink routes must fail runner validation"),
-        Err(error) => error,
+    let Err(error) = result else {
+        panic!("missing sink routes must fail runner validation");
     };
     let CalcFlowError::Streaming(error) = error else {
         panic!("public runner errors must use the safe streaming boundary");
@@ -1032,7 +1031,7 @@ fn runner_shape_errors_keep_safe_participant_coordinates() {
     let directory = tempfile::tempdir().unwrap();
     let checkpoint = || ManagedCheckpointRuntime::new(directory.path().join("managed")).unwrap();
 
-    let unknown_source = match StreamingRunner::new(
+    let Err(unknown_source) = StreamingRunner::new(
         continuous_plan(),
         BTreeMap::from([("extra".into(), SourceBinding::new(FiniteSource))]),
         BTreeMap::from([(
@@ -1048,9 +1047,8 @@ fn runner_shape_errors_keep_safe_participant_coordinates() {
             ],
         )]),
         checkpoint(),
-    ) {
-        Ok(_) => panic!("the unknown source must fail"),
-        Err(error) => error,
+    ) else {
+        panic!("the unknown source must fail");
     };
     let CalcFlowError::Streaming(unknown_source) = unknown_source else {
         panic!("shape errors must use the streaming boundary");
@@ -1062,14 +1060,13 @@ fn runner_shape_errors_keep_safe_participant_coordinates() {
         "source binding \"extra\" does not match a compiled external input"
     );
 
-    let missing_sink = match StreamingRunner::new(
+    let Err(missing_sink) = StreamingRunner::new(
         plan,
         BTreeMap::from([(source_id, SourceBinding::new(FiniteSource))]),
         BTreeMap::new(),
         checkpoint(),
-    ) {
-        Ok(_) => panic!("the missing sink must fail"),
-        Err(error) => error,
+    ) else {
+        panic!("the missing sink must fail");
     };
     let CalcFlowError::Streaming(missing_sink) = missing_sink else {
         panic!("shape errors must use the streaming boundary");
@@ -1089,7 +1086,7 @@ fn invalid_shape_ids_are_redacted_before_the_public_boundary() {
     let canary = "https://user:credential@host";
     let directory = tempfile::tempdir().unwrap();
 
-    let error = match StreamingRunner::new(
+    let Err(error) = StreamingRunner::new(
         plan,
         BTreeMap::from([(canary.into(), SourceBinding::new(FiniteSource))]),
         BTreeMap::from([(
@@ -1105,9 +1102,8 @@ fn invalid_shape_ids_are_redacted_before_the_public_boundary() {
             ],
         )]),
         ManagedCheckpointRuntime::new(directory.path().join("managed")).unwrap(),
-    ) {
-        Ok(_) => panic!("the forbidden source ID must fail shape validation"),
-        Err(error) => error,
+    ) else {
+        panic!("the forbidden source ID must fail shape validation");
     };
     let CalcFlowError::Streaming(error) = error else {
         panic!("shape errors must use the streaming boundary");
@@ -1199,9 +1195,8 @@ async fn start_errors_drop_raw_connector_details() {
     )
     .unwrap();
 
-    let error = match runner.start().await {
-        Ok(_) => panic!("the source open failure must reject start"),
-        Err(error) => error,
+    let Err(error) = runner.start().await else {
+        panic!("the source open failure must reject start");
     };
     let display = error.to_string();
     let debug = format!("{error:?}");
@@ -1253,9 +1248,8 @@ async fn capability_mismatch_precedes_lifecycle_and_storage_side_effects() {
     )
     .unwrap();
 
-    let error = match runner.start().await {
-        Ok(_) => panic!("an unproven operator must fail capability preflight"),
-        Err(error) => error,
+    let Err(error) = runner.start().await else {
+        panic!("an unproven operator must fail capability preflight");
     };
     let CalcFlowError::Streaming(error) = error else {
         panic!("capability failures must use the safe streaming boundary");
@@ -1310,9 +1304,8 @@ async fn delivery_capability_failure_names_the_safe_source_before_lifecycle() {
     )
     .unwrap();
 
-    let error = match runner.start().await {
-        Ok(_) => panic!("the lossy source must fail exactly-once preflight"),
-        Err(error) => error,
+    let Err(error) = runner.start().await else {
+        panic!("the lossy source must fail exactly-once preflight");
     };
     let CalcFlowError::Streaming(error) = error else {
         panic!("capability failures must use the streaming boundary");

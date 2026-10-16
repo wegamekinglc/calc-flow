@@ -104,7 +104,7 @@ async fn test_grouped_float_sum_average_nan_payload_chronology_native3() {
                         )
                     })
                     .collect::<Part>();
-                let batch = input(&dtype, &[part.clone()], sequence as u64);
+                let batch = input(&dtype, std::slice::from_ref(&part), sequence as u64);
                 let weak = weak_arrays(&batch);
                 let actual = process(&mut state, batch, &context).await;
                 prefix.push(part);

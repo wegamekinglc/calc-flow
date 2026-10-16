@@ -42,7 +42,7 @@ Package users need:
 Source developers additionally need:
 
 - Git;
-- Rust 1.88 or newer;
+- Rust 1.94 or newer;
 - Python 3.13 or newer;
 - uv.
 

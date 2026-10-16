@@ -91,6 +91,7 @@ jobs:
           scripts.test_issue406_harness
           scripts.test_issue406_report
           scripts.test_issue406_reuse
+          scripts.test_issue406_sources
           scripts.test_native_memory_profile
           scripts.test_native_slow_sink_diagnostics
           scripts.test_release_collectors
@@ -125,7 +126,7 @@ jobs:
         with:
           python-version-file: .python-version
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-      - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
+      - uses: dtolnay/rust-toolchain@dc08e2af391d489dff6d14cf743e574f7d1229c5 # 1.94.0
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
         with:
           workspaces: target/source -> ../release/cargo
@@ -178,7 +179,7 @@ jobs:
         with:
           python-version-file: .python-version
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-      - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
+      - uses: dtolnay/rust-toolchain@dc08e2af391d489dff6d14cf743e574f7d1229c5 # 1.94.0
         if: matrix.family == 'rust'
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
         if: matrix.family == 'rust'

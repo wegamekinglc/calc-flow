@@ -378,7 +378,7 @@ pub fn project_json_schema() -> Result<Value> {
         "const": PROJECT_FORMAT_VERSION,
         "type": "integer"
     });
-    Ok(value)
+    Ok(crate::json::sort_value(&value))
 }
 
 /// Validates both deserialized and directly constructed project models.
@@ -701,15 +701,15 @@ fn validate_project_delivery(
             DeliveryRequest::AtLeastOnce => DeliveryGuarantee::AtLeastOnce,
             DeliveryRequest::ExactlyOnce => DeliveryGuarantee::ExactlyOnce,
         };
-        if let Some(requirement) = requirements.delivery.get(&binding.binding) {
-            if *requirement != requested {
-                issues.push(issue(
-                    format!("sinks[{sink_index}].delivery"),
-                    "delivery_mismatch",
-                    "project sink delivery disagrees with the compile requirement",
-                ));
-                continue;
-            }
+        if let Some(requirement) = requirements.delivery.get(&binding.binding)
+            && *requirement != requested
+        {
+            issues.push(issue(
+                format!("sinks[{sink_index}].delivery"),
+                "delivery_mismatch",
+                "project sink delivery disagrees with the compile requirement",
+            ));
+            continue;
         }
         let mut participants = Vec::new();
         let reachable_sources = plan.reachable_source_binding_ids(&binding.binding);
@@ -724,14 +724,14 @@ fn validate_project_delivery(
             ) else {
                 continue;
             };
-            if let Ok(factory) = connectors.resolve_source(&identity) {
-                if let Ok(capabilities) = factory.capabilities(&source.options) {
-                    participants.push(DeliveryParticipant {
-                        path: format!("sources[{source_index}]"),
-                        role: ParticipantRole::Source,
-                        capabilities,
-                    });
-                }
+            if let Ok(factory) = connectors.resolve_source(&identity)
+                && let Ok(capabilities) = factory.capabilities(&source.options)
+            {
+                participants.push(DeliveryParticipant {
+                    path: format!("sources[{source_index}]"),
+                    role: ParticipantRole::Source,
+                    capabilities,
+                });
             }
         }
         let Ok(identity) = ConnectorIdentity::new(
@@ -741,14 +741,14 @@ fn validate_project_delivery(
         ) else {
             continue;
         };
-        if let Ok(factory) = connectors.resolve_sink(&identity) {
-            if let Ok(capabilities) = factory.capabilities(&binding.options) {
-                participants.push(DeliveryParticipant {
-                    path: format!("sinks[{sink_index}]"),
-                    role: ParticipantRole::Sink,
-                    capabilities,
-                });
-            }
+        if let Ok(factory) = connectors.resolve_sink(&identity)
+            && let Ok(capabilities) = factory.capabilities(&binding.options)
+        {
+            participants.push(DeliveryParticipant {
+                path: format!("sinks[{sink_index}]"),
+                role: ParticipantRole::Sink,
+                capabilities,
+            });
         }
         if let Err(error) = validate_delivery_guarantee(requested, &participants) {
             issues.push(issue(

@@ -143,12 +143,12 @@ pub(super) fn fill_all(
     let mut pairs = super::super::matches::Selection::with_capacity(count, inputs.admitted.len());
     let mut work = 0usize;
     for pos in 0..inputs.admitted.len() {
-        if work % STOP_GROUP_ITEMS == 0 {
+        if work.is_multiple_of(STOP_GROUP_ITEMS) {
             stop.check()?;
         }
         work += 1;
         for opposite_index in inputs.matches(pos) {
-            if work % STOP_GROUP_ITEMS == 0 {
+            if work.is_multiple_of(STOP_GROUP_ITEMS) {
                 stop.check()?;
             }
             work += 1;

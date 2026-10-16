@@ -6,7 +6,7 @@ use super::{
     Admission, AdmissionWorkspace, Arc, Array, AsofJoinSide, Batch, GatherStop, MemoryReservation,
     OwnedCpuWork, PreparedInput, RecordBatch, ReservedIdentities, Result, StreamAsofJoinOperator,
     StreamOperatorContext, UInt64Array, ValidatedInput, can_share_batch, check_input_cancellation,
-    encode_payload, state, take, times,
+    encode_payload, state, take_column, times,
 };
 use datafusion::arrow::{array::StringArray, datatypes::DataType};
 

@@ -1,9 +1,10 @@
 use super::*;
 use crate::DataFusionRuntime;
 use datafusion::{
-    common::Result as DataFusionResult,
+    common::{Result as DataFusionResult, tree_node::TreeNodeRecursion},
     datasource::memory::MemorySourceConfig,
     execution::TaskContext,
+    physical_expr::PhysicalExpr,
     physical_plan::{
         DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
         RecordBatchStream, SendableRecordBatchStream, repartition::RepartitionExec,
@@ -74,6 +75,13 @@ impl ExecutionPlan for ProducerInput {
 
     fn properties(&self) -> &Arc<PlanProperties> {
         self.input.properties()
+    }
+
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> DataFusionResult<TreeNodeRecursion>,
+    ) -> DataFusionResult<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {

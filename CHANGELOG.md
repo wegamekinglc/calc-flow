@@ -9,6 +9,21 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-16: Upgrade the Rust and Python benchmark engines to DataFusion
+  55.0.0 and the hash-locked Polars reference to 2.0.0. Move the Rust toolchain
+  to its required 1.94.0 minimum, synchronize Arrow/Parquet 59.2 and the Python
+  Arrow bridge, and adapt grouped state merges without allocating all-true
+  filters. SQL checkpoints bind the compiled engine version and reject earlier
+  engine state. Benchmark SQL provenance uses compiled crate versions, while
+  Polars retains explicit streaming collection and reports that selection.
+  Apply equivalent library lint updates required by the new toolchain without
+  changing validation or CI gates. Preserve sparse-group nulls and canonical
+  checkpoint fingerprints under DataFusion 55, account for Arrow terminal offsets
+  per emitted array, and retain zero-width binary payload rows during ASOF
+  admission. Symbolic square roots keep IEEE NaN behavior for negative inputs,
+  while guarded rolling input schemas follow native nullability proofs. This
+  upgrade makes no performance claim.
+
 - 2026-10-16: Replace opt-in native benchmark process CPU ticks with the safe
   Linux process CPU clock and its reported resolution. Reject unavailable or
   invalid v2 clock metadata, retaining historical evidence and CPU thresholds.

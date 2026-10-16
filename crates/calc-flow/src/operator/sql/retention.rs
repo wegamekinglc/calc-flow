@@ -130,17 +130,17 @@ pub(super) fn schema_digest(schema: &SchemaRef) -> Result<String> {
 pub(super) fn plan_dependencies_fit(plan: &LogicalPlan, columns: &RetainedColumns) -> Result<bool> {
     let mut fits = true;
     plan.apply_with_subqueries(|node| {
-        if let LogicalPlan::TableScan(scan) = node {
-            if scan.source.schema() != *columns.logical_schema() {
-                fits = false;
-            }
+        if let LogicalPlan::TableScan(scan) = node
+            && scan.source.schema() != *columns.logical_schema()
+        {
+            fits = false;
         }
         node.apply_expressions(|expression| {
             expression.apply(|expr| {
-                if let LogicalExpr::Column(column) = expr {
-                    if let Ok(index) = columns.logical_schema().index_of(&column.name) {
-                        fits &= columns.retained_index(index).is_ok();
-                    }
+                if let LogicalExpr::Column(column) = expr
+                    && let Ok(index) = columns.logical_schema().index_of(&column.name)
+                {
+                    fits &= columns.retained_index(index).is_ok();
                 }
                 Ok(TreeNodeRecursion::Continue)
             })

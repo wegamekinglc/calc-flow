@@ -171,7 +171,8 @@ impl TableBatch {
     /// Each column of each record batch is charged its Arrow slice memory
     /// size, so sliced arrays sharing a larger backing allocation are charged
     /// only for their visible window. The estimate is a logical queue charge,
-    /// not a process RSS measurement.
+    /// not a process RSS measurement. Zero-row records have no logical charge,
+    /// including the terminal offsets of empty variable-width columns.
     ///
     /// # Errors
     ///
@@ -188,16 +189,19 @@ impl TableBatch {
     }
 
     fn measure_bytes(&self) -> std::result::Result<usize, String> {
-        self.batches.iter().try_fold(0_usize, |total, batch| {
-            batch.columns().iter().try_fold(total, |total, column| {
-                let bytes = column.to_data().get_slice_memory_size().map_err(|error| {
-                    format!("Arrow slice memory could not be measured: {error}")
-                })?;
-                total
-                    .checked_add(bytes)
-                    .ok_or_else(|| "size sum overflowed usize".to_owned())
+        self.batches
+            .iter()
+            .filter(|batch| batch.num_rows() != 0)
+            .try_fold(0_usize, |total, batch| {
+                batch.columns().iter().try_fold(total, |total, column| {
+                    let bytes = column.to_data().get_slice_memory_size().map_err(|error| {
+                        format!("Arrow slice memory could not be measured: {error}")
+                    })?;
+                    total
+                        .checked_add(bytes)
+                        .ok_or_else(|| "size sum overflowed usize".to_owned())
+                })
             })
-        })
     }
 }
 

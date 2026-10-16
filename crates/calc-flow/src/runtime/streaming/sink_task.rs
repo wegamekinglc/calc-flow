@@ -380,36 +380,13 @@ async fn run_sink_task(
             .checkpoint
             .as_ref()
             .map(|checkpoint| checkpoint.initial_epoch)
-        {
-            if let Err(abort_error) = abort_and_settle(
+            && let Err(abort_error) = abort_and_settle(
                 &mut inputs,
                 epoch,
                 &BTreeMap::new(),
                 failure_signal.task_id(),
             )
             .await
-            {
-                record_sink_failure(
-                    &inputs,
-                    inputs.output_id.clone(),
-                    SinkFailurePhase::Checkpoint,
-                    abort_error,
-                );
-            }
-        }
-        failure_signal.cancel_siblings();
-        let _ = close_all(&mut inputs, &failure_signal).await;
-        return Err(task_failed(&inputs.output_id));
-    }
-    let mut failed = run_sink_loop(&mut inputs, &failure_signal).await;
-    if let Some(epoch) = inputs.epoch_owner.abortable_epoch() {
-        if let Err(abort_error) = abort_and_settle(
-            &mut inputs,
-            epoch,
-            &BTreeMap::new(),
-            failure_signal.task_id(),
-        )
-        .await
         {
             record_sink_failure(
                 &inputs,
@@ -417,8 +394,28 @@ async fn run_sink_task(
                 SinkFailurePhase::Checkpoint,
                 abort_error,
             );
-            failed = true;
         }
+        failure_signal.cancel_siblings();
+        let _ = close_all(&mut inputs, &failure_signal).await;
+        return Err(task_failed(&inputs.output_id));
+    }
+    let mut failed = run_sink_loop(&mut inputs, &failure_signal).await;
+    if let Some(epoch) = inputs.epoch_owner.abortable_epoch()
+        && let Err(abort_error) = abort_and_settle(
+            &mut inputs,
+            epoch,
+            &BTreeMap::new(),
+            failure_signal.task_id(),
+        )
+        .await
+    {
+        record_sink_failure(
+            &inputs,
+            inputs.output_id.clone(),
+            SinkFailurePhase::Checkpoint,
+            abort_error,
+        );
+        failed = true;
     }
     let close_failed = close_all(&mut inputs, &failure_signal).await;
     if failed || close_failed {

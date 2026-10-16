@@ -32,7 +32,7 @@ fn test_a12_journal_insert_delete_coalesces_and_releases_actual_credit() {
     };
     let prepared = journal
         .prepare(
-            &[insert.clone()],
+            std::slice::from_ref(&insert),
             |_| true,
             |bytes| reserve(&pool, bytes),
             "asof",

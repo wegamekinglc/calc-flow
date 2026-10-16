@@ -6,7 +6,27 @@ from pathlib import Path
 from types import ModuleType
 from unittest.mock import Mock, patch
 
-from scripts.benchmark_suite.worker import dispatch
+from scripts.benchmark_suite.worker import dispatch, environment
+
+
+class BenchmarkEnvironmentTests(unittest.TestCase):
+    def test_reports_explicit_polars_collection_engine_and_runtime_identity(self):
+        polars = ModuleType("polars")
+        polars.thread_pool_size = lambda: 32
+        with (
+            patch.dict("sys.modules", {"polars": polars}),
+            patch(
+                "scripts.toolkit.worker_environment", return_value={"python": "3.13"}
+            ),
+            patch(
+                "scripts.benchmark_suite.worker.version", side_effect=lambda name: name
+            ),
+        ):
+            identity = environment()
+        self.assertEqual(identity["polars_engine"], "streaming")
+        self.assertEqual(identity["polars_threads"], 32)
+        self.assertEqual(identity["packages"]["datafusion"], "datafusion")
+        self.assertEqual(identity["packages"]["polars"], "polars")
 
 
 class BenchmarkWorkerTests(unittest.TestCase):

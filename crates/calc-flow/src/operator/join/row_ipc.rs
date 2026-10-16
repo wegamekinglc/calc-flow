@@ -5,7 +5,7 @@ use datafusion::arrow::{
     datatypes::{DataType, Schema, SchemaRef},
     error::ArrowError,
     ipc::writer::{
-        CompressionContext, DictionaryTracker, IpcDataGenerator, IpcWriteOptions, StreamWriter,
+        DictionaryTracker, IpcDataGenerator, IpcWriteContext, IpcWriteOptions, StreamWriter,
         write_message,
     },
     record_batch::RecordBatch,
@@ -89,7 +89,7 @@ fn framed_ipc(framing: &Framing, record: &RecordBatch) -> std::result::Result<Ve
         record,
         &mut DictionaryTracker::new(false),
         &options,
-        &mut CompressionContext::default(),
+        &mut IpcWriteContext::default(),
     )?;
     debug_assert!(
         dictionaries.is_empty(),

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import pyarrow as pa
 import pytest
 
@@ -332,3 +334,27 @@ def test_lowered_document_is_byte_deterministic() -> None:
         )
 
     assert build() == build()
+
+
+def test_symbolic_sqrt_preserves_ieee_domain_nulls_and_signed_zero() -> None:
+    quotes = table_input("quotes", schema=[Field("x", "float64")])
+    program = Program(
+        "sqrt-domain",
+        engine="sql",
+        inputs=[quotes],
+        outputs=[("signals", quotes.select(root=row.sqrt(quotes["x"])))],
+    )
+    values = [-math.inf, -4.0, -0.0, 0.0, 4.0, math.inf, math.nan, None]
+    result = (
+        program.compile_batch(Runtime())
+        .execute({"input": Batch.from_pyarrow(pa.table({"x": values}))})
+        .outputs["output"]
+        .to_pyarrow()["root"]
+        .to_pylist()
+    )
+    assert math.isnan(result[0]) and math.isnan(result[1])
+    assert result[2:6] == [-0.0, 0.0, 2.0, math.inf]
+    assert math.copysign(1.0, result[2]) == -1.0
+    assert math.copysign(1.0, result[3]) == 1.0
+    assert math.isnan(result[6])
+    assert result[7] is None

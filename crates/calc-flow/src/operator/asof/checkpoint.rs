@@ -237,7 +237,7 @@ impl StreamAsofJoinOperator {
             state_version: 3,
             layout_version: layout,
             accounting_version: layout,
-            row_encoding: "arrow-batch-58.3.0",
+            row_encoding: "arrow-batch-59.2.0",
             fingerprint: &self.fingerprint,
             epoch: epoch.as_u64(),
             terminal: self.terminal,
@@ -308,7 +308,7 @@ impl StreamAsofJoinOperator {
                 (metadata.layout_version, metadata.accounting_version),
                 (10, 10)
             )
-            || metadata.row_encoding != "arrow-batch-58.3.0"
+            || metadata.row_encoding != "arrow-batch-59.2.0"
             || metadata.fingerprint != self.fingerprint
         {
             return Err(mismatch(
@@ -538,10 +538,10 @@ fn validate_encoding(
     role: u8,
     seen: &mut std::collections::BTreeSet<(usize, u8)>,
 ) -> Result<()> {
-    if let Some((address, _)) = encoding.allocation() {
-        if !seen.insert((address, role)) {
-            return Ok(());
-        }
+    if let Some((address, _)) = encoding.allocation()
+        && !seen.insert((address, role))
+    {
+        return Ok(());
     }
     // A live handle can keep expired rows in its shared batch buffer. Validate
     // the entire allocation against every schema role that references it.

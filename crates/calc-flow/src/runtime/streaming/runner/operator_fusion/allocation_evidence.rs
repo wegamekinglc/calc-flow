@@ -193,7 +193,7 @@ struct WindowRequest {
 
 impl WindowRequest {
     fn new(start: usize, rows: usize) -> Self {
-        assert!(rows > 0 && start % ENTITIES == 0 && rows % ENTITIES == 0);
+        assert!(rows > 0 && start.is_multiple_of(ENTITIES) && rows.is_multiple_of(ENTITIES));
         Self {
             start,
             rows,
@@ -572,8 +572,9 @@ fn measure_arm(
 #[test]
 #[ignore = "dedicated task: current-thread release allocation diagnostic, no timing claims"]
 fn p7_real_task_allocation_evidence() {
+    // Keep this guard at runtime so ignored diagnostics also compile in debug builds.
     assert!(
-        !cfg!(debug_assertions),
+        !std::hint::black_box(cfg!(debug_assertions)),
         "requires an independently identified release test binary"
     );
     let destination =

@@ -68,7 +68,7 @@ impl CompactControl {
         if self.state_layout != 3
             || self.state_accounting != 3
             || self.native_semantics != 1
-            || self.datafusion_version != "54.0.0"
+            || self.datafusion_version != datafusion::DATAFUSION_VERSION
             || self.identity != *trusted
             || !self.ledger.seen_input
         {

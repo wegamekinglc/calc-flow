@@ -1008,13 +1008,11 @@ mod tests {
                 .call_method1("compile_project", (PROJECT,))
                 .unwrap_err();
             assert_eq!(compile.value(py).to_string(), CLEARED_RUNTIME_MESSAGE);
-            let tokio_error = match runtime.borrow(py).clone_tokio() {
-                Ok(_) => panic!("a cleared runtime must not expose its Tokio runtime"),
-                Err(error) => error,
+            let Err(tokio_error) = runtime.borrow(py).clone_tokio() else {
+                panic!("a cleared runtime must not expose its Tokio runtime");
             };
-            let udf_error = match runtime.borrow(py).udf_snapshot() {
-                Ok(_) => panic!("a cleared runtime must not expose its UDF registry"),
-                Err(error) => error,
+            let Err(udf_error) = runtime.borrow(py).udf_snapshot() else {
+                panic!("a cleared runtime must not expose its UDF registry");
             };
             for error in [tokio_error, udf_error] {
                 assert_eq!(error.value(py).to_string(), CLEARED_RUNTIME_MESSAGE);

@@ -148,10 +148,10 @@ impl DispatchTraceOwner {
 
     /// Marks a complete, successful watermark dispatch after all its callbacks.
     pub fn complete_watermark(&self, node: &str, micros: i64) {
-        if let State::Active(trace) = &mut *self.0.lock() {
-            if let Some((_, frontier)) = trace.frontiers.iter_mut().find(|(name, _)| name == node) {
-                *frontier = Some(micros);
-            }
+        if let State::Active(trace) = &mut *self.0.lock()
+            && let Some((_, frontier)) = trace.frontiers.iter_mut().find(|(name, _)| name == node)
+        {
+            *frontier = Some(micros);
         }
     }
 

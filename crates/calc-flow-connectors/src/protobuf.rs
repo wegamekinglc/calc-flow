@@ -129,10 +129,10 @@ impl ProtobufCodec {
             .plan
             .lock()
             .expect("the plan cache lock is never poisoned by planning");
-        if let Some((cached_spec, plan)) = &*cached {
-            if cached_spec.as_slice() == spec {
-                return Ok(Arc::clone(plan));
-            }
+        if let Some((cached_spec, plan)) = &*cached
+            && cached_spec.as_slice() == spec
+        {
+            return Ok(Arc::clone(plan));
         }
         let plan = Arc::new(self.build_plan(spec)?);
         *cached = Some((spec.to_vec(), Arc::clone(&plan)));

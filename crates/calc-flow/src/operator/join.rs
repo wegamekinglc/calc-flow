@@ -3157,11 +3157,11 @@ impl RetainedRows {
                 .expect("native probe released before retained append")
                 .append_identified_indices(&chunks.indices, rows, dictionary);
         }
-        std::ops::DerefMut::deref_mut(self).commit(chunks);
+        (**self).commit(chunks);
     }
 
     fn remove_bound(&mut self, index: usize, bindings: &key_dictionary::SideBindings) -> StoredRow {
-        let row = std::ops::DerefMut::deref_mut(self).remove(index);
+        let row = (**self).remove(index);
         if let Some(native) = &mut self.1 {
             let native = Arc::get_mut(native).expect("native probe released before eviction");
             native.remove_stable(&row, bindings.canonical(&row), |index| {
@@ -3172,7 +3172,7 @@ impl RetainedRows {
     }
 
     fn clear(&mut self) {
-        std::ops::DerefMut::deref_mut(self).clear();
+        (**self).clear();
         self.1 = None;
         self.2.clear();
     }
@@ -4852,7 +4852,7 @@ impl OperatorMetadata for StreamJoinOperator {
     fn configuration(&self) -> JsonMap {
         let value = serde_json::to_value(&self.spec)
             .expect("validated stream Join configuration remains serializable");
-        let Value::Object(values) = value else {
+        let Value::Object(values) = crate::json::sort_value(&value) else {
             unreachable!("stream Join configuration serializes as an object")
         };
         values.into_iter().collect()
@@ -5733,7 +5733,7 @@ fn canonical_timestamp<T: ArrowPrimitiveType>(column: &ArrayRef, canonical: &Dat
 }
 
 fn exact_safe_duration_micros(duration: Duration, field: &str) -> Result<u64> {
-    if duration.subsec_nanos() % 1_000 != 0 {
+    if !duration.subsec_nanos().is_multiple_of(1_000) {
         return Err(CalcFlowError::InvalidArgument {
             field: field.into(),
             message: "must be an exact multiple of one microsecond".into(),

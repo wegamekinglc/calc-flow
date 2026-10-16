@@ -11,10 +11,10 @@ impl StreamAsofJoinOperator {
         &mut self,
         epoch: Epoch,
     ) -> Result<Option<OperatorStateSnapshot>> {
-        if self.replay_anchor_due() {
-            if let Some(snapshot) = self.replace_replay_anchor(epoch)? {
-                return Ok(Some(snapshot));
-            }
+        if self.replay_anchor_due()
+            && let Some(snapshot) = self.replace_replay_anchor(epoch)?
+        {
+            return Ok(Some(snapshot));
         }
         if !self.capture_replay_frame()? {
             return Ok(None);

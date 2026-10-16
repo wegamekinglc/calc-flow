@@ -22,10 +22,10 @@ jax = ["jax>=0.4.30,<0.4.31; python_version < '3.10'", "jax>=0.4; python_version
 array = ["jax>=0.4.30,<0.4.31; python_version < '3.10'", "jax>=0.4; python_version >= '3.10'", "numpy>=2.0.0"]
 benchmark = [
     "TA-Lib==0.7.1",
-    "datafusion==54.0.0; python_version >= '3.10'",
+    "datafusion==55.0.0; python_version >= '3.10'",
     "jax>=0.4",
     "numpy>=2.0.0",
-    "polars>=1.32,<2",
+    "polars>=2.0,<3; python_version >= '3.10'",
     "psutil>=6.1",
     "py-cpuinfo>=9",
     "pytest>=8",

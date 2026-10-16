@@ -28,10 +28,21 @@ pub(crate) fn fixed_width(data_type: &DataType) -> Option<usize> {
     data_type.primitive_width().or(match data_type {
         DataType::Null => Some(0),
         DataType::Boolean => Some(1),
-        DataType::Utf8 | DataType::Binary => Some(4),
-        DataType::LargeUtf8 | DataType::LargeBinary => Some(8),
+        DataType::Utf8 | DataType::Binary => Some(2 * size_of::<i32>()),
+        DataType::LargeUtf8 | DataType::LargeBinary => Some(2 * size_of::<i64>()),
         _ => None,
     })
+}
+
+/// The terminal offset belongs to each emitted array, in addition to its row offsets.
+pub(crate) fn terminal_offset_width(data_type: &DataType) -> usize {
+    match data_type {
+        DataType::Utf8 | DataType::Binary | DataType::List(_) | DataType::Map(_, _) => {
+            size_of::<i32>()
+        }
+        DataType::LargeUtf8 | DataType::LargeBinary | DataType::LargeList(_) => size_of::<i64>(),
+        _ => 0,
+    }
 }
 
 pub(crate) fn variable_offsets(column: &dyn Array) -> Option<Offsets<'_>> {
@@ -170,7 +181,8 @@ impl RowCosts {
         Ok(ColumnCharges::read(record)?.and_then(|charges| charges.total(record.num_rows())))
     }
 
-    pub(crate) fn try_new(record: &RecordBatch) -> Result<Option<Self>> {
+    #[cfg(test)]
+    fn try_new(record: &RecordBatch) -> Result<Option<Self>> {
         let Some(charges) = ColumnCharges::read(record)? else {
             return Ok(None);
         };

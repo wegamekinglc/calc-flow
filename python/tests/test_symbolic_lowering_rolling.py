@@ -975,3 +975,99 @@ def test_stream_compile_lowers_an_aggregate_program() -> None:
     )
 
     assert isinstance(plan, StreamExecutionPlan)
+
+
+@pytest.mark.parametrize("guard", ["comparison", "independent"])
+def test_negated_nullable_rolling_input_uses_native_guard_proof(guard: str) -> None:
+    schema = pa.schema(
+        [
+            pa.field("ts", pa.timestamp("us", tz="UTC"), nullable=False),
+            pa.field("symbol", pa.string(), nullable=False),
+            pa.field("seq", pa.uint64(), nullable=False),
+            pa.field("x", pa.float64()),
+            pa.field("accepted", pa.bool_(), nullable=False),
+        ]
+    )
+    source = table_input(
+        "input",
+        schema=schema,
+        entity_by=["symbol"],
+        event_time="ts",
+        sequence_by=["seq"],
+    )
+    condition = source["x"] < 0.0 if guard == "comparison" else source["accepted"]
+    program = Program(
+        "negated-rolling-input",
+        engine="sql",
+        outputs={
+            "output": source.select(
+                value=ts.lag(row.where(condition, -source["x"], 0.0))
+            )
+        },
+    )
+    data = pa.table(
+        {
+            "ts": [1, 2, 3],
+            "symbol": ["a"] * 3,
+            "seq": [1, 2, 3],
+            "x": [None, -2.0, 3.0],
+            "accepted": [True, False, True],
+        },
+        schema=schema,
+    )
+    actual = program.collect({"input": data})["output"]
+    assert actual.to_pydict() == {
+        "value": [None, 0.0, 2.0] if guard == "comparison" else [None, None, 0.0]
+    }
+    document = lower_program_document(program, Runtime(), "batch")
+    field = document["graph"]["nodes"][0]["output_ports"][0]["schema"][-1]
+    assert field["nullable"] is (guard == "independent")
+
+
+@pytest.mark.parametrize("guard", ["comparison", "independent"])
+def test_cast_nullable_rolling_input_uses_native_guard_proof(guard: str) -> None:
+    schema = pa.schema(
+        [
+            pa.field("ts", pa.timestamp("us", tz="UTC"), nullable=False),
+            pa.field("symbol", pa.string(), nullable=False),
+            pa.field("seq", pa.uint64(), nullable=False),
+            pa.field("x", pa.int64()),
+            pa.field("accepted", pa.bool_(), nullable=False),
+        ]
+    )
+    source = table_input(
+        "input",
+        schema=schema,
+        entity_by=["symbol"],
+        event_time="ts",
+        sequence_by=["seq"],
+    )
+    condition = source["x"] > 0 if guard == "comparison" else source["accepted"]
+    operand = row.where(condition, row.cast(source["x"], "float64"), 0.0)
+    program = Program(
+        "cast-rolling-input",
+        engine="sql",
+        outputs={"output": source.select(value=ts.mean(operand, window=rows(2)))},
+    )
+    data = pa.table(
+        {
+            "ts": [1, 2, 3, 4, 5],
+            "symbol": ["a"] * 5,
+            "seq": [1, 2, 3, 4, 5],
+            "x": [None, 2, -3, 0, 4],
+            "accepted": [True, True, True, False, True],
+        },
+        schema=schema,
+    )
+    actual = program.collect({"input": data})["output"]
+    expected = (
+        [0.0, 1.0, 1.0, 0.0, 2.0]
+        if guard == "comparison"
+        else [None, 2.0, -0.5, -1.5, 2.0]
+    )
+    values = actual["value"].to_pylist()
+    assert values[0] == expected[0]
+    assert values[1:] == pytest.approx(expected[1:])
+    document = lower_program_document(program, Runtime(), "batch")
+    field = document["graph"]["nodes"][0]["output_ports"][0]["schema"][-1]
+    assert field["nullable"] is (guard == "independent")

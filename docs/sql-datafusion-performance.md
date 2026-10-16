@@ -2,7 +2,7 @@
 
 [Documentation](README.md) / 5.3 SQL performance
 
-Calc Flow executes table expressions and SQL with Apache DataFusion 54. The
+Calc Flow executes table expressions and SQL with Apache DataFusion 55. The
 default configuration uses one fixed partition. Applications can opt into
 conservative auto parallelism and independently control SQL rolling rewrites
 and diagnostic collection.

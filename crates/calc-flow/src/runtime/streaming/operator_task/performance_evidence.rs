@@ -369,8 +369,9 @@ fn evidence_workloads() -> [Workload; 4] {
 #[test]
 #[ignore = "dedicated performance task: release current-thread diagnostic, not a CI timing gate"]
 fn native_callback_allocation_and_overhead_evidence() {
+    // Keep this guard at runtime so ignored diagnostics also compile in debug builds.
     assert!(
-        !cfg!(debug_assertions),
+        !std::hint::black_box(cfg!(debug_assertions)),
         "callback performance evidence requires a release test binary"
     );
     let destination =

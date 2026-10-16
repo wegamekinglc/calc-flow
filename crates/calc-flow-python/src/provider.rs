@@ -1361,13 +1361,10 @@ mod tests {
                 BTreeMap::from([("expression".into(), json!("x"))]),
             )
             .unwrap();
-            let error = match factory.create(
-                &spec,
-                vec![array_port("input")],
-                vec![array_port("output")],
-            ) {
-                Ok(_) => panic!("validation should reject the options"),
-                Err(error) => error,
+            let Err(error) =
+                factory.create(&spec, vec![array_port("input")], vec![array_port("output")])
+            else {
+                panic!("validation should reject the options");
             };
             assert!(error.to_string().contains("unsafe"));
 
@@ -1380,13 +1377,10 @@ mod tests {
             let spec =
                 calc_flow::ExternalOperatorSpec::new("python", "identity", "1", BTreeMap::new())
                     .unwrap();
-            let error = match factory.create(
-                &spec,
-                vec![array_port("wrong")],
-                vec![array_port("output")],
-            ) {
-                Ok(_) => panic!("invalid ports should be rejected"),
-                Err(error) => error,
+            let Err(error) =
+                factory.create(&spec, vec![array_port("wrong")], vec![array_port("output")])
+            else {
+                panic!("invalid ports should be rejected");
             };
             assert_eq!(
                 error.to_string(),
@@ -2038,13 +2032,12 @@ mod tests {
                 calc_flow::ExternalOperatorSpec::new("python", "mapping", "1", BTreeMap::new())
                     .unwrap();
 
-            let error = match factory.create(
+            let Err(error) = factory.create(
                 &spec,
                 vec![array_port("weights"), table_port("table")],
                 vec![array_port("output")],
-            ) {
-                Ok(_) => panic!("reordered ports should be rejected"),
-                Err(error) => error,
+            ) else {
+                panic!("reordered ports should be rejected");
             };
 
             assert_eq!(

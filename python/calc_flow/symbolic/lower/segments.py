@@ -143,7 +143,6 @@ _BINARY_SQL: Final = {
 _FUNCTION_SQL: Final = {
     "log": "ln",
     "exp": "exp",
-    "sqrt": "sqrt",
     "abs": "abs",
     "acos": "acos",
     "acosh": "acosh",
@@ -459,6 +458,12 @@ def _sql(node: Node, /) -> str:
         return "COALESCE(" + ", ".join(_sql(argument) for argument in node.args) + ")"
     if name == "power":
         return f"power({_sql(node.args[0])}, {_sql(node.args[1])})"
+    if name == "sqrt":
+        operand = _sql(node.args[0])
+        return (
+            f"sqrt(CASE WHEN {operand} < 0.0 THEN CAST('NaN' AS DOUBLE)"
+            f" ELSE {operand} END)"
+        )
     if name in _FUNCTION_SQL:
         return f"{_FUNCTION_SQL[name]}({_sql(node.args[0])})"
     if name == "clip":
@@ -803,12 +808,17 @@ def _row_local_conditional_field(
 
 
 def _where_result_is_nullable(node: Node, children: list[Field], /) -> bool:
-    """Mirror DataFusion's non-null proof for a directly guarded column."""
+    """Mirror DataFusion's guarded-column proof through hard casts and negation."""
 
     if children[2].nullable:
         return True
     selected = node.args[1]
     condition = node.args[0]
+    if selected.op.name in {"neg", "cast"}:
+        if condition.op.name not in {"eq", "ne", "lt", "le", "gt", "ge"}:
+            return children[1].nullable
+        while selected.op.name in {"neg", "cast"}:
+            selected = selected.args[0]
     if selected.op.name == "column_ref" and any(
         argument.digest == selected.digest for argument in condition.args
     ):

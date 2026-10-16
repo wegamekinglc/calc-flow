@@ -9,8 +9,7 @@ use datafusion::arrow::{
     ipc::{
         self,
         writer::{
-            CompressionContext, DictionaryHandling, DictionaryTracker, IpcDataGenerator,
-            write_message,
+            DictionaryHandling, DictionaryTracker, IpcDataGenerator, IpcWriteContext, write_message,
         },
     },
 };
@@ -195,7 +194,7 @@ fn delta_ipc_with_charges(
         .with_dictionary_handling(DictionaryHandling::Delta);
     let generator = IpcDataGenerator {};
     let mut tracker = DictionaryTracker::new(false);
-    let mut compression = CompressionContext::default();
+    let mut compression = IpcWriteContext::default();
     let schema = generator.schema_to_bytes_with_dictionary_tracker(
         &initial.schema(),
         &mut tracker,

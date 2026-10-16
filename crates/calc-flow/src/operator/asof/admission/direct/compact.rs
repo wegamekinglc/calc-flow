@@ -1,4 +1,4 @@
-use super::{RecordBatch, Result, UInt64Array, can_share_batch, take};
+use super::{RecordBatch, Result, UInt64Array, can_share_batch, take_column};
 use arrow_data::{
     ArrayData,
     transform::{Capacities, MutableArrayData},
@@ -17,7 +17,11 @@ pub(super) fn compact_complete_record(record: &RecordBatch) -> Result<RecordBatc
         return Ok(record.clone());
     }
     let columns = if can_copy(record) {
-        record.columns().iter().map(copy_column).collect()
+        record
+            .columns()
+            .iter()
+            .map(copy_column)
+            .collect::<Result<Vec<_>>>()?
     } else {
         take_columns(record)?
     };
@@ -46,7 +50,7 @@ fn copy_type(data_type: &DataType) -> bool {
         )
 }
 
-fn copy_column(column: &ArrayRef) -> ArrayRef {
+fn copy_column(column: &ArrayRef) -> Result<ArrayRef> {
     let data = column.to_data();
     let capacity = match data.data_type() {
         DataType::Utf8 | DataType::Binary => variable_capacity::<i32>(&data),
@@ -54,8 +58,10 @@ fn copy_column(column: &ArrayRef) -> ArrayRef {
         _ => Capacities::Array(data.len()),
     };
     let mut copied = MutableArrayData::with_capacities(vec![&data], false, capacity);
-    copied.extend(0, 0, data.len());
-    make_array(copied.freeze())
+    copied
+        .try_extend(0, 0, data.len())
+        .map_err(|error| super::super::super::arrow_error(&error))?;
+    Ok(make_array(copied.freeze()))
 }
 
 fn variable_capacity<T: ArrowNativeType>(data: &ArrayData) -> Capacities {
@@ -76,8 +82,6 @@ fn take_columns(record: &RecordBatch) -> Result<Vec<ArrayRef>> {
     record
         .columns()
         .iter()
-        .map(|column| {
-            take(column, &indices, None).map_err(|error| super::super::super::arrow_error(&error))
-        })
+        .map(|column| take_column(column, &indices))
         .collect()
 }

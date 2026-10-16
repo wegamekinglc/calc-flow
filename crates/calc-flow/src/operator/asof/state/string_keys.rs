@@ -52,7 +52,7 @@ fn dictionary<O: OffsetSizeTrait, R>(
         };
         ids.push(id);
     }
-    // Arrow 58.3 take_bytes allocates the sum of selected value lengths once.
+    // Arrow 59.2 take_bytes allocates the sum of selected value lengths once.
     // Hold that additional buffer reservation while RowConverter's canonical
     // rows are live; fixed admission headroom already covers ids and offsets.
     encode_distinct(column, unique, ids, reserve)

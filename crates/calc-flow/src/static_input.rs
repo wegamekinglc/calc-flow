@@ -197,7 +197,7 @@ fn write_table_type(writer: &mut DigestWriter, data_type: &DataType) -> Result<(
 }
 
 /// Writes the type descriptor; `dictionary_ordered` supplies the Arrow
-/// ordered flag for the outermost dictionary type (Arrow 58 stores the flag
+/// ordered flag for the outermost dictionary type (Arrow 59 stores the flag
 /// on the array, not the type).
 fn write_table_type_ordered(
     writer: &mut DigestWriter,

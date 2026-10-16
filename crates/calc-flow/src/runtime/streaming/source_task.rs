@@ -167,7 +167,10 @@ impl Cursor {
     }
 
     pub(crate) fn decode_manifest_order(order: &str) -> Result<Vec<u8>> {
-        if order.is_empty() || order.len() % 2 != 0 || !order.bytes().all(is_lowercase_hex_digit) {
+        if order.is_empty()
+            || !order.len().is_multiple_of(2)
+            || !order.bytes().all(is_lowercase_hex_digit)
+        {
             return Err(invalid_manifest_cursor_order());
         }
         hex::decode(order).map_err(|_| invalid_manifest_cursor_order())

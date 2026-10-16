@@ -1,4 +1,5 @@
 use super::{Arc, PhysicalExpr, RecordBatch, Result, SchemaRef, df_error};
+use datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext;
 use datafusion::{
     logical_expr::execution_props::ExecutionProps,
     physical_expr::{create_physical_expr, utils::reassign_expr_columns},
@@ -18,7 +19,13 @@ pub(super) fn bind(
             nodes = nodes.checked_add(super::native_expression::input_expression_work(
                 expression, logical,
             )?)?;
-            let physical = create_physical_expr(expression, logical, &props).ok()?;
+            let physical = create_physical_expr(
+                expression,
+                logical,
+                &props,
+                &PhysicalPlanningContext::default(),
+            )
+            .ok()?;
             reassign_expr_columns(physical, schema).ok()
         })
         .collect::<Option<Vec<_>>>()?;

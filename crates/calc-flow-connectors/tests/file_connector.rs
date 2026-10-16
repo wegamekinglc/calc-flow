@@ -984,9 +984,8 @@ async fn source_factory_opens_from_data_only_options() {
     let mut bad_format = csv_options(&root);
     bad_format.insert("format".to_string(), json!("xml"));
     let outcome = factory.open(&bad_format, &NoSecrets).await;
-    let error = match outcome {
-        Ok(_) => panic!("factory must reject unknown formats"),
-        Err(error) => error,
+    let Err(error) = outcome else {
+        panic!("factory must reject unknown formats");
     };
     assert!(error.to_string().contains("format"), "{error}");
 }

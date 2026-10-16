@@ -1159,10 +1159,10 @@ impl ContinuousRunner {
             });
         }
         spec.context = spec.context.with_checkpointing(config.checkpointing);
-        if let Some(budget) = config.sql_state_budget {
-            if let Err(error) = spec.plan.set_sql_state_budget(Some(budget)) {
-                return preflight_error_observer(error);
-            }
+        if let Some(budget) = config.sql_state_budget
+            && let Err(error) = spec.plan.set_sql_state_budget(Some(budget))
+        {
+            return preflight_error_observer(error);
         }
         let runtime_config_hash = match checkpoint.as_ref() {
             Some(checkpoint) => match spec.plan.runtime_config_hash(&checkpoint.config) {
@@ -2942,10 +2942,10 @@ fn sanitize_managed_preflight_error(
     if !managed {
         return error;
     }
-    if let CalcFlowError::CheckpointMismatch { message } = &error {
-        if message.starts_with("static_inputs.") {
-            return error;
-        }
+    if let CalcFlowError::CheckpointMismatch { message } = &error
+        && message.starts_with("static_inputs.")
+    {
+        return error;
     }
     match error {
         CalcFlowError::Conflict { .. } | CalcFlowError::PlanLeased { .. } => {

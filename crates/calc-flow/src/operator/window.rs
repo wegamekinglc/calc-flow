@@ -4921,7 +4921,7 @@ fn exact_duration_micros(duration: Duration, field: &str) -> Result<u64> {
     if nanos == 0 {
         return Err(invalid_argument(field, "must be greater than zero"));
     }
-    if nanos % 1_000 != 0 {
+    if !nanos.is_multiple_of(1_000) {
         return Err(invalid_argument(
             field,
             "must be an exact multiple of one microsecond",

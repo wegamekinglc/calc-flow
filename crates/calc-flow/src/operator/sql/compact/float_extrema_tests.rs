@@ -406,7 +406,7 @@ async fn checked_prefixes(dtype: &DataType, query: &str, parts: Vec<Part>, nativ
     for (sequence, part) in parts.into_iter().enumerate() {
         let actual = process(
             &mut state,
-            input(dtype, &[part.clone()], sequence as u64),
+            input(dtype, std::slice::from_ref(&part), sequence as u64),
             &context,
         )
         .await;

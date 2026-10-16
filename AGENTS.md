@@ -197,7 +197,7 @@ dashes span the full column width, including cell spaces.
   public `FileCheckpointStore` are removed. `FileProjectStore` remains the
   bounded atomic project-document store.
 
-Apache DataFusion 54 is the sole table engine. Table operations accept one
+Apache DataFusion 55 is the sole table engine. Table operations accept one
 expression/projection/filter node or one read-only `SELECT`/CTE SQL node.
 Reject DDL, DML, utility statements, multiple statements, and table backend
 selectors.

@@ -188,9 +188,8 @@ proptest! {
             .connect(edge(&format!("node_{}", node_count - 1), "node_0"))
             .unwrap();
 
-        let error = match builder.compile_batch(&UdfRegistry::new().snapshot()) {
-            Ok(_) => return Err(TestCaseError::fail("generated cycle compiled")),
-            Err(error) => error,
+        let Err(error) = builder.compile_batch(&UdfRegistry::new().snapshot()) else {
+            return Err(TestCaseError::fail("generated cycle compiled"));
         };
         let message = error.to_string();
         let is_compile_error = matches!(error, CalcFlowError::Compile { .. });

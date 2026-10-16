@@ -318,58 +318,58 @@ pub(crate) fn project_manual_checkpoint_error(
     if matches!(error, CalcFlowError::RecoveryRequired { .. }) {
         return project_manual_recovery_required(job_id, status);
     }
-    if let Some(status) = status {
-        if let Some(category) = status.failure_category {
-            let category = match category {
-                CheckpointFailureCategory::Timeout => StreamingErrorCategory::CheckpointTimeout,
-                CheckpointFailureCategory::Protocol => StreamingErrorCategory::CheckpointMismatch,
-                CheckpointFailureCategory::Io => StreamingErrorCategory::Io,
-                CheckpointFailureCategory::Runtime if matches!(error, CalcFlowError::Io { .. }) => {
-                    StreamingErrorCategory::Io
-                }
-                CheckpointFailureCategory::Maintenance | CheckpointFailureCategory::Runtime => {
-                    StreamingErrorCategory::Internal
-                }
-            };
-            let message = match (category, status.current_epoch) {
-                (StreamingErrorCategory::CheckpointTimeout, Some(epoch)) => format!(
-                    "checkpoint epoch {} exceeded the configured timeout",
+    if let Some(status) = status
+        && let Some(category) = status.failure_category
+    {
+        let category = match category {
+            CheckpointFailureCategory::Timeout => StreamingErrorCategory::CheckpointTimeout,
+            CheckpointFailureCategory::Protocol => StreamingErrorCategory::CheckpointMismatch,
+            CheckpointFailureCategory::Io => StreamingErrorCategory::Io,
+            CheckpointFailureCategory::Runtime if matches!(error, CalcFlowError::Io { .. }) => {
+                StreamingErrorCategory::Io
+            }
+            CheckpointFailureCategory::Maintenance | CheckpointFailureCategory::Runtime => {
+                StreamingErrorCategory::Internal
+            }
+        };
+        let message = match (category, status.current_epoch) {
+            (StreamingErrorCategory::CheckpointTimeout, Some(epoch)) => format!(
+                "checkpoint epoch {} exceeded the configured timeout",
+                epoch.as_u64()
+            ),
+            (StreamingErrorCategory::CheckpointTimeout, None) => {
+                "checkpoint request exceeded the configured timeout".into()
+            }
+            (StreamingErrorCategory::CheckpointMismatch, Some(epoch)) => {
+                format!(
+                    "checkpoint epoch {} did not match the active protocol",
                     epoch.as_u64()
-                ),
-                (StreamingErrorCategory::CheckpointTimeout, None) => {
-                    "checkpoint request exceeded the configured timeout".into()
-                }
-                (StreamingErrorCategory::CheckpointMismatch, Some(epoch)) => {
-                    format!(
-                        "checkpoint epoch {} did not match the active protocol",
-                        epoch.as_u64()
-                    )
-                }
-                (StreamingErrorCategory::CheckpointMismatch, None) => {
-                    "checkpoint request did not match the active protocol".into()
-                }
-                (StreamingErrorCategory::Io, Some(epoch)) => {
-                    format!(
-                        "checkpoint storage operation failed for epoch {}",
-                        epoch.as_u64()
-                    )
-                }
-                (StreamingErrorCategory::Io, None) => "checkpoint storage operation failed".into(),
-                _ => "checkpoint runtime failed".into(),
-            };
-            return StreamingError {
-                category,
-                reason_code: None,
-                message,
-                job_id: Some(job_id),
-                epoch: status.current_epoch,
-                checkpoint_phase: status.phase.map(CheckpointPhase::from),
-                component_kind: Some(ComponentKind::Checkpoint),
-                component_id: None,
-                diagnostic_id: None,
-                position: 0,
-            };
-        }
+                )
+            }
+            (StreamingErrorCategory::CheckpointMismatch, None) => {
+                "checkpoint request did not match the active protocol".into()
+            }
+            (StreamingErrorCategory::Io, Some(epoch)) => {
+                format!(
+                    "checkpoint storage operation failed for epoch {}",
+                    epoch.as_u64()
+                )
+            }
+            (StreamingErrorCategory::Io, None) => "checkpoint storage operation failed".into(),
+            _ => "checkpoint runtime failed".into(),
+        };
+        return StreamingError {
+            category,
+            reason_code: None,
+            message,
+            job_id: Some(job_id),
+            epoch: status.current_epoch,
+            checkpoint_phase: status.phase.map(CheckpointPhase::from),
+            component_kind: Some(ComponentKind::Checkpoint),
+            component_id: None,
+            diagnostic_id: None,
+            position: 0,
+        };
     }
     project_public_error(Some(job_id), error)
 }

@@ -1,6 +1,6 @@
 use super::{GatherStop, GatherWork, JoinOutput, Result};
 use crate::operator::join::{MatchedPair, PayloadRef, columnar::RowPayload};
-use crate::operator::row_cost::{Offsets, fixed_width, variable_offsets};
+use crate::operator::row_cost::{Offsets, fixed_width, terminal_offset_width, variable_offsets};
 use datafusion::arrow::datatypes::DataType;
 
 const MAX_SCRATCH: usize = 512 * 1024 * 1024;
@@ -86,7 +86,7 @@ fn schema_bytes(output: &JoinOutput<'_>) -> Option<(usize, Vec<usize>)> {
 fn physical_width(data_type: &DataType) -> Option<usize> {
     match data_type {
         DataType::FixedSizeBinary(width) => usize::try_from(*width).ok(),
-        _ => fixed_width(data_type),
+        _ => fixed_width(data_type).map(|width| width - terminal_offset_width(data_type)),
     }
 }
 

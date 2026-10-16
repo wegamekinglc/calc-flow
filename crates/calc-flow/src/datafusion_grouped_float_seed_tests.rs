@@ -98,7 +98,7 @@ async fn assert_plain_seed_mismatch(dtype: DataType, maximum: bool) {
     assert_eq!(state.len(), 1);
     let actual = bits(&state[0]);
     let mut reseeded = expression.create_groups_accumulator().unwrap();
-    reseeded.merge_batch(&state, &[0], None, 1).unwrap();
+    reseeded.merge_batch(&state, &[0], 1).unwrap();
     let output = reseeded.evaluate(EmitTo::All).unwrap();
     let plain = bits(&output);
     let (winner, sentinel) = match (&dtype, maximum) {

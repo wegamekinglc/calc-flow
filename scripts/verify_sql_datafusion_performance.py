@@ -849,8 +849,8 @@ def _verify_environment_identity(environment: dict) -> None:
         value = environment[field]
         if not isinstance(value, str) or FINGERPRINT.fullmatch(value) is None:
             raise ValueError(f"environment.{field} must be a SHA-256 digest")
-    if environment["datafusion_version"] != "54.0.0":
-        raise ValueError("environment.datafusion_version must be 54.0.0")
+    if environment["datafusion_version"] != "55.0.0":
+        raise ValueError("environment.datafusion_version must be 55.0.0")
 
 
 def _require_nonempty_str(value: object, label: str) -> None:
