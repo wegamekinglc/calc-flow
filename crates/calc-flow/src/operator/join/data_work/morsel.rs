@@ -8,8 +8,11 @@ use datafusion::{
 };
 
 use super::super::{
-    AdmittedBatch, PreparedJoinBatch, PreparedMatches, StreamJoinOperator, matches::Selection,
-    materialization::JoinOutput, native_lookup::NativeKeys, operator_error, output_gather,
+    AdmittedBatch, PreparedJoinBatch, PreparedMatches, StreamJoinOperator,
+    matches::Selection,
+    materialization::{JoinOutput, supports_flat_ranges},
+    native_lookup::NativeKeys,
+    operator_error, output_gather,
 };
 use super::{inputs::ProbeInputs, partition::Counts, worker};
 use crate::runtime::streaming::gather_work::{GatherStop, ParallelCpuWork};
@@ -42,6 +45,8 @@ pub(super) fn eligible(operator: &StreamJoinOperator, rows: usize) -> bool {
     rows >= 64_000
         && operator.output_ports[0].schema().is_some_and(|schema| {
             !schema.fields().is_empty()
+                // Ranges precede result admission; preflight must not copy arrays.
+                && supports_flat_ranges(schema)
                 && schema
                     .fields()
                     .iter()

@@ -5,6 +5,7 @@ const ROWS: usize = 64_000;
 
 mod boundaries;
 mod lifecycle;
+mod materializing_preflight;
 mod nullable_funding;
 #[cfg(feature = "benchmark-internals")]
 mod paired;

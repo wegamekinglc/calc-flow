@@ -15,6 +15,8 @@ measurements. Use the current guides for supported behavior.
   cancellation cleanup, V1 charges and checkpoint formats unchanged. Price
   result leases from physical selected buffers, including restored nullable
   fixed-width values; exceeding the result cap keeps the existing fallback.
+  Shapes requiring array-copy range preflight keep the split path before fused
+  workspace admission.
 
 - 2026-10-16: Merge general ASOF integer-sequence batches into reserved columns
   by key, preserving unordered input positions and duplicate identity history.

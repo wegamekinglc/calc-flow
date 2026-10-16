@@ -1024,7 +1024,10 @@ sizes must also fit the lease before results leave the worker. Result funding
 stays alive through collector acceptance. These workspace caps do not change V1
 state charges or turn edge byte budgets into process-memory ceilings.
 
-Other shapes retain the split probe/materialization path. Fused workspace or
+Shapes needing array-copy range preflight, including FixedSizeBinary, retain
+the split probe/materialization path. Fusion uses the same schema check as
+non-materializing range planning. Other unsupported shapes also retain the
+split path. Fused workspace or
 result refusal releases attempted output before using the prepaid serial pair
 reservation. Split fill fragments and their combined buffer remain funded until
 the fragments are released. All paths share immutable native indices and inputs.

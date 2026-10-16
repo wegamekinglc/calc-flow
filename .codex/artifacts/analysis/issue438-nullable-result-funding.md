@@ -2,7 +2,8 @@
 
 Fixes the independent review's P1 on PR #453, starting at
 `e49031f627342b957a19e90e1aac3060d4405782` (Rust source `e5987c9c`).
-The correction's source is the commit containing this report. The original
+The nullable correction's source is `889566de72a81dcc65a75ac634e58f97b9bc6ba6`.
+The subsequent preflight correction is recorded below. The original
 [validation and resource receipt](issue438-join-morsels.md) retain their source
 provenance; no paired performance observations were repeated or relabeled.
 
@@ -85,3 +86,68 @@ remain CI gates. Conservative funding can send additional nullable/wide shapes
 to fallback; performance of those shapes was not measured. The original
 development diagnostic's process CPU increase of about 20–21% remains a
 limitation, and release/#443 performance acceptance remains unmeasured.
+
+## Materializing preflight ordering correction
+
+The follow-up review found that FixedSizeBinary could enter fused ranges before
+result admission. The range planner's generic branch materializes bounded Arrow
+chunks to validate their sizes. Its width predicate excludes FixedSizeBinary,
+although the fused output predicate previously accepted that type. The source
+for this follow-up is the commit containing this section; it starts at `889566de`.
+
+A new real-worker regression uses a 1 GiB runtime pool, five projected opposite
+rows with FixedSizeBinary(1 MiB), and 64,000 incoming rows. Only 20 incoming rows
+per unit match in time: 320,000 estimated visits yield 400 actual matches, 100
+per unit. The projected state has funded RestoredV2 owners. Before the fix, all
+four units recorded **67,108,976 bytes** of peak actual Arrow array memory while
+the entire batch held only **731,552 bytes** of morsel scratch. Exactly one
+morsel admission attempt occurred (scratch); no result admission occurred.
+The new no-worker-copy assertion failed (one failed test, 0.46 seconds).
+
+Fusion now shares the exact `supports_flat_ranges` predicate used to select the
+non-materializing planner. Shapes requiring copying preflight decline fusion
+before deferred work or fused workspace admission. Of the previously supported
+flat output forms, FixedSizeBinary is the only form excluded by this predicate:
+primitive/temporal/decimal, Null, Boolean and the four byte-array forms retain
+the non-copy planner. Dictionary, view and nested output were already excluded.
+The fast fit check also performs no materialization. This keeps all fused range
+planning on widths/selected offsets/validity, before funded result construction.
+The existing split route and its bounded serial preflight remain in place.
+
+After the fix all four real fill workers report **0 copied array bytes, 0 morsel
+credit and 0 morsel admission attempts**. The fallback emits all 400 full-width
+binary rows with their original five-row order and validates every output byte.
+The regression also checks caller input equality, successful state publication
+and complete cleanup refunds. A second test covers simultaneous match/state
+limits (match error wins), a byte budget smaller than one binary row, and a sink
+failure after one accepted chunk: no retained left state, row IDs or emitted-row
+metrics commit, the accepted sequence is preserved, and all credit refunds.
+The array peak counter is test-only; no production tracing was added.
+
+Focused commands, using the same Rust/build environment recorded above:
+
+```bash
+cargo test --locked -p calc-flow --features benchmark-checkpoint-diagnostic \
+  --lib morsel_tests::materializing_preflight -- --test-threads=1 --nocapture
+target/debug/deps/calc_flow-abab16b2e36df81b \
+  test_morsel_gathers_before_fill_unit_settlement --test-threads=1
+target/debug/deps/calc_flow-abab16b2e36df81b \
+  operator::join::materialization::tests:: --test-threads=1
+cargo clippy --locked -p calc-flow --lib --tests --all-features -- -D warnings
+cargo fmt --all --check
+git diff --check
+git diff --exit-code -- Cargo.lock schemas/project-v3.schema.json
+```
+
+The two new regressions, one retained fusion check and five directly affected
+range-planning tests pass (8 tests total). The 13-pass nullable/morsel result
+regressions retain their original provenance; the two new tests complete in
+3.25 seconds after build. Core all-feature lib/test Clippy, format, whitespace
+and lockfile/schema drift checks pass. Lizard 1.23.0 checks 52 functions in
+`morsel.rs`, `materialization.rs` and the new regression module: maximum CCN 8,
+without exemptions. The nullable/morsel result
+evidence above remains scoped to `889566de`; the funding implementation is
+unchanged by this correction. The same prior broad evidence and CI boundaries
+apply. FixedSizeBinary now always uses the split route; performance of this
+fallback and release/#443 targets remains unmeasured. No performance samples,
+budget changes, public interfaces or checkpoint changes were introduced.
