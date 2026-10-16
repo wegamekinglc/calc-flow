@@ -632,8 +632,42 @@ baseline and candidate for every pair, including all twelve formerly missing
 baseline OFF arms. Both products require enabled and OFF builds of
 `stream_join_perf` and `stream_asof_e2e`, plus ordinary and traced wheels with
 the existing source, compiler, dependency, installed-member and artifact audits.
-The build, execution and harness SHA fields must identify one clean tool commit;
-no historical compatibility or controller-repair exception applies.
+By default the build, execution and harness SHA fields identify one clean tool
+commit. Historical compatibility and controller-repair exceptions do not apply.
+
+The current milestone can explicitly opt into source policy
+`calc-flow.issue406-build-execution.v1`. This separates original build provenance
+from a newer execution/fixture tool without changing either product identity:
+
+- `harness_git_sha` and `execution_git_sha` identify the real clean execution
+  checkout; `build_harness_git_sha` remains the original receipt's build tool.
+- `build_harness_source` is an absolute path to an independent, clean Git
+  checkout of that original build tool. A source export without Git identity is
+  insufficient. Restore the sealed build commit/bundle without editing receipts.
+- `sealed_files` includes every Python tool under `benchmarks/` and
+  `scripts/benchmark_suite/`, plus `scripts/toolkit.py`, in **both** checkouts.
+  Untracked Python/fixture tools and missing or wrong seals are rejected.
+- `build_execution_diff` contains `path` and `sha256` for the canonical binary
+  Git patch returned by `issue406_sources.source_diff(execution_root, build_sha,
+  execution_sha)`. Write that string unchanged and seal the file. The validator
+  independently compares it with the actual commits. The original build commit
+  must also be available in the execution checkout's Git object database.
+- The `crates` and `python` trees, Cargo/lock/project manifests, Cargo/toolchain
+  configuration and original overlay/provenance recipe files must have identical
+  Git objects across build and execution. Original fresh attestations are checked
+  using the independent build checkout. All ordinary/traced/native product,
+  toolchain, codegen, dependency/profile, byte, installation and pair checks stay.
+- `preparation_main_git_sha` records the exact main checked before preparation.
+  Its compiled inputs and entire benchmark fixture tree must match execution.
+  This includes the interval cap `6 * batch_rows + 768`, with unchanged byte/match
+  limits. Both B/C fixtures use that same sealed execution configuration and full
+  identity/value/schema oracle.
+
+Unknown source policies fail closed. Omitting the policy preserves the original
+same-SHA contract; historical v2/v3 policies are unchanged. A frozen then-main C
+remains that exact product commit when main later changes only benchmark tools.
+Record the actual diff and distinct identities; do not relabel old artifacts as
+a new product or claim the whole repository SHAs are equal.
 
 After this tooling change is integrated, freeze new exact B/C and tool SHAs;
 the preflight's `6ad1e957` is not automatically a future then-main. Sealed ordinary
@@ -664,7 +698,9 @@ anchor, then prepare and seal the plan and its artifact inventory:
 
 ```bash
 python -m scripts.benchmark_suite.issue406_run \
-  --begin-preparation target/issue443/preparation.json
+  --begin-preparation target/issue443/preparation.json \
+  --expected-execution-sha <clean-execution-H> \
+  --expected-main-sha <observed-main-SHA>
 # Prepare and review plan.json using the milestone ENVELOPE, inventory(),
 # cpu_budgets(), exact B/C release descriptors and sealed_files.
 python -m scripts.benchmark_suite.issue406_run \
@@ -679,6 +715,12 @@ preflight, startup, oracle, warmup, collection, cleanup, analysis and sealing.
 It records actual `preparation_elapsed_seconds`; `precharged_seconds`, including
 an asserted zero, is forbidden. Creating an anchor cannot overwrite an old one
 or execute a collection. Never reset an anchor to recover spent collection time.
+The guarded CLI checks the clean execution checkout, remote main and matching
+compiled/fixture inputs before creating the exclusive anchor file. A failed
+guard creates no anchor. The explicit source policy requires the anchor's
+`source_guard` to match execution and `preparation_main_git_sha`; old unguarded
+or failed-run anchors cannot be reused. Summary JSON and text retain distinct
+build/execution identities, including after an early stop.
 
 The envelope is 5,400 seconds total, with collection cutoff at 4,800, settlement
 deadline at 5,100, a 300-second settlement reserve and five-second startup/seal

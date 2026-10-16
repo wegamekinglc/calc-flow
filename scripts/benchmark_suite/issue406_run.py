@@ -17,6 +17,7 @@ from pathlib import Path
 
 from scripts.benchmark_suite import issue406_fresh_v3 as v3
 from scripts.benchmark_suite import issue406_milestone as milestone
+from scripts.benchmark_suite import issue406_sources as sources
 from scripts.benchmark_suite.issue406_acceptance import (
     acceptance_inventory,
     validate_complete_results,
@@ -1346,7 +1347,7 @@ def _exit_unsettled_controller(
     os._exit(1)
 
 
-def main() -> int:
+def _cli_arguments():
     import argparse
 
     parser = argparse.ArgumentParser(description=__doc__)
@@ -1354,18 +1355,37 @@ def main() -> int:
     parser.add_argument("output", type=Path, nargs="?")
     parser.add_argument("--plan-sha256")
     parser.add_argument("--begin-preparation", type=Path)
+    parser.add_argument("--expected-execution-sha")
+    parser.add_argument("--expected-main-sha")
     args = parser.parse_args()
     if args.begin_preparation is not None:
-        if (
-            args.plan is not None
-            or args.output is not None
-            or args.plan_sha256 is not None
+        if any(
+            value is not None for value in (args.plan, args.output, args.plan_sha256)
         ):
             parser.error("preparation anchor creation cannot execute a collection")
-        milestone.begin_preparation(args.begin_preparation)
-        return 0
-    if args.plan is None or args.output is None or args.plan_sha256 is None:
+    elif any(
+        value is not None
+        for value in (args.expected_execution_sha, args.expected_main_sha)
+    ):
+        parser.error("source guards require --begin-preparation")
+    elif any(value is None for value in (args.plan, args.output, args.plan_sha256)):
         parser.error("collection requires plan, output and --plan-sha256")
+    return args
+
+
+def _begin_cli_preparation(args):
+    expected = (args.expected_execution_sha, args.expected_main_sha)
+    guard = (
+        None if expected == (None, None) else sources.preparation_guard(ROOT, *expected)
+    )
+    milestone.begin_preparation(args.begin_preparation, source_guard=guard)
+
+
+def main() -> int:
+    args = _cli_arguments()
+    if args.begin_preparation is not None:
+        _begin_cli_preparation(args)
+        return 0
     if sha256_file(args.plan) != args.plan_sha256:
         raise ValueError("execution plan differs from the reviewed seal")
     report = asyncio.run(_run_cli(json.loads(args.plan.read_text()), args.output))
@@ -1392,6 +1412,8 @@ def _validate_plan_inventory(plan: dict) -> dict:
     for path, digest in files.items():
         if sha256_file(Path(path)) != digest:
             raise ValueError(f"sealed execution input changed: {path}")
+    if plan.get("schema") == milestone.SCHEMA:
+        sources.validate_binding(plan, ROOT, files)
     return files
 
 
@@ -1987,6 +2009,7 @@ def _validate_plan_binary(plan, side, name, files, build_harness):
     ):
         raise ValueError("native and wheel product revisions differ")
     build = _validate_plan_native_build(plan, descriptor, files, mode)
+    sources.validate_native_identity(plan, build, descriptor, release["product_commit"])
     return target, mode, build
 
 
@@ -2017,11 +2040,7 @@ def _validate_source_attestation(
 
 
 def _plan_python_sources():
-    return {
-        str(path.resolve())
-        for directory in (ROOT / "benchmarks", ROOT / "scripts/benchmark_suite")
-        for path in directory.rglob("*.py")
-    } | {str(ROOT / "scripts/toolkit.py")}
+    return sources.python_sources(ROOT)
 
 
 def _plan_binary_inventory(side, *, current=False):
