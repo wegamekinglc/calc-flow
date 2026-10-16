@@ -2,7 +2,7 @@ use super::super::native_lookup::scratch_error;
 use crate::Result;
 use std::ops::Range;
 
-const MAX_UNITS: usize = 8;
+const MAX_UNITS: usize = 4;
 
 pub(super) fn units(rows: usize) -> usize {
     (rows / super::MIN_PROBE_ROWS).clamp(1, MAX_UNITS)

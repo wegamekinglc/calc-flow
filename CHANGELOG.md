@@ -9,6 +9,20 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-16: Retain Join/ASOF ingress receivers through supervised failure
+  publication and cancellation. Preserve the underlying operator reason and
+  detail when preparation workers stop; upstream edge-close errors remain
+  secondary to that failure.
+
+- 2026-10-16: Add bounded Join probe/gather morsels on the existing native pool.
+  Large eligible batches use up to four stable input ranges, with global match
+  limits and state admission before output work. Keep funded serial fallbacks,
+  cancellation cleanup, V1 charges and checkpoint formats unchanged. Price
+  result leases from physical selected buffers, including restored nullable
+  fixed-width values; exceeding the result cap keeps the existing fallback.
+  Shapes requiring array-copy range preflight keep the split path before fused
+  workspace admission.
+
 - 2026-10-16: Merge general ASOF integer-sequence batches into reserved columns
   by key, preserving unordered input positions and duplicate identity history.
   Finalization caches each key's latest Arrow payload route and advances

@@ -9,6 +9,8 @@ use crate::{CancellationToken, JsonMap, StreamJobContext};
 
 mod cleanup;
 mod parallel;
+#[cfg(feature = "benchmark-internals")]
+mod roundtrip;
 
 #[test]
 fn typed_idle_pool_yields_capacity_with_live_context_and_unobserved_ticket() {

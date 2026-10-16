@@ -525,9 +525,11 @@ identities; generic key ordering retains its existing canonical-byte path.
 Controls remain FIFO and require owner acknowledgement before preparation
 reads another envelope. All waits are cancellable; task exit, failure and panic
 join every preparation task before releasing the operator.
-On failure or panic, the operator records the failure trigger and signals job
-cancellation before joining preparation tasks, whose cleanup closes upstream
-receivers. Those resulting edge errors remain secondary.
+On operator failure or panic, the failure trigger is recorded and job cancellation
+is signalled before joining preparation tasks. Each task returns its physical
+receiver, including on cancellation or a contained panic, to the retained operator
+frame. The supervisor publishes the original result and converges before that
+frame releases the receivers, so resulting edge errors remain secondary.
 
 In a checkpoint-enabled job, an operator removes only barrier-arrived
 ingresses from receive selection; their post-barrier traffic remains in the

@@ -115,7 +115,7 @@ pub(super) fn column(
     ))
 }
 
-fn flat_owned_type(data_type: &DataType) -> bool {
+pub(super) fn flat_owned_type(data_type: &DataType) -> bool {
     data_type.is_primitive()
         || matches!(
             data_type,
