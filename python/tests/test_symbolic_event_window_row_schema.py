@@ -315,15 +315,22 @@ def test_unsigned_negation_allows_explicit_signed_cast():
 
 @pytest.mark.parametrize(
     ("operation", "sql"),
-    [("sqrt", 'sqrt("x")'), ("exp", 'exp("x")'), ("log", 'ln("x")')],
+    [
+        (
+            "sqrt",
+            """sqrt(CASE WHEN "x" < 0.0 THEN CAST('NaN' AS DOUBLE) ELSE "x" END)""",
+        ),
+        ("exp", 'exp("x")'),
+        ("log", 'ln("x")'),
+    ],
 )
-def test_float64_row_rendering_keeps_existing_sql(operation, sql):
+def test_float64_row_rendering_uses_domain_safe_sql(operation, sql):
     source = _input("float64")
     result = source.with_columns(
         FeatureSet([("result", getattr(row, operation)(source["x"]))])
     )
     program = Program(
-        "unchanged-double",
+        "float64-row-rendering",
         engine="streaming",
         inputs=[source],
         outputs=[("result", result)],

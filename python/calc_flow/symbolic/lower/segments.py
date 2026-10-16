@@ -808,16 +808,16 @@ def _row_local_conditional_field(
 
 
 def _where_result_is_nullable(node: Node, children: list[Field], /) -> bool:
-    """Mirror DataFusion's non-null proof for a directly guarded column."""
+    """Mirror DataFusion's guarded-column proof through hard casts and negation."""
 
     if children[2].nullable:
         return True
     selected = node.args[1]
     condition = node.args[0]
-    if selected.op.name == "neg":
+    if selected.op.name in {"neg", "cast"}:
         if condition.op.name not in {"eq", "ne", "lt", "le", "gt", "ge"}:
             return children[1].nullable
-        while selected.op.name == "neg":
+        while selected.op.name in {"neg", "cast"}:
             selected = selected.args[0]
     if selected.op.name == "column_ref" and any(
         argument.digest == selected.digest for argument in condition.args
