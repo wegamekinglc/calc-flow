@@ -187,7 +187,7 @@ impl<'de> Visitor<'de> for UniqueValueVisitor {
     }
 }
 
-fn sort_value(value: &Value) -> Value {
+pub(crate) fn sort_value(value: &Value) -> Value {
     match value {
         // Feature unification can make serde_json::Map preserve insertion order.
         Value::Object(values) => Value::Object(

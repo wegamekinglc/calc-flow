@@ -4852,7 +4852,7 @@ impl OperatorMetadata for StreamJoinOperator {
     fn configuration(&self) -> JsonMap {
         let value = serde_json::to_value(&self.spec)
             .expect("validated stream Join configuration remains serializable");
-        let Value::Object(values) = value else {
+        let Value::Object(values) = crate::json::sort_value(&value) else {
             unreachable!("stream Join configuration serializes as an object")
         };
         values.into_iter().collect()

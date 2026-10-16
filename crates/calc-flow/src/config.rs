@@ -378,7 +378,7 @@ pub fn project_json_schema() -> Result<Value> {
         "const": PROJECT_FORMAT_VERSION,
         "type": "integer"
     });
-    Ok(value)
+    Ok(crate::json::sort_value(&value))
 }
 
 /// Validates both deserialized and directly constructed project models.
