@@ -1,7 +1,7 @@
 use crate::{CalcFlowError, Result};
 use datafusion::arrow::datatypes::{DataType, Schema};
 
-// State layout 1 pins the non-null Arrow 58 row encoding used by its typed indexes.
+// State layout 1 pins the non-null Arrow 59 row encoding used by its typed indexes.
 pub(super) fn validate(mut bytes: &[u8], schema: &Schema, columns: &[String]) -> Result<()> {
     for column in columns {
         let data_type = schema

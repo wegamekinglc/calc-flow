@@ -201,7 +201,11 @@ class BenchmarkSuiteTests(unittest.TestCase):
         )
         row["evidence"] = [
             {
-                "environment": {"polars_threads": 1, "tokio_worker_threads": "32"},
+                "environment": {
+                    "polars_threads": 1,
+                    "polars_engine": "streaming",
+                    "tokio_worker_threads": "32",
+                },
                 "samples": {
                     "candidate": [{"seconds": 0.01, "correctness": {"passed": True}}]
                     * 10
@@ -212,6 +216,15 @@ class BenchmarkSuiteTests(unittest.TestCase):
             for _ in range(2)
         ]
         _validate_evidence(row, {"candidate": release})
+        for engine in (None, "auto", "in-memory"):
+            bad = deepcopy(row)
+            for evidence in bad["evidence"]:
+                evidence["environment"]["polars_engine"] = engine
+            with (
+                self.subTest(engine=engine),
+                self.assertRaisesRegex(ValueError, "Polars.*engine"),
+            ):
+                _validate_evidence(bad, {"candidate": release})
         for backend, polars_threads in (("polars-1t", 32), ("polars", 1)):
             bad = deepcopy(row)
             bad["backend"] = backend

@@ -243,10 +243,10 @@ fn retain_encoding_buffer(
     bytes: u64,
     name: &str,
 ) -> Result<u64> {
-    if let Some((address, retained)) = encoding.allocation() {
-        if owners.insert(address) {
-            return checked(name, bytes, retained);
-        }
+    if let Some((address, retained)) = encoding.allocation()
+        && owners.insert(address)
+    {
+        return checked(name, bytes, retained);
     }
     Ok(bytes)
 }

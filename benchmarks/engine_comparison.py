@@ -29,7 +29,12 @@ from benchmarks.rolling_indicator_comparison import (
 )
 from benchmarks.warm_stream import BASE, _segment
 from calc_flow import Batch, PipelineBuilder
-from scripts.benchmark_suite.catalog import BATCH_ROWS, CAPABILITIES, THREADS
+from scripts.benchmark_suite.catalog import (
+    BATCH_ROWS,
+    CAPABILITIES,
+    POLARS_ENGINE,
+    THREADS,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -362,7 +367,7 @@ def _polars_plan(data: Workload, scenario: str):
 
 def _polars(data: Workload, scenario: str):
     plan = _polars_plan(data, scenario)
-    return lambda: plan.collect(engine="streaming").to_arrow()
+    return lambda: plan.collect(engine=POLARS_ENGINE).to_arrow()
 
 
 def _ta_lib(data: Workload, scenario: str):

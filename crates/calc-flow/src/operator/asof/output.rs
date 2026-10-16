@@ -444,7 +444,9 @@ impl<'a> GatherPlan<'a> {
         let nullable = data.iter().any(|data| data.nulls().is_some());
         let mut mutable = MutableArrayData::new(data.iter().collect(), nullable, len);
         for span in self.spans {
-            mutable.extend(span.source, span.start, span.end);
+            mutable
+                .try_extend(span.source, span.start, span.end)
+                .map_err(|error| super::arrow_error(&error))?;
         }
         Ok(make_array(mutable.freeze()))
     }

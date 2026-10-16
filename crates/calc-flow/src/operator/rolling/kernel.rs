@@ -1262,10 +1262,6 @@ fn typed_group_input(
     node_id: &str,
 ) -> Result<TypedGroupInput> {
     match *group {
-        TypedGroupPlan::Numeric { input_index, .. } => Ok(TypedGroupInput::Single(cast_float64(
-            input.column(input_index),
-            node_id,
-        )?)),
         TypedGroupPlan::Extrema {
             input_index,
             storage,
@@ -1285,9 +1281,12 @@ fn typed_group_input(
             cast_float64(input.column(left_index), node_id)?,
             cast_float64(input.column(right_index), node_id)?,
         )),
-        TypedGroupPlan::Ewma { input_index, .. } | TypedGroupPlan::Scan { input_index, .. } => Ok(
-            TypedGroupInput::Single(cast_float64(input.column(input_index), node_id)?),
-        ),
+        TypedGroupPlan::Numeric { input_index, .. }
+        | TypedGroupPlan::Ewma { input_index, .. }
+        | TypedGroupPlan::Scan { input_index, .. } => Ok(TypedGroupInput::Single(cast_float64(
+            input.column(input_index),
+            node_id,
+        )?)),
     }
 }
 
@@ -3198,7 +3197,7 @@ pub(super) fn stable_v2_rebase_due(
         return false;
     }
     let cadence = u64::try_from(retained_samples.max(64)).unwrap_or(u64::MAX);
-    transition_count % cadence == 0
+    transition_count.is_multiple_of(cadence)
 }
 
 #[derive(Default)]

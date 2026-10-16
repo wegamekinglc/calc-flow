@@ -371,7 +371,7 @@ fn buffer_slice(body: &[u8], offset: usize, length: usize) -> Result<&[u8]> {
     let end = offset
         .checked_add(length)
         .ok_or_else(|| invalid("V2 IPC buffer range overflow"))?;
-    if offset % 8 != 0 {
+    if !offset.is_multiple_of(8) {
         return Err(invalid(
             "V2 IPC buffer offset is not aligned to eight bytes",
         ));

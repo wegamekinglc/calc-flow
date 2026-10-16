@@ -6,6 +6,7 @@ import re
 
 from scripts.benchmark_suite.catalog import (
     CONTRACT,
+    POLARS_ENGINE,
     THREADS,
     comparison_kind,
     get_shard,
@@ -105,6 +106,11 @@ def _validate_evidence(case: dict, releases: dict) -> None:
     if len(rounds) != 2 or rounds[0]["environment"] != rounds[1]["environment"]:
         raise ValueError("missing confirmation or changed environment")
     environment = rounds[0]["environment"]
+    if (
+        case.get("backend") in ("polars", "polars-1t")
+        and environment.get("polars_engine") != POLARS_ENGINE
+    ):
+        raise ValueError("unexpected Polars collection engine")
     if environment["polars_threads"] != polars_thread_count(case) or environment[
         "tokio_worker_threads"
     ] != str(THREADS):

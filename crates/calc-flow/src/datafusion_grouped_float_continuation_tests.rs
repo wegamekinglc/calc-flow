@@ -139,10 +139,10 @@ fn seed(accumulator: &mut dyn GroupsAccumulator, dtype: &DataType, state: &Array
         .collect::<Vec<_>>();
     let ranks = (0..state.len()).collect::<Vec<_>>();
     accumulator
-        .merge_batch(&[array(dtype, &reset)], &ranks, None, count)
+        .merge_batch(&[array(dtype, &reset)], &ranks, count)
         .unwrap();
     accumulator
-        .merge_batch(&[state.clone()], &ranks, None, count)
+        .merge_batch(&[state.clone()], &ranks, count)
         .unwrap();
 }
 

@@ -42,20 +42,19 @@ impl PartialAccumulator {
             })
             .collect::<DataFusionResult<Vec<_>>>()
             .map_err(|error| df_error(name, error))?;
-        let filter = BooleanArray::from(vec![true; ranks.len()]);
         if self.numeric {
             self.native
-                .merge_batch(&values, &ranks, Some(&filter), count)
+                .merge_batch(&values, &ranks, count)
                 .map_err(|error| df_error(name, error))
         } else {
             let reset = super::grouped_float::reset(first.last().expect("sequential state"), name)?
                 .to_array_of_size(ranks.len())
                 .map_err(|error| df_error(name, error))?;
             self.native
-                .merge_batch(&[reset], &ranks, Some(&filter), count)
+                .merge_batch(&[reset], &ranks, count)
                 .map_err(|error| df_error(name, error))?;
             self.native
-                .merge_batch(&values, &ranks, Some(&filter), count)
+                .merge_batch(&values, &ranks, count)
                 .map_err(|error| df_error(name, error))
         }
     }

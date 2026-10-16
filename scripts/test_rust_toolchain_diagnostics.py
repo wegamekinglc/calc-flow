@@ -43,7 +43,7 @@ class InstallLogTests(unittest.TestCase):
                 "BASH_ENV": str(HOOK),
                 "RUST_TOOLCHAIN_EVIDENCE": str(output),
             }
-            for command in ("rustup toolchain install 1.88.0", "rustup --version"):
+            for command in ("rustup toolchain install 1.94.0", "rustup --version"):
                 with self.subTest(command=command):
                     result = subprocess.run(  # nosec B603  # fixed local fixtures, no external commands
                         ["/bin/bash", "-e", "-o", "pipefail", "-c", command],
@@ -82,7 +82,7 @@ class InstallLogTests(unittest.TestCase):
                             "-o",
                             "pipefail",
                             "-c",
-                            "rustup toolchain install 1.88.0",
+                            "rustup toolchain install 1.94.0",
                         ],
                         env=env,
                         capture_output=True,
@@ -102,7 +102,7 @@ class InstallLogTests(unittest.TestCase):
                         str(code),
                     )
                     self.assertIn(
-                        "rustup toolchain install 1.88.0",
+                        "rustup toolchain install 1.94.0",
                         (output / "install-command.txt").read_text(),
                     )
 
@@ -194,7 +194,7 @@ class SnapshotTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             rustup_home = root / "rustup"
-            toolchain = rustup_home / "toolchains/1.88.0-x86_64-unknown-linux-gnu"
+            toolchain = rustup_home / "toolchains/1.94.0-x86_64-unknown-linux-gnu"
             manifests = toolchain / "lib/rustlib"
             manifests.mkdir(parents=True)
             manifest = manifests / "manifest-clippy-preview-x86_64-unknown-linux-gnu"
@@ -258,7 +258,7 @@ class WorkflowTests(unittest.TestCase):
         )
         self.assertIn("path: ${{ runner.temp }}/rust-toolchain-install/", job)
         install = job.index(
-            "uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4"
+            "uses: dtolnay/rust-toolchain@dc08e2af391d489dff6d14cf743e574f7d1229c5"
         )
         self.assertLess(
             job.index("scripts/rust_toolchain_diagnostics.py before"), install

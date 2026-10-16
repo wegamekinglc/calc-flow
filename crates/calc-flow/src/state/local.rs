@@ -507,13 +507,13 @@ fn open_lock_file(root: &Path, lineage_hash: &str) -> Result<File> {
 }
 
 fn validate_lock_path(path: &Path) -> Result<()> {
-    if let Ok(metadata) = std::fs::symlink_metadata(path) {
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            return Err(format_error(format!(
-                "state lock {} is not a regular file",
-                path.display()
-            )));
-        }
+    if let Ok(metadata) = std::fs::symlink_metadata(path)
+        && (metadata.file_type().is_symlink() || !metadata.is_file())
+    {
+        return Err(format_error(format!(
+            "state lock {} is not a regular file",
+            path.display()
+        )));
     }
     Ok(())
 }

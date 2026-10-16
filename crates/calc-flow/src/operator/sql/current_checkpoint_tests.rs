@@ -166,6 +166,27 @@ async fn test_current_ineligible_sql_checkpoint_writes_retained_layout4() {
     );
 }
 
+#[tokio::test]
+async fn test_current_sql_checkpoints_bind_the_datafusion_release() {
+    for query in [NATIVE, RETAINED] {
+        let (_, snapshot) = capture(query).await;
+        let control: Value = serde_json::from_slice(snapshot.segments["control"].bytes()).unwrap();
+        assert_eq!(control["datafusion_version"], json!("55.0.0"));
+        StreamOperator::restore(&mut operator(query), &snapshot).unwrap();
+        for version in ["54.0.0", "55.1.0", "unknown"] {
+            let mut changed = control.clone();
+            changed["datafusion_version"] = json!(version);
+            let segment = StateSegment::new(serde_json::to_vec(&changed).unwrap());
+            let mut forged = snapshot.clone();
+            forged
+                .inline_metadata
+                .insert("control_sha256".into(), json!(segment.sha256()));
+            forged.segments.insert("control".into(), segment);
+            assert!(StreamOperator::restore(&mut operator(query), &forged).is_err());
+        }
+    }
+}
+
 #[test]
 fn test_old_sql_layouts_are_rejected_before_input_decode() {
     for layout in [None, Some(0), Some(1), Some(2), Some(5)] {

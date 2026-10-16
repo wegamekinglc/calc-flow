@@ -99,8 +99,8 @@ def _report() -> dict[str, object]:
             "machine_fingerprint": "2" * 64,
             "dependency_fingerprint": "3" * 64,
             "workload_fingerprint": "4" * 64,
-            "datafusion_version": "54.0.0",
-            "arrow_version": "58.3.0",
+            "datafusion_version": "55.0.0",
+            "arrow_version": "59.2.0",
             "build_profile": "release",
             "allocator": "system",
             "os": "linux",
@@ -186,6 +186,16 @@ def _operator_report() -> dict[str, object]:
 class TestSqlDataFusionEvidence(unittest.TestCase):
     def test_accepts_complete_comparable_twenty_pair_report(self) -> None:
         verify_report(_report(), minimum_samples=20, require_stable=True)
+
+    def test_rejects_evidence_from_a_different_datafusion_release(self) -> None:
+        for release in ("54.0.0", "55.1.0", "unknown"):
+            report = _report()
+            report["environment"]["datafusion_version"] = release
+            with (
+                self.subTest(release=release),
+                self.assertRaisesRegex(ValueError, "datafusion_version must be 55.0.0"),
+            ):
+                verify_report(report, minimum_samples=20)
 
     def test_accepts_zero_window_operator_case_with_reduced_output_rows(self) -> None:
         verify_report(_operator_report(), minimum_samples=20, require_stable=True)

@@ -1,3 +1,4 @@
+use datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext;
 use std::{borrow::Cow, mem::size_of, sync::Arc};
 
 use ahash::RandomState;
@@ -522,7 +523,7 @@ fn native_grouped_result(
         .create_groups_accumulator()
         .map_err(|error| df_error(name, error))?;
     native
-        .merge_batch(&arrays, &[0], None, 1)
+        .merge_batch(&arrays, &[0], 1)
         .map_err(|error| df_error(name, error))?;
     let result = native
         .evaluate(EmitTo::All)
@@ -2821,7 +2822,16 @@ fn physical_plan(
     let Ok(lowered) = aggregate
         .aggr_expr
         .iter()
-        .map(|expr| LoweredAggregateBuilder::new(expr, &input, schema, &props).build())
+        .map(|expr| {
+            LoweredAggregateBuilder::new(
+                expr,
+                &input,
+                schema,
+                &props,
+                &PhysicalPlanningContext::default(),
+            )
+            .build()
+        })
         .collect::<datafusion::error::Result<Vec<_>>>()
     else {
         return None;
@@ -2835,7 +2845,14 @@ fn physical_plan(
     let Ok(projection) = projection
         .expr
         .iter()
-        .map(|expr| create_physical_expr(expr, &aggregate.schema, &props))
+        .map(|expr| {
+            create_physical_expr(
+                expr,
+                &aggregate.schema,
+                &props,
+                &PhysicalPlanningContext::default(),
+            )
+        })
         .collect::<datafusion::error::Result<Vec<_>>>()
     else {
         return None;
@@ -2938,9 +2955,15 @@ fn bind_post_filter(
     props: &ExecutionProps,
 ) -> Option<BoundPostFilter> {
     let post_filter = match projection.input.as_ref() {
-        LogicalPlan::Filter(filter) => {
-            Some(create_physical_expr(&filter.predicate, &aggregate.schema, props).ok()?)
-        }
+        LogicalPlan::Filter(filter) => Some(
+            create_physical_expr(
+                &filter.predicate,
+                &aggregate.schema,
+                props,
+                &PhysicalPlanningContext::default(),
+            )
+            .ok()?,
+        ),
         _ => None,
     };
     if post_filter.as_ref().is_some_and(|expression| {
@@ -3235,7 +3258,7 @@ mod tests {
                     scalar.evaluate().map_err(|error| df_error("totals", error))
                 } else {
                     let mut native = expression.create_groups_accumulator().unwrap();
-                    native.merge_batch(&arrays, &[0], None, 1).unwrap();
+                    native.merge_batch(&arrays, &[0], 1).unwrap();
                     let result = native
                         .evaluate(EmitTo::All)
                         .map_err(|error| df_error("totals", error))?;
@@ -3472,7 +3495,7 @@ mod tests {
             + arrays.capacity() * size_of::<ArrayRef>();
         let mut native = expression.create_groups_accumulator().unwrap();
         let owner_bytes = size_of_val(native.as_ref());
-        native.merge_batch(&arrays, &[0], None, 1).unwrap();
+        native.merge_batch(&arrays, &[0], 1).unwrap();
         let state = native.state(EmitTo::All).unwrap();
         let state_bytes = state
             .iter()
@@ -3480,7 +3503,7 @@ mod tests {
             .sum::<usize>()
             + state.capacity() * size_of::<ArrayRef>();
         let mut result_owner = expression.create_groups_accumulator().unwrap();
-        result_owner.merge_batch(&arrays, &[0], None, 1).unwrap();
+        result_owner.merge_batch(&arrays, &[0], 1).unwrap();
         let result = result_owner.evaluate(EmitTo::All).unwrap();
         seed_bytes + state_bytes + 2 * owner_bytes + result.get_array_memory_size()
     }

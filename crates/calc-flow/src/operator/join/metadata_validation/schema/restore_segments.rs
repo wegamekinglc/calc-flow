@@ -123,10 +123,10 @@ impl RestoreSegmentsWork {
             let Some(frame) = cursor.next() else {
                 return Ok(false);
             };
-            if let Some(range) = frame.ipc {
-                if inspector::inspect(&bytes[range], expected).is_none() {
-                    return Ok(false);
-                }
+            if let Some(range) = frame.ipc
+                && inspector::inspect(&bytes[range], expected).is_none()
+            {
+                return Ok(false);
             }
         }
         Ok(cursor.finished())

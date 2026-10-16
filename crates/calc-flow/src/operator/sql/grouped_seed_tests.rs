@@ -44,11 +44,18 @@ impl GroupsAccumulator for ObservedAccumulator {
         &mut self,
         values: &[ArrayRef],
         indices: &[usize],
-        filter: Option<&BooleanArray>,
         count: usize,
     ) -> DataFusionResult<()> {
         self.merge_rows.lock().unwrap().push(indices.len());
-        self.native.merge_batch(values, indices, filter, count)
+        self.native.merge_batch(values, indices, count)
+    }
+
+    fn convert_to_state(
+        &self,
+        values: &[ArrayRef],
+        filter: Option<&BooleanArray>,
+    ) -> DataFusionResult<Vec<ArrayRef>> {
+        self.native.convert_to_state(values, filter)
     }
 
     fn size(&self) -> usize {

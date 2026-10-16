@@ -156,7 +156,7 @@ impl StreamRuntimeConfig {
 
 fn exact_micros(duration: Duration, field: &str) -> Result<u64> {
     let nanos = duration.as_nanos();
-    if nanos % 1_000 != 0 {
+    if !nanos.is_multiple_of(1_000) {
         return Err(CalcFlowError::InvalidArgument {
             field: field.into(),
             message: "must be an exact multiple of one microsecond".into(),

@@ -8,7 +8,7 @@ fn control() -> CompactControl {
         state_layout: 3,
         state_accounting: 3,
         native_semantics: 1,
-        datafusion_version: "54.0.0".into(),
+        datafusion_version: "55.0.0".into(),
         state_policy: incremental::grouped_float::Policy::ExactNumericV1,
         coalescer: incremental::global_record::coalescer::Inventory::None,
         identity: CompactIdentity {
@@ -118,7 +118,8 @@ fn compact_control_unknown_fields_and_policies_are_rejected_without_credit_leaks
         ("state_layout", json!(4)),
         ("state_accounting", json!(2)),
         ("native_semantics", json!(2)),
-        ("datafusion_version", json!("53.0.0")),
+        ("datafusion_version", json!("54.0.0")),
+        ("datafusion_version", json!("55.1.0")),
     ] {
         let mut value = serde_json::to_value(control()).unwrap();
         value[field] = replacement;

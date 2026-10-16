@@ -157,7 +157,9 @@ impl StreamAsofJoinSpec {
         tolerance: Duration,
         limits: AsofStateLimits,
     ) -> Result<Self> {
-        if tolerance.subsec_nanos() % 1_000 != 0 || tolerance.as_micros() > u128::from(MAX_SAFE) {
+        if !tolerance.subsec_nanos().is_multiple_of(1_000)
+            || tolerance.as_micros() > u128::from(MAX_SAFE)
+        {
             return Err(invalid(
                 "tolerance_micros",
                 "must be an exact non-negative JSON-safe integer microsecond duration",

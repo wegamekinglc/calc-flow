@@ -120,7 +120,7 @@ advanced graph, UDF, provider, and lifecycle controls. Rust crate APIs are docum
 
 ## Supported boundaries
 
-DataFusion 54 executes table expressions and SQL. SQL nodes accept one
+DataFusion 55 executes table expressions and SQL. SQL nodes accept one
 read-only `SELECT` or CTE. Batch SQL supports multiple aliases; streaming SQL
 accepts one alias. Ordinary aggregates and `GROUP BY` retain input and emit a
 full cumulative snapshot after each native batch; other SQL evaluates each
@@ -140,6 +140,14 @@ references rather than executable objects.
 
 Projects use format `3`; managed checkpoint manifests also use version `3`.
 These protocol versions are separate from this checkout's package version `2026.10.13`.
+
+The DataFusion 55 / Arrow 59 upgrade changes engine-specific checkpoint
+identity. SQL checkpoints created with DataFusion 54 and ASOF checkpoints
+marked with Arrow 58 cannot be restored directly by this version. Resume them
+with the prior version and replay input into a new job when upgrading. An
+unchanged project/checkpoint format version does not imply engine or state
+layout compatibility; incompatible identities fail closed.
+
 Streaming delivery is checked per output against source, operator, and sink
 capabilities. Ordinary sinks can receive duplicates after recovery; exactly-once
 delivery requires a compatible route and transactional or epoch-idempotent

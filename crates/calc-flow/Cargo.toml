@@ -15,7 +15,7 @@ benchmark-checkpoint-diagnostic = ["benchmark-internals"]
 
 [dependencies]
 ahash.workspace = true
-arrow-data = "=58.3.0"
+arrow-data = "=59.2.0"
 async-trait.workspace = true
 chrono.workspace = true
 datafusion.workspace = true

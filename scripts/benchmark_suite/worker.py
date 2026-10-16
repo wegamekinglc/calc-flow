@@ -9,6 +9,8 @@ import sys
 from importlib.metadata import version
 from pathlib import Path
 
+from scripts.benchmark_suite.catalog import POLARS_ENGINE
+
 
 def environment(scope: str = "all") -> dict:
     from scripts.toolkit import worker_environment
@@ -26,6 +28,7 @@ def environment(scope: str = "all") -> dict:
             for name in ("datafusion", "polars", "TA-Lib", "jax", "jaxlib")
         },
         "polars_threads": pl.thread_pool_size(),
+        "polars_engine": POLARS_ENGINE,
         "thread_environment": {
             key: os.environ.get(key)
             for key in (

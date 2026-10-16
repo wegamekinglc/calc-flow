@@ -225,6 +225,19 @@ on both sides. Warm cases retain the existing decimal input fixture.
 | Ready native streaming | Input enqueue, sources/tasks/channels, rolling, watermarks, sink and combined Arrow output | Plans, input events, runner startup/readiness, EOF/shutdown |
 | Warm native streaming  | Preconstructed data enqueue, live source/task/channel, rolling/finalization, sink to Arrow | Compilation, runner start, historical preload, validation   |
 
+The shared hash-locked benchmark environment uses DataFusion Python 55.0.0
+and Polars 2.0.0. Rust uses DataFusion 55.0.0 with Arrow 59.2; the paired SQL
+report reads both engine versions from the compiled crates. Recreate the
+benchmark environment from `benchmarks/requirements.lock` after this upgrade;
+old DataFusion 54 SQL reports are rejected by the current verifier.
+
+Polars lazy collection explicitly requests `engine="streaming"` and records
+`polars_engine` alongside its installed package version and actual thread pool.
+Polars 2 changed the lazy `auto` default, so the comparison does not depend on
+that default or process engine affinity. Materialized Arrow output remains
+inside the timer; key-based sorting and oracle validation remain outside it.
+Group and join row order is not assumed.
+
 SQL/raw-DataFusion target partitions and Tokio workers are fixed to 32.
 Polars references run in separate fresh processes with `POLARS_MAX_THREADS=32`
 or `1`, reported as `Polars (32T)` and `Polars (1T)`. Measurement and artifact

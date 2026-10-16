@@ -11,6 +11,7 @@ use datafusion::{
         aggregates::{AggregateExec, AggregateMode},
         empty::EmptyExec,
         projection::ProjectionExec,
+        statistics::{StatisticsArgs, StatisticsContext},
     },
 };
 use serde_json::{Value, json};
@@ -80,7 +81,7 @@ fn non_single_linear(aggregate: &AggregateExec) -> bool {
 
 fn inspect(plan: &dyn ExecutionPlan, shape: &mut Shape) -> Value {
     let mut node = json!({"node": plan.name(), "partitions": plan.output_partitioning().partition_count(),
-        "statistics": format!("{:?}", plan.partition_statistics(None))});
+        "statistics": format!("{:?}", StatisticsContext::new().compute(plan, &StatisticsArgs::default()))});
     if let Some(aggregate) = plan.downcast_ref::<AggregateExec>() {
         shape.aggregates += 1;
         shape.non_single_linear += usize::from(non_single_linear(aggregate));

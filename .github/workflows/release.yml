@@ -91,7 +91,7 @@ jobs:
         with:
           command: build
           maturin-version: v1.14.1
-          rust-toolchain: "1.88.0"
+          rust-toolchain: "1.94.0"
           target: ${{ matrix.target }}
           args: --release --locked --out dist --find-interpreter --features pyo3/abi3-py313
           manylinux: ${{ matrix.manylinux }}
@@ -101,7 +101,7 @@ jobs:
         with:
           command: build
           maturin-version: v1.14.1
-          rust-toolchain: "1.88.0"
+          rust-toolchain: "1.94.0"
           target: ${{ matrix.target }}
           args: --release --locked --out dist --find-interpreter --features legacy-python
           manylinux: ${{ matrix.manylinux }}
@@ -142,7 +142,7 @@ jobs:
         with:
           command: sdist
           maturin-version: v1.14.1
-          rust-toolchain: "1.88.0"
+          rust-toolchain: "1.94.0"
           args: --out dist
       - name: Upload source distribution
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

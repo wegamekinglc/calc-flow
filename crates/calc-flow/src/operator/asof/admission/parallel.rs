@@ -336,10 +336,10 @@ async fn encoding_buffers(
     for (ordinal, (identity, _)) in admission.right_identities().enumerate() {
         cooperate(ordinal, context).await?;
         for encoding in [&identity.1, &identity.2] {
-            if let Some((address, bytes)) = encoding.allocation() {
-                if owners.insert(address) {
-                    buffers = super::super::checked(name, buffers, bytes)?;
-                }
+            if let Some((address, bytes)) = encoding.allocation()
+                && owners.insert(address)
+            {
+                buffers = super::super::checked(name, buffers, bytes)?;
             }
         }
     }
@@ -355,10 +355,10 @@ fn column_encoding_buffers(
     let mut owners = BTreeSet::new();
     for (ordinal, (key, _)) in admission.right_capacities.iter().enumerate() {
         super::check_input_cancellation(ordinal, context)?;
-        if let Some((address, bytes)) = key.allocation() {
-            if owners.insert(address) {
-                buffers = super::super::checked(&operator.name, buffers, bytes)?;
-            }
+        if let Some((address, bytes)) = key.allocation()
+            && owners.insert(address)
+        {
+            buffers = super::super::checked(&operator.name, buffers, bytes)?;
         }
     }
     context.check_cancelled()?;

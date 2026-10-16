@@ -624,7 +624,7 @@ fn left_run_source(
 }
 
 async fn check_match_progress(index: usize, context: &StreamOperatorContext<'_>) -> Result<()> {
-    if index % 1_024 == 0 {
+    if index.is_multiple_of(1_024) {
         if index > 0 {
             tokio::task::yield_now().await;
         }

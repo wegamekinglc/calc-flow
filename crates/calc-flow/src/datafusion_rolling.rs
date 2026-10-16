@@ -5,13 +5,14 @@ use std::{fmt, sync::Arc};
 use async_trait::async_trait;
 use datafusion::{
     arrow::{datatypes::SchemaRef, record_batch::RecordBatch},
+    catalog::Session,
     common::{
         DataFusionError, Result as DataFusionResult, ScalarValue,
-        tree_node::{Transformed, TreeNode},
+        tree_node::{Transformed, TreeNode, TreeNodeRecursion},
     },
     execution::{
         TaskContext,
-        context::{QueryPlanner, SessionState},
+        context::QueryPlanner,
         memory_pool::{MemoryConsumer, MemoryReservation},
     },
     functions_aggregate::{average::Avg, count::Count as CountAggregate},
@@ -20,16 +21,18 @@ use datafusion::{
         expr::{WindowFunction, WindowFunctionParams},
     },
     physical_expr::{
-        Distribution, EquivalenceProperties, OrderingRequirements,
+        Distribution, EquivalenceProperties, OrderingRequirements, PhysicalExpr,
         expressions::{Column, Literal},
         window::{SlidingAggregateWindowExpr, WindowExpr},
     },
     physical_plan::{
-        DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, InputOrderMode,
-        PlanProperties, SendableRecordBatchStream, Statistics,
+        DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties,
+        InputDistributionRequirements, InputOrderMode, PlanProperties, SendableRecordBatchStream,
+        Statistics,
         metrics::{
             BaselineMetrics, Count, ExecutionPlanMetricsSet, Gauge, MetricBuilder, MetricsSet,
         },
+        statistics::StatisticsArgs,
         stream::RecordBatchStreamAdapter,
         windows::BoundedWindowAggExec,
     },
@@ -85,7 +88,7 @@ impl QueryPlanner for CalcFlowQueryPlanner {
     async fn create_physical_plan(
         &self,
         logical_plan: &LogicalPlan,
-        session_state: &SessionState,
+        session_state: &dyn Session,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
         let eligibility = inspect_logical_windows(logical_plan);
         let planner = DefaultPhysicalPlanner::default();
@@ -388,7 +391,8 @@ impl CalcFlowRollingExec {
             input.boundedness(),
         );
         let required_distribution = window
-            .required_input_distribution()
+            .input_distribution_requirements()
+            .into_per_child()
             .into_iter()
             .next()
             .unwrap_or(Distribution::UnspecifiedDistribution);
@@ -546,9 +550,7 @@ fn physical_window_rows(expression: &dyn WindowExpr) -> Option<u64> {
     bounded_preceding_rows(&frame.start_bound)
 }
 
-fn physical_columns(
-    expressions: &[Arc<dyn datafusion::physical_expr::PhysicalExpr>],
-) -> Option<Vec<usize>> {
+fn physical_columns(expressions: &[Arc<dyn PhysicalExpr>]) -> Option<Vec<usize>> {
     expressions
         .iter()
         .map(|expression| expression.downcast_ref::<Column>().map(Column::index))
@@ -595,8 +597,16 @@ impl ExecutionPlan for CalcFlowRollingExec {
         &self.properties
     }
 
-    fn required_input_distribution(&self) -> Vec<Distribution> {
-        vec![self.required_distribution.clone()]
+    fn input_distribution_requirements(&self) -> InputDistributionRequirements {
+        InputDistributionRequirements::new(vec![self.required_distribution.clone()])
+    }
+
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> DataFusionResult<TreeNodeRecursion>,
+    ) -> DataFusionResult<TreeNodeRecursion> {
+        // The compiled kernel reads Arrow columns directly.
+        Ok(TreeNodeRecursion::Continue)
     }
 
     fn required_input_ordering(&self) -> Vec<Option<OrderingRequirements>> {
@@ -691,7 +701,11 @@ impl ExecutionPlan for CalcFlowRollingExec {
         Some(self.metrics.clone_inner())
     }
 
-    fn partition_statistics(&self, _partition: Option<usize>) -> DataFusionResult<Arc<Statistics>> {
+    fn statistics_from_inputs(
+        &self,
+        _input_stats: &[Arc<Statistics>],
+        _args: &StatisticsArgs,
+    ) -> DataFusionResult<Arc<Statistics>> {
         Ok(Arc::new(Statistics::new_unknown(&self.schema)))
     }
 }

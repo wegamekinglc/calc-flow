@@ -76,7 +76,7 @@ impl RetainedControl {
     fn validate_identity(&self, identity: &RetainedIdentity) -> Result<()> {
         if self.state_layout != 4
             || self.state_accounting != 4
-            || self.datafusion_version != "54.0.0"
+            || self.datafusion_version != datafusion::DATAFUSION_VERSION
             || self.state_policy != "retained_v1"
             || self.identity != *identity
         {
@@ -112,7 +112,7 @@ pub(super) fn capture(
     let control = RetainedControl {
         state_layout: 4,
         state_accounting: 4,
-        datafusion_version: "54.0.0".into(),
+        datafusion_version: datafusion::DATAFUSION_VERSION.into(),
         state_policy: "retained_v1".into(),
         rows: state.rows,
         bytes: state.bytes,

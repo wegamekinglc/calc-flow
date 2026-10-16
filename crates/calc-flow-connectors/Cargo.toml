@@ -49,9 +49,9 @@ postgresql = [
 [dependencies]
 mysql_async = { version = "=0.37.1", default-features = false, features = ["minimal-rust", "rustls-tls", "ring", "tls12"], optional = true }
 calc-flow = { path = "../calc-flow", version = "=2026.10.13" }
-arrow = { version = "=58.3.0", default-features = false }
-arrow-csv = "=58.3.0"
-arrow-json = "=58.3.0"
+arrow = { version = "=59.2.0", default-features = false }
+arrow-csv = "=59.2.0"
+arrow-json = "=59.2.0"
 async-trait.workspace = true
 hex = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
@@ -81,7 +81,7 @@ tokio-postgres = { version = "=0.7.18", features = [
     "with-serde_json-1",
     "with-uuid-1",
 ], optional = true }
-parquet = { version = "=58.3.0", default-features = false, features = [
+parquet = { version = "=59.2.0", default-features = false, features = [
     "arrow",
     "flate2-rust_backened",
     "snap",

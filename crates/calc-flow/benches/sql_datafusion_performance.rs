@@ -44,8 +44,8 @@ use serde::Serialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
-const DATAFUSION_VERSION: &str = "54.0.0";
-const ARROW_VERSION: &str = "58.3.0";
+const DATAFUSION_VERSION: &str = datafusion::DATAFUSION_VERSION;
+const ARROW_VERSION: &str = datafusion::arrow::ARROW_VERSION;
 const DEFAULT_BATCH_SIZE: usize = 8_192;
 const DEFAULT_ENTITIES: usize = 64;
 const DEFAULT_SAMPLES: usize = 20;

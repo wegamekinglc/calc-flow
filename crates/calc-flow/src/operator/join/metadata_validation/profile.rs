@@ -218,10 +218,10 @@ fn side_metrics(value: &Value) -> Option<()> {
     for key in SIDE.iter().filter(|key| **key != "max_lateness_micros") {
         values.get(*key)?.as_u64()?;
     }
-    if let Some(lateness) = values.get("max_lateness_micros") {
-        if !lateness.is_null() {
-            lateness.as_u64()?;
-        }
+    if let Some(lateness) = values.get("max_lateness_micros")
+        && !lateness.is_null()
+    {
+        lateness.as_u64()?;
     }
     Some(())
 }

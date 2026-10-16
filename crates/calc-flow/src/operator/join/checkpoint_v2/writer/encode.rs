@@ -6,7 +6,7 @@ use datafusion::arrow::{
     ipc::{
         MetadataVersion,
         writer::{
-            CompressionContext, DictionaryTracker, EncodedData, IpcDataGenerator, IpcWriteOptions,
+            DictionaryTracker, EncodedData, IpcDataGenerator, IpcWriteContext, IpcWriteOptions,
             write_message,
         },
     },
@@ -456,7 +456,7 @@ fn encode_stream(
         &options,
     );
     check()?;
-    let mut compression = CompressionContext::default();
+    let mut compression = IpcWriteContext::default();
     let (encoded_dictionaries, batch) = generator
         .encode(
             &compacted.record,

@@ -433,6 +433,25 @@ async fn test_checkpoint_disabled_asof_keeps_live_state_without_log_owners() {
     );
 }
 
+#[test]
+fn test_asof_checkpoints_bind_the_arrow_release() {
+    let (mut operator, _, _) = prefix_fixture();
+    let snapshot = operator.capture(Epoch::INITIAL).unwrap();
+    assert_eq!(
+        snapshot.inline_metadata["row_encoding"],
+        serde_json::json!("arrow-batch-59.2.0")
+    );
+    let (mut restored, _, _) = prefix_fixture();
+    restored.restore(&snapshot).unwrap();
+    for version in ["arrow-batch-58.3.0", "arrow-batch-59.3.1", "unknown"] {
+        let mut forged = snapshot.clone();
+        forged
+            .inline_metadata
+            .insert("row_encoding".into(), serde_json::json!(version));
+        assert!(restored.restore(&forged).is_err(), "version={version}");
+    }
+}
+
 #[tokio::test]
 async fn new_checkpoint_uses_columnar_v6_and_restores_the_same_state_charge() {
     let (mut operator, left, right) = prefix_fixture();

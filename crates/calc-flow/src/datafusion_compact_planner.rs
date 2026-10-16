@@ -1,4 +1,5 @@
 use super::*;
+use datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext;
 use datafusion::{
     arrow::datatypes::{DataType, Field, FieldRef, Schema},
     catalog::{CatalogProvider, MemoryCatalogProvider, MemorySchemaProvider},
@@ -828,9 +829,15 @@ fn native_census(
         .aggr_expr
         .iter()
         .map(|expr| {
-            LoweredAggregateBuilder::new(expr, &rebound, schema, &props)
-                .build()
-                .map(|lowered| lowered.aggregate)
+            LoweredAggregateBuilder::new(
+                expr,
+                &rebound,
+                schema,
+                &props,
+                &PhysicalPlanningContext::default(),
+            )
+            .build()
+            .map(|lowered| lowered.aggregate)
         })
         .collect::<DFResult<Vec<_>>>()?;
     if !native_accumulators_supported(&aggregates, !keys.is_empty()) {
@@ -897,7 +904,12 @@ fn native_projection_types(
         .expr
         .iter()
         .map(|expr| {
-            let physical = create_physical_expr(expr, &aggregate.schema, props)?;
+            let physical = create_physical_expr(
+                expr,
+                &aggregate.schema,
+                props,
+                &PhysicalPlanningContext::default(),
+            )?;
             Ok((
                 physical.data_type(aggregate.schema.as_arrow())?,
                 physical.nullable(aggregate.schema.as_arrow())?,

@@ -27,6 +27,7 @@ POLARS_CASES = (
     "asof_join",
 )
 POLARS_SINGLE_THREAD_CASES = POLARS_CASES[:]
+POLARS_ENGINE = "streaming"
 ROLLING_CASES = SQL_CASES[-2:]
 # Keep this a literal tuple: the suite resolves baseline case ids by parsing
 # the baseline catalog's declarative forms, and derived assignments fail

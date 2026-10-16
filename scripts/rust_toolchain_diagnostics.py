@@ -123,7 +123,7 @@ def manifest_records(toolchain: Path) -> list[dict[str, object]]:
 
 def toolchain_records(rustup_home: Path) -> list[dict[str, object]]:
     directory = rustup_home / "toolchains"
-    paths = sorted(itertools.islice(directory.glob("1.88.0-*"), TOOLCHAIN_LIMIT + 1))
+    paths = sorted(itertools.islice(directory.glob("1.94.0-*"), TOOLCHAIN_LIMIT + 1))
     records: list[dict[str, object]] = []
     for path in paths[:TOOLCHAIN_LIMIT]:
         records.append(file_record(path))

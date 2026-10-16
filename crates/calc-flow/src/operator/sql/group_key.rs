@@ -2,6 +2,7 @@ use super::{
     Arc, DFSchema, ExecutionProps, PhysicalExpr, RecordBatch, Result, SchemaRef,
     create_physical_expr, df_error, native_expression,
 };
+use datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext;
 use datafusion::{
     arrow::{array::ArrayRef, datatypes::FieldRef},
     logical_expr::Aggregate,
@@ -25,7 +26,9 @@ pub(super) fn bind(
         .enumerate()
         .map(|(index, logical)| {
             native_expression::aggregate_filter_work(logical, aggregate.input.schema())?;
-            let expression = create_physical_expr(logical, input, props).ok()?;
+            let expression =
+                create_physical_expr(logical, input, props, &PhysicalPlanningContext::default())
+                    .ok()?;
             let field = aggregate.schema.as_arrow().fields().get(index)?.clone();
             (super::key_type(field.data_type())
                 && expression.data_type(schema).ok()? == *field.data_type())

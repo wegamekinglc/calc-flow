@@ -6,13 +6,13 @@ import os
 import subprocess  # nosec B404  # fixed rustup command, no shell or user input
 from pathlib import Path
 
-TOOLCHAIN = "1.88.0"
+TOOLCHAIN = "1.94.0"
 HOST = "x86_64-unknown-linux-gnu"
 METADATA = ("multirust-config.toml", "rust-installer-version")
 
 
 def repair_incomplete_toolchain(rustup_home: Path) -> bool:
-    """Let rustup replace a partial 1.88.0 install before adding components."""
+    """Let rustup replace a partial 1.94.0 install before adding components."""
 
     root = rustup_home / "toolchains" / f"{TOOLCHAIN}-{HOST}"
     metadata = root / "lib" / "rustlib"

@@ -324,9 +324,10 @@ impl fmt::Debug for SourceEvent {
 }
 
 /// Watermark behavior attached immutably to one source binding.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum WatermarkPolicy {
     /// Accept source-native watermarks without runtime generation.
+    #[default]
     SourceProvided,
     /// Generate watermarks from an event-time column and a bounded delay.
     BoundedOutOfOrderness {
@@ -337,12 +338,6 @@ pub enum WatermarkPolicy {
     },
     /// Disable watermark advancement, optionally tracking source idleness.
     Disabled { idle_timeout: Option<Duration> },
-}
-
-impl Default for WatermarkPolicy {
-    fn default() -> Self {
-        Self::SourceProvided
-    }
 }
 
 /// Async lifecycle contract for a continuous source connector.

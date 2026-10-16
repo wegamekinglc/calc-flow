@@ -55,8 +55,9 @@ pub(crate) struct NormalizedConfigFingerprint([u8; 32]);
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct RuntimeFenceConfigFingerprint([u8; 32]);
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) enum WatermarkPolicy {
+    #[default]
     SourceProvided,
     BoundedOutOfOrderness {
         event_time_column: Arc<str>,
@@ -67,12 +68,6 @@ pub(crate) enum WatermarkPolicy {
     Disabled {
         idle_timeout: Option<Duration>,
     },
-}
-
-impl Default for WatermarkPolicy {
-    fn default() -> Self {
-        Self::SourceProvided
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

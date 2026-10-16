@@ -2,6 +2,7 @@ use super::{
     ArrayRef, BooleanArray, DFSchema, ExecutionProps, Expr, NativeKeys, PhysicalExpr, RecordBatch,
     Result, SchemaRef, checked_bytes, create_physical_expr, df_error,
 };
+use datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext;
 use datafusion::{
     arrow::{
         array::Array,
@@ -30,7 +31,13 @@ impl InputPredicate {
         props: &ExecutionProps,
     ) -> Option<Self> {
         let nodes = nodes(expression, schema, 0)?;
-        let expression = create_physical_expr(expression, input, props).ok()?;
+        let expression = create_physical_expr(
+            expression,
+            input,
+            props,
+            &PhysicalPlanningContext::default(),
+        )
+        .ok()?;
         (expression.data_type(schema).ok()? == DataType::Boolean)
             .then_some(Self { expression, nodes })
     }
