@@ -214,7 +214,7 @@ class BenchmarkWorkflowTests(unittest.TestCase):
         ):
             self.assertIn(module, suite)
 
-    def test_issue406_process_tests_use_installed_dependencies(self):
+    def test_issue406_tests_use_installed_dependencies(self):
         suite = (ROOT / ".github/workflows/benchmark-suite.yml").read_text(
             encoding="utf-8"
         )
@@ -226,6 +226,7 @@ class BenchmarkWorkflowTests(unittest.TestCase):
             "scripts.test_issue406_fresh_runner",
             "scripts.test_issue406_fresh_v3",
             "scripts.test_issue406_run",
+            "scripts.test_issue406_measurement",
         ):
             with self.subTest(module=module):
                 self.assertNotIn(module, prepare)

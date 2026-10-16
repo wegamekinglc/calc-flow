@@ -347,6 +347,8 @@ pub(crate) struct GatherStop {
     run_id: Arc<str>,
     cancellation: CancellationToken,
     deadline: Option<DateTime<Utc>>,
+    #[cfg(test)]
+    deadline_clock: Option<tokio::sync::watch::Receiver<DateTime<Utc>>>,
     abandoned: Arc<AtomicBool>,
     #[cfg(test)]
     check_hook: Option<Arc<dyn Fn(bool) + Send + Sync>>,
@@ -358,6 +360,8 @@ impl GatherStop {
             run_id: job.job_id().to_string().into(),
             cancellation: job.cancellation().clone(),
             deadline: job.deadline().copied(),
+            #[cfg(test)]
+            deadline_clock: job.deadline_clock_for_test(),
             abandoned: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
             check_hook: None,
@@ -371,7 +375,13 @@ impl GatherStop {
         }
         if self.abandoned.load(Ordering::Acquire)
             || self.cancellation.is_cancelled()
-            || self.deadline.is_some_and(|deadline| Utc::now() >= deadline)
+            || self.deadline.is_some_and(|deadline| {
+                #[cfg(test)]
+                if let Some(clock) = &self.deadline_clock {
+                    return *clock.borrow() >= deadline;
+                }
+                Utc::now() >= deadline
+            })
         {
             return Err(cancelled(&self.run_id));
         }
@@ -408,9 +418,21 @@ impl GatherStop {
     }
 
     async fn wait(&self) {
+        let deadline = deadline_wait(self.deadline);
+        #[cfg(test)]
+        let deadline = async {
+            if let (Some(mut clock), Some(expires)) = (self.deadline_clock.clone(), self.deadline) {
+                clock
+                    .wait_for(|now| *now >= expires)
+                    .await
+                    .expect("deadline clock outlives its wait");
+            } else {
+                deadline.await;
+            }
+        };
         tokio::select! {
             () = self.cancellation.cancelled() => {},
-            () = deadline_wait(self.deadline) => {},
+            () = deadline => {},
         }
     }
 }

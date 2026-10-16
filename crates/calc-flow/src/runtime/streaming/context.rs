@@ -17,6 +17,8 @@ pub struct StreamJobContext {
     fingerprint: String,
     settings: JsonMap,
     deadline: Option<DateTime<Utc>>,
+    #[cfg(test)]
+    deadline_clock: Option<watch::Receiver<DateTime<Utc>>>,
     cancellation: CancellationToken,
     checkpointing: bool,
     static_inputs: Arc<BTreeMap<String, Batch>>,
@@ -53,6 +55,8 @@ impl StreamJobContext {
             fingerprint: fingerprint.into(),
             settings,
             deadline,
+            #[cfg(test)]
+            deadline_clock: None,
             cancellation,
             checkpointing: true,
             static_inputs: Arc::new(BTreeMap::new()),
@@ -101,6 +105,20 @@ impl StreamJobContext {
 
     pub const fn deadline(&self) -> Option<&DateTime<Utc>> {
         self.deadline.as_ref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_deadline_clock_for_test(
+        mut self,
+        clock: watch::Receiver<DateTime<Utc>>,
+    ) -> Self {
+        self.deadline_clock = Some(clock);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn deadline_clock_for_test(&self) -> Option<watch::Receiver<DateTime<Utc>>> {
+        self.deadline_clock.clone()
     }
 
     pub const fn cancellation(&self) -> &CancellationToken {
@@ -158,7 +176,13 @@ impl StreamJobContext {
     /// the deadline has passed.
     pub fn check_cancelled(&self) -> Result<()> {
         if self.cancellation.is_cancelled()
-            || self.deadline.is_some_and(|deadline| Utc::now() >= deadline)
+            || self.deadline.is_some_and(|deadline| {
+                #[cfg(test)]
+                if let Some(clock) = &self.deadline_clock {
+                    return *clock.borrow() >= deadline;
+                }
+                Utc::now() >= deadline
+            })
         {
             return Err(CalcFlowError::Cancelled {
                 run_id: self.job_id.to_string(),

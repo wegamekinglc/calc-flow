@@ -58,10 +58,16 @@ async fn stopped_case(service: &TestService, failure: &str) {
     let initial = job().with_gather_owner(owner.clone());
     preload(&mut operator, &initial, true).await;
     let token = CancellationToken::new();
-    let deadline =
-        (failure == "deadline").then(|| chrono::Utc::now() + chrono::Duration::seconds(3));
+    let now = chrono::Utc::now();
+    let deadline = (failure == "deadline").then(|| now + chrono::Duration::seconds(3));
+    let (clock, time) = tokio::sync::watch::channel(now);
     let job = StreamJobContext::new(438, "morsel-stop", JsonMap::new(), deadline, token.clone())
         .with_gather_owner(owner.clone());
+    let job = if deadline.is_some() {
+        job.with_deadline_clock_for_test(time)
+    } else {
+        job
+    };
     let context = StreamOperatorContext::new(&job, "match", None);
     let (entered, entering) = tokio::sync::oneshot::channel();
     let gate = Arc::new(Gate {
@@ -81,6 +87,11 @@ async fn stopped_case(service: &TestService, failure: &str) {
     let mut output = EdgeCollector::new(operator.output_ports().to_vec());
     let mut process =
         Box::pin(operator.process_data("left", input(true, ROWS, false), &context, &mut output));
+    if failure == "deadline" {
+        // Setup may exceed the deadline in wall time; expire only after the
+        // worker owns its lease, using the same clock in all stop projections.
+        tokio::time::sleep(Duration::from_secs(4)).await;
+    }
     tokio::select! {
         entered = entering => entered.unwrap(),
         result = &mut process => panic!("stopped before worker gate: {result:?}"),
@@ -96,11 +107,21 @@ async fn stopped_case(service: &TestService, failure: &str) {
         if failure == "cancel" {
             token.cancel();
         }
+        if let Some(deadline) = deadline {
+            assert!(job.check_cancelled().is_ok());
+            clock.send_replace(deadline);
+        }
         if failure != "abandon" {
             let result = tokio::time::timeout(Duration::from_secs(5), &mut process)
                 .await
                 .unwrap();
             assert!(matches!(result, Err(CalcFlowError::Cancelled { .. })));
+            if failure == "deadline" {
+                assert!(
+                    !token.is_cancelled(),
+                    "deadline alone must stop the handler"
+                );
+            }
         }
         drop(process);
         assert!(

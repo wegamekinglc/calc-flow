@@ -473,14 +473,17 @@ def test_asof_state_limit_error_is_explicit_and_emits_no_wrong_match() -> None:
     )
 
     async def run() -> None:
-        results = result.stream(
-            {"trades": _Feed([_rows([105, 106])]), "quotes": _Feed([_rows([100])])}
-        )
+        trades = _Feed([_rows([105, 106])])
+        quotes = _Feed([_rows([100])])
+        results = result.stream({"trades": trades, "quotes": quotes})
         with pytest.raises(cf.StreamingRuntimeError) as caught:
             async with asyncio.timeout(10), results:
                 await anext(results)
         assert caught.value.reason_code == "asof_state_limit_exceeded"
         assert results.job.status()["task_count"] == 0
+        assert trades.closed == quotes.closed == 1
+        asof = next(iter(results.job.status()["stream_asof_joins"].values()))
+        assert asof["emitted_left_rows"] == 0
 
     asyncio.run(run())
 
