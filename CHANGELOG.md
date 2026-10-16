@@ -9,6 +9,16 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-17: Amortize Join projected-copy stop checks. Row scans in the
+  selected-copy path (`checkpoint_v2/projected_copy` with its views and
+  dictionary remap) check cancellation, deadline and abandonment once per
+  4,096-row stride instead of once per row; per-column, per-run and
+  per-allocation checks are unchanged and every stop point stays observable.
+  The per-row path had been about 21% of Join CPU, with 16% in
+  `CancellationToken::is_cancelled` (a mutex per call). In interleaved A/B
+  runs of `engines/1000000/calc-flow-stream/join`, timings fell from
+  797/761 ms to 662/615 ms (about 18%), and `GatherStop::check` dropped out
+  of the profile top-25.
 - 2026-10-17: Fix the 2.1–2.2× streaming interval-join regression introduced
   by PR #452 (chunked Join state and batch selections). Whole-selection match
   iteration now walks a sequential cursor over runs in O(pairs + runs)

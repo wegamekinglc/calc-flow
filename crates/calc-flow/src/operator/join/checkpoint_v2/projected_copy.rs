@@ -37,6 +37,36 @@ pub(in crate::operator::join) mod views;
 pub(in crate::operator::join) mod test_support;
 
 #[cfg(test)]
+mod tests;
+
+/// Rows a selected-copy scan visits between stop checks.
+const CHECK_STRIDE: usize = 4_096;
+
+/// Amortizes stop checks over bounded strides of scanned rows: every scan
+/// checks before its first visited row and at least once per
+/// [`CHECK_STRIDE`] rows, so cancellation stays observable while per-row
+/// checks stop dominating the copy.
+struct StrideStop<'a> {
+    check: &'a dyn Fn() -> Result<()>,
+    pending: usize,
+}
+
+impl<'a> StrideStop<'a> {
+    fn new(check: &'a dyn Fn() -> Result<()>) -> Self {
+        Self { check, pending: 0 }
+    }
+
+    fn visit(&mut self) -> Result<()> {
+        if self.pending == 0 {
+            (self.check)()?;
+            self.pending = CHECK_STRIDE;
+        }
+        self.pending -= 1;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
 pub(in crate::operator::join) fn assert_selected_copy_budget() {
     use datafusion::arrow::{
         array::{Float64Array, Int64Array, TimestampMicrosecondArray},
@@ -394,8 +424,9 @@ fn selected_slices(
 fn contiguous_runs(rows: SelectedRows<'_>, check: &dyn Fn() -> Result<()>) -> Result<usize> {
     let mut runs = 0;
     let mut previous: Option<usize> = None;
+    let mut stop = StrideStop::new(check);
     for row in rows.iter() {
-        check()?;
+        stop.visit()?;
         if previous.is_none_or(|previous| previous.checked_add(1) != Some(row.source)) {
             runs = add(runs, 1)?;
         }
@@ -423,8 +454,9 @@ fn slice_runs(
 }
 
 fn run_end(rows: SelectedRows<'_>, start: usize, check: &dyn Fn() -> Result<()>) -> Result<usize> {
+    let mut stop = StrideStop::new(check);
     for index in start + 1..rows.len() {
-        check()?;
+        stop.visit()?;
         if rows.at(index - 1).source.checked_add(1) != Some(rows.at(index).source) {
             return Ok(index);
         }

@@ -8,6 +8,7 @@ use datafusion::arrow::{
     },
 };
 
+use super::super::StrideStop;
 use super::{
     Arc, Array, ArrayData, ArrayRef, DataType, Funding, MemoryReservation, Result, accounting, add,
     invalid, product, reserve, sum,
@@ -60,8 +61,9 @@ fn typed<K: ArrowDictionaryKeyType>(
     let mut mapping = BTreeMap::new();
     let mut selected = Vec::with_capacity(data.len());
     let mut keys = Vec::with_capacity(data.len());
+    let mut stop = StrideStop::new(check);
     for key in dictionary.keys() {
-        check()?;
+        stop.visit()?;
         keys.push(
             key.map(|key| remap::<K>(key, &mut mapping, &mut selected))
                 .transpose()?,
