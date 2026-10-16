@@ -9,6 +9,7 @@ from pathlib import Path
 
 from scripts.benchmark_suite.catalog import get_shard, shard_cases, shards
 from scripts.benchmark_suite.normalize import read_json
+from scripts.benchmark_suite.refs import describe_baseline
 from scripts.benchmark_suite.report import (
     comparison,
     render_report,
@@ -61,7 +62,7 @@ def unavailable_cases(shard: dict, error: str, received: list[dict] = ()) -> lis
 
 
 def _read_fragment(
-    path: Path, base: str, head: str
+    path: Path, base: str, head: str, rust_base: str | None = None
 ) -> tuple[dict | None, list[dict], list[str]]:
     try:
         report = read_json(path)
@@ -70,7 +71,7 @@ def _read_fragment(
         return None, [], [f"{path}: {error}"]
     report = {**report, "cases": fill_missing_cases(shard, report["cases"])}
     try:
-        validate_fragment(report, base, head)
+        validate_fragment(report, base, head, rust_base)
     except (KeyError, TypeError, ValueError) as error:
         message = f"{shard['id']}: {error}"
         return (
@@ -96,11 +97,11 @@ def fill_missing_cases(shard: dict, cases: list[dict]) -> list[dict]:
 
 
 def collect(
-    root: Path, base: str, head: str
+    root: Path, base: str, head: str, rust_base: str | None = None
 ) -> tuple[list[dict], list[str], list[dict]]:
     cases, errors, reports = [], [], []
     for path in sorted(root.glob("**/results.json")):
-        report, rows, failures = _read_fragment(path, base, head)
+        report, rows, failures = _read_fragment(path, base, head, rust_base)
         cases.extend(rows)
         errors.extend(failures)
         if report is not None:
@@ -166,10 +167,37 @@ def _native_hash(report: dict, side: str) -> str:
     )
 
 
+def _baseline(args: argparse.Namespace) -> tuple[str, list[str]]:
+    try:
+        description = describe_baseline(
+            args.baseline_kind, args.baseline_ref, args.expected_base
+        )
+    except ValueError as error:
+        return "unresolved", [f"baseline provenance: {error}"]
+    return description, []
+
+
+def _rust_baseline(args: argparse.Namespace) -> tuple[str | None, list[str]]:
+    if args.expected_rust_base == args.expected_base:
+        return None, []
+    try:
+        description = describe_baseline(
+            "first-parent", "HEAD^", args.expected_rust_base
+        )
+    except ValueError as error:
+        return "unresolved", [f"rust baseline provenance: {error}"]
+    return description, []
+
+
 def summarize(args: argparse.Namespace) -> int:
-    cases, errors, reports = collect(args.input, args.expected_base, args.expected_head)
+    cases, errors, reports = collect(
+        args.input, args.expected_base, args.expected_head, args.expected_rust_base
+    )
+    baseline, baseline_errors = _baseline(args)
+    rust_baseline, rust_errors = _rust_baseline(args)
+    errors = [*baseline_errors, *rust_errors, *errors]
     report = (
-        render_report(cases, errors)
+        render_report(cases, errors, baseline, rust_baseline)
         + "\n"
         + _provenance(reports, args.expected_base, args.expected_head)
     )

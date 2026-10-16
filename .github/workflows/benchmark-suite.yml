@@ -31,11 +31,15 @@ jobs:
     outputs:
       base: ${{ steps.refs.outputs.base }}
       head: ${{ steps.refs.outputs.head }}
+      baseline_kind: ${{ steps.refs.outputs.baseline_kind }}
+      baseline_ref: ${{ steps.refs.outputs.baseline_ref }}
+      rust_base: ${{ steps.refs.outputs.rust_base }}
       matrix: ${{ steps.catalog.outputs.matrix }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          # Full history also fetches the release tags that anchor schedules.
           fetch-depth: 0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
@@ -45,6 +49,9 @@ jobs:
         env:
           BENCHMARK_BASE_SHA: ${{ inputs.baseline_sha || github.event.pull_request.base.sha || github.event.before }}
           BENCHMARK_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          # Without an explicit base, schedules compare against the newest
+          # reachable calc-flow-python-v* release; other events use HEAD^.
+          BENCHMARK_EVENT: ${{ github.event_name }}
         run: python -m scripts.benchmark_suite refs --github-output "$GITHUB_OUTPUT"
       - name: Discover every benchmark shard
         id: catalog
@@ -113,14 +120,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        side: [baseline, candidate]
+        # The rust-baseline wheel anchors the Rust shard at the first parent;
+        # the candidate bench file it compiles cannot build against a release
+        # checkout that predates its benchmark_internals APIs.
+        side: [baseline, candidate, rust-baseline]
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           ref: ${{ needs.prepare.outputs.head }}
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
-          ref: ${{ matrix.side == 'baseline' && needs.prepare.outputs.base || needs.prepare.outputs.head }}
+          ref: ${{ matrix.side == 'baseline' && needs.prepare.outputs.base || matrix.side == 'rust-baseline' && needs.prepare.outputs.rust_base || needs.prepare.outputs.head }}
           path: target/source
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
@@ -172,7 +182,9 @@ jobs:
           fetch-depth: 0
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
-          ref: ${{ needs.prepare.outputs.base }}
+          # The Rust family builds its sealed baseline from the first parent;
+          # every other family compares against the resolved release baseline.
+          ref: ${{ matrix.family == 'rust' && needs.prepare.outputs.rust_base || needs.prepare.outputs.base }}
           path: target/base
           fetch-depth: 0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -208,8 +220,14 @@ jobs:
           uv pip install --python target/finance-python-venv/bin/python \
             --no-build-isolation --no-deps target/third-party/finance-python
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: matrix.family != 'rust'
         with:
           name: benchmark-release-baseline-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/releases/baseline
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: matrix.family == 'rust'
+        with:
+          name: benchmark-release-rust-baseline-${{ github.run_id }}-${{ github.run_attempt }}
           path: target/releases/baseline
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -337,10 +355,15 @@ jobs:
         env:
           EXPECTED_BASE: ${{ needs.prepare.outputs.base }}
           EXPECTED_HEAD: ${{ needs.prepare.outputs.head }}
+          BASELINE_KIND: ${{ needs.prepare.outputs.baseline_kind }}
+          BASELINE_REF: ${{ needs.prepare.outputs.baseline_ref }}
+          EXPECTED_RUST_BASE: ${{ needs.prepare.outputs.rust_base }}
         run: >-
           python -m scripts.benchmark_suite summarize
           --input target/benchmark-inputs --output target/benchmark-summary
           --expected-base "$EXPECTED_BASE" --expected-head "$EXPECTED_HEAD"
+          --baseline-kind "$BASELINE_KIND" --baseline-ref "$BASELINE_REF"
+          --expected-rust-base "$EXPECTED_RUST_BASE"
           --github-summary "$GITHUB_STEP_SUMMARY"
       - name: Retain complete consolidated report
         if: always()
