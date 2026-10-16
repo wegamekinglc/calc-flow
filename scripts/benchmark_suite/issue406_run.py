@@ -81,7 +81,9 @@ async def collect(runner, output: Path) -> dict:
     try:
         for group in collection_groups():
             for round_index in range(ROUNDS):
-                await _collect_round(runner, output, group, round_index, records)
+                await _collect_round(
+                    runner, output, group, (round_index, None), records
+                )
     except BaseException as error:
         report.update(state="stopped", error=f"{type(error).__name__}: {error}")
         raise
@@ -92,7 +94,9 @@ async def collect(runner, output: Path) -> dict:
         write_json(output / "partial.json", report)
 
 
-async def _collect_round(runner, output, group, round_index, records, *, budget=None):
+async def _collect_round(runner, output, group, position, records):
+    round_index, budget = position
+
     async def invoke(side, index):
         async def operation():
             return await _invoke_collection(

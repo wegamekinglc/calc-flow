@@ -278,7 +278,7 @@ def _runtime_inputs(case):
     return {"left": case.rows, "right": 64}
 
 
-def _runtime_sample(case, seconds, side, epochs, sample, round_index, index):
+def _runtime_sample(case, seconds, side, epochs, sample):
     inputs = _runtime_inputs(case)
     return {
         **sample,
@@ -294,7 +294,6 @@ def _runtime_sample(case, seconds, side, epochs, sample, round_index, index):
             "departed_threads": [],
         },
         "completed_processing_epochs": list(epochs),
-        "observation_id": f"{case.id}/{side}/{round_index}/{index}",
         "raw_observation_sha256": "d" * 64,
         "group_member_ids": [case.id],
         "event_layout": {
@@ -318,7 +317,16 @@ def runtime_record(case, seconds, *, side="candidate", epochs=()):
     result = record(case, seconds, side=side, epochs=list(epochs))
     rounds = [
         [
-            _runtime_sample(case, seconds, side, epochs, sample, round_index, index)
+            _runtime_sample(
+                case,
+                seconds,
+                side,
+                epochs,
+                {
+                    **sample,
+                    "observation_id": f"{case.id}/{side}/{round_index}/{index}",
+                },
+            )
             for index, sample in enumerate(group)
         ]
         for round_index, group in enumerate(result["rounds"])
@@ -339,10 +347,10 @@ def _interval_fixture(case):
     }
 
 
-def _ledger_sample(case, side, members, physical, round_index, slot, sample):
+def _ledger_sample(case, sample, observation_id, members):
     result = {
         **sample,
-        "observation_id": f"{physical}/{side}/{round_index}/{slot}",
+        "observation_id": observation_id,
         "group_member_ids": members,
         "checkpoint_enabled": case.mode != "off",
         "cpu_evidence": {**sample["cpu_evidence"], "scope": case.cpu_scope},
@@ -366,12 +374,14 @@ def _ledger_record(case, side, members, physical):
     return {
         **record,
         "warmups": [
-            _ledger_sample(case, side, members, physical, index, "warmup", sample)
+            _ledger_sample(case, sample, f"{physical}/{side}/{index}/warmup", members)
             for index, sample in enumerate(record["warmups"])
         ],
         "rounds": [
             [
-                _ledger_sample(case, side, members, physical, round_index, slot, sample)
+                _ledger_sample(
+                    case, sample, f"{physical}/{side}/{round_index}/{slot}", members
+                )
                 for slot, sample in enumerate(group)
             ]
             for round_index, group in enumerate(record["rounds"])

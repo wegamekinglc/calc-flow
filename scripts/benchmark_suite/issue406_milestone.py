@@ -369,7 +369,7 @@ async def collect(runner, output: Path) -> dict:
             budget = Row5Budget(runner.plan) if group[0].row == 5 else None
             for round_index in range(ROUNDS):
                 await _collect_round(
-                    runner, output, group, round_index, records, budget=budget
+                    runner, output, group, (round_index, budget), records
                 )
                 write_json(output / "partial.json", report)
         report["state"] = "collected"
