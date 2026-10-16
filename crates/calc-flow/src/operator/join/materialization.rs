@@ -37,6 +37,13 @@ struct FlatRow {
     nulls: Vec<usize>,
 }
 
+pub(super) fn supports_flat_ranges(schema: &SchemaRef) -> bool {
+    schema
+        .fields()
+        .iter()
+        .all(|field| fixed_width(field.data_type()).is_some())
+}
+
 #[derive(Default)]
 struct FlatChunk {
     rows: usize,
@@ -89,7 +96,12 @@ impl FlatChunk {
 
 impl JoinOutput<'_> {
     pub(super) fn materialize(&self, range: Range<usize>) -> Result<RecordBatch> {
-        super::output_projection::materialize(self, range)
+        let record = super::output_projection::materialize(self, range)?;
+        #[cfg(test)]
+        super::note_join_work(|work| {
+            work.output_peak_bytes = work.output_peak_bytes.max(record.get_array_memory_size());
+        });
+        Ok(record)
     }
 
     pub(super) fn logical_column(&self, ordinal: usize) -> usize {
@@ -129,12 +141,7 @@ impl JoinOutput<'_> {
         {
             return Ok(std::iter::once(0..self.matched.len()).collect());
         }
-        if self
-            .schema
-            .fields()
-            .iter()
-            .all(|field| fixed_width(field.data_type()).is_some())
-        {
+        if supports_flat_ranges(self.schema) {
             self.flat_ranges(budget)
         } else {
             self.nested_ranges(budget)

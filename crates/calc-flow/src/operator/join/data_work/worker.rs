@@ -98,28 +98,67 @@ impl ParallelCpuWork for FillWork {
             .observe_unit(super::ProbePhase::Fill, ordinal, false);
         stop.check()?;
         let credit = self.funding.unit();
-        let mut pairs = super::super::matches::Selection::with_capacity(
-            self.counts.rows[ordinal],
-            partition::range(self.inputs.admitted.len(), ordinal).len(),
-        );
-        let mut quantum = ProbeQuantum::new(stop);
-        for position in partition::range(self.inputs.admitted.len(), ordinal) {
-            quantum.step()?;
-            for (ordinal, opposite_index) in self.inputs.matches(position).enumerate() {
-                if ordinal > 0 {
-                    quantum.step()?;
-                }
-                pairs.push(MatchedPair {
-                    pos: position,
-                    opposite_index,
-                });
-            }
-        }
-        debug_assert_eq!(pairs.len(), self.counts.rows[ordinal]);
+        let pairs = fill_range(&self.inputs, self.counts, ordinal, stop)?;
         stop.check()?;
         #[cfg(test)]
         self.inputs
             .observe_unit(super::ProbePhase::Fill, ordinal, true);
         Ok(PairFragment { pairs, credit })
     }
+}
+
+pub(super) fn fill_range(
+    inputs: &ProbeInputs,
+    counts: Counts,
+    ordinal: usize,
+    stop: &GatherStop,
+) -> Result<super::super::matches::Selection> {
+    let range = partition::range(inputs.admitted.len(), ordinal);
+    let mut pairs =
+        super::super::matches::Selection::with_capacity(counts.rows[ordinal], range.len());
+    let mut quantum = ProbeQuantum::new(stop);
+    for position in range {
+        quantum.step()?;
+        for (offset, opposite_index) in inputs.matches(position).enumerate() {
+            if offset > 0 {
+                quantum.step()?;
+            }
+            pairs.push(MatchedPair {
+                pos: position,
+                opposite_index,
+            });
+        }
+    }
+    debug_assert_eq!(pairs.len(), counts.rows[ordinal]);
+    Ok(pairs)
+}
+
+/// Refused optional acceleration retains the already admitted serial pair lease.
+/// This inline fallback owns full stop checks; no ticket waiter drives it.
+pub(super) fn fill_all(
+    inputs: &ProbeInputs,
+    count: usize,
+    stop: &GatherStop,
+) -> Result<super::super::matches::Selection> {
+    let mut pairs = super::super::matches::Selection::with_capacity(count, inputs.admitted.len());
+    let mut work = 0usize;
+    for pos in 0..inputs.admitted.len() {
+        if work % STOP_GROUP_ITEMS == 0 {
+            stop.check()?;
+        }
+        work += 1;
+        for opposite_index in inputs.matches(pos) {
+            if work % STOP_GROUP_ITEMS == 0 {
+                stop.check()?;
+            }
+            work += 1;
+            pairs.push(MatchedPair {
+                pos,
+                opposite_index,
+            });
+        }
+    }
+    stop.check()?;
+    debug_assert_eq!(pairs.len(), count);
+    Ok(pairs)
 }

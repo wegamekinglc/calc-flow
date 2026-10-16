@@ -1004,13 +1004,33 @@ bound each inclusive time window before match materialization. Batch admission
 masks preserve null and late-drop rules. Native index capacity remains funded
 until its storage is released, including capacity retained after eviction.
 
-Large admitted native probes divide contiguous input positions among up to eight
+Large admitted native probes divide contiguous input positions among up to four
 funded count work units, with at least 8,192 admitted rows per unit. The operator
-checks the global batch match limit once before fill work builds any pairs.
-Both passes share the same immutable native index and retained input owners.
-Fill fragments and their combined pair buffer remain funded together until the
-fragments are released. Combining fragments by input range preserves row order
-regardless of worker completion order; output materialization remains serial.
+checks the global batch match limit before fill work builds any pairs. A cost
+gate counts opposite-run visits for every incoming position, including repeated
+keys; thin one-to-one and small batches keep the serial path.
+
+For at least 64,000 admitted rows with supported flat output and funded payload
+owners, state and expiration admission complete before each unit probes,
+preflights and gathers its contiguous input range on the existing native pool.
+All units finish before the first output. Results emit in range order,
+independently of completion order, without merging pair fragments or dispatching
+another column-gather job. Output chunk boundaries follow these stable ranges.
+Optional extra scratch is capped at 512 MiB per batch and result reservations at
+16 MiB per unit (64 MiB total), inside the unchanged runtime pool. Result funding
+uses the projected physical schema and selected byte-array values, including
+fixed-width values for null rows and validity buffers. Actual Arrow allocation
+sizes must also fit the lease before results leave the worker. Result funding
+stays alive through collector acceptance. These workspace caps do not change V1
+state charges or turn edge byte budgets into process-memory ceilings.
+
+Shapes needing array-copy range preflight, including FixedSizeBinary, retain
+the split probe/materialization path. Fusion uses the same schema check as
+non-materializing range planning. Other unsupported shapes also retain the
+split path. Fused workspace or
+result refusal releases attempted output before using the prepaid serial pair
+reservation. Split fill fragments and their combined buffer remain funded until
+the fragments are released. All paths share immutable native indices and inputs.
 Cancellation or an abandoned handler retains those owners until cleanup;
 subsequent state changes wait for their release. Small batches run inline.
 If worker admission is refused, matching resumes through the existing serial
