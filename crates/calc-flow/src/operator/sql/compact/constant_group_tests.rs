@@ -223,7 +223,10 @@ async fn test_constant_grouping_projection_identity_is_strict_and_atomic() {
         let mut control: Value =
             serde_json::from_slice(accepted.segments["control"].bytes()).unwrap();
         let descriptor = &mut control["identity"]["native_descriptor"];
-        assert_eq!(descriptor["key_inputs"], json!([]));
+        let keys = descriptor["key_inputs"].as_array().unwrap();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0]["kind"], "cast");
+        assert_eq!(keys[0]["input"]["kind"], "literal");
         match mutation {
             0 => descriptor["projection"][0] = Value::Null,
             _ => descriptor["key_inputs"] = json!([{"kind": "column", "index": 0}]),

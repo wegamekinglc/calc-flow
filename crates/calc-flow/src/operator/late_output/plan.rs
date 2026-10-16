@@ -16,9 +16,9 @@ pub(super) const DIAGNOSTIC_INPUT_PORT: &str = "input";
 pub(super) const DIAGNOSTIC_REASON: &str = "late_row";
 
 /// Fixed per-row diagnostic charge: five 64-bit integers, four Utf8 offset
-/// entries, and the constant port/reason values above.
+/// pairs (including terminal offsets), and the constant port/reason values above.
 pub(super) const DIAGNOSTIC_BASE_BYTES: usize = 5 * size_of::<u64>()
-    + 4 * size_of::<i32>()
+    + 4 * size_of::<[i32; 2]>()
     + DIAGNOSTIC_INPUT_PORT.len()
     + DIAGNOSTIC_REASON.len();
 

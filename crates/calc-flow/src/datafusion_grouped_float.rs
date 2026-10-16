@@ -152,7 +152,12 @@ pub(super) fn output_node(plan: &dyn ExecutionPlan, in_input: bool) -> bool {
 
 fn single_aggregate(aggregate: &AggregateExec) -> bool {
     *aggregate.mode() == AggregateMode::Single
-        && *aggregate.input_order_mode() == InputOrderMode::Linear
+        && (*aggregate.input_order_mode() == InputOrderMode::Linear
+            || (*aggregate.input_order_mode() == InputOrderMode::Sorted
+                && aggregate.group_expr().expr().iter().all(|(expr, _)| {
+                    expr.downcast_ref::<datafusion::physical_expr::expressions::Literal>()
+                        .is_some()
+                })))
         && aggregate.limit_options().is_none()
         && aggregate.group_expr().groups().len() == 1
         && !aggregate.group_expr().expr().is_empty()

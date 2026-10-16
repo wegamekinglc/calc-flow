@@ -101,10 +101,9 @@ fn input(side: &str, rows: &[InputRow<'_>]) -> (Batch, Vec<Weak<dyn Array>>, u64
     }
     for column in &columns {
         let data = column.to_data();
-        let sentinel = usize::from(column.data_type() == &DataType::Utf8) * size_of::<i32>();
         assert_eq!(
             data.get_buffer_memory_size(),
-            data.get_slice_memory_size().unwrap() + sentinel
+            data.get_slice_memory_size().unwrap()
         );
     }
     let record = RecordBatch::try_new(input_schema(), columns).unwrap();

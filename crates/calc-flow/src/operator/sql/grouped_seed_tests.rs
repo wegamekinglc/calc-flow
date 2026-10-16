@@ -236,3 +236,53 @@ async fn case(dtype: &DataType) {
     drop(job);
     assert_eq!(runtime.incremental_memory_pool().reserved(), 0);
 }
+
+#[tokio::test]
+async fn test_grouped_sparse_seed_preserves_unseen_and_all_null_groups() {
+    use super::super::IncrementalSql;
+
+    let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+    for dtype in [DataType::Float32, DataType::Float64] {
+        let input = record(&dtype, 1, 2, 0);
+        let query = crate::expression::parse_select_query(QUERY).unwrap();
+        let plan = IncrementalSql::plan(&runtime, &query, "events", input.schema(), "seed")
+            .await
+            .unwrap()
+            .unwrap();
+        for expression in plan
+            .aggregates
+            .iter()
+            .filter(|expr| super::super::grouped_float::selected(expr))
+        {
+            let mut source = expression.create_accumulator().unwrap();
+            let value = if selected(expression) {
+                ScalarValue::Float64(Some(-0.0))
+            } else if dtype == DataType::Float32 {
+                ScalarValue::Float32(Some(-0.0))
+            } else {
+                ScalarValue::Float64(Some(-0.0))
+            };
+            source.update_batch(&[value.to_array().unwrap()]).unwrap();
+            let state = source.state().unwrap();
+            let mut partial = PartialAccumulator::new(expression, "seed").unwrap();
+            partial
+                .seed_batch(std::iter::once((1, state.as_slice())), 3, "seed")
+                .unwrap();
+            let result = partial.native.evaluate(EmitTo::All).unwrap();
+            assert_eq!(result.len(), 3);
+            assert!(
+                result.is_null(0),
+                "{} unseen group became valid",
+                expression.fun().name()
+            );
+            assert!(
+                result.is_null(2),
+                "{} all-null group became valid",
+                expression.fun().name()
+            );
+            let actual = ScalarValue::try_from_array(&result, 1).unwrap();
+            let expected = source.evaluate().unwrap();
+            assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+        }
+    }
+}

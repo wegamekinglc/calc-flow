@@ -3,7 +3,8 @@
 use super::{
     Admission, AdmissionRef, AdmissionWorkspace, Arc, Batch, InputKeys, LeftOrder, RecordBatch,
     ReservedIdentities, Result, StreamAsofJoinOperator, StreamOperatorContext, UInt64Array,
-    ValidatedInput, can_share_batch, check_input_cancellation, encode_payload, state, take, times,
+    ValidatedInput, can_share_batch, check_input_cancellation, encode_payload, state, take_column,
+    times,
 };
 use datafusion::arrow::{
     array::{Array, TimestampMicrosecondArray},
@@ -377,7 +378,7 @@ fn select(record: &RecordBatch, selection: Option<&UInt64Array>) -> Result<Recor
     let columns = record
         .columns()
         .iter()
-        .map(|column| take(column, indices, None).map_err(|e| super::super::arrow_error(&e)))
+        .map(|column| take_column(column, indices))
         .collect::<Result<Vec<_>>>()?;
     RecordBatch::try_new_with_options(
         record.schema(),

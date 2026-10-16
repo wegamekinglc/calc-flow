@@ -1,4 +1,4 @@
-use super::{RecordBatch, Result, UInt64Array, can_share_batch, take};
+use super::{RecordBatch, Result, UInt64Array, can_share_batch, take_column};
 use arrow_data::{
     ArrayData,
     transform::{Capacities, MutableArrayData},
@@ -82,8 +82,6 @@ fn take_columns(record: &RecordBatch) -> Result<Vec<ArrayRef>> {
     record
         .columns()
         .iter()
-        .map(|column| {
-            take(column, &indices, None).map_err(|error| super::super::super::arrow_error(&error))
-        })
+        .map(|column| take_column(column, &indices))
         .collect()
 }

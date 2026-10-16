@@ -16,7 +16,7 @@ use super::{AdmittedRow, StoredRow};
 use super::{AdmittedRows, MatchedPair, PayloadRef};
 use crate::batch::checked_accumulate;
 use crate::operator::output_chunk::OutputChunkErrors;
-use crate::operator::row_cost::{Offsets, fixed_width, variable_offsets};
+use crate::operator::row_cost::{Offsets, fixed_width, terminal_offset_width, variable_offsets};
 use crate::{Batch, BatchMetadata, CalcFlowError, EdgeBudget, Result};
 
 pub(super) struct JoinOutput<'a> {
@@ -35,6 +35,7 @@ pub(super) struct JoinOutput<'a> {
 struct FlatRow {
     bytes: usize,
     nulls: Vec<usize>,
+    terminal: usize,
 }
 
 pub(super) fn supports_flat_ranges(schema: &SchemaRef) -> bool {
@@ -72,6 +73,8 @@ impl FlatChunk {
             .bytes
             .checked_add(opposite.bytes)
             .and_then(|bytes| self.bytes.checked_add(bytes))
+            .and_then(|bytes| bytes.checked_add(incoming.terminal))
+            .and_then(|bytes| bytes.checked_add(opposite.terminal))
             .and_then(|bytes| {
                 bitmap_count
                     .checked_mul((self.rows + 1).div_ceil(8))
@@ -300,10 +303,13 @@ fn flat_row<'a>(
         tests::FLAT_VISITS.with(|count| count.set(count.get() + 1));
         let mut bytes = 0;
         let mut nulls = Vec::new();
+        let mut terminal = 0;
         let row = record.offset();
         for (column_index, column) in row_columns(record, column_offset, projection) {
             let width = fixed_width(column.data_type()).expect("flat schema was checked");
-            bytes = checked_accumulate(bytes, width, "batch")?;
+            let offset = terminal_offset_width(column.data_type());
+            terminal = checked_accumulate(terminal, offset, "batch")?;
+            bytes = checked_accumulate(bytes, width - offset, "batch")?;
             if let Some(offsets) = variable_offsets(column.as_ref()) {
                 bytes = checked_accumulate(bytes, selected_width(&offsets, row), "batch")?;
             }
@@ -311,7 +317,11 @@ fn flat_row<'a>(
                 nulls.push(column_index);
             }
         }
-        entry.insert(FlatRow { bytes, nulls });
+        entry.insert(FlatRow {
+            bytes,
+            nulls,
+            terminal,
+        });
     }
     Ok(&rows[&index])
 }
@@ -580,9 +590,16 @@ mod tests {
                 operator_id: "allocation",
                 admitted_charges: None,
             };
+            let bytes = Batch::table(
+                vec![output.materialize(0..1_000).unwrap()],
+                BatchMetadata::default(),
+            )
+            .unwrap()
+            .estimated_bytes()
+            .unwrap();
             let measured = allocation_counter::measure(|| {
                 let ranges = output
-                    .ranges(EdgeBudget::new(1_000, 40_000).unwrap())
+                    .ranges(EdgeBudget::new(1_000, bytes).unwrap())
                     .unwrap();
                 assert_eq!(ranges.len(), fanout);
                 assert_eq!(ranges.iter().map(Range::len).sum::<usize>(), matched.len());

@@ -24,8 +24,18 @@ fn reference(record: &RecordBatch) -> Result<RecordBatch> {
         .columns()
         .iter()
         .map(|column| {
-            take(column, &indices, None)
-                .map_err(|error| super::super::super::super::arrow_error(&error))
+            if column.data_type() == &DataType::FixedSizeBinary(0) {
+                datafusion::arrow::array::FixedSizeBinaryArray::try_new_with_len(
+                    0,
+                    datafusion::arrow::buffer::Buffer::from(Vec::<u8>::new()),
+                    column.nulls().cloned(),
+                    column.len(),
+                )
+                .map(|array| Arc::new(array) as ArrayRef)
+            } else {
+                datafusion::arrow::compute::take(column, &indices, None)
+            }
+            .map_err(|error| super::super::super::super::arrow_error(&error))
         })
         .collect::<Result<Vec<_>>>()?;
     RecordBatch::try_new(record.schema(), columns)
@@ -236,5 +246,63 @@ pub(super) fn complete_records_avoid_identity_indices() {
     null_and_view_payloads();
     for rows in [64, 1_024] {
         allocation_fits_existing_workspace(rows);
+    }
+}
+
+#[test]
+fn test_zero_width_payload_compaction_preserves_rows_and_selected_validity() {
+    use datafusion::arrow::{array::FixedSizeBinaryArray, buffer::Buffer};
+
+    for rows in [1, 63, 64, 65] {
+        for validity in [
+            None,
+            Some(NullBuffer::new_valid(rows)),
+            Some(NullBuffer::from(
+                (0..rows).map(|row| row % 3 != 0).collect::<Vec<_>>(),
+            )),
+        ] {
+            let payload: ArrayRef = Arc::new(
+                FixedSizeBinaryArray::try_new_with_len(
+                    0,
+                    Buffer::from(Vec::<u8>::new()),
+                    validity,
+                    rows,
+                )
+                .unwrap(),
+            );
+            let input = with_payload(payload);
+            let before = encode(&input);
+            let record = input.slice(0, rows);
+            let actual = compact_complete_record(&record).unwrap();
+            assert_eq!(actual.num_rows(), rows);
+            assert_eq!(encode(&actual), before);
+            assert_independent(&record, &actual);
+            let selections = (0..rows).filter(|row| row % 2 == 0).collect::<Vec<_>>();
+            let accepted = selections
+                .iter()
+                .map(|&row| {
+                    (
+                        (
+                            0,
+                            state::Encoding::from_slice(&[]),
+                            state::Encoding::from_slice(&[]),
+                        ),
+                        &record,
+                        row,
+                        0,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let selected = super::super::super::compact_accepted_rows(&accepted, &record).unwrap();
+            assert_eq!(selected.num_rows(), selections.len());
+            for (index, &row) in selections.iter().enumerate() {
+                assert_eq!(
+                    selected.columns().last().unwrap().is_null(index),
+                    record.columns().last().unwrap().is_null(row)
+                );
+            }
+            assert_independent(&record, &selected);
+            assert_eq!(encode(&input), before);
+        }
     }
 }

@@ -23,7 +23,7 @@ use datafusion::arrow::{
     record_batch::RecordBatch,
 };
 
-use super::row_cost::{ColumnCharges, RowCosts};
+use super::row_cost::{ColumnCharges, RowCosts, terminal_offset_width};
 use crate::{Batch, BatchMetadata, CalcFlowError, EdgeBudget, Result, batch::checked_accumulate};
 
 /// Per-operator wording for chunking failure messages.
@@ -146,18 +146,6 @@ struct ChargePlan<'a> {
 
 impl<'a> ChargePlan<'a> {
     fn read(record: &'a RecordBatch) -> Result<Self> {
-        if let Some(rows) = RowCosts::try_new(record)? {
-            let nulls = record
-                .columns()
-                .iter()
-                .filter_map(|column| column.nulls())
-                .collect();
-            return Ok(Self {
-                rows,
-                nulls,
-                chunk: 0,
-            });
-        }
         let mut charges = ColumnCharges::default();
         let mut chunk = 0_usize;
         for column in record.columns() {
@@ -278,7 +266,10 @@ fn accumulate_column<'a>(
     if matches!(column.data_type(), DataType::Struct(_)) {
         return accumulate_struct_column(column, charges, chunk);
     }
+    let terminal = terminal_offset_width(column.data_type());
+    *chunk = checked_accumulate(*chunk, terminal, "batch")?;
     if charges.add_flat_column(column)? {
+        charges.fixed -= terminal;
         return Ok(());
     }
     accumulate_nested_column(column, charges, chunk)
@@ -572,6 +563,51 @@ mod tests {
                     estimated(&slice)
                 );
             }
+        }
+    }
+
+    #[test]
+    fn test_terminal_offsets_are_charged_once_per_chunk_in_flat_and_nested_columns() {
+        use datafusion::arrow::{array::LargeStringArray, buffer::OffsetBuffer};
+
+        let text: ArrayRef = Arc::new(StringArray::from(vec!["a"; 4]));
+        let wide: ArrayRef = Arc::new(LargeStringArray::from(vec!["a"; 4]));
+        let nested: ArrayRef = Arc::new(StructArray::from(vec![
+            (
+                Arc::new(Field::new("text", DataType::Utf8, false)),
+                text.clone(),
+            ),
+            (
+                Arc::new(Field::new("wide", DataType::LargeUtf8, false)),
+                wide.clone(),
+            ),
+        ]));
+        let lists: ArrayRef = Arc::new(ListArray::new(
+            Arc::new(Field::new("item", DataType::Utf8, false)),
+            OffsetBuffer::new(vec![0_i32, 1, 2, 3, 4].into()),
+            text.clone(),
+            None,
+        ));
+        for payload in [text, wide, nested, lists] {
+            let record = RecordBatch::try_from_iter(vec![("payload", payload)]).unwrap();
+            let bytes = estimated(&record.slice(0, 2));
+            let chunks = chunk_output_record(
+                &record,
+                "rolling",
+                0,
+                EdgeBudget::new(4, bytes).unwrap(),
+                OutputChunkErrors::ROLLING,
+            )
+            .unwrap();
+            assert_eq!(
+                chunks.iter().map(Batch::num_rows).collect::<Vec<_>>(),
+                vec![2, 2]
+            );
+            assert!(
+                chunks
+                    .iter()
+                    .all(|chunk| chunk.estimated_bytes().unwrap() == bytes)
+            );
         }
     }
 

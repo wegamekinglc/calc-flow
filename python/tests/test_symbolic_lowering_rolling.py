@@ -975,3 +975,50 @@ def test_stream_compile_lowers_an_aggregate_program() -> None:
     )
 
     assert isinstance(plan, StreamExecutionPlan)
+
+
+@pytest.mark.parametrize("guard", ["comparison", "independent"])
+def test_negated_nullable_rolling_input_uses_native_guard_proof(guard: str) -> None:
+    schema = pa.schema(
+        [
+            pa.field("ts", pa.timestamp("us", tz="UTC"), nullable=False),
+            pa.field("symbol", pa.string(), nullable=False),
+            pa.field("seq", pa.uint64(), nullable=False),
+            pa.field("x", pa.float64()),
+            pa.field("accepted", pa.bool_(), nullable=False),
+        ]
+    )
+    source = table_input(
+        "input",
+        schema=schema,
+        entity_by=["symbol"],
+        event_time="ts",
+        sequence_by=["seq"],
+    )
+    condition = source["x"] < 0.0 if guard == "comparison" else source["accepted"]
+    program = Program(
+        "negated-rolling-input",
+        engine="sql",
+        outputs={
+            "output": source.select(
+                value=ts.lag(row.where(condition, -source["x"], 0.0))
+            )
+        },
+    )
+    data = pa.table(
+        {
+            "ts": [1, 2, 3],
+            "symbol": ["a"] * 3,
+            "seq": [1, 2, 3],
+            "x": [None, -2.0, 3.0],
+            "accepted": [True, False, True],
+        },
+        schema=schema,
+    )
+    actual = program.collect({"input": data})["output"]
+    assert actual.to_pydict() == {
+        "value": [None, 0.0, 2.0] if guard == "comparison" else [None, None, 0.0]
+    }
+    document = lower_program_document(program, Runtime(), "batch")
+    field = document["graph"]["nodes"][0]["output_ports"][0]["schema"][-1]
+    assert field["nullable"] is (guard == "independent")

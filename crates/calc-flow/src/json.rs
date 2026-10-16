@@ -189,10 +189,13 @@ impl<'de> Visitor<'de> for UniqueValueVisitor {
 
 fn sort_value(value: &Value) -> Value {
     match value {
+        // Feature unification can make serde_json::Map preserve insertion order.
         Value::Object(values) => Value::Object(
             values
                 .iter()
                 .map(|(key, value)| (key.clone(), sort_value(value)))
+                .collect::<BTreeMap<_, _>>()
+                .into_iter()
                 .collect(),
         ),
         Value::Array(values) => Value::Array(values.iter().map(sort_value).collect()),
@@ -202,4 +205,21 @@ fn sort_value(value: &Value) -> Value {
 
 fn format_error(message: String) -> CalcFlowError {
     CalcFlowError::Format { message }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_canonical_json_sorts_nested_objects_without_reordering_arrays() {
+        let value: Value =
+            serde_json::from_str(r#"{"z":{"y":1,"a":2},"a":[{"z":3,"b":4},2,1]}"#).unwrap();
+        let original = value.clone();
+        assert_eq!(
+            canonical_json(&value).unwrap(),
+            r#"{"a":[{"b":4,"z":3},2,1],"z":{"a":2,"y":1}}"#,
+        );
+        assert_eq!(value, original);
+    }
 }

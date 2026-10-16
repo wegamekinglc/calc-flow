@@ -1,6 +1,9 @@
 use super::{AggregateFunctionExpr, ArrayRef, GroupsAccumulator, Result, ScalarValue, df_error};
 use datafusion::{
-    arrow::{array::BooleanArray, datatypes::DataType},
+    arrow::{
+        array::{BooleanArray, new_empty_array},
+        datatypes::DataType,
+    },
     common::Result as DataFusionResult,
     logical_expr::EmitTo,
 };
@@ -41,6 +44,16 @@ impl PartialAccumulator {
                 ScalarValue::iter_to_array(saved.clone().map(|(_, state)| state[field].clone()))
             })
             .collect::<DataFusionResult<Vec<_>>>()
+            .map_err(|error| df_error(name, error))?;
+        // Sparse merges must track unseen groups even when all saved values are valid.
+        let empty = new_empty_array(&first.last().expect("sequential state").data_type());
+        self.native
+            .update_batch(
+                &[empty],
+                &[],
+                Some(&BooleanArray::from(Vec::<bool>::new())),
+                count,
+            )
             .map_err(|error| df_error(name, error))?;
         if self.numeric {
             self.native
