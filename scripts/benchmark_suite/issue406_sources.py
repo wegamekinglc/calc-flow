@@ -21,6 +21,7 @@ COMPILED_INPUTS = (
 )
 RECIPE_INPUTS = (
     "scripts/benchmark_suite/issue406_harness.py",
+    "scripts/benchmark_suite/issue406_clock.py",
     "scripts/benchmark_suite/rust_harness.py",
     "scripts/benchmark_suite/rust_provenance.py",
     "scripts/toolkit.py",

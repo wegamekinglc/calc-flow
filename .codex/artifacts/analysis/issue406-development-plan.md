@@ -1,5 +1,26 @@
 # Issue 406: development and acceptance status
 
+## Partial milestone acceptance, October 16, 2026
+
+The frozen comparison uses B `aaf793a3`, C `c7e8657d`, original build tool
+`9c513611` and execution tool `64bbc6a4`; C is the frozen candidate, not a
+claim about every later main commit. The full 47/45/94/90 plan accepted 1,026
+measured calls and 104 warmups, rejected one measured call, and left 849 calls
+unstarted. The 10ms process CPU tick on a 1.371196ms handler triggered the
+unchanged gate but cannot establish a real CPU regression. Old refusals and
+zero-tick inconclusive records remain sealed. The benchmark clock repair adds
+no acceptance samples and requires new instrumented build/source attestations.
+
+The original eight targets remain incomplete. Join/ASOF and snapshot/restore
+absolute targets missed in the measured configurations; retained OFF scaling
+medians alone are not statistical acceptance. Handler CPU/during-compaction,
+row 7/8, ASOF10M, interval1M, native OFF execution, allocation counters and
+complete advancing ON epochs retain their gaps. The tighter planning goals
+remain separate and unmet/unmeasured. See the maintained
+[measurement controls](../../../docs/benchmark-suite.md#joinasof-acceptance-measurement-controls-428)
+and [current milestone](../../../docs/benchmark-suite.md#current-milestone-joinasof-acquisition-443).
+Neither #443 nor #406 is complete.
+
 ## Current local increments, October 15, 2026
 
 The [Join batch-admission increment](issue406-join-batch-admission.md) is locally

@@ -159,7 +159,7 @@ class SourcePolicyTests(unittest.TestCase):
                 )
 
     def test_changed_compiled_inputs_or_build_recipe_cannot_reuse_receipts(self):
-        for name in ("python/changed.py", sources.RECIPE_INPUTS[0]):
+        for name in ("python/changed.py", *sources.RECIPE_INPUTS[:2]):
             with self.subTest(name=name), TemporaryDirectory() as raw:
                 current, _files, _build, execution = source_fixture(Path(raw))
                 path = execution / name
