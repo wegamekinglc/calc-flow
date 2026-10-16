@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from scripts.benchmark_suite import issue406_milestone as policy
 from scripts.benchmark_suite import issue406_report as report_tools
+from scripts.benchmark_suite import issue406_sources as sources
 from scripts.benchmark_suite.report import ROUNDS, SAMPLES, table
 
 FORMAL = {
@@ -226,6 +227,7 @@ def summarize(report: dict) -> dict:
     )
     return {
         **summary,
+        **sources.report_fields(report),
         "schema": "calc-flow.issue406-milestone-summary.v1",
         **{
             key: report.get(key)
@@ -275,9 +277,17 @@ def aborted_summary(report):
     return {
         "schema": "calc-flow.issue406-milestone-summary.v1",
         "evidence_complete": False,
+        **sources.report_fields(report),
         **{
             key: report.get(key)
-            for key in ("baseline_product_commit", "candidate_product_commit")
+            for key in (
+                "baseline_product_commit",
+                "candidate_product_commit",
+                "harness_git_sha",
+                "build_harness_git_sha",
+                "execution_git_sha",
+                "preparation_anchor",
+            )
         },
         "acceptance": "inconclusive",
         "reason": report.get("error"),
@@ -444,6 +454,8 @@ def render(summary):
         "",
         f"B `{summary.get('baseline_product_commit')}`; "
         f"C `{summary.get('candidate_product_commit')}`.",
+        f"Build tool `{summary.get('build_harness_git_sha')}`; "
+        f"execution tool `{summary.get('execution_git_sha')}`.",
         "",
         "Acceptance inconclusive. During-compaction target unmeasured; "
         "post-compaction, preparation, queue and combined clocks are diagnostics.",

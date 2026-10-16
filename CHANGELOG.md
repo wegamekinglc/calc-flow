@@ -9,6 +9,13 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-16: Add an explicit milestone source policy for separately sealed
+  original build and execution tools, with unchanged compiled inputs/recipes,
+  complete Python/fixture seals and a verified Git diff. Retain exact B/C and
+  receipt identities, all artifact gates and historical policies. Guard source
+  checks before preparation-anchor creation. This tool change adds no performance
+  result and does not close the outstanding acceptance targets.
+
 - 2026-10-16: Add a current-milestone Join/ASOF acceptance controller with both
   sealed revisions in OFF, LOW and ON modes, absolute mode thresholds, ASOF10M
   and interval1M planning cases, and a full interval output oracle. Charge actual

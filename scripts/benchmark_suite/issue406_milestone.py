@@ -9,6 +9,7 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
+from scripts.benchmark_suite import issue406_sources as sources
 from scripts.benchmark_suite.issue406_acceptance import (
     MODES,
     AcceptanceCase,
@@ -85,11 +86,11 @@ def _validate_revisions(plan: dict) -> list[str]:
         not all(_revision(value) for value in (*revisions, harness))
         or revisions[0] == revisions[1]
         or plan.get("execution_git_sha") != harness
-        or plan.get("build_harness_git_sha") != harness
     ):
         raise ValueError(
-            "milestone requires exact distinct B/C and one sealed tool SHA"
+            "milestone requires exact distinct B/C and one sealed execution SHA"
         )
+    sources.validate_declaration(plan)
     return revisions
 
 
@@ -144,13 +145,14 @@ def validate_envelope(plan: dict) -> None:
     _validate_anchor_descriptor(plan.get("preparation_anchor", {}))
 
 
-def begin_preparation(path: Path) -> None:
+def begin_preparation(path: Path, *, source_guard: dict | None = None) -> None:
     """Start accounting after builds, before fixture, preflight and plan preparation."""
     record = {
         "schema": "calc-flow.issue406-preparation.v1",
         "clock": "CLOCK_MONOTONIC",
         "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
         "started_monotonic": time.monotonic(),
+        **({"source_guard": source_guard} if source_guard is not None else {}),
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("x", encoding="utf-8") as stream:
@@ -175,6 +177,7 @@ def _sealed_preparation_anchor(plan: dict) -> dict:
         != Path("/proc/sys/kernel/random/boot_id").read_text().strip()
     ):
         raise ValueError("preparation anchor clock or boot differs")
+    sources.validate_anchor(plan, anchor)
     return anchor
 
 
@@ -195,6 +198,7 @@ def acquisition_start(plan: dict) -> float:
 def report_identity(plan: dict) -> dict:
     return {
         "execution_schema": SCHEMA,
+        **sources.report_fields(plan),
         **{
             key: plan[key]
             for key in (
@@ -210,7 +214,7 @@ def report_identity(plan: dict) -> dict:
 
 
 def validate_releases(plan: dict, files: dict) -> None:
-    """Audit both ordinary wheels; all native/traced builds use the same fresh tool."""
+    """Audit both ordinary wheels against their sealed original build tool."""
     from scripts.benchmark_suite.issue406_reuse import validate_ordinary_release
 
     if any(
