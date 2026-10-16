@@ -355,7 +355,7 @@ impl StreamJoinOperator {
     }
 }
 
-pub(super) async fn finish_probe_ticket<T: Send + 'static, U>(
+async fn finish_probe_ticket<T: Send + 'static, U>(
     ticket: ObservedTicket<Vec<T>>,
     context: &StreamOperatorContext<'_>,
     install: impl FnOnce(Vec<T>) -> Result<U>,
@@ -385,6 +385,14 @@ pub(super) async fn finish_probe_ticket<T: Send + 'static, U>(
 
 async fn probe_stop(job: &StreamJobContext) {
     let deadline = async {
+        #[cfg(test)]
+        if let (Some(mut clock), Some(expires)) = (job.deadline_clock_for_test(), job.deadline()) {
+            clock
+                .wait_for(|now| now >= expires)
+                .await
+                .expect("deadline clock outlives its wait");
+            return;
+        }
         match job.deadline() {
             Some(deadline) => {
                 while chrono::Utc::now() < *deadline {

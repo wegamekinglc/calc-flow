@@ -18,9 +18,6 @@ use super::{inputs::ProbeInputs, partition::Counts, worker};
 use crate::runtime::streaming::gather_work::{GatherStop, ParallelCpuWork};
 use crate::{Batch, BatchMetadata, EdgeBudget, Result, StreamCollector, StreamOperatorContext};
 
-#[cfg(test)]
-#[path = "../tests/morsel_tests/deadline.rs"]
-pub(super) mod deadline_tests;
 mod fallback;
 mod funding;
 #[cfg(test)]

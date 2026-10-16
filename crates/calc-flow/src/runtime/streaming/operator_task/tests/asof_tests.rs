@@ -49,6 +49,10 @@ fn row(time: i64, sequence: u64) -> Batch {
 }
 
 fn operator() -> StreamAsofJoinOperator {
+    operator_with_limits(AsofStateLimits::new(1_000, 16 * 1024 * 1024).unwrap())
+}
+
+fn operator_with_limits(limits: AsofStateLimits) -> StreamAsofJoinOperator {
     let side = |prefix: &str| {
         AsofJoinSide::new(
             vec!["key".into()],
@@ -66,11 +70,73 @@ fn operator() -> StreamAsofJoinOperator {
             side("left"),
             side("right"),
             Duration::from_micros(10),
-            AsofStateLimits::new(1_000, 16 * 1024 * 1024).unwrap(),
+            limits,
         )
         .unwrap(),
     )
     .unwrap()
+}
+
+#[tokio::test]
+async fn test_asof_failure_precedes_ingress_worker_cleanup() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let operator = operator_with_limits(AsofStateLimits::new(1, 8_000_000).unwrap());
+    let port = operator.output_ports()[0].clone();
+    let mut harness = harness_with_operator_capability(
+        &["left", "right"],
+        1,
+        CompiledStreamOperator::StreamAsofJoin(Box::new(operator)),
+        OperatorCheckpointCapability::CheckpointedStateful { state_version: 3 },
+        port,
+        None,
+        None,
+    );
+    start(&mut harness).await;
+    let closed_before_cancel = Arc::new(AtomicBool::new(false));
+    let observed = Arc::clone(&closed_before_cancel);
+    let cancellation = harness.cancellation.clone();
+    let mut right = harness.inputs.remove("right").unwrap();
+    harness.supervisor.spawn("operator:quotes", async move {
+        loop {
+            if let Err(error) = right.send(StreamMessage::idle()).await {
+                observed.store(!cancellation.is_cancelled(), Ordering::SeqCst);
+                return Err(error);
+            }
+        }
+    });
+    for (time, sequence) in [(105, 0), (106, 1)] {
+        harness
+            .inputs
+            .get_mut("left")
+            .unwrap()
+            .send(StreamMessage::data(row(time, sequence)))
+            .await
+            .unwrap();
+    }
+    let report = tokio::time::timeout(Duration::from_secs(5), harness.supervisor.join_all())
+        .await
+        .unwrap();
+    assert!(!closed_before_cancel.load(Ordering::SeqCst), "{report:?}");
+    assert_eq!(report.primary_errors().len(), 1, "{report:?}");
+    assert!(
+        matches!(
+            &report.primary_errors()[0].error,
+            crate::CalcFlowError::OperatorReason {
+                reason_code: crate::StreamingFailureReason::AsofStateLimitExceeded,
+                ..
+            }
+        ),
+        "{report:?}"
+    );
+    assert_eq!(harness.supervisor.task_count(), 0);
+    let progress = harness.progress.snapshot();
+    assert_eq!(progress.fully_fanned_out_batches, 0);
+    assert_eq!(progress.preparation_tasks_started, 2);
+    assert_eq!(progress.preparation_tasks_exited, 2);
+    let gather = harness.gather.clone();
+    drop(harness);
+    assert!(gather.close_and_drain().await.is_empty());
 }
 
 struct TaskFixture {

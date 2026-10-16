@@ -26,7 +26,8 @@ use super::{
         SqlRestoreRequest,
     },
     supervisor::{
-        PreparedLogicalTask, PreparedTaskGroup, RetainedTaskResult, TaskId, contain_task_panic,
+        PreparedLogicalTask, PreparedTaskGroup, RetainedTaskResult, TaskFailureSignal, TaskId,
+        contain_task_panic,
     },
 };
 use crate::{
@@ -438,11 +439,7 @@ pub(crate) fn spawn_operator_task(
 ) -> TaskId {
     let task_name = format!("operator:{}", inputs.node_id);
     supervisor.spawn_with_failure_signal(task_name, move |failure_signal| {
-        run_retained_operator_task(
-            inputs,
-            failure_signal.task_id(),
-            OperatorCooperation::Disabled,
-        )
+        run_retained_operator_task(inputs, failure_signal, OperatorCooperation::Disabled)
     })
 }
 
@@ -516,9 +513,9 @@ fn prepare_pair(
     let second_name = format!("operator:{}", second.node_id);
     supervisor.prepare_pair_with_failure_signals(
         &first_name,
-        move |signal| run_retained_operator_task(first, signal.task_id(), cooperation),
+        move |signal| run_retained_operator_task(first, signal, cooperation),
         &second_name,
-        move |signal| run_retained_operator_task(second, signal.task_id(), cooperation),
+        move |signal| run_retained_operator_task(second, signal, cooperation),
     )
 }
 
@@ -550,9 +547,7 @@ pub(crate) fn prepare_operator_task_group(
     let members = members
         .into_iter()
         .map(|(inputs, token)| {
-            token.bind(move |signal| {
-                run_retained_operator_task(inputs, signal.task_id(), cooperation)
-            })
+            token.bind(move |signal| run_retained_operator_task(inputs, signal, cooperation))
         })
         .collect();
     Ok(PreparedTaskGroup::new(members, local_edges, proof))
@@ -595,18 +590,23 @@ async fn run_operator_task_with_cooperation(
     task_id: TaskId,
     cooperation: OperatorCooperation,
 ) -> Result<()> {
-    run_operator_task_body(&mut inputs, task_id, cooperation).await
+    run_operator_task_body(&mut inputs, task_id, cooperation, None).await
 }
 
 async fn run_retained_operator_task(
     inputs: OperatorTaskInputs,
-    task_id: TaskId,
+    failure_signal: TaskFailureSignal,
     cooperation: OperatorCooperation,
 ) -> RetainedTaskResult<Option<RetainedOperatorInputs>> {
+    let task_id = failure_signal.task_id();
     let mut retained = RetainedOperatorInputs::new(inputs);
     let result = contain_task_panic(
         task_id,
-        Box::pin(run_retained_body(&mut retained, task_id, cooperation)),
+        Box::pin(run_retained_body(
+            &mut retained,
+            &failure_signal,
+            cooperation,
+        )),
     )
     .await
     .and_then(std::convert::identity);
@@ -616,11 +616,12 @@ async fn run_retained_operator_task(
 
 async fn run_retained_body(
     retained: &mut RetainedOperatorInputs,
-    task_id: TaskId,
+    failure_signal: &TaskFailureSignal,
     cooperation: OperatorCooperation,
 ) -> Result<()> {
+    let task_id = failure_signal.task_id();
     if let Some(inputs) = &mut retained.inputs {
-        return run_operator_task_body(inputs, task_id, cooperation).await;
+        return run_operator_task_body(inputs, task_id, cooperation, Some(failure_signal)).await;
     }
     let frame = retained.frame.as_mut().expect("owned entry frame");
     if !wait_for_task_gate(
@@ -703,7 +704,7 @@ async fn run_retained_body(
     let Some(progress) = acknowledge_entry(inputs, Ok(progress))? else {
         return Ok(());
     };
-    run_after_operator_entry(inputs, progress, task_id, cooperation).await
+    run_after_operator_entry(inputs, progress, task_id, cooperation, Some(failure_signal)).await
 }
 
 fn install_entry_sql_restore(
@@ -724,6 +725,7 @@ async fn run_operator_task_body(
     inputs: &mut OperatorTaskInputs,
     task_id: TaskId,
     cooperation: OperatorCooperation,
+    failure_signal: Option<&TaskFailureSignal>,
 ) -> Result<()> {
     if !wait_for_task_gate(
         &mut inputs.entry_gate,
@@ -738,7 +740,7 @@ async fn run_operator_task_body(
     let Some(input_progress) = reset_and_acknowledge(inputs, task_id).await? else {
         return Ok(());
     };
-    run_after_operator_entry(inputs, input_progress, task_id, cooperation).await
+    run_after_operator_entry(inputs, input_progress, task_id, cooperation, failure_signal).await
 }
 
 async fn run_after_operator_entry(
@@ -746,6 +748,7 @@ async fn run_after_operator_entry(
     input_progress: OperatorInputProgress,
     task_id: TaskId,
     cooperation: OperatorCooperation,
+    failure_signal: Option<&TaskFailureSignal>,
 ) -> Result<()> {
     if !wait_for_task_gate(
         &mut inputs.data_gate,
@@ -764,7 +767,7 @@ async fn run_after_operator_entry(
     if let Some(client) = &mut inputs.sql_recovery {
         client.activate(task_id);
     }
-    let result = ingress_admission::run(inputs, input_progress, cooperation).await;
+    let result = ingress_admission::run(inputs, input_progress, cooperation, failure_signal).await;
     normalize_cancelled_result(inputs, result)
 }
 

@@ -11,6 +11,13 @@ performance controller tests run in this scheduled workflow. Supplemental SQL
 adaptive tuning experiments run only by manual dispatch from `benchmarks.yml`;
 they are not required suite shards.
 
+The catalog preparation job runs script tests with only the Python standard
+library. Tests requiring PyArrow, including the Issue 406 event-layout checks,
+run in the `warm-10` controller step after locked benchmark dependencies and
+the candidate wheel are installed. A preparation failure skips builds and
+measurements; the summary then reports missing shards, without establishing a
+performance regression.
+
 Historical JSON results under `benchmarks/rolling/` are stored with Git LFS.
 Install Git LFS and run `git lfs pull --include='benchmarks/rolling/*.json'`
 when inspecting those results locally. Scheduled benchmark runs generate their

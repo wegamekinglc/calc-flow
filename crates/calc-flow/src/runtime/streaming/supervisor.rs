@@ -393,7 +393,7 @@ impl TaskFailureSignal {
             .record_task_failure_and_cancel(self.task_id, &self.cancellation);
     }
 
-    async fn converge_after_failure(&self) {
+    pub(crate) async fn converge_after_failure(&self) {
         self.record_before_cancellation();
         if !self.cancellation.is_cancelled() {
             tokio::task::yield_now().await;
