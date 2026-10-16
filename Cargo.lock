@@ -575,6 +575,7 @@ dependencies = [
  "futures",
  "hashbrown 0.17.1",
  "hex",
+ "nix",
  "parking_lot",
  "proptest",
  "regex",

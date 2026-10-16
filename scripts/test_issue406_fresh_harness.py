@@ -149,7 +149,7 @@ class FreshAcceptanceHarnessTests(unittest.TestCase):
                         self.assertEqual(
                             features,
                             {
-                                "benchmark-internals": [],
+                                "benchmark-internals": ["dep:nix"],
                                 "benchmark-checkpoint-off": ["benchmark-internals"],
                                 "benchmark-checkpoint-diagnostic": [
                                     "benchmark-internals"

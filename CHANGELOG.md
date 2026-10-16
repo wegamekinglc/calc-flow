@@ -19,6 +19,12 @@ measurements. Use the current guides for supported behavior.
   Apply equivalent library lint updates required by the new toolchain without
   changing validation or CI gates. This upgrade makes no performance claim.
 
+- 2026-10-16: Replace opt-in native benchmark process CPU ticks with the safe
+  Linux process CPU clock and its reported resolution. Reject unavailable or
+  invalid v2 clock metadata, retaining historical evidence and CPU thresholds.
+  Seal the benchmark-only optional dependency in the common overlay and lock.
+  This repairs measurement precision; it adds no performance acceptance result.
+
 - 2026-10-16: Add an explicit milestone source policy for separately sealed
   original build and execution tools, with unchanged compiled inputs/recipes,
   complete Python/fixture seals and a verified Git diff. Retain exact B/C and

@@ -8,8 +8,11 @@ repository.workspace = true
 description = "Rust core for stateful DataFusion calculation pipelines"
 exclude = ["tests/**"]
 
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "=0.27.1", default-features = false, features = ["time"], optional = true }
+
 [features]
-benchmark-internals = []
+benchmark-internals = ["dep:nix"]
 benchmark-checkpoint-off = ["benchmark-internals"]
 benchmark-checkpoint-diagnostic = ["benchmark-internals"]
 

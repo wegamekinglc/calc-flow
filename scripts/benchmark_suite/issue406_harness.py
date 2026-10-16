@@ -10,6 +10,11 @@ from contextlib import contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from scripts.benchmark_suite.issue406_clock import (
+    CLOCK_MANIFEST,
+    LEGACY_FEATURES,
+    clock_lock,
+)
 from scripts.benchmark_suite.process import ROOT
 from scripts.benchmark_suite.rust_harness import _clean_revision
 from scripts.toolkit import command_output, fingerprint_json, sha256_file, write_json
@@ -30,10 +35,7 @@ COPIED_FILES = (
     "crates/calc-flow/src/runtime/streaming/operator_task/benchmark_replay/dispatch.rs",
 )
 INSERTIONS = {
-    "crates/calc-flow/Cargo.toml": (
-        "\n[features]\nbenchmark-internals = []\n"
-        'benchmark-checkpoint-off = ["benchmark-internals"]\n'
-    ),
+    "crates/calc-flow/Cargo.toml": CLOCK_MANIFEST,
     "crates/calc-flow/src/lib.rs": (
         '\n#[cfg(feature = "benchmark-internals")]\n#[doc(hidden)]\n'
         "pub mod benchmark_internals;\n"
@@ -249,6 +251,7 @@ def _apply_literal_patches(contents: str, patches: tuple, path: str) -> str:
 
 
 def _feature_insertion(original: str, path: str, insertion: str) -> str:
+    original = _clock_feature_insertion(original, path)
     if insertion in original:
         if original.count(insertion) != 1:
             raise ValueError("duplicate benchmark feature insertion")
@@ -260,6 +263,12 @@ def _feature_insertion(original: str, path: str, insertion: str) -> str:
     return original + insertion
 
 
+def _clock_feature_insertion(original: str, path: str) -> str:
+    if path == "crates/calc-flow/Cargo.toml" and original.count(LEGACY_FEATURES) == 1:
+        return original.replace(LEGACY_FEATURES, CLOCK_MANIFEST, 1)
+    return original
+
+
 def _effective(source: Path) -> dict[str, bytes]:
     effective = {path: (ROOT / path).read_bytes() for path in COPIED_FILES}
     for path, insertion in INSERTIONS.items():
@@ -269,7 +278,10 @@ def _effective(source: Path) -> dict[str, bytes]:
         contents = effective.get(path, (source / path).read_bytes()).decode()
         contents = _apply_literal_patches(contents, patches, path)
         effective[path] = contents.encode()
-    return effective
+    return {
+        **effective,
+        "Cargo.lock": clock_lock((source / "Cargo.lock").read_text()).encode(),
+    }
 
 
 def _lock_identity(source: Path) -> str:
@@ -292,7 +304,12 @@ def _verify_mirror(mirror: Path, original: dict, effective: dict, lock: str) -> 
     actual = _files(mirror)
     expected = {**original, **effective}
     # Cargo may reorder lock keys without changing its dependency graph.
-    if _lock_identity(mirror) != lock:
+    if "Cargo.lock" in effective:
+        if actual.get("Cargo.lock") != effective["Cargo.lock"]:
+            raise ValueError(
+                "native harness changed the sealed benchmark dependency lock"
+            )
+    elif _lock_identity(mirror) != lock:
         raise ValueError("native harness changed the product dependency lock")
     actual.pop("Cargo.lock", None)
     expected.pop("Cargo.lock", None)

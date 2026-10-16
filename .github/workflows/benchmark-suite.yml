@@ -83,6 +83,7 @@ jobs:
           scripts.test_checkpoint_cycles
           scripts.test_issue406_acceptance
           scripts.test_issue406_build_identity
+          scripts.test_issue406_clock
           scripts.test_issue406_failures
           scripts.test_issue406_fresh
           scripts.test_issue406_fresh_harness

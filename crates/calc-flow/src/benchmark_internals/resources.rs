@@ -19,39 +19,41 @@ struct ThreadRuntime {
 pub struct PhaseClock {
     scope: &'static str,
     started: Instant,
-    process_ticks: Option<u64>,
+    process_cpu: Option<Duration>,
     threads: Option<BTreeMap<String, ThreadRuntime>>,
-    ticks_per_second: Option<u32>,
+    resolution: Option<Duration>,
 }
 
 impl PhaseClock {
     /// Starts clocks without changing the operator or caller's inputs.
     pub fn start(scope: &'static str) -> Self {
-        let ticks_per_second = ticks_per_second();
+        let resolution = process_resolution().ok();
         let threads = thread_runtimes().ok();
-        let process_ticks = process_ticks().ok();
+        let process_cpu = process_cpu().ok();
         Self {
             scope,
             started: Instant::now(),
-            process_ticks,
+            process_cpu,
             threads,
-            ticks_per_second,
+            resolution,
         }
     }
 
     /// Retains process totals even if a worker exits before the final snapshot.
     pub fn finish(self) -> Value {
         let wall = self.started.elapsed().as_secs_f64();
-        let process_end = process_ticks().ok();
+        let process_end = process_cpu().ok();
         let current = thread_runtimes().ok();
-        let cpu = self
-            .process_ticks
-            .zip(process_end)
-            .zip(self.ticks_per_second)
-            .and_then(|((start, end), hz)| {
-                end.checked_sub(start)
-                    .map(|ticks| Duration::from_secs(ticks).as_secs_f64() / f64::from(hz))
-            });
+        self.evidence(wall, process_end, current)
+    }
+
+    fn evidence(
+        self,
+        wall: f64,
+        process_end: Option<Duration>,
+        current: Option<BTreeMap<String, ThreadRuntime>>,
+    ) -> Value {
+        let cpu = process_interval(self.process_cpu, process_end, self.resolution);
         let measured = cpu.is_some() && self.threads.is_some() && current.is_some();
         let before = self.threads.unwrap_or_default();
         let after = current.unwrap_or_default();
@@ -69,12 +71,12 @@ impl PhaseClock {
             .filter(|key| !after.contains_key(*key))
             .collect::<Vec<_>>();
         json!({
-            "schema":"calc-flow.phase-resources.v1", "scope":self.scope,
+            "schema":"calc-flow.phase-resources.v2", "scope":self.scope,
             "status":if measured {"measured"} else {"unmeasured"},
-            "reason":if measured {None} else {Some("Linux procfs/getconf clocks unavailable")},
+            "reason":if measured {None} else {Some("Linux process CPU clock/resolution or procfs unavailable or invalid")},
             "wall_seconds":wall,"process_cpu_seconds":cpu,
-            "process_cpu_clock":"linux-proc-stat-utime-stime",
-            "process_cpu_resolution_seconds":self.ticks_per_second.map(|hz|1.0 / f64::from(hz)),
+            "process_cpu_clock":"CLOCK_PROCESS_CPUTIME_ID",
+            "process_cpu_resolution_seconds":self.resolution.map(|value|value.as_secs_f64()),
             "thread_clock":"linux-task-schedstat-runtime-ns",
             "thread_boundary":"thread snapshots bracket the process CPU interval",
             "threads":threads,"departed_threads":departed,
@@ -96,13 +98,51 @@ fn field(fields: &[&str], index: usize) -> Result<u64> {
         .ok_or_else(|| invalid("missing proc stat counter"))
 }
 
-fn process_ticks() -> Result<u64> {
-    let raw =
-        std::fs::read_to_string("/proc/self/stat").map_err(|error| invalid(error.to_string()))?;
-    let fields = stat_fields(&raw)?;
-    field(&fields, 11)?
-        .checked_add(field(&fields, 12)?)
-        .ok_or_else(|| invalid("process CPU overflow"))
+fn process_interval(
+    start: Option<Duration>,
+    end: Option<Duration>,
+    resolution: Option<Duration>,
+) -> Option<f64> {
+    resolution.filter(|value| !value.is_zero())?;
+    end?.checked_sub(start?).map(|value| value.as_secs_f64())
+}
+
+#[cfg(target_os = "linux")]
+fn timespec_duration(value: nix::sys::time::TimeSpec) -> Result<Duration> {
+    let seconds = u64::try_from(value.tv_sec()).map_err(|_| invalid("negative CPU clock"))?;
+    let nanos = u32::try_from(value.tv_nsec()).map_err(|_| invalid("invalid CPU nanoseconds"))?;
+    if nanos >= 1_000_000_000 {
+        return Err(invalid("invalid CPU nanoseconds"));
+    }
+    Ok(Duration::new(seconds, nanos))
+}
+
+#[cfg(target_os = "linux")]
+fn process_cpu() -> Result<Duration> {
+    nix::time::clock_gettime(nix::time::ClockId::CLOCK_PROCESS_CPUTIME_ID)
+        .map_err(|error| invalid(error.to_string()))
+        .and_then(timespec_duration)
+}
+
+#[cfg(target_os = "linux")]
+fn process_resolution() -> Result<Duration> {
+    let resolution = nix::time::clock_getres(nix::time::ClockId::CLOCK_PROCESS_CPUTIME_ID)
+        .map_err(|error| invalid(error.to_string()))
+        .and_then(timespec_duration)?;
+    if resolution.is_zero() {
+        return Err(invalid("zero process CPU resolution"));
+    }
+    Ok(resolution)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_cpu() -> Result<Duration> {
+    Err(invalid("Linux process CPU clock required"))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_resolution() -> Result<Duration> {
+    Err(invalid("Linux process CPU resolution required"))
 }
 
 fn thread_runtimes() -> Result<BTreeMap<String, ThreadRuntime>> {
@@ -163,25 +203,86 @@ fn parse_thread_runtime(
     ))
 }
 
-fn ticks_per_second() -> Option<u32> {
-    static TICKS: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
-    *TICKS.get_or_init(|| {
-        let result = std::process::Command::new("getconf")
-            .arg("CLK_TCK")
-            .output()
-            .ok()?;
-        result.status.success().then_some(())?;
-        String::from_utf8(result.stdout)
-            .ok()?
-            .trim()
-            .parse::<u32>()
-            .ok()
-            .filter(|hz| *hz > 0)
-    })
-}
-
 #[cfg(test)]
 mod tests {
+    use std::{collections::BTreeMap, time::Duration};
+
+    #[test]
+    fn test_invalid_or_unavailable_process_clock_cannot_be_measured() {
+        for (start, end, resolution) in [
+            (None, Some(2), Some(1)),
+            (Some(1), None, Some(1)),
+            (Some(2), Some(1), Some(1)),
+            (Some(1), Some(2), None),
+            (Some(1), Some(2), Some(0)),
+        ] {
+            let clock = super::PhaseClock {
+                scope: "handler",
+                started: std::time::Instant::now(),
+                process_cpu: start.map(Duration::from_nanos),
+                resolution: resolution.map(Duration::from_nanos),
+                threads: Some(BTreeMap::new()),
+            };
+            let evidence =
+                clock.evidence(0.001, end.map(Duration::from_nanos), Some(BTreeMap::new()));
+            assert_eq!(evidence["status"], "unmeasured");
+            assert!(evidence["process_cpu_seconds"].is_null());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_process_clock_retains_cpu_after_worker_exit() {
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (go_tx, go_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            go_rx.recv().unwrap();
+            let before = super::process_cpu().unwrap();
+            let until = std::time::Instant::now() + Duration::from_millis(2);
+            while std::time::Instant::now() < until {
+                std::hint::spin_loop();
+            }
+            super::process_cpu().unwrap().checked_sub(before).unwrap()
+        });
+        ready_rx.recv().unwrap();
+        let clock = super::PhaseClock::start("handler");
+        go_tx.send(()).unwrap();
+        let worker_cpu = worker.join().unwrap();
+        let evidence = clock.finish();
+        assert_eq!(evidence["status"], "measured");
+        assert!(evidence["process_cpu_seconds"].as_f64().unwrap() >= worker_cpu.as_secs_f64());
+        assert!(!evidence["departed_threads"].as_array().unwrap().is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_timespec_rejects_abnormal_values() {
+        use nix::sys::time::TimeSpec;
+        assert!(super::timespec_duration(TimeSpec::new(-1, 0)).is_err());
+        assert!(super::timespec_duration(TimeSpec::new(0, -1)).is_err());
+        assert!(super::timespec_duration(TimeSpec::new(0, 1_000_000_000)).is_err());
+        assert_eq!(
+            super::timespec_duration(TimeSpec::new(1, 2)).unwrap(),
+            Duration::new(1, 2)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_process_clock_resolves_sub_tick_phase() {
+        let clock = super::PhaseClock::start("handler");
+        let deadline = std::time::Instant::now() + Duration::from_millis(1);
+        while std::time::Instant::now() < deadline {
+            std::hint::spin_loop();
+        }
+        let evidence = clock.finish();
+        assert_eq!(evidence["status"], "measured");
+        assert_eq!(evidence["process_cpu_clock"], "CLOCK_PROCESS_CPUTIME_ID");
+        assert!(evidence["process_cpu_seconds"].as_f64().unwrap() > 0.0);
+        assert!(evidence["process_cpu_resolution_seconds"].as_f64().unwrap() < 0.00001);
+    }
+
     #[test]
     fn test_proc_stat_uses_the_last_parenthesis_and_excludes_children() {
         let raw = "7 (worker ) name) S 1 2 3 4 5 6 7 8 9 10 11 12 1000 2000 15 16 17 18 19";
