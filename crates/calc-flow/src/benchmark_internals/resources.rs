@@ -171,8 +171,23 @@ fn read_thread_runtime(entry: &std::fs::DirEntry) -> Result<Option<(String, Thre
         Ok((stat, schedstat, name)) => {
             parse_thread_runtime(entry, &stat, &schedstat, &name).map(Some)
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) if thread_has_exited(&error) => Ok(None),
         Err(error) => Err(invalid(error.to_string())),
+    }
+}
+
+fn thread_has_exited(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        return true;
+    }
+    // Procfs can return ESRCH when a listed task exits before its files are read.
+    #[cfg(target_os = "linux")]
+    {
+        error.raw_os_error() == Some(nix::errno::Errno::ESRCH as i32)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
     }
 }
 
@@ -206,6 +221,46 @@ fn parse_thread_runtime(
 #[cfg(test)]
 mod tests {
     use std::{collections::BTreeMap, time::Duration};
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_thread_snapshot_skips_only_exited_tasks() {
+        use nix::errno::Errno;
+        for (errno, exited) in [
+            (Errno::ENOENT, true),
+            (Errno::ESRCH, true),
+            (Errno::EPERM, false),
+            (Errno::EACCES, false),
+            (Errno::EIO, false),
+            (Errno::EINVAL, false),
+        ] {
+            assert_eq!(
+                super::thread_has_exited(&std::io::Error::from_raw_os_error(errno as i32)),
+                exited,
+                "{errno}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_unavailable_thread_snapshot_cannot_be_measured() {
+        for (before, after) in [(false, true), (true, false), (false, false)] {
+            let clock = super::PhaseClock {
+                scope: "handler",
+                started: std::time::Instant::now(),
+                process_cpu: Some(Duration::from_nanos(1)),
+                resolution: Some(Duration::from_nanos(1)),
+                threads: before.then(BTreeMap::new),
+            };
+            let evidence = clock.evidence(
+                0.001,
+                Some(Duration::from_nanos(2)),
+                after.then(BTreeMap::new),
+            );
+            assert_eq!(evidence["status"], "unmeasured");
+            assert!(evidence["process_cpu_seconds"].as_f64().unwrap() > 0.0);
+        }
+    }
 
     #[test]
     fn test_invalid_or_unavailable_process_clock_cannot_be_measured() {
