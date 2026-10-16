@@ -6,6 +6,8 @@ mod inputs;
 mod morsel;
 #[cfg(test)]
 pub(super) use morsel::configure_for_test;
+#[cfg(test)]
+pub(super) use morsel::deadline_tests::stop_morsels_at_deadline;
 pub(super) use morsel::{DeferredProbe, GatheredOutput};
 mod pairs;
 mod partition;

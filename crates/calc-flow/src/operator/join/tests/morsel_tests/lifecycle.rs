@@ -58,9 +58,7 @@ async fn stopped_case(service: &TestService, failure: &str) {
     let initial = job().with_gather_owner(owner.clone());
     preload(&mut operator, &initial, true).await;
     let token = CancellationToken::new();
-    let deadline =
-        (failure == "deadline").then(|| chrono::Utc::now() + chrono::Duration::seconds(3));
-    let job = StreamJobContext::new(438, "morsel-stop", JsonMap::new(), deadline, token.clone())
+    let job = StreamJobContext::new(438, "morsel-stop", JsonMap::new(), None, token.clone())
         .with_gather_owner(owner.clone());
     let context = StreamOperatorContext::new(&job, "match", None);
     let (entered, entering) = tokio::sync::oneshot::channel();
@@ -79,30 +77,44 @@ async fn stopped_case(service: &TestService, failure: &str) {
         }
     }));
     let mut output = EdgeCollector::new(operator.output_ports().to_vec());
-    let mut process =
-        Box::pin(operator.process_data("left", input(true, ROWS, false), &context, &mut output));
-    tokio::select! {
-        entered = entering => entered.unwrap(),
-        result = &mut process => panic!("stopped before worker gate: {result:?}"),
-    }
-    assert!(pool.live.load(Ordering::SeqCst) > 0);
-    if failure == "panic" {
-        gate.release();
-        assert!(matches!(
-            process.await,
-            Err(CalcFlowError::TaskPanicked { .. })
-        ));
+    if failure == "deadline" {
+        let prepared = operator
+            .prepare_batch("left", &input(true, ROWS, false), &context)
+            .await
+            .unwrap();
+        data_work::stop_morsels_at_deadline(&mut operator, prepared, &job, entering).await;
     } else {
-        if failure == "cancel" {
-            token.cancel();
+        let mut process = Box::pin(operator.process_data(
+            "left",
+            input(true, ROWS, false),
+            &context,
+            &mut output,
+        ));
+        tokio::select! {
+            entered = entering => entered.unwrap(),
+            result = &mut process => panic!("{failure}: stopped before worker gate: {result:?}"),
         }
-        if failure != "abandon" {
-            let result = tokio::time::timeout(Duration::from_secs(5), &mut process)
-                .await
-                .unwrap();
-            assert!(matches!(result, Err(CalcFlowError::Cancelled { .. })));
+        assert!(pool.live.load(Ordering::SeqCst) > 0);
+        if failure == "panic" {
+            gate.release();
+            assert!(matches!(
+                process.await,
+                Err(CalcFlowError::TaskPanicked { .. })
+            ));
+        } else {
+            if failure == "cancel" {
+                token.cancel();
+            }
+            if failure != "abandon" {
+                let result = tokio::time::timeout(Duration::from_secs(5), &mut process)
+                    .await
+                    .unwrap();
+                assert!(matches!(result, Err(CalcFlowError::Cancelled { .. })));
+            }
+            drop(process);
         }
-        drop(process);
+    }
+    if failure != "panic" {
         assert!(
             pool.live.load(Ordering::SeqCst) > 0,
             "a live worker retains scratch after handler stop"

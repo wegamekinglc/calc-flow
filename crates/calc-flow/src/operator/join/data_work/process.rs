@@ -355,7 +355,7 @@ impl StreamJoinOperator {
     }
 }
 
-async fn finish_probe_ticket<T: Send + 'static, U>(
+pub(super) async fn finish_probe_ticket<T: Send + 'static, U>(
     ticket: ObservedTicket<Vec<T>>,
     context: &StreamOperatorContext<'_>,
     install: impl FnOnce(Vec<T>) -> Result<U>,
