@@ -138,6 +138,38 @@ def _dispatch_trace(value: str, case: dict, status: dict, frontier: int, sink) -
     }
 
 
+async def _measure_interval_clock(bindings, *, join_mode=None, phase_clock=None):
+    """Time the maintained interval workload without ASOF's one-output-per-row gate."""
+    import pyarrow as pa
+
+    from benchmarks import engine_stream as stream
+    from benchmarks.engine_lifecycle import interleaved_events
+
+    sources, sink = bindings.sources, bindings.sink
+    await asyncio.wait_for(
+        asyncio.gather(*(source.ready.wait() for source in sources.values())), 30
+    )
+    stream._require_ready_sources(sources, sink)
+    resources = phase_clock("processing")
+    started = time.perf_counter_ns()
+    for name, event in interleaved_events(bindings.streams):
+        await sources[name].push(event)
+    await asyncio.wait_for(sink.complete.wait(), 600)
+    if sink.rows != sink.expected_rows:
+        raise RuntimeError("interval output row count differs from the fixture")
+    table = pa.concat_tables(sink.tables)
+    ended = time.perf_counter_ns()
+    return (
+        table,
+        (ended - started) / 1e9,
+        {
+            "processing_started_ns": started,
+            "processing_ended_ns": ended,
+            "cpu_evidence": resources.finish(),
+        },
+    )
+
+
 async def measure_acceptance_job(
     bindings: AcceptanceBindings, *, case: dict, state_root: Path
 ) -> tuple:
@@ -174,7 +206,12 @@ async def measure_acceptance_job(
             evidence["dispatch_trace_setup_seconds"] = await _start_processing_trace(
                 job, sources, sink, case
             )
-        table, seconds, clocks = await stream._measure_ready_clock(
+        measure = (
+            _measure_interval_clock
+            if case["workload"] == "interval_join"
+            else stream._measure_ready_clock
+        )
+        table, seconds, clocks = await measure(
             bindings,
             join_mode={"join_sealed": "sealed", "join_retained": "retained"}.get(
                 case["workload"]
@@ -396,7 +433,7 @@ def _advancing_processing_epochs(
         "left"
         if scenario == "join"
         else "quotes.input"
-        if scenario == "asof_join"
+        if scenario in ("asof_join", "interval_join")
         else "input"
     )
     return sorted(
@@ -422,6 +459,7 @@ class AcceptanceEngineCase:
             "join_retained",
             "asof",
             "projection",
+            "interval_join",
         ):
             raise ValueError("acceptance runtime workload is unsupported")
         checkpoint_settings(case["mode"])
@@ -431,6 +469,7 @@ class AcceptanceEngineCase:
             "join_retained": "join",
             "asof": "asof_join",
             "projection": "projection",
+            "interval_join": "interval_join",
         }[case["workload"]]
         self.data = workload(case["rows"], scenario=self.scenario)
         self.expected = expected_output(self.data, self.scenario)
@@ -446,7 +485,7 @@ class AcceptanceEngineCase:
             }
             if self.scenario == "join"
             else {"reference.input": events, "quotes.input": events}
-            if self.scenario == "asof_join"
+            if self.scenario in ("asof_join", "interval_join")
             else {"input": events}
         )
         from scripts.benchmark_suite.issue406_measurement import event_layout
@@ -461,6 +500,17 @@ class AcceptanceEngineCase:
         )
         self.fixture = None
         self.output_node_id = None
+        if self.scenario == "interval_join":
+            from benchmarks.interval_acceptance import export_interval_fixture
+
+            fixture_root = Path(case.get("fixture_root", root / "matched-fixture"))
+            self.fixture = export_interval_fixture(
+                fixture_root / "interval_join" / f"cpu-{case['threads']}",
+                self.program,
+                self.streams,
+                self.expected,
+                case,
+            )
         if _captures_dispatch_trace(case):
             from benchmarks.join_asof_acceptance import (
                 export_runtime_fixture,
@@ -524,12 +574,19 @@ class AcceptanceEngineCase:
             case={**self.case, "dispatch_output_node_id": self.output_node_id},
             state_root=state_root,
         )
-        if self.fixture is not None and (
-            evidence["dispatch_trace"]["compiled_plan_fingerprint"] != plan_fingerprint
-        ):
-            raise CycleValidationError(
-                "dispatch trace belongs to a different plan", evidence
+        if self.fixture is not None:
+            observed = (
+                self.fixture["compiled_plan_fingerprint"]
+                if self.scenario == "interval_join"
+                else evidence["dispatch_trace"]["compiled_plan_fingerprint"]
             )
+            if observed != plan_fingerprint:
+                raise CycleValidationError(
+                    "dispatch trace belongs to a different plan"
+                    if self.scenario == "asof_join"
+                    else "interval fixture belongs to a different plan",
+                    evidence,
+                )
         evidence["startup_seconds"] = startup_seconds
         evidence.update(
             await _inspect_sample_checkpoints(
@@ -548,17 +605,27 @@ class AcceptanceEngineCase:
         try:
             self.active_task = self.loop.create_task(self._sample(state_root))
             table, evidence = self.loop.run_until_complete(self.active_task)
-            evidence["oracle"] = validate_one_to_one_output(table, self.expected)
+            if self.scenario == "interval_join":
+                from benchmarks.interval_acceptance import validate_interval_output
+
+                evidence["oracle"] = validate_interval_output(
+                    table, self.expected, self.case["rows"]
+                )
+            else:
+                evidence["oracle"] = validate_one_to_one_output(table, self.expected)
             evidence["oracle_passed"] = True
             evidence["fixture"] = self.fixture
             evidence["cpu_affinity"] = sorted(os.sched_getaffinity(0))
             evidence["mode"] = self.case["mode"]
             evidence["event_layout"] = self.event_layout
+            evidence["runtime_input_data_batches"] = len(
+                self.event_layout["data_events"]
+            )
             evidence["cpu_budget"] = self.case.get(
                 "cpu_budget", 2.0 if self.case.get("threads", 1) == 1 else None
             )
             evidence["product_commit"] = self.case.get("product_commit")
-            if self.fixture is not None:
+            if self.fixture is not None and self.scenario == "asof_join":
                 from scripts.benchmark_suite.issue406_acceptance import (
                     matched_runtime_identity,
                 )

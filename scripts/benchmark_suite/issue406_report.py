@@ -427,11 +427,18 @@ def _overhead_target(cases: list[dict], records: dict, report: dict) -> dict:
     }
 
 
-def summarize_acceptance(report: dict) -> dict:
+def summarize_acceptance(
+    report: dict,
+    *,
+    inventory=None,
+    validator=None,
+    target_builder=None,
+    arm_validator=None,
+) -> dict:
     """Return every inventory row, including partial and unsupported evidence."""
     from scripts.benchmark_suite.issue406_fresh_report import summarize_retained_control
 
-    inventory = acceptance_inventory()
+    inventory = acceptance_inventory() if inventory is None else inventory
     known = {case.id: case for case in inventory}
     records = _summary_records(report, known)
     assessment = {**report.get("assessment", {})}
@@ -441,6 +448,13 @@ def summarize_acceptance(report: dict) -> dict:
     for case in inventory:
         base = _arm(case, "baseline", records.get((case.id, "baseline")))
         head = _arm(case, "candidate", records.get((case.id, "candidate")))
+        if arm_validator is not None:
+            base = arm_validator(
+                case, "baseline", base, records.get((case.id, "baseline")), report
+            )
+            head = arm_validator(
+                case, "candidate", head, records.get((case.id, "candidate")), report
+            )
         cases.append(
             {
                 **asdict(case),
@@ -450,8 +464,12 @@ def summarize_acceptance(report: dict) -> dict:
                 "revision_comparison": _revision(case, base, head, records, assessment),
             }
         )
-    targets = _acceptance_targets(cases, records, report)
-    validation_errors, complete = _summary_completeness(report, cases, known)
+    targets = (_acceptance_targets if target_builder is None else target_builder)(
+        cases, records, report
+    )
+    validation_errors, complete = _summary_completeness(
+        report, cases, known, validator=validator
+    )
     cpu_complete = all(
         arm.get("cpu_evidence_status") == {"verified": ROUNDS * SAMPLES}
         for case in cases
@@ -929,10 +947,10 @@ def _acceptance_targets(cases, records, report):
     return targets
 
 
-def _summary_completeness(report, cases, known):
+def _summary_completeness(report, cases, known, *, validator=None):
     validation_errors = []
     try:
-        validate_complete_results(report)
+        (validate_complete_results if validator is None else validator)(report)
     except ValueError as error:
         validation_errors.append(str(error))
     complete = not validation_errors and all(

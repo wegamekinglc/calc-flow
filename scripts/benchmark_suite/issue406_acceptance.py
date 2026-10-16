@@ -158,7 +158,13 @@ def validate_observation(case: AcceptanceCase, side: str, sample: dict) -> None:
             threads=case.threads,
             budget=sample.get("cpu_budget"),
         )
-    if case.workload not in ("join_sealed", "join_retained", "asof", "projection"):
+    if case.workload not in (
+        "join_sealed",
+        "join_retained",
+        "asof",
+        "projection",
+        "interval_join",
+    ):
         return
     _validate_runtime_observation(case, side, sample)
     _validate_disabled_observation(case, side, sample)
@@ -192,7 +198,10 @@ def _validate_runtime_observation(
 ) -> None:
     if (
         sample.get("mode") != case.mode
-        or sample.get("oracle", {}).get("rows") != case.rows
+        or sample.get("oracle", {}).get(
+            "input_rows" if case.workload == "interval_join" else "rows"
+        )
+        != case.rows
         or not isinstance(sample.get("checkpoint_observations"), list)
         or len(sample["checkpoint_observations"]) < 2
         or type(sample.get("processing_checkpoint_free")) is not bool
@@ -227,10 +236,10 @@ def _validate_settled_asof(case: AcceptanceCase, side: str, sample: dict) -> Non
         raise ValueError(f"{case.id}/{side}: ASOF processing is not settled")
 
 
-def validate_complete_results(report: dict) -> None:
+def validate_complete_results(report: dict, *, cases=None) -> None:
     """Reject omitted arms, placeholders, missing metrics, and partial samples."""
 
-    cases = acceptance_inventory()
+    cases = acceptance_inventory() if cases is None else cases
     expected = {(case.id, side): case for case in cases for side in case.sides}
     records = report.get("measurements")
     if not isinstance(records, list):
@@ -241,7 +250,7 @@ def validate_complete_results(report: dict) -> None:
         raise ValueError(f"missing measurements: {sorted(missing)}")
     for key, record in actual.items():
         _validate_measurement(expected[key], key[1], record)
-    validate_observation_references(records)
+    validate_observation_references(records, inventory=cases)
 
 
 def _measurement_records(records: list, expected: dict) -> dict:
@@ -256,9 +265,12 @@ def _measurement_records(records: list, expected: dict) -> dict:
     return actual
 
 
-def validate_observation_references(records: list[dict]) -> None:
+def validate_observation_references(records: list[dict], *, inventory=None) -> None:
     """Require shared metrics to identify the same physical raw observation."""
-    cases = {case.id: case for case in acceptance_inventory()}
+    cases = {
+        case.id: case
+        for case in (acceptance_inventory() if inventory is None else inventory)
+    }
     references = {}
     physical = {}
     for record in records:
