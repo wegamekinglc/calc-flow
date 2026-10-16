@@ -173,6 +173,13 @@ Join, interval Join, ASOF, and projection also have native throughput cases
 with 1,024-row input batches and exact-cursor event-log sources. Their scope is
 `ready-enqueue-to-arrow/exact-cursor-batch-1024-v1`. The 64,000-row cases remain.
 The interval cap applies to both batch sizes.
+Its per-side row budget covers six input batches plus 768 history rows: the
+peer may hold one batch in its Python queue, native prefetch slot, source fan-out,
+bounded edge, and prepared ingress, while interleaved feeding enqueues this
+side's next batch first.
+The history allowance covers twelve inclusive 64-key ticks. Byte and per-batch
+match limits remain 1 GiB and eleven times the input batch size. This budget is
+independent of total input rows and applies unchanged after recovery.
 
 Checkpoint/recovery variants run at 100k and 1M input rows with both batch
 sizes. They use a declared 100 ms checkpoint interval and a distinct

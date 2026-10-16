@@ -110,6 +110,15 @@ def _join_limits(
     )
 
 
+def _interval_join_limits(batch_rows: int) -> JoinStateLimits:
+    """Cover bounded input skew and the inclusive five-second history."""
+
+    # The peer can hold a batch in its Python queue, native prefetch slot,
+    # source fan-out, bounded edge, and prepared ingress. Interleaved feeding
+    # may enqueue this side's next batch first. Allow twelve 64-key history ticks.
+    return JoinStateLimits(6 * batch_rows + 768, 1 << 30, 11 * batch_rows)
+
+
 def _join_stream_output(
     table: pa.Table,
     dimension: pa.Table,
@@ -285,7 +294,7 @@ def stream_program(
             left_event_time="event_time",
             right_event_time="event_time",
             bounds=JoinTimeBounds(timedelta(seconds=5), timedelta(seconds=5)),
-            limits=JoinStateLimits(2 * batch_rows + 768, 1 << 30, 11 * batch_rows),
+            limits=_interval_join_limits(batch_rows),
             left_prefix="left",
             right_prefix="right",
         )
