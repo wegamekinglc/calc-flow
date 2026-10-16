@@ -252,6 +252,16 @@ def test_interval_stream_100k_rows_matches_oracle_and_bounded_retained_state(tmp
         runner.close()
 
 
+def _assert_bounded_interval_state(evidence, batch_rows):
+    status = next(iter(evidence["interval_join"].values()))
+    assert status["state_limit_failures"] == status["match_limit_failures"] == 0
+    limits = engine_stream._interval_join_limits(batch_rows)
+    for side in ("left", "right"):
+        assert 0 < status[side]["retained_rows"] <= limits.max_state_rows_per_side
+        assert status[side]["retained_bytes"] <= limits.max_state_bytes_per_side
+        assert status[side]["evicted_rows"] > 0
+
+
 @pytest.mark.parametrize("checkpoint", (False, True))
 def test_interval_small_batches_cover_pipeline_skew_and_recovery(tmp_path, checkpoint):
     case = next(
@@ -266,13 +276,7 @@ def test_interval_small_batches_cover_pipeline_skew_and_recovery(tmp_path, check
         sample = runner.sample()
         assert sample["correctness"]["passed"]
         evidence = sample["stream_evidence"]
-        status = next(iter(evidence["interval_join"].values()))
-        assert status["state_limit_failures"] == status["match_limit_failures"] == 0
-        limits = engine_stream._interval_join_limits(case["batch_rows"])
-        for side in ("left", "right"):
-            assert 0 < status[side]["retained_rows"] <= limits.max_state_rows_per_side
-            assert status[side]["retained_bytes"] <= limits.max_state_bytes_per_side
-            assert status[side]["evicted_rows"] > 0
+        _assert_bounded_interval_state(evidence, case["batch_rows"])
         if checkpoint:
             assert evidence["recovery"] == "verified"
             assert evidence["nonterminal_epochs"]
