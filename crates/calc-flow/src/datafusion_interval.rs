@@ -129,11 +129,14 @@ fn evaluate_typed<T: ArrowTimestampType>(
             true,
             subtract,
         ),
-        (ColumnarValue::Scalar(ts), ColumnarValue::Array(iv)) => evaluate_scalar_timestamp(
-            ts.to_array()?.as_primitive::<T>(),
-            iv.as_primitive::<IntervalMonthDayNanoType>(),
-            subtract,
-        ),
+        (ColumnarValue::Scalar(ts), ColumnarValue::Array(iv)) => {
+            let scalar = ts.to_array()?;
+            evaluate_scalar_timestamp(
+                scalar.as_primitive::<T>(),
+                iv.as_primitive::<IntervalMonthDayNanoType>(),
+                subtract,
+            )
+        }
         (ColumnarValue::Scalar(ts), ColumnarValue::Scalar(iv)) => {
             evaluate_scalar_pair::<T>(&ts.to_array()?, &iv.to_array()?, subtract)
         }
@@ -160,12 +163,12 @@ fn evaluate_array_pair<T: ArrowTimestampType>(
 
 /// A one-element timestamp broadcast against array intervals.
 fn evaluate_scalar_timestamp<T: ArrowTimestampType>(
-    ts: PrimitiveArray<T>,
+    ts: &PrimitiveArray<T>,
     iv: &PrimitiveArray<IntervalMonthDayNanoType>,
     subtract: bool,
 ) -> Result<ColumnarValue> {
     Ok(ColumnarValue::Array(evaluate_arrays(
-        &ts,
+        ts,
         iv,
         true,
         false,
