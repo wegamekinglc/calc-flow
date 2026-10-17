@@ -13,7 +13,7 @@ use datafusion::arrow::{
 };
 use datafusion::execution::memory_pool::MemoryReservation;
 
-use super::{Funding, Result, accounting, add, concat, invalid, product, reserve, sum};
+use super::{Funding, Result, StrideStop, accounting, add, concat, invalid, product, reserve, sum};
 
 mod dictionaries;
 
@@ -120,8 +120,9 @@ fn copy_view<T: ByteViewType>(
         u32::try_from(bytes.min(u32::MAX as usize - 1).max(1)).expect("bounded nonzero view block");
     let mut builder =
         GenericByteViewBuilder::<T>::with_capacity(array.len()).with_fixed_block_size(block);
+    let mut stop = StrideStop::new(check);
     for value in array {
-        check()?;
+        stop.visit()?;
         append_view(&mut builder, value)?;
     }
     check()?;
@@ -165,8 +166,9 @@ fn long_values<T: ByteViewType>(
     array: &GenericByteViewArray<T>,
     check: &dyn Fn() -> Result<()>,
 ) -> Result<usize> {
+    let mut stop = StrideStop::new(check);
     (0..array.len()).try_fold(0, |bytes, row| {
-        check()?;
+        stop.visit()?;
         // The low u32 of a view is the byte length, including inline values.
         let length = usize::try_from(arrow_data::ByteView::from(array.views()[row]).length)
             .expect("u32 view length fits supported usize");
