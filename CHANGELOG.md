@@ -9,6 +9,17 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-17: Route timestamp ± interval-month-day-nano arithmetic through a
+  calendar fast path. A new optimizer rule rewrites the expression in filters
+  and projections into crate-internal scalar UDFs; when every interval in a
+  batch is pure nanoseconds divisible by the timestamp unit and both operands
+  and the shifted result sit inside chrono's representable range, the UDF
+  replaces the per-row timezone-aware calendar kernel with checked integer
+  addition, and any other batch falls back whole to arrow's own kernels so
+  results, null handling and errors match by construction. In interleaved A/B
+  runs of `engines/1000000/calc-flow-sql/interval_join`, medians fell about
+  1.6-2.6x (calmest rounds roughly 480 -> 300 ms on a loaded machine, versus
+  a 338 ms unloaded baseline); the 1:1 `join` control is unchanged.
 - 2026-10-18: Derive Join checkpoint deltas lazily and evict expired rows
   in bulk. Checkpointing no longer records one upsert per admitted row and
   one tombstone per evicted row: each side keeps a captured row_id
