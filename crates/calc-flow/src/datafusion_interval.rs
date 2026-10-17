@@ -236,6 +236,32 @@ fn fast_shift<T: ArrowTimestampType>(
     if !ts_broadcast && !iv_broadcast && ts.len() != iv.len() {
         return None;
     }
+    let values = fill_shifted(
+        ts,
+        iv,
+        ts_broadcast,
+        iv_broadcast,
+        len,
+        scale,
+        (min, max),
+        subtract,
+    )?;
+    Some(PrimitiveArray::<T>::from_iter(values).with_timezone_opt(ts.timezone()))
+}
+
+/// One output slot per row: null where either operand is null, otherwise
+/// the checked fast shift, or `None` to decline the whole batch.
+#[allow(clippy::too_many_arguments)]
+fn fill_shifted<T: ArrowTimestampType>(
+    ts: &PrimitiveArray<T>,
+    iv: &PrimitiveArray<IntervalMonthDayNanoType>,
+    ts_broadcast: bool,
+    iv_broadcast: bool,
+    len: usize,
+    scale: i64,
+    bounds: (i64, i64),
+    subtract: bool,
+) -> Option<Vec<Option<i64>>> {
     let mut values = Vec::with_capacity(len);
     for row in 0..len {
         let ts_index = if ts_broadcast { 0 } else { row };
@@ -248,12 +274,12 @@ fn fast_shift<T: ArrowTimestampType>(
             ts.value(ts_index),
             iv.value(iv_index),
             scale,
-            (min, max),
+            bounds,
             subtract,
         );
         values.push(Some(shifted?));
     }
-    Some(PrimitiveArray::<T>::from_iter(values).with_timezone_opt(ts.timezone()))
+    Some(values)
 }
 
 /// Shift one non-null timestamp by a pure-nanosecond-divisible interval,
