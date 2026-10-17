@@ -239,11 +239,9 @@ fn fast_shift<T: ArrowTimestampType>(
     let values = fill_shifted(
         ts,
         iv,
-        ts_broadcast,
-        iv_broadcast,
+        (ts_broadcast, iv_broadcast),
         len,
-        scale,
-        (min, max),
+        (scale, (min, max)),
         subtract,
     )?;
     Some(PrimitiveArray::<T>::from_iter(values).with_timezone_opt(ts.timezone()))
@@ -251,17 +249,16 @@ fn fast_shift<T: ArrowTimestampType>(
 
 /// One output slot per row: null where either operand is null, otherwise
 /// the checked fast shift, or `None` to decline the whole batch.
-#[allow(clippy::too_many_arguments)]
 fn fill_shifted<T: ArrowTimestampType>(
     ts: &PrimitiveArray<T>,
     iv: &PrimitiveArray<IntervalMonthDayNanoType>,
-    ts_broadcast: bool,
-    iv_broadcast: bool,
+    broadcast: (bool, bool),
     len: usize,
-    scale: i64,
-    bounds: (i64, i64),
+    shift: (i64, (i64, i64)),
     subtract: bool,
 ) -> Option<Vec<Option<i64>>> {
+    let (ts_broadcast, iv_broadcast) = broadcast;
+    let (scale, bounds) = shift;
     let mut values = Vec::with_capacity(len);
     for row in 0..len {
         let ts_index = if ts_broadcast { 0 } else { row };
