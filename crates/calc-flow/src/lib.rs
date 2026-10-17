@@ -36,6 +36,7 @@ mod connector;
 mod context;
 mod continuous;
 mod datafusion;
+mod datafusion_interval;
 mod datafusion_predicate;
 mod datafusion_rolling;
 mod datafusion_template;
