@@ -9,6 +9,15 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-18: Compute constant-width Join output chunks by row count.
+  When every selected output column on both sides is fixed-width and the
+  source arrays report no nulls, per-row output bytes are constant, so the
+  output preflight emits equal-length ranges by division instead of walking
+  every matched pair; variable-width or nullable inputs keep the per-pair
+  scan. Preflight-attributable self-time in the interval-join profile fell
+  from about 6.4% to 3.8% (flat_row and bytes_with leave the hot path), and
+  interleaved A/B against the branch's own base showed the fast path faster
+  in 5 of 7 rounds (median about -6%).
 - 2026-10-17: Route timestamp ± interval-month-day-nano arithmetic through a
   calendar fast path. A new optimizer rule rewrites the expression in filters
   and projections into crate-internal scalar UDFs; when every interval in a

@@ -179,6 +179,100 @@ impl JoinOutput<'_> {
     }
 
     fn flat_ranges(&self, budget: EdgeBudget) -> Result<Vec<Range<usize>>> {
+        #[cfg(test)]
+        if tests::FORCE_SLOW.with(std::cell::Cell::get) {
+            return self.per_pair_ranges(budget);
+        }
+        if let Some(ranges) = self.fixed_width_ranges(budget)? {
+            return Ok(ranges);
+        }
+        self.per_pair_ranges(budget)
+    }
+
+    /// Equal-length ranges for selections whose every matched row costs the
+    /// same flat bytes, or `None` while the per-pair scan is required.
+    ///
+    /// Fixed-width columns without variable payloads carry no terminal offset,
+    /// and null-free source arrays keep the shared null-bitmap term at zero,
+    /// so `FlatChunk::bytes_with` charges exactly
+    /// `rows * (incoming_bytes + opposite_bytes)` for such a selection. Under
+    /// that linear cost the greedy per-pair scan fills every chunk to
+    /// `min(max_rows, max_bytes / row_bytes)` rows, which is all this path
+    /// computes.
+    fn fixed_width_ranges(&self, budget: EdgeBudget) -> Result<Option<Vec<Range<usize>>>> {
+        let total = self.matched.len();
+        if total == 0 {
+            return Ok(Some(Vec::new()));
+        }
+        let Some(row_bytes) = self.constant_row_bytes() else {
+            return Ok(None);
+        };
+        let per_chunk = if row_bytes == 0 {
+            budget.max_rows
+        } else {
+            budget.max_bytes / row_bytes
+        }
+        .min(budget.max_rows);
+        if per_chunk == 0 {
+            // The per-pair scan rejects this same single row first.
+            return Err(oversized_row(row_bytes, budget));
+        }
+        Ok(Some(
+            (0..total)
+                .step_by(per_chunk)
+                .map(|start| start..(start + per_chunk).min(total))
+                .collect(),
+        ))
+    }
+
+    /// Constant per-pair flat bytes when every matched row costs the same, or
+    /// `None` when any selected column varies by row.
+    ///
+    /// Each distinct matched row is read once: incoming positions advance in
+    /// runs, and opposite coordinates are filtered through a dense seen-bit
+    /// table over the matched coordinate span, under the same span rule that
+    /// funds the per-pair row caches. Every resolved record must also agree
+    /// with its side's selected byte width.
+    fn constant_row_bytes(&self) -> Option<usize> {
+        let incoming_columns = self.side_columns(true);
+        let opposite_columns = self.side_columns(false);
+        let (low, high) = self
+            .matched
+            .iter()
+            .fold((usize::MAX, 0), |(low, high), pair| {
+                (low.min(pair.opposite_index), high.max(pair.opposite_index))
+            });
+        if high - low + 1 > self.matched.len().saturating_mul(2) {
+            return None;
+        }
+        let bits = u64::BITS as usize;
+        let mut seen = vec![0_u64; (high - low + 1).div_ceil(bits)];
+        let mut incoming = None;
+        let mut opposite = None;
+        let mut last_pos = None;
+        for pair in self.matched.iter() {
+            if last_pos != Some(pair.pos) {
+                last_pos = Some(pair.pos);
+                let bytes = side_row_bytes(
+                    self.admitted.row(pair.pos).record,
+                    incoming_columns.as_deref(),
+                )?;
+                agrees_with(&mut incoming, bytes)?;
+            }
+            let index = pair.opposite_index - low;
+            if seen[index / bits] & (1_u64 << (index % bits)) == 0 {
+                seen[index / bits] |= 1_u64 << (index % bits);
+                let bytes = side_row_bytes(
+                    self.opposite.payload(pair.opposite_index),
+                    opposite_columns.as_deref(),
+                )?;
+                agrees_with(&mut opposite, bytes)?;
+            }
+        }
+        Some(incoming? + opposite?)
+    }
+
+    fn per_pair_ranges(&self, budget: EdgeBudget) -> Result<Vec<Range<usize>>> {
         let incoming_columns = self.side_columns(true);
         let opposite_columns = self.side_columns(false);
         let mut incoming = RowCache::new(self.matched.iter().map(|pair| pair.pos));
@@ -382,6 +476,34 @@ fn flat_row(
     })
 }
 
+/// One side's constant per-row byte charge over its selected columns, or
+/// `None` when any of them varies by row.
+///
+/// Mirrors the widths `flat_row` accumulates: a fixed-width column without
+/// variable offsets contributes its full width and no terminal offset, and a
+/// null-free source array contributes no null entry for any of its rows.
+fn side_row_bytes(record: PayloadRef<'_>, projection: Option<&[(usize, usize)]>) -> Option<usize> {
+    let mut bytes = 0_usize;
+    for (_, column) in row_columns(record, 0, projection) {
+        let width = fixed_width(column.data_type())?;
+        if variable_offsets(column.as_ref()).is_some() || column.null_count() != 0 {
+            return None;
+        }
+        bytes = bytes.checked_add(width)?;
+    }
+    Some(bytes)
+}
+
+/// Records `bytes` in `model` or confirms every row of a side charges alike.
+fn agrees_with(model: &mut Option<usize>, bytes: usize) -> Option<()> {
+    if let Some(known) = *model {
+        (known == bytes).then_some(())
+    } else {
+        *model = Some(bytes);
+        Some(())
+    }
+}
+
 fn row_columns<'a>(
     record: PayloadRef<'a>,
     offset: usize,
@@ -509,6 +631,21 @@ mod tests {
     thread_local! {
         pub(super) static FLAT_VISITS: Cell<usize> = const { Cell::new(0) };
         pub(super) static NESTED_VISITS: Cell<usize> = const { Cell::new(0) };
+        pub(super) static FORCE_SLOW: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Forces `flat_ranges` onto the per-pair scan while alive.
+    struct PerPairScan;
+    impl PerPairScan {
+        fn force() -> Self {
+            FORCE_SLOW.with(|forced| forced.set(true));
+            PerPairScan
+        }
+    }
+    impl Drop for PerPairScan {
+        fn drop(&mut self) {
+            FORCE_SLOW.with(|forced| forced.set(false));
+        }
     }
 
     fn sparse_preflight(nested: bool, retained: usize) {
@@ -734,6 +871,7 @@ mod tests {
         };
         FLAT_VISITS.with(|count| count.set(0));
         let measured = allocation_counter::measure(|| {
+            let _forced = PerPairScan::force();
             let ranges = output
                 .ranges(EdgeBudget::new(1_000, 1 << 20).unwrap())
                 .unwrap();
@@ -747,6 +885,222 @@ mod tests {
             2 * rows,
             measured.count_total
         );
+    }
+
+    #[test]
+    fn test_fixed_width_ranges_visit_a_constant_number_of_flat_rows() {
+        let (rows, fanout) = (25_000, 4);
+        let record = int64_row();
+        let schema = int64_pair_schema();
+        let admitted = (0..rows).map(|_| admitted_row(&record)).collect::<Vec<_>>();
+        let opposite = vec![stored_row(&record); rows];
+        let matched: super::super::matches::Selection = (0..rows)
+            .flat_map(|pos| {
+                (0..fanout).map(move |offset| MatchedPair {
+                    pos,
+                    opposite_index: (pos + offset * 5_000) % rows,
+                })
+            })
+            .collect::<Vec<_>>()
+            .into();
+        let output = JoinOutput {
+            schema: &schema,
+            projection: None,
+            admitted: &admitted,
+            opposite: &opposite,
+            matched: &matched,
+            incoming_is_left: true,
+            operator_id: "fixed-width",
+            admitted_charges: None,
+        };
+        FLAT_VISITS.with(|count| count.set(0));
+        let ranges = output
+            .ranges(EdgeBudget::new(1_000, 1 << 20).unwrap())
+            .unwrap();
+        assert_eq!(ranges.iter().map(Range::len).sum::<usize>(), rows * fanout);
+        let visits = FLAT_VISITS.with(Cell::get);
+        assert!(
+            visits <= 4,
+            "constant-row-bytes preflight visited {visits} rows for {} pairs; \
+             fixed-width null-free ranges need no per-row costs",
+            rows * fanout
+        );
+    }
+
+    #[test]
+    fn test_fixed_width_ranges_match_the_per_pair_scan() {
+        let (rows, fanout) = (500, 3);
+        let record = int64_row();
+        let schema = int64_pair_schema();
+        let admitted = (0..rows).map(|_| admitted_row(&record)).collect::<Vec<_>>();
+        let opposite = vec![stored_row(&record); rows];
+        let matched: Vec<MatchedPair> = (0..rows)
+            .flat_map(|pos| {
+                (0..fanout).map(move |offset| MatchedPair {
+                    pos,
+                    opposite_index: (pos + offset * 100) % rows,
+                })
+            })
+            .collect();
+        let output = JoinOutput {
+            schema: &schema,
+            projection: None,
+            admitted: &admitted,
+            opposite: &opposite,
+            matched: &matched,
+            incoming_is_left: true,
+            operator_id: "equivalent",
+            admitted_charges: None,
+        };
+        // 16-byte rows: a 500-byte budget fits 31 rows while 64 would fit the
+        // row cap, and a 10-row cap leaves the byte budget idle.
+        for (max_rows, max_bytes) in [(64, 500), (10, 100_000)] {
+            let budget = EdgeBudget::new(max_rows, max_bytes).unwrap();
+            FLAT_VISITS.with(|count| count.set(0));
+            let fast = output.ranges(budget).unwrap();
+            assert_eq!(
+                FLAT_VISITS.with(Cell::get),
+                0,
+                "fixed-width null-free preflight must take the arithmetic path"
+            );
+            let slow = {
+                let _forced = PerPairScan::force();
+                output.ranges(budget).unwrap()
+            };
+            // Constant row bytes make the greedy scan fill every chunk to
+            // min(max_rows, max_bytes / row_bytes), so boundaries agree.
+            assert_eq!(fast, slow, "budget {max_rows}x{max_bytes}");
+            let mut end = 0;
+            for range in &fast {
+                assert_eq!(range.start, end);
+                assert!(range.len() <= max_rows, "{range:?} rows over {max_rows}");
+                assert!(
+                    range.len() * 16 <= max_bytes,
+                    "{range:?} bytes over {max_bytes}"
+                );
+                assert_eq!(
+                    output.materialize(range.clone()).unwrap().num_rows(),
+                    range.len()
+                );
+                end = range.end;
+            }
+            assert_eq!(end, matched.len());
+        }
+    }
+
+    #[test]
+    fn test_oversized_fixed_width_row_reports_the_same_error_in_both_paths() {
+        let record = int64_row();
+        let schema = int64_pair_schema();
+        let admitted = vec![admitted_row(&record)];
+        let opposite = vec![stored_row(&record)];
+        let matched = vec![MatchedPair {
+            pos: 0,
+            opposite_index: 0,
+        }];
+        let output = JoinOutput {
+            schema: &schema,
+            projection: None,
+            admitted: &admitted,
+            opposite: &opposite,
+            matched: &matched,
+            incoming_is_left: true,
+            operator_id: "oversized",
+            admitted_charges: None,
+        };
+        // One int64 pair costs 16 bytes; the 8-byte budget rejects the first
+        // row of either path with the same charge.
+        let budget = EdgeBudget::new(4, 8).unwrap();
+        let fast = output.ranges(budget).unwrap_err();
+        let slow = {
+            let _forced = PerPairScan::force();
+            output.ranges(budget).unwrap_err()
+        };
+        assert_eq!(fast.to_string(), slow.to_string());
+    }
+
+    #[test]
+    fn test_nullable_or_variable_columns_keep_the_per_pair_scan() {
+        let null_column: ArrayRef = Arc::new(Int64Array::from(vec![Some(7), None]));
+        let null_record = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "value",
+                DataType::Int64,
+                true,
+            )])),
+            vec![null_column],
+        )
+        .unwrap();
+        let text_record = RecordBatch::try_from_iter(vec![
+            (
+                "key",
+                Arc::new(StringArray::from(vec!["K0000000", "K0000001"])) as ArrayRef,
+            ),
+            ("value", Arc::new(Int64Array::from(vec![7, 8])) as ArrayRef),
+        ])
+        .unwrap();
+        let text_schema = Arc::new(Schema::new(vec![
+            Field::new("left_key", DataType::Utf8, false),
+            Field::new("left_value", DataType::Int64, false),
+            Field::new("right_key", DataType::Utf8, false),
+            Field::new("right_value", DataType::Int64, false),
+        ]));
+        let nullable_schema = Arc::new(Schema::new(vec![
+            Field::new("left_value", DataType::Int64, true),
+            Field::new("right_value", DataType::Int64, true),
+        ]));
+        // A nullable selected column and a variable-width selected column each
+        // force the per-pair scan, even when values never vary.
+        for (records, schema) in [(null_record, nullable_schema), (text_record, text_schema)] {
+            let admitted = (0..2)
+                .map(|row| AdmittedRow {
+                    record: records.slice(row, 1).into(),
+                    event_time: EventTime::from_micros(100),
+                    row_id: row as u64,
+                    retain: true,
+                })
+                .collect::<Vec<_>>();
+            let opposite = [
+                stored_row(&records.slice(0, 1)),
+                stored_row(&records.slice(1, 1)),
+            ]
+            .into_iter()
+            .chain([stored_row(&records.slice(0, 1))])
+            .collect::<Vec<_>>();
+            let matched = [(0, 0), (0, 1), (1, 2), (1, 0)]
+                .map(|(pos, opposite_index)| MatchedPair {
+                    pos,
+                    opposite_index,
+                })
+                .to_vec();
+            let output = JoinOutput {
+                schema: &schema,
+                projection: None,
+                admitted: &admitted,
+                opposite: &opposite,
+                matched: &matched,
+                incoming_is_left: true,
+                operator_id: "fallback",
+                admitted_charges: None,
+            };
+            FLAT_VISITS.with(|count| count.set(0));
+            let ranges = output.ranges(EdgeBudget::new(2, 4_096).unwrap()).unwrap();
+            assert!(
+                FLAT_VISITS.with(Cell::get) > 0,
+                "nullable or variable columns must keep per-pair costs"
+            );
+            let mut end = 0;
+            for range in &ranges {
+                assert_eq!(range.start, end);
+                assert!(range.len() <= 2);
+                assert_eq!(
+                    output.materialize(range.clone()).unwrap().num_rows(),
+                    range.len()
+                );
+                end = range.end;
+            }
+            assert_eq!(end, matched.len());
+        }
     }
 
     #[test]
@@ -894,9 +1248,10 @@ mod tests {
         };
         FLAT_VISITS.with(|count| count.set(0));
         // 4 pairs x (81 + 81) = 648 charge bytes exceeds 200, but exact flat
-        // widths fit, so planning falls back to the detailed flat scan.
+        // widths fit, so planning falls back past the charge bound to the
+        // fixed-width arithmetic, still without per-row costs.
         let ranges = output.ranges(EdgeBudget::new(2, 200).unwrap()).unwrap();
         assert_eq!(ranges, vec![0..2, 2..4]);
-        assert!(FLAT_VISITS.with(Cell::get) > 0);
+        assert_eq!(FLAT_VISITS.with(Cell::get), 0);
     }
 }
