@@ -115,62 +115,83 @@ fn evaluate_typed<T: ArrowTimestampType>(
     subtract: bool,
 ) -> Result<ColumnarValue> {
     match (timestamps, intervals) {
-        (ColumnarValue::Array(ts), ColumnarValue::Array(iv)) => {
-            let ts = ts.as_primitive::<T>();
-            let iv = iv.as_primitive::<IntervalMonthDayNanoType>();
-            Ok(ColumnarValue::Array(evaluate_arrays(
-                ts,
-                iv,
-                false,
-                false,
-                ts.len(),
-                subtract,
-            )?))
-        }
-        (ColumnarValue::Array(ts), ColumnarValue::Scalar(iv)) => {
-            let ts = ts.as_primitive::<T>();
-            let iv = iv
-                .to_array()?
+        (ColumnarValue::Array(ts), ColumnarValue::Array(iv)) => evaluate_array_pair(
+            ts.as_primitive::<T>(),
+            iv.as_primitive::<IntervalMonthDayNanoType>(),
+            false,
+            subtract,
+        ),
+        (ColumnarValue::Array(ts), ColumnarValue::Scalar(iv)) => evaluate_array_pair(
+            ts.as_primitive::<T>(),
+            &(iv.to_array()?
                 .as_primitive::<IntervalMonthDayNanoType>()
-                .clone();
-            Ok(ColumnarValue::Array(evaluate_arrays(
-                ts,
-                &iv,
-                false,
-                true,
-                ts.len(),
-                subtract,
-            )?))
-        }
-        (ColumnarValue::Scalar(ts), ColumnarValue::Array(iv)) => {
-            let ts = ts.to_array()?.as_primitive::<T>().clone();
-            let iv = iv.as_primitive::<IntervalMonthDayNanoType>();
-            Ok(ColumnarValue::Array(evaluate_arrays(
-                &ts,
-                iv,
-                true,
-                false,
-                iv.len(),
-                subtract,
-            )?))
-        }
+                .clone()),
+            true,
+            subtract,
+        ),
+        (ColumnarValue::Scalar(ts), ColumnarValue::Array(iv)) => evaluate_scalar_timestamp(
+            ts.to_array()?.as_primitive::<T>().clone(),
+            iv.as_primitive::<IntervalMonthDayNanoType>(),
+            subtract,
+        ),
         (ColumnarValue::Scalar(ts), ColumnarValue::Scalar(iv)) => {
-            let ts = ts.to_array()?;
-            let iv = iv.to_array()?;
-            let result = evaluate_arrays(
-                ts.as_primitive::<T>(),
-                iv.as_primitive::<IntervalMonthDayNanoType>(),
-                true,
-                true,
-                1,
-                subtract,
-            )?;
-            Ok(ColumnarValue::Scalar(ScalarValue::try_from_array(
-                result.as_ref(),
-                0,
-            )?))
+            evaluate_scalar_pair::<T>(ts.to_array()?, iv.to_array()?, subtract)
         }
     }
+}
+
+/// Array timestamps against an array or one-element broadcast interval.
+fn evaluate_array_pair<T: ArrowTimestampType>(
+    ts: &PrimitiveArray<T>,
+    iv: &PrimitiveArray<IntervalMonthDayNanoType>,
+    iv_broadcast: bool,
+    subtract: bool,
+) -> Result<ColumnarValue> {
+    let len = if iv_broadcast { ts.len() } else { iv.len() };
+    Ok(ColumnarValue::Array(evaluate_arrays(
+        ts,
+        iv,
+        false,
+        iv_broadcast,
+        len,
+        subtract,
+    )?))
+}
+
+/// A one-element timestamp broadcast against array intervals.
+fn evaluate_scalar_timestamp<T: ArrowTimestampType>(
+    ts: PrimitiveArray<T>,
+    iv: &PrimitiveArray<IntervalMonthDayNanoType>,
+    subtract: bool,
+) -> Result<ColumnarValue> {
+    Ok(ColumnarValue::Array(evaluate_arrays(
+        &ts,
+        iv,
+        true,
+        false,
+        iv.len(),
+        subtract,
+    )?))
+}
+
+/// Two scalars evaluate to one row, staying scalar-valued.
+fn evaluate_scalar_pair<T: ArrowTimestampType>(
+    ts: ArrayRef,
+    iv: ArrayRef,
+    subtract: bool,
+) -> Result<ColumnarValue> {
+    let result = evaluate_arrays(
+        ts.as_primitive::<T>(),
+        iv.as_primitive::<IntervalMonthDayNanoType>(),
+        true,
+        true,
+        1,
+        subtract,
+    )?;
+    Ok(ColumnarValue::Scalar(ScalarValue::try_from_array(
+        result.as_ref(),
+        0,
+    )?))
 }
 
 /// Shared array-level evaluation. `ts_broadcast`/`iv_broadcast` mark a
@@ -231,27 +252,41 @@ fn fast_shift<T: ArrowTimestampType>(
             values.push(None);
             continue;
         }
-        let interval = iv.value(iv_index);
-        if interval.months != 0 || interval.days != 0 {
-            return None;
-        }
-        if interval.nanoseconds % scale != 0 {
-            return None;
-        }
-        let units = interval.nanoseconds / scale;
-        let units = if subtract {
-            units.checked_neg()?
-        } else {
-            units
-        };
-        let timestamp = ts.value(ts_index);
-        let shifted = timestamp.checked_add(units)?;
-        if timestamp < min || timestamp > max || shifted < min || shifted > max {
-            return None;
-        }
-        values.push(Some(shifted));
+        let shifted = shifted_value(
+            ts.value(ts_index),
+            iv.value(iv_index),
+            scale,
+            (min, max),
+            subtract,
+        );
+        values.push(Some(shifted?));
     }
     Some(PrimitiveArray::<T>::from_iter(values).with_timezone_opt(ts.timezone()))
+}
+
+/// Shift one non-null timestamp by a pure-nanosecond-divisible interval,
+/// declining (`None`) when the row must fall back to the calendar kernel.
+fn shifted_value(
+    timestamp: i64,
+    interval: datafusion::arrow::datatypes::IntervalMonthDayNano,
+    scale: i64,
+    (min, max): (i64, i64),
+    subtract: bool,
+) -> Option<i64> {
+    if interval.months != 0 || interval.days != 0 {
+        return None;
+    }
+    if interval.nanoseconds % scale != 0 {
+        return None;
+    }
+    let units = interval.nanoseconds / scale;
+    let units = if subtract {
+        units.checked_neg()?
+    } else {
+        units
+    };
+    let shifted = timestamp.checked_add(units)?;
+    (timestamp >= min && timestamp <= max && shifted >= min && shifted <= max).then_some(shifted)
 }
 
 /// Crate-internal names of the add and subtract interval UDFs.
@@ -376,21 +411,7 @@ impl datafusion::optimizer::OptimizerRule for TimestampIntervalArithmetic {
         _config: &dyn datafusion::optimizer::OptimizerConfig,
     ) -> Result<Transformed<LogicalPlan>> {
         match plan {
-            LogicalPlan::Filter(mut filter) => {
-                let schema = Arc::clone(filter.input.schema());
-                let predicate = filter.predicate.transform_up(|expression| {
-                    Ok(match specialize_interval_arithmetic(&expression, &schema) {
-                        Some(replacement) => Transformed::yes(replacement),
-                        None => Transformed::no(expression),
-                    })
-                })?;
-                filter.predicate = predicate.data;
-                Ok(if predicate.transformed {
-                    Transformed::yes(LogicalPlan::Filter(filter))
-                } else {
-                    Transformed::no(LogicalPlan::Filter(filter))
-                })
-            }
+            LogicalPlan::Filter(filter) => rewrite_filter(filter),
             LogicalPlan::Projection(projection) => {
                 let schema = Arc::clone(projection.input.schema());
                 let mut transformed = false;
@@ -437,6 +458,49 @@ impl datafusion::optimizer::OptimizerRule for TimestampIntervalArithmetic {
     }
 }
 
+/// Returns the (timestamp, interval) operands in evaluation order, or `None`
+/// when the expression is not a supported timestamp/interval pair.
+fn classify_operands<'a>(
+    binary: &'a datafusion::logical_expr::expr::BinaryExpr,
+    schema: &DFSchema,
+    subtract: bool,
+) -> Option<(&'a Expr, &'a Expr)> {
+    let left_type = binary.left.get_type(schema).ok()?;
+    let right_type = binary.right.get_type(schema).ok()?;
+    match (&left_type, &right_type) {
+        (DataType::Timestamp(_, _), DataType::Interval(IntervalUnit::MonthDayNano)) => {
+            Some((binary.left.as_ref(), binary.right.as_ref()))
+        }
+        // arrow evaluates mirrored `interval + timestamp` by swapping the
+        // commutative operands; mirrored subtraction is not supported.
+        (DataType::Interval(IntervalUnit::MonthDayNano), DataType::Timestamp(_, _))
+            if !subtract =>
+        {
+            Some((binary.right.as_ref(), binary.left.as_ref()))
+        }
+        _ => None,
+    }
+}
+
+/// Rewrites every interval arithmetic in a filter predicate.
+fn rewrite_filter(
+    mut filter: datafusion::logical_expr::logical_plan::Filter,
+) -> Result<Transformed<LogicalPlan>> {
+    let schema = Arc::clone(filter.input.schema());
+    let predicate = filter.predicate.transform_up(|expression| {
+        Ok(match specialize_interval_arithmetic(&expression, &schema) {
+            Some(replacement) => Transformed::yes(replacement),
+            None => Transformed::no(expression),
+        })
+    })?;
+    filter.predicate = predicate.data;
+    Ok(if predicate.transformed {
+        Transformed::yes(LogicalPlan::Filter(filter))
+    } else {
+        Transformed::no(LogicalPlan::Filter(filter))
+    })
+}
+
 /// Rebuilds one `timestamp ± interval_month_daynano` expression as the UDF
 /// call, or returns `None` when the expression is not that shape.
 fn specialize_interval_arithmetic(expression: &Expr, schema: &DFSchema) -> Option<Expr> {
@@ -448,21 +512,7 @@ fn specialize_interval_arithmetic(expression: &Expr, schema: &DFSchema) -> Optio
         Operator::Minus => true,
         _ => return None,
     };
-    let left_type = binary.left.get_type(schema).ok()?;
-    let right_type = binary.right.get_type(schema).ok()?;
-    let (timestamp, interval) = match (&left_type, &right_type) {
-        (DataType::Timestamp(_, _), DataType::Interval(IntervalUnit::MonthDayNano)) => {
-            (binary.left.as_ref(), binary.right.as_ref())
-        }
-        // arrow evaluates mirrored `interval + timestamp` by swapping the
-        // commutative operands; mirrored subtraction is not supported.
-        (DataType::Interval(IntervalUnit::MonthDayNano), DataType::Timestamp(_, _))
-            if !subtract =>
-        {
-            (binary.right.as_ref(), binary.left.as_ref())
-        }
-        _ => return None,
-    };
+    let (timestamp, interval) = classify_operands(binary, schema, subtract)?;
     let DataType::Timestamp(unit, _) = timestamp.get_type(schema).ok()? else {
         return None;
     };
