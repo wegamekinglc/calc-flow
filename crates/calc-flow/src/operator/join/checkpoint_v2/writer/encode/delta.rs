@@ -1,13 +1,42 @@
+#[cfg(test)]
 use super::super::super::super::PendingOp;
+use super::super::super::super::columnar::FramedKey;
+use super::super::super::super::{JoinSide, Tombstones};
 use super::{
-    Arc, Base, CheckpointRow, Encoder, JoinSide, MemoryReservation, PaidBuffer, PendingUpsert,
-    Result, SchemaRef, accounting, add, ensure, header, integer, sum, upsert, upsert_bytes,
+    Arc, Base, CheckpointRow, Encoder, MemoryReservation, PaidBuffer, Reference, Result, SchemaRef,
+    accounting, add, ensure, error, header, integer, sum, upsert, upsert_bytes,
 };
+use crate::EventTime;
 
 const DELTA_MAGIC: &[u8; 8] = b"CFJDIX2\0";
 
-pub(super) fn encode<'a, I: Iterator<Item = &'a PendingOp>>(
-    pending: impl Fn() -> I,
+/// Read access to one side's recorded tombstones (spec FR2): either the live
+/// list or an owned copy made for asynchronous delta work.
+pub(in crate::operator::join::checkpoint_v2::writer) trait TombstoneList {
+    fn entries(&self) -> usize;
+    fn entry(&self, index: usize) -> (u64, EventTime, &Arc<FramedKey>);
+}
+
+impl TombstoneList for Tombstones {
+    fn entries(&self) -> usize {
+        Tombstones::len(self)
+    }
+    fn entry(&self, index: usize) -> (u64, EventTime, &Arc<FramedKey>) {
+        Tombstones::entry(self, index)
+    }
+}
+
+/// Derived per-side delta input (spec FR3): the live rows at or above the
+/// watermark provide the upserts and the recorded list the tombstones.
+pub(in crate::operator::join::checkpoint_v2::writer) struct SideDelta<'a> {
+    pub(in crate::operator::join::checkpoint_v2::writer) rows: &'a dyn crate::operator::join::Rows,
+    pub(in crate::operator::join::checkpoint_v2::writer) watermark: u64,
+    pub(in crate::operator::join::checkpoint_v2::writer) upserts: usize,
+    pub(in crate::operator::join::checkpoint_v2::writer) tombstones: &'a dyn TombstoneList,
+}
+
+pub(super) fn encode(
+    sides: &[SideDelta<'_>; 2],
     schemas: &[SchemaRef; 2],
     epoch: crate::Epoch,
     workspace: &MemoryReservation,
@@ -17,13 +46,13 @@ pub(super) fn encode<'a, I: Iterator<Item = &'a PendingOp>>(
     let mut encoder = Encoder::new(workspace)?;
     for (index, side) in [JoinSide::Left, JoinSide::Right].into_iter().enumerate() {
         check()?;
-        encode_side(
+        let selected = select(&sides[index], workspace, check)?;
+        emit_side(
             &mut encoder,
-            &pending,
+            selected,
             Arc::clone(&schemas[index]),
             side,
             epoch,
-            workspace,
             check,
         )?;
     }
@@ -31,95 +60,127 @@ pub(super) fn encode<'a, I: Iterator<Item = &'a PendingOp>>(
     Ok(encoder.finish())
 }
 
-fn encode_side<'a, I: Iterator<Item = &'a PendingOp>>(
-    encoder: &mut Encoder,
-    pending: &impl Fn() -> I,
-    schema: SchemaRef,
-    side: JoinSide,
-    epoch: crate::Epoch,
-    workspace: &MemoryReservation,
-    check: &dyn Fn() -> Result<()>,
-) -> Result<()> {
-    let selected = PendingRows::select(pending, side, workspace, check)?;
-    if selected.rows.is_empty() && selected.tombstones.is_empty() {
-        return Ok(());
-    }
-    let digest = if selected.rows.is_empty() {
-        [0; 32]
-    } else {
-        encoder.payload(&selected.rows, schema, side, &selected.funding, check)?
-    };
-    let bytes = index(
-        &selected.rows,
-        &selected.tombstones,
-        side,
-        epoch,
-        &digest,
-        encoder,
-        check,
-    )?;
-    install_delta(encoder, side, epoch, bytes)
+/// One wire tombstone selected for encoding.
+pub(super) struct TombstoneEntry<'a> {
+    pub(super) row_id: u64,
+    pub(super) event_time: EventTime,
+    pub(super) encoded_key: &'a Arc<FramedKey>,
 }
 
-// Field order releases the actual selection allocations before their credit.
-struct PendingRows<'a> {
-    rows: Vec<PendingUpsert<'a>>,
-    tombstones: Vec<&'a PendingOp>,
+/// Per-side selected upserts and tombstones, both ascending by `row_id`.
+pub(super) struct SideSelection<'a, C: CheckpointRow> {
+    rows: Vec<C>,
+    tombstones: Vec<TombstoneEntry<'a>>,
     funding: MemoryReservation,
 }
 
-impl<'a> PendingRows<'a> {
+impl<C: CheckpointRow> SideSelection<'_, C> {
     fn allocate(upserts: usize, removals: usize, workspace: &MemoryReservation) -> Result<Self> {
         let funding = workspace.new_empty();
         accounting::reserve(
             &funding,
             sum(&[
-                accounting::product(upserts, size_of::<PendingUpsert<'_>>())?,
-                accounting::product(removals, size_of::<&PendingOp>())?,
+                accounting::product(upserts, size_of::<C>())?,
+                accounting::product(removals, size_of::<TombstoneEntry<'_>>())?,
             ])?,
         )?;
-        let selected = Self {
+        Ok(Self {
             rows: exact_selection(upserts)?,
             tombstones: exact_selection(removals)?,
             funding,
-        };
-        Ok(selected)
-    }
-
-    fn select<I: Iterator<Item = &'a PendingOp>>(
-        pending: &impl Fn() -> I,
-        side: JoinSide,
-        workspace: &MemoryReservation,
-        check: &dyn Fn() -> Result<()>,
-    ) -> Result<Self> {
-        let (upserts, removals) = pending_counts(pending, side, check)?;
-        let mut selected = Self::allocate(upserts, removals, workspace)?;
-        for op in pending() {
-            check()?;
-            if op.identity().0 == side {
-                if let Some(row) = PendingUpsert::new(op) {
-                    selected.rows.push(row);
-                } else {
-                    selected.tombstones.push(op);
-                }
-            }
-        }
-        selected.rows.sort_unstable_by_key(|row| row.row().row_id);
-        selected
-            .tombstones
-            .sort_unstable_by_key(|op| op.identity().1);
-        check()?;
-        Ok(selected)
+        })
     }
 }
 
-fn pending_counts<'a, I: Iterator<Item = &'a PendingOp>>(
-    pending: &impl Fn() -> I,
+/// Derives one side's selection from the live rows at or above its
+/// watermark; the paid count comes from the O(1) dirty counter (spec FR8).
+fn select<'a>(
+    source: &SideDelta<'a>,
+    workspace: &MemoryReservation,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<SideSelection<'a, Reference<'a>>> {
+    let mut selected =
+        SideSelection::allocate(source.upserts, source.tombstones.entries(), workspace)?;
+    for index in source.rows.references_from(source.watermark) {
+        check()?;
+        selected.rows.push(Reference {
+            rows: source.rows,
+            index,
+        });
+    }
+    if selected.rows.len() != source.upserts {
+        return Err(error(
+            "V2 checkpoint derived selection differs from its paid count",
+        ));
+    }
+    selected.rows.sort_unstable_by_key(|row| row.row().row_id);
+    for entry in 0..source.tombstones.entries() {
+        check()?;
+        let (row_id, event_time, encoded_key) = source.tombstones.entry(entry);
+        selected.tombstones.push(TombstoneEntry {
+            row_id,
+            event_time,
+            encoded_key,
+        });
+    }
+    selected
+        .tombstones
+        .sort_unstable_by_key(|entry| entry.row_id);
+    check()?;
+    Ok(selected)
+}
+
+/// Selects one side from an old-style pending-op list: the byte-equivalence
+/// oracle (spec FR4) and encoder-test constructor.
+#[cfg(test)]
+pub(super) fn select_ops<'a>(
+    pending: &'a [PendingOp],
+    side: JoinSide,
+    workspace: &MemoryReservation,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<SideSelection<'a, super::PendingUpsert<'a>>> {
+    let (upserts, removals) = pending_counts(pending, side, check)?;
+    let mut selected = SideSelection::allocate(upserts, removals, workspace)?;
+    for op in pending {
+        check()?;
+        if op.identity().0 == side {
+            if let Some(row) = super::PendingUpsert::new(op) {
+                selected.rows.push(row);
+            } else {
+                let PendingOp::Tombstone {
+                    row_id,
+                    event_time,
+                    encoded_key,
+                    ..
+                } = op
+                else {
+                    unreachable!("delta removal selection contains tombstones")
+                };
+                selected.tombstones.push(TombstoneEntry {
+                    row_id: *row_id,
+                    event_time: *event_time,
+                    encoded_key,
+                });
+            }
+        }
+    }
+    selected.rows.sort_unstable_by_key(|row| row.row().row_id);
+    selected
+        .tombstones
+        .sort_unstable_by_key(|entry| entry.row_id);
+    check()?;
+    Ok(selected)
+}
+
+#[cfg(test)]
+fn pending_counts(
+    pending: &[PendingOp],
     side: JoinSide,
     check: &dyn Fn() -> Result<()>,
 ) -> Result<(usize, usize)> {
-    let (upserts, removals) =
-        pending().try_fold((0, 0), |(upserts, removals), op| -> Result<_> {
+    pending
+        .iter()
+        .try_fold((0, 0), |(upserts, removals), op| -> Result<_> {
             check()?;
             if op.identity().0 != side {
                 Ok((upserts, removals))
@@ -128,22 +189,54 @@ fn pending_counts<'a, I: Iterator<Item = &'a PendingOp>>(
             } else {
                 Ok((upserts, add(removals, 1)?))
             }
-        })?;
-    Ok((upserts, removals))
+        })
+}
+
+pub(super) fn emit_side<C: CheckpointRow>(
+    encoder: &mut Encoder,
+    selected: SideSelection<'_, C>,
+    schema: SchemaRef,
+    side: JoinSide,
+    epoch: crate::Epoch,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<()> {
+    let SideSelection {
+        rows,
+        tombstones,
+        funding,
+    } = selected;
+    if rows.is_empty() && tombstones.is_empty() {
+        return Ok(());
+    }
+    debug_assert!(
+        rows.windows(2)
+            .all(|pair| pair[0].row().row_id < pair[1].row().row_id),
+        "delta upsert row ids are unique and ascending"
+    );
+    debug_assert!(
+        tombstones
+            .windows(2)
+            .all(|pair| pair[0].row_id < pair[1].row_id),
+        "delta tombstone row ids are unique and ascending"
+    );
+    let digest = if rows.is_empty() {
+        [0; 32]
+    } else {
+        encoder.payload(&rows, schema, side, &funding, check)?
+    };
+    let bytes = index(&rows, &tombstones, side, epoch, &digest, encoder, check)?;
+    install_delta(encoder, side, epoch, bytes)
 }
 
 fn exact_selection<T>(count: usize) -> Result<Vec<T>> {
     let bytes = accounting::product(count, size_of::<T>())?;
-    isize::try_from(bytes)
-        .map_err(|_| super::error("V2 checkpoint selection capacity overflow"))?;
+    isize::try_from(bytes).map_err(|_| error("V2 checkpoint selection capacity overflow"))?;
     let mut selected = Vec::new();
     selected
         .try_reserve_exact(count)
-        .map_err(|_| super::error("V2 checkpoint selection allocation failed"))?;
+        .map_err(|_| error("V2 checkpoint selection allocation failed"))?;
     if selected.capacity() > count {
-        return Err(super::error(
-            "V2 checkpoint selection exceeded paid capacity",
-        ));
+        return Err(error("V2 checkpoint selection exceeded paid capacity"));
     }
     Ok(selected)
 }
@@ -159,9 +252,9 @@ fn install_delta(
     encoder.install(format!("{}-delta-{}", side.as_str(), epoch.as_u64()), bytes)
 }
 
-fn index(
-    rows: &[impl CheckpointRow],
-    tombstones: &[&PendingOp],
+fn index<C: CheckpointRow>(
+    rows: &[C],
+    tombstones: &[TombstoneEntry<'_>],
     side: JoinSide,
     epoch: crate::Epoch,
     digest: &[u8; 32],
@@ -177,9 +270,9 @@ fn index(
     bytes.into_bytes()
 }
 
-fn append_upserts(
+fn append_upserts<C: CheckpointRow>(
     bytes: &mut PaidBuffer<'_>,
-    rows: &[impl CheckpointRow],
+    rows: &[C],
     digest: &[u8; 32],
     check: &dyn Fn() -> Result<()>,
 ) -> Result<()> {
@@ -190,32 +283,29 @@ fn append_upserts(
     Ok(())
 }
 
-fn index_capacity(
-    rows: &[impl CheckpointRow],
-    tombstones: &[&PendingOp],
+fn index_capacity<C: CheckpointRow>(
+    rows: &[C],
+    tombstones: &[TombstoneEntry<'_>],
     check: &dyn Fn() -> Result<()>,
 ) -> Result<usize> {
     let capacity =
         tombstones
             .iter()
-            .try_fold(add(40, upsert_bytes(rows, check)?)?, |bytes, op| {
+            .try_fold(add(40, upsert_bytes(rows, check)?)?, |bytes, entry| {
                 check()?;
-                let PendingOp::Tombstone { encoded_key, .. } = op else {
-                    unreachable!("delta removal selection contains tombstones")
-                };
-                sum(&[bytes, 24, encoded_key.len()])
+                sum(&[bytes, 24, entry.encoded_key.len()])
             })?;
     Ok(capacity)
 }
 
 fn append_tombstones(
     bytes: &mut PaidBuffer<'_>,
-    tombstones: &[&PendingOp],
+    tombstones: &[TombstoneEntry<'_>],
     check: &dyn Fn() -> Result<()>,
 ) -> Result<()> {
-    for row in tombstones {
+    for entry in tombstones {
         check()?;
-        tombstone(bytes, row)?;
+        tombstone(bytes, entry)?;
     }
     Ok(())
 }
@@ -234,93 +324,11 @@ fn index_header(
     Ok(fixed)
 }
 
-fn tombstone(bytes: &mut PaidBuffer<'_>, op: &PendingOp) -> Result<()> {
-    let PendingOp::Tombstone {
-        row_id,
-        event_time,
-        encoded_key,
-        ..
-    } = op
-    else {
-        unreachable!("delta removal selection contains tombstones")
-    };
+fn tombstone(bytes: &mut PaidBuffer<'_>, entry: &TombstoneEntry<'_>) -> Result<()> {
     let mut fixed = [0; 24];
-    fixed[..8].copy_from_slice(&row_id.to_le_bytes());
-    fixed[8..16].copy_from_slice(&event_time.as_micros().to_le_bytes());
-    fixed[16..24].copy_from_slice(&integer(encoded_key.len())?);
+    fixed[..8].copy_from_slice(&entry.row_id.to_le_bytes());
+    fixed[8..16].copy_from_slice(&entry.event_time.as_micros().to_le_bytes());
+    fixed[16..24].copy_from_slice(&integer(entry.encoded_key.len())?);
     bytes.append(&fixed)?;
-    bytes.append(encoded_key)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::operator::join::columnar::RowPayload;
-    use datafusion::arrow::{array::Int64Array, record_batch::RecordBatch};
-    use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryConsumer, MemoryPool};
-
-    #[test]
-    fn test_pending_selection_exact_credit_retires_between_sides() {
-        let record = RecordBatch::try_from_iter([(
-            "key",
-            Arc::new(Int64Array::from(vec![9])) as datafusion::arrow::array::ArrayRef,
-        )])
-        .unwrap();
-        let key = Arc::new(vec![1, 9].into());
-        let pending = [
-            PendingOp::Upsert {
-                side: JoinSide::Left,
-                row_id: 5,
-                event_time: crate::EventTime::from_micros(3),
-                encoded_key: Arc::clone(&key),
-                record: RowPayload::Legacy(record),
-                charge: 99,
-            },
-            PendingOp::Tombstone {
-                side: JoinSide::Right,
-                row_id: 8,
-                event_time: crate::EventTime::from_micros(-3),
-                encoded_key: Arc::clone(&key),
-            },
-            PendingOp::Tombstone {
-                side: JoinSide::Left,
-                row_id: 7,
-                event_time: crate::EventTime::from_micros(1),
-                encoded_key: key,
-            },
-        ];
-        assert_eq!(size_of::<PendingUpsert<'_>>(), size_of::<&PendingOp>());
-        for (side, upserts, removals) in [(JoinSide::Left, 1, 1), (JoinSide::Right, 0, 1)] {
-            let paid = (upserts + removals) * size_of::<&PendingOp>();
-            let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(paid));
-            let workspace = MemoryConsumer::new("pending-selection").register(&pool);
-            let mut result = None;
-            let allocations = allocation_counter::measure(|| {
-                result = Some(PendingRows::select(
-                    &|| pending.iter(),
-                    side,
-                    &workspace,
-                    &|| Ok(()),
-                ));
-            });
-            let selected = result.unwrap().unwrap();
-            assert_eq!(
-                (selected.rows.len(), selected.rows.capacity()),
-                (upserts, upserts)
-            );
-            assert_eq!(
-                (selected.tombstones.len(), selected.tombstones.capacity()),
-                (removals, removals)
-            );
-            assert_eq!(selected.funding.size(), paid);
-            assert_eq!(allocations.bytes_current, i64::try_from(paid).unwrap());
-            assert!(allocations.bytes_max <= u64::try_from(paid).unwrap());
-            drop(selected);
-            assert_eq!(pool.reserved(), 0);
-            let pressure = workspace.new_empty();
-            pressure.try_grow(1).unwrap();
-            assert!(PendingRows::select(&|| pending.iter(), side, &workspace, &|| Ok(())).is_err());
-            assert_eq!(pool.reserved(), 1);
-        }
-    }
+    bytes.append(entry.encoded_key)
 }

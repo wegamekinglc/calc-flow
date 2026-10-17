@@ -13,7 +13,7 @@ fn observation(
         "pool": pool.snapshot(),
         "left_rows": operator.status().left.retained_rows,
         "right_rows": operator.status().right.retained_rows,
-        "pending_changes": operator.state.deltas.pending.iter().count(),
+        "pending_changes": operator.state.deltas.pending_count_for_test(),
         "base_writer_calls": bases.load(Ordering::SeqCst),
     })
 }
@@ -199,7 +199,7 @@ impl FullReplacementDiagnostic {
         self.observations
             .push(observation(&self.phase, pool, operator, bases));
         require(
-            operator.state.deltas.pending.iter().count() == PENDING_ROWS
+            operator.state.deltas.pending_count_for_test() == PENDING_ROWS
                 && self
                     .captures
                     .last()
@@ -224,7 +224,7 @@ impl FullReplacementDiagnostic {
         self.observations
             .push(observation(&self.phase, pool, operator, bases));
         require(
-            operator.state.deltas.pending.is_empty() && bases.load(Ordering::SeqCst) == 1,
+            operator.state.deltas.is_clean() && bases.load(Ordering::SeqCst) == 1,
             "automatic replacement must clear pending rows without a second full-base writer",
         )?;
         self.after_oracle = Some(validate_state(operator, FULL_ROWS)?);

@@ -1,7 +1,7 @@
 use std::cell::Cell;
 
 use super::*;
-use crate::operator::join::PendingLog;
+use crate::operator::join::{PendingLog, StateRows, Tombstones, columnar::FramedKey};
 
 fn log(operations: impl IntoIterator<Item = PendingOp>) -> PendingLog {
     let mut pending = PendingLog::default();
@@ -20,7 +20,7 @@ fn test_pending_cancellation_precedes_encoder_admission() {
     let (rows, record) = fixture();
     let pending = log([pending_upsert(JoinSide::Left, &rows[0])]);
     let (pool, workspace) = reservation(0);
-    let result = super::super::pending(
+    let result = pending_ops(
         &pending,
         &[record.schema(), record.schema()],
         Epoch::INITIAL,
@@ -62,7 +62,7 @@ fn test_pending_borrows_rows_within_compact_workspace() {
     // The old copies alone reserve 3 * 8_256 * 80 + 3 * 8_192 * 72 bytes.
     // The existing compact/IPC phase bound fits this unchanged 2.4 MB pool.
     let (pool, workspace) = reservation(2_400_000);
-    let output = super::super::pending(
+    let output = pending_ops(
         &pending,
         &[record.schema(), record.schema()],
         Epoch::INITIAL,
@@ -108,7 +108,7 @@ fn test_pending_cancellation_releases_each_phase_without_consuming_log() {
     let epoch = Epoch::new(7).unwrap();
     let calls = Cell::new(0);
     let (_, reference_credit) = reservation(16 << 20);
-    let expected = super::super::pending(&pending, &schemas, epoch, &reference_credit, &|| {
+    let expected = pending_ops(&pending, &schemas, epoch, &reference_credit, &|| {
         calls.set(calls.get() + 1);
         Ok(())
     })
@@ -116,7 +116,7 @@ fn test_pending_cancellation_releases_each_phase_without_consuming_log() {
     for stop in 1..=calls.get() {
         let (pool, workspace) = reservation(16 << 20);
         let checked = Cell::new(0);
-        let result = super::super::pending(&pending, &schemas, epoch, &workspace, &|| {
+        let result = pending_ops(&pending, &schemas, epoch, &workspace, &|| {
             checked.set(checked.get() + 1);
             if checked.get() == stop {
                 Err(CalcFlowError::Cancelled {
@@ -134,7 +134,7 @@ fn test_pending_cancellation_releases_each_phase_without_consuming_log() {
         assert_eq!(pool.reserved(), 0, "scratch must retire at check {stop}");
     }
     let (pool, workspace) = reservation(16 << 20);
-    let retry = super::super::pending(&pending, &schemas, epoch, &workspace, &|| Ok(())).unwrap();
+    let retry = pending_ops(&pending, &schemas, epoch, &workspace, &|| Ok(())).unwrap();
     assert_same_segments(&expected, &retry);
     drop(retry);
     assert_eq!(pool.reserved(), 0);
@@ -265,8 +265,7 @@ fn test_pending_borrowed_and_owned_paths_preserve_rich_wire_and_slot_order() {
             let expected = expected_segments(&pending, epoch);
             let (pool, workspace) = reservation(16 << 20);
             let schemas = [record.schema(), record.schema()];
-            let output =
-                super::super::pending(&pending, &schemas, epoch, &workspace, &|| Ok(())).unwrap();
+            let output = pending_ops(&pending, &schemas, epoch, &workspace, &|| Ok(())).unwrap();
             assert_eq!(output.segments.len(), expected.len());
             for (name, bytes) in &expected {
                 assert_eq!(
@@ -299,7 +298,7 @@ fn test_pending_allocations_and_surviving_segment_backing_remain_funded() {
     let workspace = MemoryConsumer::new("pending-allocation").register(&pool);
     let mut output = None;
     let allocations = allocation_counter::measure(|| {
-        output = Some(super::super::pending(
+        output = Some(pending_ops(
             &pending,
             &[record.schema(), record.schema()],
             Epoch::INITIAL,
@@ -321,4 +320,111 @@ fn test_pending_allocations_and_surviving_segment_backing_remain_funded() {
     assert_eq!(segment.bytes(), expected);
     drop(segment);
     assert_eq!(pool.reserved(), 0);
+}
+
+/// The byte-equivalence oracle (spec FR4): for identical admission, eviction,
+/// and capture schedules the derived encoding must equal the old
+/// pending-log encoding segment for segment, digest for digest.
+#[test]
+fn test_derived_delta_encoding_matches_the_pending_log_oracle() {
+    let (rows, record) = fixture();
+    let schemas = [record.schema(), record.schema()];
+    let epoch = Epoch::new(11).unwrap();
+    let check = &|| Ok(());
+    for schedule in oracle_schedules(&rows) {
+        let OracleSchedule {
+            live,
+            watermark,
+            tombstones,
+        } = schedule;
+        // The shadow pending log the pre-change bookkeeping would have held:
+        // one upsert per live row above the watermark, one tombstone per
+        // recorded entry.
+        let mut oracle = PendingLog::default();
+        for row in live.iter().filter(|row| row.row_id >= watermark) {
+            oracle.push(pending_upsert(JoinSide::Left, row));
+        }
+        for (row_id, event_time, key) in &tombstones {
+            oracle.push(PendingOp::Tombstone {
+                side: JoinSide::Left,
+                row_id: *row_id,
+                event_time: *event_time,
+                encoded_key: Arc::clone(key),
+            });
+        }
+        let mut list = Tombstones::default();
+        for (row_id, event_time, key) in &tombstones {
+            list.push(*row_id, *event_time, Arc::clone(key));
+        }
+        let state = StateRows::from(live.clone());
+        let upserts = live.iter().filter(|row| row.row_id >= watermark).count();
+        let left = SideDelta {
+            rows: &state,
+            watermark,
+            upserts,
+            tombstones: &list,
+        };
+        let empty = StateRows::default();
+        let empty_list = Tombstones::default();
+        let right = SideDelta {
+            rows: &empty,
+            watermark: u64::MAX,
+            upserts: 0,
+            tombstones: &empty_list,
+        };
+        let (pool, workspace) = reservation(16 << 20);
+        let derived = dirty(&[left, right], &schemas, epoch, &workspace, check).unwrap();
+        let (oracle_pool, oracle_workspace) = reservation(16 << 20);
+        let expected = pending_ops(&oracle, &schemas, epoch, &oracle_workspace, check).unwrap();
+        assert_same_segments(&derived, &expected);
+        drop((derived, expected, list, state, empty, empty_list));
+        assert_eq!(pool.reserved(), 0);
+        assert_eq!(oracle_pool.reserved(), 0);
+    }
+}
+
+struct OracleSchedule {
+    live: Vec<StoredRow>,
+    watermark: u64,
+    tombstones: Vec<(u64, EventTime, Arc<FramedKey>)>,
+}
+
+/// Admission, eviction before and after capture, id gaps, and tombstone-only
+/// windows (spec FR4/AC1).
+fn oracle_schedules(rows: &[StoredRow]) -> Vec<OracleSchedule> {
+    let tombstone = |row: &StoredRow| (row.row_id, row.event_time, Arc::clone(&row.encoded_key));
+    vec![
+        // Fresh admission: everything sits above the zero watermark.
+        OracleSchedule {
+            live: rows.to_vec(),
+            watermark: 0,
+            tombstones: Vec::new(),
+        },
+        // Captured rows below the watermark stay out of the derive while a
+        // later batch remains dirty.
+        OracleSchedule {
+            live: rows.to_vec(),
+            watermark: 21,
+            tombstones: Vec::new(),
+        },
+        // A captured row was evicted: its tombstone rides the same delta as
+        // the uncaptured upserts.
+        OracleSchedule {
+            live: rows[1..].to_vec(),
+            watermark: 21,
+            tombstones: vec![tombstone(&rows[0])],
+        },
+        // Only evictions since the capture: a tombstone-only delta.
+        OracleSchedule {
+            live: Vec::new(),
+            watermark: 39,
+            tombstones: vec![tombstone(&rows[0]), tombstone(&rows[2])],
+        },
+        // Monotone-with-gaps ids (spec FR15) above the watermark.
+        OracleSchedule {
+            live: vec![rows[2].clone()],
+            watermark: 22,
+            tombstones: vec![tombstone(&rows[0])],
+        },
+    ]
 }

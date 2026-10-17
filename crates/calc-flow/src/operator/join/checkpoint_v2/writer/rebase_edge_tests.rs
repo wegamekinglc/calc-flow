@@ -35,7 +35,7 @@ pub(super) fn image(join: &StreamJoinOperator) -> serde_json::Value {
         "status": join.status(), "base_epoch": writer.base_epoch,
         "deltas": writer.deltas, "payloads": base.payloads,
         "dirty_epochs": writer.dirty_epochs, "migration": writer.migration_required,
-        "pending": join.state.deltas.pending.iter().count(),
+        "pending": join.state.deltas.pending_count_for_test(),
         "next": [join.state.next_left_row_id, join.state.next_right_row_id, join.state.next_output_sequence],
         "ended": join.state.ended,
         "rows": rows,
@@ -156,7 +156,7 @@ async fn check_malformed_history(with_pending: bool) {
         let (mut join, old) = checkpointed(&context).await;
         if with_pending {
             admit_left(&mut join, &context).await;
-            assert!(!join.state.deltas.pending.is_empty());
+            assert!(!join.state.deltas.is_clean());
         }
         let base = join.v2_writer.base.as_mut().unwrap();
         let mut bytes = base.segments["left-delta-4"].bytes().to_vec();

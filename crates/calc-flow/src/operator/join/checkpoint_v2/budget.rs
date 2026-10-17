@@ -123,6 +123,18 @@ pub(in crate::operator::join) fn expiration_credit(
     Ok(credit)
 }
 
+/// Extends an existing expiration-side credit by `bytes` with the same typed
+/// refusal as a fresh expiration charge (spec FR8); tombstone-list growth
+/// fails closed through this path.
+pub(in crate::operator::join) fn grow_expiration_credit(
+    credit: &MemoryReservation,
+    bytes: usize,
+) -> Result<()> {
+    credit
+        .try_grow(bytes)
+        .map_err(|_| invalid("V2 IPC constructor credit admission failed"))
+}
+
 pub(in crate::operator::join) fn optional_expiration_credit(
     workspace: &MemoryReservation,
     capacity: usize,

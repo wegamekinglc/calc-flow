@@ -76,7 +76,7 @@ async fn test_off_same_charge_replacement_invalidates_history_until_full_rebuild
             .snapshot(join.state.last_checkpoint_epoch),
         cut
     );
-    assert!(join.state.deltas.pending.is_empty());
+    assert!(join.state.deltas.is_clean());
     assert_eq!(join.state.left.at(0).event_time.as_micros(), 1_095);
     assert_eq!(join.state.left.at(0).row_id, 8);
     assert!(join.checkpoint(Epoch::new(5).unwrap()).is_err());
@@ -141,7 +141,7 @@ async fn emitted_overflow(checkpointing: bool, projected: bool) {
         join.state.next_output_sequence,
         output.drain("output").is_empty(),
     );
-    assert!(join.state.deltas.pending.is_empty());
+    assert!(join.state.deltas.is_clean());
     assert_ne!(join.v2_writer.tracker, tracker);
     assert_eq!(join.v2_writer.history_trusted, checkpointing);
     drop((old, join, output));
@@ -171,7 +171,7 @@ async fn test_off_end_invalidates_history_until_reset_or_validated_restore() {
     assert!(join.state.ended);
     assert!(join.state.left.is_empty());
     assert!(join.state.right.is_empty());
-    assert!(join.state.deltas.pending.is_empty());
+    assert!(join.state.deltas.is_clean());
     assert_ne!(join.v2_writer.tracker, tracker);
     assert!(!join.v2_writer.history_trusted);
     join.restore(&old).unwrap();

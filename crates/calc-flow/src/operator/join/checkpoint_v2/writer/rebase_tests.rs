@@ -43,7 +43,7 @@ async fn checkpointed_from(
         admit_left(&mut join, context).await;
         snapshot = join.checkpoint(Epoch::new(epoch).unwrap()).unwrap();
     }
-    assert!(join.state.deltas.pending.is_empty());
+    assert!(join.state.deltas.is_clean());
     assert_eq!(join.v2_writer.dirty_epochs, 4);
     (join, snapshot)
 }

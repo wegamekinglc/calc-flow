@@ -330,7 +330,12 @@ impl StreamJoinOperator {
         context.check_cancelled()?;
         self.state.deltas.base = base;
         self.state.deltas.segments.clear();
-        self.state.deltas.pending.clear();
+        // The compacted base persists every live row, so the capture
+        // watermark advances and the tombstone lists drain exactly where the
+        // pending log used to clear (spec FR5).
+        self.state
+            .deltas
+            .drained_at_capture([self.state.next_left_row_id, self.state.next_right_row_id]);
         self.state.deltas.segments_since_base = 0;
         self.state.deltas.needs_compaction = false;
         Ok(())

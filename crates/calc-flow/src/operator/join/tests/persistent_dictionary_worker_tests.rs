@@ -86,18 +86,15 @@ async fn fixture(
 fn proof(operator: &StreamJoinOperator) -> Proof {
     let retained = operator.state.right.at(1);
     let canonical = operator.key_bindings.right.canonical(&retained);
-    let history = operator
-        .state
-        .deltas
-        .pending
-        .iter()
-        .find_map(|op| match op {
-            PendingOp::Upsert { encoded_key, .. } if Arc::ptr_eq(encoded_key, canonical) => {
-                Some(Arc::clone(encoded_key))
-            }
-            _ => None,
-        })
-        .expect("actual checkpoint upsert shares the canonical byte-only owner");
+    // The derivable upsert carries the row's key bytes; the rebuilt
+    // dictionary owns the canonical identity with equal bytes.
+    assert_eq!(
+        retained.encoded_key.as_slice(),
+        canonical.as_slice(),
+        "the derivable upsert row carries the canonical key bytes"
+    );
+    // The lease resolves through the canonical owner the dictionary holds.
+    let history = Arc::clone(canonical);
     let lease = operator.key_dictionary.lease(&history).unwrap();
     Proof {
         history,
@@ -112,7 +109,7 @@ async fn result_boundary(service: &TestService, cancel: bool) {
     let proof = proof(&operator);
     let before = operator.status();
     let inventory = operator.key_dictionary.inventory();
-    let pending = operator.state.deltas.pending.iter().count();
+    let pending = operator.state.deltas.pending_count_for_test();
     let gate = Arc::new(data_work::ResultTestGate::default());
     operator.probe_result_test_gate = Some(Arc::clone(&gate));
     let mut process = Box::pin(operator.process_data("left", incoming(), &context, &mut output));
@@ -130,7 +127,7 @@ async fn result_boundary(service: &TestService, cancel: bool) {
     drop(process);
     assert_eq!(operator.status(), before);
     assert_eq!(operator.key_dictionary.inventory(), inventory);
-    assert_eq!(operator.state.deltas.pending.iter().count(), pending);
+    assert_eq!(operator.state.deltas.pending_count_for_test(), pending);
     assert!(output.drain("output").is_empty());
     operator.reset().unwrap();
     gate.release.notify_one();
@@ -146,7 +143,7 @@ async fn input_boundary(service: &TestService, phase: data_work::ProbePhase) {
     let context = StreamOperatorContext::new(&owner, "match", None);
     let proof = proof(&operator);
     let before = operator.status();
-    let pending = operator.state.deltas.pending.iter().count();
+    let pending = operator.state.deltas.pending_count_for_test();
     let (entered, started) = tokio::sync::oneshot::channel();
     let (release, wait) = std::sync::mpsc::channel();
     let gate = std::sync::Mutex::new(Some((entered, wait)));
@@ -171,7 +168,7 @@ async fn input_boundary(service: &TestService, phase: data_work::ProbePhase) {
     }
     drop(process);
     assert_eq!(operator.status(), before);
-    assert_eq!(operator.state.deltas.pending.iter().count(), pending);
+    assert_eq!(operator.state.deltas.pending_count_for_test(), pending);
     operator.reset().unwrap();
     assert!(
         proof.identity.strong_count() > 0,

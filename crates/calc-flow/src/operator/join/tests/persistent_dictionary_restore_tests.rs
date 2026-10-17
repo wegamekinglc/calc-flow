@@ -1,4 +1,5 @@
 use super::*;
+use crate::operator::join::Tombstones;
 use datafusion::execution::memory_pool::{
     MemoryLimit, MemoryPool, MemoryReservation, UnboundedMemoryPool,
 };
@@ -137,7 +138,7 @@ async fn valid_refused_restore(layout: u64, managed: bool) {
     assert_fees(&target, 1, 1);
     assert_eq!(retained_keys(&target), [7, 7]);
     assert_eq!(target.state.last_checkpoint_epoch, Some(Epoch::INITIAL));
-    assert!(target.state.deltas.pending.is_empty());
+    assert!(target.state.deltas.is_clean());
     assert!(target.key_dictionary_needs_rebuild);
     assert_eq!(target.key_dictionary.inventory().0, 0);
     assert!(target.key_dictionary.lease(&old).is_none());
@@ -417,14 +418,10 @@ async fn dead_v1_snapshot(
         )
         .unwrap();
     assert!(source.state.left.is_empty());
-    assert!(
-        source
-            .state
-            .deltas
-            .pending
-            .iter()
-            .all(|op| matches!(op, PendingOp::Tombstone { .. }))
-    );
+    // Every side row was captured before eviction, so the whole side leaves
+    // tombstones and no uncaptured rows remain.
+    assert!(!source.state.deltas.tombstones[0].is_empty());
+    assert_eq!(source.state.deltas.dirty[0], 0);
     let dead = source.checkpoint(Epoch::new(2).unwrap()).unwrap();
     assert_eq!(dead.inline_metadata["layout_version"], 1);
     assert!(dead.segments.contains_key("left-delta-2"));
@@ -674,35 +671,19 @@ fn state_observation(operator: &StreamJoinOperator) -> impl PartialEq + fmt::Deb
         ),
         rows_observation(&operator.state.left),
         rows_observation(&operator.state.right),
-        operator
-            .state
-            .deltas
-            .pending
-            .iter()
-            .map(|op| match op {
-                PendingOp::Upsert {
-                    side,
-                    row_id,
-                    event_time,
-                    encoded_key,
-                    charge,
-                    ..
-                } => (
-                    *side,
-                    *row_id,
-                    *event_time,
-                    encoded_key.to_vec(),
-                    Some(*charge),
-                ),
-                PendingOp::Tombstone {
-                    side,
-                    row_id,
-                    event_time,
-                    encoded_key,
-                } => (*side, *row_id, *event_time, encoded_key.to_vec(), None),
-            })
-            .collect::<Vec<_>>(),
+        operator.state.deltas.dirty,
+        tombstone_observation(&operator.state.deltas.tombstones[0]),
+        tombstone_observation(&operator.state.deltas.tombstones[1]),
     )
+}
+
+fn tombstone_observation(list: &Tombstones) -> impl PartialEq + fmt::Debug + use<> {
+    list.row_ids
+        .iter()
+        .zip(&list.times)
+        .zip(&list.keys)
+        .map(|((&row_id, &time), key)| (row_id, time, key.as_slice().to_vec()))
+        .collect::<Vec<_>>()
 }
 
 fn rows_observation(rows: &dyn Rows) -> impl PartialEq + fmt::Debug + use<> {

@@ -140,7 +140,7 @@ async fn installed_target(
         .process_data("right", batch(9, 99), context, &mut output)
         .await
         .unwrap();
-    assert_eq!(target.state.deltas.pending.iter().count(), 1);
+    assert_eq!(target.state.deltas.pending_count_for_test(), 1);
     (target, pool, output)
 }
 

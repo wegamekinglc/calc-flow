@@ -28,24 +28,22 @@ fn writer_gate() -> WriterGate {
     let entered = Mutex::new(Some(entered));
     let (release, wait) = mpsc::channel();
     let wait = Mutex::new(wait);
-    let hook = Arc::new(
-        move |credit: &datafusion::execution::memory_pool::MemoryReservation| {
-            let native = std::thread::current()
-                .name()
-                .is_some_and(|name| name == "calc-flow-gather");
-            entered
-                .lock()
-                .unwrap()
-                .take()
-                .unwrap()
-                .send((credit.size(), native))
-                .unwrap();
-            wait.lock()
-                .unwrap()
-                .recv_timeout(Duration::from_secs(10))
-                .unwrap();
-        },
-    );
+    let hook = Arc::new(move |credit: &MemoryReservation| {
+        let native = std::thread::current()
+            .name()
+            .is_some_and(|name| name == "calc-flow-gather");
+        entered
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap()
+            .send((credit.size(), native))
+            .unwrap();
+        wait.lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap();
+    });
     WriterGate {
         hook,
         entered: started,
@@ -70,24 +68,17 @@ async fn seed(context: &StreamOperatorContext<'_>) -> StreamJoinOperator {
 }
 
 fn assert_pending(join: &StreamJoinOperator) {
-    let mut pending = join.state.deltas.pending.iter();
-    let Some(PendingOp::Upsert {
-        side,
-        row_id,
-        event_time,
-        encoded_key,
-        charge,
-        ..
-    }) = pending.next()
-    else {
-        panic!("the original dirty upsert must remain pending");
-    };
+    // The dirty window stays derivable: the one live left row sits above the
+    // watermark and encodes as the next delta's only upsert (spec FR3).
+    assert_eq!(join.state.deltas.watermark[0], 0);
+    assert_eq!(join.state.deltas.dirty[0], 1);
+    assert!(join.state.deltas.tombstones[0].is_empty());
+    let row = join.state.left.at(0);
     assert_eq!(
-        (*side, *row_id, event_time.as_micros(), *charge),
-        (JoinSide::Left, 0, 95, 136)
+        (row.row_id, row.event_time.as_micros(), row.charge),
+        (0, 95, 136)
     );
-    assert_eq!(encoded_key.as_slice(), KEY);
-    assert!(pending.next().is_none());
+    assert_eq!(row.encoded_key.as_slice(), KEY);
 }
 
 fn assert_uninstalled(
@@ -192,7 +183,7 @@ async fn seed_dirty(
 ) -> (StreamJoinOperator, OperatorStateSnapshot) {
     let mut join = seed(context).await;
     let first = join.checkpoint(Epoch::INITIAL).unwrap();
-    assert!(join.state.deltas.pending.is_empty());
+    assert!(join.state.deltas.is_clean());
     let mut output = EdgeCollector::new(join.output_ports().to_vec());
     join.process_data(
         "left",
@@ -226,33 +217,26 @@ fn assert_dirty_uninstalled(
     assert!(!join.state.ended);
     assert!(join.state.deltas.base.is_empty());
     assert!(join.state.deltas.segments.is_empty());
-    let mut pending = join.state.deltas.pending.iter();
-    let Some(PendingOp::Upsert {
-        side,
-        row_id,
-        event_time,
-        encoded_key,
-        record,
-        charge,
-    }) = pending.next()
-    else {
-        panic!("the dirty Delta upsert must remain pending");
-    };
+    // The dirty Delta row stays derivable above the watermark, reusing the
+    // live row's key and record directly (spec FR3).
+    assert_eq!(join.state.deltas.watermark[0], 1);
+    assert_eq!(join.state.deltas.dirty[0], 1);
+    assert!(join.state.deltas.tombstones[0].is_empty());
+    let row = join.state.left.at(1);
     assert_eq!(
-        (*side, *row_id, event_time.as_micros(), *charge),
-        (JoinSide::Left, 1, 97, 141)
+        (row.row_id, row.event_time.as_micros(), row.charge),
+        (1, 97, 141)
     );
-    assert_eq!(*record.view(), dirty_record());
+    assert_eq!(*row.record.view(), dirty_record());
     assert_eq!(
-        encoded_key.as_slice(),
+        row.encoded_key.as_slice(),
         encode_join_key_v1(&dirty_record(), 0, &[0]).unwrap()
     );
-    assert!(Arc::ptr_eq(encoded_key, join.state.left.key_at(1)));
+    assert!(Arc::ptr_eq(&row.encoded_key, join.state.left.key_at(1)));
     assert!(Arc::ptr_eq(
-        record.column(0),
+        row.record.column(0),
         join.state.left.at(1).record.column(0)
     ));
-    assert!(pending.next().is_none());
 }
 
 async fn cancelled_delta_writer(service: &crate::runtime::streaming::gather_work::TestService) {
@@ -313,8 +297,10 @@ async fn cancelled_delta_writer(service: &crate::runtime::streaming::gather_work
 
     let mut drain = Box::pin(job.gather_owner().close_and_drain());
     let pending = futures::poll!(drain.as_mut()).is_pending();
-    let retained_inputs = column.upgrade().is_some() && key.upgrade().is_some();
-    let retired_live_rows = rows.upgrade().is_none();
+    // The derived Delta work shares the live row state exactly like Base
+    // work (spec FR3/FR8): its inputs stay alive until the actual drain.
+    let retained_inputs =
+        rows.upgrade().is_some() && column.upgrade().is_some() && key.upgrade().is_some();
     let retired_history = segments.iter().all(|segment| segment.upgrade().is_none());
     let (_, _, attempt) = job.gather_owner().funding();
     let reserved = pool.reserved();
@@ -328,10 +314,6 @@ async fn cancelled_delta_writer(service: &crate::runtime::streaming::gather_work
     assert!(
         retained_inputs,
         "the owned pending copy must retain its inputs"
-    );
-    assert!(
-        retired_live_rows,
-        "Delta work must not retain Base row inputs"
     );
     assert!(retired_history);
     assert!(attempt > 0);

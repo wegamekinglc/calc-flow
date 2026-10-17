@@ -1,6 +1,6 @@
 use super::*;
+use crate::StateSegment;
 use crate::operator::join::StoredRow;
-use crate::{StateSegment, operator::join::PendingLog};
 use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryLimit, MemoryPool};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Mutex};
@@ -121,9 +121,9 @@ async fn pending_capture(
     join.runtime.initialize_benchmark_pool(pool).unwrap();
     add_pending(&mut join, context).await;
     let old = join.checkpoint(Epoch::INITIAL).unwrap();
-    assert!(join.state.deltas.pending.is_empty());
+    assert!(join.state.deltas.is_clean());
     add_pending(&mut join, context).await;
-    assert_eq!(join.state.deltas.pending.iter().count(), 3);
+    assert_eq!(join.state.deltas.pending_count_for_test(), 3);
     assert!(join.v2_writer.prepared.is_none());
     assert!(join.v2_writer.prepared_delta.is_none());
     (join, old)
@@ -137,54 +137,19 @@ fn segment_image(segment: &StateSegment) -> Value {
     })
 }
 
-fn pending_op_image(operation: &PendingOp) -> Value {
-    match operation {
-        PendingOp::Upsert {
-            side,
-            row_id,
-            event_time,
-            encoded_key,
-            record,
-            charge,
-        } => json!({
-            "side": side.as_str(), "row_id": row_id, "at": event_time.as_micros(),
-            "key": encoded_key.as_slice(), "key_owner": Arc::as_ptr(encoded_key) as usize,
-            "columns": record.columns().as_ptr() as usize, "offset": record.offset(),
-            "charge": charge,
-        }),
-        PendingOp::Tombstone {
-            side,
-            row_id,
-            event_time,
-            encoded_key,
-        } => json!({
-            "side": side.as_str(), "row_id": row_id, "at": event_time.as_micros(),
-            "key": encoded_key.as_slice(), "key_owner": Arc::as_ptr(encoded_key) as usize,
-        }),
-    }
-}
-
-fn pending_image(pending: &PendingLog) -> Value {
-    let slots = pending
-        .slots
-        .iter()
-        .map(|entry| {
-            entry.as_ref().map(|entry| json!({
-        "op": pending_op_image(&entry.op), "previous": entry.previous, "next": entry.next,
-    }))
-        })
-        .collect::<Vec<_>>();
-    let upserts = pending
-        .upserts
-        .iter()
-        .map(|((side, row), slot)| ((side.as_str(), *row), *slot))
-        .collect::<BTreeMap<_, _>>()
-        .into_iter()
-        .collect::<Vec<_>>();
+fn pending_image(deltas: &crate::operator::join::DeltaTracking) -> Value {
+    // The lazy dirty window image: watermarks, O(1) counters, and the exact
+    // recorded tombstone columns (spec FR1/FR2).
     json!({
-        "slots": slots, "slots_owner": pending.slots.as_ptr() as usize,
-        "free": pending.free, "head": pending.head, "tail": pending.tail,
-        "upserts": upserts,
+        "watermark": deltas.watermark,
+        "dirty": deltas.dirty,
+        "tombstones": deltas.tombstones.iter().map(|list| json!({
+            "row_ids": list.row_ids, "times": list.times,
+            "keys": list.keys.iter().map(|key| key.as_slice()).collect::<Vec<_>>(),
+            "keys_owner": list.keys.iter().map(|key| Arc::as_ptr(key) as usize)
+                .collect::<Vec<_>>(),
+            "capacity": list.keys.capacity(), "charged": list.charged,
+        })).collect::<Vec<_>>(),
     })
 }
 
@@ -218,7 +183,7 @@ fn capture_image(join: &StreamJoinOperator) -> Value {
         "epoch": state.last_checkpoint_epoch.map(Epoch::as_u64),
         "tracker": [writer.tracker.generation, writer.tracker.revision, writer.tracker.dirty_revision],
         "cut": format!("{:?}", writer.tracker.snapshot(state.last_checkpoint_epoch)),
-        "pending": pending_image(&state.deltas.pending),
+        "pending": pending_image(&state.deltas),
         "base": segments, "base_credit": std::ptr::from_ref(base.credit()) as usize,
         "base_funded": base.credit().size(), "payloads": base.payloads,
         "base_epoch": writer.base_epoch, "deltas": writer.deltas, "dirty_epochs": writer.dirty_epochs,
@@ -231,18 +196,13 @@ fn capture_image(join: &StreamJoinOperator) -> Value {
 }
 
 fn capture_records(join: &StreamJoinOperator) -> Vec<RecordBatch> {
+    // The derived delta encodes the live rows above the watermark directly
+    // (spec FR3), so refusal-preservation covers the retained records.
     join.state
         .left
         .iter()
         .chain(join.state.right.iter())
         .map(|row| row.record.view().clone())
-        .chain(join.state.deltas.pending.iter().filter_map(|op| {
-            if let PendingOp::Upsert { record, .. } = op {
-                Some(record.view().clone())
-            } else {
-                None
-            }
-        }))
         .collect()
 }
 
@@ -341,7 +301,7 @@ async fn assert_pending_capture_admission_failures(
             expected,
             "retry after admission {reject}"
         );
-        assert!(join.state.deltas.pending.is_empty());
+        assert!(join.state.deltas.is_clean());
         assert_eq!(
             join.state.last_checkpoint_epoch,
             Some(Epoch::new(2).unwrap())

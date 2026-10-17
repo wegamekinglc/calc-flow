@@ -339,6 +339,26 @@ impl NativeIndex {
             .store(self.resident_bytes(), Ordering::Relaxed);
     }
 
+    fn cut_prefix(&self, id: u32, expired: &dyn Fn(EventTime) -> bool) -> usize {
+        let run = self.slots[id as usize].as_ref().expect("live key ID");
+        run.active().partition_point(|entry| expired(entry.time))
+    }
+
+    /// Advances the run start by the cut, reporting whether it emptied.
+    fn advance_run(&mut self, id: u32, cut: usize) -> bool {
+        let run = self.slots[id as usize].as_mut().expect("live key ID");
+        run.start += cut;
+        run.start == run.rows.len()
+    }
+
+    fn retire_truncated(&mut self, count: usize, name: &str) -> crate::Result<()> {
+        self.rows = self
+            .rows
+            .checked_sub(count)
+            .ok_or_else(|| truncation_invariant(name, "truncated row count underflow"))?;
+        Ok(())
+    }
+
     pub(super) fn remove_stable<'a>(
         &mut self,
         row: &StoredRow,
@@ -346,6 +366,52 @@ impl NativeIndex {
         key_at: impl FnOnce(usize) -> &'a Arc<FramedKey>,
     ) {
         self.remove_resolved(row, key, None, key_at);
+    }
+
+    /// Truncates one key's time-sorted expired prefix in a single step
+    /// (spec FR12): advances `start`, releases the key slot when the run
+    /// empties, keeps the backing accounting exact, and refreshes the one
+    /// surviving owner whose row was cut. The `moved`/dense repair path is
+    /// unreachable from stable removals, so no replicated repair is needed.
+
+    pub(super) fn truncate_key<'a>(
+        &mut self,
+        key: &Arc<FramedKey>,
+        expected: u64,
+        expired: &dyn Fn(EventTime) -> bool,
+        key_at: impl FnOnce(usize) -> &'a Arc<FramedKey>,
+        name: &str,
+    ) -> crate::Result<()> {
+        let count = usize::try_from(expected)
+            .map_err(|_| truncation_invariant(name, "truncation count overflow"))?;
+        let hash = Self::hash(key);
+        let id = self
+            .find(hash, key)
+            .ok_or_else(|| truncation_invariant(name, "truncated key is not retained"))?;
+        let cut = self.cut_prefix(id, expired);
+        if cut != count {
+            return Err(truncation_invariant(
+                name,
+                "truncated prefix differs from the planned eviction",
+            ));
+        }
+        let emptied = self.advance_run(id, cut);
+        if emptied {
+            self.remove_key(hash, id);
+        } else {
+            self.refresh_key_owner(id, key_at);
+        }
+        self.retire_truncated(count, name)?;
+        if emptied && self.rows == 0 {
+            self.entries = HashTable::new();
+            self.slots = Vec::new();
+            self.free = Vec::new();
+        }
+        self.funding
+            .resident
+            .store(self.resident_bytes(), Ordering::Relaxed);
+        self.refund();
+        Ok(())
     }
 
     fn insert_key(&mut self, hash: u64, key: &Arc<FramedKey>, identity: Option<Lease>) -> u32 {
@@ -794,5 +860,13 @@ impl AppendCredit {
 impl Drop for AppendCredit {
     fn drop(&mut self) {
         self.funding.credit.shrink(self.bytes);
+    }
+}
+
+/// A violated monotone-with-gaps invariant is an internal error, never a
+/// silent mis-tombstone (spec FR15).
+fn truncation_invariant(name: &str, message: &str) -> crate::CalcFlowError {
+    crate::CalcFlowError::Internal {
+        message: format!("stream Join {name:?} native index truncation: {message}"),
     }
 }

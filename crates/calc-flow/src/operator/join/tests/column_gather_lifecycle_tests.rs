@@ -77,7 +77,7 @@ async fn assert_cancelled_columns(service: &TestService, cancel: bool, projected
     drop(process);
     assert_eq!(operator.state.next_left_row_id, 0);
     assert_eq!(operator.state.next_output_sequence, 0);
-    assert_eq!(operator.state.deltas.pending.iter().count(), 1);
+    assert_eq!(operator.state.deltas.pending_count_for_test(), 1);
     assert!(collector.drain("output").is_empty());
     assert!(operator.compaction_cleanup.is_some());
     operator.reset().unwrap();

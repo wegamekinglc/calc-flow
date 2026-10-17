@@ -1,4 +1,5 @@
 use super::*;
+use datafusion::arrow::array::ArrayRef;
 use sha2::{Digest, Sha256};
 
 #[path = "digest_tests.rs"]

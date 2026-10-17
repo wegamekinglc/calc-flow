@@ -3,10 +3,11 @@
 use super::{StoredRow, checkpoint_v2, retained::Rows};
 use crate::{CalcFlowError, EventTime, Result, StreamOperatorContext};
 use datafusion::execution::memory_pool::MemoryReservation;
+#[cfg(test)]
+use std::sync::Arc;
 use std::{
     cmp::Reverse,
     collections::{BTreeMap, BinaryHeap},
-    sync::Arc,
 };
 
 #[derive(Clone, Copy)]
@@ -240,8 +241,83 @@ impl ExpirationIndex {
         self.heads.push(Reverse((time, row_id, id)));
     }
 
+    #[cfg(test)]
     pub(super) fn first_time(&self, _rows: &dyn Rows) -> Option<EventTime> {
         self.heads.peek().map(|head| head.0.0)
+    }
+
+    /// The side's expiration credit that tombstone-list growth extends
+    /// (spec FR8).
+    pub(super) fn tombstone_origin(&self) -> Option<&MemoryReservation> {
+        self.origin.as_ref()
+    }
+
+    /// Read-only per-run expired prefix cuts (spec FR10): every run is
+    /// sorted by `(event_time, row_id)`, so the expired prefix is one
+    /// `partition_point` per run and cutting all runs equals today's
+    /// repeated global-head pops under the same predicate.
+    pub(super) fn expired_cuts(
+        &self,
+        rows: &dyn Rows,
+        expired: &dyn Fn(EventTime) -> bool,
+    ) -> Vec<(usize, usize)> {
+        self.runs
+            .iter()
+            .filter_map(|(&id, run)| {
+                let cut = run.entries[run.start..]
+                    .partition_point(|entry| expired(rows.identity(entry.index).0));
+                (cut > 0).then_some((id, cut))
+            })
+            .collect()
+    }
+
+    /// Stable coordinates of one run's planned expired prefix.
+    pub(super) fn run_entries(&self, id: usize, cut: usize) -> impl Iterator<Item = usize> + '_ {
+        let run = &self.runs[&id];
+        run.entries[run.start..run.start + cut]
+            .iter()
+            .map(|entry| entry.index)
+    }
+
+    /// Replays planned cuts: the heads heap is maintained once per cut run,
+    /// never per row (spec FR10). The heap minimum is only popped while it
+    /// is itself expired, so every planned run is consumed in one step.
+    pub(super) fn apply_cuts(
+        &mut self,
+        cuts: &[(usize, usize)],
+        rows: &dyn Rows,
+        expired: &dyn Fn(EventTime) -> bool,
+    ) {
+        let mut remaining = cuts
+            .iter()
+            .copied()
+            .collect::<std::collections::HashMap<_, _>>();
+        while let Some(&Reverse((time, _, _))) = self.heads.peek() {
+            if !expired(time) {
+                break;
+            }
+            let Reverse((_, _, id)) = self.heads.pop().expect("peeked expiration head");
+            #[cfg(test)]
+            super::note_join_work(|work| work.expiration_head_steps += 1);
+            let cut = remaining
+                .remove(&id)
+                .expect("expired head has a planned cut");
+            let run = self.runs.get_mut(&id).expect("live expiration run");
+            run.start += cut;
+            if let Some(next) = run.entries.get(run.start) {
+                let (time, row_id) = rows.identity(next.index);
+                self.heads.push(Reverse((time, row_id, id)));
+            } else {
+                self.runs.remove(&id);
+            }
+        }
+        debug_assert!(
+            remaining.is_empty(),
+            "every planned expiration cut was replayed"
+        );
+        if self.heads.is_empty() {
+            self.maximum = None;
+        }
     }
 
     pub(super) fn last_time(&self) -> Option<EventTime> {
@@ -254,6 +330,7 @@ impl ExpirationIndex {
         self.maximum = None;
     }
 
+    #[cfg(test)]
     pub(super) fn pop(&mut self, rows: &dyn Rows) -> Option<(usize, u128)> {
         let Reverse((_, _, id)) = self.heads.pop()?;
         #[cfg(test)]
@@ -273,6 +350,7 @@ impl ExpirationIndex {
         Some((entry.index, entry.ordinal))
     }
 
+    #[cfg(test)]
     pub(super) fn identities(
         &self,
         rows: &dyn Rows,

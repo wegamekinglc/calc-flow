@@ -94,26 +94,36 @@ fn assert_v1_base(segment: &StateSegment, rows: u64) {
 }
 
 fn pending(join: &StreamJoinOperator) -> Vec<(JoinSide, u64, i64, Option<u64>)> {
-    join.state
-        .deltas
-        .pending
-        .iter()
-        .map(|op| match op {
-            PendingOp::Upsert {
+    // The derived dirty window: live rows at or above the watermark read as
+    // upserts, recorded tombstones as removals (spec FR3).
+    let mut ops = Vec::new();
+    for (index, rows) in [(0usize, &join.state.left), (1usize, &join.state.right)] {
+        let side = if index == 0 {
+            JoinSide::Left
+        } else {
+            JoinSide::Right
+        };
+        let watermark = join.state.deltas.watermark[index];
+        let mut upserts = rows.references_from(watermark).collect::<Vec<_>>();
+        upserts.sort_unstable_by_key(|&position| rows.identity(position).1);
+        for position in upserts {
+            let (event_time, row_id) = rows.identity(position);
+            ops.push((
                 side,
                 row_id,
-                event_time,
-                charge,
-                ..
-            } => (*side, *row_id, event_time.as_micros(), Some(*charge)),
-            PendingOp::Tombstone {
-                side,
-                row_id,
-                event_time,
-                ..
-            } => (*side, *row_id, event_time.as_micros(), None),
-        })
-        .collect()
+                event_time.as_micros(),
+                Some(rows.charge(position)),
+            ));
+        }
+        let list = &join.state.deltas.tombstones[index];
+        let mut order = (0..list.len()).collect::<Vec<_>>();
+        order.sort_unstable_by_key(|&entry| list.row_ids[entry]);
+        for entry in order {
+            let (row_id, event_time, _) = list.entry(entry);
+            ops.push((side, row_id, event_time.as_micros(), None));
+        }
+    }
+    ops
 }
 
 fn assert_migration_refused(join: &mut StreamJoinOperator) {
@@ -158,7 +168,7 @@ async fn migrate(join: &mut StreamJoinOperator, context: &StreamOperatorContext<
     join.prepare_checkpoint_async(context).await.unwrap();
     assert_eq!(join.status(), state);
     assert_eq!(join.state.last_checkpoint_epoch, Epoch::new(CAPTURED));
-    assert!(join.state.deltas.pending.is_empty());
+    assert!(join.state.deltas.is_clean());
     assert!(
         join.state.deltas.base.is_empty(),
         "successful V2 migration must retire the absorbed V1 base"
@@ -365,7 +375,7 @@ fn assert_capture(snapshot: &OperatorStateSnapshot) {
     );
     assert_final(&restored);
     assert_eq!(restored.state.last_checkpoint_epoch, Epoch::new(NEXT));
-    assert!(restored.state.deltas.pending.is_empty());
+    assert!(restored.state.deltas.is_clean());
 }
 
 #[tokio::test]
@@ -390,7 +400,7 @@ async fn test_v2_writer_migrates_rich_v1_before_skipped_capture_and_eviction() {
     assert_final(&join);
     let captured = join.checkpoint(Epoch::new(NEXT).unwrap()).unwrap();
     assert_eq!(join.state.last_checkpoint_epoch, Epoch::new(NEXT));
-    assert!(join.state.deltas.pending.is_empty());
+    assert!(join.state.deltas.is_clean());
     assert_capture(&captured);
     assert_eq!(v1.inline_metadata, original.inline_metadata);
     assert_eq!(v1.segments, original.segments);

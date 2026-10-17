@@ -428,7 +428,7 @@ impl<'a, 'c> Decoder<'a, 'c> {
         repeated_ids: [bool; 2],
     ) -> Result<Prepared> {
         let [left, right] = rows;
-        let state = StreamJoinState {
+        let mut state = StreamJoinState {
             left_expirations: ExpirationIndex::restored_funded(&left, &self.workspace, self.check)?,
             right_expirations: ExpirationIndex::restored_funded(
                 &right,
@@ -443,11 +443,15 @@ impl<'a, 'c> Decoder<'a, 'c> {
             metrics: metadata.metrics,
             ended: metadata.ended,
             last_checkpoint_epoch: Epoch::new(metadata.epoch),
-            deltas: DeltaTracking {
-                needs_compaction: true,
-                ..DeltaTracking::default()
-            },
+            deltas: DeltaTracking::restored(
+                [metadata.next_left_row_id, metadata.next_right_row_id],
+                BTreeMap::new(),
+                BTreeMap::new(),
+                0,
+            ),
         };
+        // Restored V2 history must compact before its first capture.
+        state.deltas.needs_compaction = true;
         self.mark_live(&state)?;
         (self.check)()?;
         super::super::validate_restored_row_ids(repeated_ids, self.config.name)?;

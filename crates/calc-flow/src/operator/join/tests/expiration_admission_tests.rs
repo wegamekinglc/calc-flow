@@ -93,7 +93,7 @@ async fn test_restored_heap_growth_refusal_precedes_operator_output_and_allows_r
         assert_eq!(restored.status(), before);
         assert_eq!(restored.state.next_left_row_id, next_id);
         assert_eq!(restored.state.next_output_sequence, sequence);
-        assert!(restored.state.deltas.pending.is_empty());
+        assert!(restored.state.deltas.is_clean());
         pool.reject.store(false, Ordering::SeqCst);
         restored
             .process_data("left", left_batch(vec![1, 2]), &context, &mut output)
@@ -199,7 +199,7 @@ async fn test_restored_complete_expiry_preserves_funded_growth_refusal_and_retry
     );
     assert_eq!(restored.state.left.len(), 4);
     assert_eq!(restored.state.next_left_row_id, next_id + 4);
-    assert!(restored.state.deltas.pending.is_empty());
+    assert!(restored.state.deltas.is_clean());
     drop((messages, restored, progress));
     drop((source, source_context, snapshot, output));
     assert!(source_job.gather_owner().close_and_drain().await.is_empty());

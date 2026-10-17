@@ -87,7 +87,7 @@ pub(super) async fn assert_owned_process_data(service: &TestService) {
         "large process_data must use the actual paid native worker"
     );
     assert_eq!(operator.state.next_left_row_id, 8_192);
-    assert_eq!(operator.state.deltas.pending.iter().count(), 8_193);
+    assert_eq!(operator.state.deltas.pending_count_for_test(), 8_193);
     {
         let observed = observed.lock().unwrap();
         assert_eq!(observed.len(), 2);
@@ -253,7 +253,7 @@ async fn assert_abandoned_probe(
         );
     }
     assert_eq!(operator.state.next_left_row_id, 0);
-    assert_eq!(operator.state.deltas.pending.iter().count(), 1);
+    assert_eq!(operator.state.deltas.pending_count_for_test(), 1);
     assert!(collector.drain("output").is_empty());
     assert!(job_context.gather_owner().funding().2 > 0);
     assert!(operator.probe_control.as_ref().unwrap().size() > 0);
@@ -309,7 +309,7 @@ async fn resume_abandoned_probe(
         .unwrap();
     assert_literal_output(&mut collector, PROBE_ROWS, 0);
     assert_eq!(operator.state.next_left_row_id, 8_192);
-    assert_eq!(operator.state.deltas.pending.iter().count(), 8_193);
+    assert_eq!(operator.state.deltas.pending_count_for_test(), 8_193);
     assert_eq!(
         Arc::strong_count(operator.state.right.1.as_ref().unwrap()),
         1
@@ -396,7 +396,7 @@ pub(super) async fn assert_refused_process_data(service: &TestService) {
     assert_eq!(join_work().key_encodings, 0);
     assert_eq!(operator.state.next_left_row_id, 8_193);
     assert_eq!(operator.state.metrics.emitted_match_rows, 8_193);
-    assert_eq!(operator.state.deltas.pending.iter().count(), 8_194);
+    assert_eq!(operator.state.deltas.pending_count_for_test(), 8_194);
     drop(operator);
     drop(context);
     assert!(job.gather_owner().close_and_drain().await.is_empty());

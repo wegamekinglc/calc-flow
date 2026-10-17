@@ -52,7 +52,7 @@ async fn test_off_final_watermark_retires_whole_side_without_per_row_index_work(
     assert_eq!(operator.state.next_left_row_id, 65);
     assert_eq!(operator.state.metrics.emitted_match_rows, 65);
     assert!(!operator.state.ended);
-    assert!(operator.state.deltas.pending.is_empty());
+    assert!(operator.state.deltas.is_clean());
     assert!(output.drain("output").is_empty());
     assert!(!operator.has_sparse_candidates());
     drop((operator, context, progress));

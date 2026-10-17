@@ -9,6 +9,20 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-18: Derive Join checkpoint deltas lazily and evict expired rows
+  in bulk. Checkpointing no longer records one upsert per admitted row and
+  one tombstone per evicted row: each side keeps a captured row_id
+  watermark, upserts are derived from live state above the watermark at
+  capture, and only below-watermark evictions enter a compact columnar
+  tombstone list. Eviction cuts each sorted expiration run once, clears
+  state chunks and native key runs per prefix, and retires dictionary
+  references in aggregated counts. Checkpoint bytes for identical
+  schedules are unchanged (oracle-tested against the old pending-log
+  encoding), restores of old checkpoints are accepted unchanged, and the
+  fresh-preparation watermark freeze that guards against row loss is
+  pinned by its counterexample test. Interleaved A/B on
+  engines/1000000/calc-flow-stream/interval_join: 1595 -> 1365 ms median
+  (about -14.5%); stream join and projection are unchanged.
 - 2026-10-17: Drive the Join time-window probe through per-key window
   cursors instead of two binary searches per counted row and two more per
   filled row. Serial and gather probes now advance monotone cursors by

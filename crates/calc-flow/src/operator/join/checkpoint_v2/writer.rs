@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use datafusion::{arrow::datatypes::SchemaRef, execution::memory_pool::MemoryReservation};
 
-use super::super::{PendingOp, StreamJoinOperator};
+use super::super::StreamJoinOperator;
 use super::{
     budget as restore_budget,
     ipc::accounting::{self, sum},
@@ -160,7 +160,7 @@ impl WriterState {
 
 struct Inputs {
     rows: [Option<Arc<crate::operator::join::StateRows>>; 2],
-    pending: Option<Vec<PendingOp>>,
+    delta: Option<encode::CopiedDelta>,
     rebase_pending: Option<encode::rebase::PendingInput>,
     history: Option<encode::rebase::HistoryInput>,
     containers: Option<Arc<super::ContainerFunding>>,
@@ -171,7 +171,7 @@ impl Drop for Inputs {
     fn drop(&mut self) {
         drop(self.rows[0].take());
         drop(self.rows[1].take());
-        drop(self.pending.take());
+        drop(self.delta.take());
         drop(self.rebase_pending.take());
         drop(self.history.take());
         self.containers = None;
@@ -262,9 +262,27 @@ impl WriterWork {
         if let Some(history) = self.inputs.history.take() {
             return self.encode_history(history, stop);
         }
-        if let Some(pending) = &self.inputs.pending {
-            return encode::pending_owned(
-                pending,
+        if let Some(delta) = &self.inputs.delta {
+            let sides = self.inputs.rows.each_ref().map(|rows| {
+                rows.as_ref().expect("owned V2 delta input").as_ref()
+                    as &dyn crate::operator::join::Rows
+            });
+            let sides = [
+                encode::SideDelta {
+                    rows: sides[0],
+                    watermark: delta.watermark[0],
+                    upserts: delta.upserts[0],
+                    tombstones: &delta.tombstones[0],
+                },
+                encode::SideDelta {
+                    rows: sides[1],
+                    watermark: delta.watermark[1],
+                    upserts: delta.upserts[1],
+                    tombstones: &delta.tombstones[1],
+                },
+            ];
+            return encode::dirty(
+                &sides,
                 &self.schemas,
                 Epoch::INITIAL,
                 &self.workspace,
@@ -318,7 +336,7 @@ impl StreamJoinOperator {
             None
         } else if self.state.last_checkpoint_epoch.is_none() || self.v2_writer.dirty_epochs >= 4 {
             Some(Preparation::Base)
-        } else if !self.state.deltas.pending.is_empty() {
+        } else if !self.state.deltas.is_clean() {
             Some(Preparation::Delta)
         } else {
             None
@@ -398,10 +416,18 @@ impl StreamJoinOperator {
             self.v2_writer.prepared = None;
             self.v2_writer.prepared_delta = None;
             self.v2_writer.migration_required = false;
-            self.state.deltas.pending.clear();
+            // The installed base persists every live row, so the capture
+            // watermark advances and the lists drain exactly where the
+            // pending log used to clear (spec FR5).
+            self.state
+                .deltas
+                .drained_at_capture([self.state.next_left_row_id, self.state.next_right_row_id]);
             self.retire_v1_checkpoint_history();
             self.v2_writer.tracker = tracker;
         } else {
+            // The fresh branch deliberately keeps the dirty window: the
+            // prepared base may never be captured, and the first capture
+            // re-encodes everything above the watermark (spec FR6).
             self.v2_writer.prepared = Some(PreparedBase { cut, base });
         }
         self.v2_writer.history_trusted = true;
@@ -522,7 +548,7 @@ impl StreamJoinOperator {
     ) -> Result<Inputs> {
         let mut inputs = Inputs {
             rows: [None, None],
-            pending: None,
+            delta: None,
             rebase_pending: None,
             history: None,
             containers: None,
@@ -538,15 +564,17 @@ impl StreamJoinOperator {
             }
             Preparation::Delta => {
                 inputs.containers.clone_from(&self.v2_containers);
-                inputs.pending = Some(encode::copy_pending(
-                    &self.state.deltas.pending,
-                    workspace,
-                    &|| context.check_cancelled(),
-                )?);
+                inputs.rows = [
+                    Some(Arc::clone(&self.state.left.0)),
+                    Some(Arc::clone(&self.state.right.0)),
+                ];
+                inputs.delta = Some(encode::copy_delta(&self.state.deltas, workspace, &|| {
+                    context.check_cancelled()
+                })?);
             }
             Preparation::Rebase => {
                 inputs.history = Some(encode::rebase::copy(self, workspace, context).await?);
-                if !self.state.deltas.pending.is_empty() {
+                if !self.state.deltas.is_clean() {
                     inputs.rebase_pending =
                         Some(encode::rebase::PendingInput::copy(self, workspace, context).await?);
                 }
@@ -572,13 +600,15 @@ impl StreamJoinOperator {
         let tracker = self
             .v2_writer
             .tracker
-            .advanced(!self.state.deltas.pending.is_empty())?;
+            .advanced(!self.state.deltas.is_clean())?;
         let snapshot = if self.fresh_v2_preparation_matches() {
             self.capture_initial_prepared(epoch, &credit)?
         } else {
             self.capture_v2_dirty(epoch, &credit)?
         };
-        self.state.deltas.pending.clear();
+        self.state
+            .deltas
+            .drained_at_capture([self.state.next_left_row_id, self.state.next_right_row_id]);
         self.v2_writer.history_identity = Some(self.checkpoint_identity);
         self.state.last_checkpoint_epoch = Some(epoch);
         self.v2_writer.tracker = tracker;
@@ -675,7 +705,7 @@ impl StreamJoinOperator {
             Arc::clone(self.retained_schema(1)),
         ];
         let empty = self.v2_empty_base(&schemas, &workspace)?;
-        if self.state.deltas.pending.is_empty() {
+        if self.state.deltas.is_clean() {
             self.capture_v2_clean(epoch, empty, credit)
         } else {
             self.capture_v2_pending(epoch, &schemas, &workspace, empty, credit)
@@ -772,13 +802,23 @@ impl StreamJoinOperator {
                 .expect("matching dirty preparation");
             return encode::retarget::at_epoch(prepared.base, epoch);
         }
-        encode::pending(
-            &self.state.deltas.pending,
-            schemas,
-            epoch,
-            workspace,
-            &|| Ok(()),
-        )
+        // The synchronous fallback derives both sides from the live state
+        // above their watermarks (spec FR3/FR8).
+        let left = encode::SideDelta {
+            rows: &self.state.left,
+            watermark: self.state.deltas.watermark[0],
+            upserts: usize::try_from(self.state.deltas.dirty[0])
+                .map_err(|_| buffer::error("V2 delta dirty row count overflow"))?,
+            tombstones: &self.state.deltas.tombstones[0],
+        };
+        let right = encode::SideDelta {
+            rows: &self.state.right,
+            watermark: self.state.deltas.watermark[1],
+            upserts: usize::try_from(self.state.deltas.dirty[1])
+                .map_err(|_| buffer::error("V2 delta dirty row count overflow"))?,
+            tombstones: &self.state.deltas.tombstones[1],
+        };
+        encode::dirty(&[left, right], schemas, epoch, workspace, &|| Ok(()))
     }
 
     fn next_v2_dirty_epoch(&self) -> Result<u32> {

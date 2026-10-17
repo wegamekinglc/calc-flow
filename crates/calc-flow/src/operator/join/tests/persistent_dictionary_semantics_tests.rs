@@ -328,7 +328,7 @@ async fn test_persistent_dictionary_partial_emit_failure_does_not_publish_keys_o
         .unwrap();
     let canonical = Arc::clone(operator.state.right.key_at(0));
     let inventory = operator.key_dictionary.inventory();
-    let pending = operator.state.deltas.pending.iter().count();
+    let pending = operator.state.deltas.pending_count_for_test();
     let mut failed = FailSecond {
         accepted: Vec::new(),
     };
@@ -348,7 +348,7 @@ async fn test_persistent_dictionary_partial_emit_failure_does_not_publish_keys_o
     assert_eq!(operator.state.next_left_row_id, 0);
     assert!(operator.state.left.is_empty());
     assert_eq!(operator.key_dictionary.inventory(), inventory);
-    assert_eq!(operator.state.deltas.pending.iter().count(), pending);
+    assert_eq!(operator.state.deltas.pending_count_for_test(), pending);
     operator
         .process_data(
             "left",
@@ -498,7 +498,7 @@ async fn refused_capture_publication(
     let before = target.status();
     let inventory = target.key_dictionary.inventory();
     let writer = target.v2_writer.observation_for_test();
-    let pending = target.state.deltas.pending.iter().count();
+    let pending = target.state.deltas.pending_count_for_test();
     pool.refuse.store(true, Ordering::SeqCst);
     *pool.cancel.lock().unwrap() = Some(owner.cancellation().clone());
     let result = target
@@ -516,7 +516,7 @@ async fn refused_capture_publication(
             target.status() == before
                 && target.key_dictionary.inventory() == inventory
                 && target.v2_writer.observation_for_test() == writer
-                && target.state.deltas.pending.iter().count() == pending
+                && target.state.deltas.pending_count_for_test() == pending
         }
         Err(error) => panic!("unexpected restore error: {error}"),
     };

@@ -125,7 +125,41 @@ fn delta(ops: &[crate::operator::join::PendingOp]) -> Vec<u8> {
     bytes.extend_from_slice(&u64::try_from(ops.len()).unwrap().to_le_bytes());
     let mut encoder = crate::operator::join::row_ipc::RowIpcEncoder::default();
     for op in ops {
-        crate::operator::join::encode_delta_op(&mut bytes, op, &mut encoder, "match").unwrap();
+        match op {
+            crate::operator::join::PendingOp::Upsert {
+                row_id,
+                event_time,
+                encoded_key,
+                record,
+                charge,
+                ..
+            } => {
+                let payload = crate::operator::join::PayloadRef::from(record);
+                crate::operator::join::encode_delta_upsert(
+                    &mut bytes,
+                    *row_id,
+                    *event_time,
+                    encoded_key,
+                    *charge,
+                    &payload,
+                    &mut encoder,
+                    "match",
+                    op.side(),
+                )
+                .unwrap();
+            }
+            crate::operator::join::PendingOp::Tombstone {
+                row_id,
+                event_time,
+                encoded_key,
+                ..
+            } => crate::operator::join::encode_delta_tombstone(
+                &mut bytes,
+                *row_id,
+                *event_time,
+                encoded_key,
+            ),
+        }
     }
     bytes
 }

@@ -57,6 +57,7 @@ impl SideBindings {
             .map(|binding| &binding.lease)
     }
 
+    #[cfg(test)]
     pub(in crate::operator::join) fn canonical<'a>(
         &'a self,
         row: &'a super::super::StoredRow,

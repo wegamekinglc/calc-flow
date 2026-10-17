@@ -282,7 +282,7 @@ fn scaled_replacement_observation(
         "phase": phase,
         "pool": pool.snapshot(),
         "left_rows": operator.status().left.retained_rows,
-        "pending_changes": operator.state.deltas.pending.iter().count(),
+        "pending_changes": operator.state.deltas.pending_count_for_test(),
         "base_writer_calls": bases.load(Ordering::SeqCst),
     })
 }

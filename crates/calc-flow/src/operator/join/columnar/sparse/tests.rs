@@ -216,21 +216,9 @@ async fn check_replacement_and_restore(service: &TestService) {
     assert!(!Arc::ptr_eq(&old_chunk, &new_chunk));
     assert_eq!(join.sparse_position(0, &old_chunk, 1_023), None);
     assert_eq!(join.sparse_position(0, &new_chunk, new_source), Some(1_023));
-    let upsert = join
-        .state
-        .deltas
-        .pending
-        .iter()
-        .find_map(|op| match op {
-            PendingOp::Upsert {
-                side: JoinSide::Left,
-                record,
-                ..
-            } => Some(record),
-            _ => None,
-        })
-        .unwrap();
-    assert!(upsert.belongs_to(&new_chunk, new_source));
+    // The derived capture reads the live state at encode time, so the
+    // repaired payload binds automatically (spec FR3): the round-trip below
+    // carries the repaired chunk through the checkpoint.
     feed(&mut join, "right", vec![1_025, 1_023], &context).await;
     let snapshot = join.checkpoint_v1(Epoch::INITIAL).unwrap();
     let mut restored = operator();

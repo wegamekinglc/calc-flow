@@ -536,10 +536,26 @@ impl Dictionary {
         };
         let id = lease.address().slot();
         drop(lease);
+        self.retire_slot(id, 1, name)
+    }
+
+    /// Aggregated retirement (spec FR13): decrements one key's retained
+    /// count once for a whole evicted prefix with the same zero-crossing
+    /// behavior and `counter_overflow` identity as per-row retirement.
+    pub(super) fn retire_n(&mut self, key: &Arc<FramedKey>, count: u64, name: &str) -> Result<()> {
+        let Some(lease) = self.lease(key) else {
+            return Ok(());
+        };
+        let id = lease.address().slot();
+        drop(lease);
+        self.retire_slot(id, count, name)
+    }
+
+    fn retire_slot(&mut self, id: u32, count: u64, name: &str) -> Result<()> {
         let entry = self.slots[id as usize].as_mut().unwrap();
         entry.retained = entry
             .retained
-            .checked_sub(1)
+            .checked_sub(count)
             .ok_or_else(|| counter_overflow(name, "key_references"))?;
         if entry.retained > 0 {
             return Ok(());
