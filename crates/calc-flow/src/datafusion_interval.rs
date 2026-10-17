@@ -130,12 +130,12 @@ fn evaluate_typed<T: ArrowTimestampType>(
             subtract,
         ),
         (ColumnarValue::Scalar(ts), ColumnarValue::Array(iv)) => evaluate_scalar_timestamp(
-            ts.to_array()?.as_primitive::<T>().clone(),
+            ts.to_array()?.as_primitive::<T>(),
             iv.as_primitive::<IntervalMonthDayNanoType>(),
             subtract,
         ),
         (ColumnarValue::Scalar(ts), ColumnarValue::Scalar(iv)) => {
-            evaluate_scalar_pair::<T>(ts.to_array()?, iv.to_array()?, subtract)
+            evaluate_scalar_pair::<T>(&ts.to_array()?, &iv.to_array()?, subtract)
         }
     }
 }
@@ -176,8 +176,8 @@ fn evaluate_scalar_timestamp<T: ArrowTimestampType>(
 
 /// Two scalars evaluate to one row, staying scalar-valued.
 fn evaluate_scalar_pair<T: ArrowTimestampType>(
-    ts: ArrayRef,
-    iv: ArrayRef,
+    ts: &ArrayRef,
+    iv: &ArrayRef,
     subtract: bool,
 ) -> Result<ColumnarValue> {
     let result = evaluate_arrays(
