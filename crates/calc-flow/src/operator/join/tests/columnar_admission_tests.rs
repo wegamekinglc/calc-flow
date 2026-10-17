@@ -701,7 +701,7 @@ async fn sparse_admitted(
         admitted.push_ready(
             index,
             physical,
-            EventTime::from_micros(physical as i64),
+            EventTime::from_micros(i64::try_from(physical).expect("test offsets fit i64")),
             retain,
         );
     }

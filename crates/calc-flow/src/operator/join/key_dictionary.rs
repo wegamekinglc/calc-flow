@@ -1324,5 +1324,5 @@ fn local_table_bytes(rows: usize) -> Option<usize> {
             + size_of::<local::Plan>()
             + 10,
     )?
-    .checked_add(1024)
+    .checked_add(64)
 }
