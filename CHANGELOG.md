@@ -9,6 +9,19 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-18: Admit Join rows through retain bitmaps, zero-copy views and
+  batch-local key interning. Groups whose rows are all expired are skipped
+  wholesale in retained-row assembly, charging and payload projection (the
+  projection becomes a buffer-sharing view); mixed groups visit only the
+  retained bits. Key identities are deduplicated per batch by typed column
+  hashing and each DISTINCT key is resolved against the persistent
+  dictionary once, with ids broadcast back and references aggregated, so
+  births, ordering and checkpoint identities are bit-identical to the
+  per-row path (dual-path equivalence tests included). Interleaved A/B on
+  engines/1000000/calc-flow-stream: join medians fell from 314-348 ms to
+  115-128 ms (about 2.5-3x; independent reviewer spot-check 290 -> 102 ms)
+  and interval_join fell 11-16%; the 64-key workload now pays 64
+  dictionary probes per 65,536-row batch instead of one per row.
 - 2026-10-18: Derive Join checkpoint deltas lazily and evict expired rows
   in bulk. Checkpointing no longer records one upsert per admitted row and
   one tombstone per evicted row: each side keeps a captured row_id

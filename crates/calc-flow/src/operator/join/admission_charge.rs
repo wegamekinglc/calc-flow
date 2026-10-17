@@ -31,9 +31,12 @@ pub(super) struct PayloadCharges {
 }
 
 impl PayloadCharges {
+    /// `rows` covers exactly one bounded block; `selected` carries that
+    /// block's retained bits, and only those rows are positioned, charged,
+    /// and later read back.
     pub(super) async fn new(
         rows: AdmittedGroup<'_>,
-        range: Range<usize>,
+        selected: u64,
         context: &StreamOperatorContext<'_>,
         quantum: &mut Quantum,
     ) -> Result<Self> {
@@ -42,20 +45,23 @@ impl PayloadCharges {
             charges: [0; BLOCK],
             selected: 0,
             failed: 0,
-            len: range.len(),
+            len: rows.len(),
         };
-        assert!(range.len() <= BLOCK);
-        for (offset, index) in range.clone().enumerate() {
-            let row = rows.row(index);
-            result.positions[offset] = row.record.offset();
-            result.selected |= u64::from(row.retain) << offset;
-        }
-        if result.selected == 0 {
+        assert!(result.len <= BLOCK);
+        debug_assert_eq!(selected & !low_bits(result.len), 0);
+        result.selected = selected;
+        if selected == 0 {
             return Ok(result);
         }
+        for (offset, (position, retain)) in rows.key_offsets().enumerate() {
+            if retain {
+                result.positions[offset] = position;
+            }
+        }
+        let selected_rows = selected.count_ones() as usize;
         let mut constant = Some(0_u64);
-        for array in rows.row(range.start).record.columns() {
-            quantum.step(context, result.len, 0).await?;
+        for array in rows.row(0).record.columns() {
+            quantum.step(context, selected_rows, 0).await?;
             result.add_column(array.as_ref(), &mut constant);
         }
         for index in 0..result.len {
@@ -90,14 +96,22 @@ impl PayloadCharges {
     }
 
     fn valid(&self, array: &dyn Array) -> u64 {
-        if self.positions[0].checked_add(self.len - 1) == Some(self.positions[self.len - 1]) {
+        // Only selected rows are charged, so the dense bitmap word applies
+        // when the whole block survives and its positions stay contiguous.
+        if self.selected == low_bits(self.len)
+            && self.positions[0].checked_add(self.len - 1) == Some(self.positions[self.len - 1])
+        {
             return valid_bits(array, self.positions[0], self.len);
         }
         #[cfg(test)]
-        super::note_join_work(|work| work.charge_sparse_validity_visits += self.len);
-        (0..self.len).fold(0, |bits, index| {
-            bits | (u64::from(array.is_valid(self.positions[index])) << index)
-        })
+        super::note_join_work(|work| {
+            work.charge_sparse_validity_visits += self.selected.count_ones() as usize;
+        });
+        let mut bits = 0;
+        visit_bits(self.selected, |index| {
+            bits |= u64::from(array.is_valid(self.positions[index])) << index;
+        });
+        bits
     }
 
     fn add(&mut self, index: usize, value: Option<u64>) {

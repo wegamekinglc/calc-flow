@@ -107,6 +107,23 @@ impl RetainBits {
         assert!(index < self.len);
         self.words.get(index / 64) & (1_u64 << (index % 64)) != 0
     }
+    /// Retained bits for a window of at most 64 rows; bit `i` marks row
+    /// `start + i`. Windows may straddle two words.
+    pub(super) fn bits(&self, start: usize, length: usize) -> u64 {
+        debug_assert!(start + length <= self.len);
+        if length == 0 {
+            return 0;
+        }
+        let index = start / 64;
+        let offset = start % 64;
+        let low = self.words.get(index) >> offset;
+        let bits = if offset + length <= 64 {
+            low
+        } else {
+            low | (self.words.get(index + 1) << (64 - offset))
+        };
+        bits & low_bits(length)
+    }
     pub(super) fn any(&self, range: Range<usize>) -> bool {
         if range.is_empty() {
             return false;
@@ -283,4 +300,12 @@ fn note_promotion(count: usize) {
 pub(super) fn metadata_bytes(rows: usize) -> Option<usize> {
     rows.checked_mul(size_of::<usize>() + size_of::<i64>() + size_of::<u64>())?
         .checked_add(rows.div_ceil(64).checked_mul(size_of::<u64>())?)
+}
+
+fn low_bits(length: usize) -> u64 {
+    if length == 64 {
+        u64::MAX
+    } else {
+        (1_u64 << length) - 1
+    }
 }
