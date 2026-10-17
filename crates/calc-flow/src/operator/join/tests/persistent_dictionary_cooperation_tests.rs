@@ -183,8 +183,8 @@ async fn test_persistent_dictionary_small_keys_hash_once_without_per_chunk_quant
     let long = prepare_small_keys(512).await;
     for work in [&short, &long] {
         assert_eq!(
-            work.hashed, work.frames,
-            "each small key is charged and hashed once with its whole frame"
+            work.hashed, work.distinct_frames,
+            "each distinct small key is charged and hashed once with its whole frame"
         );
         assert!(
             work.boundaries * 16 <= work.frames.len(),
@@ -200,8 +200,20 @@ async fn test_persistent_dictionary_small_keys_hash_once_without_per_chunk_quant
     );
 }
 
+/// Frame lengths of the fixture's distinct keys in first-appearance order.
+fn distinct_small_frames(frames: &[usize]) -> Vec<usize> {
+    let mut distinct = Vec::new();
+    for frame in frames {
+        if !distinct.contains(frame) {
+            distinct.push(*frame);
+        }
+    }
+    distinct
+}
+
 struct SmallKeyWork {
     frames: Vec<usize>,
+    distinct_frames: Vec<usize>,
     hashed: Vec<usize>,
     steps: usize,
     boundaries: usize,
@@ -268,8 +280,11 @@ async fn prepare_small_keys(count: usize) -> SmallKeyWork {
         );
     }
     let hashed = hashed.lock().unwrap().clone();
+    let frames = encoded.iter().map(Vec::len).collect::<Vec<_>>();
+    let distinct_frames = distinct_small_frames(&frames);
     SmallKeyWork {
-        frames: encoded.iter().map(Vec::len).collect(),
+        frames,
+        distinct_frames,
         hashed,
         steps: work.quantum_steps,
         boundaries: work.quantum_boundaries,

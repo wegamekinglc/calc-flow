@@ -428,12 +428,18 @@ async fn assert_retained_probe_keys_release_batch_scratch(
     let context = StreamOperatorContext::new(&job, "match", None);
     let source = right_batch(vec![0; rows]);
     let (plan, admitted) = admitted_probe(&mut operator, "right", &source, &context).await;
+    // Preparation first funds the batch-local interning table; a refusal of
+    // that tier falls back to the per-row path, whose smaller scratch peak is
+    // the actual exhaustion boundary.
+    let forced = key_dictionary::force_per_row_keys();
+    let fallback = probe_funding::preparation_peak(&mut operator, &plan, &admitted, &observed);
+    drop(forced);
     let original = probe_funding::preparation_peak(&mut operator, &plan, &admitted, &observed);
     let runtime = operator.runtime.runtime().unwrap();
     let pool = runtime.incremental_memory_pool();
     let pressure = runtime.incremental_reservation("native-key-lifetime-pressure");
     pressure
-        .try_grow((1 << 30) - pool.reserved() - (original - 1))
+        .try_grow((1 << 30) - pool.reserved() - (fallback - 1))
         .unwrap();
     let full = pool.reserved();
     assert!(

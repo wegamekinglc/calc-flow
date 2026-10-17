@@ -327,8 +327,8 @@ async fn test_columnar_charge_partial_block_cancel_and_abandon_release_workspace
             }
             reset_join_work();
             let mut future = Box::pin(admission_charge::PayloadCharges::new(
-                rows,
-                0..64,
+                rows.block(0, 64),
+                u64::MAX,
                 &context,
                 &mut quantum,
             ));
