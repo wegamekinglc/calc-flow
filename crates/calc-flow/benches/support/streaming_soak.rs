@@ -3033,7 +3033,8 @@ impl PrivateFullRunnerFixture {
         assert_eq!(self.runner.registry_counts(), (0, 0));
         assert_eq!(self.source_closed.load(Ordering::SeqCst), 2);
         assert_eq!(self.sink_closed.load(Ordering::SeqCst), 2);
-        let manifest_count = checkpoint_manifest_count(&self.directory.path().join("manifests"));
+        let manifests = self.directory.path().join("manifests");
+        let mut manifest_count = checkpoint_manifest_count(&manifests);
         let visible_records = if matches!(self.mode, PrivateFullRunnerMode::NoCheckpoint) {
             self.sink_writes.load(Ordering::SeqCst)
         } else {
@@ -3047,7 +3048,24 @@ impl PrivateFullRunnerFixture {
         match self.mode {
             PrivateFullRunnerMode::NoCheckpoint => assert_eq!(manifest_count, 0),
             PrivateFullRunnerMode::CheckpointDisabled => assert_eq!(manifest_count, 1),
-            PrivateFullRunnerMode::CheckpointEnabled => assert!(manifest_count >= 2),
+            PrivateFullRunnerMode::CheckpointEnabled => {
+                // The auto-checkpoint interval is one millisecond, but on a
+                // loaded runner the manifest publication can lag shutdown.
+                // Wait briefly for the directory to catch up before failing;
+                // a count that never arrives means checkpoints genuinely did
+                // not happen, which stays a real failure.
+                let deadline = std::time::Instant::now() + Duration::from_secs(30);
+                while manifest_count < 2 && std::time::Instant::now() < deadline {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    manifest_count = checkpoint_manifest_count(&manifests);
+                }
+                assert!(
+                    manifest_count >= 2,
+                    "checkpoint-enabled case produced {manifest_count} manifests \
+                     (last completed epoch: {restored_epoch:?}); mid-run auto \
+                     checkpoints did not happen"
+                );
+            }
         }
         PrivateCheckpointBenchmarkReport {
             completed_jobs: 1,
