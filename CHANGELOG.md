@@ -9,6 +9,19 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-17: Add a synchronous small-key fast path for Join key identities,
+  repairing part of the roughly 5× stream-join regression from PR #427. Keys
+  whose framed bytes fit one copy quantum (at most 4096 bytes and fewer
+  than 64 columns) hash, probe and compare synchronously after a single
+  cooperative charge per row; larger keys keep the chunked async path, and
+  cancellation is still observed per row and per collision-chain candidate.
+  Hash and equality bytes are bit-identical to the chunked path, so
+  dictionary, restore and checkpoint identities are unchanged. In
+  interleaved A/B runs of `engines/1000000/calc-flow-stream/join`, timings
+  fell from 492/496 ms to 370/372 ms (about 25%); key-identity preparation
+  fell from 44% to 31% of Join CPU. The remaining gap to the pre-#427
+  level of about 95 ms needs dictionary bookkeeping redesign and is
+  tracked separately.
 - 2026-10-17: Amortize Join projected-copy stop checks. Row scans in the
   selected-copy path (`checkpoint_v2/projected_copy` with its views and
   dictionary remap) check cancellation, deadline and abandonment once per
