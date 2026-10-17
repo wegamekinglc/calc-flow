@@ -496,20 +496,78 @@ impl NativeIndex {
             .len()
     }
 
+    /// Uncached window search, kept as the reference the tests compare every
+    /// cursor-advanced bound against.
+    #[cfg(test)]
     fn window_by_id(&self, id: u32, range: (EventTime, EventTime)) -> &[RunEntry] {
         let run = self.slots[id as usize]
             .as_ref()
             .expect("live key ID")
             .active();
         let lower = run.partition_point(|entry| boundary(entry.time, range.0, false));
+        #[cfg(test)]
+        note_window_run_search();
         let upper = run.partition_point(|entry| boundary(entry.time, range.1, true));
+        #[cfg(test)]
+        note_window_run_search();
         &run[lower..upper]
     }
 
-    pub(super) fn count_window_by_id(&self, id: u32, range: (EventTime, EventTime)) -> usize {
-        self.window_by_id(id, range).len()
+    /// Exact `[lower, upper)` window bounds for `range`, reusing `cursor`
+    /// when the window only moves forward — the common case for
+    /// event-time-ordered probes — and falling back to a full search when the
+    /// new window starts before the cached one. Bounds always equal the plain
+    /// `window_by_id` search.
+    pub(super) fn window_bounds_by_id(
+        &self,
+        id: u32,
+        range: (EventTime, EventTime),
+        cursor: Option<WindowCursor>,
+    ) -> WindowBounds {
+        let run = self.slots[id as usize]
+            .as_ref()
+            .expect("live key ID")
+            .active();
+        let Some(cursor) =
+            cursor.filter(|cursor| range.0 >= cursor.range.0 && range.1 >= cursor.range.1)
+        else {
+            let lower = run.partition_point(|entry| boundary(entry.time, range.0, false));
+            #[cfg(test)]
+            note_window_run_search();
+            let upper = run.partition_point(|entry| boundary(entry.time, range.1, true));
+            #[cfg(test)]
+            note_window_run_search();
+            return WindowBounds { lower, upper };
+        };
+        let lower = advance_partition_point(run, cursor.bounds.lower, |entry| {
+            boundary(entry.time, range.0, false)
+        });
+        let upper = advance_partition_point(run, lower.max(cursor.bounds.upper), |entry| {
+            boundary(entry.time, range.1, true)
+        });
+        WindowBounds { lower, upper }
     }
 
+    /// Dense indices of a run slice described by previously computed bounds.
+    pub(super) fn range_by_bounds(
+        &self,
+        id: u32,
+        bounds: WindowBounds,
+    ) -> impl Iterator<Item = usize> + '_ {
+        let run = self.slots[id as usize]
+            .as_ref()
+            .expect("live key ID")
+            .active();
+        run[bounds.lower..bounds.upper].iter().map(|entry| {
+            #[cfg(test)]
+            super::note_join_work(|work| work.native_range_visits += 1);
+            entry.dense
+        })
+    }
+
+    /// Uncached window visit order, kept as the test reference for
+    /// cursor-advanced fills.
+    #[cfg(test)]
     pub(super) fn range_by_id(
         &self,
         id: u32,
@@ -569,6 +627,59 @@ impl NativeIndex {
     }
 }
 
+// Test-only per-thread count of full-run window binary searches, so probe
+// work stays observable as O(distinct keys + out-of-order fallbacks) instead
+// of per row, without racing parallel tests.
+#[cfg(test)]
+thread_local! {
+    static WINDOW_RUN_SEARCHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn note_window_run_search() {
+    WINDOW_RUN_SEARCHES.set(WINDOW_RUN_SEARCHES.get() + 1);
+}
+
+#[cfg(test)]
+pub(super) fn reset_window_run_searches() {
+    WINDOW_RUN_SEARCHES.set(0);
+}
+
+#[cfg(test)]
+pub(super) fn window_run_searches() -> usize {
+    WINDOW_RUN_SEARCHES.get()
+}
+
+/// Exact `[lower, upper)` bounds of one key's active run inside a time range.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) struct WindowBounds {
+    lower: usize,
+    upper: usize,
+}
+
+impl WindowBounds {
+    pub(super) const EMPTY: Self = Self { lower: 0, upper: 0 };
+
+    pub(super) fn matches(self) -> usize {
+        debug_assert!(self.upper >= self.lower);
+        self.upper - self.lower
+    }
+}
+
+/// A key's previous probe window and its run position, so the next forward
+/// window can advance from it instead of searching the whole run again.
+#[derive(Clone, Copy)]
+pub(super) struct WindowCursor {
+    range: (EventTime, EventTime),
+    bounds: WindowBounds,
+}
+
+impl WindowCursor {
+    pub(super) fn new(range: (EventTime, EventTime), bounds: WindowBounds) -> Self {
+        Self { range, bounds }
+    }
+}
+
 fn same_key(stored: &FramedKey, key: &FramedKey) -> bool {
     match (stored.address(), key.address()) {
         (Some(left), Some(right)) => left == right && std::ptr::eq(stored, key),
@@ -586,6 +697,29 @@ fn insertion_position(run: &[RunEntry], entry: RunEntry) -> usize {
         return run.len();
     }
     run.partition_point(|previous| previous.identity() <= entry.identity())
+}
+
+/// Partition point of `pred` over `run`, given `pred` holds on `run[..from]`.
+/// Gallops forward exponentially, then bisects the small remainder.
+fn advance_partition_point(
+    run: &[RunEntry],
+    from: usize,
+    pred: impl Fn(&RunEntry) -> bool,
+) -> usize {
+    debug_assert!(from <= run.len());
+    let mut low = from;
+    let mut high = run.len();
+    let mut step = 1_usize;
+    while low.saturating_add(step) < high {
+        if pred(&run[low + step - 1]) {
+            low += step;
+            step = step.saturating_mul(2);
+        } else {
+            high = low + step - 1;
+            break;
+        }
+    }
+    low + run[low..high].partition_point(|entry| pred(entry))
 }
 
 fn boundary(time: EventTime, bound: EventTime, inclusive: bool) -> bool {

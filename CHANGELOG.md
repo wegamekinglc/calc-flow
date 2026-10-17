@@ -9,6 +9,18 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-17: Drive the Join time-window probe through per-key window
+  cursors instead of two binary searches per counted row and two more per
+  filled row. Serial and gather probes now advance monotone cursors by
+  galloping and fall back to a full search for out-of-order windows, and the
+  count pass's bounds are reused by the fill pass. Full-run searches per
+  16,400-row gather batch drop from 32,800 to 6 in the pinned regression
+  test, and `NativeIndex::window_by_id` leaves the interval-join profile
+  top-20 (3.6% self to 1.0% for the remaining gallop advance); wall-clock on
+  `engines/1000000/calc-flow-stream/interval_join` moves only about 2-3%,
+  consistent with the search share. Cursor scratch (distinct keys x units x
+  `Option<WindowCursor>`) is charged up front and a refusal declines to the
+  sanctioned serial fallback unchanged.
 - 2026-10-17: Add a synchronous small-key fast path for Join key identities,
   repairing part of the roughly 5× stream-join regression from PR #427. Keys
   whose framed bytes fit one copy quantum (at most 4096 bytes and fewer

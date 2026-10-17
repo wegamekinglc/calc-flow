@@ -1,3 +1,4 @@
+use super::super::native_lookup::WindowCursor;
 use super::{
     inputs::ProbeInputs,
     pairs::PairFragment,
@@ -65,6 +66,14 @@ fn fragment_controls(rows: usize) -> Result<usize> {
     ])
 }
 
+// Unit-local window cursors: each gather unit of the count and fill phases
+// allocates one cursor per distinct probe key, so peak use is one set per unit.
+fn cursor_bytes(keys: usize, rows: usize, name: &str) -> Result<usize> {
+    keys.checked_mul(partition::units(rows))
+        .and_then(|cursors| cursors.checked_mul(size_of::<Option<WindowCursor>>()))
+        .ok_or_else(|| super::super::native_lookup::scratch_error(name))
+}
+
 pub(super) fn input_bytes(keys: usize, rows: usize, name: &str) -> Result<usize> {
     let caller = super::super::metadata_validation::inventory::caller_controls(name)
         .ok_or_else(|| super::super::native_lookup::scratch_error(name))?;
@@ -74,6 +83,7 @@ pub(super) fn input_bytes(keys: usize, rows: usize, name: &str) -> Result<usize>
         snapshot_bytes(keys, name)?,
         work_bytes()?,
         fragment_controls(rows)?,
+        cursor_bytes(keys, rows, name)?,
         caller,
         caller,
         registration,

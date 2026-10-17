@@ -66,9 +66,14 @@ impl CountWork {
         let mut count = 0usize;
         let sentinel = partition::sentinel(self.limit);
         let mut quantum = ProbeQuantum::new(stop);
+        let mut cursors = self.inputs.cursors();
         for position in partition::range(self.inputs.admitted.len(), ordinal) {
             quantum.step()?;
-            count = partition::add_count(count, self.inputs.count(position), self.limit)?;
+            count = partition::add_count(
+                count,
+                self.inputs.window(position, &mut cursors).matches(),
+                self.limit,
+            )?;
             if Some(count) == sentinel {
                 break;
             }
@@ -117,9 +122,10 @@ pub(super) fn fill_range(
     let mut pairs =
         super::super::matches::Selection::with_capacity(counts.rows[ordinal], range.len());
     let mut quantum = ProbeQuantum::new(stop);
+    let mut cursors = inputs.cursors();
     for position in range {
         quantum.step()?;
-        for (offset, opposite_index) in inputs.matches(position).enumerate() {
+        for (offset, opposite_index) in inputs.matches_window(position, &mut cursors).enumerate() {
             if offset > 0 {
                 quantum.step()?;
             }
@@ -142,12 +148,13 @@ pub(super) fn fill_all(
 ) -> Result<super::super::matches::Selection> {
     let mut pairs = super::super::matches::Selection::with_capacity(count, inputs.admitted.len());
     let mut work = 0usize;
+    let mut cursors = inputs.cursors();
     for pos in 0..inputs.admitted.len() {
         if work.is_multiple_of(STOP_GROUP_ITEMS) {
             stop.check()?;
         }
         work += 1;
-        for opposite_index in inputs.matches(pos) {
+        for opposite_index in inputs.matches_window(pos, &mut cursors) {
             if work.is_multiple_of(STOP_GROUP_ITEMS) {
                 stop.check()?;
             }
