@@ -93,6 +93,59 @@ impl FlatChunk {
     }
 }
 
+/// Records one side's selected byte width, declining when a row disagrees
+/// with the width already seen; repeated rows re-check the same value.
+fn agree_row_width(
+    agreed: &mut Option<usize>,
+    record: PayloadRef<'_>,
+    columns: Option<&[(usize, usize)]>,
+) -> Option<()> {
+    let bytes = side_row_bytes(record, columns)?;
+    agrees_with(agreed, bytes)
+}
+
+/// Running per-pair scan state for the flat-range walk.
+struct Scan {
+    ranges: Vec<Range<usize>>,
+    start: usize,
+    chunk: FlatChunk,
+}
+
+impl Scan {
+    fn step(
+        &mut self,
+        index: usize,
+        left: &FlatRow,
+        right: &FlatRow,
+        budget: EdgeBudget,
+        oversized: impl Fn(usize) -> CalcFlowError,
+    ) -> Result<()> {
+        if !self.chunk.fits(left, right, budget) {
+            if self.start == index {
+                return Err(oversized(
+                    self.chunk.bytes_with(left, right).unwrap_or(usize::MAX),
+                ));
+            }
+            self.ranges.push(self.start..index);
+            self.start = index;
+            self.chunk = FlatChunk::default();
+            if !self.chunk.fits(left, right, budget) {
+                return Err(oversized(
+                    self.chunk.bytes_with(left, right).unwrap_or(usize::MAX),
+                ));
+            }
+        }
+        self.chunk.push(left, right);
+        Ok(())
+    }
+
+    fn finish(&mut self, total: usize) {
+        if self.start < total {
+            self.ranges.push(self.start..total);
+        }
+    }
+}
+
 /// A dense seen-bit table over a bounded span of opposite coordinates.
 struct SeenRows {
     low: usize,
@@ -275,22 +328,18 @@ impl JoinOutput<'_> {
         let mut seen = SeenRows::new(low, high);
         let mut incoming = None;
         let mut opposite = None;
-        let mut last_pos = None;
         for pair in self.matched.iter() {
-            if last_pos != Some(pair.pos) {
-                last_pos = Some(pair.pos);
-                let bytes = side_row_bytes(
-                    self.admitted.row(pair.pos).record,
-                    incoming_columns.as_deref(),
-                )?;
-                agrees_with(&mut incoming, bytes)?;
-            }
+            agree_row_width(
+                &mut incoming,
+                self.admitted.row(pair.pos).record,
+                incoming_columns.as_deref(),
+            )?;
             if seen.first_visit(pair.opposite_index) {
-                let bytes = side_row_bytes(
+                agree_row_width(
+                    &mut opposite,
                     self.opposite.payload(pair.opposite_index),
                     opposite_columns.as_deref(),
                 )?;
-                agrees_with(&mut opposite, bytes)?;
             }
         }
         Some(incoming? + opposite?)
@@ -301,9 +350,11 @@ impl JoinOutput<'_> {
         let opposite_columns = self.side_columns(false);
         let mut incoming = RowCache::new(self.matched.iter().map(|pair| pair.pos));
         let mut opposite = RowCache::new(self.matched.iter().map(|pair| pair.opposite_index));
-        let mut ranges = Vec::new();
-        let mut start = 0;
-        let mut chunk = FlatChunk::default();
+        let mut scan = Scan {
+            ranges: Vec::new(),
+            start: 0,
+            chunk: FlatChunk::default(),
+        };
         let oversized = |bytes: usize| oversized_row(bytes, budget);
         for (index, pair) in self.matched.iter().enumerate() {
             // Payloads are read only for rows whose costs are not cached yet.
@@ -318,27 +369,10 @@ impl JoinOutput<'_> {
                     opposite_columns.as_deref(),
                 )
             })?;
-            if !chunk.fits(left, right, budget) {
-                if start == index {
-                    return Err(oversized(
-                        chunk.bytes_with(left, right).unwrap_or(usize::MAX),
-                    ));
-                }
-                ranges.push(start..index);
-                start = index;
-                chunk = FlatChunk::default();
-                if !chunk.fits(left, right, budget) {
-                    return Err(oversized(
-                        chunk.bytes_with(left, right).unwrap_or(usize::MAX),
-                    ));
-                }
-            }
-            chunk.push(left, right);
+            scan.step(index, left, right, budget, oversized)?;
         }
-        if start < self.matched.len() {
-            ranges.push(start..self.matched.len());
-        }
-        Ok(ranges)
+        scan.finish(self.matched.len());
+        Ok(scan.ranges)
     }
 
     fn nested_ranges(&self, budget: EdgeBudget) -> Result<Vec<Range<usize>>> {
