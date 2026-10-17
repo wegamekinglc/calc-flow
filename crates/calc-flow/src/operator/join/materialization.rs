@@ -93,6 +93,33 @@ impl FlatChunk {
     }
 }
 
+/// A dense seen-bit table over a bounded span of opposite coordinates.
+struct SeenRows {
+    low: usize,
+    seen: Vec<u64>,
+}
+
+impl SeenRows {
+    fn new(low: usize, high: usize) -> Self {
+        let bits = u64::BITS as usize;
+        Self {
+            low,
+            seen: vec![0_u64; (high - low + 1).div_ceil(bits)],
+        }
+    }
+
+    /// Records the coordinate, reporting whether this was its first visit.
+    fn first_visit(&mut self, index: usize) -> bool {
+        let index = index - self.low;
+        let bits = u64::BITS as usize;
+        let word = &mut self.seen[index / bits];
+        let mask = 1_u64 << (index % bits);
+        let first = *word & mask == 0;
+        *word |= mask;
+        first
+    }
+}
+
 impl JoinOutput<'_> {
     pub(super) fn materialize(&self, range: Range<usize>) -> Result<RecordBatch> {
         let record = super::output_projection::materialize(self, range)?;
@@ -245,8 +272,7 @@ impl JoinOutput<'_> {
         if high - low + 1 > self.matched.len().saturating_mul(2) {
             return None;
         }
-        let bits = u64::BITS as usize;
-        let mut seen = vec![0_u64; (high - low + 1).div_ceil(bits)];
+        let mut seen = SeenRows::new(low, high);
         let mut incoming = None;
         let mut opposite = None;
         let mut last_pos = None;
@@ -259,9 +285,7 @@ impl JoinOutput<'_> {
                 )?;
                 agrees_with(&mut incoming, bytes)?;
             }
-            let index = pair.opposite_index - low;
-            if seen[index / bits] & (1_u64 << (index % bits)) == 0 {
-                seen[index / bits] |= 1_u64 << (index % bits);
+            if seen.first_visit(pair.opposite_index) {
                 let bytes = side_row_bytes(
                     self.opposite.payload(pair.opposite_index),
                     opposite_columns.as_deref(),
@@ -280,6 +304,7 @@ impl JoinOutput<'_> {
         let mut ranges = Vec::new();
         let mut start = 0;
         let mut chunk = FlatChunk::default();
+        let oversized = |bytes: usize| oversized_row(bytes, budget);
         for (index, pair) in self.matched.iter().enumerate() {
             // Payloads are read only for rows whose costs are not cached yet.
             let record = || self.admitted.row(pair.pos).record;
@@ -295,18 +320,16 @@ impl JoinOutput<'_> {
             })?;
             if !chunk.fits(left, right, budget) {
                 if start == index {
-                    return Err(oversized_row(
+                    return Err(oversized(
                         chunk.bytes_with(left, right).unwrap_or(usize::MAX),
-                        budget,
                     ));
                 }
                 ranges.push(start..index);
                 start = index;
                 chunk = FlatChunk::default();
                 if !chunk.fits(left, right, budget) {
-                    return Err(oversized_row(
+                    return Err(oversized(
                         chunk.bytes_with(left, right).unwrap_or(usize::MAX),
-                        budget,
                     ));
                 }
             }
