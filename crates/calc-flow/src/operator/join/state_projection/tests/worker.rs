@@ -196,7 +196,7 @@ async fn stopped(service: &TestService, copied: bool, cancel: bool, mixed: bool)
         ),
         (0, 0)
     );
-    assert!(operator.state.deltas.pending.is_empty());
+    assert!(operator.state.deltas.is_clean());
     assert!(output.drain("output").is_empty());
     assert!(operator.compaction_cleanup.is_some());
     drop((operator, context, input, original, output));

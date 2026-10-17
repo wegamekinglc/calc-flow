@@ -398,7 +398,6 @@ fn mixed_boolean_row(operator: &StreamJoinOperator, id: u64, time: i64, byte: u8
 }
 
 fn mixed_boolean_snapshot() -> OperatorStateSnapshot {
-    use crate::operator::join::{JoinSide, PendingOp};
     let mut source = boolean_operator(false, false);
     source.state.left = vec![
         mixed_boolean_row(&source, 0, 10, 0xfe),
@@ -428,14 +427,9 @@ fn mixed_boolean_snapshot() -> OperatorStateSnapshot {
     source.state.next_left_row_id = 4;
     source.state.metrics.left.retained_rows = 4;
     source.state.metrics.left.retained_bytes = source.state.left.iter().map(|row| row.charge).sum();
-    source.state.deltas.pending.push(PendingOp::Upsert {
-        side: JoinSide::Left,
-        row_id: added.row_id,
-        event_time: added.event_time,
-        encoded_key: added.encoded_key,
-        record: added.record,
-        charge: added.charge,
-    });
+    // The added row sits at or above the restored watermark, so the derived
+    // capture encodes it as the delta's upsert (spec FR3).
+    source.state.deltas.dirty[0] += 1;
     let mixed = source.checkpoint_v1(Epoch::new(8).unwrap()).unwrap();
     assert_eq!(mixed.segments.len(), 3);
     for side in ["left", "right"] {

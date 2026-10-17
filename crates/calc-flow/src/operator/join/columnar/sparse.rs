@@ -1,5 +1,5 @@
 use super::{CopySelection, PayloadChunk, Quantum, RowPayload, SelectedRow};
-use crate::operator::join::{JoinSide, PendingOp, RetainedRows, StreamJoinOperator};
+use crate::operator::join::{RetainedRows, StreamJoinOperator};
 use crate::{Result, StreamOperatorContext, time::EventTime};
 use std::sync::{
     Arc,
@@ -182,11 +182,6 @@ impl StreamJoinOperator {
         replacement: &Arc<PayloadChunk>,
         selection: &[SelectedRow],
     ) {
-        let side = if port == 0 {
-            JoinSide::Left
-        } else {
-            JoinSide::Right
-        };
         for (offset, selected) in selection.iter().enumerate() {
             let index = self
                 .sparse_position(port, original, selected.source)
@@ -198,10 +193,8 @@ impl StreamJoinOperator {
             payload.mark_live(index);
             self.sparse_rows_mut(port)
                 .replace_payload(index, payload.clone());
-            self.state
-                .deltas
-                .pending
-                .rebind_payload(side, selected.row_id, payload);
+            // The derived capture reads the live state at encode time, so
+            // the repaired payload binds automatically (spec FR3).
             original.remove_live(selected.source);
         }
     }
@@ -270,16 +263,5 @@ impl StreamJoinOperator {
         self.repair_sparse_side(1, context).await?;
         self.ingress_progress = context.ingress_progress().clone();
         Ok(())
-    }
-}
-
-impl crate::operator::join::PendingLog {
-    fn rebind_payload(&mut self, side: JoinSide, id: u64, payload: RowPayload) {
-        if let Some(slot) = self.upserts.get(&(side, id))
-            && let Some(entry) = &mut self.slots[*slot]
-            && let PendingOp::Upsert { record, .. } = &mut entry.op
-        {
-            *record = payload;
-        }
     }
 }

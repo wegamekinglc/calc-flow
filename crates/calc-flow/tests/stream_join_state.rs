@@ -755,3 +755,105 @@ async fn compaction_survives_restore_checkpoint_restore_cycles() {
         .sum::<usize>();
     assert_eq!(matched_rows, 4);
 }
+
+/// Two restore-checkpoint-restore cycles over a tombstone-bearing history:
+/// the first cycle's derived delta (upserts above the watermark plus
+/// recorded tombstones) must fold so the second cycle's capture is clean and
+/// every later fold reproduces the same state (spec FR5, AC3).
+#[tokio::test]
+async fn two_restore_checkpoint_restore_cycles_reproduce_tombstone_history() {
+    let (mut operator, job, mut collector) = state_operator(300);
+    let context = StreamOperatorContext::new(&job, "match", None);
+    operator
+        .process_data(
+            "left",
+            keyed_batch(&[("a", 100 * SECOND), ("b", 101 * SECOND)]),
+            &context,
+            &mut collector,
+        )
+        .await
+        .unwrap();
+    let first = operator.checkpoint(Epoch::INITIAL).unwrap();
+
+    // Evict both captured rows, then capture the tombstone delta.
+    let progress = IngressProgressSnapshot::new(BTreeMap::from([(
+        "right".into(),
+        IngressProgress::new(
+            IngressState::Active,
+            Some(EventTime::from_micros(500 * SECOND)),
+        ),
+    )]));
+    operator
+        .on_ingress_progress(
+            "right",
+            &StreamOperatorContext::with_ingress_progress(&job, "match", None, progress),
+        )
+        .await
+        .unwrap();
+    assert_eq!(operator.status().left.retained_rows, 0);
+    let second = operator.checkpoint(Epoch::new(2).unwrap()).unwrap();
+    assert!(second.segments.contains_key("left-delta-2"));
+
+    // Cycle one: restore the tombstone delta, admit one fresh row, capture.
+    let (mut cycle_one, job_two, _) = state_operator(300);
+    let _ = &job_two;
+    cycle_one.restore(&second).unwrap();
+    replay_progress(&job_two, &mut cycle_one).await;
+    assert_eq!(cycle_one.status(), operator.status());
+    let context_two = StreamOperatorContext::with_ingress_progress(
+        &job_two,
+        "match",
+        None,
+        IngressProgressSnapshot::new(BTreeMap::from([(
+            "right".into(),
+            IngressProgress::new(
+                IngressState::Active,
+                Some(EventTime::from_micros(500 * SECOND)),
+            ),
+        )])),
+    );
+    cycle_one
+        .process_data(
+            "left",
+            keyed_batch(&[("c", 102 * SECOND)]),
+            &context_two,
+            &mut EdgeCollector::new(cycle_one.output_ports().to_vec()),
+        )
+        .await
+        .unwrap();
+    let third = cycle_one.checkpoint(Epoch::new(3).unwrap()).unwrap();
+
+    // Cycle two: the folded state reproduces identically.
+    let (mut cycle_two, job_three, _) = state_operator(300);
+    let _ = &job_three;
+    cycle_two.restore(&third).unwrap();
+    replay_progress(&job_three, &mut cycle_two).await;
+    assert_eq!(cycle_two.status(), cycle_one.status());
+    let fourth = cycle_two.checkpoint(Epoch::new(4).unwrap()).unwrap();
+    assert_eq!(fourth.segments, third.segments);
+    let (mut cycle_three, job_four, _) = state_operator(300);
+    let _ = &job_four;
+    cycle_three.restore(&fourth).unwrap();
+    replay_progress(&job_four, &mut cycle_three).await;
+    assert_eq!(cycle_three.status(), cycle_one.status());
+    drop(first);
+}
+
+async fn replay_progress(job: &StreamJobContext, operator: &mut StreamJoinOperator) {
+    let context = StreamOperatorContext::with_ingress_progress(
+        job,
+        "match",
+        None,
+        IngressProgressSnapshot::new(BTreeMap::from([(
+            "right".into(),
+            IngressProgress::new(
+                IngressState::Active,
+                Some(EventTime::from_micros(500 * SECOND)),
+            ),
+        )])),
+    );
+    operator
+        .on_ingress_progress("right", &context)
+        .await
+        .unwrap();
+}

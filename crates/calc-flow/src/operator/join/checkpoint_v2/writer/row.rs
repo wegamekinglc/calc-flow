@@ -1,4 +1,6 @@
-use super::super::super::{PayloadRef, PendingOp, Rows, StoredRow};
+#[cfg(test)]
+use super::super::super::PendingOp;
+use super::super::super::{PayloadRef, Rows, StoredRow};
 use crate::EventTime;
 
 pub(super) struct RowRef<'a> {
@@ -31,14 +33,17 @@ impl<T: CheckpointRow> CheckpointRow for &T {
     }
 }
 
+#[cfg(test)]
 pub(super) struct PendingUpsert<'a>(&'a PendingOp);
 
+#[cfg(test)]
 impl<'a> PendingUpsert<'a> {
     pub(super) fn new(op: &'a PendingOp) -> Option<Self> {
         matches!(op, PendingOp::Upsert { .. }).then_some(Self(op))
     }
 }
 
+#[cfg(test)]
 impl CheckpointRow for PendingUpsert<'_> {
     fn row(&self) -> RowRef<'_> {
         let PendingOp::Upsert {
@@ -64,7 +69,7 @@ impl CheckpointRow for PendingUpsert<'_> {
 
 /// A thin borrow of the side's row source plus its stable chunk coordinate.
 pub(super) struct Reference<'a> {
-    pub(super) rows: &'a &'a dyn Rows,
+    pub(super) rows: &'a dyn Rows,
     pub(super) index: usize,
 }
 

@@ -796,3 +796,105 @@ impl Drop for AppendCredit {
         self.funding.credit.shrink(self.bytes);
     }
 }
+
+/// A violated monotone-with-gaps invariant is an internal error, never a
+/// silent mis-tombstone (spec FR15).
+fn truncation_invariant(name: &str, message: &str) -> crate::CalcFlowError {
+    crate::CalcFlowError::Internal {
+        message: format!("stream Join {name:?} native index truncation: {message}"),
+    }
+}
+
+fn same_key(stored: &FramedKey, key: &FramedKey) -> bool {
+    match (stored.address(), key.address()) {
+        (Some(left), Some(right)) => left == right && std::ptr::eq(stored, key),
+        #[cfg(test)]
+        (None, None) => stored == key,
+        _ => false,
+    }
+}
+
+fn insertion_position(run: &[RunEntry], entry: RunEntry) -> usize {
+    if run
+        .last()
+        .is_none_or(|last| last.identity() <= entry.identity())
+    {
+        return run.len();
+    }
+    run.partition_point(|previous| previous.identity() <= entry.identity())
+}
+
+fn boundary(time: EventTime, bound: EventTime, inclusive: bool) -> bool {
+    #[cfg(test)]
+    super::note_join_work(|work| work.native_boundary_visits += 1);
+    if inclusive {
+        time <= bound
+    } else {
+        time < bound
+    }
+}
+
+fn vector_capacity(current: usize, required: usize) -> Option<usize> {
+    if required <= current {
+        return Some(current);
+    }
+    required
+        .checked_next_power_of_two()
+        .map(|capacity| capacity.max(4))
+}
+
+fn checked_slots(required: usize) -> Option<usize> {
+    (u64::try_from(required).ok()? <= u64::from(u32::MAX) + 1).then_some(required)
+}
+
+fn charge_sum<const N: usize>(terms: [Option<usize>; N]) -> Option<usize> {
+    terms.into_iter().try_fold(
+        BASE_BYTES.checked_add(NativeIndex::owner_bytes()?)?,
+        |total, term| total.checked_add(term?),
+    )
+}
+
+fn doubled(bytes: Option<usize>) -> Option<usize> {
+    bytes.and_then(|bytes| bytes.checked_mul(2))
+}
+
+fn capacity_bytes(capacity: usize, width: usize) -> Option<usize> {
+    capacity.checked_mul(width)
+}
+
+fn capacity_peak(old: usize, new: usize, width: usize) -> Option<usize> {
+    capacity_bytes(old.checked_add(new)?, width)
+}
+
+fn table_charge(entries: usize) -> Option<usize> {
+    if entries == 0 {
+        return Some(0);
+    }
+    let buckets = entries
+        .checked_mul(8)?
+        .div_ceil(7)
+        .checked_next_power_of_two()?
+        .max(4);
+    buckets.checked_mul(size_of::<u32>() + 1)?.checked_add(64)
+}
+
+pub(super) struct AppendCredit {
+    funding: Arc<Funding>,
+    bytes: usize,
+}
+
+impl AppendCredit {
+    pub(super) fn commit(mut self) {
+        let resident = self.funding.resident.load(Ordering::Relaxed);
+        self.funding
+            .credit
+            .shrink(self.funding.credit.size() - resident);
+        self.bytes = 0;
+    }
+}
+
+impl Drop for AppendCredit {
+    fn drop(&mut self) {
+        self.funding.credit.shrink(self.bytes);
+    }
+}

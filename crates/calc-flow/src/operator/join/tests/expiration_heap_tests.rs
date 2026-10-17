@@ -226,3 +226,78 @@ async fn test_expiration_clear_preserves_ordinals_and_funded_reuse() {
     drop(index);
     assert_eq!(pool.reserved(), 0);
 }
+
+/// The bulk cut must equal repeated per-row pops on random out-of-order runs
+/// (spec FR10/AC5): the retained set, its admission order, and the run heads
+/// stay identical to a per-row pop oracle.
+#[tokio::test]
+async fn test_bulk_cuts_match_per_row_pops_on_random_out_of_order_runs() {
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "match", None);
+    for seed in 0_u64..32 {
+        let mut state = seed.wrapping_mul(6_364_136_223_846_793_005) | 1;
+        let mut draw = move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as u32
+        };
+        let mut retained: StateRows = Vec::new().into();
+        let mut index = ExpirationIndex::restored(&retained).unwrap();
+        // The per-row oracle: repeated global-head pops are exactly repeated
+        // removals of the `(event_time, row_id)` minimum.
+        let mut oracle: BTreeMap<(EventTime, u64), u128> = BTreeMap::new();
+        let mut ordinal = 0_u128;
+        let mut next_id = 0_u64;
+        let expired = move |time: EventTime| time.as_micros() < 20;
+        for round in 0..8 {
+            let count = 1 + draw() as usize % 40;
+            let mut incoming = rows(count);
+            for row in &mut incoming {
+                row.row_id = next_id;
+                next_id += 1;
+                // Out-of-order times inside the run (spec FR10).
+                row.event_time = EventTime::from_micros(i64::from(draw() % 61) - 30);
+                oracle.insert((row.event_time, row.row_id), ordinal);
+                ordinal += 1;
+            }
+            let references = retained.append_indices(incoming.len());
+            let plan = index
+                .prepare_append(&incoming, &references, &context, false)
+                .await
+                .unwrap();
+            index.append(plan);
+            assert_eq!(retained.append(incoming), references);
+            // Bulk: plan read-only, then replay the cuts.
+            let cuts = index.expired_cuts(&retained, &expired);
+            let mut removed = Vec::new();
+            for &(id, cut) in &cuts {
+                for reference in index.run_entries(id, cut) {
+                    removed.push((reference, retained.identity(reference)));
+                }
+            }
+            index.apply_cuts(&cuts, &retained, &expired);
+            for (reference, identity) in removed {
+                retained.remove(reference);
+                assert!(
+                    oracle.remove(&identity).is_some(),
+                    "cut identity {identity:?}"
+                );
+            }
+            let mut expected = oracle
+                .iter()
+                .map(|((_, id), ordinal)| (*ordinal, *id))
+                .collect::<Vec<_>>();
+            expected.sort_unstable();
+            assert_eq!(
+                index
+                    .identities(&retained)
+                    .into_iter()
+                    .map(|(id, _, _)| id)
+                    .collect::<Vec<_>>(),
+                expected.into_iter().map(|(_, id)| id).collect::<Vec<_>>(),
+                "seed {seed} round {round} retained set differs"
+            );
+        }
+    }
+}

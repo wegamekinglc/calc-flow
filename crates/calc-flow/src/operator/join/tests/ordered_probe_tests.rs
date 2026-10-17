@@ -183,7 +183,7 @@ async fn assert_ordered_success(service: &TestService) {
     assert_eq!(operator.state.left.len(), ROWS);
     assert_eq!(operator.state.metrics.emitted_match_rows, 49_152);
     assert_eq!(operator.state.next_output_sequence, 5);
-    assert_eq!(operator.state.deltas.pending.iter().count(), ROWS);
+    assert_eq!(operator.state.deltas.pending_count_for_test(), ROWS);
     assert_settled(&operator, &job);
     drop(context);
     finish(operator, job).await;
@@ -261,7 +261,7 @@ async fn assert_global_limit(service: &TestService) {
     assert_eq!(operator.state.metrics.emitted_match_rows, 0);
     assert_eq!(operator.state.next_left_row_id, 0);
     assert_eq!(operator.state.next_output_sequence, 0);
-    assert!(operator.state.deltas.pending.iter().next().is_none());
+    assert!(operator.state.deltas.is_clean());
     assert_settled(&operator, &job);
     drop(context);
     finish(operator, job).await;

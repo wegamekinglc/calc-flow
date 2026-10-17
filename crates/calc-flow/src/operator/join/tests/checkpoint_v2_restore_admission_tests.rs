@@ -253,7 +253,7 @@ fn assert_sql_candidate(operator: &StreamJoinOperator) {
     assert_eq!(operator.key_dictionary.inventory(), (0, 0, 0, false));
     assert!(operator.state.left.1.is_none());
     assert!(operator.state.right.1.is_none());
-    assert!(operator.state.deltas.pending.is_empty());
+    assert!(operator.state.deltas.is_clean());
 }
 
 fn assert_candidate_history(operator: &mut StreamJoinOperator, target: &OperatorStateSnapshot) {

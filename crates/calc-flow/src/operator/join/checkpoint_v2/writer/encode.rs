@@ -1,7 +1,6 @@
 use std::{collections::BTreeMap, io::Write, sync::Arc};
 
 use datafusion::arrow::{
-    array::ArrayRef,
     datatypes::SchemaRef,
     ipc::{
         MetadataVersion,
@@ -24,11 +23,14 @@ use super::super::{
 use super::{
     buffer::{PaidBuffer, ensure, error},
     compact,
-    row::{CheckpointRow, PendingUpsert, Reference},
+    row::{CheckpointRow, Reference},
 };
 use crate::{Result, StateSegment};
 
 mod delta;
+#[cfg(test)]
+use super::row::PendingUpsert;
+pub(in crate::operator::join::checkpoint_v2::writer) use delta::SideDelta;
 pub(super) mod rebase;
 pub(super) mod restored;
 pub(super) mod retarget;
@@ -117,60 +119,137 @@ fn own_segment(bytes: Vec<u8>, credit: &MemoryReservation, charge: usize) -> Sta
     StateSegment::new(bytes).with_owner(Arc::new(credit.split(charge)))
 }
 
-pub(super) fn pending(
+pub(super) fn dirty(
+    sides: &[SideDelta<'_>; 2],
+    schemas: &[SchemaRef; 2],
+    epoch: crate::Epoch,
+    workspace: &MemoryReservation,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<Base> {
+    delta::encode(sides, schemas, epoch, workspace, check)
+}
+
+#[cfg(test)]
+fn emit<C: CheckpointRow>(
+    encoder: &mut Encoder,
+    selected: delta::SideSelection<'_, C>,
+    schema: SchemaRef,
+    side: JoinSide,
+    epoch: crate::Epoch,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<()> {
+    delta::emit_side(encoder, selected, schema, side, epoch, check)
+}
+
+/// An owned copy of one side's tombstones for asynchronous delta work.
+pub(super) struct CopiedTombstones {
+    row_ids: Vec<u64>,
+    times: Vec<i64>,
+    keys: Vec<Arc<super::super::super::columnar::FramedKey>>,
+}
+
+impl delta::TombstoneList for CopiedTombstones {
+    fn entries(&self) -> usize {
+        self.row_ids.len()
+    }
+    fn entry(
+        &self,
+        index: usize,
+    ) -> (
+        u64,
+        crate::EventTime,
+        &Arc<super::super::super::columnar::FramedKey>,
+    ) {
+        (
+            self.row_ids[index],
+            crate::EventTime::from_micros(self.times[index]),
+            &self.keys[index],
+        )
+    }
+}
+
+/// Owned derived-delta inputs for the asynchronous writer (spec FR8): the
+/// tombstone lists copy out with funding sized from the O(1)-maintained
+/// per-side counters, while the rows stay shared behind their `Arc`.
+pub(super) struct CopiedDelta {
+    pub(super) watermark: [u64; 2],
+    pub(super) upserts: [usize; 2],
+    pub(super) tombstones: [CopiedTombstones; 2],
+}
+
+pub(super) fn copy_delta(
+    deltas: &super::super::super::DeltaTracking,
+    workspace: &MemoryReservation,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<CopiedDelta> {
+    let mut copied = CopiedDelta {
+        watermark: deltas.watermark,
+        upserts: [0; 2],
+        tombstones: [
+            CopiedTombstones {
+                row_ids: Vec::new(),
+                times: Vec::new(),
+                keys: Vec::new(),
+            },
+            CopiedTombstones {
+                row_ids: Vec::new(),
+                times: Vec::new(),
+                keys: Vec::new(),
+            },
+        ],
+    };
+    for side in 0..2 {
+        check()?;
+        copied.upserts[side] = usize::try_from(deltas.dirty[side])
+            .map_err(|_| error("V2 delta dirty row count overflow"))?;
+        let list = &deltas.tombstones[side];
+        let count = list.len();
+        accounting::reserve(
+            workspace,
+            product(
+                count,
+                2 * size_of::<u64>() + size_of::<Arc<super::super::super::columnar::FramedKey>>(),
+            )?,
+        )?;
+        let target = &mut copied.tombstones[side];
+        target
+            .row_ids
+            .try_reserve_exact(count)
+            .and_then(|()| target.times.try_reserve_exact(count))
+            .and_then(|()| target.keys.try_reserve_exact(count))
+            .map_err(|_| error("V2 delta tombstone copy allocation failed"))?;
+        for entry in 0..count {
+            check()?;
+            target.row_ids.push(list.row_ids[entry]);
+            target.times.push(list.times[entry]);
+            target.keys.push(Arc::clone(&list.keys[entry]));
+        }
+    }
+    Ok(copied)
+}
+
+/// Encodes an old-style pending-op list through the same wire path as the
+/// derived encoder: the byte-equivalence oracle (spec FR4).
+/// Encodes an old-style pending-op list through the same wire path as the
+/// derived encoder: the byte-equivalence oracle (spec FR4).
+#[cfg(test)]
+pub(super) fn pending_ops(
     pending: &super::super::super::PendingLog,
     schemas: &[SchemaRef; 2],
     epoch: crate::Epoch,
     workspace: &MemoryReservation,
     check: &dyn Fn() -> Result<()>,
 ) -> Result<Base> {
-    delta::encode(|| pending.iter(), schemas, epoch, workspace, check)
-}
-
-pub(super) fn copy_pending(
-    pending: &super::super::super::PendingLog,
-    workspace: &MemoryReservation,
-    check: &dyn Fn() -> Result<()>,
-) -> Result<Vec<super::super::super::PendingOp>> {
-    let count = pending.iter().try_fold(0, |count, _| {
-        check()?;
-        add(count, 1)
-    })?;
-    accounting::reserve(
+    pending_owned(
+        &pending.iter().cloned().collect::<Vec<_>>(),
+        schemas,
+        epoch,
         workspace,
-        bulk_bytes::<super::super::super::PendingOp>(count)?,
-    )?;
-    let mut owned = Vec::with_capacity(count);
-    for op in pending.iter() {
-        check()?;
-        owned.push(clone_pending_op(op, workspace)?);
-    }
-    Ok(owned)
+        check,
+    )
 }
 
-fn clone_pending_op(
-    op: &super::super::super::PendingOp,
-    workspace: &MemoryReservation,
-) -> Result<super::super::super::PendingOp> {
-    if let super::super::super::PendingOp::Upsert { record, .. } = op {
-        admit_payload_clone(record, workspace)?;
-    }
-    Ok(op.clone())
-}
-
-pub(super) fn admit_payload_clone(
-    record: &super::super::super::columnar::RowPayload,
-    workspace: &MemoryReservation,
-) -> Result<()> {
-    if let super::super::super::columnar::RowPayload::Legacy(record) = record {
-        accounting::reserve(
-            workspace,
-            product(record.num_columns(), size_of::<ArrayRef>())?,
-        )?;
-    }
-    Ok(())
-}
-
+#[cfg(test)]
 pub(super) fn pending_owned(
     pending: &[super::super::super::PendingOp],
     schemas: &[SchemaRef; 2],
@@ -178,7 +257,22 @@ pub(super) fn pending_owned(
     workspace: &MemoryReservation,
     check: &dyn Fn() -> Result<()>,
 ) -> Result<Base> {
-    delta::encode(|| pending.iter(), schemas, epoch, workspace, check)
+    check()?;
+    let mut encoder = Encoder::new(workspace)?;
+    for (index, side) in [JoinSide::Left, JoinSide::Right].into_iter().enumerate() {
+        check()?;
+        let selected = delta::select_ops(pending, side, workspace, check)?;
+        emit(
+            &mut encoder,
+            selected,
+            Arc::clone(&schemas[index]),
+            side,
+            epoch,
+            check,
+        )?;
+    }
+    check()?;
+    Ok(encoder.finish())
 }
 
 struct Encoder {
@@ -243,7 +337,7 @@ impl Encoder {
         workspace: &MemoryReservation,
         check: &dyn Fn() -> Result<()>,
     ) -> Result<()> {
-        let ordered = ordered_rows(&rows, workspace, check)?;
+        let ordered = ordered_rows(rows, workspace, check)?;
         let digest = if ordered.is_empty() {
             [0; 32]
         } else {
@@ -372,7 +466,7 @@ fn upsert(
 }
 
 fn ordered_rows<'a>(
-    rows: &'a &'a dyn crate::operator::join::Rows,
+    rows: &'a dyn crate::operator::join::Rows,
     workspace: &MemoryReservation,
     check: &dyn Fn() -> Result<()>,
 ) -> Result<Vec<Reference<'a>>> {

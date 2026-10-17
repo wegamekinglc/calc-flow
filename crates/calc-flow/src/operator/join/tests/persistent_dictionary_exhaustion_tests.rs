@@ -249,6 +249,8 @@ fn drain_rows(output: &mut EdgeCollector) -> usize {
         .sum()
 }
 
+/// One observed dirty identity: a derived upsert carries its charge, a
+/// recorded tombstone does not (spec FR3).
 type PendingIdentity = (JoinSide, u64, EventTime, Vec<u8>, Option<u64>);
 
 struct Snapshot {
@@ -272,7 +274,7 @@ impl Snapshot {
             ),
             left: operator.state.left.to_vec(),
             right: operator.state.right.to_vec(),
-            pending: pending(&operator.state.deltas.pending),
+            pending: pending(operator),
         }
     }
 
@@ -289,7 +291,7 @@ impl Snapshot {
         );
         assert_rows(&operator.state.left, &self.left);
         assert_rows(&operator.state.right, &self.right);
-        assert_eq!(pending(&operator.state.deltas.pending), self.pending);
+        assert_eq!(pending(operator), self.pending);
     }
 }
 
@@ -305,29 +307,38 @@ fn assert_rows(actual: &dyn Rows, expected: &[StoredRow]) {
     }
 }
 
-fn pending(log: &PendingLog) -> Vec<PendingIdentity> {
-    log.iter()
-        .map(|op| match op {
-            PendingOp::Upsert {
+fn pending(operator: &StreamJoinOperator) -> Vec<PendingIdentity> {
+    let deltas = &operator.state.deltas;
+    let mut ops = Vec::new();
+    for (index, rows) in [
+        (0usize, &operator.state.left),
+        (1usize, &operator.state.right),
+    ] {
+        let side = if index == 0 {
+            JoinSide::Left
+        } else {
+            JoinSide::Right
+        };
+        let watermark = deltas.watermark[index];
+        let mut upserts = rows.references_from(watermark).collect::<Vec<_>>();
+        upserts.sort_unstable_by_key(|&position| rows.identity(position).1);
+        for position in upserts {
+            let (event_time, row_id) = rows.identity(position);
+            ops.push((
                 side,
                 row_id,
                 event_time,
-                encoded_key,
-                charge,
-                ..
-            } => (
-                *side,
-                *row_id,
-                *event_time,
-                encoded_key.to_vec(),
-                Some(*charge),
-            ),
-            PendingOp::Tombstone {
-                side,
-                row_id,
-                event_time,
-                encoded_key,
-            } => (*side, *row_id, *event_time, encoded_key.to_vec(), None),
-        })
-        .collect()
+                rows.key(position).as_slice().to_vec(),
+                Some(rows.charge(position)),
+            ));
+        }
+        let list = &deltas.tombstones[index];
+        let mut order = (0..list.len()).collect::<Vec<_>>();
+        order.sort_unstable_by_key(|&entry| list.row_ids[entry]);
+        for entry in order {
+            let (row_id, event_time, key) = list.entry(entry);
+            ops.push((side, row_id, event_time, key.as_slice().to_vec(), None));
+        }
+    }
+    ops
 }

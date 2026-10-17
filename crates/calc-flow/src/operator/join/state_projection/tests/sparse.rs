@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use super::*;
-use crate::operator::join::{JoinSide, PendingOp, columnar::RowPayload};
+use crate::operator::join::columnar::RowPayload;
 use crate::{EventTime, IngressProgress, IngressProgressSnapshot, IngressState};
 
 pub(super) async fn retained_sparse_repair() {
@@ -237,21 +237,9 @@ fn check_replacement(join: &StreamJoinOperator, old: &RowPayload) {
         panic!("native replacement")
     };
     assert!(!Arc::ptr_eq(old, new));
-    let rebound = join
-        .state
-        .deltas
-        .pending
-        .iter()
-        .find_map(|op| match op {
-            PendingOp::Upsert {
-                side: JoinSide::Left,
-                row_id: 1023,
-                record,
-                ..
-            } => Some(record),
-            _ => None,
-        })
-        .unwrap();
-    assert_eq!(rebound.funded_owner(), row.record.funded_owner());
-    assert_eq!(rebound.offset(), 0);
+    // The dirty window derives from the live rows (spec FR3), so the
+    // repaired row binds its own funded payload directly.
+    assert_eq!(row.row_id, 1023);
+    assert!(row.record.funded_owner().is_some());
+    assert_eq!(row.record.offset(), 0);
 }

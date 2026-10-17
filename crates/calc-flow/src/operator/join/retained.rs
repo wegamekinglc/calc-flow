@@ -6,7 +6,7 @@ use super::{StoredRow, admitted::PayloadRef, columnar::RowPayload};
 use crate::{EventTime, Result, StreamOperatorContext};
 use datafusion::execution::memory_pool::MemoryReservation;
 
-const CHUNK_ROWS: usize = 1_024;
+pub(super) const CHUNK_ROWS: usize = 1_024;
 
 pub(super) trait Rows: Send + Sync {
     fn len(&self) -> usize;
@@ -27,6 +27,16 @@ pub(super) trait Rows: Send + Sync {
 
     fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Stable coordinates of the live rows whose `row_id` is at or above the
+    /// watermark (spec FR3). Chunks entirely below the watermark are skipped
+    /// by their ids, so the derive costs the dirty rows, not the state.
+    fn references_from(&self, watermark: u64) -> Box<dyn Iterator<Item = usize> + Send + '_> {
+        Box::new(
+            self.references()
+                .filter(move |&index| self.identity(index).1 >= watermark),
+        )
     }
 }
 
@@ -137,6 +147,7 @@ impl Chunk {
         }
     }
 
+    #[cfg(test)]
     fn remove(&mut self, offset: usize) -> StoredRow {
         let row = self.row(offset);
         self.keys[offset] = None;
@@ -332,6 +343,7 @@ impl StateRows {
         indices
     }
 
+    #[cfg(test)]
     pub(super) fn remove(&mut self, index: usize) -> StoredRow {
         #[cfg(test)]
         super::note_join_work(|work| work.retained_chunk_visits += 1);
@@ -343,6 +355,46 @@ impl StateRows {
         }
         self.len -= 1;
         row
+    }
+
+    /// Bulk prefix removal (spec FR11): clears one planned offset set per
+    /// chunk in a single pass, releasing payload sources and sparse-repair
+    /// liveness, dropping emptied chunks, and updating the aggregate length
+    /// once. Surviving coordinates stay stable.
+    pub(super) fn remove_bulk(
+        &mut self,
+        groups: &BTreeMap<usize, Vec<usize>>,
+        queue: &mut super::columnar::SparseQueue,
+    ) {
+        let mut removed = 0_usize;
+        let mut emptied = Vec::new();
+        for (&id, offsets) in groups {
+            #[cfg(test)]
+            super::note_join_work(|work| work.retained_chunk_visits += 1);
+            let Some(chunk) = self.chunks.get_mut(&id) else {
+                continue;
+            };
+            for &offset in offsets {
+                // The sparse queue tracks the payload offset, which sparse
+                // repairs can move independently of the chunk slot.
+                let payload_offset = chunk.offsets[offset];
+                let owner = chunk.owner(offset);
+                queue.remove(&owner.with_offset(payload_offset));
+            }
+            for &offset in offsets {
+                chunk.keys[offset] = None;
+                chunk.release_source(offset);
+                chunk.live -= 1;
+            }
+            removed += offsets.len();
+            if chunk.live == 0 {
+                emptied.push(id);
+            }
+        }
+        for id in emptied {
+            self.chunks.remove(&id);
+        }
+        self.len -= removed;
     }
 
     pub(super) fn replace_payload(&mut self, index: usize, payload: RowPayload) {
@@ -370,6 +422,26 @@ impl Rows for StateRows {
                 .enumerate()
                 .filter_map(move |(offset, key)| key.as_ref().map(|_| id * CHUNK_ROWS + offset))
         }))
+    }
+
+    fn references_from(&self, watermark: u64) -> Box<dyn Iterator<Item = usize> + Send + '_> {
+        // Ids ascend in admission order, so a chunk whose last id lies below
+        // the watermark cannot hold a dirty row; restored chunks always sit
+        // wholly below the restored watermark and skip the same way.
+        Box::new(
+            self.chunks
+                .iter()
+                .skip_while(move |(_, chunk)| chunk.ids.last().is_some_and(|id| *id < watermark))
+                .flat_map(move |(&id, chunk)| {
+                    let start = chunk.ids.partition_point(|id| *id < watermark);
+                    chunk.keys[start..]
+                        .iter()
+                        .enumerate()
+                        .filter_map(move |(offset, key)| {
+                            key.as_ref().map(|_| id * CHUNK_ROWS + start + offset)
+                        })
+                }),
+        )
     }
 
     fn len(&self) -> usize {
@@ -447,6 +519,10 @@ impl Rows for Vec<StoredRow> {
 impl Rows for Arc<StateRows> {
     fn references(&self) -> Box<dyn Iterator<Item = usize> + Send + '_> {
         self.as_ref().references()
+    }
+
+    fn references_from(&self, watermark: u64) -> Box<dyn Iterator<Item = usize> + Send + '_> {
+        self.as_ref().references_from(watermark)
     }
 
     fn len(&self) -> usize {

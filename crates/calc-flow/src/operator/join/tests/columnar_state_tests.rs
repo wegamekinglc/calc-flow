@@ -883,29 +883,15 @@ async fn test_native_lookup_avoids_legacy_sql_probe_tables() {
 }
 
 fn retained_record_containers(operator: &StreamJoinOperator) -> usize {
-    let retained = operator
+    // The derived dirty window reads the retained rows directly (spec FR3),
+    // so it contributes no record containers of its own.
+    operator
         .state
         .left
         .iter()
-        .map(|row| row.record.columns().as_ptr() as usize);
-    let dirty = operator
-        .state
-        .deltas
-        .pending
-        .iter()
-        .filter_map(|op| match op {
-            PendingOp::Upsert {
-                side: JoinSide::Left,
-                record,
-                ..
-            } => Some(record.columns().as_ptr() as usize),
-            PendingOp::Upsert {
-                side: JoinSide::Right,
-                ..
-            }
-            | PendingOp::Tombstone { .. } => None,
-        });
-    retained.chain(dirty).collect::<BTreeSet<_>>().len()
+        .map(|row| row.record.columns().as_ptr() as usize)
+        .collect::<BTreeSet<_>>()
+        .len()
 }
 
 #[tokio::test]
@@ -1924,7 +1910,7 @@ async fn test_owned_copy_selected_identity_gaps_and_dirty_only_funding() {
         .runtime()
         .unwrap()
         .incremental_memory_pool();
-    let chunk = operator.state.left.payload_at(0).funded_owner().unwrap().1;
+    let _chunk = operator.state.left.payload_at(0).funded_owner().unwrap().1;
     let Some(columnar::RowPayload::Shared { chunk: payload, .. }) =
         operator.state.left.payload_at(0).owner()
     else {
@@ -1932,32 +1918,29 @@ async fn test_owned_copy_selected_identity_gaps_and_dirty_only_funding() {
     };
     let payload_owner = Arc::downgrade(payload);
     let key_owner = Arc::downgrade(operator.state.left.key_at(0));
-    let keys = operator
+    let key_credit = operator
         .state
-        .deltas
-        .pending
-        .iter()
-        .filter_map(|op| match op {
-            PendingOp::Upsert { encoded_key, .. } | PendingOp::Tombstone { encoded_key, .. } => {
-                encoded_key.funded_owner()
-            }
-        })
-        .collect::<BTreeMap<_, _>>();
-    assert_eq!(keys.len(), 1);
-    let key_credit = keys.values().sum::<usize>();
+        .left
+        .key_at(0)
+        .funded_owner()
+        .map_or(0, |(_, credit)| credit);
     assert!(key_credit > 0);
     assert!(native_lookup_tests::identity_funding(&operator) > 0);
     assert_eq!(
         pool.reserved(),
         native_lookup_tests::state_funding(&operator)
     );
-    let dirty = operator
+    // The dirty window is the live rows above the zero watermark (spec
+    // FR1/FR3): exactly the two retained gap rows.
+    assert_eq!(operator.state.deltas.watermark[0], 0);
+    assert_eq!(operator.state.deltas.dirty[0], 2);
+    let dirty_ids = operator
         .state
-        .deltas
-        .pending
+        .left
         .iter()
-        .cloned()
+        .map(|row| row.row_id)
         .collect::<Vec<_>>();
+    assert_eq!(dirty_ids, [2, 3]);
     operator
         .evict_progress(
             "right",
@@ -1969,26 +1952,21 @@ async fn test_owned_copy_selected_identity_gaps_and_dirty_only_funding() {
     assert_eq!(operator.status().left.retained_rows, 0);
     assert_eq!(operator.status().left.retained_bytes, 0);
     assert_eq!(operator.key_dictionary.inventory(), (0, 0, 0, false));
-    assert!(operator.state.deltas.pending.is_empty());
-    assert_dirty_identity_gap_rows(&dirty, &expected, &charges);
-    assert_empty_index_refund(&mut operator, pool.as_ref(), chunk, key_credit);
-    assert_eq!(
-        pool.reserved(),
-        chunk + key_credit,
-        "dirty locators must keep payload and shared key credits after live rows disappear"
-    );
+    assert!(operator.state.deltas.is_clean());
+    // Uncaptured rows coalesce away (spec FR2): no tombstones are recorded,
+    // and because the derived dirty window holds no payload clones, the
+    // shared key and payload credits retire with the last live row.
+    assert!(operator.state.deltas.tombstones[0].is_empty());
+    assert!(key_owner.upgrade().is_none());
+    assert!(payload_owner.upgrade().is_none());
     assert!(operator.compaction_release.is_none());
     assert!(operator.compaction_cleanup.is_none());
-    let before_dirty_drop = pool.reserved();
-    drop(dirty);
-    assert!(key_owner.upgrade().is_none());
-    assert_eq!(before_dirty_drop - pool.reserved(), key_credit);
-    assert!(operator.has_sparse_candidates());
-    assert!(payload_owner.strong_count() > 0);
-    assert_eq!(pool.reserved(), chunk);
-    operator.repair_sparse_chunks(&context).await.unwrap();
-    assert!(!operator.has_sparse_candidates());
-    assert!(payload_owner.upgrade().is_none());
+    let expiration_credit = operator.state.left_expirations.funded_bytes()
+        + operator.state.right_expirations.funded_bytes();
+    assert_eq!(pool.reserved(), expiration_credit);
+    operator.state.left_expirations = ExpirationIndex::default();
+    operator.state.right_expirations = ExpirationIndex::default();
+    assert_eq!(pool.reserved(), 0, "no dirty locator survives its rows");
     drop((operator, context, collector));
     assert!(job.gather_owner().close_and_drain().await.is_empty());
     drop(job);
@@ -2025,58 +2003,6 @@ fn assert_selected_identity_gap_rows(
             *expected
         );
     }
-}
-
-fn assert_dirty_identity_gap_rows(dirty: &[PendingOp], expected: &[Vec<u8>], charges: &[u64]) {
-    assert_eq!(
-        dirty.iter().map(PendingOp::identity).collect::<Vec<_>>(),
-        [(JoinSide::Left, 2), (JoinSide::Left, 3)]
-    );
-    for ((op, expected), charge) in dirty.iter().zip(expected).zip(charges) {
-        let PendingOp::Upsert {
-            record,
-            charge: actual,
-            ..
-        } = op
-        else {
-            panic!("captured dirty locators must remain upserts");
-        };
-        assert_eq!(actual, charge);
-        assert_eq!(
-            row_ipc::RowIpcEncoder::default()
-                .encode(&record.view(), "match", "left")
-                .unwrap(),
-            *expected
-        );
-    }
-}
-
-fn assert_empty_index_refund(
-    operator: &mut StreamJoinOperator,
-    pool: &dyn datafusion::execution::memory_pool::MemoryPool,
-    chunk: usize,
-    key_credit: usize,
-) {
-    let empty_index = native_lookup_tests::index_funding(operator);
-    assert!(empty_index > 0);
-    let expiration_credit = operator.state.left_expirations.funded_bytes()
-        + operator.state.right_expirations.funded_bytes();
-    let before_index_drop = pool.reserved();
-    assert_eq!(
-        before_index_drop,
-        chunk + key_credit + empty_index + expiration_credit
-    );
-    eprintln!(
-        "dirty owner funding: payload={chunk}, canonical={key_credit}, empty_index={empty_index}"
-    );
-    operator.state.left.1 = None;
-    assert_eq!(before_index_drop - pool.reserved(), empty_index);
-    operator.state.left_expirations = ExpirationIndex::default();
-    operator.state.right_expirations = ExpirationIndex::default();
-    assert_eq!(
-        before_index_drop - pool.reserved(),
-        empty_index + expiration_credit
-    );
 }
 
 fn nullable_admission_schema(unit: TimeUnit) -> SchemaRef {

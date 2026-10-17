@@ -221,25 +221,14 @@ async fn test_checkpoint_on_complete_expiry_preserves_tombstone_retention_order(
         .on_ingress_progress("right", &complete)
         .await
         .unwrap();
+    // FR14: whole-side expiry keeps its fast path under checkpointing and
+    // appends one tombstone per already-captured row in bulk.
     assert_eq!(
         join_work().retained_visits,
-        3,
-        "checkpoint-enabled expiry retains its ordered journal path"
+        0,
+        "checkpoint-enabled expiry keeps the fast path"
     );
-    assert_eq!(
-        operator
-            .state
-            .deltas
-            .pending
-            .iter()
-            .map(PendingOp::identity)
-            .collect::<Vec<_>>(),
-        [
-            (JoinSide::Left, 0),
-            (JoinSide::Left, 2),
-            (JoinSide::Left, 4)
-        ]
-    );
+    assert_eq!(operator.state.deltas.tombstones[0].row_ids, [0, 2, 4]);
     assert_eq!(operator.state.metrics.left.evicted_rows, 6);
     assert!(output.drain("output").is_empty());
     let pool = operator

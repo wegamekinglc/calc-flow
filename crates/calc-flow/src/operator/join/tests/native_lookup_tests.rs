@@ -1,4 +1,5 @@
 use super::*;
+use datafusion::execution::memory_pool::MemoryReservation;
 #[path = "native_probe_funding.rs"]
 mod probe_funding;
 use datafusion::arrow::array::{
@@ -34,31 +35,27 @@ pub(super) fn payload_funding<'a>(
 }
 
 pub(super) fn state_funding(operator: &StreamJoinOperator) -> usize {
+    // The derived dirty window borrows the live rows directly (spec FR3), so
+    // state funding covers the retained rows alone plus any tombstone keys
+    // recorded for already-captured evictions.
     let owned = operator
         .state
         .left
         .iter()
         .chain(operator.state.right.iter())
         .collect::<Vec<_>>();
-    let rows = owned.iter();
-    let pending = operator
-        .state
-        .deltas
-        .pending
+    let payloads = payload_funding(owned.iter().map(|row| &row.record));
+    let keys = owned
         .iter()
-        .filter_map(|op| match op {
-            PendingOp::Upsert { record, .. } => Some(record),
-            PendingOp::Tombstone { .. } => None,
-        });
-    let payloads = payload_funding(rows.clone().map(|row| &row.record).chain(pending));
-    let pending_keys = operator.state.deltas.pending.iter().map(|op| match op {
-        PendingOp::Upsert { encoded_key, .. } | PendingOp::Tombstone { encoded_key, .. } => {
-            encoded_key
-        }
-    });
-    let keys = rows
         .map(|row| &row.encoded_key)
-        .chain(pending_keys)
+        .chain(
+            operator
+                .state
+                .deltas
+                .tombstones
+                .iter()
+                .flat_map(|list| list.keys.iter()),
+        )
         .chain(operator.key_dictionary.canonical_owners())
         .filter_map(|key| key.funded_owner())
         .collect::<BTreeMap<_, _>>();
@@ -66,6 +63,14 @@ pub(super) fn state_funding(operator: &StreamJoinOperator) -> usize {
         + operator.state.right.funded_bytes()
         + operator.state.left_expirations.funded_bytes()
         + operator.state.right_expirations.funded_bytes()
+        + operator
+            .state
+            .deltas
+            .tombstones
+            .iter()
+            .filter_map(|list| list.credit.as_ref())
+            .map(MemoryReservation::size)
+            .sum::<usize>()
         + index_funding(operator)
         + payloads
         + keys.values().sum::<usize>()

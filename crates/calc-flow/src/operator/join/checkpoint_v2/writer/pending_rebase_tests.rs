@@ -35,7 +35,7 @@ async fn test_pending_rebase_preserves_payloads_restores_and_continues() {
     for side in ["right", "left"] {
         drop(admit_side(&mut join, side, &context).await);
     }
-    assert_eq!(join.state.deltas.pending.iter().count(), 3);
+    assert_eq!(join.state.deltas.pending_count_for_test(), 3);
     let previous = join.status();
     let rows = [
         Arc::as_ptr(&join.state.left.0),
@@ -52,7 +52,7 @@ async fn test_pending_rebase_preserves_payloads_restores_and_continues() {
             Arc::as_ptr(&join.state.right.0)
         ]
     );
-    assert!(join.state.deltas.pending.is_empty());
+    assert!(join.state.deltas.is_clean());
     let current = join.checkpoint(Epoch::new(5).unwrap()).unwrap();
     assert_eq!(current.inline_metadata["v2_inventory"]["base_epoch"], 4);
     assert_eq!(
@@ -268,7 +268,7 @@ fn invalidate_pending_rebase(
 }
 
 #[tokio::test]
-async fn test_pending_rebase_rejects_unique_ids_before_captured_history() {
+async fn test_derived_delta_rejects_corrupted_dirty_count() {
     let enabled = job();
     let context = StreamOperatorContext::new(&enabled, "prepared-reuse", None);
     let (original, old) = checkpointed(&context).await;
@@ -280,26 +280,18 @@ async fn test_pending_rebase_rejects_unique_ids_before_captured_history() {
     join.restore(&snapshot).unwrap();
     admit_left(&mut join, &context).await;
     reject_pending_identity(&join, &context).await;
-    let first = join
-        .state
-        .deltas
-        .pending
-        .slots
-        .iter_mut()
-        .flatten()
-        .next()
-        .unwrap();
-    let PendingOp::Upsert { row_id, .. } = &mut first.op else {
-        unreachable!()
-    };
-    *row_id = 0;
+    // The old rewound-row-id corruption is no longer representable: the
+    // derive reads ids from the live rows. The equivalent corruption is a
+    // dirty counter that disagrees with the derivable rows, which the
+    // selection must reject before touching anything (spec FR3/FR8).
+    join.state.deltas.dirty[0] += 1;
     let before = edge_tests::image(&join);
     let bases = count_base(&mut join);
     let failure = join.prepare_checkpoint_async(&context).await.unwrap_err();
     assert!(
         failure
             .to_string()
-            .contains("pending rows do not follow captured history")
+            .contains("derived selection differs from its paid count")
     );
     join.await_compaction_release(&context).await.unwrap();
     assert_eq!(bases.load(Ordering::SeqCst), 0);
@@ -343,7 +335,8 @@ async fn test_pending_rebase_drops_decoded_rows_before_merge_and_retires_indexes
         .await
         .unwrap();
     drop((join, old));
-    assert!(rows.upgrade().is_none());
+    // The derived rebase input shares the live state rows (spec FR3/FR8).
+    assert!(rows.upgrade().is_some());
     assert!(pending_column.upgrade().is_some());
     assert!(indexes.iter().all(|index| index.upgrade().is_some()));
     let retired_during_work = std::cell::Cell::new(false);
@@ -430,9 +423,11 @@ async fn test_pending_rebase_abandonment_and_cancel_retain_owners_until_drain() 
         drop((join, old));
         let mut drain = Box::pin(enabled.gather_owner().close_and_drain());
         let blocked = futures::poll!(drain.as_mut()).is_pending();
+        // The derived rebase work shares the live state and its payload
+        // columns until the actual drain (spec FR3/FR8).
         let ownership = (
-            rows.upgrade().is_none(),
-            old_column.upgrade().is_none(),
+            rows.upgrade().is_some(),
+            old_column.upgrade().is_some(),
             pending_column.upgrade().is_some(),
             segments.iter().all(|segment| segment.upgrade().is_some()),
         );

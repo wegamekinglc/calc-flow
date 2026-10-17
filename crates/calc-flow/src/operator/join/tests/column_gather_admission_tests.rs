@@ -70,7 +70,7 @@ async fn assert_refusal(service: &TestService, stage: AdmissionStage, projected:
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert_eq!(operator.state.next_left_row_id, 0);
     assert_eq!(operator.state.next_output_sequence, 0);
-    assert_eq!(operator.state.deltas.pending.iter().count(), 1);
+    assert_eq!(operator.state.deltas.pending_count_for_test(), 1);
     assert!(collector.drain("output").is_empty());
     operator
         .process_data("left", left_batch(vec![1, 2]), &context, &mut collector)

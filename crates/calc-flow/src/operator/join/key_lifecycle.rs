@@ -19,6 +19,17 @@ impl Retirement<'_> {
             .unwrap_or_else(|| Arc::clone(&row.encoded_key));
         self.dictionary.retire(&key, name)
     }
+
+    /// Aggregated retirement for one canonical key over a bulk-evicted
+    /// prefix (spec FR13); the caller removes the side bindings in bulk.
+    pub(super) fn retire_n(
+        &mut self,
+        key: &Arc<super::columnar::FramedKey>,
+        count: u64,
+        name: &str,
+    ) -> Result<()> {
+        self.dictionary.retire_n(key, count, name)
+    }
 }
 
 impl StreamJoinOperator {

@@ -1,40 +1,48 @@
 use std::sync::Arc;
 
-use super::super::{SchemaRef, clone_pending_op, pending_owned};
+use super::super::delta::SideDelta;
+use super::super::{SchemaRef, copy_delta, dirty};
 use super::{
     Base, HistoryInput, IndexInput, MemoryReservation, PayloadInput, Result, StreamJoinOperator,
     StreamOperatorContext, accounting, error, funding, input,
 };
 use crate::Epoch;
-use crate::operator::join::{PendingOp, checkpoint_v2::ContainerFunding, columnar::Quantum};
+use crate::operator::join::{checkpoint_v2::ContainerFunding, columnar::Quantum};
 
+/// The derived dirty window of a rebase-eligible operator (spec FR7): the
+/// lists are empty by eligibility, so the input is the shared row state plus
+/// its watermarks and O(1) upsert counts.
 pub(in crate::operator::join::checkpoint_v2::writer) struct PendingInput {
     pub(in crate::operator::join::checkpoint_v2::writer) identity:
         super::super::super::HistoryIdentity,
-    rows: Vec<PendingOp>,
+    delta: super::super::CopiedDelta,
+    rows: [Arc<crate::operator::join::StateRows>; 2],
     _containers: Option<Arc<ContainerFunding>>,
-    funding: MemoryReservation,
+    _funding: MemoryReservation,
 }
 
 impl PendingInput {
-    fn allocate(
-        operator: &StreamJoinOperator,
-        count: usize,
-        workspace: &MemoryReservation,
-    ) -> Result<Self> {
+    fn allocate(operator: &StreamJoinOperator, workspace: &MemoryReservation) -> Result<Self> {
         let credit = workspace.new_empty();
         accounting::reserve(
             &credit,
             accounting::sum(&[
-                accounting::product(count, size_of::<PendingOp>())?,
+                accounting::product(2, size_of::<Arc<crate::operator::join::StateRows>>())?,
                 super::super::budget::registration_bytes()?,
             ])?,
         )?;
         let pending = Self {
             identity: operator.checkpoint_identity,
-            rows: funding::vector(count)?,
+            delta: copy_delta(&operator.state.deltas, &credit, &|| {
+                // Synchronous copy: the cooperative steps happen per entry.
+                Ok(())
+            })?,
+            rows: [
+                Arc::clone(&operator.state.left.0),
+                Arc::clone(&operator.state.right.0),
+            ],
             _containers: operator.v2_containers.clone(),
-            funding: credit,
+            _funding: credit,
         };
         Ok(pending)
     }
@@ -46,31 +54,20 @@ impl PendingInput {
     ) -> Result<Self> {
         context.check_cancelled()?;
         let mut quantum = Quantum::default();
-        let count = pending_count(operator, &mut quantum, context).await?;
-        let mut pending = Self::allocate(operator, count, workspace)?;
-        for op in operator.state.deltas.pending.iter() {
-            quantum.step(context, 1, size_of::<PendingOp>()).await?;
-            pending.rows.push(clone_pending_op(op, &pending.funding)?);
+        let entries: usize = operator
+            .state
+            .deltas
+            .tombstones
+            .iter()
+            .map(crate::operator::join::Tombstones::len)
+            .sum();
+        for _ in 0..entries {
+            quantum.step(context, 1, 0).await?;
         }
+        let pending = Self::allocate(operator, workspace)?;
         context.check_cancelled()?;
         Ok(pending)
     }
-}
-
-async fn pending_count(
-    operator: &StreamJoinOperator,
-    quantum: &mut Quantum,
-    context: &StreamOperatorContext<'_>,
-) -> Result<usize> {
-    let mut count = 0;
-    for op in operator.state.deltas.pending.iter() {
-        quantum.step(context, 1, 0).await?;
-        if !matches!(op, PendingOp::Upsert { .. }) {
-            return Err(error("V2 rebase pending input contains a tombstone"));
-        }
-        count = accounting::add(count, 1)?;
-    }
-    Ok(count)
 }
 
 pub(super) fn encode(
@@ -84,7 +81,25 @@ pub(super) fn encode(
     if pending.identity != history.identity {
         return Err(error("checkpoint pending layout differs from history"));
     }
-    let dirty = pending_owned(&pending.rows, schemas, Epoch::INITIAL, workspace, check)?;
+    let rows = pending
+        .rows
+        .each_ref()
+        .map(|rows| rows.as_ref() as &dyn crate::operator::join::Rows);
+    let sides = [
+        SideDelta {
+            rows: rows[0],
+            watermark: pending.delta.watermark[0],
+            upserts: pending.delta.upserts[0],
+            tombstones: &pending.delta.tombstones[0],
+        },
+        SideDelta {
+            rows: rows[1],
+            watermark: pending.delta.watermark[1],
+            upserts: pending.delta.upserts[1],
+            tombstones: &pending.delta.tombstones[1],
+        },
+    ];
+    let dirty = dirty(&sides, schemas, Epoch::INITIAL, workspace, check)?;
     drop(pending);
     check()?;
     let history = combine(history, &dirty, workspace, check)?;

@@ -4,6 +4,7 @@ mod tests {
     mod columnar_charge_tests;
     mod complete_expiry_tests;
     mod expiration_heap_tests;
+    mod lazy_delta_tests;
     mod morsel_tests;
 
     use std::{collections::BTreeMap, sync::Arc, time::Duration};
@@ -1422,7 +1423,7 @@ mod tests {
             operator.status().left.retained_bytes,
             enabled.status().left.retained_bytes
         );
-        assert!(operator.state.deltas.pending.is_empty());
+        assert!(operator.state.deltas.is_clean());
         operator
             .process_data("right", right_batch(vec![0]), &context, &mut collector)
             .await
@@ -1443,9 +1444,9 @@ mod tests {
             .unwrap();
         assert_eq!(operator.status().left.retained_rows, 0);
         assert_eq!(operator.status().left.retained_bytes, 0);
-        assert!(operator.state.deltas.pending.is_empty());
+        assert!(operator.state.deltas.is_clean());
         operator.on_end(&context, &mut collector).await.unwrap();
-        assert!(operator.state.deltas.pending.is_empty());
+        assert!(operator.state.deltas.is_clean());
         assert_eq!(operator.status().right.retained_rows, 0);
     }
 
@@ -1523,7 +1524,7 @@ mod tests {
         assert_eq!(work.retained_descriptor_views, 0);
         assert_eq!(work.expiration_head_steps, 0);
         assert_eq!(work.native_dense_repairs, 0);
-        assert_eq!(work.pending_visits, 0);
+        assert_eq!(work.tombstone_appends, 0);
         assert_eq!(operator.status().left.retained_rows, 80);
     }
 
@@ -1551,12 +1552,16 @@ mod tests {
             .await
             .unwrap();
         let work = join_work();
-        assert_eq!(work.retained_visits, 2);
-        assert_eq!(work.retained_chunk_visits, 2);
-        assert_eq!(work.retained_descriptor_views, 2);
-        assert_eq!(work.expiration_head_steps, 2);
+        // Bulk eviction cuts the run's prefix once (spec FR10): one heap pop,
+        // one chunk pass, and no per-row descriptor work.
+        assert_eq!(work.retained_visits, 0);
+        assert_eq!(work.retained_chunk_visits, 1);
+        assert_eq!(work.retained_descriptor_views, 0);
+        assert_eq!(work.expiration_head_steps, 1);
+        assert_eq!(work.expiration_run_cuts, 1);
         assert_eq!(work.native_dense_repairs, 0);
-        assert_eq!(work.pending_visits, 2);
+        // Neither evicted row was ever captured, so nothing is recorded.
+        assert_eq!(work.tombstone_appends, 0);
         assert_eq!(operator.status().left.retained_rows, 78);
         assert_eq!(operator.status().left.evicted_rows, 2);
         let snapshot = operator.checkpoint(Epoch::INITIAL).unwrap();
@@ -1598,11 +1603,10 @@ mod tests {
                 .unwrap()
             );
         }
-        assert_eq!(operator.state.deltas.pending.iter().count(), 3);
-        assert!(operator.state.deltas.pending.iter().all(|op| match op {
-            PendingOp::Upsert { encoded_key, .. } => Arc::ptr_eq(encoded_key, key),
-            PendingOp::Tombstone { .. } => false,
-        }));
+        // The derived capture encodes exactly these three rows above the
+        // watermark, reusing each row's interned key Arc (spec FR1/FR3).
+        assert_eq!(operator.state.deltas.dirty[0], 3);
+        assert!(operator.state.deltas.tombstones[0].is_empty());
     }
 
     #[tokio::test]
@@ -1632,7 +1636,9 @@ mod tests {
                 .on_ingress_progress("right", &progress)
                 .await
                 .unwrap();
-            assert_eq!(join_work().pending_visits, 1);
+            // The evicted row was never captured, so it coalesces away
+            // instead of being recorded (spec FR2).
+            assert_eq!(join_work().tombstone_appends, 0);
             let snapshot = operator.checkpoint(Epoch::INITIAL).unwrap();
             let mut restored =
                 StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
@@ -1674,20 +1680,7 @@ mod tests {
             operator.checkpoint(Epoch::new(epoch).unwrap()).unwrap();
         }
         operator.on_end(&context, &mut collector).await.unwrap();
-        assert_eq!(
-            operator
-                .state
-                .deltas
-                .pending
-                .iter()
-                .map(PendingOp::identity)
-                .collect::<Vec<_>>(),
-            vec![
-                (JoinSide::Left, 0),
-                (JoinSide::Left, 2),
-                (JoinSide::Left, 4)
-            ]
-        );
+        assert_eq!(operator.state.deltas.tombstones[0].row_ids, vec![0, 2, 4]);
     }
 
     #[tokio::test]
@@ -1943,7 +1936,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn checkpoint_encodes_dirty_upserts_from_carried_records_not_live_state() {
+    async fn checkpoint_derives_dirty_upserts_from_live_state_above_the_watermark() {
         let mut operator =
             StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
         let job_context = job();
@@ -1953,16 +1946,20 @@ mod tests {
             .process_data("left", left_batch(vec![0, 1, 2]), &context, &mut collector)
             .await
             .unwrap();
-        // The dirty log must encode from the records it carries at admission:
-        // the checkpoint path may not scan live state per dirty row, or capture
-        // cost grows with the total retained state instead of the dirty set.
+        // The derived capture reads the live rows above the watermark through
+        // the per-chunk id seek, so its cost tracks the dirty window rather
+        // than the total retained state (spec FR3); an emptied side derives
+        // an empty delta instead of resurrecting removed rows.
         operator.state.left.clear();
+        operator.state.deltas.dirty[0] = 0;
+        operator.state.metrics.left.retained_rows = 0;
+        operator.state.metrics.left.retained_bytes = 0;
         let snapshot = operator.checkpoint(Epoch::INITIAL).unwrap();
 
         let mut restored =
             StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
         restored.restore(&snapshot).unwrap();
-        assert_eq!(restored.status().left.retained_rows, 3);
+        assert_eq!(restored.status().left.retained_rows, 0);
     }
 
     #[tokio::test]
@@ -2262,6 +2259,7 @@ use datafusion::arrow::{
     ipc::reader::StreamReader,
     record_batch::RecordBatch,
 };
+use datafusion::execution::memory_pool::MemoryReservation;
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::Value;
@@ -2294,7 +2292,9 @@ struct JoinWork {
     retained_descriptor_views: usize,
     expiration_head_steps: usize,
     native_dense_repairs: usize,
-    pending_visits: usize,
+    tombstone_appends: usize,
+    tombstone_peak: usize,
+    expiration_run_cuts: usize,
     key_encodings: usize,
     time_decoders: usize,
     sql_probe_table_builds: usize,
@@ -2345,7 +2345,7 @@ struct JoinWork {
 #[cfg(test)]
 thread_local! {
     static JOIN_WORK: std::cell::Cell<JoinWork> = const { std::cell::Cell::new(JoinWork {
-        retained_visits: 0, retained_chunk_visits: 0, retained_descriptor_views: 0, expiration_head_steps: 0, native_dense_repairs: 0, pending_visits: 0, key_encodings: 0, time_decoders: 0,
+        retained_visits: 0, retained_chunk_visits: 0, retained_descriptor_views: 0, expiration_head_steps: 0, native_dense_repairs: 0, tombstone_appends: 0, tombstone_peak: 0, expiration_run_cuts: 0, key_encodings: 0, time_decoders: 0,
         sql_probe_table_builds: 0, native_range_visits: 0, native_boundary_visits: 0,
         admission_mask_blocks: 0, native_shifted_entries: 0,
         native_eviction_comparisons: 0, native_funding_refunds: 0,
@@ -2815,7 +2815,7 @@ pub struct StreamJoinOperator {
     ingress_progress: IngressProgressSnapshot,
     compaction_release: Option<tokio::sync::oneshot::Receiver<()>>,
     compaction_cleanup: Option<crate::runtime::streaming::gather_work::AttemptCleanup>,
-    probe_control: Option<Arc<datafusion::execution::memory_pool::MemoryReservation>>,
+    probe_control: Option<Arc<MemoryReservation>>,
     #[cfg(test)]
     probe_test_hook: Option<data_work::TestHook>,
     #[cfg(test)]
@@ -2959,9 +2959,21 @@ impl JoinSide {
             JoinSide::Right => "right",
         }
     }
+
+    const fn index(self) -> usize {
+        match self {
+            JoinSide::Left => 0,
+            JoinSide::Right => 1,
+        }
+    }
 }
 
 /// One dirty state change since the last captured checkpoint (spec FR45).
+///
+/// Test-only oracle shape: production derives the same ops from the live
+/// state at capture (spec FR3), so this type survives only as the
+/// byte-equivalence oracle and as a constructor for encoder tests.
+#[cfg(test)]
 #[derive(Clone)]
 enum PendingOp {
     Upsert {
@@ -2980,6 +2992,7 @@ enum PendingOp {
     },
 }
 
+#[cfg(test)]
 impl PendingOp {
     fn identity(&self) -> (JoinSide, u64) {
         match self {
@@ -2988,8 +3001,19 @@ impl PendingOp {
             }
         }
     }
+
+    #[cfg(test)]
+    const fn side(&self) -> JoinSide {
+        match self {
+            PendingOp::Upsert { side, .. } | PendingOp::Tombstone { side, .. } => *side,
+        }
+    }
 }
 
+/// Test-only arrival-order log the pre-change production code maintained:
+/// the oracle replays schedules through it and compares encodings (spec
+/// FR4).
+#[cfg(test)]
 #[derive(Default)]
 struct PendingLog {
     slots: Vec<Option<PendingEntry>>,
@@ -2999,17 +3023,15 @@ struct PendingLog {
     tail: Option<usize>,
 }
 
+#[cfg(test)]
 struct PendingEntry {
     op: PendingOp,
     previous: Option<usize>,
     next: Option<usize>,
 }
 
+#[cfg(test)]
 impl PendingLog {
-    fn is_empty(&self) -> bool {
-        self.head.is_none()
-    }
-
     fn iter(&self) -> impl Iterator<Item = &PendingOp> {
         let mut next = self.head;
         std::iter::from_fn(move || {
@@ -3067,28 +3089,185 @@ impl PendingLog {
         self.free.push(slot);
         true
     }
+}
 
-    fn clear(&mut self) {
-        self.slots.clear();
-        self.free.clear();
-        self.upserts.clear();
-        self.head = None;
-        self.tail = None;
+/// Per-side compact columnar tombstone list (spec FR2): one entry per evicted
+/// row whose `row_id` lies below the side's capture watermark. Entries drain
+/// at each capture; the peak stays reservation-covered.
+#[derive(Default)]
+struct Tombstones {
+    row_ids: Vec<u64>,
+    times: Vec<i64>,
+    keys: Vec<Arc<columnar::FramedKey>>,
+    credit: Option<MemoryReservation>,
+    charged: usize,
+}
+
+impl Tombstones {
+    fn len(&self) -> usize {
+        self.row_ids.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.row_ids.is_empty()
+    }
+
+    /// Extends the list's reservation-backed capacity for `count` further
+    /// entries against the side's expiration credit before any mutation, so
+    /// a refusal leaves the list untouched (spec FR8). Unfunded (legacy)
+    /// sides skip the charge, mirroring the optional expiration credit.
+    fn reserve(
+        &mut self,
+        origin: Option<&MemoryReservation>,
+        count: usize,
+        name: &str,
+    ) -> Result<()> {
+        let required = self
+            .len()
+            .checked_add(count)
+            .ok_or_else(|| counter_overflow(name, "tombstone entries"))?;
+        let capacity = self
+            .keys
+            .capacity()
+            .max(required)
+            .max(4)
+            .checked_next_power_of_two()
+            .ok_or_else(|| counter_overflow(name, "tombstone capacity"))?;
+        if let Some(origin) = origin {
+            let credit = self.credit.get_or_insert_with(|| origin.new_empty());
+            let bytes = capacity
+                .checked_sub(self.charged)
+                .and_then(|delta| delta.checked_mul(3 * size_of::<u64>()))
+                .ok_or_else(|| counter_overflow(name, "tombstone bytes"))?;
+            checkpoint_v2::grow_expiration_credit(credit, bytes)?;
+            self.charged = capacity;
+        }
+        for column_bytes in [
+            self.row_ids
+                .try_reserve_exact(capacity - self.row_ids.len()),
+            self.times.try_reserve_exact(capacity - self.times.len()),
+            self.keys.try_reserve_exact(capacity - self.keys.len()),
+        ] {
+            column_bytes.map_err(|_| counter_overflow(name, "tombstone capacity"))?;
+        }
+        if self.row_ids.capacity() > capacity
+            || self.times.capacity() > capacity
+            || self.keys.capacity() > capacity
+        {
+            return Err(CalcFlowError::Internal {
+                message: format!("stream Join {name:?} tombstone capacity exceeded its credit"),
+            });
+        }
+        Ok(())
+    }
+
+    /// Appends one entry; capacity must already be reserved.
+    fn push(&mut self, row_id: u64, event_time: EventTime, key: Arc<columnar::FramedKey>) {
+        #[cfg(test)]
+        note_join_work(|work| work.tombstone_appends += 1);
+        self.row_ids.push(row_id);
+        self.times.push(event_time.as_micros());
+        self.keys.push(key);
+        #[cfg(test)]
+        note_join_work(|work| work.tombstone_peak = work.tombstone_peak.max(self.len()));
+    }
+
+    /// Drains every entry at a capture while keeping the peak capacity and
+    /// its credit resident (spec FR8).
+    fn drain(&mut self) {
+        self.row_ids.clear();
+        self.times.clear();
+        self.keys.clear();
+    }
+
+    fn entry(&self, index: usize) -> (u64, EventTime, &Arc<columnar::FramedKey>) {
+        (
+            self.row_ids[index],
+            EventTime::from_micros(self.times[index]),
+            &self.keys[index],
+        )
     }
 }
 
-/// Prepared checkpoint segments and the dirty log (spec FR45/FR47).
+/// Lazy checkpoint delta state (spec FR1-FR3): a per-side capture watermark
+/// plus compact tombstone lists replace the per-row pending log, and a
+/// capture derives upserts from the live rows at or above the watermark.
 ///
 /// Bulk encoding and compaction are prepared asynchronously before capture;
 /// `checkpoint` only shares the prepared segment allocations and encodes the
-/// dirty ops.
+/// derived delta.
 #[derive(Default)]
 struct DeltaTracking {
     base: BTreeMap<&'static str, StateSegment>,
     segments: BTreeMap<(u64, &'static str), StateSegment>,
-    pending: PendingLog,
+    watermark: [u64; 2],
+    dirty: [u64; 2],
+    tombstones: [Tombstones; 2],
     segments_since_base: u32,
     needs_compaction: bool,
+}
+
+impl DeltaTracking {
+    fn restored(
+        next_row_ids: [u64; 2],
+        base: BTreeMap<&'static str, StateSegment>,
+        segments: BTreeMap<(u64, &'static str), StateSegment>,
+        segments_since_base: u32,
+    ) -> Self {
+        Self {
+            base,
+            segments,
+            // Restored rows always sit below the allocation frontier, so the
+            // restored history already persists them (spec FR1/FR15).
+            watermark: next_row_ids,
+            dirty: [0; 2],
+            tombstones: std::array::from_fn(|_| Tombstones::default()),
+            segments_since_base,
+            needs_compaction: false,
+        }
+    }
+
+    fn note_admitted(&mut self, side: JoinSide, count: u64, name: &str) -> Result<()> {
+        self.dirty[side.index()] = self.dirty[side.index()]
+            .checked_add(count)
+            .ok_or_else(|| counter_overflow(name, "dirty rows"))?;
+        Ok(())
+    }
+
+    /// An evicted row at or above the watermark was never captured and
+    /// coalesces away (spec FR2).
+    fn note_coalesced_eviction(&mut self, side: JoinSide, name: &str) -> Result<()> {
+        self.dirty[side.index()] = self.dirty[side.index()]
+            .checked_sub(1)
+            .ok_or_else(|| counter_overflow(name, "dirty rows"))?;
+        Ok(())
+    }
+
+    fn is_clean(&self) -> bool {
+        self.dirty == [0; 2] && self.tombstones.iter().all(Tombstones::is_empty)
+    }
+
+    /// Test view of the derived dirty window: the tombstone entries plus the
+    /// uncaptured live rows that the old pending log held as upserts.
+    #[cfg(test)]
+    fn pending_count_for_test(&self) -> usize {
+        self.dirty
+            .iter()
+            .map(|&count| usize::try_from(count).unwrap_or(usize::MAX))
+            .sum::<usize>()
+            + self.tombstones.iter().map(Tombstones::len).sum::<usize>()
+    }
+
+    /// Advances both watermarks to the allocation frontiers and drains the
+    /// tombstone lists exactly where the pending log used to clear (spec
+    /// FR5).
+    fn drained_at_capture(&mut self, next_row_ids: [u64; 2]) {
+        self.watermark = next_row_ids;
+        self.dirty = [0; 2];
+        for list in &mut self.tombstones {
+            list.drain();
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -3160,6 +3339,7 @@ impl RetainedRows {
         (**self).commit(chunks);
     }
 
+    #[cfg(test)]
     fn remove_bound(&mut self, index: usize, bindings: &key_dictionary::SideBindings) -> StoredRow {
         let row = (**self).remove(index);
         if let Some(native) = &mut self.1 {
@@ -3169,6 +3349,11 @@ impl RetainedRows {
             });
         }
         row
+    }
+
+    fn remove_bulk(&mut self, groups: &BTreeMap<usize, Vec<usize>>) {
+        let state = Arc::get_mut(&mut self.0).expect("compaction input released before eviction");
+        state.remove_bulk(groups, &mut self.2);
     }
 
     fn clear(&mut self) {
@@ -3203,6 +3388,10 @@ impl IntoIterator for RetainedRows {
 impl Rows for RetainedRows {
     fn references(&self) -> Box<dyn Iterator<Item = usize> + Send + '_> {
         self.0.references()
+    }
+
+    fn references_from(&self, watermark: u64) -> Box<dyn Iterator<Item = usize> + Send + '_> {
+        self.0.references_from(watermark)
     }
 
     fn len(&self) -> usize {
@@ -3253,22 +3442,14 @@ pub(crate) fn with_one_gib_pool(mut operator: StreamJoinOperator) -> StreamJoinO
 }
 
 #[cfg(test)]
-type MetadataTestHook =
-    Arc<dyn Fn(Option<&datafusion::execution::memory_pool::MemoryReservation>, bool) + Send + Sync>;
+type MetadataTestHook = Arc<dyn Fn(Option<&MemoryReservation>, bool) + Send + Sync>;
 
 #[cfg(test)]
 type SchemaTestHook = MetadataTestHook;
 
 #[cfg(test)]
-type DecodedRowTestHook = Arc<
-    dyn Fn(
-            Option<&datafusion::execution::memory_pool::MemoryReservation>,
-            Option<(usize, usize)>,
-            bool,
-            bool,
-        ) + Send
-        + Sync,
->;
+type DecodedRowTestHook =
+    Arc<dyn Fn(Option<&MemoryReservation>, Option<(usize, usize)>, bool, bool) + Send + Sync>;
 
 #[derive(Clone, Copy)]
 struct RestoreSchema<'a> {
@@ -3277,11 +3458,11 @@ struct RestoreSchema<'a> {
     #[cfg(test)]
     hook: Option<&'a SchemaTestHook>,
     #[cfg(test)]
-    credit: Option<&'a datafusion::execution::memory_pool::MemoryReservation>,
+    credit: Option<&'a MemoryReservation>,
     #[cfg(test)]
     decoded_row_hook: Option<&'a DecodedRowTestHook>,
     #[cfg(test)]
-    decoded_row_credit: Option<&'a datafusion::execution::memory_pool::MemoryReservation>,
+    decoded_row_credit: Option<&'a MemoryReservation>,
     #[cfg(test)]
     decoded_owned_work: bool,
 }
@@ -3327,7 +3508,7 @@ mod typed_key;
 struct PreparedMatches {
     pairs: matches::Selection,
     keys: Option<native_lookup::NativeKeys>,
-    credit: Option<datafusion::execution::memory_pool::MemoryReservation>,
+    credit: Option<MemoryReservation>,
     deferred: Option<Box<data_work::DeferredProbe>>,
 }
 
@@ -3358,7 +3539,7 @@ struct PreparedJoinBatch {
     native_append: Option<native_lookup::AppendCredit>,
     dictionary: Option<key_dictionary::Pending>,
     legacy_key_references: bool,
-    _native_scratch: Option<datafusion::execution::memory_pool::MemoryReservation>,
+    _native_scratch: Option<MemoryReservation>,
 }
 
 impl StreamJoinOperator {
@@ -3548,10 +3729,7 @@ impl StreamJoinOperator {
         Ok(())
     }
 
-    pub(crate) fn reserve_checkpoint_preload(
-        &self,
-        bytes: usize,
-    ) -> Result<datafusion::execution::memory_pool::MemoryReservation> {
+    pub(crate) fn reserve_checkpoint_preload(&self, bytes: usize) -> Result<MemoryReservation> {
         let runtime = self
             .runtime
             .runtime
@@ -4512,12 +4690,17 @@ impl StreamJoinOperator {
             prepared.legacy_key_references,
             &prepared.retained,
         );
-        self.mark_retained_rows(
-            &prepared.retained,
-            side,
-            &prepared.chunks.indices,
-            checkpointing,
-        );
+        if checkpointing {
+            self.state.deltas.note_admitted(
+                side,
+                u64::try_from(prepared.retained.len())
+                    .map_err(|_| counter_overflow(&self.name, "retained rows"))?,
+                &self.name,
+            )?;
+        }
+        for (offset, row) in prepared.retained.iter().enumerate() {
+            row.record.mark_live(prepared.chunks.indices[offset]);
+        }
         if side == JoinSide::Left {
             self.state.next_left_row_id = prepared.next_row_id;
             if !prepared.retained.is_empty() {
@@ -4562,28 +4745,6 @@ impl StreamJoinOperator {
             .any(|row| self.key_dictionary.lease(&row.encoded_key).is_none());
     }
 
-    fn mark_retained_rows(
-        &mut self,
-        retained: &[StoredRow],
-        side: JoinSide,
-        retained_indices: &[usize],
-        checkpointing: bool,
-    ) {
-        for (offset, row) in retained.iter().enumerate() {
-            row.record.mark_live(retained_indices[offset]);
-            if checkpointing {
-                self.state.deltas.pending.push(PendingOp::Upsert {
-                    side,
-                    row_id: row.row_id,
-                    event_time: row.event_time,
-                    encoded_key: Arc::clone(&row.encoded_key),
-                    record: row.record.clone(),
-                    charge: row.charge,
-                });
-            }
-        }
-    }
-
     fn evict_progress(
         &mut self,
         ingress: &str,
@@ -4602,7 +4763,7 @@ impl StreamJoinOperator {
                     },
                     progress,
                     &mut self.state.metrics.right,
-                    checkpointing.then_some(&mut self.state.deltas.pending),
+                    checkpointing.then_some(&mut self.state.deltas),
                     EvictionPolicy {
                         extension_micros: self.spec.bounds.before_micros,
                         side: JoinSide::Right,
@@ -4624,7 +4785,7 @@ impl StreamJoinOperator {
                     },
                     progress,
                     &mut self.state.metrics.left,
-                    checkpointing.then_some(&mut self.state.deltas.pending),
+                    checkpointing.then_some(&mut self.state.deltas),
                     EvictionPolicy {
                         extension_micros: self.spec.bounds.after_micros,
                         side: JoinSide::Left,
@@ -4909,18 +5070,45 @@ impl StreamOperator for StreamJoinOperator {
         self.await_compaction_release(context).await?;
         if context.job().checkpointing() {
             self.v2_writer.changed(true)?;
-            let left_identities = self.state.left_expirations.identities(&self.state.left);
-            record_tombstones(
-                &mut self.state.deltas.pending,
-                JoinSide::Left,
-                left_identities,
-            );
-            let right_identities = self.state.right_expirations.identities(&self.state.right);
-            record_tombstones(
-                &mut self.state.deltas.pending,
-                JoinSide::Right,
-                right_identities,
-            );
+            // Live rows below the watermark leave terminal tombstones in
+            // bulk; rows at or above it coalesce away (spec FR2). Both sides
+            // reserve before either records, so a funding refusal fails the
+            // job with the state and lists untouched (spec FR8).
+            let left_origin = self.state.left_expirations.tombstone_origin();
+            let right_origin = self.state.right_expirations.tombstone_origin();
+            let left_watermark = self.state.deltas.watermark[0];
+            let right_watermark = self.state.deltas.watermark[1];
+            let left_captured = self
+                .state
+                .left
+                .indexed()
+                .filter(|(_, row)| row.row_id < left_watermark)
+                .count();
+            let right_captured = self
+                .state
+                .right
+                .indexed()
+                .filter(|(_, row)| row.row_id < right_watermark)
+                .count();
+            self.state.deltas.tombstones[0].reserve(left_origin, left_captured, &self.name)?;
+            self.state.deltas.tombstones[1].reserve(right_origin, right_captured, &self.name)?;
+            for (side, watermark) in [(0, left_watermark), (1, right_watermark)] {
+                let rows = if side == 0 {
+                    &self.state.left
+                } else {
+                    &self.state.right
+                };
+                for (_, row) in rows.indexed() {
+                    if row.row_id < watermark {
+                        self.state.deltas.tombstones[side].push(
+                            row.row_id,
+                            row.event_time,
+                            Arc::clone(&row.encoded_key),
+                        );
+                    }
+                }
+                self.state.deltas.dirty[side] = 0;
+            }
         } else {
             self.v2_writer.invalidate_history()?;
         }
@@ -5056,7 +5244,7 @@ impl StreamJoinOperator {
         epoch: Epoch,
         segments: &mut BTreeMap<String, StateSegment>,
     ) -> Result<()> {
-        if !self.state.deltas.pending.is_empty() {
+        if !self.state.deltas.is_clean() {
             for (side, bytes) in encode_pending_delta(&self.state, epoch, &self.name)? {
                 let segment = StateSegment::new(bytes);
                 self.state
@@ -5068,7 +5256,9 @@ impl StreamJoinOperator {
                     segment,
                 );
             }
-            self.state.deltas.pending.clear();
+            self.state
+                .deltas
+                .drained_at_capture([self.state.next_left_row_id, self.state.next_right_row_id]);
             self.state.deltas.segments_since_base += 1;
             if self.state.deltas.segments_since_base >= JOIN_DELTA_COMPACTION_SEGMENTS {
                 self.state.deltas.needs_compaction = true;
@@ -5173,12 +5363,12 @@ impl StreamJoinOperator {
                 metrics: metadata.metrics,
                 ended: metadata.ended,
                 last_checkpoint_epoch: Epoch::new(metadata.epoch),
-                deltas: DeltaTracking {
+                deltas: DeltaTracking::restored(
+                    [metadata.next_left_row_id, metadata.next_right_row_id],
                     base,
-                    segments: carried,
+                    carried,
                     segments_since_base,
-                    ..DeltaTracking::default()
-                },
+                ),
             },
             repeated_ids,
         ))
@@ -6067,10 +6257,12 @@ const JOIN_DELTA_MAGIC: &[u8; 8] = b"CFJDLT1\0";
 const JOIN_DELTA_UPSERT_TAG: u8 = 1;
 const JOIN_DELTA_TOMBSTONE_TAG: u8 = 2;
 
-/// Encodes the dirty ops of one epoch into per-side delta segments.
+/// Encodes the derived dirty ops of one epoch into per-side delta segments.
 ///
-/// Upserts encode the records they carry from admission, so the encode cost is
-/// proportional to the dirty set, never to the full state (spec FR47).
+/// Upserts derive from the live rows at or above the watermark (spec FR3), so
+/// the encode cost stays proportional to the dirty set, never to the full
+/// state (spec FR47). Identities stay unique per segment, so the sequential
+/// V1 restore fold keeps applying regardless of the derived order.
 #[cfg(test)]
 fn encode_pending_delta(
     state: &StreamJoinState,
@@ -6080,53 +6272,70 @@ fn encode_pending_delta(
     let mut encoded = Vec::new();
     let mut ipc_encoder = row_ipc::RowIpcEncoder::default();
     for side in [JoinSide::Left, JoinSide::Right] {
-        let ops = state
-            .deltas
-            .pending
-            .iter()
-            .filter(|op| op.side() == side)
-            .collect::<Vec<_>>();
-        if ops.is_empty() {
+        let rows = if side == JoinSide::Left {
+            &state.left
+        } else {
+            &state.right
+        };
+        let watermark = state.deltas.watermark[side.index()];
+        let list = &state.deltas.tombstones[side.index()];
+        if state.deltas.dirty[side.index()] == 0 && list.is_empty() {
             continue;
         }
         let mut segment = Vec::new();
+        let mut count = 0_usize;
         segment.extend_from_slice(JOIN_DELTA_MAGIC);
-        segment.extend_from_slice(&ops.len().to_le_bytes());
-        for op in ops {
-            encode_delta_op(&mut segment, op, &mut ipc_encoder, operator_id)?;
+        segment.extend_from_slice(&0_u64.to_le_bytes());
+        let mut upserts = rows.references_from(watermark).collect::<Vec<_>>();
+        upserts.sort_unstable_by_key(|&index| rows.identity(index).1);
+        for index in upserts {
+            let (event_time, row_id) = rows.identity(index);
+            encode_delta_upsert(
+                &mut segment,
+                row_id,
+                event_time,
+                rows.key(index).as_slice(),
+                rows.charge(index),
+                &rows.payload(index),
+                &mut ipc_encoder,
+                operator_id,
+                side,
+            )?;
+            count += 1;
+        }
+        let mut order = (0..list.len()).collect::<Vec<_>>();
+        order.sort_unstable_by_key(|&entry| list.row_ids[entry]);
+        for entry in order {
+            let (row_id, event_time, key) = list.entry(entry);
+            encode_delta_tombstone(&mut segment, row_id, event_time, key.as_slice());
+            count += 1;
         }
         let _ = epoch;
+        segment[JOIN_DELTA_MAGIC.len()..JOIN_DELTA_MAGIC.len() + 8].copy_from_slice(
+            &u64::try_from(count)
+                .map_err(|_| counter_overflow(operator_id, "delta ops"))?
+                .to_le_bytes(),
+        );
         encoded.push((side, segment));
     }
     Ok(encoded)
 }
 
-/// Appends one dirty op's tag, identity and (for upserts) carried row IPC.
+/// Appends one derived upsert's tag, identity and carried row IPC.
 #[cfg(test)]
-fn encode_delta_op(
+#[allow(clippy::too_many_arguments)]
+fn encode_delta_upsert(
     segment: &mut Vec<u8>,
-    op: &PendingOp,
+    row_id: u64,
+    event_time: EventTime,
+    encoded_key: &[u8],
+    charge: u64,
+    payload: &PayloadRef<'_>,
     ipc_encoder: &mut row_ipc::RowIpcEncoder,
     operator_id: &str,
+    side: JoinSide,
 ) -> Result<()> {
-    segment.push(match op {
-        PendingOp::Upsert { .. } => JOIN_DELTA_UPSERT_TAG,
-        PendingOp::Tombstone { .. } => JOIN_DELTA_TOMBSTONE_TAG,
-    });
-    let (row_id, event_time, encoded_key) = match op {
-        PendingOp::Upsert {
-            row_id,
-            event_time,
-            encoded_key,
-            ..
-        }
-        | PendingOp::Tombstone {
-            row_id,
-            event_time,
-            encoded_key,
-            ..
-        } => (*row_id, *event_time, encoded_key.as_slice()),
-    };
+    segment.push(JOIN_DELTA_UPSERT_TAG);
     segment.extend_from_slice(&row_id.to_le_bytes());
     segment.extend_from_slice(&event_time.as_micros().to_le_bytes());
     segment.extend_from_slice(
@@ -6135,26 +6344,30 @@ fn encode_delta_op(
             .to_le_bytes(),
     );
     segment.extend_from_slice(encoded_key);
-    if let PendingOp::Upsert { record, charge, .. } = op {
-        segment.extend_from_slice(&charge.to_le_bytes());
-        let ipc = ipc_encoder.encode(&record.view(), operator_id, op.side().as_str())?;
-        segment.extend_from_slice(
-            &u64::try_from(ipc.len())
-                .map_err(|_| counter_overflow(operator_id, "IPC length"))?
-                .to_le_bytes(),
-        );
-        segment.extend_from_slice(&ipc);
-    }
+    segment.extend_from_slice(&charge.to_le_bytes());
+    let ipc = ipc_encoder.encode(&payload.view(), operator_id, side.as_str())?;
+    segment.extend_from_slice(
+        &u64::try_from(ipc.len())
+            .map_err(|_| counter_overflow(operator_id, "IPC length"))?
+            .to_le_bytes(),
+    );
+    segment.extend_from_slice(&ipc);
     Ok(())
 }
 
-impl PendingOp {
-    #[cfg(test)]
-    const fn side(&self) -> JoinSide {
-        match self {
-            PendingOp::Upsert { side, .. } | PendingOp::Tombstone { side, .. } => *side,
-        }
-    }
+/// Appends one derived tombstone's tag and identity.
+#[cfg(test)]
+fn encode_delta_tombstone(
+    segment: &mut Vec<u8>,
+    row_id: u64,
+    event_time: EventTime,
+    encoded_key: &[u8],
+) {
+    segment.push(JOIN_DELTA_TOMBSTONE_TAG);
+    segment.extend_from_slice(&row_id.to_le_bytes());
+    segment.extend_from_slice(&event_time.as_micros().to_le_bytes());
+    segment.extend_from_slice(&encoded_key.len().to_le_bytes());
+    segment.extend_from_slice(encoded_key);
 }
 
 /// Restores both sides by folding the base segment and the delta segments in
@@ -6949,17 +7162,66 @@ struct EvictionPolicy<'a> {
     operator_id: &'a str,
 }
 
+/// One planned eviction (spec FR10/FR8): the expired prefix of every
+/// expiration run is planned read-only, so a tombstone funding refusal
+/// leaves state, watermark, and list unchanged.
+#[derive(Default)]
+struct EvictionPlan {
+    cuts: Vec<(usize, usize)>,
+    entries: Vec<PlannedEntry>,
+}
+
+struct PlannedEntry {
+    index: usize,
+    row_id: u64,
+    time: EventTime,
+    charge: u64,
+    key: Arc<columnar::FramedKey>,
+}
+
+impl EvictionPlan {
+    fn plan(
+        &mut self,
+        rows: &dyn Rows,
+        expirations: &ExpirationIndex,
+        expired: &dyn Fn(EventTime) -> bool,
+    ) {
+        for (id, cut) in expirations.expired_cuts(rows, expired) {
+            #[cfg(test)]
+            note_join_work(|work| work.expiration_run_cuts += 1);
+            self.cuts.push((id, cut));
+            self.entries.reserve(cut);
+            for index in expirations.run_entries(id, cut) {
+                let (time, row_id) = rows.identity(index);
+                self.entries.push(PlannedEntry {
+                    index,
+                    row_id,
+                    time,
+                    charge: rows.charge(index),
+                    // The row key is the canonical interned identity shared
+                    // with the dictionary and native index.
+                    key: Arc::clone(rows.key(index)),
+                });
+            }
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
 fn evict_opposite(
     rows: &mut RetainedRows,
     expirations: &mut ExpirationIndex,
     retirement: key_lifecycle::Retirement<'_>,
     progress: IngressProgress,
     metrics: &mut SideMetrics,
-    pending: Option<&mut PendingLog>,
+    deltas: Option<&mut DeltaTracking>,
     policy: EvictionPolicy<'_>,
 ) -> Result<()> {
-    if pending.is_none() && expires_all(expirations, progress, policy.extension_micros) {
-        return evict_all(rows, expirations, retirement, metrics, policy.operator_id);
+    if expires_all(expirations, progress, policy.extension_micros) {
+        return evict_all(rows, expirations, retirement, metrics, deltas, policy);
     }
     evict_expired(
         rows,
@@ -6967,7 +7229,7 @@ fn evict_opposite(
         retirement,
         progress,
         metrics,
-        pending,
+        deltas,
         policy,
     )
 }
@@ -6982,68 +7244,147 @@ fn expires_all(expirations: &ExpirationIndex, progress: IngressProgress, extensi
     })
 }
 
+fn expired_predicate(
+    progress: IngressProgress,
+    extension_micros: u64,
+) -> impl Fn(EventTime) -> bool {
+    move |time| {
+        progress.state() == crate::IngressState::Ended
+            || progress.watermark().is_some_and(|watermark| {
+                i128::from(time.as_micros()) + i128::from(extension_micros)
+                    < i128::from(watermark.as_micros())
+            })
+    }
+}
+
 fn evict_expired(
     rows: &mut RetainedRows,
     expirations: &mut ExpirationIndex,
     mut retirement: key_lifecycle::Retirement<'_>,
     progress: IngressProgress,
     metrics: &mut SideMetrics,
-    pending: Option<&mut PendingLog>,
+    mut deltas: Option<&mut DeltaTracking>,
     policy: EvictionPolicy<'_>,
 ) -> Result<()> {
     let EvictionPolicy {
         extension_micros,
+        side,
         operator_id,
-        ..
     } = policy;
-    let mut evicted = Vec::new();
+    let expired = expired_predicate(progress, extension_micros);
+    let mut plan = EvictionPlan::default();
+    plan.plan(rows, expirations, &expired);
+    if plan.is_empty() {
+        return Ok(());
+    }
+    // Rows below the watermark leave tombstones; rows at or above it
+    // coalesce away (spec FR2).
+    let watermark = deltas
+        .as_ref()
+        .map_or(u64::MAX, |deltas| deltas.watermark[side.index()]);
     let mut count = 0_u64;
     let mut bytes = 0_u64;
-    while let Some((ordinal, row)) = take_expired(
-        rows,
-        expirations,
-        retirement.bindings,
-        progress,
-        extension_micros,
-    ) {
-        rows.2.remove(&row.record);
-        retirement.retire(&row, operator_id)?;
+    let mut below_watermark = 0_usize;
+    for entry in &plan.entries {
         bytes = bytes
-            .checked_add(row.charge)
+            .checked_add(entry.charge)
             .ok_or_else(|| counter_overflow(operator_id, "evicted bytes"))?;
         count = count
             .checked_add(1)
             .ok_or_else(|| counter_overflow(operator_id, "evicted rows"))?;
-        if pending.is_some() {
-            evicted.push((ordinal, row));
+        if deltas.is_some() && entry.row_id < watermark {
+            below_watermark += 1;
         }
     }
-    finish_eviction(metrics, pending, evicted, count, bytes, policy)
+    if let Some(deltas) = &mut deltas {
+        deltas.tombstones[side.index()].reserve(
+            expirations.tombstone_origin(),
+            below_watermark,
+            operator_id,
+        )?;
+        for entry in &plan.entries {
+            if entry.row_id >= watermark {
+                deltas.note_coalesced_eviction(side, operator_id)?;
+            }
+        }
+    }
+    apply_eviction_plan(
+        rows,
+        expirations,
+        &mut retirement,
+        &plan,
+        &expired,
+        operator_id,
+    )?;
+    if let Some(deltas) = deltas {
+        for entry in &plan.entries {
+            if entry.row_id < watermark {
+                deltas.tombstones[side.index()].push(
+                    entry.row_id,
+                    entry.time,
+                    Arc::clone(&entry.key),
+                );
+            }
+        }
+    }
+    update_evicted_metrics(metrics, count, bytes, operator_id)
 }
 
-fn finish_eviction(
-    metrics: &mut SideMetrics,
-    pending: Option<&mut PendingLog>,
-    mut evicted: Vec<(u128, StoredRow)>,
-    count: u64,
-    bytes: u64,
-    policy: EvictionPolicy<'_>,
+fn apply_eviction_plan(
+    rows: &mut RetainedRows,
+    expirations: &mut ExpirationIndex,
+    retirement: &mut key_lifecycle::Retirement<'_>,
+    plan: &EvictionPlan,
+    expired: &dyn Fn(EventTime) -> bool,
+    operator_id: &str,
 ) -> Result<()> {
-    if count == 0 {
-        return Ok(());
+    // Aggregated retirement resolves each entry's canonical interned key,
+    // exactly as per-row removal did, so the dictionary and the native index
+    // decrement once per key (spec FR13).
+    let mut per_key: HashMap<*const columnar::FramedKey, (Arc<columnar::FramedKey>, u64)> =
+        HashMap::with_capacity(plan.entries.len().min(64));
+    for entry in &plan.entries {
+        let canonical = retirement.bindings.canonical_key(entry.row_id, &entry.key);
+        let aggregate = per_key
+            .entry(Arc::as_ptr(canonical))
+            .or_insert_with(|| (Arc::clone(canonical), 0));
+        aggregate.1 += 1;
     }
-    if let Some(pending) = pending {
-        evicted.sort_by_key(|(ordinal, _)| *ordinal);
-        record_tombstones(
-            pending,
-            policy.side,
-            evicted
-                .into_iter()
-                .map(|(_, row)| (row.row_id, row.event_time, row.encoded_key))
-                .collect(),
-        );
+    expirations.apply_cuts(&plan.cuts, &*rows, expired);
+    let mut coordinates = BTreeMap::new();
+    for entry in &plan.entries {
+        coordinates
+            .entry(entry.index / retained::CHUNK_ROWS)
+            .or_insert_with(Vec::new)
+            .push(entry.index % retained::CHUNK_ROWS);
     }
-    update_evicted_metrics(metrics, count, bytes, policy.operator_id)
+    rows.remove_bulk(&coordinates);
+    let (state, native) = (&rows.0, &mut rows.1);
+    if let Some(native) = native
+        .as_mut()
+        .map(|native| Arc::get_mut(native).expect("native probe released before eviction"))
+    {
+        for (key, count) in per_key.values() {
+            native.truncate_key(
+                key,
+                *count,
+                expired,
+                |dense| {
+                    retirement
+                        .bindings
+                        .canonical_key(state.row_id(dense), state.key(dense))
+                },
+                operator_id,
+            )?;
+        }
+    }
+    for entry in &plan.entries {
+        retirement.bindings.remove(entry.row_id);
+    }
+    for (key, count) in per_key.values() {
+        retirement.retire_n(key, *count, operator_id)?;
+    }
+    Ok(())
 }
 
 fn evict_all(
@@ -7051,11 +7392,39 @@ fn evict_all(
     expirations: &mut ExpirationIndex,
     mut retirement: key_lifecycle::Retirement<'_>,
     metrics: &mut SideMetrics,
-    operator_id: &str,
+    mut deltas: Option<&mut DeltaTracking>,
+    policy: EvictionPolicy<'_>,
 ) -> Result<()> {
+    let EvictionPolicy {
+        side, operator_id, ..
+    } = policy;
     let count =
         u64::try_from(rows.len()).map_err(|_| counter_overflow(operator_id, "evicted rows"))?;
     let bytes = metrics.retained_bytes;
+    // Under checkpointing the whole-side flush appends one bulk tombstone
+    // per already-captured row, each carrying its own row_id (spec FR14);
+    // uncaptured rows coalesce away. Funding refuses before any clearing.
+    if let Some(deltas) = &mut deltas {
+        let watermark = deltas.watermark[side.index()];
+        let mut captured = Vec::new();
+        for index in rows.0.references() {
+            let (time, row_id) = rows.0.identity(index);
+            if row_id < watermark {
+                captured.push((row_id, time, Arc::clone(rows.0.key(index))));
+            }
+        }
+        if !captured.is_empty() {
+            deltas.tombstones[side.index()].reserve(
+                expirations.tombstone_origin(),
+                captured.len(),
+                operator_id,
+            )?;
+            for (row_id, time, key) in captured {
+                deltas.tombstones[side.index()].push(row_id, time, key);
+            }
+        }
+        deltas.dirty[side.index()] = 0;
+    }
     let mut next_metrics = metrics.clone();
     update_evicted_metrics(&mut next_metrics, count, bytes, operator_id)?;
     rows.1 = None;
@@ -7085,50 +7454,6 @@ fn update_evicted_metrics(
         .checked_sub(bytes)
         .ok_or_else(|| counter_overflow(name, "retained bytes"))?;
     Ok(())
-}
-
-fn take_expired(
-    rows: &mut RetainedRows,
-    expirations: &mut ExpirationIndex,
-    bindings: &key_dictionary::SideBindings,
-    progress: IngressProgress,
-    extension: u64,
-) -> Option<(u128, StoredRow)> {
-    let time = expirations.first_time(rows)?;
-    let expired = progress.state() == crate::IngressState::Ended
-        || progress.watermark().is_some_and(|watermark| {
-            i128::from(time.as_micros()) + i128::from(extension) < i128::from(watermark.as_micros())
-        });
-    if !expired {
-        return None;
-    }
-    let (index, ordinal) = expirations.pop(rows).expect("expiration prefix exists");
-    #[cfg(test)]
-    note_join_work(|work| work.retained_visits += 1);
-    let row = rows.remove_bound(index, bindings);
-    Some((ordinal, row))
-}
-
-/// Records evictions in the dirty log: an upsert still waiting for its first
-/// checkpoint coalesces away; a captured row leaves a durable tombstone.
-fn record_tombstones(
-    pending: &mut PendingLog,
-    side: JoinSide,
-    evicted: Vec<(u64, EventTime, Arc<columnar::FramedKey>)>,
-) {
-    for (row_id, event_time, encoded_key) in evicted {
-        #[cfg(test)]
-        note_join_work(|work| work.pending_visits += 1);
-        if pending.remove_upsert((side, row_id)) {
-            continue;
-        }
-        pending.push(PendingOp::Tombstone {
-            side,
-            row_id,
-            event_time,
-            encoded_key,
-        });
-    }
 }
 
 fn refresh_retained_metrics(

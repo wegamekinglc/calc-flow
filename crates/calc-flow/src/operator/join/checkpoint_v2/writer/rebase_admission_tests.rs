@@ -14,10 +14,10 @@ async fn captured_history(
         snapshot = join.checkpoint(Epoch::new(epoch).unwrap()).unwrap();
     }
     assert_eq!(join.v2_writer.dirty_epochs, 4);
-    assert!(join.state.deltas.pending.is_empty());
+    assert!(join.state.deltas.is_clean());
     if with_pending {
         add_pending(&mut join, context).await;
-        assert_eq!(join.state.deltas.pending.iter().count(), 3);
+        assert_eq!(join.state.deltas.pending_count_for_test(), 3);
     }
     (join, snapshot)
 }

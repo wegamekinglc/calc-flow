@@ -19,7 +19,9 @@ mod work;
 mod writer;
 
 pub(in crate::operator::join) use budget::ContainerFunding;
-pub(in crate::operator::join) use budget::{expiration_credit, optional_expiration_credit};
+pub(in crate::operator::join) use budget::{
+    expiration_credit, grow_expiration_credit, optional_expiration_credit,
+};
 pub(super) use loans::V2SqlOwners;
 pub(in crate::operator::join) use writer::{HistoryIdentity, WriterState};
 

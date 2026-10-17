@@ -36,11 +36,11 @@ async fn test_first_retained_batch_interns_keys_and_shares_dirty_owners() {
         .commit_prepared("left", prepared, true, expiration_append)
         .unwrap();
     let retained = operator.state.left.key_at(0);
-    for op in operator.state.deltas.pending.iter() {
-        let PendingOp::Upsert { encoded_key, .. } = op else {
-            panic!("first batch only inserts rows");
-        };
-        assert!(Arc::ptr_eq(retained, encoded_key));
+    // The dirty window is derived from these same rows (spec FR3): every
+    // derivable upsert shares the canonical interned key.
+    assert!(operator.state.deltas.dirty[0] > 0);
+    for row in operator.state.left.iter() {
+        assert!(Arc::ptr_eq(retained, &row.encoded_key));
     }
     let pool = operator
         .runtime

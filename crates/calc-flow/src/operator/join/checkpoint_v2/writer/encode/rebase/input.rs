@@ -4,7 +4,6 @@ use super::{
     Result, SideExpected, StateSegment, StreamJoinOperator, StreamOperatorContext, accounting,
     error, frame, funding,
 };
-use crate::operator::join::PendingOp;
 use crate::operator::join::columnar::Quantum;
 
 pub(super) enum Segment<'a> {
@@ -21,7 +20,15 @@ pub(super) async fn eligible(
         return Ok(false);
     };
     let mut quantum = Quantum::default();
-    if !pending_upserts(operator, &mut quantum, context).await? {
+    // Rebase combines only upserts: any recorded tombstone disqualifies the
+    // window (spec FR7), exactly as a tombstone-bearing pending log did.
+    if operator
+        .state
+        .deltas
+        .tombstones
+        .iter()
+        .any(|list| !list.is_empty())
+    {
         return Ok(false);
     }
     validate_inventory(operator, base, epoch, &mut quantum, context).await?;
@@ -45,20 +52,6 @@ fn eligible_base<'a>(
         return None;
     }
     Some((base, epoch.as_u64()))
-}
-
-async fn pending_upserts(
-    operator: &StreamJoinOperator,
-    quantum: &mut Quantum,
-    context: &StreamOperatorContext<'_>,
-) -> Result<bool> {
-    for op in operator.state.deltas.pending.iter() {
-        quantum.step(context, 1, 0).await?;
-        if !matches!(op, PendingOp::Upsert { .. }) {
-            return Ok(false);
-        }
-    }
-    Ok(true)
 }
 
 async fn validate_inventory(
