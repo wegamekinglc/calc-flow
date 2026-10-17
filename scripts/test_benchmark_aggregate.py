@@ -1,18 +1,29 @@
 from __future__ import annotations
 
+import argparse
 import copy
+import io
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
-from scripts.benchmark_suite.aggregate import case_failures, collect, validate_fragment
+from scripts.benchmark_suite.__main__ import parse_args
+from scripts.benchmark_suite.aggregate import (
+    case_failures,
+    collect,
+    summarize,
+    validate_fragment,
+)
 from scripts.benchmark_suite.catalog import CONTRACT, get_shard, shard_cases
 from scripts.benchmark_suite.provenance import harness_sha256
 from scripts.benchmark_suite.validation import _validate_catalog_cases
 from scripts.test_benchmark_suite import measured_case
 
-BASE, HEAD = "a" * 40, "b" * 40
+BASE, HEAD, RUST = "a" * 40, "b" * 40, "c" * 40
+TAG = "calc-flow-python-v2026.10.13"
 
 
 def fragment():
@@ -38,12 +49,145 @@ def fragment():
     }
 
 
+def rust_fragment():
+    shard = get_shard("rust")
+    case = {
+        "id": "rust/stream_join_perf",
+        "family": "rust",
+        "scope": "criterion-sample-mean",
+        "status": "error",
+        "error": "fixture failure",
+    }
+    return {
+        "contract": CONTRACT,
+        "harness_sha256": harness_sha256(),
+        "shard": shard,
+        "expected_case_ids": [case["id"]],
+        "releases": {
+            side: {
+                "git_sha": sha,
+                "git_clean": True,
+                "build_profile": "release",
+                "native_sha256": "a" * 64,
+            }
+            for side, sha in (("baseline", RUST), ("candidate", HEAD))
+        },
+        "cases": [case],
+        "errors": [],
+    }
+
+
 class BenchmarkAggregateTests(unittest.TestCase):
     def collect_one(self, report):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "results.json").write_text(json.dumps(report), encoding="utf-8")
             return collect(root, BASE, HEAD)
+
+    def summarize_without_artifacts(self, kind: str, ref: str, rust: str = BASE):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "inputs").mkdir()
+            arguments = argparse.Namespace(
+                input=root / "inputs",
+                output=root / "summary",
+                github_summary=None,
+                expected_base=BASE,
+                expected_head=HEAD,
+                baseline_kind=kind,
+                baseline_ref=ref,
+                expected_rust_base=rust,
+            )
+            with redirect_stdout(io.StringIO()):
+                status = summarize(arguments)
+            markdown = (root / "summary/summary.md").read_text(encoding="utf-8")
+            errors = json.loads(
+                (root / "summary/summary.json").read_text(encoding="utf-8")
+            )["errors"]
+        return status, markdown.splitlines(), errors
+
+    def test_complete_report_header_states_the_resolved_baseline(self):
+        status, lines, errors = self.summarize_without_artifacts("release", TAG)
+        self.assertEqual(status, 1)
+        self.assertEqual(lines[0], "# Complete benchmark results")
+        self.assertEqual(lines[2], f"Baseline: release {TAG} (`{BASE}`)")
+        self.assertFalse(any(error.startswith("baseline") for error in errors))
+
+    def test_complete_report_notes_a_first_parent_rust_baseline(self):
+        status, lines, errors = self.summarize_without_artifacts("release", TAG, RUST)
+        self.assertEqual(status, 1)
+        self.assertEqual(lines[2], f"Baseline: release {TAG} (`{BASE}`)")
+        self.assertEqual(lines[4], f"Rust shard baseline: first parent (`{RUST}`)")
+        self.assertFalse(any(error.startswith("rust baseline") for error in errors))
+
+    def test_matching_rust_baseline_adds_no_note(self):
+        _, lines, _ = self.summarize_without_artifacts("release", TAG, BASE)
+        self.assertNotIn("Rust shard baseline", "\n".join(lines))
+
+    def test_invalid_rust_baseline_provenance_fails_closed(self):
+        _, lines, errors = self.summarize_without_artifacts("release", TAG, "HEAD^")
+        self.assertEqual(lines[4], "Rust shard baseline: unresolved")
+        self.assertTrue(
+            any(error.startswith("rust baseline provenance:") for error in errors)
+        )
+
+    def test_unresolved_baseline_provenance_fails_closed(self):
+        _, lines, errors = self.summarize_without_artifacts("", "")
+        self.assertEqual(lines[2], "Baseline: unresolved")
+        self.assertTrue(
+            any(error.startswith("baseline provenance:") for error in errors)
+        )
+
+    def test_rust_fragments_validate_against_the_rust_baseline(self):
+        report = rust_fragment()
+        validate_fragment(report, BASE, HEAD, RUST)
+        with self.assertRaisesRegex(ValueError, "not a clean release build"):
+            validate_fragment(report, BASE, HEAD)
+
+    def test_engines_fragments_stay_anchored_at_the_release_baseline(self):
+        validate_fragment(fragment(), BASE, HEAD, RUST)
+        report = fragment()
+        report["releases"]["baseline"]["git_sha"] = RUST
+        with self.assertRaisesRegex(ValueError, "not a clean release build"):
+            validate_fragment(report, BASE, HEAD, RUST)
+
+    def test_collect_applies_the_rust_baseline_to_rust_shards_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "results.json").write_text(
+                json.dumps(rust_fragment()), encoding="utf-8"
+            )
+            _, errors, _ = collect(root, BASE, HEAD, RUST)
+            self.assertFalse(
+                any("not a clean release build" in error for error in errors)
+            )
+            _, errors, _ = collect(root, BASE, HEAD)
+            self.assertTrue(
+                any("not a clean release build" in error for error in errors)
+            )
+
+    def test_summarize_command_requires_baseline_provenance(self):
+        command = [
+            "benchmark_suite",
+            "summarize",
+            "--input=in",
+            "--output=out",
+            f"--expected-base={BASE}",
+            f"--expected-head={HEAD}",
+            f"--expected-rust-base={RUST}",
+        ]
+        provenance = ["--baseline-kind=release", f"--baseline-ref={TAG}"]
+        with patch("sys.argv", [*command, *provenance]):
+            arguments = parse_args()
+        self.assertEqual(arguments.baseline_kind, "release")
+        self.assertEqual(arguments.baseline_ref, TAG)
+        self.assertEqual(arguments.expected_rust_base, RUST)
+        with (
+            patch("sys.argv", command),
+            redirect_stderr(io.StringIO()),
+            self.assertRaises(SystemExit),
+        ):
+            parse_args()
 
     def test_malformed_artifact_still_renders_missing_catalog_cases(self):
         for report in ([], {"shard": None}, {"cases": [None]}):

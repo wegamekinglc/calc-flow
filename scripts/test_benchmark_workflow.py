@@ -304,11 +304,75 @@ class BenchmarkWorkflowTests(unittest.TestCase):
         self.assertIn("retention-days: 30", suite)
         self.assertIn("name: Retain every measured result", suite)
 
+    def test_scheduled_baseline_provenance_reaches_the_final_report(self):
+        suite = (ROOT / ".github/workflows/benchmark-suite.yml").read_text(
+            encoding="utf-8"
+        )
+        prepare = suite.split("  prepare:\n", 1)[1].split("  build:\n", 1)[0]
+        outputs = prepare.split("    outputs:\n", 1)[1].split("    steps:\n", 1)[0]
+        for key in ("base", "head", "baseline_kind", "baseline_ref", "rust_base"):
+            self.assertIn(f"{key}: ${{{{ steps.refs.outputs.{key} }}}}", outputs)
+        checkout = prepare.split("      - uses: actions/checkout@", 1)[1].split(
+            "      - uses:", 1
+        )[0]
+        # Full history also fetches every tag, which the release lookup needs.
+        self.assertIn("fetch-depth: 0", checkout)
+        refs = prepare.split("- name: Resolve exact baseline and candidate\n", 1)[
+            1
+        ].split("      - name:", 1)[0]
+        self.assertIn("BENCHMARK_EVENT: ${{ github.event_name }}", refs)
+        self.assertIn(
+            "BENCHMARK_BASE_SHA: ${{ inputs.baseline_sha || "
+            "github.event.pull_request.base.sha || github.event.before }}",
+            refs,
+        )
+        build = suite.split("  build:\n", 1)[1].split("  suite:\n", 1)[0]
+        self.assertIn("side: [baseline, candidate, rust-baseline]", build)
+        self.assertIn(
+            "ref: ${{ matrix.side == 'baseline' && needs.prepare.outputs.base "
+            "|| matrix.side == 'rust-baseline' && needs.prepare.outputs.rust_base "
+            "|| needs.prepare.outputs.head }}",
+            build,
+        )
+        measured = suite.split("  suite:\n", 1)[1].split("  summary:\n", 1)[0]
+        # The Rust shard compiles the candidate bench file against the baseline
+        # source, so it stays on the first parent even when engines compare
+        # against a release; every other family keeps the release baseline.
+        self.assertIn(
+            "ref: ${{ matrix.family == 'rust' && needs.prepare.outputs.rust_base "
+            "|| needs.prepare.outputs.base }}",
+            measured,
+        )
+        self.assertIn("if: matrix.family != 'rust'", measured)
+        self.assertIn(
+            "name: benchmark-release-baseline-${{ github.run_id }}-", measured
+        )
+        self.assertIn("if: matrix.family == 'rust'", measured)
+        self.assertIn(
+            "name: benchmark-release-rust-baseline-${{ github.run_id }}-", measured
+        )
+        self.assertIn("path: target/releases/baseline", measured)
+        summary = suite.split("  summary:\n", 1)[1]
+        self.assertIn(
+            "BASELINE_KIND: ${{ needs.prepare.outputs.baseline_kind }}", summary
+        )
+        self.assertIn(
+            "BASELINE_REF: ${{ needs.prepare.outputs.baseline_ref }}", summary
+        )
+        self.assertIn(
+            "EXPECTED_RUST_BASE: ${{ needs.prepare.outputs.rust_base }}", summary
+        )
+        self.assertIn(
+            '--baseline-kind "$BASELINE_KIND" --baseline-ref "$BASELINE_REF"',
+            summary,
+        )
+        self.assertIn('--expected-rust-base "$EXPECTED_RUST_BASE"', summary)
+
     def test_measurements_use_release_wheels_and_exact_base_head(self):
         suite = (ROOT / ".github/workflows/benchmark-suite.yml").read_text(
             encoding="utf-8"
         )
-        self.assertIn("side: [baseline, candidate]", suite)
+        self.assertIn("side: [baseline, candidate, rust-baseline]", suite)
         self.assertIn("scripts.benchmark_suite build", suite)
         self.assertIn("--baseline", suite)
         self.assertIn("--candidate", suite)

@@ -12,7 +12,10 @@ Use the planned release date as the calendar version `YYYY.M.D`, without zero
 padding. Keep the workspace crate, Python core, native
 dependency constraints, and `calc_flow.__version__` aligned. The tag must be
 annotated, named `calc-flow-python-v<version>`, and point to the current `main`
-head. The version must not already exist on PyPI.
+head. The version must not already exist on PyPI. Release tags must keep this
+exact unpadded numeric shape: the scheduled benchmark suite anchors its
+baseline on the newest reachable `calc-flow-python-v*` tag, and a tag
+deviating from that shape fails the scheduled gate closed.
 
 The workflow builds the following artifacts for every manual or tagged release
 run:

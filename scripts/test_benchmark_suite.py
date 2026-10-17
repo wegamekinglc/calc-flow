@@ -508,6 +508,41 @@ class BenchmarkSuiteTests(unittest.TestCase):
         self.assertIn("+1.00% [+1.00%, +1.00%]", report)
         self.assertIn("97.85%", report)
 
+    def test_report_header_states_the_baseline_below_the_title(self):
+        baseline = f"release calc-flow-python-v2026.10.13 (`{'d' * 40}`)"
+        lines = render_report([measured_case()], [], baseline=baseline).splitlines()
+        self.assertEqual(
+            lines[:4],
+            ["# Complete benchmark results", "", f"Baseline: {baseline}", ""],
+        )
+        self.assertTrue(lines[4].startswith("1 result rows; positive changes mean"))
+        shard = render_report([measured_case()], []).splitlines()
+        self.assertTrue(shard[2].startswith("1 result rows; positive changes mean"))
+        self.assertNotIn("Baseline:", "\n".join(shard))
+
+    def test_report_header_notes_a_distinct_rust_shard_baseline(self):
+        baseline = f"release calc-flow-python-v2026.10.13 (`{'d' * 40}`)"
+        rust = f"first parent (`{'c' * 40}`)"
+        lines = render_report(
+            [measured_case()], [], baseline=baseline, rust_baseline=rust
+        ).splitlines()
+        self.assertEqual(
+            lines[:6],
+            [
+                "# Complete benchmark results",
+                "",
+                f"Baseline: {baseline}",
+                "",
+                f"Rust shard baseline: {rust}",
+                "",
+            ],
+        )
+        self.assertTrue(lines[6].startswith("1 result rows; positive changes mean"))
+        without_rust = render_report(
+            [measured_case()], [], baseline=baseline
+        ).splitlines()
+        self.assertNotIn("Rust shard baseline:", "\n".join(without_rust))
+
     def test_hosted_warm_samples_do_not_confirm_minimum_only_slowdowns(self):
         # Unmodified seconds from run 33980036723, head 7d79fed, identical native
         # hashes on both sides. Preserve all pairs, not only the winning minima.

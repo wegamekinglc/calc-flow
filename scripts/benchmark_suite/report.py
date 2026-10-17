@@ -211,7 +211,12 @@ def _paired_cell(intervals: list[dict]) -> str:
     )
 
 
-def render_report(cases: list[dict], errors: list[str]) -> str:
+def render_report(
+    cases: list[dict],
+    errors: list[str],
+    baseline: str | None = None,
+    rust_baseline: str | None = None,
+) -> str:
     rows = []
     metrics = []
     failures = list(errors)
@@ -233,9 +238,15 @@ def render_report(cases: list[dict], errors: list[str]) -> str:
         "Paired median [CI]",
         "Result",
     ]
+    annotations = []
+    if baseline:
+        annotations.extend([f"Baseline: {baseline}", ""])
+    if rust_baseline:
+        annotations.extend([f"Rust shard baseline: {rust_baseline}", ""])
     parts = [
         "# Complete benchmark results",
         "",
+        *annotations,
         f"{len(rows) + len(metrics)} result rows; positive changes mean slower. "
         "No top-N filtering.",
         "",

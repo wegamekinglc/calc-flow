@@ -36,6 +36,9 @@ def parse_args() -> argparse.Namespace:
     summary.add_argument("--github-summary", type=Path)
     summary.add_argument("--expected-base", required=True)
     summary.add_argument("--expected-head", required=True)
+    summary.add_argument("--expected-rust-base", required=True)
+    summary.add_argument("--baseline-kind", required=True)
+    summary.add_argument("--baseline-ref", required=True)
     return parser.parse_args()
 
 

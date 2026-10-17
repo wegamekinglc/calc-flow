@@ -9,6 +9,19 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-17: Anchor scheduled complete-benchmark baselines at the newest
+  reachable `calc-flow-python-v*` release tag, falling back to the first
+  parent only when no tag is reachable or the release commit is the head. The
+  previous first-parent default let a merged regression become the baseline of
+  every later run, so #427's stream-join regression was flagged exactly once
+  and #452's interval regression was never paired. Manual dispatch and
+  pull-request baselines are unchanged. The Rust shard keeps the first parent,
+  or the explicit SHA when one is given, through a third `rust-baseline`
+  wheel side, because its sealed harness compiles the candidate bench file
+  against the baseline source. The complete report header records the resolved
+  baseline provenance, invalid provenance renders `unresolved` and fails the
+  gate closed, and cases added since the release report `new-coverage` until
+  the next release.
 - 2026-10-16: Upgrade the Rust and Python benchmark engines to DataFusion
   55.0.0 and the hash-locked Polars reference to 2.0.0. Move the Rust toolchain
   to its required 1.94.0 minimum, synchronize Arrow/Parquet 59.2 and the Python
@@ -23,12 +36,12 @@ measurements. Use the current guides for supported behavior.
   admission. Symbolic square roots keep IEEE NaN behavior for negative inputs,
   while guarded rolling input schemas follow native nullability proofs. This
   upgrade makes no performance claim.
-
 - 2026-10-16: Replace opt-in native benchmark process CPU ticks with the safe
   Linux process CPU clock and its reported resolution. Reject unavailable or
   invalid v2 clock metadata, retaining historical evidence and CPU thresholds.
   Seal the benchmark-only optional dependency in the common overlay and lock.
   This repairs measurement precision; it adds no performance acceptance result.
+76580c (fix: anchor scheduled benchmark baselines at the latest release)
 
 - 2026-10-16: Add an explicit milestone source policy for separately sealed
   original build and execution tools, with unchanged compiled inputs/recipes,

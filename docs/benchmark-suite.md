@@ -486,9 +486,30 @@ a later head does not inherit measurements from an earlier build.
 ## Revision comparisons and regression gate
 
 The benchmark workflow resolves immutable base/head commits before building
-clean release wheels. Scheduled and manual runs default to the head's first
-parent. A manual full baseline SHA can override that choice. There is no silent
-fallback to a different successful run or debug wheel.
+clean release wheels. An explicit full baseline SHA — the manual dispatch
+input or a pull request's base — always wins. Without one, scheduled runs
+anchor at the newest `calc-flow-python-v*` release tag reachable from the
+head, so a regression keeps failing the gate until it is fixed or a release
+is deliberately cut; the first parent is used only when no release tag is
+reachable or the release commit is the head itself. Manual dispatch runs keep
+the first-parent default. There is no silent fallback to a different
+successful run or debug wheel.
+
+The Rust family is the exception: it builds and validates against the first
+parent — the explicit SHA when one is supplied — even on scheduled runs,
+because its sealed harness compiles the candidate bench file against the
+baseline source, and the current bench file exercises `benchmark-internals`
+APIs that older release sources do not provide. The wheel-build matrix
+therefore includes a third `rust-baseline` side with its own cache key and
+artifacts; the Rust family downloads that wheel as its baseline while every
+other family downloads the resolved baseline wheel.
+
+The complete report header records the resolved provenance as
+`Baseline: release <tag> (<sha>)`, `Baseline: first parent (<sha>)`, or
+`Baseline: explicit (<sha>)`, plus a `Rust shard baseline: <description>`
+line only when the Rust baseline differs. Invalid or missing provenance
+renders `Baseline: unresolved` (or `Rust shard baseline: unresolved`) and
+fails the gate closed.
 
 For every Calc Flow engine/warm case:
 
@@ -531,7 +552,10 @@ suite-block benchmark — are measured on the candidate build alone and
 reported with the `new-coverage` verdict instead of the paired gate; cases
 the baseline declared keep the full interleaved gate. The baseline's case ids
 are resolved from the baseline source's declarative catalog forms, and a
-baseline file outside those forms fails closed to full gating.
+baseline file outside those forms fails closed to full gating. With the
+scheduled release anchor, cases added since that release therefore carry no
+paired verdict on scheduled runs until the next release's baseline catalog
+declares them.
 
 Python suite blocks execute each checkout's own benchmark tests with the
 current harness's collector and shared `benchmarks/support.py`, including
@@ -898,6 +922,11 @@ FINANCE_PYTHON_PYTHON=target/finance-python-venv/bin/python \
   --candidate target/releases/candidate/release.json \
   --baseline-source target/base --output target/results/engines-1000
 ```
+
+The example pairs against the head's first parent, which matches manual
+dispatch runs and the Rust shard; a scheduled run's engine/warm shards pair
+against the newest reachable `calc-flow-python-v*` release tag, so check that
+tag out as `target/base` to reproduce them.
 
 Run every emitted catalog shard to reproduce the complete benchmark gate. A single
 shard's own `summary.md` is useful locally; the complete summarizer deliberately

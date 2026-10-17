@@ -149,11 +149,18 @@ def _validate_catalog_cases(report: dict, shard: dict) -> None:
         _validate_evidence(case, report["releases"])
 
 
-def validate_fragment(report: dict, base: str, head: str) -> None:
+def validate_fragment(
+    report: dict, base: str, head: str, rust_base: str | None = None
+) -> None:
     shard = validate_shape(report)
     if report["contract"] != CONTRACT or shard != report["shard"]:
         raise ValueError("report contract or shard differs from the current catalog")
-    validate_releases(report["releases"], base, head)
+    # The Rust shard keeps the first-parent baseline while every other family
+    # anchors at the resolved release baseline.
+    expected = (
+        rust_base if rust_base is not None and shard["family"] == "rust" else base
+    )
+    validate_releases(report["releases"], expected, head)
     if report["harness_sha256"] != harness_sha256():
         raise ValueError(
             "measurement harness or dependency lock differs from the candidate"
