@@ -130,10 +130,16 @@ async fn capture(
     {
         return Ok(None);
     }
-    let left =
-        OwnedSide::capture(matched.iter().map(|pair| records(output, &pair).0), context).await?;
-    let right =
-        OwnedSide::capture(matched.iter().map(|pair| records(output, &pair).1), context).await?;
+    let left = OwnedSide::capture(
+        matched.iter().map(|pair| output.side_record(&pair, true)),
+        context,
+    )
+    .await?;
+    let right = OwnedSide::capture(
+        matched.iter().map(|pair| output.side_record(&pair, false)),
+        context,
+    )
+    .await?;
     Ok(Some(Arc::new(Columns {
         left,
         right,

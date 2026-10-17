@@ -3,11 +3,7 @@ use crate::operator::join::retained::Rows;
 
 mod emission;
 
-use std::{
-    collections::{BTreeMap, btree_map::Entry},
-    ops::Range,
-    sync::Arc,
-};
+use std::{ops::Range, sync::Arc};
 
 use datafusion::arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
 
@@ -121,6 +117,15 @@ impl JoinOutput<'_> {
         }
     }
 
+    /// One output side's payload, without reading the other side.
+    pub(super) fn side_record(&self, pair: &MatchedPair, left: bool) -> PayloadRef<'_> {
+        if left == self.incoming_is_left {
+            self.admitted.row(pair.pos).record
+        } else {
+            self.opposite.payload(pair.opposite_index)
+        }
+    }
+
     fn side_columns(&self, incoming: bool) -> Option<Vec<(usize, usize)>> {
         let projection = self.projection?;
         let left_width = self
@@ -176,28 +181,24 @@ impl JoinOutput<'_> {
     fn flat_ranges(&self, budget: EdgeBudget) -> Result<Vec<Range<usize>>> {
         let incoming_columns = self.side_columns(true);
         let opposite_columns = self.side_columns(false);
-        // Cache only matched references; retained chunk coordinates can have gaps.
-        let mut incoming = BTreeMap::new();
-        let mut opposite = BTreeMap::new();
+        let mut incoming = RowCache::new(self.matched.iter().map(|pair| pair.pos));
+        let mut opposite = RowCache::new(self.matched.iter().map(|pair| pair.opposite_index));
         let mut ranges = Vec::new();
         let mut start = 0;
         let mut chunk = FlatChunk::default();
         for (index, pair) in self.matched.iter().enumerate() {
-            let record = self.admitted.row(pair.pos).record;
-            let left = flat_row(
-                &mut incoming,
-                pair.pos,
-                record,
-                0,
-                incoming_columns.as_deref(),
-            )?;
-            let right = flat_row(
-                &mut opposite,
-                pair.opposite_index,
-                self.opposite.payload(pair.opposite_index),
-                record.num_columns(),
-                opposite_columns.as_deref(),
-            )?;
+            // Payloads are read only for rows whose costs are not cached yet.
+            let record = || self.admitted.row(pair.pos).record;
+            let left = incoming.get_or_try_insert_with(pair.pos, || {
+                flat_row(record(), 0, incoming_columns.as_deref())
+            })?;
+            let right = opposite.get_or_try_insert_with(pair.opposite_index, || {
+                flat_row(
+                    self.opposite.payload(pair.opposite_index),
+                    record().num_columns(),
+                    opposite_columns.as_deref(),
+                )
+            })?;
             if !chunk.fits(left, right, budget) {
                 if start == index {
                     return Err(oversized_row(
@@ -226,26 +227,19 @@ impl JoinOutput<'_> {
     fn nested_ranges(&self, budget: EdgeBudget) -> Result<Vec<Range<usize>>> {
         let incoming_columns = self.side_columns(true);
         let opposite_columns = self.side_columns(false);
-        let incoming = estimated_rows(
-            self.matched
-                .iter()
-                .map(|pair| (pair.pos, self.admitted.row(pair.pos).record)),
-            incoming_columns.as_deref(),
-        )?;
+        let incoming = estimated_rows(self.matched.iter().map(|pair| pair.pos), |pos| {
+            estimated_row(self.admitted.row(pos).record, incoming_columns.as_deref())
+        })?;
         let opposite = estimated_rows(
-            self.matched.iter().map(|pair| {
-                (
-                    pair.opposite_index,
-                    self.opposite.payload(pair.opposite_index),
-                )
-            }),
-            opposite_columns.as_deref(),
+            self.matched.iter().map(|pair| pair.opposite_index),
+            |index| estimated_row(self.opposite.payload(index), opposite_columns.as_deref()),
         )?;
         let mut ranges = Vec::new();
         let mut start = 0;
         let mut bytes = 0_usize;
         for (index, pair) in self.matched.iter().enumerate() {
-            let row_bytes = incoming[&pair.pos].saturating_add(opposite[&pair.opposite_index]);
+            let row_bytes = estimated_cost(&incoming, pair.pos)
+                .saturating_add(estimated_cost(&opposite, pair.opposite_index));
             if nested_range_is_full(start..index, bytes, row_bytes, budget) {
                 self.validate_nested_range(start..index, budget, &mut ranges)?;
                 start = index;
@@ -291,39 +285,101 @@ fn nested_range_is_full(
             || bytes.saturating_add(row_bytes) > budget.max_bytes)
 }
 
-fn flat_row<'a>(
-    rows: &'a mut BTreeMap<usize, FlatRow>,
-    index: usize,
+/// Per-preflight row costs indexed by matched row coordinates.
+///
+/// Retained chunk coordinates can have gaps. A dense table spans the matched
+/// coordinate range only while it stays within twice the matched pairs, which
+/// the per-match scratch allowance already funds; wider ranges index sorted
+/// distinct coordinates instead.
+struct RowCache<T> {
+    keys: CacheKeys,
+    rows: Vec<Option<T>>,
+}
+
+enum CacheKeys {
+    Offset(usize),
+    Sorted(Vec<usize>),
+}
+
+impl<T> RowCache<T> {
+    fn new(coordinates: impl ExactSizeIterator<Item = usize> + Clone) -> Self {
+        let limit = coordinates.len().saturating_mul(2);
+        let (low, high) = coordinates
+            .clone()
+            .fold((usize::MAX, 0), |(low, high), coordinate| {
+                (low.min(coordinate), high.max(coordinate))
+            });
+        let (keys, slots) = if low > high {
+            (CacheKeys::Offset(0), 0)
+        } else if high - low < limit {
+            (CacheKeys::Offset(low), high - low + 1)
+        } else {
+            let mut keys = coordinates.collect::<Vec<_>>();
+            keys.sort_unstable();
+            keys.dedup();
+            let slots = keys.len();
+            (CacheKeys::Sorted(keys), slots)
+        };
+        Self {
+            keys,
+            rows: std::iter::repeat_with(|| None).take(slots).collect(),
+        }
+    }
+
+    fn slot(&self, coordinate: usize) -> usize {
+        match &self.keys {
+            CacheKeys::Offset(low) => coordinate - low,
+            CacheKeys::Sorted(keys) => keys
+                .binary_search(&coordinate)
+                .expect("row cache covers every matched coordinate"),
+        }
+    }
+
+    fn get(&self, coordinate: usize) -> Option<&T> {
+        self.rows[self.slot(coordinate)].as_ref()
+    }
+
+    fn get_or_try_insert_with(
+        &mut self,
+        coordinate: usize,
+        compute: impl FnOnce() -> Result<T>,
+    ) -> Result<&T> {
+        let slot = self.slot(coordinate);
+        match &mut self.rows[slot] {
+            Some(row) => Ok(&*row),
+            empty => Ok(&*empty.insert(compute()?)),
+        }
+    }
+}
+
+fn flat_row(
     record: PayloadRef<'_>,
     column_offset: usize,
     projection: Option<&[(usize, usize)]>,
-) -> Result<&'a FlatRow> {
-    if let Entry::Vacant(entry) = rows.entry(index) {
-        #[cfg(test)]
-        tests::FLAT_VISITS.with(|count| count.set(count.get() + 1));
-        let mut bytes = 0;
-        let mut nulls = Vec::new();
-        let mut terminal = 0;
-        let row = record.offset();
-        for (column_index, column) in row_columns(record, column_offset, projection) {
-            let width = fixed_width(column.data_type()).expect("flat schema was checked");
-            let offset = terminal_offset_width(column.data_type());
-            terminal = checked_accumulate(terminal, offset, "batch")?;
-            bytes = checked_accumulate(bytes, width - offset, "batch")?;
-            if let Some(offsets) = variable_offsets(column.as_ref()) {
-                bytes = checked_accumulate(bytes, selected_width(&offsets, row), "batch")?;
-            }
-            if column.nulls().is_some_and(|nulls| nulls.is_null(row)) {
-                nulls.push(column_index);
-            }
+) -> Result<FlatRow> {
+    #[cfg(test)]
+    tests::FLAT_VISITS.with(|count| count.set(count.get() + 1));
+    let mut bytes = 0;
+    let mut nulls = Vec::new();
+    let mut terminal = 0;
+    let row = record.offset();
+    for (column_index, column) in row_columns(record, column_offset, projection) {
+        let width = fixed_width(column.data_type()).expect("flat schema was checked");
+        let offset = terminal_offset_width(column.data_type());
+        terminal = checked_accumulate(terminal, offset, "batch")?;
+        bytes = checked_accumulate(bytes, width - offset, "batch")?;
+        if let Some(offsets) = variable_offsets(column.as_ref()) {
+            bytes = checked_accumulate(bytes, selected_width(&offsets, row), "batch")?;
         }
-        entry.insert(FlatRow {
-            bytes,
-            nulls,
-            terminal,
-        });
+        if column.nulls().is_some_and(|nulls| nulls.is_null(row)) {
+            nulls.push(column_index);
+        }
     }
-    Ok(&rows[&index])
+    Ok(FlatRow {
+        bytes,
+        nulls,
+        terminal,
+    })
 }
 
 fn row_columns<'a>(
@@ -357,17 +413,21 @@ fn selected_width(offsets: &Offsets<'_>, row: usize) -> usize {
     }
 }
 
-fn estimated_rows<'a>(
-    records: impl Iterator<Item = (usize, PayloadRef<'a>)>,
-    projection: Option<&[(usize, usize)]>,
-) -> Result<BTreeMap<usize, usize>> {
-    let mut rows = BTreeMap::new();
-    for (index, record) in records {
-        if let Entry::Vacant(entry) = rows.entry(index) {
-            entry.insert(estimated_row(record, projection)?);
-        }
+fn estimated_rows(
+    coordinates: impl ExactSizeIterator<Item = usize> + Clone,
+    estimate: impl Fn(usize) -> Result<usize>,
+) -> Result<RowCache<usize>> {
+    let mut rows = RowCache::new(coordinates.clone());
+    for coordinate in coordinates {
+        rows.get_or_try_insert_with(coordinate, || estimate(coordinate))?;
     }
     Ok(rows)
+}
+
+fn estimated_cost(rows: &RowCache<usize>, coordinate: usize) -> usize {
+    *rows
+        .get(coordinate)
+        .expect("nested preflight estimated every matched row")
 }
 
 fn estimated_row(record: PayloadRef<'_>, projection: Option<&[(usize, usize)]>) -> Result<usize> {
@@ -610,6 +670,127 @@ mod tests {
                 measured.count_total
             );
         }
+    }
+
+    fn int64_row() -> RecordBatch {
+        RecordBatch::try_from_iter(vec![(
+            "value",
+            Arc::new(Int64Array::from(vec![7])) as ArrayRef,
+        )])
+        .unwrap()
+    }
+
+    fn admitted_row(record: &RecordBatch) -> AdmittedRow {
+        AdmittedRow {
+            record: record.clone().into(),
+            event_time: EventTime::from_micros(100),
+            row_id: 0,
+            retain: true,
+        }
+    }
+
+    fn stored_row(record: &RecordBatch) -> StoredRow {
+        StoredRow {
+            record: record.clone().into(),
+            event_time: EventTime::from_micros(100),
+            row_id: 0,
+            charge: 0,
+            encoded_key: Arc::new(vec![].into()),
+        }
+    }
+
+    fn int64_pair_schema() -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            Field::new("left_value", DataType::Int64, false),
+            Field::new("right_value", DataType::Int64, false),
+        ]))
+    }
+
+    #[test]
+    fn test_flat_preflight_cache_allocations_are_independent_of_distinct_rows() {
+        let (rows, fanout) = (20_000, 4);
+        let record = int64_row();
+        let schema = int64_pair_schema();
+        let admitted = (0..rows).map(|_| admitted_row(&record)).collect::<Vec<_>>();
+        let opposite = vec![stored_row(&record); rows];
+        let matched: super::super::matches::Selection = (0..rows)
+            .flat_map(|pos| {
+                (0..fanout).map(move |offset| MatchedPair {
+                    pos,
+                    opposite_index: (pos + offset * 5_000) % rows,
+                })
+            })
+            .collect::<Vec<_>>()
+            .into();
+        let output = JoinOutput {
+            schema: &schema,
+            projection: None,
+            admitted: &admitted,
+            opposite: &opposite,
+            matched: &matched,
+            incoming_is_left: true,
+            operator_id: "distinct",
+            admitted_charges: None,
+        };
+        FLAT_VISITS.with(|count| count.set(0));
+        let measured = allocation_counter::measure(|| {
+            let ranges = output
+                .ranges(EdgeBudget::new(1_000, 1 << 20).unwrap())
+                .unwrap();
+            assert_eq!(ranges.len(), rows * fanout / 1_000);
+        });
+        assert_eq!(FLAT_VISITS.with(Cell::get), 2 * rows);
+        assert!(
+            measured.count_total < 64,
+            "flat preflight cached {} distinct rows with {} allocations; per-row cost \
+             caches must be dense",
+            2 * rows,
+            measured.count_total
+        );
+    }
+
+    #[test]
+    fn test_flat_preflight_scratch_ignores_retained_coordinate_gaps() {
+        let record = int64_row();
+        let schema = int64_pair_schema();
+        let admitted = vec![admitted_row(&record)];
+        let mut opposite = super::super::retained::StateRows::default();
+        let first = opposite.append(vec![stored_row(&record)])[0];
+        for _ in 0..4_096 {
+            let expired = opposite.append(vec![stored_row(&record)])[0];
+            opposite.remove(expired);
+        }
+        let last = opposite.append(vec![stored_row(&record)])[0];
+        assert!(
+            last - first > 4_000_000,
+            "expired chunks leave a coordinate gap"
+        );
+        let matched = [last, first, last].map(|opposite_index| MatchedPair {
+            pos: 0,
+            opposite_index,
+        });
+        let output = JoinOutput {
+            schema: &schema,
+            projection: None,
+            admitted: &admitted,
+            opposite: &opposite,
+            matched: &matched,
+            incoming_is_left: true,
+            operator_id: "gaps",
+            admitted_charges: None,
+        };
+        FLAT_VISITS.with(|count| count.set(0));
+        let measured = allocation_counter::measure(|| {
+            let ranges = output.ranges(EdgeBudget::new(2, 4096).unwrap()).unwrap();
+            assert_eq!(ranges, vec![0..2, 2..3]);
+        });
+        assert_eq!(FLAT_VISITS.with(Cell::get), 3);
+        assert!(
+            measured.bytes_max < 64 * 1024,
+            "preflight scratch must follow matched rows, not the retained coordinate gap: \
+             {measured:?}"
+        );
+        assert_eq!(output.materialize(0..3).unwrap().num_rows(), 3);
     }
 
     #[test]
