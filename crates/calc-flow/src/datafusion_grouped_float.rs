@@ -41,7 +41,8 @@ impl DataFusionRuntime {
                     .rules
                     .iter()
                     .map(|rule| rule.name())
-                    .chain(std::iter::once("calc_flow_uint64_modulo_predicate")))
+                    .chain(std::iter::once("calc_flow_uint64_modulo_predicate"))
+                    .chain(std::iter::once("calc_flow_timestamp_interval_arithmetic")))
             && state
                 .physical_optimizers()
                 .iter()

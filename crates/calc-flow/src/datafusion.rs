@@ -31,6 +31,7 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use crate::{
     Batch, BatchMetadata, CalcFlowError, Result, UdfKind, UdfReference, UdfRegistrySnapshot,
+    datafusion_interval::TimestampIntervalArithmetic,
     datafusion_predicate::UInt64ModuloPredicate,
     datafusion_rolling::{CalcFlowQueryPlanner, RollingRewriteAudit, RollingRewriteAuditSnapshot},
     datafusion_template::{QueryTemplate, QueryTemplates, TemplateCandidate},
@@ -818,7 +819,8 @@ impl DataFusionRuntime {
                 .with_runtime_env(Arc::clone(&self.runtime_env))
                 .with_config(session)
                 .with_default_features()
-                .with_optimizer_rule(Arc::new(UInt64ModuloPredicate));
+                .with_optimizer_rule(Arc::new(UInt64ModuloPredicate))
+                .with_optimizer_rule(Arc::new(TimestampIntervalArithmetic));
             let state = if self.config.enable_rolling_rewrite {
                 state
                     .with_query_planner(Arc::new(CalcFlowQueryPlanner::new(Arc::clone(
