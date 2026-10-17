@@ -813,10 +813,33 @@ impl Pending {
         budget: &BirthBudget<'_>,
         flow: &mut KeyFlow<'_, '_>,
     ) -> Result<bool> {
-        let name = budget.name;
-        // Classification runs per distinct key in first-appearance order;
-        // the plain finds are pure, so their outcome matches the per-row
-        // path's first resolution of the key.
+        self.classify_distinct(columns, dictionary, local, budget.name, flow)
+            .await?;
+        // Changes stage in the exact row order the per-row path would have
+        // staged them: dictionary hits at first appearance, births at the
+        // first retained row of an unknown key.
+        local.sort_changes();
+        if !self
+            .stage_changes(columns, dictionary, local, budget, flow)
+            .await?
+        {
+            return Ok(false);
+        }
+        self.ids.extend(local.broadcast());
+        Ok(true)
+    }
+
+    /// Classification runs per distinct key in first-appearance order; the
+    /// plain finds are pure, so their outcome matches the per-row path's
+    /// first resolution of the key.
+    async fn classify_distinct(
+        &mut self,
+        columns: &[KeyWriter<'_>],
+        dictionary: &Dictionary,
+        local: &mut local::LocalIntern,
+        name: &str,
+        flow: &mut KeyFlow<'_, '_>,
+    ) -> Result<()> {
         for distinct in 0..local.distinct {
             let key = TypedKey {
                 columns,
@@ -854,10 +877,19 @@ impl Pending {
                 ));
             }
         }
-        // Changes stage in the exact row order the per-row path would have
-        // staged them: dictionary hits at first appearance, births at the
-        // first retained row of an unknown key.
-        local.sort_changes();
+        Ok(())
+    }
+
+    /// Stages one classified change per ordered entry, matching the per-row
+    /// staging sequence exactly.
+    async fn stage_changes(
+        &mut self,
+        columns: &[KeyWriter<'_>],
+        dictionary: &Dictionary,
+        local: &mut local::LocalIntern,
+        budget: &BirthBudget<'_>,
+        flow: &mut KeyFlow<'_, '_>,
+    ) -> Result<bool> {
         for index in 0..local.order.len() {
             let (_, distinct) = local.order[index];
             let retains = local.retains[distinct as usize];
@@ -866,47 +898,79 @@ impl Pending {
                     debug_assert!(false, "pending identities never stage changes");
                 }
                 local::Plan::Dictionary(entry) => {
-                    let slot = dictionary.slots[entry as usize]
-                        .as_ref()
-                        .expect("classified dictionary identity");
-                    let id = self.add(
-                        slot.lease.clone(),
-                        local.canonicals[distinct as usize],
-                        slot.retained,
-                        false,
-                        name,
+                    self.stage_dictionary_hit(
+                        dictionary,
+                        local,
+                        distinct as usize,
+                        entry,
+                        retains,
+                        budget.name,
                     )?;
-                    local.posts[distinct as usize] = id;
-                    if retains > 0 {
-                        self.retain(id, retains, name)?;
-                    }
                 }
                 local::Plan::Unknown => {
-                    let key = TypedKey {
-                        columns,
-                        row: local.rows[distinct as usize],
-                    };
-                    let Some(id) = self
-                        .birth(
-                            dictionary,
-                            key,
-                            local.canonicals[distinct as usize],
-                            budget,
-                            flow,
-                        )
+                    if !self
+                        .stage_birth(columns, dictionary, local, distinct as usize, budget, flow)
                         .await?
-                    else {
+                    {
                         return Ok(false);
-                    };
-                    local.posts[distinct as usize] = id;
-                    local.splits[distinct as usize] = local.first_retained[distinct as usize];
-                    if retains > 0 {
-                        self.retain(id, retains, name)?;
                     }
                 }
             }
         }
-        self.ids.extend(local.broadcast());
+        Ok(true)
+    }
+
+    fn stage_dictionary_hit(
+        &mut self,
+        dictionary: &Dictionary,
+        local: &mut local::LocalIntern,
+        distinct: usize,
+        entry: u32,
+        retains: u32,
+        name: &str,
+    ) -> Result<()> {
+        let slot = dictionary.slots[entry as usize]
+            .as_ref()
+            .expect("classified dictionary identity");
+        let id = self.add(
+            slot.lease.clone(),
+            local.canonicals[distinct],
+            slot.retained,
+            false,
+            name,
+        )?;
+        local.posts[distinct] = id;
+        if retains > 0 {
+            self.retain(id, retains, name)?;
+        }
+        Ok(())
+    }
+
+    async fn stage_birth(
+        &mut self,
+        columns: &[KeyWriter<'_>],
+        dictionary: &Dictionary,
+        local: &mut local::LocalIntern,
+        distinct: usize,
+        budget: &BirthBudget<'_>,
+        flow: &mut KeyFlow<'_, '_>,
+    ) -> Result<bool> {
+        let key = TypedKey {
+            columns,
+            row: local.rows[distinct],
+        };
+        let Some(id) = self
+            .birth(dictionary, key, local.canonicals[distinct], budget, flow)
+            .await?
+        else {
+            return Ok(false);
+        };
+        local.posts[distinct] = id;
+        local.splits[distinct] = local.first_retained[distinct];
+        let retains = local.retains[distinct];
+        if retains > 0 {
+            self.retain(id, retains, budget.name)?;
+        }
         Ok(true)
     }
 
