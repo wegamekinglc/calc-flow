@@ -53,6 +53,32 @@ pub(super) struct LocalIntern {
     pub(super) _credit: MemoryReservation,
 }
 
+/// Running cooperative-work totals for one block of interned rows.
+#[derive(Default)]
+struct BlockCharge {
+    visits: usize,
+    bytes: usize,
+}
+
+impl BlockCharge {
+    /// Records one interned row, reporting whether the block boundary was
+    /// reached and the accumulated work must be charged now.
+    fn step(&mut self, row_bytes: usize) -> bool {
+        self.visits += 1;
+        self.bytes += row_bytes;
+        self.visits >= COPY_VISITS || self.bytes >= COPY_BYTES
+    }
+
+    fn reset(&mut self) {
+        self.visits = 0;
+        self.bytes = 0;
+    }
+
+    fn pending(&self) -> bool {
+        self.visits > 0 || self.bytes > 0
+    }
+}
+
 impl LocalIntern {
     pub(super) fn new(rows: usize, credit: MemoryReservation) -> Self {
         Self {
@@ -164,8 +190,7 @@ impl LocalIntern {
         name: &str,
         flow: &mut KeyFlow<'_, '_>,
     ) -> Result<()> {
-        let mut visits = 0_usize;
-        let mut bytes = 0_usize;
+        let mut block = BlockCharge::default();
         for (ordinal, (offset, retain)) in group.key_offsets().enumerate() {
             let (distinct, row_bytes) = self.intern_row(columns, offset, name)?;
             self.locals.push(distinct);
@@ -173,16 +198,13 @@ impl LocalIntern {
                 let ordinal = u32::try_from(ordinal).expect("group rows fit u32 ordinals");
                 self.note_retained(distinct, ordinal, name)?;
             }
-            visits += 1;
-            bytes += row_bytes;
-            if visits >= COPY_VISITS || bytes >= COPY_BYTES {
-                charge_block(flow, visits, bytes).await?;
-                visits = 0;
-                bytes = 0;
+            if block.step(row_bytes) {
+                charge_block(flow, block.visits, block.bytes).await?;
+                block.reset();
             }
         }
-        if visits > 0 || bytes > 0 {
-            charge_block(flow, visits, bytes).await?;
+        if block.pending() {
+            charge_block(flow, block.visits, block.bytes).await?;
         }
         Ok(())
     }
@@ -292,19 +314,42 @@ impl<'a> LocalColumn<'a> {
     fn bind(array: &'a dyn Array) -> Option<Self> {
         Some(match array.data_type() {
             DataType::Boolean => Self::Boolean(array.as_any().downcast_ref()?),
+            DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => {
+                Self::bind_signed(array)?
+            }
+            DataType::UInt8
+            | DataType::UInt16
+            | DataType::UInt32
+            | DataType::UInt64
+            | DataType::Date32
+            | DataType::Date64 => Self::bind_word(array)?,
+            DataType::Timestamp(unit, _) => Self::timestamp(array, *unit)?,
+            DataType::Utf8 => Self::Utf8(array.as_any().downcast_ref()?),
+            DataType::LargeUtf8 => Self::LargeUtf8(array.as_any().downcast_ref()?),
+            _ => return None,
+        })
+    }
+
+    /// Signed integers load as sign-extended i64 words.
+    fn bind_signed(array: &'a dyn Array) -> Option<Self> {
+        Some(match array.data_type() {
             DataType::Int8 => Self::I8(primitive::<Int8Type>(array)?),
             DataType::Int16 => Self::I16(primitive::<Int16Type>(array)?),
             DataType::Int32 => Self::I32(primitive::<Int32Type>(array)?),
             DataType::Int64 => Self::I64(primitive::<Int64Type>(array)?),
+            _ => return None,
+        })
+    }
+
+    /// Unsigned integers and dates load as raw i64 words.
+    fn bind_word(array: &'a dyn Array) -> Option<Self> {
+        Some(match array.data_type() {
             DataType::UInt8 => Self::U8(primitive::<UInt8Type>(array)?),
             DataType::UInt16 => Self::U16(primitive::<UInt16Type>(array)?),
             DataType::UInt32 => Self::U32(primitive::<UInt32Type>(array)?),
             DataType::UInt64 => Self::U64(primitive::<UInt64Type>(array)?),
             DataType::Date32 => Self::I32(primitive::<Date32Type>(array)?),
             DataType::Date64 => Self::I64(primitive::<Date64Type>(array)?),
-            DataType::Timestamp(unit, _) => Self::timestamp(array, *unit)?,
-            DataType::Utf8 => Self::Utf8(array.as_any().downcast_ref()?),
-            DataType::LargeUtf8 => Self::LargeUtf8(array.as_any().downcast_ref()?),
             _ => return None,
         })
     }
