@@ -339,6 +339,26 @@ impl NativeIndex {
             .store(self.resident_bytes(), Ordering::Relaxed);
     }
 
+    fn cut_prefix(&self, id: u32, expired: &dyn Fn(EventTime) -> bool) -> usize {
+        let run = self.slots[id as usize].as_ref().expect("live key ID");
+        run.active().partition_point(|entry| expired(entry.time))
+    }
+
+    /// Advances the run start by the cut, reporting whether it emptied.
+    fn advance_run(&mut self, id: u32, cut: usize) -> bool {
+        let run = self.slots[id as usize].as_mut().expect("live key ID");
+        run.start += cut;
+        run.start == run.rows.len()
+    }
+
+    fn retire_truncated(&mut self, count: usize, name: &str) -> crate::Result<()> {
+        self.rows = self
+            .rows
+            .checked_sub(count)
+            .ok_or_else(|| truncation_invariant(name, "truncated row count underflow"))?;
+        Ok(())
+    }
+
     pub(super) fn remove_stable<'a>(
         &mut self,
         row: &StoredRow,
@@ -347,7 +367,6 @@ impl NativeIndex {
     ) {
         self.remove_resolved(row, key, None, key_at);
     }
-
 
     /// Truncates one key's time-sorted expired prefix in a single step
     /// (spec FR12): advances `start`, releases the key slot when the run
@@ -369,25 +388,20 @@ impl NativeIndex {
         let id = self
             .find(hash, key)
             .ok_or_else(|| truncation_invariant(name, "truncated key is not retained"))?;
-        let run = self.slots[id as usize].as_mut().expect("live key ID");
-        let cut = run.active().partition_point(|entry| expired(entry.time));
+        let cut = self.cut_prefix(id, expired);
         if cut != count {
             return Err(truncation_invariant(
                 name,
                 "truncated prefix differs from the planned eviction",
             ));
         }
-        run.start += cut;
-        let emptied = run.start == run.rows.len();
+        let emptied = self.advance_run(id, cut);
         if emptied {
             self.remove_key(hash, id);
         } else {
             self.refresh_key_owner(id, key_at);
         }
-        self.rows = self
-            .rows
-            .checked_sub(count)
-            .ok_or_else(|| truncation_invariant(name, "truncated row count underflow"))?;
+        self.retire_truncated(count, name)?;
         if emptied && self.rows == 0 {
             self.entries = HashTable::new();
             self.slots = Vec::new();

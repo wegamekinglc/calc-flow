@@ -185,20 +185,30 @@ pub(super) fn copy_delta(
     let mut copied = CopiedDelta {
         watermark: deltas.watermark,
         upserts: [0; 2],
-        tombstones: [
-            CopiedTombstones {
-                row_ids: Vec::new(),
-                times: Vec::new(),
-                keys: Vec::new(),
-            },
-            CopiedTombstones {
-                row_ids: Vec::new(),
-                times: Vec::new(),
-                keys: Vec::new(),
-            },
-        ],
+        tombstones: [empty_tombstones(), empty_tombstones()],
     };
     for side in 0..2 {
+        copy_side(deltas, side, &mut copied, workspace, check)?;
+    }
+    Ok(copied)
+}
+
+fn empty_tombstones() -> CopiedTombstones {
+    CopiedTombstones {
+        row_ids: Vec::new(),
+        times: Vec::new(),
+        keys: Vec::new(),
+    }
+}
+
+fn copy_side(
+    deltas: &super::super::super::DeltaTracking,
+    side: usize,
+    copied: &mut CopiedDelta,
+    workspace: &MemoryReservation,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<()> {
+    {
         check()?;
         copied.upserts[side] = usize::try_from(deltas.dirty[side])
             .map_err(|_| error("V2 delta dirty row count overflow"))?;
@@ -225,7 +235,7 @@ pub(super) fn copy_delta(
             target.keys.push(Arc::clone(&list.keys[entry]));
         }
     }
-    Ok(copied)
+    Ok(())
 }
 
 /// Encodes an old-style pending-op list through the same wire path as the
