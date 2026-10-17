@@ -300,6 +300,23 @@ impl AdmittedBatch {
         self.release_table();
     }
 
+    /// Installs a zero-copy projected parent indexed by physical row. The
+    /// group keeps no retained row, so nothing enters state from it and the
+    /// projected columns can share the incoming buffers.
+    pub(super) fn replace_view(&mut self, index: usize, parent: Arc<RecordBatch>) {
+        let segment = self.segments.get_mut(index);
+        segment.payload_base = None;
+        segment.payload = Some(RowPayload::Rowed { parent, row: 0 });
+        self.release_table();
+    }
+
+    #[cfg(test)]
+    pub(super) fn projection_is_view(&self, index: usize) -> bool {
+        let segment = self.segments.get(index);
+        segment.payload_base.is_none()
+            && matches!(segment.payload.as_ref(), Some(RowPayload::Rowed { .. }))
+    }
+
     pub(super) fn complete_record(&mut self) {
         self.release_table();
     }
@@ -521,6 +538,17 @@ pub(super) trait AdmittedRows: Sync {
     fn row(&self, index: usize) -> AdmittedRef<'_>;
     fn group_end(&self, start: usize) -> usize;
     fn source_index(&self, index: usize) -> usize;
+    /// Retained bits for a window of at most 64 rows starting at `start`;
+    /// bit `i` marks the row at `start + i`.
+    fn retained_bits(&self, start: usize, length: usize) -> u64 {
+        debug_assert!(length <= 64);
+        (0..length).fold(0, |bits, offset| {
+            bits | (u64::from(self.row(start + offset).retain) << offset)
+        })
+    }
+    fn any_retained(&self, range: Range<usize>) -> bool {
+        (range.start..range.end).any(|index| self.row(index).retain)
+    }
     /// why: key identity reads only (offset, retain), so a group can resolve
     /// its segment once instead of re-walking `row` per row
     fn key_offsets(
@@ -547,6 +575,12 @@ impl AdmittedRows for AdmittedBatch {
     fn source_index(&self, index: usize) -> usize {
         let segment = self.segments.get(self.segment_index(index));
         segment.source_base + self.physical(segment, index)
+    }
+    fn retained_bits(&self, start: usize, length: usize) -> u64 {
+        self.retained.bits(start, length)
+    }
+    fn any_retained(&self, range: Range<usize>) -> bool {
+        self.retained.any(range)
     }
     fn key_offsets(
         &self,
@@ -652,6 +686,15 @@ impl<'a> AdmittedGroup<'a> {
     }
     pub(super) fn key_offsets(&self) -> Box<dyn Iterator<Item = (usize, bool)> + Send + '_> {
         self.rows.key_offsets(self.start..self.end)
+    }
+    pub(super) fn block(&self, start: usize, end: usize) -> AdmittedGroup<'a> {
+        AdmittedGroup::new(self.rows, self.start + start..self.start + end)
+    }
+    pub(super) fn retained_bits(&self, start: usize, length: usize) -> u64 {
+        self.rows.retained_bits(self.start + start, length)
+    }
+    pub(super) fn any_retained(&self) -> bool {
+        self.rows.any_retained(self.start..self.end)
     }
 }
 pub(super) struct GroupIter<'a> {

@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
     mod column_gather_tests;
+    mod columnar_admission_tests;
     mod columnar_charge_tests;
     mod complete_expiry_tests;
     mod expiration_heap_tests;
@@ -2340,6 +2341,7 @@ struct JoinWork {
     charge_range_sums: usize,
     charge_nested_rows: usize,
     charge_scalar_fallbacks: usize,
+    dictionary_probes: usize,
 }
 
 #[cfg(test)]
@@ -2364,6 +2366,7 @@ thread_local! {
         charge_column_resolutions: 0, charge_bitmap_words: 0,
         charge_sparse_validity_visits: 0, charge_offset_reads: 0,
         charge_range_sums: 0, charge_nested_rows: 0, charge_scalar_fallbacks: 0,
+        dictionary_probes: 0,
     }) };
 }
 
@@ -5571,43 +5574,53 @@ async fn retained_rows(
     let mut quantum = columnar::Quantum::default();
     let mut group_start = 0;
     for group in admitted.groups() {
-        for start in (0..group.len()).step_by(64) {
-            let end = (start + 64).min(group.len());
-            let charges =
-                admission_charge::PayloadCharges::new(group, start..end, context, &mut quantum)
-                    .await?;
-            for (index, row) in (start..end)
-                .map(|index| (index, group.row(index)))
-                .filter(|(_, row)| row.retain)
-            {
-                flow.step(1, 0).await?;
-                let encoded_key = match native_keys {
-                    Some(keys) => Arc::clone(keys.key(group_start + index)),
-                    None => {
-                        legacy_retained_key(
-                            row.record,
-                            key_indices,
-                            dictionary,
-                            operator_id,
-                            work,
-                            &mut flow,
-                        )
-                        .await?
-                    }
-                };
-                let charge = charges.state_charge(
-                    index - start,
-                    row.record,
-                    encoded_key.len(),
-                    operator_id,
-                )?;
-                retained.push(StoredRow {
-                    encoded_key,
-                    record: row.record.owned(),
-                    event_time: row.event_time,
-                    row_id: row.row_id,
-                    charge,
-                });
+        // Fully expired groups never enter state, so neither the payload
+        // charge walk nor a row visit may touch their rows.
+        if group.any_retained() {
+            for start in (0..group.len()).step_by(64) {
+                let end = (start + 64).min(group.len());
+                let selected = group.retained_bits(start, end - start);
+                if selected == 0 {
+                    continue;
+                }
+                let block = group.block(start, end);
+                let charges =
+                    admission_charge::PayloadCharges::new(block, selected, context, &mut quantum)
+                        .await?;
+                let mut bits = selected;
+                while bits != 0 {
+                    let index = start + bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    let row = group.row(index);
+                    flow.step(1, 0).await?;
+                    let encoded_key = match native_keys {
+                        Some(keys) => Arc::clone(keys.key(group_start + index)),
+                        None => {
+                            legacy_retained_key(
+                                row.record,
+                                key_indices,
+                                dictionary,
+                                operator_id,
+                                work,
+                                &mut flow,
+                            )
+                            .await?
+                        }
+                    };
+                    let charge = charges.state_charge(
+                        index - start,
+                        row.record,
+                        encoded_key.len(),
+                        operator_id,
+                    )?;
+                    retained.push(StoredRow {
+                        encoded_key,
+                        record: row.record.owned(),
+                        event_time: row.event_time,
+                        row_id: row.row_id,
+                        charge,
+                    });
+                }
             }
         }
         group_start += group.len();

@@ -8,6 +8,7 @@ use hashbrown::HashTable;
 use super::super::key_identity::{IdentityLease, NamespaceLease};
 use super::{
     AdmittedRows,
+    admitted::AdmittedGroup,
     borrowed_key::KeyHashState,
     columnar::FramedKey,
     counter_overflow,
@@ -18,11 +19,40 @@ use crate::Result;
 
 mod bindings;
 mod framed;
+mod local;
 mod rebuild;
 pub(super) use bindings::{Bindings, SideBindings};
 pub(super) use rebuild::Rebuilt;
 
 pub(super) type Lease = IdentityLease<Arc<FramedKey>>;
+
+#[cfg(test)]
+thread_local! {
+    static PER_ROW_KEYS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Test control that pins key-identity preparation to the per-row path even
+/// when the batch-local interning table is fundable; drops to release.
+#[cfg(test)]
+pub(in crate::operator::join) struct PerRowKeys;
+
+#[cfg(test)]
+impl Drop for PerRowKeys {
+    fn drop(&mut self) {
+        PER_ROW_KEYS.with(|forced| forced.set(false));
+    }
+}
+
+#[cfg(test)]
+pub(in crate::operator::join) fn force_per_row_keys() -> PerRowKeys {
+    PER_ROW_KEYS.with(|forced| forced.set(true));
+    PerRowKeys
+}
+
+#[cfg(test)]
+fn intern_locally() -> bool {
+    !PER_ROW_KEYS.with(std::cell::Cell::get)
+}
 
 struct Entry {
     lease: Lease,
@@ -73,6 +103,7 @@ pub(super) struct Pending {
     replacement: Option<Dictionary>,
     keys: Vec<Option<Arc<FramedKey>>>,
     ids: Vec<u32>,
+    local: Option<local::LocalIntern>,
     _credit: Arc<MemoryReservation>,
     #[cfg(test)]
     limits: TestLimits,
@@ -229,12 +260,34 @@ impl Dictionary {
         context: Option<&crate::StreamOperatorContext<'_>>,
         name: &str,
     ) -> Result<Option<PreparedKeys>> {
-        let bytes = scratch_bytes(rows.len(), indices.len())
+        let base = base_scratch_bytes(rows.len(), indices.len())
             .ok_or_else(|| counter_overflow(name, "key_capacity"))?;
-        let Some(credit) = grant(&master, bytes, name)? else {
-            return Ok(None);
+        let local_bytes =
+            local_table_bytes(rows.len()).ok_or_else(|| counter_overflow(name, "key_capacity"))?;
+        let interned = intern_locally();
+        let wanted = if interned {
+            base.checked_add(local_bytes)
+                .ok_or_else(|| counter_overflow(name, "key_capacity"))?
+        } else {
+            base
+        };
+        let (credit, local_credit) = match grant(&master, wanted, name)? {
+            Some(credit) => {
+                let local_credit = interned.then(|| credit.split(local_bytes));
+                (credit, local_credit)
+            }
+            // A local-table refusal only sheds the deduplication pass; the
+            // per-row identity path still prepares when the base scratch fits.
+            None if interned => {
+                let Some(credit) = grant(&master, base, name)? else {
+                    return Ok(None);
+                };
+                (credit, None)
+            }
+            None => return Ok(None),
         };
         let scratch = Arc::new(credit);
+        let local = local_credit.map(|credit| local::LocalIntern::new(rows.len(), credit));
         let mut pending = Pending::new(rows.len(), self.namespace.clone(), Arc::clone(&scratch));
         #[cfg(test)]
         {
@@ -246,7 +299,7 @@ impl Dictionary {
             name,
         };
         if !pending
-            .prepare_rows(self, rows, indices, &budget, &mut flow)
+            .prepare_rows(self, rows, indices, &budget, &mut flow, local)
             .await?
         {
             return Ok(None);
@@ -339,6 +392,8 @@ impl Dictionary {
         key: TypedKey<'_, '_>,
         flow: &mut KeyFlow<'_, '_>,
     ) -> Result<Option<u32>> {
+        #[cfg(test)]
+        super::note_join_work(|work| work.dictionary_probes += 1);
         let mut candidate = self
             .entries
             .find(hash, |head| head.hash == hash)
@@ -671,6 +726,7 @@ impl Pending {
             replacement: None,
             keys: Vec::with_capacity(capacity),
             ids: Vec::with_capacity(capacity),
+            local: None,
             _credit: credit,
             #[cfg(test)]
             limits: TestLimits::default(),
@@ -684,6 +740,7 @@ impl Pending {
         indices: &[usize],
         budget: &BirthBudget<'_>,
         flow: &mut KeyFlow<'_, '_>,
+        mut local: Option<local::LocalIntern>,
     ) -> Result<bool> {
         let mut columns = Vec::with_capacity(indices.len());
         for group in rows.groups() {
@@ -692,17 +749,164 @@ impl Pending {
                 flow.step(1, 0).await?;
                 columns.push(KeyWriter::bind(group.row(0).record.column(index).as_ref())?);
             }
-            for (offset, retain) in group.key_offsets() {
-                let key = TypedKey {
-                    columns: &columns,
-                    row: offset,
-                };
-                let Some(id) = self.resolve(dictionary, key, retain, budget, flow).await? else {
-                    return Ok(false);
-                };
-                self.ids.push(id);
+            let bound = if u32::try_from(group.len()).is_ok() {
+                local::bind_columns(group.row(0).record, indices)
+            } else {
+                None
+            };
+            let interned = match (local.as_mut(), bound) {
+                (Some(intern), Some(bound)) => Some((intern, bound)),
+                _ => None,
+            };
+            let prepared = match interned {
+                Some((intern, bound)) => {
+                    intern.begin_group();
+                    intern
+                        .intern_group(&bound, group, budget.name, flow)
+                        .await?;
+                    self.prepare_group_local(&columns, dictionary, intern, budget, flow)
+                        .await?
+                }
+                None => {
+                    self.prepare_group_rows(&columns, dictionary, group, budget, flow)
+                        .await?
+                }
+            };
+            if !prepared {
+                return Ok(false);
             }
         }
+        self.local = local;
+        Ok(true)
+    }
+
+    /// Per-row identity path: the pre-deduplication behavior, kept for
+    /// scratch refusal, exotic key layouts, and test equivalence.
+    async fn prepare_group_rows(
+        &mut self,
+        columns: &[KeyWriter<'_>],
+        dictionary: &Dictionary,
+        group: AdmittedGroup<'_>,
+        budget: &BirthBudget<'_>,
+        flow: &mut KeyFlow<'_, '_>,
+    ) -> Result<bool> {
+        for (offset, retain) in group.key_offsets() {
+            let key = TypedKey {
+                columns,
+                row: offset,
+            };
+            let Some(id) = self.resolve(dictionary, key, retain, budget, flow).await? else {
+                return Ok(false);
+            };
+            self.ids.push(id);
+        }
+        Ok(true)
+    }
+
+    /// Vectorized path: after `intern_group` deduplicated the rows, resolve
+    /// each distinct key once and broadcast the identity to every row.
+    async fn prepare_group_local(
+        &mut self,
+        columns: &[KeyWriter<'_>],
+        dictionary: &Dictionary,
+        local: &mut local::LocalIntern,
+        budget: &BirthBudget<'_>,
+        flow: &mut KeyFlow<'_, '_>,
+    ) -> Result<bool> {
+        let name = budget.name;
+        // Classification runs per distinct key in first-appearance order;
+        // the plain finds are pure, so their outcome matches the per-row
+        // path's first resolution of the key.
+        for distinct in 0..local.distinct {
+            let key = TypedKey {
+                columns,
+                row: local.rows[distinct],
+            };
+            let hash = canonical_hash(dictionary, key, flow).await?;
+            local.canonicals.push(hash);
+            let retains = local.retains[distinct];
+            if let Some(id) = self.find(hash, key, flow).await? {
+                local.plans.push(local::Plan::Pending);
+                if retains > 0 {
+                    self.retain(id, retains, name)?;
+                }
+                local.posts.push(id);
+                local.splits.push(u32::MAX);
+                continue;
+            }
+            if let Some(id) = dictionary.find(hash, key, flow).await? {
+                local.plans.push(local::Plan::Dictionary(id));
+                local.posts.push(u32::MAX);
+                local.splits.push(u32::MAX);
+                local.order.push((
+                    local.appearances[distinct],
+                    u32::try_from(distinct).expect("distinct keys fit u32 ids"),
+                ));
+                continue;
+            }
+            local.plans.push(local::Plan::Unknown);
+            local.posts.push(u32::MAX);
+            local.splits.push(u32::MAX);
+            if retains > 0 {
+                local.order.push((
+                    local.first_retained[distinct],
+                    u32::try_from(distinct).expect("distinct keys fit u32 ids"),
+                ));
+            }
+        }
+        // Changes stage in the exact row order the per-row path would have
+        // staged them: dictionary hits at first appearance, births at the
+        // first retained row of an unknown key.
+        local.sort_changes();
+        for index in 0..local.order.len() {
+            let (_, distinct) = local.order[index];
+            let retains = local.retains[distinct as usize];
+            match local.plans[distinct as usize] {
+                local::Plan::Pending => {
+                    debug_assert!(false, "pending identities never stage changes");
+                }
+                local::Plan::Dictionary(entry) => {
+                    let slot = dictionary.slots[entry as usize]
+                        .as_ref()
+                        .expect("classified dictionary identity");
+                    let id = self.add(
+                        slot.lease.clone(),
+                        local.canonicals[distinct as usize],
+                        slot.retained,
+                        false,
+                        name,
+                    )?;
+                    local.posts[distinct as usize] = id;
+                    if retains > 0 {
+                        self.retain(id, retains, name)?;
+                    }
+                }
+                local::Plan::Unknown => {
+                    let key = TypedKey {
+                        columns,
+                        row: local.rows[distinct as usize],
+                    };
+                    let Some(id) = self
+                        .birth(
+                            dictionary,
+                            key,
+                            local.canonicals[distinct as usize],
+                            budget,
+                            flow,
+                        )
+                        .await?
+                    else {
+                        return Ok(false);
+                    };
+                    local.posts[distinct as usize] = id;
+                    local.splits[distinct as usize] = local.first_retained[distinct as usize];
+                    if retains > 0 {
+                        self.retain(id, retains, name)?;
+                    }
+                }
+            }
+        }
+        self.ids.extend(local.broadcast());
         Ok(true)
     }
 
@@ -714,19 +918,7 @@ impl Pending {
         budget: &BirthBudget<'_>,
         flow: &mut KeyFlow<'_, '_>,
     ) -> Result<Option<u32>> {
-        let small = key.small();
-        let hash = match small.as_ref() {
-            Some(small) => {
-                let (visits, bytes) = small.charge();
-                flow.step(visits, bytes).await?;
-                #[cfg(test)]
-                super::typed_key::note(super::typed_key::KeyPhase::Hash, bytes);
-                small.hash(&dictionary.hasher)?
-            }
-            None => key.hash(&dictionary.hasher, flow).await?,
-        };
-        #[cfg(test)]
-        let hash = if dictionary.force_collisions { 0 } else { hash };
+        let hash = canonical_hash(dictionary, key, flow).await?;
         let Some(id) = self
             .resolve_hashed(dictionary, key, hash, retain, budget, flow)
             .await?
@@ -734,7 +926,7 @@ impl Pending {
             return Ok(None);
         };
         if retain {
-            self.retain(id, budget.name)?;
+            self.retain(id, 1, budget.name)?;
         }
         Ok(Some(id))
     }
@@ -953,11 +1145,13 @@ impl Pending {
         Ok(true)
     }
 
-    fn retain(&mut self, id: u32, name: &str) -> Result<()> {
+    /// Applies the aggregated references of one distinct key; per-row callers
+    /// pass one at a time.
+    fn retain(&mut self, id: u32, count: u32, name: &str) -> Result<()> {
         let change = &mut self.changes[id as usize];
         let next = change
             .retained
-            .checked_add(1)
+            .checked_add(u64::from(count))
             .ok_or_else(|| counter_overflow(name, "key_references"))?;
         let total = change
             .base
@@ -971,6 +1165,32 @@ impl Pending {
         change.retained = next;
         Ok(())
     }
+}
+
+/// Canonical framed hash for one key, charged exactly like the per-row path.
+async fn canonical_hash(
+    dictionary: &Dictionary,
+    key: TypedKey<'_, '_>,
+    flow: &mut KeyFlow<'_, '_>,
+) -> Result<u64> {
+    let hash = match key.small().as_ref() {
+        Some(small) => {
+            let (visits, bytes) = small.charge();
+            flow.step(visits, bytes).await?;
+            #[cfg(test)]
+            super::typed_key::note(super::typed_key::KeyPhase::Hash, bytes);
+            small.hash(&dictionary.hasher)?
+        }
+        None => key.hash(&dictionary.hasher, flow).await?,
+    };
+    #[cfg(test)]
+    let hash = if dictionary.force_collisions { 0 } else { hash };
+    Ok(hash)
+}
+
+#[cfg(not(test))]
+fn intern_locally() -> bool {
+    true
 }
 
 fn canonical_credit(frame_bytes: usize, budget: &BirthBudget<'_>) -> Result<Option<BirthCredits>> {
@@ -1015,7 +1235,7 @@ fn table_bytes(count: usize) -> Option<usize> {
         .checked_add(1024)
 }
 
-fn scratch_bytes(rows: usize, columns: usize) -> Option<usize> {
+fn base_scratch_bytes(rows: usize, columns: usize) -> Option<usize> {
     rows.checked_mul(
         size_of::<Change>()
             + size_of::<Head>() * 4
@@ -1025,5 +1245,20 @@ fn scratch_bytes(rows: usize, columns: usize) -> Option<usize> {
             + 64,
     )?
     .checked_add(columns.checked_mul(size_of::<KeyWriter<'_>>())?)?
+    .checked_add(1024)
+}
+
+/// Batch-local interning budget: per row, a plain and a canonical hash, a
+/// representative offset, six u32 lanes, the change order and the local
+/// bucket and control bytes.
+fn local_table_bytes(rows: usize) -> Option<usize> {
+    rows.checked_mul(
+        2 * size_of::<u64>()
+            + size_of::<usize>()
+            + 6 * size_of::<u32>()
+            + size_of::<(u32, u32)>()
+            + size_of::<local::Plan>()
+            + 10,
+    )?
     .checked_add(1024)
 }
