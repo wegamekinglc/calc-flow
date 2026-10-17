@@ -229,18 +229,7 @@ fn fast_shift<T: ArrowTimestampType>(
 ) -> Option<PrimitiveArray<T>> {
     let scale = nanos_per_unit(T::UNIT);
     let (min, max) = representable_bounds(T::UNIT);
-    // Arrow's kernel parses the timezone up front and fails the whole batch
-    // on a malformed offset string; parse once here so the fast path keeps
-    // that contract instead of silently carrying a bogus zone through.
-    if let Some(zone) = ts.timezone() {
-        // A malformed offset string fails arrow's kernel with a parse error
-        // for the whole batch; declining here routes the batch to the
-        // fallback, which reproduces exactly that error.
-        zone.parse::<datafusion::arrow::array::timezone::Tz>()
-            .ok()?;
-    }
-    // The scalar-function contract guarantees equal-length array arguments;
-    // make that explicit so a future caller cannot panic on an index.
+    fast_path_batch_admissible(ts)?;
     if !ts_broadcast && !iv_broadcast && ts.len() != iv.len() {
         return None;
     }
@@ -273,6 +262,18 @@ fn shifted_value(
     (min, max): (i64, i64),
     subtract: bool,
 ) -> Option<i64> {
+    let units = whole_units(interval, scale, subtract)?;
+    let shifted = timestamp.checked_add(units)?;
+    both_within_bounds(timestamp, shifted, min, max).then_some(shifted)
+}
+
+/// Whole-unit shift for a pure-nanosecond interval, or `None` when calendar
+/// components or an indivisible remainder force the fallback kernel.
+fn whole_units(
+    interval: datafusion::arrow::datatypes::IntervalMonthDayNano,
+    scale: i64,
+    subtract: bool,
+) -> Option<i64> {
     if interval.months != 0 || interval.days != 0 {
         return None;
     }
@@ -280,13 +281,29 @@ fn shifted_value(
         return None;
     }
     let units = interval.nanoseconds / scale;
-    let units = if subtract {
-        units.checked_neg()?
+    if subtract {
+        units.checked_neg()
     } else {
-        units
-    };
-    let shifted = timestamp.checked_add(units)?;
-    (timestamp >= min && timestamp <= max && shifted >= min && shifted <= max).then_some(shifted)
+        Some(units)
+    }
+}
+
+/// Both the input and shifted timestamps must stay inside the range arrow's
+/// kernel can represent for the unit.
+fn both_within_bounds(timestamp: i64, shifted: i64, min: i64, max: i64) -> bool {
+    timestamp >= min && timestamp <= max && shifted >= min && shifted <= max
+}
+
+/// Arrow's kernel parses the timezone up front and fails the whole batch on
+/// a malformed offset string; parse once here so the fast path keeps that
+/// contract instead of silently carrying a bogus zone through (declining
+/// routes the batch to the fallback, which reproduces the parse error).
+fn fast_path_batch_admissible<T: ArrowTimestampType>(ts: &PrimitiveArray<T>) -> Option<()> {
+    if let Some(zone) = ts.timezone() {
+        zone.parse::<datafusion::arrow::array::timezone::Tz>()
+            .ok()?;
+    }
+    Some(())
 }
 
 /// Crate-internal names of the add and subtract interval UDFs.
@@ -516,13 +533,8 @@ fn specialize_interval_arithmetic(expression: &Expr, schema: &DFSchema) -> Optio
     let DataType::Timestamp(unit, _) = timestamp.get_type(schema).ok()? else {
         return None;
     };
-    // A literal interval that can never take the fast path keeps the plain
-    // binary expression instead of paying UDF dispatch just to fall back.
-    if let Expr::Literal(ScalarValue::IntervalMonthDayNano(Some(value)), _) = interval {
-        let scale = nanos_per_unit(unit);
-        if value.months != 0 || value.days != 0 || value.nanoseconds % scale != 0 {
-            return None;
-        }
+    if hopeless_literal(interval, unit) {
+        return None;
     }
     let udf = if subtract {
         interval_subtract_udf()
@@ -530,6 +542,16 @@ fn specialize_interval_arithmetic(expression: &Expr, schema: &DFSchema) -> Optio
         interval_add_udf()
     };
     Some(udf.call(vec![timestamp.clone(), interval.clone()]))
+}
+
+/// A literal interval that can never take the fast path keeps the plain
+/// binary expression instead of paying UDF dispatch just to fall back.
+fn hopeless_literal(interval: &Expr, unit: TimeUnit) -> bool {
+    let Expr::Literal(ScalarValue::IntervalMonthDayNano(Some(value)), _) = interval else {
+        return false;
+    };
+    let scale = nanos_per_unit(unit);
+    value.months != 0 || value.days != 0 || value.nanoseconds % scale != 0
 }
 
 #[cfg(test)]
