@@ -257,7 +257,10 @@ async fn retained_history_preserves_row3_fixture_progress_and_complete_restores(
 
 const SCALED_ROWS: usize = 32_768;
 const SCALED_INITIAL_ROWS: usize = 28_672;
-const SCALED_LIMIT: usize = 10 << 20;
+// The batch-local key interning pass adds its hash-table scratch to the
+// admission footprint, so the scaled case's bounded pool carries that tier
+// alongside the checkpoint writer's credits.
+const SCALED_LIMIT: usize = 12 << 20;
 
 #[derive(Default)]
 struct ScaledReplacementDiagnostic {
