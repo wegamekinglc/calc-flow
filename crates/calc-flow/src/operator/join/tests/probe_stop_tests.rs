@@ -191,7 +191,9 @@ async fn test_probe_stops_at_the_next_position_or_match_group() {
             // The iterator can fetch one match before the next group poll.
             assert!(join_work().native_range_visits <= GROUP + 1);
         } else {
-            assert_eq!(join_work().native_boundary_visits, 2 * GROUP);
+            // One first-touch search plus one gallop comparison per ordered
+            // row: cursor advance replaces the two per-row binary searches.
+            assert_eq!(join_work().native_boundary_visits, GROUP + 1);
         }
         let pool = operator
             .runtime

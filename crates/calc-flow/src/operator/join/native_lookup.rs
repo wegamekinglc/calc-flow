@@ -11,7 +11,7 @@ use super::columnar::FramedKey;
 use super::key_arena::{ArenaLayout, visit_key_frames, visit_string_values};
 #[cfg(test)]
 use super::native_dictionary::BASE_BYTES;
-pub(super) use super::native_dictionary::{AppendCredit, NativeIndex};
+pub(super) use super::native_dictionary::{AppendCredit, NativeIndex, WindowBounds, WindowCursor};
 use super::{
     AdmittedRows, CompiledJoin, JoinTimeBounds, MatchedPair, SidePlan, StreamJoinOperator,
     enforce_match_limit,
@@ -28,6 +28,13 @@ use std::sync::Arc;
 #[cfg(test)]
 #[path = "tests/native_index_allocation_tests.rs"]
 mod allocation_tests;
+
+#[cfg(test)]
+#[path = "tests/native_window_probe_tests.rs"]
+mod window_probe_tests;
+
+#[cfg(test)]
+pub(super) use super::native_dictionary::{reset_window_run_searches, window_run_searches};
 
 pub(super) fn eligible(compiled: &CompiledJoin, left: &Schema) -> bool {
     compiled
@@ -97,6 +104,7 @@ struct ProbeWindows<'a> {
     index: &'a NativeIndex,
     ids: &'a [u32],
     slots: Vec<Option<u32>>,
+    cursors: Vec<Option<WindowCursor>>,
 }
 
 impl<'a> ProbeWindows<'a> {
@@ -107,28 +115,37 @@ impl<'a> ProbeWindows<'a> {
                 .iter()
                 .map(|key| key.as_ref().and_then(|key| index.key_id(key))),
         );
+        let cursors = vec![None; slots.len()];
         Self {
             index,
             ids: &keys.ids,
             slots,
+            cursors,
         }
     }
 
-    fn count(&self, pos: usize, range: (EventTime, EventTime)) -> usize {
-        self.slots
-            .get(self.ids[pos] as usize)
-            .copied()
-            .flatten()
-            .map_or(0, |id| self.index.count_window_by_id(id, range))
+    /// Window bounds for one probe row, advancing the key's cursor so
+    /// consecutive probes reuse the previous position.
+    fn count(&mut self, pos: usize, range: (EventTime, EventTime)) -> WindowBounds {
+        let slot = self.ids[pos] as usize;
+        let Some(id) = self.slots.get(slot).copied().flatten() else {
+            return WindowBounds::EMPTY;
+        };
+        let bounds = self
+            .index
+            .window_bounds_by_id(id, range, self.cursors[slot]);
+        self.cursors[slot] = Some(WindowCursor::new(range, bounds));
+        bounds
     }
 
-    fn range(&self, pos: usize, range: (EventTime, EventTime)) -> impl Iterator<Item = usize> + '_ {
+    /// Dense opposite indices for bounds computed by the counting pass.
+    fn range_bounds(&self, pos: usize, bounds: WindowBounds) -> impl Iterator<Item = usize> + '_ {
         self.slots
             .get(self.ids[pos] as usize)
             .copied()
             .flatten()
             .into_iter()
-            .flat_map(move |id| self.index.range_by_id(id, range))
+            .flat_map(move |id| self.index.range_by_bounds(id, bounds))
     }
 }
 
@@ -500,6 +517,13 @@ impl StreamJoinOperator {
         admitted: &dyn AdmittedRows,
         keys: &NativeKeys,
     ) -> Result<Option<NativePairs>> {
+        let scratch = window_scratch_charge(keys.keys.len(), admitted.len())
+            .ok_or_else(|| scratch_error(&self.name))?;
+        // Funds the per-key window cursors and the per-row window bounds that
+        // the fill pass reuses; held until those vectors drop.
+        let Some(_scratch_credit) = self.optional_credit(scratch)? else {
+            return Ok(None);
+        };
         let opposite = if plan.incoming_is_left {
             &self.state.right
         } else {
@@ -509,9 +533,9 @@ impl StreamJoinOperator {
             .1
             .as_ref()
             .expect("native index built before probing");
-        let windows = ProbeWindows::new(index, keys);
-        let count = count_pairs(
-            &windows,
+        let mut windows = ProbeWindows::new(index, keys);
+        let (count, row_bounds) = count_pairs(
+            &mut windows,
             admitted,
             self.spec.bounds,
             plan,
@@ -536,13 +560,10 @@ impl StreamJoinOperator {
             return Ok(None);
         };
         let mut pairs = super::matches::Selection::with_capacity(count, admitted.len());
-        for (pos, row) in admitted.iter().enumerate() {
+        for (pos, bounds) in row_bounds.into_iter().enumerate() {
             pairs.extend(
                 windows
-                    .range(
-                        pos,
-                        time_range(self.spec.bounds, plan.incoming_is_left, row.event_time),
-                    )
+                    .range_bounds(pos, bounds)
                     .map(|opposite_index| MatchedPair {
                         pos,
                         opposite_index,
@@ -675,30 +696,37 @@ pub(super) fn scratch_error(name: &str) -> CalcFlowError {
     }
 }
 
+// Window cursors (one per distinct probe key) plus the per-row window bounds
+// stored by the counting pass and reused by the fill pass.
+fn window_scratch_charge(keys: usize, rows: usize) -> Option<usize> {
+    keys.checked_mul(size_of::<Option<WindowCursor>>())?
+        .checked_add(rows.checked_mul(size_of::<WindowBounds>())?)?
+        .checked_add(64)
+}
+
 fn count_pairs(
-    windows: &ProbeWindows<'_>,
+    windows: &mut ProbeWindows<'_>,
     admitted: &dyn AdmittedRows,
     bounds: JoinTimeBounds,
     plan: &SidePlan,
     limit: u64,
-) -> Result<usize> {
+) -> Result<(usize, Vec<WindowBounds>)> {
     let limit = usize::try_from(limit).unwrap_or(usize::MAX);
     let mut count = 0_usize;
+    let mut row_bounds = Vec::with_capacity(admitted.len());
     for (pos, row) in admitted.iter().enumerate() {
+        let bounds = windows.count(
+            pos,
+            time_range(bounds, plan.incoming_is_left, row.event_time),
+        );
+        row_bounds.push(bounds);
         let remaining = limit.saturating_sub(count).saturating_add(1);
         count = count
-            .checked_add(
-                windows
-                    .count(
-                        pos,
-                        time_range(bounds, plan.incoming_is_left, row.event_time),
-                    )
-                    .min(remaining),
-            )
+            .checked_add(bounds.matches().min(remaining))
             .ok_or_else(|| scratch_error("join"))?;
         if count > limit {
             break;
         }
     }
-    Ok(count)
+    Ok((count, row_bounds))
 }

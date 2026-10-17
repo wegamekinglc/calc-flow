@@ -20,6 +20,10 @@ use std::sync::Arc;
 #[path = "../tests/probe_stop_tests.rs"]
 mod probe_stop_tests;
 
+#[cfg(test)]
+#[path = "../tests/native_gather_window_tests.rs"]
+mod native_gather_window_tests;
+
 struct Capture {
     declined: Option<(AdmittedBatch, Option<NativeKeys>)>,
     ready: Option<Arc<ProbeInputs>>,

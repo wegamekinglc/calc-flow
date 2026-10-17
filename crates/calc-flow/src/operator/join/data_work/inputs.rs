@@ -1,7 +1,7 @@
 use super::super::{
     AdmittedBatch, JoinTimeBounds,
     checkpoint_v2::ContainerFunding,
-    native_lookup::{NativeIndex, NativeKeys},
+    native_lookup::{NativeIndex, NativeKeys, WindowBounds, WindowCursor},
 };
 use datafusion::execution::memory_pool::MemoryReservation;
 use std::sync::Arc;
@@ -39,21 +39,45 @@ impl ProbeInputs {
         )
     }
 
-    pub(super) fn count(&self, position: usize) -> usize {
-        self.slot(position).map_or(0, |id| {
-            self.index
-                .as_ref()
-                .expect("owned native index")
-                .count_window_by_id(id, self.range(position))
-        })
+    /// Unit-local window cursors, one per distinct probe key. Each gather unit
+    /// owns its own set; cursors are never shared between concurrent units.
+    pub(super) fn cursors(&self) -> Vec<Option<WindowCursor>> {
+        vec![None; self.slots.len()]
     }
 
-    pub(super) fn matches(&self, position: usize) -> impl Iterator<Item = usize> + '_ {
+    /// Exact window bounds for one probe row, advancing the unit-local cursor
+    /// so consecutive probes for a key reuse its previous position.
+    pub(super) fn window(
+        &self,
+        position: usize,
+        cursors: &mut [Option<WindowCursor>],
+    ) -> WindowBounds {
+        let Some(id) = self.slot(position) else {
+            return WindowBounds::EMPTY;
+        };
+        let slot = self.keys.as_ref().expect("owned probe keys").id(position) as usize;
+        let range = self.range(position);
+        let bounds = self
+            .index
+            .as_ref()
+            .expect("owned native index")
+            .window_bounds_by_id(id, range, cursors[slot]);
+        cursors[slot] = Some(WindowCursor::new(range, bounds));
+        bounds
+    }
+
+    /// Dense opposite indices for one probe row's window, advancing the cursor.
+    pub(super) fn matches_window(
+        &self,
+        position: usize,
+        cursors: &mut [Option<WindowCursor>],
+    ) -> impl Iterator<Item = usize> + '_ {
+        let bounds = self.window(position, cursors);
         self.slot(position).into_iter().flat_map(move |id| {
             self.index
                 .as_ref()
                 .expect("owned native index")
-                .range_by_id(id, self.range(position))
+                .range_by_bounds(id, bounds)
         })
     }
 }
