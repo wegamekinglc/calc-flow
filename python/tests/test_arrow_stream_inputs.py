@@ -381,3 +381,58 @@ def test_closed_materialized_results_release_input_and_queued_owners(ending) -> 
     asyncio.run(run())
     gc.collect()
     assert reference() is None
+
+
+@pytest.mark.parametrize("failure", ["schema", "budget"])
+def test_failed_materialized_stream_start_releases_foreign_buffer_owner(
+    failure,
+) -> None:
+    import numpy as np
+
+    class Owner:
+        def __init__(self):
+            self.values = np.arange(128, dtype=np.int64)
+
+    def make_results():
+        owner = Owner()
+        reference = weakref.ref(owner)
+        buffer = pa.foreign_buffer(
+            owner.values.ctypes.data, owner.values.nbytes, base=owner
+        )
+        data = pa.table({"a": pa.Array.from_buffers(pa.int64(), 128, [None, buffer])})
+        schema = (
+            pa.schema([("different", pa.int64())])
+            if failure == "schema"
+            else data.schema
+        )
+        source = cf.table_input("events", schema=schema)
+        value = (
+            cf.SourceBinding.from_arrow(data, budget=cf.EdgeBudget(2, 1024))
+            if failure == "budget"
+            else data
+        )
+        return source.stream(
+            value, config=cf.StreamRuntimeConfig(edge_budget=cf.EdgeBudget(1, 1024))
+        ), reference
+
+    results, reference = make_results()
+    expected = ValueError if failure == "schema" else cf.StreamingRuntimeError
+
+    async def run():
+        before = asyncio.all_tasks()
+        with pytest.raises(expected) as caught:
+            async with results:
+                pytest.fail("invalid materialized input entered the stream")
+        if failure == "schema":
+            assert str(caught.value) == (
+                "stream.inputs.events.schema: expected declared Arrow schema"
+            )
+        else:
+            assert caught.value.category == "validation"
+        await results.aclose()
+        await results.aclose()
+        assert asyncio.all_tasks() == before
+
+    asyncio.run(run())
+    gc.collect()
+    assert reference() is None

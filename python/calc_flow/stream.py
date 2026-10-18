@@ -341,6 +341,8 @@ class StreamResults(Generic[T]):
             self._starting.cancel()
         # Context entry reports startup errors; close waits for its owned work.
         await asyncio.gather(self._starting, return_exceptions=True)
+        # Failed task tracebacks can retain input bindings after close.
+        self._starting = None
 
     async def _stop_job(self) -> JobOutcome | None:
         if self._job is None:
