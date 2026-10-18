@@ -308,8 +308,14 @@ impl AdmittedBatch {
         self.len += length;
     }
 
+    #[inline]
     fn segment_index(&self, position: usize) -> usize {
         assert!(position < self.len);
+        if self.current == 1 {
+            #[cfg(test)]
+            super::note_join_work(|work| work.admission_segment_lookups += 1);
+            return 0;
+        }
         let mut start = 0;
         let mut end = self.current;
         while start < end {
@@ -332,6 +338,7 @@ impl AdmittedBatch {
         )
     }
 
+    #[inline]
     pub(super) fn row(&self, position: usize) -> AdmittedRef<'_> {
         self.view(position).row(position)
     }
@@ -602,6 +609,10 @@ pub(super) trait AdmittedRows: Sync {
     }
     fn len(&self) -> usize;
     fn row(&self, index: usize) -> AdmittedRef<'_>;
+    /// Event time at a logical admitted position, independent of payload offsets.
+    fn event_time(&self, index: usize) -> EventTime {
+        self.row(index).event_time
+    }
     fn group_end(&self, start: usize) -> usize;
     fn source_index(&self, index: usize) -> usize;
     /// Retained bits for a window of at most 64 rows starting at `start`;
@@ -637,6 +648,10 @@ impl AdmittedRows for AdmittedBatch {
     }
     fn row(&self, index: usize) -> AdmittedRef<'_> {
         self.row(index)
+    }
+    fn event_time(&self, index: usize) -> EventTime {
+        assert!(index < self.len);
+        EventTime::from_micros(self.times.get(index))
     }
     fn group_end(&self, start: usize) -> usize {
         self.segments.get(self.segment_index(start)).range.end
