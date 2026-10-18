@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use super::super::{
-    AdmittedBatch, StoredRow, StreamJoinOperator,
+    AdmittedBatch, AdmittedRows, StoredRow, StreamJoinOperator,
     columnar::{OwnedSelection, Quantum, RowPayload, SelectedRows},
     operator_error,
 };
@@ -20,26 +20,43 @@ impl StreamJoinOperator {
             return Ok(());
         }
         let mut quantum = Quantum::default();
-        for index in 0..admitted.record_count() {
+        let records = admitted.record_count();
+        for index in 0..records {
             let range = admitted.group_range(index);
             if range.is_empty() {
                 continue;
             }
-            let rows = super::super::admitted::AdmittedGroup::new(admitted, range);
-            let payload = self
-                .project_group(rows, side, context, &mut quantum)
-                .await?;
-            admitted.replace(index, payload);
+            let group = super::super::admitted::AdmittedGroup::new(&*admitted, range);
+            if group.any_retained() {
+                let payload = self
+                    .project_group(group, side, context, &mut quantum)
+                    .await?;
+                admitted.replace(index, payload);
+            } else {
+                // No row of this group enters state, so the projected parent
+                // can share the incoming buffers; the gather still reads its
+                // physical rows through the view.
+                let record = self.project_payload(group.row(0).record, side)?;
+                quantum.step(context, 1, 0).await?;
+                admitted.replace_view(index, Arc::new(record));
+            }
         }
         let mut selected = retained.iter_mut();
-        for source in admitted.iter() {
-            quantum.step(context, 8, 0).await?;
-            if source.retain {
-                let row = selected
-                    .next()
-                    .expect("retained rows preserve admission order");
-                debug_assert_eq!(row.row_id, source.row_id);
-                row.record = source.record.owned();
+        for group in (&*admitted as &dyn AdmittedRows).groups() {
+            for start in (0..group.len()).step_by(64) {
+                let end = (start + 64).min(group.len());
+                let mut bits = group.retained_bits(start, end - start);
+                while bits != 0 {
+                    let index = start + bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    quantum.step(context, 8, 0).await?;
+                    let source = group.row(index);
+                    let row = selected
+                        .next()
+                        .expect("retained rows preserve admission order");
+                    debug_assert_eq!(row.row_id, source.row_id);
+                    row.record = source.record.owned();
+                }
             }
         }
         context.check_cancelled()

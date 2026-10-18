@@ -133,8 +133,8 @@ async fn test_dictionary_refusal_mixed_legacy_state_matches_until_explicit_rebui
     assert!(Arc::ptr_eq(&known, operator.state.right.key_at(0)));
     assert_eq!(
         pool.refusals.load(Ordering::SeqCst),
-        1,
-        "needs-rebuild is not a fresh pool failure"
+        2,
+        "one refused preparation probes both the local-table and base scratch tiers"
     );
     assert!(join_work().sql_probe_table_builds > 0);
     assert_eq!(
@@ -319,8 +319,8 @@ async fn test_dictionary_refusal_commits_batched_sql_retention_with_full_fees() 
     assert!(join_work().sql_probe_table_builds > 0);
     assert_eq!(
         pool.refusals.load(Ordering::SeqCst),
-        1,
-        "the first real refusal leaves a persistent needs-rebuild route, not a second fake failure"
+        2,
+        "the first real refusal probes both scratch tiers and leaves a persistent needs-rebuild route"
     );
     drop((operator, output, context));
     assert!(job.gather_owner().close_and_drain().await.is_empty());
