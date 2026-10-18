@@ -66,6 +66,7 @@ impl KeyRun {
         self.rows.insert(position, entry);
     }
 
+    #[cfg(test)]
     fn remove(&mut self, identity: (EventTime, u64)) -> bool {
         #[cfg(test)]
         super::note_join_work(|work| work.native_eviction_comparisons += 1);
@@ -94,6 +95,7 @@ impl KeyRun {
         self.start == self.rows.len()
     }
 
+    #[cfg(test)]
     fn move_dense(&mut self, identity: (EventTime, u64), dense: usize) {
         #[cfg(test)]
         super::note_join_work(|work| work.native_dense_repairs += 1);
@@ -359,6 +361,7 @@ impl NativeIndex {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(super) fn remove_stable<'a>(
         &mut self,
         row: &StoredRow,
@@ -373,7 +376,6 @@ impl NativeIndex {
     /// empties, keeps the backing accounting exact, and refreshes the one
     /// surviving owner whose row was cut. The `moved`/dense repair path is
     /// unreachable from stable removals, so no replicated repair is needed.
-
     pub(super) fn truncate_key<'a>(
         &mut self,
         key: &Arc<FramedKey>,
@@ -462,6 +464,7 @@ impl NativeIndex {
         );
     }
 
+    #[cfg(test)]
     pub(super) fn remove_resolved<'a>(
         &mut self,
         row: &StoredRow,
@@ -518,6 +521,7 @@ impl NativeIndex {
         self.free.push(id);
     }
 
+    #[cfg(test)]
     fn move_dense(&mut self, row: &StoredRow, key: &Arc<FramedKey>, dense: usize) {
         let id = self
             .find(Self::hash(key), key)

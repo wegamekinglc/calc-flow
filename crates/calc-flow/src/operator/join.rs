@@ -3340,6 +3340,7 @@ impl RetainedRows {
     }
 
     #[cfg(test)]
+    #[cfg(test)]
     fn remove_bound(&mut self, index: usize, bindings: &key_dictionary::SideBindings) -> StoredRow {
         let row = (**self).remove(index);
         if let Some(native) = &mut self.1 {
@@ -6292,14 +6293,12 @@ fn encode_pending_delta(
             let (event_time, row_id) = rows.identity(index);
             encode_delta_upsert(
                 &mut segment,
-                row_id,
-                event_time,
+                (row_id, event_time),
                 rows.key(index).as_slice(),
                 rows.charge(index),
                 &rows.payload(index),
                 &mut ipc_encoder,
-                operator_id,
-                side,
+                (operator_id, side),
             )?;
             count += 1;
         }
@@ -6323,18 +6322,17 @@ fn encode_pending_delta(
 
 /// Appends one derived upsert's tag, identity and carried row IPC.
 #[cfg(test)]
-#[allow(clippy::too_many_arguments)]
 fn encode_delta_upsert(
     segment: &mut Vec<u8>,
-    row_id: u64,
-    event_time: EventTime,
+    identity: (u64, EventTime),
     encoded_key: &[u8],
     charge: u64,
     payload: &PayloadRef<'_>,
     ipc_encoder: &mut row_ipc::RowIpcEncoder,
-    operator_id: &str,
-    side: JoinSide,
+    context: (&str, JoinSide),
 ) -> Result<()> {
+    let (operator_id, side) = context;
+    let (row_id, event_time) = identity;
     segment.push(JOIN_DELTA_UPSERT_TAG);
     segment.extend_from_slice(&row_id.to_le_bytes());
     segment.extend_from_slice(&event_time.as_micros().to_le_bytes());
