@@ -543,6 +543,10 @@ pub(super) struct AdmittedRef<'a> {
 pub(super) trait AdmittedRows: Sync {
     fn len(&self) -> usize;
     fn row(&self, index: usize) -> AdmittedRef<'_>;
+    /// Event time at a logical admitted position, independent of payload offsets.
+    fn event_time(&self, index: usize) -> EventTime {
+        self.row(index).event_time
+    }
     fn group_end(&self, start: usize) -> usize;
     fn source_index(&self, index: usize) -> usize;
     /// Retained bits for a window of at most 64 rows starting at `start`;
@@ -575,6 +579,10 @@ impl AdmittedRows for AdmittedBatch {
     }
     fn row(&self, index: usize) -> AdmittedRef<'_> {
         self.row(index)
+    }
+    fn event_time(&self, index: usize) -> EventTime {
+        assert!(index < self.len);
+        EventTime::from_micros(self.times.get(index))
     }
     fn group_end(&self, start: usize) -> usize {
         self.segments.get(self.segment_index(start)).range.end

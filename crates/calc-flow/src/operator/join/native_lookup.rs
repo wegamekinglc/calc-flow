@@ -714,10 +714,10 @@ fn count_pairs(
     let limit = usize::try_from(limit).unwrap_or(usize::MAX);
     let mut count = 0_usize;
     let mut row_bounds = Vec::with_capacity(admitted.len());
-    for (pos, row) in admitted.iter().enumerate() {
+    for pos in 0..admitted.len() {
         let bounds = windows.count(
             pos,
-            time_range(bounds, plan.incoming_is_left, row.event_time),
+            time_range(bounds, plan.incoming_is_left, admitted.event_time(pos)),
         );
         row_bounds.push(bounds);
         let remaining = limit.saturating_sub(count).saturating_add(1);

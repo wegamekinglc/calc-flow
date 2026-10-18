@@ -1,5 +1,20 @@
 use super::*;
 
+fn assert_admitted_event_times(rows: &dyn AdmittedRows) {
+    for index in (0..rows.len()).rev() {
+        assert_eq!(rows.event_time(index), rows.row(index).event_time);
+    }
+    for index in [rows.len(), usize::MAX] {
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rows.row(index))).is_err()
+        );
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rows.event_time(index)))
+                .is_err()
+        );
+    }
+}
+
 fn keyed_left_batch(keys: Vec<i64>, times: Vec<i64>) -> Batch {
     let original = left_batch(times);
     let record = &original.table_payload().unwrap().batches()[0];
@@ -33,6 +48,7 @@ async fn admitted_left(
 
 #[tokio::test]
 async fn test_single_and_multiple_records_preserve_admitted_coordinates() {
+    assert_admitted_event_times(&AdmittedBatch::default());
     for record_count in [1, 3, 5] {
         let mut operator =
             StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
@@ -55,12 +71,7 @@ async fn test_single_and_multiple_records_preserve_admitted_coordinates() {
             assert_eq!(bundle.admitted.source_index(index), index);
             assert!(row.retain);
         }
-        assert!(
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                bundle.admitted.row(bundle.admitted.len())
-            }))
-            .is_err()
-        );
+        assert_admitted_event_times(&bundle.admitted);
     }
 }
 
@@ -226,6 +237,7 @@ async fn test_project_admitted_uses_zero_copy_views_for_unretained_groups() {
         prepared.admitted.projection_is_view(1),
         "groups without retained rows must not copy their payloads"
     );
+    assert_admitted_event_times(&prepared.admitted);
     drop(prepared);
     // The zero-copy group still feeds the output gather with its rows.
     let mut operator =
@@ -722,6 +734,7 @@ async fn sparse_admitted(
     operator: &mut StreamJoinOperator,
     source: &Batch,
     context: &StreamOperatorContext<'_>,
+    retain_rows: bool,
 ) -> AdmittedBatch {
     let mut admitted = AdmittedBatch::reserve(operator, source).unwrap();
     let index = admitted.begin_record(0, 0);
@@ -735,11 +748,33 @@ async fn sparse_admitted(
             index,
             physical,
             EventTime::from_micros(i64::try_from(physical).expect("test offsets fit i64")),
-            retain,
+            retain && retain_rows,
         );
     }
     admitted.complete_record();
     admitted
+}
+
+#[tokio::test]
+async fn test_sparse_event_times_use_logical_positions_before_and_after_projection() {
+    let source = keyed_left_batch(vec![7; 6], (0..6).collect());
+    let mut operator =
+        StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "match", None);
+    let mut admitted = Box::pin(sparse_admitted(&mut operator, &source, &context, false)).await;
+    assert_eq!(admitted.len(), 4);
+    assert_eq!(
+        (0..admitted.len())
+            .map(|index| admitted.event_time(index).as_micros())
+            .collect::<Vec<_>>(),
+        vec![0, 2, 3, 5]
+    );
+    assert_admitted_event_times(&admitted);
+    let record = &source.table_payload().unwrap().batches()[0];
+    admitted.replace_view(0, Arc::new(record.project(&[0]).unwrap()));
+    assert!(admitted.projection_is_view(0));
+    assert_admitted_event_times(&admitted);
 }
 
 /// Resolves one sparse group's identity through either path and reports the
@@ -787,7 +822,7 @@ async fn test_sparse_promoted_group_interns_through_both_identity_paths() {
         StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
     let job = job();
     let context = StreamOperatorContext::new(&job, "match", None);
-    let admitted = Box::pin(sparse_admitted(&mut operator, &source, &context)).await;
+    let admitted = Box::pin(sparse_admitted(&mut operator, &source, &context, true)).await;
     assert_eq!(admitted.len(), 4);
     assert_eq!(
         admitted.sparse_index_len(),
