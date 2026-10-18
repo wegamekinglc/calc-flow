@@ -19,6 +19,16 @@ and specializes single-column equality. Full typed equality resolves collisions;
 canonical framing and persistent identity resolution remain per distinct key.
 Flat admission fees sum fixed widths once and then add variable offsets.
 
+Local hashing charges each fixed-width column block before reading values;
+Utf8/LargeUtf8 hashing and equality charge at most 4 KiB before processing
+each chunk. Composite columns share the same 64-visit/4-KiB quantum. Integer
+slots make every collision probe resumable and chargeable before its work,
+including probes whose full hash differs. Small equality retains its typed
+dispatch only when the entire comparison fits one quantum. The slot array
+fits the existing conservative interning allowance; refusal/fallback and the
+scratch lifetime are unchanged. Long-key cancellation and deadline regressions
+observe processed bytes, with an end-to-end check for unchanged committed state.
+
 The funded native retained path prepares selection and logical charges, borrows
 the existing `NativeKeys` identity column, and writes owned chunks directly.
 There is no batch-sized `Vec<StoredRow>` on this path. The temporary selection
@@ -80,3 +90,9 @@ AB/BA rule governs comparison; descriptive latency is not a new interpretation
 of the 40 ms gate. Raw results, actual commands and remaining costs belong in
 the PR and its evidence attachment. Final full profiling follows focused review
 under the coordinator's existing handoff.
+
+The sealed `9440f561f1b11b8c598639212c053c935683a49a` wheel and its profiles
+precede the cooperative-work fix above. They remain reusable historical
+evidence, not measurements of subsequent commits. The repair receives only
+targeted interning/stop checks before blocker review; final-commit measurement
+remains with the coordinator.

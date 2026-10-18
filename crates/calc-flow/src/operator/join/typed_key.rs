@@ -16,6 +16,9 @@ mod tests;
 pub(super) enum KeyPhase {
     Hash,
     Comparison,
+    LocalHash,
+    LocalComparison,
+    LocalProbe,
 }
 #[cfg(test)]
 type WorkHook = std::sync::Arc<dyn Fn(KeyPhase, usize) + Send + Sync>;
