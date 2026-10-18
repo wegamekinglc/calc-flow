@@ -228,6 +228,7 @@ class BenchmarkWorkflowTests(unittest.TestCase):
             "scripts.test_issue406_run",
             "scripts.test_issue406_measurement",
             "scripts.test_issue406_milestone",
+            "scripts.test_issue406_sources",
             "scripts.test_interval_acceptance",
         ):
             with self.subTest(module=module):
