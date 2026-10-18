@@ -1,10 +1,24 @@
-use super::{GatherStop, GatherWork, JoinOutput, Result};
-use crate::operator::join::{MatchedPair, PayloadRef, columnar::RowPayload};
+use super::{FundedProbeInputs, GatherStop, GatherWork, JoinOutput, ProbeInputs, Result};
+use crate::StreamOperatorContext;
+use crate::operator::join::{
+    MatchedPair, PayloadRef,
+    columnar::{Quantum, RowPayload},
+    output_gather,
+    retained::Rows,
+};
 use crate::operator::row_cost::{Offsets, fixed_width, terminal_offset_width, variable_offsets};
-use datafusion::arrow::datatypes::DataType;
+use datafusion::{
+    arrow::{array::ArrayRef, datatypes::DataType, record_batch::RecordBatch},
+    execution::memory_pool::MemoryReservation,
+};
+use std::sync::Arc;
 
 const MAX_SCRATCH: usize = 512 * 1024 * 1024;
 const MAX_UNIT_OUTPUT: usize = 16 * 1024 * 1024;
+
+#[cfg(test)]
+#[path = "../../tests/morsel_tests/rowed_funding.rs"]
+mod rowed_funding_tests;
 
 pub(in crate::operator::join::data_work) fn pair_credit_bytes(
     count: usize,
@@ -30,19 +44,99 @@ pub(super) fn scratch_bytes(matches: usize, rows: usize, columns: usize) -> Opti
         .filter(|&bytes| bytes <= MAX_SCRATCH)
 }
 
-pub(super) fn owned_payloads(output: &JoinOutput<'_>, stop: &GatherStop) -> Result<bool> {
-    for (index, pair) in output.matched.iter().enumerate() {
+pub(super) async fn fund_inputs(
+    inputs: &Arc<ProbeInputs>,
+    scratch: &MemoryReservation,
+    base: usize,
+    context: &StreamOperatorContext<'_>,
+) -> Result<Option<FundedProbeInputs>> {
+    let Some(bytes) = input_bytes(inputs, context).await? else {
+        return Ok(None);
+    };
+    let Some(total) = base
+        .checked_add(bytes)
+        .filter(|&total| total <= MAX_SCRATCH)
+    else {
+        return Ok(None);
+    };
+    if scratch.try_grow(total).is_err() {
+        return Ok(None);
+    }
+    Ok(Some(FundedProbeInputs {
+        inputs: Arc::clone(inputs),
+        _credit: scratch.split(bytes),
+    }))
+}
+
+async fn input_bytes(
+    inputs: &ProbeInputs,
+    context: &StreamOperatorContext<'_>,
+) -> Result<Option<usize>> {
+    use crate::operator::join::AdmittedRows;
+
+    let mut bytes = 0usize;
+    let mut quantum = Quantum::default();
+    for group in (&inputs.admitted as &dyn AdmittedRows).groups() {
+        quantum.step(context, 1, 0).await?;
+        match group.row(0).record.owner() {
+            Some(RowPayload::Rowed { parent, .. }) => {
+                let Some(controls) = parent
+                    .num_columns()
+                    .checked_mul(size_of::<ArrayRef>())
+                    .and_then(|columns| columns.checked_add(size_of::<RecordBatch>()))
+                    .and_then(|controls| controls.checked_add(2 * size_of::<usize>()))
+                else {
+                    return Ok(None);
+                };
+                let Some(charged) = bytes.checked_add(controls) else {
+                    return Ok(None);
+                };
+                bytes = charged;
+                for column in parent.columns() {
+                    quantum.step(context, 1, 0).await?;
+                    if !output_gather::flat_owned_type(column.data_type()) {
+                        return Ok(None);
+                    }
+                    // Include backing capacities and conservative array/Buffer controls.
+                    let Some(charged) = bytes
+                        .checked_add(column.get_array_memory_size())
+                        .and_then(|total| total.checked_add(4096))
+                        .filter(|&total| total <= MAX_SCRATCH)
+                    else {
+                        return Ok(None);
+                    };
+                    bytes = charged;
+                }
+            }
+            Some(RowPayload::Shared { .. } | RowPayload::RestoredV2 { .. }) => {}
+            _ => return Ok(None),
+        }
+    }
+    context.check_cancelled()?;
+    Ok(Some(bytes))
+}
+
+pub(super) fn owned_payloads(
+    inputs: &FundedProbeInputs,
+    pairs: &crate::operator::join::matches::Selection,
+    stop: &GatherStop,
+) -> Result<bool> {
+    for (index, pair) in pairs.iter().enumerate() {
         if index % 4096 == 0 {
             stop.check_abandoned()?;
         }
-        let (left, right) = output.records(&pair);
+        let opposite = inputs
+            .opposite
+            .as_ref()
+            .expect("owned morsel state")
+            .payload(pair.opposite_index);
         let funded = |payload: PayloadRef<'_>| {
             matches!(
                 payload.owner(),
                 Some(RowPayload::Shared { .. } | RowPayload::RestoredV2 { .. })
             )
         };
-        if !funded(left) || !funded(right) {
+        if !funded(opposite) {
             return Ok(false);
         }
     }

@@ -18,6 +18,9 @@ use std::time::Duration;
 
 const ROWS: usize = 64_000;
 
+#[path = "batch_parallel_output_lifecycle.rs"]
+mod rowed_lifecycle;
+
 fn schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
         Field::new("key", DataType::Int64, false),
@@ -151,6 +154,65 @@ async fn admit(operator: &mut StreamJoinOperator) -> AdmittedBatch {
     bundle.admitted
 }
 
+fn projected_probe_operator() -> StreamJoinOperator {
+    let mut fields = schema().fields().to_vec();
+    fields.push(Arc::new(Field::new("unused", DataType::Int64, false)));
+    let mut operator = StreamJoinOperator::new(
+        "match",
+        schema(),
+        Arc::new(Schema::new(fields)),
+        operator().spec.clone(),
+    )
+    .unwrap();
+    operator.set_output_projection(vec![2, 0, 5]).unwrap();
+    assert!(operator.payload_projection.is_some());
+    operator
+}
+
+async fn preload_projected_probe(operator: &mut StreamJoinOperator, job: &StreamJobContext) {
+    let dimension = input(true);
+    let record = &dimension.table_payload().unwrap().batches()[0];
+    let mut columns = record.columns().to_vec();
+    columns.push(Arc::new(Int64Array::from(vec![42; 64])));
+    let right = Batch::table(
+        vec![RecordBatch::try_new(Arc::clone(operator.input_schema(1)), columns).unwrap()],
+        BatchMetadata::default(),
+    )
+    .unwrap();
+    let mut output = EdgeCollector::new(operator.output_ports().to_vec());
+    operator
+        .process_data(
+            "right",
+            right,
+            &StreamOperatorContext::new(job, "match", None),
+            &mut output,
+        )
+        .await
+        .unwrap();
+    assert!(output.drain("output").is_empty());
+}
+
+fn probe_only_context(job: &StreamJobContext) -> StreamOperatorContext<'_> {
+    use crate::{IngressProgress, IngressProgressSnapshot, IngressState};
+    use std::collections::BTreeMap;
+
+    StreamOperatorContext::with_ingress_progress(
+        job,
+        "match",
+        None,
+        IngressProgressSnapshot::new(BTreeMap::from([
+            (
+                "left".into(),
+                IngressProgress::new(IngressState::Active, None),
+            ),
+            (
+                "right".into(),
+                IngressProgress::new(IngressState::Ended, None),
+            ),
+        ])),
+    )
+}
+
 fn verify(output: &mut EdgeCollector, max_rows: usize) {
     let mut position = 0;
     for (sequence, message) in output.drain("output").into_iter().enumerate() {
@@ -233,6 +295,72 @@ fn batch_parallel_output_narrow_one_to_one_uses_funded_ordered_morsels() {
             .unwrap()
             .incremental_memory_pool();
         drop((operator, restored, snapshot));
+        assert!(job.gather_owner().close_and_drain().await.is_empty());
+        drop(context);
+        drop(job);
+        assert_eq!(pool.reserved(), 0);
+    });
+    drop(runtime);
+    service.shutdown();
+}
+
+#[test]
+fn batch_parallel_output_sealed_dimension_funds_projected_probe_only_views() {
+    use crate::operator::join::{columnar::RowPayload, retained::Rows};
+
+    let _gate = ProductionGate::new();
+    let service = TestService::new(4, 1).unwrap();
+    let runtime = runtime();
+    runtime.block_on(async {
+        let mut operator = projected_probe_operator();
+        let job = job(&service);
+        preload_projected_probe(&mut operator, &job).await;
+        assert!(matches!(
+            operator.state.right.payload(0).owner(),
+            Some(RowPayload::Shared { .. } | RowPayload::RestoredV2 { .. })
+        ));
+        let context = probe_only_context(&job);
+        let source = input(false);
+        let before = source.table_payload().unwrap().batches().to_vec();
+        let (mut prepared, expiration) = operator
+            .prepare_data_append("left", &source, &context)
+            .await
+            .unwrap();
+        assert!(
+            prepared.deferred.is_some(),
+            "narrow production gate must count first"
+        );
+        assert!(
+            prepared.retained.is_empty(),
+            "sealed peer needs no new left state"
+        );
+        assert!(prepared.admitted.projection_is_view(0));
+        assert!(prepared.admitted.projection_is_view(1));
+        operator
+            .finish_morsels(&mut prepared, &context)
+            .await
+            .unwrap();
+        assert!(
+            prepared.gathered.is_some(),
+            "projected read-only probe views need prepaid input funding for fused workers"
+        );
+        let gathered = prepared.gathered.as_ref().unwrap();
+        assert_eq!(gathered.rows(), ROWS);
+        assert_eq!(gathered.funding_for_test().len(), 4);
+        let mut output = EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .finish_data("left", prepared, expiration, &context, &mut output)
+            .await
+            .unwrap();
+        verify(&mut output, usize::MAX);
+        assert_eq!(source.table_payload().unwrap().batches(), &before);
+        assert_eq!(operator.status().left.retained_rows, 0);
+        let pool = operator
+            .runtime
+            .runtime()
+            .unwrap()
+            .incremental_memory_pool();
+        drop(operator);
         assert!(job.gather_owner().close_and_drain().await.is_empty());
         drop(context);
         drop(job);

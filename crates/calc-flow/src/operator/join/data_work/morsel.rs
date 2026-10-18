@@ -96,7 +96,7 @@ pub(in crate::operator::join) fn configure_for_test(disabled: bool) -> RestoreMo
 }
 
 struct GatherWork {
-    inputs: Arc<ProbeInputs>,
+    inputs: FundedProbeInputs,
     counts: Counts,
     schema: SchemaRef,
     projection: Option<Arc<[usize]>>,
@@ -104,6 +104,21 @@ struct GatherWork {
     budget: EdgeBudget,
     name: String,
     scratch: MemoryReservation,
+}
+
+/// Funds temporary background ownership until workers settle; field order
+/// releases the work's input references before refunding their lease.
+struct FundedProbeInputs {
+    inputs: Arc<ProbeInputs>,
+    _credit: MemoryReservation,
+}
+
+impl std::ops::Deref for FundedProbeInputs {
+    type Target = ProbeInputs;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inputs
+    }
 }
 
 pub(in crate::operator::join) struct GatheredOutput(Vec<FundedMorsel>);
@@ -161,7 +176,7 @@ impl GatherWork {
             operator_id: &self.name,
             admitted_charges: Some(&self.charges),
         };
-        if !funding::owned_payloads(&output, stop)? {
+        if !funding::owned_payloads(&self.inputs, pairs, stop)? {
             return Ok(None);
         }
         let ranges = output.ranges(self.budget)?;
@@ -296,11 +311,11 @@ impl StreamJoinOperator {
             .runtime
             .runtime()?
             .incremental_reservation("stream-join-morsel");
-        if scratch.try_grow(bytes).is_err() {
+        let Some(funded) = funding::fund_inputs(inputs, &scratch, bytes, context).await? else {
             return Ok(None);
-        }
+        };
         let work = Arc::new(GatherWork {
-            inputs: Arc::clone(inputs),
+            inputs: funded,
             counts,
             schema,
             projection: self.output_columns.clone(),

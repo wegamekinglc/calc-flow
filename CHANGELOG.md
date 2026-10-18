@@ -13,7 +13,9 @@ measurements. Use the current guides for supported behavior.
   preserving deterministic retained-row identity semantics and serial fallback.
   Extend funded row-wise probe/gather eligibility to large primitive narrow
   projections, retaining match, state and output budgets, and reuse incoming
-  payload segments during output gathering. Batch graphs with
+  payload segments during output gathering. Prepay the full backing pinned by
+  projected probe-only views so sealed-dimension joins can use that path.
+  Batch graphs with
   multi-input SQL can opt into a run-scoped Auto partition budget based on
   external table row counts, so an earlier small node does not fix the run to
   one partition. Fixed defaults and checkpoint layouts are unchanged.

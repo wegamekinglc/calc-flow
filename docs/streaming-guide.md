@@ -1081,6 +1081,13 @@ serial path unless the original probe gate is met.
 For at least 64,000 admitted rows with supported flat output and funded payload
 owners, state and expiration admission complete before each unit probes,
 preflights and gathers its contiguous input range on the existing native pool.
+Probe-only projected views can also use this path after the work package
+prepays their full pinned Arrow backing, including parent-buffer capacity held
+by slices. This temporary lease covers background gather ownership until the
+workers settle; caller-owned input references outside that work remain shared.
+Its charge and the existing gather scratch share the 512 MiB cap. A refusal
+retains the serial fallback, and opposite-side state must still have a funded
+owner. Legacy payloads remain ineligible for fused gathering.
 All units finish before the first output. Results emit in range order,
 independently of completion order, without merging pair fragments or dispatching
 another column-gather job. Output chunk boundaries follow these stable ranges.
