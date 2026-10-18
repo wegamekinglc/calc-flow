@@ -146,3 +146,34 @@ outputs such as cumulative SQL snapshots. A reusable explicit binding retains
 its buffers until it is released. No persistent cursor replay, reader support,
 generic C stream bridge, full-suite performance or whole-workspace coverage
 claim is made here. Full regression and the existing coverage gates remain CI.
+
+## CI compatibility follow-up
+
+The follow-up to `c0042e8` preserves the native binding protocol: `_native_*`
+implementations need no `source` attribute. Only an optional `_ArrowSource`
+descriptor selects the materialized path; other property exceptions propagate.
+The existing connector completion/checkpoint/status unit now passes unchanged,
+and a new unit protects propagation of a failing `source` property.
+
+The Join regression owns its fixture and full schema/value/multiplicity oracle
+inside the test module. A newly built debug wheel passed 37 focused tests from
+an isolated directory where neither `benchmarks` nor `scripts` is importable:
+28 Arrow-input cases and nine directly affected connector/start/close/cancel
+cases. Native connector, property-error and Arrow owner/replay units each passed.
+
+The four flagged functions were split without changing their workloads,
+validation errors, binary search or temporal state updates. Lizard CCN is now
+3/7 for `workload`/`collect` and 6/6 for `bounded_batch`/`validate_time`; all
+extracted helpers are at most 6. The existing complexity ratchet, scoped Ruff,
+Cargo fmt and scoped Clippy with denied warnings pass without rule changes.
+One correctness-only invocation per case/side still reports projection source
+callbacks 65 → 0 and Join 18 → 0, task_count=0 and Arrow allocator bytes 0 → 0.
+The release performance measurements above retain their original code and
+artifact identities; no new timing or RSS comparison was collected.
+
+The Windows runtime-drop unraisable warning predates this PR. The Windows
+Python job on the review baseline `658527f` already reports the same panic in
+the same UDF test (1772 passed, five skipped, one warning):
+[baseline Windows log](https://github.com/wegamekinglc/calc-flow/actions/runs/39107510462/job/117616482758).
+This follow-up leaves that existing runtime-lifetime issue unchanged. Local
+checks ran on Linux; Windows parity, full regression and coverage remain CI.

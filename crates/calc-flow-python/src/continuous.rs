@@ -849,6 +849,22 @@ fn source_policy(binding: &Bound<'_, PyAny>) -> PyResult<calc_flow::WatermarkPol
     }
 }
 
+fn materialized_source(
+    binding: &Bound<'_, PyAny>,
+) -> PyResult<Option<crate::arrow_source::ArrowSource>> {
+    let source = match binding.getattr("source") {
+        Ok(source) => source,
+        Err(error) if error.is_instance_of::<pyo3::exceptions::PyAttributeError>(binding.py()) => {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    let Ok(source) = source.extract::<PyRef<'_, crate::arrow_source::PyArrowSource>>() else {
+        return Ok(None);
+    };
+    source.source().map(Some).map_err(crate::error::to_py_err)
+}
+
 fn build_sources(
     sources: &Bound<'_, PyDict>,
     awaits: &Arc<PythonAwaitRegistry>,
@@ -862,14 +878,10 @@ fn build_sources(
             .extract::<String>()
             .map_err(|_| PyTypeError::new_err("source binding IDs must be strings"))?;
         let policy = source_policy(&binding)?;
-        if let Ok(source) = binding
-            .getattr("source")?
-            .extract::<PyRef<'_, crate::arrow_source::PyArrowSource>>()
-        {
+        if let Some(source) = materialized_source(&binding)? {
             native.insert(
                 source_id,
-                calc_flow::SourceBinding::new(source.source().map_err(crate::error::to_py_err)?)
-                    .with_watermark_policy(policy),
+                calc_flow::SourceBinding::new(source).with_watermark_policy(policy),
             );
             continue;
         }
@@ -3363,6 +3375,34 @@ mod tests {
             .map(super::delivery_guarantee_name),
             ["at_least_once", "exactly_once"]
         );
+    }
+
+    #[test]
+    fn materialized_source_probe_propagates_source_property_errors() {
+        Python::initialize();
+        Python::attach(|py| {
+            let locals = PyDict::new(py);
+            py.run(
+                &CString::new(
+                    r"class Binding:
+    @property
+    def source(self):
+        raise RuntimeError('source lookup failed')
+binding = Binding()
+",
+                )
+                .unwrap(),
+                None,
+                Some(&locals),
+            )
+            .unwrap();
+            let binding = locals.get_item("binding").unwrap().unwrap();
+            let Err(error) = super::materialized_source(&binding) else {
+                panic!("expected the source property error");
+            };
+            assert!(error.is_instance_of::<pyo3::exceptions::PyRuntimeError>(py));
+            assert_eq!(error.value(py).to_string(), "source lookup failed");
+        });
     }
 
     #[test]

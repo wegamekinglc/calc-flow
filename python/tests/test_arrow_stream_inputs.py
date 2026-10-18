@@ -222,13 +222,118 @@ def test_materialized_input_rejects_reader_and_source_watermarks() -> None:
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("side", ["baseline", "candidate"])
-def test_materialized_join_matches_full_oracle(side) -> None:
-    from benchmarks.arrow_source import collect
+@pytest.fixture
+def materialized_join():
+    schema = pa.schema(
+        [
+            pa.field("key", pa.int64(), nullable=False),
+            pa.field("ts", pa.timestamp("us", tz="UTC"), nullable=False),
+            pa.field("value", pa.int64()),
+        ]
+    )
+    inputs = {
+        name: pa.Table.from_batches(
+            pa.table(
+                {
+                    "key": list(range(64)),
+                    "ts": list(range(64)),
+                    "value": list(range(offset, offset + 64)),
+                },
+                schema=schema,
+            ).to_batches(max_chunksize=8)
+        )
+        for name, offset in (("left", 0), ("right", 100))
+    }
+    left, right = (
+        cf.table_input(
+            name,
+            schema=schema,
+            entity_by=("key",),
+            event_time="ts",
+            sequence_by=("ts",),
+        )
+        for name in inputs
+    )
+    joined = cf.table.stream_join(
+        left,
+        right,
+        left_keys=["key"],
+        right_keys=["key"],
+        left_event_time="ts",
+        right_event_time="ts",
+        bounds=cf.JoinTimeBounds(timedelta(0), timedelta(0)),
+        limits=cf.JoinStateLimits(1024, 16 << 20, 4096),
+        left_prefix="l",
+        right_prefix="r",
+    )
+    program = cf.Program(
+        "arrow-join",
+        engine="streaming",
+        outputs={
+            "result": joined.select(
+                key=joined["l__key"],
+                left=joined["l__value"],
+                right=joined["r__value"],
+            )
+        },
+    )
+    expected = pa.table(
+        {
+            "key": list(range(64)),
+            "left": list(range(64)),
+            "right": list(range(100, 164)),
+        },
+        schema=pa.schema(
+            [
+                pa.field("key", pa.int64(), nullable=False),
+                pa.field("left", pa.int64()),
+                pa.field("right", pa.int64()),
+            ]
+        ),
+    )
+    return program, inputs, expected
 
-    facts = asyncio.run(collect("join", side))
-    assert facts["rows"] == 64
-    assert facts["task_count"] == 0
+
+async def _join_records(data):
+    for record in data.to_batches():
+        yield record
+
+
+@pytest.mark.parametrize("side", ["baseline", "candidate"])
+def test_materialized_join_matches_full_oracle(side, materialized_join, monkeypatch):
+    program, inputs, expected = materialized_join
+    before = {name: (data.to_pydict(), data.schema) for name, data in inputs.items()}
+    calls = 0
+    original = _IterableSource.next
+
+    async def counted(self):
+        nonlocal calls
+        calls += 1
+        return await original(self)
+
+    monkeypatch.setattr(_IterableSource, "next", counted)
+    bound = (
+        inputs
+        if side == "candidate"
+        else {name: _join_records(data) for name, data in inputs.items()}
+    )
+
+    async def collect():
+        async with program.stream(
+            bound,
+            config=cf.StreamRuntimeConfig(edge_budget=cf.EdgeBudget(8, 1 << 20)),
+            watermarks={name: cf.DisabledWatermarks() for name in inputs},
+        ) as results:
+            tables = [event.table async for event in results]
+        assert results.job.status()["state"] == "completed"
+        assert results.job.status()["task_count"] == 0
+        return pa.concat_tables(tables).sort_by("key")
+
+    assert asyncio.run(collect()).equals(expected, check_metadata=True)
+    assert calls == (0 if side == "candidate" else 18)
+    assert {
+        name: (data.to_pydict(), data.schema) for name, data in inputs.items()
+    } == before
 
 
 def test_materialized_binding_preserves_batch_metadata_and_can_be_reused() -> None:

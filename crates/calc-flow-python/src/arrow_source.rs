@@ -6,7 +6,7 @@ use calc_flow::{
     SourceSchema, StreamSource,
 };
 use datafusion::arrow::{
-    array::{Array, Int64Array},
+    array::{Array, ArrayRef, Int64Array},
     compute::cast,
     datatypes::{DataType, SchemaRef},
     record_batch::RecordBatch,
@@ -78,6 +78,21 @@ fn invalid(field: &str, message: &str) -> CalcFlowError {
     }
 }
 
+fn event_times(batch: &Batch, column: &str) -> Result<ArrayRef> {
+    let record = &batch.table_payload()?.batches()[0];
+    let column = record
+        .column_by_name(column)
+        .ok_or_else(|| invalid("source.arrow.event_time", "missing event time column"))?;
+    if column.null_count() != 0 {
+        return Err(invalid(
+            "source.arrow.event_time",
+            "expected non-null event time",
+        ));
+    }
+    cast(column, &DataType::Int64)
+        .map_err(|_| invalid("source.arrow.event_time", "expected timestamp column"))
+}
+
 impl ArrowSource {
     fn slice(&self, record: &RecordBatch, rows: usize) -> Result<Batch> {
         Batch::table(vec![record.slice(0, rows)], self.metadata.clone())
@@ -89,8 +104,19 @@ impl ArrowSource {
         if batch.estimated_bytes()? <= self.budget.max_bytes {
             return Ok(batch);
         }
+        let rows = self.fitting_prefix_rows(record, rows)?;
+        if rows == 0 {
+            return Err(invalid(
+                "source.arrow.max_bytes",
+                "one row exceeds the source byte budget",
+            ));
+        }
+        self.slice(record, rows)
+    }
+
+    fn fitting_prefix_rows(&self, record: &RecordBatch, upper: usize) -> Result<usize> {
         // Visible Arrow slice charges are monotone; find a fitting prefix without copying.
-        let (mut low, mut high) = (0, rows);
+        let (mut low, mut high) = (0, upper);
         while low < high {
             let middle = low + (high - low).div_ceil(2);
             if self.slice(record, middle)?.estimated_bytes()? <= self.budget.max_bytes {
@@ -99,31 +125,14 @@ impl ArrowSource {
                 high = middle - 1;
             }
         }
-        if low == 0 {
-            return Err(invalid(
-                "source.arrow.max_bytes",
-                "one row exceeds the source byte budget",
-            ));
-        }
-        self.slice(record, low)
+        Ok(low)
     }
 
     fn validate_time(&mut self, batch: &Batch) -> Result<()> {
         let Some(column) = &self.ordered_column else {
             return Ok(());
         };
-        let record = &batch.table_payload()?.batches()[0];
-        let column = record
-            .column_by_name(column)
-            .ok_or_else(|| invalid("source.arrow.event_time", "missing event time column"))?;
-        if column.null_count() != 0 {
-            return Err(invalid(
-                "source.arrow.event_time",
-                "expected non-null event time",
-            ));
-        }
-        let values = cast(column, &DataType::Int64)
-            .map_err(|_| invalid("source.arrow.event_time", "expected timestamp column"))?;
+        let values = event_times(batch, column)?;
         let values = values
             .as_any()
             .downcast_ref::<Int64Array>()
