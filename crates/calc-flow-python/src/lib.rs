@@ -1,5 +1,6 @@
 //! Python bindings for Calc Flow's Rust-native v3 engine.
 
+mod arrow_source;
 mod batch;
 mod config;
 mod connector;
@@ -27,6 +28,7 @@ fn calc_flow_python(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(version, module)?)?;
     error::register(module)?;
     batch::register(module)?;
+    module.add_class::<arrow_source::PyArrowSource>()?;
     execution_options::register(module)?;
     config::register(module)?;
     connector::register(module)?;

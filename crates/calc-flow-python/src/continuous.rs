@@ -849,6 +849,40 @@ fn source_policy(binding: &Bound<'_, PyAny>) -> PyResult<calc_flow::WatermarkPol
     }
 }
 
+fn source_attribute_absent(binding: &Bound<'_, PyAny>) -> PyResult<bool> {
+    // A descriptor can raise AttributeError; inspect without evaluating it again.
+    match binding
+        .py()
+        .import("inspect")?
+        .call_method1("getattr_static", (binding, "source"))
+    {
+        Ok(_) => Ok(false),
+        Err(error) if error.is_instance_of::<pyo3::exceptions::PyAttributeError>(binding.py()) => {
+            Ok(true)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn materialized_source(
+    binding: &Bound<'_, PyAny>,
+) -> PyResult<Option<crate::arrow_source::ArrowSource>> {
+    let source = match binding.getattr("source") {
+        Ok(source) => source,
+        Err(error)
+            if error.is_instance_of::<pyo3::exceptions::PyAttributeError>(binding.py())
+                && source_attribute_absent(binding)? =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    let Ok(source) = source.extract::<PyRef<'_, crate::arrow_source::PyArrowSource>>() else {
+        return Ok(None);
+    };
+    source.source().map(Some).map_err(crate::error::to_py_err)
+}
+
 fn build_sources(
     sources: &Bound<'_, PyDict>,
     awaits: &Arc<PythonAwaitRegistry>,
@@ -862,6 +896,13 @@ fn build_sources(
             .extract::<String>()
             .map_err(|_| PyTypeError::new_err("source binding IDs must be strings"))?;
         let policy = source_policy(&binding)?;
+        if let Some(source) = materialized_source(&binding)? {
+            native.insert(
+                source_id,
+                calc_flow::SourceBinding::new(source).with_watermark_policy(policy),
+            );
+            continue;
+        }
         let root = Arc::new(PythonRoot::new(binding.unbind()));
         let source = PythonContinuousSource {
             binding: Arc::clone(&root),
@@ -3352,6 +3393,63 @@ mod tests {
             .map(super::delivery_guarantee_name),
             ["at_least_once", "exactly_once"]
         );
+    }
+
+    fn assert_materialized_source_property_error(exception_type: &str) {
+        Python::initialize();
+        Python::attach(|py| {
+            let locals = PyDict::new(py);
+            let expected_error = py
+                .import("builtins")
+                .unwrap()
+                .getattr(exception_type)
+                .unwrap()
+                .call1(("source lookup failed",))
+                .unwrap();
+            locals.set_item("expected_error", &expected_error).unwrap();
+            py.run(
+                &CString::new(
+                    r"class Descriptor:
+    @property
+    def source(self):
+        self.reads += 1
+        raise expected_error
+class Binding(Descriptor):
+    def __init__(self):
+        self.reads = 0
+binding = Binding()
+",
+                )
+                .unwrap(),
+                Some(&locals),
+                Some(&locals),
+            )
+            .unwrap();
+            let binding = locals.get_item("binding").unwrap().unwrap();
+            let Err(error) = super::materialized_source(&binding) else {
+                panic!("expected the source property error");
+            };
+            assert!(error.value(py).is(&expected_error));
+            assert_eq!(error.value(py).to_string(), "source lookup failed");
+            assert_eq!(
+                binding
+                    .getattr("reads")
+                    .unwrap()
+                    .extract::<usize>()
+                    .unwrap(),
+                1
+            );
+        });
+    }
+
+    #[test]
+    fn materialized_source_probe_propagates_source_property_errors() {
+        assert_materialized_source_property_error("RuntimeError");
+    }
+
+    #[test]
+    fn materialized_source_probe_propagates_attribute_error_from_descriptor_once() {
+        assert_materialized_source_property_error("AttributeError");
     }
 
     #[test]

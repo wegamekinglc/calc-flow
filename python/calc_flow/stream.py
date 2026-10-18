@@ -341,6 +341,8 @@ class StreamResults(Generic[T]):
             self._starting.cancel()
         # Context entry reports startup errors; close waits for its owned work.
         await asyncio.gather(self._starting, return_exceptions=True)
+        # Failed task tracebacks can retain input bindings after close.
+        self._starting = None
 
     async def _stop_job(self) -> JobOutcome | None:
         if self._job is None:
@@ -356,8 +358,15 @@ class StreamResults(Generic[T]):
             for adapter in self._adapters:
                 await adapter.close()
         finally:
-            if self._root is not None:
-                await asyncio.to_thread(shutil.rmtree, self._root)
+            try:
+                if self._root is not None:
+                    await asyncio.to_thread(shutil.rmtree, self._root)
+            finally:
+                self._request = replace(self._request, inputs={})
+                queue = getattr(self, "_queue", None)
+                if queue is not None:
+                    while not queue.empty():
+                        queue.get_nowait()
 
 
 def _stream_program(

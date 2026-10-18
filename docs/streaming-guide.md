@@ -18,6 +18,7 @@ On this page:
 - [Choose batch or stream](#choose-batch-or-stream)
 - [First Python continuous job](#first-python-continuous-job)
 - [Named streaming outputs](#named-streaming-outputs)
+- [Materialized Arrow inputs](#materialized-arrow-inputs)
 - [Route late rows](#route-late-rows)
 - [Stream ownership and SQL boundaries](#stream-ownership-and-sql-boundaries)
 - [Explicit connectors and recovery](#explicit-connectors-and-recovery)
@@ -461,11 +462,50 @@ root for inspection. Once finished, remove only that demo directory with
 without arguments performs all three phases in a temporary root and removes
 it on exit; only the explicit-root commands demonstrate process restarts.
 
+## Materialized Arrow inputs
+
+Replay an already materialized table through the same public stream entry:
+
+```python
+data = pa.table({"value": [1, 2, 3]})
+source = cf.table_input("events", schema=data.schema)
+output = source.select(doubled=source["value"] * 2)
+
+async def replay():
+    config = cf.StreamRuntimeConfig(edge_budget=cf.EdgeBudget(2, 1024))
+    async with output.stream(data, config=config) as results:
+        return pa.concat_tables([table async for table in results])
+```
+
+`Program.stream({"events": data})` also accepts Table, RecordBatch and table
+Batch values. One Arrow import shares immutable buffers; the native source
+emits record slices that fit both row and visible-byte limits, without Python
+source calls per batch. A single row that cannot fit fails the job. Empty inputs
+retain their schema. Record boundaries can produce smaller batches; chunking
+affects per-batch outputs such as cumulative SQL snapshots.
+
+Default event-time ordering checks and generated watermarks match iterable
+inputs. An explicit bounded-disorder or disabled policy replaces those checks.
+Materialized sources cannot emit source-provided watermarks. Reader and generic
+C stream providers require separate lifecycle handling and are not accepted.
+
+For explicit runners use `cf.SourceBinding.from_arrow(data, budget=...,
+watermark_policy=...)`. Its default is disabled watermarks, and the supplied
+budget must fit the runner's edge budget. The binding preserves imported Arrow
+schema and Batch metadata; convenience expression streams apply the same schema
+normalization as iterables. A binding retains its imported buffers for reuse;
+each job releases its own references on EOF, cancellation or failure. Keep the
+binding only as long as reuse is needed. Slices can pin larger backing buffers:
+edge budgets bound queued logical slices, not the materialized input or RSS.
+Closing a convenience result also releases its captured input references and
+discards queued outputs; the closed result can still expose native job status.
+The cursor offers no persistent replay or exactly-once delivery guarantee.
+
 ## Stream ownership and SQL boundaries
 
 `stream(inputs, /, *, runtime=None, config=None, watermarks=None)` constructs a
 one-shot `StreamResults` owner. A single-table declaration with no static parameters
-accepts one async iterable or `SourceBinding` directly; multiple or static
+accepts one async iterable, materialized Arrow input, or `SourceBinding` directly; multiple or static
 inputs require a logical-name mapping. `Program.stream` always takes a mapping.
 Input and watermark-policy mappings are copied immediately, but source references
 and read-only Arrow buffers are shared. Opening sources, compiling the fresh plan,

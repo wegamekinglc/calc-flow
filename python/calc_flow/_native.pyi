@@ -71,6 +71,16 @@ class StreamingRuntimeError(CalcFlowError):
 class CheckpointPublicationUnknownError(StreamingRuntimeError): ...
 
 @final
+class _ArrowSource:
+    def __init__(
+        self,
+        batch: Batch,
+        max_rows: int,
+        max_bytes: int,
+        ordered_column: str | None = ...,
+    ) -> None: ...
+
+@final
 class ExecutionOptions:
     def __init__(
         self,

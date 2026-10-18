@@ -10,6 +10,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 
 from calc_flow._compat import TypeAliasType, dataclass
+from calc_flow._native import Batch
 from calc_flow.compute import TableData, _arrow_table, _table_batch
 from calc_flow.runtime import (
     BoundedOutOfOrderness,
@@ -25,6 +26,7 @@ from calc_flow.runtime import (
     SourceProvidedWatermarks,
     Watermark,
     WatermarkPolicy,
+    _arrow_source_binding,
 )
 from calc_flow.symbolic.analyzer import _schema_fields
 from calc_flow.symbolic.expr import Parameter, TableExpr
@@ -32,7 +34,8 @@ from calc_flow.symbolic.lower.schema import _arrow_schema
 from calc_flow.symbolic.nodes import CStr
 
 StreamInput = TypeAliasType(
-    "StreamInput", Union[AsyncIterable[Union[TableData, Watermark]], SourceBinding]
+    "StreamInput",
+    Union[AsyncIterable[Union[TableData, Watermark]], SourceBinding, TableData],
 )
 
 _POLICIES = (SourceProvidedWatermarks, BoundedOutOfOrderness, DisabledWatermarks)
@@ -224,10 +227,23 @@ def _source_binding(
 ) -> tuple[SourceBinding, _IterableSource | None]:
     if isinstance(data, SourceBinding):
         return data, None
+    config = _source_config(name, value, budget, policy)
+    if isinstance(data, (pa.Table, pa.RecordBatch, Batch)):
+        table = _arrow_table(data, f"stream.inputs.{name}")
+        if not table.schema.equals(config.schema):
+            raise ValueError(
+                f"stream.inputs.{name}.schema: expected declared Arrow schema"
+            )
+        return _arrow_source_binding(
+            _table_batch(data, f"stream.inputs.{name}"),
+            budget,
+            config.policy,
+            config.ordered_column,
+        ), None
     if not isinstance(data, AsyncIterable):
         raise TypeError(
-            f"stream.inputs.{name}: expected async iterable or SourceBinding"
+            f"stream.inputs.{name}: expected async iterable, materialized Arrow "
+            "input or SourceBinding"
         )
-    config = _source_config(name, value, budget, policy)
     source = _IterableSource(data, config)
     return SourceBinding(source, watermark_policy=config.policy), source
