@@ -259,8 +259,11 @@ config=None, watermarks=None)` returns `StreamResults[StreamOutput]`. Both requi
 [named-output example](../examples/21_streaming_outputs.py), or follow the
 [streaming guide](streaming-guide.md#first-python-continuous-job).
 
-A dynamic input accepts an `AsyncIterable` of Arrow `Table`, `RecordBatch`, or
-table `Batch` values, or a `SourceBinding`. With `SourceProvidedWatermarks`, the
+A dynamic input accepts a materialized Arrow `Table`, `RecordBatch`, table
+`Batch`, an `AsyncIterable` of those values, or a `SourceBinding`.
+Materialized inputs are imported once and sliced by a native source within
+`config.edge_budget`; they do not call a Python source per batch. With
+`SourceProvidedWatermarks`, the
 iterable may also yield `Watermark` values. A single-table root without static
 parameters accepts that source directly. Otherwise pass a mapping by logical
 declaration name; Program always requires one. Static parameter entries hold
@@ -278,7 +281,7 @@ the declared Arrow schema and finite row/byte limits from
 `config.edge_budget`. They provide no replay. A supplied `SourceBinding` keeps
 its actual capabilities and watermark policy.
 
-With `watermarks=None`, an iterable whose input declares `event_time` must have
+With `watermarks=None`, an iterable or materialized input declaring `event_time` must have
 non-null, nondecreasing timestamps in arrival order across rows, batches, and
 all entities in that source. The native runtime generates a watermark at
 `max_seen - 1 microsecond`, with a 100 ms emission interval. Equal timestamps
@@ -298,6 +301,20 @@ validation. Unknown or static names, invalid policies, and overrides of a
 `SourceBinding` fail.
 See [watermark policies](streaming-guide.md#watermark-policies) for inclusive
 cutoffs, late-data errors, and multi-source progress.
+
+`SourceBinding.from_arrow(data, *, budget=None, watermark_policy=None)` supplies
+the same native source to an explicit `StreamingRunner`. `budget` defaults to
+`EdgeBudget()` and must fit the runner's edge budget. Its default watermark
+policy is `DisabledWatermarks`; select `BoundedOutOfOrderness` explicitly for
+event-time progress. Materialized input cannot provide native watermarks.
+The explicit factory preserves the imported Arrow schema and table `Batch`
+metadata; expression streams normalize schema metadata as ordinary iterables do.
+Each runner has an independent cursor; the reusable binding retains its imported
+buffers until released. Jobs release their own references on close, including
+failure and cancellation. Slices can retain larger backing allocations: logical
+edge byte limits do not bound input storage or process RSS. Neither this cursor
+nor temporary checkpoints provide persistent replay or exactly-once delivery.
+Readers and arbitrary Arrow stream providers are not accepted by this factory.
 
 `StreamResults` supports async context management, async iteration, idempotent
 `aclose()`, and a `job` property available after successful entry. A context

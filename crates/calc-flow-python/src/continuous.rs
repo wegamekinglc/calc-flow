@@ -862,6 +862,17 @@ fn build_sources(
             .extract::<String>()
             .map_err(|_| PyTypeError::new_err("source binding IDs must be strings"))?;
         let policy = source_policy(&binding)?;
+        if let Ok(source) = binding
+            .getattr("source")?
+            .extract::<PyRef<'_, crate::arrow_source::PyArrowSource>>()
+        {
+            native.insert(
+                source_id,
+                calc_flow::SourceBinding::new(source.source().map_err(crate::error::to_py_err)?)
+                    .with_watermark_policy(policy),
+            );
+            continue;
+        }
         let root = Arc::new(PythonRoot::new(binding.unbind()));
         let source = PythonContinuousSource {
             binding: Arc::clone(&root),

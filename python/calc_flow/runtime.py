@@ -25,6 +25,7 @@ from calc_flow._compat import StrEnum, TypeAliasType, dataclass
 from calc_flow.store import _copy_json_value
 
 if TYPE_CHECKING:
+    from calc_flow.compute import TableData
     from calc_flow.pipeline import StreamExecutionPlan
 
 JSONValue = TypeAliasType(
@@ -326,15 +327,19 @@ class TransactionalStreamSink(Protocol):
 class SourceBinding:
     """Own a source connector and its immutable watermark policy."""
 
-    source: StreamSource = field(repr=False)
+    source: StreamSource | _native._ArrowSource = field(repr=False)
     watermark_policy: WatermarkPolicy = field(default_factory=SourceProvidedWatermarks)
 
     def __init__(
-        self, source: StreamSource, *, watermark_policy: WatermarkPolicy | None = None
+        self,
+        source: StreamSource | _native._ArrowSource,
+        *,
+        watermark_policy: WatermarkPolicy | None = None,
     ) -> None:
-        if not callable(getattr(source, "capabilities", None)):
-            raise TypeError("source.capabilities must be callable")
-        _require_async_methods(source, "source", ("open", "next", "close"))
+        if not isinstance(source, _native._ArrowSource):
+            if not callable(getattr(source, "capabilities", None)):
+                raise TypeError("source.capabilities must be callable")
+            _require_async_methods(source, "source", ("open", "next", "close"))
         selected = (
             SourceProvidedWatermarks() if watermark_policy is None else watermark_policy
         )
@@ -345,6 +350,26 @@ class SourceBinding:
             raise TypeError("watermark_policy is not a supported watermark policy")
         object.__setattr__(self, "source", source)
         object.__setattr__(self, "watermark_policy", selected)
+
+    @classmethod
+    def from_arrow(
+        cls,
+        data: TableData,
+        *,
+        budget: EdgeBudget | None = None,
+        watermark_policy: WatermarkPolicy | None = None,
+    ) -> SourceBinding:
+        """Import materialized Arrow once; each runner owns a native bounded cursor.
+
+        Accept Table, RecordBatch or table Batch. Buffers stay shared and read-only.
+        The binding retains its imported buffers for reuse; each job releases its
+        own references on close. No durable replay or source-native watermarks.
+        """
+        return _arrow_source_binding(
+            data,
+            EdgeBudget() if budget is None else budget,
+            DisabledWatermarks() if watermark_policy is None else watermark_policy,
+        )
 
     def _native_capabilities(self) -> dict[str, object]:
         value = self.source.capabilities()
@@ -423,6 +448,30 @@ class SourceBinding:
 
     async def _native_close(self) -> None:
         await self.source.close()
+
+
+def _arrow_source_binding(
+    data: TableData,
+    budget: EdgeBudget,
+    policy: WatermarkPolicy,
+    ordered_column: str | None = None,
+) -> SourceBinding:
+    from calc_flow.compute import _arrow_table
+
+    if not isinstance(budget, EdgeBudget):
+        raise TypeError("source.arrow.budget: expected EdgeBudget")
+    if isinstance(policy, SourceProvidedWatermarks):
+        raise ValueError(
+            "source.arrow: materialized input cannot emit native watermarks"
+        )
+    if isinstance(data, _native.Batch) and data.kind == "table":
+        batch = data
+    else:
+        batch = _native.Batch.from_pyarrow(_arrow_table(data, "source.arrow"))
+    source = _native._ArrowSource(
+        batch, budget.max_rows, budget.max_bytes, ordered_column
+    )
+    return SourceBinding(source, watermark_policy=policy)
 
 
 @dataclass(frozen=True, slots=True)
