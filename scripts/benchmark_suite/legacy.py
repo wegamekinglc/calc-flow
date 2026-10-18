@@ -169,13 +169,20 @@ def block_problem(name: str, blocks: dict, *, rust: bool = False) -> str | None:
     if _missing_block(name, blocks):
         return "benchmark missing from a base/head confirmation block"
     rows = [block[name] for values in blocks.values() for block in values]
-    for key in ("rows", "scope"):
-        if any(row[key] != rows[0][key] for row in rows):
-            return f"benchmark {key} changed; no timing classification"
+    problem = _descriptor_problem(rows)
+    if problem:
+        return problem
     return _fingerprint_problem(
         [row["metadata"] for row in rows],
         rust_blocks=(name, blocks) if rust else None,
     )
+
+
+def _descriptor_problem(rows: list[dict]) -> str | None:
+    for key in ("rows", "scope"):
+        if any(row[key] != rows[0][key] for row in rows):
+            return f"benchmark {key} changed; no timing classification"
+    return None
 
 
 def _fingerprint_problem(
@@ -190,6 +197,14 @@ def _fingerprint_problem(
         problem = dependency_migration_problem(*rust_blocks)
         if problem:
             return problem
+    return _matching_fingerprints_problem(
+        metadata, check_dependency=rust_blocks is None
+    )
+
+
+def _matching_fingerprints_problem(
+    metadata: list[dict], *, check_dependency: bool
+) -> str | None:
     for key in (
         "machine_fingerprint",
         "dependency_fingerprint",
@@ -197,7 +212,7 @@ def _fingerprint_problem(
         "benchmark_source_sha256",
         "benchmark_support_sha256",
     ):
-        if key == "dependency_fingerprint" and rust_blocks is not None:
+        if key == "dependency_fingerprint" and not check_dependency:
             continue
         if any(row.get(key) != metadata[0].get(key) for row in metadata):
             return f"benchmark {key} changed; no timing classification"

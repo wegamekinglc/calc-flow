@@ -141,6 +141,17 @@ def blocks(stamps: dict) -> dict:
     }
 
 
+def without_attestation_field(report: dict, field: str) -> dict:
+    result = copy.deepcopy(report)
+    if field == "declarations":
+        del result["dependency_migrations"]
+    elif field == "marker":
+        del result["cases"][0]["metadata"]["dependency_migration"]
+    else:
+        result["cases"][0]["metadata"]["dependency_fingerprint"] = "f" * 64
+    return result
+
+
 class DependencyMigrationTests(unittest.TestCase):
     def setUp(self):
         self.provenance = provenance()
@@ -402,13 +413,7 @@ class DependencyMigrationTests(unittest.TestCase):
                 with self.subTest(field=field), self.assertRaises(ValueError):
                     validate_dependency_migrations(invalid)
             for remove in ("declarations", "marker", "fingerprint"):
-                invalid = copy.deepcopy(report)
-                if remove == "declarations":
-                    del invalid["dependency_migrations"]
-                elif remove == "marker":
-                    del invalid["cases"][0]["metadata"]["dependency_migration"]
-                else:
-                    invalid["cases"][0]["metadata"]["dependency_fingerprint"] = "f" * 64
+                invalid = without_attestation_field(report, remove)
                 with self.subTest(remove=remove), self.assertRaises(ValueError):
                     validate_dependency_migrations(invalid)
             invalid = copy.deepcopy(report)
