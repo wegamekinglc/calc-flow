@@ -875,28 +875,8 @@ impl Pending {
             local.splits.push(u32::MAX);
             return Ok(());
         }
-        match dictionary.find(hash, key, flow).await? {
-            Some(id) => {
-                local.plans.push(local::Plan::Dictionary(id));
-                local.posts.push(u32::MAX);
-                local.splits.push(u32::MAX);
-                local.order.push((
-                    local.appearances[distinct],
-                    u32::try_from(distinct).expect("distinct keys fit u32 ids"),
-                ));
-            }
-            None => {
-                local.plans.push(local::Plan::Unknown);
-                local.posts.push(u32::MAX);
-                local.splits.push(u32::MAX);
-                if retains > 0 {
-                    local.order.push((
-                        local.first_retained[distinct],
-                        u32::try_from(distinct).expect("distinct keys fit u32 ids"),
-                    ));
-                }
-            }
-        }
+        let found = dictionary.find(hash, key, flow).await?;
+        local.stage_classification(distinct, found, retains);
         Ok(())
     }
 

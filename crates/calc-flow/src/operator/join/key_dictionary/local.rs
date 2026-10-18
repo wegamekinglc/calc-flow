@@ -215,6 +215,47 @@ impl LocalIntern {
         Ok(())
     }
 
+    /// Records one classified key's staging slots: a dictionary hit stages
+    /// an add at its first appearance; an unknown key stages a birth at its
+    /// first retained row.
+    pub(super) fn stage_classification(
+        &mut self,
+        distinct: usize,
+        found: Option<u32>,
+        retains: u32,
+    ) {
+        match found {
+            Some(id) => {
+                self.plans.push(Plan::Dictionary(id));
+                self.posts.push(u32::MAX);
+                self.splits.push(u32::MAX);
+                self.order.push(self.appearance_order(distinct));
+            }
+            None => {
+                self.plans.push(Plan::Unknown);
+                self.posts.push(u32::MAX);
+                self.splits.push(u32::MAX);
+                if retains > 0 {
+                    self.order.push(self.birth_order(distinct));
+                }
+            }
+        }
+    }
+
+    fn appearance_order(&self, distinct: usize) -> (u32, u32) {
+        (
+            self.appearances[distinct],
+            u32::try_from(distinct).expect("distinct keys fit u32 ids"),
+        )
+    }
+
+    fn birth_order(&self, distinct: usize) -> (u32, u32) {
+        (
+            self.first_retained[distinct],
+            u32::try_from(distinct).expect("distinct keys fit u32 ids"),
+        )
+    }
+
     /// Sorts the staged changes by their creation ordinal, reproducing the
     /// per-row order in which today's path would have staged them.
     pub(super) fn sort_changes(&mut self) {
