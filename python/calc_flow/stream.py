@@ -356,8 +356,15 @@ class StreamResults(Generic[T]):
             for adapter in self._adapters:
                 await adapter.close()
         finally:
-            if self._root is not None:
-                await asyncio.to_thread(shutil.rmtree, self._root)
+            try:
+                if self._root is not None:
+                    await asyncio.to_thread(shutil.rmtree, self._root)
+            finally:
+                self._request = replace(self._request, inputs={})
+                queue = getattr(self, "_queue", None)
+                if queue is not None:
+                    while not queue.empty():
+                        queue.get_nowait()
 
 
 def _stream_program(

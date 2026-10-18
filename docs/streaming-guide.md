@@ -497,6 +497,8 @@ normalization as iterables. A binding retains its imported buffers for reuse;
 each job releases its own references on EOF, cancellation or failure. Keep the
 binding only as long as reuse is needed. Slices can pin larger backing buffers:
 edge budgets bound queued logical slices, not the materialized input or RSS.
+Closing a convenience result also releases its captured input references and
+discards queued outputs; the closed result can still expose native job status.
 The cursor offers no persistent replay or exactly-once delivery guarantee.
 
 ## Stream ownership and SQL boundaries

@@ -339,3 +339,45 @@ def test_materialized_job_releases_foreign_buffer_owner(ending) -> None:
     asyncio.run(run())
     gc.collect()
     assert reference() is None
+
+
+@pytest.mark.parametrize("ending", ["eof", "early", "unentered"])
+def test_closed_materialized_results_release_input_and_queued_owners(ending) -> None:
+    import numpy as np
+
+    class Owner:
+        def __init__(self):
+            self.values = np.arange(128, dtype=np.int64)
+
+    owner = Owner()
+    reference = weakref.ref(owner)
+    buffer = pa.foreign_buffer(
+        owner.values.ctypes.data, owner.values.nbytes, base=owner
+    )
+    array = pa.Array.from_buffers(pa.int64(), 128, [None, buffer])
+    data = pa.table({"a": array})
+    source = cf.table_input("events", schema=data.schema)
+    results = source.stream(
+        data, config=cf.StreamRuntimeConfig(edge_budget=cf.EdgeBudget(1, 1024))
+    )
+    del data, owner, buffer, array
+
+    async def run():
+        if ending == "unentered":
+            await results.aclose()
+            return
+        async with results:
+            if ending == "early":
+                await results.__anext__()
+                await asyncio.sleep(0.01)
+            else:
+                while True:
+                    try:
+                        await results.__anext__()
+                    except StopAsyncIteration:
+                        break
+        assert results.job.status()["task_count"] == 0
+
+    asyncio.run(run())
+    gc.collect()
+    assert reference() is None
