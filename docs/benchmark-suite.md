@@ -238,6 +238,11 @@ that default or process engine affinity. Materialized Arrow output remains
 inside the timer; key-based sorting and oracle validation remain outside it.
 Group and join row order is not assumed.
 
+The `polars_engine` setting is required and checked for both Polars references.
+It does not participate in Python suite or Calc Flow worker environment
+comparisons, so release workers that predate this metadata remain comparable.
+Package versions, machine/thread identities, and native hashes are still checked.
+
 SQL/raw-DataFusion target partitions and Tokio workers are fixed to 32.
 Polars references run in separate fresh processes with `POLARS_MAX_THREADS=32`
 or `1`, reported as `Polars (32T)` and `Polars (1T)`. Measurement and artifact

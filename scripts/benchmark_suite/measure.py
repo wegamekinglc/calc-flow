@@ -8,6 +8,7 @@ from pathlib import Path
 
 from scripts.benchmark_suite.catalog import (
     CONTRACT,
+    POLARS_ENGINE,
     STREAM_EVIDENCE_FIELDS,
     THREADS,
     baseline_case_ids,
@@ -21,7 +22,11 @@ from scripts.benchmark_suite.report import ROUNDS, SAMPLES, comparison
 
 
 def validate_environment(
-    environment: dict, release: dict, *, polars_threads: int = THREADS
+    environment: dict,
+    release: dict,
+    *,
+    polars_threads: int = THREADS,
+    backend: str = "calc-flow",
 ) -> dict:
     if environment["native_sha256"] != release["native_sha256"]:
         raise ValueError(
@@ -31,7 +36,13 @@ def validate_environment(
         "tokio_worker_threads"
     ] != str(THREADS):
         raise ValueError("worker thread configuration does not match the catalog")
-    return {key: value for key, value in environment.items() if key != "native_sha256"}
+    is_polars = backend in ("polars", "polars-1t")
+    if is_polars and environment.get("polars_engine") != POLARS_ENGINE:
+        raise ValueError("unexpected Polars collection engine")
+    # This adapter setting is irrelevant to non-Polars workloads, whose release
+    # workers may predate its addition to the environment report.
+    excluded = ("native_sha256",) if is_polars else ("native_sha256", "polars_engine")
+    return {key: value for key, value in environment.items() if key not in excluded}
 
 
 def validate_sample(sample: dict) -> float:
@@ -92,6 +103,7 @@ async def _prepare(workers: dict, releases: dict, case: dict) -> dict:
             await worker.request(operation="hello"),
             releases[side],
             polars_threads=polars_thread_count(case),
+            backend=case["backend"],
         )
         response = await worker.request(operation="prepare", case=case)
         if response["case"] != case:
