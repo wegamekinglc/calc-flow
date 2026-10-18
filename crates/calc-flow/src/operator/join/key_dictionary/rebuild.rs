@@ -107,12 +107,14 @@ impl<'a> Builder<'a> {
         flow: &mut KeyFlow<'_, '_, C>,
     ) -> Result<bool> {
         for (side, rows) in rows.into_iter().enumerate() {
-            for reference in rows.references() {
-                flow.step(1, 0).await?;
-                let Some(id) = self.resolve(rows.key(reference), flow).await? else {
-                    return Ok(false);
-                };
-                self.record(side, id, rows.key(reference))?;
+            for batch in rows.batches() {
+                for reference in batch.references() {
+                    flow.step(1, 0).await?;
+                    let Some(id) = self.resolve(batch.key(reference), flow).await? else {
+                        return Ok(false);
+                    };
+                    self.record(side, id, batch.key(reference))?;
+                }
             }
         }
         Ok(true)

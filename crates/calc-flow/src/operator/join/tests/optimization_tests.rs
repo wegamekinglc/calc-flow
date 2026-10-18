@@ -270,7 +270,11 @@ async fn assert_sparse_generic_sql_has_no_owned_admission_rows() {
     assert_eq!(prepared.metrics.null_key_rows, 2);
     assert_eq!(prepared.next_row_id, 6);
     assert_generic_materialized(&operator, &prepared, 3);
-    for (row, (record, physical)) in prepared.retained.iter().zip([(0, 0), (1, 1), (1, 2)]) {
+    for (row, (record, physical)) in
+        (&prepared.chunks as &dyn Rows)
+            .iter()
+            .zip([(0, 0), (1, 1), (1, 2)])
+    {
         let original = &source.table_payload().unwrap().batches()[record];
         assert_eq!(
             row.charge,
@@ -285,12 +289,7 @@ async fn assert_sparse_generic_sql_has_no_owned_admission_rows() {
     let expiration = operator
         .state
         .left_expirations
-        .prepare_append(
-            &prepared.retained,
-            &prepared.chunks.indices,
-            &context,
-            false,
-        )
+        .prepare_append(&prepared.chunks, &prepared.chunks.indices, &context, false)
         .await
         .unwrap();
     operator
@@ -316,7 +315,7 @@ async fn commit_generic_opposite(
     let expiration = operator
         .state
         .right_expirations
-        .prepare_append(&prepared.retained, &prepared.chunks.indices, context, false)
+        .prepare_append(&prepared.chunks, &prepared.chunks.indices, context, false)
         .await
         .unwrap();
     operator

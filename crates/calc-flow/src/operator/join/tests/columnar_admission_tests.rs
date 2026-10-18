@@ -228,7 +228,7 @@ async fn test_project_admitted_uses_zero_copy_views_for_unretained_groups() {
         .prepare_batch("left", &input, &context)
         .await
         .unwrap();
-    assert_eq!(prepared.retained.len(), 30);
+    assert_eq!(prepared.chunks.len(), 30);
     assert!(
         !prepared.admitted.projection_is_view(0),
         "retained groups keep the copied payload path"

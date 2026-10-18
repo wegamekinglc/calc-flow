@@ -15,21 +15,18 @@ async fn test_first_retained_batch_interns_keys_and_shares_dirty_owners() {
     assert_eq!(join_work().key_encodings, 1);
     assert_eq!(join_work().sql_probe_table_builds, 0);
     assert!(prepared.output.is_empty());
-    for row in &prepared.retained {
-        assert!(Arc::ptr_eq(
-            &row.encoded_key,
-            &prepared.retained[0].encoded_key
-        ));
+    assert_eq!(
+        join_work().retained_descriptor_views,
+        0,
+        "native preparation writes columns directly"
+    );
+    for row in (&prepared.chunks as &dyn Rows).iter() {
+        assert!(Arc::ptr_eq(&row.encoded_key, prepared.chunks.key(0)));
     }
     let expiration_append = operator
         .state
         .left_expirations
-        .prepare_append(
-            &prepared.retained,
-            &prepared.chunks.indices,
-            &context,
-            false,
-        )
+        .prepare_append(&prepared.chunks, &prepared.chunks.indices, &context, false)
         .await
         .unwrap();
     operator
@@ -67,12 +64,7 @@ async fn test_native_count_does_not_visit_materialized_pairs() {
     let expiration_append = operator
         .state
         .left_expirations
-        .prepare_append(
-            &prepared.retained,
-            &prepared.chunks.indices,
-            &context,
-            false,
-        )
+        .prepare_append(&prepared.chunks, &prepared.chunks.indices, &context, false)
         .await
         .unwrap();
     operator
@@ -397,7 +389,7 @@ async fn test_wide_composite_masks_keep_quantum_work_bounded_in_both_paths() {
             .await
             .unwrap();
         assert_eq!(prepared.admitted.len(), 1);
-        assert_eq!(prepared.retained.len(), 1);
+        assert_eq!(prepared.chunks.len(), 1);
     }
 }
 

@@ -3341,19 +3341,16 @@ impl From<Vec<StoredRow>> for RetainedRows {
 }
 
 impl RetainedRows {
-    fn extend(
-        &mut self,
-        rows: &[StoredRow],
-        chunks: retained::Append,
-        dictionary: &key_dictionary::Dictionary,
-    ) {
-        for row in rows {
-            self.2.enqueue_if_due(&row.record);
+    fn extend(&mut self, chunks: retained::Append, dictionary: &key_dictionary::Dictionary) {
+        for batch in chunks.batches() {
+            for index in batch.references() {
+                self.2.enqueue_if_due(&batch.payload(index).owned());
+            }
         }
         if let Some(index) = &mut self.1 {
             Arc::get_mut(index)
                 .expect("native probe released before retained append")
-                .append_identified_indices(&chunks.indices, rows, dictionary);
+                .append_prepared_indices(&chunks, dictionary);
         }
         (**self).commit(chunks);
     }
@@ -3405,6 +3402,10 @@ impl IntoIterator for RetainedRows {
 }
 
 impl Rows for RetainedRows {
+    fn batches(&self) -> Box<dyn Iterator<Item = retained::RowBatch<'_>> + Send + '_> {
+        self.0.batches()
+    }
+
     fn references(&self) -> Box<dyn Iterator<Item = usize> + Send + '_> {
         self.0.references()
     }
@@ -3548,7 +3549,6 @@ struct PreparedJoinBatch {
     gathered: Option<data_work::GatheredOutput>,
     admitted: AdmittedBatch,
     incoming_is_left: bool,
-    retained: Vec<StoredRow>,
     chunks: retained::Append,
     next_row_id: u64,
     metrics: SideMetrics,
@@ -3868,38 +3868,50 @@ impl StreamJoinOperator {
         context: &StreamOperatorContext<'_>,
     ) -> Result<PreparedJoinBatch> {
         bundle.admitted.prepare_retained_parents();
-        let mut retained = retained_rows(
-            &bundle.admitted,
-            &plan.key_indices,
-            &self.name,
-            matches.keys.as_ref(),
-            &self.key_dictionary,
-            context,
-            &mut self.key_work,
-        )
-        .await?;
         let legacy_key_references = matches.keys.is_none();
-        if legacy_key_references {
+        let chunks = if let Some(keys) = &matches.keys {
+            let master = self
+                .runtime
+                .runtime()?
+                .incremental_reservation("stream-join-state-chunks");
+            let retained =
+                retained::ColumnarPlan::prepare(&bundle.admitted, keys, &master, context).await?;
+            self.validate_state_totals(plan.incoming_is_left, retained.len(), retained.bytes)?;
+            self.project_admitted_payloads(&mut bundle.admitted, plan.port_index, context)
+                .await?;
+            let current = if plan.incoming_is_left {
+                &self.state.left
+            } else {
+                &self.state.right
+            };
+            current
+                .prepare_columns(&bundle.admitted, keys, &retained, &master, context)
+                .await?
+        } else {
+            let mut retained = retained_rows(
+                &bundle.admitted,
+                &plan.key_indices,
+                &self.name,
+                None,
+                &self.key_dictionary,
+                context,
+                &mut self.key_work,
+            )
+            .await?;
             self.key_dictionary
                 .validate_known_references(&retained, context, &self.name)
                 .await?;
-        }
-        self.validate_state_admission(plan.incoming_is_left, &retained)?;
-        self.project_admitted(
-            &mut bundle.admitted,
-            &mut retained,
-            plan.port_index,
-            context,
-        )
-        .await?;
-        let chunks = self
-            .prepare_chunk_state(
-                plan.incoming_is_left,
-                &retained,
-                legacy_key_references,
+            self.validate_state_admission(plan.incoming_is_left, &retained)?;
+            self.project_admitted(
+                &mut bundle.admitted,
+                &mut retained,
+                plan.port_index,
                 context,
             )
             .await?;
+            self.prepare_chunk_state(plan.incoming_is_left, &retained, true, context)
+                .await?
+        };
         let dictionary = matches
             .keys
             .as_mut()
@@ -3914,7 +3926,6 @@ impl StreamJoinOperator {
             gathered: None,
             admitted: std::mem::take(&mut bundle.admitted),
             incoming_is_left: plan.incoming_is_left,
-            retained,
             next_row_id: bundle.next_row_id,
             metrics: std::mem::take(&mut bundle.metrics),
             admitted_charges,
@@ -3928,12 +3939,13 @@ impl StreamJoinOperator {
     fn reserve_retained_append(
         &mut self,
         incoming_is_left: bool,
-        retained: &[StoredRow],
+        retained: &dyn Rows,
     ) -> Result<Option<native_lookup::AppendCredit>> {
-        if retained
-            .iter()
-            .all(|row| row.encoded_key.address().is_some())
-        {
+        if retained.batches().all(|batch| {
+            batch
+                .distinct_keys()
+                .all(|(_, key)| key.address().is_some())
+        }) {
             return self.reserve_native_append(incoming_is_left, retained.len());
         }
         self.drop_native_index(incoming_is_left);
@@ -4544,14 +4556,38 @@ impl StreamJoinOperator {
     fn validate_state_admission(
         &mut self,
         incoming_is_left: bool,
-        retained: &[StoredRow],
+        retained: &dyn Rows,
+    ) -> Result<()> {
+        let (rows, bytes) =
+            prospective_state_charge(&SideMetrics::default(), retained, &self.name)?;
+        self.validate_state_totals(
+            incoming_is_left,
+            usize::try_from(rows).map_err(|_| counter_overflow(&self.name, "state rows"))?,
+            bytes,
+        )
+    }
+
+    fn validate_state_totals(
+        &mut self,
+        incoming_is_left: bool,
+        count: usize,
+        charge: u64,
     ) -> Result<()> {
         let current = if incoming_is_left {
             &self.state.metrics.left
         } else {
             &self.state.metrics.right
         };
-        let (rows, bytes) = prospective_state_charge(current, retained, &self.name)?;
+        let rows = current
+            .retained_rows
+            .checked_add(
+                u64::try_from(count).map_err(|_| counter_overflow(&self.name, "state rows"))?,
+            )
+            .ok_or_else(|| counter_overflow(&self.name, "state rows"))?;
+        let bytes = current
+            .retained_bytes
+            .checked_add(charge)
+            .ok_or_else(|| counter_overflow(&self.name, "state bytes"))?;
         if !super::StateBudget::new(
             self.spec.limits.max_state_rows_per_side,
             self.spec.limits.max_state_bytes_per_side,
@@ -4698,7 +4734,7 @@ impl StreamJoinOperator {
     ) -> Result<()> {
         let mut metrics = prepared.metrics;
         (metrics.retained_rows, metrics.retained_bytes) =
-            prospective_state_charge(&metrics, &prepared.retained, &self.name)?;
+            prospective_state_charge(&metrics, &prepared.chunks, &self.name)?;
         let side = if ingress == "left" {
             JoinSide::Left
         } else {
@@ -4707,38 +4743,42 @@ impl StreamJoinOperator {
         self.commit_key_references(
             prepared.dictionary,
             prepared.legacy_key_references,
-            &prepared.retained,
+            &prepared.chunks,
         );
         if checkpointing {
             self.state.deltas.note_admitted(
                 side,
-                u64::try_from(prepared.retained.len())
+                u64::try_from(prepared.chunks.len())
                     .map_err(|_| counter_overflow(&self.name, "retained rows"))?,
                 &self.name,
             )?;
         }
-        for (offset, row) in prepared.retained.iter().enumerate() {
-            row.record.mark_live(prepared.chunks.indices[offset]);
+        for batch in prepared.chunks.batches() {
+            for offset in batch.references() {
+                batch
+                    .payload(offset)
+                    .mark_live(prepared.chunks.indices[offset]);
+            }
         }
         if side == JoinSide::Left {
             self.state.next_left_row_id = prepared.next_row_id;
-            if !prepared.retained.is_empty() {
+            if !prepared.chunks.is_empty() {
                 self.retained_key_cache.left = None;
             }
             self.state.left_expirations.append(expiration_append);
             self.state
                 .left
-                .extend(&prepared.retained, prepared.chunks, &self.key_dictionary);
+                .extend(prepared.chunks, &self.key_dictionary);
             self.state.metrics.left = metrics;
         } else {
             self.state.next_right_row_id = prepared.next_row_id;
-            if !prepared.retained.is_empty() {
+            if !prepared.chunks.is_empty() {
                 self.retained_key_cache.right = None;
             }
             self.state.right_expirations.append(expiration_append);
             self.state
                 .right
-                .extend(&prepared.retained, prepared.chunks, &self.key_dictionary);
+                .extend(prepared.chunks, &self.key_dictionary);
             self.state.metrics.right = metrics;
         }
         if let Some(credit) = prepared.native_append {
@@ -4751,7 +4791,7 @@ impl StreamJoinOperator {
         &mut self,
         dictionary: Option<key_dictionary::Pending>,
         legacy: bool,
-        retained: &[StoredRow],
+        retained: &dyn Rows,
     ) {
         if let Some(dictionary) = dictionary {
             self.key_dictionary.commit(dictionary);
@@ -4759,9 +4799,11 @@ impl StreamJoinOperator {
         if legacy {
             self.key_dictionary.commit_known_references(retained);
         }
-        self.key_dictionary_needs_rebuild |= retained
-            .iter()
-            .any(|row| self.key_dictionary.lease(&row.encoded_key).is_none());
+        self.key_dictionary_needs_rebuild |= retained.batches().any(|batch| {
+            batch
+                .distinct_keys()
+                .any(|(_, key)| self.key_dictionary.lease(key).is_none())
+        });
     }
 
     fn evict_progress(
@@ -4961,14 +5003,14 @@ impl StreamJoinOperator {
         expirations.fund_origin(&master);
         let expiration_append = expirations
             .prepare_append(
-                &prepared.retained,
+                &prepared.chunks,
                 &prepared.chunks.indices,
                 context,
                 prepared.chunks.is_unfunded(),
             )
             .await?;
         prepared.native_append =
-            self.reserve_retained_append(prepared.incoming_is_left, &prepared.retained)?;
+            self.reserve_retained_append(prepared.incoming_is_left, &prepared.chunks)?;
         if context.job().checkpointing() {
             self.v2_writer.changed(true)?;
         }
@@ -5441,14 +5483,8 @@ impl AdmissionBundle {
             work.admission_grants += 1;
             work.generic_fast_rows += offsets.len();
         });
-        for offset in offsets {
-            self.admitted.push_ready(
-                record_index,
-                start + offset,
-                masks.admitted_time(offset),
-                masks.retain(offset),
-            );
-        }
+        self.admitted
+            .push_block(record_index, start, offsets, masks);
         Ok(())
     }
 
@@ -5556,7 +5592,7 @@ fn empty_retained_metrics(metrics: &JoinMetrics) -> bool {
 /// Prospective (rows, bytes) charge if `retained` were installed next to `current`.
 fn prospective_state_charge(
     current: &SideMetrics,
-    retained: &[StoredRow],
+    retained: &dyn Rows,
     operator_id: &str,
 ) -> Result<(u64, u64)> {
     let rows = current
@@ -5564,15 +5600,17 @@ fn prospective_state_charge(
         .checked_add(state_row_count(retained, operator_id)?)
         .ok_or_else(|| counter_overflow(operator_id, "state rows"))?;
     let bytes = retained
-        .iter()
-        .try_fold(current.retained_bytes, |total, row| {
-            total.checked_add(row.charge)
+        .batches()
+        .try_fold(current.retained_bytes, |total, batch| {
+            batch.references().try_fold(total, |total, reference| {
+                total.checked_add(batch.charge(reference))
+            })
         })
         .ok_or_else(|| counter_overflow(operator_id, "state bytes"))?;
     Ok((rows, bytes))
 }
 
-fn state_row_count(rows: &[StoredRow], operator_id: &str) -> Result<u64> {
+fn state_row_count(rows: &dyn Rows, operator_id: &str) -> Result<u64> {
     u64::try_from(rows.len()).map_err(|_| counter_overflow(operator_id, "state rows"))
 }
 
@@ -5663,9 +5701,11 @@ async fn legacy_retained_key(
 
 fn admitted_charge_cache(charges: Option<Vec<u64>>, rows: &dyn AdmittedRows) -> Option<Vec<u64>> {
     charges.map(|charges| {
-        (0..rows.len())
-            .map(|row| charges[rows.source_index(row)])
-            .collect()
+        let mut admitted = Vec::with_capacity(rows.len());
+        for group in rows.groups() {
+            admitted.extend(group.source_indices().map(|index| charges[index]));
+        }
+        admitted
     })
 }
 
@@ -7208,7 +7248,7 @@ struct PlannedEntry {
 impl EvictionPlan {
     fn plan(
         &mut self,
-        rows: &dyn Rows,
+        rows: &RetainedRows,
         expirations: &ExpirationIndex,
         expired: &dyn Fn(EventTime) -> bool,
     ) {
@@ -7217,16 +7257,24 @@ impl EvictionPlan {
             note_join_work(|work| work.expiration_run_cuts += 1);
             self.cuts.push((id, cut));
             self.entries.reserve(cut);
+            let mut batch = None;
+            let mut previous_chunk = usize::MAX;
             for index in expirations.run_entries(id, cut) {
-                let (time, row_id) = rows.identity(index);
+                let chunk = index / retained::CHUNK_ROWS;
+                if chunk != previous_chunk {
+                    batch = Some(rows.batch_at(index));
+                    previous_chunk = chunk;
+                }
+                let batch = batch.as_ref().expect("bound expiration chunk");
+                let (time, row_id) = batch.identity(index);
                 self.entries.push(PlannedEntry {
                     index,
                     row_id,
                     time,
-                    charge: rows.charge(index),
+                    charge: batch.charge(index),
                     // The row key is the canonical interned identity shared
                     // with the dictionary and native index.
-                    key: Arc::clone(rows.key(index)),
+                    key: Arc::clone(batch.key(index)),
                 });
             }
         }

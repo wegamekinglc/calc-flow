@@ -109,6 +109,11 @@ impl RowPayload {
         }
     }
 
+    pub(in crate::operator::join) fn mark_live_at(&self, offset: usize, dense: usize) {
+        if let Self::Shared { chunk, .. } = self {
+            chunk.add_live(offset, dense);
+        }
+    }
     fn belongs_to(&self, chunk: &Arc<PayloadChunk>, offset: usize) -> bool {
         matches!(self, Self::Shared { chunk: current, row } if *row == offset && Arc::ptr_eq(current, chunk))
     }

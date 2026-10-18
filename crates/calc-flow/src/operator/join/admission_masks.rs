@@ -204,6 +204,9 @@ impl AdmissionMasks {
         )))
     }
 
+    pub(super) fn retained_bits(&self, offsets: std::ops::Range<usize>) -> u64 {
+        (self.retain >> offsets.start) & low_bits(offsets.len())
+    }
     pub(super) fn retain(&self, offset: usize) -> bool {
         self.retain & (1_u64 << offset) != 0
     }
