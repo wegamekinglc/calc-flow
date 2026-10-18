@@ -351,7 +351,7 @@ struct WindowState {
 /// close that earlier checkpoints persisted.
 struct CheckpointMark {
     created: bool,
-    closed_group_values: Option<Vec<Option<ScalarValue>>>,
+    closed_group_values: Option<Arc<[Option<ScalarValue>]>>,
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -363,7 +363,7 @@ struct WindowKey {
 
 #[derive(Clone)]
 struct AccumulatorRow {
-    group_values: Vec<Option<ScalarValue>>,
+    group_values: Arc<[Option<ScalarValue>]>,
     aggregates: Vec<AccumulatorValue>,
 }
 
@@ -1242,7 +1242,7 @@ impl WindowAggregateOperator {
         let table = batch.table_payload()?;
         let mut scratch = self.new_scratch();
         scratch.column_defaults =
-            new_accumulator_row(&self.spec, &self.compiled, Vec::new()).aggregates;
+            new_accumulator_row(&self.spec, &self.compiled, Arc::from([])).aggregates;
         scratch.columns = scratch
             .column_defaults
             .iter()
@@ -2851,7 +2851,7 @@ fn extend_group_encoding(encoded: &mut Vec<u8>, bytes: &[u8]) -> std::result::Re
 fn new_accumulator_row(
     spec: &WindowSpec,
     compiled: &CompiledWindowSpec,
-    group_values: Vec<Option<ScalarValue>>,
+    group_values: Arc<[Option<ScalarValue>]>,
 ) -> AccumulatorRow {
     let aggregates = spec
         .aggregates
@@ -4458,7 +4458,7 @@ fn decode_state_segment(
         decoded.push((
             key,
             (!tombstone).then_some(AccumulatorRow {
-                group_values,
+                group_values: group_values.into(),
                 aggregates: accumulators,
             }),
         ));
@@ -5497,7 +5497,7 @@ mod tests {
             stable_group_key: Arc::from([]),
         };
         let entry = |total: i64| AccumulatorRow {
-            group_values: vec![],
+            group_values: Arc::from([]),
             aggregates: vec![AccumulatorValue::SignedSum(Some(i128::from(total)))],
         };
         let summary = |accumulators: &BTreeMap<WindowKey, AccumulatorRow>| {
@@ -5731,7 +5731,7 @@ mod tests {
                 stable_group_key: Arc::from([]),
             },
             entry: AccumulatorRow {
-                group_values: Vec::new(),
+                group_values: Arc::from([]),
                 aggregates: vec![sum, average],
             },
             tombstone: false,
@@ -5800,7 +5800,7 @@ mod tests {
                 stable_group_key: Arc::from([]),
             },
             entry: AccumulatorRow {
-                group_values: Vec::new(),
+                group_values: Arc::from([]),
                 aggregates: vec![AccumulatorValue::FloatSum(Some(CompensatedSum::new(5.0)))],
             },
             tombstone: false,
@@ -5952,7 +5952,7 @@ mod tests {
                     stable_group_key: Arc::from([]),
                 },
                 entry: AccumulatorRow {
-                    group_values: Vec::new(),
+                    group_values: Arc::from([]),
                     aggregates: vec![AccumulatorValue::SignedSum(Some(150))],
                 },
                 tombstone: false,
@@ -5964,7 +5964,7 @@ mod tests {
                     stable_group_key: Arc::from([]),
                 },
                 entry: AccumulatorRow {
-                    group_values: Vec::new(),
+                    group_values: Arc::from([]),
                     aggregates: vec![AccumulatorValue::SignedSum(Some(42))],
                 },
                 tombstone: false,

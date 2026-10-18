@@ -8,8 +8,7 @@ use super::super::{
 use super::KeyFlow;
 use crate::Result;
 use datafusion::arrow::array::{
-    Array, BooleanArray, GenericStringArray, LargeStringArray, OffsetSizeTrait, PrimitiveArray,
-    StringArray,
+    Array, BooleanArray, LargeStringArray, PrimitiveArray, StringArray,
 };
 use datafusion::arrow::datatypes::{
     ArrowPrimitiveType, DataType, Date32Type, Date64Type, Int8Type, Int16Type, Int32Type,
@@ -17,13 +16,50 @@ use datafusion::arrow::datatypes::{
     TimestampNanosecondType, TimestampSecondType, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
 };
 use datafusion::execution::memory_pool::MemoryReservation;
-use hashbrown::HashTable;
 
 #[cfg(test)]
-#[path = "../tests/local_intern_tests.rs"]
+#[path = "local_tests.rs"]
 mod tests;
 
-const HASH_SEED: u64 = 0x243F_6A88_85A3_08D3;
+/// Prepaid cooperation allowance, shared across hash, probe and equality.
+/// Refilling happens before work, so small operations amortize the async step
+/// while a long value or collision chain cannot outrun either quantum limit.
+struct LocalFlow<'a, 'c, 'j> {
+    flow: &'a mut KeyFlow<'c, 'j>,
+    visits: usize,
+    bytes: usize,
+}
+
+impl<'a, 'c, 'j> LocalFlow<'a, 'c, 'j> {
+    fn new(flow: &'a mut KeyFlow<'c, 'j>) -> Self {
+        Self {
+            flow,
+            visits: 0,
+            bytes: 0,
+        }
+    }
+
+    async fn step(&mut self, visits: usize, bytes: usize) -> Result<()> {
+        if !self.take(visits, bytes) {
+            self.flow.step(COPY_VISITS, COPY_BYTES).await?;
+            self.visits = COPY_VISITS - visits;
+            self.bytes = COPY_BYTES - bytes;
+        }
+        Ok(())
+    }
+
+    /// Debit only prepaid work. Failure leaves both allowances untouched.
+    #[inline]
+    fn take(&mut self, visits: usize, bytes: usize) -> bool {
+        debug_assert!(visits <= COPY_VISITS && bytes <= COPY_BYTES);
+        if visits > self.visits || bytes > self.bytes {
+            return false;
+        }
+        self.visits -= visits;
+        self.bytes -= bytes;
+        true
+    }
+}
 
 /// How one distinct key resolves against the batch-persistent state before
 /// any change is applied.
@@ -41,7 +77,9 @@ pub(super) enum Plan {
 /// and reused group by group; every vector is prepaid for the batch's rows.
 pub(super) struct LocalIntern {
     /// Local distinct index per bucket, keyed by the plain row hash.
-    pub(super) table: HashTable<u32>,
+    // Integer slots let probing resume across awaits without retaining a raw
+    // hash-table iterator. The existing table allowance funds every slot.
+    table: Vec<u32>,
     /// Plain (non-canonical) hash per distinct key, for table probing.
     pub(super) hashes: Vec<u64>,
     /// Canonical framed hash per distinct key, from the classification pass.
@@ -60,44 +98,10 @@ pub(super) struct LocalIntern {
     pub(super) _credit: MemoryReservation,
 }
 
-/// Running cooperative-work totals for one block of interned rows.
-#[derive(Default)]
-struct BlockCharge {
-    visits: usize,
-    bytes: usize,
-}
-
-impl BlockCharge {
-    /// Records one interned row, reporting whether the block boundary was
-    /// reached and the accumulated work must be charged now.
-    fn step(&mut self, row_bytes: usize) -> bool {
-        self.visits += 1;
-        self.bytes += row_bytes;
-        self.visits >= COPY_VISITS || self.bytes >= COPY_BYTES
-    }
-
-    fn reset(&mut self) {
-        self.visits = 0;
-        self.bytes = 0;
-    }
-
-    fn pending(&self) -> bool {
-        self.visits > 0 || self.bytes > 0
-    }
-
-    /// Charges any trailing partial block.
-    async fn flush(&self, flow: &mut KeyFlow<'_, '_>) -> Result<()> {
-        if self.pending() {
-            charge_block(flow, self.visits, self.bytes).await?;
-        }
-        Ok(())
-    }
-}
-
 impl LocalIntern {
     pub(super) fn new(rows: usize, credit: MemoryReservation) -> Self {
         Self {
-            table: HashTable::with_capacity(rows),
+            table: vec![u32::MAX; slot_count(rows).expect("funded local table capacity")],
             hashes: Vec::with_capacity(rows),
             canonicals: Vec::with_capacity(rows),
             rows: Vec::with_capacity(rows),
@@ -131,7 +135,7 @@ impl LocalIntern {
             distinct,
             ..
         } = self;
-        table.clear();
+        table.fill(u32::MAX);
         hashes.clear();
         canonicals.clear();
         rows.clear();
@@ -146,63 +150,128 @@ impl LocalIntern {
         *distinct = 0;
     }
 
-    /// Hashes one row over the bound key columns and interns it, returning
-    /// its local distinct index and plain key byte width for cooperation.
-    pub(super) fn intern_row(
-        &mut self,
-        columns: &[LocalColumn<'_>],
-        offset: usize,
-        name: &str,
-    ) -> Result<(u32, usize)> {
-        let (hash, bytes) = hash_row(columns, offset);
-        let local = self.intern_value(hash, offset, name, |first| {
-            values_equal(columns, first, offset)
-        })?;
-        Ok((local, bytes))
-    }
-
-    fn intern_string<O: OffsetSizeTrait>(
-        &mut self,
-        values: &GenericStringArray<O>,
-        offset: usize,
-        name: &str,
-    ) -> Result<(u32, usize)> {
-        let bytes = values.value(offset).as_bytes();
-        let hash = hash_bytes(HASH_SEED, bytes);
-        let local = self.intern_value(hash, offset, name, |first| {
-            values.value(first).as_bytes() == bytes
-        })?;
-        Ok((local, bytes.len()))
-    }
-
-    fn intern_value(
+    /// Probes candidates with separately charged visits and equality work.
+    async fn intern_hashed(
         &mut self,
         hash: u64,
-        offset: usize,
+        (offset, width): (usize, usize),
+        columns: &[LocalColumn<'_>],
         name: &str,
-        equal: impl Fn(usize) -> bool,
+        flow: &mut LocalFlow<'_, '_, '_>,
+        equal: impl Fn(usize, usize) -> bool,
     ) -> Result<u32> {
-        let existing = self.table.find(hash, |&local| {
-            self.hashes[local as usize] == hash && equal(self.rows[local as usize])
-        });
-        let local = if let Some(&local) = existing {
-            local
-        } else {
-            let local = u32::try_from(self.distinct)
-                .ok()
-                .filter(|id| *id != u32::MAX)
-                .ok_or_else(|| super::counter_overflow(name, "key_id"))?;
-            self.hashes.push(hash);
-            self.rows.push(offset);
-            self.appearances
-                .push(u32::try_from(self.locals.len()).expect("group rows fit u32 ordinals"));
-            self.first_retained.push(u32::MAX);
-            self.retains.push(0);
-            self.distinct += 1;
-            let Self { table, hashes, .. } = self;
-            table.insert_unique(hash, local, |&local| hashes[local as usize]);
-            local
-        };
+        let mask = self.table.len() - 1;
+        let mut bucket = usize::try_from(hash & u64::try_from(mask).expect("slot mask fits u64"))
+            .expect("masked hash fits usize");
+        loop {
+            if !flow.take(1, 0) {
+                flow.step(1, 0).await?;
+            }
+            let local = self.table[bucket];
+            if local == u32::MAX {
+                let local = self.insert_distinct(hash, offset, name)?;
+                self.table[bucket] = local;
+                return Ok(local);
+            }
+            #[cfg(test)]
+            super::super::typed_key::note(super::super::typed_key::KeyPhase::LocalProbe, 0);
+            if self.hashes[local as usize] != hash {
+                bucket = (bucket + 1) & mask;
+                continue;
+            }
+            let left = self.rows[local as usize];
+            let matches = equal_row(columns, left, (offset, width), flow, &equal).await?;
+            if matches {
+                return Ok(local);
+            }
+            bucket = (bucket + 1) & mask;
+        }
+    }
+
+    /// Common short-key path stays synchronous within the prepaid allowance.
+    /// A depleted allowance or wide key returns to the resumable async path.
+    fn try_intern(
+        &mut self,
+        hash: u64,
+        row: (usize, usize),
+        columns: &[LocalColumn<'_>],
+        name: &str,
+        flow: &mut LocalFlow<'_, '_, '_>,
+        equal: impl Fn(usize, usize) -> bool,
+    ) -> Result<Option<u32>> {
+        if row.1 > COPY_BYTES || columns.len() > COPY_VISITS {
+            return Ok(None);
+        }
+        self.probe_small(hash, row, columns, name, flow, equal)
+    }
+
+    fn probe_small(
+        &mut self,
+        hash: u64,
+        (offset, width): (usize, usize),
+        columns: &[LocalColumn<'_>],
+        name: &str,
+        flow: &mut LocalFlow<'_, '_, '_>,
+        equal: impl Fn(usize, usize) -> bool,
+    ) -> Result<Option<u32>> {
+        let mask = self.table.len() - 1;
+        let mut bucket = usize::try_from(hash & u64::try_from(mask).expect("slot mask fits u64"))
+            .expect("masked hash fits usize");
+        loop {
+            if !flow.take(1, 0) {
+                return Ok(None);
+            }
+            let local = self.table[bucket];
+            if local == u32::MAX {
+                let local = self.insert_distinct(hash, offset, name)?;
+                self.table[bucket] = local;
+                return Ok(Some(local));
+            }
+            #[cfg(test)]
+            super::super::typed_key::note(super::super::typed_key::KeyPhase::LocalProbe, 0);
+            match self.small_equal(local, hash, (offset, width), columns.len(), flow, &equal) {
+                Some(true) => return Ok(Some(local)),
+                None => return Ok(None),
+                Some(false) => bucket = (bucket + 1) & mask,
+            }
+        }
+    }
+
+    fn small_equal(
+        &self,
+        local: u32,
+        hash: u64,
+        (offset, width): (usize, usize),
+        columns: usize,
+        flow: &mut LocalFlow<'_, '_, '_>,
+        equal: impl Fn(usize, usize) -> bool,
+    ) -> Option<bool> {
+        if self.hashes[local as usize] != hash {
+            return Some(false);
+        }
+        flow.take(columns, width).then(|| {
+            let matches = equal(self.rows[local as usize], offset);
+            #[cfg(test)]
+            super::super::typed_key::note(
+                super::super::typed_key::KeyPhase::LocalComparison,
+                width,
+            );
+            matches
+        })
+    }
+
+    fn insert_distinct(&mut self, hash: u64, offset: usize, name: &str) -> Result<u32> {
+        let local = u32::try_from(self.distinct)
+            .ok()
+            .filter(|id| *id != u32::MAX)
+            .ok_or_else(|| super::counter_overflow(name, "key_id"))?;
+        self.hashes.push(hash);
+        self.rows.push(offset);
+        self.appearances
+            .push(u32::try_from(self.locals.len()).expect("group rows fit u32 ordinals"));
+        self.first_retained.push(u32::MAX);
+        self.retains.push(0);
+        self.distinct += 1;
         Ok(local)
     }
 
@@ -223,7 +292,7 @@ impl LocalIntern {
     }
 
     /// Deduplicates one group's rows into the local table, charging the
-    /// vectorized hash and probe work per bounded block.
+    /// vectorized hash and probe work before each byte/visit quantum.
     pub(super) async fn intern_group(
         &mut self,
         columns: &[LocalColumn<'_>],
@@ -231,49 +300,110 @@ impl LocalIntern {
         name: &str,
         flow: &mut KeyFlow<'_, '_>,
     ) -> Result<()> {
+        let flow = &mut LocalFlow::new(flow);
+        // Dispatch a single key's equality once per group, including string
+        // offsets. Composite equality still checks every typed component.
+        macro_rules! primitive {
+            ($values:expr) => {
+                self.intern_blocks(columns, group, name, flow, |left, right| {
+                    $values[left] == $values[right]
+                })
+                .await
+            };
+        }
         match columns {
+            [LocalColumn::I8(values)] => primitive!(values),
+            [LocalColumn::I16(values)] => primitive!(values),
+            [LocalColumn::I32(values)] => primitive!(values),
+            [LocalColumn::I64(values)] => primitive!(values),
+            [LocalColumn::U8(values)] => primitive!(values),
+            [LocalColumn::U16(values)] => primitive!(values),
+            [LocalColumn::U32(values)] => primitive!(values),
+            [LocalColumn::U64(values)] => primitive!(values),
+            [LocalColumn::Boolean(values)] => {
+                self.intern_blocks(columns, group, name, flow, |left, right| {
+                    values.value(left) == values.value(right)
+                })
+                .await
+            }
             [LocalColumn::Utf8(values)] => {
-                self.intern_group_with(group, name, flow, |intern, offset| {
-                    intern.intern_string(values, offset, name)
+                self.intern_blocks(columns, group, name, flow, |left, right| {
+                    values.value(left) == values.value(right)
                 })
                 .await
             }
             [LocalColumn::LargeUtf8(values)] => {
-                self.intern_group_with(group, name, flow, |intern, offset| {
-                    intern.intern_string(values, offset, name)
+                self.intern_blocks(columns, group, name, flow, |left, right| {
+                    values.value(left) == values.value(right)
                 })
                 .await
             }
             _ => {
-                self.intern_group_with(group, name, flow, |intern, offset| {
-                    intern.intern_row(columns, offset, name)
+                self.intern_blocks(columns, group, name, flow, |left, right| {
+                    values_equal(columns, left, right)
                 })
                 .await
             }
         }
     }
 
-    async fn intern_group_with(
+    async fn intern_blocks(
         &mut self,
+        columns: &[LocalColumn<'_>],
         group: super::super::admitted::AdmittedGroup<'_>,
         name: &str,
-        flow: &mut KeyFlow<'_, '_>,
-        intern: impl Fn(&mut Self, usize) -> Result<(u32, usize)>,
+        flow: &mut LocalFlow<'_, '_, '_>,
+        equal: impl Fn(usize, usize) -> bool,
     ) -> Result<()> {
-        let mut block = BlockCharge::default();
-        for (ordinal, (offset, retain)) in group.key_offsets().enumerate() {
-            let (distinct, row_bytes) = intern(self, offset)?;
-            self.locals.push(distinct);
-            if retain {
-                let ordinal = u32::try_from(ordinal).expect("group rows fit u32 ordinals");
-                self.note_retained(distinct, ordinal, name)?;
+        let mut offsets = group.key_offsets();
+        // Bounded stack scratch never outlives preparation and adds no per-row
+        // namespace or heap allocation to the existing prepaid local table.
+        let mut positions = [(0, false); COPY_VISITS];
+        let mut hashes = [(0, 0); COPY_VISITS];
+        loop {
+            let length = read_positions(&mut offsets, &mut positions);
+            if length == 0 {
+                break;
             }
-            if block.step(row_bytes) {
-                charge_block(flow, block.visits, block.bytes).await?;
-                block.reset();
+            hashes[..length].fill((0x243F_6A88_85A3_08D3, 0));
+            hash_block(columns, &positions[..length], &mut hashes[..length], flow).await?;
+            self.intern_positions(
+                columns,
+                &positions[..length],
+                &hashes[..length],
+                name,
+                flow,
+                &equal,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn intern_positions(
+        &mut self,
+        columns: &[LocalColumn<'_>],
+        positions: &[(usize, bool)],
+        hashes: &[(u64, usize)],
+        name: &str,
+        flow: &mut LocalFlow<'_, '_, '_>,
+        equal: impl Fn(usize, usize) -> bool,
+    ) -> Result<()> {
+        for (&(offset, retain), &(hash, width)) in positions.iter().zip(hashes) {
+            let local = match self.try_intern(hash, (offset, width), columns, name, flow, &equal)? {
+                Some(local) => local,
+                None => {
+                    self.intern_hashed(hash, (offset, width), columns, name, flow, &equal)
+                        .await?
+                }
+            };
+            self.locals.push(local);
+            if retain {
+                let ordinal =
+                    u32::try_from(self.locals.len() - 1).expect("group rows fit u32 ordinals");
+                self.note_retained(local, ordinal, name)?;
             }
         }
-        block.flush(flow).await?;
         Ok(())
     }
 
@@ -341,19 +471,23 @@ impl LocalIntern {
     }
 }
 
-/// Charges one deduplication block, splitting oversized byte totals into
-/// bounded cooperative steps.
-pub(super) async fn charge_block(
-    flow: &mut KeyFlow<'_, '_>,
-    visits: usize,
-    bytes: usize,
-) -> Result<()> {
-    let mut remaining = bytes;
-    while remaining > COPY_BYTES {
-        flow.step(0, COPY_BYTES).await?;
-        remaining -= COPY_BYTES;
+pub(super) fn slot_count(rows: usize) -> Option<usize> {
+    // At most 7/8 full, rounded up to a power of two. Four-byte slots cost
+    // less than the existing 12-byte-per-row table allowance (plus header).
+    rows.checked_add(rows.div_ceil(7))?
+        .checked_next_power_of_two()
+}
+
+fn read_positions(
+    offsets: &mut dyn Iterator<Item = (usize, bool)>,
+    positions: &mut [(usize, bool)],
+) -> usize {
+    let mut length = 0;
+    for (target, value) in positions.iter_mut().zip(offsets) {
+        *target = value;
+        length += 1;
     }
-    flow.step(visits, remaining).await
+    length
 }
 
 pub(super) fn bind_columns<'a>(
@@ -370,16 +504,71 @@ fn values_equal(columns: &[LocalColumn<'_>], left: usize, right: usize) -> bool 
     columns.iter().all(|column| column.equal(left, right))
 }
 
-/// A plain type-appropriate row hash; only equality matters within a batch,
-/// so it needs none of the canonical framing.
-fn hash_row(columns: &[LocalColumn<'_>], row: usize) -> (u64, usize) {
-    let mut hash = HASH_SEED;
-    let mut bytes = 0;
+async fn hash_block(
+    columns: &[LocalColumn<'_>],
+    positions: &[(usize, bool)],
+    hashes: &mut [(u64, usize)],
+    flow: &mut LocalFlow<'_, '_, '_>,
+) -> Result<()> {
     for column in columns {
-        hash = column.hash(row, hash);
-        bytes += column.bytes(row);
+        column.hash_column(positions, hashes, flow).await?;
     }
-    (hash, bytes)
+    Ok(())
+}
+
+async fn equal_row(
+    columns: &[LocalColumn<'_>],
+    left: usize,
+    (right, width): (usize, usize),
+    flow: &mut LocalFlow<'_, '_, '_>,
+    equal: impl Fn(usize, usize) -> bool,
+) -> Result<bool> {
+    if columns.len() <= COPY_VISITS && width <= COPY_BYTES {
+        if !flow.take(columns.len(), width) {
+            flow.step(columns.len(), width).await?;
+        }
+        let matches = equal(left, right);
+        #[cfg(test)]
+        super::super::typed_key::note(super::super::typed_key::KeyPhase::LocalComparison, width);
+        Ok(matches)
+    } else {
+        equal_columns(columns, left, right, flow).await
+    }
+}
+
+async fn equal_columns(
+    columns: &[LocalColumn<'_>],
+    left: usize,
+    right: usize,
+    flow: &mut LocalFlow<'_, '_, '_>,
+) -> Result<bool> {
+    for column in columns {
+        if !column.equal_cooperatively(left, right, flow).await? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+async fn equal_bytes(left: &[u8], right: &[u8], flow: &mut LocalFlow<'_, '_, '_>) -> Result<bool> {
+    if left.len() != right.len() {
+        return Ok(false);
+    }
+    for (left, right) in left.chunks(COPY_BYTES).zip(right.chunks(COPY_BYTES)) {
+        if !flow.take(0, right.len()) {
+            flow.step(0, right.len()).await?;
+        }
+        let matches = left == right;
+        #[cfg(test)]
+        super::super::typed_key::note(
+            super::super::typed_key::KeyPhase::LocalComparison,
+            right.len(),
+        );
+        if !matches {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn mix(seed: u64, value: u64) -> u64 {
@@ -387,8 +576,10 @@ fn mix(seed: u64, value: u64) -> u64 {
     hash ^ (hash >> 31)
 }
 
-fn hash_bytes(seed: u64, bytes: &[u8]) -> u64 {
-    let mut hash = mix(seed, bytes.len() as u64);
+fn hash_words(seed: u64, bytes: &[u8]) -> u64 {
+    // COPY_BYTES is word aligned, so only the final chunk pads a remainder.
+    const { assert!(COPY_BYTES.is_multiple_of(8)) };
+    let mut hash = seed;
     let mut chunks = bytes.chunks_exact(8);
     for chunk in &mut chunks {
         hash = mix(
@@ -422,6 +613,41 @@ pub(super) enum LocalColumn<'a> {
 }
 
 impl<'a> LocalColumn<'a> {
+    async fn equal_cooperatively(
+        &self,
+        left: usize,
+        right: usize,
+        flow: &mut LocalFlow<'_, '_, '_>,
+    ) -> Result<bool> {
+        if !flow.take(1, 0) {
+            flow.step(1, 0).await?;
+        }
+        match self {
+            Self::Utf8(values) => {
+                equal_bytes(
+                    values.value(left).as_bytes(),
+                    values.value(right).as_bytes(),
+                    flow,
+                )
+                .await
+            }
+            Self::LargeUtf8(values) => {
+                equal_bytes(
+                    values.value(left).as_bytes(),
+                    values.value(right).as_bytes(),
+                    flow,
+                )
+                .await
+            }
+            _ => {
+                if !flow.take(0, 8) {
+                    flow.step(0, 8).await?;
+                }
+                Ok(self.equal(left, right))
+            }
+        }
+    }
+
     fn bind(array: &'a dyn Array) -> Option<Self> {
         Some(match array.data_type() {
             DataType::Boolean => Self::Boolean(array.as_any().downcast_ref()?),
@@ -475,29 +701,82 @@ impl<'a> LocalColumn<'a> {
         Some(Self::I64(values))
     }
 
-    /// A deterministic u64 view of a fixed-width slot's raw bytes; the sign
-    /// reading is irrelevant because only within-batch equality matters.
-    fn word(&self, row: usize) -> u64 {
+    async fn hash_column(
+        &self,
+        positions: &[(usize, bool)],
+        hashes: &mut [(u64, usize)],
+        flow: &mut LocalFlow<'_, '_, '_>,
+    ) -> Result<()> {
         match self {
-            Self::I8(values) => u64::from_ne_bytes(i64::from(values[row]).to_ne_bytes()),
-            Self::I16(values) => u64::from_ne_bytes(i64::from(values[row]).to_ne_bytes()),
-            Self::I32(values) => u64::from_ne_bytes(i64::from(values[row]).to_ne_bytes()),
-            Self::I64(values) => u64::from_ne_bytes(values[row].to_ne_bytes()),
-            Self::U8(values) => u64::from(values[row]),
-            Self::U16(values) => u64::from(values[row]),
-            Self::U32(values) => u64::from(values[row]),
-            Self::U64(values) => values[row],
-            Self::Boolean(_) | Self::Utf8(_) | Self::LargeUtf8(_) => 0,
+            Self::Utf8(values) => {
+                hash_strings(positions, hashes, |row: usize| values.value(row), flow).await?;
+            }
+            Self::LargeUtf8(values) => {
+                hash_strings(positions, hashes, |row: usize| values.value(row), flow).await?;
+            }
+            Self::Boolean(values) => {
+                hash_values(
+                    positions,
+                    hashes,
+                    1,
+                    |row| u64::from(values.value(row)),
+                    flow,
+                )
+                .await?;
+            }
+            _ => self.hash_integer_column(positions, hashes, flow).await?,
         }
+        Ok(())
     }
 
-    fn hash(&self, row: usize, seed: u64) -> u64 {
-        match self {
-            Self::Boolean(values) => mix(seed, u64::from(values.value(row))),
-            Self::Utf8(values) => hash_bytes(seed, values.value(row).as_bytes()),
-            Self::LargeUtf8(values) => hash_bytes(seed, values.value(row).as_bytes()),
-            fixed => mix(seed, fixed.word(row)),
+    async fn hash_integer_column(
+        &self,
+        positions: &[(usize, bool)],
+        hashes: &mut [(u64, usize)],
+        flow: &mut LocalFlow<'_, '_, '_>,
+    ) -> Result<()> {
+        macro_rules! column {
+            ($width:expr, $word:expr) => {
+                hash_values(positions, hashes, $width, $word, flow).await?
+            };
         }
+        match self {
+            Self::I8(values) => column!(1, |row: usize| u64::from_ne_bytes(
+                i64::from(values[row]).to_ne_bytes()
+            )),
+            Self::I16(values) => column!(2, |row: usize| u64::from_ne_bytes(
+                i64::from(values[row]).to_ne_bytes()
+            )),
+            Self::I32(values) => column!(4, |row: usize| u64::from_ne_bytes(
+                i64::from(values[row]).to_ne_bytes()
+            )),
+            Self::I64(values) => column!(8, |row: usize| u64::from_ne_bytes(
+                values[row].to_ne_bytes()
+            )),
+            _ => self.hash_unsigned_column(positions, hashes, flow).await?,
+        }
+        Ok(())
+    }
+
+    async fn hash_unsigned_column(
+        &self,
+        positions: &[(usize, bool)],
+        hashes: &mut [(u64, usize)],
+        flow: &mut LocalFlow<'_, '_, '_>,
+    ) -> Result<()> {
+        macro_rules! column {
+            ($width:expr, $word:expr) => {
+                hash_values(positions, hashes, $width, $word, flow).await?
+            };
+        }
+        match self {
+            Self::U8(values) => column!(1, |row: usize| u64::from(values[row])),
+            Self::U16(values) => column!(2, |row: usize| u64::from(values[row])),
+            Self::U32(values) => column!(4, |row: usize| u64::from(values[row])),
+            Self::U64(values) => column!(8, |row: usize| values[row]),
+            _ => unreachable!("other key types dispatch before unsigned columns"),
+        }
+        Ok(())
     }
 
     fn equal(&self, left: usize, right: usize) -> bool {
@@ -515,19 +794,55 @@ impl<'a> LocalColumn<'a> {
             Self::LargeUtf8(values) => values.value(left) == values.value(right),
         }
     }
-
-    fn bytes(&self, row: usize) -> usize {
-        match self {
-            Self::Utf8(values) => values.value(row).len(),
-            Self::LargeUtf8(values) => values.value(row).len(),
-            Self::Boolean(_) | Self::I8(_) | Self::U8(_) => 1,
-            Self::I16(_) | Self::U16(_) => 2,
-            Self::I32(_) | Self::U32(_) => 4,
-            Self::I64(_) | Self::U64(_) => 8,
-        }
-    }
 }
 
 fn primitive<T: ArrowPrimitiveType>(array: &dyn Array) -> Option<&[T::Native]> {
     Some(array.as_any().downcast_ref::<PrimitiveArray<T>>()?.values())
+}
+
+async fn hash_values(
+    positions: &[(usize, bool)],
+    hashes: &mut [(u64, usize)],
+    width: usize,
+    word: impl Fn(usize) -> u64,
+    flow: &mut LocalFlow<'_, '_, '_>,
+) -> Result<()> {
+    if !flow.take(positions.len(), positions.len() * width) {
+        flow.step(positions.len(), positions.len() * width).await?;
+    }
+    for (&(row, _), (hash, bytes)) in positions.iter().zip(hashes) {
+        *hash = mix(*hash, word(row));
+        *bytes += width;
+        #[cfg(test)]
+        super::super::typed_key::note(super::super::typed_key::KeyPhase::LocalHash, width);
+    }
+    Ok(())
+}
+
+async fn hash_strings<'a>(
+    positions: &[(usize, bool)],
+    hashes: &mut [(u64, usize)],
+    value: impl Fn(usize) -> &'a str,
+    flow: &mut LocalFlow<'_, '_, '_>,
+) -> Result<()> {
+    for (&(row, _), (hash, bytes)) in positions.iter().zip(hashes) {
+        if !flow.take(1, 0) {
+            flow.step(1, 0).await?;
+        }
+        let value = value(row).as_bytes();
+        *hash = mix(*hash, value.len() as u64);
+        for chunk in value.chunks(COPY_BYTES) {
+            if !flow.take(0, chunk.len()) {
+                flow.step(0, chunk.len()).await?;
+            }
+            *hash = hash_words(*hash, chunk);
+            #[cfg(test)]
+            super::super::typed_key::note(
+                super::super::typed_key::KeyPhase::LocalHash,
+                chunk.len(),
+            );
+        }
+        *bytes += value.len();
+    }
+    Ok(())
 }

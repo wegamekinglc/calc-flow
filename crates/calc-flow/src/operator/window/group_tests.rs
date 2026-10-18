@@ -287,3 +287,59 @@ fn repeated_string_groups_do_not_allocate_owned_scalars() {
         }
     }
 }
+
+#[tokio::test]
+async fn existing_string_groups_share_values_across_batches_and_close() {
+    let long = "group\0".repeat(1024);
+    for large in [false, true] {
+        let record = string_record(large, vec![0; 2], vec![Some(&long), None]);
+        let mut operator =
+            WindowAggregateOperator::new("window", record.schema(), spec(true)).unwrap();
+        let job = crate::StreamJobContext::new(
+            1,
+            "shared-window-groups",
+            JsonMap::new(),
+            None,
+            crate::CancellationToken::new(),
+        );
+        let context = StreamOperatorContext::new(&job, "window", None);
+        let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+        let batch = Batch::table(vec![record], crate::BatchMetadata::default()).unwrap();
+        operator
+            .process_data("input", batch.clone(), &context, &mut output)
+            .await
+            .unwrap();
+        // Keep the first batch alive so address equality proves shared ownership.
+        let original = operator.state.accumulators.clone();
+        operator.checkpoint(crate::Epoch::INITIAL).unwrap();
+        for _ in 0..3 {
+            operator
+                .process_data("input", batch.clone(), &context, &mut output)
+                .await
+                .unwrap();
+            for (key, entry) in &operator.state.accumulators {
+                assert_eq!(
+                    entry.group_values.as_ptr(),
+                    original[key].group_values.as_ptr()
+                );
+                assert!(matches!(
+                    entry.aggregates.as_slice(),
+                    [AccumulatorValue::SignedSum(Some(_))]
+                ));
+            }
+        }
+        operator
+            .on_watermark(EventTime::from_micros(10), &context, &mut output)
+            .await
+            .unwrap();
+        assert!(operator.state.accumulators.is_empty());
+        assert_eq!(operator.state.checkpoint_marks.len(), 2);
+        for (key, mark) in &operator.state.checkpoint_marks {
+            assert_eq!(
+                mark.closed_group_values.as_ref().unwrap().as_ptr(),
+                original[key].group_values.as_ptr()
+            );
+        }
+        assert_eq!(output.drain("output")[0].as_data().unwrap().num_rows(), 2);
+    }
+}

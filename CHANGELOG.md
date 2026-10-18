@@ -9,6 +9,12 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-18: Share Window group values across batches and checkpoint marks.
+  Bind Join incoming metadata by segment, append admission blocks, and hash
+  typed key columns in bounded scratch. Prepare native retained chunks without
+  a whole-batch row-descriptor vector, share distinct chunk keys, and route
+  native index append per distinct key. Restore native Join histories directly
+  into chunks while preserving legacy migration and existing checkpoint formats.
 - 2026-10-18: Apply post-merge review follow-ups to the Join performance
   work. Drop the batch-local key interning table when preparation ends
   instead of holding it and its credit until commit, and budget its hash

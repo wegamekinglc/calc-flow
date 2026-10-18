@@ -35,8 +35,9 @@ async fn test_columnar_charge_nullable_fixed_columns_skip_scalar_cells() {
         .unwrap();
     assert_eq!(
         prepared
-            .retained
-            .iter()
+            .chunks
+            .indexed()
+            .map(|(_, row)| row)
             .map(|row| row.charge)
             .collect::<Vec<_>>(),
         expected
@@ -68,8 +69,9 @@ async fn assert_oracle(payloads: &[ArrayRef]) -> JoinWork {
         last_work = join_work();
         assert_eq!(
             prepared
-                .retained
-                .iter()
+                .chunks
+                .indexed()
+                .map(|(_, row)| row)
                 .map(|row| row.charge)
                 .collect::<Vec<_>>(),
             expected,
@@ -78,8 +80,9 @@ async fn assert_oracle(payloads: &[ArrayRef]) -> JoinWork {
         );
         assert_eq!(
             prepared
-                .retained
-                .iter()
+                .chunks
+                .indexed()
+                .map(|(_, row)| row)
                 .map(|row| row.row_id)
                 .collect::<Vec<_>>(),
             (0..67).collect::<Vec<_>>()
@@ -157,13 +160,14 @@ async fn test_columnar_charge_sparse_null_late_and_retention_coordinates() {
         .collect::<Vec<_>>();
     assert_eq!(
         prepared
-            .retained
-            .iter()
+            .chunks
+            .indexed()
+            .map(|(_, row)| row)
             .map(|row| usize::try_from(row.row_id).unwrap())
             .collect::<Vec<_>>(),
         retained
     );
-    for row in &prepared.retained {
+    for row in (&prepared.chunks as &dyn Rows).iter() {
         assert_eq!(
             row.charge,
             state_row_charge(
@@ -206,7 +210,7 @@ async fn test_columnar_charge_empty_and_all_rejected_skip_payloads() {
             .prepare_batch("left", &input, &context)
             .await
             .unwrap();
-        assert!(prepared.retained.is_empty());
+        assert!(prepared.chunks.is_empty());
         assert_eq!(join_work().charge_column_resolutions, 0);
         assert_eq!(join_work().scalar_charge_cells, 0);
     }
@@ -242,7 +246,7 @@ async fn test_columnar_charge_unsupported_dictionary_keeps_v1_error_and_null_pat
         .await
         .unwrap();
     assert_eq!(
-        prepared.retained[0].charge,
+        prepared.chunks.charge(0),
         state_row_charge(&source, 1, &[0], "match").unwrap()
     );
 }

@@ -19,6 +19,39 @@ impl StreamJoinOperator {
         if self.payload_projection.is_none() {
             return Ok(());
         }
+        self.project_admitted_payloads(admitted, side, context)
+            .await?;
+        let mut quantum = Quantum::default();
+        let mut selected = retained.iter_mut();
+        for group in (&*admitted as &dyn AdmittedRows).groups() {
+            for start in (0..group.len()).step_by(64) {
+                let end = (start + 64).min(group.len());
+                let mut bits = group.retained_bits(start, end - start);
+                while bits != 0 {
+                    let index = start + bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    quantum.step(context, 8, 0).await?;
+                    let source = group.row(index);
+                    let row = selected
+                        .next()
+                        .expect("retained rows preserve admission order");
+                    debug_assert_eq!(row.row_id, source.row_id);
+                    row.record = source.record.owned();
+                }
+            }
+        }
+        context.check_cancelled()
+    }
+
+    pub(in crate::operator::join) async fn project_admitted_payloads(
+        &mut self,
+        admitted: &mut AdmittedBatch,
+        side: usize,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<()> {
+        if self.payload_projection.is_none() {
+            return Ok(());
+        }
         let mut quantum = Quantum::default();
         let records = admitted.record_count();
         for index in 0..records {
@@ -39,24 +72,6 @@ impl StreamJoinOperator {
                 let record = self.project_payload(group.row(0).record, side)?;
                 quantum.step(context, 1, 0).await?;
                 admitted.replace_view(index, Arc::new(record));
-            }
-        }
-        let mut selected = retained.iter_mut();
-        for group in (&*admitted as &dyn AdmittedRows).groups() {
-            for start in (0..group.len()).step_by(64) {
-                let end = (start + 64).min(group.len());
-                let mut bits = group.retained_bits(start, end - start);
-                while bits != 0 {
-                    let index = start + bits.trailing_zeros() as usize;
-                    bits &= bits - 1;
-                    quantum.step(context, 8, 0).await?;
-                    let source = group.row(index);
-                    let row = selected
-                        .next()
-                        .expect("retained rows preserve admission order");
-                    debug_assert_eq!(row.row_id, source.row_id);
-                    row.record = source.record.owned();
-                }
             }
         }
         context.check_cancelled()

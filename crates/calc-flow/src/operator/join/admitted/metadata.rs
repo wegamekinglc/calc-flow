@@ -40,6 +40,26 @@ impl<T: Copy + Default, const N: usize> Values<T, N> {
             }
         }
     }
+    pub(super) fn extend(&mut self, values: impl ExactSizeIterator<Item = T>) {
+        match self {
+            Self::Inline {
+                values: target,
+                len,
+            } => {
+                for value in values {
+                    target[*len] = value;
+                    *len += 1;
+                }
+            }
+            Self::Heap(target) => {
+                assert!(
+                    values.len() <= target.capacity() - target.len(),
+                    "prepaid admission capacity"
+                );
+                target.extend(values);
+            }
+        }
+    }
     pub(super) fn get(&self, index: usize) -> T {
         match self {
             Self::Inline { values, len } => {
@@ -102,6 +122,26 @@ impl RetainBits {
                 .set(index, self.words.get(index) | (1_u64 << offset));
         }
         self.len += 1;
+    }
+    pub(super) fn extend_bits(&mut self, bits: u64, length: usize) {
+        debug_assert!(length <= 64);
+        if length == 0 {
+            return;
+        }
+        let offset = self.len % 64;
+        if offset == 0 {
+            self.words.push(bits & low_bits(length));
+        } else {
+            let index = self.len / 64;
+            self.words.set(
+                index,
+                self.words.get(index) | ((bits & low_bits(length)) << offset),
+            );
+            if offset + length > 64 {
+                self.words.push(bits >> (64 - offset));
+            }
+        }
+        self.len += length;
     }
     pub(super) fn get(&self, index: usize) -> bool {
         assert!(index < self.len);

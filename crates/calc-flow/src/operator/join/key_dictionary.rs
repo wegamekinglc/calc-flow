@@ -535,7 +535,7 @@ impl Dictionary {
 
     pub(super) async fn validate_known_references(
         &mut self,
-        rows: &[super::StoredRow],
+        rows: &dyn super::retained::Rows,
         context: &crate::StreamOperatorContext<'_>,
         name: &str,
     ) -> Result<()> {
@@ -544,16 +544,16 @@ impl Dictionary {
             dictionary: self,
             head: None,
         };
-        for row in rows {
+        for index in rows.references() {
             flow.step(1, 0).await?;
-            guard.add(&row.encoded_key, name)?;
+            guard.add(rows.key(index), name)?;
         }
         Ok(())
     }
 
-    pub(super) fn commit_known_references(&mut self, rows: &[super::StoredRow]) {
-        for row in rows {
-            if let Some(lease) = self.lease(&row.encoded_key) {
+    pub(super) fn commit_known_references(&mut self, rows: &dyn super::retained::Rows) {
+        for index in rows.references() {
+            if let Some(lease) = self.lease(rows.key(index)) {
                 let entry = self.slots[lease.address().slot() as usize]
                     .as_mut()
                     .unwrap();
@@ -1338,11 +1338,11 @@ fn base_scratch_bytes(rows: usize, columns: usize) -> Option<usize> {
 
 /// Batch-local interning budget: per row, a plain and a canonical hash, a
 /// representative offset, six u32 lanes, the change order and the local
-/// plan, plus the interning table's buckets and control bytes. The table
-/// rounds its bucket count up to a power of two above 8/7 of the rows at
-/// five bytes a bucket, so its worst case is 12 bytes per row plus a fixed
-/// header allowance.
+/// plan, plus the interning table's slots. Four-byte slots round up to a power
+/// of two at least 8/7 of the rows. Keep the existing conservative 12-byte
+/// per-row table allowance and fixed header, including on optional refusal.
 pub(super) fn local_table_bytes(rows: usize) -> Option<usize> {
+    local::slot_count(rows)?;
     rows.checked_mul(
         2 * size_of::<u64>()
             + size_of::<usize>()

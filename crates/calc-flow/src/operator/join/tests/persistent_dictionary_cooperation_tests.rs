@@ -3,6 +3,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[tokio::test]
 async fn test_persistent_dictionary_long_single_value_stops_before_canonical_frame() {
+    for phase in [typed_key::KeyPhase::LocalHash, typed_key::KeyPhase::Hash] {
+        assert_long_single_value_stops_before_canonical_frame(phase).await;
+    }
+}
+
+async fn assert_long_single_value_stops_before_canonical_frame(stop_phase: typed_key::KeyPhase) {
     let schema = |source: SchemaRef| {
         Arc::new(Schema::new(
             source
@@ -38,7 +44,7 @@ async fn test_persistent_dictionary_long_single_value_stops_before_canonical_fra
     let cancellation = CancellationToken::new();
     let token = cancellation.clone();
     let hook = typed_key::observe(Arc::new(move |phase, bytes| {
-        if phase == typed_key::KeyPhase::Hash && bytes == 4096 {
+        if phase == stop_phase && bytes == 4096 {
             token.cancel();
         }
     }));
