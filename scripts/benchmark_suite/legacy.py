@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 from scripts.benchmark_suite.catalog import CONTRACT
+from scripts.benchmark_suite.dependency_migrations import dependency_migration_problem
 from scripts.benchmark_suite.identity import IDENTITIES, validate_component
 from scripts.benchmark_suite.normalize import pytest_rows, read_json
 from scripts.benchmark_suite.process import ROOT, child_environment, command, install
@@ -141,7 +142,7 @@ def _block_row(shard: dict, name: str, descriptor: dict, blocks: dict) -> dict:
                 }
             ),
         }
-    problem = block_problem(name, blocks)
+    problem = block_problem(name, blocks, rust=shard["family"] == "rust")
     if problem:
         return {**row, "status": "error", "error": problem}
     row = {
@@ -164,22 +165,31 @@ def _missing_block(name: str, blocks: dict) -> bool:
     )
 
 
-def block_problem(name: str, blocks: dict) -> str | None:
+def block_problem(name: str, blocks: dict, *, rust: bool = False) -> str | None:
     if _missing_block(name, blocks):
         return "benchmark missing from a base/head confirmation block"
     rows = [block[name] for values in blocks.values() for block in values]
     for key in ("rows", "scope"):
         if any(row[key] != rows[0][key] for row in rows):
             return f"benchmark {key} changed; no timing classification"
-    return _fingerprint_problem([row["metadata"] for row in rows])
+    return _fingerprint_problem(
+        [row["metadata"] for row in rows],
+        rust_blocks=(name, blocks) if rust else None,
+    )
 
 
-def _fingerprint_problem(metadata: list[dict]) -> str | None:
+def _fingerprint_problem(
+    metadata: list[dict], *, rust_blocks: tuple[str, dict] | None = None
+) -> str | None:
     problem = _raw_identity_problem(metadata) or _required_fingerprints_problem(
         metadata
     )
     if problem:
         return problem
+    if rust_blocks is not None:
+        problem = dependency_migration_problem(*rust_blocks)
+        if problem:
+            return problem
     for key in (
         "machine_fingerprint",
         "dependency_fingerprint",
@@ -187,6 +197,8 @@ def _fingerprint_problem(metadata: list[dict]) -> str | None:
         "benchmark_source_sha256",
         "benchmark_support_sha256",
     ):
+        if key == "dependency_fingerprint" and rust_blocks is not None:
+            continue
         if any(row.get(key) != metadata[0].get(key) for row in metadata):
             return f"benchmark {key} changed; no timing classification"
     return None

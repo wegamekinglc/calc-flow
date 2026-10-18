@@ -66,6 +66,7 @@ jobs:
           scripts.test_benchmark_rust_harness
           scripts.test_benchmark_rust_provenance
           scripts.test_benchmark_rust_migrations
+          scripts.test_benchmark_dependency_migrations
           scripts.test_benchmark_worker
           scripts.test_benchmark_pytest
       - name: Test benchmark and performance support scripts

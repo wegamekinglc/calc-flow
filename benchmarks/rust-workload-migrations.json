@@ -9,6 +9,13 @@
       "reference": "DAL-384 / Rust job 117719606184; ca3de78c and PR #446"
     },
     {
+      "target": "sql_datafusion_performance",
+      "baseline_sha256": "857973f8cccd66996cbddae7617c8d7bef9a58676684580d17e2c437f71f35a6",
+      "candidate_sha256": "edeac3050279be916529bcddb23e039afba1be2afd3bfaf005cc1b973c86083b",
+      "reason": "Version-reporting metadata only: replace the DataFusion 54.0.0 / Arrow 58.3.0 literals with the linked crate version constants. The exact diff changes only these two constants; matched-adaptive fixtures, query declarations, correctness checks and timing boundaries are unchanged. The release comparison intentionally includes the real dependency upgrade.",
+      "reference": "DAL-384 / PR #481; Rust job 117764158200"
+    },
+    {
       "target": "stream_join_perf",
       "baseline_sha256": "718d6aacdab004ed0e06ecf4f66d7e7e25896ff8c0d2acf3b5a34525e77084e6",
       "candidate_sha256": "0aa67fed5b67f03fb84fbf688749a2263edd253d160ab8d01d06bec332a5fb95",
