@@ -35,7 +35,7 @@ pages explain how the implementation provides those behaviors.
 
 ## 3. API references
 
-1. [API reference](api-reference.md): public surfaces, HTTP routes, errors,
+1. [API reference](api-reference.md): public surfaces, errors,
    and package/protocol versions.
 2. [Python API](python-api.md): `compute`, SQL, `pipe`, named table expressions,
    `Program`, collection, streams, and advanced execution/provider/runner contracts.

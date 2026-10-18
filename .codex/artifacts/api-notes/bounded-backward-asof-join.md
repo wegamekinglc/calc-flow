@@ -51,7 +51,7 @@ Relevant existing surfaces are [Rust exports](../../../crates/calc-flow/src/lib.
 [advanced builder](../../../python/calc_flow/pipeline.py),
 [native stub](../../../python/calc_flow/_native.pyi),
 [stream input ownership](../../../python/calc_flow/_stream_inputs.py),
-[OpenAPI](../../../web-ui/openapi.json), and the existing
+[OpenAPI snapshot](https://github.com/wegamekinglc/calc-flow/blob/e4302f4101f609c8a58ce191beef32bf909519ed/web-ui/openapi.json), and the existing
 [inner Join example](../../../examples/12_symbolic_stream_join.py).
 
 ## Proposed Surface

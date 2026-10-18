@@ -75,11 +75,14 @@ python reviewer_guards.py > reviewer-v2-proof.log 2>&1
 ```
 
 Actual exit 0, tool chunk `64a43b`; raw output read in chunk `3f31b8`:
-**7 tests passed in 0.070 seconds**. The
-[reviewer proof](../../../target/issue363-asof-columnar-admission-perf/reviewer-v2-proof/reviewer_guards.py)
+**7 tests passed in 0.070 seconds**. These runtime-local files are absent from
+this checkout; their recorded paths and hashes identify the original evidence.
+The reviewer proof
+(`target/issue363-asof-columnar-admission-perf/reviewer-v2-proof/reviewer_guards.py`)
 has SHA-256
 `72baeaa0c39cdb5287059dd86fd51ec58f1b1cd4602be487c42f0944385e4900`;
-the [raw log](../../../target/issue363-asof-columnar-admission-perf/reviewer-v2-proof/reviewer-v2-proof.log)
+the raw log
+(`target/issue363-asof-columnar-admission-perf/reviewer-v2-proof/reviewer-v2-proof.log`)
 has SHA-256
 `855b2cf48f3827eb7c44cfb442ea685e5d99de0667886ea7f31626c45f11fbd3`.
 Synthetic fixture helpers construct evidence only; they are not compiler

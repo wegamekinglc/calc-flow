@@ -971,8 +971,10 @@ Matching, duplicate-row behavior, and deterministic output order are preserved.
 
 Preflight computes and caches row costs only for distinct indices referenced
 by matched pairs, for both flat and nested payloads. Unmatched retained rows
-are not scanned for these costs. For flat columns, row costs and
-validity-bitmap charges avoid building the complete output. Nested and
+are not scanned for these costs. Eligible selections of fixed-width columns
+with null-free source arrays and a constant per-side row cost derive chunk
+lengths from the row and byte budgets. Other flat shapes use per-pair row costs
+and validity-bitmap charges without building the complete output. Nested and
 dictionary payloads require actual candidate-range materialization: an
 over-budget range is split in half and checked again. Each trial allocation
 is released before the next trial;
@@ -999,8 +1001,12 @@ allocations, the current output chunk, and chunks held by edges or sinks.
 Funded native matching shares persistent key identities across batches and both
 inputs through one dictionary per Join operator. Keys used only for probing
 create no persistent entries. Each retained row keeps its full V1 logical
-charge. Two binary searches
-bound each inclusive time window before match materialization. Batch admission
+charge. On the serial native path, the counting pass caches each row's inclusive
+time-window bounds for the fill pass. Worker count and fill phases maintain
+separate per-key cursors in each work unit and recompute bounds during fill;
+fused gather uses the same fill path. Within each cursor's lifetime, consecutive
+forward windows reuse its position; the first window and windows that move
+backward use binary searches. Batch admission
 masks preserve null and late-drop rules. Native index capacity remains funded
 until its storage is released, including capacity retained after eviction.
 
