@@ -114,8 +114,13 @@ async fn assert_probe_encodes_contiguous_frames_without_per_row_type_resolution(
         keys = operator.native_probe_keys(&plan, &bundle.admitted).unwrap();
     });
     let keys = keys.unwrap();
+    // The batch-local interning scratch is prepaid per row and deliberately
+    // released when preparation ends, so it is the one allowed transient;
+    // everything beyond per-distinct frames must stay live.
+    let interning_scratch = u64::try_from(key_dictionary::local_table_bytes(129).unwrap()).unwrap();
     assert!(
-        allocations.bytes_max - u64::try_from(allocations.bytes_current).unwrap() <= 1024,
+        allocations.bytes_max - u64::try_from(allocations.bytes_current).unwrap()
+            <= interning_scratch + 1024,
         "repeated keys reuse one row buffer without retaining N frames and offsets: {allocations:?}"
     );
     assert_eq!(join_work().borrowed_key_hashes, 0);

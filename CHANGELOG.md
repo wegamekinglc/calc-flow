@@ -9,6 +9,18 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-18: Apply post-merge review follow-ups to the Join performance
+  work. Drop the batch-local key interning table when preparation ends
+  instead of holding it and its credit until commit, and budget its hash
+  table's power-of-two bucket growth. Retire keys aggregated by bulk
+  eviction in deterministic first-appearance plan order rather than HashMap
+  iteration order, keeping slot recycling reproducible. Right-size Join
+  checkpoint tombstone lists and their expiration credit at each capture
+  drain so a whole-side flush no longer stays resident for the operator's
+  lifetime. Compute each row's small-key identity once and share it across
+  hashing, dictionary walks and candidate comparisons on the per-row path.
+  Also remove a changelog rebase artifact and a duplicated cfg(test)
+  attribute. Checkpoint formats and observable behavior are unchanged.
 - 2026-10-18: Admit Join rows through retain bitmaps, zero-copy views and
   batch-local key interning. Groups whose rows are all expired are skipped
   wholesale in retained-row assembly, charging and payload projection (the
@@ -132,7 +144,6 @@ measurements. Use the current guides for supported behavior.
   invalid v2 clock metadata, retaining historical evidence and CPU thresholds.
   Seal the benchmark-only optional dependency in the common overlay and lock.
   This repairs measurement precision; it adds no performance acceptance result.
-76580c (fix: anchor scheduled benchmark baselines at the latest release)
 
 - 2026-10-16: Add an explicit milestone source policy for separately sealed
   original build and execution tools, with unchanged compiled inputs/recipes,

@@ -3175,12 +3175,28 @@ impl Tombstones {
         note_join_work(|work| work.tombstone_peak = work.tombstone_peak.max(self.len()));
     }
 
-    /// Drains every entry at a capture while keeping the peak capacity and
-    /// its credit resident (spec FR8).
+    /// Drains every entry at a capture, right-sizing the columns and the
+    /// expiration credit to the drained run (spec FR8 keeps reservation
+    /// before mutation). Holding the drained run's power-of-two capacity
+    /// preserves steady-state reuse across captures, while releasing the
+    /// capacity a whole-side flush spiked to instead of keeping it resident
+    /// for the operator's lifetime.
     fn drain(&mut self) {
-        self.row_ids.clear();
-        self.times.clear();
-        self.keys.clear();
+        let target = self.len().max(4).next_power_of_two();
+        if self.charged > target {
+            self.row_ids = Vec::with_capacity(target);
+            self.times = Vec::with_capacity(target);
+            self.keys = Vec::with_capacity(target);
+            if let Some(credit) = self.credit.as_ref() {
+                let bytes = (self.charged - target).saturating_mul(3 * size_of::<u64>());
+                credit.shrink(bytes);
+            }
+            self.charged = target;
+        } else {
+            self.row_ids.clear();
+            self.times.clear();
+            self.keys.clear();
+        }
     }
 
     fn entry(&self, index: usize) -> (u64, EventTime, &Arc<columnar::FramedKey>) {
@@ -3342,7 +3358,6 @@ impl RetainedRows {
         (**self).commit(chunks);
     }
 
-    #[cfg(test)]
     #[cfg(test)]
     fn remove_bound(&mut self, index: usize, bindings: &key_dictionary::SideBindings) -> StoredRow {
         let row = (**self).remove(index);
@@ -7351,15 +7366,23 @@ fn apply_eviction_plan(
 ) -> Result<()> {
     // Aggregated retirement resolves each entry's canonical interned key,
     // exactly as per-row removal did, so the dictionary and the native index
-    // decrement once per key (spec FR13).
-    let mut per_key: HashMap<*const columnar::FramedKey, (Arc<columnar::FramedKey>, u64)> =
+    // decrement once per key (spec FR13). Keys retire in first-appearance
+    // plan order, so slot recycling stays deterministic run to run instead
+    // of following HashMap iteration order.
+    let mut per_key: Vec<(Arc<columnar::FramedKey>, u64)> = Vec::new();
+    let mut per_key_index: HashMap<*const columnar::FramedKey, usize> =
         HashMap::with_capacity(plan.entries.len().min(64));
     for entry in &plan.entries {
         let canonical = retirement.bindings.canonical_key(entry.row_id, &entry.key);
-        let aggregate = per_key
-            .entry(Arc::as_ptr(canonical))
-            .or_insert_with(|| (Arc::clone(canonical), 0));
-        aggregate.1 += 1;
+        match per_key_index.entry(Arc::as_ptr(canonical)) {
+            std::collections::hash_map::Entry::Occupied(index) => {
+                per_key[*index.get()].1 += 1;
+            }
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(per_key.len());
+                per_key.push((Arc::clone(canonical), 1));
+            }
+        }
     }
     expirations.apply_cuts(&plan.cuts, &*rows, expired);
     let mut coordinates = BTreeMap::new();
@@ -7375,7 +7398,7 @@ fn apply_eviction_plan(
         .as_mut()
         .map(|native| Arc::get_mut(native).expect("native probe released before eviction"))
     {
-        for (key, count) in per_key.values() {
+        for (key, count) in &per_key {
             native.truncate_key(
                 key,
                 *count,
@@ -7392,7 +7415,7 @@ fn apply_eviction_plan(
     for entry in &plan.entries {
         retirement.bindings.remove(entry.row_id);
     }
-    for (key, count) in per_key.values() {
+    for (key, count) in &per_key {
         retirement.retire_n(key, *count, operator_id)?;
     }
     Ok(())
