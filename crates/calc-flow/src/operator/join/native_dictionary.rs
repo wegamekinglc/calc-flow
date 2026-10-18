@@ -1,6 +1,7 @@
+#[cfg(test)]
+use super::StoredRow;
 use super::retained::Rows;
 use super::{
-    StoredRow,
     columnar::FramedKey,
     key_dictionary::{Dictionary, Lease, SideBindings},
 };
@@ -288,6 +289,7 @@ impl NativeIndex {
             .store(self.resident_bytes(), Ordering::Relaxed);
     }
 
+    #[cfg(test)]
     fn append_entry(
         &mut self,
         index: usize,
@@ -320,20 +322,42 @@ impl NativeIndex {
         self.run_backing_bytes += (run.rows.capacity() - old_capacity) * size_of::<RunEntry>();
     }
 
-    pub(super) fn append_identified_indices(
+    pub(super) fn append_prepared_indices(
         &mut self,
-        indices: &[usize],
-        rows: &[StoredRow],
+        rows: &super::retained::Append,
         dictionary: &Dictionary,
     ) {
-        for (&index, row) in indices.iter().zip(rows) {
-            self.append_entry(index, row, &row.encoded_key, |key| {
-                Some(
-                    dictionary
-                        .lease(key)
-                        .expect("committed live canonical identity"),
-                )
-            });
+        use super::retained::Rows;
+        for batch in rows.batches() {
+            let mut routes = [0; super::retained::CHUNK_ROWS];
+            for (slot, key) in batch.distinct_keys() {
+                let hash = Self::hash(key);
+                routes[slot] = self.find(hash, key).unwrap_or_else(|| {
+                    self.insert_key(
+                        hash,
+                        key,
+                        Some(
+                            dictionary
+                                .lease(key)
+                                .expect("committed live canonical identity"),
+                        ),
+                    )
+                });
+            }
+            for ordinal in batch.references() {
+                let (time, row_id) = batch.identity(ordinal);
+                let run = self.slots[routes[batch.key_slot(ordinal)] as usize]
+                    .as_mut()
+                    .expect("live key ID");
+                let old_capacity = run.rows.capacity();
+                run.insert(RunEntry {
+                    time,
+                    row_id,
+                    dense: rows.indices[ordinal],
+                });
+                self.run_backing_bytes +=
+                    (run.rows.capacity() - old_capacity) * size_of::<RunEntry>();
+            }
         }
         self.rows += rows.len();
         self.funding

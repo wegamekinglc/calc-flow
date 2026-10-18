@@ -95,6 +95,46 @@ impl Segments {
     }
 }
 
+/// One bound segment, shared by all row/selection reads in a group.
+#[derive(Clone, Copy)]
+pub(super) struct GroupView<'a> {
+    batch: &'a AdmittedBatch,
+    segment: &'a Segment,
+}
+impl<'a> GroupView<'a> {
+    fn contains(self, position: usize) -> bool {
+        self.segment.range.contains(&position)
+    }
+    fn source_index(self, position: usize) -> usize {
+        self.segment.source_base + self.batch.physical(self.segment, position)
+    }
+    fn row(self, position: usize) -> AdmittedRef<'a> {
+        let physical = self.batch.physical(self.segment, position);
+        let offset = self
+            .segment
+            .payload_base
+            .map_or(physical, |base| base + position - self.segment.range.start);
+        let record = match &self.segment.payload {
+            Some(payload) => PayloadRef::Payload(payload, offset),
+            None => PayloadRef::Record(
+                &self
+                    .batch
+                    .table
+                    .as_ref()
+                    .expect("borrowed admission table")
+                    .batches()[self.segment.record],
+                offset,
+            ),
+        };
+        AdmittedRef {
+            record,
+            row_id: self.segment.row_id_base + physical as u64,
+            event_time: EventTime::from_micros(self.batch.times.get(position)),
+            retain: self.batch.retained.get(position),
+        }
+    }
+}
+
 pub(super) struct AdmittedBatch {
     table: Option<TableBatch>,
     segments: Segments,
@@ -236,6 +276,38 @@ impl AdmittedBatch {
         self.len += 1;
     }
 
+    pub(super) fn push_block(
+        &mut self,
+        index: usize,
+        start: usize,
+        offsets: Range<usize>,
+        masks: &super::admission_masks::AdmissionMasks,
+    ) {
+        let segment = self.segments.get_mut(index);
+        let physical = start + offsets.start;
+        if segment.range.is_empty() {
+            segment.first = physical;
+        }
+        if segment.sparse_start.is_some() {
+            for offset in offsets.clone() {
+                self.indices.push(start + offset);
+            }
+        } else {
+            assert_eq!(
+                physical,
+                segment.first + segment.range.len(),
+                "prepared dense selection"
+            );
+        }
+        let length = offsets.len();
+        segment.range.end += length;
+        self.retained
+            .extend_bits(masks.retained_bits(offsets.clone()), length);
+        self.times
+            .extend(offsets.map(|offset| masks.admitted_time(offset).as_micros()));
+        self.len += length;
+    }
+
     fn segment_index(&self, position: usize) -> usize {
         assert!(position < self.len);
         let mut start = 0;
@@ -261,27 +333,13 @@ impl AdmittedBatch {
     }
 
     pub(super) fn row(&self, position: usize) -> AdmittedRef<'_> {
-        let segment = self.segments.get(self.segment_index(position));
-        let physical = self.physical(segment, position);
-        let offset = segment
-            .payload_base
-            .map_or(physical, |base| base + position - segment.range.start);
-        let record = match &segment.payload {
-            Some(payload) => PayloadRef::Payload(payload, offset),
-            None => PayloadRef::Record(
-                &self
-                    .table
-                    .as_ref()
-                    .expect("borrowed admission table")
-                    .batches()[segment.record],
-                offset,
-            ),
-        };
-        AdmittedRef {
-            record,
-            row_id: segment.row_id_base + physical as u64,
-            event_time: EventTime::from_micros(self.times.get(position)),
-            retain: self.retained.get(position),
+        self.view(position).row(position)
+    }
+
+    fn view(&self, position: usize) -> GroupView<'_> {
+        GroupView {
+            batch: self,
+            segment: self.segments.get(self.segment_index(position)),
         }
     }
 
@@ -494,6 +552,11 @@ impl<'a> PayloadRef<'a> {
         )
         .expect("validated payload position")
     }
+    pub(super) fn mark_live(self, dense: usize) {
+        if let Self::Payload(payload, offset) = self {
+            payload.mark_live_at(offset, dense);
+        }
+    }
     pub(super) fn owned(self) -> RowPayload {
         self.owner()
             .expect("prepared admission parent")
@@ -534,6 +597,9 @@ pub(super) struct AdmittedRef<'a> {
 }
 
 pub(super) trait AdmittedRows: Sync {
+    fn group_view(&self, _position: usize) -> Option<GroupView<'_>> {
+        None
+    }
     fn len(&self) -> usize;
     fn row(&self, index: usize) -> AdmittedRef<'_>;
     fn group_end(&self, start: usize) -> usize;
@@ -563,6 +629,9 @@ pub(super) trait AdmittedRows: Sync {
 }
 
 impl AdmittedRows for AdmittedBatch {
+    fn group_view(&self, position: usize) -> Option<GroupView<'_>> {
+        Some(self.view(position))
+    }
     fn len(&self) -> usize {
         self.len
     }
@@ -625,16 +694,28 @@ impl dyn AdmittedRows + '_ {
 pub(super) struct RowIter<'a> {
     rows: &'a dyn AdmittedRows,
     range: Range<usize>,
+    view: Option<GroupView<'a>>,
 }
 impl<'a> RowIter<'a> {
     fn new(rows: &'a dyn AdmittedRows, range: Range<usize>) -> Self {
-        Self { rows, range }
+        Self {
+            rows,
+            range,
+            view: None,
+        }
+    }
+    fn row(&mut self, position: usize) -> AdmittedRef<'a> {
+        if !self.view.is_some_and(|view| view.contains(position)) {
+            self.view = self.rows.group_view(position);
+        }
+        self.view
+            .map_or_else(|| self.rows.row(position), |view| view.row(position))
     }
 }
 impl<'a> Iterator for RowIter<'a> {
     type Item = AdmittedRef<'a>;
     fn next(&mut self) -> Option<Self::Item> {
-        self.range.next().map(|index| self.rows.row(index))
+        self.range.next().map(|index| self.row(index))
     }
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.range.size_hint()
@@ -643,7 +724,7 @@ impl<'a> Iterator for RowIter<'a> {
 impl ExactSizeIterator for RowIter<'_> {}
 impl DoubleEndedIterator for RowIter<'_> {
     fn next_back(&mut self) -> Option<Self::Item> {
-        self.range.next_back().map(|index| self.rows.row(index))
+        self.range.next_back().map(|index| self.row(index))
     }
 }
 impl<'a> IntoIterator for &'a AdmittedBatch {
@@ -666,6 +747,7 @@ pub(super) struct AdmittedGroup<'a> {
     rows: &'a dyn AdmittedRows,
     start: usize,
     end: usize,
+    view: Option<GroupView<'a>>,
 }
 impl<'a> AdmittedGroup<'a> {
     pub(super) fn new(rows: &'a dyn AdmittedRows, range: Range<usize>) -> Self {
@@ -673,22 +755,45 @@ impl<'a> AdmittedGroup<'a> {
             rows,
             start: range.start,
             end: range.end,
+            view: (!range.is_empty())
+                .then(|| rows.group_view(range.start))
+                .flatten(),
         }
     }
     pub(super) fn len(&self) -> usize {
         self.end - self.start
     }
     pub(super) fn row(&self, index: usize) -> AdmittedRef<'a> {
-        self.rows.row(self.start + index)
+        self.view.map_or_else(
+            || self.rows.row(self.start + index),
+            |view| view.row(self.start + index),
+        )
+    }
+    pub(super) fn source_indices(&self) -> impl Iterator<Item = usize> + '_ {
+        (self.start..self.end).map(|position| {
+            self.view.map_or_else(
+                || self.rows.source_index(position),
+                |view| view.source_index(position),
+            )
+        })
     }
     pub(super) fn iter(&self) -> RowIter<'a> {
-        RowIter::new(self.rows, self.start..self.end)
+        RowIter {
+            rows: self.rows,
+            range: self.start..self.end,
+            view: self.view,
+        }
     }
     pub(super) fn key_offsets(&self) -> Box<dyn Iterator<Item = (usize, bool)> + Send + '_> {
         self.rows.key_offsets(self.start..self.end)
     }
     pub(super) fn block(&self, start: usize, end: usize) -> AdmittedGroup<'a> {
-        AdmittedGroup::new(self.rows, self.start + start..self.start + end)
+        Self {
+            rows: self.rows,
+            start: self.start + start,
+            end: self.start + end,
+            view: self.view,
+        }
     }
     pub(super) fn retained_bits(&self, start: usize, length: usize) -> u64 {
         self.rows.retained_bits(self.start + start, length)
@@ -707,8 +812,17 @@ impl<'a> Iterator for GroupIter<'a> {
         if self.next == self.rows.len() {
             return None;
         }
-        let end = self.rows.group_end(self.next);
-        let group = AdmittedGroup::new(self.rows, self.next..end);
+        let view = self.rows.group_view(self.next);
+        let end = view.map_or_else(
+            || self.rows.group_end(self.next),
+            |view| view.segment.range.end,
+        );
+        let group = AdmittedGroup {
+            rows: self.rows,
+            start: self.next,
+            end,
+            view,
+        };
         self.next = end;
         Some(group)
     }

@@ -1,10 +1,7 @@
 //! Batch-local key interning: one vectorized deduplication pass per group so
 //! repeated keys pay persistent-dictionary resolution once per distinct key.
 
-use super::super::{
-    PayloadRef,
-    columnar::{COPY_BYTES, COPY_VISITS},
-};
+use super::super::{PayloadRef, columnar::COPY_BYTES};
 use super::KeyFlow;
 use crate::Result;
 use datafusion::arrow::array::{
@@ -51,40 +48,6 @@ pub(super) struct LocalIntern {
     pub(super) splits: Vec<u32>,
     pub(super) distinct: usize,
     pub(super) _credit: MemoryReservation,
-}
-
-/// Running cooperative-work totals for one block of interned rows.
-#[derive(Default)]
-struct BlockCharge {
-    visits: usize,
-    bytes: usize,
-}
-
-impl BlockCharge {
-    /// Records one interned row, reporting whether the block boundary was
-    /// reached and the accumulated work must be charged now.
-    fn step(&mut self, row_bytes: usize) -> bool {
-        self.visits += 1;
-        self.bytes += row_bytes;
-        self.visits >= COPY_VISITS || self.bytes >= COPY_BYTES
-    }
-
-    fn reset(&mut self) {
-        self.visits = 0;
-        self.bytes = 0;
-    }
-
-    fn pending(&self) -> bool {
-        self.visits > 0 || self.bytes > 0
-    }
-
-    /// Charges any trailing partial block.
-    async fn flush(&self, flow: &mut KeyFlow<'_, '_>) -> Result<()> {
-        if self.pending() {
-            charge_block(flow, self.visits, self.bytes).await?;
-        }
-        Ok(())
-    }
 }
 
 impl LocalIntern {
@@ -141,16 +104,15 @@ impl LocalIntern {
 
     /// Hashes one row over the bound key columns and interns it, returning
     /// its local distinct index and plain key byte width for cooperation.
-    pub(super) fn intern_row(
+    fn intern_hashed(
         &mut self,
-        columns: &[LocalColumn<'_>],
+        hash: u64,
         offset: usize,
         name: &str,
-    ) -> Result<(u32, usize)> {
-        let (hash, bytes) = hash_row(columns, offset);
+        equal: impl Fn(usize, usize) -> bool,
+    ) -> Result<u32> {
         let existing = self.table.find(hash, |&local| {
-            self.hashes[local as usize] == hash
-                && values_equal(columns, self.rows[local as usize], offset)
+            self.hashes[local as usize] == hash && equal(self.rows[local as usize], offset)
         });
         let local = if let Some(&local) = existing {
             local
@@ -170,7 +132,7 @@ impl LocalIntern {
             table.insert_unique(hash, local, |&local| hashes[local as usize]);
             local
         };
-        Ok((local, bytes))
+        Ok(local)
     }
 
     pub(super) fn note_retained(&mut self, local: u32, ordinal: u32, name: &str) -> Result<()> {
@@ -198,20 +160,93 @@ impl LocalIntern {
         name: &str,
         flow: &mut KeyFlow<'_, '_>,
     ) -> Result<()> {
-        let mut block = BlockCharge::default();
-        for (ordinal, (offset, retain)) in group.key_offsets().enumerate() {
-            let (distinct, row_bytes) = self.intern_row(columns, offset, name)?;
-            self.locals.push(distinct);
-            if retain {
-                let ordinal = u32::try_from(ordinal).expect("group rows fit u32 ordinals");
-                self.note_retained(distinct, ordinal, name)?;
+        // Dispatch a single key's equality once per group, including string
+        // offsets. Composite equality still checks every typed component.
+        macro_rules! primitive {
+            ($values:expr) => {
+                self.intern_blocks(columns, group, name, flow, |left, right| {
+                    $values[left] == $values[right]
+                })
+                .await
+            };
+        }
+        match columns {
+            [LocalColumn::I8(values)] => primitive!(values),
+            [LocalColumn::I16(values)] => primitive!(values),
+            [LocalColumn::I32(values)] => primitive!(values),
+            [LocalColumn::I64(values)] => primitive!(values),
+            [LocalColumn::U8(values)] => primitive!(values),
+            [LocalColumn::U16(values)] => primitive!(values),
+            [LocalColumn::U32(values)] => primitive!(values),
+            [LocalColumn::U64(values)] => primitive!(values),
+            [LocalColumn::Boolean(values)] => {
+                self.intern_blocks(columns, group, name, flow, |left, right| {
+                    values.value(left) == values.value(right)
+                })
+                .await
             }
-            if block.step(row_bytes) {
-                charge_block(flow, block.visits, block.bytes).await?;
-                block.reset();
+            [LocalColumn::Utf8(values)] => {
+                self.intern_blocks(columns, group, name, flow, |left, right| {
+                    values.value(left) == values.value(right)
+                })
+                .await
+            }
+            [LocalColumn::LargeUtf8(values)] => {
+                self.intern_blocks(columns, group, name, flow, |left, right| {
+                    values.value(left) == values.value(right)
+                })
+                .await
+            }
+            _ => {
+                self.intern_blocks(columns, group, name, flow, |left, right| {
+                    values_equal(columns, left, right)
+                })
+                .await
             }
         }
-        block.flush(flow).await?;
+    }
+
+    async fn intern_blocks(
+        &mut self,
+        columns: &[LocalColumn<'_>],
+        group: super::super::admitted::AdmittedGroup<'_>,
+        name: &str,
+        flow: &mut KeyFlow<'_, '_>,
+        equal: impl Fn(usize, usize) -> bool,
+    ) -> Result<()> {
+        let mut offsets = group.key_offsets();
+        // Bounded stack scratch never outlives preparation and adds no per-row
+        // namespace or heap allocation to the existing prepaid local table.
+        let mut positions = [(0, false); 64];
+        let mut hashes = [(0, 0); 64];
+        let mut ordinal = 0;
+        loop {
+            let mut length = 0;
+            for (target, value) in positions.iter_mut().zip(offsets.by_ref()) {
+                *target = value;
+                length += 1;
+            }
+            if length == 0 {
+                break;
+            }
+            hashes[..length].fill((0x243F_6A88_85A3_08D3, 0));
+            for column in columns {
+                column.hash_column(&positions[..length], &mut hashes[..length]);
+            }
+            let mut bytes = 0;
+            for (&(offset, retain), &(hash, width)) in
+                positions[..length].iter().zip(&hashes[..length])
+            {
+                let local = self.intern_hashed(hash, offset, name, &equal)?;
+                self.locals.push(local);
+                if retain {
+                    self.note_retained(local, ordinal, name)?;
+                }
+                ordinal += 1;
+                bytes += width;
+            }
+            charge_block(flow, length, bytes).await?;
+        }
         Ok(())
     }
 
@@ -308,18 +343,6 @@ fn values_equal(columns: &[LocalColumn<'_>], left: usize, right: usize) -> bool 
     columns.iter().all(|column| column.equal(left, right))
 }
 
-/// A plain type-appropriate row hash; only equality matters within a batch,
-/// so it needs none of the canonical framing.
-fn hash_row(columns: &[LocalColumn<'_>], row: usize) -> (u64, usize) {
-    let mut hash = 0x243F_6A88_85A3_08D3_u64;
-    let mut bytes = 0;
-    for column in columns {
-        hash = column.hash(row, hash);
-        bytes += column.bytes(row);
-    }
-    (hash, bytes)
-}
-
 fn mix(seed: u64, value: u64) -> u64 {
     let hash = seed ^ value.wrapping_mul(0x9E37_79B9_7F4A_7C15);
     hash ^ (hash >> 31)
@@ -413,28 +436,37 @@ impl<'a> LocalColumn<'a> {
         Some(Self::I64(values))
     }
 
-    /// A deterministic u64 view of a fixed-width slot's raw bytes; the sign
-    /// reading is irrelevant because only within-batch equality matters.
-    fn word(&self, row: usize) -> u64 {
-        match self {
-            Self::I8(values) => u64::from_ne_bytes(i64::from(values[row]).to_ne_bytes()),
-            Self::I16(values) => u64::from_ne_bytes(i64::from(values[row]).to_ne_bytes()),
-            Self::I32(values) => u64::from_ne_bytes(i64::from(values[row]).to_ne_bytes()),
-            Self::I64(values) => u64::from_ne_bytes(values[row].to_ne_bytes()),
-            Self::U8(values) => u64::from(values[row]),
-            Self::U16(values) => u64::from(values[row]),
-            Self::U32(values) => u64::from(values[row]),
-            Self::U64(values) => values[row],
-            Self::Boolean(_) | Self::Utf8(_) | Self::LargeUtf8(_) => 0,
+    fn hash_column(&self, positions: &[(usize, bool)], hashes: &mut [(u64, usize)]) {
+        macro_rules! column {
+            ($width:expr, $word:expr) => {
+                for (&(row, _), (hash, bytes)) in positions.iter().zip(hashes) {
+                    *hash = mix(*hash, $word(row));
+                    *bytes += $width;
+                }
+            };
         }
-    }
-
-    fn hash(&self, row: usize, seed: u64) -> u64 {
         match self {
-            Self::Boolean(values) => mix(seed, u64::from(values.value(row))),
-            Self::Utf8(values) => hash_bytes(seed, values.value(row).as_bytes()),
-            Self::LargeUtf8(values) => hash_bytes(seed, values.value(row).as_bytes()),
-            fixed => mix(seed, fixed.word(row)),
+            Self::I8(values) => column!(1, |row: usize| u64::from_ne_bytes(
+                i64::from(values[row]).to_ne_bytes()
+            )),
+            Self::I16(values) => column!(2, |row: usize| u64::from_ne_bytes(
+                i64::from(values[row]).to_ne_bytes()
+            )),
+            Self::I32(values) => column!(4, |row: usize| u64::from_ne_bytes(
+                i64::from(values[row]).to_ne_bytes()
+            )),
+            Self::I64(values) => column!(8, |row: usize| u64::from_ne_bytes(
+                values[row].to_ne_bytes()
+            )),
+            Self::U8(values) => column!(1, |row: usize| u64::from(values[row])),
+            Self::U16(values) => column!(2, |row: usize| u64::from(values[row])),
+            Self::U32(values) => column!(4, |row: usize| u64::from(values[row])),
+            Self::U64(values) => column!(8, |row: usize| values[row]),
+            Self::Boolean(values) => column!(1, |row: usize| u64::from(values.value(row))),
+            Self::Utf8(values) => hash_strings(positions, hashes, |row: usize| values.value(row)),
+            Self::LargeUtf8(values) => {
+                hash_strings(positions, hashes, |row: usize| values.value(row));
+            }
         }
     }
 
@@ -453,19 +485,20 @@ impl<'a> LocalColumn<'a> {
             Self::LargeUtf8(values) => values.value(left) == values.value(right),
         }
     }
-
-    fn bytes(&self, row: usize) -> usize {
-        match self {
-            Self::Utf8(values) => values.value(row).len(),
-            Self::LargeUtf8(values) => values.value(row).len(),
-            Self::Boolean(_) | Self::I8(_) | Self::U8(_) => 1,
-            Self::I16(_) | Self::U16(_) => 2,
-            Self::I32(_) | Self::U32(_) => 4,
-            Self::I64(_) | Self::U64(_) => 8,
-        }
-    }
 }
 
 fn primitive<T: ArrowPrimitiveType>(array: &dyn Array) -> Option<&[T::Native]> {
     Some(array.as_any().downcast_ref::<PrimitiveArray<T>>()?.values())
+}
+
+fn hash_strings<'a>(
+    positions: &[(usize, bool)],
+    hashes: &mut [(u64, usize)],
+    value: impl Fn(usize) -> &'a str,
+) {
+    for (&(row, _), (hash, bytes)) in positions.iter().zip(hashes) {
+        let value = value(row).as_bytes();
+        *hash = hash_bytes(*hash, value);
+        *bytes += value.len();
+    }
 }

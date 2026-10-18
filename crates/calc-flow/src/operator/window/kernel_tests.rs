@@ -39,7 +39,7 @@ fn string_record(large: bool, values: &[Option<&str>]) -> RecordBatch {
 
 fn extremes(minimum: &str, maximum: &str) -> AccumulatorRow {
     AccumulatorRow {
-        group_values: vec![],
+        group_values: Arc::from([]),
         aggregates: vec![
             AccumulatorValue::Min(Some(ScalarValue::String(minimum.into()))),
             AccumulatorValue::Max(Some(ScalarValue::String(maximum.into()))),
@@ -150,7 +150,7 @@ fn assert_reference(values: ArrayRef, functions: &[AggregateFunction]) {
     let spec = spec(functions);
     let operator = WindowAggregateOperator::new("window", record.schema(), spec.clone()).unwrap();
     let columns = RecordColumns::new(&record, &spec, &operator.compiled, "window").unwrap();
-    let mut actual = new_accumulator_row(&spec, &operator.compiled, vec![]);
+    let mut actual = new_accumulator_row(&spec, &operator.compiled, Arc::from([]));
     let mut expected = actual.clone();
     for index in 0..record.num_rows() {
         reference_update(&mut expected, &columns, index, &spec).unwrap();
@@ -310,7 +310,7 @@ fn numeric_failures_preserve_first_aggregate_and_partial_scratch_state() {
         (0, 0, u64::MAX),
     ] {
         let mut actual = AccumulatorRow {
-            group_values: vec![],
+            group_values: Arc::from([]),
             aggregates: vec![
                 AccumulatorValue::Count(count),
                 AccumulatorValue::SignedSum(Some(i128::from(sum))),

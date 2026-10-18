@@ -1,6 +1,6 @@
 //! One expiration head per sorted incoming run, using stable chunk coordinates.
 
-use super::{StoredRow, checkpoint_v2, retained::Rows};
+use super::{checkpoint_v2, retained::Rows};
 use crate::{CalcFlowError, EventTime, Result, StreamOperatorContext};
 use datafusion::execution::memory_pool::MemoryReservation;
 #[cfg(test)]
@@ -179,7 +179,7 @@ impl ExpirationIndex {
 
     pub(super) async fn prepare_append(
         &mut self,
-        incoming: &[StoredRow],
+        incoming: &dyn Rows,
         indices: &[usize],
         context: &StreamOperatorContext<'_>,
         legacy: bool,
@@ -195,14 +195,16 @@ impl ExpirationIndex {
             });
         }
         plan.entries.sort_unstable_by_key(|entry| {
-            let row = &incoming[(entry.ordinal - self.next_ordinal) as usize];
-            (row.event_time, row.row_id)
+            incoming.identity((entry.ordinal - self.next_ordinal) as usize)
         });
-        plan.first = plan.entries.first().map(|entry| {
-            let row = &incoming[(entry.ordinal - self.next_ordinal) as usize];
-            (row.event_time, row.row_id)
-        });
-        plan.maximum = incoming.iter().map(|row| row.event_time).max();
+        plan.first = plan
+            .entries
+            .first()
+            .map(|entry| incoming.identity((entry.ordinal - self.next_ordinal) as usize));
+        plan.maximum = incoming
+            .references()
+            .map(|index| incoming.identity(index).0)
+            .max();
         context.check_cancelled()?;
         Ok(plan)
     }

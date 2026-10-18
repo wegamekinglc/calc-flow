@@ -535,7 +535,7 @@ impl Dictionary {
 
     pub(super) async fn validate_known_references(
         &mut self,
-        rows: &[super::StoredRow],
+        rows: &dyn super::retained::Rows,
         context: &crate::StreamOperatorContext<'_>,
         name: &str,
     ) -> Result<()> {
@@ -544,16 +544,16 @@ impl Dictionary {
             dictionary: self,
             head: None,
         };
-        for row in rows {
+        for index in rows.references() {
             flow.step(1, 0).await?;
-            guard.add(&row.encoded_key, name)?;
+            guard.add(rows.key(index), name)?;
         }
         Ok(())
     }
 
-    pub(super) fn commit_known_references(&mut self, rows: &[super::StoredRow]) {
-        for row in rows {
-            if let Some(lease) = self.lease(&row.encoded_key) {
+    pub(super) fn commit_known_references(&mut self, rows: &dyn super::retained::Rows) {
+        for index in rows.references() {
+            if let Some(lease) = self.lease(rows.key(index)) {
                 let entry = self.slots[lease.address().slot() as usize]
                     .as_mut()
                     .unwrap();

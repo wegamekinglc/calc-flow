@@ -120,3 +120,49 @@ fn test_repeated_owner_replacement_reuses_one_spare_source_slot() {
         }
     }
 }
+
+#[test]
+fn test_chunks_share_distinct_keys_and_release_the_last_reference() {
+    let incoming = rows(2 * CHUNK_ROWS);
+    let key = Arc::clone(&incoming[0].encoded_key);
+    let mut state: StateRows = incoming.into();
+    assert_eq!(Arc::strong_count(&key), 3, "one owner per chunk");
+    for reference in 0..CHUNK_ROWS {
+        state.remove(reference);
+    }
+    assert_eq!(Arc::strong_count(&key), 2);
+    assert_eq!(
+        state.identity(CHUNK_ROWS),
+        (
+            EventTime::from_micros(i64::try_from(CHUNK_ROWS).unwrap()),
+            CHUNK_ROWS as u64
+        )
+    );
+    for reference in CHUNK_ROWS..2 * CHUNK_ROWS {
+        state.remove(reference);
+    }
+    assert_eq!(Arc::strong_count(&key), 1);
+}
+
+#[test]
+fn test_batch_views_preserve_sparse_coordinates_and_charge() {
+    let mut state: StateRows = rows(2 * CHUNK_ROWS + 3).into();
+    for reference in [0, CHUNK_ROWS - 1, CHUNK_ROWS, 2 * CHUNK_ROWS + 1] {
+        state.remove(reference);
+    }
+    let expected = state.references().collect::<Vec<_>>();
+    let mut actual = Vec::new();
+    for batch in state.batches() {
+        for reference in batch.references() {
+            actual.push(reference);
+            assert_eq!(batch.identity(reference), state.identity(reference));
+            assert_eq!(batch.charge(reference), state.charge(reference));
+            assert!(Arc::ptr_eq(batch.key(reference), state.key(reference)));
+            assert_eq!(
+                batch.payload(reference).offset(),
+                state.payload(reference).offset()
+            );
+        }
+    }
+    assert_eq!(actual, expected);
+}

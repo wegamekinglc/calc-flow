@@ -649,14 +649,15 @@ fn oversized_row(bytes: usize, budget: EdgeBudget) -> CalcFlowError {
 pub(super) fn flat_row_charges(record: &RecordBatch, overhead: u64) -> Result<Option<Vec<u64>>> {
     let bitmap_per_row = record.num_columns().div_ceil(8);
     let overhead = usize::try_from(overhead).map_err(|_| overflow_charge())?;
-    let mut charges = vec![overhead + bitmap_per_row; record.num_rows()];
+    let mut constant = checked_accumulate(overhead, bitmap_per_row, "batch")?;
     for column in record.columns() {
         let Some(width) = fixed_width(column.data_type()) else {
             return Ok(None);
         };
-        for charge in &mut charges {
-            *charge = checked_accumulate(*charge, width, "batch")?;
-        }
+        constant = checked_accumulate(constant, width, "batch")?;
+    }
+    let mut charges = vec![constant; record.num_rows()];
+    for column in record.columns() {
         if let Some(offsets) = variable_offsets(column.as_ref()) {
             offsets.add_charges(&mut charges)?;
         }

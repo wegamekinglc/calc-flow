@@ -1,11 +1,12 @@
+use super::super::retained::Rows;
 use std::{collections::BTreeMap, sync::Arc};
 
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::execution::memory_pool::MemoryReservation;
 
 use super::super::{
-    DeltaTracking, ExpirationIndex, JoinSide, OperatorStateSnapshot, StoredRow, StreamJoinSpec,
-    StreamJoinState, columnar, metadata_validation::ValidatedMetadata,
+    DeltaTracking, ExpirationIndex, JoinSide, OperatorStateSnapshot, RetainedRows, StateRows,
+    StoredRow, StreamJoinSpec, StreamJoinState, columnar, metadata_validation::ValidatedMetadata,
     restored_retained_metrics_match,
 };
 use super::budget::{self, ContainerFunding};
@@ -112,6 +113,15 @@ impl<'a, 'c> Decoder<'a, 'c> {
         let history = History::new(self.snapshot, &geometry, &self.workspace, self.check)?;
         let summaries = self.summaries(&history, &metadata)?;
         let payloads = self.decode_payloads(geometry.payloads)?;
+        // Layout migration retains its cold compatibility path. Native v2/v3
+        // histories decode directly into the same owned column chunks as admission.
+        if self.projected || self.config.projection.is_none() {
+            let rows = self.validate_column_histories(&history, &metadata, summaries, &payloads)?;
+            drop(history);
+            drop(payloads);
+            let writer = self.prepared_writer(false, &inventory)?;
+            return self.assemble_columns(metadata, rows, writer, [false; 2]);
+        }
         let rows = self.validate_histories(&history, &metadata, summaries, &payloads)?;
         drop(history);
         drop(payloads);
@@ -212,6 +222,46 @@ impl<'a, 'c> Decoder<'a, 'c> {
             );
         }
         Ok(owner)
+    }
+
+    fn validate_column_histories(
+        &self,
+        history: &History<'_>,
+        metadata: &ValidatedMetadata,
+        summaries: [LiveSummary; 2],
+        payloads: &BTreeMap<(JoinSide, [u8; 32]), Decoded<'_>>,
+    ) -> Result<[RetainedRows; 2]> {
+        let count = ipc::accounting::add(summaries[0].rows, summaries[1].rows)?;
+        self.containers.grow(budget::containers(count)?)?;
+        let mut result = [RetainedRows::default(), RetainedRows::default()];
+        for (index, (side, next_id)) in [
+            (JoinSide::Left, metadata.next_left_row_id),
+            (JoinSide::Right, metadata.next_right_row_id),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut rows = StateRows::default();
+            let actual = history.scan(side, next_id, self.check, |locator, live| {
+                (self.check)()?;
+                let workspace = self.workspace.new_empty();
+                let context = self.row_context(side, &workspace);
+                let (payload, offset) = located_payload(payloads, side, locator)?;
+                let validated = row::validate(payload.owner.record(), offset, locator, &context)?;
+                if live {
+                    rows.push_restored(
+                        self.stored_row(payload, offset, locator, validated)?,
+                        summaries[index].rows,
+                    )?;
+                }
+                Ok(())
+            })?;
+            if actual != summaries[index] || rows.len() != summaries[index].rows {
+                return Err(invalid("V2 history changed between validation passes"));
+            }
+            result[index] = RetainedRows(Arc::new(rows), None, columnar::SparseQueue::default());
+        }
+        Ok(result)
     }
 
     fn validate_histories(
@@ -428,6 +478,17 @@ impl<'a, 'c> Decoder<'a, 'c> {
         repeated_ids: [bool; 2],
     ) -> Result<Prepared> {
         let [left, right] = rows;
+        self.assemble_columns(metadata, [left.into(), right.into()], writer, repeated_ids)
+    }
+
+    fn assemble_columns(
+        self,
+        metadata: ValidatedMetadata,
+        rows: [RetainedRows; 2],
+        writer: super::WriterState,
+        repeated_ids: [bool; 2],
+    ) -> Result<Prepared> {
+        let [left, right] = rows;
         let mut state = StreamJoinState {
             left_expirations: ExpirationIndex::restored_funded(&left, &self.workspace, self.check)?,
             right_expirations: ExpirationIndex::restored_funded(
@@ -435,8 +496,8 @@ impl<'a, 'c> Decoder<'a, 'c> {
                 &self.workspace,
                 self.check,
             )?,
-            left: left.into(),
-            right: right.into(),
+            left,
+            right,
             next_left_row_id: metadata.next_left_row_id,
             next_right_row_id: metadata.next_right_row_id,
             next_output_sequence: metadata.next_output_sequence,
@@ -473,9 +534,11 @@ impl<'a, 'c> Decoder<'a, 'c> {
 
     fn mark_live(&self, state: &StreamJoinState) -> Result<()> {
         for rows in [&state.left, &state.right] {
-            for (dense, row) in rows.indexed() {
-                (self.check)()?;
-                row.record.mark_live(dense);
+            for batch in rows.batches() {
+                for dense in batch.references() {
+                    (self.check)()?;
+                    batch.payload(dense).mark_live(dense);
+                }
             }
         }
         Ok(())

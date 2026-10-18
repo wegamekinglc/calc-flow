@@ -5,10 +5,12 @@ use std::{collections::BTreeMap, sync::Arc};
 use super::{StoredRow, admitted::PayloadRef, columnar::RowPayload};
 use crate::{EventTime, Result, StreamOperatorContext};
 use datafusion::execution::memory_pool::MemoryReservation;
+use hashbrown::HashTable;
 
 pub(super) const CHUNK_ROWS: usize = 1_024;
 
 pub(super) trait Rows: Send + Sync {
+    fn batches(&self) -> Box<dyn Iterator<Item = RowBatch<'_>> + Send + '_>;
     fn len(&self) -> usize;
     fn row(&self, index: usize) -> StoredRow;
     fn charge(&self, index: usize) -> u64 {
@@ -52,15 +54,26 @@ struct Source {
     count: usize,
 }
 
+struct KeyOwner {
+    key: Arc<super::columnar::FramedKey>,
+    count: usize,
+}
+
+fn key_hash(key: &Arc<super::columnar::FramedKey>) -> u64 {
+    Arc::as_ptr(key) as usize as u64
+}
+
 #[derive(Default)]
-struct Chunk {
+pub(super) struct Chunk {
     sources: Vec<Option<Source>>,
     source_ids: Vec<usize>,
     offsets: Vec<usize>,
     times: Vec<EventTime>,
     ids: Vec<u64>,
     charges: Vec<u64>,
-    keys: Vec<Option<Arc<super::columnar::FramedKey>>>,
+    keys: Vec<Option<u32>>,
+    key_owners: Vec<Option<KeyOwner>>,
+    key_slots: HashTable<usize>,
     live: usize,
     credit: Option<MemoryReservation>,
 }
@@ -91,6 +104,15 @@ impl Chunk {
     }
 
     fn reserved(count: usize, sources: usize, credit: Option<MemoryReservation>) -> Self {
+        Self::reserved_keys(count, sources, count, credit)
+    }
+
+    fn reserved_keys(
+        count: usize,
+        sources: usize,
+        keys: usize,
+        credit: Option<MemoryReservation>,
+    ) -> Self {
         Self {
             // Sparse repair replaces every live row of one payload owner together.
             // One spare slot covers overlap until the previous owner retires.
@@ -101,6 +123,8 @@ impl Chunk {
             ids: Vec::with_capacity(count),
             charges: Vec::with_capacity(count),
             keys: Vec::with_capacity(count),
+            key_owners: Vec::with_capacity(keys),
+            key_slots: HashTable::with_capacity(keys),
             live: 0,
             credit,
         }
@@ -113,7 +137,40 @@ impl Chunk {
         self.times.push(row.event_time);
         self.ids.push(row.row_id);
         self.charges.push(row.charge);
-        self.keys.push(Some(row.encoded_key));
+        let key = self.intern_key(&row.encoded_key);
+        self.keys
+            .push(Some(u32::try_from(key).expect("chunk key slot fits u32")));
+        self.live += 1;
+    }
+
+    fn push_columns(
+        &mut self,
+        payload: PayloadRef<'_>,
+        time: EventTime,
+        id: u64,
+        charge: u64,
+        key: &Arc<super::columnar::FramedKey>,
+    ) {
+        self.offsets.push(payload.offset());
+        let columns = payload.columns().as_ptr();
+        let source = match self.sources.iter().position(|source| {
+            source
+                .as_ref()
+                .is_some_and(|source| source.owner.columns().as_ptr() == columns)
+        }) {
+            Some(index) => {
+                self.sources[index].as_mut().unwrap().count += 1;
+                index
+            }
+            None => self.source(payload.owned()),
+        };
+        self.source_ids.push(source);
+        self.times.push(time);
+        self.ids.push(id);
+        self.charges.push(charge);
+        let key = self.intern_key(key);
+        self.keys
+            .push(Some(u32::try_from(key).expect("chunk key slot fits u32")));
         self.live += 1;
     }
 
@@ -135,7 +192,61 @@ impl Chunk {
             event_time: self.times[offset],
             row_id: self.ids[offset],
             charge: self.charges[offset],
-            encoded_key: Arc::clone(self.keys[offset].as_ref().expect("live chunk row")),
+            encoded_key: Arc::clone(self.key(offset)),
+        }
+    }
+
+    fn intern_key(&mut self, key: &Arc<super::columnar::FramedKey>) -> usize {
+        let hash = key_hash(key);
+        if let Some(&index) = self.key_slots.find(hash, |&index| {
+            Arc::ptr_eq(&self.key_owners[index].as_ref().unwrap().key, key)
+        }) {
+            self.key_owners[index].as_mut().unwrap().count += 1;
+            return index;
+        }
+        let index = self
+            .key_owners
+            .iter()
+            .position(Option::is_none)
+            .unwrap_or(self.key_owners.len());
+        let owner = Some(KeyOwner {
+            key: Arc::clone(key),
+            count: 1,
+        });
+        if index == self.key_owners.len() {
+            self.key_owners.push(owner);
+        } else {
+            self.key_owners[index] = owner;
+        }
+        let Self {
+            key_slots,
+            key_owners,
+            ..
+        } = self;
+        key_slots.insert_unique(hash, index, |&index| {
+            key_hash(&key_owners[index].as_ref().unwrap().key)
+        });
+        index
+    }
+
+    fn key(&self, offset: usize) -> &Arc<super::columnar::FramedKey> {
+        &self.key_owners[self.keys[offset].expect("live chunk row") as usize]
+            .as_ref()
+            .expect("live chunk key")
+            .key
+    }
+
+    fn release_key(&mut self, offset: usize) {
+        let index = self.keys[offset].take().expect("live chunk row") as usize;
+        let owner = self.key_owners[index].as_mut().expect("live chunk key");
+        owner.count -= 1;
+        if owner.count == 0 {
+            let hash = key_hash(&owner.key);
+            self.key_slots
+                .find_entry(hash, |&candidate| candidate == index)
+                .unwrap_or_else(|_| unreachable!())
+                .remove();
+            self.key_owners[index] = None;
         }
     }
 
@@ -150,7 +261,7 @@ impl Chunk {
     #[cfg(test)]
     fn remove(&mut self, offset: usize) -> StoredRow {
         let row = self.row(offset);
-        self.keys[offset] = None;
+        self.release_key(offset);
         self.release_source(offset);
         self.live -= 1;
         row
@@ -158,7 +269,7 @@ impl Chunk {
 }
 
 pub(super) struct Append {
-    chunks: BTreeMap<usize, Chunk>,
+    chunks: Vec<Chunk>,
     pub(super) indices: Vec<usize>,
     count: usize,
     control: Option<MemoryReservation>,
@@ -167,7 +278,7 @@ pub(super) struct Append {
 impl Append {
     pub(super) fn is_unfunded(&self) -> bool {
         self.count != 0
-            && (self.control.is_none() || self.chunks.values().any(|chunk| chunk.credit.is_none()))
+            && (self.control.is_none() || self.chunks.iter().any(|chunk| chunk.credit.is_none()))
     }
 }
 
@@ -218,7 +329,10 @@ impl StateRows {
         chunk.times[offset] = row.event_time;
         chunk.ids[offset] = row.row_id;
         chunk.charges[offset] = row.charge;
-        chunk.keys[offset] = Some(row.encoded_key);
+        chunk.release_key(offset);
+        chunk.keys[offset] = Some(
+            u32::try_from(chunk.intern_key(&row.encoded_key)).expect("chunk key slot fits u32"),
+        );
     }
     #[cfg(test)]
     pub(super) fn last(&self) -> Option<StoredRow> {
@@ -243,6 +357,13 @@ impl StateRows {
     #[cfg(test)]
     pub(super) fn push(&mut self, row: StoredRow) {
         self.append(vec![row]);
+    }
+    pub(super) fn batch_at(&self, reference: usize) -> RowBatch<'_> {
+        let base = reference / CHUNK_ROWS * CHUNK_ROWS;
+        RowBatch::Columns {
+            chunk: &self.chunks[&(base / CHUNK_ROWS)],
+            base,
+        }
     }
     pub(super) fn row_id(&self, index: usize) -> u64 {
         self.chunks[&(index / CHUNK_ROWS)].ids[index % CHUNK_ROWS]
@@ -282,11 +403,10 @@ impl StateRows {
                 .all(|row| matches!(row.record, RowPayload::Legacy(_) | RowPayload::Rowed { .. }));
         let control = reserve_references(master, rows.len(), context.operator_id(), legacy)?;
         let indices = self.append_indices(rows.len());
-        let mut chunks = BTreeMap::new();
+        let mut chunks = Vec::with_capacity(rows.len().div_ceil(CHUNK_ROWS));
         let mut quantum = super::columnar::Quantum::default();
-        for (rows, indices) in rows.chunks(CHUNK_ROWS).zip(indices.chunks(CHUNK_ROWS)) {
-            let chunk = prepare_chunk(rows, master, context, &mut quantum, legacy).await?;
-            chunks.insert(indices[0] / CHUNK_ROWS, chunk);
+        for rows in rows.chunks(CHUNK_ROWS) {
+            chunks.push(prepare_chunk(rows, master, context, &mut quantum, legacy).await?);
         }
         Ok(Append {
             chunks,
@@ -309,10 +429,11 @@ impl StateRows {
     }
 
     pub(super) fn commit(&mut self, append: Append) {
+        let first = self.next;
         self.next += append.chunks.len();
         self.len += append.count;
-        for (id, chunk) in append.chunks {
-            self.chunks.insert(id, chunk);
+        for (ordinal, chunk) in append.chunks.into_iter().enumerate() {
+            self.chunks.insert(first + ordinal, chunk);
         }
     }
 
@@ -322,6 +443,33 @@ impl StateRows {
                 (self.next + position / CHUNK_ROWS) * CHUNK_ROWS + position % CHUNK_ROWS
             })
             .collect()
+    }
+
+    /// The restore decoder has already funded the maximum live-row containers.
+    /// Fill one owned chunk at a time rather than collecting an entire side.
+    pub(super) fn push_restored(&mut self, row: StoredRow, expected: usize) -> Result<()> {
+        if self.len >= expected {
+            return Err(crate::CalcFlowError::CheckpointMismatch {
+                message: "V2 history exceeds its funded row count".into(),
+            });
+        }
+        let new_chunk = self
+            .chunks
+            .last_key_value()
+            .is_none_or(|(_, chunk)| chunk.ids.len() == CHUNK_ROWS);
+        if new_chunk {
+            let capacity = (expected - self.len).min(CHUNK_ROWS);
+            self.chunks
+                .insert(self.next, Chunk::reserved(capacity, capacity, None));
+            self.next += 1;
+        }
+        self.chunks
+            .last_entry()
+            .expect("restored chunk")
+            .get_mut()
+            .push(row);
+        self.len += 1;
+        Ok(())
     }
 
     pub(super) fn append(&mut self, rows: Vec<StoredRow>) -> Vec<usize> {
@@ -382,7 +530,7 @@ impl StateRows {
                 queue.remove(&owner.with_offset(payload_offset));
             }
             for &offset in offsets {
-                chunk.keys[offset] = None;
+                chunk.release_key(offset);
                 chunk.release_source(offset);
                 chunk.live -= 1;
             }
@@ -413,7 +561,134 @@ impl StateRows {
     }
 }
 
+/// Borrowed column block; row descriptors are compatibility views only.
+#[derive(Clone, Copy)]
+pub(super) enum RowBatch<'a> {
+    Columns { chunk: &'a Chunk, base: usize },
+    Legacy(&'a [StoredRow]),
+}
+impl RowBatch<'_> {
+    pub(super) fn references(&self) -> Box<dyn Iterator<Item = usize> + Send + '_> {
+        match self {
+            Self::Columns { chunk, base } => Box::new(
+                chunk
+                    .keys
+                    .iter()
+                    .enumerate()
+                    .filter_map(move |(offset, key)| key.as_ref().map(|_| base + offset)),
+            ),
+            Self::Legacy(rows) => Box::new(0..rows.len()),
+        }
+    }
+    pub(super) fn identity(&self, reference: usize) -> (EventTime, u64) {
+        match self {
+            Self::Columns { chunk, base } => {
+                (chunk.times[reference - base], chunk.ids[reference - base])
+            }
+            Self::Legacy(rows) => (rows[reference].event_time, rows[reference].row_id),
+        }
+    }
+    pub(super) fn key(&self, reference: usize) -> &Arc<super::columnar::FramedKey> {
+        match self {
+            Self::Columns { chunk, base } => chunk.key(reference - base),
+            Self::Legacy(rows) => &rows[reference].encoded_key,
+        }
+    }
+    pub(super) fn payload(&self, reference: usize) -> PayloadRef<'_> {
+        match self {
+            Self::Columns { chunk, base } => PayloadRef::Payload(
+                chunk.owner(reference - base),
+                chunk.offsets[reference - base],
+            ),
+            Self::Legacy(rows) => (&rows[reference].record).into(),
+        }
+    }
+    pub(super) fn distinct_keys(
+        &self,
+    ) -> Box<dyn Iterator<Item = (usize, &Arc<super::columnar::FramedKey>)> + Send + '_> {
+        match self {
+            Self::Columns { chunk, .. } => Box::new(
+                chunk
+                    .key_owners
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, owner)| owner.as_ref().map(|owner| (index, &owner.key))),
+            ),
+            Self::Legacy(rows) => Box::new(
+                rows.iter()
+                    .enumerate()
+                    .map(|(index, row)| (index, &row.encoded_key)),
+            ),
+        }
+    }
+    pub(super) fn key_slot(&self, reference: usize) -> usize {
+        match self {
+            Self::Columns { chunk, base } => {
+                chunk.keys[reference - base].expect("live chunk row") as usize
+            }
+            Self::Legacy(_) => reference,
+        }
+    }
+    pub(super) fn charge(&self, reference: usize) -> u64 {
+        match self {
+            Self::Columns { chunk, base } => chunk.charges[reference - base],
+            Self::Legacy(rows) => rows[reference].charge,
+        }
+    }
+}
+
+impl Rows for Append {
+    fn len(&self) -> usize {
+        self.count
+    }
+    fn row(&self, index: usize) -> StoredRow {
+        self.chunks[index / CHUNK_ROWS].row(index % CHUNK_ROWS)
+    }
+    fn identity(&self, index: usize) -> (EventTime, u64) {
+        let chunk = &self.chunks[index / CHUNK_ROWS];
+        (
+            chunk.times[index % CHUNK_ROWS],
+            chunk.ids[index % CHUNK_ROWS],
+        )
+    }
+    fn charge(&self, index: usize) -> u64 {
+        self.chunks[index / CHUNK_ROWS].charges[index % CHUNK_ROWS]
+    }
+    fn payload(&self, index: usize) -> PayloadRef<'_> {
+        let chunk = &self.chunks[index / CHUNK_ROWS];
+        let offset = index % CHUNK_ROWS;
+        PayloadRef::Payload(chunk.owner(offset), chunk.offsets[offset])
+    }
+    fn key(&self, index: usize) -> &Arc<super::columnar::FramedKey> {
+        self.chunks[index / CHUNK_ROWS].key(index % CHUNK_ROWS)
+    }
+    fn indexed(&self) -> Box<dyn Iterator<Item = (usize, StoredRow)> + Send + '_> {
+        Box::new((0..self.count).map(|index| (index, self.row(index))))
+    }
+    fn references(&self) -> Box<dyn Iterator<Item = usize> + Send + '_> {
+        Box::new(0..self.count)
+    }
+    fn batches(&self) -> Box<dyn Iterator<Item = RowBatch<'_>> + Send + '_> {
+        Box::new(
+            self.chunks
+                .iter()
+                .enumerate()
+                .map(|(index, chunk)| RowBatch::Columns {
+                    chunk,
+                    base: index * CHUNK_ROWS,
+                }),
+        )
+    }
+}
+
 impl Rows for StateRows {
+    fn batches(&self) -> Box<dyn Iterator<Item = RowBatch<'_>> + Send + '_> {
+        Box::new(self.chunks.iter().map(|(&index, chunk)| RowBatch::Columns {
+            chunk,
+            base: index * CHUNK_ROWS,
+        }))
+    }
+
     fn references(&self) -> Box<dyn Iterator<Item = usize> + Send + '_> {
         Box::new(self.chunks.iter().flat_map(|(&id, chunk)| {
             chunk
@@ -468,9 +743,7 @@ impl Rows for StateRows {
     }
 
     fn key(&self, index: usize) -> &Arc<super::columnar::FramedKey> {
-        self.chunks[&(index / CHUNK_ROWS)].keys[index % CHUNK_ROWS]
-            .as_ref()
-            .unwrap()
+        self.chunks[&(index / CHUNK_ROWS)].key(index % CHUNK_ROWS)
     }
 
     fn indexed(&self) -> Box<dyn Iterator<Item = (usize, StoredRow)> + Send + '_> {
@@ -488,6 +761,10 @@ impl Rows for StateRows {
 }
 
 impl Rows for Vec<StoredRow> {
+    fn batches(&self) -> Box<dyn Iterator<Item = RowBatch<'_>> + Send + '_> {
+        Box::new(std::iter::once(RowBatch::Legacy(self)))
+    }
+
     fn charge(&self, index: usize) -> u64 {
         self[index].charge
     }
@@ -517,6 +794,9 @@ impl Rows for Vec<StoredRow> {
 }
 
 impl Rows for Arc<StateRows> {
+    fn batches(&self) -> Box<dyn Iterator<Item = RowBatch<'_>> + Send + '_> {
+        self.as_ref().batches()
+    }
     fn references(&self) -> Box<dyn Iterator<Item = usize> + Send + '_> {
         self.as_ref().references()
     }
@@ -549,6 +829,10 @@ impl Rows for Arc<StateRows> {
 }
 
 impl<const N: usize> Rows for [StoredRow; N] {
+    fn batches(&self) -> Box<dyn Iterator<Item = RowBatch<'_>> + Send + '_> {
+        Box::new(std::iter::once(RowBatch::Legacy(self.as_slice())))
+    }
+
     fn references(&self) -> Box<dyn Iterator<Item = usize> + Send + '_> {
         Box::new(0..N)
     }
@@ -644,18 +928,7 @@ fn source_count(rows: &[StoredRow]) -> usize {
 }
 
 fn chunk_bytes(rows: &[StoredRow]) -> Result<usize> {
-    let width = 2 * size_of::<usize>()
-        + size_of::<EventTime>()
-        + 2 * size_of::<u64>()
-        + size_of::<Option<Arc<super::columnar::FramedKey>>>();
-    let sources = source_count(rows)
-        .checked_add(1)
-        .and_then(|count| count.checked_mul(size_of::<Option<Source>>()));
-    let fixed = rows
-        .len()
-        .checked_mul(width)
-        .and_then(|bytes| bytes.checked_add(sources?));
-    fixed
+    chunk_base_bytes(rows.len(), source_count(rows), rows.len())
         .and_then(|fixed| {
             rows.iter().try_fold(fixed, |bytes, row| {
                 let legacy = if matches!(row.record, RowPayload::Legacy(_)) {
@@ -668,9 +941,26 @@ fn chunk_bytes(rows: &[StoredRow]) -> Result<usize> {
                 bytes.checked_add(legacy)
             })
         })
-        .and_then(|bytes| bytes.checked_add(8192))
         .ok_or_else(|| super::native_lookup::scratch_error("Join state chunks"))
 }
+
+fn chunk_base_bytes(count: usize, source_count: usize, key_count: usize) -> Option<usize> {
+    let width = 2 * size_of::<usize>()
+        + size_of::<EventTime>()
+        + 2 * size_of::<u64>()
+        + size_of::<Option<u32>>();
+    let sources = source_count
+        .checked_add(1)?
+        .checked_mul(size_of::<Option<Source>>())?;
+    count
+        .checked_mul(width)?
+        .checked_add(sources)?
+        .checked_add(key_count.checked_mul(size_of::<Option<KeyOwner>>() + 24)?)?
+        .checked_add(8192)
+}
+
+mod admission;
+pub(super) use admission::ColumnarPlan;
 
 #[cfg(test)]
 mod tests;
