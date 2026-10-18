@@ -841,23 +841,42 @@ impl Pending {
         flow: &mut KeyFlow<'_, '_>,
     ) -> Result<()> {
         for distinct in 0..local.distinct {
-            let key = TypedKey {
-                columns,
-                row: local.rows[distinct],
-            };
-            let hash = canonical_hash(dictionary, key, flow).await?;
-            local.canonicals.push(hash);
-            let retains = local.retains[distinct];
-            if let Some(id) = self.find(hash, key, flow).await? {
-                local.plans.push(local::Plan::Pending);
-                if retains > 0 {
-                    self.retain(id, retains, name)?;
-                }
-                local.posts.push(id);
-                local.splits.push(u32::MAX);
-                continue;
+            self.classify_one(columns, dictionary, local, distinct, name, flow)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Classifies one distinct key: a pending hit keeps its slot, a
+    /// dictionary hit schedules a staged add, and an unknown key schedules a
+    /// birth at its first retained row.
+    async fn classify_one(
+        &mut self,
+        columns: &[KeyWriter<'_>],
+        dictionary: &Dictionary,
+        local: &mut local::LocalIntern,
+        distinct: usize,
+        name: &str,
+        flow: &mut KeyFlow<'_, '_>,
+    ) -> Result<()> {
+        let key = TypedKey {
+            columns,
+            row: local.rows[distinct],
+        };
+        let hash = canonical_hash(dictionary, key, flow).await?;
+        local.canonicals.push(hash);
+        let retains = local.retains[distinct];
+        if let Some(id) = self.find(hash, key, flow).await? {
+            local.plans.push(local::Plan::Pending);
+            if retains > 0 {
+                self.retain(id, retains, name)?;
             }
-            if let Some(id) = dictionary.find(hash, key, flow).await? {
+            local.posts.push(id);
+            local.splits.push(u32::MAX);
+            return Ok(());
+        }
+        match dictionary.find(hash, key, flow).await? {
+            Some(id) => {
                 local.plans.push(local::Plan::Dictionary(id));
                 local.posts.push(u32::MAX);
                 local.splits.push(u32::MAX);
@@ -865,16 +884,17 @@ impl Pending {
                     local.appearances[distinct],
                     u32::try_from(distinct).expect("distinct keys fit u32 ids"),
                 ));
-                continue;
             }
-            local.plans.push(local::Plan::Unknown);
-            local.posts.push(u32::MAX);
-            local.splits.push(u32::MAX);
-            if retains > 0 {
-                local.order.push((
-                    local.first_retained[distinct],
-                    u32::try_from(distinct).expect("distinct keys fit u32 ids"),
-                ));
+            None => {
+                local.plans.push(local::Plan::Unknown);
+                local.posts.push(u32::MAX);
+                local.splits.push(u32::MAX);
+                if retains > 0 {
+                    local.order.push((
+                        local.first_retained[distinct],
+                        u32::try_from(distinct).expect("distinct keys fit u32 ids"),
+                    ));
+                }
             }
         }
         Ok(())

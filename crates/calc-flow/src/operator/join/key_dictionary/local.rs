@@ -77,6 +77,14 @@ impl BlockCharge {
     fn pending(&self) -> bool {
         self.visits > 0 || self.bytes > 0
     }
+
+    /// Charges any trailing partial block.
+    async fn flush(&self, flow: &mut KeyFlow<'_, '_>) -> Result<()> {
+        if self.pending() {
+            charge_block(flow, self.visits, self.bytes).await?;
+        }
+        Ok(())
+    }
 }
 
 impl LocalIntern {
@@ -203,9 +211,7 @@ impl LocalIntern {
                 block.reset();
             }
         }
-        if block.pending() {
-            charge_block(flow, block.visits, block.bytes).await?;
-        }
+        block.flush(flow).await?;
         Ok(())
     }
 
