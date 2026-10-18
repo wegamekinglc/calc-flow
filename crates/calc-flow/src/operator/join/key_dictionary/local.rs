@@ -8,7 +8,8 @@ use super::super::{
 use super::KeyFlow;
 use crate::Result;
 use datafusion::arrow::array::{
-    Array, BooleanArray, LargeStringArray, PrimitiveArray, StringArray,
+    Array, BooleanArray, GenericStringArray, LargeStringArray, OffsetSizeTrait, PrimitiveArray,
+    StringArray,
 };
 use datafusion::arrow::datatypes::{
     ArrowPrimitiveType, DataType, Date32Type, Date64Type, Int8Type, Int16Type, Int32Type,
@@ -17,6 +18,12 @@ use datafusion::arrow::datatypes::{
 };
 use datafusion::execution::memory_pool::MemoryReservation;
 use hashbrown::HashTable;
+
+#[cfg(test)]
+#[path = "../tests/local_intern_tests.rs"]
+mod tests;
+
+const HASH_SEED: u64 = 0x243F_6A88_85A3_08D3;
 
 /// How one distinct key resolves against the batch-persistent state before
 /// any change is applied.
@@ -148,9 +155,35 @@ impl LocalIntern {
         name: &str,
     ) -> Result<(u32, usize)> {
         let (hash, bytes) = hash_row(columns, offset);
+        let local = self.intern_value(hash, offset, name, |first| {
+            values_equal(columns, first, offset)
+        })?;
+        Ok((local, bytes))
+    }
+
+    fn intern_string<O: OffsetSizeTrait>(
+        &mut self,
+        values: &GenericStringArray<O>,
+        offset: usize,
+        name: &str,
+    ) -> Result<(u32, usize)> {
+        let bytes = values.value(offset).as_bytes();
+        let hash = hash_bytes(HASH_SEED, bytes);
+        let local = self.intern_value(hash, offset, name, |first| {
+            values.value(first).as_bytes() == bytes
+        })?;
+        Ok((local, bytes.len()))
+    }
+
+    fn intern_value(
+        &mut self,
+        hash: u64,
+        offset: usize,
+        name: &str,
+        equal: impl Fn(usize) -> bool,
+    ) -> Result<u32> {
         let existing = self.table.find(hash, |&local| {
-            self.hashes[local as usize] == hash
-                && values_equal(columns, self.rows[local as usize], offset)
+            self.hashes[local as usize] == hash && equal(self.rows[local as usize])
         });
         let local = if let Some(&local) = existing {
             local
@@ -170,7 +203,7 @@ impl LocalIntern {
             table.insert_unique(hash, local, |&local| hashes[local as usize]);
             local
         };
-        Ok((local, bytes))
+        Ok(local)
     }
 
     pub(super) fn note_retained(&mut self, local: u32, ordinal: u32, name: &str) -> Result<()> {
@@ -198,9 +231,38 @@ impl LocalIntern {
         name: &str,
         flow: &mut KeyFlow<'_, '_>,
     ) -> Result<()> {
+        match columns {
+            [LocalColumn::Utf8(values)] => {
+                self.intern_group_with(group, name, flow, |intern, offset| {
+                    intern.intern_string(values, offset, name)
+                })
+                .await
+            }
+            [LocalColumn::LargeUtf8(values)] => {
+                self.intern_group_with(group, name, flow, |intern, offset| {
+                    intern.intern_string(values, offset, name)
+                })
+                .await
+            }
+            _ => {
+                self.intern_group_with(group, name, flow, |intern, offset| {
+                    intern.intern_row(columns, offset, name)
+                })
+                .await
+            }
+        }
+    }
+
+    async fn intern_group_with(
+        &mut self,
+        group: super::super::admitted::AdmittedGroup<'_>,
+        name: &str,
+        flow: &mut KeyFlow<'_, '_>,
+        intern: impl Fn(&mut Self, usize) -> Result<(u32, usize)>,
+    ) -> Result<()> {
         let mut block = BlockCharge::default();
         for (ordinal, (offset, retain)) in group.key_offsets().enumerate() {
-            let (distinct, row_bytes) = self.intern_row(columns, offset, name)?;
+            let (distinct, row_bytes) = intern(self, offset)?;
             self.locals.push(distinct);
             if retain {
                 let ordinal = u32::try_from(ordinal).expect("group rows fit u32 ordinals");
@@ -311,7 +373,7 @@ fn values_equal(columns: &[LocalColumn<'_>], left: usize, right: usize) -> bool 
 /// A plain type-appropriate row hash; only equality matters within a batch,
 /// so it needs none of the canonical framing.
 fn hash_row(columns: &[LocalColumn<'_>], row: usize) -> (u64, usize) {
-    let mut hash = 0x243F_6A88_85A3_08D3_u64;
+    let mut hash = HASH_SEED;
     let mut bytes = 0;
     for column in columns {
         hash = column.hash(row, hash);
