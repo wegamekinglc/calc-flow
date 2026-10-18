@@ -240,9 +240,9 @@ The current public inventory is in
 [capabilities.py](../../../python/calc_flow/capabilities.py): Join semantic
 state version 1 and `state_layouts=(1,)`. At J2b advertise `(1, 2)` only after
 both readers are proven, keeping semantic version 1. Studio's
-[models.py](../../../web-ui/backend/src/calc_flow_studio/models.py) already
+[models.py snapshot](https://github.com/wegamekinglc/calc-flow/blob/e4302f4101f609c8a58ce191beef32bf909519ed/web-ui/backend/src/calc_flow_studio/models.py) already
 supports a sorted layout inventory distinct from semantic version.
-[RunManager](../../../web-ui/backend/src/calc_flow_studio/run_manager.py)
+[RunManager snapshot](https://github.com/wegamekinglc/calc-flow/blob/e4302f4101f609c8a58ce191beef32bf909519ed/web-ui/backend/src/calc_flow_studio/run_manager.py)
 selects the root by project ID and delegates native compatibility; preserve
 that root and test same-project migration. Do not invent a layout-dependent
 checkpoint directory or change symbolic declaration `stream_join@2` identity.

@@ -206,9 +206,9 @@ barrier alignment and before synchronous `checkpoint(epoch)` capture. Built-in
 operators prepare state asynchronously, yielding during index writing and moving
 bulk hashing or compaction to blocking workers. Managed capture shares prepared
 immutable segments and bounded metadata. Direct callers
-of `checkpoint` must first await preparation if they need this property; ASOF
-retains a synchronous encoding fallback for direct calls. Durable staging is
-runtime-owned. `restore(snapshot)` applies a captured snapshot, and
+of `checkpoint` must first await preparation if they need this property; Join
+and ASOF retain synchronous encoding fallbacks for direct calls. Durable staging
+is runtime-owned. `restore(snapshot)` applies a captured snapshot, and
 `reset()` returns the operator to its freshly constructed state. The
 defaults are stateless: capture returns an empty snapshot, restore rejects a
 non-empty one, and reset succeeds.
@@ -249,9 +249,15 @@ new retained-state commit. This is separate from state and match limits and
 does not increment their failure counters. The default runtime has no implicit
 memory-pool limit.
 
-Admission preserves null/late classification and computes retained rows' V1
-logical charges from the complete input before selecting columns. Layout 3
-carries those authoritative historical charges. Every historical row's charge
+Admission preserves null/late classification and uses retained-row bitmaps to
+skip payload charging for rows that do not enter state. Retained rows' V1
+logical charges use the complete input before selecting columns. Projected
+groups with retained rows own independent selected buffers; groups with no
+retained rows can use a projected view of the input during output gathering.
+Batch-local key interning resolves repeated keys against the persistent
+dictionary once per distinct key in each eligible group, with funded scratch
+and the existing per-row fallback for unsupported keys or unavailable scratch.
+Layout 3 carries those authoritative historical charges. Every historical row's charge
 must meet a checked lower bound and the configured per-side byte cap. The bound
 includes V1 row overhead, encoded-key length, the existing 16-byte term,
 retained logical-cell charges and one validity byte per omitted logical column.
@@ -262,10 +268,16 @@ integrity; they do not authenticate original admission history. Logical state
 charges and limits retain their complete-input meaning. Physical payload and
 temporary work reservations separately fund actual storage.
 
-Checkpoint preparation builds a replacement base on owned native workers under
-the configured memory budget. Capture carries immutable payload batches and
-row indexes, adding later dirty operations; clean captures share unchanged
-segment allocations. Four dirty checkpoint epochs arm base compaction.
+Join tracks each side's capture row-ID frontier, dirty live-row count and
+compact tombstone list. Managed checkpoint preparation derives upserts from
+live rows at or above that frontier and encodes tombstones for previously
+captured rows that were evicted. Rows admitted and evicted between captures leave no delta
+entry. This row-ID frontier is separate from event-time watermark progress.
+Preparation also builds replacement bases on owned native workers under the
+configured memory budget. Capture shares the prepared immutable segments and
+advances the row-ID frontiers; clean captures share unchanged segment
+allocations. Direct capture without matching preparation can encode dirty
+state synchronously. Four dirty checkpoint epochs arm base compaction.
 History, prepared cuts and worker inputs bind the compiled physical layout and
 charge mode. Processing with checkpointing disabled invalidates reusable
 history and prepared cuts; a later capture requires successful preparation of
