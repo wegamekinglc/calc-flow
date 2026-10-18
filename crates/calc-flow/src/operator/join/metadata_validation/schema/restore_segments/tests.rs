@@ -137,14 +137,12 @@ fn delta(ops: &[crate::operator::join::PendingOp]) -> Vec<u8> {
                 let payload = crate::operator::join::PayloadRef::from(record);
                 crate::operator::join::encode_delta_upsert(
                     &mut bytes,
-                    *row_id,
-                    *event_time,
+                    (*row_id, *event_time),
                     encoded_key,
                     *charge,
                     &payload,
                     &mut encoder,
-                    "match",
-                    op.side(),
+                    ("match", op.side()),
                 )
                 .unwrap();
             }
