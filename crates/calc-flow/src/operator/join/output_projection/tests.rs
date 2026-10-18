@@ -11,7 +11,11 @@ use datafusion::arrow::{
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use super::super::{AdmittedRow, StoredRow, columnar::RowPayload};
+use super::super::{
+    AdmittedRow, AdmittedRows, PayloadRef, StoredRow,
+    admitted::{AdmittedBatch, AdmittedRef},
+    columnar::RowPayload,
+};
 
 struct Fixture {
     parents: [Arc<RecordBatch>; 2],
@@ -113,6 +117,90 @@ impl Fixture {
             operator_id: "projected-join",
             admitted_charges: Some(&self.charges),
         }
+    }
+}
+
+struct PayloadOnly<'a>(&'a dyn AdmittedRows);
+
+impl AdmittedRows for PayloadOnly<'_> {
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+    fn row(&self, _index: usize) -> AdmittedRef<'_> {
+        panic!("output gathering must not reconstruct admitted row metadata")
+    }
+    fn payload(&self, index: usize) -> PayloadRef<'_> {
+        self.0.payload(index)
+    }
+    fn group_end(&self, start: usize) -> usize {
+        self.0.group_end(start)
+    }
+    fn source_index(&self, index: usize) -> usize {
+        self.0.source_index(index)
+    }
+}
+
+#[test]
+fn test_output_payload_access_keeps_order_without_reading_metadata_or_the_unused_side() {
+    for incoming_left in [true, false] {
+        let fixture = Fixture::new(incoming_left);
+        let normal = fixture.output(&fixture.schema, None, incoming_left);
+        let expected = normal.materialize(0..3).unwrap();
+        let rows = AdmittedBatch::from(
+            fixture
+                .admitted
+                .iter()
+                .map(|row| AdmittedRow {
+                    record: row.record.clone(),
+                    event_time: row.event_time,
+                    row_id: row.row_id,
+                    retain: row.retain,
+                })
+                .collect::<Vec<_>>(),
+        );
+        let admitted = PayloadOnly(&rows);
+        let empty_admitted: Vec<AdmittedRow> = Vec::new();
+        let empty_opposite: Vec<StoredRow> = Vec::new();
+        let mut output = JoinOutput {
+            admitted: &admitted,
+            ..fixture.output(&fixture.schema, None, incoming_left)
+        };
+        assert_eq!(output.materialize(0..3).unwrap(), expected);
+        for pair in &fixture.matched {
+            let (left, right) = output.records(pair);
+            let (expected_left, expected_right) = normal.records(pair);
+            assert_eq!(left.offset(), expected_left.offset());
+            assert_eq!(right.offset(), expected_right.offset());
+            assert!(std::ptr::eq(left.columns(), expected_left.columns()));
+            assert!(std::ptr::eq(right.columns(), expected_right.columns()));
+        }
+        for index in [fixture.admitted.len(), usize::MAX] {
+            assert!(
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    normal.admitted.payload(index)
+                }))
+                .is_err()
+            );
+        }
+        output.opposite = &empty_opposite;
+        let pair = MatchedPair {
+            pos: 1,
+            opposite_index: usize::MAX,
+        };
+        assert_eq!(
+            output.side_record(&pair, incoming_left).offset(),
+            fixture.admitted[1].record.offset()
+        );
+        output.admitted = &empty_admitted;
+        output.opposite = &fixture.opposite;
+        let pair = MatchedPair {
+            pos: usize::MAX,
+            opposite_index: 2,
+        };
+        assert_eq!(
+            output.side_record(&pair, !incoming_left).offset(),
+            fixture.opposite[2].record.offset()
+        );
     }
 }
 

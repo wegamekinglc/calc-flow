@@ -73,16 +73,6 @@ fn profitable(rows: usize, columns: usize) -> bool {
     rows >= MIN_ROWS && columns >= MIN_COLUMNS
 }
 
-fn records<'a>(output: &'a JoinOutput<'_>, pair: &MatchedPair) -> (PayloadRef<'a>, PayloadRef<'a>) {
-    let incoming = output.admitted.row(pair.pos).record;
-    let opposite = output.opposite.payload(pair.opposite_index);
-    if output.incoming_is_left {
-        (incoming, opposite)
-    } else {
-        (opposite, incoming)
-    }
-}
-
 fn supports_capture(output: &JoinOutput<'_>, range: &Range<usize>) -> bool {
     if output.schema.fields().is_empty()
         || !profitable(range.len(), output.schema.fields().len())
@@ -104,7 +94,7 @@ fn supports_capture(output: &JoinOutput<'_>, range: &Range<usize>) -> bool {
 }
 
 fn detached_pair(output: &JoinOutput<'_>, pair: &MatchedPair) -> bool {
-    let (left, right) = records(output, pair);
+    let (left, right) = output.records(pair);
     left.shared_columns().is_some()
         && right.shared_columns().is_some()
         && left.owner().is_some()
