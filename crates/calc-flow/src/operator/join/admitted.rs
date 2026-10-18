@@ -236,8 +236,14 @@ impl AdmittedBatch {
         self.len += 1;
     }
 
+    #[inline]
     fn segment_index(&self, position: usize) -> usize {
         assert!(position < self.len);
+        if self.current == 1 {
+            #[cfg(test)]
+            super::note_join_work(|work| work.admission_segment_lookups += 1);
+            return 0;
+        }
         let mut start = 0;
         let mut end = self.current;
         while start < end {
@@ -260,6 +266,7 @@ impl AdmittedBatch {
         )
     }
 
+    #[inline]
     pub(super) fn row(&self, position: usize) -> AdmittedRef<'_> {
         let segment = self.segments.get(self.segment_index(position));
         let physical = self.physical(segment, position);

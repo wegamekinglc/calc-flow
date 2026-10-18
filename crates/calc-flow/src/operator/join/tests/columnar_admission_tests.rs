@@ -32,6 +32,39 @@ async fn admitted_left(
 }
 
 #[tokio::test]
+async fn test_single_and_multiple_records_preserve_admitted_coordinates() {
+    for record_count in [1, 3, 5] {
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        let job = job();
+        let context = StreamOperatorContext::new(&job, "match", None);
+        let records = (0..record_count)
+            .map(|index| {
+                let start = index * 65;
+                let batch = keyed_left_batch(vec![7; 65], (start..start + 65).collect());
+                batch.table_payload().unwrap().batches()[0].clone()
+            })
+            .collect();
+        let source = Batch::table(records, BatchMetadata::default()).unwrap();
+        let bundle = Box::pin(admitted_left(&mut operator, &context, &source)).await;
+        for index in (0..bundle.admitted.len()).rev() {
+            let row = bundle.admitted.row(index);
+            assert_eq!(row.row_id, u64::try_from(index).unwrap());
+            assert_eq!(row.event_time.as_micros(), i64::try_from(index).unwrap());
+            assert_eq!(row.record.offset(), index % 65);
+            assert_eq!(bundle.admitted.source_index(index), index);
+            assert!(row.retain);
+        }
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                bundle.admitted.row(bundle.admitted.len())
+            }))
+            .is_err()
+        );
+    }
+}
+
+#[tokio::test]
 async fn test_retained_rows_skips_unretained_blocks_without_row_visits() {
     let mut operator =
         StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
