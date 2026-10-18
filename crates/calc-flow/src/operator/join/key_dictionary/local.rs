@@ -224,21 +224,23 @@ impl LocalIntern {
         found: Option<u32>,
         retains: u32,
     ) {
-        match found {
-            Some(id) => {
-                self.plans.push(Plan::Dictionary(id));
-                self.posts.push(u32::MAX);
-                self.splits.push(u32::MAX);
-                self.order.push(self.appearance_order(distinct));
-            }
-            None => {
-                self.plans.push(Plan::Unknown);
-                self.posts.push(u32::MAX);
-                self.splits.push(u32::MAX);
-                if retains > 0 {
-                    self.order.push(self.birth_order(distinct));
-                }
-            }
+        let Some(id) = found else {
+            self.stage_unknown(distinct, retains);
+            return;
+        };
+        self.plans.push(Plan::Dictionary(id));
+        self.posts.push(u32::MAX);
+        self.splits.push(u32::MAX);
+        self.order.push(self.appearance_order(distinct));
+    }
+
+    /// An unresolved key stages a birth at its first retained row.
+    fn stage_unknown(&mut self, distinct: usize, retains: u32) {
+        self.plans.push(Plan::Unknown);
+        self.posts.push(u32::MAX);
+        self.splits.push(u32::MAX);
+        if retains > 0 {
+            self.order.push(self.birth_order(distinct));
         }
     }
 
