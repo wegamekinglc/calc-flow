@@ -221,11 +221,7 @@ impl LocalIntern {
         let mut hashes = [(0, 0); 64];
         let mut ordinal = 0;
         loop {
-            let mut length = 0;
-            for (target, value) in positions.iter_mut().zip(offsets.by_ref()) {
-                *target = value;
-                length += 1;
-            }
+            let length = read_positions(&mut offsets, &mut positions);
             if length == 0 {
                 break;
             }
@@ -312,6 +308,18 @@ impl LocalIntern {
             }
         })
     }
+}
+
+fn read_positions(
+    offsets: &mut dyn Iterator<Item = (usize, bool)>,
+    positions: &mut [(usize, bool)],
+) -> usize {
+    let mut length = 0;
+    for (target, value) in positions.iter_mut().zip(offsets) {
+        *target = value;
+        length += 1;
+    }
+    length
 }
 
 /// Charges one deduplication block, splitting oversized byte totals into

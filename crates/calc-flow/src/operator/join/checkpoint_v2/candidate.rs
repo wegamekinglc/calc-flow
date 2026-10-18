@@ -241,27 +241,55 @@ impl<'a, 'c> Decoder<'a, 'c> {
         .into_iter()
         .enumerate()
         {
-            let mut rows = StateRows::default();
-            let actual = history.scan(side, next_id, self.check, |locator, live| {
-                (self.check)()?;
-                let workspace = self.workspace.new_empty();
-                let context = self.row_context(side, &workspace);
-                let (payload, offset) = located_payload(payloads, side, locator)?;
-                let validated = row::validate(payload.owner.record(), offset, locator, &context)?;
-                if live {
-                    rows.push_restored(
-                        self.stored_row(payload, offset, locator, validated)?,
-                        summaries[index].rows,
-                    )?;
-                }
-                Ok(())
-            })?;
-            if actual != summaries[index] || rows.len() != summaries[index].rows {
-                return Err(invalid("V2 history changed between validation passes"));
-            }
-            result[index] = RetainedRows(Arc::new(rows), None, columnar::SparseQueue::default());
+            result[index] =
+                self.validate_column_side(side, next_id, history, summaries[index], payloads)?;
         }
         Ok(result)
+    }
+
+    fn validate_column_side(
+        &self,
+        side: JoinSide,
+        next_id: u64,
+        history: &History<'_>,
+        summary: LiveSummary,
+        payloads: &BTreeMap<(JoinSide, [u8; 32]), Decoded<'_>>,
+    ) -> Result<RetainedRows> {
+        let mut rows = StateRows::default();
+        let actual = history.scan(side, next_id, self.check, |locator, live| {
+            self.validate_column_row(side, locator, live, payloads, &mut rows, summary.rows)
+        })?;
+        if actual != summary || rows.len() != summary.rows {
+            return Err(invalid("V2 history changed between validation passes"));
+        }
+        Ok(RetainedRows(
+            Arc::new(rows),
+            None,
+            columnar::SparseQueue::default(),
+        ))
+    }
+
+    fn validate_column_row(
+        &self,
+        side: JoinSide,
+        locator: &history::Locator<'_>,
+        live: bool,
+        payloads: &BTreeMap<(JoinSide, [u8; 32]), Decoded<'_>>,
+        rows: &mut StateRows,
+        expected: usize,
+    ) -> Result<()> {
+        (self.check)()?;
+        let workspace = self.workspace.new_empty();
+        let context = self.row_context(side, &workspace);
+        let (payload, offset) = located_payload(payloads, side, locator)?;
+        let validated = row::validate(payload.owner.record(), offset, locator, &context)?;
+        if live {
+            rows.push_restored(
+                self.stored_row(payload, offset, locator, validated)?,
+                expected,
+            )?;
+        }
+        Ok(())
     }
 
     fn validate_histories(
