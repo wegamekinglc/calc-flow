@@ -184,10 +184,10 @@ async fn test_collision_probe_stops_within_visit_quantum() {
     let (job, processed, _hook) = stop_after_work(typed_key::KeyPhase::LocalProbe, false);
     let context = StreamOperatorContext::new(&job, "match", None);
     let error = local
-        .intern_hashed(
-            42,
-            (256, 8),
+        .intern_positions(
             &columns,
+            &[(256, true)],
+            &[(42, 8)],
             "match",
             &mut LocalFlow::new(&mut KeyFlow::new(Some(&context))),
             |left, right| values[left] == values[right],
@@ -197,6 +197,54 @@ async fn test_collision_probe_stops_within_visit_quantum() {
     assert!(matches!(error, CalcFlowError::Cancelled { .. }));
     assert!((1..=COPY_VISITS).contains(&processed.load(Ordering::SeqCst)));
     assert_eq!(local.distinct, 256);
+}
+
+#[tokio::test]
+async fn test_small_collision_chain_resumes_after_allowance_exhaustion() {
+    use std::{future::Future, task::Poll};
+    let values = (0..512).collect::<Vec<i64>>();
+    let columns = [LocalColumn::I64(&values)];
+    let positions = (0..values.len()).map(|row| (row, true)).collect::<Vec<_>>();
+    let hashes = vec![(42, 8); values.len()];
+    let mut local = local_table(values.len());
+    let job = StreamJobContext::new(
+        1,
+        "local-resume",
+        BTreeMap::new(),
+        None,
+        CancellationToken::new(),
+    );
+    let context = StreamOperatorContext::new(&job, "match", None);
+    let mut key_flow = KeyFlow::new(Some(&context));
+    let mut flow = LocalFlow::new(&mut key_flow);
+    let pending = {
+        let mut future = Box::pin(local.intern_positions(
+            &columns,
+            &positions,
+            &hashes,
+            "match",
+            &mut flow,
+            |left, right| values[left] == values[right],
+        ));
+        let mut pending = 0;
+        futures::future::poll_fn(|context| match future.as_mut().poll(context) {
+            Poll::Pending => {
+                pending += 1;
+                Poll::Pending
+            }
+            Poll::Ready(result) => Poll::Ready(result),
+        })
+        .await
+        .unwrap();
+        pending
+    };
+    assert!(
+        pending > 0,
+        "exercise real cooperative Pending and continuation"
+    );
+    assert_eq!(local.locals, (0..512).collect::<Vec<u32>>());
+    assert_eq!(local.retains, vec![1; 512]);
+    assert_eq!(local.first_retained, (0..512).collect::<Vec<u32>>());
 }
 
 #[tokio::test]

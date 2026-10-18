@@ -29,6 +29,13 @@ fits the existing conservative interning allowance; refusal/fallback and the
 scratch lifetime are unchanged. Long-key cancellation and deadline regressions
 observe processed bytes, with an end-to-end check for unchanged committed state.
 
+Short-key probes and comparisons debit that prepaid allowance synchronously;
+only exhausted credit or wide comparisons enter the async continuation. Hash
+loops likewise await only when more credit is needed. Failed debits leave both
+counters untouched, and the same shared byte/visit limits cover fast and slow
+work. Forced collision tests check real cooperative suspension and continuation
+through this transition, preserving first-appearance IDs and retained counts.
+
 The funded native retained path prepares selection and logical charges, borrows
 the existing `NativeKeys` identity column, and writes owned chunks directly.
 There is no batch-sized `Vec<StoredRow>` on this path. The temporary selection
