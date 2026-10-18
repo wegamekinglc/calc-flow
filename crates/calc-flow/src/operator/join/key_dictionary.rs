@@ -13,7 +13,7 @@ use super::{
     columnar::FramedKey,
     counter_overflow,
     key_arena::KeyWriter,
-    typed_key::{KeyFlow, TypedKey},
+    typed_key::{KeyFlow, SmallKey, TypedKey},
 };
 use crate::Result;
 
@@ -103,7 +103,6 @@ pub(super) struct Pending {
     replacement: Option<Dictionary>,
     keys: Vec<Option<Arc<FramedKey>>>,
     ids: Vec<u32>,
-    local: Option<local::LocalIntern>,
     _credit: Arc<MemoryReservation>,
     #[cfg(test)]
     limits: TestLimits,
@@ -390,6 +389,7 @@ impl Dictionary {
         &self,
         hash: u64,
         key: TypedKey<'_, '_>,
+        small: Option<&SmallKey<'_, '_>>,
         flow: &mut KeyFlow<'_, '_>,
     ) -> Result<Option<u32>> {
         #[cfg(test)]
@@ -401,7 +401,7 @@ impl Dictionary {
         // why: a small key's single row charge covers this walk's first
         // comparison; the same row can reach both the pending and dictionary
         // walks, so at most two uncharged first comparisons share that charge
-        let mut charged = key.small().is_some();
+        let mut charged = small.is_some();
         while let Some(id) = candidate {
             if !charged {
                 flow.step(1, 0).await?;
@@ -410,7 +410,11 @@ impl Dictionary {
             #[cfg(test)]
             super::typed_key::note(super::typed_key::KeyPhase::Comparison, 0);
             let entry = self.slots[id as usize].as_ref().unwrap();
-            if key.equals(entry.lease.owner(), flow).await? {
+            let matched = match small {
+                Some(small) => small.equals(entry.lease.owner())?,
+                None => key.equals(entry.lease.owner(), flow).await?,
+            };
+            if matched {
                 return Ok(Some(id));
             }
             candidate = entry.next;
@@ -726,7 +730,6 @@ impl Pending {
             replacement: None,
             keys: Vec::with_capacity(capacity),
             ids: Vec::with_capacity(capacity),
-            local: None,
             _credit: credit,
             #[cfg(test)]
             limits: TestLimits::default(),
@@ -776,7 +779,10 @@ impl Pending {
                 return Ok(false);
             }
         }
-        self.local = local;
+        // The batch-local table drops here: nothing after preparation reads
+        // it, and dropping releases its split credit before matching, output
+        // preflight and checkpoint-writer grants contend for the pool.
+        drop(local);
         Ok(true)
     }
 
@@ -863,10 +869,11 @@ impl Pending {
             columns,
             row: local.rows[distinct],
         };
-        let hash = canonical_hash(dictionary, key, flow).await?;
+        let small = key.small();
+        let hash = canonical_hash(dictionary, key, small.as_ref(), flow).await?;
         local.canonicals.push(hash);
         let retains = local.retains[distinct];
-        if let Some(id) = self.find(hash, key, flow).await? {
+        if let Some(id) = self.find(hash, key, small.as_ref(), flow).await? {
             local.plans.push(local::Plan::Pending);
             if retains > 0 {
                 self.retain(id, retains, name)?;
@@ -875,7 +882,7 @@ impl Pending {
             local.splits.push(u32::MAX);
             return Ok(());
         }
-        let found = dictionary.find(hash, key, flow).await?;
+        let found = dictionary.find(hash, key, small.as_ref(), flow).await?;
         local.stage_classification(distinct, found, retains);
         Ok(())
     }
@@ -982,9 +989,17 @@ impl Pending {
         budget: &BirthBudget<'_>,
         flow: &mut KeyFlow<'_, '_>,
     ) -> Result<Option<u32>> {
-        let hash = canonical_hash(dictionary, key, flow).await?;
+        let small = key.small();
+        let hash = canonical_hash(dictionary, key, small.as_ref(), flow).await?;
         let Some(id) = self
-            .resolve_hashed(dictionary, key, hash, retain, budget, flow)
+            .resolve_hashed(
+                dictionary,
+                (key, small.as_ref()),
+                hash,
+                retain,
+                budget,
+                flow,
+            )
             .await?
         else {
             return Ok(None);
@@ -998,16 +1013,17 @@ impl Pending {
     async fn resolve_hashed(
         &mut self,
         dictionary: &Dictionary,
-        key: TypedKey<'_, '_>,
+        identity: (TypedKey<'_, '_>, Option<&SmallKey<'_, '_>>),
         hash: u64,
         retain: bool,
         budget: &BirthBudget<'_>,
         flow: &mut KeyFlow<'_, '_>,
     ) -> Result<Option<u32>> {
-        if let Some(id) = self.find(hash, key, flow).await? {
+        let (key, small) = identity;
+        if let Some(id) = self.find(hash, key, small, flow).await? {
             return Ok(Some(id));
         }
-        if let Some(id) = dictionary.find(hash, key, flow).await? {
+        if let Some(id) = dictionary.find(hash, key, small, flow).await? {
             let entry = dictionary.slots[id as usize].as_ref().unwrap();
             return self
                 .add(
@@ -1029,6 +1045,7 @@ impl Pending {
         &self,
         hash: u64,
         key: TypedKey<'_, '_>,
+        small: Option<&SmallKey<'_, '_>>,
         flow: &mut KeyFlow<'_, '_>,
     ) -> Result<Option<u32>> {
         let mut candidate = self
@@ -1038,7 +1055,7 @@ impl Pending {
         // why: a small key's single row charge covers this walk's first
         // comparison; the same row can reach both the pending and dictionary
         // walks, so at most two uncharged first comparisons share that charge
-        let mut charged = key.small().is_some();
+        let mut charged = small.is_some();
         while let Some(id) = candidate {
             if !charged {
                 flow.step(1, 0).await?;
@@ -1047,7 +1064,11 @@ impl Pending {
             #[cfg(test)]
             super::typed_key::note(super::typed_key::KeyPhase::Comparison, 0);
             let change = &self.changes[id as usize];
-            if key.equals(change.lease.owner(), flow).await? {
+            let matched = match small {
+                Some(small) => small.equals(change.lease.owner())?,
+                None => key.equals(change.lease.owner(), flow).await?,
+            };
+            if matched {
                 return Ok(Some(id));
             }
             candidate = change.next;
@@ -1232,12 +1253,15 @@ impl Pending {
 }
 
 /// Canonical framed hash for one key, charged exactly like the per-row path.
+/// The caller computes the row's `SmallKey` once and shares it here so the
+/// byte-summing walk is not repeated per hash, find and comparison.
 async fn canonical_hash(
     dictionary: &Dictionary,
     key: TypedKey<'_, '_>,
+    small: Option<&SmallKey<'_, '_>>,
     flow: &mut KeyFlow<'_, '_>,
 ) -> Result<u64> {
-    let hash = match key.small().as_ref() {
+    let hash = match small {
         Some(small) => {
             let (visits, bytes) = small.charge();
             flow.step(visits, bytes).await?;
@@ -1314,15 +1338,18 @@ fn base_scratch_bytes(rows: usize, columns: usize) -> Option<usize> {
 
 /// Batch-local interning budget: per row, a plain and a canonical hash, a
 /// representative offset, six u32 lanes, the change order and the local
-/// bucket and control bytes.
-fn local_table_bytes(rows: usize) -> Option<usize> {
+/// plan, plus the interning table's buckets and control bytes. The table
+/// rounds its bucket count up to a power of two above 8/7 of the rows at
+/// five bytes a bucket, so its worst case is 12 bytes per row plus a fixed
+/// header allowance.
+pub(super) fn local_table_bytes(rows: usize) -> Option<usize> {
     rows.checked_mul(
         2 * size_of::<u64>()
             + size_of::<usize>()
             + 6 * size_of::<u32>()
             + size_of::<(u32, u32)>()
             + size_of::<local::Plan>()
-            + 10,
+            + 12,
     )?
     .checked_add(64)
 }
