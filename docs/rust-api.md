@@ -124,9 +124,11 @@ through `ProviderRegistry` and lifecycle-specific factories, covered below.
 create no DataFusion session or UDF snapshot.
 `BatchExecutionPlan::requires_datafusion()` returns the classification alone.
 `DataFusionConfig` keeps `parallelism_mode=Fixed` and
-`target_partitions=1` as its compatible default. Opt-in `Auto` uses row count,
-host capacity, and the trusted `calc_flow.datafusion.active_entities` batch
-metadata value without scanning input. See
+`target_partitions=1` as its compatible default. Opt-in `Auto` freezes a
+whole-run external-row policy for batch graphs containing multi-input SQL.
+Other graphs and runtimes additionally require the trusted
+`calc_flow.datafusion.active_entities` batch metadata value. Neither policy
+scans input rows. See
 [SQL and DataFusion performance controls](sql-datafusion-performance.md) for
 the complete configuration, telemetry, benchmark, and rollback contract.
 

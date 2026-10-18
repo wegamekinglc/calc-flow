@@ -497,9 +497,12 @@ builder = PipelineBuilder("parallel-sql").with_datafusion_config(
 )
 ```
 
-Auto mode requires trusted `calc_flow.datafusion.active_entities` batch
-metadata and otherwise uses p1 without scanning the table. Fixed p1 remains the
-default. See [SQL and DataFusion performance controls](sql-datafusion-performance.md)
+For batch graphs containing multi-input SQL, auto mode chooses one run-scoped
+partition budget from total external table rows and host capacity before the
+first node executes. Other graphs and runtimes require trusted
+`calc_flow.datafusion.active_entities` batch metadata and otherwise use p1.
+Both policies avoid scanning rows. Fixed p1 remains the default.
+See [SQL and DataFusion performance controls](sql-datafusion-performance.md)
 for all fields, telemetry, evidence gates, and rollback steps.
 
 ## Trusted Python scalar UDFs

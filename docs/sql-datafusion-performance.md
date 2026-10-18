@@ -14,7 +14,7 @@ and diagnostic collection.
 `with_datafusion_config(...)` method.
 
 | Field                    | Default | Meaning                                                        |
-|--------------------------|--------:|----------------------------------------------------------------|
+|--------------------------|---------|----------------------------------------------------------------|
 | `batch_size`             | `8192`  | DataFusion execution batch size                                |
 | `target_partitions`      | `1`     | Requested count in `fixed` mode                                |
 | `parallelism_mode`       | `fixed` | `fixed` preserves explicit behavior; `auto` uses trusted facts |
@@ -39,7 +39,30 @@ effective = min(requested, ceil(rows / min_rows_per_partition), active_entities)
 
 Inputs below `small_rows_threshold`, single-entity inputs, and inputs without a
 trusted positive `calc_flow.datafusion.active_entities` metadata value use one
-partition. The runtime never scans a table to choose its partition count.
+partition under this entity-based policy.
+
+Batch graphs containing a SQL node with more than one input alias use a
+whole-run row policy instead. Before the first node executes, the runtime sums
+the external table input row counts with saturation and freezes:
+
+```text
+requested = min(available_parallelism, max_partitions)
+effective = min(requested, ceil(external_table_rows / min_rows_per_partition))
+```
+
+Empty inputs and totals below `small_rows_threshold` still use one partition.
+The policy applies to every SQL and expression node sharing that run's session,
+so an earlier small node cannot pin a later multi-input query to one partition.
+Each execution makes a fresh decision. Multi-input SQL includes joins, unions,
+subqueries and declarations with unused aliases; the policy does not classify
+join algorithms or infer their output size. Filtering, fan-out and derived
+inputs can make the external row count differ from later work, so it is a
+heuristic rather than an optimal partition estimate. The runtime never scans
+rows to choose its partition count.
+
+Single-input batch graphs, standalone DataFusion runtimes and stream nodes keep
+the entity-based policy. Fixed mode is unchanged. Session creation remains lazy
+and its first-query phase timing retains the initialization cost.
 
 ## Telemetry
 
@@ -49,6 +72,12 @@ counts; per-output-partition rows; spill bytes; physical operator counts; total,
 window, and repartition/sort compute; and phase timings. The recorded
 `parallelism_mode`, `rolling_rewrite_enabled`, and `diagnostics_collected`
 values make rollback state explicit.
+
+For the whole-run batch policy, `decision_active_entities` is null and
+`decision_active_entities_source` is `batch_multi_input_sql`;
+`decision_input_rows` is the total external table row count. Per-query
+`input_rows` and entity metadata continue to describe that query's actual
+bindings.
 
 Set `collect_diagnostics=false` when plan text and recursive physical metrics
 are not required. Planning and execution continue unchanged, while plan strings

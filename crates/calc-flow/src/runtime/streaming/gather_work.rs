@@ -619,6 +619,24 @@ impl JobGatherOwner {
         }
     }
 
+    pub(crate) fn parallelism(&self) -> usize {
+        self.0
+            .home
+            .state
+            .lock()
+            .service
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .map_or_else(
+                || {
+                    std::thread::available_parallelism()
+                        .map_or(1, usize::from)
+                        .min(32)
+                },
+                |service| service.worker_limit,
+            )
+    }
+
     pub(crate) fn close_admission(&self) {
         self.0.home.close();
     }

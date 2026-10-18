@@ -31,6 +31,7 @@ struct ProcessControl {
 }
 
 pub(super) struct ProcessService {
+    pub(super) worker_limit: usize,
     slots: Mutex<[Option<PoolRecord>; 256]>,
     wake: Condvar,
     workers: Arc<Semaphore>,
@@ -117,6 +118,7 @@ pub(super) fn service() -> Result<Arc<ProcessService>> {
 fn start_service(workers: usize, registrations: usize) -> Result<ProcessControl> {
     let credit = InfrastructureCredit::reserve(STACK_BYTES + 1_048_576)?;
     let service = Arc::new(ProcessService {
+        worker_limit: workers,
         slots: Mutex::new(std::array::from_fn(|_| None)),
         wake: Condvar::new(),
         workers: Arc::new(Semaphore::new(workers)),

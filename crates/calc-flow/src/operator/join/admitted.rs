@@ -609,6 +609,9 @@ pub(super) trait AdmittedRows: Sync {
     }
     fn len(&self) -> usize;
     fn row(&self, index: usize) -> AdmittedRef<'_>;
+    fn cursor_row(&self, index: usize, _segment: &mut Option<usize>) -> AdmittedRef<'_> {
+        self.row(index)
+    }
     /// Event time at a logical admitted position, independent of payload offsets.
     fn event_time(&self, index: usize) -> EventTime {
         self.row(index).event_time
@@ -648,6 +651,26 @@ impl AdmittedRows for AdmittedBatch {
     }
     fn row(&self, index: usize) -> AdmittedRef<'_> {
         self.row(index)
+    }
+    fn cursor_row(&self, index: usize, cursor: &mut Option<usize>) -> AdmittedRef<'_> {
+        assert!(index < self.len);
+        let segment = match *cursor {
+            Some(mut segment) if index >= self.segments.get(segment).range.start => {
+                while self.segments.get(segment).range.end <= index {
+                    segment += 1;
+                    #[cfg(test)]
+                    super::note_join_work(|work| work.admission_segment_lookups += 1);
+                }
+                segment
+            }
+            _ => self.segment_index(index),
+        };
+        *cursor = Some(segment);
+        GroupView {
+            batch: self,
+            segment: self.segments.get(segment),
+        }
+        .row(index)
     }
     fn event_time(&self, index: usize) -> EventTime {
         assert!(index < self.len);
@@ -698,11 +721,28 @@ impl dyn AdmittedRows + '_ {
     pub(super) fn iter(&self) -> RowIter<'_> {
         RowIter::new(self, 0..self.len())
     }
+    pub(super) fn cursor(&self) -> AdmittedCursor<'_> {
+        AdmittedCursor {
+            rows: self,
+            segment: None,
+        }
+    }
     pub(super) fn groups(&self) -> GroupIter<'_> {
         GroupIter {
             rows: self,
             next: 0,
         }
+    }
+}
+
+pub(super) struct AdmittedCursor<'a> {
+    rows: &'a dyn AdmittedRows,
+    segment: Option<usize>,
+}
+
+impl<'a> AdmittedCursor<'a> {
+    pub(super) fn row(&mut self, index: usize) -> AdmittedRef<'a> {
+        self.rows.cursor_row(index, &mut self.segment)
     }
 }
 

@@ -1,5 +1,5 @@
 use super::super::{
-    AdmittedBatch, JoinTimeBounds,
+    AdmittedBatch, AdmittedRows, JoinTimeBounds,
     checkpoint_v2::ContainerFunding,
     native_lookup::{NativeIndex, NativeKeys, WindowBounds, WindowCursor},
 };
@@ -35,7 +35,7 @@ impl ProbeInputs {
         super::super::native_lookup::time_range(
             self.bounds,
             self.incoming_is_left,
-            self.admitted.row(position).event_time,
+            self.admitted.event_time(position),
         )
     }
 

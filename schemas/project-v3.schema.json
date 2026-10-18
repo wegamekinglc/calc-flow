@@ -931,7 +931,7 @@
         },
         {
           "const": "auto",
-          "description": "Choose a conservative partition count from host capacity, row count,\nand trusted input entity statistics.",
+          "description": "Choose a partition count from host capacity and input work. Batch graphs\ncontaining multi-input SQL use the external table row count; other\nruntimes also require trusted input entity statistics.",
           "type": "string"
         }
       ]

@@ -77,7 +77,7 @@ async fn fixture(
     assert!(operator.ensure_native_index(false).unwrap());
     super::super::relax_probe_cost_gate_for_test();
     let inputs = operator
-        .capture_keyed_probe(&plan, bundle.admitted, keys)
+        .capture_keyed_probe(&plan, bundle.admitted, keys, job.gather_owner())
         .unwrap()
         .ready
         .unwrap();

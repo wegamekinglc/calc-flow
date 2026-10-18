@@ -53,16 +53,18 @@ pub enum DataFusionParallelismMode {
     /// configured minimum rows per partition.
     #[default]
     Fixed,
-    /// Choose a conservative partition count from host capacity, row count,
-    /// and trusted input entity statistics.
+    /// Choose a partition count from host capacity and input work. Batch graphs
+    /// containing multi-input SQL use the external table row count; other
+    /// runtimes also require trusted input entity statistics.
     Auto,
 }
 
 /// Batch metadata key carrying a trusted positive active-entity count.
 ///
-/// Auto parallelism never scans the input to derive this value. A missing,
-/// malformed, zero, or row-count-exceeding value safely falls back to one
-/// partition and records the reason in [`DataFusionQueryMetric`].
+/// Auto parallelism never scans the input to derive this value. Outside batch
+/// graphs containing multi-input SQL, a missing, malformed, zero, or
+/// row-count-exceeding value falls back to one partition and records the reason
+/// in [`DataFusionQueryMetric`].
 pub const DATAFUSION_ACTIVE_ENTITIES_METADATA_KEY: &str = "calc_flow.datafusion.active_entities";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -784,6 +786,19 @@ impl DataFusionRuntime {
             })
     }
 
+    /// Freeze a whole-batch policy without eagerly creating the session.
+    pub(crate) fn prepare_batch_sql_parallelism(&mut self, input_rows: usize) {
+        if self.config.parallelism_mode != DataFusionParallelismMode::Auto {
+            return;
+        }
+        self.parallelism_decision.get_or_init(|| {
+            let available = std::thread::available_parallelism()
+                .map(std::num::NonZero::get)
+                .unwrap_or(1);
+            batch_sql_parallelism_decision(&self.config, input_rows, available)
+        });
+    }
+
     #[cfg(test)]
     fn context(&self) -> &SessionContext {
         self.context_for_rows(0, None, "not_evaluated")
@@ -796,20 +811,20 @@ impl DataFusionRuntime {
         active_entities_source: &'static str,
     ) -> &SessionContext {
         self.context.get_or_init(|| {
-            let available_parallelism = std::thread::available_parallelism()
-                .map(std::num::NonZero::get)
-                .unwrap_or(1);
-            let mut decision = parallelism_decision(
-                &self.config,
-                input_rows,
-                active_entities,
-                available_parallelism,
-            );
-            decision.active_entities_source = active_entities_source;
+            let decision = self.parallelism_decision.get_or_init(|| {
+                let available_parallelism = std::thread::available_parallelism()
+                    .map(std::num::NonZero::get)
+                    .unwrap_or(1);
+                let mut decision = parallelism_decision(
+                    &self.config,
+                    input_rows,
+                    active_entities,
+                    available_parallelism,
+                );
+                decision.active_entities_source = active_entities_source;
+                decision
+            });
             let target_partitions = decision.effective_partitions;
-            self.parallelism_decision
-                .set(decision)
-                .expect("parallelism decision initializes with the session");
             self.effective_target_partitions
                 .store(target_partitions, Ordering::Release);
             let session = SessionConfig::new()
@@ -1007,6 +1022,41 @@ struct DataFusionParallelismDecision {
     input_rows: usize,
     active_entities: Option<usize>,
     active_entities_source: &'static str,
+}
+
+fn batch_sql_parallelism_decision(
+    config: &DataFusionConfig,
+    input_rows: usize,
+    available_parallelism: usize,
+) -> DataFusionParallelismDecision {
+    let available_parallelism = available_parallelism.max(1);
+    let requested_partitions = available_parallelism.min(config.max_partitions);
+    let work_cap = input_rows.div_ceil(config.min_rows_per_partition).max(1);
+    let effective_partitions = if input_rows < config.small_rows_threshold {
+        1
+    } else {
+        requested_partitions.min(work_cap)
+    };
+    let limit_reason = if input_rows == 0 {
+        "empty_input"
+    } else if input_rows < config.small_rows_threshold {
+        "small_input"
+    } else if work_cap < requested_partitions {
+        "minimum_rows_per_partition"
+    } else if config.max_partitions <= available_parallelism {
+        "configured_max_partitions"
+    } else {
+        "available_parallelism"
+    };
+    DataFusionParallelismDecision {
+        requested_partitions,
+        effective_partitions,
+        available_parallelism,
+        limit_reason,
+        input_rows,
+        active_entities: None,
+        active_entities_source: "batch_multi_input_sql",
+    }
 }
 
 fn parallelism_decision(

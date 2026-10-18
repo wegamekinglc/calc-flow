@@ -1049,12 +1049,34 @@ forward windows reuse its position; the first window and windows that move
 backward use binary searches. Batch admission
 masks preserve null and late-drop rules. Native index capacity remains funded
 until its storage is released, including capacity retained after eviction.
+Output gathering also keeps a local incoming-row cursor: duplicate and forward
+positions reuse the current payload segment, while backward positions locate
+their segment again. The cursor borrows immutable input and allocates no row
+mapping.
+
+Key preparation can use the existing native CPU pool for supported groups with
+at least 64,000 admitted rows and at least two configured workers. Two to four
+contiguous work units hash and deduplicate local keys; the owner merges distinct
+representatives and broadcasts their local mappings without hashing each input
+row again. Persistent identity creation still follows the first retained row,
+including unresolved probe-only prefixes. Extra scratch is reserved before
+worker buffers are allocated. Large key values or unsupported local shapes
+decline the optional work and use the cooperative serial path. Original Arrow
+buffers remain shared and owned until workers settle; cloned retained payloads
+keep their existing backing funding. A one-worker pool retains serial key
+preparation.
 
 Large admitted native probes divide contiguous input positions among up to four
 funded count work units, with at least 8,192 admitted rows per unit. The operator
 checks the global batch match limit before fill work builds any pairs. A cost
 gate counts opposite-run visits for every incoming position, including repeated
-keys; thin one-to-one and small batches keep the serial path.
+keys. A second gate admits large fixed-width projected output when at least
+64,000 input rows, two configured workers and one MiB of estimated primitive
+output work justify fused row work. This gate multiplies opposite-run visits by
+projected primitive width, so it estimates potential work before temporal
+filtering, not actual output bytes. It permits narrow one-to-one projections to
+use the existing row workers. Unsupported shapes and smaller work retain the
+serial path unless the original probe gate is met.
 
 For at least 64,000 admitted rows with supported flat output and funded payload
 owners, state and expiration admission complete before each unit probes,
@@ -1062,6 +1084,9 @@ preflights and gathers its contiguous input range on the existing native pool.
 All units finish before the first output. Results emit in range order,
 independently of completion order, without merging pair fragments or dispatching
 another column-gather job. Output chunk boundaries follow these stable ranges.
+Enabling these ranges can change physical batch boundaries. Matched row order
+and checkpoint state remain deterministic; downstream cumulative aggregates can
+emit different intermediate snapshots when they receive different batch sizes.
 Optional extra scratch is capped at 512 MiB per batch and result reservations at
 16 MiB per unit (64 MiB total), inside the unchanged runtime pool. Result funding
 uses the projected physical schema and selected byte-array values, including

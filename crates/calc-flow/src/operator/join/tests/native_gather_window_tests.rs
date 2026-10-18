@@ -94,7 +94,7 @@ async fn gather_fixture() -> (StreamJoinOperator, Arc<ProbeInputs>, StreamJobCon
         .unwrap();
     assert!(operator.ensure_native_index(false).unwrap());
     let inputs = operator
-        .capture_keyed_probe(&plan, bundle.admitted, keys)
+        .capture_keyed_probe(&plan, bundle.admitted, keys, job.gather_owner())
         .unwrap()
         .ready
         .unwrap();

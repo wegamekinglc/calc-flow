@@ -9,6 +9,14 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-19: Prepare large Join key groups on the bounded native CPU pool,
+  preserving deterministic retained-row identity semantics and serial fallback.
+  Extend funded row-wise probe/gather eligibility to large primitive narrow
+  projections, retaining match, state and output budgets, and reuse incoming
+  payload segments during output gathering. Batch graphs with
+  multi-input SQL can opt into a run-scoped Auto partition budget based on
+  external table row counts, so an earlier small node does not fix the run to
+  one partition. Fixed defaults and checkpoint layouts are unchanged.
 - 2026-10-18: Share Window group values across batches and checkpoint marks.
   Bind Join incoming metadata by segment, append admission blocks, and hash
   typed key columns in bounded scratch. Prepare native retained chunks without

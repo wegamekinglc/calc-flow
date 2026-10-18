@@ -10,7 +10,7 @@ use super::{
     worker::{CountWork, FillWork},
 };
 use crate::runtime::streaming::gather_work::{
-    AdmissionFailure, GatherOperatorId, GatherStop, ObservedTicket, ParallelCpuWork,
+    AdmissionFailure, GatherOperatorId, GatherStop, JobGatherOwner, ObservedTicket, ParallelCpuWork,
 };
 use crate::{Result, StreamJobContext, StreamOperatorContext};
 use parking_lot::Mutex;
@@ -23,6 +23,10 @@ mod probe_stop_tests;
 #[cfg(test)]
 #[path = "../tests/native_gather_window_tests.rs"]
 mod native_gather_window_tests;
+
+#[cfg(test)]
+#[path = "../tests/batch_parallel_output_tests.rs"]
+mod batch_parallel_output_tests;
 
 struct Capture {
     declined: Option<(AdmittedBatch, Option<NativeKeys>)>,
@@ -60,7 +64,12 @@ impl StreamJoinOperator {
         context: &StreamOperatorContext<'_>,
     ) -> ProbeAttempt {
         let inputs = {
-            let captured = match self.capture_probe(plan, std::mem::take(admitted), keys) {
+            let captured = match self.capture_probe(
+                plan,
+                std::mem::take(admitted),
+                keys,
+                context.job().gather_owner(),
+            ) {
                 Ok(captured) => captured,
                 Err(error) => return ProbeAttempt::Complete(Err(error)),
             };
@@ -102,6 +111,7 @@ impl StreamJoinOperator {
         plan: &SidePlan,
         admitted: AdmittedBatch,
         keys: Option<NativeKeys>,
+        owner: &JobGatherOwner,
     ) -> Result<Capture> {
         if !self.probe_ready(plan, admitted.len())? {
             return Ok(Capture::declined(admitted, keys));
@@ -109,7 +119,7 @@ impl StreamJoinOperator {
         let Some(keys) = keys else {
             return Ok(Capture::declined(admitted, None));
         };
-        self.capture_keyed_probe(plan, admitted, keys)
+        self.capture_keyed_probe(plan, admitted, keys, owner)
     }
 
     fn capture_keyed_probe(
@@ -117,6 +127,7 @@ impl StreamJoinOperator {
         plan: &SidePlan,
         mut admitted: AdmittedBatch,
         keys: NativeKeys,
+        owner: &JobGatherOwner,
     ) -> Result<Capture> {
         let bytes = control::input_bytes(keys.keys.len(), admitted.len(), &self.name)?;
         let Some(credit) = self.optional_credit(bytes)? else {
@@ -142,7 +153,10 @@ impl StreamJoinOperator {
             .fold(0usize, |total, id| {
                 total.saturating_add(index.run_len_by_id(id))
             });
-        if estimated_visits < super::probe_min_visits() {
+        if estimated_visits < super::probe_min_visits()
+            && !(super::morsel::materialization_worthwhile(self, admitted.len(), estimated_visits)
+                && owner.parallelism() > 1)
+        {
             return Ok(Capture::declined(admitted, Some(keys)));
         }
         let (released, receiver) = tokio::sync::oneshot::channel();

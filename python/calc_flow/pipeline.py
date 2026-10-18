@@ -917,9 +917,10 @@ class PipelineBuilder:
     ) -> PipelineBuilder:
         """Return a builder with an immutable run-scoped DataFusion policy.
 
-        ``auto`` is opt-in. It uses trusted
-        ``calc_flow.datafusion.active_entities`` batch metadata and safely
-        falls back to one partition when that statistic is absent or invalid.
+        ``auto`` is opt-in. Batch graphs containing multi-input SQL select a
+        run-scoped budget from external table rows and host capacity. Other
+        graphs require trusted ``calc_flow.datafusion.active_entities`` batch
+        metadata and fall back to one partition when it is absent or invalid.
         """
         integers = {
             "batch_size": batch_size,

@@ -144,6 +144,7 @@ pub struct BatchExecutionPlan {
     table: Option<TablePlanResources>,
     /// Built-in batch operators hold no run state; only external ones can.
     has_operator_state: bool,
+    row_parallel_sql: bool,
     pub(crate) run_lock: tokio::sync::Mutex<()>,
     operation_state: StdMutex<OperationState>,
 }
@@ -209,6 +210,9 @@ impl PipelineBuilder {
             .nodes
             .values()
             .any(|node| matches!(node.operator, NodeOperator::Batch(_)));
+        let row_parallel_sql = self.nodes.values().any(
+            |node| matches!(&node.operator, NodeOperator::Sql(sql) if sql.input_ports().len() > 1),
+        );
         let nodes = build_nodes(self, graph.order, |definition| {
             CompiledBatchOperator::try_convert(definition)
                 .expect("batch-only nodes were validated before conversion")
@@ -221,6 +225,7 @@ impl PipelineBuilder {
             fingerprint: graph.fingerprint,
             table: graph.table,
             has_operator_state,
+            row_parallel_sql,
             run_lock: tokio::sync::Mutex::new(()),
             operation_state: StdMutex::new(OperationState::default()),
         })
@@ -403,6 +408,15 @@ impl BatchExecutionPlan {
             .map(|table| {
                 let mut runtime = DataFusionRuntime::new(table.config)?;
                 runtime.register_udfs(&table.udfs, &table.selected_udfs)?;
+                if self.row_parallel_sql {
+                    let input_rows = inputs
+                        .values()
+                        .filter(|batch| batch.kind() == crate::BatchKind::Table)
+                        .fold(0usize, |total, batch| {
+                            total.saturating_add(batch.num_rows())
+                        });
+                    runtime.prepare_batch_sql_parallelism(input_rows);
+                }
                 Ok::<DataFusionRuntime, CalcFlowError>(runtime)
             })
             .transpose()?;
@@ -1307,6 +1321,10 @@ mod lifecycle_tests {
         assert_eq!(restores.load(Ordering::SeqCst), 1);
     }
 }
+
+#[cfg(test)]
+#[path = "batch/parallelism_tests.rs"]
+mod parallelism_tests;
 
 #[cfg(test)]
 mod data_tests {

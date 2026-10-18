@@ -25,6 +25,8 @@ mod funding;
 mod funding_tests;
 pub(super) use funding::pair_credit_bytes;
 
+const MIN_MATERIALIZATION_BYTES: usize = 1 << 20;
+
 pub(in crate::operator::join) struct DeferredProbe {
     inputs: ProbeInputs,
     counts: Counts,
@@ -52,6 +54,25 @@ pub(super) fn eligible(operator: &StreamJoinOperator, rows: usize) -> bool {
                     .iter()
                     .all(|field| output_gather::flat_owned_type(field.data_type()))
         })
+}
+
+pub(super) fn materialization_worthwhile(
+    operator: &StreamJoinOperator,
+    rows: usize,
+    estimated_visits: usize,
+) -> bool {
+    if !eligible(operator, rows) {
+        return false;
+    }
+    operator.output_ports[0]
+        .schema()
+        .and_then(|schema| {
+            schema.fields().iter().try_fold(0usize, |bytes, field| {
+                bytes.checked_add(field.data_type().primitive_width()?)
+            })
+        })
+        .and_then(|width| width.checked_mul(estimated_visits))
+        .is_some_and(|bytes| bytes >= MIN_MATERIALIZATION_BYTES)
 }
 
 #[cfg(test)]

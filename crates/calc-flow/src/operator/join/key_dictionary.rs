@@ -20,7 +20,10 @@ use crate::Result;
 mod bindings;
 mod framed;
 mod local;
+mod parallel;
 mod rebuild;
+#[cfg(test)]
+mod tests;
 pub(super) use bindings::{Bindings, SideBindings};
 pub(super) use rebuild::Rebuilt;
 
@@ -292,13 +295,12 @@ impl Dictionary {
         {
             pending.limits = self.limits;
         }
-        let mut flow = KeyFlow::new(context);
         let budget = BirthBudget {
             master: &master,
             name,
         };
         if !pending
-            .prepare_rows(self, rows, indices, &budget, &mut flow, local)
+            .prepare_rows(self, rows, indices, &budget, context, local)
             .await?
         {
             return Ok(None);
@@ -742,9 +744,10 @@ impl Pending {
         rows: &dyn AdmittedRows,
         indices: &[usize],
         budget: &BirthBudget<'_>,
-        flow: &mut KeyFlow<'_, '_>,
+        context: Option<&crate::StreamOperatorContext<'_>>,
         mut local: Option<local::LocalIntern>,
     ) -> Result<bool> {
+        let mut flow = KeyFlow::new(context);
         let mut columns = Vec::with_capacity(indices.len());
         for group in rows.groups() {
             columns.clear();
@@ -764,14 +767,20 @@ impl Pending {
             let prepared = match interned {
                 Some((intern, bound)) => {
                     intern.begin_group();
-                    intern
-                        .intern_group(&bound, group, budget.name, flow)
-                        .await?;
-                    self.prepare_group_local(&columns, dictionary, intern, budget, flow)
+                    if !parallel::intern_group(
+                        intern, &bound, group, indices, budget, &mut flow, context,
+                    )
+                    .await?
+                    {
+                        intern
+                            .intern_group(&bound, group, budget.name, &mut flow)
+                            .await?;
+                    }
+                    self.prepare_group_local(&columns, dictionary, intern, budget, &mut flow)
                         .await?
                 }
                 None => {
-                    self.prepare_group_rows(&columns, dictionary, group, budget, flow)
+                    self.prepare_group_rows(&columns, dictionary, group, budget, &mut flow)
                         .await?
                 }
             };
