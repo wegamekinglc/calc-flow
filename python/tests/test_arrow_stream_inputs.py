@@ -302,7 +302,8 @@ async def _join_records(data):
 @pytest.mark.parametrize("side", ["baseline", "candidate"])
 def test_materialized_join_matches_full_oracle(side, materialized_join, monkeypatch):
     program, inputs, expected = materialized_join
-    before = {name: (data.to_pydict(), data.schema) for name, data in inputs.items()}
+    # Copy the chunked Arrow inputs without converting timestamps to Python.
+    before = {name: data.combine_chunks() for name, data in inputs.items()}
     calls = 0
     original = _IterableSource.next
 
@@ -331,9 +332,9 @@ def test_materialized_join_matches_full_oracle(side, materialized_join, monkeypa
 
     assert asyncio.run(collect()).equals(expected, check_metadata=True)
     assert calls == (0 if side == "candidate" else 18)
-    assert {
-        name: (data.to_pydict(), data.schema) for name, data in inputs.items()
-    } == before
+    assert inputs.keys() == before.keys()
+    for name, data in inputs.items():
+        assert data.equals(before[name], check_metadata=True), name
 
 
 def test_materialized_binding_preserves_batch_metadata_and_can_be_reused() -> None:
