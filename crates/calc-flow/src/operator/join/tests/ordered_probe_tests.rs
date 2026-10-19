@@ -159,7 +159,8 @@ fn completed_units(observations: &Observations, phase: data_work::ProbePhase) ->
 
 async fn assert_ordered_success(service: &TestService) {
     let job = job().with_gather_owner(service.owner("ordered-probe".into()));
-    let context = StreamOperatorContext::new(&job, "match", None);
+    let context = StreamOperatorContext::new(&job, "match", None)
+        .with_output_budget(EdgeBudget::new(10_000, usize::MAX).unwrap());
     let mut operator = restored_operator(49_152, &context).await;
     let observed = observe_units(&mut operator, &job);
     let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
