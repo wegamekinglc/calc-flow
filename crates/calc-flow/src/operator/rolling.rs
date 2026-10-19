@@ -76,7 +76,9 @@ use budget::StateCharge;
 #[cfg(test)]
 use kernel::KernelSelection;
 #[cfg(test)]
-pub(crate) use kernel::entity_parallel_tests::entity_parallel_test_pair;
+pub(crate) use kernel::entity_parallel_tests::{
+    entity_parallel_test_pair, entity_parallel_test_work,
+};
 use kernel::{RollingKernelPlan, RollingKernelState, TypedStreamTransition};
 pub(crate) use kernel::{
     StreamKernelUpdate,

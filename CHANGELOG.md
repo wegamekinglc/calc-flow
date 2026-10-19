@@ -9,6 +9,14 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-19: Extend CPU-aware streaming work beyond Join. Decouple ASOF compute
+  routing from persistent shards and let explicit budgets size finalization
+  prefixes. Scale warm ordered rolling mean/dual-SMA across whole-entity lanes,
+  reuse entity counts, and build compact row schedules without private batch or
+  scratch-byte ceilings. Compute eligible cross-section means by complete time
+  groups with owned cancellation and budgeted output preparation. Reuse compiled
+  immutable expression steps for repeated row-local SQL while preserving state,
+  arithmetic order, explicit limits and checkpoint formats.
 - 2026-10-19: Preserve project-v3 stream JSON's historical omitted budget values
   and connector-project fingerprints. New runtime constructors use the larger
   defaults, which remain explicit when exported from `StreamRunOptions`.

@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     AsofStateLimits, BatchMetadata, EdgeCollector, Epoch, OperatorMetadata, StreamOperator,
-    runtime::streaming::gather_work::TestService,
+    runtime::streaming::gather_work::{ParallelCpuWork, TestService},
 };
 use datafusion::arrow::{
     array::{Int64Array, StringArray},
@@ -10,6 +10,108 @@ use datafusion::arrow::{
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 const ROWS: usize = 8_192;
+
+#[tokio::test]
+async fn test_admission_capture_occupies_sixteen_and_thirty_two_units() {
+    let mut operator = fixture();
+    let pool = operator.runtime.pool.clone();
+    let job = StreamJobContext::new(914, "asof", JsonMap::new(), None, CancellationToken::new());
+    let context = StreamOperatorContext::new(&job, "asof", None);
+    let batch = many_key_input(&operator, ROWS);
+    let validated = operator.validate_admission("right", &batch).unwrap();
+    let admission = operator
+        .prepare_admission(validated, &batch, &context)
+        .await
+        .unwrap();
+    let reserved = pool.reserved();
+    let status = operator.status.clone();
+    for units in [16, 32] {
+        let (work, references, credit) = parallel::capture(&operator, &admission, units, &context)
+            .await
+            .unwrap();
+        let occupied = work
+            .key_units()
+            .into_values()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            occupied.len(),
+            units,
+            "temporary admission work stayed within storage shards"
+        );
+        let stop = GatherStop::from_job(&job);
+        let buckets = (0..units)
+            .flat_map(|unit| work.run(unit, &stop).unwrap())
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(buckets.len(), 256);
+        assert_eq!(
+            buckets.values().map(|bucket| bucket.len()).sum::<usize>(),
+            ROWS
+        );
+        drop((work, references, credit, buckets));
+        assert_eq!(pool.reserved(), reserved);
+        assert_eq!(operator.status, status);
+    }
+    drop((admission, operator, batch, context));
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop(job);
+    assert_eq!(pool.reserved(), 0);
+}
+
+#[tokio::test]
+async fn test_cpu_sized_admission_executes_available_work_above_eight_units() {
+    let mut operator = fixture();
+    let pool = operator.runtime.pool.clone();
+    let job = StreamJobContext::new(915, "asof", JsonMap::new(), None, CancellationToken::new());
+    let context = StreamOperatorContext::new(&job, "asof", None);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = calls.clone();
+    operator.admission_hook = Some(Arc::new(move |_| {
+        counter.fetch_add(1, Ordering::Relaxed);
+    }));
+    let batch = many_key_input(&operator, 9 * 4_096);
+    let mut output = EdgeCollector::new(operator.output_ports().to_vec());
+    operator
+        .process_data("right", batch, &context, &mut output)
+        .await
+        .unwrap();
+    let units = std::thread::available_parallelism()
+        .map_or(1, usize::from)
+        .min(9);
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        if units < 2 { 0 } else { units },
+        "admission scheduling retained the storage shard ceiling"
+    );
+    assert_eq!(operator.status.right.accepted_rows, 9 * 4_096);
+    drop((operator, output, context));
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop(job);
+    assert_eq!(pool.reserved(), 0);
+}
+
+fn many_key_input(operator: &StreamAsofJoinOperator, rows: usize) -> Batch {
+    let record = RecordBatch::try_new(
+        operator.schemas[0].clone(),
+        vec![
+            Arc::new(StringArray::from_iter_values(
+                (0..rows)
+                    .rev()
+                    .map(|row| format!("key-{key:03}", key = row % 256)),
+            )),
+            Arc::new(
+                TimestampMicrosecondArray::from_iter_values(
+                    (0..rows).rev().map(|row| i64::try_from(row).unwrap()),
+                )
+                .with_timezone("UTC"),
+            ),
+            Arc::new(Int64Array::from_iter_values(
+                (0..rows).rev().map(|row| i64::try_from(row).unwrap()),
+            )),
+        ],
+    )
+    .unwrap();
+    Batch::table(vec![record], BatchMetadata::default()).unwrap()
+}
 
 #[tokio::test]
 async fn right_bucket_storage_is_sharded_before_and_after_cold_restore() {
@@ -130,7 +232,7 @@ async fn right_key_routing_survives_new_keys_and_batch_reordering() {
             "new keys must not reroute retained keys"
         );
     }
-    for units in [2, 3, 4, 8] {
+    for units in [2, 3, 4, 8, 16, 32] {
         let expected = key_routes(&mut operator, &next, units, &context).await;
         assert_eq!(
             key_routes(&mut restored, &next, units, &context).await,

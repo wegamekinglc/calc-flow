@@ -124,9 +124,7 @@ pub(in super::super) async fn prepare(
     admission: &Admission,
     context: &StreamOperatorContext<'_>,
 ) -> Result<Option<PreparedAdmission>> {
-    let units = (admission.len() / 4_096)
-        .min(admission.right_capacities.len())
-        .min(state::KEY_SHARDS);
+    let units = (admission.len() / 4_096).min(admission.right_capacities.len());
     if units < 2 {
         return Ok(None);
     }
@@ -282,7 +280,7 @@ fn capture_buckets(
 ) -> Vec<(usize, usize)> {
     let mut routes = Vec::with_capacity(admission.right_capacities.len());
     for (id, (key, count)) in admission.right_capacities.iter().enumerate() {
-        let shard = state::key_shard(key) % units;
+        let shard = state::key_partition(key, units);
         let target = &mut work.shards[shard];
         routes.push((shard, target.len()));
         target.push(InputBucket {

@@ -373,8 +373,12 @@ fn unique_keys_and_tiny_cuts_fit_the_unchanged_prefix_workspace() {
                 prefix = aggregated_prefix(&operator, selected);
             });
             assert_prefix(&prefix, &expected);
-            let charge =
-                prefix_workspace_bytes(selected) + operator.state.left.iter_workspace_bytes();
+            let charge = prefix_workspace_bytes(
+                selected,
+                operator.state.left.iter_workspace_bytes(),
+                &operator.name,
+            )
+            .unwrap();
             assert!(
                 allocation.bytes_max <= charge,
                 "canonical={canonical}, selected={selected}, charge={charge}, actual={allocation:?}"

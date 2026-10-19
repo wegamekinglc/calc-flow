@@ -7,6 +7,16 @@ default configuration uses one fixed partition. Applications can opt into
 conservative auto parallelism and independently control SQL rolling rewrites
 and diagnostic collection.
 
+Eligible immutable row-local stream SQL reuses the same compiled DataFusion
+expression steps as stream expressions after its first execution. Later calls
+with the same query, input alias and exact schema avoid rebinding and scheduling
+a new physical plan. Filter state is fresh for each call. Selected UDFs,
+non-immutable functions, aggregates, sorts, limits and unsupported plan shapes
+retain their existing execution paths. This reuse does not change configured
+DataFusion partition policy or aggregate reduction order; stream callback
+metrics cover both paths, while private SQL query metrics describe SQL fallback
+executions.
+
 ## Configuration
 
 `DataFusionConfig` is part of project-v3 and is also available through Rust's

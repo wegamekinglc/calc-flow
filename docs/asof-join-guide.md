@@ -291,8 +291,13 @@ capacities, unique identity buffers, payload batches, owning indexes, and the
 reserved canonical checkpoint index. A partly referenced identity buffer remains
 charged at its full retained capacity.
 
-Finalization takes ready rows up to the smaller of the output edge's row budget
-and 64,000 rows. Key and candidate vectors reserve workspace before allocation;
+Temporary admission and probe work use the available CPU and input work budget,
+with stable full-key hashes routing complete keys to compute units. The eight
+persistent storage shards retain their existing identity and checkpoint layout;
+their count does not cap temporary computation concurrency.
+
+Finalization takes ready rows up to the output edge's row budget. Key and
+candidate vectors reserve checked workspace before allocation;
 the operator halves a chunk and releases unused scratch if workspace or output
 bytes exceed a limit. Each accepted chunk updates the deferred index length and
 releases obsolete prepared index bytes. Right-side

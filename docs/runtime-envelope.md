@@ -850,7 +850,7 @@ actual capacity awaits, including failed and cancelled waits. These wall-clock
 intervals include scheduling delay and must not be presented as CPU samples
 or added across concurrent operators.
 
-An owned two-lane numeric computation has one parent `numeric_update` interval
+An owned numeric work group has one parent `numeric_update` interval
 covering dispatch, blocking-pool queueing, execution and joins. Lane CPU times
 are not summed. If the async callback is dropped first, subsequent drain time
 belongs to `other`; retained stage handles cannot reopen a named stage. The
@@ -892,18 +892,22 @@ entity's routed row count and walk back from the batch end only until every
 tail is full.
 
 An already initialized, ordered Native Float64 StableV1 mean calculation can
-assign whole entities to two owned CPU lanes. The narrow path requires one or
+assign whole entities to owned CPU lanes. The narrow path requires one or
 two numeric groups and one or two derived Float64 mean/difference columns,
 Rows frames of 5 or 20, and validated typed queues no longer than those frames. A finalized
-batch has 64,000 to 256,000 rows and at least 16 touched entities; each lane
-has at least 16,000 rows and no more than 5/8 of the batch. Initial state
+batch has at least 64,000 rows and 16 touched entities. The lane count is the
+minimum of available CPU capacity, the batch's 16,000-row work units and touched
+entities; fewer than two lanes use the serial path. Entity routing counts are
+reused, one pass builds stable lane schedules, and each lane visits only its
+assigned rows. No lane may own more than 5/8 of the batch. Initial state
 creation, the first reconstruction after restore, unsupported shapes, small
 or skewed batches and unavailable admission use the original serial loop.
 Preparing a serial fallback does not repeat entity resolution or state copying.
 
-Each job admits at most one two-lane pair. A private 16 MiB limit accounts for
-the additional declared scratch capacities; it is not an allocator or process
-RSS limit. Joining the CPU handles does not free this reservation while lane
+Each job admits at most one numeric work group. Its checked scratch ledger
+accounts for the additional declared capacities without a private byte ceiling;
+it is not an allocator or process RSS limit. Explicit retained-state budgets
+remain independent. Joining the CPU handles does not free this ownership while lane
 results or merge scratch are still live. Each entity retains its original
 transition and readout order, and a serial merge restores the original row
 order. Validation, history preparation, output budgets and emit-to-commit
@@ -913,8 +917,8 @@ watermark, checkpoint or state-commit authority.
 Cancellation is local to the owned computation and does not set the job token.
 Partial launch, task abortion and driver takeover retain the work handles and
 drain them asynchronously before terminal publication. Ordinary errors do not
-cancel a second lane that may still encounter an earlier row's failure;
-failure selection preserves original row/check order after both lanes settle.
+cancel other lanes that may still encounter an earlier row's failure;
+failure selection preserves original row/check order after all lanes settle.
 A selected panic resumes with its original payload only while the callback is
 still active, keeping the original logical task identity. After callback Drop,
 the frozen outcome remains; late panics are secondary task diagnostics and do
@@ -936,8 +940,21 @@ materializes pending buffers and retained histories into the durable layout;
 watermark, lateness, duplicate, null, output-budget, and recovery semantics
 are enforced on both paths.
 
+Ordered cross-section exact-time mean can reuse complete timestamp-group
+boundaries collected by its existing order proof. Large inputs divide complete
+groups among CPU- and work-sized units; each group retains its original
+accumulation order. A single group uses the serial path. Workers share immutable
+numeric Arrow input and return one mean per group; the owner expands those means
+into the original ordered output. Optional-work memory reservations cover the
+parallel buffers and controls, including output preparation, without changing
+the logical `StateBudget`. Admission refusal uses the existing serial path.
+Worker tickets settle before backpressured emission, while the prepared Arrow
+output retains its credit until emission finishes. Reset, restore and abandoned
+callbacks retain cleanup ownership until workers settle. Checkpoints keep their
+existing wire representation.
+
 Column-only stream projections reuse Arrow arrays without SQL planning.
-Other eligible single-input, row-local stream expressions first execute through
+Other eligible single-input, row-local stream expressions and SQL first execute through
 SQL. Later batches with the same query, alias and exact Arrow schema, including
 metadata, reuse compiled immutable DataFusion expressions for arithmetic and
 filtering. Evaluation uses the planned output schema and SQL visible-slice

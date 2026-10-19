@@ -19,6 +19,8 @@ use datafusion::execution::memory_pool::MemoryReservation;
 use std::collections::BTreeMap;
 use std::{collections::HashMap, sync::Arc};
 
+#[cfg(test)]
+mod cpu_scaling;
 mod merge;
 #[cfg(test)]
 mod output_ranges;
@@ -111,14 +113,14 @@ impl StreamAsofJoinOperator {
         ended: bool,
         context: &StreamOperatorContext<'_>,
     ) -> Result<(usize, MemoryReservation)> {
-        const MAX_ROWS: usize = 64_000;
         context.check_cancelled()?;
-        let limit = context.output_budget().max_rows.min(MAX_ROWS);
+        let limit = context.output_budget().max_rows;
         let mut count = self.state.left.ready_prefix_len(limit, frontier, ended);
         loop {
-            match self.reserve_workspace(
-                prefix_workspace_bytes(count) + self.state.left.iter_workspace_bytes(),
-            ) {
+            let reservation =
+                prefix_workspace_bytes(count, self.state.left.iter_workspace_bytes(), &self.name)
+                    .and_then(|bytes| self.reserve_workspace(bytes));
+            match reservation {
                 Ok(reservation) => return Ok((count, reservation)),
                 Err(_) if count > 1 => count /= 2,
                 Err(error) => return Err(error),
@@ -322,6 +324,7 @@ impl StreamAsofJoinOperator {
                         *count,
                         self.state.left.iter_workspace_bytes(),
                         prefix_workspace,
+                        &self.name,
                     );
                 }
                 Err(error) => return Err(error),
@@ -644,13 +647,30 @@ fn retryable(error: &CalcFlowError) -> bool {
     )
 }
 
-fn prefix_workspace_bytes(count: usize) -> u64 {
-    (count * 640 + 2_048) as u64
+fn prefix_workspace_bytes(count: usize, heap_bytes: u64, name: &str) -> Result<u64> {
+    (count as u64)
+        .checked_mul(640)
+        .and_then(|bytes| bytes.checked_add(2_048))
+        .and_then(|bytes| bytes.checked_add(heap_bytes))
+        .ok_or_else(|| {
+            reason(
+                name,
+                StreamingFailureReason::AsofWorkspaceLimitExceeded,
+                "ASOF prefix workspace exceeds the resource domain",
+            )
+        })
 }
 
-fn shrink_prefix_workspace(count: usize, heap_bytes: u64, reservation: &MemoryReservation) {
-    let needed = usize::try_from(prefix_workspace_bytes(count) + heap_bytes)
-        .expect("bounded ASOF prefix scratch");
+fn shrink_prefix_workspace(
+    count: usize,
+    heap_bytes: u64,
+    reservation: &MemoryReservation,
+    name: &str,
+) {
+    let needed = usize::try_from(
+        prefix_workspace_bytes(count, heap_bytes, name).expect("previously funded ASOF prefix"),
+    )
+    .expect("bounded ASOF prefix scratch");
     reservation.shrink(reservation.size() - needed);
 }
 
@@ -1276,15 +1296,15 @@ mod workspace_tests {
         let mut count = 1_024;
         let reservation = MemoryConsumer::new("asof-test-keys").register(&pool);
         reservation
-            .try_grow(usize::try_from(prefix_workspace_bytes(count)).unwrap())
+            .try_grow(usize::try_from(prefix_workspace_bytes(count, 0, "asof").unwrap()).unwrap())
             .unwrap();
         let initial = reservation.size();
         count = 1;
-        shrink_prefix_workspace(count, 0, &reservation);
+        shrink_prefix_workspace(count, 0, &reservation, "asof");
         assert!(reservation.size() < initial / 100);
         assert_eq!(
             reservation.size(),
-            usize::try_from(prefix_workspace_bytes(count)).unwrap()
+            usize::try_from(prefix_workspace_bytes(count, 0, "asof").unwrap()).unwrap()
         );
         assert_eq!(pool.reserved(), reservation.size());
     }

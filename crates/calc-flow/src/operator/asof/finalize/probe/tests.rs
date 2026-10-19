@@ -20,6 +20,69 @@ mod key_routes;
 const ROWS: usize = 32_768;
 type Row = (String, i64, i64, u64);
 
+#[tokio::test]
+async fn test_cpu_sized_probe_executes_available_work_above_eight_units() {
+    let rows = 9 * 16_384;
+    let (template, left, right) = fixture_with_keys(false, rows, 256);
+    let spec = StreamAsofJoinSpec::new(
+        template.spec.left().clone(),
+        template.spec.right().clone(),
+        Duration::from_micros(1),
+        AsofStateLimits::new(200_000, 256 << 20).unwrap(),
+    )
+    .unwrap();
+    let mut operator = StreamAsofJoinOperator::new(
+        "asof",
+        template.schemas[0].clone(),
+        template.schemas[1].clone(),
+        spec,
+    )
+    .unwrap();
+    let pool = operator.runtime.pool.clone();
+    let job = StreamJobContext::new(913, "asof", JsonMap::new(), None, CancellationToken::new());
+    let context = test_context(&job);
+    let mut output = EdgeCollector::new(operator.output_ports().to_vec());
+    for (port, batch) in [
+        ("right", input(&operator, &right[..512])),
+        ("left", input(&operator, &left)),
+    ] {
+        operator
+            .process_data(port, batch, &context, &mut output)
+            .await
+            .unwrap();
+    }
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = calls.clone();
+    operator.match_hook = Some(Arc::new(move |_| {
+        counter.fetch_add(1, Ordering::Relaxed);
+    }));
+    let matches = parallel_matches(&operator, rows, &context).await.unwrap();
+    let expected_units = std::thread::available_parallelism()
+        .map_or(1, usize::from)
+        .min(9);
+    if expected_units < 2 {
+        assert!(matches.is_none());
+    } else {
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            expected_units,
+            "probe scheduling retained the storage shard ceiling"
+        );
+        let matches = matches.as_ref().unwrap();
+        assert_eq!(matches.rows.len(), rows);
+        for ((key, _), matched) in operator.state.left.output_iter().zip(&matches.rows) {
+            assert_eq!(
+                *matched,
+                operator.state.candidate(key.1, *key.0, 1).copied()
+            );
+        }
+    }
+    drop((matches, operator, output, context));
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop(job);
+    assert_eq!(pool.reserved(), 0);
+}
+
 fn test_context(job: &StreamJobContext) -> StreamOperatorContext<'_> {
     StreamOperatorContext::new(job, "asof", None)
         .with_output_budget(crate::EdgeBudget::new(ROWS, 128 << 20).unwrap())

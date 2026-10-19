@@ -75,7 +75,6 @@ pub(super) async fn parallel_matches(
 ) -> Result<Option<ProbedRows>> {
     let workers = std::thread::available_parallelism()
         .map_or(1, usize::from)
-        .min(state::KEY_SHARDS)
         .min(operator.state.right.len())
         .min(count / 16_384);
     if workers < 2 {
@@ -204,7 +203,7 @@ fn capture_route<'a>(
         return Some(*route);
     }
     let bucket = operator.state.right.owned_bucket(key)?;
-    let shard = state::key_shard(key) % work.shards.len();
+    let shard = state::key_partition(key, work.shards.len());
     let target = &mut work.shards[shard];
     let index = target.buckets.len();
     target.buckets.push(bucket);

@@ -44,10 +44,15 @@ mod restore;
 pub(crate) use restore::PreparedSqlRestore;
 mod retention;
 
+#[cfg(test)]
+mod row_local_compiled_tests;
+
 /// A multi-input `DataFusion` SQL operator.
 ///
 /// Batch graphs may use several input aliases. Stream graphs accept one alias,
 /// emit cumulative aggregate snapshots and process row-level SQL per batch.
+/// Eligible immutable row-level stream queries reuse compiled expression steps
+/// after their first execution, with fresh filter state for each input batch.
 /// Use [`Self::set_state_budget`] to enforce an application-chosen state limit.
 pub struct SqlOperator {
     name: String,
@@ -1197,9 +1202,15 @@ impl SqlOperator {
             self.incremental_work.1 += 1;
         }
         let runtime = self.stream_state.runtime()?;
-        let produced = runtime
-            .sql_validated(&self.validated, &tables, Some(&self.name))
-            .await?;
+        let produced = if !self.stream_aggregate && self.udfs.is_empty() {
+            runtime
+                .stream_expression(&self.validated, &tables, &self.name, context)
+                .await?
+        } else {
+            runtime
+                .sql_validated(&self.validated, &tables, Some(&self.name))
+                .await?
+        };
         context.check_cancelled()?;
         output.emit("output", produced).await?;
         self.retained = next;

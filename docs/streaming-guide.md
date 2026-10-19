@@ -1328,6 +1328,15 @@ reservations without an implicit byte limit. Explicit operator state budgets
 and edge budgets remain separate from these execution-memory reservations;
 edge backpressure does not impose a total runtime or process memory limit.
 
+Native ASOF temporary work uses CPU- and input-sized concurrency independently
+of its persistent storage shards. Its finalization prefixes follow the explicit
+edge budget and shrink when workspace or output bytes require it. Warm ordered
+Float64 rolling mean and compatible dual-SMA use whole-entity CPU lanes, retaining
+each entity's arithmetic order. Large exact-time cross-section means can compute
+complete timestamp groups concurrently. Small, unsupported or severely skewed
+inputs keep their serial paths. Window and cumulative SQL aggregates retain
+their ordered state updates and compensated accumulators.
+
 Rolling, cross-section and window nodes default to the JSON counter range,
 9,007,199,254,740,991 rows and logical bytes, without a smaller implicit state
 budget. Rust callers can set a finite `StateBudget` on the operator before

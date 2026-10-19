@@ -2,6 +2,46 @@
 
 use super::*;
 
+#[tokio::test]
+async fn test_probe_capture_occupies_sixteen_and_thirty_two_units() {
+    let (operator, left, right) = fixture_with_keys(false, 4_096, 256);
+    let operator = admitted(operator, &left, &right).await;
+    let pool = operator.runtime.pool.clone();
+    let reserved = pool.reserved();
+    let status = operator.status.clone();
+    let job = StreamJobContext::new(912, "asof", JsonMap::new(), None, CancellationToken::new());
+    let context = test_context(&job);
+    let expected = operator
+        .state
+        .left
+        .output_iter()
+        .map(|(key, _)| operator.state.candidate(key.1, *key.0, 1).copied())
+        .collect::<Vec<_>>();
+    for units in [16, 32] {
+        let (work, credit) = capture(&operator, left.len(), units, &context)
+            .await
+            .unwrap();
+        assert_eq!(
+            work.unit_count(),
+            units,
+            "temporary probe work stayed within storage shards"
+        );
+        assert!(work.shards.iter().all(|shard| !shard.rows.is_empty()));
+        let stop = GatherStop::from_job(&job);
+        let matches = (0..work.unit_count())
+            .map(|unit| work.run(unit, &stop).unwrap())
+            .collect();
+        assert_eq!(restore_order(matches, left.len()), expected);
+        drop((work, credit));
+        assert_eq!(pool.reserved(), reserved);
+        assert_eq!(operator.status, status);
+    }
+    drop((operator, context));
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop(job);
+    assert_eq!(pool.reserved(), 0);
+}
+
 async fn admitted(
     mut operator: StreamAsofJoinOperator,
     left: &[Row],
