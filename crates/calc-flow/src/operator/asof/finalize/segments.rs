@@ -185,7 +185,7 @@ impl Work {
             if index.is_multiple_of(1_024) {
                 stop.check()?;
             }
-            let matched = self.resolve_route(routes[key].as_mut(), time, plan, credit)?;
+            let matched = self.resolve_route(&mut routes[key], time, plan, credit)?;
             plan.left_position(left.0, row.row as usize, &self.name)?;
             plan.push_right_source(matched, &self.name)?;
         }
@@ -222,7 +222,7 @@ impl Work {
 
     fn resolve_route(
         &self,
-        route: Option<&mut Route<'_>>,
+        route: &mut Option<Route<'_>>,
         time: i64,
         plan: &mut OutputPlanBuilder<'_>,
         credit: &mut MemoryReservation,
