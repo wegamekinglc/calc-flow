@@ -233,20 +233,36 @@ impl ScratchPlan {
         name_bytes: usize,
         lanes: usize,
     ) -> Self {
-        let bytes = (|| {
-            let routing = Self::routing_capacity(rows, entities)?;
-            let output = Self::output_capacity(rows, outputs, lanes)?;
-            let controls = lanes.checked_mul(4096 + COMPILED_LANE_READOUT_METADATA_BYTES / 2)?;
-            let fixed_metadata = controls
-                .checked_add(NULL_FREE_MERGE_METADATA_BYTES)?
-                .checked_add(size_of::<NumericResults>())?
-                .checked_add(size_of::<PreparedNumericInput>())?;
-            routing
-                .checked_add(output)?
-                .checked_add(fixed_metadata)?
-                .checked_add(name_bytes.checked_mul(lanes.checked_mul(2)?.checked_add(1)?)?)
-        })();
+        let bytes = Self::owned_capacity(rows, entities, outputs, name_bytes, lanes);
         Self { bytes, lanes }
+    }
+
+    fn owned_capacity(
+        rows: usize,
+        entities: usize,
+        outputs: usize,
+        name_bytes: usize,
+        lanes: usize,
+    ) -> Option<usize> {
+        let routing = Self::routing_capacity(rows, entities)?;
+        let output = Self::output_capacity(rows, outputs, lanes)?;
+        let fixed_metadata = Self::fixed_capacity(lanes)?;
+        routing
+            .checked_add(output)?
+            .checked_add(fixed_metadata)?
+            .checked_add(Self::name_capacity(name_bytes, lanes)?)
+    }
+
+    fn fixed_capacity(lanes: usize) -> Option<usize> {
+        let controls = lanes.checked_mul(4096 + COMPILED_LANE_READOUT_METADATA_BYTES / 2)?;
+        controls
+            .checked_add(NULL_FREE_MERGE_METADATA_BYTES)?
+            .checked_add(size_of::<NumericResults>())?
+            .checked_add(size_of::<PreparedNumericInput>())
+    }
+
+    fn name_capacity(name_bytes: usize, lanes: usize) -> Option<usize> {
+        name_bytes.checked_mul(lanes.checked_mul(2)?.checked_add(1)?)
     }
 
     fn routing_capacity(rows: usize, entities: usize) -> Option<usize> {
@@ -451,13 +467,7 @@ impl PreparedOrderedKernel<'_> {
             loads[lane] = load;
             available.push(Reverse((loads[lane], lane)));
         }
-        let max_load = self.fill.row_count / 8 * 5 + self.fill.row_count % 8 * 5 / 8;
-        if loads.iter().any(|&rows| rows == 0 || rows > max_load)
-            || loads
-                .iter()
-                .try_fold(0_usize, |sum, &rows| sum.checked_add(rows))
-                != Some(self.fill.row_count)
-        {
+        if !balanced_lane_loads(&loads, self.fill.row_count) {
             return Err(self);
         }
         let PreparedTypedFill {
@@ -521,6 +531,15 @@ impl PreparedOrderedKernel<'_> {
         };
         Ok((seed, requests))
     }
+}
+
+fn balanced_lane_loads(loads: &[usize], row_count: usize) -> bool {
+    let max_load = row_count / 8 * 5 + row_count % 8 * 5 / 8;
+    !loads.iter().any(|&rows| rows == 0 || rows > max_load)
+        && loads
+            .iter()
+            .try_fold(0_usize, |sum, &rows| sum.checked_add(rows))
+            == Some(row_count)
 }
 
 fn parallel_entity_state(entity: &TypedEntityState, groups: &[TypedGroupPlan]) -> bool {

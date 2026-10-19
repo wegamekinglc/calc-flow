@@ -1,6 +1,6 @@
 //! Pack immutable worker records into envelopes sized by the downstream edge.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, iter::Peekable};
 
 use datafusion::arrow::{array::ArrayRef, record_batch::RecordBatch};
 
@@ -61,8 +61,7 @@ pub(super) async fn emit(
         morsel: 0,
         record: 0,
     };
-    let plan = plan(records.clone(), name, context).await?;
-    validate_output_sequence_range(name, *sequence, plan.len())?;
+    let plan = plan(records.clone(), name, context, *sequence).await?;
     let mut records = records.peekable();
     let mut offset = 0;
     let mut quantum = Quantum::default();
@@ -72,78 +71,142 @@ pub(super) async fn emit(
         let mut remaining = envelope.rows;
         while remaining > 0 {
             quantum.step(context, 1, 0).await?;
-            let record = records.peek().expect("planned output record");
-            let rows = remaining.min(record.num_rows() - offset);
-            parts.push(slice(record, offset, rows));
-            remaining -= rows;
-            offset += rows;
-            if offset == record.num_rows() {
-                records.next();
-                offset = 0;
-            }
+            append_part(&mut parts, &mut records, &mut offset, &mut remaining);
         }
-        let metadata = BatchMetadata::new(name, *sequence, BTreeMap::new())?;
-        let batch = Batch::table(parts, metadata)?;
+        let batch = output_batch(name, *sequence, parts)?;
         output.emit("output", batch).await?;
         *sequence += 1;
     }
     Ok(())
 }
 
+fn append_part(
+    parts: &mut Vec<RecordBatch>,
+    records: &mut Peekable<Records<'_>>,
+    offset: &mut usize,
+    remaining: &mut usize,
+) {
+    let record = records.peek().expect("planned output record");
+    let rows = (*remaining).min(record.num_rows() - *offset);
+    parts.push(slice(record, *offset, rows));
+    *remaining -= rows;
+    *offset += rows;
+    if *offset == record.num_rows() {
+        records.next();
+        *offset = 0;
+    }
+}
+
+fn output_batch(name: &str, sequence: u64, parts: Vec<RecordBatch>) -> Result<Batch> {
+    let metadata = BatchMetadata::new(name, sequence, BTreeMap::new())?;
+    Batch::table(parts, metadata)
+}
+
 async fn plan(
     records: Records<'_>,
     name: &str,
     context: &StreamOperatorContext<'_>,
+    sequence: u64,
 ) -> Result<Vec<Envelope>> {
-    let capacity = records
-        .morsels
+    let capacity = plan_capacity(records.morsels, name)?;
+    let mut builder = EnvelopePlan {
+        result: Vec::with_capacity(capacity),
+        capacity,
+        current: Envelope::default(),
+        bytes: 0,
+    };
+    let budget = context.output_budget();
+    let mut quantum = Quantum::default();
+    for record in records {
+        quantum.step(context, 1, 0).await?;
+        builder.append(record, budget, name, context)?;
+    }
+    let result = builder.finish(name)?;
+    validate_output_sequence_range(name, sequence, result.len())?;
+    Ok(result)
+}
+
+fn plan_capacity(morsels: &[FundedMorsel], name: &str) -> Result<usize> {
+    morsels
         .iter()
         .try_fold(0_usize, |count, morsel| {
             count.checked_add(morsel.records.len())
         })
         .and_then(|count| count.checked_mul(2))
-        .ok_or_else(|| operator_error(name, "Join envelope plan size overflowed"))?;
-    let mut result = Vec::with_capacity(capacity);
-    let budget = context.output_budget();
-    let mut current = Envelope::default();
-    let mut bytes = 0;
-    let mut quantum = Quantum::default();
-    for record in records {
-        quantum.step(context, 1, 0).await?;
-        let whole_bytes = measure(record, 0, record.num_rows())?;
-        if record.num_rows() > budget.max_rows || whole_bytes > budget.max_bytes {
-            return Err(operator_error(
-                name,
-                "validated Join chunk exceeded its row or byte budget",
-            ));
-        }
+        .ok_or_else(|| operator_error(name, "Join envelope plan size overflowed"))
+}
+
+struct EnvelopePlan {
+    result: Vec<Envelope>,
+    capacity: usize,
+    current: Envelope,
+    bytes: usize,
+}
+
+impl EnvelopePlan {
+    fn append(
+        &mut self,
+        record: &RecordBatch,
+        budget: EdgeBudget,
+        name: &str,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<()> {
+        let whole_bytes = validated_bytes(record, budget, name)?;
         let mut offset = 0;
         while offset < record.num_rows() {
             context.check_cancelled()?;
             let available = EdgeBudget {
-                max_rows: budget.max_rows - current.rows,
-                max_bytes: budget.max_bytes - bytes,
+                max_rows: budget.max_rows - self.current.rows,
+                max_bytes: budget.max_bytes - self.bytes,
             };
             let (rows, charge) = prefix(record, offset, whole_bytes, available)?;
             if rows > 0 {
-                current.rows += rows;
-                current.records += 1;
-                bytes += charge;
+                self.current.rows += rows;
+                self.current.records += 1;
+                self.bytes += charge;
                 offset += rows;
             }
-            if offset < record.num_rows()
-                || current.rows == budget.max_rows
-                || bytes == budget.max_bytes
-            {
-                push(&mut result, std::mem::take(&mut current), capacity, name)?;
-                bytes = 0;
+            if self.needs_flush(record, offset, budget) {
+                self.flush(name)?;
             }
         }
+        Ok(())
     }
-    if current.rows > 0 {
-        push(&mut result, current, capacity, name)?;
+
+    fn needs_flush(&self, record: &RecordBatch, offset: usize, budget: EdgeBudget) -> bool {
+        offset < record.num_rows()
+            || self.current.rows == budget.max_rows
+            || self.bytes == budget.max_bytes
     }
-    Ok(result)
+
+    fn flush(&mut self, name: &str) -> Result<()> {
+        push(
+            &mut self.result,
+            std::mem::take(&mut self.current),
+            self.capacity,
+            name,
+        )?;
+        self.bytes = 0;
+        Ok(())
+    }
+
+    fn finish(mut self, name: &str) -> Result<Vec<Envelope>> {
+        if self.current.rows > 0 {
+            push(&mut self.result, self.current, self.capacity, name)?;
+        }
+        Ok(self.result)
+    }
+}
+
+fn validated_bytes(record: &RecordBatch, budget: EdgeBudget, name: &str) -> Result<usize> {
+    let bytes = measure(record, 0, record.num_rows())?;
+    if record.num_rows() > budget.max_rows || bytes > budget.max_bytes {
+        return Err(operator_error(
+            name,
+            "validated Join chunk exceeded its row or byte budget",
+        ));
+    }
+    Ok(bytes)
 }
 
 fn push(plan: &mut Vec<Envelope>, envelope: Envelope, capacity: usize, name: &str) -> Result<()> {
@@ -175,13 +238,22 @@ fn prefix(
     if bytes <= budget.max_bytes {
         return Ok((limit, bytes));
     }
+    fitting_prefix(record, offset, limit, budget.max_bytes)
+}
+
+fn fitting_prefix(
+    record: &RecordBatch,
+    offset: usize,
+    limit: usize,
+    max_bytes: usize,
+) -> Result<(usize, usize)> {
     let mut low = 0;
     let mut high = limit - 1;
     let mut charge = 0;
     while low < high {
         let middle = low + (high - low).div_ceil(2);
         let bytes = measure(record, offset, middle)?;
-        if bytes <= budget.max_bytes {
+        if bytes <= max_bytes {
             low = middle;
             charge = bytes;
         } else {

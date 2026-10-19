@@ -84,11 +84,16 @@ fn cursor_bytes(keys: usize, units: usize, name: &str) -> Result<usize> {
         .ok_or_else(|| super::super::native_lookup::scratch_error(name))
 }
 
-pub(super) fn input_bytes(keys: usize, units: usize, name: &str) -> Result<usize> {
+fn inventory_controls(name: &str) -> Result<(usize, usize)> {
     let caller = super::super::metadata_validation::inventory::caller_controls(name)
         .ok_or_else(|| super::super::native_lookup::scratch_error(name))?;
     let registration = super::super::metadata_validation::inventory::registration_controls()
         .ok_or_else(|| super::super::native_lookup::scratch_error(name))?;
+    Ok((caller, registration))
+}
+
+pub(super) fn input_bytes(keys: usize, units: usize, name: &str) -> Result<usize> {
+    let (caller, registration) = inventory_controls(name)?;
     sum(&[
         snapshot_bytes(keys, name)?,
         work_bytes(units)?,

@@ -81,13 +81,7 @@ impl OwnedGatherPlan for SegmentedInput {
         );
         stop.check()?;
         let request = &self.requests[ordinal];
-        if range.is_empty() || range.end > self.rows || request.index < self.left_fields {
-            return Err(super::super::arrow_error(
-                &datafusion::arrow::error::ArrowError::InvalidArgumentError(
-                    "invalid segmented ASOF gather range".into(),
-                ),
-            ));
-        }
+        validate_range(&range, self.rows, request.index, self.left_fields)?;
         let mut offset = 0;
         let mut pieces = Vec::new();
         for plan in &self.plans {
@@ -136,6 +130,22 @@ impl OwnedGatherPlan for SegmentedInput {
     }
 }
 
+fn validate_range(
+    range: &std::ops::Range<usize>,
+    rows: usize,
+    column: usize,
+    left_fields: usize,
+) -> Result<()> {
+    if range.is_empty() || range.end > rows || column < left_fields {
+        return Err(super::super::arrow_error(
+            &datafusion::arrow::error::ArrowError::InvalidArgumentError(
+                "invalid segmented ASOF gather range".into(),
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn concatenate(mut pieces: Vec<ArrayRef>, stop: &GatherStop) -> Result<ArrayRef> {
     stop.check()?;
     if pieces.len() == 1 {
@@ -178,6 +188,10 @@ fn shared(
         source = Some(column.clone());
         end = span.end;
     }
+    complete_owner(source, end)
+}
+
+fn complete_owner(source: Option<ArrayRef>, end: usize) -> Result<Option<ArrayRef>> {
     let Some(source) = source else {
         return Ok(None);
     };
@@ -189,6 +203,26 @@ fn shared(
         .get_slice_memory_size()
         .map_err(|error| super::super::arrow_error(&error))?;
     Ok((data.get_buffer_memory_size() <= visible).then_some(source))
+}
+
+fn gather_error(name: &str, failure: AdmissionFailure) -> crate::CalcFlowError {
+    match failure {
+        AdmissionFailure::Budget { stage, source } => super::super::reason(
+            name,
+            crate::StreamingFailureReason::AsofWorkspaceLimitExceeded,
+            &format!("native {stage} admission failed: {source}"),
+        ),
+        AdmissionFailure::Runtime(error) => error,
+    }
+}
+
+fn materialize_reserved_batch(
+    columns: Vec<ArrayRef>,
+    schema: &SchemaRef,
+    rows: usize,
+    workspace: MemoryReservation,
+) -> Result<(Batch, MemoryReservation)> {
+    Ok((materialize_batch(columns, schema, rows)?, workspace))
 }
 
 impl OutputRuntime {
@@ -219,14 +253,12 @@ impl OutputRuntime {
             .map(|request| shared(&plans, request, left_fields))
             .collect::<Result<Vec<_>>>()?;
         if shared.iter().all(Option::is_some) {
-            return Ok((
-                materialize_batch(
-                    shared.into_iter().map(Option::unwrap).collect(),
-                    schema,
-                    rows,
-                )?,
+            return materialize_reserved_batch(
+                shared.into_iter().map(Option::unwrap).collect(),
+                schema,
+                rows,
                 workspace,
-            ));
+            );
         }
         let input = Arc::new(SegmentedInput {
             plans,
@@ -240,19 +272,9 @@ impl OutputRuntime {
         let ticket = scope
             .submit(input, workspace, GatherStop::from_job(context.job()))
             .await
-            .map_err(|failure| match failure {
-                AdmissionFailure::Budget { stage, source } => super::super::reason(
-                    name,
-                    crate::StreamingFailureReason::AsofWorkspaceLimitExceeded,
-                    &format!("native {stage} admission failed: {source}"),
-                ),
-                AdmissionFailure::Runtime(error) => error,
-            })?;
+            .map_err(|failure| gather_error(name, failure))?;
         let output = ticket.finish().await?;
-        Ok((
-            materialize_batch(output.value, schema, rows)?,
-            output.credit,
-        ))
+        materialize_reserved_batch(output.value, schema, rows, output.credit)
     }
 }
 

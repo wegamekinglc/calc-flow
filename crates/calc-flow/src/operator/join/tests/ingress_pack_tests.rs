@@ -59,16 +59,7 @@ fn nullable_input(unit: TimeUnit, lengths: &[usize], bad_time: bool) -> Batch {
                     times[offset + 5] = Some(9);
                 }
             }
-            for offset in [62, 1_022, 1_026] {
-                if offset < rows {
-                    times[offset + 5] = Some(9);
-                }
-            }
-            for offset in [1, 1_027] {
-                if offset < rows {
-                    times[offset + 5] = Some(20);
-                }
-            }
+            set_boundary_times(&mut times, rows);
             if rows > 1_024 {
                 times[1_024 + 5] = if bad_time { Some(i64::MAX) } else { None };
             }
@@ -90,6 +81,19 @@ fn nullable_input(unit: TimeUnit, lengths: &[usize], bad_time: bool) -> Batch {
         })
         .collect();
     Batch::table(records, BatchMetadata::default()).unwrap()
+}
+
+fn set_boundary_times(times: &mut [Option<i64>], rows: usize) {
+    for offset in [62, 1_022, 1_026] {
+        if offset < rows {
+            times[offset + 5] = Some(9);
+        }
+    }
+    for offset in [1, 1_027] {
+        if offset < rows {
+            times[offset + 5] = Some(20);
+        }
+    }
 }
 
 async fn admission_result(

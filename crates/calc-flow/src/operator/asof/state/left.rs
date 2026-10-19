@@ -376,6 +376,14 @@ impl ChunkData {
         })
     }
 
+    fn native_prefix_key_workspace_bytes(&self, count: usize) -> Option<u64> {
+        if self.sequences.kind() == SequenceKind::Canonical {
+            return None;
+        }
+        let keys = count.min(self.keys.len()) as u64;
+        keys.checked_mul(640)?.checked_add(256)
+    }
+
     fn compaction_workspace_bytes(&self, remaining: usize, name: &str) -> Result<u64> {
         // A detached worker can outlive reset and the original state. Fund
         // both its retained buffers and the replacement column allocations.
@@ -872,11 +880,7 @@ impl LeftState {
         }
         let mut bytes = 2_048_u64.checked_add((count as u64).checked_mul(4)?)?;
         for chunk in &self.chunks {
-            if chunk.data.sequences.kind() == SequenceKind::Canonical {
-                return None;
-            }
-            let keys = count.min(chunk.data.keys.len()) as u64;
-            bytes = bytes.checked_add(keys.checked_mul(640)?.checked_add(256)?)?;
+            bytes = bytes.checked_add(chunk.data.native_prefix_key_workspace_bytes(count)?)?;
         }
         bytes.checked_add(self.iter_workspace_bytes())
     }

@@ -4,7 +4,8 @@ use super::{
 };
 use crate::operator::join::{AdmittedBatch, operator_error};
 use crate::runtime::streaming::gather_work::{
-    AdmissionFailure, GatherOperatorId, GatherStop, ParallelCpuWork, cleanup_control_bytes,
+    AdmissionFailure, AttemptCleanup, GatherOperatorId, GatherStop, ObservedTicket,
+    ParallelCpuWork, cleanup_control_bytes,
 };
 use std::{ops::Range, sync::Arc};
 
@@ -26,6 +27,55 @@ struct SelectionWork {
     name: Arc<str>,
     #[cfg(test)]
     hook: Option<PreparationHook>,
+}
+
+impl SelectionWork {
+    fn select_group(
+        &self,
+        group: AdmittedGroup<'_>,
+        start: usize,
+        result: &mut Selection,
+        stop: &GatherStop,
+    ) -> Result<()> {
+        for offset in (0..group.len()).step_by(64) {
+            stop.check_abandoned()?;
+            let block = group.block(offset, (offset + 64).min(group.len()));
+            let selected = block.retained_bits(0, block.len());
+            if selected == 0 {
+                continue;
+            }
+            self.select_block(block, start + offset, selected, result, stop)?;
+        }
+        Ok(())
+    }
+
+    fn select_block(
+        &self,
+        block: AdmittedGroup<'_>,
+        start: usize,
+        mut selected: u64,
+        result: &mut Selection,
+        stop: &GatherStop,
+    ) -> Result<()> {
+        let charges = PayloadCharges::on_worker(block, selected, stop)?;
+        while selected != 0 {
+            let index = selected.trailing_zeros() as usize;
+            selected &= selected - 1;
+            let position = start + index;
+            let charge = charges.state_charge(
+                index,
+                block.row(index).record,
+                self.inputs.keys.key(position).len(),
+                &self.name,
+            )?;
+            result.positions.push(position);
+            result.charges.push(charge);
+            result.bytes = result.bytes.checked_add(charge).ok_or_else(|| {
+                crate::operator::join::counter_overflow(&self.name, "state bytes")
+            })?;
+        }
+        Ok(())
+    }
 }
 
 impl ParallelCpuWork for SelectionWork {
@@ -55,31 +105,7 @@ impl ParallelCpuWork for SelectionWork {
             stop.check_abandoned()?;
             let group_end = rows.group_end(start).min(end);
             let group = AdmittedGroup::new(rows, start..group_end);
-            for offset in (0..group.len()).step_by(64) {
-                stop.check_abandoned()?;
-                let block = group.block(offset, (offset + 64).min(group.len()));
-                let mut selected = block.retained_bits(0, block.len());
-                if selected == 0 {
-                    continue;
-                }
-                let charges = PayloadCharges::on_worker(block, selected, stop)?;
-                while selected != 0 {
-                    let index = selected.trailing_zeros() as usize;
-                    selected &= selected - 1;
-                    let position = start + offset + index;
-                    let charge = charges.state_charge(
-                        index,
-                        block.row(index).record,
-                        self.inputs.keys.key(position).len(),
-                        &self.name,
-                    )?;
-                    result.positions.push(position);
-                    result.charges.push(charge);
-                    result.bytes = result.bytes.checked_add(charge).ok_or_else(|| {
-                        crate::operator::join::counter_overflow(&self.name, "state bytes")
-                    })?;
-                }
-            }
+            self.select_group(group, start, &mut result, stop)?;
             start = group_end;
         }
         stop.check()?;
@@ -289,31 +315,44 @@ async fn dispatch<W: ParallelCpuWork>(
         )
         .await;
     let result = match ticket {
-        Ok(ticket) => {
-            let result = tokio::select! {
-                biased;
-                () = crate::operator::join::output_gather::cancelled(context.job()) => {
-                    context.check_cancelled()?;
-                    unreachable!("retained stop requires cancellation or deadline");
-                }
-                result = ticket.finish() => result,
-            };
-            let mut fragments = None;
-            result?.install(|values| {
-                fragments = Some(values);
-                Ok(())
-            })?;
-            Ok(fragments)
-        }
+        Ok(ticket) => Ok(finish_ticket(ticket, context).await?),
         Err(AdmissionFailure::Budget { .. }) => Ok(None),
         Err(AdmissionFailure::Runtime(error)) => Err(error),
     };
+    wait_cleanup(cleanup, context, &stop).await?;
+    result
+}
+
+async fn finish_ticket<T: Send + 'static>(
+    ticket: ObservedTicket<Vec<T>>,
+    context: &StreamOperatorContext<'_>,
+) -> Result<Option<Vec<T>>> {
+    let result = tokio::select! {
+        biased;
+        () = crate::operator::join::output_gather::cancelled(context.job()) => {
+            context.check_cancelled()?;
+            unreachable!("retained stop requires cancellation or deadline");
+        }
+        result = ticket.finish() => result,
+    };
+    let mut fragments = None;
+    result?.install(|values| {
+        fragments = Some(values);
+        Ok(())
+    })?;
+    Ok(fragments)
+}
+
+async fn wait_cleanup(
+    cleanup: Option<AttemptCleanup>,
+    context: &StreamOperatorContext<'_>,
+    stop: &GatherStop,
+) -> Result<()> {
     context.check_cancelled()?;
     if let Some(cleanup) = cleanup {
-        cleanup.wait(&stop).await?;
+        cleanup.wait(stop).await?;
     }
-    context.check_cancelled()?;
-    result
+    context.check_cancelled()
 }
 
 #[cfg(test)]

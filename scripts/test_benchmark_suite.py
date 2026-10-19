@@ -65,11 +65,14 @@ class BenchmarkSuiteTests(unittest.TestCase):
                 )
             )
             ids = baseline_case_ids(baseline, {"family": "engines"})
-            for case in engine_cases(1_000_000):
-                if case["backend"] == "calc-flow-stream" and not case.get("variant"):
-                    self.assertEqual(catalog.comparison_kind(case, ids), "new")
-                elif case["backend"] == "calc-flow-sql":
-                    self.assertEqual(catalog.comparison_kind(case, ids), "interleaved")
+            self._assert_default_stream_case_comparisons(ids)
+
+    def _assert_default_stream_case_comparisons(self, ids):
+        for case in engine_cases(1_000_000):
+            if case["backend"] == "calc-flow-stream" and not case.get("variant"):
+                self.assertEqual(catalog.comparison_kind(case, ids), "new")
+            elif case["backend"] == "calc-flow-sql":
+                self.assertEqual(catalog.comparison_kind(case, ids), "interleaved")
 
     def test_asof_e2e_report_requires_complete_validated_inventory(self):
         from scripts.benchmark_suite.asof_e2e import asof_e2e_rows

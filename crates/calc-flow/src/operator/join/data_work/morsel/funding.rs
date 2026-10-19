@@ -49,13 +49,20 @@ pub(super) fn scratch_bytes(
 ) -> Option<usize> {
     // Selection/ranges, both take/interleave routes, source maps, flat-row cost
     // maps and null inventories. All units share this prepaid upper bound.
-    let per_match = 512usize.checked_add(columns.checked_mul(16)?)?;
-    matches
-        .checked_mul(per_match)?
+    match_scratch_bytes(matches, columns)?
         .checked_add(rows.checked_mul(size_of::<u64>())?)?
-        .checked_add(columns.checked_mul(units)?.checked_mul(4096)?)?
+        .checked_add(worker_scratch_bytes(columns, units)?)?
         .checked_add(output_control_bytes(units)?)?
         .checked_add(size_of::<GatherWork>() + 4096)
+}
+
+fn match_scratch_bytes(matches: usize, columns: usize) -> Option<usize> {
+    let per_match = 512usize.checked_add(columns.checked_mul(16)?)?;
+    matches.checked_mul(per_match)
+}
+
+fn worker_scratch_bytes(columns: usize, units: usize) -> Option<usize> {
+    columns.checked_mul(units)?.checked_mul(4096)
 }
 
 pub(super) async fn fund_inputs(

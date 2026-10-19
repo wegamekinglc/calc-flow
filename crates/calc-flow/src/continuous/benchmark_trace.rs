@@ -22,17 +22,20 @@ fn join_started(join: &crate::StreamJoinStatus) -> bool {
     join.emitted_match_rows != 0
         || join.state_limit_failures != 0
         || join.match_limit_failures != 0
-        || [&join.left, &join.right].iter().any(|side| {
-            side.retained_rows != 0
-                || side.retained_bytes != 0
-                || side.evicted_rows != 0
-                || side.late_rows != 0
-                || side.null_event_time_rows != 0
-                || side.null_key_rows != 0
-                || side.watermark_micros.is_some()
-                || side.idle
-                || side.ended
-        })
+        || [&join.left, &join.right].into_iter().any(join_side_started)
+}
+
+fn join_side_started(side: &crate::StreamJoinSideStatus) -> bool {
+    join_side_rows_changed(side) || side.watermark_micros.is_some() || side.idle || side.ended
+}
+
+fn join_side_rows_changed(side: &crate::StreamJoinSideStatus) -> bool {
+    side.retained_rows != 0
+        || side.retained_bytes != 0
+        || side.evicted_rows != 0
+        || side.late_rows != 0
+        || side.null_event_time_rows != 0
+        || side.null_key_rows != 0
 }
 
 fn require_join_cpu_completion(

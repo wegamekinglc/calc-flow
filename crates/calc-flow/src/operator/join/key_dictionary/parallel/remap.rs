@@ -35,21 +35,7 @@ impl Group {
         flow: &mut KeyFlow<'_, '_>,
         context: &StreamOperatorContext<'_>,
     ) -> Result<()> {
-        for fragment in &mut self.fragments {
-            for (post, frequency) in fragment
-                .local
-                .posts
-                .iter_mut()
-                .zip(&mut fragment.local.retains)
-            {
-                let global = *post as usize;
-                *post = local.posts[global];
-                fragment.local.splits.push(local.splits[global]);
-                // Retained references were merged; reuse their prepaid lane for resolved frequencies.
-                *frequency = 0;
-                flow.step(1, 0).await?;
-            }
-        }
+        self.resolve_posts(local, flow).await?;
         let work = Arc::new(RemapWork {
             fragments: self
                 .fragments
@@ -71,32 +57,51 @@ impl Group {
         {
             fragments
         } else {
-            let mut fragments = Vec::with_capacity(work.fragments.len());
-            for cell in &work.fragments {
-                let mut fragment = cell.lock().take().expect("unsubmitted remap fragment");
-                for start in (0..fragment.local.locals.len()).step_by(COPY_VISITS) {
-                    let end = (start + COPY_VISITS).min(fragment.local.locals.len());
-                    remap_rows(&mut fragment, start..end);
-                    #[cfg(test)]
-                    note_owner_remap(end - start);
-                    flow.step(end - start, 0).await?;
-                }
-                fragments.push(fragment);
-            }
-            fragments
+            work.finish_serial(flow).await?
         };
-        for fragment in fragments {
-            for (&id, &frequency) in fragment.local.posts.iter().zip(&fragment.local.retains) {
-                pending.note_frequency(id, frequency as usize);
+        install_fragments(fragments, pending, flow).await
+    }
+
+    async fn resolve_posts(
+        &mut self,
+        local: &LocalIntern,
+        flow: &mut KeyFlow<'_, '_>,
+    ) -> Result<()> {
+        for fragment in &mut self.fragments {
+            for (post, frequency) in fragment
+                .local
+                .posts
+                .iter_mut()
+                .zip(&mut fragment.local.retains)
+            {
+                let global = *post as usize;
+                *post = local.posts[global];
+                fragment.local.splits.push(local.splits[global]);
+                // Retained references were merged; reuse their prepaid lane for resolved frequencies.
+                *frequency = 0;
                 flow.step(1, 0).await?;
-            }
-            for ids in fragment.local.locals.chunks(COPY_BYTES / size_of::<u32>()) {
-                pending.ids.extend_from_slice(ids);
-                flow.step(0, size_of_val(ids)).await?;
             }
         }
         Ok(())
     }
+}
+
+async fn install_fragments(
+    fragments: Vec<Fragment>,
+    pending: &mut super::super::Pending,
+    flow: &mut KeyFlow<'_, '_>,
+) -> Result<()> {
+    for fragment in fragments {
+        for (&id, &frequency) in fragment.local.posts.iter().zip(&fragment.local.retains) {
+            pending.note_frequency(id, frequency as usize);
+            flow.step(1, 0).await?;
+        }
+        for ids in fragment.local.locals.chunks(COPY_BYTES / size_of::<u32>()) {
+            pending.ids.extend_from_slice(ids);
+            flow.step(0, size_of_val(ids)).await?;
+        }
+    }
+    Ok(())
 }
 
 struct RemapWork {
@@ -105,6 +110,24 @@ struct RemapWork {
     #[cfg(test)]
     hook: Option<super::super::tests::WorkerHook>,
     _credit: Arc<MemoryReservation>,
+}
+
+impl RemapWork {
+    async fn finish_serial(&self, flow: &mut KeyFlow<'_, '_>) -> Result<Vec<Fragment>> {
+        let mut fragments = Vec::with_capacity(self.fragments.len());
+        for cell in &self.fragments {
+            let mut fragment = cell.lock().take().expect("unsubmitted remap fragment");
+            for start in (0..fragment.local.locals.len()).step_by(COPY_VISITS) {
+                let end = (start + COPY_VISITS).min(fragment.local.locals.len());
+                remap_rows(&mut fragment, start..end);
+                #[cfg(test)]
+                note_owner_remap(end - start);
+                flow.step(end - start, 0).await?;
+            }
+            fragments.push(fragment);
+        }
+        Ok(fragments)
+    }
 }
 
 impl ParallelCpuWork for RemapWork {

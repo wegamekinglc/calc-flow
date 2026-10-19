@@ -372,29 +372,19 @@ impl StreamAsofJoinOperator {
             segments::prepare(self, count, prefix_workspace.clone(), context).await?
         };
         if let Some(prepared) = prepared {
-            let matched = prepared.plans.iter().map(|plan| plan.matched).sum();
-            let workspace = self.reserve_workspace(0)?;
-            let (result, workspace) = self
-                .runtime
-                .materialize_fragments(
-                    prepared.plans,
-                    prepared.credits.clone(),
-                    self.outputs[0].schema().expect("exact ASOF output"),
-                    workspace,
-                    &self.name,
-                    context,
-                )
-                .await?;
-            let batch = self.output_batch(&result, context)?;
-            return Ok(PreparedOutput {
-                batch,
-                matched,
-                workspace,
-                prefix: prepared.prefix,
-                _parallel_credits: Some(prepared.credits),
-                _prefix_workspace: prefix_workspace,
-            });
+            return self
+                .fragment_output(prepared, prefix_workspace, context)
+                .await;
         }
+        self.serial_output(count, prefix_workspace, context).await
+    }
+
+    async fn serial_output(
+        &mut self,
+        count: usize,
+        prefix_workspace: Arc<MemoryReservation>,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<PreparedOutput> {
         let cursor_workspace = self.cursor_workspace(count)?;
         let mut workspace = self.reserve_workspace(0)?;
         let MatchedPrefix { plan, prefix } =
@@ -418,6 +408,36 @@ impl StreamAsofJoinOperator {
             workspace,
             prefix,
             _parallel_credits: None,
+            _prefix_workspace: prefix_workspace,
+        })
+    }
+
+    async fn fragment_output(
+        &mut self,
+        prepared: segments::Prepared,
+        prefix_workspace: Arc<MemoryReservation>,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<PreparedOutput> {
+        let matched = prepared.plans.iter().map(|plan| plan.matched).sum();
+        let workspace = self.reserve_workspace(0)?;
+        let (result, workspace) = self
+            .runtime
+            .materialize_fragments(
+                prepared.plans,
+                prepared.credits.clone(),
+                self.outputs[0].schema().expect("exact ASOF output"),
+                workspace,
+                &self.name,
+                context,
+            )
+            .await?;
+        let batch = self.output_batch(&result, context)?;
+        Ok(PreparedOutput {
+            batch,
+            matched,
+            workspace,
+            prefix: prepared.prefix,
+            _parallel_credits: Some(prepared.credits),
             _prefix_workspace: prefix_workspace,
         })
     }

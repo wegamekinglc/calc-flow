@@ -13,7 +13,8 @@ use super::{
     local::{self, LocalColumn, LocalIntern},
 };
 use crate::runtime::streaming::gather_work::{
-    AdmissionFailure, GatherOperatorId, GatherStop, ParallelCpuWork, cleanup_control_bytes,
+    AdmissionFailure, AttemptCleanup, GatherOperatorId, GatherStop, ObservedTicket,
+    ParallelCpuWork, cleanup_control_bytes,
 };
 use crate::{Result, StreamOperatorContext};
 
@@ -114,6 +115,61 @@ impl KeyWork {
         let length = width + usize::from(ordinal < remainder);
         start..start + length
     }
+
+    fn intern_range(
+        &self,
+        range: Range<usize>,
+        columns: &[LocalColumn<'_>],
+        stop: &GatherStop,
+    ) -> Result<Option<LocalIntern>> {
+        let mut local = LocalIntern::new(range.len(), self.credit.new_empty());
+        let mut flow = local::WorkerFlow::new(stop)?;
+        let mut visits = 0;
+        let mut bytes = 0;
+        for (position, ordinal) in range.enumerate() {
+            let Some(width) = intern_row(
+                &mut local,
+                columns,
+                self.rows.get(ordinal),
+                position,
+                &self.name,
+                &mut flow,
+            )?
+            else {
+                return Ok(None);
+            };
+            visits += 1;
+            bytes += width;
+            if visits >= COPY_VISITS || bytes >= COPY_BYTES {
+                stop.check()?;
+                visits = 0;
+                bytes = 0;
+            }
+        }
+        Ok(Some(local))
+    }
+}
+
+fn intern_row(
+    local: &mut LocalIntern,
+    columns: &[LocalColumn<'_>],
+    (offset, retain): (usize, bool),
+    position: usize,
+    name: &str,
+    flow: &mut local::WorkerFlow<'_>,
+) -> Result<Option<usize>> {
+    let Some((distinct, width)) = local.intern_worker_row(columns, offset, name, flow)? else {
+        return Ok(None);
+    };
+    local.locals.push(distinct);
+    if retain {
+        local.note_retained(
+            distinct,
+            u32::try_from(position).expect("group rows fit u32 ordinals"),
+            name,
+        )?;
+    }
+    Ok(Some(width))
 }
 
 impl ParallelCpuWork for KeyWork {
@@ -132,33 +188,9 @@ impl ParallelCpuWork for KeyWork {
         let columns = local::bind_columns(PayloadRef::from(&self.payload), &self.indices)
             .expect("prebound local key types");
         let range = self.range(ordinal);
-        let mut local = LocalIntern::new(range.len(), self.credit.new_empty());
-        let mut flow = local::WorkerFlow::new(stop)?;
-        let mut visits = 0;
-        let mut bytes = 0;
-        for (position, ordinal) in range.clone().enumerate() {
-            let (offset, retain) = self.rows.get(ordinal);
-            let Some((distinct, width)) =
-                local.intern_worker_row(&columns, offset, &self.name, &mut flow)?
-            else {
-                return Ok(None);
-            };
-            local.locals.push(distinct);
-            if retain {
-                local.note_retained(
-                    distinct,
-                    u32::try_from(position).expect("group rows fit u32 ordinals"),
-                    &self.name,
-                )?;
-            }
-            visits += 1;
-            bytes += width;
-            if visits >= COPY_VISITS || bytes >= COPY_BYTES {
-                stop.check()?;
-                visits = 0;
-                bytes = 0;
-            }
-        }
+        let Some(local) = self.intern_range(range.clone(), &columns, stop)? else {
+            return Ok(None);
+        };
         stop.check()?;
         Ok(Some(Fragment {
             local,
@@ -231,17 +263,28 @@ fn unit_control_bytes(columns: usize, units: usize) -> Option<usize> {
     let headers = units
         .saturating_sub(1)
         .checked_mul(super::local_table_bytes(0)?)?;
+    let columns = column_control_bytes(columns, units)?;
+    let fragments = units.checked_mul(
+        2 * size_of::<Fragment>() + size_of::<parking_lot::Mutex<Option<Fragment>>>(),
+    )?;
+    headers.checked_add(columns)?.checked_add(fragments)
+}
+
+fn column_control_bytes(columns: usize, units: usize) -> Option<usize> {
     let indices = columns.checked_mul(size_of::<usize>())?;
     let bound_columns = columns
         .checked_mul(size_of::<LocalColumn<'_>>())?
         .checked_mul(units)?;
-    let fragments = units.checked_mul(
-        2 * size_of::<Fragment>() + size_of::<parking_lot::Mutex<Option<Fragment>>>(),
-    )?;
-    headers
-        .checked_add(indices)?
-        .checked_add(bound_columns)?
-        .checked_add(fragments)
+    indices.checked_add(bound_columns)
+}
+
+fn selection_bytes(rows: usize, dense: bool, name: &str) -> Result<usize> {
+    if dense {
+        rows.div_ceil(64).checked_mul(size_of::<u64>())
+    } else {
+        rows.checked_mul(size_of::<(usize, bool)>())
+    }
+    .ok_or_else(|| counter_overflow(name, "parallel_key_capacity"))
 }
 
 async fn capture(
@@ -253,12 +296,7 @@ async fn capture(
 ) -> Result<Option<Arc<KeyWork>>> {
     let record = group.row(0).record;
     let dense = group.dense_key_range();
-    let selection_bytes = if dense.is_some() {
-        group.len().div_ceil(64).checked_mul(size_of::<u64>())
-    } else {
-        group.len().checked_mul(size_of::<(usize, bool)>())
-    }
-    .ok_or_else(|| counter_overflow(budget.name, "parallel_key_capacity"))?;
+    let selection_bytes = selection_bytes(group.len(), dense.is_some(), budget.name)?;
     let bytes = work_bytes(
         group.len(),
         selection_bytes,
@@ -274,32 +312,7 @@ async fn capture(
         PayloadRef::Record(record, _) => RowPayload::from(record.clone()),
         PayloadRef::Payload(payload, _) => payload.clone(),
     };
-    let rows = if let Some(range) = dense {
-        let mut retained = Vec::with_capacity(group.len().div_ceil(64));
-        for start in (0..group.len()).step_by(64) {
-            retained.push(group.retained_bits(start, (group.len() - start).min(64)));
-            flow.step(1, size_of::<u64>()).await?;
-        }
-        KeyRows::Dense { range, retained }
-    } else {
-        let mut offsets = Vec::with_capacity(group.len());
-        for (position, row) in group.key_offsets().enumerate() {
-            #[cfg(test)]
-            {
-                let work = OWNER_WORK.get();
-                OWNER_WORK.set(OwnerWork {
-                    captured_offsets: work.captured_offsets + 1,
-                    ..work
-                });
-            }
-            offsets.push(row);
-            if (position + 1).is_multiple_of(COPY_VISITS) {
-                flow.step(COPY_VISITS, 0).await?;
-            }
-        }
-        flow.step(group.len() % COPY_VISITS, 0).await?;
-        KeyRows::Sparse(offsets)
-    };
+    let rows = capture_rows(group, dense, flow).await?;
     Ok(Some(Arc::new(KeyWork {
         payload,
         indices: indices.to_vec(),
@@ -310,6 +323,56 @@ async fn capture(
         #[cfg(test)]
         hook: super::tests::worker_hook(),
     })))
+}
+
+async fn capture_rows(
+    group: AdmittedGroup<'_>,
+    dense: Option<Range<usize>>,
+    flow: &mut KeyFlow<'_, '_>,
+) -> Result<KeyRows> {
+    if let Some(range) = dense {
+        Ok(KeyRows::Dense {
+            range,
+            retained: capture_retained(group, flow).await?,
+        })
+    } else {
+        Ok(KeyRows::Sparse(capture_offsets(group, flow).await?))
+    }
+}
+
+async fn capture_retained(
+    group: AdmittedGroup<'_>,
+    flow: &mut KeyFlow<'_, '_>,
+) -> Result<Vec<u64>> {
+    let mut retained = Vec::with_capacity(group.len().div_ceil(64));
+    for start in (0..group.len()).step_by(64) {
+        retained.push(group.retained_bits(start, (group.len() - start).min(64)));
+        flow.step(1, size_of::<u64>()).await?;
+    }
+    Ok(retained)
+}
+
+async fn capture_offsets(
+    group: AdmittedGroup<'_>,
+    flow: &mut KeyFlow<'_, '_>,
+) -> Result<Vec<(usize, bool)>> {
+    let mut offsets = Vec::with_capacity(group.len());
+    for (position, row) in group.key_offsets().enumerate() {
+        #[cfg(test)]
+        {
+            let work = OWNER_WORK.get();
+            OWNER_WORK.set(OwnerWork {
+                captured_offsets: work.captured_offsets + 1,
+                ..work
+            });
+        }
+        offsets.push(row);
+        if (position + 1).is_multiple_of(COPY_VISITS) {
+            flow.step(COPY_VISITS, 0).await?;
+        }
+    }
+    flow.step(group.len() % COPY_VISITS, 0).await?;
+    Ok(offsets)
 }
 
 async fn dispatch<W: ParallelCpuWork>(
@@ -327,32 +390,45 @@ async fn dispatch<W: ParallelCpuWork>(
         .submit_observed_parallel_work(work, credit, stop.clone(), retirement, &mut cleanup)
         .await;
     let result = match ticket {
-        Ok(ticket) => {
-            let result = tokio::select! {
-                biased;
-                () = super::super::output_gather::cancelled(context.job()) => {
-                    context.check_cancelled()?;
-                    unreachable!("key stop requires cancellation or deadline");
-                }
-                result = ticket.finish() => result,
-            };
-            context.check_cancelled()?;
-            let mut fragments = None;
-            result?.install(|values| {
-                fragments = Some(values);
-                Ok(())
-            })?;
-            Ok(fragments)
-        }
+        Ok(ticket) => Ok(finish_ticket(ticket, context).await?),
         Err(AdmissionFailure::Budget { .. }) => Ok(None),
         Err(AdmissionFailure::Runtime(error)) => Err(error),
     };
+    wait_cleanup(cleanup, context, &stop).await?;
+    result
+}
+
+async fn finish_ticket<T: Send + 'static>(
+    ticket: ObservedTicket<Vec<T>>,
+    context: &StreamOperatorContext<'_>,
+) -> Result<Option<Vec<T>>> {
+    let result = tokio::select! {
+        biased;
+        () = super::super::output_gather::cancelled(context.job()) => {
+            context.check_cancelled()?;
+            unreachable!("key stop requires cancellation or deadline");
+        }
+        result = ticket.finish() => result,
+    };
+    context.check_cancelled()?;
+    let mut fragments = None;
+    result?.install(|values| {
+        fragments = Some(values);
+        Ok(())
+    })?;
+    Ok(fragments)
+}
+
+async fn wait_cleanup(
+    cleanup: Option<AttemptCleanup>,
+    context: &StreamOperatorContext<'_>,
+    stop: &GatherStop,
+) -> Result<()> {
     context.check_cancelled()?;
     if let Some(cleanup) = cleanup {
-        cleanup.wait(&stop).await?;
+        cleanup.wait(stop).await?;
     }
-    context.check_cancelled()?;
-    result
+    context.check_cancelled()
 }
 
 async fn merge_fragment(

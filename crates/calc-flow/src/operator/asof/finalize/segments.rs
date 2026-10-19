@@ -24,6 +24,11 @@ use std::{
 
 type Payloads = HashMap<u32, state::PayloadBatch, RandomState>;
 type Buckets = HashMap<state::Encoding, Arc<state::RightBucket>, RandomState>;
+type Route<'a> = (
+    &'a Arc<state::RightBucket>,
+    state::RightCursor<'a>,
+    Option<(state::RowRef, usize)>,
+);
 
 pub(super) struct Prepared {
     pub(super) plans: Vec<OutputPlan>,
@@ -91,10 +96,7 @@ impl Work {
                 .with_funded_sources();
         let prefix_credit = self.prefix_credit(runs, count)?;
         let mut prefix = state::LeftPrefix::default();
-        for run in runs {
-            self.append_run(run, &mut plan, &mut credit, &mut prefix, stop)?;
-        }
-        stop.check()?;
+        self.append_runs(runs, &mut plan, &mut credit, &mut prefix, stop)?;
         let mut plan = plan.finish(&self.right_schema, &mut credit, &self.name)?;
         if let Some(span) = contiguous_right(&plan) {
             plan.right.spans.push(span);
@@ -105,6 +107,20 @@ impl Work {
             credit,
             prefix_credit,
         })
+    }
+
+    fn append_runs(
+        &self,
+        runs: &[state::OwnedOutputRun],
+        plan: &mut OutputPlanBuilder<'_>,
+        credit: &mut MemoryReservation,
+        prefix: &mut state::LeftPrefix,
+        stop: &GatherStop,
+    ) -> Result<()> {
+        for run in runs {
+            self.append_run(run, plan, credit, prefix, stop)?;
+        }
+        stop.check()
     }
 
     fn prefix_credit(
@@ -137,54 +153,89 @@ impl Work {
         let (first, left) = run.rows(1).next().expect("nonempty ASOF fragment");
         let source = plan.left_source(self.view(left), credit, &self.name)?;
         if let Some((keys, rows)) = run.dictionary_rows(count) {
-            let scratch = credit.new_empty();
-            scratch
-                .try_grow(keys.len() * 256 + 256)
-                .map_err(|_| workspace_error(&self.name))?;
-            let mut routes = keys
-                .iter()
-                .map(|key| {
-                    key.as_ref()
-                        .and_then(|key| self.buckets.get(key))
-                        .map(|bucket| (bucket, bucket.cursor_at(*first.0), None))
-                })
-                .collect::<Vec<_>>();
-            for (index, (time, key, left)) in rows.enumerate() {
-                if index.is_multiple_of(1_024) {
-                    stop.check()?;
-                }
-                let matched = match routes[key].as_mut() {
-                    Some((bucket, cursor, latest)) => {
-                        let matched = bucket
-                            .candidate_monotonic(time, self.tolerance, cursor)
-                            .copied();
-                        self.resolve(matched, latest, plan, credit)?
-                    }
-                    None => None,
-                };
-                plan.left_position(source, left.row as usize, &self.name)?;
-                plan.push_right_source(matched, &self.name)?;
-            }
+            self.append_dictionary_rows(keys, rows, (source, *first.0), plan, credit, stop)?;
         } else {
-            for (index, ((time, key, _), left)) in run.rows(count).enumerate() {
-                if index.is_multiple_of(1_024) {
-                    stop.check()?;
-                }
-                let right = self
-                    .buckets
-                    .get(key)
-                    .and_then(|bucket| bucket.candidate(*time, self.tolerance))
-                    .copied();
-                plan.push_reference(
-                    source,
-                    left.row as usize,
-                    right.map(|row| self.view(row)),
-                    credit,
-                    &self.name,
-                )?;
-            }
+            self.append_searched_rows(run, source, plan, credit, stop)?;
         }
         owned.visit_prefix(prefix, self.view(left).batch.key, &self.name)
+    }
+
+    fn append_dictionary_rows(
+        &self,
+        keys: &[Option<state::Encoding>],
+        rows: impl Iterator<Item = (i64, usize, state::RowRef)>,
+        left: (usize, i64),
+        plan: &mut OutputPlanBuilder<'_>,
+        credit: &mut MemoryReservation,
+        stop: &GatherStop,
+    ) -> Result<()> {
+        let scratch = credit.new_empty();
+        scratch
+            .try_grow(keys.len() * 256 + 256)
+            .map_err(|_| workspace_error(&self.name))?;
+        let mut routes = keys
+            .iter()
+            .map(|key| {
+                key.as_ref()
+                    .and_then(|key| self.buckets.get(key))
+                    .map(|bucket| (bucket, bucket.cursor_at(left.1), None))
+            })
+            .collect::<Vec<_>>();
+        for (index, (time, key, row)) in rows.enumerate() {
+            if index.is_multiple_of(1_024) {
+                stop.check()?;
+            }
+            let matched = self.resolve_route(routes[key].as_mut(), time, plan, credit)?;
+            plan.left_position(left.0, row.row as usize, &self.name)?;
+            plan.push_right_source(matched, &self.name)?;
+        }
+        Ok(())
+    }
+
+    fn append_searched_rows(
+        &self,
+        run: state::OutputRun<'_>,
+        source: usize,
+        plan: &mut OutputPlanBuilder<'_>,
+        credit: &mut MemoryReservation,
+        stop: &GatherStop,
+    ) -> Result<()> {
+        for (index, ((time, key, _), left)) in run.rows(run.len()).enumerate() {
+            if index.is_multiple_of(1_024) {
+                stop.check()?;
+            }
+            let right = self
+                .buckets
+                .get(key)
+                .and_then(|bucket| bucket.candidate(*time, self.tolerance))
+                .copied();
+            plan.push_reference(
+                source,
+                left.row as usize,
+                right.map(|row| self.view(row)),
+                credit,
+                &self.name,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn resolve_route(
+        &self,
+        route: Option<&mut Route<'_>>,
+        time: i64,
+        plan: &mut OutputPlanBuilder<'_>,
+        credit: &mut MemoryReservation,
+    ) -> Result<Option<(usize, usize)>> {
+        match route {
+            Some((bucket, cursor, latest)) => {
+                let matched = bucket
+                    .candidate_monotonic(time, self.tolerance, cursor)
+                    .copied();
+                self.resolve(matched, latest, plan, credit)
+            }
+            None => Ok(None),
+        }
     }
 
     fn resolve(
@@ -428,45 +479,8 @@ async fn capture(
     if !operator.state.left.legacy.is_empty() {
         return Ok(None);
     }
-    let retained = checked(
-        &operator.name,
-        operator.state.left.capacity_bytes(&operator.name)?,
-        operator.state.right.metadata_bytes(),
-    )?;
-    let retained = checked(
-        &operator.name,
-        retained,
-        operator.state.encoding_owner_allocation().0,
-    )?;
-    let control = checked(
-        &operator.name,
-        workers as u64 * 1_024 + 8_192,
-        operator.state.right.len() as u64 * 512,
-    )?;
-    let control = checked(&operator.name, control, operator.name.len() as u64)?;
-    let mut credit = operator.reserve_workspace(checked(&operator.name, retained, control)?)?;
-    let mut units: Vec<Vec<state::OwnedOutputRun>> = (0..workers).map(|_| Vec::new()).collect();
-    let width = count.div_ceil(workers);
-    let mut position = 0;
-    for (index, run) in operator.state.left.output_runs().enumerate() {
-        super::check_match_progress(index, context).await?;
-        let amount = run.len().min(count - position);
-        let mut start = 0;
-        while start < amount {
-            let unit = (position / width).min(workers - 1);
-            let take = (width - position % width).min(amount - start);
-            grow_workspace(&mut credit, 256, &operator.name)?;
-            units[unit].push(
-                run.owned_slice(start..start + take)
-                    .expect("columnar ASOF run"),
-            );
-            position += take;
-            start += take;
-        }
-        if position == count {
-            break;
-        }
-    }
+    let mut credit = capture_credit(operator, workers)?;
+    let units = capture_units(operator, count, workers, &mut credit, context).await?;
     let payloads = capture_payloads(operator, &mut credit, context).await?;
     let schema = operator.physical_schema(1);
     let schema_bytes = schema.fields().iter().try_fold(1_024, |bytes, field| {
@@ -498,6 +512,58 @@ async fn capture(
         #[cfg(test)]
         hook: operator.match_hook.clone(),
     }))
+}
+
+fn capture_credit(operator: &StreamAsofJoinOperator, workers: usize) -> Result<MemoryReservation> {
+    let retained = checked(
+        &operator.name,
+        operator.state.left.capacity_bytes(&operator.name)?,
+        operator.state.right.metadata_bytes(),
+    )?;
+    let retained = checked(
+        &operator.name,
+        retained,
+        operator.state.encoding_owner_allocation().0,
+    )?;
+    let control = checked(
+        &operator.name,
+        workers as u64 * 1_024 + 8_192,
+        operator.state.right.len() as u64 * 512,
+    )?;
+    let control = checked(&operator.name, control, operator.name.len() as u64)?;
+    operator.reserve_workspace(checked(&operator.name, retained, control)?)
+}
+
+async fn capture_units(
+    operator: &StreamAsofJoinOperator,
+    count: usize,
+    workers: usize,
+    credit: &mut MemoryReservation,
+    context: &StreamOperatorContext<'_>,
+) -> Result<Vec<Vec<state::OwnedOutputRun>>> {
+    let mut units: Vec<Vec<state::OwnedOutputRun>> = (0..workers).map(|_| Vec::new()).collect();
+    let width = count.div_ceil(workers);
+    let mut position = 0;
+    for (index, run) in operator.state.left.output_runs().enumerate() {
+        super::check_match_progress(index, context).await?;
+        let amount = run.len().min(count - position);
+        let mut start = 0;
+        while start < amount {
+            let unit = (position / width).min(workers - 1);
+            let take = (width - position % width).min(amount - start);
+            grow_workspace(credit, 256, &operator.name)?;
+            units[unit].push(
+                run.owned_slice(start..start + take)
+                    .expect("columnar ASOF run"),
+            );
+            position += take;
+            start += take;
+        }
+        if position == count {
+            break;
+        }
+    }
+    Ok(units)
 }
 
 async fn capture_payloads(
