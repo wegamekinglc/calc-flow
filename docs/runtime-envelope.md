@@ -530,10 +530,15 @@ exactly once after every ingress observes explicit end-of-input. A closed
 channel without an earlier explicit end is a failure, not synthetic EOF.
 
 Join and ASOF also own one preparation task per live ingress on the existing
-Tokio runtime. Each task stages at most one envelope; Join streams up to 64
-fixed-size classification blocks (4,096 rows), while ASOF sends one null/late
-summary and, for compatible typed keys, a batch-local order proof. Envelope
-readiness is published before preparation completes. The operator still selects
+Tokio runtime. Each task stages at most one envelope. Join groups sixteen
+64-row classification masks into each internal message. One pack can be queued,
+one prepared by the producer, and one drained locally by the operator; only
+loading a new pack acquires the receiver lock. Packs end at physical record
+boundaries, and scratch stays fixed rather than growing with the input batch.
+This transport granularity does not limit input batch size or CPU concurrency.
+ASOF sends one null/late summary and, for compatible typed keys, a batch-local
+order proof. Envelope readiness is published before preparation completes.
+The operator still selects
 ready inputs and alone validates current progress, resolves and publishes key
 identities, applies limits, emits, commits state, and aligns checkpoint cuts.
 ASOF rejects stale watermark facts and rechecks the boundary against resident

@@ -5,6 +5,7 @@ mod tests {
     mod columnar_charge_tests;
     mod complete_expiry_tests;
     mod expiration_heap_tests;
+    mod ingress_pack_tests;
     mod lazy_delta_tests;
     mod morsel_tests;
 
@@ -4127,10 +4128,17 @@ impl StreamJoinOperator {
             ingress,
         )?;
         let config = self.admission_mask_context((record, plan, ingress), context);
+        let mut prepared = admission_masks::PreparedMasks::default();
         for start in (0..record.num_rows()).step_by(64) {
             let length = (record.num_rows() - start).min(64);
             let masks = admission_masks::AdmissionMasks::new(
-                &config, &times, start, length, context, quantum,
+                &config,
+                &times,
+                start,
+                length,
+                context,
+                quantum,
+                &mut prepared,
             )
             .await?;
             self.append_masked_rows(

@@ -629,6 +629,9 @@ pub(super) trait AdmittedRows: Sync {
     fn any_retained(&self, range: Range<usize>) -> bool {
         (range.start..range.end).any(|index| self.row(index).retain)
     }
+    fn dense_key_range(&self, _range: Range<usize>) -> Option<Range<usize>> {
+        None
+    }
     /// why: key identity reads only (offset, retain), so a group can resolve
     /// its segment once instead of re-walking `row` per row
     fn key_offsets(
@@ -688,6 +691,22 @@ impl AdmittedRows for AdmittedBatch {
     }
     fn any_retained(&self, range: Range<usize>) -> bool {
         self.retained.any(range)
+    }
+    fn dense_key_range(&self, range: Range<usize>) -> Option<Range<usize>> {
+        if range.is_empty() {
+            return None;
+        }
+        let segment = self.segments.get(self.segment_index(range.start));
+        if range.end > segment.range.end {
+            return None;
+        }
+        let first = match segment.payload_base {
+            Some(base) => base,
+            None if segment.sparse_start.is_none() => segment.first,
+            None => return None,
+        };
+        let start = first.checked_add(range.start - segment.range.start)?;
+        Some(start..start.checked_add(range.len())?)
     }
     fn key_offsets(
         &self,
@@ -855,6 +874,9 @@ impl<'a> AdmittedGroup<'a> {
     }
     pub(super) fn any_retained(&self) -> bool {
         self.rows.any_retained(self.start..self.end)
+    }
+    pub(super) fn dense_key_range(&self) -> Option<Range<usize>> {
+        self.rows.dense_key_range(self.start..self.end)
     }
 }
 pub(super) struct GroupIter<'a> {

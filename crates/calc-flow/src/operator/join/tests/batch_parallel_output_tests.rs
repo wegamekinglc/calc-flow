@@ -24,6 +24,9 @@ mod rowed_lifecycle;
 #[path = "batch_parallel_cpu_tests.rs"]
 mod cpu_aware;
 
+#[path = "probe_cost_frequency_tests.rs"]
+mod cost_frequency;
+
 fn schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
         Field::new("key", DataType::Int64, false),

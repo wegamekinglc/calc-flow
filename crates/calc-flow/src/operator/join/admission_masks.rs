@@ -28,8 +28,7 @@ pub(super) struct AdmissionMasks {
     watermark: i128,
 }
 
-/// Fixed-size scratch, streamed through one bounded slot per ingress. Time
-/// conversion failures remain row bits until the owner reaches that row.
+/// Time conversion failures remain row bits until the owner reaches that row.
 pub(crate) struct PureMasks {
     times: [i64; 64],
     null_time: u64,
@@ -61,6 +60,33 @@ impl PureMasks {
     }
 }
 
+const MASKS_PER_CHUNK: usize = 16;
+
+pub(crate) struct PureMasksChunk(Vec<PureMasks>);
+
+#[derive(Default)]
+pub(super) struct PreparedMasks {
+    current: std::vec::IntoIter<PureMasks>,
+}
+
+impl PreparedMasks {
+    async fn next(
+        &mut self,
+        preparation: &crate::operator::ingress::Preparation,
+    ) -> Result<PureMasks> {
+        if let Some(mask) = self.current.next() {
+            return Ok(mask);
+        }
+        self.current = Vec::new().into_iter();
+        self.current = preparation.join().await?.0.into_iter();
+        self.current
+            .next()
+            .ok_or_else(|| crate::CalcFlowError::Internal {
+                message: "ingress admission producer returned an empty mask chunk".into(),
+            })
+    }
+}
+
 pub(crate) struct IngressPlan {
     name: String,
     ingress: String,
@@ -84,7 +110,7 @@ impl IngressPlan {
     pub(crate) async fn prepare(
         &self,
         batch: &Batch,
-        output: &tokio::sync::mpsc::Sender<Result<PureMasks>>,
+        output: &tokio::sync::mpsc::Sender<Result<PureMasksChunk>>,
     ) -> Result<()> {
         self.port.validate(batch, &self.ingress)?;
         let mut blocks = 0;
@@ -94,25 +120,44 @@ impl IngressPlan {
                 &self.name,
                 &self.ingress,
             )?;
+            let mut masks = Vec::with_capacity(MASKS_PER_CHUNK);
             for start in (0..record.num_rows()).step_by(64) {
-                let facts = PureMasks::new(
+                masks.push(PureMasks::new(
                     record,
                     &self.plan.key_indices,
                     &times,
                     start,
                     (record.num_rows() - start).min(64),
-                );
-                if output.send(Ok(facts)).await.is_err() {
-                    return Ok(());
+                ));
+                if masks.len() == MASKS_PER_CHUNK {
+                    if !send_masks(output, masks, &mut blocks).await {
+                        return Ok(());
+                    }
+                    masks = Vec::with_capacity(MASKS_PER_CHUNK);
                 }
-                blocks += 1;
-                if blocks % 64 == 0 {
-                    tokio::task::yield_now().await;
-                }
+            }
+            if !masks.is_empty() && !send_masks(output, masks, &mut blocks).await {
+                return Ok(());
             }
         }
         Ok(())
     }
+}
+
+async fn send_masks(
+    output: &tokio::sync::mpsc::Sender<Result<PureMasksChunk>>,
+    masks: Vec<PureMasks>,
+    blocks: &mut usize,
+) -> bool {
+    *blocks += masks.len();
+    if output.send(Ok(PureMasksChunk(masks))).await.is_err() {
+        return false;
+    }
+    if *blocks >= 64 {
+        *blocks %= 64;
+        tokio::task::yield_now().await;
+    }
+    true
 }
 
 impl AdmissionMasks {
@@ -123,6 +168,7 @@ impl AdmissionMasks {
         length: usize,
         context: &StreamOperatorContext<'_>,
         quantum: &mut columnar::Quantum,
+        prepared: &mut PreparedMasks,
     ) -> Result<Self> {
         debug_assert!(length <= 64);
         let watermark = config
@@ -140,7 +186,7 @@ impl AdmissionMasks {
         }
         let pure = match context.ingress_preparation() {
             Some(preparation) => {
-                let facts = preparation.join().await;
+                let facts = prepared.next(preparation).await;
                 context.check_cancelled()?;
                 facts?
             }

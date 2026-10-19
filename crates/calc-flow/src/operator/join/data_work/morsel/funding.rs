@@ -167,10 +167,11 @@ pub(super) fn output_bytes(output: &JoinOutput<'_>, records: usize) -> Option<us
 
 fn funded_bytes(bytes: usize, records: usize, columns: usize) -> Option<usize> {
     // Buffer growth headroom plus per-array controls, bitmap padding and the
-    // terminal byte-array offset in each chunk. This is physical funding, not V1.
+    // terminal byte-array offset in each chunk, plus envelope control storage.
     bytes
         .checked_mul(2)?
-        .checked_add(records.checked_mul(columns.checked_mul(4096)?)?)
+        .checked_add(records.checked_mul(columns.checked_mul(4096)?)?)?
+        .checked_add(super::envelopes::control_bytes(records, columns)?)
 }
 
 fn schema_bytes(output: &JoinOutput<'_>) -> Option<(usize, Vec<usize>)> {

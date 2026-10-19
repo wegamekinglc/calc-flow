@@ -1057,9 +1057,14 @@ mapping.
 Key preparation can use the existing native CPU pool for supported groups with
 at least 64,000 admitted rows and at least two available workers. The work-unit
 count follows the pool's CPU capacity and requires at least 16,000 rows per
-unit. Contiguous work units hash and deduplicate local keys; the owner merges distinct
-representatives and broadcasts their local mappings without hashing each input
-row again. Persistent identity creation still follows the first retained row,
+unit. Contiguous work units hash and deduplicate local keys. Dense admitted
+ranges avoid copying a row-offset tuple for every input row. The owner merges
+distinct representatives and establishes persistent identities; funded native
+work then maps each fragment directly to final row identities. The owner
+appends the completed identity lanes in input order without a second per-row
+mapping. Optional remap admission refusal uses a cooperative serial remap of
+the same fragments. Persistent identity creation still follows the first
+retained row,
 including unresolved probe-only prefixes. Extra scratch is reserved before
 worker buffers are allocated. Large key values or unsupported local shapes
 decline the optional work and use the cooperative serial path. Original Arrow
@@ -1072,8 +1077,12 @@ count work units according to the pool's CPU capacity, with at least 8,192
 admitted rows per unit. The partition count is captured once and shared by
 count, fill and gather. The operator
 checks the global batch match limit before fill work builds any pairs. A cost
-gate counts opposite-run visits for every incoming position, including repeated
-keys. A second gate admits large fixed-width projected output when at least
+gate aggregates each resolved key's admitted-row frequency times its
+opposite-run length. Frequencies are collected during key preparation, including
+probe-only rows, so the gate does not scan row identities again. Unknown
+probe-only identities contribute no visits. Saturating arithmetic preserves the
+cost estimate; the separate exact counting pass still enforces the match limit.
+A second gate admits large fixed-width projected output when at least
 64,000 input rows, two configured workers and one MiB of estimated primitive
 output work justify fused row work. This gate multiplies opposite-run visits by
 projected primitive width, so it estimates potential work before temporal
@@ -1094,7 +1103,13 @@ and opposite-side state must still have a funded owner. Legacy payloads remain
 ineligible for fused gathering.
 All units finish before the first output. Results emit in range order,
 independently of completion order, without merging pair fragments or dispatching
-another column-gather job. Output chunk boundaries follow these stable ranges.
+another column-gather job. Adjacent range records are packed into output
+Batch envelopes according to the actual edge row and byte budgets. The packing
+can slice records at an envelope boundary and shares the original Arrow
+buffers. Each record's visible slice bytes, including variable-width offsets
+and validity buffers, count toward its envelope. The complete envelope count
+is checked against the output sequence range before the first send. CPU work
+units therefore need not create separate output messages.
 Enabling these ranges can change physical batch boundaries. Matched row order
 and checkpoint state remain deterministic; downstream cumulative aggregates can
 emit different intermediate snapshots when they receive different batch sizes.

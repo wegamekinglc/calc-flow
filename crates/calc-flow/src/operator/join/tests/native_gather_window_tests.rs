@@ -77,9 +77,7 @@ async fn gather_fixture(
         .await
         .unwrap();
     let rows = 16_400;
-    let mut probe_times: Vec<i64> = (0..rows - 2)
-        .map(|index| i64::try_from(index).unwrap() * 10)
-        .collect();
+    let mut probe_times: Vec<i64> = (0..rows - 2).map(|index| i64::from(index) * 10).collect();
     probe_times.extend([5, 15]);
     let input = window_batch(7, &probe_times);
     let plan = operator.begin_batch("left", &input).unwrap();

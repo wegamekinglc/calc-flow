@@ -9,6 +9,13 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-19: Reduce repeated Join preparation scans by aggregating admitted-key
+  frequencies, sharing dense row ranges, and mapping parallel fragments directly
+  to final identities. Treat unresolved probe-only keys as misses during cost
+  estimation. Pack admission masks into bounded internal messages and group
+  native output records by the configured edge row/byte budgets while sharing
+  Arrow buffers. Preserve deterministic identities, output order, sequence
+  preflight, cancellation ownership, and explicit memory limits.
 - 2026-10-19: Prepare large Join key groups on the bounded native CPU pool,
   preserving deterministic retained-row identity semantics and serial fallback.
   Extend funded row-wise probe/gather eligibility to large primitive narrow

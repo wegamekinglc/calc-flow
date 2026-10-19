@@ -40,6 +40,21 @@ enum ProbeOutput {
         datafusion::execution::memory_pool::MemoryReservation,
     ),
 }
+
+fn estimated_key_visits(
+    frequencies: &[usize],
+    slots: &[Option<u32>],
+    run_length: impl Fn(u32) -> usize,
+) -> usize {
+    frequencies
+        .iter()
+        .zip(slots)
+        .fold(0_usize, |total, (&frequency, &slot)| {
+            slot.map_or(total, |id| {
+                total.saturating_add(frequency.saturating_mul(run_length(id)))
+            })
+        })
+}
 impl Capture {
     fn declined(admitted: AdmittedBatch, keys: Option<NativeKeys>) -> Self {
         Self {
@@ -150,11 +165,8 @@ impl StreamJoinOperator {
             .iter()
             .map(|key| key.as_ref().and_then(|key| index.key_id(key)))
             .collect::<Vec<_>>();
-        let estimated_visits = (0..admitted.len())
-            .filter_map(|position| slots[keys.id(position) as usize])
-            .fold(0usize, |total, id| {
-                total.saturating_add(index.run_len_by_id(id))
-            });
+        let estimated_visits =
+            estimated_key_visits(&keys.frequencies, &slots, |id| index.run_len_by_id(id));
         if estimated_visits < super::probe_min_visits()
             && !(super::morsel::materialization_worthwhile(self, admitted.len(), estimated_visits)
                 && capacity > 1)

@@ -154,10 +154,11 @@ struct RejectSecond {
 
 #[async_trait]
 impl StreamCollector for RejectSecond {
-    async fn emit(&mut self, _: &str, _: Batch) -> Result<()> {
+    async fn emit(&mut self, _: &str, batch: Batch) -> Result<()> {
         if self.accepted > 0 {
             return Err(operator_error("match", "morsel downstream failure"));
         }
+        assert!(batch.table_payload()?.batches().len() > 1);
         self.entered.take().unwrap().send(()).unwrap();
         (&mut self.release).await.unwrap();
         self.accepted += 1;
@@ -178,7 +179,8 @@ fn test_morsel_result_credit_survives_sink_wait_and_failure_preserves_accepted_s
             .unwrap();
         let job = job().with_gather_owner(service.owner("morsel-sink".into()));
         preload(&mut operator, &job, true).await;
-        let context = StreamOperatorContext::new(&job, "match", None);
+        let context = StreamOperatorContext::new(&job, "match", None)
+            .with_output_budget(EdgeBudget::new(ROWS * 3, usize::MAX).unwrap());
         let (entered, entering) = tokio::sync::oneshot::channel();
         let (release, released) = tokio::sync::oneshot::channel();
         let mut output = RejectSecond {

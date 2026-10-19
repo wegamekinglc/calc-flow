@@ -1,6 +1,6 @@
 //! Count first; defer owned probe/gather until mandatory state admission succeeds.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 
 use datafusion::{
     arrow::{datatypes::SchemaRef, record_batch::RecordBatch},
@@ -18,6 +18,10 @@ use super::{inputs::ProbeInputs, partition::Counts, worker};
 use crate::runtime::streaming::gather_work::{GatherStop, ParallelCpuWork};
 use crate::{Batch, BatchMetadata, EdgeBudget, Result, StreamCollector, StreamOperatorContext};
 
+#[cfg(test)]
+#[path = "../tests/morsel_tests/envelopes.rs"]
+mod envelope_tests;
+mod envelopes;
 mod fallback;
 mod funding;
 #[cfg(test)]
@@ -356,6 +360,19 @@ impl StreamJoinOperator {
 
 impl GatheredOutput {
     #[cfg(test)]
+    pub(in crate::operator::join) fn total_funding_for_test(&self) -> usize {
+        let Self {
+            _control: control, ..
+        } = self;
+        control.size()
+            + self
+                .morsels
+                .iter()
+                .map(|morsel| morsel.credit.size())
+                .sum::<usize>()
+    }
+
+    #[cfg(test)]
     pub(in crate::operator::join) fn funding_for_test(&self) -> Vec<(usize, usize)> {
         self.morsels
             .iter()
@@ -387,17 +404,6 @@ impl GatheredOutput {
         output: &mut dyn StreamCollector,
         sequence: &mut u64,
     ) -> Result<()> {
-        let records = self.morsels.iter().flat_map(|morsel| &morsel.records);
-        let count = records.clone().count();
-        crate::operator::output_chunk::validate_output_sequence_range(name, *sequence, count)?;
-        for record in records {
-            context.check_cancelled()?;
-            let metadata = BatchMetadata::new(name, *sequence, BTreeMap::new())?;
-            output
-                .emit("output", Batch::table(vec![record.clone()], metadata)?)
-                .await?;
-            *sequence += 1;
-        }
-        Ok(())
+        envelopes::emit(&self.morsels, name, context, output, sequence).await
     }
 }

@@ -28,7 +28,7 @@ fn cpu_budget_key_ranges_cover_rows_without_empty_or_overlapping_units() {
         let work = KeyWork {
             payload: RowPayload::from(RecordBatch::new_empty(Arc::new(Schema::empty()))),
             indices: Vec::new(),
-            offsets: vec![(0, false); rows],
+            rows: KeyRows::Sparse(vec![(0, false); rows]),
             units,
             name: "key-partition-test".into(),
             credit: Arc::new(credit),
@@ -56,10 +56,10 @@ fn cpu_budget_key_ranges_cover_rows_without_empty_or_overlapping_units() {
 
 #[test]
 fn cpu_budget_key_scratch_prepays_additional_worker_columns_and_tables() {
-    let four = work_bytes(256_000, 64, 64, 4, "key-budget").unwrap();
-    let sixteen = work_bytes(256_000, 64, 64, 16, "key-budget").unwrap();
+    let four = work_bytes(256_000, 0, 64, 64, 4, "key-budget").unwrap();
+    let sixteen = work_bytes(256_000, 0, 64, 64, 16, "key-budget").unwrap();
     let per_unit = 64 * size_of::<LocalColumn<'_>>() + super::super::local_table_bytes(0).unwrap();
     assert!(sixteen >= four + 12 * per_unit);
-    assert!(work_bytes(256_000, usize::MAX, 64, 16, "key-budget").is_err());
-    assert!(work_bytes(256_000, 1, 1, usize::MAX, "key-budget").is_err());
+    assert!(work_bytes(256_000, 0, usize::MAX, 64, 16, "key-budget").is_err());
+    assert!(work_bytes(256_000, 0, 1, 1, usize::MAX, "key-budget").is_err());
 }

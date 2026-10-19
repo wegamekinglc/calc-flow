@@ -22,6 +22,26 @@ pub(super) type WorkerHook = Arc<dyn Fn(usize) + Send + Sync>;
 
 thread_local! {
     static WORKER_HOOK: RefCell<Option<WorkerHook>> = const { RefCell::new(None) };
+    static REMAP_WORKER_HOOK: RefCell<Option<WorkerHook>> = const { RefCell::new(None) };
+}
+
+pub(super) fn remap_worker_hook() -> Option<WorkerHook> {
+    REMAP_WORKER_HOOK.with(|hook| hook.borrow().clone())
+}
+
+struct RemapObserve;
+
+impl RemapObserve {
+    fn new(hook: WorkerHook) -> Self {
+        REMAP_WORKER_HOOK.with(|current| *current.borrow_mut() = Some(hook));
+        Self
+    }
+}
+
+impl Drop for RemapObserve {
+    fn drop(&mut self) {
+        REMAP_WORKER_HOOK.with(|hook| hook.borrow_mut().take());
+    }
 }
 
 pub(super) fn worker_hook() -> Option<WorkerHook> {

@@ -74,14 +74,32 @@ pub(super) struct NativePairs {
 
 pub(super) struct NativeKeys {
     pub(super) keys: Vec<Option<Arc<FramedKey>>>,
+    pub(super) frequencies: Vec<usize>,
     ids: Vec<u32>,
     _credit: Arc<MemoryReservation>,
     _scratch: Arc<MemoryReservation>,
     pub(super) dictionary: Option<super::key_dictionary::Pending>,
 }
 
+#[cfg(test)]
+thread_local! {
+    static KEY_ID_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn reset_key_id_reads() {
+    KEY_ID_READS.set(0);
+}
+
+#[cfg(test)]
+pub(super) fn key_id_reads() -> usize {
+    KEY_ID_READS.get()
+}
+
 impl NativeKeys {
     pub(super) fn id(&self, position: usize) -> u32 {
+        #[cfg(test)]
+        KEY_ID_READS.set(KEY_ID_READS.get() + 1);
         self.ids[position]
     }
 
@@ -312,6 +330,7 @@ impl ProbeKeyInterner {
             .capacity()
             .checked_mul(size_of::<Arc<FramedKey>>())
             .and_then(|bytes| bytes.checked_add(self.ids.capacity().checked_mul(size_of::<u32>())?))
+            .and_then(|bytes| bytes.checked_add(self.keys.len().checked_mul(size_of::<usize>())?))
             // Serial ProbeWindows allocates these slots while it borrows the IDs.
             .and_then(|bytes| {
                 bytes.checked_add(self.keys.len().checked_mul(size_of::<Option<u32>>())?)
@@ -332,11 +351,18 @@ impl ProbeKeyInterner {
             ..
         } = self;
         drop((hashes, dictionary));
+        let mut frequencies = vec![0_usize; keys.len()];
+        for &id in &ids {
+            if let Some(count) = frequencies.get_mut(id as usize) {
+                *count = count.saturating_add(1);
+            }
+        }
         // Key aliases may outlive this batch's IDs and lookup vectors.
         let scratch = credit.split(scratch);
         credit.shrink(credit.size() - retained);
         Ok(NativeKeys {
             keys: keys.into_iter().map(Some).collect(),
+            frequencies,
             ids,
             _credit: credit,
             _scratch: Arc::new(scratch),
@@ -499,12 +525,14 @@ impl StreamJoinOperator {
             dictionary,
             keys,
             ids,
+            frequencies,
             scratch,
         } = prepared;
         let credit = Arc::clone(&scratch);
         Ok(Some(NativeKeys {
             keys,
             ids,
+            frequencies,
             _credit: credit,
             _scratch: scratch,
             dictionary: Some(dictionary),

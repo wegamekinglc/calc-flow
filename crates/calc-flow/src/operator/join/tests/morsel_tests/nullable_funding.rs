@@ -55,7 +55,7 @@ async fn restore_wide(operator: &mut StreamJoinOperator, job: &StreamJobContext)
 }
 
 #[test]
-fn test_morsel_restored_wide_nullable_backing_requires_safe_fallback() {
+fn test_morsel_restored_wide_nullable_results_have_no_internal_byte_cap() {
     let service = TestService::new(4, 1).unwrap();
     let runtime = runtime();
     runtime.block_on(async {
@@ -69,6 +69,7 @@ fn test_morsel_restored_wide_nullable_backing_requires_safe_fallback() {
         restore_wide(&mut operator, &job).await;
         let context = StreamOperatorContext::new(&job, "match", None);
         let source = input(true, ROWS, false);
+        let original = source.table_payload().unwrap().batches().to_vec();
         let (mut prepared, expiration) = operator
             .prepare_data_append("left", &source, &context)
             .await
@@ -78,29 +79,27 @@ fn test_morsel_restored_wide_nullable_backing_requires_safe_fallback() {
             .finish_morsels(&mut prepared, &context)
             .await
             .unwrap();
-        if let Some(gathered) = &prepared.gathered {
-            let funding = gathered.funding_for_test();
-            println!("restored nullable result backing/lease per unit: {funding:?}");
-            assert!(funding.iter().all(|&(backing, lease)| backing <= lease));
-        }
+        let lease = check_funding(&prepared, 0);
+        let gathered = prepared.gathered.as_ref().unwrap();
         assert!(
-            prepared.gathered.is_none(),
-            "physical output exceeds 16 MiB/unit"
+            gathered
+                .funding_for_test()
+                .iter()
+                .all(|&(backing, _)| backing > 16 << 20),
+            "every worker must exercise the removed internal byte cap"
         );
-        assert_eq!(prepared.output.len(), ROWS * 5);
-        assert_eq!(
-            pool.attempts.load(Ordering::SeqCst),
-            1,
-            "only scratch was admitted"
-        );
-        assert_eq!(pool.live.load(Ordering::SeqCst), 0);
-        let mut sink = CheckedSink::new(pool.clone(), 0, false, false);
+        assert_eq!(gathered.rows(), ROWS * 5);
+        assert_eq!(pool.live.load(Ordering::SeqCst), lease);
+        let mut sink = CheckedSink::new(pool.clone(), lease, false, false);
         operator
             .finish_data("left", prepared, expiration, &context, &mut sink)
             .await
             .unwrap();
         assert_eq!(sink.rows, ROWS * 5);
+        assert_eq!(operator.state.next_output_sequence, sink.batches);
         assert_eq!(operator.status().left.retained_rows, ROWS as u64);
+        assert_eq!(source.table_payload().unwrap().batches(), &original);
+        assert_eq!(pool.live.load(Ordering::SeqCst), 0);
         drop(operator);
         assert!(job.gather_owner().close_and_drain().await.is_empty());
         drop(context);
@@ -210,7 +209,8 @@ async fn funded_case(service: &TestService, projected: bool, fail: bool, reject_
         .unwrap();
     let job = job().with_gather_owner(service.owner("nullable-funded".into()));
     restore_wide(&mut operator, &job).await;
-    let context = StreamOperatorContext::new(&job, "match", None);
+    let context = StreamOperatorContext::new(&job, "match", None)
+        .with_output_budget(EdgeBudget::new(ROWS * 2, usize::MAX).unwrap());
     let source = input(true, ROWS, false);
     let original = source.table_payload().unwrap().batches().to_vec();
     let (mut prepared, expiration) = operator
@@ -249,13 +249,8 @@ fn check_funding(prepared: &PreparedJoinBatch, reject_at: usize) -> usize {
     };
     let funding = gathered.funding_for_test();
     assert_eq!(funding.len(), 4);
-    assert!(
-        funding
-            .iter()
-            .all(|&(backing, lease)| backing <= lease && lease <= 16 << 20)
-    );
-    println!("nullable output backing/lease per unit: {funding:?}");
-    funding.iter().map(|(_, lease)| lease).sum()
+    assert!(funding.iter().all(|&(backing, lease)| backing <= lease));
+    gathered.total_funding_for_test()
 }
 
 fn check_delivery(
