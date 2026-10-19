@@ -209,6 +209,14 @@ async fn finish_gather(
 
 pub(in crate::operator::join) async fn cancelled(job: &StreamJobContext) {
     let deadline = async {
+        #[cfg(test)]
+        if let (Some(mut clock), Some(expires)) = (job.deadline_clock_for_test(), job.deadline()) {
+            clock
+                .wait_for(|now| *now >= *expires)
+                .await
+                .expect("deadline clock outlives its wait");
+            return;
+        }
         match job.deadline() {
             Some(deadline) => {
                 let delay = (*deadline - chrono::Utc::now())
