@@ -1153,7 +1153,8 @@ impl WindowAggregateOperator {
 
     /// Sets the logical row and byte limit for retained window accumulators.
     ///
-    /// The default is one million windows and 256 MiB of logical charge.
+    /// The default uses the JSON counter range without a smaller implicit
+    /// window-count or logical-byte limit.
     /// A window stops counting once its close is emitted. Existing state must
     /// fit the replacement budget. Checkpoint segment copies and process RSS
     /// are outside this limit.

@@ -67,7 +67,7 @@ pub(crate) trait GatherPlan: Send + Sync {
     fn gather(&self, ordinal: usize, stop: &GatherStop) -> Result<ArrayRef>;
 
     fn parallelism(&self) -> usize {
-        self.column_count().clamp(1, 8)
+        self.column_count().max(1)
     }
 
     fn row_gather(&self) -> Result<Option<RowGather>> {
@@ -160,17 +160,41 @@ impl<W: OwnedCpuWork> ErasedWork for WorkAdapter<W> {
     }
 }
 
-struct ColumnsWork(Arc<dyn GatherPlan>);
+struct ColumnsWork {
+    plan: Arc<dyn GatherPlan>,
+    workers: usize,
+    rows: Option<RowGather>,
+}
+
+impl ColumnsWork {
+    fn new(plan: Arc<dyn GatherPlan>, capacity: usize) -> Result<Self> {
+        let workers = plan.parallelism().max(1).min(capacity);
+        let rows = if workers > 1 && plan.column_count() > 1 {
+            plan.row_gather()?
+        } else {
+            None
+        };
+        Ok(Self {
+            plan,
+            workers,
+            rows,
+        })
+    }
+}
 
 impl WorkPackage for ColumnsWork {
     type Output = Vec<ArrayRef>;
 
     fn control_bytes(&self) -> Result<usize> {
-        columns::Columns::control_bytes(self.0.as_ref())
+        columns::Columns::control_bytes(self.plan.as_ref(), self.workers, self.rows.as_ref())
     }
 
     fn into_work(self) -> Result<ReadyWork> {
-        Ok(ReadyWork::Columns(columns::Columns::new(self.0)?))
+        Ok(ReadyWork::Columns(columns::Columns::new(
+            self.plan,
+            self.workers,
+            self.rows,
+        )?))
     }
 }
 
@@ -182,10 +206,10 @@ impl OwnedCpuWork for ColumnsWork {
     }
 
     fn run(self, stop: &GatherStop) -> Result<Vec<ArrayRef>> {
-        let mut columns = Vec::with_capacity(self.0.column_count());
-        for ordinal in 0..self.0.column_count() {
+        let mut columns = Vec::with_capacity(self.plan.column_count());
+        for ordinal in 0..self.plan.column_count() {
             stop.check()?;
-            columns.push(self.0.gather(ordinal, stop)?);
+            columns.push(self.plan.gather(ordinal, stop)?);
         }
         Ok(columns)
     }
@@ -620,21 +644,7 @@ impl JobGatherOwner {
     }
 
     pub(crate) fn parallelism(&self) -> usize {
-        self.0
-            .home
-            .state
-            .lock()
-            .service
-            .as_ref()
-            .and_then(Weak::upgrade)
-            .map_or_else(
-                || {
-                    std::thread::available_parallelism()
-                        .map_or(1, usize::from)
-                        .min(32)
-                },
-                |service| service.worker_limit,
-            )
+        self.0.home.parallelism()
     }
 
     pub(crate) fn close_admission(&self) {
@@ -737,10 +747,11 @@ impl GatherScope {
         credit: MemoryReservation,
         stop: GatherStop,
     ) -> AdmissionResult<GatherTicket> {
-        if plan.column_count() <= 1 || plan.parallelism() <= 1 {
-            self.submit_work(ColumnsWork(plan), credit, stop).await
+        let work = ColumnsWork::new(plan, self.home.parallelism())?;
+        if work.plan.column_count() <= 1 || work.workers <= 1 {
+            self.submit_work(work, credit, stop).await
         } else {
-            self.submit_package(ColumnsWork(plan), credit, stop).await
+            self.submit_package(work, credit, stop).await
         }
     }
 
@@ -1014,6 +1025,15 @@ impl GatherHome {
         Ok(state.phase == PoolPhase::Retiring)
     }
 
+    fn parallelism(&self) -> usize {
+        self.state
+            .lock()
+            .service
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .map_or_else(process::available_workers, |service| service.worker_limit)
+    }
+
     fn execution_service(&self) -> Result<Arc<process::ProcessService>> {
         if let Some(service) = &self.state.lock().service {
             return service
@@ -1036,6 +1056,12 @@ impl GatherHome {
         if !state.open || matches!(state.phase, PoolPhase::Initializing | PoolPhase::Retiring) {
             return Err(cancelled(&self.run_id));
         }
+        let capacity = state
+            .service
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .ok_or_else(|| internal("missing dispatch service"))?
+            .worker_limit;
         let (Slot::Active(record) | Slot::Parked(record)) = &mut state.slot else {
             return Err(internal("lost registered attempt"));
         };
@@ -1043,7 +1069,11 @@ impl GatherHome {
             return Err(cancelled(&self.run_id));
         }
         record.generation = generation;
-        let units = record.work.as_ref().map_or(0, ReadyWork::units).min(8);
+        let units = record
+            .work
+            .as_ref()
+            .map_or(0, |work| work.units().min(work.workers()))
+            .min(capacity);
         record.next_unit = units;
         if !state.queue.is_empty() {
             return Err(internal("paid request ring occupied"));

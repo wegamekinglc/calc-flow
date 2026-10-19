@@ -27,6 +27,10 @@ const LEFT_TIME: i64 = 1_000_000;
 const RIGHT_TIME: i64 = LEFT_TIME - 1;
 const FRONTIER: i64 = 2_000_000;
 
+fn fixture_budget() -> EdgeBudget {
+    EdgeBudget::new(10_000, 64 << 20).unwrap()
+}
+
 fn rss() -> u64 {
     std::fs::read_to_string("/proc/self/status")
         .unwrap_or_default()
@@ -138,6 +142,7 @@ fn progress(job: &StreamJobContext, left: i64, right: i64) -> StreamOperatorCont
         Some(EventTime::from_micros(left.min(right))),
         snapshot,
     )
+    .with_benchmark_output_budget(fixture_budget())
 }
 
 struct AdmissionPhases {
@@ -154,7 +159,8 @@ async fn seed(
     retained: usize,
     skew: bool,
 ) -> AdmissionPhases {
-    let cx = StreamOperatorContext::new(job, "asof", None);
+    let cx = StreamOperatorContext::new(job, "asof", None)
+        .with_benchmark_output_budget(fixture_budget());
     let mut collector = EdgeCollector::new(op.output_ports().to_vec());
     let started = Instant::now();
     let right = batch(retained, skew, false);
@@ -322,7 +328,7 @@ fn sample(rt: &tokio::runtime::Runtime, config: &Config, check: bool) -> Value {
         collector
             .chunks
             .iter()
-            .all(|(rows, _)| *rows > 0 && *rows <= EdgeBudget::default().max_rows)
+            .all(|(rows, _)| *rows > 0 && *rows <= fixture_budget().max_rows)
     );
     assert_eq!(after_status.pending_left_rows, 0);
     assert_eq!(after_status.matched_rows, pending as u64);
@@ -375,9 +381,8 @@ fn strict_frontiers_cancel_restore_check() {
         let cancel = CancellationToken::new();
         let job = job(cancel.clone());
         let mut op = operator();
-        // Exceed the public context's output budget so cancellation always
-        // occurs after a committed prefix, even when output batching grows.
-        let pending = EdgeBudget::default().max_rows + 300;
+        // Keep the historical fixture large enough to cancel after a committed prefix.
+        let pending = fixture_budget().max_rows + 300;
         seed(&mut op, &job, pending, 512, true).await;
         let mut zero = EdgeCollector::new(op.output_ports().to_vec());
         for (l, r) in [(LEFT_TIME, LEFT_TIME), (FRONTIER, LEFT_TIME)] {

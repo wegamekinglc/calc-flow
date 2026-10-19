@@ -19,21 +19,21 @@ pub(super) struct Columns {
     plan: Arc<dyn GatherPlan>,
     cells: Vec<Cell>,
     active: usize,
+    workers: usize,
     remaining: usize,
     rows: Option<super::row_gather::Assembly>,
     stop: Arc<AtomicBool>,
 }
 
 impl Columns {
-    pub(super) fn new(plan: Arc<dyn GatherPlan>) -> Result<Self> {
-        let shape = if plan.parallelism() > 1 {
-            plan.row_gather()?
-        } else {
-            None
-        };
+    pub(super) fn new(
+        plan: Arc<dyn GatherPlan>,
+        workers: usize,
+        shape: Option<super::RowGather>,
+    ) -> Result<Self> {
         let count = shape
             .as_ref()
-            .map_or(plan.column_count(), |shape| shape.parts(plan.parallelism()));
+            .map_or(plan.column_count(), |shape| shape.parts(workers));
         let rows = shape
             .map(|shape| super::row_gather::Assembly::new(plan.as_ref(), shape))
             .transpose()?;
@@ -46,24 +46,24 @@ impl Columns {
                 })
                 .collect(),
             active: 0,
+            workers: workers.min(count),
             remaining: count,
             rows,
             stop: Arc::new(AtomicBool::new(false)),
         })
     }
 
-    pub(super) fn control_bytes(plan: &dyn GatherPlan) -> Result<usize> {
-        let shape = if plan.parallelism() > 1 {
-            plan.row_gather()?
-        } else {
-            None
-        };
+    pub(super) fn control_bytes(
+        plan: &dyn GatherPlan,
+        workers: usize,
+        shape: Option<&super::RowGather>,
+    ) -> Result<usize> {
         let count = shape
             .as_ref()
-            .map_or(plan.column_count(), |shape| shape.parts(plan.parallelism()));
+            .map_or(plan.column_count(), |shape| shape.parts(workers));
         let workspace = shape
             .as_ref()
-            .map_or(Ok(0), |shape| shape.workspace_bytes(plan.parallelism()))?;
+            .map_or(Ok(0), |shape| shape.workspace_bytes(workers))?;
         count
             .checked_mul(size_of::<Cell>() + size_of::<super::ArrayRef>() + 128)
             .and_then(|bytes| bytes.checked_add(plan.column_count().checked_mul(64)?))
@@ -77,7 +77,7 @@ impl Columns {
     }
 
     pub(super) fn workers(&self) -> usize {
-        self.plan.parallelism().clamp(1, 8).min(self.count())
+        self.workers
     }
 
     pub(super) fn active(&self) -> usize {

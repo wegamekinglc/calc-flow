@@ -1,20 +1,34 @@
 use super::super::native_lookup::scratch_error;
 use crate::Result;
+use datafusion::execution::memory_pool::MemoryReservation;
 use std::ops::Range;
+use std::sync::Arc;
 
-const MAX_UNITS: usize = 4;
-
-pub(super) fn units(rows: usize) -> usize {
-    (rows / super::MIN_PROBE_ROWS).clamp(1, MAX_UNITS)
+#[derive(Clone, Copy)]
+pub(super) struct Partition {
+    rows: usize,
+    units: usize,
 }
 
-pub(super) fn range(rows: usize, ordinal: usize) -> Range<usize> {
-    let units = units(rows);
-    debug_assert!(ordinal < units);
-    let width = rows / units;
-    let remainder = rows % units;
-    let start = ordinal * width + ordinal.min(remainder);
-    start..start + width + usize::from(ordinal < remainder)
+impl Partition {
+    pub(super) fn new(rows: usize, capacity: usize) -> Self {
+        Self {
+            rows,
+            units: capacity.max(1).min((rows / super::MIN_PROBE_ROWS).max(1)),
+        }
+    }
+
+    pub(super) fn units(self) -> usize {
+        self.units
+    }
+
+    pub(super) fn range(self, ordinal: usize) -> Range<usize> {
+        debug_assert!(ordinal < self.units);
+        let width = self.rows / self.units;
+        let remainder = self.rows % self.units;
+        let start = ordinal * width + ordinal.min(remainder);
+        start..start + width + usize::from(ordinal < remainder)
+    }
 }
 
 pub(super) fn sentinel(limit: u64) -> Option<usize> {
@@ -30,25 +44,44 @@ pub(super) fn add_count(total: usize, value: usize, limit: u64) -> Result<usize>
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) struct Counts {
-    pub(super) rows: [usize; MAX_UNITS],
+    pub(super) rows: Arc<CountRows>,
     pub(super) units: usize,
     pub(super) total: usize,
 }
 
+pub(super) struct CountRows {
+    values: Vec<usize>,
+    // Dynamic count backing must drop before its prepaid input-control lease.
+    _credit: Arc<MemoryReservation>,
+}
+
+impl std::ops::Deref for CountRows {
+    type Target = [usize];
+
+    fn deref(&self) -> &Self::Target {
+        &self.values
+    }
+}
+
 impl Counts {
-    pub(super) fn ordered(values: Vec<usize>, limit: u64) -> Result<Self> {
-        debug_assert!(!values.is_empty() && values.len() <= MAX_UNITS);
-        let mut counts = Self {
-            rows: [0; MAX_UNITS],
+    pub(super) fn ordered(
+        values: Vec<usize>,
+        limit: u64,
+        credit: Arc<MemoryReservation>,
+    ) -> Result<Self> {
+        debug_assert!(!values.is_empty());
+        let total = values
+            .iter()
+            .try_fold(0, |total, &value| add_count(total, value, limit))?;
+        Ok(Self {
             units: values.len(),
-            total: 0,
-        };
-        for (ordinal, value) in values.into_iter().enumerate() {
-            counts.rows[ordinal] = value;
-            counts.total = add_count(counts.total, value, limit)?;
-        }
-        Ok(counts)
+            total,
+            rows: Arc::new(CountRows {
+                values,
+                _credit: credit,
+            }),
+        })
     }
 }

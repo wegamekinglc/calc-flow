@@ -20,6 +20,50 @@ from scripts.benchmark_suite.rust import (
 
 
 class AddedRustTargetTests(unittest.IsolatedAsyncioTestCase):
+    async def test_bench_build_enables_only_features_required_by_each_source_target(
+        self,
+    ):
+        targets = ("core", "stream_asof_perf", "stream_join_materialization")
+        with TemporaryDirectory() as raw:
+            root = Path(raw)
+            manifest = root / "crates/calc-flow/Cargo.toml"
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text(
+                '\n[[bench]]\nname = "core"\nharness = false\n'
+                + "".join(
+                    f'\n[[bench]]\nname = "{name}"\nharness = false\n'
+                    'required-features = ["benchmark-internals"]\n'
+                    for name in targets[1:]
+                )
+            )
+
+            async def command(argv, **kwargs):
+                target = argv[argv.index("--bench") + 1]
+                if target == "core":
+                    self.assertNotIn("--features", argv)
+                else:
+                    self.assertIn("--features", argv)
+                    self.assertEqual(
+                        argv[argv.index("--features") + 1], "benchmark-internals"
+                    )
+                executable = root / f"{target}.bin"
+                executable.write_bytes(b"fixture executable")
+                kwargs["log"].write_text(
+                    json.dumps(
+                        {
+                            "reason": "compiler-artifact",
+                            "target": {"name": target},
+                            "executable": str(executable),
+                        }
+                    )
+                )
+
+            with patch("scripts.benchmark_suite.rust.command", side_effect=command):
+                binaries = await build_binaries(
+                    root, root, root / "target", targets=targets
+                )
+            self.assertEqual(tuple(binaries), targets)
+
     async def test_each_source_rebuilds_its_product_library_before_linking(self):
         with TemporaryDirectory() as raw:
             root = Path(raw)

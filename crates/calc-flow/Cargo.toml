@@ -71,6 +71,7 @@ harness = false
 [[bench]]
 name = "stream_join_materialization"
 harness = false
+required-features = ["benchmark-internals"]
 
 [[bench]]
 name = "sql_datafusion_performance"
@@ -82,6 +83,7 @@ workspace = true
 [[bench]]
 name = "stream_asof_perf"
 harness = false
+required-features = ["benchmark-internals"]
 
 [[bench]]
 name = "stream_asof_e2e"

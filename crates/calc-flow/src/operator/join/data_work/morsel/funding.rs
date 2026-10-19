@@ -1,4 +1,6 @@
-use super::{FundedProbeInputs, GatherStop, GatherWork, JoinOutput, ProbeInputs, Result};
+use super::{
+    FundedMorsel, FundedProbeInputs, GatherStop, GatherWork, JoinOutput, ProbeInputs, Result,
+};
 use crate::StreamOperatorContext;
 use crate::operator::join::{
     MatchedPair, PayloadRef,
@@ -13,12 +15,13 @@ use datafusion::{
 };
 use std::sync::Arc;
 
-const MAX_SCRATCH: usize = 512 * 1024 * 1024;
-const MAX_UNIT_OUTPUT: usize = 16 * 1024 * 1024;
-
 #[cfg(test)]
 #[path = "../../tests/morsel_tests/rowed_funding.rs"]
 mod rowed_funding_tests;
+
+#[cfg(test)]
+#[path = "../../tests/morsel_tests/cpu_budget.rs"]
+mod cpu_budget_tests;
 
 pub(in crate::operator::join::data_work) fn pair_credit_bytes(
     count: usize,
@@ -32,16 +35,27 @@ pub(in crate::operator::join::data_work) fn pair_credit_bytes(
     (bytes >= count.checked_mul(3 * size_of::<usize>())?).then_some(bytes)
 }
 
-pub(super) fn scratch_bytes(matches: usize, rows: usize, columns: usize) -> Option<usize> {
+pub(super) fn output_control_bytes(units: usize) -> Option<usize> {
+    units
+        .checked_mul(size_of::<Option<FundedMorsel>>() + size_of::<FundedMorsel>())?
+        .checked_add(128)
+}
+
+pub(super) fn scratch_bytes(
+    matches: usize,
+    rows: usize,
+    columns: usize,
+    units: usize,
+) -> Option<usize> {
     // Selection/ranges, both take/interleave routes, source maps, flat-row cost
     // maps and null inventories. All units share this prepaid upper bound.
     let per_match = 512usize.checked_add(columns.checked_mul(16)?)?;
     matches
         .checked_mul(per_match)?
         .checked_add(rows.checked_mul(size_of::<u64>())?)?
-        .checked_add(columns.checked_mul(4096)?)?
+        .checked_add(columns.checked_mul(units)?.checked_mul(4096)?)?
+        .checked_add(output_control_bytes(units)?)?
         .checked_add(size_of::<GatherWork>() + 4096)
-        .filter(|&bytes| bytes <= MAX_SCRATCH)
 }
 
 pub(super) async fn fund_inputs(
@@ -53,10 +67,11 @@ pub(super) async fn fund_inputs(
     let Some(bytes) = input_bytes(inputs, context).await? else {
         return Ok(None);
     };
-    let Some(total) = base
-        .checked_add(bytes)
-        .filter(|&total| total <= MAX_SCRATCH)
-    else {
+    let Some(total) = base.checked_add(bytes).filter(|&total| {
+        total
+            .checked_add(inputs.control.as_ref().map_or(0, |credit| credit.size()))
+            .is_some()
+    }) else {
         return Ok(None);
     };
     if scratch.try_grow(total).is_err() {
@@ -101,7 +116,6 @@ async fn input_bytes(
                     let Some(charged) = bytes
                         .checked_add(column.get_array_memory_size())
                         .and_then(|total| total.checked_add(4096))
-                        .filter(|&total| total <= MAX_SCRATCH)
                     else {
                         return Ok(None);
                     };
@@ -157,7 +171,6 @@ fn funded_bytes(bytes: usize, records: usize, columns: usize) -> Option<usize> {
     bytes
         .checked_mul(2)?
         .checked_add(records.checked_mul(columns.checked_mul(4096)?)?)
-        .filter(|&bytes| bytes <= MAX_UNIT_OUTPUT)
 }
 
 fn schema_bytes(output: &JoinOutput<'_>) -> Option<(usize, Vec<usize>)> {

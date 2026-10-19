@@ -8,6 +8,7 @@ use super::{GatherOperatorId, GatherStop, TestService, WorkOutput};
 use crate::{CancellationToken, JsonMap, StreamJobContext};
 
 mod cleanup;
+mod cpu_aware;
 mod parallel;
 #[cfg(feature = "benchmark-internals")]
 mod roundtrip;
@@ -1076,7 +1077,13 @@ fn multi_funded(scope: &super::GatherScope, pool: &Arc<dyn MemoryPool>) -> bool 
         _ => 0,
     };
     home == 16_384
-        && generation == 16_384
+        && generation
+            == state
+                .service
+                .as_ref()
+                .and_then(std::sync::Weak::upgrade)
+                .and_then(|service| super::process::generation_bytes(service.worker_limit).ok())
+                .unwrap_or(0)
         && attempt >= 33_554_432
         && pool.reserved() == home + generation + attempt
 }

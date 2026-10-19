@@ -92,7 +92,7 @@ pub struct StreamRunOptions {
     pub checkpoint_interval_ms: u64,
     #[schemars(range(min = 1, max = 1_000_000))]
     pub max_batch_rows: usize,
-    #[schemars(range(min = 1, max = 268_435_456))]
+    #[schemars(range(min = 1))]
     pub max_batch_bytes: usize,
 }
 
@@ -100,8 +100,8 @@ impl Default for StreamRunOptions {
     fn default() -> Self {
         Self {
             checkpoint_interval_ms: 30_000,
-            max_batch_rows: 10_000,
-            max_batch_bytes: 64 * 1024 * 1024,
+            max_batch_rows: 1_000_000,
+            max_batch_bytes: usize::MAX,
         }
     }
 }
@@ -1764,13 +1764,6 @@ fn validate_runtime(project: &ProjectSpec, mode: CompileMode, issues: &mut Vec<V
                     "must be greater than zero",
                 ));
             }
-            if options.max_batch_bytes > crate::EdgeBudget::MAX_BYTES {
-                issues.push(issue(
-                    "runtime.options.max_batch_bytes",
-                    "out_of_range",
-                    format!("must not exceed {}", crate::EdgeBudget::MAX_BYTES),
-                ));
-            }
         }
         (RuntimeSpec::Batch(_), CompileMode::Stream) => issues.push(issue(
             "runtime.mode",
@@ -3190,6 +3183,36 @@ mod tests {
     use std::collections::BTreeMap;
 
     #[test]
+    fn cpu_project_stream_defaults_use_large_batch_without_implicit_byte_limit() {
+        let defaults: super::StreamRunOptions =
+            serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(defaults.max_batch_rows, 1_000_000);
+        assert_eq!(defaults.max_batch_bytes, usize::MAX);
+        assert_eq!(defaults, super::StreamRunOptions::default());
+    }
+
+    #[test]
+    fn cpu_project_stream_accepts_address_space_byte_budget() {
+        let project: ProjectSpec = serde_json::from_value(serde_json::json!({
+            "format_version": 3,
+            "id": "large-batch",
+            "name": "large-batch",
+            "runtime": {
+                "mode": "stream",
+                "options": {
+                    "max_batch_rows": 1_000_000,
+                    "max_batch_bytes": usize::MAX
+                }
+            },
+            "graph": {"name": "large-batch", "nodes": []}
+        }))
+        .unwrap();
+        let mut issues = Vec::new();
+        validate_runtime(&project, CompileMode::Stream, &mut issues);
+        assert!(issues.is_empty(), "{issues:?}");
+    }
+
+    #[test]
     fn declared_secret_slot_is_present_even_when_its_value_is_unavailable() {
         let reference = SecretReference::new(SecretResolverKind::Registered, "backing-secret")
             .expect("reference");
@@ -3229,10 +3252,7 @@ mod tests {
                 .iter()
                 .map(|issue| issue.path.as_str())
                 .collect::<Vec<_>>(),
-            [
-                "runtime.options.max_batch_rows",
-                "runtime.options.max_batch_bytes"
-            ]
+            ["runtime.options.max_batch_rows"]
         );
     }
 

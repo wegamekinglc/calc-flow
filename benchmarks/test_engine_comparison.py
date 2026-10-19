@@ -25,6 +25,15 @@ def test_sql_queries_reject_unknown_scenario_names():
         sql_query("sma20; DROP TABLE input")
 
 
+def test_sql_fixture_retains_historical_arrow_chunks_when_stream_default_grows():
+    from scripts.benchmark_suite.catalog import BATCH_ROWS
+
+    assert BATCH_ROWS == 1_000_000
+    assert engine_comparison.TABLE_BATCH_ROWS == 64_000
+    data = workload(64_001)
+    assert [batch.num_rows for batch in data.table.to_batches()] == [64_000, 1]
+
+
 def test_interval_sql_fits_one_bounded_hash_build():
     from datafusion import RuntimeEnvBuilder, SessionConfig, SessionContext
 
@@ -235,7 +244,9 @@ def test_join_streams_complete_many_chunks_with_bounded_state(scenario, tmp_path
         for case in engine_cases(320_000)
         if case["backend"] == "calc-flow-stream" and case["scenario"] == scenario
     )
-    runner = EngineCase(case, tmp_path)
+    runner = EngineCase(
+        {**case, "batch_rows": 64_000, "checkpoint_interval_millis": None}, tmp_path
+    )
     try:
         assert runner.sample()["correctness"]["passed"]
     finally:
@@ -418,6 +429,8 @@ def test_ready_stream_finalizes_every_chunk_before_eof(count, scenario, tmp_path
         "backend": "calc-flow-stream",
         "scenario": scenario,
         "rows": count,
+        "batch_rows": 64_000,
+        "checkpoint_interval_millis": None,
         "scope": "ready-enqueue-to-arrow",
     }
     runner = EngineCase(case, tmp_path)

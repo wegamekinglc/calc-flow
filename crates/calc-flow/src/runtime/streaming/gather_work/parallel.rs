@@ -82,7 +82,7 @@ impl Units {
         self.cells.len()
     }
     pub(super) fn workers(&self) -> usize {
-        self.count().clamp(1, 8)
+        self.count().max(1)
     }
     pub(super) fn active(&self) -> usize {
         self.active

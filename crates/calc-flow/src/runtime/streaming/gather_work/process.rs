@@ -20,14 +20,11 @@ use super::{
 use crate::Result;
 
 const STACK_BYTES: usize = 512 * 1_024;
-const INFRASTRUCTURE_LIMIT: usize = 32 * 1_024 * 1_024;
-static INFRASTRUCTURE_BYTES: AtomicUsize = AtomicUsize::new(0);
 static PROCESS: Mutex<Option<ProcessControl>> = Mutex::new(None);
 
 struct ProcessControl {
     service: Arc<ProcessService>,
     _joiner: JoinHandle<()>,
-    _credit: InfrastructureCredit,
 }
 
 pub(super) struct ProcessService {
@@ -49,8 +46,9 @@ pub(super) struct ProcessService {
 }
 
 struct PoolRecord {
+    // Release dynamic controls before the pool refunds their generation credit.
+    handles: Box<[Option<WorkerHandle>]>,
     pool: Arc<NativePool>,
-    handles: [Option<WorkerHandle>; 8],
     _registration: OwnedSemaphorePermit,
 }
 
@@ -58,7 +56,6 @@ struct WorkerHandle {
     handle: JoinHandle<()>,
     identity: Arc<Mutex<Option<super::WorkerIdentity>>>,
     permit: OwnedSemaphorePermit,
-    credit: InfrastructureCredit,
 }
 
 pub(super) struct NativePool {
@@ -78,27 +75,34 @@ pub(super) struct Registration {
     pub(super) generation: u64,
 }
 
-struct InfrastructureCredit {
-    bytes: usize,
+pub(super) fn worker_capacity(available: usize) -> usize {
+    available.max(1)
 }
 
-impl InfrastructureCredit {
-    fn reserve(bytes: usize) -> Result<Self> {
-        INFRASTRUCTURE_BYTES
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                current
-                    .checked_add(bytes)
-                    .filter(|total| *total <= INFRASTRUCTURE_LIMIT)
-            })
-            .map_err(|_| internal("bounded process infrastructure exhausted"))?;
-        Ok(Self { bytes })
-    }
+pub(super) fn available_workers() -> usize {
+    worker_capacity(thread::available_parallelism().map_or(1, usize::from))
 }
 
-impl Drop for InfrastructureCredit {
-    fn drop(&mut self) {
-        INFRASTRUCTURE_BYTES.fetch_sub(self.bytes, Ordering::AcqRel);
-    }
+fn ring_capacity(workers: usize) -> Result<usize> {
+    workers
+        .checked_next_power_of_two()
+        .ok_or_else(|| internal("native request ring capacity overflow"))
+}
+
+pub(super) fn generation_bytes(workers: usize) -> Result<usize> {
+    // Identity replacement briefly retains both old and new diagnostic names.
+    // The Arc header and alignment allowance cover the owned identity mutex.
+    let per_worker = size_of::<Option<WorkerHandle>>()
+        + size_of::<Mutex<Option<super::WorkerIdentity>>>()
+        + 4 * size_of::<AtomicUsize>()
+        + 2 * super::DIAGNOSTIC_NAME_BYTES;
+    let handles = workers.checked_mul(per_worker);
+    let ring = ring_capacity(workers)?.checked_mul(size_of::<super::Request>());
+    handles
+        .zip(ring)
+        .and_then(|(handles, ring)| handles.checked_add(ring))
+        .and_then(|bytes| bytes.checked_add(16_384))
+        .ok_or_else(|| internal("native generation control credit overflow"))
 }
 
 pub(super) fn service() -> Result<Arc<ProcessService>> {
@@ -106,9 +110,7 @@ pub(super) fn service() -> Result<Arc<ProcessService>> {
     if let Some(control) = &*process {
         return Ok(control.service.clone());
     }
-    let workers = thread::available_parallelism()
-        .map_or(1, usize::from)
-        .min(32);
+    let workers = available_workers();
     let control = start_service(workers, 256)?;
     let service = control.service.clone();
     *process = Some(control);
@@ -116,7 +118,7 @@ pub(super) fn service() -> Result<Arc<ProcessService>> {
 }
 
 fn start_service(workers: usize, registrations: usize) -> Result<ProcessControl> {
-    let credit = InfrastructureCredit::reserve(STACK_BYTES + 1_048_576)?;
+    let workers = worker_capacity(workers);
     let service = Arc::new(ProcessService {
         worker_limit: workers,
         slots: Mutex::new(std::array::from_fn(|_| None)),
@@ -143,7 +145,6 @@ fn start_service(workers: usize, registrations: usize) -> Result<ProcessControl>
     Ok(ProcessControl {
         service,
         _joiner: joiner,
-        _credit: credit,
     })
 }
 
@@ -171,7 +172,10 @@ impl ProcessService {
             let pool = Arc::new(self.prepare_pool(home)?);
             slots[slot] = Some(PoolRecord {
                 pool: pool.clone(),
-                handles: std::array::from_fn(|_| None),
+                handles: std::iter::repeat_with(|| None)
+                    .take(self.worker_limit)
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
                 _registration: registration,
             });
             (pool, slot)
@@ -210,6 +214,8 @@ impl ProcessService {
     }
 
     fn prepare_pool(self: &Arc<Self>, home: Arc<GatherHome>) -> AdmissionResult<NativePool> {
+        let bytes = generation_bytes(self.worker_limit)?;
+        let capacity = ring_capacity(self.worker_limit)?;
         let (generation, credit) = {
             let mut state = home.state.lock();
             if !state.open {
@@ -222,24 +228,28 @@ impl ProcessService {
             let _pressure = super::admission_probe::before(
                 state.admission_probe.as_ref(),
                 super::admission_probe::AdmissionStage::Generation,
-                16_384,
+                bytes,
                 &attempt.operator,
             )?;
             attempt
                 .credit
-                .try_grow(16_384)
+                .try_grow(bytes)
                 .map_err(|source| AdmissionFailure::Budget {
                     stage: "generation",
                     source,
                 })?;
-            let credit = attempt.credit.split(16_384);
+            let credit = attempt.credit.split(bytes);
+            let queue = std::collections::VecDeque::with_capacity(capacity);
+            if queue.capacity() > capacity {
+                return Err(internal("native request ring exceeded prepaid capacity").into());
+            }
             let generation = increment(state.generation, "pool generation")?;
             // Track both the final NativePool owner and the joiner's Home reference.
             home.retain_releases(2)?;
             state.generation = generation;
             state.phase = PoolPhase::Initializing;
             state.service = Some(Arc::downgrade(self));
-            state.queue = std::collections::VecDeque::with_capacity(8);
+            state.queue = queue;
             (state.generation, credit)
         };
         Ok(NativePool {
@@ -303,7 +313,6 @@ impl ProcessService {
                 handle,
                 identity,
                 permit,
-                credit,
             } = worker;
             if let Err(payload) = handle.join() {
                 home.retain_join_panic(identity.lock().as_ref(), payload.as_ref());
@@ -312,7 +321,6 @@ impl ProcessService {
             #[cfg(test)]
             self.joined_workers.fetch_add(1, Ordering::AcqRel);
             drop(permit);
-            drop(credit);
         }
         self.remove_closed(index);
     }
@@ -400,7 +408,8 @@ async fn acquire(
 
 impl Registration {
     pub(super) fn launch(mut self, workers: usize) -> Result<()> {
-        for _ in 0..workers.clamp(1, 8) {
+        let workers = workers.max(1).min(self.service.worker_limit);
+        for _ in 0..workers {
             let mut slots = self.service.slots.lock();
             let record = slots[self.slot]
                 .as_mut()
@@ -419,7 +428,32 @@ impl Registration {
             record.handles[ordinal] = Some(launch_worker(&self.pool, &self.service, permit)?);
         }
         {
+            let state = self.pool.home.state.lock();
+            if !state.open {
+                return Err(super::cancelled(&self.pool.home.run_id));
+            }
+        }
+        {
+            let slots = self.service.slots.lock();
+            let ready = slots[self.slot].as_ref().is_some_and(|record| {
+                record
+                    .handles
+                    .iter()
+                    .flatten()
+                    .any(|worker| !worker.handle.is_finished())
+            });
+            if !ready {
+                if !self.pool.home.state.lock().open {
+                    return Err(super::cancelled(&self.pool.home.run_id));
+                }
+                return Err(internal("native pool has no runnable worker"));
+            }
+        }
+        {
             let mut state = self.pool.home.state.lock();
+            if !state.open {
+                return Err(super::cancelled(&self.pool.home.run_id));
+            }
             state.pool = Some(Arc::downgrade(&self.pool));
             state.phase = PoolPhase::Ready;
         }
@@ -447,7 +481,6 @@ fn launch_worker(
     service: &ProcessService,
     permit: OwnedSemaphorePermit,
 ) -> Result<WorkerHandle> {
-    let credit = InfrastructureCredit::reserve(STACK_BYTES + 131_072)?;
     let operator = {
         let state = pool.home.state.lock();
         match &state.slot {
@@ -479,7 +512,6 @@ fn launch_worker(
         handle,
         identity,
         permit,
-        credit,
     })
 }
 
@@ -708,7 +740,6 @@ fn shutdown_on_native_thread(control: ProcessControl) {
         tokio::runtime::Handle::try_current().is_err(),
         "isolated service control runs outside Tokio"
     );
-    let credit = InfrastructureCredit::reserve(STACK_BYTES + 131_072).unwrap();
     let controller = thread::Builder::new()
         .name("calc-flow-gather-test-control".into())
         .stack_size(STACK_BYTES)
@@ -716,7 +747,6 @@ fn shutdown_on_native_thread(control: ProcessControl) {
             let ProcessControl {
                 service,
                 _joiner: joiner,
-                _credit: credit,
             } = control;
             let homes: Vec<_> = service
                 .slots
@@ -729,11 +759,8 @@ fn shutdown_on_native_thread(control: ProcessControl) {
             }
             service.shutdown.store(true, Ordering::Release);
             service.wake.notify_all();
-            let result = joiner.join();
-            drop(credit);
-            result
+            joiner.join()
         })
         .unwrap();
     controller.join().unwrap().unwrap();
-    drop(credit);
 }

@@ -4,6 +4,7 @@ import asyncio
 import concurrent.futures
 import inspect
 import os
+import sys
 import threading
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import field
@@ -595,10 +596,14 @@ class SinkBinding:
 
 @dataclass(frozen=True, slots=True)
 class EdgeBudget:
-    """Row and byte bounds applied independently to every stream edge."""
+    """Per-edge row backpressure with an optional explicit byte ceiling.
 
-    max_rows: int = 10_000
-    max_bytes: int = 64 << 20
+    Defaults allow one million queued rows and impose no byte ceiling below
+    the native address-space limit. This does not limit total process memory.
+    """
+
+    max_rows: int = 1_000_000
+    max_bytes: int = 2 * sys.maxsize + 1
 
     def __post_init__(self) -> None:
         for name in ("max_rows", "max_bytes"):

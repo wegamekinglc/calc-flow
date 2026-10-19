@@ -278,8 +278,9 @@ against the input watermark, and `RollingValuePolicy` is the frozen
 `stateful_numeric_v1`, which preserves a null or NaN current or referenced
 value.
 
-Stream rolling state has a default limit of 1,000,000 logical rows and 256 MiB.
-`RollingOperator::set_state_budget(StateBudget::new(...))` changes the row and
+Stream rolling state defaults to the JSON counter range,
+9,007,199,254,740,991 rows and logical bytes, without a smaller implicit budget.
+`RollingOperator::set_state_budget(StateBudget::new(...))` sets explicit row and
 byte limits before graph compilation. The charge covers accepted reorder rows,
 retained per-entity history, keys, and state overhead; it excludes checkpoint
 copies and process-wide resident memory. Input and watermark callbacks reject
@@ -470,8 +471,9 @@ configuration-hash and schema-fingerprint metadata plus bounded inline
 manifest fields — and a restored operator reproduces the same ordered
 output, watermark frontier, output sequence, and metrics.
 
-Stream cross-section state permits at most 1,000,000 open rows and 256 MiB of
-logical charges by default. Direct Rust users can set positive row and byte
+Stream cross-section state defaults to the JSON counter range,
+9,007,199,254,740,991 rows and logical bytes, without a smaller implicit budget.
+Direct Rust users can set positive row and byte
 limits through `CrossSectionOperator::set_state_budget(StateBudget::new(...))`.
 Project-created operators use the default; the budget is runtime tuning and
 does not change project fingerprints. Charges count materialized values,
@@ -592,8 +594,9 @@ progress.
 aggregates. `WindowAggregateOperator` is stream-only: it updates incremental
 state, classifies late row-window assignments against the current input
 watermark, emits closed windows in deterministic order, and snapshots retained
-Arrow IPC deltas. Retained accumulators have a default budget of one million
-windows and 256 MiB of logical charge. A window stops counting once its close
+Arrow IPC deltas. Retained accumulators default to the JSON counter range,
+9,007,199,254,740,991 windows and logical bytes, without a smaller implicit budget.
+A window stops counting once its close
 is emitted, with checkpointing enabled or disabled, so the budget bounds open
 windows regardless of the checkpoint interval. Rust callers can set a
 different limit through

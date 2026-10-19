@@ -43,7 +43,7 @@ impl ParallelCpuWork for CountWork {
     type Output = usize;
 
     fn unit_count(&self) -> usize {
-        partition::units(self.inputs.admitted.len())
+        self.inputs.partition.units()
     }
 
     fn run(&self, ordinal: usize, stop: &GatherStop) -> Result<usize> {
@@ -67,7 +67,7 @@ impl CountWork {
         let sentinel = partition::sentinel(self.limit);
         let mut quantum = ProbeQuantum::new(stop);
         let mut cursors = self.inputs.cursors();
-        for position in partition::range(self.inputs.admitted.len(), ordinal) {
+        for position in self.inputs.partition.range(ordinal) {
             quantum.step()?;
             count = partition::add_count(
                 count,
@@ -103,7 +103,7 @@ impl ParallelCpuWork for FillWork {
             .observe_unit(super::ProbePhase::Fill, ordinal, false);
         stop.check()?;
         let credit = self.funding.unit();
-        let pairs = fill_range(&self.inputs, self.counts, ordinal, stop)?;
+        let pairs = fill_range(&self.inputs, &self.counts, ordinal, stop)?;
         stop.check()?;
         #[cfg(test)]
         self.inputs
@@ -114,11 +114,11 @@ impl ParallelCpuWork for FillWork {
 
 pub(super) fn fill_range(
     inputs: &ProbeInputs,
-    counts: Counts,
+    counts: &Counts,
     ordinal: usize,
     stop: &GatherStop,
 ) -> Result<super::super::matches::Selection> {
-    let range = partition::range(inputs.admitted.len(), ordinal);
+    let range = inputs.partition.range(ordinal);
     let mut pairs =
         super::super::matches::Selection::with_capacity(counts.rows[ordinal], range.len());
     let mut quantum = ProbeQuantum::new(stop);

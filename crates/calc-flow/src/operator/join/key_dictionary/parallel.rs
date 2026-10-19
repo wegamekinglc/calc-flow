@@ -18,7 +18,15 @@ use crate::runtime::streaming::gather_work::{
 use crate::{Result, StreamOperatorContext};
 
 const MIN_ROWS: usize = 64_000;
-const MAX_UNITS: usize = 4;
+const MIN_ROWS_PER_UNIT: usize = 16_000;
+
+#[cfg(test)]
+#[path = "tests/cpu_budget.rs"]
+mod cpu_budget_tests;
+
+fn work_units(rows: usize, cpu_budget: usize) -> usize {
+    cpu_budget.min(rows / MIN_ROWS_PER_UNIT)
+}
 
 struct KeyWork {
     payload: RowPayload,
@@ -39,9 +47,11 @@ struct Fragment {
 
 impl KeyWork {
     fn range(&self, ordinal: usize) -> Range<usize> {
-        let width = self.offsets.len().div_ceil(self.units);
-        let start = ordinal * width;
-        start..(start + width).min(self.offsets.len())
+        let width = self.offsets.len() / self.units;
+        let remainder = self.offsets.len() % self.units;
+        let start = ordinal * width + ordinal.min(remainder);
+        let length = width + usize::from(ordinal < remainder);
+        start..start + length
     }
 }
 
@@ -106,7 +116,7 @@ pub(super) async fn intern_group(
     let Some(context) = context.filter(|_| group.len() >= MIN_ROWS) else {
         return Ok(false);
     };
-    let units = context.job().gather_owner().parallelism().min(MAX_UNITS);
+    let units = work_units(group.len(), context.job().gather_owner().parallelism());
     if units < 2 || columns.len() > COPY_VISITS {
         return Ok(false);
     }
@@ -125,16 +135,37 @@ pub(super) async fn intern_group(
     Ok(true)
 }
 
-fn work_bytes(rows: usize, columns: usize, payload_columns: usize, name: &str) -> Result<usize> {
+fn work_bytes(
+    rows: usize,
+    columns: usize,
+    payload_columns: usize,
+    units: usize,
+    name: &str,
+) -> Result<usize> {
     super::local_table_bytes(rows)
         .and_then(|bytes| bytes.checked_add(rows.checked_mul(size_of::<(usize, bool)>())?))
-        .and_then(|bytes| bytes.checked_add(columns.checked_mul(128)?))
-        .and_then(|bytes| bytes.checked_add(payload_columns.checked_mul(16)?))
+        .and_then(|bytes| bytes.checked_add(unit_control_bytes(columns, units)?))
+        .and_then(|bytes| {
+            bytes.checked_add(
+                payload_columns.checked_mul(size_of::<datafusion::arrow::array::ArrayRef>())?,
+            )
+        })
         .and_then(|bytes| bytes.checked_add(name.len()))
         .and_then(|bytes| {
             bytes.checked_add(cleanup_control_bytes::<Vec<Option<Fragment>>>() + 4096)
         })
         .ok_or_else(|| counter_overflow(name, "parallel_key_capacity"))
+}
+
+fn unit_control_bytes(columns: usize, units: usize) -> Option<usize> {
+    let headers = units
+        .saturating_sub(1)
+        .checked_mul(super::local_table_bytes(0)?)?;
+    let indices = columns.checked_mul(size_of::<usize>())?;
+    let bound_columns = columns
+        .checked_mul(size_of::<LocalColumn<'_>>())?
+        .checked_mul(units)?;
+    headers.checked_add(indices)?.checked_add(bound_columns)
 }
 
 async fn capture(
@@ -149,6 +180,7 @@ async fn capture(
         group.len(),
         indices.len(),
         record.num_columns(),
+        units,
         budget.name,
     )?;
     let Some(credit) = super::grant(budget.master, bytes, budget.name)? else {

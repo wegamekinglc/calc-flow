@@ -2,7 +2,7 @@ use super::super::native_lookup::WindowCursor;
 use super::{
     inputs::ProbeInputs,
     pairs::PairFragment,
-    partition,
+    partition::CountRows,
     worker::{CountWork, FillWork},
 };
 use crate::Result;
@@ -46,17 +46,22 @@ fn snapshot_bytes(keys: usize, name: &str) -> Result<usize> {
     ])
 }
 
-fn work_bytes() -> Result<usize> {
+fn work_bytes(units: usize) -> Result<usize> {
+    let results = units
+        .checked_mul(2 * size_of::<usize>() + size_of::<PairFragment>())
+        .ok_or_else(|| super::super::native_lookup::scratch_error("join"))?;
     sum(&[
+        arc::<CountRows>()?,
         arc::<CountWork>()?,
         arc::<FillWork>()?,
         cleanup_control_bytes::<Vec<usize>>(),
         cleanup_control_bytes::<Vec<PairFragment>>(),
+        results,
     ])
 }
 
-fn fragment_controls(rows: usize) -> Result<usize> {
-    if partition::units(rows) < 2 {
+fn fragment_controls(units: usize) -> Result<usize> {
+    if units < 2 {
         return Ok(0);
     }
     sum(&[
@@ -68,22 +73,22 @@ fn fragment_controls(rows: usize) -> Result<usize> {
 
 // Unit-local window cursors: each gather unit of the count and fill phases
 // allocates one cursor per distinct probe key, so peak use is one set per unit.
-fn cursor_bytes(keys: usize, rows: usize, name: &str) -> Result<usize> {
-    keys.checked_mul(partition::units(rows))
+fn cursor_bytes(keys: usize, units: usize, name: &str) -> Result<usize> {
+    keys.checked_mul(units)
         .and_then(|cursors| cursors.checked_mul(size_of::<Option<WindowCursor>>()))
         .ok_or_else(|| super::super::native_lookup::scratch_error(name))
 }
 
-pub(super) fn input_bytes(keys: usize, rows: usize, name: &str) -> Result<usize> {
+pub(super) fn input_bytes(keys: usize, units: usize, name: &str) -> Result<usize> {
     let caller = super::super::metadata_validation::inventory::caller_controls(name)
         .ok_or_else(|| super::super::native_lookup::scratch_error(name))?;
     let registration = super::super::metadata_validation::inventory::registration_controls()
         .ok_or_else(|| super::super::native_lookup::scratch_error(name))?;
     sum(&[
         snapshot_bytes(keys, name)?,
-        work_bytes()?,
-        fragment_controls(rows)?,
-        cursor_bytes(keys, rows, name)?,
+        work_bytes(units)?,
+        fragment_controls(units)?,
+        cursor_bytes(keys, units, name)?,
         caller,
         caller,
         registration,

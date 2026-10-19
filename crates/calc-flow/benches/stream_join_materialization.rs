@@ -24,6 +24,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+fn fixture_budget() -> EdgeBudget {
+    EdgeBudget::new(10_000, 64 << 20).unwrap()
+}
+
 fn rss() -> u64 {
     std::fs::read_to_string("/proc/self/status")
         .unwrap_or_default()
@@ -173,7 +177,8 @@ fn prepare(
         None,
         CancellationToken::new(),
     );
-    let context = StreamOperatorContext::new(&job, "join", None);
+    let context = StreamOperatorContext::new(&job, "join", None)
+        .with_benchmark_output_budget(fixture_budget());
     let mut preload = EdgeCollector::new(operator.output_ports().to_vec());
     rt.block_on(operator.process_data("left", left, &context, &mut preload))
         .unwrap();
@@ -191,8 +196,9 @@ fn sample(rt: &tokio::runtime::Runtime, config: &Config, validate: bool) -> Valu
     } = *config;
     let expected = incoming * fan;
     let (mut operator, job, right) = prepare(rt, config);
-    let context = StreamOperatorContext::new(&job, "join", None);
-    let budget = EdgeBudget::default();
+    let budget = fixture_budget();
+    let context =
+        StreamOperatorContext::new(&job, "join", None).with_benchmark_output_budget(budget);
     let (sender, mut receiver) = edge_channel("join-materialization", budget).unwrap();
     let mut collector = SendingCollector {
         sender,
@@ -284,7 +290,8 @@ fn cancelled_input_check() {
         None,
         cancel.clone(),
     );
-    let context = StreamOperatorContext::new(&job, "join", None);
+    let context = StreamOperatorContext::new(&job, "join", None)
+        .with_benchmark_output_budget(fixture_budget());
     let spec = StreamJoinSpec::inner(
         ["key"],
         ["key"],

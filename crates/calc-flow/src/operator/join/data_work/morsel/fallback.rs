@@ -33,7 +33,7 @@ impl StreamJoinOperator {
     pub(super) async fn fallback_morsels(
         &mut self,
         inputs: &Arc<ProbeInputs>,
-        counts: Counts,
+        counts: &Counts,
         credit: MemoryReservation,
         prepared: &mut PreparedJoinBatch,
         context: &StreamOperatorContext<'_>,

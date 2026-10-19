@@ -121,7 +121,10 @@ impl std::ops::Deref for FundedProbeInputs {
     }
 }
 
-pub(in crate::operator::join) struct GatheredOutput(Vec<FundedMorsel>);
+pub(in crate::operator::join) struct GatheredOutput {
+    morsels: Vec<FundedMorsel>,
+    _control: MemoryReservation,
+}
 
 struct FundedMorsel {
     // Array backing is destroyed before its funding.
@@ -154,7 +157,7 @@ impl ParallelCpuWork for GatherWork {
         #[cfg(test)]
         self.inputs
             .observe_unit(super::ProbePhase::Fill, ordinal, false);
-        let pairs = worker::fill_range(&self.inputs, self.counts, ordinal, stop)?;
+        let pairs = worker::fill_range(&self.inputs, &self.counts, ordinal, stop)?;
         let result = self.gather(&pairs, stop)?;
         stop.check()?;
         #[cfg(test)]
@@ -270,7 +273,7 @@ impl StreamJoinOperator {
         let gathered = self
             .gather_morsels(
                 &inputs,
-                counts,
+                &counts,
                 prepared.admitted_charges.as_deref(),
                 context,
             )
@@ -281,7 +284,7 @@ impl StreamJoinOperator {
                 Ok(())
             }
             Ok(None) => {
-                self.fallback_morsels(&inputs, counts, fallback, prepared, context)
+                self.fallback_morsels(&inputs, &counts, fallback, prepared, context)
                     .await
             }
             Err(error) => Err(error),
@@ -291,10 +294,10 @@ impl StreamJoinOperator {
         result
     }
 
-    async fn gather_morsels(
+    pub(super) async fn gather_morsels(
         &mut self,
         inputs: &Arc<ProbeInputs>,
-        counts: Counts,
+        counts: &Counts,
         charges: Option<&[u64]>,
         context: &StreamOperatorContext<'_>,
     ) -> Result<Option<GatheredOutput>> {
@@ -302,9 +305,12 @@ impl StreamJoinOperator {
             return Ok(None);
         };
         let schema = Arc::clone(self.output_ports[0].schema().expect("compiled Join output"));
-        let Some(bytes) =
-            funding::scratch_bytes(counts.total, inputs.admitted.len(), schema.fields().len())
-        else {
+        let Some(bytes) = funding::scratch_bytes(
+            counts.total,
+            inputs.admitted.len(),
+            schema.fields().len(),
+            counts.units,
+        ) else {
             return Ok(None);
         };
         let scratch = self
@@ -314,9 +320,13 @@ impl StreamJoinOperator {
         let Some(funded) = funding::fund_inputs(inputs, &scratch, bytes, context).await? else {
             return Ok(None);
         };
+        let Some(control_bytes) = funding::output_control_bytes(counts.units) else {
+            return Ok(None);
+        };
+        let output_control = scratch.split(control_bytes);
         let work = Arc::new(GatherWork {
             inputs: funded,
-            counts,
+            counts: counts.clone(),
             schema,
             projection: self.output_columns.clone(),
             charges: charges.to_vec(),
@@ -327,11 +337,14 @@ impl StreamJoinOperator {
         self.run_probe_units(
             work,
             context,
-            |values| {
+            move |values| {
                 Ok(values
                     .into_iter()
                     .collect::<Option<Vec<_>>>()
-                    .map(GatheredOutput))
+                    .map(|morsels| GatheredOutput {
+                        morsels,
+                        _control: output_control,
+                    }))
             },
             #[cfg(test)]
             true,
@@ -344,7 +357,7 @@ impl StreamJoinOperator {
 impl GatheredOutput {
     #[cfg(test)]
     pub(in crate::operator::join) fn funding_for_test(&self) -> Vec<(usize, usize)> {
-        self.0
+        self.morsels
             .iter()
             .map(|morsel| {
                 (
@@ -360,7 +373,7 @@ impl GatheredOutput {
     }
 
     pub(in crate::operator::join) fn rows(&self) -> usize {
-        self.0
+        self.morsels
             .iter()
             .flat_map(|morsel| &morsel.records)
             .map(RecordBatch::num_rows)
@@ -374,7 +387,7 @@ impl GatheredOutput {
         output: &mut dyn StreamCollector,
         sequence: &mut u64,
     ) -> Result<()> {
-        let records = self.0.iter().flat_map(|morsel| &morsel.records);
+        let records = self.morsels.iter().flat_map(|morsel| &morsel.records);
         let count = records.clone().count();
         crate::operator::output_chunk::validate_output_sequence_range(name, *sequence, count)?;
         for record in records {

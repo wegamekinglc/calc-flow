@@ -550,7 +550,8 @@ impl CrossSectionOperator {
     }
 
     /// Sets the maximum number of open rows and their logical byte charge.
-    /// The default is 1,000,000 rows and 256 MiB. The budget is runtime
+    /// The default uses the JSON counter range without a smaller implicit
+    /// row or byte limit. The budget is runtime
     /// tuning; changing it does not change the project fingerprint.
     ///
     /// # Errors

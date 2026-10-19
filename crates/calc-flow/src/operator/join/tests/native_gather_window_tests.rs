@@ -1,5 +1,4 @@
 use super::super::super::native_lookup::{reset_window_run_searches, window_run_searches};
-use super::super::partition;
 use super::*;
 use crate::{
     Batch, BatchMetadata, CancellationToken, EdgeCollector, JoinStateLimits, JoinTimeBounds,
@@ -42,7 +41,9 @@ fn window_batch(key: i64, times: &[i64]) -> Batch {
 
 // A gather probe over one key: event-time-ordered rows across two units, with
 // one out-of-order row and one recovering row at the tail of the second unit.
-async fn gather_fixture() -> (StreamJoinOperator, Arc<ProbeInputs>, StreamJobContext) {
+async fn gather_fixture(
+    owner: JobGatherOwner,
+) -> (StreamJoinOperator, Arc<ProbeInputs>, StreamJobContext) {
     let spec = StreamJoinSpec::inner(
         ["key"],
         ["key"],
@@ -54,7 +55,8 @@ async fn gather_fixture() -> (StreamJoinOperator, Arc<ProbeInputs>, StreamJobCon
     .unwrap();
     let mut operator =
         StreamJoinOperator::new("probe", window_schema(), window_schema(), spec).unwrap();
-    let job = StreamJobContext::new(91, "probe", JsonMap::new(), None, CancellationToken::new());
+    let job = StreamJobContext::new(91, "probe", JsonMap::new(), None, CancellationToken::new())
+        .with_gather_owner(owner);
     let context = StreamOperatorContext::new(&job, "probe", None);
     let mut output = EdgeCollector::new(operator.output_ports().to_vec());
     let mut right_times = Vec::new();
@@ -75,7 +77,6 @@ async fn gather_fixture() -> (StreamJoinOperator, Arc<ProbeInputs>, StreamJobCon
         .await
         .unwrap();
     let rows = 16_400;
-    assert_eq!(partition::units(rows), 2, "fixture must span two units");
     let mut probe_times: Vec<i64> = (0..rows - 2)
         .map(|index| i64::try_from(index).unwrap() * 10)
         .collect();
@@ -98,6 +99,7 @@ async fn gather_fixture() -> (StreamJoinOperator, Arc<ProbeInputs>, StreamJobCon
         .unwrap()
         .ready
         .unwrap();
+    assert_eq!(inputs.partition.units(), 2, "fixture must span two units");
     (operator, inputs, job)
 }
 
@@ -115,9 +117,20 @@ fn expected_pairs(inputs: &ProbeInputs) -> Vec<(usize, usize)> {
         .collect()
 }
 
-#[tokio::test]
-async fn test_gather_probe_windows_use_cursors_instead_of_per_row_searches() {
-    let (mut operator, inputs, job) = gather_fixture().await;
+#[test]
+fn test_gather_probe_windows_use_cursors_instead_of_per_row_searches() {
+    let service = crate::runtime::streaming::gather_work::TestService::new(2, 1).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(check_gather_windows(service.owner("window-probe".into())));
+    drop(runtime);
+    service.shutdown();
+}
+
+async fn check_gather_windows(owner: JobGatherOwner) {
+    let (mut operator, inputs, job) = gather_fixture(owner).await;
     let expected = expected_pairs(&inputs);
     assert!(!expected.is_empty());
     let stop = GatherStop::from_job(&job);
@@ -131,8 +144,10 @@ async fn test_gather_probe_windows_use_cursors_instead_of_per_row_searches() {
         .map(|unit| count.run(unit, &stop).unwrap())
         .collect::<Vec<_>>();
     let counted = window_run_searches();
-    let counts = Counts::ordered(values, 1_000_000).unwrap();
-    let (funding, credit) = operator.admit_fill(counts).unwrap().unwrap();
+    let counts =
+        Counts::ordered(values, 1_000_000, inputs.control.as_ref().unwrap().clone()).unwrap();
+    let (funding, credit) = operator.admit_fill(&counts).unwrap().unwrap();
+    let total = counts.total;
     let fill = FillWork {
         inputs: Arc::clone(&inputs),
         counts,
@@ -143,7 +158,7 @@ async fn test_gather_probe_windows_use_cursors_instead_of_per_row_searches() {
         .map(|unit| fill.run(unit, &stop).unwrap())
         .collect::<Vec<_>>();
     let filled = window_run_searches();
-    let output = pairs::ordered_output(fragments, credit, counts.total).unwrap();
+    let output = pairs::ordered_output(fragments, credit, total).unwrap();
     let identities = output
         .pairs
         .iter()

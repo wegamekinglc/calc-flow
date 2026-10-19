@@ -344,6 +344,8 @@ def stream_events(
     for position, start in enumerate(starts):
         end = starts[position + 1] if position + 1 < len(starts) else table.num_rows
         part = table.slice(start, end - start)
+        if batch_rows == BATCH_ROWS:
+            part = part.combine_chunks()
         end = start + part.num_rows
         events.append(
             Data(

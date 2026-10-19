@@ -21,6 +21,9 @@ const ROWS: usize = 64_000;
 #[path = "batch_parallel_output_lifecycle.rs"]
 mod rowed_lifecycle;
 
+#[path = "batch_parallel_cpu_tests.rs"]
+mod cpu_aware;
+
 fn schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
         Field::new("key", DataType::Int64, false),
@@ -506,6 +509,7 @@ fn batch_parallel_output_probe_time_avoids_payload_segment_lookup() {
         let mut operator = operator();
         let inputs = ProbeInputs {
             admitted: admit(&mut operator).await,
+            partition: Partition::new(ROWS, 1),
             keys: None,
             slots: Vec::new(),
             opposite: None,

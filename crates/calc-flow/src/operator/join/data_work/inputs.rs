@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 pub(super) struct ProbeInputs {
     pub(super) admitted: AdmittedBatch,
+    pub(super) partition: super::partition::Partition,
     pub(super) keys: Option<NativeKeys>,
     pub(super) slots: Vec<Option<u32>>,
     pub(super) opposite: Option<Arc<crate::operator::join::StateRows>>,

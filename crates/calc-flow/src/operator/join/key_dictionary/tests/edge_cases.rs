@@ -316,3 +316,72 @@ fn batch_parallel_keys_dropped_future_retains_source_until_job_drain() {
     drop(runtime);
     service.shutdown();
 }
+
+fn cpu_budget_key_case(cpu_budget: usize, count: usize) {
+    let service = TestService::new(cpu_budget, 1).unwrap();
+    let runtime = runtime();
+    runtime.block_on(async {
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 30));
+        let master = MemoryConsumer::new("cpu-budget-key-test").register(&pool);
+        let template = rows();
+        let rows = (0..count)
+            .map(|row| super::super::super::AdmittedRow {
+                record: template[row % template.len()].record.clone(),
+                event_time: EventTime::from_micros(0),
+                row_id: u64::try_from(row).unwrap(),
+                retain: row >= count / 2 + 17 && !row.is_multiple_of(3),
+            })
+            .collect::<Vec<_>>();
+        let expected = Dictionary::default()
+            .prepare(&rows, &[0], master.new_empty(), None, "parallel-keys")
+            .await
+            .unwrap()
+            .unwrap();
+        let job = job(&service);
+        let context = StreamOperatorContext::new(&job, "parallel-keys", None);
+        let units = Arc::new(Mutex::new(Vec::new()));
+        let observed = Arc::clone(&units);
+        let _observe = Observe::new(Arc::new(move |unit| {
+            observed.lock().unwrap().push(unit);
+        }));
+        let mut dictionary = Dictionary::default();
+        let actual = dictionary
+            .prepare(
+                &rows,
+                &[0],
+                master.new_empty(),
+                Some(&context),
+                "parallel-keys",
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot(&actual), snapshot(&expected));
+        assert!(
+            actual.ids[..count / 2 + 17]
+                .iter()
+                .all(|&id| id == u32::MAX)
+        );
+        {
+            let mut units = units.lock().unwrap();
+            units.sort_unstable();
+            assert_eq!(*units, (0..cpu_budget).collect::<Vec<_>>());
+        }
+        drop((actual, expected, dictionary));
+        assert!(job.gather_owner().close_and_drain().await.is_empty());
+        drop((job, master));
+        assert_eq!(pool.reserved(), 0);
+    });
+    drop(runtime);
+    service.shutdown();
+}
+
+#[test]
+fn cpu_budget_key_eight_workers_preserve_first_retained_identity() {
+    cpu_budget_key_case(8, 128_000);
+}
+
+#[test]
+fn cpu_budget_key_sixteen_workers_preserve_first_retained_identity() {
+    cpu_budget_key_case(16, 256_000);
+}

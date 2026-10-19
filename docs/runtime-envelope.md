@@ -345,8 +345,11 @@ fails before enqueue, a closed receiver wakes blocked senders, and each fan-out
 edge is charged independently even though immutable payload buffers are
 shared. The default `Block` path therefore propagates a slow consumer through
 sink, operator, source task, prefetch slot, and source pump. FIFO order, close wakeup, and single-producer ownership apply to every edge.
-An edge budget or source batch declaration cannot exceed 1,000,000 rows or
-256 MiB; project-v3 stream runtime options use the same bounds.
+An edge budget or source batch declaration cannot exceed 1,000,000 rows.
+Byte budgets must be positive and fit the native address space; no smaller
+global byte ceiling applies. Project-v3 stream runtime options use the same
+bounds. Row and envelope backpressure remains active when the byte budget is
+`usize::MAX`; these queue charges do not cap total runtime or process memory.
 
 ## Stream plan compilation
 
@@ -411,8 +414,9 @@ Two hashes describe the plan:
   checkpoints. Durations must be exact multiples of one microsecond, and
   both budget fields must be positive. Checkpointing defaults to enabled. Other defaults
   are a 60-second checkpoint
-  interval, a 600-second checkpoint timeout, 10,000 envelopes, 10,000 rows and
-  64 MiB per edge, and two retained epochs.
+  interval, a 600-second checkpoint timeout, 1,000,000 envelopes and rows per
+  edge, no byte ceiling below the native address-space limit, and two retained
+  epochs. Set an explicit edge byte budget when needed.
 
 ## Job preflight
 

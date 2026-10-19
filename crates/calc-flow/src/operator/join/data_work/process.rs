@@ -6,7 +6,7 @@ use super::{
     MIN_PROBE_ROWS, ProbeAttempt, control,
     inputs::ProbeInputs,
     pairs::{self, FillFunding, PairOutput},
-    partition::Counts,
+    partition::{Counts, Partition},
     worker::{CountWork, FillWork},
 };
 use crate::runtime::streaming::gather_work::{
@@ -129,7 +129,9 @@ impl StreamJoinOperator {
         keys: NativeKeys,
         owner: &JobGatherOwner,
     ) -> Result<Capture> {
-        let bytes = control::input_bytes(keys.keys.len(), admitted.len(), &self.name)?;
+        let capacity = owner.parallelism();
+        let partition = Partition::new(admitted.len(), capacity);
+        let bytes = control::input_bytes(keys.keys.len(), partition.units(), &self.name)?;
         let Some(credit) = self.optional_credit(bytes)? else {
             return Ok(Capture::declined(admitted, Some(keys)));
         };
@@ -155,7 +157,7 @@ impl StreamJoinOperator {
             });
         if estimated_visits < super::probe_min_visits()
             && !(super::morsel::materialization_worthwhile(self, admitted.len(), estimated_visits)
-                && owner.parallelism() > 1)
+                && capacity > 1)
         {
             return Ok(Capture::declined(admitted, Some(keys)));
         }
@@ -164,6 +166,7 @@ impl StreamJoinOperator {
         self.probe_control = Some(Arc::clone(&control));
         Ok(Capture::ready(Arc::new(ProbeInputs {
             admitted,
+            partition,
             keys: Some(keys),
             slots,
             opposite: Some(Arc::clone(&opposite.0)),
@@ -197,11 +200,12 @@ impl StreamJoinOperator {
             inputs: Arc::clone(inputs),
             limit,
         });
+        let control = Arc::clone(inputs.control.as_ref().expect("prepaid count controls"));
         let Some(counts) = self
             .run_probe_units(
                 work,
                 context,
-                move |values| Counts::ordered(values, limit),
+                move |values| Counts::ordered(values, limit, control),
                 #[cfg(test)]
                 false,
             )
@@ -215,7 +219,7 @@ impl StreamJoinOperator {
             self.spec.limits.max_matches_per_input_batch,
             &self.name,
         )?;
-        if let Some(credit) = self.deferred_credit(counts, inputs.admitted.len())? {
+        if let Some(credit) = self.deferred_credit(&counts, inputs.admitted.len())? {
             return Ok(Some(ProbeOutput::Counted(counts, credit)));
         }
         self.fill_probe(inputs, counts, context)
@@ -225,7 +229,7 @@ impl StreamJoinOperator {
 
     fn deferred_credit(
         &mut self,
-        counts: Counts,
+        counts: &Counts,
         rows: usize,
     ) -> Result<Option<datafusion::execution::memory_pool::MemoryReservation>> {
         if counts.total == 0 || !super::morsel::eligible(self, rows) {
@@ -248,9 +252,10 @@ impl StreamJoinOperator {
         counts: Counts,
         context: &StreamOperatorContext<'_>,
     ) -> Result<Option<PairOutput>> {
-        let Some((funding, credit)) = self.admit_fill(counts)? else {
+        let Some((funding, credit)) = self.admit_fill(&counts)? else {
             return Ok(None);
         };
+        let total = counts.total;
         self.run_probe_units(
             Arc::new(FillWork {
                 inputs: Arc::clone(inputs),
@@ -258,7 +263,7 @@ impl StreamJoinOperator {
                 funding,
             }),
             context,
-            move |fragments| pairs::ordered_output(fragments, credit, counts.total),
+            move |fragments| pairs::ordered_output(fragments, credit, total),
             #[cfg(test)]
             true,
         )
@@ -267,7 +272,7 @@ impl StreamJoinOperator {
 
     fn admit_fill(
         &mut self,
-        counts: Counts,
+        counts: &Counts,
     ) -> Result<
         Option<(
             FillFunding,

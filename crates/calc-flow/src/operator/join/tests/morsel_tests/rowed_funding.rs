@@ -33,6 +33,7 @@ fn inputs(rows: Vec<AdmittedRow>, opposite: RowPayload) -> Arc<ProbeInputs> {
         encoded_key: Arc::new(vec![].into()),
     }]);
     Arc::new(ProbeInputs {
+        partition: super::super::super::partition::Partition::new(rows.len(), 1),
         admitted: rows.into(),
         keys: None,
         slots: Vec::new(),
@@ -88,7 +89,7 @@ async fn batch_parallel_output_rowed_funding_prices_backing_and_refunds_refusals
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(base + bytes));
     let scratch = MemoryConsumer::new("rowed-full-backing").register(&pool);
     assert!(
-        fund_inputs(&inputs, &scratch, MAX_SCRATCH, &context)
+        fund_inputs(&inputs, &scratch, base + bytes, &context)
             .await
             .unwrap()
             .is_none()
@@ -96,7 +97,7 @@ async fn batch_parallel_output_rowed_funding_prices_backing_and_refunds_refusals
     assert_eq!(
         pool.reserved(),
         0,
-        "combined scratch/input cap declines before allocation"
+        "explicit finite pool declines the combined scratch/input reservation"
     );
     let funded = fund_inputs(&inputs, &scratch, base, &context)
         .await
@@ -105,6 +106,70 @@ async fn batch_parallel_output_rowed_funding_prices_backing_and_refunds_refusals
     assert_eq!(scratch.size(), base);
     assert_eq!(pool.reserved(), base + bytes);
     drop((funded, scratch));
+    assert_eq!(pool.reserved(), 0);
+}
+
+#[tokio::test]
+async fn cpu_aware_probe_large_scratch_reservation_uses_user_pool_and_refunds() {
+    let source = source();
+    let payload = RowPayload::Rowed {
+        parent: source,
+        row: 0,
+    };
+    let inputs = inputs(vec![row(payload.clone(), 0)], payload);
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "match", None);
+    let base = 600 << 20;
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 30));
+    let scratch = MemoryConsumer::new("large-user-scratch").register(&pool);
+    let funded = fund_inputs(&inputs, &scratch, base, &context)
+        .await
+        .unwrap()
+        .expect("a sufficient user pool permits scratch above the old fixed cap");
+    assert!(pool.reserved() > base);
+    drop((funded, scratch));
+    assert_eq!(pool.reserved(), 0);
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(base));
+    let scratch = MemoryConsumer::new("limited-user-scratch").register(&pool);
+    assert!(
+        fund_inputs(&inputs, &scratch, base, &context)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(pool.reserved(), 0);
+}
+
+#[tokio::test]
+async fn cpu_aware_probe_large_parent_inventory_obeys_only_user_pool() {
+    let source = source();
+    let payload = RowPayload::Rowed {
+        parent: source,
+        row: 0,
+    };
+    let rows = (0..4_097)
+        .map(|ordinal| row(payload.clone(), ordinal))
+        .collect();
+    let inputs = inputs(rows, payload);
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "match", None);
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 30));
+    let scratch = MemoryConsumer::new("large-user-inputs").register(&pool);
+    let funded = fund_inputs(&inputs, &scratch, 0, &context)
+        .await
+        .unwrap()
+        .expect("parent inventory has no independent fixed byte cap");
+    assert!(pool.reserved() > 512 << 20);
+    drop((funded, scratch));
+    assert_eq!(pool.reserved(), 0);
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let scratch = MemoryConsumer::new("limited-user-inputs").register(&pool);
+    assert!(
+        fund_inputs(&inputs, &scratch, 0, &context)
+            .await
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(pool.reserved(), 0);
 }
 
