@@ -53,6 +53,11 @@ from calc_flow.symbolic import (
     table as tables,
 )
 from scripts.benchmark_suite.catalog import BATCH_ROWS, stream_dimensions
+from scripts.benchmark_suite.diagnostics import (
+    mark_phase,
+    report_failure,
+    stream_failure,
+)
 
 QUOTE_FIELDS = (
     Field("event_time", "timestamp[us, UTC]", nullable=False),
@@ -720,7 +725,11 @@ async def run_stream(
         return result
 
     try:
-        table, seconds = await run_with_completion(measure_and_end(), job.wait_async())
+        table, seconds = await run_with_completion(
+            measure_and_end(),
+            job.wait_async(),
+            on_failure=lambda error: stream_failure(root, job, sources, sink, error),
+        )
         if sink.rows != expected_rows:
             raise RuntimeError("stream output row count changed after the timed result")
         return table, seconds
@@ -728,7 +737,7 @@ async def run_stream(
         await job.cancel_async()
 
 
-async def _with_running_job(operation, completion):
+async def _with_running_job(operation, completion, *, on_failure=None):
     """Cancel pending benchmark work as soon as its owned runtime terminates."""
 
     running = asyncio.ensure_future(operation)
@@ -744,6 +753,9 @@ async def _with_running_job(operation, completion):
                 f"{outcome.errors}"
             )
         return await running
+    except BaseException as error:
+        report_failure(on_failure, error)
+        raise
     finally:
         for task in (running, finished):
             if not task.done():
@@ -853,7 +865,11 @@ async def _run_throughput_stream(plan_factory, streams, root, expected_rows, cas
         )
 
     try:
-        result = await run_with_completion(measure_and_end(), job.wait_async())
+        result = await run_with_completion(
+            measure_and_end(),
+            job.wait_async(),
+            on_failure=lambda error: stream_failure(root, job, sources, sink, error),
+        )
         if sink.rows != expected_rows:
             raise RuntimeError("stream output row count changed after the timed result")
         return result
@@ -873,6 +889,7 @@ async def _checkpoint_cut(job, sources, sink, streams, case):
         await sources[name].push(event)
     await asyncio.wait_for(sink.wait_for_rows(prefix_outputs), 600)
     await asyncio.sleep(0.1)
+    mark_phase("manual-checkpoint")
     epoch = await job.trigger_checkpoint_async()
     _require_checkpoint_ack(job, epoch)
     if case["scenario"] == "join":
@@ -939,16 +956,22 @@ async def _run_checkpoint_stream(plan_factory, streams, root, expected_rows, cas
         raise ValueError("checkpoint workload requires a nonterminal input prefix")
 
     try:
+        mark_phase("checkpoint-prefix")
         started, epoch, prefix_tables, delivered = await _with_running_job(
-            _checkpoint_cut(job, sources, sink, streams, case), job.wait_async()
+            _checkpoint_cut(job, sources, sink, streams, case),
+            job.wait_async(),
+            on_failure=lambda error: stream_failure(root, job, sources, sink, error),
         )
     finally:
+        mark_phase("prefix-cancel")
         await job.cancel_async()
 
+    mark_phase("restoring")
     restored_plan = plan_factory()
     resumed_sources, resumed_sink, resumed = await _start_replay_job(
         restored_plan, streams, root, expected_rows - delivered, case
     )
+    mark_phase("restored")
 
     async def complete_recovery():
         await asyncio.wait_for(
@@ -958,8 +981,10 @@ async def _run_checkpoint_stream(plan_factory, streams, root, expected_rows, cas
             30,
         )
         _require_ready_sources(resumed_sources, resumed_sink)
+        mark_phase("ready")
         pending = await _recovery_pending_events(resumed_sources)
         await _measure_ready(resumed_sources, resumed_sink, pending, resumed)
+        mark_phase("rows-collected")
         table = pa.concat_tables((*prefix_tables, *resumed_sink.tables))
         seconds = (time.perf_counter_ns() - started) / 1e9
         observation = (
@@ -976,6 +1001,7 @@ async def _run_checkpoint_stream(plan_factory, streams, root, expected_rows, cas
         )
         for source in resumed_sources.values():
             await source.push(None)
+        mark_phase("eof-enqueued")
         return (
             table,
             seconds,
@@ -990,7 +1016,13 @@ async def _run_checkpoint_stream(plan_factory, streams, root, expected_rows, cas
         )
 
     try:
-        result = await run_with_completion(complete_recovery(), resumed.wait_async())
+        result = await run_with_completion(
+            complete_recovery(),
+            resumed.wait_async(),
+            on_failure=lambda error: stream_failure(
+                root, resumed, resumed_sources, resumed_sink, error
+            ),
+        )
         if resumed_sink.rows + delivered != expected_rows:
             raise RuntimeError(
                 "recovery output row count differs from the timed workload"

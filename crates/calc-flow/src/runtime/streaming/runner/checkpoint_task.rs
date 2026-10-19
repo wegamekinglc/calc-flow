@@ -264,7 +264,7 @@ pub(super) async fn run_live_checkpoint_task(
     let mut terminal_request_active = false;
     let mut assembly = EpochManifestAssembly::default();
     let mut terminal_source_cuts = None;
-    let mut terminal_operators = BTreeSet::new();
+    let mut terminal_operators = BTreeSet::<String>::new();
     let mut terminal_sinks = BTreeSet::new();
     let terminal_sources = {
         let terminal_sources = sources.clone();
@@ -283,6 +283,7 @@ pub(super) async fn run_live_checkpoint_task(
                         message: "checkpoint coordinator event channel closed".into(),
                     });
                 };
+                let started = matches!(event, CheckpointEvent::Started(_));
                 match handle_checkpoint_event(
                     event,
                     &coordinator,
@@ -302,6 +303,13 @@ pub(super) async fn run_live_checkpoint_task(
                     Ok(false) => {
                         if cancellation.is_cancelled() {
                             continue;
+                        }
+                        if started && let Err(error) = try_join_all(
+                            terminal_operators.iter().map(|node_id| {
+                                request_ended_operator_capture(node_id, &channels.operator_commands, &assembly)
+                            })
+                        ).await {
+                            break Err(error);
                         }
                         if let Err(error) = maybe_request_terminal_checkpoint(
                             &coordinator,
@@ -353,7 +361,12 @@ pub(super) async fn run_live_checkpoint_task(
                         message: format!("foreign terminal operator {ready:?}"),
                     });
                 }
-                terminal_operators.insert(ready);
+                terminal_operators.insert(ready.clone());
+                if let Err(error) = request_ended_operator_capture(
+                    &ready, &channels.operator_commands, &assembly,
+                ).await {
+                    break Err(error);
+                }
                 if let Err(error) = maybe_request_terminal_checkpoint(
                     &coordinator,
                     &expected_operators,
@@ -1080,6 +1093,25 @@ pub(super) async fn maybe_request_terminal_checkpoint(
         coordinator.request(CheckpointRequest::Terminal).await?;
         *request_active = true;
         *terminal_request_active = true;
+    }
+    Ok(())
+}
+
+async fn request_ended_operator_capture(
+    node_id: &str,
+    commands: &BTreeMap<String, mpsc::Sender<OperatorCheckpointCommand>>,
+    assembly: &EpochManifestAssembly,
+) -> crate::Result<()> {
+    if let Some(epoch) = assembly.epoch
+        && !assembly.terminal
+        && !assembly.operators.contains_key(node_id)
+    {
+        // EOF removes this path from barrier fanout. Its owning task must still
+        // capture and ACK every mixed epoch, then wait for the final command.
+        commands[node_id]
+            .send(OperatorCheckpointCommand::Capture(epoch))
+            .await
+            .map_err(|_| checkpoint_channel_closed("ended operator commands"))?;
     }
     Ok(())
 }

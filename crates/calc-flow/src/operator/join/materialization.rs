@@ -188,7 +188,7 @@ impl JoinOutput<'_> {
     }
 
     pub(super) fn records(&self, pair: &MatchedPair) -> (PayloadRef<'_>, PayloadRef<'_>) {
-        let incoming = self.admitted.row(pair.pos).record;
+        let incoming = self.admitted.payload(pair.pos);
         let opposite = self.opposite.payload(pair.opposite_index);
         if self.incoming_is_left {
             (incoming, opposite)
@@ -200,7 +200,7 @@ impl JoinOutput<'_> {
     /// One output side's payload, without reading the other side.
     pub(super) fn side_record(&self, pair: &MatchedPair, left: bool) -> PayloadRef<'_> {
         if left == self.incoming_is_left {
-            self.admitted.row(pair.pos).record
+            self.admitted.payload(pair.pos)
         } else {
             self.opposite.payload(pair.opposite_index)
         }

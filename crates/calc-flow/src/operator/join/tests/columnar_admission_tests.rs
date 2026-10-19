@@ -1,8 +1,13 @@
 use super::*;
 
-fn assert_admitted_event_times(rows: &dyn AdmittedRows) {
+fn assert_admitted_accessors(rows: &dyn AdmittedRows) {
     for index in (0..rows.len()).rev() {
-        assert_eq!(rows.event_time(index), rows.row(index).event_time);
+        let row = rows.row(index);
+        assert_eq!(rows.event_time(index), row.event_time);
+        let payload = rows.payload(index);
+        assert_eq!(payload.offset(), row.record.offset());
+        assert!(std::ptr::eq(payload.columns(), row.record.columns()));
+        assert!(Arc::ptr_eq(payload.schema_ref(), row.record.schema_ref()));
     }
     for index in [rows.len(), usize::MAX] {
         assert!(
@@ -11,6 +16,9 @@ fn assert_admitted_event_times(rows: &dyn AdmittedRows) {
         assert!(
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rows.event_time(index)))
                 .is_err()
+        );
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rows.payload(index))).is_err()
         );
     }
 }
@@ -48,19 +56,25 @@ async fn admitted_left(
 
 #[tokio::test]
 async fn test_single_and_multiple_records_preserve_admitted_coordinates() {
-    assert_admitted_event_times(&AdmittedBatch::default());
+    assert_admitted_accessors(&AdmittedBatch::default());
     for record_count in [1, 3, 5] {
         let mut operator =
             StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
         let job = job();
         let context = StreamOperatorContext::new(&job, "match", None);
-        let records = (0..record_count)
+        let mut records = (0..record_count)
             .map(|index| {
                 let start = index * 65;
-                let batch = keyed_left_batch(vec![7; 65], (start..start + 65).collect());
-                batch.table_payload().unwrap().batches()[0].clone()
+                let batch = keyed_left_batch(vec![7; 67], (start - 1..start + 66).collect());
+                batch.table_payload().unwrap().batches()[0].slice(1, 65)
             })
-            .collect();
+            .collect::<Vec<_>>();
+        if record_count == 5 {
+            let empty = records[0].slice(0, 0);
+            records.insert(0, empty.clone());
+            records.insert(2, empty.clone());
+            records.push(empty);
+        }
         let source = Batch::table(records, BatchMetadata::default()).unwrap();
         let bundle = Box::pin(admitted_left(&mut operator, &context, &source)).await;
         for index in (0..bundle.admitted.len()).rev() {
@@ -71,7 +85,7 @@ async fn test_single_and_multiple_records_preserve_admitted_coordinates() {
             assert_eq!(bundle.admitted.source_index(index), index);
             assert!(row.retain);
         }
-        assert_admitted_event_times(&bundle.admitted);
+        assert_admitted_accessors(&bundle.admitted);
     }
 }
 
@@ -237,7 +251,7 @@ async fn test_project_admitted_uses_zero_copy_views_for_unretained_groups() {
         prepared.admitted.projection_is_view(1),
         "groups without retained rows must not copy their payloads"
     );
-    assert_admitted_event_times(&prepared.admitted);
+    assert_admitted_accessors(&prepared.admitted);
     drop(prepared);
     // The zero-copy group still feeds the output gather with its rows.
     let mut operator =
@@ -660,7 +674,17 @@ impl MemoryPool for FirstGrantRefusalPool {
 
 #[tokio::test]
 async fn test_local_table_refusal_falls_back_to_per_row_identity() {
-    let parent = record_of(vec![Arc::new(Int64Array::from(vec![1, 2, 3]))]);
+    let columns: Vec<ArrayRef> = vec![
+        Arc::new(Int64Array::from(vec![1, 2, 3])),
+        Arc::new(StringArray::from(vec!["a", "b", "c"])),
+        Arc::new(LargeStringArray::from(vec!["a", "b", "c"])),
+    ];
+    for column in columns {
+        Box::pin(assert_local_table_refusal(record_of(vec![column]))).await;
+    }
+}
+
+async fn assert_local_table_refusal(parent: Arc<RecordBatch>) {
     let rows = [
         (0_usize, 0_usize, true),
         (0, 1, true),
@@ -756,8 +780,10 @@ async fn sparse_admitted(
 }
 
 #[tokio::test]
-async fn test_sparse_event_times_use_logical_positions_before_and_after_projection() {
-    let source = keyed_left_batch(vec![7; 6], (0..6).collect());
+async fn test_sparse_accessors_preserve_logical_positions_and_payload_offsets() {
+    let original = keyed_left_batch(vec![7; 8], (-1..7).collect());
+    let record = original.table_payload().unwrap().batches()[0].slice(1, 6);
+    let source = Batch::table(vec![record], BatchMetadata::default()).unwrap();
     let mut operator =
         StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
     let job = job();
@@ -770,11 +796,38 @@ async fn test_sparse_event_times_use_logical_positions_before_and_after_projecti
             .collect::<Vec<_>>(),
         vec![0, 2, 3, 5]
     );
-    assert_admitted_event_times(&admitted);
+    assert_admitted_accessors(&admitted);
     let record = &source.table_payload().unwrap().batches()[0];
     admitted.replace_view(0, Arc::new(record.project(&[0]).unwrap()));
     assert!(admitted.projection_is_view(0));
-    assert_admitted_event_times(&admitted);
+    assert_admitted_accessors(&admitted);
+    let copied = keyed_left_batch(vec![7; 6], vec![-2, -1, 0, 2, 3, 5]);
+    let projected = Arc::new(
+        copied.table_payload().unwrap().batches()[0]
+            .project(&[1])
+            .unwrap(),
+    );
+    admitted.replace(
+        0,
+        columnar::RowPayload::Rowed {
+            parent: projected,
+            row: 2,
+        },
+    );
+    assert_admitted_accessors(&admitted);
+    for (index, physical) in [0, 2, 3, 5].into_iter().enumerate() {
+        let payload = admitted.payload(index);
+        assert_eq!(payload.offset(), index + 2);
+        assert_eq!(
+            payload
+                .column(0)
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .unwrap()
+                .value(payload.offset()),
+            physical
+        );
+    }
 }
 
 /// Resolves one sparse group's identity through either path and reports the
@@ -790,6 +843,7 @@ async fn sparse_identity(
     let job = job();
     let context = StreamOperatorContext::new(&job, "match", None);
     let mut dictionary = key_dictionary::Dictionary::default();
+    dictionary.force_collisions();
     let forced = per_row.then(key_dictionary::force_per_row_keys);
     let prepared = dictionary
         .prepare(admitted, &[0], master, Some(&context), "match")
@@ -812,6 +866,58 @@ async fn sparse_identity(
         );
     }
     (ids, keys, dictionary.inventory())
+}
+
+#[tokio::test]
+async fn test_single_string_groups_preserve_birth_and_pending_change_order() {
+    let values = vec!["prefix", "A", "B", "C", "A", "suffix"];
+    let columns: Vec<ArrayRef> = vec![
+        Arc::new(StringArray::from(values.clone()).slice(1, 4)),
+        Arc::new(LargeStringArray::from(values).slice(1, 4)),
+    ];
+    let rows = [
+        (0, 0, false),
+        (0, 1, true),
+        (0, 0, true),
+        (1, 0, false),
+        (1, 1, true),
+        (1, 2, true),
+    ];
+    for column in columns {
+        let parent = record_of(vec![column]);
+        let parents = [Arc::new(parent.slice(0, 2)), Arc::new(parent.slice(1, 3))];
+        let actual = Box::pin(resolve_identity(&parents, &[0], &rows, false)).await;
+        let oracle = Box::pin(resolve_identity(&parents, &[0], &rows, true)).await;
+        assert_eq!(actual.ids, oracle.ids);
+        assert_eq!(actual.keys, oracle.keys);
+        assert_eq!(actual.inventory, oracle.inventory);
+        assert_eq!(actual.ids, vec![u32::MAX, 0, 1, 0, 2, 1]);
+    }
+}
+
+#[tokio::test]
+async fn test_single_string_sparse_slices_preserve_first_retained_identity() {
+    let values = vec!["prefix", "é\0", "skip", "B", "B", "skip", "é\0", "suffix"];
+    let columns: Vec<ArrayRef> = vec![
+        Arc::new(StringArray::from(values.clone()).slice(1, 6)),
+        Arc::new(LargeStringArray::from(values).slice(1, 6)),
+    ];
+    for column in columns {
+        let original = column.to_data();
+        let parent = record_of(vec![column]);
+        let source = Batch::table(vec![parent.as_ref().clone()], BatchMetadata::default()).unwrap();
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        let job = job();
+        let context = StreamOperatorContext::new(&job, "match", None);
+        let admitted = Box::pin(sparse_admitted(&mut operator, &source, &context, true)).await;
+        assert_eq!(admitted.sparse_index_len(), 4);
+        let actual = Box::pin(sparse_identity(&admitted, &parent, &[0, 3, 5], false)).await;
+        let oracle = Box::pin(sparse_identity(&admitted, &parent, &[0, 3, 5], true)).await;
+        assert_eq!(actual, oracle);
+        assert_eq!(actual.0, vec![0, u32::MAX, 1, 0]);
+        assert_eq!(parent.column(0).to_data(), original);
+    }
 }
 
 #[tokio::test]

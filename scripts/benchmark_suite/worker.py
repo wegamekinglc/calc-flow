@@ -10,6 +10,7 @@ from importlib.metadata import version
 from pathlib import Path
 
 from scripts.benchmark_suite.catalog import POLARS_ENGINE
+from scripts.benchmark_suite.diagnostics import close_after_failure, trace_request
 
 
 def environment(scope: str = "all") -> dict:
@@ -112,8 +113,8 @@ def prepare_case(case: dict, root: Path):
     active = factory(case, root)
     try:
         warmup = active.sample()
-    except BaseException:
-        active.close()
+    except BaseException as error:
+        close_after_failure(active, error)
         raise
     return {"warmup": warmup, "case": case}, active
 
@@ -155,13 +156,35 @@ def dispatch(message: dict, active, root: Path):
 
 def main(root: Path) -> None:
     active = None
+    primary = None
     try:
         for line in sys.stdin:
-            response, active = dispatch(json.loads(line), active, root)
+            message = json.loads(line)
+            with trace_request(root, message) as trace:
+                response, active = dispatch(message, active, root)
+                trace["response"] = response
             print(json.dumps(response, allow_nan=False), flush=True)
-    except Exception as error:
-        print(json.dumps({"error": f"{type(error).__name__}: {error}"}), flush=True)
+    except BaseException as error:
+        primary = error
+        try:
+            print(
+                json.dumps(
+                    {
+                        "error": f"{type(error).__name__}: {error}",
+                        "error_notes": list(getattr(error, "__notes__", ())),
+                    }
+                ),
+                flush=True,
+            )
+        except Exception as diagnostic_error:
+            error.add_note(
+                f"worker error response: {type(diagnostic_error).__name__}: "
+                f"{diagnostic_error}"
+            )
         raise
     finally:
         if active is not None:
-            active.close()
+            if primary is None:
+                active.close()
+            else:
+                close_after_failure(active, primary)

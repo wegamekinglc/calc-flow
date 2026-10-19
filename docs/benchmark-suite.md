@@ -599,9 +599,37 @@ Adding a target does not invalidate comparisons for unchanged shared targets.
 The inventory comes from Cargo's
 [compiler-artifact messages](https://doc.rust-lang.org/cargo/reference/external-tools.html#artifact-messages),
 including cache hits. Unused optional connector dependencies can change without
-invalidating a core-only comparison. Changes to compiled dependencies still
-fail closed, as do incomplete build logs or unsupported dependency sources.
+invalidating a core-only comparison. Changes to compiled dependencies fail
+closed unless an exact release comparison is declared as described below;
+incomplete build logs or unsupported dependency sources still fail closed.
 The core package's source revision remains bound to the release identity.
+
+`benchmarks/rust-dependency-migrations.json` declares directional, per-target
+release comparisons across real dependencies. Each endpoint pins the original
+lock hash, original scoped workload fingerprint and actual compiled dependency
+fingerprint, including package/checksum/features/profile and compiler identity.
+The declaration also pins one common measured workload fingerprint, a reason
+and an evidence reference. Unknown changes remain incomparable. Applying a
+declaration adds `dependency_migration` to all four blocks and lists it in the
+shard's `dependency_migrations`; it never replaces either dependency fingerprint
+or edits source, locks or compiled graphs. Collection and aggregation recompute
+the attestation from provenance, and block comparison checks its target,
+direction and common workload. Markdown labels these rows **cross-dependency
+release**. Their statistics, allocation checks and coverage gates are unchanged;
+legacy suite-block verdicts remain informational, and the interleaved +5% rule
+is unchanged.
+
+DAL-384's declarations use run `39156806624`, Rust job `117764158200`, artifact
+`12151521716`: DataFusion 54.0.0 / Arrow 58.3.0 to 55.0.0 / 59.2.0 on the same
+Rust/Cargo 1.94.0. Ten of its twelve benchmark entry points have identical
+source bytes. The SQL entry point's exact `857973f8…` to `edeac305…` migration
+changes only the two version-reporting constants; fixtures, query declarations
+and clocks are unchanged. Join uses the existing common `0aa67fed…` harness
+and identical support, with common measured fingerprint `40f6b841…`.
+The registry retains the full endpoint digests. Allocation's target identity is
+also pinned, but its sixteen metric rows retain their existing validation.
+Replaying these historical b53 samples proves the contract only; it supplies
+no performance evidence for a newer candidate or a sealed release gate pass.
 
 The `stream_join_perf` compaction and control cases are
 `checkpoint/prepare_then_left_500_{compact,steady}_60k`. Both time asynchronous
@@ -900,6 +928,27 @@ A second table places every supported engine implementation side by side. No top
 filtering is applied. Build, measurement and summary artifacts retain raw
 JSON/JSONL samples, original runner formats, stdout/stderr, release/native and
 harness hashes, exact source refs and environment identities for 30 days.
+
+Engine/warm worker requests retain separate `request-*.started.json` and
+completed/failed records, including side, zero-based round/sample, phase and
+the original release manifest. Warmup uses `sample: null`. Each validated
+sample also updates its round's `partial.json`; an error row includes this
+`partial_evidence` without treating an incomplete round as a comparison.
+Worker-local traces flush lifecycle milestones after timing or on failure.
+Recovery milestones distinguish prefix checkpoint/cancel, restore/readiness,
+collected rows, queued EOF and waiting for the terminal outcome.
+
+Before cancelling owned completion tasks, stream failures write
+`failure-before-cancel.json`: job status, source positions/cursors/queue state,
+sink rows and bounded checkpoint manifest evidence. A push attempt is distinct
+from confirmed EOF enqueue or consumption. The completion wait remains 600
+seconds and IPC wait 900 seconds; no retries or fallback passes are added.
+If IPC itself cannot respond, the parent retains the request, process identity
+and available checkpoint files; in-process state may be unavailable.
+Diagnostic failures and worker-close errors are retained as notes without
+replacing the primary error. Native lifecycle stalls remain unresolved unless
+a reproduction establishes their cause; adding diagnostics is not a runtime
+fix or a release-gate pass.
 
 Wrong/dirty releases, incompatible workload fingerprints, missing or duplicate
 cases/shards, changed confirmation environments, failed correctness and

@@ -73,6 +73,16 @@ def registry(root: Path, baseline: bytes, candidate: bytes) -> None:
 
 
 class CommonJoinHarnessTests(unittest.TestCase):
+    def test_published_release_join_accepts_the_declared_common_harness(self):
+        # Published 61a81f20 source; other byte pairs still require declarations.
+        original = "2533de442d20cc252c0fbef406777d6d080ae901fb1a5e247078d807a771213b"
+        measured = digest((rust_harness.ROOT / BENCH).read_bytes())
+        declaration = rust_harness._declaration(original, measured)
+        self.assertIsNotNone(declaration)
+        self.assertEqual(declaration["target"], TARGET)
+        self.assertEqual(declaration["baseline_sha256"], original)
+        self.assertEqual(declaration["candidate_sha256"], measured)
+
     def test_common_join_copies_and_attests_its_component_support(self):
         support = Path("crates/calc-flow/benches/support/native_join_components.rs")
         with TemporaryDirectory() as raw:

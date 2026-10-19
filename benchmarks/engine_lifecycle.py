@@ -8,7 +8,10 @@ from dataclasses import dataclass
 from itertools import zip_longest
 from typing import Any, TypeVar
 
+from scripts.benchmark_suite.diagnostics import mark_phase, report_failure
+
 _T = TypeVar("_T")
+COMPLETION_TIMEOUT = 600
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,7 +38,7 @@ def _require_completed(outcome: Any) -> None:
 
 
 async def run_with_completion(
-    operation: Awaitable[_T], completion: Awaitable[Any]
+    operation: Awaitable[_T], completion: Awaitable[Any], *, on_failure=None
 ) -> _T:
     running = asyncio.ensure_future(operation)
     finished = asyncio.ensure_future(completion)
@@ -47,8 +50,14 @@ async def run_with_completion(
             _require_completed(await finished)
             return await running
         result = await running
-        _require_completed(await asyncio.wait_for(finished, timeout=600))
+        mark_phase("terminal-awaited")
+        _require_completed(
+            await asyncio.wait_for(asyncio.shield(finished), timeout=COMPLETION_TIMEOUT)
+        )
         return result
+    except BaseException as error:
+        report_failure(on_failure, error)
+        raise
     finally:
         for task in (running, finished):
             if not task.done():

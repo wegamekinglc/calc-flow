@@ -108,13 +108,28 @@ impl<'a> GroupView<'a> {
     fn source_index(self, position: usize) -> usize {
         self.segment.source_base + self.batch.physical(self.segment, position)
     }
+    fn payload(self, position: usize) -> PayloadRef<'a> {
+        let offset = self.segment.payload_base.map_or_else(
+            || self.batch.physical(self.segment, position),
+            |base| base + position - self.segment.range.start,
+        );
+        self.payload_at(offset)
+    }
     fn row(self, position: usize) -> AdmittedRef<'a> {
         let physical = self.batch.physical(self.segment, position);
         let offset = self
             .segment
             .payload_base
             .map_or(physical, |base| base + position - self.segment.range.start);
-        let record = match &self.segment.payload {
+        AdmittedRef {
+            record: self.payload_at(offset),
+            row_id: self.segment.row_id_base + physical as u64,
+            event_time: EventTime::from_micros(self.batch.times.get(position)),
+            retain: self.batch.retained.get(position),
+        }
+    }
+    fn payload_at(self, offset: usize) -> PayloadRef<'a> {
+        match &self.segment.payload {
             Some(payload) => PayloadRef::Payload(payload, offset),
             None => PayloadRef::Record(
                 &self
@@ -125,12 +140,6 @@ impl<'a> GroupView<'a> {
                     .batches()[self.segment.record],
                 offset,
             ),
-        };
-        AdmittedRef {
-            record,
-            row_id: self.segment.row_id_base + physical as u64,
-            event_time: EventTime::from_micros(self.batch.times.get(position)),
-            retain: self.batch.retained.get(position),
         }
     }
 }
@@ -612,6 +621,10 @@ pub(super) trait AdmittedRows: Sync {
     fn cursor_row(&self, index: usize, _segment: &mut Option<usize>) -> AdmittedRef<'_> {
         self.row(index)
     }
+    /// Payload at a logical admitted position, without requiring row metadata.
+    fn payload(&self, index: usize) -> PayloadRef<'_> {
+        self.row(index).record
+    }
     /// Event time at a logical admitted position, independent of payload offsets.
     fn event_time(&self, index: usize) -> EventTime {
         self.row(index).event_time
@@ -674,6 +687,9 @@ impl AdmittedRows for AdmittedBatch {
             segment: self.segments.get(segment),
         }
         .row(index)
+    }
+    fn payload(&self, index: usize) -> PayloadRef<'_> {
+        self.view(index).payload(index)
     }
     fn event_time(&self, index: usize) -> EventTime {
         assert!(index < self.len);

@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 from scripts.benchmark_suite.catalog import THREADS
+from scripts.benchmark_suite.diagnostics import checkpoint_summary, observe, persist
 from scripts.toolkit import write_json
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -167,6 +168,8 @@ async def install(release: dict, root: Path) -> Path:
 class Worker:
     def __init__(self, process: asyncio.subprocess.Process, log) -> None:
         self.process, self.log = process, log
+        self.root = Path(log.name).parent
+        self.request_count = 0
 
     @classmethod
     async def start(
@@ -196,6 +199,41 @@ class Worker:
         return cls(process, log)
 
     async def request(self, **message) -> dict:
+        self.request_count += 1
+        message = {**message, "request_id": self.request_count}
+        path = self.root / f"request-{self.request_count:04d}"
+        persist(path.with_suffix(".started.json"), message)
+        try:
+            response = await self._exchange(message)
+        except BaseException as error:
+            error.add_note(
+                "worker request context: "
+                + str(
+                    observe(
+                        lambda: json.dumps(message.get("context", {}), sort_keys=True)
+                    )
+                )
+            )
+            persist(
+                path.with_suffix(".failed.json"),
+                {
+                    **message,
+                    "error": f"{type(error).__name__}: {error}",
+                    "worker_pid": self.process.pid,
+                    "worker_returncode": self.process.returncode,
+                    "in_process_state": (
+                        "see worker failure-before-cancel snapshot; "
+                        "unavailable if IPC is unresponsive"
+                    ),
+                    "checkpoint": observe(lambda: checkpoint_summary(self.root)),
+                },
+                error,
+            )
+            raise
+        persist(path.with_suffix(".completed.json"), {**message, "response": response})
+        return response
+
+    async def _exchange(self, message: dict) -> dict:
         self.process.stdin.write((json.dumps(message) + "\n").encode())
         await self.process.stdin.drain()
         line = await asyncio.wait_for(self.process.stdout.readline(), timeout=900)
