@@ -2292,6 +2292,7 @@ struct JoinWork {
     retained_visits: usize,
     retained_chunk_visits: usize,
     retained_descriptor_views: usize,
+    retained_sparse_checks: usize,
     expiration_head_steps: usize,
     native_dense_repairs: usize,
     tombstone_appends: usize,
@@ -2348,7 +2349,7 @@ struct JoinWork {
 #[cfg(test)]
 thread_local! {
     static JOIN_WORK: std::cell::Cell<JoinWork> = const { std::cell::Cell::new(JoinWork {
-        retained_visits: 0, retained_chunk_visits: 0, retained_descriptor_views: 0, expiration_head_steps: 0, native_dense_repairs: 0, tombstone_appends: 0, tombstone_peak: 0, expiration_run_cuts: 0, key_encodings: 0, time_decoders: 0,
+        retained_visits: 0, retained_chunk_visits: 0, retained_descriptor_views: 0, retained_sparse_checks: 0, expiration_head_steps: 0, native_dense_repairs: 0, tombstone_appends: 0, tombstone_peak: 0, expiration_run_cuts: 0, key_encodings: 0, time_decoders: 0,
         sql_probe_table_builds: 0, native_range_visits: 0, native_boundary_visits: 0,
         admission_mask_blocks: 0, native_shifted_entries: 0,
         native_eviction_comparisons: 0, native_funding_refunds: 0,
@@ -3343,10 +3344,10 @@ impl From<Vec<StoredRow>> for RetainedRows {
 
 impl RetainedRows {
     fn extend(&mut self, chunks: retained::Append, dictionary: &key_dictionary::Dictionary) {
-        for batch in chunks.batches() {
-            for index in batch.references() {
-                self.2.enqueue_if_due(&batch.payload(index).owned());
-            }
+        for owner in chunks.payload_owners() {
+            #[cfg(test)]
+            note_join_work(|work| work.retained_sparse_checks += 1);
+            self.2.enqueue_if_due(owner);
         }
         if let Some(index) = &mut self.1 {
             Arc::get_mut(index)

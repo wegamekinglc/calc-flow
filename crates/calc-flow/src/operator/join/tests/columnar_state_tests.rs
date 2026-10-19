@@ -2662,3 +2662,81 @@ async fn assert_slim_probe_reuses_keys(incoming_left: bool) {
     drop(job_context);
     assert_eq!(pool.reserved(), 0);
 }
+
+#[tokio::test]
+async fn test_retained_append_checks_each_payload_owner_once_per_chunk() {
+    let mut checks = Vec::new();
+    for ranges in [vec![(0_i64, 4_097)], vec![(0_i64, 1_500), (1_500, 3_000)]] {
+        let records = ranges
+            .into_iter()
+            .map(|(start, end)| {
+                left_batch((start..end).collect())
+                    .table_payload()
+                    .unwrap()
+                    .batches()[0]
+                    .clone()
+            })
+            .collect::<Vec<_>>();
+        let count = records.iter().map(RecordBatch::num_rows).sum::<usize>();
+        let key = encode_join_key_v1(&records[0], 0, &[0]).unwrap();
+        let charge = state_row_charge_with_key(&records[0], 0, key.len(), "match").unwrap();
+        let input = Batch::table(records.clone(), BatchMetadata::default()).unwrap();
+        let mut declaration = spec();
+        declaration.limits = JoinStateLimits::new(8_192, 16_000_000, 1_000).unwrap();
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), declaration).unwrap();
+        let job = job();
+        let context = StreamOperatorContext::new(&job, "match", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        reset_join_work();
+        operator
+            .process_data("left", input.clone(), &context, &mut collector)
+            .await
+            .unwrap();
+        checks.push(join_work().retained_sparse_checks);
+        assert_eq!(operator.status().left.retained_rows, count as u64);
+        assert_eq!(operator.state.next_left_row_id, count as u64);
+        assert_eq!(operator.status().left.retained_bytes, charge * count as u64);
+        for (index, row) in operator.state.left.iter().enumerate() {
+            assert_eq!(row.row_id, index as u64);
+            assert_eq!(row.event_time.as_micros(), i64::try_from(index).unwrap());
+            assert_eq!(row.charge, charge);
+            assert_eq!(
+                row.record
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<TimestampMicrosecondArray>()
+                    .unwrap()
+                    .value(row.record.offset()),
+                i64::try_from(index).unwrap()
+            );
+            assert_eq!(
+                row.record
+                    .column(2)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap()
+                    .value(row.record.offset()),
+                42
+            );
+        }
+        assert_eq!(input.table_payload().unwrap().batches(), records);
+        assert!(collector.drain("output").is_empty());
+        let pool = operator
+            .runtime
+            .runtime()
+            .unwrap()
+            .incremental_memory_pool();
+        drop(collector);
+        drop(operator);
+        drop(context);
+        assert!(job.gather_owner().close_and_drain().await.is_empty());
+        drop(job);
+        assert_eq!(pool.reserved(), 0);
+    }
+    assert_eq!(
+        checks,
+        [5, 4],
+        "sparse eligibility is shared by all rows of one payload owner in a retained chunk"
+    );
+}

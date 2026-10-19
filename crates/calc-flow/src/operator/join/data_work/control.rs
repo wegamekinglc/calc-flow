@@ -1,8 +1,8 @@
-use super::super::native_lookup::WindowCursor;
+use super::super::native_lookup::{NativeIndex, WindowCursor};
 use super::{
     inputs::ProbeInputs,
     pairs::PairFragment,
-    partition::CountRows,
+    partition::{CountFragment, CountRows},
     worker::{CountWork, FillWork},
 };
 use crate::Result;
@@ -48,16 +48,21 @@ fn snapshot_bytes(keys: usize, name: &str) -> Result<usize> {
 
 fn work_bytes(units: usize) -> Result<usize> {
     let results = units
-        .checked_mul(2 * size_of::<usize>() + size_of::<PairFragment>())
+        .checked_mul(size_of::<CountFragment>() + size_of::<usize>() + size_of::<PairFragment>())
         .ok_or_else(|| super::super::native_lookup::scratch_error("join"))?;
     sum(&[
         arc::<CountRows>()?,
         arc::<CountWork>()?,
         arc::<FillWork>()?,
-        cleanup_control_bytes::<Vec<usize>>(),
+        cleanup_control_bytes::<Vec<CountFragment>>(),
         cleanup_control_bytes::<Vec<PairFragment>>(),
         results,
     ])
+}
+
+pub(super) fn window_guards_bytes() -> Result<usize> {
+    // Weak guards keep their Arc headers alive even after snapshot retirement.
+    sum(&[arc::<MemoryReservation>()?, arc::<NativeIndex>()?])
 }
 
 fn fragment_controls(units: usize) -> Result<usize> {

@@ -111,7 +111,10 @@ async fn test_probe_stop_checks_scale_with_groups_and_units() {
         let values = (0..units)
             .map(|unit| count.run(unit, &stop).unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(values.iter().sum::<usize>(), rows * opposite);
+        assert_eq!(
+            values.iter().map(|value| value.count).sum::<usize>(),
+            rows * opposite
+        );
         assert_eq!(full_checks.swap(0, Ordering::SeqCst), units);
         assert_eq!(polls.swap(0, Ordering::SeqCst), expected_polls(1));
         let counts =

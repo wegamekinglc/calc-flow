@@ -1042,13 +1042,20 @@ Funded native matching shares persistent key identities across batches and both
 inputs through one dictionary per Join operator. Keys used only for probing
 create no persistent entries. Each retained row keeps its full V1 logical
 charge. On the serial native path, the counting pass caches each row's inclusive
-time-window bounds for the fill pass. Worker count and fill phases maintain
-separate per-key cursors in each work unit and recompute bounds during fill;
-fused gather uses the same fill path. Within each cursor's lifetime, consecutive
-forward windows reuse its position; the first window and windows that move
-backward use binary searches. Batch admission
+time-window bounds for the fill pass. Parallel count work can retain the same
+bounds in optional prepaid work-unit storage for fill and fused gather. Cache
+identity includes the captured immutable index and probe configuration. If
+cache credit is refused, each phase uses its own per-key cursors; optional
+bounds are released before retrying required output admission. Deferred output
+also releases optional bounds before mandatory state preparation for any pool
+other than the default unbounded implementation. Within each cursor's lifetime,
+consecutive forward windows reuse its position; the first window and windows
+that move backward use binary searches. Batch admission
 masks preserve null and late-drop rules. Native index capacity remains funded
 until its storage is released, including capacity retained after eviction.
+Retained append checks sparse replacement eligibility once per payload owner
+within each new retained chunk after live-row accounting is complete, preserving
+first-seen candidate order.
 Output gathering also keeps a local incoming-row cursor: duplicate and forward
 positions reuse the current payload segment, while backward positions locate
 their segment again. The cursor borrows immutable input and allocates no row

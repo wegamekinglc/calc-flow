@@ -213,7 +213,7 @@ impl StreamJoinOperator {
             limit,
         });
         let control = Arc::clone(inputs.control.as_ref().expect("prepaid count controls"));
-        let Some(counts) = self
+        let Some(mut counts) = self
             .run_probe_units(
                 work,
                 context,
@@ -232,6 +232,13 @@ impl StreamJoinOperator {
             &self.name,
         )?;
         if let Some(credit) = self.deferred_credit(&counts, inputs.admitted.len())? {
+            return Ok(Some(ProbeOutput::Counted(counts, credit)));
+        }
+        if counts.total > 0
+            && super::morsel::eligible(self, inputs.admitted.len())
+            && counts.discard_windows()
+            && let Some(credit) = self.deferred_credit(&counts, inputs.admitted.len())?
+        {
             return Ok(Some(ProbeOutput::Counted(counts, credit)));
         }
         self.fill_probe(inputs, counts, context)
@@ -261,10 +268,14 @@ impl StreamJoinOperator {
     pub(super) async fn fill_probe(
         &mut self,
         inputs: &Arc<ProbeInputs>,
-        counts: Counts,
+        mut counts: Counts,
         context: &StreamOperatorContext<'_>,
     ) -> Result<Option<PairOutput>> {
-        let Some((funding, credit)) = self.admit_fill(&counts)? else {
+        let mut admission = self.admit_fill(&counts)?;
+        if admission.is_none() && counts.discard_windows() {
+            admission = self.admit_fill(&counts)?;
+        }
+        let Some((funding, credit)) = admission else {
             return Ok(None);
         };
         let total = counts.total;

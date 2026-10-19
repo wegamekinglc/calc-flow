@@ -67,13 +67,11 @@ impl ProbeInputs {
         bounds
     }
 
-    /// Dense opposite indices for one probe row's window, advancing the cursor.
-    pub(super) fn matches_window(
+    pub(super) fn matches_bounds(
         &self,
         position: usize,
-        cursors: &mut [Option<WindowCursor>],
+        bounds: WindowBounds,
     ) -> impl Iterator<Item = usize> + '_ {
-        let bounds = self.window(position, cursors);
         self.slot(position).into_iter().flat_map(move |id| {
             self.index
                 .as_ref()

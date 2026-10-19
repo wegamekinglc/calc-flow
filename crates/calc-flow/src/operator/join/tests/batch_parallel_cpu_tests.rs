@@ -230,9 +230,9 @@ fn run_count_fill(capacity: usize) {
         let values = (0..capacity)
             .map(|ordinal| count.run(ordinal, &stop).unwrap())
             .collect::<Vec<_>>();
-        for (ordinal, &value) in values.iter().enumerate() {
+        for (ordinal, value) in values.iter().enumerate() {
             assert_eq!(
-                value,
+                value.count,
                 rows / capacity + usize::from(ordinal < rows % capacity)
             );
         }

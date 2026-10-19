@@ -94,7 +94,7 @@ impl FlatChunk {
 }
 
 /// Records one side's selected byte width, declining when a row disagrees
-/// with the width already seen; repeated rows re-check the same value.
+/// with the width already seen.
 fn agree_row_width(
     agreed: &mut Option<usize>,
     record: PayloadRef<'_>,
@@ -328,12 +328,16 @@ impl JoinOutput<'_> {
         let mut seen = SeenRows::new(low, high);
         let mut incoming = None;
         let mut opposite = None;
+        let mut previous_incoming = None;
         for pair in self.matched.iter() {
-            agree_row_width(
-                &mut incoming,
-                self.admitted.row(pair.pos).record,
-                incoming_columns.as_deref(),
-            )?;
+            if previous_incoming != Some(pair.pos) {
+                agree_row_width(
+                    &mut incoming,
+                    self.admitted.row(pair.pos).record,
+                    incoming_columns.as_deref(),
+                )?;
+                previous_incoming = Some(pair.pos);
+            }
             if seen.first_visit(pair.opposite_index) {
                 agree_row_width(
                     &mut opposite,
@@ -540,6 +544,8 @@ fn flat_row(
 /// variable offsets contributes its full width and no terminal offset, and a
 /// null-free source array contributes no null entry for any of its rows.
 fn side_row_bytes(record: PayloadRef<'_>, projection: Option<&[(usize, usize)]>) -> Option<usize> {
+    #[cfg(test)]
+    tests::SIDE_VISITS.with(|count| count.set(count.get() + 1));
     let mut bytes = 0_usize;
     for (_, column) in row_columns(record, 0, projection) {
         let width = fixed_width(column.data_type())?;
@@ -689,6 +695,7 @@ mod tests {
     thread_local! {
         pub(super) static FLAT_VISITS: Cell<usize> = const { Cell::new(0) };
         pub(super) static NESTED_VISITS: Cell<usize> = const { Cell::new(0) };
+        pub(super) static SIDE_VISITS: Cell<usize> = const { Cell::new(0) };
         pub(super) static FORCE_SLOW: Cell<bool> = const { Cell::new(false) };
     }
 
@@ -942,6 +949,48 @@ mod tests {
              caches must be dense",
             2 * rows,
             measured.count_total
+        );
+    }
+
+    #[test]
+    fn test_interval_preflight_checks_each_incoming_run_once() {
+        let (rows, fanout) = (16, 11);
+        let record = int64_row();
+        let schema = int64_pair_schema();
+        let admitted = (0..rows).map(|_| admitted_row(&record)).collect::<Vec<_>>();
+        let opposite = vec![stored_row(&record); rows];
+        let matched = (0..rows)
+            .flat_map(|pos| {
+                (0..fanout).map(move |offset| MatchedPair {
+                    pos,
+                    opposite_index: (pos + offset) % rows,
+                })
+            })
+            .collect::<Vec<_>>();
+        let output = JoinOutput {
+            schema: &schema,
+            projection: None,
+            admitted: &admitted,
+            opposite: &opposite,
+            matched: &matched,
+            incoming_is_left: true,
+            operator_id: "interval-widths",
+            admitted_charges: None,
+        };
+        let budget = EdgeBudget::new(17, 160).unwrap();
+        SIDE_VISITS.with(|count| count.set(0));
+        let fast = output.ranges(budget).unwrap();
+        let visits = SIDE_VISITS.with(Cell::get);
+        let slow = {
+            let _scan = PerPairScan::force();
+            output.ranges(budget).unwrap()
+        };
+        assert_eq!(fast, slow);
+        assert_eq!(fast.iter().map(Range::len).sum::<usize>(), rows * fanout);
+        assert_eq!(
+            visits,
+            rows * 2,
+            "fanout must not repeat incoming width checks"
         );
     }
 

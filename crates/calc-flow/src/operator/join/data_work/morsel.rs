@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use datafusion::{
     arrow::{datatypes::SchemaRef, record_batch::RecordBatch},
-    execution::memory_pool::MemoryReservation,
+    execution::memory_pool::{MemoryReservation, UnboundedMemoryPool},
 };
 
 use super::super::{
@@ -230,11 +230,20 @@ impl StreamJoinOperator {
         &mut self,
         inputs: Arc<ProbeInputs>,
         admitted: &mut AdmittedBatch,
-        counts: Counts,
+        mut counts: Counts,
         fallback: MemoryReservation,
         context: &StreamOperatorContext<'_>,
     ) -> Result<PreparedMatches> {
         self.await_probe_attempt(context).await?;
+        // Optional cache must not consume later mandatory state headroom.
+        if !self
+            .runtime
+            .runtime()?
+            .incremental_memory_pool()
+            .is::<UnboundedMemoryPool>()
+        {
+            counts.discard_windows();
+        }
         let mut inputs = Arc::try_unwrap(inputs).unwrap_or_else(|_| panic!("settled count inputs"));
         *admitted = std::mem::take(&mut inputs.admitted);
         let keys = inputs.keys.take();
@@ -265,7 +274,7 @@ impl StreamJoinOperator {
         self.await_compaction_release(context).await?;
         let DeferredProbe {
             mut inputs,
-            counts,
+            mut counts,
             fallback,
         } = *deferred;
         inputs.admitted = std::mem::take(&mut prepared.admitted);
@@ -274,7 +283,7 @@ impl StreamJoinOperator {
         self.compaction_release = Some(receiver);
         self.probe_control.clone_from(&inputs.control);
         let inputs = Arc::new(inputs);
-        let gathered = self
+        let mut gathered = self
             .gather_morsels(
                 &inputs,
                 &counts,
@@ -282,6 +291,16 @@ impl StreamJoinOperator {
                 context,
             )
             .await;
+        if matches!(gathered, Ok(None)) && counts.discard_windows() {
+            gathered = self
+                .gather_morsels(
+                    &inputs,
+                    &counts,
+                    prepared.admitted_charges.as_deref(),
+                    context,
+                )
+                .await;
+        }
         let result = match gathered {
             Ok(Some(output)) => {
                 prepared.gathered = Some(output);
@@ -293,6 +312,7 @@ impl StreamJoinOperator {
             }
             Err(error) => Err(error),
         };
+        drop(counts);
         self.recover_probe(inputs, &mut prepared.admitted, context)
             .await?;
         result

@@ -9,6 +9,13 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-19: Reuse prepaid interval Join window bounds between parallel count
+  and fill/gather, with cursor fallback under explicit memory pressure. Avoid
+  repeated incoming-row output-width checks within each match run and check
+  retained sparse replacement candidates per chunk owner instead of per row.
+  Preserve inclusive bounds, stable pair ordering, resource limits, cancellation
+  cleanup, and checkpoint formats.
+
 - 2026-10-19: Extend CPU-aware streaming work beyond Join. Decouple ASOF compute
   routing from persistent shards and let explicit budgets size finalization
   prefixes. Scale warm ordered rolling mean/dual-SMA across whole-entity lanes,

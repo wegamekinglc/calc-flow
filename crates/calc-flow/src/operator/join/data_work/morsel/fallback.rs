@@ -7,7 +7,7 @@ use parking_lot::Mutex;
 
 struct FallbackWork {
     inputs: Arc<ProbeInputs>,
-    count: usize,
+    counts: Counts,
     credit: Mutex<Option<MemoryReservation>>,
 }
 
@@ -24,7 +24,7 @@ impl ParallelCpuWork for FallbackWork {
             .lock()
             .take()
             .expect("prepaid serial pair lease");
-        let pairs = worker::fill_all(&self.inputs, self.count, stop)?;
+        let pairs = worker::fill_all(&self.inputs, &self.counts, stop)?;
         Ok(PairOutput { pairs, credit })
     }
 }
@@ -40,7 +40,7 @@ impl StreamJoinOperator {
     ) -> Result<()> {
         let work = Arc::new(FallbackWork {
             inputs: Arc::clone(inputs),
-            count: counts.total,
+            counts: counts.clone(),
             credit: Mutex::new(Some(credit)),
         });
         let output = self
