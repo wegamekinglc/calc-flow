@@ -789,10 +789,21 @@ mod public_stream_contract {
     };
 
     #[test]
-    fn edge_budget_rejects_unbounded_runtime_limits() {
-        assert!(EdgeBudget::new(1_000_001, 1).is_err());
-        assert!(EdgeBudget::new(1, (256 << 20) + 1).is_err());
-        assert!(EdgeBudget::new(EdgeBudget::MAX_ROWS, EdgeBudget::MAX_BYTES).is_ok());
+    fn edge_budget_rejects_zero_limits_and_excess_rows() {
+        assert!(EdgeBudget::new(0, 1).is_err());
+        assert!(EdgeBudget::new(1, 0).is_err());
+        assert!(EdgeBudget::new(EdgeBudget::MAX_ROWS + 1, 1).is_err());
+    }
+
+    #[test]
+    fn edge_budget_accepts_caller_selected_bytes_without_global_cap() {
+        for bytes in [1, (256 << 20) + 1, usize::MAX] {
+            let budget = EdgeBudget::new(EdgeBudget::MAX_ROWS, bytes).unwrap();
+            assert_eq!(budget.max_rows, EdgeBudget::MAX_ROWS);
+            assert_eq!(budget.max_bytes, bytes);
+        }
+        assert_eq!(EdgeBudget::MAX_BYTES, usize::MAX);
+        assert_eq!(EdgeBudget::default().max_bytes, usize::MAX);
     }
 
     #[test]
