@@ -133,14 +133,16 @@ impl ParallelCpuWork for KeyWork {
             .expect("prebound local key types");
         let range = self.range(ordinal);
         let mut local = LocalIntern::new(range.len(), self.credit.new_empty());
+        let mut flow = local::WorkerFlow::new(stop)?;
         let mut visits = 0;
         let mut bytes = 0;
         for (position, ordinal) in range.clone().enumerate() {
             let (offset, retain) = self.rows.get(ordinal);
-            let Some(width) = local::bounded_row_bytes(&columns, offset) else {
+            let Some((distinct, width)) =
+                local.intern_worker_row(&columns, offset, &self.name, &mut flow)?
+            else {
                 return Ok(None);
             };
-            let (distinct, _) = local.intern_row(&columns, offset, &self.name)?;
             local.locals.push(distinct);
             if retain {
                 local.note_retained(
@@ -195,8 +197,9 @@ pub(super) async fn intern_group(
         return Ok(None);
     }
     let mut fragments = fragments.into_iter().flatten().collect::<Vec<_>>();
+    let mut flow = local::LocalFlow::new(flow);
     for fragment in &mut fragments {
-        merge_fragment(intern, fragment, columns, budget.name, flow).await?;
+        merge_fragment(intern, fragment, columns, budget.name, &mut flow).await?;
     }
     Ok(Some(Group::new(fragments, payload, credit)))
 }
@@ -357,19 +360,22 @@ async fn merge_fragment(
     fragment: &mut Fragment,
     columns: &[LocalColumn<'_>],
     name: &str,
-    flow: &mut KeyFlow<'_, '_>,
+    flow: &mut local::LocalFlow<'_, '_, '_>,
 ) -> Result<()> {
     let base = u32::try_from(fragment.start).expect("group rows fit u32 ordinals");
     for distinct in 0..fragment.local.distinct {
         let ordinal = base + fragment.local.appearances[distinct];
         let offset = fragment.local.rows[distinct];
-        let global = intern.intern_hashed(
-            columns,
-            offset,
-            fragment.local.hashes[distinct],
-            ordinal,
-            name,
-        )?;
+        let global = intern
+            .merge_hashed(
+                columns,
+                offset,
+                fragment.local.hashes[distinct],
+                ordinal,
+                name,
+                flow,
+            )
+            .await?;
         fragment.local.posts.push(global);
         let global = global as usize;
         intern.retains[global] = intern.retains[global]
@@ -379,11 +385,7 @@ async fn merge_fragment(
         if first != u32::MAX {
             intern.first_retained[global] = intern.first_retained[global].min(base + first);
         }
-        flow.step(
-            1,
-            local::bounded_row_bytes(columns, offset).expect("bounded worker keys"),
-        )
-        .await?;
+        flow.step(1, 0).await?;
     }
     Ok(())
 }

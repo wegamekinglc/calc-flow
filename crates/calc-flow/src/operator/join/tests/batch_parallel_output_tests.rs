@@ -337,7 +337,7 @@ fn batch_parallel_output_sealed_dimension_funds_projected_probe_only_views() {
             "narrow production gate must count first"
         );
         assert!(
-            prepared.retained.is_empty(),
+            prepared.chunks.is_empty(),
             "sealed peer needs no new left state"
         );
         assert!(prepared.admitted.projection_is_view(0));

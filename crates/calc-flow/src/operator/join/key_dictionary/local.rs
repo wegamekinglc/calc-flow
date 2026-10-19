@@ -25,14 +25,14 @@ mod tests;
 /// Prepaid cooperation allowance, shared across hash, probe and equality.
 /// Refilling happens before work, so small operations amortize the async step
 /// while a long value or collision chain cannot outrun either quantum limit.
-struct LocalFlow<'a, 'c, 'j> {
+pub(super) struct LocalFlow<'a, 'c, 'j> {
     flow: &'a mut KeyFlow<'c, 'j>,
     visits: usize,
     bytes: usize,
 }
 
 impl<'a, 'c, 'j> LocalFlow<'a, 'c, 'j> {
-    fn new(flow: &'a mut KeyFlow<'c, 'j>) -> Self {
+    pub(super) fn new(flow: &'a mut KeyFlow<'c, 'j>) -> Self {
         Self {
             flow,
             visits: 0,
@@ -40,7 +40,7 @@ impl<'a, 'c, 'j> LocalFlow<'a, 'c, 'j> {
         }
     }
 
-    async fn step(&mut self, visits: usize, bytes: usize) -> Result<()> {
+    pub(super) async fn step(&mut self, visits: usize, bytes: usize) -> Result<()> {
         if !self.take(visits, bytes) {
             self.flow.step(COPY_VISITS, COPY_BYTES).await?;
             self.visits = COPY_VISITS - visits;
@@ -62,13 +62,22 @@ impl<'a, 'c, 'j> LocalFlow<'a, 'c, 'j> {
     }
 }
 
-struct WorkerFlow<'a> {
+pub(super) struct WorkerFlow<'a> {
     stop: &'a GatherStop,
     visits: usize,
     bytes: usize,
 }
 
-impl WorkerFlow<'_> {
+impl<'a> WorkerFlow<'a> {
+    pub(super) fn new(stop: &'a GatherStop) -> Result<Self> {
+        stop.check()?;
+        Ok(Self {
+            stop,
+            visits: 0,
+            bytes: 0,
+        })
+    }
+
     fn step(&mut self, visits: usize, bytes: usize) -> Result<()> {
         debug_assert!(visits <= COPY_VISITS && bytes <= COPY_BYTES);
         if self.visits + visits > COPY_VISITS || self.bytes + bytes > COPY_BYTES {
@@ -177,18 +186,13 @@ impl LocalIntern {
         columns: &[LocalColumn<'_>],
         offset: usize,
         name: &str,
-        stop: &GatherStop,
+        flow: &mut WorkerFlow<'_>,
     ) -> Result<Option<(u32, usize)>> {
-        stop.check()?;
-        let Some(width) =
-            bounded_row_bytes(columns, offset).filter(|_| columns.len() <= COPY_VISITS)
-        else {
+        if columns.len() > COPY_VISITS {
             return Ok(None);
-        };
-        let mut flow = WorkerFlow {
-            stop,
-            visits: 0,
-            bytes: 0,
+        }
+        let Some(width) = bounded_row_bytes(columns, offset) else {
+            return Ok(None);
         };
         let mut hash = 0x243F_6A88_85A3_08D3_u64;
         for column in columns {
@@ -198,8 +202,7 @@ impl LocalIntern {
             #[cfg(test)]
             super::super::typed_key::note(super::super::typed_key::KeyPhase::LocalHash, bytes);
         }
-        let local = self.intern_worker_hashed(hash, (offset, width), columns, name, &mut flow)?;
-        stop.check()?;
+        let local = self.intern_worker_hashed(hash, (offset, width), columns, name, flow)?;
         Ok(Some((local, width)))
     }
 
@@ -248,7 +251,7 @@ impl LocalIntern {
         hash: u64,
         appearance: u32,
         name: &str,
-        flow: &mut KeyFlow<'_, '_>,
+        flow: &mut LocalFlow<'_, '_, '_>,
     ) -> Result<u32> {
         let width = columns
             .iter()
@@ -258,14 +261,9 @@ impl LocalIntern {
             .ok_or_else(|| super::counter_overflow(name, "key_bytes"))?;
         let previous = self.distinct;
         let local = self
-            .intern_hashed(
-                hash,
-                (offset, width),
-                columns,
-                name,
-                &mut LocalFlow::new(flow),
-                |left, right| values_equal(columns, left, right),
-            )
+            .intern_hashed(hash, (offset, width), columns, name, flow, |left, right| {
+                values_equal(columns, left, right)
+            })
             .await?;
         if self.distinct > previous {
             self.appearances[local as usize] = appearance;

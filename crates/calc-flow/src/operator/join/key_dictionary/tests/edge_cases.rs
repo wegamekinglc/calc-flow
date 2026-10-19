@@ -459,6 +459,106 @@ fn scaling_keys_dense_capture_uses_range_without_per_row_offsets() {
 }
 
 #[test]
+fn scaling_keys_dense_projection_preserves_group_view_coordinates() {
+    use crate::operator::join::columnar::RowPayload;
+    use datafusion::arrow::{
+        array::UInt32Array,
+        compute::{concat_batches, take},
+    };
+
+    let service = TestService::new(4, 1).unwrap();
+    let runtime = runtime();
+    runtime.block_on(async {
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 30));
+        let master = MemoryConsumer::new("projected-key-selection").register(&pool);
+        let source = sparse_source();
+        let mut operator = sparse_operator(&source, &pool);
+        let job = job(&service);
+        let context = sparse_context(&job, false);
+        let plan = operator.begin_batch("left", &source).unwrap();
+        let mut bundle = operator.admission_bundle(&plan, &source).unwrap();
+        operator
+            .admit_batch_records("left", &source, &plan, &context, &mut bundle)
+            .await
+            .unwrap();
+        bundle.finish("parallel-keys").unwrap();
+        let group = (&bundle.admitted as &dyn AdmittedRows)
+            .groups()
+            .next()
+            .unwrap();
+        assert!(group.len() >= 64_000);
+        assert_eq!(group.dense_key_range(), None);
+        let source_indices = group.source_indices().collect::<Vec<_>>();
+        let positions = group
+            .key_offsets()
+            .map(|(offset, _)| u32::try_from(offset).unwrap())
+            .collect::<UInt32Array>();
+        let expected = Dictionary::default()
+            .prepare(
+                &bundle.admitted,
+                &[0],
+                master.new_empty(),
+                None,
+                "parallel-keys",
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let record = &source.table_payload().unwrap().batches()[0];
+        let selected = RecordBatch::try_new(
+            record.schema(),
+            record
+                .columns()
+                .iter()
+                .map(|column| take(column.as_ref(), &positions, None).unwrap())
+                .collect(),
+        )
+        .unwrap();
+        let padded = concat_batches(&record.schema(), &[record.slice(0, 7), selected]).unwrap();
+        bundle.admitted.replace(
+            0,
+            RowPayload::Rowed {
+                parent: Arc::new(padded),
+                row: 7,
+            },
+        );
+        let rows = &bundle.admitted as &dyn AdmittedRows;
+        let group = rows.groups().next().unwrap();
+        assert_eq!(group.dense_key_range(), Some(7..7 + rows.len()));
+        assert_eq!(group.source_indices().collect::<Vec<_>>(), source_indices);
+        let mut cursor = rows.cursor();
+        for ordinal in [0, 63, 64, rows.len() - 1] {
+            let row = cursor.row(ordinal);
+            assert_eq!(row.record.offset(), 7 + ordinal);
+            assert_eq!(row.row_id, group.row(ordinal).row_id);
+            assert_eq!(row.event_time, group.row(ordinal).event_time);
+            assert_eq!(row.retain, group.row(ordinal).retain);
+        }
+        parallel::reset_owner_work();
+        let actual = Dictionary::default()
+            .prepare(
+                rows,
+                &[0],
+                master.new_empty(),
+                Some(&context),
+                "parallel-keys",
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot(&actual), snapshot(&expected));
+        assert_eq!(actual.frequencies, expected.frequencies);
+        assert_eq!(parallel::owner_work().captured_offsets, 0);
+        drop((actual, expected, bundle, operator));
+        assert!(job.gather_owner().close_and_drain().await.is_empty());
+        drop((master, job));
+        assert_eq!(pool.reserved(), 0);
+    });
+    drop(runtime);
+    service.shutdown();
+}
+
+#[test]
 fn scaling_keys_final_remap_runs_on_workers_with_distinct_only_owner_merge() {
     let service = TestService::new(4, 1).unwrap();
     let runtime = runtime();
