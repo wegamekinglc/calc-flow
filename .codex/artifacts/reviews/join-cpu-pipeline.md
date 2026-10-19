@@ -4,17 +4,18 @@
 
 **Feature base:** `80d98ae089c8a317c2a884967b83728c94cb87ff`
 
-**Reviewed source:** frozen working tree over the feature base; the implementation
-owner will bind the final verdict to the resulting commit.
+**Reviewed and measured source:**
+`61aab0e571800df8e8a18ad2244993d0929f5247`.
 
 **Files:** 44 implementation, test, specification and documentation files, plus
 this review.
 
-This review uses the implementation owner's isolated worktree, which remains
-available for the pending build and measurement work. The reviewer changed only
-this report and ran no native compilation, product tests or measurements. No PR,
-check-run snapshot or prior GitHub review applies to this working diff. No remote
-review or merge action was taken.
+The source review used the implementation owner's isolated worktree, retained
+for subsequent build and measurement work. The reviewer changed only this
+report and ran no native compilation, product tests or measurements. No PR,
+check-run snapshot or prior GitHub review applied at that handoff. No remote
+review or merge action was taken. The follow-up below records the completed
+installed-wheel checks and measurements without changing the approved source.
 
 ## Summary
 
@@ -131,8 +132,9 @@ frozen implementation:
   Trace retrieval requires completed, naturally ended work with settled spans;
   thread CPU attribution is confined to synchronous worker spans.
 
-All requested focused verification conditions have passed. Required CI,
-coverage and performance acceptance remain separate from this source review.
+All requested focused verification conditions have passed. Required CI and
+coverage remain uncertified. The measurement follow-up below records the
+per-configuration performance conclusions separately from source approval.
 
 ## Style Issues
 
@@ -172,15 +174,80 @@ and key-owner metadata; fragmented input can still have row-scale metadata.
 Interval append coordinates, expiration preparation and index updates remain
 on the owner. The bounded/custom cold-service fallback is documented.
 
-The new documentation makes no measured-speedup claim. Candidate acquisition
-has not begun at this handoff. The fixed five-configuration measurement
-contract and separate diagnostic provenance remain in the specification;
-neither default-release speedup nor CPU-scaling acceptance is established here.
-Changed Markdown structure, links, whitespace and final newlines were checked.
+At the original source-review handoff, candidate acquisition had not begun and
+the new guides made no measured-speedup claim. The fixed five-configuration
+contract and separate diagnostic provenance remain in the specification. The
+completed conclusions are now recorded in the follow-up below and the
+[performance report](../analysis/join-cpu-pipeline.md). Changed Markdown
+structure, links, whitespace and final newlines were checked.
 
 ## Verdict
 
-**Approve** the frozen source and its focused verification. No blocking source,
-style or documentation finding remains. Candidate performance acceptance,
-required CI and coverage remain uncertified. This report does not declare the
+**Approve** source commit `61aab0e571800df8e8a18ad2244993d0929f5247` and its focused
+verification. No blocking source, style or documentation finding remains.
+Required CI and coverage remain uncertified. This report does not declare the
 branch merge-ready or authorize a merge.
+
+## Installed-wheel and measurement follow-up
+
+This narrow follow-up reviews the completed evidence and
+[final performance report](../analysis/join-cpu-pipeline.md). It leaves source
+approval bound to `61aab0e571800df8e8a18ad2244993d0929f5247`. The subsequent
+analysis/review documentation commit is not a new build or measurement source.
+No product source, benchmark, native artifact or measurement was changed by
+this review.
+
+The final installed default-release wheel passed **seven Python tests** from
+`test_symbolic_stream_join_acceptance.py` and `test_stream_budget_defaults.py`
+(`installed-candidate.log`). `installed-candidate-proof.json` records successful
+execution, the sealed import path and absence of diagnostic methods. Its native
+SHA-256 matches the formal candidate build:
+`1c1ad9934bdbb229976ff4d0d283e751d5ce65dd80fdf2e6437014a54dfe2fca`.
+This is focused installed-wheel evidence; the full Python suite, required CI
+and combined coverage gate remain unverified.
+
+The reviewer checked `formal-offline-audit.json`,
+`diagnostic-offline-audit.json`, `diagnostic-analysis.json`, the installed-wheel
+proof and log, and the report's interpretation of the maintained comparison
+function. All five declared configurations completed two rounds of ten pairs:
+**200 formal observations and 20 excluded warmups**. The formal baseline is
+`80d98ae089c8a317c2a884967b83728c94cb87ff`; default and diagnostic candidate builds
+both identify the approved source, with separate native hashes and features.
+
+| Configuration             | P50 time change | Maintained verdict |
+|---------------------------|-----------------|--------------------|
+| ASOF 1,000,000 / 1 CPU    | +6.25%          | Inconclusive       |
+| ASOF 1,000,000 / 32 CPU   | -38.53%         | Improved           |
+| Interval 262,144 / 1 CPU  | +2.01%          | Inconclusive       |
+| Interval 262,144 / 8 CPU  | -19.49%         | Improved           |
+| Interval 262,144 / 32 CPU | -8.59%          | Inconclusive       |
+
+Negative changes mean shorter time relative to the baseline. The two improved
+cases satisfy the maintained rule in both rounds. The other three remain
+inconclusive: neither their pooled P50 changes nor the absence of a confirmed
+regression establishes equivalence or no regression. Nearest-rank descriptive
+P95 and the maintained paired intervals retain their separate definitions.
+Cross-CPU ratios are descriptive because those configurations were not paired.
+
+The single 32-CPU profile per version and scenario supports local parallel
+execution, not sustained use of 26 or 28 executing cores. The report correctly
+distinguishes peak instrumented worker threads from average process CPU use,
+and overlapping worker sums from parent-stage wall time. It does not attribute
+the ASOF improvement to copied row gathering, which this workload did not
+exercise, or infer the cause of interval's 8-to-32-CPU difference from a single
+32-CPU profile. The interval conclusion is limited to the observed remaining
+wall time rather than a proved scaling cause.
+
+The diagnostic audit preserves four accepted warmups, four observations and
+one failed warmup: **nine actual diagnostic calls**. The failed interval warmup
+retains its error report and process output; its complete raw trace was not
+saved before validation failed. The technical repair and its distinct baseline
+instrumentation build remain explicit and do not alter formal statistics.
+Total acquisition was **126.373 seconds**, including that failed attempt,
+within the declared 600-second budget; builds are accounted for separately.
+The raw evidence is retained at the local paths linked by the analysis report.
+
+**Documentation verdict: Approve.** The final analysis agrees with the audited
+evidence and states its statistical, diagnostic and coverage limits. Source
+approval remains unchanged; there is no blanket performance-pass or
+merge-ready claim.
