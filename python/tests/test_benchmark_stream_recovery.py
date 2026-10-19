@@ -93,19 +93,16 @@ def test_periodic_manual_checkpoint_cancel_restore_and_two_source_eof(
             await _wait_for(
                 lambda: sources[first].position == len(sources[first].events)
             )
+            await _wait_for(
+                lambda: job.status()["operators"][first.split(".")[0]]["ended"]
+            )
             assert job.status()["state"] != "completed"
             assert not task.done()
+            await _require_mixed_checkpoint(job, trigger, tmp_path, first)
             release.set()
             result = await asyncio.wait_for(task, 5)
             assert engine.validate(result[0])["passed"]
-            assert job.status()["state"] == "completed"
-            assert all(
-                source.position == len(source.events) for source in sources.values()
-            )
-            assert (
-                _require_terminal_manifest(tmp_path)
-                == job.status()["checkpoint"]["last_completed_epoch"]
-            )
+            _require_completed(job, sources, tmp_path)
         finally:
             release.set()
             task.cancel()
@@ -117,6 +114,26 @@ def test_periodic_manual_checkpoint_cancel_restore_and_two_source_eof(
     finally:
         engine.close()
     assert epochs and all(manual > periodic >= 1 for periodic, manual in epochs)
+
+
+async def _require_mixed_checkpoint(job, trigger, root, first):
+    epoch = await asyncio.wait_for(trigger(job), 5)
+    mixed = json.loads(next(root.rglob(f"manifest-{epoch:020}.json")).read_text())
+    assert mixed["sources"][first]["ended"]
+    assert all(
+        not source["ended"]
+        for name, source in mixed["sources"].items()
+        if name != first
+    )
+
+
+def _require_completed(job, sources, root):
+    assert job.status()["state"] == "completed"
+    assert all(source.position == len(source.events) for source in sources.values())
+    assert (
+        _require_terminal_manifest(root)
+        == job.status()["checkpoint"]["last_completed_epoch"]
+    )
 
 
 def _require_terminal_manifest(root):

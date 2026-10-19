@@ -92,6 +92,7 @@ pub(crate) struct OperatorTerminalPort {
 }
 
 pub(crate) enum OperatorCheckpointCommand {
+    Capture(Epoch),
     Terminal(Epoch),
 }
 
@@ -1082,7 +1083,7 @@ async fn run_operator_loop(
             .values()
             .all(|ingress| ingress.saw_explicit_eof)
         {
-            finish_operator(inputs, &input_progress).await?;
+            finish_operator(inputs, &input_progress, barrier_alignment.completed_epoch).await?;
             if cooperation != OperatorCooperation::Disabled {
                 tokio::task::yield_now().await;
             }
@@ -1136,6 +1137,7 @@ async fn run_operator_loop(
 async fn finish_operator(
     inputs: &mut OperatorTaskInputs,
     input_progress: &OperatorInputProgress,
+    completed_epoch: Option<Epoch>,
 ) -> Result<()> {
     let work = inputs
         .entity_work
@@ -1198,12 +1200,13 @@ async fn finish_operator(
     )
     .await?;
     inputs.progress.mark_ended();
-    complete_terminal_checkpoint(inputs, input_progress).await
+    complete_terminal_checkpoint(inputs, input_progress, completed_epoch).await
 }
 
 async fn complete_terminal_checkpoint(
     inputs: &mut OperatorTaskInputs,
     input_progress: &OperatorInputProgress,
+    mut completed_epoch: Option<Epoch>,
 ) -> Result<()> {
     let Some(terminal) = inputs
         .checkpoint
@@ -1222,21 +1225,59 @@ async fn complete_terminal_checkpoint(
             }
         })?,
     }
-    let command = tokio::select! {
+    while let Some(command) = receive_ended_checkpoint_command(inputs, &cancellation).await? {
+        if capture_ended_checkpoint(inputs, input_progress, command, &mut completed_epoch).await? {
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
+async fn receive_ended_checkpoint_command(
+    inputs: &mut OperatorTaskInputs,
+    cancellation: &CancellationToken,
+) -> Result<Option<OperatorCheckpointCommand>> {
+    let terminal = inputs
+        .checkpoint
+        .as_mut()
+        .and_then(|port| port.terminal.as_mut())
+        .expect("ended checkpoint owns its terminal port");
+    tokio::select! {
         biased;
-        () = cancellation.cancelled() => return Ok(()),
-        command = terminal.commands.recv() => command,
+        () = cancellation.cancelled() => Ok(None),
+        command = terminal.commands.recv() => command.map(Some).ok_or_else(|| CalcFlowError::Internal {
+            message: format!("operator {:?} terminal checkpoint command channel closed", inputs.node_id),
+        }),
+    }
+}
+
+async fn capture_ended_checkpoint(
+    inputs: &mut OperatorTaskInputs,
+    input_progress: &OperatorInputProgress,
+    command: OperatorCheckpointCommand,
+    completed_epoch: &mut Option<Epoch>,
+) -> Result<bool> {
+    let (epoch, terminal) = match command {
+        // Readiness may overtake a real barrier ACK already in the bounded
+        // channel. Keep that original cut instead of recapturing post-EOF state.
+        OperatorCheckpointCommand::Capture(epoch) if *completed_epoch == Some(epoch) => {
+            return Ok(false);
+        }
+        OperatorCheckpointCommand::Capture(epoch) => (epoch, false),
+        OperatorCheckpointCommand::Terminal(epoch) => (epoch, true),
     };
-    let Some(OperatorCheckpointCommand::Terminal(epoch)) = command else {
-        return Err(CalcFlowError::Internal {
+    if completed_epoch.is_some_and(|completed| epoch <= completed) {
+        return Err(CalcFlowError::CheckpointMismatch {
             message: format!(
-                "operator {:?} terminal checkpoint command channel closed",
+                "operator {:?} ended checkpoint epoch regressed",
                 inputs.node_id
             ),
         });
-    };
+    }
     let ack = capture_operator_checkpoint(inputs, input_progress, epoch).await?;
-    send_operator_checkpoint_ack(inputs, ack).await
+    send_operator_checkpoint_ack(inputs, ack).await?;
+    *completed_epoch = Some(epoch);
+    Ok(terminal)
 }
 
 async fn receive_operator_message_observing_pending(
@@ -2576,6 +2617,7 @@ pub(super) mod tests {
     mod asof_tests;
     #[cfg(feature = "benchmark-internals")]
     mod dispatch_trace_tests;
+    mod ended_checkpoint_tests;
     mod error_propagation_tests;
     mod ingress_admission_tests;
     mod join_checkpoint_owner_tests;
