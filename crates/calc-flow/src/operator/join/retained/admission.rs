@@ -1,9 +1,12 @@
 //! Preparation borrows the existing native key-ID column. Only selection and
 //! logical charges survive until the owned chunks have been filled.
 
+use std::{ops::Range, sync::Arc};
+
 use super::super::{
     admission_charge::PayloadCharges,
     admitted::{AdmittedGroup, AdmittedRef, AdmittedRows, GroupIter},
+    columnar::{COPY_BYTES, COPY_VISITS},
     native_lookup::NativeKeys,
 };
 use super::{
@@ -12,15 +15,63 @@ use super::{
 };
 
 pub(in crate::operator::join) struct ColumnarPlan {
+    single: Selection,
+    parts: Vec<Selection>,
+    pub(in crate::operator::join) bytes: u64,
+}
+
+struct Selection {
     positions: Vec<usize>,
     charges: Vec<u64>,
-    pub(in crate::operator::join) bytes: u64,
-    _credit: Option<MemoryReservation>,
+    end: usize,
+    bytes: u64,
+    _credit: Option<Arc<MemoryReservation>>,
+    controls: Option<Arc<MemoryReservation>>,
+}
+
+impl Selection {
+    fn new(count: usize, credit: Option<Arc<MemoryReservation>>) -> Self {
+        Self {
+            positions: Vec::with_capacity(count),
+            charges: Vec::with_capacity(count),
+            end: 0,
+            bytes: 0,
+            _credit: credit,
+            controls: None,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct SelectionIter<'a> {
+    parts: &'a [Selection],
+    part: usize,
+    offset: usize,
+    remaining: usize,
+}
+
+impl Iterator for SelectionIter<'_> {
+    type Item = (usize, u64);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        while self.offset == self.parts[self.part].positions.len() {
+            self.part += 1;
+            self.offset = 0;
+        }
+        let part = &self.parts[self.part];
+        let row = (part.positions[self.offset], part.charges[self.offset]);
+        self.offset += 1;
+        self.remaining -= 1;
+        Some(row)
+    }
 }
 
 impl ColumnarPlan {
     pub(in crate::operator::join) fn len(&self) -> usize {
-        self.positions.len()
+        self.selections().last().map_or(0, |part| part.end)
     }
 
     pub(in crate::operator::join) async fn prepare(
@@ -59,24 +110,87 @@ impl ColumnarPlan {
             }
             base += group.len();
         }
+        plan.single.end = plan.single.positions.len();
         Ok(plan)
     }
-    fn new(count: usize, master: &MemoryReservation, name: &str) -> Result<Self> {
+
+    fn selections(&self) -> &[Selection] {
+        if self.parts.is_empty() {
+            std::slice::from_ref(&self.single)
+        } else {
+            &self.parts
+        }
+    }
+
+    fn range(&self, range: Range<usize>) -> SelectionIter<'_> {
+        let parts = self.selections();
+        let part = parts.partition_point(|part| part.end <= range.start);
+        let base = if part == 0 { 0 } else { parts[part - 1].end };
+        SelectionIter {
+            parts,
+            part,
+            offset: range.start - base,
+            remaining: range.len(),
+        }
+    }
+
+    fn reserve_credit(
+        count: usize,
+        master: &MemoryReservation,
+        name: &str,
+    ) -> Result<Option<Arc<MemoryReservation>>> {
         let bytes = count
             .checked_mul(size_of::<usize>() + size_of::<u64>())
             .and_then(|bytes| bytes.checked_add(64))
             .ok_or_else(|| super::super::native_lookup::scratch_error("Join retained selection"))?;
-        let credit = if count == 0 {
-            None
+        if count == 0 {
+            Ok(None)
         } else {
-            grant(master, bytes, name, false)?
-        };
+            grant(master, bytes, name, false).map(|credit| credit.map(Arc::new))
+        }
+    }
+
+    fn new(count: usize, master: &MemoryReservation, name: &str) -> Result<Self> {
+        let credit = Self::reserve_credit(count, master, name)?;
         Ok(Self {
-            positions: Vec::with_capacity(count),
-            charges: Vec::with_capacity(count),
+            single: Selection::new(count, credit),
+            parts: Vec::new(),
             bytes: 0,
-            _credit: credit,
         })
+    }
+
+    async fn into_serial(
+        self,
+        master: &MemoryReservation,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<Self> {
+        if self.parts.is_empty() {
+            return Ok(self);
+        }
+        context.check_cancelled()?;
+        let mut serial = Self::new(self.len(), master, context.operator_id())?;
+        let mut quantum = super::super::columnar::Quantum::default();
+        let width = size_of::<usize>() + size_of::<u64>();
+        let copy_rows = COPY_VISITS.min(COPY_BYTES / width);
+        // Preserve the frozen logical charges after payload projection.
+        for part in &self.parts {
+            for (positions, charges) in part
+                .positions
+                .chunks(copy_rows)
+                .zip(part.charges.chunks(copy_rows))
+            {
+                quantum
+                    .step(context, positions.len(), positions.len() * width)
+                    .await?;
+                serial.single.positions.extend_from_slice(positions);
+                serial.single.charges.extend_from_slice(charges);
+            }
+        }
+        serial.single.end = self.len();
+        serial.bytes = self.bytes;
+        drop(self);
+        context.check_cancelled()?;
+        Ok(serial)
     }
 
     async fn append_block(
@@ -103,8 +217,8 @@ impl ColumnarPlan {
                 keys.key(base + index).len(),
                 context.operator_id(),
             )?;
-            self.positions.push(base + index);
-            self.charges.push(charge);
+            self.single.positions.push(base + index);
+            self.single.charges.push(charge);
             self.bytes = self.bytes.checked_add(charge).ok_or_else(|| {
                 super::super::counter_overflow(context.operator_id(), "state bytes")
             })?;
@@ -132,13 +246,10 @@ impl StateRows {
         let mut group = groups.next();
         let mut group_base = 0;
         let mut quantum = super::super::columnar::Quantum::default();
-        for (block, charges) in plan
-            .positions
-            .chunks(CHUNK_ROWS)
-            .zip(plan.charges.chunks(CHUNK_ROWS))
-        {
-            let mut chunk = reserve_column_chunk(rows, keys, block, master, context)?;
-            for (&position, &charge) in block.iter().zip(charges) {
+        for start in (0..plan.len()).step_by(CHUNK_ROWS) {
+            let block = plan.range(start..(start + CHUNK_ROWS).min(plan.len()));
+            let mut chunk = reserve_column_chunk(rows, keys, block.clone(), master, context)?;
+            for (position, charge) in block {
                 let row = bound_row(position, &mut group, &mut group_base, &mut groups);
                 quantum.step(context, 1, 128).await?;
                 chunk.push_columns(
@@ -163,33 +274,45 @@ impl StateRows {
 fn reserve_column_chunk(
     rows: &dyn AdmittedRows,
     keys: &NativeKeys,
-    block: &[usize],
+    block: SelectionIter<'_>,
     master: &MemoryReservation,
     context: &StreamOperatorContext<'_>,
 ) -> Result<Chunk> {
+    let count = block.remaining;
     let sources = selected_sources(rows, block);
-    let key_count = block.len().min(keys.keys.len());
-    let bytes = chunk_base_bytes(block.len(), sources, key_count)
+    let key_count = count.min(keys.keys.len());
+    let bytes = chunk_base_bytes(count, sources, key_count)
         .ok_or_else(|| super::super::native_lookup::scratch_error("Join state chunks"))?;
     let credit = grant(master, bytes, context.operator_id(), false)?;
-    Ok(Chunk::reserved_keys(
-        block.len(),
-        sources,
-        key_count,
-        credit,
-    ))
+    Ok(Chunk::reserved_keys(count, sources, key_count, credit))
 }
 
-fn selected_sources(rows: &dyn AdmittedRows, block: &[usize]) -> usize {
+fn selected_sources(rows: &dyn AdmittedRows, mut block: SelectionIter<'_>) -> usize {
     let mut sources = 0;
-    let mut end = 0;
-    for &position in block {
-        if position >= end {
-            sources += 1;
-            end = rows.group_end(position);
-        }
+    while let Some((position, _)) = block.next() {
+        sources += 1;
+        block.skip_before(rows.group_end(position));
     }
     sources
+}
+
+impl SelectionIter<'_> {
+    fn skip_before(&mut self, position: usize) {
+        while self.remaining > 0 {
+            let part = &self.parts[self.part];
+            let end = part.positions.len().min(self.offset + self.remaining);
+            let skipped =
+                part.positions[self.offset..end].partition_point(|value| *value < position);
+            self.offset += skipped;
+            self.remaining -= skipped;
+            if self.offset == part.positions.len() && self.remaining > 0 {
+                self.part += 1;
+                self.offset = 0;
+            } else {
+                break;
+            }
+        }
+    }
 }
 
 fn bound_row<'a>(
@@ -206,3 +329,5 @@ fn bound_row<'a>(
         .expect("selected admission group")
         .row(position - *base)
 }
+
+pub(super) mod parallel;

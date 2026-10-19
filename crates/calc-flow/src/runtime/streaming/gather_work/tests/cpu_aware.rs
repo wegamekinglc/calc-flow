@@ -401,3 +401,266 @@ fn cpu_aware_closed_home_rejects_registered_launch_and_drains_credit() {
     service.shutdown();
     assert_eq!(pool.reserved(), 0);
 }
+
+struct SingleColumnRows;
+
+impl GatherPlan for SingleColumnRows {
+    fn column_count(&self) -> usize {
+        1
+    }
+    fn parallelism(&self) -> usize {
+        16
+    }
+    fn row_gather(&self) -> crate::Result<Option<RowGather>> {
+        Ok(Some(RowGather {
+            ordinal: 0,
+            rows: 65_536,
+            width: 8,
+            sources: 1,
+        }))
+    }
+    fn gather(&self, _ordinal: usize, _stop: &GatherStop) -> crate::Result<ArrayRef> {
+        unreachable!("planning test")
+    }
+}
+
+#[test]
+fn cpu_pipeline_single_column_uses_row_dispatch_at_job_capacity() {
+    for capacity in [1, 2, 8, 32] {
+        let work = super::super::ColumnsWork::new(Arc::new(SingleColumnRows), capacity).unwrap();
+        assert_eq!(work.workers, capacity.min(16));
+        assert_eq!(work.rows.is_some(), capacity > 1);
+    }
+}
+
+#[test]
+fn cpu_pipeline_row_scratch_rejection_retries_funded_column_work() {
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(128 << 10));
+    let credit = MemoryConsumer::new("optional-row-scratch").register(&pool);
+    let work = super::super::ColumnsWork::new(Arc::new(SingleColumnRows), 8).unwrap();
+    let mut work = Some(work);
+    let funded = super::super::fund_work(
+        &mut work,
+        &credit,
+        4,
+        true,
+        None,
+        &GatherOperatorId::new("asof".into()),
+    );
+    assert!(
+        funded.is_ok(),
+        "optional row concat scratch must not reject mandatory column work"
+    );
+    let funded = funded.unwrap();
+    assert_eq!(funded.work.units(), 1);
+    drop((funded, credit));
+    assert_eq!(pool.reserved(), 0);
+}
+
+#[cfg(feature = "benchmark-internals")]
+struct OperatorNameWork;
+
+#[cfg(feature = "benchmark-internals")]
+impl super::super::OwnedCpuWork for OperatorNameWork {
+    type Output = String;
+
+    fn run(self, stop: &GatherStop) -> crate::Result<String> {
+        Ok(stop.join_cpu_operator().to_owned())
+    }
+}
+
+#[cfg(feature = "benchmark-internals")]
+#[test]
+fn cpu_pipeline_worker_trace_preserves_raw_and_explicit_operator_names() {
+    let service = TestService::new(1, 1).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let context = job(914, &service);
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1_048_576));
+    runtime.block_on(async {
+        for (operator, expected) in [
+            (
+                GatherOperatorId::new("operator:legal-interval-name".into()),
+                "operator:legal-interval-name",
+            ),
+            (
+                GatherOperatorId::new("operator:asof".into()).with_join_cpu_name("asof".into()),
+                "asof",
+            ),
+        ] {
+            let scope = context.gather_owner().client(operator).scope().unwrap();
+            let output = scope
+                .submit_work(
+                    OperatorNameWork,
+                    credit(&pool),
+                    GatherStop::from_job(&context),
+                )
+                .await
+                .unwrap()
+                .finish()
+                .await
+                .unwrap();
+            assert_eq!(output.value, expected);
+        }
+        assert!(context.gather_owner().close_and_drain().await.is_empty());
+    });
+    drop((context, runtime));
+    service.shutdown();
+    assert_eq!(pool.reserved(), 0);
+}
+
+#[cfg(feature = "benchmark-internals")]
+#[test]
+fn cpu_pipeline_observed_worker_trace_preserves_raw_and_explicit_operator_names() {
+    let service = TestService::new(1, 1).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let context = job(916, &service);
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1_048_576));
+    let names = runtime.block_on(async {
+        let mut names = Vec::new();
+        for operator in [
+            GatherOperatorId::new("operator:legal-interval-name".into()),
+            GatherOperatorId::new("operator:asof".into()).with_join_cpu_name("asof".into()),
+        ] {
+            let scope = context.gather_owner().client(operator).scope().unwrap();
+            let mut observer = None;
+            let output = scope
+                .submit_observed_work(
+                    OperatorNameWork,
+                    credit(&pool),
+                    GatherStop::from_job(&context),
+                    context.gather_owner().retain_retirement().unwrap(),
+                    &mut observer,
+                )
+                .await
+                .unwrap()
+                .finish()
+                .await
+                .unwrap();
+            output
+                .install(|name| {
+                    names.push(name);
+                    Ok(())
+                })
+                .unwrap();
+            observer
+                .unwrap()
+                .wait(&GatherStop::from_job(&context))
+                .await
+                .unwrap();
+        }
+        assert!(context.gather_owner().close_and_drain().await.is_empty());
+        names
+    });
+    drop((context, runtime));
+    service.shutdown();
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(names, ["operator:legal-interval-name", "asof"]);
+}
+
+struct ExecutingSingleColumnRows {
+    entered: std::sync::mpsc::Sender<Range<usize>>,
+    release: Arc<TypedGate>,
+}
+
+impl GatherPlan for ExecutingSingleColumnRows {
+    fn column_count(&self) -> usize {
+        1
+    }
+    fn parallelism(&self) -> usize {
+        16
+    }
+    fn row_gather(&self) -> crate::Result<Option<RowGather>> {
+        SingleColumnRows.row_gather()
+    }
+    fn gather(&self, _ordinal: usize, _stop: &GatherStop) -> crate::Result<ArrayRef> {
+        Err(super::super::internal(
+            "single-column execution must dispatch row parts",
+        ))
+    }
+    fn gather_range(
+        &self,
+        ordinal: usize,
+        range: Range<usize>,
+        stop: &GatherStop,
+    ) -> crate::Result<ArrayRef> {
+        assert_eq!(ordinal, 0);
+        self.entered.send(range.clone()).unwrap();
+        self.release.wait();
+        stop.check()?;
+        Ok(Arc::new(Int64Array::from_iter_values(
+            range.map(|row| i64::try_from(row).unwrap()),
+        )))
+    }
+}
+
+#[test]
+fn cpu_pipeline_single_column_row_workers_overlap_and_reassemble_exactly() {
+    let service = TestService::new(4, 1).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let context = job(915, &service);
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(16 << 20));
+    let release = TypedGateRelease(Arc::new(TypedGate::default()));
+    let (entered, receiver) = std::sync::mpsc::channel();
+    let scope = context
+        .gather_owner()
+        .client(GatherOperatorId::new("single-column".into()))
+        .scope()
+        .unwrap();
+    let ticket = runtime
+        .block_on(scope.submit(
+            Arc::new(ExecutingSingleColumnRows {
+                entered,
+                release: release.0.clone(),
+            }),
+            credit(&pool),
+            GatherStop::from_job(&context),
+        ))
+        .unwrap();
+    let mut ranges = Vec::new();
+    for _ in 0..4 {
+        match receiver.recv_timeout(Duration::from_secs(2)) {
+            Ok(range) => ranges.push(range),
+            Err(_) => break,
+        }
+    }
+    drop(release);
+    let output = runtime.block_on(ticket.finish()).unwrap();
+    assert_eq!(output.value.len(), 1);
+    assert_eq!(
+        output.value[0]
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .values()
+            .as_ref(),
+        (0..65_536).collect::<Vec<i64>>()
+    );
+    drop(output);
+    assert!(
+        runtime
+            .block_on(context.gather_owner().close_and_drain())
+            .is_empty()
+    );
+    drop((scope, context, runtime));
+    service.shutdown();
+    assert_eq!(pool.reserved(), 0);
+    ranges.sort_unstable_by_key(|range| range.start);
+    assert_eq!(
+        ranges.len(),
+        4,
+        "single-column row work did not overlap at CPU capacity"
+    );
+    assert_eq!(
+        ranges.into_iter().flatten().collect::<Vec<_>>(),
+        (0..65_536).collect::<Vec<_>>()
+    );
+}

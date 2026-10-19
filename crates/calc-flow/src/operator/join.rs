@@ -4,6 +4,9 @@ mod tests {
     mod columnar_admission_tests;
     mod columnar_charge_tests;
     mod complete_expiry_tests;
+    mod cpu_pipeline_budget_tests;
+    mod cpu_pipeline_chunk_tests;
+    mod cpu_pipeline_tests;
     mod expiration_heap_tests;
     mod ingress_pack_tests;
     mod lazy_delta_tests;
@@ -2261,7 +2264,7 @@ use datafusion::arrow::{
     ipc::reader::StreamReader,
     record_batch::RecordBatch,
 };
-use datafusion::execution::memory_pool::MemoryReservation;
+use datafusion::execution::memory_pool::{MemoryReservation, UnboundedMemoryPool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::Value;
@@ -3828,6 +3831,12 @@ impl StreamJoinOperator {
         batch: &Batch,
         context: &StreamOperatorContext<'_>,
     ) -> Result<PreparedJoinBatch> {
+        #[cfg(feature = "benchmark-internals")]
+        let _phase =
+            context
+                .job()
+                .join_cpu_trace()
+                .stage(&self.name, "prepare_batch", batch.num_rows());
         let plan = self.begin_batch(ingress, batch)?;
         let mut bundle = self.admission_bundle(&plan, batch)?;
         let charges = self
@@ -3869,15 +3878,32 @@ impl StreamJoinOperator {
         admitted_charges: Option<Vec<u64>>,
         context: &StreamOperatorContext<'_>,
     ) -> Result<PreparedJoinBatch> {
+        #[cfg(feature = "benchmark-internals")]
+        let _phase = context.job().join_cpu_trace().stage(
+            &self.name,
+            "state_prepare",
+            bundle.admitted.len(),
+        );
         bundle.admitted.prepare_retained_parents();
         let legacy_key_references = matches.keys.is_none();
-        let chunks = if let Some(keys) = &matches.keys {
+        let chunks = if matches.keys.is_some() {
+            let reuse_only = !self
+                .runtime
+                .runtime()?
+                .incremental_memory_pool()
+                .is::<UnboundedMemoryPool>();
             let master = self
                 .runtime
                 .runtime()?
                 .incremental_reservation("stream-join-state-chunks");
-            let retained =
-                retained::ColumnarPlan::prepare(&bundle.admitted, keys, &master, context).await?;
+            let retained = retained::ColumnarPlan::prepare_owned(
+                &mut bundle.admitted,
+                &mut matches.keys,
+                &master,
+                reuse_only,
+                context,
+            )
+            .await?;
             self.validate_state_totals(plan.incoming_is_left, retained.len(), retained.bytes)?;
             self.project_admitted_payloads(&mut bundle.admitted, plan.port_index, context)
                 .await?;
@@ -3887,7 +3913,14 @@ impl StreamJoinOperator {
                 &self.state.right
             };
             current
-                .prepare_columns(&bundle.admitted, keys, &retained, &master, context)
+                .prepare_columns_owned(
+                    &mut bundle.admitted,
+                    &mut matches.keys,
+                    retained,
+                    &master,
+                    reuse_only,
+                    context,
+                )
                 .await?
         } else {
             let mut retained = retained_rows(
@@ -5000,6 +5033,12 @@ impl StreamJoinOperator {
         context: &StreamOperatorContext<'_>,
     ) -> Result<(PreparedJoinBatch, expiration::AppendPlan)> {
         let mut prepared = self.prepare_batch(ingress, batch, context).await?;
+        #[cfg(feature = "benchmark-internals")]
+        let _phase = context.job().join_cpu_trace().stage(
+            &self.name,
+            "append_prepare",
+            prepared.admitted.len(),
+        );
         let master = self
             .runtime
             .runtime()?
@@ -5034,15 +5073,29 @@ impl StreamJoinOperator {
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
+        #[cfg(feature = "benchmark-internals")]
+        let _phase = context.job().join_cpu_trace().stage(
+            &self.name,
+            "finish_data",
+            prepared.admitted.len(),
+        );
         self.finish_morsels(&mut prepared, context).await?;
         let emitted = self.emit_prepared(&prepared, context, output).await?;
         self.state.metrics.emitted_match_rows = emitted;
-        self.commit_prepared(
-            ingress,
-            prepared,
-            context.job().checkpointing(),
-            expiration_append,
-        )?;
+        {
+            #[cfg(feature = "benchmark-internals")]
+            let _phase = context.job().join_cpu_trace().stage(
+                &self.name,
+                "state_commit",
+                prepared.admitted.len(),
+            );
+            self.commit_prepared(
+                ingress,
+                prepared,
+                context.job().checkpointing(),
+                expiration_append,
+            )?;
+        }
         if self.has_sparse_candidates() {
             return self.repair_sparse_chunks(context).await;
         }

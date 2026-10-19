@@ -119,7 +119,7 @@ fn fixture(narrow: bool, count: usize) -> (StreamAsofJoinOperator, Vec<Row>, Vec
     fixture_with_keys(narrow, count, 16)
 }
 
-fn fixture_with_keys(
+pub(in crate::operator::asof::finalize) fn fixture_with_keys(
     narrow: bool,
     count: usize,
     keys: usize,
@@ -183,7 +183,10 @@ fn fixture_with_keys(
     (operator, left, right)
 }
 
-fn input(operator: &StreamAsofJoinOperator, rows: &[Row]) -> Batch {
+pub(in crate::operator::asof::finalize) fn input(
+    operator: &StreamAsofJoinOperator,
+    rows: &[Row],
+) -> Batch {
     let records = rows
         .chunks(2_048)
         .map(|rows| {
@@ -210,7 +213,10 @@ fn input(operator: &StreamAsofJoinOperator, rows: &[Row]) -> Batch {
     Batch::table(records, BatchMetadata::default()).unwrap()
 }
 
-fn oracle(left: &[Row], right: &[Row]) -> Vec<(i64, Option<i64>, Option<u64>)> {
+pub(in crate::operator::asof::finalize) fn oracle(
+    left: &[Row],
+    right: &[Row],
+) -> Vec<(i64, Option<i64>, Option<u64>)> {
     let mut groups = BTreeMap::<&str, BTreeMap<(i64, i64), u64>>::new();
     for row in right {
         groups
@@ -235,7 +241,7 @@ fn oracle(left: &[Row], right: &[Row]) -> Vec<(i64, Option<i64>, Option<u64>)> {
         .collect()
 }
 
-fn assert_output(
+pub(in crate::operator::asof::finalize) fn assert_output(
     output: &mut EdgeCollector,
     expected: &[(i64, Option<i64>, Option<u64>)],
     narrow: bool,
@@ -705,4 +711,57 @@ async fn rejected_output_continuation(
     drop((operator, restored, snapshot, repeated, output, context));
     drop(job);
     (pool, restored_pool)
+}
+
+#[test]
+fn cpu_pipeline_single_hot_key_parallelizes_complete_output_preparation() {
+    let service = TestService::new(4, 1).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let (mut operator, mut left, _) = fixture_with_keys(true, 65_536, 1);
+        for row in &mut left {
+            row.1 = row.2 / 4;
+        }
+        let right = left.iter().step_by(2).cloned().collect::<Vec<_>>();
+        let pool = operator.runtime.pool.clone();
+        let job = StreamJobContext::new(
+            915,
+            "hot-key",
+            JsonMap::new(),
+            None,
+            CancellationToken::new(),
+        )
+        .with_gather_owner(service.owner("hot-key".into()));
+        let context = StreamOperatorContext::new(&job, "asof", None)
+            .with_output_budget(crate::EdgeBudget::new(65_536, 128 << 20).unwrap());
+        let mut output = EdgeCollector::new(operator.output_ports().to_vec());
+        for (port, rows) in [("right", &right), ("left", &left)] {
+            operator
+                .process_data(port, input(&operator, rows), &context, &mut output)
+                .await
+                .unwrap();
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        operator.match_hook = Some(Arc::new(move |_| {
+            counter.fetch_add(1, Ordering::Relaxed);
+        }));
+        operator.on_end(&context, &mut output).await.unwrap();
+        assert_output(&mut output, &oracle(&left, &right), true);
+        assert_eq!(operator.status.pending_left_rows, 0);
+        let calls = calls.load(Ordering::Relaxed);
+        drop((operator, output, context));
+        assert!(job.gather_owner().close_and_drain().await.is_empty());
+        drop(job);
+        assert_eq!(pool.reserved(), 0);
+        assert_eq!(
+            calls, 4,
+            "one hot key prevented contiguous output preparation tasks"
+        );
+    });
+    drop(runtime);
+    service.shutdown();
 }

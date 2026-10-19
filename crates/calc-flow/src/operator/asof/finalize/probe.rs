@@ -8,7 +8,7 @@ use datafusion::execution::memory_pool::MemoryReservation;
 use std::{collections::HashMap, sync::Arc};
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
 
 type Matches = Vec<(usize, Option<state::RowRef>)>;
 type Route = (usize, usize);
@@ -36,6 +36,12 @@ impl ParallelCpuWork for ProbeWork {
     }
 
     fn run(&self, ordinal: usize, stop: &GatherStop) -> Result<Matches> {
+        #[cfg(feature = "benchmark-internals")]
+        let _phase = stop.join_cpu_trace().worker_stage(
+            stop.join_cpu_operator(),
+            "match_worker",
+            self.shards[ordinal].rows.len(),
+        );
         #[cfg(test)]
         if let Some(hook) = &self.hook {
             hook(ordinal);

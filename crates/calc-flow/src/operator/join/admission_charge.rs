@@ -31,6 +31,35 @@ pub(super) struct PayloadCharges {
 }
 
 impl PayloadCharges {
+    pub(super) fn on_worker(
+        rows: AdmittedGroup<'_>,
+        selected: u64,
+        stop: &crate::runtime::streaming::gather_work::GatherStop,
+    ) -> Result<Self> {
+        let mut result = Self {
+            positions: [0; BLOCK],
+            charges: [0; BLOCK],
+            selected,
+            failed: 0,
+            len: rows.len(),
+        };
+        assert!(result.len <= BLOCK);
+        for (offset, (position, retain)) in rows.key_offsets().enumerate() {
+            if retain {
+                result.positions[offset] = position;
+            }
+        }
+        let mut constant = Some(0_u64);
+        for array in rows.row(0).record.columns() {
+            stop.check_abandoned()?;
+            result.add_column(array.as_ref(), &mut constant);
+        }
+        for index in 0..result.len {
+            result.add(index, constant);
+        }
+        Ok(result)
+    }
+
     /// `rows` covers exactly one bounded block; `selected` carries that
     /// block's retained bits, and only those rows are positioned, charged,
     /// and later read back.

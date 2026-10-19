@@ -866,6 +866,21 @@ impl LeftState {
         self.legacy.is_empty() && self.chunks.is_empty()
     }
 
+    pub fn native_prefix_workspace_bytes(&self, count: usize) -> Option<u64> {
+        if !self.legacy.is_empty() {
+            return None;
+        }
+        let mut bytes = 2_048_u64.checked_add((count as u64).checked_mul(4)?)?;
+        for chunk in &self.chunks {
+            if chunk.data.sequences.kind() == SequenceKind::Canonical {
+                return None;
+            }
+            let keys = count.min(chunk.data.keys.len()) as u64;
+            bytes = bytes.checked_add(keys.checked_mul(640)?.checked_add(256)?)?;
+        }
+        bytes.checked_add(self.iter_workspace_bytes())
+    }
+
     pub fn iter_workspace_bytes(&self) -> u64 {
         (self.chunks.len() * size_of::<Cursor<'_>>()) as u64
     }
@@ -1297,7 +1312,65 @@ pub(in super::super) enum OutputRun<'a> {
     Chunk(ChunkRun<'a>),
 }
 
+pub(in super::super) struct OwnedOutputRun {
+    chunk: LeftChunk,
+    start: usize,
+    end: usize,
+}
+
+impl OwnedOutputRun {
+    pub fn borrowed(&self) -> OutputRun<'_> {
+        OutputRun::Chunk(ChunkRun {
+            chunk: &self.chunk,
+            start: self.start,
+            end: self.end,
+        })
+    }
+
+    pub fn native_prefix_workspace_bytes(&self) -> Option<u64> {
+        if self.chunk.data.sequences.kind() == SequenceKind::Canonical {
+            return None;
+        }
+        let count = self.end - self.start;
+        let keys = count.min(self.chunk.data.keys.len()) as u64;
+        (count as u64)
+            .checked_mul(4)?
+            .checked_add(keys.checked_mul(640)?)?
+            .checked_add(256)
+    }
+
+    pub fn visit_prefix(
+        &self,
+        prefix: &mut super::LeftPrefix,
+        batch: BatchKey,
+        name: &str,
+    ) -> Result<()> {
+        let run = ChunkRun {
+            chunk: &self.chunk,
+            start: self.start,
+            end: self.end,
+        };
+        let count = self.end - self.start;
+        prefix.visit_batch(batch, count, name)?;
+        run.visit_keys(count, prefix, batch);
+        run.visit_sequence_owners(count, prefix, batch);
+        Ok(())
+    }
+}
+
 impl<'a> OutputRun<'a> {
+    pub fn owned_slice(self, range: std::ops::Range<usize>) -> Option<OwnedOutputRun> {
+        let Self::Chunk(run) = self else {
+            return None;
+        };
+        debug_assert!(range.end <= self.len());
+        Some(OwnedOutputRun {
+            chunk: run.chunk.clone(),
+            start: run.start + range.start,
+            end: run.start + range.end,
+        })
+    }
+
     pub fn len(self) -> usize {
         match self {
             Self::Legacy(_, _) => 1,

@@ -9,6 +9,14 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-19: Prepare large streaming ASOF matches and output references in
+  contiguous CPU-sized fragments, including a single hot key. Preserve local
+  fragment references and shared Arrow spans, and allow narrow outputs to use
+  row parallelism independently of their column count. Prepare interval Join
+  retained-row charges and chunks on the owned native CPU pool, preserving
+  source-order state admission. Optional acceleration yields to explicit memory
+  limits; checkpoint formats and default memory policy remain unchanged.
+
 - 2026-10-19: Reuse prepaid interval Join window bounds between parallel count
   and fill/gather, with cursor fallback under explicit memory pressure. Avoid
   repeated incoming-row output-width checks within each match run and check

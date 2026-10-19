@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 mod all_shared;
+mod cpu_pipeline;
 
 fn fixture() -> (StreamAsofJoinSpec, [SchemaRef; 3], RowPayload) {
     let schema = Arc::new(Schema::new(vec![

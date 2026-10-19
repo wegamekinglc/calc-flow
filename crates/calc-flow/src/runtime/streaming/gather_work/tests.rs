@@ -10,6 +10,7 @@ use crate::{CancellationToken, JsonMap, StreamJobContext};
 mod cleanup;
 mod cpu_aware;
 mod parallel;
+mod reuse;
 #[cfg(feature = "benchmark-internals")]
 mod roundtrip;
 

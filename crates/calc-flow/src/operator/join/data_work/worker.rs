@@ -47,6 +47,12 @@ impl ParallelCpuWork for CountWork {
     }
 
     fn run(&self, ordinal: usize, stop: &GatherStop) -> Result<CountFragment> {
+        #[cfg(feature = "benchmark-internals")]
+        let _phase = stop.join_cpu_trace().worker_stage(
+            stop.join_cpu_operator(),
+            "count_worker",
+            self.inputs.partition.range(ordinal).len(),
+        );
         #[cfg(test)]
         self.inputs.observe(super::ProbePhase::Count);
         #[cfg(test)]
@@ -98,6 +104,12 @@ impl ParallelCpuWork for FillWork {
     }
 
     fn run(&self, ordinal: usize, stop: &GatherStop) -> Result<PairFragment> {
+        #[cfg(feature = "benchmark-internals")]
+        let _phase = stop.join_cpu_trace().worker_stage(
+            stop.join_cpu_operator(),
+            "fill_worker",
+            self.inputs.partition.range(ordinal).len(),
+        );
         #[cfg(test)]
         self.inputs.observe(super::ProbePhase::Fill);
         #[cfg(test)]

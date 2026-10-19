@@ -971,6 +971,8 @@ fn chunk_base_bytes(count: usize, source_count: usize, key_count: usize) -> Opti
 
 mod admission;
 pub(super) use admission::ColumnarPlan;
+#[cfg(test)]
+pub(super) use admission::parallel::observe_preparation_for_test;
 
 #[cfg(test)]
 mod tests;

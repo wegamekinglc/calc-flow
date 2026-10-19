@@ -25,6 +25,8 @@ use datafusion::{
 use std::collections::HashMap;
 use std::sync::Arc;
 
+mod segments;
+
 pub(super) struct OutputRuntime {
     pub pool: Arc<dyn MemoryPool>,
     config: DataFusionConfig,
@@ -55,8 +57,12 @@ impl OwnedGatherPlan for MaterializationInput {
         self.requests.len()
     }
 
+    fn parallelism(&self) -> usize {
+        (self.rows.len / 16_384).max(self.column_count()).max(1)
+    }
+
     fn row_gather(&self) -> Result<Option<RowGather>> {
-        if self.rows.len < 2 || self.parallelism() <= 1 {
+        if self.rows.len / 16_384 < 2 {
             return Ok(None);
         }
         let mut copied = None;
@@ -100,6 +106,12 @@ impl OwnedGatherPlan for MaterializationInput {
         range: std::ops::Range<usize>,
         stop: &GatherStop,
     ) -> Result<ArrayRef> {
+        #[cfg(feature = "benchmark-internals")]
+        let _phase = stop.join_cpu_trace().worker_stage(
+            stop.join_cpu_operator(),
+            "gather_worker",
+            range.len(),
+        );
         stop.check()?;
         if range.is_empty() || range.end > self.rows.len {
             return Err(super::arrow_error(
@@ -123,6 +135,12 @@ impl OwnedGatherPlan for MaterializationInput {
     }
 
     fn gather(&self, ordinal: usize, stop: &GatherStop) -> Result<ArrayRef> {
+        #[cfg(feature = "benchmark-internals")]
+        let _phase = stop.join_cpu_trace().worker_stage(
+            stop.join_cpu_operator(),
+            "gather_worker",
+            self.rows.len,
+        );
         #[cfg(test)]
         if ordinal == 0 {
             if let Some(probe) = &self.worker_probe {
@@ -142,11 +160,14 @@ impl OwnedGatherPlan for MaterializationInput {
 
 impl OutputRuntime {
     pub fn new(limit: usize, name: &str) -> Self {
+        let operator = GatherOperatorId::new(format!("operator:{name}").into());
+        #[cfg(feature = "benchmark-internals")]
+        let operator = operator.with_join_cpu_name(name.into());
         Self {
             pool: Arc::new(GreedyMemoryPool::new(limit)),
             config: DataFusionConfig::default(),
             output_columns: None,
-            operator: GatherOperatorId::new(format!("operator:{name}").into()),
+            operator,
             #[cfg(test)]
             worker_gate: None,
             #[cfg(test)]
@@ -170,6 +191,11 @@ impl OutputRuntime {
         name: &str,
         context: &StreamOperatorContext<'_>,
     ) -> Result<(Batch, MemoryReservation)> {
+        #[cfg(feature = "benchmark-internals")]
+        let _phase = context
+            .job()
+            .join_cpu_trace()
+            .stage(name, "materialize", owned.len);
         self.prepare_output(schema, &mut workspace, name, context)
             .await?;
         let requests = column_requests(schema, self.output_columns.as_deref());

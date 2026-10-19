@@ -195,12 +195,7 @@ async fn test_large_prefix_halves_to_available_workspace_without_consuming_state
     let status = operator.status.clone();
     let context = StreamOperatorContext::new(&job, "asof", None)
         .with_output_budget(EdgeBudget::new(ROWS, 64 << 20).unwrap());
-    let allowance = prefix_workspace_bytes(
-        ROWS / 2,
-        operator.state.left.iter_workspace_bytes(),
-        &operator.name,
-    )
-    .unwrap();
+    let allowance = operator.prefix_workspace_bytes(ROWS / 2).unwrap();
     let occupied = operator
         .reserve_workspace((WORKSPACE - before) as u64 - allowance)
         .unwrap();
@@ -232,6 +227,36 @@ async fn test_oversized_prefix_reservation_fails_without_overflow_or_charge() {
     ));
     assert_eq!(pool.reserved(), before);
     drop((operator, output));
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop(job);
+    assert_eq!(pool.reserved(), 0);
+}
+
+#[tokio::test]
+async fn cpu_pipeline_columnar_prefix_credit_tracks_keys_and_actual_allocations() {
+    let (operator, job, output) = admitted().await;
+    let pool = operator.runtime.pool.clone();
+    let context = StreamOperatorContext::new(&job, "asof", None)
+        .with_output_budget(EdgeBudget::new(ROWS, 64 << 20).unwrap());
+    let (count, credit) = operator.finalizable_rows(None, true, &context).unwrap();
+    let mut prefix = LeftPrefix::default();
+    let allocation = allocation_counter::measure(|| {
+        for run in operator.state.left.output_runs() {
+            run.visit_prefix(run.len(), &mut prefix, &operator.state.batches, "asof")
+                .unwrap();
+        }
+    });
+    assert_eq!(count, ROWS);
+    assert_eq!(prefix.count, ROWS);
+    assert!(
+        allocation.bytes_max <= credit.size() as u64,
+        "unfunded prefix allocation: {allocation:?}"
+    );
+    assert!(
+        credit.size() < ROWS * 32,
+        "columnar prefix still prepays per-row map entries"
+    );
+    drop((prefix, credit, operator, output, context));
     assert!(job.gather_owner().close_and_drain().await.is_empty());
     drop(job);
     assert_eq!(pool.reserved(), 0);

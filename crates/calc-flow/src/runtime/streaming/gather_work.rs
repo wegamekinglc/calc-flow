@@ -137,6 +137,10 @@ trait WorkPackage: Send + 'static {
 
     fn control_bytes(&self) -> Result<usize>;
     fn into_work(self) -> Result<ReadyWork>;
+
+    fn reduce_memory(&mut self) -> bool {
+        false
+    }
 }
 
 struct WorkAdapter<W>(W);
@@ -169,7 +173,7 @@ struct ColumnsWork {
 impl ColumnsWork {
     fn new(plan: Arc<dyn GatherPlan>, capacity: usize) -> Result<Self> {
         let workers = plan.parallelism().max(1).min(capacity);
-        let rows = if workers > 1 && plan.column_count() > 1 {
+        let rows = if workers > 1 {
             plan.row_gather()?
         } else {
             None
@@ -184,6 +188,14 @@ impl ColumnsWork {
 
 impl WorkPackage for ColumnsWork {
     type Output = Vec<ArrayRef>;
+
+    fn reduce_memory(&mut self) -> bool {
+        if self.rows.take().is_none() {
+            return false;
+        }
+        self.workers = self.workers.min(self.plan.column_count().max(1));
+        true
+    }
 
     fn control_bytes(&self) -> Result<usize> {
         columns::Columns::control_bytes(self.plan.as_ref(), self.workers, self.rows.as_ref())
@@ -348,6 +360,8 @@ impl ClaimedWork {
 pub(crate) struct GatherOperatorId {
     token: Arc<()>,
     name: Arc<str>,
+    #[cfg(feature = "benchmark-internals")]
+    join_cpu_name: Arc<str>,
     task: Option<TaskId>,
 }
 
@@ -355,9 +369,17 @@ impl GatherOperatorId {
     pub(crate) fn new(name: Arc<str>) -> Self {
         Self {
             token: Arc::new(()),
+            #[cfg(feature = "benchmark-internals")]
+            join_cpu_name: name.clone(),
             name,
             task: None,
         }
+    }
+
+    #[cfg(feature = "benchmark-internals")]
+    pub(crate) fn with_join_cpu_name(mut self, name: Arc<str>) -> Self {
+        self.join_cpu_name = name;
+        self
     }
 
     pub(crate) fn with_task(mut self, task: Option<TaskId>) -> Self {
@@ -368,6 +390,10 @@ impl GatherOperatorId {
 
 #[derive(Clone)]
 pub(crate) struct GatherStop {
+    #[cfg(feature = "benchmark-internals")]
+    trace: crate::benchmark_internals::JoinCpuTraceOwner,
+    #[cfg(feature = "benchmark-internals")]
+    operator: Arc<str>,
     run_id: Arc<str>,
     cancellation: CancellationToken,
     deadline: Option<DateTime<Utc>>,
@@ -381,6 +407,10 @@ pub(crate) struct GatherStop {
 impl GatherStop {
     pub(crate) fn from_job(job: &super::StreamJobContext) -> Self {
         Self {
+            #[cfg(feature = "benchmark-internals")]
+            trace: job.join_cpu_trace().clone(),
+            #[cfg(feature = "benchmark-internals")]
+            operator: "".into(),
             run_id: job.job_id().to_string().into(),
             cancellation: job.cancellation().clone(),
             deadline: job.deadline().copied(),
@@ -390,6 +420,16 @@ impl GatherStop {
             #[cfg(test)]
             check_hook: None,
         }
+    }
+
+    #[cfg(feature = "benchmark-internals")]
+    pub(crate) fn join_cpu_trace(&self) -> &crate::benchmark_internals::JoinCpuTraceOwner {
+        &self.trace
+    }
+
+    #[cfg(feature = "benchmark-internals")]
+    pub(crate) fn join_cpu_operator(&self) -> &str {
+        &self.operator
     }
 
     pub(crate) fn check(&self) -> Result<()> {
@@ -493,6 +533,7 @@ pub(crate) struct GatherScope {
     home: Arc<GatherHome>,
     id: u64,
     operator: GatherOperatorId,
+    reuse_only: bool,
 }
 
 pub(crate) type GatherTicket = WorkTicket<Vec<ArrayRef>>;
@@ -706,6 +747,7 @@ impl GatherClient {
             home,
             id,
             operator: self.operator.clone(),
+            reuse_only: false,
         })
     }
 }
@@ -731,6 +773,11 @@ impl Drop for GatherScope {
 }
 
 impl GatherScope {
+    pub(crate) fn reuse_only(mut self) -> Self {
+        self.reuse_only = true;
+        self
+    }
+
     pub(crate) async fn submit_parallel_work<W: ParallelCpuWork>(
         &self,
         work: Arc<W>,
@@ -748,7 +795,7 @@ impl GatherScope {
         stop: GatherStop,
     ) -> AdmissionResult<GatherTicket> {
         let work = ColumnsWork::new(plan, self.home.parallelism())?;
-        if work.plan.column_count() <= 1 || work.workers <= 1 {
+        if work.workers <= 1 || (work.plan.column_count() <= 1 && work.rows.is_none()) {
             self.submit_work(work, credit, stop).await
         } else {
             self.submit_package(work, credit, stop).await
@@ -913,6 +960,18 @@ impl GatherHome {
             return Err(cancelled(&self.run_id).into());
         }
         self.retire_if_pressured(&mut state);
+        if scope.reuse_only
+            && (state.control.is_none()
+                || state.phase != PoolPhase::Ready
+                || state.pool.as_ref().and_then(Weak::upgrade).is_none())
+        {
+            return Err(AdmissionFailure::Budget {
+                stage: "generation reuse",
+                source: DataFusionError::ResourcesExhausted(
+                    "no funded native generation is available for reuse".into(),
+                ),
+            });
+        }
         if state.phase == PoolPhase::Retiring || !matches!(state.slot, Slot::Empty) {
             return Ok(None);
         }
@@ -933,6 +992,11 @@ impl GatherHome {
         }
         state.next_attempt = next_attempt;
         let id = state.next_attempt;
+        #[cfg(feature = "benchmark-internals")]
+        let stop = GatherStop {
+            operator: scope.operator.join_cpu_name.clone(),
+            ..stop
+        };
         state.slot = Slot::Active(Attempt {
             id,
             generation: 0,
@@ -1319,12 +1383,24 @@ fn fund_work<W: WorkPackage>(
         total_fee,
         operator,
     )?;
-    credit
-        .try_grow(total_fee)
-        .map_err(|source| AdmissionFailure::Budget {
+    if let Err(source) = credit.try_grow(total_fee) {
+        if work.as_mut().is_some_and(WorkPackage::reduce_memory) {
+            return fund_work(
+                work,
+                credit,
+                name_bytes,
+                needs_control,
+                #[cfg(test)]
+                probe,
+                #[cfg(test)]
+                operator,
+            );
+        }
+        return Err(AdmissionFailure::Budget {
             stage: "attempt",
             source,
-        })?;
+        });
+    }
     let owned = work.take().ok_or_else(|| internal("missing owned work"))?;
     let work = owned.into_work()?;
     let home_credit = (home_fee > 0).then(|| credit.split(home_fee));

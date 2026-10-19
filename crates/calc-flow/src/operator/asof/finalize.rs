@@ -28,6 +28,7 @@ mod output_ranges;
 mod owner_runs;
 mod prefix;
 mod probe;
+mod segments;
 
 type EvictionProjection = (state::EvictionPreview, u64, state::Inventory, u64);
 
@@ -46,6 +47,8 @@ struct PreparedOutput {
     matched: u64,
     workspace: MemoryReservation,
     prefix: LeftPrefix,
+    _parallel_credits: Option<Arc<super::output_plan::FragmentCredits>>,
+    _prefix_workspace: Arc<MemoryReservation>,
 }
 
 struct MatchedPrefix {
@@ -67,6 +70,12 @@ impl StreamAsofJoinOperator {
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
+        #[cfg(feature = "benchmark-internals")]
+        let _phase =
+            context
+                .job()
+                .join_cpu_trace()
+                .stage(&self.name, "finalize", self.state.left.len());
         loop {
             context.check_cancelled()?;
             self.retirement.wait(context).await?;
@@ -112,20 +121,30 @@ impl StreamAsofJoinOperator {
         frontier: Option<i64>,
         ended: bool,
         context: &StreamOperatorContext<'_>,
-    ) -> Result<(usize, MemoryReservation)> {
+    ) -> Result<(usize, Arc<MemoryReservation>)> {
         context.check_cancelled()?;
         let limit = context.output_budget().max_rows;
         let mut count = self.state.left.ready_prefix_len(limit, frontier, ended);
         loop {
-            let reservation =
-                prefix_workspace_bytes(count, self.state.left.iter_workspace_bytes(), &self.name)
-                    .and_then(|bytes| self.reserve_workspace(bytes));
+            let reservation = self
+                .prefix_workspace_bytes(count)
+                .and_then(|bytes| self.reserve_workspace(bytes));
             match reservation {
-                Ok(reservation) => return Ok((count, reservation)),
+                Ok(reservation) => return Ok((count, Arc::new(reservation))),
                 Err(_) if count > 1 => count /= 2,
                 Err(error) => return Err(error),
             }
         }
+    }
+
+    fn prefix_workspace_bytes(&self, count: usize) -> Result<u64> {
+        let original =
+            prefix_workspace_bytes(count, self.state.left.iter_workspace_bytes(), &self.name)?;
+        Ok(self
+            .state
+            .left
+            .native_prefix_workspace_bytes(count)
+            .map_or(original, |bytes| bytes.min(original)))
     }
 
     fn output_status(&self, rows: usize, matched: u64) -> Result<StreamAsofJoinStatus> {
@@ -311,21 +330,21 @@ impl StreamAsofJoinOperator {
     async fn prepare_output(
         &mut self,
         count: &mut usize,
-        prefix_workspace: &MemoryReservation,
+        prefix_workspace: &Arc<MemoryReservation>,
         context: &StreamOperatorContext<'_>,
     ) -> Result<PreparedOutput> {
         loop {
             context.check_cancelled()?;
-            match self.output_attempt(*count, context).await {
+            match self
+                .output_attempt_with_prefix(*count, prefix_workspace.clone(), context)
+                .await
+            {
                 Ok(output) => return Ok(output),
                 Err(error) if *count > 1 && retryable(&error) => {
                     *count /= 2;
-                    shrink_prefix_workspace(
-                        *count,
-                        self.state.left.iter_workspace_bytes(),
-                        prefix_workspace,
-                        &self.name,
-                    );
+                    let needed = usize::try_from(self.prefix_workspace_bytes(*count)?)
+                        .expect("previously funded ASOF prefix");
+                    prefix_workspace.shrink(prefix_workspace.size() - needed);
                 }
                 Err(error) => return Err(error),
             }
@@ -338,11 +357,44 @@ impl StreamAsofJoinOperator {
         skip_all,
         fields(operator = %self.name, rows = count)
     )]
-    async fn output_attempt(
+    async fn output_attempt_with_prefix(
         &mut self,
         count: usize,
+        prefix_workspace: Arc<MemoryReservation>,
         context: &StreamOperatorContext<'_>,
     ) -> Result<PreparedOutput> {
+        let prepared = {
+            #[cfg(feature = "benchmark-internals")]
+            let _phase = context
+                .job()
+                .join_cpu_trace()
+                .stage(&self.name, "match_plan", count);
+            segments::prepare(self, count, prefix_workspace.clone(), context).await?
+        };
+        if let Some(prepared) = prepared {
+            let matched = prepared.plans.iter().map(|plan| plan.matched).sum();
+            let workspace = self.reserve_workspace(0)?;
+            let (result, workspace) = self
+                .runtime
+                .materialize_fragments(
+                    prepared.plans,
+                    prepared.credits.clone(),
+                    self.outputs[0].schema().expect("exact ASOF output"),
+                    workspace,
+                    &self.name,
+                    context,
+                )
+                .await?;
+            let batch = self.output_batch(&result, context)?;
+            return Ok(PreparedOutput {
+                batch,
+                matched,
+                workspace,
+                prefix: prepared.prefix,
+                _parallel_credits: Some(prepared.credits),
+                _prefix_workspace: prefix_workspace,
+            });
+        }
         let cursor_workspace = self.cursor_workspace(count)?;
         let mut workspace = self.reserve_workspace(0)?;
         let MatchedPrefix { plan, prefix } =
@@ -365,7 +417,20 @@ impl StreamAsofJoinOperator {
             matched,
             workspace,
             prefix,
+            _parallel_credits: None,
+            _prefix_workspace: prefix_workspace,
         })
+    }
+
+    #[cfg(test)]
+    async fn output_attempt(
+        &mut self,
+        count: usize,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<PreparedOutput> {
+        let credit = self.reserve_workspace(self.prefix_workspace_bytes(count)?)?;
+        self.output_attempt_with_prefix(count, Arc::new(credit), context)
+            .await
     }
 
     fn cursor_workspace(&self, count: usize) -> Result<Option<MemoryReservation>> {
@@ -425,6 +490,11 @@ async fn match_output_prefix(
     cursor_workspace: Option<MemoryReservation>,
     workspace: &mut MemoryReservation,
 ) -> Result<MatchedPrefix> {
+    #[cfg(feature = "benchmark-internals")]
+    let _phase = context
+        .job()
+        .join_cpu_trace()
+        .stage(&operator.name, "match_plan", count);
     let mut plan = OutputPlanBuilder::new(
         count,
         operator.output_columns.as_ref(),
@@ -661,6 +731,7 @@ fn prefix_workspace_bytes(count: usize, heap_bytes: u64, name: &str) -> Result<u
         })
 }
 
+#[cfg(test)]
 fn shrink_prefix_workspace(
     count: usize,
     heap_bytes: u64,

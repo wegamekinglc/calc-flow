@@ -112,3 +112,17 @@ fn output_plan_reserves_timestamp_timezone_backing() {
 
 #[path = "tests/backing_allocation.rs"]
 mod backing_allocation;
+
+#[test]
+fn cpu_pipeline_output_metadata_uses_allocation_bound_instead_of_legacy_row_credit() {
+    let rows = 65_536;
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(rows * 96 + 16_384));
+    let mut credit = MemoryConsumer::new("bounded-output-metadata").register(&pool);
+    let builder = OutputPlanBuilder::new(rows, None, &mut credit, "asof");
+    assert!(
+        builder.is_ok(),
+        "legacy256bytes-per-row reserve prevents bounded metadata allocation"
+    );
+    drop((builder, credit));
+    assert_eq!(pool.reserved(), 0);
+}

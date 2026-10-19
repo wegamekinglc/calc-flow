@@ -156,6 +156,12 @@ impl ParallelCpuWork for GatherWork {
     }
 
     fn run(&self, ordinal: usize, stop: &GatherStop) -> Result<Self::Output> {
+        #[cfg(feature = "benchmark-internals")]
+        let _phase = stop.join_cpu_trace().worker_stage(
+            &self.name,
+            "gather_worker",
+            self.inputs.partition.range(ordinal).len(),
+        );
         #[cfg(test)]
         self.inputs.observe(super::ProbePhase::Fill);
         #[cfg(test)]

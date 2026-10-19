@@ -8,7 +8,7 @@ use datafusion::{
     execution::memory_pool::MemoryReservation,
 };
 
-pub(super) fn source_bytes(
+pub(in super::super) fn source_bytes(
     record: &RecordBatch,
     workspace: &MemoryReservation,
     name: &str,

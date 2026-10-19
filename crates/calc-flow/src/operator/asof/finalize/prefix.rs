@@ -79,6 +79,11 @@ impl StreamAsofJoinOperator {
         status.state_rows = inventory.identities;
         status.state_bytes = inventory.bytes;
         emit_output(output.batch, context, collector).await?;
+        #[cfg(feature = "benchmark-internals")]
+        let phase = context
+            .job()
+            .join_cpu_trace()
+            .stage(&self.name, "state_commit", count);
         // Nothing after sink acceptance can fail or yield before installation.
         self.state
             .commit_prepared_left_prefix(&output.prefix, prepared.drain, prepared.pool);
@@ -103,6 +108,8 @@ impl StreamAsofJoinOperator {
             "prefix inventory must match committed gauge"
         );
         drop(output.workspace);
+        #[cfg(feature = "benchmark-internals")]
+        drop(phase);
         self.retirement.wait(context).await
     }
 

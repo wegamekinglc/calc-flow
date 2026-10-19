@@ -1079,6 +1079,19 @@ buffers remain shared and owned until workers settle; cloned retained payloads
 keep their existing backing funding. A one-worker pool retains serial key
 preparation.
 
+Retained selection, logical payload charging and native chunk filling can also
+use the CPU pool. Useful retained work determines the task count; batches with
+no retained rows skip these tasks. With a bounded or custom runtime memory
+pool, these preparation tasks reuse an already funded worker generation; a
+cold or retiring generation takes the serial path. The standard unbounded
+runtime pool permits new worker generations. Chunk credits are admitted in source order,
+and worker results keep that order. When optional parallel metadata would
+prevent required chunk admission, the settled attempt releases those controls
+and uses the serial layout with the already computed logical charges. This
+preserves charges from before payload projection. Row identities, append
+coordinates, expiration preparation and index updates retain their owner order;
+state still commits only after output acceptance.
+
 Large admitted native probes divide contiguous input positions among funded
 count work units according to the pool's CPU capacity, with at least 8,192
 admitted rows per unit. The partition count is captured once and shared by
