@@ -1,7 +1,9 @@
-//! Owned, two-lane work for the deliberately narrow native ordered route.
+//! Owned entity work for the deliberately narrow native ordered route.
 
 use std::{
     any::Any,
+    cmp::Reverse,
+    collections::BinaryHeap,
     fmt, mem,
     sync::{
         Arc,
@@ -19,6 +21,14 @@ use super::{
     read_typed_float, typed_output_mismatch, valid_float64,
 };
 use crate::{CalcFlowError, Result};
+
+const ROWS_PER_LANE: usize = 16_000;
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static SCHEDULE_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static ENTITY_COUNT_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum NumericPhase {
@@ -109,7 +119,6 @@ struct PreparedNumericInput {
 
 pub(crate) struct NumericLaneRequest {
     input: Arc<PreparedNumericInput>,
-    lane: usize,
     row_count: usize,
     pub(super) rows: Vec<LaneRow>,
     pub(super) entities: Vec<OwnedLaneEntity>,
@@ -186,47 +195,74 @@ impl NumericJoinSeed {
     }
 }
 
-/// The cap counts named extra capacities, not allocator usable size or job RSS.
+/// Declared additional owned capacities, distinct from retained state or RSS.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ScratchPlan {
     bytes: Option<usize>,
+    lanes: usize,
 }
 
 impl ScratchPlan {
-    pub(crate) const CAP_BYTES: usize = 16 * 1024 * 1024;
-
     pub(crate) const fn accounted_bytes(self) -> Option<usize> {
         self.bytes
     }
 
+    pub(crate) const fn lanes(self) -> usize {
+        self.lanes
+    }
+
+    #[cfg(test)]
+    pub(crate) fn large_test_plan() -> Self {
+        Self::for_dimensions(1_000_000, 64, 2, 1)
+    }
+
+    #[cfg(test)]
     pub(super) fn for_dimensions(
         rows: usize,
         entities: usize,
         outputs: usize,
         name_bytes: usize,
     ) -> Self {
-        // Arrow 59.2 Float64Builder uses an exactly reserved Vec<f64>.
-        // Its lazy validity buffer rounds to 64 bytes. Reserve two rounded
-        // validity allocations per output, plus fixed Arrow/Arc/builder metadata.
-        // The original typed input Vec, entity_ids, one touched-state clone and
-        // final serial output buffers are moved/reused, not charged a second time.
-        let bytes = (|| {
-            let routing = Self::routing_capacity(rows, entities)?;
-            let output = Self::output_capacity(rows, outputs)?;
-            // Two lane/count pairs and the two result-held Arc slots.
-            let routing_metadata =
-                2 * (size_of::<[usize; 2]>() + size_of::<Option<Arc<PreparedNumericInput>>>());
-            let fixed_metadata = routing_metadata
-                + NULL_FREE_MERGE_METADATA_BYTES
-                + COMPILED_LANE_READOUT_METADATA_BYTES
-                + size_of::<PreparedNumericInput>()
-                + 2 * size_of::<usize>();
-            routing
-                .checked_add(output)?
-                .checked_add(fixed_metadata)?
-                .checked_add(name_bytes)
-        })();
-        Self { bytes }
+        Self::for_lanes(rows, entities, outputs, name_bytes, 2)
+    }
+
+    fn for_lanes(
+        rows: usize,
+        entities: usize,
+        outputs: usize,
+        name_bytes: usize,
+        lanes: usize,
+    ) -> Self {
+        let bytes = Self::owned_capacity(rows, entities, outputs, name_bytes, lanes);
+        Self { bytes, lanes }
+    }
+
+    fn owned_capacity(
+        rows: usize,
+        entities: usize,
+        outputs: usize,
+        name_bytes: usize,
+        lanes: usize,
+    ) -> Option<usize> {
+        let routing = Self::routing_capacity(rows, entities)?;
+        let output = Self::output_capacity(rows, outputs, lanes)?;
+        let fixed_metadata = Self::fixed_capacity(lanes)?;
+        routing
+            .checked_add(output)?
+            .checked_add(fixed_metadata)?
+            .checked_add(Self::name_capacity(name_bytes, lanes)?)
+    }
+
+    fn fixed_capacity(lanes: usize) -> Option<usize> {
+        let controls = lanes.checked_mul(4096 + COMPILED_LANE_READOUT_METADATA_BYTES / 2)?;
+        controls
+            .checked_add(NULL_FREE_MERGE_METADATA_BYTES)?
+            .checked_add(size_of::<NumericResults>())?
+            .checked_add(size_of::<PreparedNumericInput>())
+    }
+
+    fn name_capacity(name_bytes: usize, lanes: usize) -> Option<usize> {
+        name_bytes.checked_mul(lanes.checked_mul(2)?.checked_add(1)?)
     }
 
     fn routing_capacity(rows: usize, entities: usize) -> Option<usize> {
@@ -240,19 +276,17 @@ impl ScratchPlan {
         schedules.checked_add(moved)?.checked_add(assignment)
     }
 
-    fn validity_capacity(rows: usize, outputs: usize) -> Option<usize> {
+    fn validity_capacity(rows: usize, outputs: usize, lanes: usize) -> Option<usize> {
         rows.checked_add(7)?
             .checked_div(8)?
-            .checked_add(128)?
+            .checked_add(lanes.checked_mul(128)?)?
             .checked_mul(outputs)
     }
 
-    fn output_capacity(rows: usize, outputs: usize) -> Option<usize> {
+    fn output_capacity(rows: usize, outputs: usize, lanes: usize) -> Option<usize> {
         let values = rows.checked_mul(outputs)?.checked_mul(size_of::<f64>())?;
-        let validity = Self::validity_capacity(rows, outputs)?;
-        // Each output has at most two lane builders/arrays and their buffer
-        // owners. The fixed allowance is checked separately from capacities.
-        let metadata = outputs.checked_mul(4096)?;
+        let validity = Self::validity_capacity(rows, outputs, lanes)?;
+        let metadata = outputs.checked_mul(lanes)?.checked_mul(4096)?;
         values.checked_add(validity)?.checked_add(metadata)
     }
 }
@@ -290,7 +324,8 @@ impl RollingKernelPlan {
     }
 
     fn parallel_dimensions(&self, input: &RecordBatch) -> bool {
-        (64_000..=256_000).contains(&input.num_rows())
+        input.num_rows() >= 64_000
+            && u32::try_from(input.num_rows()).is_ok()
             && self.selection == KernelSelection::OrderedPrimitive
             && self.numerical_profile == RollingNumericalProfile::StableV1
             && !self.nan_as_value
@@ -331,7 +366,15 @@ impl RollingKernelPlan {
 }
 
 impl PreparedOrderedKernel<'_> {
+    #[cfg(test)]
     pub(in crate::operator::rolling) fn scratch_plan(&self) -> Option<ScratchPlan> {
+        self.scratch_plan_for_cpu(2)
+    }
+
+    pub(in crate::operator::rolling) fn scratch_plan_for_cpu(
+        &self,
+        cpus: usize,
+    ) -> Option<ScratchPlan> {
         let plan = self.plan;
         let states = &self.fill.stream.state.states;
         if !self.parallel_shape
@@ -347,12 +390,20 @@ impl PreparedOrderedKernel<'_> {
         {
             return None;
         }
-        Some(ScratchPlan::for_dimensions(
+        let lanes = cpus
+            .min(self.fill.row_count / ROWS_PER_LANE)
+            .min(states.len());
+        if lanes < 2 {
+            return None;
+        }
+        let scratch = ScratchPlan::for_lanes(
             self.fill.row_count,
             states.len(),
             plan.outputs.len(),
             self.node_id.len(),
-        ))
+            lanes,
+        );
+        scratch.accounted_bytes().map(|_| scratch)
     }
 
     pub(in crate::operator::rolling) fn finish_serial(
@@ -370,34 +421,53 @@ impl PreparedOrderedKernel<'_> {
         clippy::result_large_err,
         reason = "rejection returns the same owned preparation without a new heap allocation"
     )]
+    #[cfg(test)]
     pub(in crate::operator::rolling) fn split_two(
         self,
     ) -> std::result::Result<(NumericJoinSeed, [NumericLaneRequest; 2]), Self> {
-        if self
-            .scratch_plan()
-            .and_then(ScratchPlan::accounted_bytes)
-            .is_none_or(|bytes| bytes > ScratchPlan::CAP_BYTES)
-        {
+        self.split_lanes(2)
+            .map(|(seed, requests)| (seed, requests.try_into().expect("two-lane fixture")))
+    }
+
+    #[allow(
+        clippy::result_large_err,
+        reason = "rejection reuses the existing owned serial preparation"
+    )]
+    pub(in crate::operator::rolling) fn split_lanes(
+        self,
+        cpus: usize,
+    ) -> std::result::Result<(NumericJoinSeed, Vec<NumericLaneRequest>), Self> {
+        let Some(scratch) = self.scratch_plan_for_cpu(cpus) else {
             return Err(self);
-        }
+        };
+        let lanes = scratch.lanes();
         let mut assignments =
             vec![EntityAssignment::default(); self.fill.stream.state.states.len()];
-        for &entity in &self.fill.stream.entity_ids {
-            assignments[entity].rows += 1;
+        for (assignment, &count) in assignments
+            .iter_mut()
+            .zip(&self.fill.stream.entity_rows.counts)
+        {
+            #[cfg(test)]
+            ENTITY_COUNT_VISITS.set(ENTITY_COUNT_VISITS.get() + 1);
+            assignment.rows = count;
         }
-        let mut loads = [0_usize; 2];
-        let mut entities = [0_usize; 2];
+        let mut loads = vec![0_usize; lanes];
+        let mut entities = vec![0_usize; lanes];
+        let mut available = (0..lanes)
+            .map(|lane| Reverse((0_usize, lane)))
+            .collect::<BinaryHeap<_>>();
         for assignment in &mut assignments {
-            let lane = usize::from(loads[1] < loads[0]);
+            let Reverse((_, lane)) = available.pop().expect("nonempty lane plan");
             assignment.lane = lane;
             assignment.local = entities[lane];
             entities[lane] += 1;
-            loads[lane] += assignment.rows;
+            let Some(load) = loads[lane].checked_add(assignment.rows) else {
+                return Err(self);
+            };
+            loads[lane] = load;
+            available.push(Reverse((loads[lane], lane)));
         }
-        if loads
-            .iter()
-            .any(|&rows| rows < 16_000 || rows > self.fill.row_count * 5 / 8)
-        {
+        if !balanced_lane_loads(&loads, self.fill.row_count) {
             return Err(self);
         }
         let PreparedTypedFill {
@@ -406,10 +476,23 @@ impl PreparedOrderedKernel<'_> {
             row_count,
             mut stream,
         } = self.fill;
-        let mut lane_entities =
-            std::array::from_fn::<_, 2, _>(|lane| Vec::with_capacity(entities[lane]));
+        let mut lane_entities = entities
+            .iter()
+            .map(|&count| Vec::with_capacity(count))
+            .collect::<Vec<_>>();
         for (local_id, state) in stream.state.states.drain(..).enumerate() {
             lane_entities[assignments[local_id].lane].push(OwnedLaneEntity { local_id, state });
+        }
+        let mut schedules = loads
+            .iter()
+            .map(|&rows| Vec::with_capacity(rows))
+            .collect::<Vec<_>>();
+        for (row, &entity) in stream.entity_ids.iter().enumerate() {
+            let assignment = assignments[entity];
+            schedules[assignment.lane].push(LaneRow {
+                original_row: u32::try_from(row).expect("qualified rows fit u32"),
+                lane_entity: u32::try_from(assignment.local).expect("qualified entities fit u32"),
+            });
         }
         let shared = Arc::new(PreparedNumericInput {
             entity_ids: stream.entity_ids,
@@ -419,15 +502,16 @@ impl PreparedOrderedKernel<'_> {
             outputs: self.plan.outputs.clone(),
             node_id: self.node_id.to_owned(),
         });
-        let requests = std::array::from_fn(|lane| NumericLaneRequest {
-            input: Arc::clone(&shared),
-            lane,
-            row_count: loads[lane],
-            rows: Vec::with_capacity(loads[lane]),
-            entities: mem::take(&mut lane_entities[lane]),
-            #[cfg(test)]
-            test_hook: None,
-        });
+        let requests = (0..lanes)
+            .map(|lane| NumericLaneRequest {
+                input: Arc::clone(&shared),
+                row_count: loads[lane],
+                rows: mem::take(&mut schedules[lane]),
+                entities: mem::take(&mut lane_entities[lane]),
+                #[cfg(test)]
+                test_hook: None,
+            })
+            .collect();
         if stream.last_identity.is_some() {
             stream.state.last_identity = stream.last_identity;
         }
@@ -447,6 +531,15 @@ impl PreparedOrderedKernel<'_> {
         };
         Ok((seed, requests))
     }
+}
+
+fn balanced_lane_loads(loads: &[usize], row_count: usize) -> bool {
+    let max_load = row_count / 8 * 5 + row_count % 8 * 5 / 8;
+    !loads.iter().any(|&rows| rows == 0 || rows > max_load)
+        && loads
+            .iter()
+            .try_fold(0_usize, |sum, &rows| sum.checked_add(rows))
+            == Some(row_count)
 }
 
 fn parallel_entity_state(entity: &TypedEntityState, groups: &[TypedGroupPlan]) -> bool {
@@ -769,22 +862,15 @@ impl<'a, const GROUPS: usize> NumericLaneContext<'a, GROUPS> {
         }
     }
 
-    fn record_row(
+    fn check_row(
         &self,
-        rows: &mut Vec<LaneRow>,
-        original_row: usize,
-        local: usize,
+        ordinal: usize,
         progress: &mut LaneProgress,
-    ) -> std::result::Result<LaneRow, NumericLaneStop> {
-        if rows.len().is_multiple_of(256) {
+    ) -> std::result::Result<(), NumericLaneStop> {
+        if ordinal.is_multiple_of(256) {
             check_cancelled(self.cancellation, progress)?;
         }
-        let row = LaneRow {
-            original_row: u32::try_from(original_row).expect("qualified rows fit u32"),
-            lane_entity: u32::try_from(local).expect("qualified entity IDs fit u32"),
-        };
-        rows.push(row);
-        Ok(row)
+        Ok(())
     }
 
     fn column(&self, ordinal: usize) -> &TypedGroupInput {
@@ -946,13 +1032,10 @@ fn run_prepared_numeric_lane<const GROUPS: usize>(
         .iter_mut()
         .map(|entity| Arc::make_mut(&mut entity.state))
         .collect::<Vec<_>>();
-    for (original_row, &entity_id) in context.input.entity_ids.iter().enumerate() {
-        let assignment = context.input.assignments[entity_id];
-        if assignment.lane != request.lane {
-            continue;
-        }
-        let row =
-            context.record_row(&mut request.rows, original_row, assignment.local, progress)?;
+    for (ordinal, row) in request.rows.iter().copied().enumerate() {
+        #[cfg(test)]
+        SCHEDULE_VISITS.set(SCHEDULE_VISITS.get() + 1);
+        context.check_row(ordinal, progress)?;
         let entity = &mut *entities[usize::try_from(row.lane_entity).expect("u32 fits platform")];
         context.update_entity(entity, row, progress)?;
         context.append_outputs(&mut builders, entity, row, progress, &mut append)?;
@@ -1003,7 +1086,8 @@ pub(super) const NULL_FREE_MERGE_METADATA_BYTES: usize =
 impl NumericOutputBuffers {
     fn gather(
         entity_ids: &[usize],
-        results: &[NumericLaneResult; 2],
+        assignments: &[EntityAssignment],
+        results: &[NumericLaneResult],
         count: usize,
     ) -> Result<Self> {
         let rows = entity_ids.len();
@@ -1012,12 +1096,16 @@ impl NumericOutputBuffers {
                 .iter()
                 .all(|result| result.columns.iter().all(|column| column.null_count() == 0));
         match count {
-            1 if null_free => {
-                gather_null_free_numeric_columns(entity_ids, results, [Vec::with_capacity(rows)])
-                    .map(Self::One)
-            }
-            2 if null_free => gather_null_free_numeric_columns(
+            1 if null_free => gather_null_free_numeric_columns_impl(
                 entity_ids,
+                assignments,
+                results,
+                [Vec::with_capacity(rows)],
+            )
+            .map(Self::One),
+            2 if null_free => gather_null_free_numeric_columns_impl(
+                entity_ids,
+                assignments,
                 results,
                 std::array::from_fn(|_| Vec::with_capacity(rows)),
             )
@@ -1026,7 +1114,7 @@ impl NumericOutputBuffers {
                 let mut builders = (0..count)
                     .map(|_| Float64Builder::with_capacity(rows))
                     .collect::<Vec<_>>();
-                merge_numeric_rows(entity_ids, results, |lane, offset| {
+                merge_numeric_rows(entity_ids, assignments, results, |lane, offset| {
                     for (builder, column) in builders.iter_mut().zip(&results[lane].columns) {
                         if column.is_null(offset) {
                             builder.append_null();
@@ -1052,17 +1140,29 @@ impl NumericOutputBuffers {
     }
 }
 
+#[cfg(test)]
 pub(super) fn gather_null_free_numeric_columns<const COLUMNS: usize>(
     entity_ids: &[usize],
-    results: &[NumericLaneResult; 2],
+    results: &[NumericLaneResult],
+    values: [Vec<f64>; COLUMNS],
+) -> Result<[Vec<f64>; COLUMNS]> {
+    let assignments = &results[0]
+        .input
+        .as_ref()
+        .expect("test input remains owned")
+        .assignments;
+    gather_null_free_numeric_columns_impl(entity_ids, assignments, results, values)
+}
+
+fn gather_null_free_numeric_columns_impl<const COLUMNS: usize>(
+    entity_ids: &[usize],
+    assignments: &[EntityAssignment],
+    results: &[NumericLaneResult],
     mut values: [Vec<f64>; COLUMNS],
 ) -> Result<[Vec<f64>; COLUMNS]> {
-    let columns: [[&[f64]; COLUMNS]; 2] = std::array::from_fn(|lane| {
-        std::array::from_fn(|column| results[lane].columns[column].values().as_ref())
-    });
-    merge_numeric_rows(entity_ids, results, |lane, offset| {
+    merge_numeric_rows(entity_ids, assignments, results, |lane, offset| {
         for (column, values) in values.iter_mut().enumerate() {
-            values.push(columns[lane][column][offset]);
+            values.push(results[lane].columns[column].value(offset));
         }
     })?;
     Ok(values)
@@ -1070,20 +1170,31 @@ pub(super) fn gather_null_free_numeric_columns<const COLUMNS: usize>(
 
 fn merge_numeric_rows(
     entity_ids: &[usize],
-    results: &[NumericLaneResult; 2],
+    assignments: &[EntityAssignment],
+    results: &[NumericLaneResult],
     mut append: impl FnMut(usize, usize),
 ) -> Result<()> {
-    let mut offsets = [0_usize; 2];
+    let mut inline = [0_usize; 2];
+    let mut dynamic = Vec::new();
+    let offsets = if results.len() <= inline.len() {
+        &mut inline[..results.len()]
+    } else {
+        dynamic.resize(results.len(), 0_usize);
+        dynamic.as_mut_slice()
+    };
     for (global, expected_entity) in entity_ids.iter().enumerate() {
-        let first = results[0].rows.get(offsets[0]);
-        let second = results[1].rows.get(offsets[1]);
-        let (lane, row) = match (first, second) {
-            (Some(first), Some(second)) if second.original_row < first.original_row => (1, *second),
-            (Some(first), _) => (0, *first),
-            (None, Some(second)) => (1, *second),
-            (None, None) => return Err(internal_error("numeric lane row coverage is incomplete")),
-        };
+        let lane = assignments
+            .get(*expected_entity)
+            .map(|assignment| assignment.lane)
+            .filter(|&lane| lane < results.len())
+            .ok_or_else(|| {
+                internal_error("numeric lane row coverage or entity identity changed")
+            })?;
         let result = &results[lane];
+        let row = result
+            .rows
+            .get(offsets[lane])
+            .ok_or_else(|| internal_error("numeric lane row coverage is incomplete"))?;
         if row.original_row as usize != global
             || result
                 .entities
@@ -1100,29 +1211,52 @@ fn merge_numeric_rows(
     }
     if results
         .iter()
-        .zip(offsets)
-        .any(|(result, consumed)| result.rows.len() != consumed)
+        .zip(offsets.iter())
+        .any(|(result, &consumed)| result.rows.len() != consumed)
     {
         return Err(internal_error("numeric lane row coverage has extra rows"));
     }
     Ok(())
 }
 
-fn take_numeric_input(results: &mut [NumericLaneResult; 2]) -> Result<PreparedNumericInput> {
-    let [Some(first), Some(second)] = results.each_mut().map(|result| result.input.take()) else {
-        return Err(internal_error("numeric lane input ownership is missing"));
-    };
-    if !Arc::ptr_eq(&first, &second) {
-        return Err(internal_error("numeric lane inputs differ"));
+fn take_numeric_input(results: &mut [NumericLaneResult]) -> Result<PreparedNumericInput> {
+    let mut input = None;
+    for result in results {
+        let current = result
+            .input
+            .take()
+            .ok_or_else(|| internal_error("numeric lane input ownership is missing"))?;
+        if let Some(first) = &input {
+            if !Arc::ptr_eq(first, &current) {
+                return Err(internal_error("numeric lane inputs differ"));
+            }
+        } else {
+            input = Some(current);
+        }
     }
-    drop(second);
+    let first = input.ok_or_else(|| internal_error("numeric lane input ownership is missing"))?;
     Arc::try_unwrap(first).map_err(|_| internal_error("numeric lane input ownership is shared"))
 }
 
-fn take_numeric_results(
-    exits: &mut [NumericLaneExit; 2],
-    run_id: &str,
-) -> Result<[NumericLaneResult; 2]> {
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the two-lane case preserves its existing allocation-free merge metadata"
+)]
+enum NumericResults {
+    Two([NumericLaneResult; 2]),
+    Many(Vec<NumericLaneResult>),
+}
+
+impl NumericResults {
+    fn as_mut_slice(&mut self) -> &mut [NumericLaneResult] {
+        match self {
+            Self::Two(results) => results,
+            Self::Many(results) => results,
+        }
+    }
+}
+
+fn take_numeric_results(exits: &mut [NumericLaneExit], run_id: &str) -> Result<NumericResults> {
     // Unlocated panics are task failures, never assigned the last active row.
     let selected = exits
         .iter()
@@ -1161,32 +1295,38 @@ fn take_numeric_results(
             run_id: run_id.to_owned(),
         });
     }
-    Ok(exits.each_mut().map(|exit| {
-        match mem::replace(&mut exit.outcome, NumericLaneOutcome::Consumed) {
-            NumericLaneOutcome::Complete(result) => result,
-            _ => unreachable!("all non-complete outcomes handled above"),
-        }
-    }))
+    let take = |exit: &mut NumericLaneExit| match mem::replace(
+        &mut exit.outcome,
+        NumericLaneOutcome::Consumed,
+    ) {
+        NumericLaneOutcome::Complete(result) => result,
+        _ => unreachable!("all non-complete outcomes handled above"),
+    };
+    if exits.len() == 2 {
+        Ok(NumericResults::Two(std::array::from_fn(|lane| {
+            take(&mut exits[lane])
+        })))
+    } else {
+        Ok(NumericResults::Many(exits.iter_mut().map(take).collect()))
+    }
 }
 
 /// Used only by `JoinedNumericPair`'s concrete merge operation, with its scratch
 /// permit alive. Kept separate from that runtime owner for direct numerical tests.
 pub(crate) fn merge_numeric_results(
     mut seed: NumericJoinSeed,
-    exits: &mut [NumericLaneExit; 2],
+    exits: &mut [NumericLaneExit],
     run_id: &str,
 ) -> Result<StreamKernelUpdate> {
     let mut results = take_numeric_results(exits, run_id)?;
-    seed.execution.entity_ids = take_numeric_input(&mut results)?.entity_ids;
+    let results = results.as_mut_slice();
+    let input = take_numeric_input(results)?;
     let count = seed.output_count;
-    validate_numeric_shape(&results, count)?;
-    let buffers = NumericOutputBuffers::gather(&seed.execution.entity_ids, &results, count)?;
-    let [first, second] = results
-        .each_mut()
-        .map(|result| mem::take(&mut result.entities));
-    let mut first = first.into_iter().peekable();
-    let mut second = second.into_iter().peekable();
-    merge_numeric_entities(&mut seed.execution.state, &mut first, &mut second)?;
+    validate_numeric_shape(results, count)?;
+    let buffers =
+        NumericOutputBuffers::gather(&input.entity_ids, &input.assignments, results, count)?;
+    merge_numeric_entities(&mut seed.execution.state, &input.assignments, results)?;
+    seed.execution.entity_ids = input.entity_ids;
     #[cfg(test)]
     if seed.panic_before_output_finish {
         std::panic::resume_unwind(Box::new(673_u32));
@@ -1207,7 +1347,7 @@ pub(crate) fn merge_numeric_results(
     })
 }
 
-fn validate_numeric_shape(results: &[NumericLaneResult; 2], count: usize) -> Result<()> {
+fn validate_numeric_shape(results: &[NumericLaneResult], count: usize) -> Result<()> {
     if results.iter().any(|result| {
         result.columns.len() != count
             || result.columns.iter().any(|column| {
@@ -1221,25 +1361,27 @@ fn validate_numeric_shape(results: &[NumericLaneResult; 2], count: usize) -> Res
 
 fn merge_numeric_entities(
     state: &mut RollingKernelState,
-    first: &mut std::iter::Peekable<std::vec::IntoIter<OwnedLaneEntity>>,
-    second: &mut std::iter::Peekable<std::vec::IntoIter<OwnedLaneEntity>>,
+    assignments: &[EntityAssignment],
+    results: &[NumericLaneResult],
 ) -> Result<()> {
-    while first.peek().is_some() || second.peek().is_some() {
-        let take_first = match (first.peek(), second.peek()) {
-            (Some(a), Some(b)) => a.local_id < b.local_id,
-            (Some(_), None) => true,
-            _ => false,
-        };
-        let entity = if take_first {
-            first.next()
-        } else {
-            second.next()
-        }
-        .expect("nonempty entity lane");
-        if entity.local_id != state.states.len() {
+    if results
+        .iter()
+        .map(|result| result.entities.len())
+        .sum::<usize>()
+        != assignments.len()
+    {
+        return Err(internal_error("numeric lane entity slots changed"));
+    }
+    for (local_id, assignment) in assignments.iter().enumerate() {
+        let entity = results
+            .get(assignment.lane)
+            .and_then(|result| result.entities.get(assignment.local))
+            .filter(|entity| entity.local_id == local_id)
+            .ok_or_else(|| internal_error("numeric lane entity slots changed"))?;
+        if local_id != state.states.len() {
             return Err(internal_error("numeric lane entity slots changed"));
         }
-        state.states.push(entity.state);
+        state.states.push(Arc::clone(&entity.state));
     }
     if state.states.len() != state.entities.len() {
         return Err(internal_error("numeric lane entity slots are incomplete"));

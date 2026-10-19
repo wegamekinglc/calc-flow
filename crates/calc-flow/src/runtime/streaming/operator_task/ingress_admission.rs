@@ -1,6 +1,6 @@
 //! One owned prepare task per Join/ASOF ingress. Envelopes become ready before
 //! their facts, so receive arbitration never waits for preparation completion.
-//! Read-ahead is one envelope and at most 64 fixed-size classification blocks.
+//! Read-ahead is one envelope with one queued pack of classification blocks.
 
 #[cfg(test)]
 use super::OperatorProgress;

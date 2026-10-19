@@ -94,15 +94,16 @@ fn test_checkpointing_mode_is_fixed_in_each_owned_job_context() {
 fn test_checkpointing_hash_records_disabled_mode_without_changing_the_plan() {
     let runner = runner(None);
     let fingerprint = runner.plan.fingerprint().to_owned();
-    let enabled = runner
-        .plan
-        .runtime_config_hash(&StreamRuntimeConfig::default())
-        .unwrap();
+    let historical = StreamRuntimeConfig {
+        edge_budget: crate::EdgeBudget::new(10_000, 64 << 20).unwrap(),
+        ..StreamRuntimeConfig::default()
+    };
+    let enabled = runner.plan.runtime_config_hash(&historical).unwrap();
     let disabled = runner
         .plan
         .runtime_config_hash(&StreamRuntimeConfig {
             checkpointing: false,
-            ..StreamRuntimeConfig::default()
+            ..historical
         })
         .unwrap();
     assert_eq!(
@@ -110,5 +111,12 @@ fn test_checkpointing_hash_records_disabled_mode_without_changing_the_plan() {
         "fd02188bac4dfdca45ddd37267c08da51ea4a47c562edb06236b59b056f6e4bb"
     );
     assert_ne!(enabled, disabled);
+    assert_ne!(
+        enabled,
+        runner
+            .plan
+            .runtime_config_hash(&StreamRuntimeConfig::default())
+            .unwrap()
+    );
     assert_eq!(runner.plan.fingerprint(), fingerprint);
 }

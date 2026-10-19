@@ -16,7 +16,7 @@ const INLINE_ENCODING_BYTES: usize = 10;
 
 #[path = "state/key_shards.rs"]
 mod key_shards;
-pub(super) use key_shards::{KEY_SHARDS, key_shard};
+pub(super) use key_shards::{KEY_SHARDS, key_partition, key_shard};
 
 #[cfg(test)]
 #[path = "state/expiration_cost_tests.rs"]
@@ -519,7 +519,7 @@ impl<'a> IntoIterator for &'a LegacyLeftState {
 
 mod left;
 pub(super) use left::{
-    ChunkData, LeftState, LeftView, OutputRun, PreparedLeftChunk, PreparedLeftDrain,
+    ChunkData, LeftState, LeftView, OutputRun, OwnedOutputRun, PreparedLeftChunk, PreparedLeftDrain,
 };
 
 mod capacity;

@@ -130,6 +130,7 @@ async fn checkpoint_a_real_pair(root: &Path) {
     let gate = Arc::new(WorkerGate::default());
     let _release = Release(gate.clone());
     block_after_numeric(&job, &gate);
+    job.core.entity_work.set_worker_limit_for_test(2);
     f.start.notify_one();
     wait_until(|| gate.entered.load(Ordering::SeqCst) == 2).await;
     let epoch = {
@@ -207,6 +208,7 @@ async fn real_checkpoint_drains_lanes_and_restores_serial_before_the_next_warm_p
         .unwrap();
     let weak = Arc::downgrade(&job.core);
     assert_eq!(*restored_cursor.lock(), Some(vec![2]));
+    job.core.entity_work.set_worker_limit_for_test(2);
     f.start.notify_one();
     wait_until(|| rows(&f.records) == ROWS).await;
     assert_eq!(job.core.owned_lane_launches.load(Ordering::SeqCst), 0);
@@ -239,6 +241,7 @@ async fn claimed_terminal_manifest_driver_abort_resolves_without_a_supervisor_or
         .start_checkpointed(f.spec, checkpoint(directory.path()))
         .await
         .unwrap();
+    job.core.entity_work.set_worker_limit_for_test(2);
     f.start.notify_one();
     let outcome = tokio::time::timeout(Duration::from_secs(10), job.wait())
         .await
@@ -292,6 +295,7 @@ async fn classified_terminal_recovery_failure_closes_claim_before_report_publica
         .start_checkpointed(f.spec, checkpoint(directory.path()))
         .await
         .unwrap();
+    job.core.entity_work.set_worker_limit_for_test(2);
     f.start.notify_one();
     assert_eq!(job.wait().await.state, ContinuousJobState::Completed);
     drop(job);

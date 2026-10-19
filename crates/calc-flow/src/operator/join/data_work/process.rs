@@ -6,11 +6,11 @@ use super::{
     MIN_PROBE_ROWS, ProbeAttempt, control,
     inputs::ProbeInputs,
     pairs::{self, FillFunding, PairOutput},
-    partition::Counts,
+    partition::{Counts, Partition},
     worker::{CountWork, FillWork},
 };
 use crate::runtime::streaming::gather_work::{
-    AdmissionFailure, GatherOperatorId, GatherStop, ObservedTicket, ParallelCpuWork,
+    AdmissionFailure, GatherOperatorId, GatherStop, JobGatherOwner, ObservedTicket, ParallelCpuWork,
 };
 use crate::{Result, StreamJobContext, StreamOperatorContext};
 use parking_lot::Mutex;
@@ -24,6 +24,10 @@ mod probe_stop_tests;
 #[path = "../tests/native_gather_window_tests.rs"]
 mod native_gather_window_tests;
 
+#[cfg(test)]
+#[path = "../tests/batch_parallel_output_tests.rs"]
+mod batch_parallel_output_tests;
+
 struct Capture {
     declined: Option<(AdmittedBatch, Option<NativeKeys>)>,
     ready: Option<Arc<ProbeInputs>>,
@@ -35,6 +39,21 @@ enum ProbeOutput {
         Counts,
         datafusion::execution::memory_pool::MemoryReservation,
     ),
+}
+
+fn estimated_key_visits(
+    frequencies: &[usize],
+    slots: &[Option<u32>],
+    run_length: impl Fn(u32) -> usize,
+) -> usize {
+    frequencies
+        .iter()
+        .zip(slots)
+        .fold(0_usize, |total, (&frequency, &slot)| {
+            slot.map_or(total, |id| {
+                total.saturating_add(frequency.saturating_mul(run_length(id)))
+            })
+        })
 }
 impl Capture {
     fn declined(admitted: AdmittedBatch, keys: Option<NativeKeys>) -> Self {
@@ -60,7 +79,12 @@ impl StreamJoinOperator {
         context: &StreamOperatorContext<'_>,
     ) -> ProbeAttempt {
         let inputs = {
-            let captured = match self.capture_probe(plan, std::mem::take(admitted), keys) {
+            let captured = match self.capture_probe(
+                plan,
+                std::mem::take(admitted),
+                keys,
+                context.job().gather_owner(),
+            ) {
                 Ok(captured) => captured,
                 Err(error) => return ProbeAttempt::Complete(Err(error)),
             };
@@ -102,6 +126,7 @@ impl StreamJoinOperator {
         plan: &SidePlan,
         admitted: AdmittedBatch,
         keys: Option<NativeKeys>,
+        owner: &JobGatherOwner,
     ) -> Result<Capture> {
         if !self.probe_ready(plan, admitted.len())? {
             return Ok(Capture::declined(admitted, keys));
@@ -109,7 +134,7 @@ impl StreamJoinOperator {
         let Some(keys) = keys else {
             return Ok(Capture::declined(admitted, None));
         };
-        self.capture_keyed_probe(plan, admitted, keys)
+        self.capture_keyed_probe(plan, admitted, keys, owner)
     }
 
     fn capture_keyed_probe(
@@ -117,8 +142,11 @@ impl StreamJoinOperator {
         plan: &SidePlan,
         mut admitted: AdmittedBatch,
         keys: NativeKeys,
+        owner: &JobGatherOwner,
     ) -> Result<Capture> {
-        let bytes = control::input_bytes(keys.keys.len(), admitted.len(), &self.name)?;
+        let capacity = owner.parallelism();
+        let partition = Partition::new(admitted.len(), capacity);
+        let bytes = control::input_bytes(keys.keys.len(), partition.units(), &self.name)?;
         let Some(credit) = self.optional_credit(bytes)? else {
             return Ok(Capture::declined(admitted, Some(keys)));
         };
@@ -137,12 +165,12 @@ impl StreamJoinOperator {
             .iter()
             .map(|key| key.as_ref().and_then(|key| index.key_id(key)))
             .collect::<Vec<_>>();
-        let estimated_visits = (0..admitted.len())
-            .filter_map(|position| slots[keys.id(position) as usize])
-            .fold(0usize, |total, id| {
-                total.saturating_add(index.run_len_by_id(id))
-            });
-        if estimated_visits < super::probe_min_visits() {
+        let estimated_visits =
+            estimated_key_visits(&keys.frequencies, &slots, |id| index.run_len_by_id(id));
+        if estimated_visits < super::probe_min_visits()
+            && !(super::morsel::materialization_worthwhile(self, admitted.len(), estimated_visits)
+                && capacity > 1)
+        {
             return Ok(Capture::declined(admitted, Some(keys)));
         }
         let (released, receiver) = tokio::sync::oneshot::channel();
@@ -150,6 +178,7 @@ impl StreamJoinOperator {
         self.probe_control = Some(Arc::clone(&control));
         Ok(Capture::ready(Arc::new(ProbeInputs {
             admitted,
+            partition,
             keys: Some(keys),
             slots,
             opposite: Some(Arc::clone(&opposite.0)),
@@ -183,11 +212,12 @@ impl StreamJoinOperator {
             inputs: Arc::clone(inputs),
             limit,
         });
-        let Some(counts) = self
+        let control = Arc::clone(inputs.control.as_ref().expect("prepaid count controls"));
+        let Some(mut counts) = self
             .run_probe_units(
                 work,
                 context,
-                move |values| Counts::ordered(values, limit),
+                move |values| Counts::ordered(values, limit, control),
                 #[cfg(test)]
                 false,
             )
@@ -201,7 +231,14 @@ impl StreamJoinOperator {
             self.spec.limits.max_matches_per_input_batch,
             &self.name,
         )?;
-        if let Some(credit) = self.deferred_credit(counts, inputs.admitted.len())? {
+        if let Some(credit) = self.deferred_credit(&counts, inputs.admitted.len())? {
+            return Ok(Some(ProbeOutput::Counted(counts, credit)));
+        }
+        if counts.total > 0
+            && super::morsel::eligible(self, inputs.admitted.len())
+            && counts.discard_windows()
+            && let Some(credit) = self.deferred_credit(&counts, inputs.admitted.len())?
+        {
             return Ok(Some(ProbeOutput::Counted(counts, credit)));
         }
         self.fill_probe(inputs, counts, context)
@@ -211,7 +248,7 @@ impl StreamJoinOperator {
 
     fn deferred_credit(
         &mut self,
-        counts: Counts,
+        counts: &Counts,
         rows: usize,
     ) -> Result<Option<datafusion::execution::memory_pool::MemoryReservation>> {
         if counts.total == 0 || !super::morsel::eligible(self, rows) {
@@ -231,12 +268,17 @@ impl StreamJoinOperator {
     pub(super) async fn fill_probe(
         &mut self,
         inputs: &Arc<ProbeInputs>,
-        counts: Counts,
+        mut counts: Counts,
         context: &StreamOperatorContext<'_>,
     ) -> Result<Option<PairOutput>> {
-        let Some((funding, credit)) = self.admit_fill(counts)? else {
+        let mut admission = self.admit_fill(&counts)?;
+        if admission.is_none() && counts.discard_windows() {
+            admission = self.admit_fill(&counts)?;
+        }
+        let Some((funding, credit)) = admission else {
             return Ok(None);
         };
+        let total = counts.total;
         self.run_probe_units(
             Arc::new(FillWork {
                 inputs: Arc::clone(inputs),
@@ -244,7 +286,7 @@ impl StreamJoinOperator {
                 funding,
             }),
             context,
-            move |fragments| pairs::ordered_output(fragments, credit, counts.total),
+            move |fragments| pairs::ordered_output(fragments, credit, total),
             #[cfg(test)]
             true,
         )
@@ -253,7 +295,7 @@ impl StreamJoinOperator {
 
     fn admit_fill(
         &mut self,
-        counts: Counts,
+        counts: &Counts,
     ) -> Result<
         Option<(
             FillFunding,

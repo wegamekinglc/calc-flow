@@ -98,6 +98,20 @@
       "candidate_sha256": "e5d1b4793a4fcf1277482812c1637e7b6723cc7503e6cc806b9dc1734910d8bd",
       "reason": "Keep the four maintained legacy cases behind the default entry point; add a feature-only compiled fixture and actual ASOF dispatch replay with an explicit System allocator. The common acceptance overlay applies the same helper and instrumentation to both pinned products.",
       "reference": "Issue #406 / PR #407; .codex/artifacts/specs/issue406-performance-acceptance.md"
+    },
+    {
+      "target": "stream_asof_perf",
+      "baseline_sha256": "8b1b5502793b2746e46e71ec2bf61aa154fc7836aa4cbba8d26f764c48e607a8",
+      "candidate_sha256": "681d0671855c9f2f9a12289c4dfa9bf090fc7d149911e33d8f60d2c9e79e0ac9",
+      "reason": "Pin the historical 10,000-row / 64 MiB output budget explicitly in benchmark contexts, chunk assertions and the committed-prefix cancellation fixture after the runtime default grows. Existing measured row fixtures, join declarations and timing boundaries are unchanged. The directional declaration records these exact harness bytes without rewriting historical dependency attestations or timing evidence.",
+      "reference": "PR #482; historical output-budget fixture preservation"
+    },
+    {
+      "target": "stream_join_materialization",
+      "baseline_sha256": "97894cebbd84d0933bfde106cf9a48d353f0f27dff0da74c605b4261415c7e5c",
+      "candidate_sha256": "26f40d42e335ae53d1502f4d4758e33ff48f0de7b7aaab22fe4f5d2fb0e8b4f6",
+      "reason": "Pin the historical 10,000-row / 64 MiB output budget explicitly in benchmark contexts and the output channel after the runtime default grows. Existing input rows, fanout, join declarations, correctness checks and timing boundaries are unchanged. The directional declaration records these exact harness bytes without rewriting historical dependency attestations or timing evidence.",
+      "reference": "PR #482; historical output-budget fixture preservation"
     }
   ]
 }

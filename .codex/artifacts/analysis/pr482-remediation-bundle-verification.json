@@ -1,0 +1,31 @@
+{
+  "schema": "calc-flow.pr482-portable-evidence-verification.v1",
+  "status": "verified-all-archive-members",
+  "archive": "pr482-remediation-evidence.tar.gz",
+  "archive_sha256": "312315f439a2aee75ae394e58244fcbcf066ca8d223a12a6140299a0f5f58d73",
+  "archive_bytes": 407912,
+  "index_sha256": "e2e94224c453a3e502cc8f2a818076104051cf1dc425692cca4792a304debf73",
+  "payload_file_count": 134,
+  "total_archive_members_including_index": 135,
+  "payload_uncompressed_bytes": 4154724,
+  "all_members_exact_original_bytes": true,
+  "all_index_hashes_and_sizes_verified": true,
+  "relative_regular_files_only": true,
+  "external_and_archived_index_identical": true,
+  "formal_measurement_sha256": "13b1e2afddc6fe1019edc0bd4fff183d3f1ba3357d71d8f26280079700c2d74e",
+  "formal_observations": 200,
+  "excluded_warmups": 20,
+  "report_sha256": "a6f885b7e8d2e15e2d513a955ca456d98bd6c071dce6c281e38d36995b3b7784",
+  "formal_audit_sha256": "12e2515a6b8e801d87ae2f14eb224deb14e067767fdf2f55fa8e66a11fcebf0d",
+  "ci_pending_at_freeze": true,
+  "native_calls": false,
+  "new_acquisition": false,
+  "archived_statistics_recomputed_using_archived_source": true,
+  "archived_case_verdicts": [
+    "inconclusive",
+    "inconclusive",
+    "no-confirmed-regression",
+    "inconclusive",
+    "inconclusive"
+  ]
+}

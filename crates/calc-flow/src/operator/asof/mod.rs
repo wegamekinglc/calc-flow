@@ -97,6 +97,12 @@ impl StreamAsofJoinOperator {
         batch: &Batch,
         context: &StreamOperatorContext<'_>,
     ) -> Result<()> {
+        #[cfg(feature = "benchmark-internals")]
+        let _phase =
+            context
+                .job()
+                .join_cpu_trace()
+                .stage(&self.name, "admission", batch.num_rows());
         let prepared = match context.ingress_preparation() {
             Some(preparation) => {
                 let facts = preparation.asof().await;
@@ -124,6 +130,12 @@ impl StreamAsofJoinOperator {
         validated: admission::ValidatedInput,
         context: &StreamOperatorContext<'_>,
     ) -> Result<()> {
+        #[cfg(feature = "benchmark-internals")]
+        let _phase =
+            context
+                .job()
+                .join_cpu_trace()
+                .stage(&self.name, "state_install", admission.len());
         let staging_workspace = self.reserve_admission_staging(&admission)?;
         let (index_len, projected, owners) = self.checked_capacity_admission(&admission)?;
         let journal = self

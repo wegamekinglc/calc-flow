@@ -1,9 +1,101 @@
 use super::*;
-use crate::operator::rolling::entity_parallel_test_pair;
+use crate::operator::rolling::{entity_parallel_test_pair, entity_parallel_test_work};
 use std::sync::{
     Condvar,
     atomic::{AtomicU64, Ordering},
 };
+
+#[tokio::test]
+async fn cpu_rolling_owner_dispatches_eight_concurrent_lanes() {
+    let owner = owner();
+    let gate = Arc::new(Gate::default());
+    let _release = ReleaseGate(gate.clone());
+    owner.set_hooks(TestHooks {
+        before_run: Some({
+            let gate = gate.clone();
+            Arc::new(move |_| gate.block())
+        }),
+        ..TestHooks::default()
+    });
+    let task = owner.client(TaskId::new(3), "operator:rolling".into());
+    let scope = task.callback_scope();
+    let (seed, requests, scratch) = entity_parallel_test_work(8);
+    let planned = requests.len() as u64;
+    let mut ticket = reserved(&scope, scratch).start(requests, None);
+    gate.wait_for(planned).await;
+    let concurrent = gate.entered.load(Ordering::SeqCst);
+    gate.release();
+    let joined = ticket.join().await;
+    let update = joined.merge(seed).unwrap();
+    drop(update);
+    drop(scope);
+    owner.close_admission();
+    assert!(owner.drain().await.is_empty());
+    assert_eq!(
+        concurrent, 8,
+        "all eight lanes must enter before any completes"
+    );
+    assert_eq!(owner.active_bytes(), 0);
+}
+
+#[tokio::test]
+async fn cpu_rolling_owner_has_no_private_scratch_byte_limit() {
+    let owner = owner();
+    let task = owner.client(TaskId::new(3), "operator:rolling".into());
+    let scope = task.callback_scope();
+    let scratch = ScratchPlan::large_test_plan();
+    assert!(scratch.accounted_bytes().unwrap() > 16 << 20);
+    let reservation = scope.context_client().try_reserve(scratch);
+    let admitted = matches!(reservation, ReservePair::Reserved(_));
+    drop(reservation);
+    scope.settle_abandoned().await;
+    drop(scope);
+    owner.close_admission();
+    assert!(owner.drain().await.is_empty());
+    assert!(
+        admitted,
+        "checked declared scratch must not have a private 16MiB cap"
+    );
+    assert_eq!(owner.active_bytes(), 0);
+}
+
+#[tokio::test]
+async fn cpu_rolling_abandoned_eight_lanes_retain_scratch_and_input_until_settled() {
+    let owner = owner();
+    let gate = Arc::new(Gate::default());
+    let _release = ReleaseGate(gate.clone());
+    owner.set_hooks(TestHooks {
+        before_run: Some({
+            let gate = gate.clone();
+            Arc::new(move |_| gate.block())
+        }),
+        ..TestHooks::default()
+    });
+    let task = owner.client(TaskId::new(3), "operator:rolling".into());
+    let scope = task.callback_scope();
+    let (seed, requests, scratch) = entity_parallel_test_work(8);
+    let input = requests[0].input_weak_for_test();
+    let ticket = reserved(&scope, scratch).start(requests, None);
+    gate.wait_for(8).await;
+    drop(ticket);
+    {
+        let settle = scope.settle_abandoned();
+        tokio::pin!(settle);
+        assert!(futures::poll!(&mut settle).is_pending());
+        assert!(input.upgrade().is_some());
+        assert_eq!(owner.active_bytes(), scratch.accounted_bytes().unwrap());
+        gate.release();
+        tokio::time::timeout(std::time::Duration::from_secs(5), &mut settle)
+            .await
+            .unwrap();
+    }
+    assert!(input.upgrade().is_none());
+    assert_eq!(owner.active_bytes(), 0);
+    drop(seed);
+    drop(scope);
+    owner.close_admission();
+    assert!(owner.drain().await.is_empty());
+}
 
 struct ReleaseGate(Arc<Gate>);
 

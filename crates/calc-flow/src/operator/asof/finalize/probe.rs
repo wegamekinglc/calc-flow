@@ -8,7 +8,7 @@ use datafusion::execution::memory_pool::MemoryReservation;
 use std::{collections::HashMap, sync::Arc};
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
 
 type Matches = Vec<(usize, Option<state::RowRef>)>;
 type Route = (usize, usize);
@@ -36,6 +36,12 @@ impl ParallelCpuWork for ProbeWork {
     }
 
     fn run(&self, ordinal: usize, stop: &GatherStop) -> Result<Matches> {
+        #[cfg(feature = "benchmark-internals")]
+        let _phase = stop.join_cpu_trace().worker_stage(
+            stop.join_cpu_operator(),
+            "match_worker",
+            self.shards[ordinal].rows.len(),
+        );
         #[cfg(test)]
         if let Some(hook) = &self.hook {
             hook(ordinal);
@@ -75,7 +81,6 @@ pub(super) async fn parallel_matches(
 ) -> Result<Option<ProbedRows>> {
     let workers = std::thread::available_parallelism()
         .map_or(1, usize::from)
-        .min(state::KEY_SHARDS)
         .min(operator.state.right.len())
         .min(count / 16_384);
     if workers < 2 {
@@ -204,7 +209,7 @@ fn capture_route<'a>(
         return Some(*route);
     }
     let bucket = operator.state.right.owned_bucket(key)?;
-    let shard = state::key_shard(key) % work.shards.len();
+    let shard = state::key_partition(key, work.shards.len());
     let target = &mut work.shards[shard];
     let index = target.buckets.len();
     target.buckets.push(bucket);

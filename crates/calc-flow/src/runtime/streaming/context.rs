@@ -25,6 +25,8 @@ pub struct StreamJobContext {
     gather: super::gather_work::JobGatherOwner,
     #[cfg(feature = "benchmark-internals")]
     dispatch_trace: crate::benchmark_internals::DispatchTraceOwner,
+    #[cfg(feature = "benchmark-internals")]
+    join_cpu_trace: crate::benchmark_internals::JoinCpuTraceOwner,
 }
 
 impl fmt::Debug for StreamJobContext {
@@ -63,6 +65,8 @@ impl StreamJobContext {
             gather: super::gather_work::JobGatherOwner::new(job_id.to_string().into()),
             #[cfg(feature = "benchmark-internals")]
             dispatch_trace: crate::benchmark_internals::DispatchTraceOwner::default(),
+            #[cfg(feature = "benchmark-internals")]
+            join_cpu_trace: crate::benchmark_internals::JoinCpuTraceOwner::default(),
         }
     }
 
@@ -80,6 +84,11 @@ impl StreamJobContext {
     #[cfg(feature = "benchmark-internals")]
     pub(crate) fn dispatch_trace(&self) -> &crate::benchmark_internals::DispatchTraceOwner {
         &self.dispatch_trace
+    }
+
+    #[cfg(feature = "benchmark-internals")]
+    pub(crate) fn join_cpu_trace(&self) -> &crate::benchmark_internals::JoinCpuTraceOwner {
+        &self.join_cpu_trace
     }
 
     pub(crate) fn with_gather_owner(mut self, gather: super::gather_work::JobGatherOwner) -> Self {

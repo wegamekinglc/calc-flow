@@ -2,6 +2,8 @@
 
 mod dispatch_trace;
 pub use dispatch_trace::DispatchTraceOwner;
+mod join_cpu_trace;
+pub use join_cpu_trace::JoinCpuTraceOwner;
 mod resources;
 pub use resources::PhaseClock;
 

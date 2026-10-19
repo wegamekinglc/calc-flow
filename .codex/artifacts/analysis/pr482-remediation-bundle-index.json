@@ -1,0 +1,694 @@
+{
+  "schema": "calc-flow.pr482-portable-evidence-index.v1",
+  "archive": "pr482-remediation-evidence.tar.gz",
+  "archive_root": "pr482-remediation",
+  "status": "frozen-local-evidence-ci-pending",
+  "measured_baseline": "61aab0e571800df8e8a18ad2244993d0929f5247",
+  "measured_candidate": "25e8b4c33114f1f85a8473136bf3c1f7991873e5",
+  "measurement_sha256": "13b1e2afddc6fe1019edc0bd4fff183d3f1ba3357d71d8f26280079700c2d74e",
+  "plan_sha256": "3c0e89048f27dfc866094ba27d16f136081a768805494a734078684bf3273950",
+  "controller_sha256": "4476b61628a7eae91017d82d10367cf9a0bd5b4ab7671aa6d1c738282cbc83af",
+  "formal_observations": 200,
+  "excluded_warmups": 20,
+  "combined_acquisition_elapsed_seconds": 122.67738912400091,
+  "ci_pending_at_freeze": true,
+  "payload_file_count": 134,
+  "files": {
+    "acquisition-plan.md": {
+      "sha256": "80623982b4ea7d12b8f7de80f458349b47dfdcf450811ff3a5b9b73e328093f4",
+      "bytes": 11249,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/acquisition-plan.md"
+    },
+    "baseline-relocation.json": {
+      "sha256": "da0a601d0d6f8077747680f4f5927208e49c89c9f20f4fb9152c3f4716afc23e",
+      "bytes": 1614,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/baseline-relocation.json"
+    },
+    "build-release.py": {
+      "sha256": "e53708e33e2cbdae9f09b7061a02c976cd9375f972c5421a1fda0d0dfc3875b0",
+      "bytes": 3988,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/build-release.py"
+    },
+    "bundle-README.md": {
+      "sha256": "5d8c1384f0170f43c5debafcf9e9d954492ed7eceafce6a7ba630d8cdad70520",
+      "bytes": 2994,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/bundle-README.md"
+    },
+    "check-binding-feature.py": {
+      "sha256": "b5f5a525da8a07695553e9f4530341e865edae1a519b0e6fb102b0002e9cdc3d",
+      "bytes": 890,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/check-binding-feature.py"
+    },
+    "check-feature.py": {
+      "sha256": "a68b991b4797a91a1568adbbef47cd558632c0e51a11e0dcabb11290532b462d",
+      "bytes": 2745,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/check-feature.py"
+    },
+    "check-installed-candidate.py": {
+      "sha256": "cb1047fe185cc447bcfad55dccf33af3cc04a34ecb48b26e28d05471c777bb0f",
+      "bytes": 1223,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/check-installed-candidate.py"
+    },
+    "complexity-after.json": {
+      "sha256": "8903efeaa44ee75b90af0ce0c5ab4751df2628ce24110d8b05a40454baad0399",
+      "bytes": 66462,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/complexity-after.json"
+    },
+    "complexity-before.json": {
+      "sha256": "33e7c763c8d0418d9f58b7a7cf9a176861c4b9982d54cea50b9ef7886e77d4bb",
+      "bytes": 4156,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/complexity-before.json"
+    },
+    "failed-import-attempt/acquisition-plan.md": {
+      "sha256": "34eafedea095b2d903df373b3639bfbd5d38366ade3e170d9f5bfb77056b51d0",
+      "bytes": 9799,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/failed-import-attempt/acquisition-plan.md"
+    },
+    "failed-import-attempt/baseline-relocation.json": {
+      "sha256": "da0a601d0d6f8077747680f4f5927208e49c89c9f20f4fb9152c3f4716afc23e",
+      "bytes": 1614,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/failed-import-attempt/baseline-relocation.json"
+    },
+    "failed-import-attempt/formal-measurement.log": {
+      "sha256": "dd08bda431fc5a5a102e3186139b1f8bf37fad760fc185efbe4389115ad00b1a",
+      "bytes": 630,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/failed-import-attempt/formal-measurement.log"
+    },
+    "failed-import-attempt/inventory.json": {
+      "sha256": "e4bfba15ad05bd8cba24a451e04aff4cb32ad9e922c19e57058f079f668de0a4",
+      "bytes": 5895,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/failed-import-attempt/inventory.json"
+    },
+    "failed-import-attempt/measure.py": {
+      "sha256": "63c299f6a42893cef4fa916039bef29cd06fb69b10bd6f4cdc9c6cff6a462585",
+      "bytes": 23196,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/failed-import-attempt/measure.py"
+    },
+    "failed-import-attempt/measure_worker.py": {
+      "sha256": "fcccefc39ceb7122e655cb14e4bed7e88e58073305d6b72fbe77e3703a3bd4da",
+      "bytes": 15168,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/failed-import-attempt/measure_worker.py"
+    },
+    "failed-import-attempt/measurement_contract.py": {
+      "sha256": "f7339c0d289f7ec410e10045becad29033140c17f57725ecce17ee4f179764ee",
+      "bytes": 5580,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/failed-import-attempt/measurement_contract.py"
+    },
+    "failed-import-attempt/plan.json": {
+      "sha256": "3a34aa162fcbcbeeae6a892be8a521187320d6fb78e6be517d2751fad2a8c1c5",
+      "bytes": 13993,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/failed-import-attempt/plan.json"
+    },
+    "failed-import-attempt/preparation-checks.json": {
+      "sha256": "adc5071e5f6e026983d89326fae58fca9526ccca0e5b02fa2c46a07238813c41",
+      "bytes": 5042,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/failed-import-attempt/preparation-checks.json"
+    },
+    "failed-import-attempt/prepare_plan.py": {
+      "sha256": "69ec61fdd06efc7d1aa2526452d61937f8aa0fd23b022b5de3052adc3735609c",
+      "bytes": 9490,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/failed-import-attempt/prepare_plan.py"
+    },
+    "failed-import-attempt/provenance-green.log": {
+      "sha256": "e8826ddf071536d75e282d791d15a7e1d8c8d6b92c8b22ddeaf8b6d4ea1e8182",
+      "bytes": 98,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/failed-import-attempt/provenance-green.log"
+    },
+    "failed-import-attempt/provenance-red.log": {
+      "sha256": "e6cf7d514538b92bc56c94cfabc228ad13690f97f361d5e5b6456b4da730a2a7",
+      "bytes": 7307,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/failed-import-attempt/provenance-red.log"
+    },
+    "failed-import-attempt/releases/base-relocated/build.json": {
+      "sha256": "5c1cd81f61fdf577fb8988871ac4937ca9089b0b872d55d7b56a74f195655449",
+      "bytes": 2993,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/failed-import-attempt/releases/base-relocated/build.json"
+    },
+    "failed-import-attempt/releases/base-relocated/original-build.json": {
+      "sha256": "2d80666e7e8238672d97f64547b52568ae278fc2be28a9648b787f5ec055dac4",
+      "bytes": 1932,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/failed-import-attempt/releases/base-relocated/original-build.json"
+    },
+    "failed-import-attempt/releases/candidate/build.json": {
+      "sha256": "75af93b58c8dc7c66d0da7acbabe6c86579ecf95a42cc539d402daf532527640",
+      "bytes": 1932,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/failed-import-attempt/releases/candidate/build.json"
+    },
+    "failed-import-attempt/reports/measurement.json": {
+      "sha256": "14bd60fe605b40a6d0e8405c04f9a173aa3a1168cf8f4ef4eb82643f099ecbdd",
+      "bytes": 27392,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/failed-import-attempt/reports/measurement.json"
+    },
+    "failed-import-attempt/reports/workers/asof_join-1000000-batch1000000-cpu1/remediation-vs-61aab0e-1cpu/round-1-A/stderr.log": {
+      "sha256": "a778f8ad0571cf68b654a7353a801b34536d4328192ab5ab67448b31c283689f",
+      "bytes": 752,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/failed-import-attempt/reports/workers/asof_join-1000000-batch1000000-cpu1/remediation-vs-61aab0e-1cpu/round-1-A/stderr.log"
+    },
+    "failed-import-attempt/reports/workers/asof_join-1000000-batch1000000-cpu1/remediation-vs-61aab0e-1cpu/round-1-A/stdout.jsonl": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/failed-import-attempt/reports/workers/asof_join-1000000-batch1000000-cpu1/remediation-vs-61aab0e-1cpu/round-1-A/stdout.jsonl"
+    },
+    "failed-import-attempt/test_measurement_provenance.py": {
+      "sha256": "357bb490c028f67ed0451e56eeee18bea84a5acd90fa43207340990bacb01636",
+      "bytes": 1808,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/failed-import-attempt/test_measurement_provenance.py"
+    },
+    "final-binding-feature.log": {
+      "sha256": "d3f3edebdf661faf272a132b0c80477a3e2af846c6ed546423b65622562ef272",
+      "bytes": 903,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/final-binding-feature.log"
+    },
+    "final-clippy-green.log": {
+      "sha256": "44b03dad2c2e300f0bae6903b46c8721b0ff343b10a77043ac751e0da6dca937",
+      "bytes": 556,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/final-clippy-green.log"
+    },
+    "final-clippy.log": {
+      "sha256": "3aca4ee3610dede7592a4e1788dbcb17759f9d0dcfdae4357bba01afc9b762ac",
+      "bytes": 1024,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/final-clippy.log"
+    },
+    "formal-measurement.log": {
+      "sha256": "b4c138b24dd6ffa37dde436610665b07da5f891d952b41ea410e6a35f58e20cb",
+      "bytes": 3664,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/formal-measurement.log"
+    },
+    "formal-offline-audit.json": {
+      "sha256": "12e2515a6b8e801d87ae2f14eb224deb14e067767fdf2f55fa8e66a11fcebf0d",
+      "bytes": 27255,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/formal-offline-audit.json"
+    },
+    "import-budget-red.log": {
+      "sha256": "d4005ce13ff8544d00c63cc4cc96cc4021ed3487bc876d938553dbf14fb07d9c",
+      "bytes": 2516,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/import-budget-red.log"
+    },
+    "import-recovery-green.log": {
+      "sha256": "e8a03aa5376f00138c772120654eed2dcc3609732b976966954755922810b7e5",
+      "bytes": 99,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/import-recovery-green.log"
+    },
+    "import-recovery-offline-audit.json": {
+      "sha256": "37d1cb6b7eaf728211270965bd3a470ba6c355ee8079e585c38185d2747fe57c",
+      "bytes": 2276,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/import-recovery-offline-audit.json"
+    },
+    "import-recovery-red.log": {
+      "sha256": "8b5eb241744c9cff09065cf50ec1022d46a28ab06baa9883a8bd3d41b24776b0",
+      "bytes": 3157,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/import-recovery-red.log"
+    },
+    "import-recovery.json": {
+      "sha256": "64f075bbd4a16406ee30312e38f99bdf0e045c02dbc36166b29d980b4390d0e9",
+      "bytes": 1633,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/import-recovery.json"
+    },
+    "installed-candidate-proof.json": {
+      "sha256": "f53e735ffa1e2bb4db5212d27f57b6b69c71018a277b45176156c9de9f90ac13",
+      "bytes": 635,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/installed-candidate-proof.json"
+    },
+    "installed-candidate.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/installed-candidate.log"
+    },
+    "installed-diagnostic.log": {
+      "sha256": "6c0b63496d9c9248baf59bc51847830d0c7a68b26a75f838f1f579e056e20988",
+      "bytes": 6278,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/installed-diagnostic.log"
+    },
+    "installed-host-check.log": {
+      "sha256": "1bfeb2f8fd5829af6bb4d4ff93b5edcf85498fa9038edc950bee145590f2273a",
+      "bytes": 98,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/installed-host-check.log"
+    },
+    "measure.py": {
+      "sha256": "4476b61628a7eae91017d82d10367cf9a0bd5b4ab7671aa6d1c738282cbc83af",
+      "bytes": 25017,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/measure.py"
+    },
+    "measure_worker.py": {
+      "sha256": "fcccefc39ceb7122e655cb14e4bed7e88e58073305d6b72fbe77e3703a3bd4da",
+      "bytes": 15168,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/measure_worker.py"
+    },
+    "measurement_contract.py": {
+      "sha256": "f7339c0d289f7ec410e10045becad29033140c17f57725ecce17ee4f179764ee",
+      "bytes": 5580,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/measurement_contract.py"
+    },
+    "performance-summary.md": {
+      "sha256": "a6f885b7e8d2e15e2d513a955ca456d98bd6c071dce6c281e38d36995b3b7784",
+      "bytes": 11429,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/performance-summary.md"
+    },
+    "plan.json": {
+      "sha256": "3c0e89048f27dfc866094ba27d16f136081a768805494a734078684bf3273950",
+      "bytes": 14276,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/plan.json"
+    },
+    "preparation-checks.json": {
+      "sha256": "adc5071e5f6e026983d89326fae58fca9526ccca0e5b02fa2c46a07238813c41",
+      "bytes": 5042,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/preparation-checks.json"
+    },
+    "prepare_plan.py": {
+      "sha256": "6c8df40b065426b101b5a324df9c5ceb5291d784f31379fc338e6d531443b8cc",
+      "bytes": 9815,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/prepare_plan.py"
+    },
+    "provenance-green.log": {
+      "sha256": "e8826ddf071536d75e282d791d15a7e1d8c8d6b92c8b22ddeaf8b6d4ea1e8182",
+      "bytes": 98,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/provenance-green.log"
+    },
+    "provenance-red.log": {
+      "sha256": "e6cf7d514538b92bc56c94cfabc228ad13690f97f361d5e5b6456b4da730a2a7",
+      "bytes": 7307,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/provenance-red.log"
+    },
+    "recovery-acquisition-plan.md.diff": {
+      "sha256": "18e583136610c1f598315b15f8e745227c5b54c423a2491db9f5b07fbac77588",
+      "bytes": 3686,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/recovery-acquisition-plan.md.diff"
+    },
+    "recovery-measure.py.diff": {
+      "sha256": "75bfe98a35d29824299aae7e6aba38e2bceb4ac47312849b7a271daddd5521ed",
+      "bytes": 3157,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/recovery-measure.py.diff"
+    },
+    "recovery-plan.json.diff": {
+      "sha256": "1d35e709efe55bb60d5cfe9f0f0b8ade7c3f2b5b6f05195ff65591f847d1d5d1",
+      "bytes": 1789,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/recovery-plan.json.diff"
+    },
+    "recovery-prepare_plan.py.diff": {
+      "sha256": "088ad8b33157f3dc1e7e360cdb08f5fd731ca536e1835bee2188dbf84e2a422b",
+      "bytes": 1187,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/recovery-prepare_plan.py.diff"
+    },
+    "recovery-test_measurement_provenance.py.diff": {
+      "sha256": "8777d0e142f206ce7248a5ed7d6d782c0a420cf2e73dfc3c9160c0b6f5988584",
+      "bytes": 2557,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/recovery-test_measurement_provenance.py.diff"
+    },
+    "releases/base-relocated/build.json": {
+      "sha256": "5c1cd81f61fdf577fb8988871ac4937ca9089b0b872d55d7b56a74f195655449",
+      "bytes": 2993,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/releases/base-relocated/build.json"
+    },
+    "releases/base-relocated/original-build.json": {
+      "sha256": "2d80666e7e8238672d97f64547b52568ae278fc2be28a9648b787f5ec055dac4",
+      "bytes": 1932,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/releases/base-relocated/original-build.json"
+    },
+    "releases/candidate/build.json": {
+      "sha256": "75af93b58c8dc7c66d0da7acbabe6c86579ecf95a42cc539d402daf532527640",
+      "bytes": 1932,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/releases/candidate/build.json"
+    },
+    "releases/candidate/build.log": {
+      "sha256": "2a24fba89a47a4a02f4baaf50add94de454a2c9e1d91f43a233083162c442374",
+      "bytes": 1096,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/releases/candidate/build.log"
+    },
+    "remediation-core-build.jsonl": {
+      "sha256": "962d62586c61c9cb7fe79a5902ffc8a615cde49c575d3641ec8906a750b609fa",
+      "bytes": 267174,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/remediation-core-build.jsonl"
+    },
+    "remediation-core-build.log": {
+      "sha256": "8263599482aeb53783fc3edc84d44ebe9f06de17d9262f61ff2f5e52865fdb14",
+      "bytes": 223,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/remediation-core-build.log"
+    },
+    "remediation-core-execution.json": {
+      "sha256": "43f32d674aa43c3cc2113335c1dca2f22acff7eb2bfc4ebc72693a65ea2be1f0",
+      "bytes": 681,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/remediation-core-execution.json"
+    },
+    "remediation-core.log": {
+      "sha256": "98ab9fb068966b8927c07aeed1d19f2e7deea142e89807ac7c4250d5c116c9ba",
+      "bytes": 28240,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/remediation-core.log"
+    },
+    "remediation-deadline-build.jsonl": {
+      "sha256": "93b9be812472b2e0a2e3076296e3cfd502f16226a70551e26d6eda8584056309",
+      "bytes": 267174,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/remediation-deadline-build.jsonl"
+    },
+    "remediation-deadline-build.log": {
+      "sha256": "c80c63db7c30287006a67a631a32d385c97ecb37e31e5104c902aa1caf2f3835",
+      "bytes": 223,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/remediation-deadline-build.log"
+    },
+    "remediation-deadline-execution.json": {
+      "sha256": "b9c8054ae7d4e613f623e3c3ded82a94ba75dec9ab0084af12e407f5a607c623",
+      "bytes": 511,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/remediation-deadline-execution.json"
+    },
+    "remediation-deadline.log": {
+      "sha256": "767670557fd62f7d0b20e79024a03370f43d37af9d212a216b794ca8918bd6f6",
+      "bytes": 639,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/remediation-deadline.log"
+    },
+    "remediation-route-build.jsonl": {
+      "sha256": "3771b8e309eea2ee883139c67595e8141e0c2e9722b2dbcee1f8998476aa5edf",
+      "bytes": 267174,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/remediation-route-build.jsonl"
+    },
+    "remediation-route-build.log": {
+      "sha256": "c774fb970b128168203368dd9a030549f3f3d049224f6d7e9eb4cdc5e3b4d6bc",
+      "bytes": 223,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/remediation-route-build.log"
+    },
+    "remediation-route-execution.json": {
+      "sha256": "25c2c0daa4c3be6ed992ac3e34deb0b8da1a0bb4bd381c8487fb9f027c0a6340",
+      "bytes": 406,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/remediation-route-execution.json"
+    },
+    "remediation-route.log": {
+      "sha256": "06b07c4775a5b752c83c9775177a5a68437909a0c8b4a3d524b362777d09a37b",
+      "bytes": 973,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/remediation-route.log"
+    },
+    "remediation-scope.json": {
+      "sha256": "20787e5ad4ba5361cd4e1d2d0ef305b0ed52af5de16c7a29f28b896a192a5e03",
+      "bytes": 1650,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/remediation-scope.json"
+    },
+    "reports/measurement.json": {
+      "sha256": "13b1e2afddc6fe1019edc0bd4fff183d3f1ba3357d71d8f26280079700c2d74e",
+      "bytes": 1843916,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/reports/measurement.json"
+    },
+    "reports/workers/asof_join-1000000-batch1000000-cpu1/remediation-vs-61aab0e-1cpu/round-1-A/stderr.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/reports/workers/asof_join-1000000-batch1000000-cpu1/remediation-vs-61aab0e-1cpu/round-1-A/stderr.log"
+    },
+    "reports/workers/asof_join-1000000-batch1000000-cpu1/remediation-vs-61aab0e-1cpu/round-1-A/stdout.jsonl": {
+      "sha256": "c1410ff22a43b69ee89c6909cf13aee7f9cbb49d0ad6d28706e1d13ea8d9275b",
+      "bytes": 29173,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/reports/workers/asof_join-1000000-batch1000000-cpu1/remediation-vs-61aab0e-1cpu/round-1-A/stdout.jsonl"
+    },
+    "reports/workers/asof_join-1000000-batch1000000-cpu1/remediation-vs-61aab0e-1cpu/round-1-B/stderr.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/reports/workers/asof_join-1000000-batch1000000-cpu1/remediation-vs-61aab0e-1cpu/round-1-B/stderr.log"
+    },
+    "reports/workers/asof_join-1000000-batch1000000-cpu1/remediation-vs-61aab0e-1cpu/round-1-B/stdout.jsonl": {
+      "sha256": "9fa6a95408037d845ea1e3fcb9a11e51c4ebbace2239677b3415e4fa203415ef",
+      "bytes": 28154,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/reports/workers/asof_join-1000000-batch1000000-cpu1/remediation-vs-61aab0e-1cpu/round-1-B/stdout.jsonl"
+    },
+    "reports/workers/asof_join-1000000-batch1000000-cpu1/remediation-vs-61aab0e-1cpu/round-2-A/stderr.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/reports/workers/asof_join-1000000-batch1000000-cpu1/remediation-vs-61aab0e-1cpu/round-2-A/stderr.log"
+    },
+    "reports/workers/asof_join-1000000-batch1000000-cpu1/remediation-vs-61aab0e-1cpu/round-2-A/stdout.jsonl": {
+      "sha256": "29ae7191372e22545fbd7919f766e63face7400b962df1ebdd8296a289d66fd1",
+      "bytes": 30050,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/reports/workers/asof_join-1000000-batch1000000-cpu1/remediation-vs-61aab0e-1cpu/round-2-A/stdout.jsonl"
+    },
+    "reports/workers/asof_join-1000000-batch1000000-cpu1/remediation-vs-61aab0e-1cpu/round-2-B/stderr.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/reports/workers/asof_join-1000000-batch1000000-cpu1/remediation-vs-61aab0e-1cpu/round-2-B/stderr.log"
+    },
+    "reports/workers/asof_join-1000000-batch1000000-cpu1/remediation-vs-61aab0e-1cpu/round-2-B/stdout.jsonl": {
+      "sha256": "c9bd29ffab1e93369f348b782f70f126abeaba8436c2b47c09bd6739ec12465c",
+      "bytes": 29033,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/reports/workers/asof_join-1000000-batch1000000-cpu1/remediation-vs-61aab0e-1cpu/round-2-B/stdout.jsonl"
+    },
+    "reports/workers/asof_join-1000000-batch1000000-cpu32/remediation-vs-61aab0e-32cpu/round-1-A/stderr.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/reports/workers/asof_join-1000000-batch1000000-cpu32/remediation-vs-61aab0e-32cpu/round-1-A/stderr.log"
+    },
+    "reports/workers/asof_join-1000000-batch1000000-cpu32/remediation-vs-61aab0e-32cpu/round-1-A/stdout.jsonl": {
+      "sha256": "0dc1d97558719771101fb8fc2468045989a895266cf0e7867dcba5aa643c1b84",
+      "bytes": 40270,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/reports/workers/asof_join-1000000-batch1000000-cpu32/remediation-vs-61aab0e-32cpu/round-1-A/stdout.jsonl"
+    },
+    "reports/workers/asof_join-1000000-batch1000000-cpu32/remediation-vs-61aab0e-32cpu/round-1-B/stderr.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/reports/workers/asof_join-1000000-batch1000000-cpu32/remediation-vs-61aab0e-32cpu/round-1-B/stderr.log"
+    },
+    "reports/workers/asof_join-1000000-batch1000000-cpu32/remediation-vs-61aab0e-32cpu/round-1-B/stdout.jsonl": {
+      "sha256": "6a1702eb0bff9d9708b7e8a6c9179892fbec92a54215c8a340a7a4b03cfa7157",
+      "bytes": 39255,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/reports/workers/asof_join-1000000-batch1000000-cpu32/remediation-vs-61aab0e-32cpu/round-1-B/stdout.jsonl"
+    },
+    "reports/workers/asof_join-1000000-batch1000000-cpu32/remediation-vs-61aab0e-32cpu/round-2-A/stderr.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/reports/workers/asof_join-1000000-batch1000000-cpu32/remediation-vs-61aab0e-32cpu/round-2-A/stderr.log"
+    },
+    "reports/workers/asof_join-1000000-batch1000000-cpu32/remediation-vs-61aab0e-32cpu/round-2-A/stdout.jsonl": {
+      "sha256": "045adca9f2ceffc960410b10239367dbf8e7e8088003e32aff61f8dade1da515",
+      "bytes": 40265,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/reports/workers/asof_join-1000000-batch1000000-cpu32/remediation-vs-61aab0e-32cpu/round-2-A/stdout.jsonl"
+    },
+    "reports/workers/asof_join-1000000-batch1000000-cpu32/remediation-vs-61aab0e-32cpu/round-2-B/stderr.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/reports/workers/asof_join-1000000-batch1000000-cpu32/remediation-vs-61aab0e-32cpu/round-2-B/stderr.log"
+    },
+    "reports/workers/asof_join-1000000-batch1000000-cpu32/remediation-vs-61aab0e-32cpu/round-2-B/stdout.jsonl": {
+      "sha256": "ebc0685d8a4392ba7362becaef828533241a85cd737068bd01f865d9168730d9",
+      "bytes": 39250,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/reports/workers/asof_join-1000000-batch1000000-cpu32/remediation-vs-61aab0e-32cpu/round-2-B/stdout.jsonl"
+    },
+    "reports/workers/interval_join-262144-batch262144-cpu1/remediation-vs-61aab0e-1cpu/round-1-A/stderr.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/reports/workers/interval_join-262144-batch262144-cpu1/remediation-vs-61aab0e-1cpu/round-1-A/stderr.log"
+    },
+    "reports/workers/interval_join-262144-batch262144-cpu1/remediation-vs-61aab0e-1cpu/round-1-A/stdout.jsonl": {
+      "sha256": "fbc220afc6bc3504934f46cf386f78558a88e3ea6c133173478c50eaf6db641b",
+      "bytes": 38357,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/reports/workers/interval_join-262144-batch262144-cpu1/remediation-vs-61aab0e-1cpu/round-1-A/stdout.jsonl"
+    },
+    "reports/workers/interval_join-262144-batch262144-cpu1/remediation-vs-61aab0e-1cpu/round-1-B/stderr.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/reports/workers/interval_join-262144-batch262144-cpu1/remediation-vs-61aab0e-1cpu/round-1-B/stderr.log"
+    },
+    "reports/workers/interval_join-262144-batch262144-cpu1/remediation-vs-61aab0e-1cpu/round-1-B/stdout.jsonl": {
+      "sha256": "fb60ba8bbc803ea5cc7c33dcfa6874d36dd6eb54dd978a5a03d6c31984529691",
+      "bytes": 37338,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/reports/workers/interval_join-262144-batch262144-cpu1/remediation-vs-61aab0e-1cpu/round-1-B/stdout.jsonl"
+    },
+    "reports/workers/interval_join-262144-batch262144-cpu1/remediation-vs-61aab0e-1cpu/round-2-A/stderr.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/reports/workers/interval_join-262144-batch262144-cpu1/remediation-vs-61aab0e-1cpu/round-2-A/stderr.log"
+    },
+    "reports/workers/interval_join-262144-batch262144-cpu1/remediation-vs-61aab0e-1cpu/round-2-A/stdout.jsonl": {
+      "sha256": "f7217178cf45211408ae88b723c62fb2bfd588571b872cdaff364d5169df4b50",
+      "bytes": 38355,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/reports/workers/interval_join-262144-batch262144-cpu1/remediation-vs-61aab0e-1cpu/round-2-A/stdout.jsonl"
+    },
+    "reports/workers/interval_join-262144-batch262144-cpu1/remediation-vs-61aab0e-1cpu/round-2-B/stderr.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/reports/workers/interval_join-262144-batch262144-cpu1/remediation-vs-61aab0e-1cpu/round-2-B/stderr.log"
+    },
+    "reports/workers/interval_join-262144-batch262144-cpu1/remediation-vs-61aab0e-1cpu/round-2-B/stdout.jsonl": {
+      "sha256": "efeb43da2ed37a6ca39bf57d7560451257bc5bca624954770b663a261c52c663",
+      "bytes": 37343,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/reports/workers/interval_join-262144-batch262144-cpu1/remediation-vs-61aab0e-1cpu/round-2-B/stdout.jsonl"
+    },
+    "reports/workers/interval_join-262144-batch262144-cpu32/remediation-vs-61aab0e-32cpu/round-1-A/stderr.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/reports/workers/interval_join-262144-batch262144-cpu32/remediation-vs-61aab0e-32cpu/round-1-A/stderr.log"
+    },
+    "reports/workers/interval_join-262144-batch262144-cpu32/remediation-vs-61aab0e-32cpu/round-1-A/stdout.jsonl": {
+      "sha256": "0068cd8dda5a774541f7893c93bc8c287361da6588679b9166b34811107b0130",
+      "bytes": 48551,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/reports/workers/interval_join-262144-batch262144-cpu32/remediation-vs-61aab0e-32cpu/round-1-A/stdout.jsonl"
+    },
+    "reports/workers/interval_join-262144-batch262144-cpu32/remediation-vs-61aab0e-32cpu/round-1-B/stderr.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/reports/workers/interval_join-262144-batch262144-cpu32/remediation-vs-61aab0e-32cpu/round-1-B/stderr.log"
+    },
+    "reports/workers/interval_join-262144-batch262144-cpu32/remediation-vs-61aab0e-32cpu/round-1-B/stdout.jsonl": {
+      "sha256": "c73cac93b7d3594c58eb6c5628406f85007b7620f4f80330d9387caae8c68fa1",
+      "bytes": 47542,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/reports/workers/interval_join-262144-batch262144-cpu32/remediation-vs-61aab0e-32cpu/round-1-B/stdout.jsonl"
+    },
+    "reports/workers/interval_join-262144-batch262144-cpu32/remediation-vs-61aab0e-32cpu/round-2-A/stderr.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/reports/workers/interval_join-262144-batch262144-cpu32/remediation-vs-61aab0e-32cpu/round-2-A/stderr.log"
+    },
+    "reports/workers/interval_join-262144-batch262144-cpu32/remediation-vs-61aab0e-32cpu/round-2-A/stdout.jsonl": {
+      "sha256": "bd4bbd6f9e5c8b4ddd50613cd138654381658b11b609da83442916b20338cfa0",
+      "bytes": 48561,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/reports/workers/interval_join-262144-batch262144-cpu32/remediation-vs-61aab0e-32cpu/round-2-A/stdout.jsonl"
+    },
+    "reports/workers/interval_join-262144-batch262144-cpu32/remediation-vs-61aab0e-32cpu/round-2-B/stderr.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/reports/workers/interval_join-262144-batch262144-cpu32/remediation-vs-61aab0e-32cpu/round-2-B/stderr.log"
+    },
+    "reports/workers/interval_join-262144-batch262144-cpu32/remediation-vs-61aab0e-32cpu/round-2-B/stdout.jsonl": {
+      "sha256": "bf8de8afd2d407fc9bc44114d58a342639141ce50ff2d9f6e7572d9c950f0ab6",
+      "bytes": 47538,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/reports/workers/interval_join-262144-batch262144-cpu32/remediation-vs-61aab0e-32cpu/round-2-B/stdout.jsonl"
+    },
+    "reports/workers/interval_join-262144-batch262144-cpu8/remediation-vs-61aab0e-8cpu/round-1-A/stderr.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/reports/workers/interval_join-262144-batch262144-cpu8/remediation-vs-61aab0e-8cpu/round-1-A/stderr.log"
+    },
+    "reports/workers/interval_join-262144-batch262144-cpu8/remediation-vs-61aab0e-8cpu/round-1-A/stdout.jsonl": {
+      "sha256": "711fc047b842380b1107963573527f793f4d8e3893a8b415791749af072e5405",
+      "bytes": 39701,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/reports/workers/interval_join-262144-batch262144-cpu8/remediation-vs-61aab0e-8cpu/round-1-A/stdout.jsonl"
+    },
+    "reports/workers/interval_join-262144-batch262144-cpu8/remediation-vs-61aab0e-8cpu/round-1-B/stderr.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/reports/workers/interval_join-262144-batch262144-cpu8/remediation-vs-61aab0e-8cpu/round-1-B/stderr.log"
+    },
+    "reports/workers/interval_join-262144-batch262144-cpu8/remediation-vs-61aab0e-8cpu/round-1-B/stdout.jsonl": {
+      "sha256": "0cce06c99aed3ec1ad8a89989e3f481da656b16ccea388e9efdd21fa24161e59",
+      "bytes": 38691,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/reports/workers/interval_join-262144-batch262144-cpu8/remediation-vs-61aab0e-8cpu/round-1-B/stdout.jsonl"
+    },
+    "reports/workers/interval_join-262144-batch262144-cpu8/remediation-vs-61aab0e-8cpu/round-2-A/stderr.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/reports/workers/interval_join-262144-batch262144-cpu8/remediation-vs-61aab0e-8cpu/round-2-A/stderr.log"
+    },
+    "reports/workers/interval_join-262144-batch262144-cpu8/remediation-vs-61aab0e-8cpu/round-2-A/stdout.jsonl": {
+      "sha256": "d09e9ad1713357beb66c44727b60136aadc673dbeb96dcafa8ede144b96b6712",
+      "bytes": 39698,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/reports/workers/interval_join-262144-batch262144-cpu8/remediation-vs-61aab0e-8cpu/round-2-A/stdout.jsonl"
+    },
+    "reports/workers/interval_join-262144-batch262144-cpu8/remediation-vs-61aab0e-8cpu/round-2-B/stderr.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/reports/workers/interval_join-262144-batch262144-cpu8/remediation-vs-61aab0e-8cpu/round-2-B/stderr.log"
+    },
+    "reports/workers/interval_join-262144-batch262144-cpu8/remediation-vs-61aab0e-8cpu/round-2-B/stdout.jsonl": {
+      "sha256": "324422e658d667dde4a81844e0709fcadcf03b00ac6bf9ffec54e8036dec25f9",
+      "bytes": 38690,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/reports/workers/interval_join-262144-batch262144-cpu8/remediation-vs-61aab0e-8cpu/round-2-B/stdout.jsonl"
+    },
+    "reused-baseline/build.json": {
+      "sha256": "2d80666e7e8238672d97f64547b52568ae278fc2be28a9648b787f5ec055dac4",
+      "bytes": 1932,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/join-cpu-pipeline/releases/candidate/build.json"
+    },
+    "reused-baseline/build.log": {
+      "sha256": "f951ace2f1d2640b651f83bc4c3253629fe7122460721211aa2b46b4947c0cf1",
+      "bytes": 1096,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/join-cpu-pipeline/releases/candidate/build.log"
+    },
+    "source-harness/Cargo.lock": {
+      "sha256": "a5a1628756aa0d5d1f4b06ac33ae7a549fa7491614c643499e11a7cc3fd4f385",
+      "bytes": 129738,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/join-cpu-pipeline/Cargo.lock"
+    },
+    "source-harness/benchmarks/engine_comparison.py": {
+      "sha256": "98d4d3ff5bbb7d6a0300755953afaec1eccdcd5aa1eaf4da92c6239bd9260bbf",
+      "bytes": 22336,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/join-cpu-pipeline/benchmarks/engine_comparison.py"
+    },
+    "source-harness/benchmarks/engine_lifecycle.py": {
+      "sha256": "830545f48c623b283881afbbeff053aeb48f93864d9bd483585a070afa4f0f49",
+      "bytes": 1985,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/join-cpu-pipeline/benchmarks/engine_lifecycle.py"
+    },
+    "source-harness/benchmarks/engine_stream.py": {
+      "sha256": "1f37cfa730c111793ca0ce698e5722074592ac1e3a5b97206bd9e71fd84ee70f",
+      "bytes": 35946,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/join-cpu-pipeline/benchmarks/engine_stream.py"
+    },
+    "source-harness/benchmarks/interval_acceptance.py": {
+      "sha256": "dab95e6487f24fe4dce2a34c21ddc180fe76ba9962524c081161a6551b5e8e4b",
+      "bytes": 5180,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/join-cpu-pipeline/benchmarks/interval_acceptance.py"
+    },
+    "source-harness/benchmarks/join_asof_acceptance.py": {
+      "sha256": "e10ab964fd7c16df68dac60f20281b6c44254022312410375d170f19432497f9",
+      "bytes": 27699,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/join-cpu-pipeline/benchmarks/join_asof_acceptance.py"
+    },
+    "source-harness/benchmarks/native_memory_profile.py": {
+      "sha256": "98b35c8fc2a0b0754d78e9cd0d602c1eba1b36dd405f4ac4101d282e586a56d3",
+      "bytes": 12774,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/join-cpu-pipeline/benchmarks/native_memory_profile.py"
+    },
+    "source-harness/scripts/__init__.py": {
+      "sha256": "afc6aadca28402549493544115b9d573b939af527a17705f1bb9a6ced91fe143",
+      "bytes": 59,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/join-cpu-pipeline/scripts/__init__.py"
+    },
+    "source-harness/scripts/benchmark_suite/__init__.py": {
+      "sha256": "9b2771a26f85bad6bbeca839a9313559f04ab056bcf7b42b53accd1e22cb992d",
+      "bytes": 74,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/join-cpu-pipeline/scripts/benchmark_suite/__init__.py"
+    },
+    "source-harness/scripts/benchmark_suite/catalog.py": {
+      "sha256": "e9ddf293b33b2aec4bfa57cd0e1f72c5b68c0e443d256fe31d9964918ae71e25",
+      "bytes": 18947,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/join-cpu-pipeline/scripts/benchmark_suite/catalog.py"
+    },
+    "source-harness/scripts/benchmark_suite/diagnostics.py": {
+      "sha256": "04510514204fad73725459c05c817d75ea2299eeec0f2b060fac9a26d240ed4f",
+      "bytes": 4934,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/join-cpu-pipeline/scripts/benchmark_suite/diagnostics.py"
+    },
+    "source-harness/scripts/benchmark_suite/issue406_measurement.py": {
+      "sha256": "680faeb7a220e39dfb7f47287d96688353aa9203715c9be8e23750d431718ce8",
+      "bytes": 8391,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/join-cpu-pipeline/scripts/benchmark_suite/issue406_measurement.py"
+    },
+    "source-harness/scripts/benchmark_suite/process.py": {
+      "sha256": "c40edb30ead3355aa95669e0dd6e6a38180d845351134f4b69bc41a52a66d7e2",
+      "bytes": 8510,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/join-cpu-pipeline/scripts/benchmark_suite/process.py"
+    },
+    "source-harness/scripts/benchmark_suite/report.py": {
+      "sha256": "3910e484b601db483d8eed5afc973d7b965164e1452edc71a144fa697455e1f2",
+      "bytes": 15625,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/join-cpu-pipeline/scripts/benchmark_suite/report.py"
+    },
+    "source-harness/scripts/benchmark_suite/statistics.py": {
+      "sha256": "c84b6065a7c8ca0ee0d123377df3750c7fd82e2eb0f50443af33161117757bcd",
+      "bytes": 1774,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/join-cpu-pipeline/scripts/benchmark_suite/statistics.py"
+    },
+    "source-harness/scripts/toolkit.py": {
+      "sha256": "cb898f828ad0d1a93be46f8634ac4e0b848653715a604252aa29102f4b52bc9f",
+      "bytes": 4544,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/join-cpu-pipeline/scripts/toolkit.py"
+    },
+    "test-executable.json": {
+      "sha256": "b85d462ba120b8da367bd3d0d84fd1ba10a84e9fc2d94ee43aa2105ec192a1f1",
+      "bytes": 117,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/test-executable.json"
+    },
+    "test_measurement_provenance.py": {
+      "sha256": "dae722eacf237aa67286a30ba0f319cc007a2310850ba3b5722527726cfbe391",
+      "bytes": 3944,
+      "original_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/pr482-remediation/test_measurement_provenance.py"
+    }
+  },
+  "excluded": [
+    "wheel/native binaries",
+    "checkpoint payloads; verified directory inventory retained",
+    "full repository and Python environment",
+    "later CI results"
+  ]
+}

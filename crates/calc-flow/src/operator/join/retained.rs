@@ -276,6 +276,16 @@ pub(super) struct Append {
 }
 
 impl Append {
+    /// New chunks retain payload owners in first-seen order.
+    pub(super) fn payload_owners(&self) -> impl Iterator<Item = &RowPayload> {
+        self.chunks.iter().flat_map(|chunk| {
+            chunk
+                .sources
+                .iter()
+                .filter_map(|source| source.as_ref().map(|source| &source.owner))
+        })
+    }
+
     pub(super) fn is_unfunded(&self) -> bool {
         self.count != 0
             && (self.control.is_none() || self.chunks.iter().any(|chunk| chunk.credit.is_none()))
@@ -961,6 +971,8 @@ fn chunk_base_bytes(count: usize, source_count: usize, key_count: usize) -> Opti
 
 mod admission;
 pub(super) use admission::ColumnarPlan;
+#[cfg(test)]
+pub(super) use admission::parallel::observe_preparation_for_test;
 
 #[cfg(test)]
 mod tests;

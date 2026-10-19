@@ -51,6 +51,165 @@ fn seed_distinct(local: &mut LocalIntern, hash: u64, row: usize) {
     local.table[bucket] = local.insert_distinct(hash, row, "match").unwrap();
 }
 
+#[tokio::test]
+async fn test_parallel_merge_preserves_explicit_first_appearance_without_owner_rows() {
+    let values = [7_i64, 9, 7];
+    let columns = [LocalColumn::I64(&values)];
+    let mut local = local_table(values.len());
+    let mut key_flow = KeyFlow::new(None);
+    let mut flow = LocalFlow::new(&mut key_flow);
+    for (row, appearance, expected) in [(0, 31, 0), (1, 77, 1), (2, 99, 0)] {
+        assert_eq!(
+            local
+                .merge_hashed(&columns, row, 42, appearance, "match", &mut flow)
+                .await
+                .unwrap(),
+            expected
+        );
+    }
+    assert_eq!(local.appearances, [31, 77]);
+    assert!(local.locals.is_empty());
+}
+
+#[tokio::test]
+async fn test_parallel_owner_merge_reuses_allowance_across_distinct_keys() {
+    use crate::operator::join::{join_work, reset_join_work};
+
+    let values = (0..32).collect::<Vec<i64>>();
+    let columns = [LocalColumn::I64(&values)];
+    let mut local = local_table(values.len());
+    let job = StreamJobContext::new(
+        1,
+        "owner-merge-allowance",
+        BTreeMap::new(),
+        None,
+        CancellationToken::new(),
+    );
+    let context = StreamOperatorContext::new(&job, "match", None);
+    let mut key_flow = KeyFlow::new(Some(&context));
+    let mut flow = LocalFlow::new(&mut key_flow);
+    reset_join_work();
+    for row in 0..values.len() {
+        local
+            .merge_hashed(
+                &columns,
+                row,
+                row as u64,
+                u32::try_from(row + 1_024).unwrap(),
+                "match",
+                &mut flow,
+            )
+            .await
+            .unwrap();
+        flow.step(1, 0).await.unwrap();
+    }
+    assert!(
+        join_work().quantum_boundaries <= 1,
+        "32 distinct keys must share the probe and metadata allowance"
+    );
+    assert_eq!(local.appearances, (1_024..1_056).collect::<Vec<_>>());
+    assert!(local.locals.is_empty());
+}
+
+#[tokio::test]
+async fn test_parallel_worker_short_hashes_match_cooperative_column_blocks() {
+    let strings = ["", "é\0tail", "", "other"];
+    let cases: Vec<Vec<ArrayRef>> = vec![
+        vec![Arc::new(StringArray::from(strings.to_vec()))],
+        vec![Arc::new(LargeStringArray::from(strings.to_vec()))],
+        vec![Arc::new(PrimitiveArray::<Int64Type>::from(vec![
+            -1, 7, -1, 9,
+        ]))],
+        vec![
+            Arc::new(StringArray::from(strings.to_vec())),
+            Arc::new(PrimitiveArray::<Int8Type>::from(vec![-1, 2, -1, 3])),
+        ],
+        vec![Arc::new(BooleanArray::from(vec![true, false, true, false]))],
+    ];
+    for arrays in cases {
+        let rows = admitted(arrays);
+        let indices = (0..rows[0].record.columns().len()).collect::<Vec<_>>();
+        let columns = bind_columns((&rows[0].record).into(), &indices).unwrap();
+        let mut serial = local_table(rows.len());
+        serial
+            .intern_group(
+                &columns,
+                AdmittedGroup::new(&rows, 0..rows.len()),
+                "match",
+                &mut KeyFlow::new(None),
+            )
+            .await
+            .unwrap();
+        let job = StreamJobContext::new(
+            1,
+            "worker-hash-parity",
+            BTreeMap::new(),
+            None,
+            CancellationToken::new(),
+        );
+        let stop = GatherStop::from_job(&job);
+        let mut flow = WorkerFlow::new(&stop).unwrap();
+        let mut worker = local_table(rows.len());
+        for row in 0..rows.len() {
+            let (id, _) = worker
+                .intern_worker_row(&columns, row, "match", &mut flow)
+                .unwrap()
+                .unwrap();
+            worker.locals.push(id);
+        }
+        assert_eq!(worker.locals, serial.locals);
+        assert_eq!(worker.hashes, serial.hashes);
+        assert_eq!(worker.appearances, serial.appearances);
+    }
+}
+
+#[test]
+fn test_parallel_worker_collision_checks_cancel_and_deadline_within_quantum() {
+    let values = (0..257).collect::<Vec<i64>>();
+    let columns = [LocalColumn::I64(&values)];
+    for deadline in [false, true] {
+        let mut local = local_table(values.len());
+        for row in 0..256 {
+            seed_distinct(&mut local, 42, row);
+        }
+        let (job, processed, _hook) = stop_after_work(typed_key::KeyPhase::LocalProbe, deadline);
+        let stop = GatherStop::from_job(&job);
+        let mut flow = WorkerFlow::new(&stop).unwrap();
+        let error = local
+            .intern_worker_hashed(42, (256, 8), &columns, "match", &mut flow)
+            .unwrap_err();
+        assert!(matches!(error, CalcFlowError::Cancelled { .. }));
+        assert!((1..=COPY_VISITS).contains(&processed.load(Ordering::SeqCst)));
+        assert_eq!(local.distinct, 256);
+    }
+}
+
+#[tokio::test]
+async fn test_parallel_owner_merge_collision_stays_cooperative() {
+    let values = (0..257).collect::<Vec<i64>>();
+    let columns = [LocalColumn::I64(&values)];
+    let mut local = local_table(values.len());
+    for row in 0..256 {
+        seed_distinct(&mut local, 42, row);
+    }
+    let (job, processed, _hook) = stop_after_work(typed_key::KeyPhase::LocalProbe, false);
+    let context = StreamOperatorContext::new(&job, "match", None);
+    let error = local
+        .merge_hashed(
+            &columns,
+            256,
+            42,
+            1234,
+            "match",
+            &mut LocalFlow::new(&mut KeyFlow::new(Some(&context))),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, CalcFlowError::Cancelled { .. }));
+    assert!((1..=COPY_VISITS).contains(&processed.load(Ordering::SeqCst)));
+    assert_eq!(local.distinct, 256);
+}
+
 fn string_column(large: bool, count: usize, width: usize) -> ArrayRef {
     let values = vec!["x".repeat(width); count];
     if large {

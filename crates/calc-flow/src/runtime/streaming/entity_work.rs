@@ -1,4 +1,4 @@
-//! One job-owned numeric pair; observers never own its blocking join handles.
+//! One job-owned numeric work group; observers never own its blocking handles.
 
 use std::{
     future::{Future, poll_fn},
@@ -42,6 +42,8 @@ struct OwnerCell {
     launches: Arc<std::sync::atomic::AtomicU64>,
     #[cfg(test)]
     hooks: Mutex<TestHooks>,
+    #[cfg(test)]
+    worker_limit: std::sync::atomic::AtomicUsize,
 }
 
 struct OwnerState {
@@ -65,16 +67,16 @@ struct PairRecord {
     cancellation: Arc<AtomicBool>,
     abandoned: bool,
     launching: bool,
-    requests: [Option<NumericLaneRequest>; 2],
-    handles: [Option<JoinHandle<NumericLaneExit>>; 2],
-    exits: [Option<NumericLaneExit>; 2],
+    requests: Vec<Option<NumericLaneRequest>>,
+    handles: Vec<Option<JoinHandle<NumericLaneExit>>>,
+    exits: Vec<Option<NumericLaneExit>>,
     lease: Option<NumericWorkLease>,
 }
 
 impl PairRecord {
     fn poll_handles(&mut self, cx: &mut Context<'_>) -> bool {
         let mut pending = false;
-        for lane in 0..2 {
+        for lane in 0..self.handles.len() {
             if let Some(handle) = &mut self.handles[lane] {
                 match Pin::new(handle).poll(cx) {
                     Poll::Pending => pending = true,
@@ -88,11 +90,10 @@ impl PairRecord {
         pending
     }
 
-    fn settle_work(&mut self, exits: &[NumericLaneExit; 2]) {
-        let rows = exits[0]
-            .work
-            .numeric_rows
-            .checked_add(exits[1].work.numeric_rows);
+    fn settle_work(&mut self, exits: &[NumericLaneExit]) {
+        let rows = exits
+            .iter()
+            .try_fold(0_u64, |rows, exit| rows.checked_add(exit.work.numeric_rows));
         if let Some(lease) = self.lease.take() {
             lease.settle(
                 rows.unwrap_or(0),
@@ -134,6 +135,8 @@ impl JobEntityWorkOwner {
             launches,
             #[cfg(test)]
             hooks: Mutex::new(TestHooks::default()),
+            #[cfg(test)]
+            worker_limit: std::sync::atomic::AtomicUsize::new(0),
         }))
     }
 
@@ -274,7 +277,6 @@ pub(crate) enum SerialReason {
     Busy,
     GenerationExhausted,
     AlreadyUsed,
-    ScratchLimit,
     Unrepresentable,
 }
 
@@ -285,6 +287,17 @@ pub(crate) enum ReservePair {
 }
 
 impl ScopedEntityWorkClient {
+    #[cfg(test)]
+    pub(crate) fn parallelism(&self, available: usize) -> usize {
+        if let Some(owner) = self.0.owner.upgrade() {
+            let configured = owner.worker_limit.load(Ordering::SeqCst);
+            if configured > 0 {
+                return configured;
+            }
+        }
+        available
+    }
+
     pub(crate) fn try_reserve(&self, scratch: ScratchPlan) -> ReservePair {
         let Some(owner) = self.0.owner.upgrade() else {
             return ReservePair::Stopped;
@@ -303,13 +316,11 @@ impl ScopedEntityWorkClient {
         let Some(bytes) = scratch.accounted_bytes() else {
             return ReservePair::Serial(SerialReason::Unrepresentable);
         };
-        if bytes > ScratchPlan::CAP_BYTES {
-            return ReservePair::Serial(SerialReason::ScratchLimit);
-        }
         let Some(id) = state.generation.checked_add(1) else {
             return ReservePair::Serial(SerialReason::GenerationExhausted);
         };
         state.generation = id;
+        let lanes = scratch.lanes();
         state.slot = Slot::Active(Box::new(PairRecord {
             id,
             bytes,
@@ -318,9 +329,9 @@ impl ScopedEntityWorkClient {
             cancellation: Arc::new(AtomicBool::new(false)),
             abandoned: false,
             launching: true,
-            requests: [None, None],
-            handles: [None, None],
-            exits: [None, None],
+            requests: Vec::new(),
+            handles: (0..lanes).map(|_| None).collect(),
+            exits: (0..lanes).map(|_| None).collect(),
             lease: None,
         }));
         *used = Some(id);
@@ -341,7 +352,7 @@ pub(crate) struct PairLaunchGuard {
 impl PairLaunchGuard {
     pub(crate) fn start(
         mut self,
-        requests: [NumericLaneRequest; 2],
+        requests: impl IntoIterator<Item = NumericLaneRequest>,
         recorder: Option<RollingMetricsRecorder>,
     ) -> PairTicket {
         let owner = self
@@ -353,9 +364,14 @@ impl PairLaunchGuard {
             unreachable!("reserved pair remains owned");
         };
         assert_eq!(pair.id, self.id);
-        pair.requests = requests.map(Some);
+        pair.requests = requests.into_iter().map(Some).collect();
+        assert_eq!(
+            pair.requests.len(),
+            pair.handles.len(),
+            "scratch funds every planned lane"
+        );
         pair.lease = recorder.and_then(|recorder| recorder.numeric_lease(self.id));
-        for lane in 0..2 {
+        for lane in 0..pair.handles.len() {
             #[cfg(test)]
             assert!(
                 lane != 1 || !owner.hooks.lock().panic_before_second_launch,
@@ -488,12 +504,16 @@ impl OwnerCell {
         else {
             unreachable!();
         };
-        let exits = pair.exits.each_mut().map(|exit| {
-            exit.take().unwrap_or(NumericLaneExit {
-                outcome: NumericLaneOutcome::Cancelled,
-                work: ActualNumericWork::default(),
+        let exits = pair
+            .exits
+            .iter_mut()
+            .map(|exit| {
+                exit.take().unwrap_or(NumericLaneExit {
+                    outcome: NumericLaneOutcome::Cancelled,
+                    work: ActualNumericWork::default(),
+                })
             })
-        });
+            .collect::<Vec<_>>();
         pair.settle_work(&exits);
         Poll::Ready(Some(JoinedNumericPair {
             owner: Arc::downgrade(self),
@@ -528,8 +548,8 @@ pub(crate) struct JoinedNumericPair {
     task_id: TaskId,
     task_name: Arc<str>,
     run_id: Arc<str>,
-    exits: Option<[NumericLaneExit; 2]>,
-    requests: [Option<NumericLaneRequest>; 2],
+    exits: Option<Vec<NumericLaneExit>>,
+    requests: Vec<Option<NumericLaneRequest>>,
 }
 
 impl JoinedNumericPair {
@@ -592,6 +612,11 @@ pub(crate) struct TestHooks {
 
 #[cfg(test)]
 impl JobEntityWorkOwner {
+    pub(crate) fn set_worker_limit_for_test(&self, workers: usize) {
+        assert!(workers > 0);
+        self.0.worker_limit.store(workers, Ordering::SeqCst);
+    }
+
     pub(crate) fn set_hooks(&self, hooks: TestHooks) {
         *self.0.hooks.lock() = hooks;
     }

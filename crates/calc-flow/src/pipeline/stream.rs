@@ -59,8 +59,8 @@ pub struct EdgeBudget {
 impl EdgeBudget {
     /// Largest admitted row count for one stream batch or edge budget.
     pub const MAX_ROWS: usize = 1_000_000;
-    /// Largest admitted byte count for one stream batch or edge budget.
-    pub const MAX_BYTES: usize = 256 << 20;
+    /// Address-space maximum; byte limits are chosen explicitly by callers.
+    pub const MAX_BYTES: usize = usize::MAX;
 
     /// Creates a budget with positive, bounded limits (S10.1).
     ///
@@ -86,12 +86,6 @@ impl EdgeBudget {
                 message: format!("must not exceed {}", Self::MAX_ROWS),
             });
         }
-        if max_bytes > Self::MAX_BYTES {
-            return Err(CalcFlowError::InvalidArgument {
-                field: "max_bytes".into(),
-                message: format!("must not exceed {}", Self::MAX_BYTES),
-            });
-        }
         Ok(Self {
             max_rows,
             max_bytes,
@@ -102,8 +96,8 @@ impl EdgeBudget {
 impl Default for EdgeBudget {
     fn default() -> Self {
         Self {
-            max_rows: 10_000,
-            max_bytes: 64 << 20,
+            max_rows: 1_000_000,
+            max_bytes: usize::MAX,
         }
     }
 }
@@ -1438,6 +1432,24 @@ mod runtime_projection_tests {
         CompiledStreamOperator, EdgeBudget, OperatorCheckpointCapability, RuntimeEdgeKind,
         RuntimeProducer,
     };
+
+    #[test]
+    fn cpu_default_edge_budget_accepts_one_million_rows_without_byte_limit() {
+        let budget = EdgeBudget::default();
+        assert_eq!(budget.max_rows, 1_000_000);
+        assert_eq!(budget.max_bytes, usize::MAX);
+        assert_eq!(EdgeBudget::MAX_BYTES, usize::MAX);
+        assert!(EdgeBudget::new(1_000_000, usize::MAX).is_ok());
+    }
+
+    #[test]
+    fn cpu_explicit_edge_byte_budget_has_no_arbitrary_global_ceiling() {
+        let explicit = EdgeBudget::new(17, (256 << 20) + 1).unwrap();
+        assert_eq!(explicit.max_rows, 17);
+        assert_eq!(explicit.max_bytes, (256 << 20) + 1);
+        assert!(EdgeBudget::new(EdgeBudget::MAX_ROWS + 1, 1).is_err());
+        assert!(EdgeBudget::new(1, 0).is_err());
+    }
 
     fn endpoint(node_id: &str, port: &str) -> PortEndpoint {
         PortEndpoint::new(node_id, port).unwrap()

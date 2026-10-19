@@ -1,5 +1,5 @@
 use super::super::{
-    AdmittedBatch, JoinTimeBounds,
+    AdmittedBatch, AdmittedRows, JoinTimeBounds,
     checkpoint_v2::ContainerFunding,
     native_lookup::{NativeIndex, NativeKeys, WindowBounds, WindowCursor},
 };
@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 pub(super) struct ProbeInputs {
     pub(super) admitted: AdmittedBatch,
+    pub(super) partition: super::partition::Partition,
     pub(super) keys: Option<NativeKeys>,
     pub(super) slots: Vec<Option<u32>>,
     pub(super) opposite: Option<Arc<crate::operator::join::StateRows>>,
@@ -35,7 +36,7 @@ impl ProbeInputs {
         super::super::native_lookup::time_range(
             self.bounds,
             self.incoming_is_left,
-            self.admitted.row(position).event_time,
+            self.admitted.event_time(position),
         )
     }
 
@@ -66,13 +67,11 @@ impl ProbeInputs {
         bounds
     }
 
-    /// Dense opposite indices for one probe row's window, advancing the cursor.
-    pub(super) fn matches_window(
+    pub(super) fn matches_bounds(
         &self,
         position: usize,
-        cursors: &mut [Option<WindowCursor>],
+        bounds: WindowBounds,
     ) -> impl Iterator<Item = usize> + '_ {
-        let bounds = self.window(position, cursors);
         self.slot(position).into_iter().flat_map(move |id| {
             self.index
                 .as_ref()

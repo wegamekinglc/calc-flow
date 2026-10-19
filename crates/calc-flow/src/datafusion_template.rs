@@ -5,9 +5,9 @@
 //! one in-memory scan, and every function is immutable, the plan is kept as a
 //! template. Later batches with the same query text, alias, and exact schema
 //! reuse the template instead of parsing, registering, and planning again.
-//! Ordinary SQL queries bind rows into a fresh plan tree with fresh execution
-//! metrics. Eligible stream expressions compile the template into immutable
-//! expression steps with filtering state owned by each evaluation.
+//! Finite SQL queries bind rows into a fresh plan tree with fresh execution
+//! metrics. Eligible stream expressions and row-local stream SQL compile the
+//! template into immutable steps with filtering state owned by each evaluation.
 
 use std::{
     collections::BTreeMap,

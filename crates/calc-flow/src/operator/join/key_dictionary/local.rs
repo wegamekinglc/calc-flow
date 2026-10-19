@@ -7,6 +7,7 @@ use super::super::{
 };
 use super::KeyFlow;
 use crate::Result;
+use crate::runtime::streaming::gather_work::GatherStop;
 use datafusion::arrow::array::{
     Array, BooleanArray, LargeStringArray, PrimitiveArray, StringArray,
 };
@@ -24,14 +25,14 @@ mod tests;
 /// Prepaid cooperation allowance, shared across hash, probe and equality.
 /// Refilling happens before work, so small operations amortize the async step
 /// while a long value or collision chain cannot outrun either quantum limit.
-struct LocalFlow<'a, 'c, 'j> {
+pub(super) struct LocalFlow<'a, 'c, 'j> {
     flow: &'a mut KeyFlow<'c, 'j>,
     visits: usize,
     bytes: usize,
 }
 
 impl<'a, 'c, 'j> LocalFlow<'a, 'c, 'j> {
-    fn new(flow: &'a mut KeyFlow<'c, 'j>) -> Self {
+    pub(super) fn new(flow: &'a mut KeyFlow<'c, 'j>) -> Self {
         Self {
             flow,
             visits: 0,
@@ -39,7 +40,7 @@ impl<'a, 'c, 'j> LocalFlow<'a, 'c, 'j> {
         }
     }
 
-    async fn step(&mut self, visits: usize, bytes: usize) -> Result<()> {
+    pub(super) async fn step(&mut self, visits: usize, bytes: usize) -> Result<()> {
         if !self.take(visits, bytes) {
             self.flow.step(COPY_VISITS, COPY_BYTES).await?;
             self.visits = COPY_VISITS - visits;
@@ -58,6 +59,35 @@ impl<'a, 'c, 'j> LocalFlow<'a, 'c, 'j> {
         self.visits -= visits;
         self.bytes -= bytes;
         true
+    }
+}
+
+pub(super) struct WorkerFlow<'a> {
+    stop: &'a GatherStop,
+    visits: usize,
+    bytes: usize,
+}
+
+impl<'a> WorkerFlow<'a> {
+    pub(super) fn new(stop: &'a GatherStop) -> Result<Self> {
+        stop.check()?;
+        Ok(Self {
+            stop,
+            visits: 0,
+            bytes: 0,
+        })
+    }
+
+    fn step(&mut self, visits: usize, bytes: usize) -> Result<()> {
+        debug_assert!(visits <= COPY_VISITS && bytes <= COPY_BYTES);
+        if self.visits + visits > COPY_VISITS || self.bytes + bytes > COPY_BYTES {
+            self.stop.check()?;
+            self.visits = 0;
+            self.bytes = 0;
+        }
+        self.visits += visits;
+        self.bytes += bytes;
+        Ok(())
     }
 }
 
@@ -148,6 +178,97 @@ impl LocalIntern {
         posts.clear();
         splits.clear();
         *distinct = 0;
+    }
+
+    /// Native workers handle only a bounded row and poll within collision chains.
+    pub(super) fn intern_worker_row(
+        &mut self,
+        columns: &[LocalColumn<'_>],
+        offset: usize,
+        name: &str,
+        flow: &mut WorkerFlow<'_>,
+    ) -> Result<Option<(u32, usize)>> {
+        if columns.len() > COPY_VISITS {
+            return Ok(None);
+        }
+        let Some(width) = bounded_row_bytes(columns, offset) else {
+            return Ok(None);
+        };
+        let mut hash = 0x243F_6A88_85A3_08D3_u64;
+        for column in columns {
+            let bytes = column.bytes(offset);
+            flow.step(1, bytes)?;
+            hash = column.worker_hash(offset, hash);
+            #[cfg(test)]
+            super::super::typed_key::note(super::super::typed_key::KeyPhase::LocalHash, bytes);
+        }
+        let local = self.intern_worker_hashed(hash, (offset, width), columns, name, flow)?;
+        Ok(Some((local, width)))
+    }
+
+    fn intern_worker_hashed(
+        &mut self,
+        hash: u64,
+        (offset, width): (usize, usize),
+        columns: &[LocalColumn<'_>],
+        name: &str,
+        flow: &mut WorkerFlow<'_>,
+    ) -> Result<u32> {
+        let mask = self.table.len() - 1;
+        let mut bucket = usize::try_from(hash & u64::try_from(mask).expect("slot mask fits u64"))
+            .expect("masked hash fits usize");
+        loop {
+            flow.step(1, 0)?;
+            let local = self.table[bucket];
+            if local == u32::MAX {
+                let local = self.insert_distinct(hash, offset, name)?;
+                self.table[bucket] = local;
+                return Ok(local);
+            }
+            #[cfg(test)]
+            super::super::typed_key::note(super::super::typed_key::KeyPhase::LocalProbe, 0);
+            if self.hashes[local as usize] == hash {
+                flow.step(columns.len(), width)?;
+                let matched = values_equal(columns, self.rows[local as usize], offset);
+                #[cfg(test)]
+                super::super::typed_key::note(
+                    super::super::typed_key::KeyPhase::LocalComparison,
+                    width,
+                );
+                if matched {
+                    return Ok(local);
+                }
+            }
+            bucket = (bucket + 1) & mask;
+        }
+    }
+
+    /// Owner merging retains cooperative probing and the fragment's first appearance.
+    pub(super) async fn merge_hashed(
+        &mut self,
+        columns: &[LocalColumn<'_>],
+        offset: usize,
+        hash: u64,
+        appearance: u32,
+        name: &str,
+        flow: &mut LocalFlow<'_, '_, '_>,
+    ) -> Result<u32> {
+        let width = columns
+            .iter()
+            .try_fold(0_usize, |total, column| {
+                total.checked_add(column.bytes(offset))
+            })
+            .ok_or_else(|| super::counter_overflow(name, "key_bytes"))?;
+        let previous = self.distinct;
+        let local = self
+            .intern_hashed(hash, (offset, width), columns, name, flow, |left, right| {
+                values_equal(columns, left, right)
+            })
+            .await?;
+        if self.distinct > previous {
+            self.appearances[local as usize] = appearance;
+        }
+        Ok(local)
     }
 
     /// Probes candidates with separately charged visits and equality work.
@@ -500,6 +621,14 @@ pub(super) fn bind_columns<'a>(
         .collect()
 }
 
+pub(super) fn bounded_row_bytes(columns: &[LocalColumn<'_>], row: usize) -> Option<usize> {
+    columns.iter().try_fold(0_usize, |bytes, column| {
+        bytes
+            .checked_add(column.bytes(row))
+            .filter(|&bytes| bytes <= COPY_BYTES)
+    })
+}
+
 fn values_equal(columns: &[LocalColumn<'_>], left: usize, right: usize) -> bool {
     columns.iter().all(|column| column.equal(left, right))
 }
@@ -792,6 +921,40 @@ impl<'a> LocalColumn<'a> {
             Self::U64(values) => values[left] == values[right],
             Self::Utf8(values) => values.value(left) == values.value(right),
             Self::LargeUtf8(values) => values.value(left) == values.value(right),
+        }
+    }
+
+    fn worker_hash(&self, row: usize, seed: u64) -> u64 {
+        let word = match self {
+            Self::Utf8(values) => {
+                let value = values.value(row).as_bytes();
+                return hash_words(mix(seed, value.len() as u64), value);
+            }
+            Self::LargeUtf8(values) => {
+                let value = values.value(row).as_bytes();
+                return hash_words(mix(seed, value.len() as u64), value);
+            }
+            Self::Boolean(values) => u64::from(values.value(row)),
+            Self::I8(values) => u64::from_ne_bytes(i64::from(values[row]).to_ne_bytes()),
+            Self::I16(values) => u64::from_ne_bytes(i64::from(values[row]).to_ne_bytes()),
+            Self::I32(values) => u64::from_ne_bytes(i64::from(values[row]).to_ne_bytes()),
+            Self::I64(values) => u64::from_ne_bytes(values[row].to_ne_bytes()),
+            Self::U8(values) => u64::from(values[row]),
+            Self::U16(values) => u64::from(values[row]),
+            Self::U32(values) => u64::from(values[row]),
+            Self::U64(values) => values[row],
+        };
+        mix(seed, word)
+    }
+
+    fn bytes(&self, row: usize) -> usize {
+        match self {
+            Self::Utf8(values) => values.value(row).len(),
+            Self::LargeUtf8(values) => values.value(row).len(),
+            Self::Boolean(_) | Self::I8(_) | Self::U8(_) => 1,
+            Self::I16(_) | Self::U16(_) => 2,
+            Self::I32(_) | Self::U32(_) => 4,
+            Self::I64(_) | Self::U64(_) => 8,
         }
     }
 }

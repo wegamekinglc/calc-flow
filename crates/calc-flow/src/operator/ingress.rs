@@ -3,11 +3,11 @@
 
 use tokio::sync::{Mutex, mpsc};
 
-use super::{asof::admission::IngressFacts as AsofFacts, join::admission_masks::PureMasks};
+use super::{asof::admission::IngressFacts as AsofFacts, join::admission_masks::PureMasksChunk};
 use crate::{CalcFlowError, Result};
 
 pub(crate) enum Sender {
-    Join(mpsc::Sender<Result<PureMasks>>),
+    Join(mpsc::Sender<Result<PureMasksChunk>>),
     Asof(mpsc::Sender<Result<AsofFacts>>),
 }
 
@@ -25,7 +25,7 @@ impl Sender {
 }
 
 pub(crate) enum Preparation {
-    Join(Mutex<mpsc::Receiver<Result<PureMasks>>>),
+    Join(Mutex<mpsc::Receiver<Result<PureMasksChunk>>>),
     Asof {
         receiver: Mutex<mpsc::Receiver<Result<AsofFacts>>>,
         facts: std::sync::OnceLock<AsofFacts>,
@@ -34,9 +34,8 @@ pub(crate) enum Preparation {
 
 impl Preparation {
     pub(crate) fn join_channel() -> (Sender, Self) {
-        // At most 4,096 rows of fixed scratch; no per-row allocations and no
-        // full-batch cache. Batching wakeups avoids one handoff per 64 rows.
-        let (sender, receiver) = mpsc::channel(64);
+        // Producer, queue, and owner each hold at most one 16-mask pack.
+        let (sender, receiver) = mpsc::channel(1);
         (Sender::Join(sender), Self::Join(Mutex::new(receiver)))
     }
 
@@ -51,7 +50,7 @@ impl Preparation {
         )
     }
 
-    pub(crate) async fn join(&self) -> Result<PureMasks> {
+    pub(crate) async fn join(&self) -> Result<PureMasksChunk> {
         match self {
             Self::Join(receiver) => receive(receiver).await,
             Self::Asof { .. } => Err(kind_mismatch()),

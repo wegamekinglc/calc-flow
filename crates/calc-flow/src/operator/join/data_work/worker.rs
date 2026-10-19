@@ -2,7 +2,7 @@ use super::super::MatchedPair;
 use super::inputs::ProbeInputs;
 use super::{
     pairs::{FillFunding, PairFragment},
-    partition::{self, Counts},
+    partition::{self, CountFragment, Counts, WindowCache},
 };
 use crate::{
     Result,
@@ -40,13 +40,19 @@ pub(super) struct CountWork {
 }
 
 impl ParallelCpuWork for CountWork {
-    type Output = usize;
+    type Output = CountFragment;
 
     fn unit_count(&self) -> usize {
-        partition::units(self.inputs.admitted.len())
+        self.inputs.partition.units()
     }
 
-    fn run(&self, ordinal: usize, stop: &GatherStop) -> Result<usize> {
+    fn run(&self, ordinal: usize, stop: &GatherStop) -> Result<CountFragment> {
+        #[cfg(feature = "benchmark-internals")]
+        let _phase = stop.join_cpu_trace().worker_stage(
+            stop.join_cpu_operator(),
+            "count_worker",
+            self.inputs.partition.range(ordinal).len(),
+        );
         #[cfg(test)]
         self.inputs.observe(super::ProbePhase::Count);
         #[cfg(test)]
@@ -62,23 +68,25 @@ impl ParallelCpuWork for CountWork {
 }
 
 impl CountWork {
-    fn count_range(&self, ordinal: usize, stop: &GatherStop) -> Result<usize> {
+    fn count_range(&self, ordinal: usize, stop: &GatherStop) -> Result<CountFragment> {
         let mut count = 0usize;
         let sentinel = partition::sentinel(self.limit);
         let mut quantum = ProbeQuantum::new(stop);
+        let mut windows = WindowCache::admit(&self.inputs, ordinal)?;
         let mut cursors = self.inputs.cursors();
-        for position in partition::range(self.inputs.admitted.len(), ordinal) {
+        for position in self.inputs.partition.range(ordinal) {
             quantum.step()?;
-            count = partition::add_count(
-                count,
-                self.inputs.window(position, &mut cursors).matches(),
-                self.limit,
-            )?;
+            let bounds = self.inputs.window(position, &mut cursors);
+            if let Some(windows) = &mut windows {
+                windows.values.push(bounds);
+            }
+            count = partition::add_count(count, bounds.matches(), self.limit)?;
             if Some(count) == sentinel {
+                windows = None;
                 break;
             }
         }
-        Ok(count)
+        Ok(CountFragment { count, windows })
     }
 }
 
@@ -96,6 +104,12 @@ impl ParallelCpuWork for FillWork {
     }
 
     fn run(&self, ordinal: usize, stop: &GatherStop) -> Result<PairFragment> {
+        #[cfg(feature = "benchmark-internals")]
+        let _phase = stop.join_cpu_trace().worker_stage(
+            stop.join_cpu_operator(),
+            "fill_worker",
+            self.inputs.partition.range(ordinal).len(),
+        );
         #[cfg(test)]
         self.inputs.observe(super::ProbePhase::Fill);
         #[cfg(test)]
@@ -103,7 +117,7 @@ impl ParallelCpuWork for FillWork {
             .observe_unit(super::ProbePhase::Fill, ordinal, false);
         stop.check()?;
         let credit = self.funding.unit();
-        let pairs = fill_range(&self.inputs, self.counts, ordinal, stop)?;
+        let pairs = fill_range(&self.inputs, &self.counts, ordinal, stop)?;
         stop.check()?;
         #[cfg(test)]
         self.inputs
@@ -114,18 +128,23 @@ impl ParallelCpuWork for FillWork {
 
 pub(super) fn fill_range(
     inputs: &ProbeInputs,
-    counts: Counts,
+    counts: &Counts,
     ordinal: usize,
     stop: &GatherStop,
 ) -> Result<super::super::matches::Selection> {
-    let range = partition::range(inputs.admitted.len(), ordinal);
+    let range = inputs.partition.range(ordinal);
     let mut pairs =
-        super::super::matches::Selection::with_capacity(counts.rows[ordinal], range.len());
+        super::super::matches::Selection::with_capacity(counts.count(ordinal), range.len());
     let mut quantum = ProbeQuantum::new(stop);
-    let mut cursors = inputs.cursors();
-    for position in range {
+    let windows = counts.windows(inputs, ordinal);
+    let mut cursors = windows.is_none().then(|| inputs.cursors());
+    for (offset, position) in range.enumerate() {
         quantum.step()?;
-        for (offset, opposite_index) in inputs.matches_window(position, &mut cursors).enumerate() {
+        let bounds = match windows {
+            Some(windows) => windows[offset],
+            None => inputs.window(position, cursors.as_mut().expect("uncached window cursors")),
+        };
+        for (offset, opposite_index) in inputs.matches_bounds(position, bounds).enumerate() {
             if offset > 0 {
                 quantum.step()?;
             }
@@ -135,7 +154,7 @@ pub(super) fn fill_range(
             });
         }
     }
-    debug_assert_eq!(pairs.len(), counts.rows[ordinal]);
+    debug_assert_eq!(pairs.len(), counts.count(ordinal));
     Ok(pairs)
 }
 
@@ -143,29 +162,37 @@ pub(super) fn fill_range(
 /// This inline fallback owns full stop checks; no ticket waiter drives it.
 pub(super) fn fill_all(
     inputs: &ProbeInputs,
-    count: usize,
+    counts: &Counts,
     stop: &GatherStop,
 ) -> Result<super::super::matches::Selection> {
-    let mut pairs = super::super::matches::Selection::with_capacity(count, inputs.admitted.len());
+    let mut pairs =
+        super::super::matches::Selection::with_capacity(counts.total, inputs.admitted.len());
     let mut work = 0usize;
-    let mut cursors = inputs.cursors();
-    for pos in 0..inputs.admitted.len() {
-        if work.is_multiple_of(STOP_GROUP_ITEMS) {
-            stop.check()?;
-        }
-        work += 1;
-        for opposite_index in inputs.matches_window(pos, &mut cursors) {
+    let mut cursors = None;
+    for ordinal in 0..counts.units {
+        let windows = counts.windows(inputs, ordinal);
+        for (offset, pos) in inputs.partition.range(ordinal).enumerate() {
             if work.is_multiple_of(STOP_GROUP_ITEMS) {
                 stop.check()?;
             }
             work += 1;
-            pairs.push(MatchedPair {
-                pos,
-                opposite_index,
-            });
+            let bounds = match windows {
+                Some(windows) => windows[offset],
+                None => inputs.window(pos, cursors.get_or_insert_with(|| inputs.cursors())),
+            };
+            for opposite_index in inputs.matches_bounds(pos, bounds) {
+                if work.is_multiple_of(STOP_GROUP_ITEMS) {
+                    stop.check()?;
+                }
+                work += 1;
+                pairs.push(MatchedPair {
+                    pos,
+                    opposite_index,
+                });
+            }
         }
     }
     stop.check()?;
-    debug_assert_eq!(pairs.len(), count);
+    debug_assert_eq!(pairs.len(), counts.total);
     Ok(pairs)
 }

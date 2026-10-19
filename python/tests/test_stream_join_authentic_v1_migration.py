@@ -327,6 +327,7 @@ def _create_runner(root: Path, sources, sink, udf_sink):
             "proof.output": [cf.SinkBinding.ordinary("fixture-udf-archive", udf_sink)],
         },
         cf.ManagedCheckpointRuntime(root),
+        config=cf.StreamRuntimeConfig(edge_budget=cf.EdgeBudget(10_000, 64 << 20)),
     )
 
 

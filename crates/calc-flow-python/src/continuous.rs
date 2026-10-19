@@ -1405,6 +1405,29 @@ impl PyStreamingJob {
     }
 
     #[cfg(feature = "benchmark-internals")]
+    fn _benchmark_start_join_cpu_trace(&self) -> PyResult<()> {
+        self.job()?
+            .benchmark_start_join_cpu_trace()
+            .map_err(streaming_py_err)
+    }
+
+    #[cfg(feature = "benchmark-internals")]
+    fn _benchmark_mark_join_cpu_trace(&self, label: &str) -> PyResult<()> {
+        self.job()?
+            .benchmark_mark_join_cpu_trace(label)
+            .map_err(streaming_py_err)
+    }
+
+    #[cfg(feature = "benchmark-internals")]
+    fn _benchmark_take_join_cpu_trace(&self) -> PyResult<String> {
+        let trace = self
+            .job()?
+            .benchmark_take_join_cpu_trace()
+            .map_err(streaming_py_err)?;
+        serde_json::to_string(&trace).map_err(|error| PyRuntimeError::new_err(error.to_string()))
+    }
+
+    #[cfg(feature = "benchmark-internals")]
     #[pyo3(signature = (allow_barriers=false))]
     fn _benchmark_start_dispatch_trace(&self, allow_barriers: bool) -> PyResult<()> {
         self.job()?
@@ -2416,6 +2439,9 @@ mod tests {
         Python::attach(|py| {
             let class = py.get_type::<super::PyStreamingJob>();
             for name in [
+                "_benchmark_start_join_cpu_trace",
+                "_benchmark_mark_join_cpu_trace",
+                "_benchmark_take_join_cpu_trace",
                 "_benchmark_start_dispatch_trace",
                 "_benchmark_take_dispatch_trace",
                 "_benchmark_dispatch_frontier",
@@ -2440,6 +2466,15 @@ mod tests {
                 .unwrap();
                 let instance = cleared.bind(py);
                 for error in [
+                    instance
+                        .call_method0("_benchmark_start_join_cpu_trace")
+                        .unwrap_err(),
+                    instance
+                        .call_method1("_benchmark_mark_join_cpu_trace", ("ready_timer_start",))
+                        .unwrap_err(),
+                    instance
+                        .call_method0("_benchmark_take_join_cpu_trace")
+                        .unwrap_err(),
                     instance
                         .call_method0("_benchmark_start_dispatch_trace")
                         .unwrap_err(),

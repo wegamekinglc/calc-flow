@@ -345,8 +345,18 @@ fails before enqueue, a closed receiver wakes blocked senders, and each fan-out
 edge is charged independently even though immutable payload buffers are
 shared. The default `Block` path therefore propagates a slow consumer through
 sink, operator, source task, prefetch slot, and source pump. FIFO order, close wakeup, and single-producer ownership apply to every edge.
-An edge budget or source batch declaration cannot exceed 1,000,000 rows or
-256 MiB; project-v3 stream runtime options use the same bounds.
+An edge budget or source batch declaration cannot exceed 1,000,000 rows.
+Byte budgets must be positive and fit the native address space; no smaller
+global byte ceiling applies. Project-v3 stream runtime options use the same
+bounds. Row and envelope backpressure remains active when the byte budget is
+`usize::MAX`; these queue charges do not cap total runtime or process memory.
+
+Project-v3 JSON requires an `options` object and preserves its historical field
+defaults: `{}` or omitted budget fields use 10,000 rows and 64 MiB. The omitted
+checkpoint interval remains 30 seconds. This keeps existing documents and
+their durable fingerprints stable. New `StreamRunOptions::default()` values
+serialize the current one-million-row and address-space byte limits explicitly;
+explicit project values are preserved and participate in the project fingerprint.
 
 ## Stream plan compilation
 
@@ -411,8 +421,9 @@ Two hashes describe the plan:
   checkpoints. Durations must be exact multiples of one microsecond, and
   both budget fields must be positive. Checkpointing defaults to enabled. Other defaults
   are a 60-second checkpoint
-  interval, a 600-second checkpoint timeout, 10,000 envelopes, 10,000 rows and
-  64 MiB per edge, and two retained epochs.
+  interval, a 600-second checkpoint timeout, 1,000,000 envelopes and rows per
+  edge, no byte ceiling below the native address-space limit, and two retained
+  epochs. Set an explicit edge byte budget when needed.
 
 ## Job preflight
 
@@ -526,10 +537,15 @@ exactly once after every ingress observes explicit end-of-input. A closed
 channel without an earlier explicit end is a failure, not synthetic EOF.
 
 Join and ASOF also own one preparation task per live ingress on the existing
-Tokio runtime. Each task stages at most one envelope; Join streams up to 64
-fixed-size classification blocks (4,096 rows), while ASOF sends one null/late
-summary and, for compatible typed keys, a batch-local order proof. Envelope
-readiness is published before preparation completes. The operator still selects
+Tokio runtime. Each task stages at most one envelope. Join groups sixteen
+64-row classification masks into each internal message. One pack can be queued,
+one prepared by the producer, and one drained locally by the operator; only
+loading a new pack acquires the receiver lock. Packs end at physical record
+boundaries, and scratch stays fixed rather than growing with the input batch.
+This transport granularity does not limit input batch size or CPU concurrency.
+ASOF sends one null/late summary and, for compatible typed keys, a batch-local
+order proof. Envelope readiness is published before preparation completes.
+The operator still selects
 ready inputs and alone validates current progress, resolves and publishes key
 identities, applies limits, emits, commits state, and aligns checkpoint cuts.
 ASOF rejects stale watermark facts and rechecks the boundary against resident
@@ -834,7 +850,7 @@ actual capacity awaits, including failed and cancelled waits. These wall-clock
 intervals include scheduling delay and must not be presented as CPU samples
 or added across concurrent operators.
 
-An owned two-lane numeric computation has one parent `numeric_update` interval
+An owned numeric work group has one parent `numeric_update` interval
 covering dispatch, blocking-pool queueing, execution and joins. Lane CPU times
 are not summed. If the async callback is dropped first, subsequent drain time
 belongs to `other`; retained stage handles cannot reopen a named stage. The
@@ -876,18 +892,22 @@ entity's routed row count and walk back from the batch end only until every
 tail is full.
 
 An already initialized, ordered Native Float64 StableV1 mean calculation can
-assign whole entities to two owned CPU lanes. The narrow path requires one or
+assign whole entities to owned CPU lanes. The narrow path requires one or
 two numeric groups and one or two derived Float64 mean/difference columns,
 Rows frames of 5 or 20, and validated typed queues no longer than those frames. A finalized
-batch has 64,000 to 256,000 rows and at least 16 touched entities; each lane
-has at least 16,000 rows and no more than 5/8 of the batch. Initial state
+batch has at least 64,000 rows and 16 touched entities. The lane count is the
+minimum of available CPU capacity, the batch's 16,000-row work units and touched
+entities; fewer than two lanes use the serial path. Entity routing counts are
+reused, one pass builds stable lane schedules, and each lane visits only its
+assigned rows. No lane may own more than 5/8 of the batch. Initial state
 creation, the first reconstruction after restore, unsupported shapes, small
 or skewed batches and unavailable admission use the original serial loop.
 Preparing a serial fallback does not repeat entity resolution or state copying.
 
-Each job admits at most one two-lane pair. A private 16 MiB limit accounts for
-the additional declared scratch capacities; it is not an allocator or process
-RSS limit. Joining the CPU handles does not free this reservation while lane
+Each job admits at most one numeric work group. Its checked scratch ledger
+accounts for the additional declared capacities without a private byte ceiling;
+it is not an allocator or process RSS limit. Explicit retained-state budgets
+remain independent. Joining the CPU handles does not free this ownership while lane
 results or merge scratch are still live. Each entity retains its original
 transition and readout order, and a serial merge restores the original row
 order. Validation, history preparation, output budgets and emit-to-commit
@@ -897,8 +917,8 @@ watermark, checkpoint or state-commit authority.
 Cancellation is local to the owned computation and does not set the job token.
 Partial launch, task abortion and driver takeover retain the work handles and
 drain them asynchronously before terminal publication. Ordinary errors do not
-cancel a second lane that may still encounter an earlier row's failure;
-failure selection preserves original row/check order after both lanes settle.
+cancel other lanes that may still encounter an earlier row's failure;
+failure selection preserves original row/check order after all lanes settle.
 A selected panic resumes with its original payload only while the callback is
 still active, keeping the original logical task identity. After callback Drop,
 the frozen outcome remains; late panics are secondary task diagnostics and do
@@ -921,7 +941,7 @@ watermark, lateness, duplicate, null, output-budget, and recovery semantics
 are enforced on both paths.
 
 Column-only stream projections reuse Arrow arrays without SQL planning.
-Other eligible single-input, row-local stream expressions first execute through
+Other eligible single-input, row-local stream expressions and SQL first execute through
 SQL. Later batches with the same query, alias and exact Arrow schema, including
 metadata, reuse compiled immutable DataFusion expressions for arithmetic and
 filtering. Evaluation uses the planned output schema and SQL visible-slice

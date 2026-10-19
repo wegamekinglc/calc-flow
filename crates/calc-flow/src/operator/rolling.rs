@@ -76,7 +76,9 @@ use budget::StateCharge;
 #[cfg(test)]
 use kernel::KernelSelection;
 #[cfg(test)]
-pub(crate) use kernel::entity_parallel_tests::entity_parallel_test_pair;
+pub(crate) use kernel::entity_parallel_tests::{
+    entity_parallel_test_pair, entity_parallel_test_work,
+};
 use kernel::{RollingKernelPlan, RollingKernelState, TypedStreamTransition};
 pub(crate) use kernel::{
     StreamKernelUpdate,
@@ -1176,7 +1178,8 @@ impl RollingOperator {
     }
 
     /// Sets the logical row and byte limit for buffered rows and retained
-    /// per-entity rolling history. The default is one million rows and 256 MiB.
+    /// per-entity rolling history. The default uses the JSON counter range
+    /// without a smaller implicit row or byte limit.
     /// Checkpoint copies and process resident memory are outside this limit.
     ///
     /// # Errors

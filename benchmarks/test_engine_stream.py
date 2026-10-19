@@ -293,6 +293,38 @@ def test_static_join_limits_allow_only_dimension_and_one_batch():
     assert limits.max_matches_per_input_batch == 128 + engine_stream.BATCH_ROWS
 
 
+def test_stream_fixture_batches_coalesce_only_the_selected_input_part(monkeypatch):
+    monkeypatch.setattr(engine_stream, "BATCH_ROWS", 8)
+    original = engine_stream.pa.table(
+        {
+            "event_time": [
+                BASE + engine_stream.timedelta(seconds=row) for row in range(10)
+            ],
+            "value": range(10),
+        }
+    )
+    record = original.to_batches()[0]
+    chunked = engine_stream.pa.Table.from_batches([record.slice(0, 6), record.slice(6)])
+    events = engine_stream.stream_events(chunked, 1, batch_rows=8)
+    tables = [event.batch.to_pyarrow() for event in events if isinstance(event, Data)]
+    assert [table.num_rows for table in tables] == [8, 2]
+    assert [len(table.to_batches()) for table in tables] == [1, 1]
+    assert chunked.column("value").num_chunks == 2
+    assert engine_stream.pa.concat_tables(tables).equals(chunked)
+
+
+def test_historical_small_batches_preserve_arrow_boundary_crossing():
+    from benchmarks.engine_comparison import workload
+
+    data = workload(64_513)
+    events = engine_stream.stream_events(data.table, data.entities, batch_rows=1024)
+    batches = [event.batch for event in events if isinstance(event, Data)]
+    crossing = batches[62].to_pyarrow()
+    assert crossing.equals(data.table.slice(63_488, 1024))
+    assert [record.num_rows for record in crossing.to_batches()] == [512, 512]
+    assert [record.num_rows for record in data.table.to_batches()] == [64_000, 513]
+
+
 def test_explicit_retained_join_limits_admit_the_full_quote_state():
     limits = engine_stream._join_limits(64, 1024, retained_rows=1_000_000)
     assert limits.max_state_rows_per_side == 1_000_064

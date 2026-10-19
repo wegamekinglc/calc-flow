@@ -18,6 +18,7 @@ from scripts.benchmark_suite.dependency_migrations import (
     validate_dependency_migrations,
 )
 from scripts.benchmark_suite.legacy import combine_blocks
+from scripts.benchmark_suite.migrations import load_migrations
 from scripts.benchmark_suite.report import render_report
 from scripts.benchmark_suite.rust import _stamp_fingerprints
 from scripts.benchmark_suite.rust_provenance import target_dependency_fingerprint
@@ -150,6 +151,22 @@ def without_attestation_field(report: dict, field: str) -> dict:
     else:
         result["cases"][0]["metadata"]["dependency_fingerprint"] = "f" * 64
     return result
+
+
+def repository_workload_matches(
+    target: str, declared: str, current_sha256: str, migrations: list[dict]
+) -> bool:
+    path = f"crates/calc-flow/benches/{target}.rs"
+    if fingerprint_json({path: current_sha256}) == declared:
+        return True
+    historical_sources = (
+        entry["baseline_sha256"]
+        for entry in migrations
+        if entry["target"] == target and entry["candidate_sha256"] == current_sha256
+    )
+    return any(
+        fingerprint_json({path: digest}) == declared for digest in historical_sources
+    )
 
 
 class DependencyMigrationTests(unittest.TestCase):
@@ -428,13 +445,77 @@ class DependencyRegistryTests(unittest.TestCase):
     def test_repository_declarations_pin_existing_targets_and_workloads(self):
         root = Path(__file__).resolve().parents[1]
         entries = load_dependency_migrations(root)
+        migrations = load_migrations(root)
         self.assertEqual(len(entries), 12)
         for entry in entries:
             path = f"crates/calc-flow/benches/{entry['target']}.rs"
-            self.assertEqual(
-                fingerprint_json({path: sha256_file(root / path)}),
-                entry["candidate"]["workload_fingerprint"],
+            self.assertTrue(
+                repository_workload_matches(
+                    entry["target"],
+                    entry["candidate"]["workload_fingerprint"],
+                    sha256_file(root / path),
+                    migrations,
+                ),
+                f"undeclared repository workload change: {entry['target']}",
             )
+
+    def test_repository_workload_accepts_current_or_exact_directional_migration(self):
+        path = "crates/calc-flow/benches/core.rs"
+        migration = {
+            "target": "core",
+            "baseline_sha256": "a" * 64,
+            "candidate_sha256": "b" * 64,
+        }
+        original = copy.deepcopy(migration)
+        for digest in ("a" * 64, "b" * 64):
+            with self.subTest(digest=digest):
+                self.assertTrue(
+                    repository_workload_matches(
+                        "core", fingerprint_json({path: digest}), "b" * 64, [migration]
+                    )
+                )
+        self.assertEqual(migration, original)
+
+    def test_repository_workload_rejects_unrelated_or_undeclared_source_bytes(self):
+        path = "crates/calc-flow/benches/core.rs"
+        migration = {
+            "target": "core",
+            "baseline_sha256": "a" * 64,
+            "candidate_sha256": "b" * 64,
+        }
+        invalid = [
+            ("other", "a" * 64, "b" * 64, [migration]),
+            ("core", "b" * 64, "a" * 64, [migration]),
+            ("core", "c" * 64, "b" * 64, [migration]),
+            ("core", "a" * 64, "c" * 64, [migration]),
+            ("core", "a" * 64, "b" * 64, []),
+            (
+                "core",
+                "a" * 64,
+                "c" * 64,
+                [
+                    migration,
+                    {
+                        **migration,
+                        "baseline_sha256": "b" * 64,
+                        "candidate_sha256": "c" * 64,
+                    },
+                ],
+            ),
+        ]
+        for target, declared_sha, current_sha, entries in invalid:
+            with self.subTest(
+                target=target, declared=declared_sha, current=current_sha
+            ):
+                declared_path = path.replace("core.rs", f"{target}.rs")
+                self.assertFalse(
+                    repository_workload_matches(
+                        target,
+                        fingerprint_json({declared_path: declared_sha}),
+                        current_sha,
+                        entries,
+                    )
+                )
 
     def test_registry_rejects_unknown_schema_fields_endpoints_and_duplicates(self):
         entry = declaration(provenance())

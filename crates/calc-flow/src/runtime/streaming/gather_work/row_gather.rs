@@ -13,7 +13,7 @@ pub(crate) struct RowGather {
 
 impl RowGather {
     pub(super) fn parts(&self, workers: usize) -> usize {
-        workers.clamp(1, 8).min(self.rows)
+        workers.max(1).min(self.rows)
     }
 
     pub(super) fn range(&self, ordinal: usize, parts: usize) -> Range<usize> {
@@ -35,7 +35,7 @@ impl RowGather {
             .checked_add(1)
             .and_then(|sources| sources.checked_mul(256))
             .and_then(|bytes| bytes.checked_add(8_192))
-            .and_then(|bytes| bytes.checked_mul(parts + 1));
+            .and_then(|bytes| bytes.checked_mul(parts.checked_add(1)?));
         buffers
             .zip(heads)
             .and_then(|(buffers, heads)| buffers.checked_add(heads))

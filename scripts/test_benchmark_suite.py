@@ -36,6 +36,44 @@ def measured_case(**changes):
 
 
 class BenchmarkSuiteTests(unittest.TestCase):
+    def test_default_stream_batch_does_not_relabel_historical_acceptance(self):
+        from scripts.benchmark_suite.issue406_acceptance import acceptance_inventory
+
+        self.assertEqual(catalog.BATCH_ROWS, 1_000_000)
+        runtime = [
+            case
+            for case in acceptance_inventory()
+            if case.workload in {"join_sealed", "join_retained", "asof"}
+            and case.row != 7
+        ]
+        self.assertTrue(runtime)
+        self.assertEqual({case.batch_rows for case in runtime}, {64_000})
+        source = Path(__file__).resolve().parents[1]
+        original = (source / "scripts/benchmark_suite/catalog.py").read_text()
+        with TemporaryDirectory() as directory:
+            baseline = Path(directory)
+            path = baseline / "scripts/benchmark_suite/catalog.py"
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                original.replace("BATCH_ROWS = 1_000_000", "BATCH_ROWS = 64_000")
+                .replace(
+                    catalog.STREAM_SCOPE, "ready-enqueue-to-arrow/bounded-feeds-v6"
+                )
+                .replace(
+                    catalog.INTERVAL_SCOPE,
+                    "ready-enqueue-to-arrow/retained-interval-v1",
+                )
+            )
+            ids = baseline_case_ids(baseline, {"family": "engines"})
+            self._assert_default_stream_case_comparisons(ids)
+
+    def _assert_default_stream_case_comparisons(self, ids):
+        for case in engine_cases(1_000_000):
+            if case["backend"] == "calc-flow-stream" and not case.get("variant"):
+                self.assertEqual(catalog.comparison_kind(case, ids), "new")
+            elif case["backend"] == "calc-flow-sql":
+                self.assertEqual(catalog.comparison_kind(case, ids), "interleaved")
+
     def test_asof_e2e_report_requires_complete_validated_inventory(self):
         from scripts.benchmark_suite.asof_e2e import asof_e2e_rows
 
@@ -286,6 +324,7 @@ class BenchmarkSuiteTests(unittest.TestCase):
             "interleaved-inputs-v4",
             "interleaved-inputs-v5",
             "bounded-feeds-v6",
+            "bounded-feeds-v7",
         ):
             with self.subTest(scope=scope), TemporaryDirectory() as directory:
                 base = Path(directory)
@@ -302,7 +341,8 @@ class BenchmarkSuiteTests(unittest.TestCase):
                         expected = (
                             "new"
                             if case["scope"] == catalog.STREAM_SCOPE
-                            and not scope.endswith("v6")
+                            and f"ready-enqueue-to-arrow/{scope}"
+                            != catalog.STREAM_SCOPE
                             else "interleaved"
                         )
                         self.assertEqual(catalog.comparison_kind(case, ids), expected)

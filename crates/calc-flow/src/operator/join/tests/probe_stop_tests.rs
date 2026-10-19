@@ -77,7 +77,7 @@ async fn fixture(
     assert!(operator.ensure_native_index(false).unwrap());
     super::super::relax_probe_cost_gate_for_test();
     let inputs = operator
-        .capture_keyed_probe(&plan, bundle.admitted, keys)
+        .capture_keyed_probe(&plan, bundle.admitted, keys, job.gather_owner())
         .unwrap()
         .ready
         .unwrap();
@@ -104,18 +104,23 @@ async fn test_probe_stop_checks_scale_with_groups_and_units() {
         let units = count.unit_count();
         let expected_polls = |width: usize| {
             (0..units)
-                .map(|unit| super::super::partition::range(rows, unit).len() * width)
+                .map(|unit| inputs.partition.range(unit).len() * width)
                 .map(|work| work.div_ceil(GROUP))
                 .sum::<usize>()
         };
         let values = (0..units)
             .map(|unit| count.run(unit, &stop).unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(values.iter().sum::<usize>(), rows * opposite);
+        assert_eq!(
+            values.iter().map(|value| value.count).sum::<usize>(),
+            rows * opposite
+        );
         assert_eq!(full_checks.swap(0, Ordering::SeqCst), units);
         assert_eq!(polls.swap(0, Ordering::SeqCst), expected_polls(1));
-        let counts = Counts::ordered(values, 1_000_000).unwrap();
-        let (funding, credit) = operator.admit_fill(counts).unwrap().unwrap();
+        let counts =
+            Counts::ordered(values, 1_000_000, inputs.control.as_ref().unwrap().clone()).unwrap();
+        let (funding, credit) = operator.admit_fill(&counts).unwrap().unwrap();
+        let total = counts.total;
         let fill = FillWork {
             inputs: inputs.clone(),
             counts,
@@ -124,7 +129,7 @@ async fn test_probe_stop_checks_scale_with_groups_and_units() {
         let fragments = (0..units)
             .map(|unit| fill.run(unit, &stop).unwrap())
             .collect();
-        let output = pairs::ordered_output(fragments, credit, counts.total).unwrap();
+        let output = pairs::ordered_output(fragments, credit, total).unwrap();
         assert_eq!(full_checks.load(Ordering::SeqCst), 2 * units);
         assert_eq!(
             polls.load(Ordering::SeqCst),
@@ -161,8 +166,13 @@ async fn test_probe_stops_at_the_next_position_or_match_group() {
             limit: 1_000_000,
         };
         let plain = GatherStop::from_job(&job);
-        let counts = Counts::ordered(vec![count.run(0, &plain).unwrap()], 1_000_000).unwrap();
-        let (funding, credit) = operator.admit_fill(counts).unwrap().unwrap();
+        let counts = Counts::ordered(
+            vec![count.run(0, &plain).unwrap()],
+            1_000_000,
+            inputs.control.as_ref().unwrap().clone(),
+        )
+        .unwrap();
+        let (funding, credit) = operator.admit_fill(&counts).unwrap().unwrap();
         let fill = FillWork {
             inputs: inputs.clone(),
             counts,
@@ -225,10 +235,11 @@ fn test_probe_owner_cancel_and_deadline_stop_group_pollers_and_refund() {
                     let counts = Counts::ordered(
                         vec![count.run(0, &GatherStop::from_job(&fixture_job)).unwrap()],
                         1_000_000,
+                        inputs.control.as_ref().unwrap().clone(),
                     )
                     .unwrap();
                     drop(count);
-                    let (funding, credit) = operator.admit_fill(counts).unwrap().unwrap();
+                    let (funding, credit) = operator.admit_fill(&counts).unwrap().unwrap();
                     assert!(credit.is_none());
                     assert_owner_stop(
                         &operator,

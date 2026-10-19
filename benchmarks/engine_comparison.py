@@ -36,6 +36,9 @@ from scripts.benchmark_suite.catalog import (
     THREADS,
 )
 
+# Keep comparison-engine fixture chunks independent of native stream batching.
+TABLE_BATCH_ROWS = 64_000
+
 
 @dataclass(frozen=True, slots=True)
 class Workload:
@@ -56,7 +59,7 @@ def workload(count: int, *, scenario: str | None = None) -> Workload:
     table = table.set_column(
         table.column_names.index("price"), table.schema.field("price"), pa.array(prices)
     )
-    table = pa.Table.from_batches(table.to_batches(max_chunksize=BATCH_ROWS))
+    table = pa.Table.from_batches(table.to_batches(max_chunksize=TABLE_BATCH_ROWS))
     dimension = pa.table(
         {
             "symbol": [f"S{i:03d}" for i in range(entities)],
@@ -286,7 +289,7 @@ def _calc_flow(data: Workload, scenario: str):
 def _datafusion(data: Workload, scenario: str):
     from datafusion import SessionConfig, SessionContext
 
-    batches = data.table.to_batches(max_chunksize=BATCH_ROWS)
+    batches = data.table.to_batches(max_chunksize=TABLE_BATCH_ROWS)
     dimension = data.dimension.to_batches()
     query = sql_query(scenario)
 

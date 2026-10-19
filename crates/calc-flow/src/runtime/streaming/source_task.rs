@@ -1295,12 +1295,6 @@ pub(super) fn validate_source_capabilities(
             message: format!("must not exceed {}", crate::EdgeBudget::MAX_ROWS),
         });
     }
-    if capabilities.max_batch_bytes > crate::EdgeBudget::MAX_BYTES {
-        return Err(CalcFlowError::InvalidArgument {
-            field: format!("sources.{binding_id}.capabilities.max_batch_bytes"),
-            message: format!("must not exceed {}", crate::EdgeBudget::MAX_BYTES),
-        });
-    }
     Ok(())
 }
 
@@ -2658,10 +2652,7 @@ mod tests {
             )
             .is_ok()
         );
-        for (rows, bytes, field) in [
-            (1_000_001, 1, "max_batch_rows"),
-            (1, (256 << 20) + 1, "max_batch_bytes"),
-        ] {
+        for (rows, bytes, field) in [(1_000_001, 1, "max_batch_rows"), (1, 0, "max_batch_bytes")] {
             assert!(matches!(
                 super::validate_source_capabilities(
                     "input",

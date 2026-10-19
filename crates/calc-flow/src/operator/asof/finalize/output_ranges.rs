@@ -89,7 +89,7 @@ fn planning_vector_allocations_scale_only_with_candidate_references() {
         let allocation = allocation_counter::measure(|| {
             builder = Some(OutputPlanBuilder::new(count, None, &mut credit, "asof").unwrap());
         });
-        assert_eq!(credit.size(), count * 256 + 16 * 1_024);
+        assert_eq!(credit.size(), count * 96 + 16 * 1_024);
         let expected = count * size_of::<(usize, usize)>() + 512;
         assert!(
             allocation.bytes_max <= u64::try_from(expected).unwrap(),
@@ -162,7 +162,7 @@ async fn matching_left_planning_steps_scale_with_source_ranges() {
 }
 
 #[test]
-fn fragmented_span_allocations_fit_the_unchanged_planning_charge() {
+fn fragmented_span_allocations_fit_the_current_planning_charge() {
     for count in [0, 1, 2, 3, 7, 17, 1_024, 64_000] {
         let operator = operator(count.max(1));
         let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(128 << 20));
@@ -186,7 +186,7 @@ fn fragmented_span_allocations_fit_the_unchanged_planning_charge() {
             );
         });
         assert!(
-            allocation.bytes_max <= u64::try_from(count * 256 + 16 * 1_024).unwrap(),
+            allocation.bytes_max <= u64::try_from(count * 96 + 16 * 1_024).unwrap(),
             "count={count}, actual={allocation:?}"
         );
         let plan = plan.unwrap();

@@ -11,7 +11,12 @@ use datafusion::{
 };
 use std::{collections::HashMap, sync::Arc};
 
-mod backing;
+pub(super) mod backing;
+
+// Fund right positions and simultaneous old/new span allocations during growth.
+const ROW_METADATA_BYTES: u64 = 96;
+const _: () =
+    assert!((size_of::<(usize, usize)>() + 3 * size_of::<Span>()) as u64 <= ROW_METADATA_BYTES);
 
 #[derive(Clone, Copy)]
 pub(super) struct Span {
@@ -36,6 +41,11 @@ pub(super) struct OutputPlan {
     pub raw_bytes: u64,
 }
 
+pub(super) struct FragmentCredits {
+    pub _fragments: Vec<MemoryReservation>,
+    pub _input: Arc<MemoryReservation>,
+}
+
 pub(super) struct OutputPlanBuilder<'a> {
     left: SideBuilder<'a>,
     right: SideBuilder<'a>,
@@ -52,6 +62,7 @@ struct SideBuilder<'a> {
     span: Option<Span>,
     run: Option<SourceRun>,
     raw: u64,
+    backing_funded: bool,
     #[cfg(test)]
     right: bool,
 }
@@ -71,7 +82,7 @@ impl<'a> OutputPlanBuilder<'a> {
         name: &str,
     ) -> Result<Self> {
         let rows = (capacity as u64)
-            .checked_mul(256)
+            .checked_mul(ROW_METADATA_BYTES)
             .ok_or_else(|| overflow(name))?;
         grow_workspace(workspace, checked(name, rows, 16 * 1024)?, name)?;
         Ok(Self {
@@ -88,6 +99,12 @@ impl<'a> OutputPlanBuilder<'a> {
             len: 0,
             matched: 0,
         })
+    }
+
+    pub fn with_funded_sources(mut self) -> Self {
+        self.left.backing_funded = true;
+        self.right.backing_funded = true;
+        self
     }
 
     pub fn left_source(
@@ -232,6 +249,7 @@ impl<'a> SideBuilder<'a> {
             span: None,
             run: None,
             raw: 0,
+            backing_funded: false,
             #[cfg(test)]
             right,
         }
@@ -297,7 +315,11 @@ impl<'a> SideBuilder<'a> {
         let (types, heads) = source_headers(&row.batch.record, name)?;
         let backing = checked(
             name,
-            backing::source_bytes(&row.batch.record, workspace, name)?,
+            if self.backing_funded {
+                0
+            } else {
+                backing::source_bytes(&row.batch.record, workspace, name)?
+            },
             types,
         )?;
         checked(name, metadata, checked(name, heads, backing)?)

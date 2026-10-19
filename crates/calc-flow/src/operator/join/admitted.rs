@@ -359,6 +359,27 @@ impl AdmittedBatch {
         }
     }
 
+    #[inline]
+    fn cursor_view(&self, index: usize, cursor: &mut Option<usize>) -> GroupView<'_> {
+        assert!(index < self.len);
+        let segment = match *cursor {
+            Some(mut segment) if index >= self.segments.get(segment).range.start => {
+                while self.segments.get(segment).range.end <= index {
+                    segment += 1;
+                    #[cfg(test)]
+                    super::note_join_work(|work| work.admission_segment_lookups += 1);
+                }
+                segment
+            }
+            _ => self.segment_index(index),
+        };
+        *cursor = Some(segment);
+        GroupView {
+            batch: self,
+            segment: self.segments.get(segment),
+        }
+    }
+
     pub(super) fn group_range(&self, index: usize) -> Range<usize> {
         self.segments.get(index).range.clone()
     }
@@ -618,9 +639,15 @@ pub(super) trait AdmittedRows: Sync {
     }
     fn len(&self) -> usize;
     fn row(&self, index: usize) -> AdmittedRef<'_>;
+    fn cursor_row(&self, index: usize, _segment: &mut Option<usize>) -> AdmittedRef<'_> {
+        self.row(index)
+    }
     /// Payload at a logical admitted position, without requiring row metadata.
     fn payload(&self, index: usize) -> PayloadRef<'_> {
         self.row(index).record
+    }
+    fn cursor_payload(&self, index: usize, _segment: &mut Option<usize>) -> PayloadRef<'_> {
+        self.payload(index)
     }
     /// Event time at a logical admitted position, independent of payload offsets.
     fn event_time(&self, index: usize) -> EventTime {
@@ -638,6 +665,9 @@ pub(super) trait AdmittedRows: Sync {
     }
     fn any_retained(&self, range: Range<usize>) -> bool {
         (range.start..range.end).any(|index| self.row(index).retain)
+    }
+    fn dense_key_range(&self, _range: Range<usize>) -> Option<Range<usize>> {
+        None
     }
     /// why: key identity reads only (offset, retain), so a group can resolve
     /// its segment once instead of re-walking `row` per row
@@ -662,8 +692,14 @@ impl AdmittedRows for AdmittedBatch {
     fn row(&self, index: usize) -> AdmittedRef<'_> {
         self.row(index)
     }
+    fn cursor_row(&self, index: usize, cursor: &mut Option<usize>) -> AdmittedRef<'_> {
+        self.cursor_view(index, cursor).row(index)
+    }
     fn payload(&self, index: usize) -> PayloadRef<'_> {
         self.view(index).payload(index)
+    }
+    fn cursor_payload(&self, index: usize, cursor: &mut Option<usize>) -> PayloadRef<'_> {
+        self.cursor_view(index, cursor).payload(index)
     }
     fn event_time(&self, index: usize) -> EventTime {
         assert!(index < self.len);
@@ -681,6 +717,22 @@ impl AdmittedRows for AdmittedBatch {
     }
     fn any_retained(&self, range: Range<usize>) -> bool {
         self.retained.any(range)
+    }
+    fn dense_key_range(&self, range: Range<usize>) -> Option<Range<usize>> {
+        if range.is_empty() {
+            return None;
+        }
+        let segment = self.segments.get(self.segment_index(range.start));
+        if range.end > segment.range.end {
+            return None;
+        }
+        let first = match segment.payload_base {
+            Some(base) => base,
+            None if segment.sparse_start.is_none() => segment.first,
+            None => return None,
+        };
+        let start = first.checked_add(range.start - segment.range.start)?;
+        Some(start..start.checked_add(range.len())?)
     }
     fn key_offsets(
         &self,
@@ -714,11 +766,31 @@ impl dyn AdmittedRows + '_ {
     pub(super) fn iter(&self) -> RowIter<'_> {
         RowIter::new(self, 0..self.len())
     }
+    pub(super) fn cursor(&self) -> AdmittedCursor<'_> {
+        AdmittedCursor {
+            rows: self,
+            segment: None,
+        }
+    }
     pub(super) fn groups(&self) -> GroupIter<'_> {
         GroupIter {
             rows: self,
             next: 0,
         }
+    }
+}
+
+pub(super) struct AdmittedCursor<'a> {
+    rows: &'a dyn AdmittedRows,
+    segment: Option<usize>,
+}
+
+impl<'a> AdmittedCursor<'a> {
+    pub(super) fn row(&mut self, index: usize) -> AdmittedRef<'a> {
+        self.rows.cursor_row(index, &mut self.segment)
+    }
+    pub(super) fn payload(&mut self, index: usize) -> PayloadRef<'a> {
+        self.rows.cursor_payload(index, &mut self.segment)
     }
 }
 
@@ -831,6 +903,9 @@ impl<'a> AdmittedGroup<'a> {
     }
     pub(super) fn any_retained(&self) -> bool {
         self.rows.any_retained(self.start..self.end)
+    }
+    pub(super) fn dense_key_range(&self) -> Option<Range<usize>> {
+        self.rows.dense_key_range(self.start..self.end)
     }
 }
 pub(super) struct GroupIter<'a> {

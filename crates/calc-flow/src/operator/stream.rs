@@ -428,6 +428,15 @@ impl<'a> StreamOperatorContext<'a> {
         self
     }
 
+    /// Fixes an output budget for a benchmark fixture independently of runtime defaults.
+    ///
+    /// This helper is available only with the `benchmark-internals` feature.
+    #[cfg(feature = "benchmark-internals")]
+    #[must_use]
+    pub fn with_benchmark_output_budget(self, budget: EdgeBudget) -> Self {
+        self.with_output_budget(budget)
+    }
+
     /// Verifies that the owning job remains active.
     ///
     /// # Errors
@@ -763,6 +772,29 @@ impl StreamCollector for EdgeCollector {
 mod tests {
     use super::*;
     use crate::CancellationToken;
+
+    #[cfg(feature = "benchmark-internals")]
+    #[test]
+    fn cpu_benchmark_context_keeps_explicit_output_budget() {
+        let job = StreamJobContext::new(
+            7,
+            "fingerprint",
+            JsonMap::new(),
+            None,
+            CancellationToken::new(),
+        );
+        let budget = EdgeBudget::new(10_000, 64 << 20).unwrap();
+        let context = StreamOperatorContext::with_ingress_progress(
+            &job,
+            "benchmark",
+            Some(EventTime::from_micros(3)),
+            IngressProgressSnapshot::default(),
+        )
+        .with_benchmark_output_budget(budget);
+        assert_eq!(context.output_budget(), budget);
+        assert_eq!(context.operator_id(), "benchmark");
+        assert_eq!(context.input_watermark(), Some(EventTime::from_micros(3)));
+    }
 
     #[test]
     fn test_late_metrics_prepare_is_invisible_and_commit_has_no_fallible_arithmetic() {

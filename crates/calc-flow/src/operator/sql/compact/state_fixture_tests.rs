@@ -64,7 +64,7 @@ struct FixtureOwners {
 #[tokio::test]
 async fn test_layout3_state_only_fixture_native_controls_are_valid() {
     for (query, kind) in cases() {
-        let fixture = valid_fixture(query, kind).await;
+        let fixture = Box::pin(valid_fixture(query, kind)).await;
         let source_pool = fixture.source_pool.clone();
         let target_pool = fixture.target_pool.clone();
         assert!(source_pool.reserved() > 0);
@@ -79,7 +79,7 @@ async fn test_layout3_state_only_fixture_native_controls_are_valid() {
 async fn test_sql_restore_accepts_valid_layout3_state_only_checkpoint() {
     let mut fixtures = Vec::new();
     for (query, kind) in cases() {
-        fixtures.push(valid_fixture(query, kind).await);
+        fixtures.push(Box::pin(valid_fixture(query, kind)).await);
     }
     for mut fixture in fixtures {
         fixture

@@ -14,6 +14,10 @@ use datafusion::arrow::{
 use super::{entity_parallel::*, *};
 use crate::CalcFlowError;
 
+mod cpu_scaling;
+
+const HISTORICAL_SCRATCH_THRESHOLD: usize = 16 << 20;
+
 fn lane_plan(dual: bool) -> RollingKernelPlan {
     let groups = if dual {
         vec![
@@ -191,7 +195,9 @@ fn pair(
     let prepared = plan
         .prepare_ordered_stream_inputs(state, input, "r", None)
         .unwrap();
-    assert!(prepared.scratch_plan().unwrap().accounted_bytes().unwrap() <= ScratchPlan::CAP_BYTES);
+    assert!(
+        prepared.scratch_plan().unwrap().accounted_bytes().unwrap() <= HISTORICAL_SCRATCH_THRESHOLD
+    );
     prepared
         .split_two()
         .unwrap_or_else(|_| panic!("balanced fixture must split"))
@@ -208,6 +214,24 @@ pub(crate) fn entity_parallel_test_pair() -> (NumericJoinSeed, [NumericLaneReque
     let scratch = prepared.scratch_plan().unwrap();
     let (seed, requests) = prepared
         .split_two()
+        .unwrap_or_else(|_| panic!("balanced fixture"));
+    (seed, requests, scratch)
+}
+
+pub(crate) fn entity_parallel_test_work(
+    cpus: usize,
+) -> (NumericJoinSeed, Vec<NumericLaneRequest>, ScratchPlan) {
+    let batch = input(128_000, 64, false);
+    let plan = lane_plan(true);
+    let state = warm(&plan, &batch);
+    let prepared = plan
+        .prepare_ordered_stream_inputs(&state, &batch, "r", None)
+        .unwrap();
+    let scratch = prepared
+        .scratch_plan_for_cpu(cpus)
+        .expect("supported CPU work");
+    let (seed, requests) = prepared
+        .split_lanes(cpus)
         .unwrap_or_else(|_| panic!("balanced fixture"));
     (seed, requests, scratch)
 }
@@ -371,13 +395,13 @@ fn entity_parallel_scratch_uses_checked_capacity_including_entity_containers() {
         ScratchPlan::for_dimensions(64_000, 64, 2, 1)
             .accounted_bytes()
             .unwrap()
-            < ScratchPlan::CAP_BYTES
+            < HISTORICAL_SCRATCH_THRESHOLD
     );
     assert!(
         ScratchPlan::for_dimensions(256_000, 256_000, 2, 1)
             .accounted_bytes()
             .unwrap()
-            > ScratchPlan::CAP_BYTES
+            > HISTORICAL_SCRATCH_THRESHOLD
     );
     assert_eq!(
         ScratchPlan::for_dimensions(usize::MAX, 64, 2, 1).accounted_bytes(),
@@ -535,7 +559,7 @@ fn entity_parallel_split_preserves_reserved_container_capacities() {
         assert_eq!(seed.execution.state.states.capacity(), capacity);
         let mut container_bytes = 0;
         for request in &requests {
-            assert!(request.rows.is_empty());
+            assert_eq!(request.rows.len(), rows / 2);
             assert_eq!(request.rows.capacity(), rows / 2);
             assert_eq!(request.entities.capacity(), request.entities.len());
             container_bytes += request.rows.capacity() * size_of::<LaneRow>()
@@ -543,7 +567,7 @@ fn entity_parallel_split_preserves_reserved_container_capacities() {
         }
         let values_and_validity = 2 * (rows * 8 + rows.div_ceil(8) + 128);
         assert!(container_bytes + values_and_validity < accounted);
-        assert!(accounted <= ScratchPlan::CAP_BYTES);
+        assert!(accounted <= HISTORICAL_SCRATCH_THRESHOLD);
     }
 }
 
@@ -882,8 +906,8 @@ fn entity_parallel_lazy_rows_reuse_reserved_capacities_and_original_ids() {
         let loads = [rows * 5 / 8, rows * 3 / 8];
         let reserved = requests.each_ref().map(|request| {
             assert!(
-                request.rows.is_empty(),
-                "split must defer schedule filling to lanes"
+                !request.rows.is_empty(),
+                "split prepares compact schedules once"
             );
             (request.rows.as_ptr(), request.rows.capacity())
         });
@@ -2189,21 +2213,21 @@ fn entity_parallel_compiled_readout_fixed_metadata_keeps_checked_capacity_bounda
         .accounted_bytes()
         .unwrap();
     assert!(fixed >= required + 96 + NULL_FREE_MERGE_METADATA_BYTES);
-    let cap_name = ScratchPlan::CAP_BYTES - fixed;
+    let cap_name = (HISTORICAL_SCRATCH_THRESHOLD - fixed).div_ceil(5);
     assert_eq!(
         ScratchPlan::for_dimensions(0, 0, 0, cap_name).accounted_bytes(),
-        Some(ScratchPlan::CAP_BYTES)
+        Some(fixed + 5 * cap_name)
     );
     assert_eq!(
         ScratchPlan::for_dimensions(0, 0, 0, cap_name + 1).accounted_bytes(),
-        Some(ScratchPlan::CAP_BYTES + 1)
+        Some(fixed + 5 * (cap_name + 1))
     );
     assert_eq!(
-        ScratchPlan::for_dimensions(0, 0, 0, usize::MAX - fixed).accounted_bytes(),
-        Some(usize::MAX)
+        ScratchPlan::for_dimensions(0, 0, 0, (usize::MAX - fixed) / 5).accounted_bytes(),
+        Some(fixed + 5 * ((usize::MAX - fixed) / 5))
     );
     assert_eq!(
-        ScratchPlan::for_dimensions(0, 0, 0, usize::MAX - fixed + 1).accounted_bytes(),
+        ScratchPlan::for_dimensions(0, 0, 0, (usize::MAX - fixed) / 5 + 1).accounted_bytes(),
         None
     );
     eprintln!(

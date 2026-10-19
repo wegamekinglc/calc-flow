@@ -20,7 +20,10 @@ use crate::Result;
 mod bindings;
 mod framed;
 mod local;
+mod parallel;
 mod rebuild;
+#[cfg(test)]
+mod tests;
 pub(super) use bindings::{Bindings, SideBindings};
 pub(super) use rebuild::Rebuilt;
 
@@ -103,6 +106,7 @@ pub(super) struct Pending {
     replacement: Option<Dictionary>,
     keys: Vec<Option<Arc<FramedKey>>>,
     ids: Vec<u32>,
+    frequencies: Vec<usize>,
     _credit: Arc<MemoryReservation>,
     #[cfg(test)]
     limits: TestLimits,
@@ -112,6 +116,7 @@ pub(super) struct PreparedKeys {
     pub(super) dictionary: Pending,
     pub(super) keys: Vec<Option<Arc<FramedKey>>>,
     pub(super) ids: Vec<u32>,
+    pub(super) frequencies: Vec<usize>,
     pub(super) scratch: Arc<MemoryReservation>,
 }
 
@@ -292,13 +297,12 @@ impl Dictionary {
         {
             pending.limits = self.limits;
         }
-        let mut flow = KeyFlow::new(context);
         let budget = BirthBudget {
             master: &master,
             name,
         };
         if !pending
-            .prepare_rows(self, rows, indices, &budget, &mut flow, local)
+            .prepare_rows(self, rows, indices, &budget, context, local)
             .await?
         {
             return Ok(None);
@@ -306,6 +310,7 @@ impl Dictionary {
         Ok(Some(PreparedKeys {
             keys: std::mem::take(&mut pending.keys),
             ids: std::mem::take(&mut pending.ids),
+            frequencies: std::mem::take(&mut pending.frequencies),
             dictionary: pending,
             scratch,
         }))
@@ -730,6 +735,7 @@ impl Pending {
             replacement: None,
             keys: Vec::with_capacity(capacity),
             ids: Vec::with_capacity(capacity),
+            frequencies: Vec::with_capacity(capacity),
             _credit: credit,
             #[cfg(test)]
             limits: TestLimits::default(),
@@ -742,9 +748,10 @@ impl Pending {
         rows: &dyn AdmittedRows,
         indices: &[usize],
         budget: &BirthBudget<'_>,
-        flow: &mut KeyFlow<'_, '_>,
+        context: Option<&crate::StreamOperatorContext<'_>>,
         mut local: Option<local::LocalIntern>,
     ) -> Result<bool> {
+        let mut flow = KeyFlow::new(context);
         let mut columns = Vec::with_capacity(indices.len());
         for group in rows.groups() {
             columns.clear();
@@ -764,14 +771,27 @@ impl Pending {
             let prepared = match interned {
                 Some((intern, bound)) => {
                     intern.begin_group();
-                    intern
-                        .intern_group(&bound, group, budget.name, flow)
-                        .await?;
-                    self.prepare_group_local(&columns, dictionary, intern, budget, flow)
-                        .await?
+                    let parallel = parallel::intern_group(
+                        intern, &bound, group, indices, budget, &mut flow, context,
+                    )
+                    .await?;
+                    if parallel.is_none() {
+                        intern
+                            .intern_group(&bound, group, budget.name, &mut flow)
+                            .await?;
+                    }
+                    self.prepare_group_local(
+                        &columns,
+                        dictionary,
+                        intern,
+                        budget,
+                        &mut flow,
+                        parallel.zip(context),
+                    )
+                    .await?
                 }
                 None => {
-                    self.prepare_group_rows(&columns, dictionary, group, budget, flow)
+                    self.prepare_group_rows(&columns, dictionary, group, budget, &mut flow)
                         .await?
                 }
             };
@@ -805,6 +825,7 @@ impl Pending {
                 return Ok(false);
             };
             self.ids.push(id);
+            self.note_frequency(id, 1);
         }
         Ok(true)
     }
@@ -818,6 +839,7 @@ impl Pending {
         local: &mut local::LocalIntern,
         budget: &BirthBudget<'_>,
         flow: &mut KeyFlow<'_, '_>,
+        parallel: Option<(parallel::Group, &crate::StreamOperatorContext<'_>)>,
     ) -> Result<bool> {
         self.classify_distinct(columns, dictionary, local, budget.name, flow)
             .await?;
@@ -831,8 +853,27 @@ impl Pending {
         {
             return Ok(false);
         }
-        self.ids.extend(local.broadcast());
+        if let Some((group, context)) = parallel {
+            group.finish(self, local, flow, context).await?;
+        } else {
+            #[cfg(test)]
+            parallel::note_owner_remap(local.locals.len());
+            let Self {
+                ids, frequencies, ..
+            } = self;
+            ids.extend(local.broadcast().inspect(|&id| {
+                if let Some(count) = frequencies.get_mut(id as usize) {
+                    *count = count.saturating_add(1);
+                }
+            }));
+        }
         Ok(true)
+    }
+
+    fn note_frequency(&mut self, id: u32, count: usize) {
+        if let Some(frequency) = self.frequencies.get_mut(id as usize) {
+            *frequency = frequency.saturating_add(count);
+        }
     }
 
     /// Classification runs per distinct key in first-appearance order; the
@@ -1086,6 +1127,7 @@ impl Pending {
             .find(hash, |head| head.hash == hash)
             .map(|head| head.id);
         self.keys.push(Some(Arc::clone(lease.owner())));
+        self.frequencies.push(0);
         self.changes.push(Change {
             lease,
             hash,
@@ -1329,6 +1371,7 @@ fn base_scratch_bytes(rows: usize, columns: usize) -> Option<usize> {
             + size_of::<Head>() * 4
             + size_of::<Option<Arc<FramedKey>>>()
             + size_of::<u32>()
+            + size_of::<usize>()
             + size_of::<Option<u32>>()
             + 64,
     )?

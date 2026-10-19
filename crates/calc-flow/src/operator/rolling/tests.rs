@@ -2209,20 +2209,21 @@ fn parallel_rollback_record(start: usize, count: usize) -> RecordBatch {
     )
 }
 
+struct RejectParallelOutput;
+
+#[async_trait]
+impl StreamCollector for RejectParallelOutput {
+    async fn emit(&mut self, _port: &str, _batch: Batch) -> Result<()> {
+        Err(internal_error("expected parallel collector rejection"))
+    }
+}
+
 #[tokio::test]
 async fn failed_parallel_ordered_emission_preserves_committed_snapshot() {
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
     use crate::runtime::streaming::entity_work::JobEntityWorkOwner;
     use crate::{CancellationToken, StreamJobContext};
-
-    struct Reject;
-    #[async_trait]
-    impl StreamCollector for Reject {
-        async fn emit(&mut self, _port: &str, _batch: Batch) -> Result<()> {
-            Err(internal_error("expected parallel collector rejection"))
-        }
-    }
 
     let spec = kernel_spec(json!([
         aggregate_output("mean", "price", "fast", 5),
@@ -2284,6 +2285,7 @@ async fn failed_parallel_ordered_emission_preserves_committed_snapshot() {
 
     let launches = Arc::new(AtomicU64::new(0));
     let owner = JobEntityWorkOwner::new(7, Arc::clone(&launches));
+    owner.set_worker_limit_for_test(2);
     let task = owner.test_client(3, "operator:rolling".into());
     let scope = task.callback_scope();
     let parallel_context =
@@ -2299,7 +2301,12 @@ async fn failed_parallel_ordered_emission_preserves_committed_snapshot() {
         .checked_add(charge, "rolling")
         .unwrap();
     let result = operator
-        .emit_ordered(vec![record], None, &parallel_context, &mut Reject)
+        .emit_ordered(
+            vec![record],
+            None,
+            &parallel_context,
+            &mut RejectParallelOutput,
+        )
         .await;
     scope.settle_abandoned().await;
     drop(parallel_context);

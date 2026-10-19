@@ -75,6 +75,16 @@ async def build_binaries(
     source: Path, output: Path, shared: Path, *, targets: tuple[str, ...] | None = None
 ) -> dict:
     targets = targets if targets is not None else bench_targets(source)
+    manifest_path = source / "crates/calc-flow/Cargo.toml"
+    manifest = (
+        tomllib.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest_path.is_file()
+        else {}
+    )
+    target_features = {
+        entry["name"]: entry.get("required-features", [])
+        for entry in manifest.get("bench", [])
+    }
     clear_stale_product_library(shared)
     environment = {
         **child_environment(),
@@ -84,6 +94,8 @@ async def build_binaries(
     }
     binaries = {}
     for target in targets:
+        features = target_features.get(target, [])
+        feature_args = ["--features", ",".join(features)] if features else []
         log = output / f"build-{target}.jsonl"
         clear_stale_bench_binary(shared, target)
         # The sub-nanosecond core getter benchmark changes when its loop crosses
@@ -98,6 +110,7 @@ async def build_binaries(
                 "bench",
                 "-p",
                 "calc-flow",
+                *feature_args,
                 "--bench",
                 target,
                 "--message-format=json",
@@ -112,6 +125,7 @@ async def build_binaries(
                 "--locked",
                 "-p",
                 "calc-flow",
+                *feature_args,
                 "--bench",
                 target,
                 "--no-run",

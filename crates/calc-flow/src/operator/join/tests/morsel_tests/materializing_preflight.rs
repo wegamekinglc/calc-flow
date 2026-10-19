@@ -215,6 +215,8 @@ async fn failure_case(service: &TestService, failure: &str) {
     let mut context = StreamOperatorContext::new(&job, "match", None);
     if failure == "row" {
         context = context.with_output_budget(EdgeBudget::new(10_000, WIDTH - 1).unwrap());
+    } else if failure == "sink" {
+        context = context.with_output_budget(EdgeBudget::new(100, usize::MAX).unwrap());
     }
     let source = sparse_input();
     let original = source.table_payload().unwrap().batches().to_vec();

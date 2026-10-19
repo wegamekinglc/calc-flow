@@ -204,6 +204,34 @@ fn test_output_payload_access_keeps_order_without_reading_metadata_or_the_unused
     }
 }
 
+#[test]
+fn test_output_preflight_uses_payload_only_for_fixed_variable_and_nested_projections() {
+    for incoming_left in [true, false] {
+        let fixture = Fixture::new(incoming_left);
+        for columns in [vec![0, 4], vec![1, 5], vec![3, 7], vec![5, 0, 5], vec![]] {
+            let columns: Arc<[usize]> = columns.into();
+            let schema = Arc::new(fixture.schema.project(&columns).unwrap());
+            let mut normal = fixture.output(&schema, Some(&columns), incoming_left);
+            normal.admitted_charges = None;
+            let admitted = PayloadOnly(&fixture.admitted);
+            let output = JoinOutput {
+                admitted: &admitted,
+                ..normal
+            };
+            let budget = EdgeBudget::new(2, 1_000_000).unwrap();
+            let ranges = normal.ranges(budget).unwrap();
+            assert_eq!(output.ranges(budget).unwrap(), ranges);
+            assert_eq!(ranges, vec![0..2, 2..3]);
+            for range in ranges {
+                assert_eq!(
+                    output.materialize(range.clone()).unwrap(),
+                    normal.materialize(range).unwrap()
+                );
+            }
+        }
+    }
+}
+
 fn observer(counter: &Arc<AtomicUsize>) -> output_gather::test_support::Hook {
     let counter = Arc::clone(counter);
     Arc::new(move |_, finished| {

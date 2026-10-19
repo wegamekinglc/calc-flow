@@ -147,7 +147,10 @@ and `asof_join` have no equivalent Finance-Python operator in this comparison.
 Engine comparisons use identical Arrow input bytes within Python 3.13; the
 isolated Python 3.9 Finance-Python worker reconstructs the same deterministic
 values in pandas. All cases use deterministic entity and
-timestamp ordering, up to 64 entities, and 64,000-row input batches. Prices are
+timestamp ordering and up to 64 entities. Native generic stream cases use
+1,000,000-row input batches; their preconstructed slices combine Arrow chunks
+before timing. SQL, DataFusion, and Polars comparison fixtures retain their
+historical 64,000-row Arrow chunks. Prices are
 bounded exact eighths: `100 + sequence % 257 / 8 + sequence % entities / 8`.
 This controls decimal accumulation drift in long rolling performance runs;
 it is not a claim of numerical accuracy on arbitrary decimal sequences.
@@ -167,11 +170,16 @@ one-tick-per-key grid. Their case identity records
 `integer-second-offset-equality-v1`; these references do not measure arbitrary
 non-grid interval SQL. Every interval backend has an explicit 1M-input-row
 cap: the 10M fixture would emit roughly 110M rows. Its native timing scope is
-`ready-enqueue-to-arrow/retained-interval-v1`.
+`ready-enqueue-to-arrow/retained-interval-v2`.
 
 Join, interval Join, ASOF, and projection also have native throughput cases
 with 1,024-row input batches and exact-cursor event-log sources. Their scope is
-`ready-enqueue-to-arrow/exact-cursor-batch-1024-v1`. The 64,000-row cases remain.
+`ready-enqueue-to-arrow/exact-cursor-batch-1024-v1`. Generic large-batch cases
+use 1,000,000 rows. Named historical acceptance cases, including issue 406,
+retain their declared 64,000-row batches and existing contracts.
+Historical 1,024-row and 64,000-row fixtures also preserve existing Arrow
+record-batch boundaries, including a small batch that crosses a 64,000-row
+comparison-fixture chunk.
 The interval cap applies to both batch sizes.
 Its per-side row budget covers six input batches plus 768 history rows: the
 peer may hold one batch in its Python queue, native prefetch slot, source fan-out,
@@ -267,7 +275,10 @@ Report contract v3 validates the ready-runner timing scope and complete
 sample statistics. Both revisions must be measured with the same scope;
 do not subtract a separately measured startup time from another report.
 The current native stream scope is
-`ready-enqueue-to-arrow/bounded-feeds-v6`: ASOF lockstep waits use
+`ready-enqueue-to-arrow/bounded-feeds-v7`: input slices combine their Arrow
+chunks before timing and use the 1,000,000-row stream default. The updated
+generic and interval scopes keep historical 64,000-row results separate.
+ASOF lockstep waits use
 sink delivery events, with no `job.status()` polling in the timed ASOF path.
 Delivery of all accepted left rows proves finality for this workload, but
 does not wait for the operator's subsequent status update. Static Join polls
@@ -314,6 +325,14 @@ timing boundaries remain unchanged.
 
 ## ASOF settlement measurements
 
+The ASOF settlement and Join materialization targets now require
+`benchmark-internals` to retain their explicit 10,000-row, 64 MiB fixture
+budgets independently of runtime defaults. Establish fresh baselines for
+these builds: historical samples without that feature have different build
+and workload fingerprints and must not be used for speedup claims. The
+harness continues to reject mismatched provenance; no migration exemption
+is declared for this change.
+
 `stream_asof_perf` is an independent Rust target for bounded backward ASOF.
 It measures `operator-watermark-settlement`: one large watermark advance
 settles preloaded pending left rows against retained right history. Input
@@ -338,7 +357,7 @@ identity-only entries. Every workload retains its right rows after settlement.
 | `skew_8192`          | 8,192        | 8,192          | About 90% on key 0 | No       |
 | `restored_skew_8192` | 8,192        | 8,192          | About 90% on key 0 | Yes      |
 
-Output chunks adapt to the context's default 10,000-row, 64 MiB edge budget
+Output chunks adapt to the fixture's explicit 10,000-row, 64 MiB edge budget
 and available workspace. The oracle requires positive, bounded chunk sizes
 covering every pending row; historical 128-row chunks remain valid. Left time
 starts at 1,000,000 microseconds, right time is 999,999, both watermarks advance
@@ -350,8 +369,8 @@ same chunk size. See [ASOF state and workspace](asof-join-guide.md#bounded-state
 Run from the repository root:
 
 ```bash
-cargo bench --locked -p calc-flow --bench stream_asof_perf -- --output target/asof.json
-cargo bench --locked -p calc-flow --bench stream_asof_perf -- --check --output target/asof-check.json
+cargo bench --locked -p calc-flow --features benchmark-internals --bench stream_asof_perf -- --output target/asof.json
+cargo bench --locked -p calc-flow --features benchmark-internals --bench stream_asof_perf -- --check --output target/asof-check.json
 ```
 
 Normal mode runs the strict-frontier/cancellation/restore check, then one full
@@ -432,8 +451,9 @@ not end-to-end managed-job startup or checkpoint recovery.
 
 All four maintained cases use 10 keys and 1,000 incoming right rows. The
 preloaded left side has `10 * fan` rows; each incoming row matches `fan`
-left rows. Payload width applies to each side's UTF-8 payload. The default
-edge budget is 10,000 rows and 64 MiB of logical bytes.
+left rows. Payload width applies to each side's UTF-8 payload. The fixture's
+explicit edge budget is 10,000 rows and 64 MiB of logical bytes, independently
+of runtime defaults.
 
 | Case               | Payload per side | Fan-out | Sink delay per chunk | Output rows | Output chunks |
 |--------------------|------------------|---------|----------------------|-------------|---------------|
@@ -445,8 +465,8 @@ edge budget is 10,000 rows and 64 MiB of logical bytes.
 Run from the repository root:
 
 ```bash
-cargo bench --locked -p calc-flow --bench stream_join_materialization -- --check
-cargo bench --locked -p calc-flow --bench stream_join_materialization -- --output target/join-materialization.json
+cargo bench --locked -p calc-flow --features benchmark-internals --bench stream_join_materialization -- --check
+cargo bench --locked -p calc-flow --features benchmark-internals --bench stream_join_materialization -- --output target/join-materialization.json
 ```
 
 Normal standalone mode runs the pre-cancelled-input check, then one full row

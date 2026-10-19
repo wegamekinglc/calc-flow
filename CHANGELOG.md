@@ -9,6 +9,52 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-19: Prepare large streaming ASOF matches and output references in
+  contiguous CPU-sized fragments, including a single hot key. Preserve local
+  fragment references and shared Arrow spans, and allow narrow outputs to use
+  row parallelism independently of their column count. Prepare interval Join
+  retained-row charges and chunks on the owned native CPU pool, preserving
+  source-order state admission. Optional acceleration yields to explicit memory
+  limits; checkpoint formats and default memory policy remain unchanged.
+
+- 2026-10-19: Reuse prepaid interval Join window bounds between parallel count
+  and fill/gather, with cursor fallback under explicit memory pressure. Avoid
+  repeated incoming-row output-width checks within each match run and check
+  retained sparse replacement candidates per chunk owner instead of per row.
+  Preserve inclusive bounds, stable pair ordering, resource limits, cancellation
+  cleanup, and checkpoint formats.
+
+- 2026-10-19: Extend CPU-aware streaming work beyond Join. Decouple ASOF compute
+  routing from persistent shards and let explicit budgets size finalization
+  prefixes. Scale warm ordered rolling mean/dual-SMA across whole-entity lanes,
+  reuse entity counts, and build compact row schedules without private batch or
+  scratch-byte ceilings. Reuse compiled
+  immutable expression steps for repeated row-local SQL while preserving state,
+  arithmetic order, explicit limits and checkpoint formats.
+- 2026-10-19: Retain the existing serial cross-section mean after a complete-group
+  parallel experiment regressed the selected million-row workload. Keep the
+  rejected candidate and its measurements as evidence rather than enabling the
+  slower path by default.
+- 2026-10-19: Preserve project-v3 stream JSON's historical omitted budget values
+  and connector-project fingerprints. New runtime constructors use the larger
+  defaults, which remain explicit when exported from `StreamRunOptions`.
+- 2026-10-19: Reduce repeated Join preparation scans by aggregating admitted-key
+  frequencies, sharing dense row ranges, and mapping parallel fragments directly
+  to final identities. Treat unresolved probe-only keys as misses during cost
+  estimation. Pack admission masks into bounded internal messages and group
+  native output records by the configured edge row/byte budgets while sharing
+  Arrow buffers. Preserve deterministic identities, output order, sequence
+  preflight, cancellation ownership, and explicit memory limits.
+- 2026-10-19: Prepare large Join key groups on the bounded native CPU pool,
+  preserving deterministic retained-row identity semantics and serial fallback.
+  Extend funded row-wise probe/gather eligibility to large primitive narrow
+  projections, retaining match, state and output budgets, and reuse incoming
+  payload segments during output gathering. Prepay the full backing pinned by
+  projected probe-only views so sealed-dimension joins can use that path.
+  Batch graphs with
+  multi-input SQL can opt into a run-scoped Auto partition budget based on
+  external table row counts, so an earlier small node does not fix the run to
+  one partition. Fixed defaults and checkpoint layouts are unchanged.
 - 2026-10-18: Share Window group values across batches and checkpoint marks.
   Bind Join incoming metadata by segment, append admission blocks, and hash
   typed key columns in bounded scratch. Prepare native retained chunks without

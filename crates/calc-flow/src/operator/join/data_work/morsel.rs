@@ -1,10 +1,10 @@
 //! Count first; defer owned probe/gather until mandatory state admission succeeds.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 
 use datafusion::{
     arrow::{datatypes::SchemaRef, record_batch::RecordBatch},
-    execution::memory_pool::MemoryReservation,
+    execution::memory_pool::{MemoryReservation, UnboundedMemoryPool},
 };
 
 use super::super::{
@@ -18,12 +18,18 @@ use super::{inputs::ProbeInputs, partition::Counts, worker};
 use crate::runtime::streaming::gather_work::{GatherStop, ParallelCpuWork};
 use crate::{Batch, BatchMetadata, EdgeBudget, Result, StreamCollector, StreamOperatorContext};
 
+#[cfg(test)]
+#[path = "../tests/morsel_tests/envelopes.rs"]
+mod envelope_tests;
+mod envelopes;
 mod fallback;
 mod funding;
 #[cfg(test)]
 #[path = "../tests/morsel_tests/physical_funding.rs"]
 mod funding_tests;
 pub(super) use funding::pair_credit_bytes;
+
+const MIN_MATERIALIZATION_BYTES: usize = 1 << 20;
 
 pub(in crate::operator::join) struct DeferredProbe {
     inputs: ProbeInputs,
@@ -54,6 +60,25 @@ pub(super) fn eligible(operator: &StreamJoinOperator, rows: usize) -> bool {
         })
 }
 
+pub(super) fn materialization_worthwhile(
+    operator: &StreamJoinOperator,
+    rows: usize,
+    estimated_visits: usize,
+) -> bool {
+    if !eligible(operator, rows) {
+        return false;
+    }
+    operator.output_ports[0]
+        .schema()
+        .and_then(|schema| {
+            schema.fields().iter().try_fold(0usize, |bytes, field| {
+                bytes.checked_add(field.data_type().primitive_width()?)
+            })
+        })
+        .and_then(|width| width.checked_mul(estimated_visits))
+        .is_some_and(|bytes| bytes >= MIN_MATERIALIZATION_BYTES)
+}
+
 #[cfg(test)]
 thread_local! {
     pub(super) static DISABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -75,7 +100,7 @@ pub(in crate::operator::join) fn configure_for_test(disabled: bool) -> RestoreMo
 }
 
 struct GatherWork {
-    inputs: Arc<ProbeInputs>,
+    inputs: FundedProbeInputs,
     counts: Counts,
     schema: SchemaRef,
     projection: Option<Arc<[usize]>>,
@@ -85,7 +110,25 @@ struct GatherWork {
     scratch: MemoryReservation,
 }
 
-pub(in crate::operator::join) struct GatheredOutput(Vec<FundedMorsel>);
+/// Funds temporary background ownership until workers settle; field order
+/// releases the work's input references before refunding their lease.
+struct FundedProbeInputs {
+    inputs: Arc<ProbeInputs>,
+    _credit: MemoryReservation,
+}
+
+impl std::ops::Deref for FundedProbeInputs {
+    type Target = ProbeInputs;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inputs
+    }
+}
+
+pub(in crate::operator::join) struct GatheredOutput {
+    morsels: Vec<FundedMorsel>,
+    _control: MemoryReservation,
+}
 
 struct FundedMorsel {
     // Array backing is destroyed before its funding.
@@ -113,12 +156,18 @@ impl ParallelCpuWork for GatherWork {
     }
 
     fn run(&self, ordinal: usize, stop: &GatherStop) -> Result<Self::Output> {
+        #[cfg(feature = "benchmark-internals")]
+        let _phase = stop.join_cpu_trace().worker_stage(
+            &self.name,
+            "gather_worker",
+            self.inputs.partition.range(ordinal).len(),
+        );
         #[cfg(test)]
         self.inputs.observe(super::ProbePhase::Fill);
         #[cfg(test)]
         self.inputs
             .observe_unit(super::ProbePhase::Fill, ordinal, false);
-        let pairs = worker::fill_range(&self.inputs, self.counts, ordinal, stop)?;
+        let pairs = worker::fill_range(&self.inputs, &self.counts, ordinal, stop)?;
         let result = self.gather(&pairs, stop)?;
         stop.check()?;
         #[cfg(test)]
@@ -140,7 +189,7 @@ impl GatherWork {
             operator_id: &self.name,
             admitted_charges: Some(&self.charges),
         };
-        if !funding::owned_payloads(&output, stop)? {
+        if !funding::owned_payloads(&self.inputs, pairs, stop)? {
             return Ok(None);
         }
         let ranges = output.ranges(self.budget)?;
@@ -187,11 +236,20 @@ impl StreamJoinOperator {
         &mut self,
         inputs: Arc<ProbeInputs>,
         admitted: &mut AdmittedBatch,
-        counts: Counts,
+        mut counts: Counts,
         fallback: MemoryReservation,
         context: &StreamOperatorContext<'_>,
     ) -> Result<PreparedMatches> {
         self.await_probe_attempt(context).await?;
+        // Optional cache must not consume later mandatory state headroom.
+        if !self
+            .runtime
+            .runtime()?
+            .incremental_memory_pool()
+            .is::<UnboundedMemoryPool>()
+        {
+            counts.discard_windows();
+        }
         let mut inputs = Arc::try_unwrap(inputs).unwrap_or_else(|_| panic!("settled count inputs"));
         *admitted = std::mem::take(&mut inputs.admitted);
         let keys = inputs.keys.take();
@@ -222,7 +280,7 @@ impl StreamJoinOperator {
         self.await_compaction_release(context).await?;
         let DeferredProbe {
             mut inputs,
-            counts,
+            mut counts,
             fallback,
         } = *deferred;
         inputs.admitted = std::mem::take(&mut prepared.admitted);
@@ -231,34 +289,45 @@ impl StreamJoinOperator {
         self.compaction_release = Some(receiver);
         self.probe_control.clone_from(&inputs.control);
         let inputs = Arc::new(inputs);
-        let gathered = self
+        let mut gathered = self
             .gather_morsels(
                 &inputs,
-                counts,
+                &counts,
                 prepared.admitted_charges.as_deref(),
                 context,
             )
             .await;
+        if matches!(gathered, Ok(None)) && counts.discard_windows() {
+            gathered = self
+                .gather_morsels(
+                    &inputs,
+                    &counts,
+                    prepared.admitted_charges.as_deref(),
+                    context,
+                )
+                .await;
+        }
         let result = match gathered {
             Ok(Some(output)) => {
                 prepared.gathered = Some(output);
                 Ok(())
             }
             Ok(None) => {
-                self.fallback_morsels(&inputs, counts, fallback, prepared, context)
+                self.fallback_morsels(&inputs, &counts, fallback, prepared, context)
                     .await
             }
             Err(error) => Err(error),
         };
+        drop(counts);
         self.recover_probe(inputs, &mut prepared.admitted, context)
             .await?;
         result
     }
 
-    async fn gather_morsels(
+    pub(super) async fn gather_morsels(
         &mut self,
         inputs: &Arc<ProbeInputs>,
-        counts: Counts,
+        counts: &Counts,
         charges: Option<&[u64]>,
         context: &StreamOperatorContext<'_>,
     ) -> Result<Option<GatheredOutput>> {
@@ -266,21 +335,28 @@ impl StreamJoinOperator {
             return Ok(None);
         };
         let schema = Arc::clone(self.output_ports[0].schema().expect("compiled Join output"));
-        let Some(bytes) =
-            funding::scratch_bytes(counts.total, inputs.admitted.len(), schema.fields().len())
-        else {
+        let Some(bytes) = funding::scratch_bytes(
+            counts.total,
+            inputs.admitted.len(),
+            schema.fields().len(),
+            counts.units,
+        ) else {
             return Ok(None);
         };
         let scratch = self
             .runtime
             .runtime()?
             .incremental_reservation("stream-join-morsel");
-        if scratch.try_grow(bytes).is_err() {
+        let Some(funded) = funding::fund_inputs(inputs, &scratch, bytes, context).await? else {
             return Ok(None);
-        }
+        };
+        let Some(control_bytes) = funding::output_control_bytes(counts.units) else {
+            return Ok(None);
+        };
+        let output_control = scratch.split(control_bytes);
         let work = Arc::new(GatherWork {
-            inputs: Arc::clone(inputs),
-            counts,
+            inputs: funded,
+            counts: counts.clone(),
             schema,
             projection: self.output_columns.clone(),
             charges: charges.to_vec(),
@@ -291,11 +367,14 @@ impl StreamJoinOperator {
         self.run_probe_units(
             work,
             context,
-            |values| {
+            move |values| {
                 Ok(values
                     .into_iter()
                     .collect::<Option<Vec<_>>>()
-                    .map(GatheredOutput))
+                    .map(|morsels| GatheredOutput {
+                        morsels,
+                        _control: output_control,
+                    }))
             },
             #[cfg(test)]
             true,
@@ -307,8 +386,21 @@ impl StreamJoinOperator {
 
 impl GatheredOutput {
     #[cfg(test)]
+    pub(in crate::operator::join) fn total_funding_for_test(&self) -> usize {
+        let Self {
+            _control: control, ..
+        } = self;
+        control.size()
+            + self
+                .morsels
+                .iter()
+                .map(|morsel| morsel.credit.size())
+                .sum::<usize>()
+    }
+
+    #[cfg(test)]
     pub(in crate::operator::join) fn funding_for_test(&self) -> Vec<(usize, usize)> {
-        self.0
+        self.morsels
             .iter()
             .map(|morsel| {
                 (
@@ -324,7 +416,7 @@ impl GatheredOutput {
     }
 
     pub(in crate::operator::join) fn rows(&self) -> usize {
-        self.0
+        self.morsels
             .iter()
             .flat_map(|morsel| &morsel.records)
             .map(RecordBatch::num_rows)
@@ -338,17 +430,6 @@ impl GatheredOutput {
         output: &mut dyn StreamCollector,
         sequence: &mut u64,
     ) -> Result<()> {
-        let records = self.0.iter().flat_map(|morsel| &morsel.records);
-        let count = records.clone().count();
-        crate::operator::output_chunk::validate_output_sequence_range(name, *sequence, count)?;
-        for record in records {
-            context.check_cancelled()?;
-            let metadata = BatchMetadata::new(name, *sequence, BTreeMap::new())?;
-            output
-                .emit("output", Batch::table(vec![record.clone()], metadata)?)
-                .await?;
-            *sequence += 1;
-        }
-        Ok(())
+        envelopes::emit(&self.morsels, name, context, output, sequence).await
     }
 }

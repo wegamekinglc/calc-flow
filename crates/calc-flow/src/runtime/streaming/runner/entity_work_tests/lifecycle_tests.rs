@@ -168,6 +168,7 @@ async fn cancelled_managed_pair_joins_before_terminal_and_never_emits_stale_cand
     let gate = Arc::new(WorkerGate::default());
     let _release = Release(gate.clone());
     block_after_numeric(&job, &gate);
+    job.core.entity_work.set_worker_limit_for_test(2);
     f.start.notify_one();
     wait_until(|| gate.entered.load(Ordering::SeqCst) == 2).await;
     let outcome = job.cancel();
@@ -201,6 +202,7 @@ async fn driver_abort_drains_real_lanes_then_resolves_the_claimed_job_waiter() {
     let gate = Arc::new(WorkerGate::default());
     let _release = Release(gate.clone());
     block_after_numeric(&job, &gate);
+    job.core.entity_work.set_worker_limit_for_test(2);
     f.start.notify_one();
     wait_until(|| gate.entered.load(Ordering::SeqCst) == 2).await;
     job.core.abort_driver_for_test();
@@ -234,6 +236,7 @@ async fn prepared_completed_report_survives_a_real_driver_panic_before_publicati
     let mut runner = ContinuousRunner::new();
     let job = runner.start(f.spec).await.unwrap();
     job.core.panic_after_prepared_report_for_test();
+    job.core.entity_work.set_worker_limit_for_test(2);
     f.start.notify_one();
     let outcome = tokio::time::timeout(Duration::from_secs(5), job.wait())
         .await
@@ -260,6 +263,7 @@ async fn worker_panic_preserves_original_operator_id_and_interrupted_p2_work() {
         })),
         ..TestHooks::default()
     });
+    job.core.entity_work.set_worker_limit_for_test(2);
     f.start.notify_one();
     let outcome = tokio::time::timeout(Duration::from_secs(5), job.wait())
         .await
@@ -294,6 +298,7 @@ async fn last_job_owner_drop_keeps_the_reaper_alive_until_the_real_workers_exit(
     let gate = Arc::new(WorkerGate::default());
     let _release = Release(gate.clone());
     block_after_numeric(&job, &gate);
+    job.core.entity_work.set_worker_limit_for_test(2);
     f.start.notify_one();
     wait_until(|| gate.entered.load(Ordering::SeqCst) == 2).await;
     drop(job);
@@ -318,6 +323,7 @@ async fn driver_takeover_preserves_settled_tasks_while_only_cpu_work_remains() {
     let gate = Arc::new(WorkerGate::default());
     let _release = Release(gate.clone());
     block_after_numeric(&job, &gate);
+    job.core.entity_work.set_worker_limit_for_test(2);
     f.start.notify_one();
     wait_until(|| gate.entered.load(Ordering::SeqCst) == 2).await;
     let tasks = job.core.runtime_status.lock().tasks.clone();

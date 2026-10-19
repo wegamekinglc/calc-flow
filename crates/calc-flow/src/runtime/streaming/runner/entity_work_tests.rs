@@ -185,6 +185,7 @@ async fn managed_native_dual_sma_registers_two_owned_numeric_lanes() {
     };
     let mut runner = ContinuousRunner::new();
     let job = runner.start(spec).await.unwrap();
+    job.core.entity_work.set_worker_limit_for_test(2);
     let outcome = job.wait().await;
     assert_eq!(
         outcome.state,

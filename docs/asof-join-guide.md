@@ -291,8 +291,28 @@ capacities, unique identity buffers, payload batches, owning indexes, and the
 reserved canonical checkpoint index. A partly referenced identity buffer remains
 charged at its full retained capacity.
 
-Finalization takes ready rows up to the smaller of the output edge's row budget
-and 64,000 rows. Key and candidate vectors reserve workspace before allocation;
+Temporary admission and probe work use the available CPU and input work budget.
+Admission retains stable full-key routing. Large native columnar prefixes can
+split consecutive output rows between workers, including rows of a single hot
+key. Each worker matches rows and builds its local output references. Assembly
+preserves those local references and merges prefix summaries; its work still
+follows the actual span, source and key-owner metadata. Fragmented inputs can
+therefore require more owner work. Legacy layouts retain their existing probe
+paths. The eight persistent storage shards retain their identity and checkpoint
+layout; their count does not cap temporary computation concurrency.
+
+Worker prefix summaries and the owner merge destination have separate prepaid
+workspace while both are alive. Native integer-sequence summaries use retained
+chunk and dictionary metadata to size their reservation. Optional parallel
+workspace refusal releases the attempt before using the serial path; a required
+allocation failure can still reduce the finalization prefix. Narrow primitive
+outputs can use row tasks independently of the selected column count, including
+one copied column. These tasks retain the normal column path when optional row
+scratch cannot fit. Shared left spans remain eligible for zero-copy output
+across consecutive fragments.
+
+Finalization takes ready rows up to the output edge's row budget. Key and
+candidate vectors reserve checked workspace before allocation;
 the operator halves a chunk and releases unused scratch if workspace or output
 bytes exceed a limit. Each accepted chunk updates the deferred index length and
 releases obsolete prepared index bytes. Right-side

@@ -739,8 +739,8 @@ let plan = PipelineBuilder::new("orders")?
     .compile_stream(&udfs, &StreamRequirements::default())?;
 ```
 
-The window operator bounds retained accumulators by default to one million
-window groups and 256 MiB of logical charge. A window group stops counting
+The window operator has no default state budget below the JSON counter range
+(9,007,199,254,740,991 rows and logical bytes). A window group stops counting
 once its close is emitted, with checkpointing enabled or disabled, so the
 budget bounds open window groups regardless of the checkpoint interval. Rust
 callers can adjust the budget with
@@ -1042,33 +1042,105 @@ Funded native matching shares persistent key identities across batches and both
 inputs through one dictionary per Join operator. Keys used only for probing
 create no persistent entries. Each retained row keeps its full V1 logical
 charge. On the serial native path, the counting pass caches each row's inclusive
-time-window bounds for the fill pass. Worker count and fill phases maintain
-separate per-key cursors in each work unit and recompute bounds during fill;
-fused gather uses the same fill path. Within each cursor's lifetime, consecutive
-forward windows reuse its position; the first window and windows that move
-backward use binary searches. Batch admission
+time-window bounds for the fill pass. Parallel count work can retain the same
+bounds in optional prepaid work-unit storage for fill and fused gather. Cache
+identity includes the captured immutable index and probe configuration. If
+cache credit is refused, each phase uses its own per-key cursors; optional
+bounds are released before retrying required output admission. Deferred output
+also releases optional bounds before mandatory state preparation for any pool
+other than the default unbounded implementation. Within each cursor's lifetime,
+consecutive forward windows reuse its position; the first window and windows
+that move backward use binary searches. Batch admission
 masks preserve null and late-drop rules. Native index capacity remains funded
 until its storage is released, including capacity retained after eviction.
+Retained append checks sparse replacement eligibility once per payload owner
+within each new retained chunk after live-row accounting is complete, preserving
+first-seen candidate order.
+Output gathering also keeps a local incoming-row cursor: duplicate and forward
+positions reuse the current payload segment, while backward positions locate
+their segment again. The cursor borrows immutable input and allocates no row
+mapping.
 
-Large admitted native probes divide contiguous input positions among up to four
-funded count work units, with at least 8,192 admitted rows per unit. The operator
+Key preparation can use the existing native CPU pool for supported groups with
+at least 64,000 admitted rows and at least two available workers. The work-unit
+count follows the pool's CPU capacity and requires at least 16,000 rows per
+unit. Contiguous work units hash and deduplicate local keys. Dense admitted
+ranges avoid copying a row-offset tuple for every input row. The owner merges
+distinct representatives and establishes persistent identities; funded native
+work then maps each fragment directly to final row identities. The owner
+appends the completed identity lanes in input order without a second per-row
+mapping. Optional remap admission refusal uses a cooperative serial remap of
+the same fragments. Persistent identity creation still follows the first
+retained row,
+including unresolved probe-only prefixes. Extra scratch is reserved before
+worker buffers are allocated. Large key values or unsupported local shapes
+decline the optional work and use the cooperative serial path. Original Arrow
+buffers remain shared and owned until workers settle; cloned retained payloads
+keep their existing backing funding. A one-worker pool retains serial key
+preparation.
+
+Retained selection, logical payload charging and native chunk filling can also
+use the CPU pool. Useful retained work determines the task count; batches with
+no retained rows skip these tasks. With a bounded or custom runtime memory
+pool, these preparation tasks reuse an already funded worker generation; a
+cold or retiring generation takes the serial path. The standard unbounded
+runtime pool permits new worker generations. Chunk credits are admitted in source order,
+and worker results keep that order. When optional parallel metadata would
+prevent required chunk admission, the settled attempt releases those controls
+and uses the serial layout with the already computed logical charges. This
+preserves charges from before payload projection. Row identities, append
+coordinates, expiration preparation and index updates retain their owner order;
+state still commits only after output acceptance.
+
+Large admitted native probes divide contiguous input positions among funded
+count work units according to the pool's CPU capacity, with at least 8,192
+admitted rows per unit. The partition count is captured once and shared by
+count, fill and gather. The operator
 checks the global batch match limit before fill work builds any pairs. A cost
-gate counts opposite-run visits for every incoming position, including repeated
-keys; thin one-to-one and small batches keep the serial path.
+gate aggregates each resolved key's admitted-row frequency times its
+opposite-run length. Frequencies are collected during key preparation, including
+probe-only rows, so the gate does not scan row identities again. Unknown
+probe-only identities contribute no visits. Saturating arithmetic preserves the
+cost estimate; the separate exact counting pass still enforces the match limit.
+A second gate admits large fixed-width projected output when at least
+64,000 input rows, two configured workers and one MiB of estimated primitive
+output work justify fused row work. This gate multiplies opposite-run visits by
+projected primitive width, so it estimates potential work before temporal
+filtering, not actual output bytes. It permits narrow one-to-one projections to
+use the existing row workers. Unsupported shapes and smaller work retain the
+serial path unless the original probe gate is met.
 
 For at least 64,000 admitted rows with supported flat output and funded payload
 owners, state and expiration admission complete before each unit probes,
 preflights and gathers its contiguous input range on the existing native pool.
+Probe-only projected views can also use this path after the work package
+prepays their full pinned Arrow backing, including parent-buffer capacity held
+by slices. This temporary lease covers background gather ownership until the
+workers settle; caller-owned input references outside that work remain shared.
+Its charge and the existing gather scratch use the runtime memory pool, with
+no additional internal byte ceiling. A pool refusal retains the serial fallback,
+and opposite-side state must still have a funded owner. Legacy payloads remain
+ineligible for fused gathering.
 All units finish before the first output. Results emit in range order,
 independently of completion order, without merging pair fragments or dispatching
-another column-gather job. Output chunk boundaries follow these stable ranges.
-Optional extra scratch is capped at 512 MiB per batch and result reservations at
-16 MiB per unit (64 MiB total), inside the unchanged runtime pool. Result funding
-uses the projected physical schema and selected byte-array values, including
-fixed-width values for null rows and validity buffers. Actual Arrow allocation
-sizes must also fit the lease before results leave the worker. Result funding
-stays alive through collector acceptance. These workspace caps do not change V1
-state charges or turn edge byte budgets into process-memory ceilings.
+another column-gather job. Adjacent range records are packed into output
+Batch envelopes according to the actual edge row and byte budgets. The packing
+can slice records at an envelope boundary and shares the original Arrow
+buffers. Each record's visible slice bytes, including variable-width offsets
+and validity buffers, count toward its envelope. The complete envelope count
+is checked against the output sequence range before the first send. CPU work
+units therefore need not create separate output messages.
+Enabling these ranges can change physical batch boundaries. Matched row order
+and checkpoint state remain deterministic; downstream cumulative aggregates can
+emit different intermediate snapshots when they receive different batch sizes.
+Optional scratch and result reservations have no fixed per-batch or per-unit
+byte limit. They use the runtime memory pool, which is unbounded by default.
+Result funding uses the projected physical schema and selected byte-array
+values, including fixed-width values for null rows and validity buffers. Actual
+Arrow allocation sizes must also fit the lease before results leave the worker.
+Result funding stays alive through collector acceptance. Explicit logical state,
+match and edge budgets retain their configured limits; edge byte budgets are
+not process-memory ceilings.
 
 Shapes needing array-copy range preflight, including FixedSizeBinary, retain
 the split probe/materialization path. Fusion uses the same schema check as
@@ -1081,6 +1153,16 @@ Cancellation or an abandoned handler retains those owners until cleanup;
 subsequent state changes wait for their release. Small batches run inline.
 If worker admission is refused, matching resumes through the existing serial
 native and DataFusion paths after the attempted work has been released.
+
+The shared native CPU service detects process-available parallelism at service
+startup. Join key preparation, probe work, column gathering and row gathering
+use this capacity rather than fixed worker counts. CPU capacity is an upper
+bound: useful input work and admitted memory can reduce actual concurrency.
+The service does not impose an additional fixed thread-memory ceiling. All jobs
+share its CPU capacity, and workers are created on demand. Task controls, request
+queues and result metadata are funded for their dynamic capacities. Thread
+startup failures propagate and retain the normal join-and-cleanup lifecycle.
+Explicit DataFusion partition settings remain separate from this native service.
 
 If optional workspace admission for the dictionary or native index is refused,
 matching uses the existing batched DataFusion equality path. Incomplete
@@ -1243,16 +1325,42 @@ Choose an `EdgeBudget` large enough for the largest admitted source batch and
 the number of simultaneous control envelopes. Rows and envelopes each have an
 independent `max_rows` bound; bytes have `max_bytes`. A source declaration that
 can exceed the effective edge budget fails before open.
-Every stream edge budget and source batch declaration is capped at 1,000,000
-rows and 256 MiB. Project-v3 stream runtime options follow the same caps.
+The default permits 1,000,000 queued rows and has no byte ceiling below the
+native address-space limit. Set `EdgeBudget(max_rows=..., max_bytes=...)` to
+choose an explicit byte ceiling. Stream edges and source batch declarations
+retain a maximum of 1,000,000 rows. Project-v3 JSON keeps the historical
+10,000-row and 64 MiB defaults when budget fields are omitted from its required
+`options` object, including `options: {}`, so existing project fingerprints
+remain stable.
+Explicit project budgets retain their values, including the new constructor
+defaults of 1,000,000 rows and no smaller byte ceiling.
+
+This is a maximum batch size and queue budget. A materialized Arrow source
+keeps existing record-batch boundaries and splits records that exceed the
+selected budget. Existing small Arrow chunks stay small. Iterable sources
+preserve caller-provided batch boundaries and reject oversized batches rather
+than combining or splitting them. Neither path waits to assemble a full
+1,000,000-row batch. Larger batches can improve throughput while increasing
+per-batch latency and working memory.
+
 Each stream SQL or expression node accounts for its own DataFusion memory
 reservations without an implicit byte limit. Explicit operator state budgets
-and edge budgets remain separate from these execution-memory reservations.
+and edge budgets remain separate from these execution-memory reservations;
+edge backpressure does not impose a total runtime or process memory limit.
 
-Each rolling node also bounds its accepted buffer and retained history to
-1,000,000 logical rows and 256 MiB by default. Rust callers can set a different
-`StateBudget` on `RollingOperator` before compiling the stream. Project-created
-rolling nodes use the default. A callback that exceeds either limit fails
+Native ASOF temporary work uses CPU- and input-sized concurrency independently
+of its persistent storage shards. Its finalization prefixes follow the explicit
+edge budget and shrink when workspace or output bytes require it. Warm ordered
+Float64 rolling mean and compatible dual-SMA use whole-entity CPU lanes, retaining
+each entity's arithmetic order. Small, unsupported or severely skewed
+inputs keep their serial paths. Window and cumulative SQL aggregates retain
+their ordered state updates and compensated accumulators.
+
+Rolling, cross-section and window nodes default to the JSON counter range,
+9,007,199,254,740,991 rows and logical bytes, without a smaller implicit state
+budget. Rust callers can set a finite `StateBudget` on the operator before
+compiling the stream. Project-created nodes use the default. A callback that
+exceeds either explicitly configured limit fails
 before it commits new state; recovery rejects snapshots above the selected
 limit. These logical charges do not count checkpoint copies or total process
 memory.
