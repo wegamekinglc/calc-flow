@@ -1,5 +1,13 @@
 # Branch Review: stream operator CPU scaling
 
+This is the historical source review for
+`ca80229738f169ae6880f72392683477f8e03c7f`. Subsequent performance evidence
+rejected its cross-section experiment, which was withdrawn from the final
+candidate. The original source and measurement evidence remain preserved.
+See [the final scope review](stream-operator-cpu-scaling-final.md) for the
+reviewed withdrawal and the retained ASOF, rolling and SQL changes. The results
+below belong to the original candidate and are not fresh final-candidate runs.
+
 **Branch:** `feature/stream-operator-cpu-scaling`
 
 **Base:** `e35ff1190e8eba08ad3c3135299bbca6ac029698`

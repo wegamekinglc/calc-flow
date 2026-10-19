@@ -51,7 +51,6 @@ use super::{
 };
 
 mod late;
-mod mean_parallel;
 
 /// Semantic configuration version of the first cross-section release.
 pub const CROSS_SECTION_CONFIGURATION_VERSION: u32 = 1;
@@ -510,11 +509,6 @@ pub struct CrossSectionOperator {
     output_ports: Vec<Port>,
     compiled: CompiledCrossSectionSpec,
     state: CrossSectionStreamState,
-    mean_parallel: mean_parallel::MeanParallelState,
-    #[cfg(test)]
-    mean_test_hook: Option<mean_parallel::TestHook>,
-    #[cfg(test)]
-    mean_test_pool: Option<Arc<dyn datafusion::execution::memory_pool::MemoryPool>>,
 }
 
 impl CrossSectionOperator {
@@ -547,11 +541,6 @@ impl CrossSectionOperator {
             output_ports,
             compiled,
             state: CrossSectionStreamState::default(),
-            mean_parallel: mean_parallel::MeanParallelState::new(),
-            #[cfg(test)]
-            mean_test_hook: None,
-            #[cfg(test)]
-            mean_test_pool: None,
         })
     }
 
@@ -672,7 +661,7 @@ struct CrossSectionStreamState {
     groups: Groups,
     charge: StateCharge,
     /// One proven canonical batch awaiting a complete-group watermark.
-    pending_mean: Option<mean_parallel::PendingMean>,
+    pending_mean: Option<RecordBatch>,
     /// Duplicate evidence for every open identity: one row identity maps to
     /// its owning open group (SCE-00 D11).
     identity_groups: BTreeMap<RowIdentity, GroupKey>,
@@ -915,7 +904,7 @@ impl CrossSectionOperator {
         Ok((accepted, metrics, next_metrics))
     }
 
-    async fn try_buffer_columnar_mean(
+    fn try_buffer_columnar_mean(
         &mut self,
         ingress: &str,
         batch: &Batch,
@@ -941,12 +930,11 @@ impl CrossSectionOperator {
                 record
             }
         };
-        if record.num_rows() == 0 {
+        if record.num_rows() == 0
+            || !self.columnar_mean_order_is_proven(&record, context.input_watermark())
+        {
             return Ok(false);
         }
-        let Some(record) = self.prove_pending_mean(record, context).await? else {
-            return Ok(false);
-        };
         let Some(charge) =
             bounded_pending_mean_charge(&record, &self.compiled, context.operator_id())?
         else {
@@ -987,6 +975,48 @@ impl CrossSectionOperator {
                 .field(self.compiled.sequence_columns[0].index)
                 .data_type()
                 == &DataType::UInt64
+    }
+
+    fn columnar_mean_order_is_proven(
+        &self,
+        record: &RecordBatch,
+        watermark: Option<EventTime>,
+    ) -> bool {
+        let Some(times) = record
+            .column(self.compiled.event_time_index)
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+        else {
+            return false;
+        };
+        let Some(entities) = record
+            .column(self.compiled.entity_columns[0].index)
+            .as_any()
+            .downcast_ref::<StringArray>()
+        else {
+            return false;
+        };
+        let Some(sequences) = record
+            .column(self.compiled.sequence_columns[0].index)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+        else {
+            return false;
+        };
+        if times.null_count() != 0 || sequences.null_count() != 0 {
+            return false;
+        }
+        if watermark.is_some_and(|watermark| times.value(0) <= watermark.as_micros()) {
+            return false;
+        }
+        (1..record.num_rows()).all(|index| {
+            let entity = |row| entities.is_valid(row).then(|| entities.value(row));
+            (
+                times.value(index - 1),
+                entity(index - 1),
+                sequences.value(index - 1),
+            ) < (times.value(index), entity(index), sequences.value(index))
+        })
     }
 
     fn materialize_pending_mean(&mut self, node_id: &str) -> Result<()> {
@@ -1072,7 +1102,6 @@ impl StreamOperator for CrossSectionOperator {
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
-        self.await_mean_attempt(context).await?;
         if matches!(self.spec.late_policy, LatePolicySpec::SideOutput { .. }) {
             self.validate_stream_data(ingress, &batch, context)?;
             let watermark = context.input_watermark();
@@ -1080,10 +1109,7 @@ impl StreamOperator for CrossSectionOperator {
                 .process_late_data(&batch, watermark, context, output)
                 .await;
         }
-        if self
-            .try_buffer_columnar_mean(ingress, &batch, context)
-            .await?
-        {
+        if self.try_buffer_columnar_mean(ingress, &batch, context)? {
             return Ok(());
         }
         let pending = self.state.pending_mean.clone();
@@ -1116,7 +1142,6 @@ impl StreamOperator for CrossSectionOperator {
         // Cancellation is checked before any state mutation so a cancelled
         // emission leaves the buffered groups available for a retry.
         context.check_cancelled()?;
-        self.await_mean_attempt(context).await?;
         self.observe_context(context)?;
         if self
             .state
@@ -1165,7 +1190,6 @@ impl StreamOperator for CrossSectionOperator {
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
         context.check_cancelled()?;
-        self.await_mean_attempt(context).await?;
         self.observe_context(context)?;
         if self.state.ended {
             return Ok(());
@@ -1510,18 +1534,10 @@ impl CrossSectionOperator {
 
     async fn emit_columnar_mean(
         &mut self,
-        input: &mean_parallel::PendingMean,
+        input: &RecordBatch,
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
-        if let Some(prepared) = self.parallel_mean_record(input, context).await? {
-            // Release the shared attempt before downstream backpressure can wait
-            // for this job's workers; only the funded Arrow result crosses emit.
-            self.await_mean_attempt(context).await?;
-            let result = self.emit_record(prepared.record, context, output).await;
-            drop(prepared.credit);
-            return result;
-        }
         let record = build_columnar_mean_record(
             input,
             &self.compiled,
@@ -4015,7 +4031,6 @@ fn format_error(error: &serde_json::Error) -> CalcFlowError {
 #[cfg(test)]
 mod tests {
     mod late;
-    mod mean_parallel;
 
     fn mean_input_record() -> RecordBatch {
         let rows = [

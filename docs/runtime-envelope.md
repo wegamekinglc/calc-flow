@@ -940,19 +940,6 @@ materializes pending buffers and retained histories into the durable layout;
 watermark, lateness, duplicate, null, output-budget, and recovery semantics
 are enforced on both paths.
 
-Ordered cross-section exact-time mean can reuse complete timestamp-group
-boundaries collected by its existing order proof. Large inputs divide complete
-groups among CPU- and work-sized units; each group retains its original
-accumulation order. A single group uses the serial path. Workers share immutable
-numeric Arrow input and return one mean per group; the owner expands those means
-into the original ordered output. Optional-work memory reservations cover the
-parallel buffers and controls, including output preparation, without changing
-the logical `StateBudget`. Admission refusal uses the existing serial path.
-Worker tickets settle before backpressured emission, while the prepared Arrow
-output retains its credit until emission finishes. Reset, restore and abandoned
-callbacks retain cleanup ownership until workers settle. Checkpoints keep their
-existing wire representation.
-
 Column-only stream projections reuse Arrow arrays without SQL planning.
 Other eligible single-input, row-local stream expressions and SQL first execute through
 SQL. Later batches with the same query, alias and exact Arrow schema, including

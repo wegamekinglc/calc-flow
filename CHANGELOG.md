@@ -13,10 +13,13 @@ measurements. Use the current guides for supported behavior.
   routing from persistent shards and let explicit budgets size finalization
   prefixes. Scale warm ordered rolling mean/dual-SMA across whole-entity lanes,
   reuse entity counts, and build compact row schedules without private batch or
-  scratch-byte ceilings. Compute eligible cross-section means by complete time
-  groups with owned cancellation and budgeted output preparation. Reuse compiled
+  scratch-byte ceilings. Reuse compiled
   immutable expression steps for repeated row-local SQL while preserving state,
   arithmetic order, explicit limits and checkpoint formats.
+- 2026-10-19: Retain the existing serial cross-section mean after a complete-group
+  parallel experiment regressed the selected million-row workload. Keep the
+  rejected candidate and its measurements as evidence rather than enabling the
+  slower path by default.
 - 2026-10-19: Preserve project-v3 stream JSON's historical omitted budget values
   and connector-project fingerprints. New runtime constructors use the larger
   defaults, which remain explicit when exported from `StreamRunOptions`.

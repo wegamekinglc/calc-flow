@@ -1332,8 +1332,7 @@ Native ASOF temporary work uses CPU- and input-sized concurrency independently
 of its persistent storage shards. Its finalization prefixes follow the explicit
 edge budget and shrink when workspace or output bytes require it. Warm ordered
 Float64 rolling mean and compatible dual-SMA use whole-entity CPU lanes, retaining
-each entity's arithmetic order. Large exact-time cross-section means can compute
-complete timestamp groups concurrently. Small, unsupported or severely skewed
+each entity's arithmetic order. Small, unsupported or severely skewed
 inputs keep their serial paths. Window and cumulative SQL aggregates retain
 their ordered state updates and compensated accumulators.
 

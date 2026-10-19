@@ -15,10 +15,10 @@ immutable worker input, deterministic owner publication, and owned cancellation.
   counts, and build stable schedules in one pass. Large batches must be eligible;
   remove private size ceilings while retaining checked owned scratch accounting
   and the existing explicit logical state budget.
-- Cross-section exact-time mean: retain complete time-group boundaries from the
-  existing order proof, compute independent groups in the managed CPU service,
-  and assemble the original output on the owner. Keep each group's arithmetic
-  order, output geometry, rollback, and checkpoint wire format.
+- Cross-section exact-time mean was evaluated using complete timestamp groups.
+  The `ca802297` experiment regressed the selected million-row workload from
+  10.304 to 24.104 ms (P50, two independently confirmed rounds). Withdraw it and
+  restore the exact `e35ff119` module. Keep cross-section as a regression control.
 - Row-local SQL: reuse the already proven immutable compiled-expression path
   for repeated nonaggregate SQL with no selected UDFs. Ineligible plans continue
   through DataFusion. Stateful aggregate/reduction semantics are unchanged.
@@ -59,6 +59,13 @@ alternating AB/BA pairs per configuration, one excluded warmup per worker,
 validation and cleanup share 600 seconds. Estimate and report release builds
 separately. Stop on interference, identity/oracle/protocol error or deadline;
 preserve partial evidence and do not retry or expand for a favorable verdict.
+
+The first acquisition completed in 48.115 seconds and rejected the cross-section
+experiment. A second exact-source release comparison is required after that
+code correction. It uses the same five configurations and sample counts, spends
+only the remaining 551 seconds of the original acquisition budget, and keeps
+both versions' evidence separate. Do not splice samples or re-run either source
+to seek a different verdict. Builds remain separately recorded.
 
 Report each selected case and uncertainty. Separate same-resource version
 comparisons from descriptive CPU ratios. Do not relabel older Join release
