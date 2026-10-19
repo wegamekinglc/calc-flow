@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from calc_flow import JoinStateLimits, JoinTimeBounds, Runtime
+from calc_flow import ConfigError, EdgeBudget, JoinStateLimits, JoinTimeBounds, Runtime
+from calc_flow.config import ProjectDocument
 from calc_flow.symbolic import Field, Program, table, table_input
 from calc_flow.symbolic.lower import lower_program_document
 
@@ -87,3 +88,33 @@ def test_inner_connector_project_fingerprint_preserves_historical_identity():
     expected = json.loads((_FIXTURES / "fingerprints.json").read_text())
 
     assert plan.fingerprint == expected["connector_project"]
+
+
+def test_inner_connector_project_requires_runtime_options():
+    project = json.loads((_FIXTURES / "connector-project.json").read_text())
+    document = {**project, "runtime": {"mode": "stream"}}
+
+    with pytest.raises(ConfigError, match="missing field.*options"):
+        Runtime().compile_stream_project(json.dumps(document))
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"max_batch_rows": EdgeBudget().max_rows},
+        {"max_batch_bytes": EdgeBudget().max_bytes},
+    ],
+)
+def test_inner_connector_explicit_budgets_survive_export_and_change_identity(options):
+    project = json.loads((_FIXTURES / "connector-project.json").read_text())
+    document = {**project, "runtime": {"mode": "stream", "options": options}}
+    canonical = ProjectDocument.model_validate(document).canonical_json()
+    exported = json.loads(canonical)
+    runtime = Runtime()
+    plan = runtime.compile_stream_project(json.dumps(document))
+    expected = json.loads((_FIXTURES / "fingerprints.json").read_text())
+
+    for field, value in options.items():
+        assert exported["runtime"]["options"][field] == value
+    assert plan.fingerprint != expected["connector_project"]
+    assert runtime.compile_stream_project(canonical).fingerprint == plan.fingerprint

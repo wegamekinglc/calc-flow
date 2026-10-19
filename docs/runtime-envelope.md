@@ -351,6 +351,13 @@ global byte ceiling applies. Project-v3 stream runtime options use the same
 bounds. Row and envelope backpressure remains active when the byte budget is
 `usize::MAX`; these queue charges do not cap total runtime or process memory.
 
+Project-v3 JSON requires an `options` object and preserves its historical field
+defaults: `{}` or omitted budget fields use 10,000 rows and 64 MiB. The omitted
+checkpoint interval remains 30 seconds. This keeps existing documents and
+their durable fingerprints stable. New `StreamRunOptions::default()` values
+serialize the current one-million-row and address-space byte limits explicitly;
+explicit project values are preserved and participate in the project fingerprint.
+
 ## Stream plan compilation
 
 `PipelineBuilder::compile_stream` validates and consumes a graph into an

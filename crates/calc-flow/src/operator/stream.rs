@@ -432,6 +432,7 @@ impl<'a> StreamOperatorContext<'a> {
     ///
     /// This helper is available only with the `benchmark-internals` feature.
     #[cfg(feature = "benchmark-internals")]
+    #[must_use]
     pub fn with_benchmark_output_budget(self, budget: EdgeBudget) -> Self {
         self.with_output_budget(budget)
     }

@@ -9,6 +9,9 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-19: Preserve project-v3 stream JSON's historical omitted budget values
+  and connector-project fingerprints. New runtime constructors use the larger
+  defaults, which remain explicit when exported from `StreamRunOptions`.
 - 2026-10-19: Reduce repeated Join preparation scans by aggregating admitted-key
   frequencies, sharing dense row ranges, and mapping parallel fragments directly
   to final identities. Treat unresolved probe-only keys as misses during cost

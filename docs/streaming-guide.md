@@ -1308,8 +1308,12 @@ can exceed the effective edge budget fails before open.
 The default permits 1,000,000 queued rows and has no byte ceiling below the
 native address-space limit. Set `EdgeBudget(max_rows=..., max_bytes=...)` to
 choose an explicit byte ceiling. Stream edges and source batch declarations
-retain a maximum of 1,000,000 rows; project-v3 stream runtime options use the
-same defaults and row bound.
+retain a maximum of 1,000,000 rows. Project-v3 JSON keeps the historical
+10,000-row and 64 MiB defaults when budget fields are omitted from its required
+`options` object, including `options: {}`, so existing project fingerprints
+remain stable.
+Explicit project budgets retain their values, including the new constructor
+defaults of 1,000,000 rows and no smaller byte ceiling.
 
 This is a maximum batch size and queue budget. A materialized Arrow source
 keeps existing record-batch boundaries and splits records that exceed the

@@ -86,8 +86,12 @@ impl Default for RuntimeSpec {
 }
 
 /// Continuous runtime limits carried by project v3.
+///
+/// Omitted JSON fields retain the project-v3 defaults for stable document
+/// fingerprints. [`Self::default`] uses current runtime defaults, which
+/// serialize explicitly.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default = "project_v3_stream_defaults", deny_unknown_fields)]
 pub struct StreamRunOptions {
     pub checkpoint_interval_ms: u64,
     #[schemars(range(min = 1, max = 1_000_000))]
@@ -103,6 +107,14 @@ impl Default for StreamRunOptions {
             max_batch_rows: 1_000_000,
             max_batch_bytes: usize::MAX,
         }
+    }
+}
+
+fn project_v3_stream_defaults() -> StreamRunOptions {
+    StreamRunOptions {
+        checkpoint_interval_ms: 30_000,
+        max_batch_rows: 10_000,
+        max_batch_bytes: 64 << 20,
     }
 }
 
@@ -3184,11 +3196,64 @@ mod tests {
 
     #[test]
     fn cpu_project_stream_defaults_use_large_batch_without_implicit_byte_limit() {
-        let defaults: super::StreamRunOptions =
-            serde_json::from_value(serde_json::json!({})).unwrap();
+        let defaults = super::StreamRunOptions::default();
         assert_eq!(defaults.max_batch_rows, 1_000_000);
         assert_eq!(defaults.max_batch_bytes, usize::MAX);
-        assert_eq!(defaults, super::StreamRunOptions::default());
+        let runtime = super::RuntimeSpec::Stream(defaults);
+        let encoded = serde_json::to_value(&runtime).unwrap();
+        assert_eq!(encoded["options"]["max_batch_rows"], 1_000_000);
+        assert_eq!(encoded["options"]["max_batch_bytes"], usize::MAX);
+        assert_eq!(
+            serde_json::from_value::<super::RuntimeSpec>(encoded).unwrap(),
+            runtime
+        );
+    }
+
+    #[test]
+    fn test_project_v3_empty_stream_options_preserve_historical_values() {
+        let historical = serde_json::json!({
+            "checkpoint_interval_ms": 30_000,
+            "max_batch_rows": 10_000,
+            "max_batch_bytes": 64 << 20,
+        });
+        for value in [
+            serde_json::json!({"mode": "stream", "options": {}}),
+            serde_json::json!({"mode": "stream", "options": historical}),
+        ] {
+            let runtime: super::RuntimeSpec = serde_json::from_value(value).unwrap();
+            let encoded = serde_json::to_value(runtime).unwrap();
+            assert_eq!(encoded["options"], historical);
+        }
+    }
+
+    #[test]
+    fn test_project_v3_missing_stream_options_remain_invalid() {
+        let error = serde_json::from_value::<super::RuntimeSpec>(serde_json::json!({
+            "mode": "stream",
+        }))
+        .unwrap_err();
+        assert!(error.to_string().contains("missing field `options`"));
+    }
+
+    #[test]
+    fn test_project_v3_partial_stream_options_preserve_explicit_values() {
+        for (options, rows, bytes) in [
+            (
+                serde_json::json!({"max_batch_rows": 1_000_000}),
+                1_000_000,
+                64 << 20,
+            ),
+            (
+                serde_json::json!({"max_batch_bytes": usize::MAX}),
+                10_000,
+                usize::MAX,
+            ),
+        ] {
+            let parsed: super::StreamRunOptions = serde_json::from_value(options).unwrap();
+            assert_eq!(parsed.checkpoint_interval_ms, 30_000);
+            assert_eq!(parsed.max_batch_rows, rows);
+            assert_eq!(parsed.max_batch_bytes, bytes);
+        }
     }
 
     #[test]

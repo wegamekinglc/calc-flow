@@ -3243,7 +3243,7 @@
     },
     "StreamRunOptions": {
       "additionalProperties": false,
-      "description": "Continuous runtime limits carried by project v3.",
+      "description": "Continuous runtime limits carried by project v3.\n\nOmitted JSON fields retain the project-v3 defaults for stable document\nfingerprints. [`Self::default`] uses current runtime defaults, which\nserialize explicitly.",
       "properties": {
         "checkpoint_interval_ms": {
           "default": 30000,
@@ -3252,13 +3252,13 @@
           "type": "integer"
         },
         "max_batch_bytes": {
-          "default": 18446744073709551615,
+          "default": 67108864,
           "format": "uint",
           "minimum": 1,
           "type": "integer"
         },
         "max_batch_rows": {
-          "default": 1000000,
+          "default": 10000,
           "format": "uint",
           "maximum": 1000000,
           "minimum": 1,

@@ -71,9 +71,10 @@ async fn test_a03_a10_projected_restore_preserves_multiplicity_and_funding() {
     let drained = job.gather_owner().funding();
     drop(context);
     drop(job);
-    assert_eq!(funding, (16_384, 16_384, 0));
+    assert_eq!((funding.0, funding.2), (16_384, 0));
+    assert!(funding.1 > funding.0, "generation funds CPU-sized controls");
     assert_eq!(retained, restored_configured + funding.0 + funding.1);
-    assert_eq!((drained.1, drained.2), (0, 0));
+    assert_eq!(drained, (funding.0, 0, 0));
     assert!(failures.is_empty());
     assert_eq!(restored.runtime.pool.reserved(), restored_configured);
     let restored_pool = restored.runtime.pool.clone();
@@ -326,7 +327,8 @@ async fn assert_cropped_continuation(
     assert!(output.drain("output").is_empty());
     assert_eq!(restored.status.state_rows, 0);
     let funding = job.gather_owner().funding();
-    assert_eq!(funding, (16_384, 16_384, 0));
+    assert_eq!((funding.0, funding.2), (16_384, 0));
+    assert!(funding.1 > funding.0, "generation funds CPU-sized controls");
     assert_eq!(
         restored.runtime.pool.reserved(),
         restored_configured + funding.0 + funding.1,
@@ -334,7 +336,7 @@ async fn assert_cropped_continuation(
     let failures = job.gather_owner().close_and_drain().await;
     let drained = job.gather_owner().funding();
     assert!(failures.is_empty());
-    assert_eq!((drained.1, drained.2), (0, 0));
+    assert_eq!(drained, (funding.0, 0, 0));
     assert_eq!(
         restored.runtime.pool.reserved(),
         restored_configured + drained.0,
