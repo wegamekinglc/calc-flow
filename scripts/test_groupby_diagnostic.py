@@ -8,6 +8,38 @@ from types import SimpleNamespace
 from unittest import mock
 
 
+def _worker_response(operation, release, case):
+    sample = {"seconds": 1.0, "correctness": {"passed": True}}
+    return {
+        "hello": {**release, "polars_threads": 32, "tokio_worker_threads": "32"},
+        "prepare": {"case": case, "warmup": sample},
+        "sample": sample,
+        "finish": {"state": "completed"},
+    }[operation]
+
+
+def _assert_sample_contexts(test, samples, case, releases, root):
+    for index, (side, message) in enumerate(samples):
+        test.assertEqual(
+            message["context"],
+            {
+                "side": side,
+                "round": index // 20,
+                "sample": (index % 20) // 2,
+                "phase": "measurement",
+                "case_id": case.get("id"),
+                "release": releases[side],
+            },
+        )
+    for index in range(2):
+        partial = json.loads((root / f"round-{index}" / "partial.json").read_text())
+        test.assertFalse(partial["complete"])
+        test.assertEqual(
+            {side: len(rows) for side, rows in partial["samples"].items()},
+            {"baseline": 10, "candidate": 10},
+        )
+
+
 class ContractTests(unittest.TestCase):
     def test_plan_is_only_two_fixed_cases_and_three_fixed_comparisons(self):
         from scripts.groupby_diagnostic import contract
@@ -188,7 +220,7 @@ class FailureTests(unittest.IsolatedAsyncioTestCase):
             (root / "calc_flow/_native.so").write_bytes(b"fixture")
             with (
                 mock.patch.object(profile.AuditWorker, "start", return_value=worker),
-                mock.patch.object(profile, "_prepare", new_callable=mock.AsyncMock),
+                mock.patch.object(profile, "_prepare", autospec=True),
                 mock.patch.object(
                     profile,
                     "perf_preflight",
@@ -208,12 +240,15 @@ class FailureTests(unittest.IsolatedAsyncioTestCase):
         from scripts.groupby_diagnostic.contract import cases
 
         events = []
+        case = cases()[0]
+        releases = {
+            "baseline": {"native_sha256": "a" * 64},
+            "candidate": {"native_sha256": "b" * 64},
+        }
 
         async def request(side, **message):
-            events.append((side, message["operation"]))
-            if message["operation"] == "sample":
-                return {"seconds": 1.0, "correctness": {"passed": True}}
-            return {"state": "completed"}
+            events.append((side, message))
+            return _worker_response(message["operation"], releases[side], case)
 
         workers = {
             side: SimpleNamespace(
@@ -223,6 +258,7 @@ class FailureTests(unittest.IsolatedAsyncioTestCase):
             )
             for side in ("baseline", "candidate")
         }
+        sites = {side: side for side in workers}
         from functools import partial
 
         for side, worker in workers.items():
@@ -233,28 +269,30 @@ class FailureTests(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            with (
-                mock.patch.object(controller.AuditWorker, "start", side_effect=start),
-                mock.patch.object(
-                    controller, "_prepare", return_value={"fixture": True}
-                ),
-            ):
-                result = await controller.paired(
-                    cases()[0], {s: s for s in workers}, {}, root
-                )
-                samples = [side for side, operation in events if operation == "sample"]
+            with mock.patch.object(controller.AuditWorker, "start", side_effect=start):
+                result = await controller.paired(case, sites, releases, root)
+                samples = [
+                    (side, message)
+                    for side, message in events
+                    if message["operation"] == "sample"
+                ]
                 self.assertEqual(
-                    samples, ["baseline", "candidate", "candidate", "baseline"] * 10
+                    [side for side, _ in samples],
+                    ["baseline", "candidate", "candidate", "baseline"] * 10,
                 )
+                _assert_sample_contexts(self, samples, case, releases, root)
                 self.assertEqual(result["baseline"], [[1.0] * 10] * 2)
                 self.assertEqual(len(result["evidence"]), 2)
                 workers["baseline"].input_hashes = {"table": "different"}
                 events.clear()
                 with self.assertRaisesRegex(ValueError, "input IPC"):
                     await controller.round_(
-                        cases()[0], {s: s for s in workers}, {}, root
+                        case, sites, controller.request_contexts(case, releases), root
                     )
-                self.assertEqual(events, [])
+                self.assertEqual(
+                    [message["operation"] for _, message in events],
+                    ["hello", "prepare"] * 2,
+                )
 
     async def test_failed_preflight_writes_failure_and_never_starts_measurement(self):
         import json

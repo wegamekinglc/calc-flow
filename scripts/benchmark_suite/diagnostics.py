@@ -14,6 +14,20 @@ from scripts.toolkit import sha256_file, write_json
 _TRACE: ContextVar[dict | None] = ContextVar("benchmark_request_trace", default=None)
 
 
+def request_contexts(
+    case: dict, releases: dict, *, round_index: int | None = None
+) -> dict:
+    return {
+        side: {
+            "side": side,
+            "round": round_index,
+            "case_id": case.get("id"),
+            "release": release,
+        }
+        for side, release in releases.items()
+    }
+
+
 def persist(path: Path, value: dict, error: BaseException | None = None) -> None:
     """A failed diagnostic must never replace the failure being investigated."""
     try:

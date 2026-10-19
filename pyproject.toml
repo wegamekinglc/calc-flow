@@ -55,6 +55,8 @@ strip = true
 
 [tool.pytest.ini_options]
 testpaths = ["python/tests"]
+# Binding regressions also exercise the repository's benchmark adapters.
+pythonpath = ["."]
 markers = [
     "stream_lifecycle: isolated stateful stream lifecycle performance evidence",
 ]
