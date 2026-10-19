@@ -11,6 +11,49 @@ from scripts.benchmark_suite.legacy import observe_workers
 
 
 class BenchmarkMeasureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_failed_round_keeps_partial_samples_and_primary_error(self):
+        case = {"id": "recovery", "family": "warm", "backend": "calc-flow"}
+        release = {"native_sha256": "a" * 64}
+        sample = {"seconds": 0.01, "correctness": {"passed": True}}
+        environment = {**release, "polars_threads": 32, "tokio_worker_threads": "32"}
+        workers = {}
+        for side in ("baseline", "candidate"):
+            requests = [environment, {"case": case, "warmup": sample}, sample]
+            requests += (
+                [TimeoutError("original terminal wait")]
+                if side == "baseline"
+                else [sample]
+            )
+            workers[side] = SimpleNamespace(
+                request=AsyncMock(side_effect=requests),
+                close=AsyncMock(side_effect=OSError("cleanup failure")),
+            )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(
+                measure.Worker, "start", AsyncMock(side_effect=workers.values())
+            ):
+                result = await measure.measure_case(
+                    case,
+                    "interleaved",
+                    {side: (root, root) for side in workers},
+                    dict.fromkeys(workers, release),
+                    root,
+                )
+            self.assertEqual(result["status"], "error")
+            self.assertEqual(result["error"], "TimeoutError: original terminal wait")
+            self.assertEqual(result["evidence"], [])
+            partial = result["partial_evidence"][0]
+            self.assertFalse(partial["complete"])
+            self.assertEqual(
+                {side: len(values) for side, values in partial["samples"].items()},
+                {"baseline": 1, "candidate": 2},
+            )
+            self.assertEqual(partial["contexts"]["baseline"]["release"], release)
+            self.assertIn("cleanup failure", result["error_notes"][0])
+        for worker in workers.values():
+            worker.close.assert_awaited_once()
+
     def test_polars_collection_engine_is_required_for_polars_references(self):
         release = {"native_sha256": "a" * 64}
         for backend, threads in (("polars", 32), ("polars-1t", 1)):

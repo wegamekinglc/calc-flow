@@ -909,6 +909,27 @@ filtering is applied. Build, measurement and summary artifacts retain raw
 JSON/JSONL samples, original runner formats, stdout/stderr, release/native and
 harness hashes, exact source refs and environment identities for 30 days.
 
+Engine/warm worker requests retain separate `request-*.started.json` and
+completed/failed records, including side, zero-based round/sample, phase and
+the original release manifest. Warmup uses `sample: null`. Each validated
+sample also updates its round's `partial.json`; an error row includes this
+`partial_evidence` without treating an incomplete round as a comparison.
+Worker-local traces flush lifecycle milestones after timing or on failure.
+Recovery milestones distinguish prefix checkpoint/cancel, restore/readiness,
+collected rows, queued EOF and waiting for the terminal outcome.
+
+Before cancelling owned completion tasks, stream failures write
+`failure-before-cancel.json`: job status, source positions/cursors/queue state,
+sink rows and bounded checkpoint manifest evidence. A push attempt is distinct
+from confirmed EOF enqueue or consumption. The completion wait remains 600
+seconds and IPC wait 900 seconds; no retries or fallback passes are added.
+If IPC itself cannot respond, the parent retains the request, process identity
+and available checkpoint files; in-process state may be unavailable.
+Diagnostic failures and worker-close errors are retained as notes without
+replacing the primary error. Native lifecycle stalls remain unresolved unless
+a reproduction establishes their cause; adding diagnostics is not a runtime
+fix or a release-gate pass.
+
 Wrong/dirty releases, incompatible workload fingerprints, missing or duplicate
 cases/shards, changed confirmation environments, failed correctness and
 nonfinite observations all fail closed. Missing known catalog cases appear as

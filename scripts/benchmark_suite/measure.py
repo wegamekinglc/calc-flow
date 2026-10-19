@@ -16,6 +16,7 @@ from scripts.benchmark_suite.catalog import (
     polars_thread_count,
     shard_cases,
 )
+from scripts.benchmark_suite.diagnostics import observe, persist
 from scripts.benchmark_suite.process import ROOT, Worker, install
 from scripts.benchmark_suite.provenance import harness_sha256
 from scripts.benchmark_suite.report import ROUNDS, SAMPLES, comparison
@@ -96,16 +97,23 @@ def _validate_checkpoint_proof(case: dict, sample: dict, evidence: dict) -> None
         raise ValueError("checkpoint evidence lacks durable nonterminal recovery proof")
 
 
-async def _prepare(workers: dict, releases: dict, case: dict) -> dict:
+async def _prepare(workers: dict, releases: dict, case: dict, contexts: dict) -> dict:
     identities = {}
     for side, worker in workers.items():
         identities[side] = validate_environment(
-            await worker.request(operation="hello"),
+            await worker.request(
+                operation="hello",
+                context={**contexts[side], "phase": "hello", "sample": None},
+            ),
             releases[side],
             polars_threads=polars_thread_count(case),
             backend=case["backend"],
         )
-        response = await worker.request(operation="prepare", case=case)
+        response = await worker.request(
+            operation="prepare",
+            case=case,
+            context={**contexts[side], "phase": "warmup", "sample": None},
+        )
         if response["case"] != case:
             raise ValueError("worker prepared a different workload")
         validate_sample(response["warmup"])
@@ -115,7 +123,7 @@ async def _prepare(workers: dict, releases: dict, case: dict) -> dict:
     return identities["candidate"]
 
 
-async def _samples(workers: dict, case: dict) -> dict:
+async def _samples(workers: dict, case: dict, contexts: dict, root: Path) -> dict:
     collected = {side: [] for side in workers}
     for index in range(SAMPLES):
         order = (
@@ -124,10 +132,17 @@ async def _samples(workers: dict, case: dict) -> dict:
         for side in order:
             if side not in workers:
                 continue
-            sample = await workers[side].request(operation="sample")
+            sample = await workers[side].request(
+                operation="sample",
+                context={**contexts[side], "phase": "measurement", "sample": index},
+            )
             validate_sample(sample)
             validate_stream_sample(case, sample)
             collected[side].append(sample)
+            persist(
+                root / "partial.json",
+                {"contexts": contexts, "samples": collected, "complete": False},
+            )
         if len(workers) == 2:
             _check_latest_cursors(collected)
     return collected
@@ -139,8 +154,28 @@ def _check_latest_cursors(collected: dict) -> None:
         raise ValueError("warm base/head sample cursors differ")
 
 
-async def _round(case: dict, workers_by_side: dict, releases: dict, root: Path) -> dict:
+async def _round(
+    case: dict,
+    workers_by_side: dict,
+    releases: dict,
+    root: Path,
+    *,
+    round_index: int = 0,
+) -> dict:
     workers = {}
+    primary = None
+    contexts = {
+        side: {
+            "side": side,
+            "round": round_index,
+            "case_id": case.get("id"),
+            "release": releases[side],
+        }
+        for side in workers_by_side
+    }
+    persist(
+        root / "partial.json", {"contexts": contexts, "samples": {}, "complete": False}
+    )
     try:
         for side, (site, source) in workers_by_side.items():
             workers[side] = await Worker.start(
@@ -149,15 +184,18 @@ async def _round(case: dict, workers_by_side: dict, releases: dict, root: Path) 
                 source=source,
                 polars_threads=polars_thread_count(case),
             )
-        environment = await _prepare(workers, releases, case)
-        samples = await _samples(workers, case)
+        environment = await _prepare(workers, releases, case, contexts)
+        samples = await _samples(workers, case, contexts, root)
         completion = {}
         for side, worker in workers.items():
-            result = await worker.request(operation="finish")
+            result = await worker.request(
+                operation="finish",
+                context={**contexts[side], "phase": "finish", "sample": None},
+            )
             if result["state"] != "completed":
                 raise ValueError("benchmark worker did not complete")
             completion[side] = result
-        return {
+        result = {
             "environment": environment,
             "samples": samples,
             "completion": completion,
@@ -165,9 +203,25 @@ async def _round(case: dict, workers_by_side: dict, releases: dict, root: Path) 
                 side: releases[side]["native_sha256"] for side in workers
             },
         }
+        persist(
+            root / "partial.json", {**result, "contexts": contexts, "complete": True}
+        )
+        return result
+    except BaseException as error:
+        primary = error
+        raise
     finally:
-        for worker in workers.values():
+        await _close_workers(workers, primary)
+
+
+async def _close_workers(workers: dict, primary: BaseException | None) -> None:
+    for worker in workers.values():
+        try:
             await worker.close()
+        except BaseException as error:
+            if primary is None:
+                raise
+            primary.add_note(f"worker cleanup: {type(error).__name__}: {error}")
 
 
 async def measure_case(
@@ -182,7 +236,9 @@ async def measure_case(
     try:
         for index in range(ROUNDS):
             evidence.append(
-                await _round(case, selected, releases, root / f"round-{index}")
+                await _round(
+                    case, selected, releases, root / f"round-{index}", round_index=index
+                )
             )
         if evidence[0]["environment"] != evidence[1]["environment"]:
             raise ValueError("confirmation-round environment changed")
@@ -193,8 +249,18 @@ async def measure_case(
             **case,
             "status": "error",
             "error": f"{type(error).__name__}: {error}",
+            "error_notes": list(getattr(error, "__notes__", ())),
             "evidence": evidence,
+            "partial_evidence": observe(lambda: _partial_evidence(root)),
         }
+
+
+def _partial_evidence(root: Path) -> list:
+    return [
+        observe(lambda: json.loads(path.read_text(encoding="utf-8")))
+        for index in range(ROUNDS)
+        if (path := root / f"round-{index}" / "partial.json").exists()
+    ]
 
 
 def _sample_seconds(evidence: list[dict], side: str) -> list[list[float]]:
