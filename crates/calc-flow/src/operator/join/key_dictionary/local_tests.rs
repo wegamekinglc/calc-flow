@@ -304,3 +304,96 @@ async fn test_long_collision_equality_checks_tail_and_shares_identical_keys() {
         assert_eq!(local.distinct, 2);
     }
 }
+
+#[tokio::test]
+async fn test_single_strings_compare_bytes_after_a_plain_hash_collision() {
+    for large in [false, true] {
+        let values = vec!["other", "right", "right"];
+        let column: ArrayRef = if large {
+            Arc::new(LargeStringArray::from(values))
+        } else {
+            Arc::new(StringArray::from(values))
+        };
+        let columns = [LocalColumn::bind(column.as_ref()).unwrap()];
+        let rows = admitted(vec![Arc::clone(&column)]);
+        let mut local = local_table(rows.len());
+        let collision = hash_words(mix(0x243F_6A88_85A3_08D3, 5), b"right");
+        // A different equal-width representative occupies the same full-hash bucket.
+        seed_distinct(&mut local, collision, 0);
+        local
+            .intern_group(
+                &columns,
+                AdmittedGroup::new(&rows, 1..3),
+                "match",
+                &mut KeyFlow::new(None),
+            )
+            .await
+            .unwrap();
+        assert_eq!(local.locals, [1, 1]);
+        assert_eq!(local.distinct, 2);
+        assert_eq!(local.retains, [0, 2]);
+    }
+}
+
+#[tokio::test]
+async fn test_single_string_blocks_keep_generic_work_and_cancellation_boundaries() {
+    use crate::operator::join::{join_work, reset_join_work};
+
+    let wide = "x".repeat(COPY_BYTES + 1);
+    let mut values = vec![""; COPY_VISITS + 1];
+    values.extend(["é\0", &wide, "tail"]);
+    let arrays: Vec<ArrayRef> = vec![
+        Arc::new(StringArray::from(values.clone())),
+        Arc::new(LargeStringArray::from(values)),
+    ];
+    for array in arrays {
+        for cancelled in [false, true] {
+            let token = CancellationToken::new();
+            if cancelled {
+                token.cancel();
+            }
+            let job = StreamJobContext::new(1, "intern", BTreeMap::new(), None, token);
+            let context = StreamOperatorContext::new(&job, "intern", None);
+            let mut rows = admitted(vec![Arc::clone(&array)]);
+            for (index, row) in rows.iter_mut().enumerate() {
+                row.retain = index % 3 == 0;
+            }
+            let columns = [LocalColumn::bind(array.as_ref()).unwrap()];
+            let mut outcomes = Vec::new();
+            for specialized in [false, true] {
+                let mut local = local_table(rows.len());
+                let mut flow = KeyFlow::new(Some(&context));
+                let group = AdmittedGroup::new(&rows, 0..rows.len());
+                reset_join_work();
+                let result = if specialized {
+                    local
+                        .intern_group(&columns, group, "match", &mut flow)
+                        .await
+                } else {
+                    local
+                        .intern_blocks(
+                            &columns,
+                            group,
+                            "match",
+                            &mut LocalFlow::new(&mut flow),
+                            |left, right| values_equal(&columns, left, right),
+                        )
+                        .await
+                };
+                assert_eq!(result.is_err(), cancelled);
+                let work = join_work();
+                outcomes.push((
+                    local.locals,
+                    local.rows,
+                    local.hashes,
+                    local.first_retained,
+                    local.retains,
+                    local.appearances,
+                    work.quantum_steps,
+                    work.quantum_boundaries,
+                ));
+            }
+            assert_eq!(outcomes[0], outcomes[1]);
+        }
+    }
+}

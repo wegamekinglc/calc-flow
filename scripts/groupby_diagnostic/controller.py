@@ -6,6 +6,7 @@ import platform
 from functools import partial
 from pathlib import Path
 
+from scripts.benchmark_suite.diagnostics import request_contexts
 from scripts.benchmark_suite.measure import _measured_row, _prepare, _samples
 from scripts.benchmark_suite.process import install
 from scripts.benchmark_suite.provenance import harness_sha256
@@ -16,21 +17,18 @@ from scripts.toolkit import git_output, sha256_file, write_json
 
 
 async def round_(
-    case: dict, sites: dict, releases: dict, root: Path, *, worker_type=AuditWorker
+    case: dict, sites: dict, contexts: dict, root: Path, *, worker_type=AuditWorker
 ) -> dict:
     workers = {}
+    releases = {side: context["release"] for side, context in contexts.items()}
     try:
         for side, site in sites.items():
             workers[side] = await worker_type.start(site, root / side)
-        environment = await _prepare(workers, releases, case)
+        environment = await _prepare(workers, releases, case, contexts)
         if workers["baseline"].input_hashes != workers["candidate"].input_hashes:
             raise ValueError("paired input IPC bytes differ")
-        samples = await _samples(workers, case)
-        completion = {
-            side: await w.request(operation="finish") for side, w in workers.items()
-        }
-        if any(value["state"] != "completed" for value in completion.values()):
-            raise ValueError("worker did not finish")
+        samples = await _samples(workers, case, contexts, root)
+        completion = await finish_workers(workers, contexts)
         return {
             "environment": environment,
             "samples": samples,
@@ -41,6 +39,19 @@ async def round_(
         raise
     finally:
         await close_workers(workers, root)
+
+
+async def finish_workers(workers: dict, contexts: dict) -> dict:
+    completion = {
+        side: await worker.request(
+            operation="finish",
+            context={**contexts[side], "phase": "finish", "sample": None},
+        )
+        for side, worker in workers.items()
+    }
+    if any(value["state"] != "completed" for value in completion.values()):
+        raise ValueError("worker did not finish")
+    return completion
 
 
 async def close_workers(workers: dict, root: Path) -> None:
@@ -60,7 +71,11 @@ async def paired(
     for index in range(ROUNDS):
         evidence.append(
             await round_(
-                case, sites, releases, root / f"round-{index}", worker_type=worker_type
+                case,
+                sites,
+                request_contexts(case, releases, round_index=index),
+                root / f"round-{index}",
+                worker_type=worker_type,
             )
         )
         write_json(root / "rounds.json", evidence)

@@ -6,6 +6,7 @@ import asyncio
 import re
 from pathlib import Path
 
+from scripts.benchmark_suite.diagnostics import request_contexts
 from scripts.benchmark_suite.measure import _prepare
 from scripts.benchmark_suite.process import _complete_owned
 from scripts.groupby_diagnostic.issue406 import Issue406Worker, case
@@ -149,7 +150,13 @@ async def record(worker: Issue406Worker, root: Path, perf: str) -> None:
 async def collect(release: dict, site: Path, root: Path, perf: str) -> None:
     worker = await Issue406Worker.start(site, root)
     try:
-        await _prepare({"candidate": worker}, {"candidate": release}, case())
+        workload = case()
+        await _prepare(
+            {"candidate": worker},
+            {"candidate": release},
+            workload,
+            request_contexts(workload, {"candidate": release}),
+        )
         await preflight(perf, root)
         await record(worker, root, perf)
         completion = await worker.request(operation="finish")

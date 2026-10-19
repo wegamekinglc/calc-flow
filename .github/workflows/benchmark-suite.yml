@@ -61,11 +61,13 @@ jobs:
           python -m unittest scripts.test_benchmark_suite
           scripts.test_benchmark_workflow scripts.test_benchmark_normalize
           scripts.test_benchmark_aggregate scripts.test_benchmark_process
+          scripts.test_benchmark_diagnostics
           scripts.test_benchmark_refs
           scripts.test_benchmark_rust
           scripts.test_benchmark_rust_harness
           scripts.test_benchmark_rust_provenance
           scripts.test_benchmark_rust_migrations
+          scripts.test_benchmark_dependency_migrations
           scripts.test_benchmark_worker
           scripts.test_benchmark_pytest
       - name: Test benchmark and performance support scripts

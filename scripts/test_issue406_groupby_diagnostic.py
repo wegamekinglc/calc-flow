@@ -196,7 +196,7 @@ class OwnershipTests(unittest.IsolatedAsyncioTestCase):
             root = Path(temporary)
             with (
                 mock.patch.object(profile.Issue406Worker, "start", return_value=worker),
-                mock.patch.object(profile, "_prepare", new_callable=mock.AsyncMock),
+                mock.patch.object(profile, "_prepare", autospec=True),
                 mock.patch.object(
                     profile, "preflight", side_effect=ValueError("denied")
                 ),

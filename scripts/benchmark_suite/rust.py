@@ -12,6 +12,11 @@ from scripts.benchmark_suite.asof import asof_rows
 from scripts.benchmark_suite.asof_e2e import asof_e2e_rows
 from scripts.benchmark_suite.asof_eviction import asof_eviction_rows
 from scripts.benchmark_suite.catalog import CONTRACT
+from scripts.benchmark_suite.dependency_migrations import (
+    applied_dependency_migrations,
+    load_dependency_migrations,
+    stamp_dependency_migrations,
+)
 from scripts.benchmark_suite.join_materialization import materialization_rows
 from scripts.benchmark_suite.legacy import combine_blocks
 from scripts.benchmark_suite.migrations import declared_migrations, load_migrations
@@ -421,7 +426,11 @@ async def measure_rust(shard: dict, releases: dict, roots: dict, output: Path) -
     applied = with_harness_migrations(
         declared_migrations(provenance, migrations), provenance, migrations
     )
-    stamps = _stamp_fingerprints(provenance, applied)
+    stamps = stamp_dependency_migrations(
+        provenance,
+        _stamp_fingerprints(provenance, applied),
+        load_dependency_migrations(),
+    )
     for index, side in enumerate(("baseline", "candidate", "candidate", "baseline")):
         block, failures = await _rust_block(
             binaries[side],
@@ -454,6 +463,7 @@ async def measure_rust(shard: dict, releases: dict, roots: dict, output: Path) -
         "workload_migrations": sorted(
             applied.values(), key=lambda entry: entry["target"]
         ),
+        "dependency_migrations": applied_dependency_migrations(stamps),
     }
 
 

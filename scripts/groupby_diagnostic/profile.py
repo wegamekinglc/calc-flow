@@ -10,6 +10,7 @@ import time
 import zipfile
 from pathlib import Path
 
+from scripts.benchmark_suite.diagnostics import request_contexts
 from scripts.benchmark_suite.measure import _prepare, validate_sample
 from scripts.benchmark_suite.process import ROOT, command, install
 from scripts.groupby_diagnostic.contract import SEALS, cases
@@ -309,7 +310,12 @@ async def profile_workload(worker: AuditWorker, profiler) -> int:
 async def profile_case(case: dict, release: dict, site: Path, root: Path) -> None:
     worker = await AuditWorker.start(site, root)
     try:
-        await _prepare({"candidate": worker}, {"candidate": release}, case)
+        await _prepare(
+            {"candidate": worker},
+            {"candidate": release},
+            case,
+            request_contexts(case, {"candidate": release}),
+        )
         natives = list((site / "calc_flow").glob("_native*.so"))
         if len(natives) != 1:
             raise ValueError("missing installed profile ELF")

@@ -175,7 +175,10 @@ def _result_row(case: dict) -> list[object]:
     dimensions = f"N={case.get('rows', '—')}"
     if "history_rows" in case:
         dimensions += f", H0={case['history_rows']}"
-    prefix = [case["id"], dimensions, case["scope"]]
+    scope = case["scope"]
+    if "dependency_migration" in case.get("metadata", {}):
+        scope += " (cross-dependency release)"
+    prefix = [case["id"], dimensions, scope]
     if case["status"] != "ok":
         return [
             *prefix,

@@ -237,6 +237,52 @@ class CommandOwnershipTests(unittest.IsolatedAsyncioTestCase):
 
 
 class BenchmarkProcessTests(unittest.IsolatedAsyncioTestCase):
+    async def test_request_journal_retains_release_context_and_partial_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = root / "source/scripts/benchmark_suite"
+            package.mkdir(parents=True)
+            package.parent.joinpath("__init__.py").write_text("")
+            package.joinpath("__init__.py").write_text("")
+            package.joinpath("__main__.py").write_text(
+                "import json, sys\n"
+                "for index, line in enumerate(sys.stdin):\n"
+                "    print(json.dumps({'seconds': 0.25} if index == 0 else "
+                "{'error': 'TimeoutError: terminal wait'}), flush=True)\n"
+            )
+            worker = await Worker.start(
+                root / "site", root / "output", source=root / "source"
+            )
+            context = {
+                "side": "baseline",
+                "round": 1,
+                "sample": 5,
+                "phase": "measurement",
+                "release": {"git_sha": "release", "native_sha256": "native"},
+            }
+            try:
+                self.assertEqual(
+                    await worker.request(operation="sample", context=context),
+                    {"seconds": 0.25},
+                )
+                with self.assertRaisesRegex(RuntimeError, "terminal wait") as raised:
+                    await worker.request(
+                        operation="sample", context={**context, "sample": 6}
+                    )
+                self.assertIn('"side": "baseline"', raised.exception.__notes__[0])
+                saved = json.loads(
+                    (root / "output/request-0001.completed.json").read_text()
+                )
+                self.assertEqual(saved["context"], context)
+                self.assertEqual(saved["response"], {"seconds": 0.25})
+                failed = json.loads(
+                    (root / "output/request-0002.failed.json").read_text()
+                )
+                self.assertEqual(failed["context"]["sample"], 6)
+                self.assertEqual(failed["context"]["release"], context["release"])
+            finally:
+                await worker.close()
+
     async def test_worker_runs_workload_from_its_release_source(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

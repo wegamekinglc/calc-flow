@@ -291,7 +291,8 @@ mod tests {
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let (go_tx, go_rx) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
-            ready_tx.send(()).unwrap();
+            let path = std::fs::read_link("/proc/thread-self").unwrap();
+            ready_tx.send(path.file_name().unwrap().to_owned()).unwrap();
             go_rx.recv().unwrap();
             let before = super::process_cpu().unwrap();
             let until = std::time::Instant::now() + Duration::from_millis(2);
@@ -300,14 +301,73 @@ mod tests {
             }
             super::process_cpu().unwrap().checked_sub(before).unwrap()
         });
-        ready_rx.recv().unwrap();
+        let tid = ready_rx.recv().unwrap();
         let clock = super::PhaseClock::start("handler");
+        let worker_tid: u32 = tid.to_str().unwrap().parse().unwrap();
+        let identity = clock
+            .threads
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|(_, thread)| thread.tid == worker_tid)
+            .unwrap()
+            .0
+            .clone();
         go_tx.send(()).unwrap();
         let worker_cpu = worker.join().unwrap();
+        // join may return before the kernel removes the task from procfs.
+        let path = std::path::Path::new("/proc/self/task").join(tid);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while path.try_exists().unwrap() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "joined task remains in procfs"
+            );
+            std::thread::yield_now();
+        }
         let evidence = clock.finish();
         assert_eq!(evidence["status"], "measured");
         assert!(evidence["process_cpu_seconds"].as_f64().unwrap() >= worker_cpu.as_secs_f64());
-        assert!(!evidence["departed_threads"].as_array().unwrap().is_empty());
+        assert!(
+            evidence["departed_threads"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!(identity))
+        );
+    }
+
+    #[test]
+    fn test_exited_cpu_is_retained_before_and_after_procfs_removal() {
+        for visible in [true, false] {
+            let thread = || super::ThreadRuntime {
+                runtime_ns: 2_000_000,
+                name: "worker".to_owned(),
+                tid: 42,
+            };
+            let clock = super::PhaseClock {
+                scope: "handler",
+                started: std::time::Instant::now(),
+                process_cpu: Some(Duration::from_millis(10)),
+                resolution: Some(Duration::from_nanos(1)),
+                threads: Some(BTreeMap::from([("42/3".to_owned(), thread())])),
+            };
+            let after = if visible {
+                BTreeMap::from([("42/3".to_owned(), thread())])
+            } else {
+                BTreeMap::new()
+            };
+            let evidence = clock.evidence(0.01, Some(Duration::from_millis(15)), Some(after));
+            assert_eq!(evidence["status"], "measured");
+            assert_eq!(evidence["process_cpu_seconds"], 0.005);
+            assert_eq!(
+                evidence["departed_threads"],
+                if visible {
+                    serde_json::json!([])
+                } else {
+                    serde_json::json!(["42/3"])
+                }
+            );
+        }
     }
 
     #[cfg(target_os = "linux")]

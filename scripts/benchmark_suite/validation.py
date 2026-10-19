@@ -13,6 +13,7 @@ from scripts.benchmark_suite.catalog import (
     polars_thread_count,
     shard_cases,
 )
+from scripts.benchmark_suite.dependency_migrations import validate_dependency_migrations
 from scripts.benchmark_suite.measure import validate_stream_sample
 from scripts.benchmark_suite.provenance import harness_sha256
 from scripts.benchmark_suite.report import SAMPLES, comparison, validate_shards
@@ -168,6 +169,8 @@ def validate_fragment(
     _validate_inventory(report, shard)
     if shard["family"] in ("engines", "warm"):
         _validate_catalog_cases(report, shard)
+    if shard["family"] == "rust":
+        validate_dependency_migrations(report)
 
 
 def _validate_inventory(report: dict, shard: dict) -> None:

@@ -1,0 +1,197 @@
+{
+  "schema": "calc-flow.rust-dependency-migrations.v1",
+  "migrations": [
+    {
+      "target": "allocation_regression",
+      "baseline": {
+        "dependency_fingerprint": "825c52358225e2f8f07798129bd3cd81c3b4a48b902348de28a4770c13d1af19",
+        "cargo_lock_sha256": "5718b857be2965feb9334c255c777d85fe61b7057bdfc4ce8a16ab3c3a8109bf",
+        "workload_fingerprint": "c500eea9737dec7d1a90dc45b605a50d018772088b862eb1a8e341bdb8c97b9d"
+      },
+      "candidate": {
+        "dependency_fingerprint": "8daec27dbb460e4cbff85a0665b9bc6b92757fe0711f4d437162799d172266d8",
+        "cargo_lock_sha256": "a5a1628756aa0d5d1f4b06ac33ae7a549fa7491614c643499e11a7cc3fd4f385",
+        "workload_fingerprint": "c500eea9737dec7d1a90dc45b605a50d018772088b862eb1a8e341bdb8c97b9d"
+      },
+      "measured_workload_fingerprint": "c500eea9737dec7d1a90dc45b605a50d018772088b862eb1a8e341bdb8c97b9d",
+      "reason": "Cross-dependency release comparison: DataFusion 54.0.0 / Arrow 58.3.0 to 55.0.0 / 59.2.0, including the exact compiled packages, checksums, features, profiles and rustc/cargo 1.94.0. Workload and timing evidence is documented in docs/benchmark-suite.md; this declaration does not align locks, replace fingerprints or establish a performance pass.",
+      "reference": "DAL-384 / PR #481; run 39156806624, artifact 12151521716"
+    },
+    {
+      "target": "core",
+      "baseline": {
+        "dependency_fingerprint": "771ac45350f1bfc19bb6f0ee0af67394c661bc0881ac12f7c55bdc2dd79cfdb7",
+        "cargo_lock_sha256": "5718b857be2965feb9334c255c777d85fe61b7057bdfc4ce8a16ab3c3a8109bf",
+        "workload_fingerprint": "ada62f0b1bbdf2bac30bf08c1bf72b1613eea46f276788976740b6eda1778218"
+      },
+      "candidate": {
+        "dependency_fingerprint": "256fafc74f1cca7c37daa9a3462421ffa7c7cae2cefcfde69ec85783a26ebb4c",
+        "cargo_lock_sha256": "a5a1628756aa0d5d1f4b06ac33ae7a549fa7491614c643499e11a7cc3fd4f385",
+        "workload_fingerprint": "ada62f0b1bbdf2bac30bf08c1bf72b1613eea46f276788976740b6eda1778218"
+      },
+      "measured_workload_fingerprint": "ada62f0b1bbdf2bac30bf08c1bf72b1613eea46f276788976740b6eda1778218",
+      "reason": "Cross-dependency release comparison: DataFusion 54.0.0 / Arrow 58.3.0 to 55.0.0 / 59.2.0, including the exact compiled packages, checksums, features, profiles and rustc/cargo 1.94.0. Workload and timing evidence is documented in docs/benchmark-suite.md; this declaration does not align locks, replace fingerprints or establish a performance pass.",
+      "reference": "DAL-384 / PR #481; run 39156806624, artifact 12151521716"
+    },
+    {
+      "target": "m4_state_window",
+      "baseline": {
+        "dependency_fingerprint": "5186984d18c13e18f5dd5d753bd9459fd3bed80122a7ba253f36ba8452f4e56a",
+        "cargo_lock_sha256": "5718b857be2965feb9334c255c777d85fe61b7057bdfc4ce8a16ab3c3a8109bf",
+        "workload_fingerprint": "6bbdbc3a88a029e86cbc2b6eeabee18c4af885305048c31ff86f9a4e4663c09c"
+      },
+      "candidate": {
+        "dependency_fingerprint": "8f7b3759cb3da7d1a57aa0dad26d5173d88e7fdb442ff509a9eb6aa18197f555",
+        "cargo_lock_sha256": "a5a1628756aa0d5d1f4b06ac33ae7a549fa7491614c643499e11a7cc3fd4f385",
+        "workload_fingerprint": "6bbdbc3a88a029e86cbc2b6eeabee18c4af885305048c31ff86f9a4e4663c09c"
+      },
+      "measured_workload_fingerprint": "6bbdbc3a88a029e86cbc2b6eeabee18c4af885305048c31ff86f9a4e4663c09c",
+      "reason": "Cross-dependency release comparison: DataFusion 54.0.0 / Arrow 58.3.0 to 55.0.0 / 59.2.0, including the exact compiled packages, checksums, features, profiles and rustc/cargo 1.94.0. Workload and timing evidence is documented in docs/benchmark-suite.md; this declaration does not align locks, replace fingerprints or establish a performance pass.",
+      "reference": "DAL-384 / PR #481; run 39156806624, artifact 12151521716"
+    },
+    {
+      "target": "sql_datafusion_performance",
+      "baseline": {
+        "dependency_fingerprint": "de65b611647d193e33ed0eeb42de80444d8a9ff6d7eaa0a09ab619d1ebb9ad8c",
+        "cargo_lock_sha256": "5718b857be2965feb9334c255c777d85fe61b7057bdfc4ce8a16ab3c3a8109bf",
+        "workload_fingerprint": "17d4fdd05a6fa3ecd4e06b7530b793486aba91ae791c7c1609feaa0c8c5ff226"
+      },
+      "candidate": {
+        "dependency_fingerprint": "104eb73a7b138f8b70449592b97677dad61a8514275cd3f9ba709227a9aaf3ba",
+        "cargo_lock_sha256": "a5a1628756aa0d5d1f4b06ac33ae7a549fa7491614c643499e11a7cc3fd4f385",
+        "workload_fingerprint": "c212cb0f72b2758eeb181bb6178272f6201dab7c5109a5d8fb4d89da520c6f89"
+      },
+      "measured_workload_fingerprint": "c212cb0f72b2758eeb181bb6178272f6201dab7c5109a5d8fb4d89da520c6f89",
+      "reason": "Cross-dependency release comparison: DataFusion 54.0.0 / Arrow 58.3.0 to 55.0.0 / 59.2.0, including the exact compiled packages, checksums, features, profiles and rustc/cargo 1.94.0. Workload and timing evidence is documented in docs/benchmark-suite.md; this declaration does not align locks, replace fingerprints or establish a performance pass.",
+      "reference": "DAL-384 / PR #481; run 39156806624, artifact 12151521716"
+    },
+    {
+      "target": "stream_asof_e2e",
+      "baseline": {
+        "dependency_fingerprint": "3eceaee2dfe80cac5ed96875a1ee13278c8aac963e59f32169790ecff50e6215",
+        "cargo_lock_sha256": "5718b857be2965feb9334c255c777d85fe61b7057bdfc4ce8a16ab3c3a8109bf",
+        "workload_fingerprint": "8dc93cccf7a9893488c8830364b07ceed9f04ac890818da8595558a683438adf"
+      },
+      "candidate": {
+        "dependency_fingerprint": "5ab80c06474c368d4b9d40cbf163df2c21adad1b3e7182f7c773cd32af78bf5b",
+        "cargo_lock_sha256": "a5a1628756aa0d5d1f4b06ac33ae7a549fa7491614c643499e11a7cc3fd4f385",
+        "workload_fingerprint": "8dc93cccf7a9893488c8830364b07ceed9f04ac890818da8595558a683438adf"
+      },
+      "measured_workload_fingerprint": "8dc93cccf7a9893488c8830364b07ceed9f04ac890818da8595558a683438adf",
+      "reason": "Cross-dependency release comparison: DataFusion 54.0.0 / Arrow 58.3.0 to 55.0.0 / 59.2.0, including the exact compiled packages, checksums, features, profiles and rustc/cargo 1.94.0. Workload and timing evidence is documented in docs/benchmark-suite.md; this declaration does not align locks, replace fingerprints or establish a performance pass.",
+      "reference": "DAL-384 / PR #481; run 39156806624, artifact 12151521716"
+    },
+    {
+      "target": "stream_asof_eviction",
+      "baseline": {
+        "dependency_fingerprint": "79a90a84f83da7a730b3fe04365c04a5213600e608c87089715d29eec40cad64",
+        "cargo_lock_sha256": "5718b857be2965feb9334c255c777d85fe61b7057bdfc4ce8a16ab3c3a8109bf",
+        "workload_fingerprint": "b1214f2c5079b3d475d9a83618c1b005ec521e695cd0a014f46c608fc8fa99d9"
+      },
+      "candidate": {
+        "dependency_fingerprint": "36577bbc54a4038a696e33a4308293d82bec3e6519290f1d8201dbbd90dadbf0",
+        "cargo_lock_sha256": "a5a1628756aa0d5d1f4b06ac33ae7a549fa7491614c643499e11a7cc3fd4f385",
+        "workload_fingerprint": "b1214f2c5079b3d475d9a83618c1b005ec521e695cd0a014f46c608fc8fa99d9"
+      },
+      "measured_workload_fingerprint": "b1214f2c5079b3d475d9a83618c1b005ec521e695cd0a014f46c608fc8fa99d9",
+      "reason": "Cross-dependency release comparison: DataFusion 54.0.0 / Arrow 58.3.0 to 55.0.0 / 59.2.0, including the exact compiled packages, checksums, features, profiles and rustc/cargo 1.94.0. Workload and timing evidence is documented in docs/benchmark-suite.md; this declaration does not align locks, replace fingerprints or establish a performance pass.",
+      "reference": "DAL-384 / PR #481; run 39156806624, artifact 12151521716"
+    },
+    {
+      "target": "stream_asof_perf",
+      "baseline": {
+        "dependency_fingerprint": "906024d8f69a76263ededa1576f600435e634c412e2a5d29121da7f54ff5005a",
+        "cargo_lock_sha256": "5718b857be2965feb9334c255c777d85fe61b7057bdfc4ce8a16ab3c3a8109bf",
+        "workload_fingerprint": "3c5603620eff9c3c7b3622a7b44d76e4dacdc57eacb8ccb1170e9305cf80f627"
+      },
+      "candidate": {
+        "dependency_fingerprint": "f81db8289cef83f7326238997b759bd25580432a5b40962aa94db471d56a32f5",
+        "cargo_lock_sha256": "a5a1628756aa0d5d1f4b06ac33ae7a549fa7491614c643499e11a7cc3fd4f385",
+        "workload_fingerprint": "3c5603620eff9c3c7b3622a7b44d76e4dacdc57eacb8ccb1170e9305cf80f627"
+      },
+      "measured_workload_fingerprint": "3c5603620eff9c3c7b3622a7b44d76e4dacdc57eacb8ccb1170e9305cf80f627",
+      "reason": "Cross-dependency release comparison: DataFusion 54.0.0 / Arrow 58.3.0 to 55.0.0 / 59.2.0, including the exact compiled packages, checksums, features, profiles and rustc/cargo 1.94.0. Workload and timing evidence is documented in docs/benchmark-suite.md; this declaration does not align locks, replace fingerprints or establish a performance pass.",
+      "reference": "DAL-384 / PR #481; run 39156806624, artifact 12151521716"
+    },
+    {
+      "target": "stream_join_materialization",
+      "baseline": {
+        "dependency_fingerprint": "21fdd6bcc3c09a42faf5db38102411b8e6fb6d84fd5b0393ffb12568fd5d339c",
+        "cargo_lock_sha256": "5718b857be2965feb9334c255c777d85fe61b7057bdfc4ce8a16ab3c3a8109bf",
+        "workload_fingerprint": "80082e2000d2dbe2b5e0a8744359dae0cec104a58a3dcb365757358bd07eaeae"
+      },
+      "candidate": {
+        "dependency_fingerprint": "a60854fd369133ce7ebac8a811630d3b24d37dc9722322532bc748484d4b8cd8",
+        "cargo_lock_sha256": "a5a1628756aa0d5d1f4b06ac33ae7a549fa7491614c643499e11a7cc3fd4f385",
+        "workload_fingerprint": "80082e2000d2dbe2b5e0a8744359dae0cec104a58a3dcb365757358bd07eaeae"
+      },
+      "measured_workload_fingerprint": "80082e2000d2dbe2b5e0a8744359dae0cec104a58a3dcb365757358bd07eaeae",
+      "reason": "Cross-dependency release comparison: DataFusion 54.0.0 / Arrow 58.3.0 to 55.0.0 / 59.2.0, including the exact compiled packages, checksums, features, profiles and rustc/cargo 1.94.0. Workload and timing evidence is documented in docs/benchmark-suite.md; this declaration does not align locks, replace fingerprints or establish a performance pass.",
+      "reference": "DAL-384 / PR #481; run 39156806624, artifact 12151521716"
+    },
+    {
+      "target": "stream_join_perf",
+      "baseline": {
+        "dependency_fingerprint": "daaae60e112553272715d42b1942ea01fce05876b994b5a4d814009e758f0aa3",
+        "cargo_lock_sha256": "5718b857be2965feb9334c255c777d85fe61b7057bdfc4ce8a16ab3c3a8109bf",
+        "workload_fingerprint": "b3605041ff102f99752881cb3bc68f00d05358420fe2879191be4df5091a0899"
+      },
+      "candidate": {
+        "dependency_fingerprint": "629e21dbb55f717b8a151ce82d021f96b6a88e6edfe4bbda1d730c60f4e40b4b",
+        "cargo_lock_sha256": "a5a1628756aa0d5d1f4b06ac33ae7a549fa7491614c643499e11a7cc3fd4f385",
+        "workload_fingerprint": "60ee25a5d805588dfe74dfde96ff667b990a883cf34520aeef0551b3616453bb"
+      },
+      "measured_workload_fingerprint": "40f6b841fefe1ff931a363ee2cffeb8d7574766df94f18efe895ca58516062fe",
+      "reason": "Cross-dependency release comparison: DataFusion 54.0.0 / Arrow 58.3.0 to 55.0.0 / 59.2.0, including the exact compiled packages, checksums, features, profiles and rustc/cargo 1.94.0. Workload and timing evidence is documented in docs/benchmark-suite.md; this declaration does not align locks, replace fingerprints or establish a performance pass.",
+      "reference": "DAL-384 / PR #481; run 39156806624, artifact 12151521716"
+    },
+    {
+      "target": "stream_sql_aggregate",
+      "baseline": {
+        "dependency_fingerprint": "824e0a782f76fbaceb6f1b33d7a302a498d4a7ea67e23c1916baa1bdd233aae0",
+        "cargo_lock_sha256": "5718b857be2965feb9334c255c777d85fe61b7057bdfc4ce8a16ab3c3a8109bf",
+        "workload_fingerprint": "660ad8eb7edbdeeac84a82716766dda4da0f7483154e4467c100bfc892ee3ccd"
+      },
+      "candidate": {
+        "dependency_fingerprint": "065dedfbfd7d012e7c312b1108fd200cc2b0e9704ac20d78c2cb3bd7ff5da5fb",
+        "cargo_lock_sha256": "a5a1628756aa0d5d1f4b06ac33ae7a549fa7491614c643499e11a7cc3fd4f385",
+        "workload_fingerprint": "660ad8eb7edbdeeac84a82716766dda4da0f7483154e4467c100bfc892ee3ccd"
+      },
+      "measured_workload_fingerprint": "660ad8eb7edbdeeac84a82716766dda4da0f7483154e4467c100bfc892ee3ccd",
+      "reason": "Cross-dependency release comparison: DataFusion 54.0.0 / Arrow 58.3.0 to 55.0.0 / 59.2.0, including the exact compiled packages, checksums, features, profiles and rustc/cargo 1.94.0. Workload and timing evidence is documented in docs/benchmark-suite.md; this declaration does not align locks, replace fingerprints or establish a performance pass.",
+      "reference": "DAL-384 / PR #481; run 39156806624, artifact 12151521716"
+    },
+    {
+      "target": "stream_union",
+      "baseline": {
+        "dependency_fingerprint": "36b7ed234b992e2af1437aa269c091a329eb67908f5311ffca523a1473960a2b",
+        "cargo_lock_sha256": "5718b857be2965feb9334c255c777d85fe61b7057bdfc4ce8a16ab3c3a8109bf",
+        "workload_fingerprint": "1dc3b3d81843a03161c0161d5d5596897e9db8c275b03f81c792ba8a39e58819"
+      },
+      "candidate": {
+        "dependency_fingerprint": "1b1e2f02df0bde3bff516d3f0477775822b1082feeb78e40a05c637a72399f3e",
+        "cargo_lock_sha256": "a5a1628756aa0d5d1f4b06ac33ae7a549fa7491614c643499e11a7cc3fd4f385",
+        "workload_fingerprint": "1dc3b3d81843a03161c0161d5d5596897e9db8c275b03f81c792ba8a39e58819"
+      },
+      "measured_workload_fingerprint": "1dc3b3d81843a03161c0161d5d5596897e9db8c275b03f81c792ba8a39e58819",
+      "reason": "Cross-dependency release comparison: DataFusion 54.0.0 / Arrow 58.3.0 to 55.0.0 / 59.2.0, including the exact compiled packages, checksums, features, profiles and rustc/cargo 1.94.0. Workload and timing evidence is documented in docs/benchmark-suite.md; this declaration does not align locks, replace fingerprints or establish a performance pass.",
+      "reference": "DAL-384 / PR #481; run 39156806624, artifact 12151521716"
+    },
+    {
+      "target": "stream_window_groups",
+      "baseline": {
+        "dependency_fingerprint": "d232a72068bfd351b80590af2b8fd18c53397ed33d91dd93bbba29d1decbc32e",
+        "cargo_lock_sha256": "5718b857be2965feb9334c255c777d85fe61b7057bdfc4ce8a16ab3c3a8109bf",
+        "workload_fingerprint": "560f42b7664f67a31ca5a05a6a77cabe42bbac2dfcb1db17e0e55b7d31333e74"
+      },
+      "candidate": {
+        "dependency_fingerprint": "bc723ddda40c08386b15511d08a6d5a5a12cbf10a61bd550a8f9b29e8ce02090",
+        "cargo_lock_sha256": "a5a1628756aa0d5d1f4b06ac33ae7a549fa7491614c643499e11a7cc3fd4f385",
+        "workload_fingerprint": "560f42b7664f67a31ca5a05a6a77cabe42bbac2dfcb1db17e0e55b7d31333e74"
+      },
+      "measured_workload_fingerprint": "560f42b7664f67a31ca5a05a6a77cabe42bbac2dfcb1db17e0e55b7d31333e74",
+      "reason": "Cross-dependency release comparison: DataFusion 54.0.0 / Arrow 58.3.0 to 55.0.0 / 59.2.0, including the exact compiled packages, checksums, features, profiles and rustc/cargo 1.94.0. Workload and timing evidence is documented in docs/benchmark-suite.md; this declaration does not align locks, replace fingerprints or establish a performance pass.",
+      "reference": "DAL-384 / PR #481; run 39156806624, artifact 12151521716"
+    }
+  ]
+}

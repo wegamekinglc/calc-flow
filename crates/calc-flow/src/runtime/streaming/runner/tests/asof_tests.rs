@@ -1,4 +1,5 @@
 mod fusion_controls;
+mod recovery_cut;
 
 use super::{
     ContinuousJobSpec, ContinuousJobState, ContinuousRunner, Cursor, M2DeliveryMode,
