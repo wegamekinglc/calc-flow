@@ -359,6 +359,27 @@ impl AdmittedBatch {
         }
     }
 
+    #[inline]
+    fn cursor_view(&self, index: usize, cursor: &mut Option<usize>) -> GroupView<'_> {
+        assert!(index < self.len);
+        let segment = match *cursor {
+            Some(mut segment) if index >= self.segments.get(segment).range.start => {
+                while self.segments.get(segment).range.end <= index {
+                    segment += 1;
+                    #[cfg(test)]
+                    super::note_join_work(|work| work.admission_segment_lookups += 1);
+                }
+                segment
+            }
+            _ => self.segment_index(index),
+        };
+        *cursor = Some(segment);
+        GroupView {
+            batch: self,
+            segment: self.segments.get(segment),
+        }
+    }
+
     pub(super) fn group_range(&self, index: usize) -> Range<usize> {
         self.segments.get(index).range.clone()
     }
@@ -625,6 +646,9 @@ pub(super) trait AdmittedRows: Sync {
     fn payload(&self, index: usize) -> PayloadRef<'_> {
         self.row(index).record
     }
+    fn cursor_payload(&self, index: usize, _segment: &mut Option<usize>) -> PayloadRef<'_> {
+        self.payload(index)
+    }
     /// Event time at a logical admitted position, independent of payload offsets.
     fn event_time(&self, index: usize) -> EventTime {
         self.row(index).event_time
@@ -669,27 +693,13 @@ impl AdmittedRows for AdmittedBatch {
         self.row(index)
     }
     fn cursor_row(&self, index: usize, cursor: &mut Option<usize>) -> AdmittedRef<'_> {
-        assert!(index < self.len);
-        let segment = match *cursor {
-            Some(mut segment) if index >= self.segments.get(segment).range.start => {
-                while self.segments.get(segment).range.end <= index {
-                    segment += 1;
-                    #[cfg(test)]
-                    super::note_join_work(|work| work.admission_segment_lookups += 1);
-                }
-                segment
-            }
-            _ => self.segment_index(index),
-        };
-        *cursor = Some(segment);
-        GroupView {
-            batch: self,
-            segment: self.segments.get(segment),
-        }
-        .row(index)
+        self.cursor_view(index, cursor).row(index)
     }
     fn payload(&self, index: usize) -> PayloadRef<'_> {
         self.view(index).payload(index)
+    }
+    fn cursor_payload(&self, index: usize, cursor: &mut Option<usize>) -> PayloadRef<'_> {
+        self.cursor_view(index, cursor).payload(index)
     }
     fn event_time(&self, index: usize) -> EventTime {
         assert!(index < self.len);
@@ -778,6 +788,9 @@ pub(super) struct AdmittedCursor<'a> {
 impl<'a> AdmittedCursor<'a> {
     pub(super) fn row(&mut self, index: usize) -> AdmittedRef<'a> {
         self.rows.cursor_row(index, &mut self.segment)
+    }
+    pub(super) fn payload(&mut self, index: usize) -> PayloadRef<'a> {
+        self.rows.cursor_payload(index, &mut self.segment)
     }
 }
 

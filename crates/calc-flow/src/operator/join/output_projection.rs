@@ -90,7 +90,7 @@ fn gather_columns(
     let left_width = output.records(&matched.pair(0)).0.num_columns();
     let mut cursor = output.admitted.cursor();
     let incoming =
-        output_gather::SideGather::new(matched.iter().map(|pair| cursor.row(pair.pos).record));
+        output_gather::SideGather::new(matched.iter().map(|pair| cursor.payload(pair.pos)));
     let opposite = output_gather::SideGather::new(
         matched
             .iter()

@@ -333,7 +333,7 @@ impl JoinOutput<'_> {
             if previous_incoming != Some(pair.pos) {
                 agree_row_width(
                     &mut incoming,
-                    self.admitted.row(pair.pos).record,
+                    self.admitted.payload(pair.pos),
                     incoming_columns.as_deref(),
                 )?;
                 previous_incoming = Some(pair.pos);
@@ -362,7 +362,7 @@ impl JoinOutput<'_> {
         let oversized = |bytes: usize| oversized_row(bytes, budget);
         for (index, pair) in self.matched.iter().enumerate() {
             // Payloads are read only for rows whose costs are not cached yet.
-            let record = || self.admitted.row(pair.pos).record;
+            let record = || self.admitted.payload(pair.pos);
             let left = incoming.get_or_try_insert_with(pair.pos, || {
                 flat_row(record(), 0, incoming_columns.as_deref())
             })?;
@@ -383,7 +383,7 @@ impl JoinOutput<'_> {
         let incoming_columns = self.side_columns(true);
         let opposite_columns = self.side_columns(false);
         let incoming = estimated_rows(self.matched.iter().map(|pair| pair.pos), |pos| {
-            estimated_row(self.admitted.row(pos).record, incoming_columns.as_deref())
+            estimated_row(self.admitted.payload(pos), incoming_columns.as_deref())
         })?;
         let opposite = estimated_rows(
             self.matched.iter().map(|pair| pair.opposite_index),

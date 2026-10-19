@@ -9,6 +9,7 @@ fn assert_admitted_accessors(rows: &dyn AdmittedRows) {
         assert!(std::ptr::eq(payload.columns(), row.record.columns()));
         assert!(Arc::ptr_eq(payload.schema_ref(), row.record.schema_ref()));
     }
+    assert_admitted_cursors(rows);
     for index in [rows.len(), usize::MAX] {
         assert!(
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rows.row(index))).is_err()
@@ -19,6 +20,39 @@ fn assert_admitted_accessors(rows: &dyn AdmittedRows) {
         );
         assert!(
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rows.payload(index))).is_err()
+        );
+    }
+}
+
+fn assert_admitted_cursors(rows: &dyn AdmittedRows) {
+    let mut payloads = rows.cursor();
+    let mut metadata = rows.cursor();
+    let positions = (0..rows.len())
+        .chain((0..rows.len()).rev())
+        .flat_map(|index| [index, index]);
+    for index in positions {
+        let expected = rows.row(index);
+        let payload = payloads.payload(index);
+        let row = metadata.row(index);
+        assert_eq!(payload.offset(), expected.record.offset());
+        assert!(std::ptr::eq(payload.columns(), expected.record.columns()));
+        assert!(Arc::ptr_eq(
+            payload.schema_ref(),
+            expected.record.schema_ref()
+        ));
+        assert_eq!(row.row_id, expected.row_id);
+        assert_eq!(row.event_time, expected.event_time);
+        assert_eq!(row.retain, expected.retain);
+        assert_eq!(row.record.offset(), payload.offset());
+        assert!(std::ptr::eq(row.record.columns(), payload.columns()));
+    }
+    for index in [rows.len(), usize::MAX] {
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| payloads.payload(index)))
+                .is_err()
+        );
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| metadata.row(index))).is_err()
         );
     }
 }
