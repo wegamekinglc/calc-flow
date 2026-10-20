@@ -257,7 +257,8 @@ jobs:
             TOKIO_WORKER_THREADS=32 JAX_PLATFORMS=cpu \
             target/benchmark-venv/bin/python -m pytest \
             benchmarks/test_engine_comparison.py benchmarks/test_engine_stream.py \
-            benchmarks/test_retained_stream.py benchmarks/test_sql_operators.py -q
+            benchmarks/test_retained_stream.py benchmarks/test_sql_operators.py \
+            benchmarks/test_polars_operators.py -q
       - name: Verify benchmark controllers and warm-stream scenarios
         if: matrix.id == 'warm-10'
         run: |

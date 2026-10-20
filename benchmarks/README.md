@@ -32,6 +32,13 @@ for timing, frame and reference-algorithm details.
 The [DAL-389 results](sql-operators/README.md) retain all 98 added cells,
 their raw samples, build identity and validation commands.
 
+Polars now covers the same fourteen scenarios in both thread configurations.
+The six additions are average, 64/256-row argmax, 64-row unique count,
+cross-section mean and ten-second tumbling sum. The
+[DAL-394 results](polars-operators/README.md) retain these 84 added cells
+at the original seven row scales, with the same independent oracles and
+streaming-engine collect-to-Arrow timing boundary.
+
 New engine/warm base/head measurements have a same-runner, two-round +5%
 regression gate using paired-median confidence lower bounds; cases the
 baseline catalog never declared are measured as new coverage without the

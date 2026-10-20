@@ -90,7 +90,7 @@ scale and four selected `Program.execute` cases. The Rust `stream_union` target
 measures native Union forwarding. These cases extend the inventory without
 adding a new shard or changing the scheduled 06:00 and 18:00 runs.
 
-There are 507 engine cases and 26 warm cases, in addition to dynamically
+There are 591 engine cases and 26 warm cases, in addition to dynamically
 discovered cases. Warm cases use one entity to support one-row appends.
 Compare measurements only when entity count, history depth, append size,
 and timing boundaries match.
@@ -117,7 +117,7 @@ no regression verdict.
 | Raw DataFusion   | Yes         | Yes         | Yes         | Yes         | Yes         | Yes         | Yes         |
 | Native streaming | Yes         | Yes         | Yes         | Yes         | Yes         | Yes         | Yes         |
 | Finance-Python   | Yes         | Yes         | Yes         | Yes         | Yes         | Unsupported | Unsupported |
-| Polars 1T / 32T  | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported | Yes         |
+| Polars 1T / 32T  | Yes         | Yes         | Yes         | Yes         | Yes         | Yes         | Yes         |
 | TA-Lib           | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported |
 
 Unsupported operations are explicit cells, not silent dependency skips.
@@ -167,6 +167,18 @@ tied maximum in a partial or full 64/256-row frame; it uses DataFusion's
 DataFusion sessions. Unique count uses `COUNT(DISTINCT price)` over 64 rows. CS mean
 partitions by exact event time. Window sum uses epoch-anchored, half-open
 ten-second bins and preserves UTC microsecond timestamps.
+
+Polars covers the same fourteen scenarios in both its 1T and 32T references.
+Cumulative sum/count implements average; exact-time window means implement
+CS mean; UTC timestamp truncation and grouped sums implement the epoch-anchored
+ten-second bins. Argmax and unique count use native integer-index rolling
+groups after sorting by symbol, event time and sequence. Entity-local row
+indices define partial/full frames; argmax subtracts the earliest maximal
+row's index from the current index, explicitly preserving oldest ties rather
+than relying on Polars `arg_max` tie selection. All computation stays inside
+lazy collection; there are no Python per-row callbacks or precomputed answers.
+The [DAL-394 results](../benchmarks/polars-operators/README.md) retain the 84
+added cells, raw samples, environment and reproduction commands.
 
 The ASOF fixture has **zero tolerance**, on both engines. SQL therefore uses
 a left equality join on symbol and event time, selecting the reference row

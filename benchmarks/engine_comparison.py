@@ -398,6 +398,42 @@ def _polars_plan(data: Workload, scenario: str):
             strategy="backward",
             check_sortedness=False,
         ).select("sequence", "value")
+    if scenario == "average":
+        return frame.select(
+            "sequence",
+            (value.cum_sum() / value.cum_count())
+            .over("symbol", order_by=["event_time", "sequence"])
+            .alias("value"),
+        )
+    if scenario in ("argmax64", "argmax256", "unique64"):
+        window = 64 if scenario == "unique64" else int(scenario[6:])
+        tick = pl.col("_tick")
+        # arg_max does not guarantee oldest-tie selection. Choose that row
+        # explicitly, using entity-local row indices rather than sequence gaps.
+        aggregate = (
+            value.n_unique()
+            if scenario == "unique64"
+            else tick.last() - tick.filter(value == value.max()).first()
+        )
+        return (
+            frame.sort("symbol", "event_time", "sequence")
+            .with_columns(
+                pl.int_range(pl.len(), dtype=pl.Int64).over("symbol").alias("_tick")
+            )
+            .rolling("_tick", period=f"{window}i", group_by="symbol", closed="right")
+            .agg(pl.col("sequence").last(), aggregate.cast(pl.Float64).alias("value"))
+            .select("sequence", "value")
+        )
+    if scenario == "cs_mean":
+        return frame.select("sequence", value.mean().over("event_time").alias("value"))
+    if scenario == "window_sum":
+        return (
+            frame.with_columns(
+                pl.col("event_time").dt.truncate("10s").alias("window_start")
+            )
+            .group_by("symbol", "window_start")
+            .agg(value.sum().alias("value"))
+        )
     slow = value.rolling_mean(20, min_samples=20).over(
         "symbol", order_by=["event_time", "sequence"]
     )
