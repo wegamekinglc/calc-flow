@@ -329,9 +329,10 @@ The ASOF settlement and Join materialization targets now require
 `benchmark-internals` to retain their explicit 10,000-row, 64 MiB fixture
 budgets independently of runtime defaults. Establish fresh baselines for
 these builds: historical samples without that feature have different build
-and workload fingerprints and must not be used for speedup claims. The
-harness continues to reject mismatched provenance; no migration exemption
-is declared for this change.
+and workload fingerprints and must not be used for speedup claims. The exact
+DAL-388 declarations below permit an informational cross-dependency release
+comparison for the recorded endpoints and budget-preserving workload changes.
+The harness continues to reject all undeclared or mismatched provenance.
 
 `stream_asof_perf` is an independent Rust target for bounded backward ASOF.
 It measures `operator-watermark-settlement`: one large watermark advance
@@ -630,6 +631,40 @@ The registry retains the full endpoint digests. Allocation's target identity is
 also pinned, but its sixteen metric rows retain their existing validation.
 Replaying these historical b53 samples proves the contract only; it supplies
 no performance evidence for a newer candidate or a sealed release gate pass.
+
+DAL-388 appends two declarations for `stream_asof_perf` and
+`stream_join_materialization`, retaining all twelve DAL-384 declarations. The
+evidence is [run `39358081556`](https://github.com/wegamekinglc/calc-flow/actions/runs/39358081556),
+Rust job `118424384624`, artifact `12242296762`, comparing release
+`61a81f203f68c2cd20be603851c4b41fa3672b40` with candidate
+`3613026aec1d309ad1c4581188fb2fa1e12183c1`. The new bench sources retain the
+historical 10,000-row / 64 MiB output budgets, fixtures, oracle and timing
+boundaries through `benchmark-internals`. Their source changes already have
+exact workload declarations; the dependency declarations additionally bind the
+feature's compiled package inventory and the common measured workloads.
+
+| Target                        | Candidate dependency | Common measured workload |
+|-------------------------------|----------------------|--------------------------|
+| `stream_asof_perf`            | `9a8f739d…`          | `9f0d9f15…`              |
+| `stream_join_materialization` | `7fd334e5…`          | `ca874902…`              |
+
+The registry pins the full original endpoint and common-workload digests.
+The retained Cargo compiler-artifact messages were independently recomputed;
+both targets were also compiled without sampling at the newer `main` commit
+`abadd7fe6a02acfc6d5b4f55ba1ab6ce22b4fcb8`, confirming the same candidate
+dependency and workload endpoints with Rust/Cargo 1.94.0. This is build identity
+evidence for that newer commit, not a performance measurement.
+
+Offline replay of the historical four ABBA blocks removes only the twelve
+dependency-identity errors (eight ASOF and four Join cases). The other 790
+complete-report rows, raw samples, oracle evidence and timing boundaries remain
+unchanged. Unknown endpoints and mismatched common workloads still fail closed,
+including during persisted-fragment validation. Replayed rows retain the
+**cross-dependency release** label and informational verdicts; they establish
+neither a performance result for newer `main` nor a release gate pass. After
+review and merge, the complete rerun must explicitly retain
+`baseline_sha=61a81f203f68c2cd20be603851c4b41fa3672b40`; this input also sets
+the Rust baseline to that release rather than the default first parent.
 
 The `stream_join_perf` compaction and control cases are
 `checkpoint/prepare_then_left_500_{compact,steady}_60k`. Both time asynchronous

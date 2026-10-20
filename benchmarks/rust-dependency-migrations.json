@@ -192,6 +192,38 @@
       "measured_workload_fingerprint": "560f42b7664f67a31ca5a05a6a77cabe42bbac2dfcb1db17e0e55b7d31333e74",
       "reason": "Cross-dependency release comparison: DataFusion 54.0.0 / Arrow 58.3.0 to 55.0.0 / 59.2.0, including the exact compiled packages, checksums, features, profiles and rustc/cargo 1.94.0. Workload and timing evidence is documented in docs/benchmark-suite.md; this declaration does not align locks, replace fingerprints or establish a performance pass.",
       "reference": "DAL-384 / PR #481; run 39156806624, artifact 12151521716"
+    },
+    {
+      "target": "stream_asof_perf",
+      "baseline": {
+        "dependency_fingerprint": "906024d8f69a76263ededa1576f600435e634c412e2a5d29121da7f54ff5005a",
+        "cargo_lock_sha256": "5718b857be2965feb9334c255c777d85fe61b7057bdfc4ce8a16ab3c3a8109bf",
+        "workload_fingerprint": "3c5603620eff9c3c7b3622a7b44d76e4dacdc57eacb8ccb1170e9305cf80f627"
+      },
+      "candidate": {
+        "dependency_fingerprint": "9a8f739dcb9fb3e6f6752dc7f9bff0790a027fab3067c2090722848e44d22e7b",
+        "cargo_lock_sha256": "a5a1628756aa0d5d1f4b06ac33ae7a549fa7491614c643499e11a7cc3fd4f385",
+        "workload_fingerprint": "9f0d9f15d59e4542d11458aaa0076dd37c39cd55418cd47963d99dfa417f97b8"
+      },
+      "measured_workload_fingerprint": "9f0d9f15d59e4542d11458aaa0076dd37c39cd55418cd47963d99dfa417f97b8",
+      "reason": "Cross-dependency release comparison: DataFusion 54.0.0 / Arrow 58.3.0 to 55.0.0 / 59.2.0 on Rust/Cargo 1.94.0. The declared workload migration explicitly preserves the historical 10,000-row / 64 MiB output budget through benchmark-internals, with unchanged fixtures, oracle and timing boundaries. Exact compiled feature/profile inventories and common workload were verified from retained Cargo logs and a fresh build without sampling at abadd7fe. Historical replay is informational only; it does not establish performance for newer main or a release gate pass. See docs/benchmark-suite.md.",
+      "reference": "DAL-388 / PR #482 budget preservation; run 39358081556, artifact 12242296762; build-only abadd7fe6a02acfc6d5b4f55ba1ab6ce22b4fcb8"
+    },
+    {
+      "target": "stream_join_materialization",
+      "baseline": {
+        "dependency_fingerprint": "21fdd6bcc3c09a42faf5db38102411b8e6fb6d84fd5b0393ffb12568fd5d339c",
+        "cargo_lock_sha256": "5718b857be2965feb9334c255c777d85fe61b7057bdfc4ce8a16ab3c3a8109bf",
+        "workload_fingerprint": "80082e2000d2dbe2b5e0a8744359dae0cec104a58a3dcb365757358bd07eaeae"
+      },
+      "candidate": {
+        "dependency_fingerprint": "7fd334e512dd978b7d4ea9602c1ff921439b57de31ecf620a91aa2f4fac5473d",
+        "cargo_lock_sha256": "a5a1628756aa0d5d1f4b06ac33ae7a549fa7491614c643499e11a7cc3fd4f385",
+        "workload_fingerprint": "ca87490231dbd5f3b838d17f656d6079b08d2cc828db904a017794868c9c6edb"
+      },
+      "measured_workload_fingerprint": "ca87490231dbd5f3b838d17f656d6079b08d2cc828db904a017794868c9c6edb",
+      "reason": "Cross-dependency release comparison: DataFusion 54.0.0 / Arrow 58.3.0 to 55.0.0 / 59.2.0 on Rust/Cargo 1.94.0. The declared workload migration explicitly preserves the historical 10,000-row / 64 MiB output budget through benchmark-internals, with unchanged fixtures, oracle and timing boundaries. Exact compiled feature/profile inventories and common workload were verified from retained Cargo logs and a fresh build without sampling at abadd7fe. Historical replay is informational only; it does not establish performance for newer main or a release gate pass. See docs/benchmark-suite.md.",
+      "reference": "DAL-388 / PR #482 budget preservation; run 39358081556, artifact 12242296762; build-only abadd7fe6a02acfc6d5b4f55ba1ab6ce22b4fcb8"
     }
   ]
 }
