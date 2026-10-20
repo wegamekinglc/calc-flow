@@ -163,8 +163,8 @@ SQL and raw DataFusion cover all fourteen native stream scenarios using the
 same fixtures and independent oracles. Cumulative average partitions by symbol
 and orders by event time and sequence. Argmax returns the row lag of the oldest
 tied maximum in a partial or full 64/256-row frame; it uses DataFusion's
-`array_agg`, `MAX` and `array_position`, enabled by `nested_expressions` in the
-core runtime. Unique count uses `COUNT(DISTINCT price)` over 64 rows. CS mean
+`array_agg`, `MAX` and `array_position`; the core registers the latter on its
+DataFusion sessions. Unique count uses `COUNT(DISTINCT price)` over 64 rows. CS mean
 partitions by exact event time. Window sum uses epoch-anchored, half-open
 ten-second bins and preserves UTC microsecond timestamps.
 

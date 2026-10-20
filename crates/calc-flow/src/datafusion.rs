@@ -845,6 +845,11 @@ impl DataFusionRuntime {
                 state.build()
             };
             let context = SessionContext::new_with_state(state);
+            context.register_udf(
+                datafusion_functions_nested::position::array_position_udf()
+                    .as_ref()
+                    .clone(),
+            );
             for (_, udf) in &self.selected_udfs {
                 context.register_udf(udf.as_ref().clone());
             }

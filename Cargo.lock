@@ -570,6 +570,7 @@ dependencies = [
  "command-group",
  "criterion",
  "datafusion",
+ "datafusion-functions-nested",
  "flatbuffers",
  "fs2",
  "futures",
