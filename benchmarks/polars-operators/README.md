@@ -274,3 +274,13 @@ PYTHONPATH=. "$BENCH_PY" target/verify_polars_c901_extraction.py
 
 The equivalence script is attached to the issue's C901 fix handoff. Existing
 matrix and shared-controller validation remain valid and were not repeated.
+
+## TLS dependency patches after measurement
+
+The subsequent security-only lockfile update moves `rustls-webpki` from
+0.103.14 to 0.103.16, and `webpki-root-certs` / `webpki-roots` from 1.0.9 to
+1.0.10. The 0.26.11 roots compatibility crate now forwards to 1.0.10. The
+adapter and all historical evidence JSON, including the original native seals,
+remain unchanged. The saved measurements describe the original sealed wheel;
+they do not measure the updated dependency graph. No benchmark was rerun and
+no dependency migration or native equivalence claim was added.
