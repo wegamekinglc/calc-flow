@@ -198,7 +198,8 @@ complete. No sample count or case scope was expanded. The full verifier checks
 the original 81-cell snapshot's SHA-256 and exact per-cell contents before
 accepting the complete 84-cell report.
 
-Focused verification used the same prepared Python and the current source:
+The original focused verification used the same prepared Python and the
+measured implementation:
 
 ```bash
 PYTHONPATH=. POLARS_MAX_THREADS=32 TOKIO_WORKER_THREADS=32 JAX_PLATFORMS=cpu \
@@ -230,3 +231,46 @@ An intermediate overbroad `-k 'argmax or polars_single_thread'` selection picked
 Finance-Python cases that failed because its separate Python 3.9 worker was not
 configured; its 36 other tests passed. The focused Polars selection above passes.
 No core runtime behavior changed. Full regressions and coverage remain with CI.
+
+## Equivalent refactor after measurement
+
+The C901 fix extracts the `average`, `argmax64`, `argmax256` and `unique64`
+plan construction from `_polars_plan` into `_polars_window_plan`. Relative to
+`ac8da003d08e7e10da635302bdcaa1a023967aec`, the extracted expression statements
+have identical ASTs and all four unoptimized lazy plans match on the 101-row
+fixture. All other module statements, including the collect-to-Arrow wrapper
+and sample timer, are unchanged. The helper runs during untimed plan construction.
+
+[Refactor verification](refactor-check.json) records the measured adapter hash
+and the new adapter/harness hashes separately. The historical result, validation,
+cohort, environment and build JSON files remain byte-for-byte unchanged; their
+source identities describe the code that was actually measured. No matrix cell
+was remeasured after extraction. Run the historical full identity verifier at
+the measured source revision; reuse at this revision rests on the recorded
+equivalence checks and the focused tests below, not a new measurement identity.
+
+The same prepared Python 3.13.9 / Polars 2.0.0 environment passed:
+
+```bash
+"$BENCH_PY" -m ruff check benchmarks/engine_comparison.py --select C901
+# All checks passed; no suppressions or baseline changes.
+
+"$BENCH_PY" scripts/verify_complexity_gates.py
+# complexity ratchet holds (the repository's actual CI complexity gate).
+
+"$BENCH_PY" -m ruff format --check benchmarks/engine_comparison.py
+# 1 file already formatted.
+
+PYTHONPATH=. POLARS_MAX_THREADS=32 TOKIO_WORKER_THREADS=32 JAX_PLATFORMS=cpu \
+  "$BENCH_PY" -m pytest benchmarks/test_polars_operators.py \
+  benchmarks/test_engine_comparison.py \
+  -q -k 'polars and (argmax or unique or average or samples_collect)'
+# 25 passed, 213 deselected.
+
+git show ac8da003:benchmarks/engine_comparison.py > target/dal394_pre_c901.py
+PYTHONPATH=. "$BENCH_PY" target/verify_polars_c901_extraction.py
+# AST/plan equivalence and historical evidence byte checks passed; no collect.
+```
+
+The equivalence script is attached to the issue's C901 fix handoff. Existing
+matrix and shared-controller validation remain valid and were not repeated.
