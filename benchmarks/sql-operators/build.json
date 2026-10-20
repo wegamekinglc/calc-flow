@@ -1,0 +1,25 @@
+{
+  "contract": "benchmark-release-v1",
+  "source": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-389-61b4dc82f747/workdir/calc-flow",
+  "git_sha": "23edd3a39ad5b8ab9c493387b3e0ba9d22641442",
+  "git_clean": true,
+  "source_sha256": "faf7b0e1cc2747154d59296d79bc92323d8dd9db6c5aa71637e5f715d54c4078",
+  "cargo_lock_sha256": "d5332444718f9cdb6f17bd75cb14a025875495ebe585d6bf3fb9a1acb6b84a8a",
+  "wheel": "calc_flow_python-2026.10.13-cp313-cp313-linux_x86_64.whl",
+  "wheel_sha256": "9ee13e2bb91cc3969506427ebc8db92189eee8958494f929a038755924cc4aab",
+  "native_sha256": "13e801f24536b27553bc9bff8897f363f8f023da5ef97981f67f3c4c52b30122",
+  "build_profile": "release",
+  "command": [
+    "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-389-61b4dc82f747/workdir/calc-flow/target/benchmark-venv/bin/python",
+    "-m",
+    "maturin",
+    "build",
+    "--release",
+    "--locked",
+    "--out",
+    "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-389-61b4dc82f747/workdir/calc-flow/target/sql-release"
+  ],
+  "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)\nbinary: rustc\ncommit-hash: 4a4ef493e3a1488c6e321570238084b38948f6db\ncommit-date: 2026-03-02\nhost: x86_64-unknown-linux-gnu\nrelease: 1.94.0\nLLVM version: 21.1.8",
+  "python": "3.13.9",
+  "python_executable": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-389-61b4dc82f747/workdir/calc-flow/target/benchmark-venv/bin/python"
+}

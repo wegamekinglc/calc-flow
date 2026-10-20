@@ -29,6 +29,8 @@ argmax returns the lag of the oldest tied maximum; ASOF retains the fixture's
 zero tolerance and records its equivalent left equality join. See the
 [operator semantics](../docs/benchmark-suite.md#inputs-correctness-and-timing-boundaries)
 for timing, frame and reference-algorithm details.
+The [DAL-389 results](sql-operators/README.md) retain all 98 added cells,
+their raw samples, build identity and validation commands.
 
 New engine/warm base/head measurements have a same-runner, two-round +5%
 regression gate using paired-median confidence lower bounds; cases the
