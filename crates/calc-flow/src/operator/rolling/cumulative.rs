@@ -404,7 +404,7 @@ mod tests {
             if values[0].is_infinite() {
                 assert!(value.is_nan());
             } else {
-                assert_eq!(value, f64::INFINITY);
+                assert_eq!(value.to_bits(), f64::INFINITY.to_bits());
             }
         }
     }

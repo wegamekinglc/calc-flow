@@ -150,7 +150,7 @@ async fn test_cumulative_snapshot_rejects_missing_prefix_inventory() {
             .as_any()
             .downcast_ref::<Float64Array>()
             .unwrap();
-        assert_eq!(total.value(0), 30.0);
+        assert_eq!(total.value(0).to_bits(), 30.0_f64.to_bits());
     }
 }
 
@@ -185,7 +185,7 @@ async fn test_cumulative_snapshot_restores_pending_only_entity() {
             .as_any()
             .downcast_ref::<Float64Array>()
             .unwrap();
-        assert_eq!(total.value(0), 20.0);
+        assert_eq!(total.value(0).to_bits(), 20.0_f64.to_bits());
     }
 }
 
@@ -249,7 +249,7 @@ async fn test_cumulative_snapshot_restores_summaries_and_pending_rows() {
         .as_any()
         .downcast_ref::<Float64Array>()
         .unwrap();
-    assert_eq!(variance.value(0), 2.0);
+    assert_eq!(variance.value(0).to_bits(), 2.0_f64.to_bits());
     assert!(variance.is_null(1));
     let low = output[1]
         .column_by_name("low")
@@ -257,8 +257,8 @@ async fn test_cumulative_snapshot_restores_summaries_and_pending_rows() {
         .as_any()
         .downcast_ref::<Float64Array>()
         .unwrap();
-    assert_eq!(low.value(0), 1e12);
-    assert_eq!(low.value(1), 10.0);
+    assert_eq!(low.value(0).to_bits(), 1e12_f64.to_bits());
+    assert_eq!(low.value(1).to_bits(), 10.0_f64.to_bits());
     let context = StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(2)));
     for operator in [&mut source, &mut restored] {
         let next = float64_fast_record(&[(3, "a", 3, Some(1e12 + 4.0)), (3, "b", 3, Some(20.0))]);
@@ -284,8 +284,8 @@ async fn test_cumulative_snapshot_restores_summaries_and_pending_rows() {
         .as_any()
         .downcast_ref::<Float64Array>()
         .unwrap();
-    assert_eq!(variance.value(0), 4.0);
-    assert_eq!(variance.value(1), 50.0);
+    assert_eq!(variance.value(0).to_bits(), 4.0_f64.to_bits());
+    assert_eq!(variance.value(1).to_bits(), 50.0_f64.to_bits());
 }
 
 #[test]
