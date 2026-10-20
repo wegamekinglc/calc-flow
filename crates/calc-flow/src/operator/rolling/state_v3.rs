@@ -787,6 +787,29 @@ impl<'a> StateDecoder<'a> {
         group: Option<u64>,
         payload: Option<&[u8]>,
     ) -> Result<()> {
+        let (group, payload) = self.cumulative_row_payload(entity_id, group, payload)?;
+        let (group_index, accumulator) = self.decode_cumulative_summary(group, payload)?;
+        let entity = self.entity(entity_id)?.0.clone();
+        let state = self
+            .decoded
+            .histories
+            .by_entity
+            .entry(entity)
+            .or_insert_with(|| EntityRollingState::fresh(self.compiled));
+        if state.windows.is_empty() {
+            state.windows = super::fresh_windows(self.compiled);
+        }
+        state.windows[group_index] = WindowState::Cumulative(accumulator);
+        self.cumulative_groups.insert((entity_id, group));
+        self.mark_used(entity_id)
+    }
+
+    fn cumulative_row_payload<'b>(
+        &self,
+        entity_id: u64,
+        group: Option<u64>,
+        payload: Option<&'b [u8]>,
+    ) -> Result<(u64, &'b [u8])> {
         if self.compiled.state_layout_version != super::ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION {
             return Err(state_format("cumulative row requires layout 4".to_owned()));
         }
@@ -802,6 +825,14 @@ impl<'a> StateDecoder<'a> {
                 "cumulative rows are not ordered and unique".to_owned(),
             ));
         }
+        Ok((group, payload))
+    }
+
+    fn decode_cumulative_summary(
+        &self,
+        group: u64,
+        payload: &[u8],
+    ) -> Result<(usize, super::CumulativeAccumulator)> {
         let group_index = usize::try_from(group)
             .map_err(|_| state_format("invalid cumulative group".to_owned()))?;
         let Some(CompiledWindowGroup::Cumulative {
@@ -818,19 +849,7 @@ impl<'a> StateDecoder<'a> {
             *statistic,
             self.input_schema.field(*input_index).data_type(),
         )?;
-        let entity = self.entity(entity_id)?.0.clone();
-        let state = self
-            .decoded
-            .histories
-            .by_entity
-            .entry(entity)
-            .or_insert_with(|| EntityRollingState::fresh(self.compiled));
-        if state.windows.is_empty() {
-            state.windows = super::fresh_windows(self.compiled);
-        }
-        state.windows[group_index] = WindowState::Cumulative(accumulator);
-        self.cumulative_groups.insert((entity_id, group));
-        self.mark_used(entity_id)
+        Ok((group_index, accumulator))
     }
 
     fn entity(&self, entity_id: u64) -> Result<&(Vec<Option<KeyValue>>, Vec<ScalarValue>)> {

@@ -8,7 +8,11 @@ use super::{
     CompiledAggregate, Statistic, SumClass, compare_samples, float_sample, internal_error,
     operator_error, signed_sample, state_format, typed_null, unsigned_sample,
 };
-use crate::Result;
+use crate::{CalcFlowError, Result};
+
+fn inconsistent_summary() -> CalcFlowError {
+    state_format("cumulative summary is inconsistent with its group".to_owned())
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", content = "value", deny_unknown_fields)]
@@ -83,6 +87,45 @@ impl NumericValue {
             )),
         })
     }
+
+    fn matches_input_class(&self, input_type: &DataType) -> bool {
+        matches!(
+            (SumClass::from_input(input_type), self),
+            (SumClass::Signed, Self::Signed(_) | Self::SignedTotal(_))
+                | (
+                    SumClass::Unsigned,
+                    Self::Unsigned(_) | Self::UnsignedTotal(_)
+                )
+                | (SumClass::Float, Self::Float(_))
+        )
+    }
+
+    fn validate_group(&self, statistic: Statistic, input_type: &DataType) -> Result<()> {
+        let total = matches!(self, Self::SignedTotal(_) | Self::UnsignedTotal(_));
+        if !self.matches_input_class(input_type)
+            || ((statistic == Statistic::Sum
+                && !matches!(SumClass::from_input(input_type), SumClass::Float))
+                != total)
+        {
+            return Err(inconsistent_summary());
+        }
+        if matches!(statistic, Statistic::Min | Statistic::Max) {
+            self.validate_extremum(input_type)?;
+        }
+        Ok(())
+    }
+
+    fn validate_extremum(&self, input_type: &DataType) -> Result<()> {
+        let scalar = self
+            .scalar("cumulative")
+            .map_err(|_| inconsistent_summary())?
+            .cast_to(input_type)
+            .map_err(|_| inconsistent_summary())?;
+        if !super::is_valid_sample(&scalar) {
+            return Err(inconsistent_summary());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -112,29 +155,7 @@ impl CumulativeAccumulator {
                 let next = NumericValue::from_scalar(value);
                 self.value = Some(NumericValue::add(self.value.as_ref(), next, node)?);
             }
-            Statistic::Min | Statistic::Max => {
-                let replace =
-                    if let Some(previous) = &self.value {
-                        let previous = previous.scalar(node)?.cast_to(&value.data_type()).map_err(
-                            |error| {
-                                internal_error(format!(
-                                    "cumulative extremum type mismatch: {error}"
-                                ))
-                            },
-                        )?;
-                        let order = compare_samples(value, &previous);
-                        if statistic == Statistic::Min {
-                            order.is_lt()
-                        } else {
-                            order.is_gt()
-                        }
-                    } else {
-                        true
-                    };
-                if replace {
-                    self.value = Some(NumericValue::from_scalar(value));
-                }
-            }
+            Statistic::Min | Statistic::Max => self.add_extremum(value, statistic, node)?,
             Statistic::Variance => self.add_variance(float_sample(value), count),
             _ => return Err(internal_error("unsupported cumulative statistic")),
         }
@@ -142,7 +163,34 @@ impl CumulativeAccumulator {
         Ok(())
     }
 
-    #[allow(clippy::cast_precision_loss, reason = "variance is a Float64 readout")]
+    fn add_extremum(
+        &mut self,
+        value: &ScalarValue,
+        statistic: Statistic,
+        node: &str,
+    ) -> Result<()> {
+        let replace = if let Some(previous) = &self.value {
+            let previous = previous
+                .scalar(node)?
+                .cast_to(&value.data_type())
+                .map_err(|error| {
+                    internal_error(format!("cumulative extremum type mismatch: {error}"))
+                })?;
+            let order = compare_samples(value, &previous);
+            if statistic == Statistic::Min {
+                order.is_lt()
+            } else {
+                order.is_gt()
+            }
+        } else {
+            true
+        };
+        if replace {
+            self.value = Some(NumericValue::from_scalar(value));
+        }
+        Ok(())
+    }
+
     fn add_variance(&mut self, sample: f64, count: u64) {
         if sample.is_infinite() {
             self.has_infinity = true;
@@ -150,24 +198,7 @@ impl CumulativeAccumulator {
             if self.valid_count == 0 {
                 self.origin_bits = sample.to_bits();
             }
-            let shifted = sample - f64::from_bits(self.origin_bits);
-            let mean = f64::from_bits(self.mean_bits);
-            let delta = shifted - mean;
-            let next_mean = if self.valid_count == 0 {
-                0.0
-            } else if delta.is_finite() {
-                mean + delta / count as f64
-            } else {
-                let weight = 1.0 / count as f64;
-                mean * (1.0 - weight) + shifted * weight
-            };
-            let next_m2 = if self.valid_count == 0 {
-                0.0
-            } else if delta.is_infinite() {
-                f64::INFINITY
-            } else {
-                f64::from_bits(self.m2_bits) + delta * (shifted - next_mean)
-            };
+            let (next_mean, next_m2) = self.next_variance(sample, count);
             // Once M2 overflows, its classification is permanent. Keep
             // a finite mean so the durable summary remains canonical.
             if next_mean.is_finite() {
@@ -175,6 +206,29 @@ impl CumulativeAccumulator {
             }
             self.m2_bits = next_m2.to_bits();
         }
+    }
+
+    #[allow(clippy::cast_precision_loss, reason = "variance is a Float64 readout")]
+    fn next_variance(&self, sample: f64, count: u64) -> (f64, f64) {
+        let shifted = sample - f64::from_bits(self.origin_bits);
+        let mean = f64::from_bits(self.mean_bits);
+        let delta = shifted - mean;
+        let next_mean = if self.valid_count == 0 {
+            0.0
+        } else if delta.is_finite() {
+            mean + delta / count as f64
+        } else {
+            let weight = 1.0 / count as f64;
+            mean * (1.0 - weight) + shifted * weight
+        };
+        let next_m2 = if self.valid_count == 0 {
+            0.0
+        } else if delta.is_infinite() {
+            f64::INFINITY
+        } else {
+            f64::from_bits(self.m2_bits) + delta * (shifted - next_mean)
+        };
+        (next_mean, next_m2)
     }
 
     #[allow(clippy::cast_precision_loss, reason = "variance is a Float64 readout")]
@@ -218,66 +272,39 @@ impl CumulativeAccumulator {
     ) -> Result<Self> {
         let state: Self = serde_json::from_slice(bytes)
             .map_err(|error| state_format(format!("invalid cumulative summary: {error}")))?;
-        let invalid =
-            || state_format("cumulative summary is inconsistent with its group".to_owned());
         if state.valid_count == 0 {
             return if state == Self::default() {
                 Ok(state)
             } else {
-                Err(invalid())
+                Err(inconsistent_summary())
             };
         }
         if statistic == Statistic::Variance {
-            if state.value.is_some()
-                || !f64::from_bits(state.origin_bits).is_finite()
-                || !f64::from_bits(state.mean_bits).is_finite()
-                || f64::from_bits(state.m2_bits).is_nan()
-                || f64::from_bits(state.m2_bits) < 0.0
-            {
-                return Err(invalid());
-            }
+            state.validate_variance()?;
         } else {
-            if state.origin_bits != 0
-                || state.mean_bits != 0
-                || state.m2_bits != 0
-                || state.has_infinity
-            {
-                return Err(invalid());
-            }
-            let value = state.value.as_ref().ok_or_else(invalid)?;
-            let correct_class = matches!(
-                (SumClass::from_input(input_type), value),
-                (
-                    SumClass::Signed,
-                    NumericValue::Signed(_) | NumericValue::SignedTotal(_)
-                ) | (
-                    SumClass::Unsigned,
-                    NumericValue::Unsigned(_) | NumericValue::UnsignedTotal(_)
-                ) | (SumClass::Float, NumericValue::Float(_))
-            );
-            let total = matches!(
-                value,
-                NumericValue::SignedTotal(_) | NumericValue::UnsignedTotal(_)
-            );
-            if !correct_class
-                || ((statistic == Statistic::Sum
-                    && !matches!(SumClass::from_input(input_type), SumClass::Float))
-                    != total)
-            {
-                return Err(invalid());
-            }
-            if matches!(statistic, Statistic::Min | Statistic::Max) {
-                let scalar = value
-                    .scalar("cumulative")
-                    .map_err(|_| invalid())?
-                    .cast_to(input_type)
-                    .map_err(|_| invalid())?;
-                if !super::is_valid_sample(&scalar) {
-                    return Err(invalid());
-                }
-            }
+            state.validate_value(statistic, input_type)?;
         }
         Ok(state)
+    }
+
+    fn validate_variance(&self) -> Result<()> {
+        if self.value.is_some()
+            || !f64::from_bits(self.origin_bits).is_finite()
+            || !f64::from_bits(self.mean_bits).is_finite()
+            || f64::from_bits(self.m2_bits).is_nan()
+            || f64::from_bits(self.m2_bits) < 0.0
+        {
+            return Err(inconsistent_summary());
+        }
+        Ok(())
+    }
+
+    fn validate_value(&self, statistic: Statistic, input_type: &DataType) -> Result<()> {
+        if self.origin_bits != 0 || self.mean_bits != 0 || self.m2_bits != 0 || self.has_infinity {
+            return Err(inconsistent_summary());
+        }
+        let value = self.value.as_ref().ok_or_else(inconsistent_summary)?;
+        value.validate_group(statistic, input_type)
     }
 }
 
