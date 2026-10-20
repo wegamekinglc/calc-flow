@@ -23,6 +23,15 @@ is accepted. The report includes new average, 64/256-row argmax, 64-row unique
 count, cross-section mean, ten-second tumbling sum, and backward ASOF cases.
 Unsupported library/scenario combinations remain explicit cells.
 
+Calc Flow SQL and raw DataFusion cover all fourteen stream scenarios, including
+these seven additional operators, at the original 10-to-10M row scales. SQL
+argmax returns the lag of the oldest tied maximum; ASOF retains the fixture's
+zero tolerance and records its equivalent left equality join. See the
+[operator semantics](../docs/benchmark-suite.md#inputs-correctness-and-timing-boundaries)
+for timing, frame and reference-algorithm details.
+The [DAL-389 results](sql-operators/README.md) retain all 98 added cells,
+their raw samples, build identity and validation commands.
+
 New engine/warm base/head measurements have a same-runner, two-round +5%
 regression gate using paired-median confidence lower bounds; cases the
 baseline catalog never declared are measured as new coverage without the

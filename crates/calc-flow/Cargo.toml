@@ -22,6 +22,7 @@ arrow-data = "=59.2.0"
 async-trait.workspace = true
 chrono.workspace = true
 datafusion.workspace = true
+datafusion-functions-nested.workspace = true
 futures.workspace = true
 fs2.workspace = true
 flatbuffers = "=25.12.19"

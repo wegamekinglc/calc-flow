@@ -15,6 +15,13 @@ SQL_CASES = (
     "interval_join",
     "sma20",
     "dual_sma",
+    "average",
+    "argmax64",
+    "argmax256",
+    "unique64",
+    "cs_mean",
+    "window_sum",
+    "asof_join",
 )
 POLARS_CASES = (
     "projection",
@@ -28,7 +35,7 @@ POLARS_CASES = (
 )
 POLARS_SINGLE_THREAD_CASES = POLARS_CASES[:]
 POLARS_ENGINE = "streaming"
-ROLLING_CASES = SQL_CASES[-2:]
+ROLLING_CASES = ("sma20", "dual_sma")
 # Keep this a literal tuple: the suite resolves baseline case ids by parsing
 # the baseline catalog's declarative forms, and derived assignments fail
 # closed to degraded gating.
@@ -230,6 +237,11 @@ def engine_cases(rows: int | None = None) -> list[dict]:
         )
     ]
     for case in cases:
+        if case["scenario"] == "asof_join" and case["backend"] in (
+            "calc-flow-sql",
+            "datafusion",
+        ):
+            case["reference_algorithm"] = "zero-tolerance-asof-equality-v1"
         if case["scenario"] == "interval_join":
             case["reference_algorithm"] = (
                 "native-interval-v1"

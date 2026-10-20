@@ -213,6 +213,18 @@ def expected_output(data: Workload, scenario: str) -> pa.Table:
     return pa.table({"sequence": sequence, "value": values})
 
 
+def _argmax_sql(window: int) -> str:
+    # array_position is one-based and chooses the oldest tied maximum. Count
+    # rows, including the partial prefix, to return a lag within each entity.
+    return (
+        "SELECT sequence, CAST(COUNT(*) OVER trailing - "
+        "CAST(array_position(array_agg(price) OVER trailing, "
+        "MAX(price) OVER trailing) AS BIGINT) AS DOUBLE) AS value FROM input "
+        "WINDOW trailing AS (PARTITION BY symbol ORDER BY event_time, sequence "
+        f"ROWS BETWEEN {window - 1} PRECEDING AND CURRENT ROW)"
+    )
+
+
 def sql_query(scenario: str) -> str:
     # Closed, literal query catalog: scenario names never become SQL fragments.
     queries = {
@@ -257,6 +269,38 @@ def sql_query(scenario: str) -> str:
             "fast AS (PARTITION BY symbol ORDER BY event_time, sequence "
             "ROWS BETWEEN 4 PRECEDING AND CURRENT ROW)"
         ),
+        "average": (
+            "SELECT sequence, AVG(price) OVER (PARTITION BY symbol "
+            "ORDER BY event_time, sequence ROWS BETWEEN UNBOUNDED PRECEDING "
+            "AND CURRENT ROW) AS value FROM input"
+        ),
+        "argmax64": _argmax_sql(64),
+        "argmax256": _argmax_sql(256),
+        "unique64": (
+            "SELECT sequence, CAST(COUNT(DISTINCT price) OVER (PARTITION BY symbol "
+            "ORDER BY event_time, sequence ROWS BETWEEN 63 PRECEDING "
+            "AND CURRENT ROW) AS DOUBLE) AS value FROM input"
+        ),
+        "cs_mean": (
+            "SELECT sequence, AVG(price) OVER (PARTITION BY event_time) AS value "
+            "FROM input"
+        ),
+        "window_sum": (
+            "SELECT symbol, arrow_cast(date_bin(INTERVAL '10 seconds', event_time, "
+            "TIMESTAMP '1970-01-01 00:00:00'), "
+            "'Timestamp(Microsecond, Some(\"UTC\"))') AS window_start, "
+            "SUM(price) AS value FROM input GROUP BY symbol, window_start"
+        ),
+        # The maintained ASOF workload declares tolerance=0. Its backward
+        # match is therefore equality at the event time, with the highest
+        # reference sequence breaking ties and unmatched left rows retained.
+        "asof_join": (
+            "SELECT input.sequence, reference.price AS value FROM input LEFT JOIN "
+            "(SELECT symbol, event_time, price, ROW_NUMBER() OVER "
+            "(PARTITION BY symbol, event_time ORDER BY sequence DESC) AS position "
+            "FROM reference) AS reference ON input.symbol = reference.symbol "
+            "AND input.event_time = reference.event_time AND reference.position = 1"
+        ),
     }
     try:
         return queries[scenario]
@@ -269,7 +313,7 @@ def _calc_flow(data: Workload, scenario: str):
         ("input", "dimension")
         if scenario == "join"
         else ("input", "reference")
-        if scenario == "interval_join"
+        if scenario in ("interval_join", "asof_join")
         else ("input",)
     )
     plan = (
@@ -281,7 +325,7 @@ def _calc_flow(data: Workload, scenario: str):
     inputs = {"input": Batch.from_pyarrow(data.table)}
     if scenario == "join":
         inputs["dimension"] = Batch.from_pyarrow(data.dimension)
-    elif scenario == "interval_join":
+    elif scenario in ("interval_join", "asof_join"):
         inputs["reference"] = inputs["input"]
     return lambda: plan.execute(inputs).outputs["output"].to_pyarrow()
 
@@ -300,7 +344,7 @@ def _datafusion(data: Workload, scenario: str):
         context.register_record_batches("input", [batches])
         if scenario == "join":
             context.register_record_batches("dimension", [dimension])
-        elif scenario == "interval_join":
+        elif scenario in ("interval_join", "asof_join"):
             context.register_record_batches("reference", [batches])
         return pa.Table.from_batches(context.sql(query).collect())
 
