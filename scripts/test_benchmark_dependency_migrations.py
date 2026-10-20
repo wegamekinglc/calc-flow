@@ -18,7 +18,7 @@ from scripts.benchmark_suite.dependency_migrations import (
     validate_dependency_migrations,
 )
 from scripts.benchmark_suite.legacy import combine_blocks
-from scripts.benchmark_suite.migrations import load_migrations
+from scripts.benchmark_suite.migrations import declared_migrations, load_migrations
 from scripts.benchmark_suite.report import render_report
 from scripts.benchmark_suite.rust import _stamp_fingerprints
 from scripts.benchmark_suite.rust_provenance import target_dependency_fingerprint
@@ -124,6 +124,21 @@ def declaration(identities: dict) -> dict:
     }
 
 
+def changed_workload() -> tuple[dict, dict]:
+    identities = provenance()
+    path = "crates/calc-flow/benches/core.rs"
+    identities["candidate"]["workload_identity"][path] = "d" * 64
+    identities["candidate"] = refresh(identities["candidate"])
+    migration = {
+        "target": "core",
+        "baseline_sha256": "c" * 64,
+        "candidate_sha256": "d" * 64,
+        "reason": "Retain the explicit output budget through the benchmark feature",
+        "reference": "DAL-388 regression fixture",
+    }
+    return identities, migration
+
+
 def blocks(stamps: dict) -> dict:
     return {
         side: [
@@ -201,6 +216,84 @@ class DependencyMigrationTests(unittest.TestCase):
         self.assertEqual(
             next(case for case in cases if case["scenario"] == "other/case")["status"],
             "error",
+        )
+
+    def test_dependency_and_workload_migrations_preserve_both_original_endpoints(self):
+        identities, migration = changed_workload()
+        entry = declaration(identities)
+        applied = declared_migrations(identities, [migration])
+        stamps = _stamp_fingerprints(identities, applied)
+        original = copy.deepcopy((identities, stamps, entry))
+        accepted = stamp_dependency_migrations(identities, stamps, [self.entry, entry])
+        self.assertEqual((identities, stamps, entry), original)
+        self.assertNotEqual(
+            entry["baseline"]["workload_fingerprint"],
+            entry["candidate"]["workload_fingerprint"],
+        )
+        for side in accepted:
+            self.assertEqual(
+                accepted[side]["core"],
+                {**stamps[side]["core"], "dependency_migration": entry},
+            )
+            self.assertEqual(
+                accepted[side]["core"]["workload_migration"], migration["reference"]
+            )
+        with patch(LOADER, return_value=[self.entry, entry]):
+            cases = combine_blocks(SHARD, blocks(accepted))
+        migrated = next(case for case in cases if case["scenario"] == "core/case")
+        self.assertEqual(migrated["status"], "ok")
+        self.assertEqual(migrated["result"]["verdict"], "informational-slowdown")
+        self.assertEqual(migrated["baseline"], [[1.0] * 10] * 2)
+        self.assertEqual(migrated["candidate"], [[1.2] * 10] * 2)
+        report = {
+            "provenance": identities,
+            "releases": {
+                side: {
+                    "git_sha": identity["git_sha"],
+                    "cargo_lock_sha256": identity["dependency_identity"][
+                        "cargo_lock_sha256"
+                    ],
+                }
+                for side, identity in identities.items()
+            },
+            "dependency_migrations": applied_dependency_migrations(accepted),
+            "cases": cases,
+        }
+        with (
+            patch(LOADER, return_value=[self.entry, entry]),
+            patch(
+                "scripts.benchmark_suite.migrations.load_migrations",
+                return_value=[migration],
+            ),
+        ):
+            validate_dependency_migrations(report)
+
+    def test_simultaneous_migrations_reject_unknown_endpoints_or_common_workload(self):
+        identities, migration = changed_workload()
+        entry = declaration(identities)
+        stamps = _stamp_fingerprints(
+            identities, declared_migrations(identities, [migration])
+        )
+        invalid = [
+            self.entry,
+            {**entry, "measured_workload_fingerprint": "e" * 64},
+        ]
+        for side in ("baseline", "candidate"):
+            for field in entry[side]:
+                invalid.append({**entry, side: {**entry[side], field: "e" * 64}})
+        for declared in invalid:
+            with self.subTest(declared=declared):
+                rejected = stamp_dependency_migrations(identities, stamps, [declared])
+                self.assertEqual(rejected, stamps)
+                self.assertTrue(
+                    all(
+                        case["status"] == "error"
+                        for case in self.cases(blocks(rejected))
+                    )
+                )
+        unstamped = _stamp_fingerprints(identities, {})
+        self.assertEqual(
+            stamp_dependency_migrations(identities, unstamped, [entry]), unstamped
         )
 
     def test_unknown_direction_target_workload_and_lock_cannot_migrate(self):
@@ -446,7 +539,7 @@ class DependencyRegistryTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         entries = load_dependency_migrations(root)
         migrations = load_migrations(root)
-        self.assertEqual(len(entries), 12)
+        self.assertEqual(len(entries), 14)
         for entry in entries:
             path = f"crates/calc-flow/benches/{entry['target']}.rs"
             self.assertTrue(
