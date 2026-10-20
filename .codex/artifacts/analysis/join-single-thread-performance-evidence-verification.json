@@ -1,0 +1,21 @@
+{
+  "status": "passed",
+  "archive": "join-single-thread-performance-evidence.tar.gz",
+  "archive_sha256": "a3dda02639851c8d3f43674480bac9660a1b6e2121ad9ea9323a696ec2075f87",
+  "archive_bytes": 266719,
+  "members_verified": 99,
+  "member_hashes_verified": true,
+  "formal_report_hash_verified": true,
+  "source_revisions": {
+    "base": "78b75724f408f9d46a479488b4ecc76ea17aec68",
+    "candidate": "98012d8a91bb3d0847a50cb77d21025f13629864"
+  },
+  "source_trees": {
+    "base": "2cde42df5d7ef9412b3871ee4a4142d08c95371e",
+    "candidate": "1ae0a8e48818c7464fbf51425c9931347cafa928"
+  },
+  "formal_observations": 200,
+  "excluded_warmups": 20,
+  "native_imports": false,
+  "new_measurements": false
+}
