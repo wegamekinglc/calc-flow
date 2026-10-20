@@ -9,6 +9,14 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-21: Prepare the `calc-flow-python` 2026.10.21 release, aligning
+  workspace crates, exact native dependencies, Python metadata, and current
+  documentation. This release includes the DataFusion 55 / Arrow 59 upgrade,
+  streaming Join, ASOF, and Window state and execution improvements, and native
+  streaming ingress for materialized Arrow inputs. SQL checkpoints from
+  DataFusion 54 and ASOF checkpoints marked with Arrow 58 require replay into
+  a new job when upgrading; project and manifest format versions remain 3.
+
 - 2026-10-20: Reuse source-column width checks and borrowed retained chunks
   during streaming Join output preparation. Hash bounded short-string blocks
   with shared cooperation accounting, and append interval match runs directly
