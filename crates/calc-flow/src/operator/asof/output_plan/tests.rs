@@ -113,6 +113,9 @@ fn output_plan_reserves_timestamp_timezone_backing() {
 #[path = "tests/backing_allocation.rs"]
 mod backing_allocation;
 
+#[path = "tests/compact_positions.rs"]
+mod compact_positions;
+
 #[test]
 fn cpu_pipeline_output_metadata_uses_allocation_bound_instead_of_legacy_row_credit() {
     let rows = 65_536;

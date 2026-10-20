@@ -183,22 +183,30 @@ fn test_output_payload_access_keeps_order_without_reading_metadata_or_the_unused
             );
         }
         output.opposite = &empty_opposite;
-        let pair = MatchedPair {
+        let pairs = vec![MatchedPair {
             pos: 1,
             opposite_index: usize::MAX,
-        };
+        }];
         assert_eq!(
-            output.side_record(&pair, incoming_left).offset(),
+            output
+                .side_payloads(&pairs, incoming_left)
+                .next()
+                .unwrap()
+                .offset(),
             fixture.admitted[1].record.offset()
         );
         output.admitted = &empty_admitted;
         output.opposite = &fixture.opposite;
-        let pair = MatchedPair {
+        let pairs = vec![MatchedPair {
             pos: usize::MAX,
             opposite_index: 2,
-        };
+        }];
         assert_eq!(
-            output.side_record(&pair, !incoming_left).offset(),
+            output
+                .side_payloads(&pairs, !incoming_left)
+                .next()
+                .unwrap()
+                .offset(),
             fixture.opposite[2].record.offset()
         );
     }

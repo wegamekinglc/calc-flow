@@ -9,6 +9,15 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-20: Reuse source-column width checks and borrowed retained chunks
+  during streaming Join output preparation. Hash bounded short-string blocks
+  with shared cooperation accounting, and append interval match runs directly
+  during worker fill and ordered result assembly. Store single-source ASOF
+  output positions as compact nullable indices and preserve one-pass output
+  gathering when multiple sources appear. Reuse partial-eviction summaries and
+  move captured key owners directly into checkpoint tombstones. Preserve input
+  transactions, explicit budgets, output order, and checkpoint identities.
+
 - 2026-10-19: Prepare large streaming ASOF matches and output references in
   contiguous CPU-sized fragments, including a single hot key. Preserve local
   fragment references and shared Arrow spans, and allow narrow outputs to use

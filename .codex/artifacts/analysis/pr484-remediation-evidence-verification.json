@@ -1,0 +1,28 @@
+{
+  "status": "passed",
+  "archive": "pr484-remediation-evidence.tar.gz",
+  "archive_sha256": "cd4100a2ed26c5a4b7704734b7bb3a443f54e77b127784f93b22114856720cd7",
+  "archive_bytes": 152142,
+  "members_verified": 56,
+  "member_hashes_verified": true,
+  "formal_report_hash_verified": true,
+  "source_revisions": {
+    "base": "98012d8a91bb3d0847a50cb77d21025f13629864",
+    "candidate": "00c313ba0ab144e0f1537c7160ee323b5ccbef18"
+  },
+  "source_trees": {
+    "base": "1ae0a8e48818c7464fbf51425c9931347cafa928",
+    "candidate": "65c98f18e09b50a18245bbbba3c99e95c7aa6683"
+  },
+  "formal_observations": 80,
+  "excluded_warmups": 8,
+  "timing_verdicts": [
+    "inconclusive",
+    "inconclusive"
+  ],
+  "native_bytes": 107360072,
+  "native_sha256": "2740ff5037253d672f52c77193cf7de45afbd29abf49779f42a5b85fea08cc60",
+  "native_modules_byte_identical": true,
+  "native_imports": false,
+  "new_measurements": false
+}

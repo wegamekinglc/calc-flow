@@ -3,7 +3,7 @@ use super::{
     state::{BatchKey, PayloadView},
     workspace::{ColumnWorkspace, OutputColumns},
 };
-use crate::{Result, StreamingFailureReason};
+use crate::{Result, StreamingFailureReason, runtime::streaming::gather_work::GatherStop};
 use ahash::RandomState;
 use datafusion::{
     arrow::{array::ArrayRef, datatypes::Schema, record_batch::RecordBatch},
@@ -12,9 +12,18 @@ use datafusion::{
 use std::{collections::HashMap, sync::Arc};
 
 pub(super) mod backing;
+mod positions;
+#[cfg(test)]
+pub(super) use positions::test_support::take_converted as take_position_promotions;
+pub(super) use positions::{Positions, PrefixView, View as PositionView};
 
-// Fund right positions and simultaneous old/new span allocations during growth.
+// Fund single-source indices, cancellable tuple promotion, and disjoint span growth.
 const ROW_METADATA_BYTES: u64 = 96;
+const _: () = assert!((size_of::<u64>() + 1 + 3 * size_of::<Span>()) as u64 <= ROW_METADATA_BYTES);
+const _: () = assert!(
+    (size_of::<u64>() + 1 + size_of::<(usize, usize)>() + 2 * size_of::<Span>()) as u64
+        <= ROW_METADATA_BYTES
+);
 const _: () =
     assert!((size_of::<(usize, usize)>() + 3 * size_of::<Span>()) as u64 <= ROW_METADATA_BYTES);
 
@@ -27,7 +36,7 @@ pub(super) struct Span {
 
 pub(super) struct OutputSide {
     pub batches: Vec<Vec<ArrayRef>>,
-    pub positions: Vec<(usize, usize)>,
+    pub positions: Positions,
     pub spans: Vec<Span>,
     pub has_nulls: bool,
 }
@@ -55,6 +64,7 @@ pub(super) struct OutputPlanBuilder<'a> {
 
 struct SideBuilder<'a> {
     rows: OutputSide,
+    positions: Option<positions::Builder>,
     columns: Vec<OutputColumns>,
     sources: HashMap<BatchKey, usize, RandomState>,
     selected: Option<&'a [usize]>,
@@ -81,20 +91,30 @@ impl<'a> OutputPlanBuilder<'a> {
         workspace: &mut MemoryReservation,
         name: &str,
     ) -> Result<Self> {
+        Self::new_for_owner(capacity, selected, workspace, name, true)
+    }
+
+    pub fn new_for_owner(
+        capacity: usize,
+        selected: Option<&'a [Vec<usize>; 2]>,
+        workspace: &mut MemoryReservation,
+        name: &str,
+        compact: bool,
+    ) -> Result<Self> {
         let rows = (capacity as u64)
             .checked_mul(ROW_METADATA_BYTES)
             .ok_or_else(|| overflow(name))?;
         grow_workspace(workspace, checked(name, rows, 16 * 1024)?, name)?;
+        let positions = if compact {
+            positions::Builder::new(capacity)
+        } else {
+            positions::Builder::legacy(capacity)
+        };
         Ok(Self {
-            left: SideBuilder::new(
-                capacity,
-                selected.map(|columns| columns[0].as_slice()),
-                false,
-            ),
+            left: SideBuilder::new(selected.map(|columns| columns[0].as_slice()), None),
             right: SideBuilder::new(
-                capacity,
                 selected.map(|columns| columns[1].as_slice()),
-                true,
+                Some(positions),
             ),
             len: 0,
             matched: 0,
@@ -104,6 +124,15 @@ impl<'a> OutputPlanBuilder<'a> {
     pub fn with_funded_sources(mut self) -> Self {
         self.left.backing_funded = true;
         self.right.backing_funded = true;
+        self
+    }
+
+    pub fn with_stop(mut self, stop: GatherStop) -> Self {
+        self.right
+            .positions
+            .as_mut()
+            .expect("right ASOF positions builder")
+            .set_stop(stop);
         self
     }
 
@@ -152,12 +181,14 @@ impl<'a> OutputPlanBuilder<'a> {
         if let Some((source, row)) = right {
             let end = row + 1;
             self.right.record_range(source, row..end, name)?;
-            self.right.rows.positions.push((source + 1, row));
-            self.matched += 1;
-        } else {
-            self.right.rows.positions.push((0, 0));
-            self.right.rows.has_nulls = true;
         }
+        self.right
+            .positions
+            .as_mut()
+            .expect("right ASOF positions builder")
+            .push(right, name)?;
+        self.matched += u64::from(right.is_some());
+        self.right.rows.has_nulls |= right.is_none();
         self.len += 1;
         Ok(())
     }
@@ -184,6 +215,12 @@ impl<'a> OutputPlanBuilder<'a> {
         self.left.flush_run(name)?;
         self.right.flush_run(name)?;
         self.reserve_buffers(right_schema, workspace, name)?;
+        self.right.rows.positions = self
+            .right
+            .positions
+            .take()
+            .expect("right ASOF positions builder")
+            .finish();
         Ok(OutputPlan {
             left: self.left.rows,
             right: self.right.rows,
@@ -230,18 +267,17 @@ impl<'a> OutputPlanBuilder<'a> {
 }
 
 impl<'a> SideBuilder<'a> {
-    fn new(capacity: usize, selected: Option<&'a [usize]>, right: bool) -> Self {
+    fn new(selected: Option<&'a [usize]>, positions: Option<positions::Builder>) -> Self {
+        #[cfg(test)]
+        let right = positions.is_some();
         Self {
             rows: OutputSide {
                 batches: Vec::new(),
-                positions: if right {
-                    Vec::with_capacity(capacity)
-                } else {
-                    Vec::new()
-                },
+                positions: Positions::default(),
                 has_nulls: false,
                 spans: Vec::new(),
             },
+            positions,
             columns: Vec::new(),
             sources: HashMap::with_hasher(RandomState::new()),
             selected,

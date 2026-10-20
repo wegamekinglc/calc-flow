@@ -8,6 +8,101 @@ use datafusion::{
     },
     execution::memory_pool::{GreedyMemoryPool, MemoryConsumer, MemoryPool},
 };
+use std::cell::Cell;
+
+thread_local! {
+    pub(super) static PAYLOAD_LOOKUPS: Cell<usize> = const { Cell::new(0) };
+}
+
+#[test]
+fn test_output_gather_resolves_retained_chunks_once_per_run_with_sparse_coordinates() {
+    use super::super::{AdmittedRow, MatchedPair, materialization::JoinOutput, output_projection};
+
+    let mut state: StateRows = rows(3 * CHUNK_ROWS).into();
+    for reference in CHUNK_ROWS..2 * CHUNK_ROWS {
+        state.remove(reference);
+    }
+    state.remove(0);
+    state.next = 1_000_000;
+    let added = state.append(rows(3));
+    let references = [
+        1,
+        2,
+        3,
+        2 * CHUNK_ROWS + 2,
+        2 * CHUNK_ROWS + 1,
+        2 * CHUNK_ROWS + 2,
+        5,
+        added[2],
+        added[0],
+        2 * CHUNK_ROWS,
+    ];
+    let expected = references
+        .iter()
+        .map(|&reference| {
+            let payload = state.payload(reference);
+            payload
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(payload.offset())
+        })
+        .collect::<Vec<_>>();
+    let incoming = rows(1).pop().unwrap();
+    let admitted = vec![AdmittedRow {
+        record: incoming.record,
+        event_time: incoming.event_time,
+        row_id: 0,
+        retain: true,
+    }];
+    let matched = references
+        .iter()
+        .map(|&opposite_index| MatchedPair {
+            pos: 0,
+            opposite_index,
+        })
+        .collect::<Vec<_>>();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("left", DataType::Int64, false),
+        Field::new("right", DataType::Int64, false),
+    ]));
+    let output = JoinOutput {
+        schema: &schema,
+        projection: None,
+        admitted: &admitted,
+        opposite: &state,
+        matched: &matched,
+        incoming_is_left: true,
+        operator_id: "chunk-cursor",
+        admitted_charges: None,
+    };
+    super::super::reset_join_work();
+    PAYLOAD_LOOKUPS.with(|count| count.set(0));
+    let record = output_projection::materialize(&output, 0..matched.len()).unwrap();
+    assert_eq!(record.num_rows(), matched.len());
+    assert_eq!(
+        record
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .values()
+            .as_ref(),
+        expected.as_slice()
+    );
+    assert_eq!(
+        state.chunks.len(),
+        3,
+        "coordinate gaps never allocate placeholder chunks"
+    );
+    assert_eq!(super::super::join_work().retained_descriptor_views, 0);
+    assert_eq!(
+        PAYLOAD_LOOKUPS.with(Cell::get),
+        6,
+        "one initial width lookup and five chunk runs"
+    );
+}
 
 fn rows(count: usize) -> Vec<StoredRow> {
     let schema = Arc::new(Schema::new(vec![Field::new(

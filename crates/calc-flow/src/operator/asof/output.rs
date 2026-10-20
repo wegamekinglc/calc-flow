@@ -1,6 +1,6 @@
 //! Materialize an already matched ASOF prefix directly from Arrow batches.
 
-use super::output_plan::{OutputPlan, OutputSide, Span};
+use super::output_plan::{OutputPlan, OutputSide, PositionView, PrefixView, Span};
 #[cfg(test)]
 use super::state::{BatchKey, PayloadView};
 use crate::runtime::streaming::gather_work::{
@@ -15,7 +15,7 @@ use datafusion::execution::memory_pool::MemoryReservation;
 use datafusion::{
     arrow::{
         array::{Array, ArrayRef, make_array, new_null_array},
-        compute::interleave,
+        compute::{interleave, take},
         datatypes::{DataType, SchemaRef},
         record_batch::{RecordBatch, RecordBatchOptions},
     },
@@ -130,8 +130,12 @@ impl OwnedGatherPlan for MaterializationInput {
             ));
         }
         let mut right = GatherPlan::new(&self.rows.right, true);
-        right.positions = right.positions.map(|positions| &positions[range.clone()]);
-        right.column(request.index - left_fields, &request.data_type, range.len())
+        right.positions = right
+            .positions
+            .map(|positions| positions.slice(range.clone()));
+        let column = right.column(request.index - left_fields, &request.data_type, range.len())?;
+        stop.check()?;
+        Ok(column)
     }
 
     fn gather(&self, ordinal: usize, stop: &GatherStop) -> Result<ArrayRef> {
@@ -154,7 +158,9 @@ impl OwnedGatherPlan for MaterializationInput {
         stop.check()?;
         let left = GatherPlan::new(&self.rows.left, false);
         let right = GatherPlan::new(&self.rows.right, true);
-        materialize_column(&left, &right, self.rows.len, &self.requests[ordinal])
+        let column = materialize_column(&left, &right, self.rows.len, &self.requests[ordinal])?;
+        stop.check()?;
+        Ok(column)
     }
 }
 
@@ -391,7 +397,7 @@ impl OutputSide {
     fn empty(len: usize) -> Self {
         Self {
             batches: Vec::new(),
-            positions: Vec::with_capacity(len),
+            positions: Vec::with_capacity(len).into(),
             spans: Vec::new(),
             has_nulls: false,
         }
@@ -399,7 +405,7 @@ impl OutputSide {
 
     fn push(&mut self, selected: Option<PayloadView<'_>>, by_key: &mut SourceMap, right: bool) {
         let Some(row) = selected else {
-            self.positions.push((0, 0));
+            self.positions.legacy_mut().push((0, 0));
             self.has_nulls = true;
             return;
         };
@@ -410,7 +416,9 @@ impl OutputSide {
             self.batches.push(row.batch.record.columns().to_vec());
             source
         });
-        self.positions.push((source + usize::from(right), row.row));
+        self.positions
+            .legacy_mut()
+            .push((source + usize::from(right), row.row));
         if !right {
             if let Some(span) = self.spans.last_mut()
                 && span.source == source
@@ -431,7 +439,7 @@ impl OutputSide {
 struct GatherPlan<'a> {
     batches: &'a [Vec<ArrayRef>],
     spans: &'a [Span],
-    positions: Option<&'a [(usize, usize)]>,
+    positions: Option<PositionView<'a>>,
     has_nulls: bool,
 }
 
@@ -440,7 +448,7 @@ impl<'a> GatherPlan<'a> {
         Self {
             batches: &rows.batches,
             spans: &rows.spans,
-            positions: right.then_some(rows.positions.as_slice()),
+            positions: right.then(|| rows.positions.view().slice(0..rows.positions.len())),
             has_nulls: rows.has_nulls,
         }
     }
@@ -450,14 +458,7 @@ impl<'a> GatherPlan<'a> {
             return Ok(new_null_array(data_type, len));
         }
         if let Some(positions) = &self.positions {
-            let null_column = self.has_nulls.then(|| new_null_array(data_type, 1));
-            let first = null_column
-                .as_ref()
-                .map_or_else(|| self.batches[0][index].as_ref(), |column| column.as_ref());
-            let columns = std::iter::once(first)
-                .chain(self.batches.iter().map(|batch| batch[index].as_ref()))
-                .collect::<Vec<&dyn Array>>();
-            return interleave(&columns, positions).map_err(|error| super::arrow_error(&error));
+            return position_column(positions, self.batches, index, data_type, self.has_nulls);
         }
         if let Some(column) = self.shared_column(index)? {
             return Ok(column);
@@ -478,11 +479,11 @@ impl<'a> GatherPlan<'a> {
     }
 
     fn shared_column(&self, index: usize) -> Result<Option<ArrayRef>> {
-        let column = if let Some(positions) = self.positions {
+        let column = if let Some(positions) = &self.positions {
             if self.has_nulls {
                 return Ok(None);
             }
-            let Some(&(source, 0)) = positions.first() else {
+            let Some((source, 0)) = positions.iter().next() else {
                 return Ok(None);
             };
             let Some(batch) = source.checked_sub(1) else {
@@ -493,7 +494,7 @@ impl<'a> GatherPlan<'a> {
                 || !positions
                     .iter()
                     .enumerate()
-                    .all(|(row, &position)| position == (source, row))
+                    .all(|(row, position)| position == (source, row))
             {
                 return Ok(None);
             }
@@ -516,6 +517,49 @@ impl<'a> GatherPlan<'a> {
             .map_err(|error| super::arrow_error(&error))?;
         Ok((data.get_buffer_memory_size() <= visible).then(|| Arc::clone(column)))
     }
+}
+
+fn position_column(
+    positions: &PositionView<'_>,
+    batches: &[Vec<ArrayRef>],
+    index: usize,
+    data_type: &DataType,
+    has_nulls: bool,
+) -> Result<ArrayRef> {
+    match positions.prefix.as_ref() {
+        Some(prefix) => compact_position_column(prefix, batches, index, data_type),
+        None => interleaved_positions(positions.pairs, batches, index, data_type, has_nulls),
+    }
+}
+
+fn compact_position_column(
+    prefix: &PrefixView<'_>,
+    batches: &[Vec<ArrayRef>],
+    index: usize,
+    data_type: &DataType,
+) -> Result<ArrayRef> {
+    let Some(source) = prefix.source else {
+        return Ok(new_null_array(data_type, prefix.len()));
+    };
+    take(batches[source][index].as_ref(), &prefix.indices(), None)
+        .map_err(|error| super::arrow_error(&error))
+}
+
+fn interleaved_positions(
+    positions: &[(usize, usize)],
+    batches: &[Vec<ArrayRef>],
+    index: usize,
+    data_type: &DataType,
+    has_nulls: bool,
+) -> Result<ArrayRef> {
+    let null_column = has_nulls.then(|| new_null_array(data_type, 1));
+    let first = null_column
+        .as_ref()
+        .map_or_else(|| batches[0][index].as_ref(), |column| column.as_ref());
+    let columns = std::iter::once(first)
+        .chain(batches.iter().map(|batch| batch[index].as_ref()))
+        .collect::<Vec<&dyn Array>>();
+    interleave(&columns, positions).map_err(|error| super::arrow_error(&error))
 }
 
 #[cfg(test)]

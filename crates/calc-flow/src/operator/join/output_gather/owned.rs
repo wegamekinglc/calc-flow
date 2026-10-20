@@ -1,6 +1,5 @@
 use super::super::{
-    MatchedPair, PayloadRef, canonical_column, columnar::RowPayload, materialization::JoinOutput,
-    operator_error,
+    PayloadRef, canonical_column, columnar::RowPayload, materialization::JoinOutput, operator_error,
 };
 use crate::runtime::streaming::gather_work::{
     AttemptCleanup, GatherOperatorId, GatherStop, ObservedTicket, ParallelCpuWork,
@@ -87,18 +86,17 @@ fn supports_capture(output: &JoinOutput<'_>, range: &Range<usize>) -> bool {
     }
     let selected = output.matched.slice(range.clone());
     let matched: &dyn super::super::matches::Matches = &selected;
-    if matched.is_empty() || !matched.iter().all(|pair| detached_pair(output, &pair)) {
+    if matched.is_empty()
+        || !output.side_payloads(matched, true).all(detached_payload)
+        || !output.side_payloads(matched, false).all(detached_payload)
+    {
         return false;
     }
     true
 }
 
-fn detached_pair(output: &JoinOutput<'_>, pair: &MatchedPair) -> bool {
-    let (left, right) = output.records(pair);
-    left.shared_columns().is_some()
-        && right.shared_columns().is_some()
-        && left.owner().is_some()
-        && right.owner().is_some()
+fn detached_payload(payload: PayloadRef<'_>) -> bool {
+    payload.shared_columns().is_some() && payload.owner().is_some()
 }
 
 async fn capture(
@@ -120,16 +118,8 @@ async fn capture(
     {
         return Ok(None);
     }
-    let left = OwnedSide::capture(
-        matched.iter().map(|pair| output.side_record(&pair, true)),
-        context,
-    )
-    .await?;
-    let right = OwnedSide::capture(
-        matched.iter().map(|pair| output.side_record(&pair, false)),
-        context,
-    )
-    .await?;
+    let left = OwnedSide::capture(output.side_payloads(matched, true), context).await?;
+    let right = OwnedSide::capture(output.side_payloads(matched, false), context).await?;
     Ok(Some(Arc::new(Columns {
         left,
         right,

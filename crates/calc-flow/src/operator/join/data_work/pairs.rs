@@ -1,4 +1,4 @@
-use super::super::native_lookup::scratch_error;
+use super::super::{matches::Matches, native_lookup::scratch_error};
 use crate::Result;
 use datafusion::execution::memory_pool::MemoryReservation;
 use parking_lot::Mutex;
@@ -76,7 +76,7 @@ pub(super) fn ordered_output(
             pairs: fragment,
             credit: fragment_credit,
         } = fragment;
-        pairs.extend(fragment.iter());
+        pairs.append_view(fragment.view());
         drop(fragment);
         drop(fragment_credit);
     }
@@ -114,6 +114,7 @@ mod tests {
             .collect();
         let credit = master.new_empty();
         credit.try_grow(count * 24).unwrap();
+        crate::operator::join::matches::reset_pair_pushes();
         let measured = allocation_counter::measure(|| {
             let output = ordered_output(fragments, Some(credit), count).unwrap();
             assert_eq!(output.pairs.len(), count);
@@ -131,6 +132,11 @@ mod tests {
         assert!(
             measured.bytes_max <= (count * size_of::<usize>() + 128) as u64,
             "merge expanded input positions with fanout: {measured:?}"
+        );
+        assert_eq!(
+            crate::operator::join::matches::pair_pushes(),
+            0,
+            "owner assembly must append existing runs rather than rebuild every pair"
         );
         assert_eq!(pool.reserved(), 0);
     }

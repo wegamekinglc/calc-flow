@@ -93,7 +93,8 @@ impl Work {
         let mut credit = self.credit.new_empty();
         let mut plan =
             OutputPlanBuilder::new(count, self.selected.as_ref(), &mut credit, &self.name)?
-                .with_funded_sources();
+                .with_funded_sources()
+                .with_stop(stop.clone());
         let prefix_credit = self.prefix_credit(runs, count)?;
         let mut prefix = state::LeftPrefix::default();
         self.append_runs(runs, &mut plan, &mut credit, &mut prefix, stop)?;
@@ -262,13 +263,13 @@ fn contiguous_right(plan: &OutputPlan) -> Option<Span> {
     if plan.right.has_nulls {
         return None;
     }
-    let &(source, start) = plan.right.positions.first()?;
+    let positions = plan.right.positions.view();
+    let (source, start) = positions.iter().next()?;
     let source_index = source.checked_sub(1)?;
-    plan.right
-        .positions
+    positions
         .iter()
         .enumerate()
-        .all(|(offset, &position)| position == (source, start + offset))
+        .all(|(offset, position)| position == (source, start + offset))
         .then_some(Span {
             source: source_index,
             start,

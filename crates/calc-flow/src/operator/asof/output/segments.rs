@@ -90,7 +90,7 @@ impl OwnedGatherPlan for SegmentedInput {
             if start < end {
                 stop.check()?;
                 let mut right = GatherPlan::new(&plan.right, true);
-                right.positions = right.positions.map(|positions| &positions[start..end]);
+                right.positions = right.positions.map(|positions| positions.slice(start..end));
                 pieces.push(right.column(
                     request.index - self.left_fields,
                     &request.data_type,

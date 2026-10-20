@@ -5,7 +5,7 @@ mod emission;
 
 use std::{ops::Range, sync::Arc};
 
-use datafusion::arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
+use datafusion::arrow::{array::ArrayRef, datatypes::SchemaRef, record_batch::RecordBatch};
 
 #[cfg(test)]
 use super::{AdmittedRow, StoredRow};
@@ -93,15 +93,30 @@ impl FlatChunk {
     }
 }
 
-/// Records one side's selected byte width, declining when a row disagrees
-/// with the width already seen.
-fn agree_row_width(
-    agreed: &mut Option<usize>,
-    record: PayloadRef<'_>,
-    columns: Option<&[(usize, usize)]>,
-) -> Option<()> {
-    let bytes = side_row_bytes(record, columns)?;
-    agrees_with(agreed, bytes)
+/// Allocation-free width cache for one immutable source-column run.
+#[derive(Default)]
+struct RowWidth<'a> {
+    bytes: Option<usize>,
+    columns: Option<&'a [ArrayRef]>,
+}
+
+impl<'a> RowWidth<'a> {
+    fn agree(
+        &mut self,
+        record: PayloadRef<'a>,
+        projection: Option<&[(usize, usize)]>,
+    ) -> Option<()> {
+        let columns = record.columns();
+        if self
+            .columns
+            .is_some_and(|previous| std::ptr::eq(previous, columns))
+        {
+            return Some(());
+        }
+        agrees_with(&mut self.bytes, side_row_bytes(record, projection)?)?;
+        self.columns = Some(columns);
+        Some(())
+    }
 }
 
 /// Running per-pair scan state for the flat-range walk.
@@ -197,13 +212,21 @@ impl JoinOutput<'_> {
         }
     }
 
-    /// One output side's payload, without reading the other side.
-    pub(super) fn side_record(&self, pair: &MatchedPair, left: bool) -> PayloadRef<'_> {
-        if left == self.incoming_is_left {
-            self.admitted.payload(pair.pos)
-        } else {
-            self.opposite.payload(pair.opposite_index)
-        }
+    /// Resolve only the selected side, reusing its immutable source/chunk cursor.
+    pub(super) fn side_payloads<'a>(
+        &'a self,
+        matched: &'a dyn super::matches::Matches,
+        left: bool,
+    ) -> impl ExactSizeIterator<Item = PayloadRef<'a>> {
+        let mut admitted = self.admitted.cursor();
+        let mut retained = self.opposite.cursor();
+        matched.iter().map(move |pair| {
+            if left == self.incoming_is_left {
+                admitted.payload(pair.pos)
+            } else {
+                retained.payload(pair.opposite_index)
+            }
+        })
     }
 
     fn side_columns(&self, incoming: bool) -> Option<Vec<(usize, usize)>> {
@@ -308,11 +331,8 @@ impl JoinOutput<'_> {
     /// Constant per-pair flat bytes when every matched row costs the same, or
     /// `None` when any selected column varies by row.
     ///
-    /// Each distinct matched row is read once: incoming positions advance in
-    /// runs, and opposite coordinates are filtered through a dense seen-bit
-    /// table over the matched coordinate span, under the same span rule that
-    /// funds the per-pair row caches. Every resolved record must also agree
-    /// with its side's selected byte width.
+    /// Distinct row coordinates are filtered as before; source-column runs
+    /// reuse their immutable width inspection without allocating a source map.
     fn constant_row_bytes(&self) -> Option<usize> {
         let incoming_columns = self.side_columns(true);
         let opposite_columns = self.side_columns(false);
@@ -326,27 +346,24 @@ impl JoinOutput<'_> {
             return None;
         }
         let mut seen = SeenRows::new(low, high);
-        let mut incoming = None;
-        let mut opposite = None;
+        let mut incoming = RowWidth::default();
+        let mut opposite = RowWidth::default();
         let mut previous_incoming = None;
+        let mut admitted = self.admitted.cursor();
+        let mut retained = self.opposite.cursor();
         for pair in self.matched.iter() {
             if previous_incoming != Some(pair.pos) {
-                agree_row_width(
-                    &mut incoming,
-                    self.admitted.payload(pair.pos),
-                    incoming_columns.as_deref(),
-                )?;
+                incoming.agree(admitted.payload(pair.pos), incoming_columns.as_deref())?;
                 previous_incoming = Some(pair.pos);
             }
             if seen.first_visit(pair.opposite_index) {
-                agree_row_width(
-                    &mut opposite,
-                    self.opposite.payload(pair.opposite_index),
+                opposite.agree(
+                    retained.payload(pair.opposite_index),
                     opposite_columns.as_deref(),
                 )?;
             }
         }
-        Some(incoming? + opposite?)
+        Some(incoming.bytes? + opposite.bytes?)
     }
 
     fn per_pair_ranges(&self, budget: EdgeBudget) -> Result<Vec<Range<usize>>> {
@@ -360,15 +377,17 @@ impl JoinOutput<'_> {
             chunk: FlatChunk::default(),
         };
         let oversized = |bytes: usize| oversized_row(bytes, budget);
+        let mut admitted = self.admitted.cursor();
+        let mut retained = self.opposite.cursor();
         for (index, pair) in self.matched.iter().enumerate() {
             // Payloads are read only for rows whose costs are not cached yet.
-            let record = || self.admitted.payload(pair.pos);
+            let mut record = || admitted.payload(pair.pos);
             let left = incoming.get_or_try_insert_with(pair.pos, || {
                 flat_row(record(), 0, incoming_columns.as_deref())
             })?;
             let right = opposite.get_or_try_insert_with(pair.opposite_index, || {
                 flat_row(
-                    self.opposite.payload(pair.opposite_index),
+                    retained.payload(pair.opposite_index),
                     record().num_columns(),
                     opposite_columns.as_deref(),
                 )
@@ -382,12 +401,14 @@ impl JoinOutput<'_> {
     fn nested_ranges(&self, budget: EdgeBudget) -> Result<Vec<Range<usize>>> {
         let incoming_columns = self.side_columns(true);
         let opposite_columns = self.side_columns(false);
+        let mut admitted = self.admitted.cursor();
+        let mut retained = self.opposite.cursor();
         let incoming = estimated_rows(self.matched.iter().map(|pair| pair.pos), |pos| {
-            estimated_row(self.admitted.payload(pos), incoming_columns.as_deref())
+            estimated_row(admitted.payload(pos), incoming_columns.as_deref())
         })?;
         let opposite = estimated_rows(
             self.matched.iter().map(|pair| pair.opposite_index),
-            |index| estimated_row(self.opposite.payload(index), opposite_columns.as_deref()),
+            |index| estimated_row(retained.payload(index), opposite_columns.as_deref()),
         )?;
         let mut ranges = Vec::new();
         let mut start = 0;
@@ -571,7 +592,7 @@ fn row_columns<'a>(
     record: PayloadRef<'a>,
     offset: usize,
     projection: Option<&'a [(usize, usize)]>,
-) -> impl Iterator<Item = (usize, &'a datafusion::arrow::array::ArrayRef)> {
+) -> impl Iterator<Item = (usize, &'a ArrayRef)> {
     let full = record
         .columns()
         .iter()
@@ -600,7 +621,7 @@ fn selected_width(offsets: &Offsets<'_>, row: usize) -> usize {
 
 fn estimated_rows(
     coordinates: impl ExactSizeIterator<Item = usize> + Clone,
-    estimate: impl Fn(usize) -> Result<usize>,
+    mut estimate: impl FnMut(usize) -> Result<usize>,
 ) -> Result<RowCache<usize>> {
     let mut rows = RowCache::new(coordinates.clone());
     for coordinate in coordinates {
@@ -700,9 +721,9 @@ mod tests {
     }
 
     /// Forces `flat_ranges` onto the per-pair scan while alive.
-    struct PerPairScan;
+    pub(super) struct PerPairScan;
     impl PerPairScan {
-        fn force() -> Self {
+        pub(super) fn force() -> Self {
             FORCE_SLOW.with(|forced| forced.set(true));
             PerPairScan
         }
@@ -1362,3 +1383,7 @@ mod tests {
         assert_eq!(FLAT_VISITS.with(Cell::get), 0);
     }
 }
+
+#[cfg(test)]
+#[path = "materialization/source_width_tests.rs"]
+mod source_width_tests;

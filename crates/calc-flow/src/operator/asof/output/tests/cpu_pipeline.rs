@@ -8,7 +8,7 @@ fn input(rows: usize, columns: usize) -> MaterializationInput {
         rows: OutputPlan {
             left: OutputSide {
                 batches: vec![vec![left]],
-                positions: Vec::new(),
+                positions: Vec::new().into(),
                 spans: vec![Span {
                     source: 0,
                     start: 0,

@@ -1,4 +1,3 @@
-use super::super::MatchedPair;
 use super::inputs::ProbeInputs;
 use super::{
     pairs::{FillFunding, PairFragment},
@@ -17,20 +16,41 @@ const STOP_GROUP_ITEMS: usize = 4_096;
 struct ProbeQuantum<'a> {
     stop: &'a GatherStop,
     remaining: usize,
+    full_checks: bool,
 }
 
 impl<'a> ProbeQuantum<'a> {
     fn new(stop: &'a GatherStop) -> Self {
-        Self { stop, remaining: 0 }
+        Self {
+            stop,
+            remaining: 0,
+            full_checks: false,
+        }
+    }
+
+    fn checked(stop: &'a GatherStop) -> Self {
+        Self {
+            full_checks: true,
+            ..Self::new(stop)
+        }
     }
 
     fn step(&mut self) -> Result<()> {
+        self.take(1).map(|_| ())
+    }
+
+    fn take(&mut self, requested: usize) -> Result<usize> {
         if self.remaining == 0 {
-            self.stop.check_abandoned()?;
+            if self.full_checks {
+                self.stop.check()?;
+            } else {
+                self.stop.check_abandoned()?;
+            }
             self.remaining = STOP_GROUP_ITEMS;
         }
-        self.remaining -= 1;
-        Ok(())
+        let count = requested.min(self.remaining);
+        self.remaining -= count;
+        Ok(count)
     }
 }
 
@@ -144,14 +164,18 @@ pub(super) fn fill_range(
             Some(windows) => windows[offset],
             None => inputs.window(position, cursors.as_mut().expect("uncached window cursors")),
         };
-        for (offset, opposite_index) in inputs.matches_bounds(position, bounds).enumerate() {
-            if offset > 0 {
-                quantum.step()?;
-            }
-            pairs.push(MatchedPair {
-                pos: position,
-                opposite_index,
-            });
+        let mut matches = inputs.matches_bounds(position, bounds);
+        let mut remaining = bounds.matches();
+        if remaining != 0 {
+            let count = remaining.min(quantum.remaining + 1);
+            quantum.remaining -= count - 1;
+            pairs.append_run(position, matches.by_ref().take(count));
+            remaining -= count;
+        }
+        while remaining != 0 {
+            let count = quantum.take(remaining)?;
+            pairs.append_run(position, matches.by_ref().take(count));
+            remaining -= count;
         }
     }
     debug_assert_eq!(pairs.len(), counts.count(ordinal));
@@ -167,28 +191,22 @@ pub(super) fn fill_all(
 ) -> Result<super::super::matches::Selection> {
     let mut pairs =
         super::super::matches::Selection::with_capacity(counts.total, inputs.admitted.len());
-    let mut work = 0usize;
+    let mut quantum = ProbeQuantum::checked(stop);
     let mut cursors = None;
     for ordinal in 0..counts.units {
         let windows = counts.windows(inputs, ordinal);
         for (offset, pos) in inputs.partition.range(ordinal).enumerate() {
-            if work.is_multiple_of(STOP_GROUP_ITEMS) {
-                stop.check()?;
-            }
-            work += 1;
+            quantum.step()?;
             let bounds = match windows {
                 Some(windows) => windows[offset],
                 None => inputs.window(pos, cursors.get_or_insert_with(|| inputs.cursors())),
             };
-            for opposite_index in inputs.matches_bounds(pos, bounds) {
-                if work.is_multiple_of(STOP_GROUP_ITEMS) {
-                    stop.check()?;
-                }
-                work += 1;
-                pairs.push(MatchedPair {
-                    pos,
-                    opposite_index,
-                });
+            let mut matches = inputs.matches_bounds(pos, bounds);
+            let mut remaining = bounds.matches();
+            while remaining != 0 {
+                let count = quantum.take(remaining)?;
+                pairs.append_run(pos, matches.by_ref().take(count));
+                remaining -= count;
             }
         }
     }

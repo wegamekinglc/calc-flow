@@ -174,7 +174,7 @@ fn build(pool: &Arc<dyn MemoryPool>, first_error: bool, row_mode: bool) -> Input
         },
         right: OutputSide {
             batches: Vec::new(),
-            positions: Vec::new(),
+            positions: Vec::new().into(),
             spans: Vec::new(),
             has_nulls: false,
         },

@@ -11,7 +11,7 @@ use super::{
 };
 use crate::{
     Batch, BatchMetadata, CalcFlowError, EventTime, JsonMap, Result, StreamCollector,
-    StreamOperatorContext, StreamingFailureReason,
+    StreamOperatorContext, StreamingFailureReason, runtime::streaming::gather_work::GatherStop,
 };
 use ahash::RandomState;
 use datafusion::execution::memory_pool::MemoryReservation;
@@ -515,12 +515,14 @@ async fn match_output_prefix(
         .job()
         .join_cpu_trace()
         .stage(&operator.name, "match_plan", count);
-    let mut plan = OutputPlanBuilder::new(
+    let mut plan = OutputPlanBuilder::new_for_owner(
         count,
         operator.output_columns.as_ref(),
         workspace,
         &operator.name,
-    )?;
+        owner_compact_positions(&operator.state.batches),
+    )?
+    .with_stop(GatherStop::from_job(context.job()));
     let prefix = if let Some(matches) = probe::parallel_matches(operator, count, context).await? {
         parallel_candidate_rows(
             operator,
@@ -538,6 +540,15 @@ async fn match_output_prefix(
     };
     drop(cursor_workspace);
     finish_output_prefix(operator, plan, prefix, workspace)
+}
+
+fn owner_compact_positions(pool: &state::PayloadPool) -> bool {
+    // Two input sides bound this metadata proof, including sparse backing scans.
+    let sides = 2_usize;
+    let max_buckets = (sides + 1).next_power_of_two();
+    pool.len() <= sides
+        && pool.backing_buckets().1 <= max_buckets
+        && pool.values().filter(|(batch, _)| batch.key.0 == 1).count() <= 1
 }
 
 fn finish_output_prefix(
