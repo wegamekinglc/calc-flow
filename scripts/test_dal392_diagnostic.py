@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,6 +11,28 @@ from scripts.groupby_diagnostic import dal392
 
 
 class FixedEvidenceTests(unittest.TestCase):
+    def test_large_thread_snapshots_are_preserved_without_overflowing_ipc(self):
+        phases = {
+            scope: {
+                "status": "measured",
+                "wall_seconds": 0.1,
+                "process_cpu_seconds": 0.1,
+                "threads": [{"identity": "thread", "runtime_seconds": 0.01}] * 1000,
+            }
+            for scope in dal392.plan()["phases"]
+        }
+        phases["native_status_after_processing"] = {"operators": {}}
+        sample = {"seconds": 0.1, "phase_evidence": phases}
+        with tempfile.TemporaryDirectory() as directory:
+            result = dal392.persist_phases(sample, Path(directory), 1)
+            path = Path(directory) / result["phase_evidence"]["file"]
+            self.assertEqual(json.loads(path.read_text()), phases)
+            self.assertEqual(
+                result["phase_evidence"]["sha256"], dal392.sha256_file(path)
+            )
+            self.assertLess(len(json.dumps(result)), 64 * 1024)
+            self.assertEqual(sample["phase_evidence"], phases)
+
     def test_original_release_mismatch_fails_closed(self):
         with (
             patch.object(dal392, "load_release", return_value=dal392.SEALS["A"]),

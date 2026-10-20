@@ -145,6 +145,30 @@ def phase_sample(active) -> dict:
     return {**result, "phase_evidence": capture.phases}
 
 
+def persist_phases(sample: dict, root: Path, number: int) -> dict:
+    """Keep full task snapshots off the bounded JSON-lines IPC channel."""
+
+    evidence = sample["phase_evidence"]
+    path = root / f"phase-sample-{number:04d}.json"
+    write_json(path, evidence)
+    summary = {
+        phase: {
+            key: evidence[phase][key]
+            for key in ("status", "wall_seconds", "process_cpu_seconds")
+        }
+        for phase in plan()["phases"]
+    }
+    return {
+        **sample,
+        "phase_evidence": {
+            "file": path.name,
+            "sha256": sha256_file(path),
+            "summary": summary,
+            "operators": evidence["native_status_after_processing"]["operators"],
+        },
+    }
+
+
 def worker(root: Path, *, phases: bool = False) -> None:
     active = None
     try:
@@ -153,7 +177,7 @@ def worker(root: Path, *, phases: bool = False) -> None:
             if message["operation"] == "prepare" and message["case"] != case():
                 raise ValueError("only fixed group_by/1M workload is permitted")
             if phases and message["operation"] == "sample":
-                response = phase_sample(active)
+                response = persist_phases(phase_sample(active), root, active.count)
             else:
                 response, active = dispatch(message, active, root)
             if message["operation"] == "prepare":
@@ -193,12 +217,13 @@ def preflight(root: Path, release_root: Path) -> dict:
     return releases
 
 
-async def collect(root: Path, releases: dict) -> None:
+async def collect(root: Path, releases: dict, *, phase_only: bool) -> None:
     sites = {}
     for side, value in releases.items():
         sites[side] = await install(value, root / "sites" / side)
     results = []
-    for label in (*plan()["comparisons"], "phase-AB"):
+    labels = ["phase-AB"] if phase_only else [*plan()["comparisons"], "phase-AB"]
+    for label in labels:
         left, right = ("A", "B") if label == "phase-AB" else label
         selected = {"baseline": left, "candidate": right}
         row = await paired(
@@ -216,7 +241,16 @@ async def collect(root: Path, releases: dict) -> None:
 async def run(root: Path, releases: Path) -> int:
     started = float(os.environ["DAL392_START_UNIX"])
     root.mkdir(parents=True, exist_ok=True)
-    write_json(root / "plan.json", {**plan(), "job_started_unix": started})
+    phase_only = os.environ.get("DAL392_PART", "all") == "phases"
+    write_json(
+        root / "plan.json",
+        {
+            **plan(),
+            "job_started_unix": started,
+            "phase_only": phase_only,
+            "reused_control_run": 39458710899 if phase_only else None,
+        },
+    )
     outcome = {"status": "failed"}
     try:
         remaining = started + plan()["budget_seconds"] - time.time() - 10
@@ -224,7 +258,9 @@ async def run(root: Path, releases: Path) -> int:
             raise TimeoutError("preparation exhausted measurement budget")
         async with asyncio.timeout(remaining):
             manifests = preflight(root, releases)
-            await observed_collect(root, lambda: collect(root, manifests))
+            await observed_collect(
+                root, lambda: collect(root, manifests, phase_only=phase_only)
+            )
         outcome = {"status": "completed"}
     except (Exception, asyncio.CancelledError) as error:
         outcome = {"status": "failed", "error": f"{type(error).__name__}: {error}"}

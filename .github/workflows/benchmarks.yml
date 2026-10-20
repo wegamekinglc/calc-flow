@@ -11,6 +11,11 @@ on:
         description: Original complete-suite run containing both sealed wheels
         type: string
         default: ""
+      dal392_part:
+        description: Fixed DAL-392 collection or missing phase evidence only
+        type: choice
+        options: [all, phases]
+        default: all
       release_run_attempt:
         description: Original release artifact attempt
         type: number
@@ -303,6 +308,7 @@ jobs:
     timeout-minutes: 12
     env:
       UV_CACHE_DIR: ${{ github.workspace }}/target/uv-cache
+      DAL392_PART: ${{ inputs.dal392_part }}
     steps:
       - name: Start fixed ten-minute preparation and measurement budget
         run: |
