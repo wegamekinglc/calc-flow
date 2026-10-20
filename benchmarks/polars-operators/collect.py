@@ -41,6 +41,16 @@ async def collect(args: argparse.Namespace) -> int:
     ]
     if len(cases) != 84:
         raise ValueError("expected DAL-394's 84 added Polars cells")
+    if args.case_ids_file is not None:
+        selected = json.loads(args.case_ids_file.read_text(encoding="utf-8"))
+        if (
+            not isinstance(selected, list)
+            or not all(isinstance(value, str) for value in selected)
+            or len(set(selected)) != len(selected)
+            or not set(selected) <= {case["id"] for case in cases}
+        ):
+            raise ValueError("selected case ids must be unique added Polars cells")
+        cases = [case for case in cases if case["id"] in selected]
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     report = {
@@ -104,4 +114,5 @@ if __name__ == "__main__":
     parser.add_argument("--baseline-source", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--budget-seconds", type=int, required=True)
+    parser.add_argument("--case-ids-file", type=Path)
     raise SystemExit(asyncio.run(collect(parser.parse_args())))

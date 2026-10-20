@@ -408,21 +408,38 @@ def _polars_plan(data: Workload, scenario: str):
     if scenario in ("argmax64", "argmax256", "unique64"):
         window = 64 if scenario == "unique64" else int(scenario[6:])
         tick = pl.col("_tick")
-        # arg_max does not guarantee oldest-tie selection. Choose that row
-        # explicitly, using entity-local row indices rather than sequence gaps.
-        aggregate = (
-            value.n_unique()
-            if scenario == "unique64"
-            else tick.last() - tick.filter(value == value.max()).first()
+        indexed = frame.sort("symbol", "event_time", "sequence").with_columns(
+            pl.int_range(pl.len(), dtype=pl.Int64).over("symbol").alias("_tick")
         )
-        return (
-            frame.sort("symbol", "event_time", "sequence")
-            .with_columns(
-                pl.int_range(pl.len(), dtype=pl.Int64).over("symbol").alias("_tick")
+        if scenario == "unique64":
+            return (
+                indexed.rolling(
+                    "_tick", period="64i", group_by="symbol", closed="right"
+                )
+                .agg(
+                    pl.col("sequence").last(),
+                    value.n_unique().cast(pl.Float64).alias("value"),
+                )
+                .select("sequence", "value")
             )
-            .rolling("_tick", period=f"{window}i", group_by="symbol", closed="right")
-            .agg(pl.col("sequence").last(), aggregate.cast(pl.Float64).alias("value"))
-            .select("sequence", "value")
+        # The first matching maximum at/after the frame start must be in the
+        # frame. This selects oldest ties without expanding every rolling group.
+        maxima = indexed.with_columns(
+            value.rolling_max(window, min_samples=1).over("symbol").alias("_maximum"),
+            (tick - window + 1).clip(lower_bound=0).alias("_start"),
+        )
+        candidates = indexed.select(
+            "symbol", value.alias("_maximum"), tick.alias("_candidate")
+        )
+        return maxima.join_asof(
+            candidates,
+            left_on="_start",
+            right_on="_candidate",
+            by=["symbol", "_maximum"],
+            strategy="forward",
+            check_sortedness=False,
+        ).select(
+            "sequence", (tick - pl.col("_candidate")).cast(pl.Float64).alias("value")
         )
     if scenario == "cs_mean":
         return frame.select("sequence", value.mean().over("event_time").alias("value"))

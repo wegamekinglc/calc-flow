@@ -34,9 +34,11 @@ leaving the distinct window, temporal/sequence ordering, negative timestamps,
 exact microsecond bin boundaries and input immutability.
 
 Average uses per-symbol cumulative sum/count ordered by event time and sequence.
-Argmax returns the row lag of the oldest tied maximum in a partial/full frame;
-native integer-index rolling groups explicitly select the earliest maximal
-row. Unique count uses `n_unique` in a partial/full 64-row frame. CS mean
+Argmax returns the row lag of the oldest tied maximum in a partial/full frame.
+Per-symbol rolling maxima supply the lookup price; forward ASOF from the frame's
+starting row selects the earliest row with that price, which must lie in the
+frame. This avoids expanding all rolling-group members. Unique count uses
+`n_unique` in a native integer-index partial/full 64-row frame. CS mean
 groups exact event times, and window sum groups symbol and UTC timestamps
 truncated to epoch-anchored half-open ten-second bins. See
 [suite semantics](../../docs/benchmark-suite.md#inputs-correctness-and-timing-boundaries).

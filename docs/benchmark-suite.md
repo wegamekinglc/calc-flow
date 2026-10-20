@@ -171,11 +171,13 @@ ten-second bins and preserves UTC microsecond timestamps.
 Polars covers the same fourteen scenarios in both its 1T and 32T references.
 Cumulative sum/count implements average; exact-time window means implement
 CS mean; UTC timestamp truncation and grouped sums implement the epoch-anchored
-ten-second bins. Argmax and unique count use native integer-index rolling
-groups after sorting by symbol, event time and sequence. Entity-local row
-indices define partial/full frames; argmax subtracts the earliest maximal
-row's index from the current index, explicitly preserving oldest ties rather
-than relying on Polars `arg_max` tie selection. All computation stays inside
+ten-second bins. Unique count uses native integer-index rolling groups after
+sorting by symbol, event time and sequence. Argmax uses per-symbol rolling
+maxima and a forward ASOF lookup from each frame's starting row, keyed by
+symbol and maximal price. The first matching row must lie in the frame;
+subtracting its entity-local index from the current index preserves oldest
+ties without expanding all frame members or relying on `arg_max` tie selection.
+All computation stays inside
 lazy collection; there are no Python per-row callbacks or precomputed answers.
 The [DAL-394 results](../benchmarks/polars-operators/README.md) retain the 84
 added cells, raw samples, environment and reproduction commands.
