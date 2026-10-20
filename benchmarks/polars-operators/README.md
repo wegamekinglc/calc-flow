@@ -1,6 +1,6 @@
 # Polars operator coverage: DAL-394
 
-81 of 84 added cells completed: two rounds of ten samples per cell, 1,620 accepted measured checks and 162 warmup checks passed. Maximum absolute oracle error: 0. Total collection elapsed 1804.0 seconds, including the stopped initial path and final process cleanup. The 1,800-second budget was exhausted; no further collection was started. The missing cells are 10M/1T unique64, cs_mean and window_sum. Full inventory validation therefore fails, and this is an incomplete delivery pending an additional measurement budget.
+All 84 added cells completed: two rounds of ten samples per cell, 1,680 measured checks and 168 warmup checks passed. Maximum absolute oracle error: 0. The approved final three-cell collection and full matrix validation completed in 318.6 seconds, including startup, warmup and cleanup, within the additional 360-second wall-clock budget. The previous 81 complete results were reused unchanged. Full inventory and artifact integrity validation pass.
 
 The addition covers cumulative average, 64/256-row argmax, 64-row distinct
 count, exact-time cross-section mean and ten-second tumbling sum. Both Polars
@@ -58,6 +58,8 @@ bounded streaming memory. All calculations use Polars native expressions.
 [Accepted results](results.json) identify the measurement cohort of every cell.
 [Initial collection](initial-results.json) and [completion collection](completion-results.json)
 preserve their original inventories, raw samples, environments and source identities.
+[Final three-cell collection](remaining-results.json) and its
+[wall-clock record](additional-budget.json) preserve the approved completion run.
 [Validation](validation.json) seals the accepted results and records the unchanged
 plan hashes; [build](build.json) preserves the reused wheel identity;
 [host](host.json) records the machine and exact Python executable. The issue
@@ -75,8 +77,14 @@ unoptimized lazy plans for every unchanged operator. The completion collection
 measured those 28 argmax cells and four of the seven previously unmeasured cells.
 Its 880-second timeout expired while preparing 10M/1T unique64; settling the
 owned process took total elapsed time to 892.7 seconds.
-The remaining three cells are explicitly unmeasured. No partial round or
-superseded argmax timing contributes to the table.
+The three outstanding cells were then measured at
+`e8cb19d1ab719328ec27a8848408d3e9bd95aed4` under a separately approved
+360-second wall-clock budget. A 330-second collector timeout reserved 30 seconds
+for cleanup and full artifact validation. Collection took 315.1 seconds;
+the full wrapper took 318.6 seconds and exited successfully. All three cells
+have two complete ten-sample rounds. Full validation additionally confirms
+the previous 81 cells are unchanged and the worker environments match.
+No partial round or superseded argmax timing contributes to the table.
 
 2026-10-21; Intel Core i9-13900HX, 16 exposed physical cores / 32 logical CPUs,
 31.2 GiB RAM; Linux 5.15.167.4 WSL2. Python 3.13.9, Polars 2.0.0,
@@ -136,9 +144,9 @@ statistics over both complete rounds for each cell.
 | 10,000,000 | average    | 261.099        | 307.840        | 1626.491      | 1802.157      |
 | 10,000,000 | argmax64   | 1309.992       | 1547.381       | 6753.822      | 7705.206      |
 | 10,000,000 | argmax256  | 1263.417       | 1418.224       | 7233.731      | 15519.624     |
-| 10,000,000 | unique64   | 1480.239       | 2361.235       | unmeasured    | unmeasured    |
-| 10,000,000 | cs_mean    | 113.136        | 194.279        | unmeasured    | unmeasured    |
-| 10,000,000 | window_sum | 121.604        | 136.189        | unmeasured    | unmeasured    |
+| 10,000,000 | unique64   | 1480.239       | 2361.235       | 10865.440     | 13438.790     |
+| 10,000,000 | cs_mean    | 113.136        | 194.279        | 274.619       | 314.231       |
+| 10,000,000 | window_sum | 121.604        | 136.189        | 367.093       | 400.467       |
 
 ## Commands and validation
 
@@ -163,7 +171,7 @@ PYTHONPATH=. "$BENCH_PY" benchmarks/polars-operators/collect.py \
   --case-ids-file target/polars-completion-ids.json
 
 PYTHONPATH=. "$BENCH_PY" target/verify_completed_polars.py
-# Exit 1: completed artifacts validate, but three required cells are unmeasured.
+# Original handoff: exit 1 for the then-unmeasured three cells.
 ```
 
 The completion ID list and verifier are included in the issue attachment.
@@ -172,18 +180,23 @@ benchmark environment and a sealed release wheel with identical native inputs,
 then run `collect.py` without `--case-ids-file` to collect all 84 cells directly.
 The collector validates selected IDs against the original added-cell inventory.
 
-To finish only the three remaining cells after an additional budget is approved:
+The approved final three-cell run used the bounded wrapper:
 
 ```bash
-PYTHONPATH=. "$BENCH_PY" benchmarks/polars-operators/collect.py \
-  --release target/polars-release/release.json \
-  --baseline-source target/polars-baseline \
-  --output target/polars-remaining-results --budget-seconds 360 \
-  --case-ids-file benchmarks/polars-operators/remaining-case-ids.json
+PYTHONPATH=. "$BENCH_PY" target/run_polars_remaining.py
+# Collector: --output target/polars-remaining-results --budget-seconds 330
+#           --case-ids-file benchmarks/polars-operators/remaining-case-ids.json
+# Then: "$BENCH_PY" target/verify_polars_full.py
+# Exit 0; 318.6 seconds including collection, validation and cleanup.
 ```
 
-This command has not been run. Retain the 81 complete cells; the three remaining
-cells still require two complete ten-sample rounds each.
+The wrapper, full verifier, immutable previous-result snapshot and logs are
+included in the issue attachment. `additional-budget.json` records the exact
+collector argv, including the same release and baseline-source arguments used
+above. `remaining-case-ids.json` retains the three approved IDs; all are now
+complete. No sample count or case scope was expanded. The full verifier checks
+the original 81-cell snapshot's SHA-256 and exact per-cell contents before
+accepting the complete 84-cell report.
 
 Focused verification used the same prepared Python and the current source:
 
@@ -207,11 +220,12 @@ PYTHONPATH=. POLARS_MAX_THREADS=32 TOKIO_WORKER_THREADS=32 JAX_PLATFORMS=cpu \
 ```
 
 Changed Python files passed Ruff lint/format checks; `git diff --check` passed.
-The final artifact verification checks the 84-cell catalog and validates the
-81 completed cells' thread counts, collection engines, native seals,
+The final artifact verification checks the 84-cell catalog and validates all
+84 completed cells' thread counts, collection engines, native seals,
 round/sample inventories, raw versus summary samples, recomputed statistics and
-every accepted warmup. Its full-inventory gate remains failed for the three
-missing cells. All 34 installed package versions match the unchanged lock.
+every accepted warmup. Its full-inventory gate passes with no missing cells.
+The 81 previous results were reused exactly; no unchanged tests were repeated.
+All 34 installed package versions still match the unchanged lock.
 An intermediate overbroad `-k 'argmax or polars_single_thread'` selection picked four
 Finance-Python cases that failed because its separate Python 3.9 worker was not
 configured; its 36 other tests passed. The focused Polars selection above passes.

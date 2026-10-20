@@ -36,9 +36,10 @@ Polars now covers the same fourteen scenarios in both thread configurations.
 The six additions are average, 64/256-row argmax, 64-row unique count,
 cross-section mean and ten-second tumbling sum. The
 [DAL-394 results](polars-operators/README.md) retain the 84-cell inventory
-and 81 complete measurements at the original seven row scales. Three 10M/1T
-cells remain unmeasured after the collection budget expired. The independent
-oracles and streaming-engine collect-to-Arrow timing boundary are unchanged.
+and all 84 complete measurements at the original seven row scales. The final
+three 10M/1T cells completed within the approved additional 360-second budget.
+The independent oracles and streaming-engine collect-to-Arrow timing boundary
+are unchanged.
 
 New engine/warm base/head measurements have a same-runner, two-round +5%
 regression gate using paired-median confidence lower bounds; cases the

@@ -180,8 +180,8 @@ ties without expanding all frame members or relying on `arg_max` tie selection.
 All computation stays inside
 lazy collection; there are no Python per-row callbacks or precomputed answers.
 The [DAL-394 results](../benchmarks/polars-operators/README.md) retain the 84-cell
-inventory, 81 complete measurements, environment and reproduction commands.
-The remaining three 10M/1T cells are explicit budget-limited gaps.
+inventory, all 84 complete measurements, environment and reproduction commands.
+The final three 10M/1T cells completed under the approved additional budget.
 
 The ASOF fixture has **zero tolerance**, on both engines. SQL therefore uses
 a left equality join on symbol and event time, selecting the reference row
