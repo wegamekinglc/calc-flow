@@ -139,7 +139,7 @@ raw tables or arrays, and configuration contains data and registration
 references rather than executable objects.
 
 Projects use format `3`; managed checkpoint manifests also use version `3`.
-These protocol versions are separate from this checkout's package version `2026.10.13`.
+These protocol versions are separate from this checkout's package version `2026.10.21`.
 
 The DataFusion 55 / Arrow 59 upgrade changes engine-specific checkpoint
 identity. SQL checkpoints created with DataFusion 54 and ASOF checkpoints
