@@ -5,8 +5,8 @@ use datafusion::{arrow::datatypes::DataType, common::ScalarValue};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    CompiledAggregate, Statistic, SumClass, compare_samples, float_sample, internal_error,
-    operator_error, signed_sample, state_format, typed_null, unsigned_sample,
+    CompiledAggregate, Statistic, SumClass, float_sample, internal_error, operator_error,
+    signed_sample, state_format, typed_null, unsigned_sample,
 };
 use crate::{CalcFlowError, Result};
 
@@ -16,7 +16,7 @@ fn inconsistent_summary() -> CalcFlowError {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", content = "value", deny_unknown_fields)]
-enum NumericValue {
+pub(super) enum NumericValue {
     Signed(i64),
     SignedTotal([u8; 16]),
     Unsigned(u64),
@@ -25,6 +25,17 @@ enum NumericValue {
 }
 
 impl NumericValue {
+    fn compare(&self, previous: &Self) -> Result<std::cmp::Ordering> {
+        match (self, previous) {
+            (Self::Signed(next), Self::Signed(previous)) => Ok(next.cmp(previous)),
+            (Self::Unsigned(next), Self::Unsigned(previous)) => Ok(next.cmp(previous)),
+            (Self::Float(next), Self::Float(previous)) => {
+                Ok(f64::from_bits(*next).total_cmp(&f64::from_bits(*previous)))
+            }
+            _ => Err(internal_error("cumulative extremum type changed")),
+        }
+    }
+
     fn from_scalar(value: &ScalarValue) -> Self {
         match SumClass::from_input(&value.data_type()) {
             SumClass::Signed => Self::Signed(signed_sample(value)),
@@ -146,37 +157,46 @@ impl CumulativeAccumulator {
         statistic: Statistic,
         node: &str,
     ) -> Result<()> {
+        let value = if statistic == Statistic::Variance {
+            NumericValue::Float(float_sample(value).to_bits())
+        } else {
+            NumericValue::from_scalar(value)
+        };
+        self.add_numeric(value, statistic, node)
+    }
+
+    pub(super) fn add_numeric(
+        &mut self,
+        value: NumericValue,
+        statistic: Statistic,
+        node: &str,
+    ) -> Result<()> {
         let count = self
             .valid_count
             .checked_add(1)
             .ok_or_else(|| operator_error(node, "cumulative valid count overflowed"))?;
         match statistic {
             Statistic::Sum => {
-                let next = NumericValue::from_scalar(value);
-                self.value = Some(NumericValue::add(self.value.as_ref(), next, node)?);
+                self.value = Some(NumericValue::add(self.value.as_ref(), value, node)?);
             }
-            Statistic::Min | Statistic::Max => self.add_extremum(value, statistic, node)?,
-            Statistic::Variance => self.add_variance(float_sample(value), count),
+            Statistic::Min | Statistic::Max => self.add_extremum(value, statistic)?,
+            Statistic::Variance => {
+                let NumericValue::Float(bits) = value else {
+                    return Err(internal_error(
+                        "cumulative variance requires a float sample",
+                    ));
+                };
+                self.add_variance(f64::from_bits(bits), count);
+            }
             _ => return Err(internal_error("unsupported cumulative statistic")),
         }
         self.valid_count = count;
         Ok(())
     }
 
-    fn add_extremum(
-        &mut self,
-        value: &ScalarValue,
-        statistic: Statistic,
-        node: &str,
-    ) -> Result<()> {
+    fn add_extremum(&mut self, value: NumericValue, statistic: Statistic) -> Result<()> {
         let replace = if let Some(previous) = &self.value {
-            let previous = previous
-                .scalar(node)?
-                .cast_to(&value.data_type())
-                .map_err(|error| {
-                    internal_error(format!("cumulative extremum type mismatch: {error}"))
-                })?;
-            let order = compare_samples(value, &previous);
+            let order = value.compare(previous)?;
             if statistic == Statistic::Min {
                 order.is_lt()
             } else {
@@ -186,7 +206,7 @@ impl CumulativeAccumulator {
             true
         };
         if replace {
-            self.value = Some(NumericValue::from_scalar(value));
+            self.value = Some(value);
         }
         Ok(())
     }
@@ -231,7 +251,6 @@ impl CumulativeAccumulator {
         (next_mean, next_m2)
     }
 
-    #[allow(clippy::cast_precision_loss, reason = "variance is a Float64 readout")]
     pub(super) fn read(
         &self,
         output: &CompiledAggregate,
@@ -242,23 +261,34 @@ impl CumulativeAccumulator {
             return Ok(typed_null(data_type));
         }
         if output.statistic == Statistic::Variance {
-            if self.valid_count <= u64::from(output.ddof) {
-                return Ok(ScalarValue::Float64(None));
-            }
-            let variance = if self.has_infinity {
-                f64::NAN
-            } else {
-                f64::from_bits(self.m2_bits).max(0.0)
-                    / (self.valid_count - u64::from(output.ddof)) as f64
-            };
-            return Ok(ScalarValue::Float64(Some(variance)));
+            return Ok(ScalarValue::Float64(self.variance(output.ddof)));
         }
+        self.scalar(node)?
+            .cast_to(data_type)
+            .map_err(|error| internal_error(format!("cumulative value type mismatch: {error}")))
+    }
+
+    pub(super) const fn valid_count(&self) -> u64 {
+        self.valid_count
+    }
+
+    pub(super) fn scalar(&self, node: &str) -> Result<ScalarValue> {
         self.value
             .as_ref()
             .ok_or_else(|| internal_error("cumulative value is missing"))?
-            .scalar(node)?
-            .cast_to(data_type)
-            .map_err(|error| internal_error(format!("cumulative value type mismatch: {error}")))
+            .scalar(node)
+    }
+
+    #[allow(clippy::cast_precision_loss, reason = "variance is a Float64 readout")]
+    pub(super) fn variance(&self, ddof: u8) -> Option<f64> {
+        if self.valid_count <= u64::from(ddof) {
+            return None;
+        }
+        Some(if self.has_infinity {
+            f64::NAN
+        } else {
+            f64::from_bits(self.m2_bits).max(0.0) / (self.valid_count - u64::from(ddof)) as f64
+        })
     }
 
     pub(super) fn encode(&self) -> Result<Vec<u8>> {

@@ -306,6 +306,7 @@ mod tests {
             fallback_reason: None,
             estimated_state_bytes_per_entity: 0,
             fingerprint: "test-kernel".to_owned(),
+            checkpoint_fingerprint: None,
         }
     }
 

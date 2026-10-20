@@ -204,8 +204,11 @@ recovery without replaying prefix history. Layout `4` requires an entity
 processed-row count for both numerical profiles, distinguishing cumulative
 prefixes from entities with only pending rows; snapshots without this evidence
 fail closed. Missing, duplicate, malformed or mismatched summaries fail closed
-before state installation. New summaries use the general row kernel;
-existing typed kernels and old checkpoint encodings retain their identities.
+before state installation. Primitive numeric cumulative outputs use the typed
+Arrow transition and ordered columnar buffering, including stages shared with
+cumulative mean or supported rolling outputs. Other shapes retain the general
+fallback. Both paths update the same constant summaries; checkpoint encodings
+and kernel identities remain compatible with earlier layout `4` snapshots.
 The [columnar state implementation](../crates/calc-flow/src/operator/rolling/state_v3.rs)
 owns this encoding.
 

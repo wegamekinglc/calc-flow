@@ -16,9 +16,9 @@ use crate::runtime::streaming::entity_work::ReservePair;
 use super::{
     Arc, Array, BTreeMap, Batch, BufferedRow, CompiledRollingSpec, EntityRollingState, EventTime,
     KeyValue, RecordBatch, Result, RollingHistories, RollingOperator, RowIdentity, ScalarValue,
-    StreamCollector, StreamOperatorContext, TableBatch, VecDeque, WindowState, chunk_output_record,
-    closing_coordinate, concat_batches, fresh_windows, internal_error, operator_error,
-    read_buffered_row, reconstruct_typed_state,
+    StreamCollector, StreamOperatorContext, TableBatch, VecDeque, chunk_output_record,
+    closing_coordinate, concat_batches, internal_error, operator_error, read_buffered_row,
+    reconstruct_typed_state,
 };
 
 #[derive(Default)]
@@ -374,12 +374,12 @@ impl RollingOperator {
                 observer,
             )?
         };
-        let ewma_seeds = update.ewma_seeds();
+        let recurrence_seeds = update.recurrence_seeds();
         let (batches, next_sequence) = self.ordered_output_chunks(input, &mut update, context)?;
         Ok(PreparedOrderedOutput {
             update,
             touched,
-            ewma_seeds,
+            recurrence_seeds,
             batches,
             next_sequence,
         })
@@ -543,7 +543,7 @@ fn combine_ordered_records(records: &[RecordBatch], node_id: &str) -> Result<Opt
 struct PreparedOrderedOutput {
     update: StreamKernelUpdate,
     touched: Vec<RetainedHistoryAppend>,
-    ewma_seeds: Vec<Vec<Option<(u64, f64)>>>,
+    recurrence_seeds: Vec<Vec<Option<super::kernel::RecurrenceSeed>>>,
     batches: Vec<Batch>,
     next_sequence: u64,
 }
@@ -567,9 +567,9 @@ impl PreparedOrderedOutput {
                 )?;
             }
             let seeds = self
-                .ewma_seeds
+                .recurrence_seeds
                 .get(tail.entity_id)
-                .expect("every touched entity has a prepared EWMA seed");
+                .expect("every touched entity has a prepared recurrence seed");
             new = new.checked_add(
                 tail.projected_charge(previous, retention, &operator.compiled, seeds, node)?,
                 node,
@@ -582,9 +582,9 @@ impl PreparedOrderedOutput {
         let retention = usize::try_from(operator.compiled.max_row_retention).unwrap_or(usize::MAX);
         for tail in self.touched {
             let seeds = self
-                .ewma_seeds
+                .recurrence_seeds
                 .get(tail.entity_id)
-                .expect("every touched entity has a prepared EWMA seed");
+                .expect("every touched entity has a prepared recurrence seed");
             tail.commit(
                 &mut operator.state.histories,
                 retention,
@@ -754,7 +754,7 @@ impl RetainedHistoryAppend {
         previous: Option<&EntityRollingState>,
         retention: usize,
         compiled: &CompiledRollingSpec,
-        seeds: &[Option<(u64, f64)>],
+        seeds: &[Option<super::kernel::RecurrenceSeed>],
         node: &str,
     ) -> Result<super::budget::StateCharge> {
         let windows = if seeds.iter().any(Option::is_some) {
@@ -812,7 +812,7 @@ impl RetainedHistoryAppend {
         histories: &mut RollingHistories,
         retention: usize,
         compiled: &CompiledRollingSpec,
-        seeds: &[Option<(u64, f64)>],
+        seeds: &[Option<super::kernel::RecurrenceSeed>],
     ) {
         let state = histories.by_entity.entry(self.entity).or_default();
         let keep = retention.saturating_sub(self.rows.len());
@@ -829,16 +829,7 @@ impl RetainedHistoryAppend {
             RetainedRows::Columnar(_) => {}
             RetainedRows::Scalar(rows) => state.rows.extend(rows),
         }
-        state.windows.clear();
-        if seeds.iter().any(Option::is_some) {
-            state.windows = fresh_windows(compiled);
-            for (window, seed) in state.windows.iter_mut().zip(seeds) {
-                if let (WindowState::Ewma(window), Some((valid_count, value))) = (window, seed) {
-                    window.valid_count = *valid_count;
-                    window.value = *value;
-                }
-            }
-        }
+        state.windows = super::state_codec::recurrence_windows(compiled, seeds);
         state.transition_count = self.transition_count;
     }
 }

@@ -71,6 +71,7 @@ fn lane_plan(dual: bool) -> RollingKernelPlan {
         fallback_reason: None,
         estimated_state_bytes_per_entity: 0,
         fingerprint: "two-lane-fixture".into(),
+        checkpoint_fingerprint: None,
     }
 }
 

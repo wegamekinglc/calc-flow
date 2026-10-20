@@ -1206,7 +1206,7 @@ pub(super) fn build_typed_stream_output(
     };
     let touched = {
         let _stage = observer.map(|recorder| recorder.stage(RollingStage::HistoryMaintenance));
-        typed_history_updates(rows, histories, compiled, node_id)?
+        typed_history_updates(rows, histories, compiled, &update, node_id)?
     };
     Ok(Some((
         record,
@@ -1285,7 +1285,7 @@ fn seed_typed_restored_state(
         .by_entity
         .values()
         .map(|entity| {
-            let mut seeds = typed_ewma_seeds(entity, compiled)?;
+            let mut seeds = typed_recurrence_seeds(entity, compiled)?;
             seeds.resize(compiled.kernel_plan.typed_group_count(), None);
             Ok(seeds)
         })
@@ -1308,22 +1308,32 @@ fn seed_typed_restored_state(
         .seed_restored_state(state, &entities, &transition_counts, &seeds, node_id)
 }
 
-fn typed_ewma_seeds(
+fn typed_recurrence_seeds(
     entity: &EntityRollingState,
     compiled: &CompiledRollingSpec,
-) -> Result<Vec<Option<(u64, f64)>>> {
+) -> Result<Vec<Option<kernel::RecurrenceSeed>>> {
     compiled
         .window_groups
         .iter()
         .enumerate()
         .map(|(group_index, group)| {
+            if matches!(group, CompiledWindowGroup::Cumulative { .. }) {
+                return match entity.windows.get(group_index) {
+                    Some(WindowState::Cumulative(state)) => {
+                        Ok(Some(kernel::RecurrenceSeed::Cumulative(state.clone())))
+                    }
+                    _ => Err(internal_error(
+                        "rolling cumulative checkpoint state mismatch",
+                    )),
+                };
+            }
             if !matches!(group, CompiledWindowGroup::Ewma { .. }) {
                 return Ok(None);
             }
             match entity.windows.get(group_index) {
-                Some(WindowState::Ewma(state)) if state.valid_count > 0 => {
-                    Ok(Some((state.valid_count, state.value)))
-                }
+                Some(WindowState::Ewma(state)) if state.valid_count > 0 => Ok(Some(
+                    kernel::RecurrenceSeed::Ewma(state.valid_count, state.value),
+                )),
                 Some(WindowState::Ewma(_)) | None => Ok(None),
                 _ => Err(internal_error("rolling EWMA checkpoint state mismatch")),
             }
@@ -1397,8 +1407,10 @@ fn typed_history_updates(
     rows: &[BufferedRow],
     histories: &RollingHistories,
     compiled: &CompiledRollingSpec,
+    update: &StreamKernelUpdate,
     node_id: &str,
 ) -> Result<HistoryUpdates> {
+    let seeds = update.recurrence_seeds();
     let has_ewma = compiled
         .window_groups
         .iter()
@@ -1410,10 +1422,9 @@ fn typed_history_updates(
             let transitions = u64::try_from(indices.len()).map_err(|_| {
                 operator_error(node_id, "rolling micro-batch row count does not fit u64")
             })?;
-            if has_ewma {
-                advance_typed_ewma_windows(&mut state, rows, &indices, compiled, node_id)?;
-            } else {
-                state.windows.clear();
+            state.windows = recurrence_windows(compiled, &seeds[update.entity_ids()[indices[0]]]);
+            if state.windows.is_empty() && has_ewma {
+                state.windows = fresh_windows(compiled);
             }
             state
                 .rows
@@ -1431,32 +1442,27 @@ fn typed_history_updates(
         .collect()
 }
 
-fn advance_typed_ewma_windows(
-    state: &mut EntityRollingState,
-    rows: &[BufferedRow],
-    indices: &[usize],
+pub(super) fn recurrence_windows(
     compiled: &CompiledRollingSpec,
-    node_id: &str,
-) -> Result<()> {
-    if state.windows.len() != compiled.window_groups.len() {
-        state.windows = fresh_windows(compiled);
+    seeds: &[Option<kernel::RecurrenceSeed>],
+) -> Vec<WindowState> {
+    if !seeds.iter().any(Option::is_some) {
+        return Vec::new();
     }
-    for &row_index in indices {
-        for (group_index, group) in compiled.window_groups.iter().enumerate() {
-            let CompiledWindowGroup::Ewma {
-                input_index, alpha, ..
-            } = group
-            else {
-                continue;
-            };
-            let WindowState::Ewma(accumulator) = &mut state.windows[group_index] else {
-                return Err(internal_error("rolling typed EWMA history state mismatch"));
-            };
-            let sample = &rows[row_index].values[*input_index];
-            if is_valid_sample(sample) {
-                accumulator.add(sample, *alpha, node_id)?;
+    let mut windows = fresh_windows(compiled);
+    for (window, seed) in windows.iter_mut().zip(seeds) {
+        match seed {
+            Some(kernel::RecurrenceSeed::Ewma(valid_count, value)) => {
+                *window = WindowState::Ewma(EwmaAccumulator {
+                    valid_count: *valid_count,
+                    value: *value,
+                });
             }
+            Some(kernel::RecurrenceSeed::Cumulative(summary)) => {
+                *window = WindowState::Cumulative(summary.clone());
+            }
+            None => {}
         }
     }
-    Ok(())
+    windows
 }

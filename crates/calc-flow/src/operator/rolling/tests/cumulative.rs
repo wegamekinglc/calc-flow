@@ -1,4 +1,5 @@
 use super::*;
+use datafusion::arrow::array::Int64Array;
 
 fn cumulative_spec() -> RollingSpec {
     serde_json::from_value(json!({
@@ -16,6 +17,325 @@ fn cumulative_spec() -> RollingSpec {
         "late_policy":{"kind":"error", "scope":"envelope"},
         "value_policy":"stateful_numeric_v1"
     })).unwrap()
+}
+
+fn mixed_cumulative_spec() -> RollingSpec {
+    let mut value = serde_json::to_value(cumulative_spec()).unwrap();
+    let outputs = value["outputs"].as_array_mut().unwrap();
+    outputs.push(json!({"kind":"cumulative_mean", "primitive_version":1,
+        "input":"price", "output":"mean", "min_periods":1}));
+    outputs.push(aggregate_output("mean", "price", "rolling_mean", 3));
+    serde_json::from_value(value).unwrap()
+}
+
+#[test]
+fn test_cumulative_single_and_mixed_stages_select_typed_transition() {
+    let mut selections = Vec::new();
+    for profile in [
+        RollingNumericalProfile::StableV1,
+        RollingNumericalProfile::StableV2Preview,
+    ] {
+        let mut mixed = mixed_cumulative_spec();
+        mixed.numerical_profile = profile;
+        let mut cumulative = cumulative_spec();
+        cumulative.numerical_profile = profile;
+        let compiled = compile_spec(&cumulative, &kernel_schema()).unwrap();
+        let expected = match profile {
+            RollingNumericalProfile::StableV1 => {
+                "241fc56daeb51a3fea8f780c215658956b3b75437852305f4ac6c657bb4f131a"
+            }
+            RollingNumericalProfile::StableV2Preview => {
+                "37d8c3f0e6b451348349c5fd69da6346be96cbb0e69d584830f35ae1cd473646"
+            }
+        };
+        assert_eq!(
+            compiled.kernel_plan.fingerprint(),
+            expected,
+            "layout 4 identity at e59f26cb"
+        );
+        for output in &cumulative.outputs {
+            let single = RollingSpec {
+                outputs: vec![output.clone()],
+                ..cumulative.clone()
+            };
+            selections.push(
+                compile_spec(&single, &kernel_schema())
+                    .unwrap()
+                    .kernel_plan
+                    .selection(),
+            );
+        }
+        selections.push(
+            compile_spec(&mixed, &kernel_schema())
+                .unwrap()
+                .kernel_plan
+                .selection(),
+        );
+    }
+    assert!(
+        selections
+            .iter()
+            .all(|selection| *selection == KernelSelection::OrderedPrimitive),
+        "{selections:?}"
+    );
+}
+
+fn cumulative_volume_spec(profile: RollingNumericalProfile) -> RollingSpec {
+    let mut value = serde_json::to_value(cumulative_spec()).unwrap();
+    for output in value["outputs"].as_array_mut().unwrap() {
+        output["input"] = json!("volume");
+    }
+    let mut spec: RollingSpec = serde_json::from_value(value).unwrap();
+    spec.numerical_profile = profile;
+    spec
+}
+
+#[test]
+fn test_cumulative_typed_state_rejects_a_different_transition() {
+    let spec = cumulative_spec();
+    let compile = |index: usize| {
+        compile_spec(
+            &RollingSpec {
+                outputs: vec![spec.outputs[index].clone()],
+                ..spec.clone()
+            },
+            &kernel_schema(),
+        )
+        .unwrap()
+        .kernel_plan
+    };
+    let sum = compile(0);
+    let min = compile(1);
+    assert_eq!(sum.fingerprint(), min.fingerprint());
+    let input = float64_fast_record(&[(1, "a", 1, Some(2.0))]);
+    let state = sum.open_and_fill(&input, "rolling").unwrap().unwrap().state;
+    assert!(
+        min.update_and_fill(
+            &state,
+            &float64_fast_record(&[(2, "a", 2, Some(3.0))]),
+            "rolling"
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn test_cumulative_typed_primitives_match_general() {
+    use datafusion::arrow::array::Float32Array;
+    let values: ArrayRef = Arc::new(Int64Array::from(vec![Some(2), None, Some(0), Some(3)]));
+    let mut cases = [
+        DataType::Int8,
+        DataType::Int16,
+        DataType::Int32,
+        DataType::Int64,
+        DataType::UInt8,
+        DataType::UInt16,
+        DataType::UInt32,
+        DataType::UInt64,
+        DataType::Float32,
+        DataType::Float64,
+    ]
+    .iter()
+    .map(|dtype| datafusion::arrow::compute::cast(&values, dtype).unwrap())
+    .collect::<Vec<_>>();
+    cases.push(Arc::new(Float64Array::from(vec![
+        None,
+        Some(f64::NAN),
+        Some(-0.0),
+        Some(0.0),
+        Some(1e12),
+        Some(1e12 + 2.0),
+        Some(f64::INFINITY),
+        Some(f64::NEG_INFINITY),
+    ])));
+    cases.push(Arc::new(Float32Array::from(vec![
+        Some(-0.0),
+        None,
+        Some(f32::NAN),
+        Some(2.5),
+        Some(f32::INFINITY),
+    ])));
+    cases.push(Arc::new(Float64Array::from(vec![
+        Some(1e308),
+        Some(-1e308),
+        Some(1.0),
+    ])));
+    cases.push(Arc::new(Float64Array::new_null(0)));
+    for profile in [
+        RollingNumericalProfile::StableV1,
+        RollingNumericalProfile::StableV2Preview,
+    ] {
+        for values in &cases {
+            let (schema, input) = primitive_volume_record(Arc::clone(values));
+            assert_typed_matches_general(&cumulative_volume_spec(profile), &schema, &input);
+        }
+    }
+}
+
+#[test]
+fn test_cumulative_typed_integer_overflow_matches_general() {
+    let cases: [ArrayRef; 2] = [
+        Arc::new(Int64Array::from(vec![i64::MAX, 1])),
+        Arc::new(UInt64Array::from(vec![u64::MAX, 1])),
+    ];
+    for values in cases {
+        let (schema, input) = primitive_volume_record(values);
+        let compiled = compile_spec(
+            &cumulative_volume_spec(RollingNumericalProfile::StableV1),
+            &schema,
+        )
+        .unwrap();
+        let fast = compiled
+            .kernel_plan
+            .open_and_fill(&input, "rolling")
+            .err()
+            .unwrap();
+        let rows = (0..input.num_rows())
+            .map(|index| read_buffered_row(&input, index, &compiled, "rolling").unwrap())
+            .collect::<Vec<_>>();
+        let general =
+            compute_output_columns(&rows, &RollingHistories::default(), &compiled, "rolling")
+                .err()
+                .unwrap();
+        assert_eq!(fast.to_string(), general.to_string());
+    }
+    let mut spec = cumulative_volume_spec(RollingNumericalProfile::StableV1);
+    spec.outputs.truncate(1);
+    let mut value = serde_json::to_value(spec).unwrap();
+    value["outputs"][0]["min_periods"] = json!(3);
+    let spec = serde_json::from_value(value).unwrap();
+    let (schema, input) = primitive_volume_record(Arc::new(Int64Array::from(vec![
+        i64::MAX,
+        i64::MAX,
+        -i64::MAX,
+    ])));
+    assert_typed_matches_general(&spec, &schema, &input);
+}
+
+#[test]
+fn test_cumulative_preserves_unordered_and_unsupported_stage_fallback() {
+    let spec = mixed_cumulative_spec();
+    let compiled = compile_spec(&spec, &kernel_schema()).unwrap();
+    let input = float64_fast_record(&[(2, "a", 2, Some(2.0)), (1, "a", 1, Some(1.0))]);
+    assert!(
+        compiled
+            .kernel_plan
+            .open_and_fill(&input, "rolling")
+            .unwrap()
+            .is_none()
+    );
+    let mut value = serde_json::to_value(spec).unwrap();
+    value["outputs"].as_array_mut().unwrap().push(lag_price(1));
+    let spec = serde_json::from_value(value).unwrap();
+    assert_eq!(
+        compile_spec(&spec, &kernel_schema())
+            .unwrap()
+            .kernel_plan
+            .selection(),
+        KernelSelection::General
+    );
+}
+
+async fn advance_cumulative_stream(
+    operator: &mut RollingOperator,
+    input: &RecordBatch,
+    watermark: i64,
+    job: &crate::StreamJobContext,
+) -> RecordBatch {
+    let context = StreamOperatorContext::new(job, "rolling", None);
+    let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+    operator
+        .process_data(
+            "input",
+            Batch::table(vec![input.clone()], BatchMetadata::default()).unwrap(),
+            &context,
+            &mut output,
+        )
+        .await
+        .unwrap();
+    operator
+        .on_watermark(EventTime::from_micros(watermark), &context, &mut output)
+        .await
+        .unwrap();
+    drain(&mut output).remove(0)
+}
+
+async fn cumulative_stream_roundtrip(profile: RollingNumericalProfile, rolling: bool) {
+    let mut spec = mixed_cumulative_spec();
+    spec.numerical_profile = profile;
+    if !rolling {
+        spec.outputs.pop();
+    }
+    let mut value = serde_json::to_value(&spec).unwrap();
+    value["outputs"].as_array_mut().unwrap().push(lag_price(1));
+    let fallback_spec = serde_json::from_value(value).unwrap();
+    let mut fast =
+        RollingOperator::new("rolling", Arc::new(kernel_schema()), spec.clone()).unwrap();
+    let mut general =
+        RollingOperator::new("rolling", Arc::new(kernel_schema()), fallback_spec).unwrap();
+    let job = crate::StreamJobContext::new(
+        7,
+        TEST_FINGERPRINT,
+        JsonMap::new(),
+        None,
+        crate::CancellationToken::new(),
+    );
+    let first = float64_fast_record(&[
+        (1, "a", 1, Some(1e12)),
+        (1, "b", 1, None),
+        (2, "a", 2, Some(1e12 + 2.0)),
+        (2, "b", 2, Some(10.0)),
+    ]);
+    let out = advance_cumulative_stream(&mut fast, &first, 1, &job).await;
+    let fallback = advance_cumulative_stream(&mut general, &first, 1, &job).await;
+    for (actual, expected) in out.columns().iter().zip(fallback.columns()) {
+        assert_eq!(actual.to_data(), expected.to_data());
+    }
+    assert!(fast.state.buffer.is_empty());
+    assert!(!fast.state.ordered.is_empty());
+    assert!(fast.state.typed_kernel_state.is_some());
+    assert_eq!(
+        out.column(3).to_data().buffers()[0].as_ptr(),
+        first.column(3).to_data().buffers()[0].as_ptr()
+    );
+    if !rolling {
+        assert!(
+            fast.state
+                .histories
+                .by_entity
+                .values()
+                .all(|state| state.rows.is_empty() && state.columnar.records.is_empty())
+        );
+    }
+    let snapshot = fast.checkpoint(Epoch::new(1).unwrap()).unwrap();
+    let mut restored = RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
+    StreamOperator::restore(&mut restored, &snapshot).unwrap();
+    let next = float64_fast_record(&[
+        (3, "a", 3, Some(1e12 + 4.0)),
+        (3, "b", 3, Some(f64::NAN)),
+        (4, "a", 4, None),
+        (4, "b", 4, Some(20.0)),
+    ]);
+    let expected = advance_cumulative_stream(&mut general, &next, 4, &job).await;
+    for operator in [&mut fast, &mut restored] {
+        let actual = advance_cumulative_stream(operator, &next, 4, &job).await;
+        for (actual, expected) in actual.columns().iter().zip(expected.columns()) {
+            assert_eq!(actual.to_data(), expected.to_data());
+        }
+        assert!(operator.state.typed_kernel_state.is_some());
+    }
+}
+
+#[tokio::test]
+async fn test_cumulative_ordered_and_fallback_streams_match_across_batches_and_restore() {
+    for profile in [
+        RollingNumericalProfile::StableV1,
+        RollingNumericalProfile::StableV2Preview,
+    ] {
+        for rolling in [false, true] {
+            cumulative_stream_roundtrip(profile, rolling).await;
+        }
+    }
 }
 
 fn drain(collector: &mut crate::EdgeCollector) -> Vec<RecordBatch> {

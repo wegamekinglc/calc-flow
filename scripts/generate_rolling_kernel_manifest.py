@@ -50,6 +50,7 @@ TRANSITIONS = {
     "extrema": "Extrema",
     "pair": "Pair",
     "ewma": "Ewma",
+    "cumulative": "Cumulative",
     "fused_difference": "FusedDifference",
     "scan": "Scan",
 }
@@ -176,6 +177,7 @@ pub(super) enum GeneratedTransition {{
     Extrema,
     Pair,
     Ewma,
+    Cumulative,
     FusedDifference,
     Scan,
 }}
