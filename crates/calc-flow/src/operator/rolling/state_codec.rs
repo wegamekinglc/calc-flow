@@ -7,20 +7,23 @@ use super::{
     CompiledWindowGroup, Cursor, DataType, DecodedRollingState, Deserialize, Deserializer,
     DictionaryTracker, Digest, EntityRollingState, EwmaAccumulator, ExtremaAccumulator, ExtremaKey,
     Field, FileReader, FileWriter, Float64Array, HashMap, HistoryUpdates, IpcSchemaEncoder,
-    KeyValue, ROLLING_COLUMNAR_STATE_LAYOUT_VERSION, ROLLING_EWMA_STATE_LAYOUT_VERSION,
-    RecordBatch, Result, RollingHistories, RollingKernelState, RollingMetricsRecorder,
-    RollingSnapshotMetadata, RollingStage, RowIdentity, ScalarValue, Schema, SchemaRef,
-    SegmentDescriptor, Sha256, StateInventory, StateRowOrderKey, SumClass, TableBatch, UInt8Array,
-    UInt64Array, Value, WindowState, checkpoint_mismatch, concat_batches, evict_retained_history,
-    ewma_entity_values, float_sample, format_error, fresh_windows, group_rows_by_entity,
-    history_event_time, internal_error, is_valid_sample, kernel, new_null_array, operator_error,
-    spec_uses_stable_v2, state_format, state_v3,
+    KeyValue, ROLLING_COLUMNAR_STATE_LAYOUT_VERSION, ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION,
+    ROLLING_EWMA_STATE_LAYOUT_VERSION, RecordBatch, Result, RollingHistories, RollingKernelState,
+    RollingMetricsRecorder, RollingSnapshotMetadata, RollingStage, RowIdentity, ScalarValue,
+    Schema, SchemaRef, SegmentDescriptor, Sha256, StateInventory, StateRowOrderKey, SumClass,
+    TableBatch, UInt8Array, UInt64Array, Value, WindowState, checkpoint_mismatch, concat_batches,
+    evict_retained_history, ewma_entity_values, float_sample, format_error, fresh_windows,
+    group_rows_by_entity, history_event_time, internal_error, is_valid_sample, kernel,
+    new_null_array, operator_error, spec_uses_stable_v2, state_format, state_v3,
 };
 use kernel::{StreamKernelUpdate, TypedStreamTransition};
 
 fn state_fields(input_schema: &Schema, state_layout_version: u32) -> Vec<Field> {
-    if state_layout_version == ROLLING_COLUMNAR_STATE_LAYOUT_VERSION {
-        return state_v3::state_fields(input_schema);
+    if matches!(
+        state_layout_version,
+        ROLLING_COLUMNAR_STATE_LAYOUT_VERSION | ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
+    ) {
+        return state_v3::state_fields_for_layout(input_schema, state_layout_version);
     }
     let mut fields = vec![
         Field::new("_state_kind", DataType::UInt8, false),
@@ -76,7 +79,10 @@ pub(super) fn state_schema(
             compiled.state_schema_fingerprint.clone(),
         ),
     ]);
-    if compiled.state_layout_version == ROLLING_COLUMNAR_STATE_LAYOUT_VERSION {
+    if matches!(
+        compiled.state_layout_version,
+        ROLLING_COLUMNAR_STATE_LAYOUT_VERSION | ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
+    ) {
         metadata.insert(
             "calc_flow.rolling_kernel_fingerprint".into(),
             compiled.kernel_plan.fingerprint().to_owned(),
@@ -103,7 +109,10 @@ pub(super) fn encode_state_segment(
     pipeline_fingerprint: &str,
     operator_id: &str,
 ) -> Result<Vec<u8>> {
-    if compiled.state_layout_version == ROLLING_COLUMNAR_STATE_LAYOUT_VERSION {
+    if matches!(
+        compiled.state_layout_version,
+        ROLLING_COLUMNAR_STATE_LAYOUT_VERSION | ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
+    ) {
         return state_v3::encode(
             histories,
             buffer,
@@ -261,7 +270,10 @@ pub(super) fn decode_state_segment(
     compiled: &CompiledRollingSpec,
     metadata: &RollingSnapshotMetadata,
 ) -> Result<DecodedRollingState> {
-    if metadata.state_layout_version == ROLLING_COLUMNAR_STATE_LAYOUT_VERSION {
+    if matches!(
+        metadata.state_layout_version,
+        ROLLING_COLUMNAR_STATE_LAYOUT_VERSION | ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
+    ) {
         return state_v3::decode(bytes, input_schema, compiled, metadata);
     }
     let mut legacy = compiled.clone();
@@ -381,7 +393,10 @@ pub(super) fn validate_segment_schema_metadata(
             snapshot.state_schema_fingerprint.clone(),
         ),
     ];
-    if snapshot.state_layout_version == ROLLING_COLUMNAR_STATE_LAYOUT_VERSION {
+    if matches!(
+        snapshot.state_layout_version,
+        ROLLING_COLUMNAR_STATE_LAYOUT_VERSION | ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
+    ) {
         expected.extend([
             (
                 "calc_flow.rolling_kernel_fingerprint",
@@ -744,6 +759,11 @@ pub(super) fn rebuild_windows(
                         accumulator.expired_through = expired_through_bound(last_time, *micros);
                     }
                 }
+                CompiledWindowGroup::Cumulative { .. } => {
+                    if let Some(WindowState::Cumulative(saved)) = persisted.get(group_index) {
+                        windows[group_index] = WindowState::Cumulative(saved.clone());
+                    }
+                }
                 CompiledWindowGroup::Ewma { .. } => {
                     if let Some(WindowState::Ewma(saved)) = persisted.get(group_index) {
                         windows[group_index] = WindowState::Ewma(*saved);
@@ -902,10 +922,11 @@ pub(super) fn validate_snapshot_metadata(
             "rolling state schema fingerprint does not match the compiled operator",
         ));
     }
-    if metadata.state_layout_version == ROLLING_COLUMNAR_STATE_LAYOUT_VERSION
-        && (metadata.kernel_fingerprint.as_deref() != Some(compiled.kernel_plan.fingerprint())
-            || metadata.numerical_profile.as_deref()
-                != Some(compiled.kernel_plan.numerical_profile()))
+    if matches!(
+        metadata.state_layout_version,
+        ROLLING_COLUMNAR_STATE_LAYOUT_VERSION | ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
+    ) && (metadata.kernel_fingerprint.as_deref() != Some(compiled.kernel_plan.fingerprint())
+        || metadata.numerical_profile.as_deref() != Some(compiled.kernel_plan.numerical_profile()))
     {
         return Err(checkpoint_mismatch(
             "rolling kernel fingerprint or numerical profile does not match the compiled operator",

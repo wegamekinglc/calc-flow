@@ -1583,6 +1583,9 @@ fn compile_typed_group(
     group: &CompiledWindowGroup,
 ) -> std::result::Result<TypedGroupPlan, String> {
     match group {
+        CompiledWindowGroup::Cumulative { .. } => {
+            Err("cumulative summary uses the general row kernel".into())
+        }
         CompiledWindowGroup::Numeric {
             input_index,
             frame,

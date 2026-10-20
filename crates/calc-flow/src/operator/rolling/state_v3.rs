@@ -1,4 +1,4 @@
-//! Columnar rolling checkpoint layout v3.
+//! Columnar rolling checkpoint layouts v3 and v4.
 //!
 //! Entity keys are stored once in a deterministic dictionary. Retained
 //! history stores only columns that a future rolling transition can read,
@@ -12,7 +12,7 @@ use std::{
 
 use datafusion::{
     arrow::{
-        array::{Array, ArrayRef, Float64Array, UInt8Array, UInt64Array},
+        array::{Array, ArrayRef, BinaryArray, Float64Array, UInt8Array, UInt64Array},
         datatypes::{DataType, Field, Schema},
         ipc::{reader::FileReader, writer::FileWriter},
         record_batch::RecordBatch,
@@ -33,6 +33,15 @@ const KIND_ENTITY: u8 = 0;
 const KIND_HISTORY: u8 = 1;
 const KIND_BUFFER: u8 = 2;
 const KIND_EWMA: u8 = 3;
+const KIND_CUMULATIVE: u8 = 4;
+
+pub(super) fn state_fields_for_layout(input_schema: &Schema, layout: u32) -> Vec<Field> {
+    let mut fields = state_fields(input_schema);
+    if layout == super::ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION {
+        fields.push(Field::new("_cumulative_summary", DataType::Binary, true));
+    }
+    fields
+}
 
 pub(super) fn state_fields(input_schema: &Schema) -> Vec<Field> {
     let mut fields = vec![
@@ -140,6 +149,7 @@ pub(super) fn encode(
         }
     }
 
+    encoded.push_cumulative(histories, &entity_ids, input_schema)?;
     let schema = state_schema(input_schema, compiled, pipeline_fingerprint, operator_id);
     let record = encoded.finish(Arc::new(schema.clone()))?;
     let mut bytes = Vec::new();
@@ -168,7 +178,10 @@ pub(super) fn decode(
     let reader = FileReader::try_new(Cursor::new(bytes), None)
         .map_err(|error| state_format(format!("rolling state IPC open failed: {error}")))?;
     validate_segment_schema_metadata(reader.schema().metadata(), metadata, compiled)?;
-    let expected_schema = Schema::new(state_fields(input_schema));
+    let expected_schema = Schema::new(state_fields_for_layout(
+        input_schema,
+        compiled.state_layout_version,
+    ));
     if reader.schema().fields() != expected_schema.fields() {
         return Err(state_format(
             "rolling columnar state fields do not match layout v3".to_owned(),
@@ -181,7 +194,7 @@ pub(super) fn decode(
         state_format("rolling state segment must contain exactly one record batch".to_owned())
     })?;
     let width = input_schema.fields().len();
-    if record.num_columns() != width + 6 {
+    if record.num_columns() != expected_schema.fields().len() {
         return Err(state_format(
             "rolling columnar state segment column count does not match layout v3".to_owned(),
         ));
@@ -234,7 +247,7 @@ fn history_projection(compiled: &CompiledRollingSpec) -> BTreeSet<usize> {
                 projection.insert(*left_index);
                 projection.insert(*right_index);
             }
-            CompiledWindowGroup::Ewma { .. } => {}
+            CompiledWindowGroup::Ewma { .. } | CompiledWindowGroup::Cumulative { .. } => {}
         }
     }
     projection
@@ -304,6 +317,7 @@ struct EncodedColumns {
     groups: Vec<Option<u64>>,
     counts: Vec<Option<u64>>,
     values: Vec<Option<f64>>,
+    summaries: Vec<Option<Vec<u8>>>,
 }
 
 impl EncodedColumns {
@@ -316,6 +330,7 @@ impl EncodedColumns {
             groups: Vec::new(),
             counts: Vec::new(),
             values: Vec::new(),
+            summaries: Vec::new(),
         }
     }
 
@@ -336,6 +351,35 @@ impl EncodedColumns {
         self.groups.push(ewma.map(|value| value.0));
         self.counts.push(ewma.map(|value| value.1));
         self.values.push(ewma.map(|value| value.2));
+        self.summaries.push(None);
+    }
+
+    fn push_cumulative(
+        &mut self,
+        histories: &RollingHistories,
+        entity_ids: &BTreeMap<Vec<Option<KeyValue>>, u64>,
+        input_schema: &Schema,
+    ) -> Result<()> {
+        for (entity, state) in &histories.by_entity {
+            for (group, window) in state.windows.iter().enumerate() {
+                let WindowState::Cumulative(accumulator) = window else {
+                    continue;
+                };
+                self.push(
+                    KIND_CUMULATIVE,
+                    entity_ids[entity],
+                    Some(group as u64),
+                    null_values(input_schema),
+                    None,
+                );
+                *self
+                    .summaries
+                    .last_mut()
+                    .ok_or_else(|| internal_error("missing summary row"))? =
+                    Some(accumulator.encode()?);
+            }
+        }
+        Ok(())
     }
 
     fn finish(self, schema: Arc<Schema>) -> Result<RecordBatch> {
@@ -356,6 +400,14 @@ impl EncodedColumns {
             Arc::new(UInt64Array::from(self.counts)) as ArrayRef,
             Arc::new(Float64Array::from(self.values)) as ArrayRef,
         ]);
+        if schema.fields().len() == arrays.len() + 1 {
+            arrays.push(Arc::new(
+                self.summaries
+                    .iter()
+                    .map(|value| value.as_deref())
+                    .collect::<BinaryArray>(),
+            ));
+        }
         RecordBatch::try_new(schema, arrays)
             .map_err(|error| state_format(format!("rolling state batch is invalid: {error}")))
     }
@@ -421,6 +473,7 @@ struct StateDecoder<'a> {
     last_history_entity: Option<u64>,
     last_buffer: Option<super::RowIdentity>,
     last_ewma: Option<(u64, u64)>,
+    cumulative_groups: BTreeSet<(u64, u64)>,
 }
 
 impl<'a> StateDecoder<'a> {
@@ -441,6 +494,7 @@ impl<'a> StateDecoder<'a> {
             last_history_entity: None,
             last_buffer: None,
             last_ewma: None,
+            cumulative_groups: BTreeSet::new(),
         }
     }
 
@@ -473,6 +527,28 @@ impl<'a> StateDecoder<'a> {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
+        let payload = if self.compiled.state_layout_version
+            == super::ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
+        {
+            let summaries: &BinaryArray =
+                required_array(record, record.num_columns() - 1, "cumulative summary")?;
+            (!summaries.is_null(row_index)).then(|| summaries.value(row_index))
+        } else {
+            None
+        };
+        if kind == KIND_CUMULATIVE {
+            if ewma.is_some() || values.iter().any(|value| !value.is_null()) {
+                return Err(state_format(
+                    "cumulative row contains unrelated values".to_owned(),
+                ));
+            }
+            return self.decode_cumulative(entity_id, position, payload);
+        }
+        if payload.is_some() {
+            return Err(state_format(
+                "non-cumulative row contains a summary".to_owned(),
+            ));
+        }
         match kind {
             KIND_ENTITY => self.decode_entity(entity_id, position, ewma, values),
             KIND_HISTORY => self.decode_history(entity_id, position, ewma, values),
@@ -694,6 +770,58 @@ impl<'a> StateDecoder<'a> {
         Ok(())
     }
 
+    fn decode_cumulative(
+        &mut self,
+        entity_id: u64,
+        group: Option<u64>,
+        payload: Option<&[u8]>,
+    ) -> Result<()> {
+        if self.compiled.state_layout_version != super::ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION {
+            return Err(state_format("cumulative row requires layout 4".to_owned()));
+        }
+        let group = group.ok_or_else(|| state_format("missing cumulative group".to_owned()))?;
+        let payload =
+            payload.ok_or_else(|| state_format("missing cumulative summary".to_owned()))?;
+        if self
+            .cumulative_groups
+            .last()
+            .is_some_and(|previous| *previous >= (entity_id, group))
+        {
+            return Err(state_format(
+                "cumulative rows are not ordered and unique".to_owned(),
+            ));
+        }
+        let group_index = usize::try_from(group)
+            .map_err(|_| state_format("invalid cumulative group".to_owned()))?;
+        let Some(CompiledWindowGroup::Cumulative {
+            input_index,
+            statistic,
+        }) = self.compiled.window_groups.get(group_index)
+        else {
+            return Err(state_format(
+                "cumulative row references a different group type".to_owned(),
+            ));
+        };
+        let accumulator = super::CumulativeAccumulator::decode(
+            payload,
+            *statistic,
+            self.input_schema.field(*input_index).data_type(),
+        )?;
+        let entity = self.entity(entity_id)?.0.clone();
+        let state = self
+            .decoded
+            .histories
+            .by_entity
+            .entry(entity)
+            .or_insert_with(|| EntityRollingState::fresh(self.compiled));
+        if state.windows.is_empty() {
+            state.windows = super::fresh_windows(self.compiled);
+        }
+        state.windows[group_index] = WindowState::Cumulative(accumulator);
+        self.cumulative_groups.insert((entity_id, group));
+        self.mark_used(entity_id)
+    }
+
     fn entity(&self, entity_id: u64) -> Result<&(Vec<Option<KeyValue>>, Vec<ScalarValue>)> {
         usize::try_from(entity_id)
             .ok()
@@ -760,6 +888,21 @@ impl<'a> StateDecoder<'a> {
                 ));
             }
         }
+        for (entity_id, (entity, _)) in self.entities.iter().enumerate() {
+            if self.decoded.histories.by_entity.contains_key(entity) {
+                for (group, declaration) in self.compiled.window_groups.iter().enumerate() {
+                    if matches!(declaration, CompiledWindowGroup::Cumulative { .. })
+                        && !self
+                            .cumulative_groups
+                            .contains(&(entity_id as u64, group as u64))
+                    {
+                        return Err(state_format(
+                            "entity is missing a cumulative summary".to_owned(),
+                        ));
+                    }
+                }
+            }
+        }
         validate_decoded_state(&self.decoded, self.compiled)?;
         rebuild_windows(&mut self.decoded.histories, self.compiled, "rolling")?;
         Ok(self.decoded)
@@ -799,7 +942,16 @@ mod tests {
     }
 
     fn compiled(output: &Value, stable_v2: bool) -> CompiledRollingSpec {
-        let state_layout_version = if output["kind"] == "ewma" { 2 } else { 1 };
+        let state_layout_version = if output["kind"]
+            .as_str()
+            .is_some_and(|kind| kind.starts_with("cumulative_"))
+        {
+            4
+        } else if output["kind"] == "ewma" {
+            2
+        } else {
+            1
+        };
         let mut document = json!({
             "configuration_version": 1,
             "state_layout_version": state_layout_version,
@@ -868,6 +1020,61 @@ mod tests {
 
     fn decoder<'a>(schema: &'a Schema, compiled: &'a CompiledRollingSpec) -> StateDecoder<'a> {
         StateDecoder::new(schema, compiled, history_projection(compiled))
+    }
+
+    #[test]
+    fn test_cumulative_rows_require_complete_unique_group_summaries() {
+        let schema = input_schema();
+        let compiled = compiled(
+            &json!({
+                "kind": "cumulative_sum", "primitive_version": 1,
+                "input": "price", "output": "total", "min_periods": 1
+            }),
+            false,
+        );
+        let mut state = decoder(&schema, &compiled);
+        state
+            .decode_entity(0, None, None, entity_values("a"))
+            .unwrap();
+        let mut accumulator = super::super::CumulativeAccumulator::default();
+        accumulator
+            .add(
+                &ScalarValue::Float64(Some(2.0)),
+                super::super::Statistic::Sum,
+                "test",
+            )
+            .unwrap();
+        let bytes = accumulator.encode().unwrap();
+        assert!(state.decode_cumulative(0, Some(0), None).is_err());
+        assert!(state.decode_cumulative(0, Some(1), Some(&bytes)).is_err());
+        assert!(state.decode_cumulative(1, Some(0), Some(&bytes)).is_err());
+        state.decode_cumulative(0, Some(0), Some(&bytes)).unwrap();
+        assert!(state.decode_cumulative(0, Some(0), Some(&bytes)).is_err());
+        let decoded = state.finish().unwrap();
+        assert_eq!(decoded.histories.by_entity.len(), 1);
+
+        let mut missing = decoder(&schema, &compiled);
+        missing
+            .decode_entity(0, None, None, entity_values("a"))
+            .unwrap();
+        let entity = missing.entity(0).unwrap().0.clone();
+        missing
+            .decoded
+            .histories
+            .by_entity
+            .insert(entity, EntityRollingState::fresh(&compiled));
+        missing.mark_used(0).unwrap();
+        assert!(missing.finish().is_err());
+        let old = mean_compiled(false);
+        let mut old_state = decoder(&schema, &old);
+        old_state
+            .decode_entity(0, None, None, entity_values("a"))
+            .unwrap();
+        assert!(
+            old_state
+                .decode_cumulative(0, Some(0), Some(&bytes))
+                .is_err()
+        );
     }
 
     #[test]

@@ -249,7 +249,15 @@ unadjusted `alpha = 2 / (span + 1)` recurrence and shares constant state by
 not output columns; the operator writes their nullable `float64` difference
 directly.
 Kind `cumulative_mean` carries an input, output, and positive `min_periods`;
-it stores one count and arithmetic mean per entity. `argmax`, `argmin`,
+it stores one count and arithmetic mean per entity. Kinds `cumulative_sum`,
+`cumulative_min`, `cumulative_max`, and `cumulative_variance` carry numeric
+input/output names and positive `min_periods`; variance also carries `ddof`
+(`0` or `1`, default `1` in Python). They skip null/NaN and emit null below
+`min_periods`; variance additionally requires `count > ddof`. Sum preserves
+checked integer promotion, min/max preserve input types, and online mean/M2
+variance emits `float64`, becoming NaN in the presence of infinity. These
+summaries have constant size per entity and use the general row kernel.
+`argmax`, `argmin`,
 `rank`, and `unique_count` emit nullable `uint64`; `quantile` and `decay`
 emit nullable `float64`. Extrema positions count rows back from the current
 row and choose the oldest tie. Rank is zero-based ascending with the first
@@ -257,17 +265,26 @@ rank for ties; signed zero values tie and a singleton quantile is null.
 Decay weights valid samples
 linearly, newest highest.
 
+Cumulative sum/min/max/variance require
+`ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION` (4) in both declarations and writer
+state. Layout 4 extends the columnar layout with exact per-group summaries
+(including binary64 bits), alongside entity keys, history and pending rows.
+Other declarations keep their existing layout and checkpoint fingerprints.
+Recovery validates the layout, complete summary inventory, configuration,
+schema, kernel and numerical profile before installing state. Unknown versions
+and incompatible configurations fail closed.
+
 A frame is `rows(size)` —
 the `size` rows through the current row of the entity total order — or
 `duration(micros)`: the exact-width event-time interval `(t − micros, t]`,
 open at the lower bound and closed at the upper bound, with equal-time rows
 ordered by `sequence_by`. `configuration_version` and `state_layout_version`
 use their validated declaration constants. `configuration_version` is
-`ROLLING_CONFIGURATION_VERSION` (1). Declarations without EWMA or cumulative
-mean use `ROLLING_STATE_LAYOUT_VERSION` (1), while either recurrence requires
+`ROLLING_CONFIGURATION_VERSION` (1). Declarations without cumulative summaries,
+EWMA or cumulative mean use `ROLLING_STATE_LAYOUT_VERSION` (1), while either recurrence requires
 `ROLLING_EWMA_STATE_LAYOUT_VERSION` (2). These values belong to project
-documents and configuration fingerprints. Current operators
-write `ROLLING_COLUMNAR_STATE_LAYOUT_VERSION` (3): one deterministic entity
+documents and configuration fingerprints. Operators without the new cumulative
+summaries write `ROLLING_COLUMNAR_STATE_LAYOUT_VERSION` (3): one deterministic entity
 dictionary, projected retained history, a columnar reorder buffer, recurrence
 state, and kernel/numerical fingerprints. Restore continues to read the
 declaration's v1/v2 layout, while newly emitted descriptors and pipeline

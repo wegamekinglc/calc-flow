@@ -106,6 +106,38 @@
       "complexity": "amortized_constant"
     },
     {
+      "primitive": "cumulative_sum",
+      "batch": true,
+      "stream": true,
+      "datafusion": false,
+      "typed_transition": null,
+      "complexity": "general"
+    },
+    {
+      "primitive": "cumulative_min",
+      "batch": true,
+      "stream": true,
+      "datafusion": false,
+      "typed_transition": null,
+      "complexity": "general"
+    },
+    {
+      "primitive": "cumulative_max",
+      "batch": true,
+      "stream": true,
+      "datafusion": false,
+      "typed_transition": null,
+      "complexity": "general"
+    },
+    {
+      "primitive": "cumulative_variance",
+      "batch": true,
+      "stream": true,
+      "datafusion": false,
+      "typed_transition": null,
+      "complexity": "general"
+    },
+    {
       "primitive": "difference",
       "batch": true,
       "stream": true,

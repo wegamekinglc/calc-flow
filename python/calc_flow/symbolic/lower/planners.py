@@ -177,7 +177,14 @@ def _plan_rolling_stage(
             )
             derived_fields.append(Field(name, operands[0][2].data_type, nullable=True))
             continue
-        if kind in ("ewma", "cumulative_mean"):
+        if kind in (
+            "ewma",
+            "cumulative_mean",
+            "cumulative_sum",
+            "cumulative_min",
+            "cumulative_max",
+            "cumulative_variance",
+        ):
             declarations.append(
                 {
                     "kind": kind,
@@ -186,9 +193,20 @@ def _plan_rolling_stage(
                     "output": name,
                     "min_periods": _cint(subtree.attr("min_periods")) or 1,
                     **({"span": _cint(subtree.attr("span"))} if kind == "ewma" else {}),
+                    **(
+                        {"ddof": _cint(subtree.attr("ddof"))}
+                        if kind == "cumulative_variance"
+                        else {}
+                    ),
                 }
             )
-            derived_fields.append(Field(name, "float64", nullable=True))
+            derived_fields.append(
+                Field(
+                    name,
+                    _rolling_output_type(kind, operands[0][2].data_type) or "float64",
+                    nullable=True,
+                )
+            )
             continue
         frame = _rolling_frame(subtree, f"{path}.{name}", kind)
         declaration: dict[str, object] = {
@@ -248,7 +266,13 @@ def _plan_rolling_stage(
             "spec": {
                 "configuration_version": 1,
                 "state_layout_version": (
-                    2
+                    4
+                    if any(
+                        str(item["kind"]).startswith("cumulative_")
+                        and item["kind"] != "cumulative_mean"
+                        for item in declarations
+                    )
+                    else 2
                     if any(
                         _rolling_declaration_requires_ewma(item)
                         for item in declarations

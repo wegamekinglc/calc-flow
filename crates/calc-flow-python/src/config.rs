@@ -650,6 +650,7 @@ impl PyRuntime {
         json_to_python(py, &encoded)
     }
 
+    /// Compile a strict project-v3 graph, including rolling cumulative summaries.
     fn compile_project(
         slf: PyRef<'_, Self>,
         py: Python<'_>,

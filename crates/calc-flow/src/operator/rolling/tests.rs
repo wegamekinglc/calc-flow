@@ -4545,3 +4545,5 @@ async fn emission_chunks_by_edge_budget_and_oversize_rows_fail() {
             CalcFlowError::InvalidArgument { ref field, .. } if field == "message.bytes"
     ));
 }
+
+mod cumulative;

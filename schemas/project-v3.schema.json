@@ -2103,6 +2103,166 @@
         },
         {
           "additionalProperties": false,
+          "description": "Checked sum of every valid numeric sample seen for an entity.",
+          "properties": {
+            "input": {
+              "description": "Numeric input column name.",
+              "type": "string"
+            },
+            "kind": {
+              "const": "cumulative_sum",
+              "type": "string"
+            },
+            "min_periods": {
+              "description": "Positive minimum valid sample count.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "output": {
+              "description": "Output column name.",
+              "type": "string"
+            },
+            "primitive_version": {
+              "description": "Primitive version; must equal `1`.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "primitive_version",
+            "input",
+            "output",
+            "min_periods"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Minimum of every valid numeric sample seen for an entity.",
+          "properties": {
+            "input": {
+              "description": "Numeric input column name.",
+              "type": "string"
+            },
+            "kind": {
+              "const": "cumulative_min",
+              "type": "string"
+            },
+            "min_periods": {
+              "description": "Positive minimum valid sample count.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "output": {
+              "description": "Output column name.",
+              "type": "string"
+            },
+            "primitive_version": {
+              "description": "Primitive version; must equal `1`.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "primitive_version",
+            "input",
+            "output",
+            "min_periods"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Maximum of every valid numeric sample seen for an entity.",
+          "properties": {
+            "input": {
+              "description": "Numeric input column name.",
+              "type": "string"
+            },
+            "kind": {
+              "const": "cumulative_max",
+              "type": "string"
+            },
+            "min_periods": {
+              "description": "Positive minimum valid sample count.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "output": {
+              "description": "Output column name.",
+              "type": "string"
+            },
+            "primitive_version": {
+              "description": "Primitive version; must equal `1`.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "primitive_version",
+            "input",
+            "output",
+            "min_periods"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Online variance of every valid numeric sample seen for an entity.",
+          "properties": {
+            "ddof": {
+              "description": "Degrees-of-freedom adjustment; must be `0` or `1`.",
+              "format": "uint8",
+              "maximum": 1,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "input": {
+              "description": "Numeric input column name.",
+              "type": "string"
+            },
+            "kind": {
+              "const": "cumulative_variance",
+              "type": "string"
+            },
+            "min_periods": {
+              "description": "Positive minimum valid sample count.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "output": {
+              "description": "Output column name.",
+              "type": "string"
+            },
+            "primitive_version": {
+              "description": "Primitive version; must equal `1`.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "primitive_version",
+            "input",
+            "output",
+            "min_periods",
+            "ddof"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
           "description": "Valid (non-null, non-NaN) sample count over the frame (SCE-00 D3,\ncontract section 5.2).",
           "properties": {
             "frame": {
@@ -2876,7 +3036,7 @@
           "type": "array"
         },
         "state_layout_version": {
-          "description": "Durable state-layout version. Existing primitives use\n[`ROLLING_STATE_LAYOUT_VERSION`]; EWMA requires\n[`ROLLING_EWMA_STATE_LAYOUT_VERSION`].",
+          "description": "Durable state-layout version. Existing primitives use\n[`ROLLING_STATE_LAYOUT_VERSION`]; EWMA requires\n[`ROLLING_EWMA_STATE_LAYOUT_VERSION`]. Cumulative sum/min/max/variance\nrequire [`ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION`].",
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
