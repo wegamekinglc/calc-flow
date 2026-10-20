@@ -3,6 +3,8 @@
 //! Entity keys are stored once in a deterministic dictionary. Retained
 //! history stores only columns that a future rolling transition can read,
 //! while unfinalized buffer rows retain every non-partition input column.
+//! Layout v4 always persists entity transition counts, so a buffered entity
+//! cannot hide a missing cumulative prefix behind an absent history entry.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -88,8 +90,10 @@ pub(super) fn encode(
     let mut encoded = EncodedColumns::new(input_schema);
 
     for (entity, &entity_id) in &entity_ids {
-        let transition_count = (compiled.kernel_plan.numerical_profile_kind()
-            == RollingNumericalProfile::StableV2Preview)
+        let transition_count = (compiled.state_layout_version
+            == super::ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
+            || compiled.kernel_plan.numerical_profile_kind()
+                == RollingNumericalProfile::StableV2Preview)
             .then(|| {
                 histories
                     .by_entity
@@ -582,6 +586,13 @@ impl<'a> StateDecoder<'a> {
     }
 
     fn entity_transition_count(&self, position: Option<u64>) -> Result<u64> {
+        if self.compiled.state_layout_version == super::ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION {
+            return position.ok_or_else(|| {
+                state_format(
+                    "layout_v4 rolling entity row is missing its transition count".to_owned(),
+                )
+            });
+        }
         match self.compiled.kernel_plan.numerical_profile_kind() {
             RollingNumericalProfile::StableV1 if position.is_none() => Ok(0),
             RollingNumericalProfile::StableV2Preview => position.ok_or_else(|| {
@@ -1033,8 +1044,13 @@ mod tests {
             false,
         );
         let mut state = decoder(&schema, &compiled);
+        assert!(
+            state
+                .decode_entity(0, None, None, entity_values("a"))
+                .is_err()
+        );
         state
-            .decode_entity(0, None, None, entity_values("a"))
+            .decode_entity(0, Some(1), None, entity_values("a"))
             .unwrap();
         let mut accumulator = super::super::CumulativeAccumulator::default();
         accumulator
@@ -1055,7 +1071,7 @@ mod tests {
 
         let mut missing = decoder(&schema, &compiled);
         missing
-            .decode_entity(0, None, None, entity_values("a"))
+            .decode_entity(0, Some(1), None, entity_values("a"))
             .unwrap();
         let entity = missing.entity(0).unwrap().0.clone();
         missing

@@ -199,9 +199,12 @@ and kernel/numerical fingerprints. Restore also supports the declaration's
 layout `1` or `2` state. Writer layout is distinct from the declaration fields.
 Cumulative sum/min/max/variance use declaration and writer layout `4`, adding
 complete per-entity/per-group summaries. Counts, exact integer totals, extrema,
-the variance origin/mean/M2 IEEE bits and infinity classification survive recovery without replaying
-prefix history. Missing, duplicate, malformed or mismatched summaries fail
-closed before state installation. New summaries use the general row kernel;
+the variance origin/mean/M2 IEEE bits and infinity classification survive
+recovery without replaying prefix history. Layout `4` requires an entity
+processed-row count for both numerical profiles, distinguishing cumulative
+prefixes from entities with only pending rows; snapshots without this evidence
+fail closed. Missing, duplicate, malformed or mismatched summaries fail closed
+before state installation. New summaries use the general row kernel;
 existing typed kernels and old checkpoint encodings retain their identities.
 The [columnar state implementation](../crates/calc-flow/src/operator/rolling/state_v3.rs)
 owns this encoding.
