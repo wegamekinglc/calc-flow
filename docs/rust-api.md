@@ -256,7 +256,10 @@ input/output names and positive `min_periods`; variance also carries `ddof`
 `min_periods`; variance additionally requires `count > ddof`. Sum preserves
 checked integer promotion, min/max preserve input types, and online mean/M2
 variance emits `float64`, becoming NaN in the presence of infinity. These
-summaries have constant size per entity and use the general row kernel.
+summaries have constant size per entity. Supported primitive inputs use typed
+Arrow transitions and ordered columnar stream buffering, including compatible
+mixed stages with Mean or rolling outputs; other shapes retain the general
+fallback.
 `argmax`, `argmin`,
 `rank`, and `unique_count` emit nullable `uint64`; `quantile` and `decay`
 emit nullable `float64`. Extrema positions count rows back from the current

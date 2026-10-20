@@ -796,6 +796,44 @@ impl RollingKernelPlan {
         self.update_and_fill(&RollingKernelState::default(), input, node_id)
     }
 
+    /// Rebuilds finite windows without replaying durable recurrences or
+    /// reading temporary tail aggregates. The caller installs saved recurrence
+    /// summaries and transition counts before making the state resident.
+    pub(super) fn rebuild_history(
+        &self,
+        input: &RecordBatch,
+        node_id: &str,
+    ) -> Result<Option<RollingKernelState>> {
+        let mut replay = self.clone();
+        replay.groups.retain(|group| group.frame().is_some());
+        replay.outputs.clear();
+        let Some(mut rebuilt) = replay.open_and_fill(input, node_id)? else {
+            return Ok(None);
+        };
+        for entity in &mut rebuilt.state.states {
+            self.restore_group_positions(Arc::make_mut(entity))?;
+        }
+        Ok(Some(rebuilt.state))
+    }
+
+    fn restore_group_positions(&self, entity: &mut TypedEntityState) -> Result<()> {
+        let mut replayed = std::mem::take(&mut entity.groups).into_iter();
+        entity.groups = self
+            .groups
+            .iter()
+            .map(|group| {
+                if group.frame().is_some() {
+                    replayed
+                        .next()
+                        .ok_or_else(|| internal_error("typed restore history group is missing"))
+                } else {
+                    Ok(TypedWindowState::new(*group, 0))
+                }
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(())
+    }
+
     /// Installs durable per-entity transition counts and EWMA recurrence values
     /// into an otherwise reconstructed typed state. This is used only after
     /// checkpoint restore; ordinary live transitions keep both values directly.

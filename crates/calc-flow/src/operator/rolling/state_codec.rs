@@ -1259,9 +1259,8 @@ pub(super) fn reconstruct_typed_state(
         let input = build_input_record(&bootstrap, Arc::clone(input_schema), node_id)?;
         compiled
             .kernel_plan
-            .update_and_fill(&RollingKernelState::default(), &input, node_id)?
+            .rebuild_history(&input, node_id)?
             .ok_or_else(|| internal_error("typed rolling restore history is not canonical"))?
-            .state
     };
     seed_typed_restored_state(histories, compiled, input_schema, &reconstructed, node_id)
 }

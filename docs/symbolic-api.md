@@ -660,8 +660,10 @@ features = quotes.with_columns(
 These declarations retain constant summaries per entity, share state across
 compatible readouts, and continue across native batches and checkpoints.
 Entity cardinality and pending reorder rows still consume the configured
-state budget. They use the general row kernel with constant summary updates;
-they do not retain the entire prefix or substitute a large rolling frame.
+state budget. Supported primitive inputs use typed Arrow transitions and
+ordered columnar stream buffering, including compatible mixed stages with
+Mean or rolling outputs; other shapes retain the general fallback. Updates
+retain constant summaries rather than the prefix or a large rolling frame.
 
 A filter declared below every rolling feature becomes a deterministic
 `<output>__cf_prefilter` expression node feeding the rolling node; a filter

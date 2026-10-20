@@ -338,6 +338,92 @@ async fn test_cumulative_ordered_and_fallback_streams_match_across_batches_and_r
     }
 }
 
+async fn assert_cumulative_prefix_overflow_is_atomic(
+    operator: &mut RollingOperator,
+    input: &RecordBatch,
+    job: &crate::StreamJobContext,
+) {
+    let context = StreamOperatorContext::new(job, "rolling", Some(EventTime::from_micros(4)));
+    let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+    operator
+        .process_data(
+            "input",
+            Batch::table(vec![input.clone()], BatchMetadata::default()).unwrap(),
+            &context,
+            &mut output,
+        )
+        .await
+        .unwrap();
+    let before = format!("{:?}", operator.state.typed_kernel_state);
+    let error = operator
+        .on_watermark(EventTime::from_micros(5), &context, &mut output)
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("cumulative integer sum overflowed"),
+        "{error}"
+    );
+    assert!(drain(&mut output).is_empty());
+    assert_eq!(format!("{:?}", operator.state.typed_kernel_state), before);
+}
+
+#[tokio::test]
+async fn test_cumulative_mixed_integer_restore_replays_only_window_history() {
+    for profile in [
+        RollingNumericalProfile::StableV1,
+        RollingNumericalProfile::StableV2Preview,
+    ] {
+        let mut spec = cumulative_volume_spec(profile);
+        spec.outputs.truncate(1);
+        spec.outputs.push(
+            serde_json::from_value(aggregate_output("mean", "volume", "rolling_mean", 2)).unwrap(),
+        );
+        let mut source =
+            RollingOperator::new("rolling", Arc::new(kernel_schema()), spec.clone()).unwrap();
+        let job = crate::StreamJobContext::new(
+            7,
+            TEST_FINGERPRINT,
+            JsonMap::new(),
+            None,
+            crate::CancellationToken::new(),
+        );
+        let input = int64_fast_record(&[
+            Some(-i64::MAX),
+            Some(i64::MAX),
+            Some(i64::MAX),
+            Some(0),
+            Some(1),
+        ]);
+        let prefix = advance_cumulative_stream(&mut source, &input.slice(0, 3), 3, &job).await;
+        let totals = prefix
+            .column_by_name("total")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(totals.values().as_ref(), &[-i64::MAX, 0, i64::MAX]);
+        let snapshot = source.checkpoint(Epoch::new(1).unwrap()).unwrap();
+        let mut restored =
+            RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
+        StreamOperator::restore(&mut restored, &snapshot).unwrap();
+        let expected = advance_cumulative_stream(&mut source, &input.slice(3, 1), 4, &job).await;
+        let actual = advance_cumulative_stream(&mut restored, &input.slice(3, 1), 4, &job).await;
+        assert_eq!(actual, expected, "{profile:?}");
+        let total = actual
+            .column_by_name("total")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(total.value(0), i64::MAX);
+        for operator in [&mut source, &mut restored] {
+            assert_cumulative_prefix_overflow_is_atomic(operator, &input.slice(4, 1), &job).await;
+        }
+    }
+}
+
 fn drain(collector: &mut crate::EdgeCollector) -> Vec<RecordBatch> {
     collector
         .drain("output")
