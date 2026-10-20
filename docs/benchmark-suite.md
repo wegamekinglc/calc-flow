@@ -79,7 +79,7 @@ benchmark cases without a second hand-written case list.
 | Family         | Dimensions                                          | Cases per dimension                                       |
 |----------------|-----------------------------------------------------|-----------------------------------------------------------|
 | Python         | overhead 1k, small 10k, standard 100k, nightly 1M   | All collected non-lifecycle pytest benchmarks             |
-| Engines        | 10, 100, 1k, 10k, 100k, 1M, 10M rows                | 57 through 10k, 65 at 100k/1M, 51 at 10M                  |
+| Engines        | 10, 100, 1k, 10k, 100k, 1M, 10M rows                | 71 through 10k, 79 at 100k/1M, 65 at 10M                  |
 | Warm streaming | 10, 100, 1k, 10k, 100k, 1M, 10M history; append 64  | SMA(20), SMA(5) minus SMA(20)                             |
 | Warm append    | History 1M; append 1, 4, 16, 64, 640, 6,400, 64,000 | Both indicators; append 64 shared with history matrix     |
 | Rust           | Every `[[bench]]` target in the core crate          | Core, allocation, state/window, Join/ASOF, SQL/DataFusion |
@@ -90,7 +90,7 @@ scale and four selected `Program.execute` cases. The Rust `stream_union` target
 measures native Union forwarding. These cases extend the inventory without
 adding a new shard or changing the scheduled 06:00 and 18:00 runs.
 
-There are 409 engine cases and 26 warm cases, in addition to dynamically
+There are 507 engine cases and 26 warm cases, in addition to dynamically
 discovered cases. Warm cases use one entity to support one-row appends.
 Compare measurements only when entity count, history depth, append size,
 and timing boundaries match.
@@ -113,10 +113,12 @@ no regression verdict.
 
 | Backend          | Average     | Argmax 64   | Argmax 256  | Unique 64   | CS mean     | Window sum  | ASOF join   |
 |------------------|-------------|-------------|-------------|-------------|-------------|-------------|-------------|
+| Calc Flow SQL    | Yes         | Yes         | Yes         | Yes         | Yes         | Yes         | Yes         |
+| Raw DataFusion   | Yes         | Yes         | Yes         | Yes         | Yes         | Yes         | Yes         |
 | Native streaming | Yes         | Yes         | Yes         | Yes         | Yes         | Yes         | Yes         |
 | Finance-Python   | Yes         | Yes         | Yes         | Yes         | Yes         | Unsupported | Unsupported |
 | Polars 1T / 32T  | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported | Yes         |
-| Other libraries  | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported |
+| TA-Lib           | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported |
 
 Unsupported operations are explicit cells, not silent dependency skips.
 Native streaming measures `join` through the bounded temporal join with the
@@ -129,7 +131,7 @@ ASOF feeds one interleaved batch pair at a time and awaits delivery of every
 left row in that pair before feeding the next. Window sum uses ten-second
 tumbling windows. These cases retain bounded in-flight state
 rather than both complete input streams.
-Missing DataFusion, Polars, TA-Lib, or Finance-Python fails its shard. DataFusion Python 54 matches
+Missing DataFusion, Polars, TA-Lib, or Finance-Python fails its shard. DataFusion Python 55 matches
 the core's DataFusion major; the shared requirements file pins all Python
 build/benchmark dependencies with hashes.
 
@@ -156,6 +158,25 @@ This controls decimal accumulation drift in long rolling performance runs;
 it is not a claim of numerical accuracy on arbitrary decimal sequences.
 Decimal numerical regression fixtures are checked separately from the
 performance workload.
+
+SQL and raw DataFusion cover all fourteen native stream scenarios using the
+same fixtures and independent oracles. Cumulative average partitions by symbol
+and orders by event time and sequence. Argmax returns the row lag of the oldest
+tied maximum in a partial or full 64/256-row frame; it uses DataFusion's
+`array_agg`, `MAX` and `array_position`, enabled by `nested_expressions` in the
+core runtime. Unique count uses `COUNT(DISTINCT price)` over 64 rows. CS mean
+partitions by exact event time. Window sum uses epoch-anchored, half-open
+ten-second bins and preserves UTC microsecond timestamps.
+
+The ASOF fixture has **zero tolerance**, on both engines. SQL therefore uses
+a left equality join on symbol and event time, selecting the reference row
+with the highest sequence on ties and retaining unmatched left rows. Its
+`zero-tolerance-asof-equality-v1` identity describes this reduction; these
+results do not measure a general nonzero-tolerance backward ASOF join.
+All added SQL cases retain the original 10-to-10M scales, 64,000-row Arrow
+chunks, 32 target partitions, 8,192-row execution batches and execute-to-Arrow
+timer. The existing two-round, ten-sample collector measures Calc Flow SQL as new
+coverage when the baseline catalog lacks their IDs.
 
 `interval_join` uses exactly 64 keys and inclusive bounds of five seconds
 before and after each left event. Both inputs contain the same Arrow rows and
