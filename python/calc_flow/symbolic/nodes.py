@@ -404,6 +404,17 @@ _PRIMITIVES: dict[str, PrimitiveSpec] = {
     ),
     **{
         name: PrimitiveSpec(
+            frozenset({"min_periods"}),
+            CMap.from_mapping({"min_periods": CInt(1)}),
+        )
+        for name in ("cumulative_sum", "cumulative_min", "cumulative_max")
+    },
+    "cumulative_variance": PrimitiveSpec(
+        frozenset({"min_periods", "ddof"}),
+        CMap.from_mapping({"min_periods": CInt(1), "ddof": CInt(1)}),
+    ),
+    **{
+        name: PrimitiveSpec(
             frozenset({"frame", "min_periods"}),
             CMap.from_mapping({"min_periods": CInt(1)}),
         )

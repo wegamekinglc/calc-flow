@@ -92,9 +92,9 @@ def _sum_output_type(input_type: str | None, /) -> str:
 def _rolling_output_type(primitive: str, input_type: str | None, /) -> str | None:
     if primitive in ("count", "argmax", "argmin", "rolling_rank", "unique_count"):
         return "uint64"
-    if primitive == "sum":
+    if primitive in ("sum", "cumulative_sum"):
         return _sum_output_type(input_type)
-    if primitive in ("min", "max"):
+    if primitive in ("min", "max", "cumulative_min", "cumulative_max"):
         return input_type
     return "float64"
 
@@ -185,7 +185,18 @@ _ROLLING_AGGREGATES: Final = frozenset(
 )
 _ROLLING_DDOF: Final = frozenset({"variance", "stddev"})
 _ROLLING_PRIMITIVES: Final = _ROLLING_AGGREGATES | frozenset(
-    {"lag", "delta", "ewma", "cumulative_mean", "covariance", "correlation"}
+    {
+        "lag",
+        "delta",
+        "ewma",
+        "cumulative_mean",
+        "cumulative_sum",
+        "cumulative_min",
+        "cumulative_max",
+        "cumulative_variance",
+        "covariance",
+        "correlation",
+    }
 )
 _CROSS_SECTION: Final = frozenset(
     {
@@ -1959,21 +1970,24 @@ class _Analyzer:
         return ColumnFacts("float64", True, operand.lineage, states)
 
     def _cumulative_mean(self, node: Node, path: str, /) -> ColumnFacts:
-        role = f"{path}.cumulative_mean"
+        role = f"{path}.{node.op.name}"
         operand = self._operand(node.args[0], f"{role}.value", None)
         self._require_rolling_operand(
             node.args[0],
             f"{role}.value",
-            "cumulative mean argument must be an input column or row-local expression",
+            "cumulative argument must be an input column or row-local expression",
         )
         if operand.lineage is not None:
             self._temporal_lineages.add(operand.lineage)
         states = operand.state | frozenset({"cumulative"})
-        if not self._numeric_or_issue(
-            operand.data_type, f"{role}.value", "cumulative_mean"
-        ):
+        if not self._numeric_or_issue(operand.data_type, f"{role}.value", node.op.name):
             return ColumnFacts(None, True, operand.lineage, states)
-        return ColumnFacts("float64", True, operand.lineage, states)
+        return ColumnFacts(
+            _rolling_output_type(node.op.name, operand.data_type),
+            True,
+            operand.lineage,
+            states,
+        )
 
     def _rolling_pair(self, node: Node, path: str, /) -> ColumnFacts:
         role = f"{path}.{node.op.name}"
@@ -2565,7 +2579,16 @@ _COLUMN_HANDLERS: Final[dict[str, Callable[[_Analyzer, Node, str], ColumnFacts]]
     "isnan": _Analyzer._isnan,
     **dict.fromkeys(("lag", "delta"), _Analyzer._lag_like),
     "ewma": _Analyzer._ewma,
-    "cumulative_mean": _Analyzer._cumulative_mean,
+    **dict.fromkeys(
+        (
+            "cumulative_mean",
+            "cumulative_sum",
+            "cumulative_min",
+            "cumulative_max",
+            "cumulative_variance",
+        ),
+        _Analyzer._cumulative_mean,
+    ),
     **dict.fromkeys(_ROLLING_AGGREGATES, _Analyzer._rolling_aggregate),
     **dict.fromkeys(("covariance", "correlation"), _Analyzer._rolling_pair),
     **dict.fromkeys(_CROSS_SECTION, _Analyzer._cross_section),

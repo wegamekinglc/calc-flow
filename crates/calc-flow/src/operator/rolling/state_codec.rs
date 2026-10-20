@@ -7,20 +7,23 @@ use super::{
     CompiledWindowGroup, Cursor, DataType, DecodedRollingState, Deserialize, Deserializer,
     DictionaryTracker, Digest, EntityRollingState, EwmaAccumulator, ExtremaAccumulator, ExtremaKey,
     Field, FileReader, FileWriter, Float64Array, HashMap, HistoryUpdates, IpcSchemaEncoder,
-    KeyValue, ROLLING_COLUMNAR_STATE_LAYOUT_VERSION, ROLLING_EWMA_STATE_LAYOUT_VERSION,
-    RecordBatch, Result, RollingHistories, RollingKernelState, RollingMetricsRecorder,
-    RollingSnapshotMetadata, RollingStage, RowIdentity, ScalarValue, Schema, SchemaRef,
-    SegmentDescriptor, Sha256, StateInventory, StateRowOrderKey, SumClass, TableBatch, UInt8Array,
-    UInt64Array, Value, WindowState, checkpoint_mismatch, concat_batches, evict_retained_history,
-    ewma_entity_values, float_sample, format_error, fresh_windows, group_rows_by_entity,
-    history_event_time, internal_error, is_valid_sample, kernel, new_null_array, operator_error,
-    spec_uses_stable_v2, state_format, state_v3,
+    KeyValue, ROLLING_COLUMNAR_STATE_LAYOUT_VERSION, ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION,
+    ROLLING_EWMA_STATE_LAYOUT_VERSION, RecordBatch, Result, RollingHistories, RollingKernelState,
+    RollingMetricsRecorder, RollingSnapshotMetadata, RollingStage, RowIdentity, ScalarValue,
+    Schema, SchemaRef, SegmentDescriptor, Sha256, StateInventory, StateRowOrderKey, SumClass,
+    TableBatch, UInt8Array, UInt64Array, Value, WindowState, checkpoint_mismatch, concat_batches,
+    evict_retained_history, ewma_entity_values, float_sample, format_error, fresh_windows,
+    group_rows_by_entity, history_event_time, internal_error, is_valid_sample, kernel,
+    new_null_array, operator_error, spec_uses_stable_v2, state_format, state_v3,
 };
 use kernel::{StreamKernelUpdate, TypedStreamTransition};
 
 fn state_fields(input_schema: &Schema, state_layout_version: u32) -> Vec<Field> {
-    if state_layout_version == ROLLING_COLUMNAR_STATE_LAYOUT_VERSION {
-        return state_v3::state_fields(input_schema);
+    if matches!(
+        state_layout_version,
+        ROLLING_COLUMNAR_STATE_LAYOUT_VERSION | ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
+    ) {
+        return state_v3::state_fields_for_layout(input_schema, state_layout_version);
     }
     let mut fields = vec![
         Field::new("_state_kind", DataType::UInt8, false),
@@ -76,7 +79,10 @@ pub(super) fn state_schema(
             compiled.state_schema_fingerprint.clone(),
         ),
     ]);
-    if compiled.state_layout_version == ROLLING_COLUMNAR_STATE_LAYOUT_VERSION {
+    if matches!(
+        compiled.state_layout_version,
+        ROLLING_COLUMNAR_STATE_LAYOUT_VERSION | ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
+    ) {
         metadata.insert(
             "calc_flow.rolling_kernel_fingerprint".into(),
             compiled.kernel_plan.fingerprint().to_owned(),
@@ -103,7 +109,10 @@ pub(super) fn encode_state_segment(
     pipeline_fingerprint: &str,
     operator_id: &str,
 ) -> Result<Vec<u8>> {
-    if compiled.state_layout_version == ROLLING_COLUMNAR_STATE_LAYOUT_VERSION {
+    if matches!(
+        compiled.state_layout_version,
+        ROLLING_COLUMNAR_STATE_LAYOUT_VERSION | ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
+    ) {
         return state_v3::encode(
             histories,
             buffer,
@@ -261,7 +270,10 @@ pub(super) fn decode_state_segment(
     compiled: &CompiledRollingSpec,
     metadata: &RollingSnapshotMetadata,
 ) -> Result<DecodedRollingState> {
-    if metadata.state_layout_version == ROLLING_COLUMNAR_STATE_LAYOUT_VERSION {
+    if matches!(
+        metadata.state_layout_version,
+        ROLLING_COLUMNAR_STATE_LAYOUT_VERSION | ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
+    ) {
         return state_v3::decode(bytes, input_schema, compiled, metadata);
     }
     let mut legacy = compiled.clone();
@@ -381,7 +393,10 @@ pub(super) fn validate_segment_schema_metadata(
             snapshot.state_schema_fingerprint.clone(),
         ),
     ];
-    if snapshot.state_layout_version == ROLLING_COLUMNAR_STATE_LAYOUT_VERSION {
+    if matches!(
+        snapshot.state_layout_version,
+        ROLLING_COLUMNAR_STATE_LAYOUT_VERSION | ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
+    ) {
         expected.extend([
             (
                 "calc_flow.rolling_kernel_fingerprint",
@@ -744,6 +759,11 @@ pub(super) fn rebuild_windows(
                         accumulator.expired_through = expired_through_bound(last_time, *micros);
                     }
                 }
+                CompiledWindowGroup::Cumulative { .. } => {
+                    if let Some(WindowState::Cumulative(saved)) = persisted.get(group_index) {
+                        windows[group_index] = WindowState::Cumulative(saved.clone());
+                    }
+                }
                 CompiledWindowGroup::Ewma { .. } => {
                     if let Some(WindowState::Ewma(saved)) = persisted.get(group_index) {
                         windows[group_index] = WindowState::Ewma(*saved);
@@ -902,10 +922,11 @@ pub(super) fn validate_snapshot_metadata(
             "rolling state schema fingerprint does not match the compiled operator",
         ));
     }
-    if metadata.state_layout_version == ROLLING_COLUMNAR_STATE_LAYOUT_VERSION
-        && (metadata.kernel_fingerprint.as_deref() != Some(compiled.kernel_plan.fingerprint())
-            || metadata.numerical_profile.as_deref()
-                != Some(compiled.kernel_plan.numerical_profile()))
+    if matches!(
+        metadata.state_layout_version,
+        ROLLING_COLUMNAR_STATE_LAYOUT_VERSION | ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
+    ) && (metadata.kernel_fingerprint.as_deref() != Some(compiled.kernel_plan.fingerprint())
+        || metadata.numerical_profile.as_deref() != Some(compiled.kernel_plan.numerical_profile()))
     {
         return Err(checkpoint_mismatch(
             "rolling kernel fingerprint or numerical profile does not match the compiled operator",
@@ -1185,7 +1206,7 @@ pub(super) fn build_typed_stream_output(
     };
     let touched = {
         let _stage = observer.map(|recorder| recorder.stage(RollingStage::HistoryMaintenance));
-        typed_history_updates(rows, histories, compiled, node_id)?
+        typed_history_updates(rows, histories, compiled, &update, node_id)?
     };
     Ok(Some((
         record,
@@ -1238,9 +1259,8 @@ pub(super) fn reconstruct_typed_state(
         let input = build_input_record(&bootstrap, Arc::clone(input_schema), node_id)?;
         compiled
             .kernel_plan
-            .update_and_fill(&RollingKernelState::default(), &input, node_id)?
+            .rebuild_history(&input, node_id)?
             .ok_or_else(|| internal_error("typed rolling restore history is not canonical"))?
-            .state
     };
     seed_typed_restored_state(histories, compiled, input_schema, &reconstructed, node_id)
 }
@@ -1264,7 +1284,7 @@ fn seed_typed_restored_state(
         .by_entity
         .values()
         .map(|entity| {
-            let mut seeds = typed_ewma_seeds(entity, compiled)?;
+            let mut seeds = typed_recurrence_seeds(entity, compiled)?;
             seeds.resize(compiled.kernel_plan.typed_group_count(), None);
             Ok(seeds)
         })
@@ -1287,22 +1307,32 @@ fn seed_typed_restored_state(
         .seed_restored_state(state, &entities, &transition_counts, &seeds, node_id)
 }
 
-fn typed_ewma_seeds(
+fn typed_recurrence_seeds(
     entity: &EntityRollingState,
     compiled: &CompiledRollingSpec,
-) -> Result<Vec<Option<(u64, f64)>>> {
+) -> Result<Vec<Option<kernel::RecurrenceSeed>>> {
     compiled
         .window_groups
         .iter()
         .enumerate()
         .map(|(group_index, group)| {
+            if matches!(group, CompiledWindowGroup::Cumulative { .. }) {
+                return match entity.windows.get(group_index) {
+                    Some(WindowState::Cumulative(state)) => {
+                        Ok(Some(kernel::RecurrenceSeed::Cumulative(state.clone())))
+                    }
+                    _ => Err(internal_error(
+                        "rolling cumulative checkpoint state mismatch",
+                    )),
+                };
+            }
             if !matches!(group, CompiledWindowGroup::Ewma { .. }) {
                 return Ok(None);
             }
             match entity.windows.get(group_index) {
-                Some(WindowState::Ewma(state)) if state.valid_count > 0 => {
-                    Ok(Some((state.valid_count, state.value)))
-                }
+                Some(WindowState::Ewma(state)) if state.valid_count > 0 => Ok(Some(
+                    kernel::RecurrenceSeed::Ewma(state.valid_count, state.value),
+                )),
                 Some(WindowState::Ewma(_)) | None => Ok(None),
                 _ => Err(internal_error("rolling EWMA checkpoint state mismatch")),
             }
@@ -1376,8 +1406,10 @@ fn typed_history_updates(
     rows: &[BufferedRow],
     histories: &RollingHistories,
     compiled: &CompiledRollingSpec,
+    update: &StreamKernelUpdate,
     node_id: &str,
 ) -> Result<HistoryUpdates> {
+    let seeds = update.recurrence_seeds();
     let has_ewma = compiled
         .window_groups
         .iter()
@@ -1389,10 +1421,9 @@ fn typed_history_updates(
             let transitions = u64::try_from(indices.len()).map_err(|_| {
                 operator_error(node_id, "rolling micro-batch row count does not fit u64")
             })?;
-            if has_ewma {
-                advance_typed_ewma_windows(&mut state, rows, &indices, compiled, node_id)?;
-            } else {
-                state.windows.clear();
+            state.windows = recurrence_windows(compiled, &seeds[update.entity_ids()[indices[0]]]);
+            if state.windows.is_empty() && has_ewma {
+                state.windows = fresh_windows(compiled);
             }
             state
                 .rows
@@ -1410,32 +1441,27 @@ fn typed_history_updates(
         .collect()
 }
 
-fn advance_typed_ewma_windows(
-    state: &mut EntityRollingState,
-    rows: &[BufferedRow],
-    indices: &[usize],
+pub(super) fn recurrence_windows(
     compiled: &CompiledRollingSpec,
-    node_id: &str,
-) -> Result<()> {
-    if state.windows.len() != compiled.window_groups.len() {
-        state.windows = fresh_windows(compiled);
+    seeds: &[Option<kernel::RecurrenceSeed>],
+) -> Vec<WindowState> {
+    if !seeds.iter().any(Option::is_some) {
+        return Vec::new();
     }
-    for &row_index in indices {
-        for (group_index, group) in compiled.window_groups.iter().enumerate() {
-            let CompiledWindowGroup::Ewma {
-                input_index, alpha, ..
-            } = group
-            else {
-                continue;
-            };
-            let WindowState::Ewma(accumulator) = &mut state.windows[group_index] else {
-                return Err(internal_error("rolling typed EWMA history state mismatch"));
-            };
-            let sample = &rows[row_index].values[*input_index];
-            if is_valid_sample(sample) {
-                accumulator.add(sample, *alpha, node_id)?;
+    let mut windows = fresh_windows(compiled);
+    for (window, seed) in windows.iter_mut().zip(seeds) {
+        match seed {
+            Some(kernel::RecurrenceSeed::Ewma(valid_count, value)) => {
+                *window = WindowState::Ewma(EwmaAccumulator {
+                    valid_count: *valid_count,
+                    value: *value,
+                });
             }
+            Some(kernel::RecurrenceSeed::Cumulative(summary)) => {
+                *window = WindowState::Cumulative(summary.clone());
+            }
+            None => {}
         }
     }
-    Ok(())
+    windows
 }

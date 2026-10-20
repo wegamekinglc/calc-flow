@@ -48,6 +48,8 @@ use super::{
 
 mod budget;
 mod compile;
+mod cumulative;
+use cumulative::CumulativeAccumulator;
 mod generated_kernel_manifest;
 mod kernel;
 mod late;
@@ -95,8 +97,10 @@ pub const ROLLING_CONFIGURATION_VERSION: u32 = 1;
 pub const ROLLING_STATE_LAYOUT_VERSION: u32 = 1;
 /// Durable state-layout version that persists exponential accumulators.
 pub const ROLLING_EWMA_STATE_LAYOUT_VERSION: u32 = 2;
-/// Durable columnar state-layout version written by current rolling operators.
+/// Durable columnar layout for declarations without cumulative summaries.
 pub const ROLLING_COLUMNAR_STATE_LAYOUT_VERSION: u32 = 3;
+/// Durable columnar layout with exact cumulative summaries.
+pub const ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION: u32 = 4;
 
 /// Versioned floating-point behavior for rolling numeric transitions.
 ///
@@ -571,6 +575,57 @@ pub enum RollingOutputSpec {
         #[schemars(range(min = 1))]
         min_periods: u64,
     },
+    /// Checked sum of every valid numeric sample seen for an entity.
+    CumulativeSum {
+        /// Primitive version; must equal `1`.
+        primitive_version: u32,
+        /// Numeric input column name.
+        input: String,
+        /// Output column name.
+        output: String,
+        /// Positive minimum valid sample count.
+        #[schemars(range(min = 1))]
+        min_periods: u64,
+    },
+    /// Minimum of every valid numeric sample seen for an entity.
+    CumulativeMin {
+        /// Primitive version; must equal `1`.
+        primitive_version: u32,
+        /// Numeric input column name.
+        input: String,
+        /// Output column name.
+        output: String,
+        /// Positive minimum valid sample count.
+        #[schemars(range(min = 1))]
+        min_periods: u64,
+    },
+    /// Maximum of every valid numeric sample seen for an entity.
+    CumulativeMax {
+        /// Primitive version; must equal `1`.
+        primitive_version: u32,
+        /// Numeric input column name.
+        input: String,
+        /// Output column name.
+        output: String,
+        /// Positive minimum valid sample count.
+        #[schemars(range(min = 1))]
+        min_periods: u64,
+    },
+    /// Online variance of every valid numeric sample seen for an entity.
+    CumulativeVariance {
+        /// Primitive version; must equal `1`.
+        primitive_version: u32,
+        /// Numeric input column name.
+        input: String,
+        /// Output column name.
+        output: String,
+        /// Positive minimum valid sample count.
+        #[schemars(range(min = 1))]
+        min_periods: u64,
+        /// Degrees-of-freedom adjustment; must be `0` or `1`.
+        #[schemars(range(min = 0, max = 1))]
+        ddof: u8,
+    },
     /// Valid (non-null, non-NaN) sample count over the frame (SCE-00 D3,
     /// contract section 5.2).
     Count {
@@ -832,6 +887,18 @@ impl RollingOutputSpec {
             | Self::CumulativeMean {
                 primitive_version, ..
             }
+            | Self::CumulativeSum {
+                primitive_version, ..
+            }
+            | Self::CumulativeMin {
+                primitive_version, ..
+            }
+            | Self::CumulativeMax {
+                primitive_version, ..
+            }
+            | Self::CumulativeVariance {
+                primitive_version, ..
+            }
             | Self::Count {
                 primitive_version, ..
             }
@@ -890,6 +957,10 @@ impl RollingOutputSpec {
             | Self::Delta { input, .. }
             | Self::Ewma { input, .. }
             | Self::CumulativeMean { input, .. }
+            | Self::CumulativeSum { input, .. }
+            | Self::CumulativeMin { input, .. }
+            | Self::CumulativeMax { input, .. }
+            | Self::CumulativeVariance { input, .. }
             | Self::Count { input, .. }
             | Self::Sum { input, .. }
             | Self::Mean { input, .. }
@@ -922,6 +993,10 @@ impl RollingOutputSpec {
             | Self::Delta { output, .. }
             | Self::Ewma { output, .. }
             | Self::CumulativeMean { output, .. }
+            | Self::CumulativeSum { output, .. }
+            | Self::CumulativeMin { output, .. }
+            | Self::CumulativeMax { output, .. }
+            | Self::CumulativeVariance { output, .. }
             | Self::Count { output, .. }
             | Self::Sum { output, .. }
             | Self::Mean { output, .. }
@@ -946,7 +1021,12 @@ impl RollingOutputSpec {
     const fn retained_rows(&self) -> u64 {
         match self {
             Self::Lag { periods, .. } | Self::Delta { periods, .. } => *periods,
-            Self::Ewma { .. } | Self::CumulativeMean { .. } => 0,
+            Self::Ewma { .. }
+            | Self::CumulativeMean { .. }
+            | Self::CumulativeSum { .. }
+            | Self::CumulativeMin { .. }
+            | Self::CumulativeMax { .. }
+            | Self::CumulativeVariance { .. } => 0,
             Self::Count { frame, .. }
             | Self::Sum { frame, .. }
             | Self::Mean { frame, .. }
@@ -977,7 +1057,11 @@ impl RollingOutputSpec {
             Self::Lag { .. }
             | Self::Delta { .. }
             | Self::Ewma { .. }
-            | Self::CumulativeMean { .. } => None,
+            | Self::CumulativeMean { .. }
+            | Self::CumulativeSum { .. }
+            | Self::CumulativeMin { .. }
+            | Self::CumulativeMax { .. }
+            | Self::CumulativeVariance { .. } => None,
             Self::Count { frame, .. }
             | Self::Sum { frame, .. }
             | Self::Mean { frame, .. }
@@ -1015,6 +1099,10 @@ impl RollingOutputSpec {
             | Self::Delta { .. }
             | Self::Ewma { .. }
             | Self::CumulativeMean { .. }
+            | Self::CumulativeSum { .. }
+            | Self::CumulativeMin { .. }
+            | Self::CumulativeMax { .. }
+            | Self::CumulativeVariance { .. }
             | Self::Difference { .. } => None,
             Self::Count { frame, .. }
             | Self::Sum { frame, .. }
@@ -1039,6 +1127,10 @@ impl RollingOutputSpec {
             Self::Lag { .. } | Self::Delta { .. } | Self::Difference { .. } => None,
             Self::Ewma { min_periods, .. }
             | Self::CumulativeMean { min_periods, .. }
+            | Self::CumulativeSum { min_periods, .. }
+            | Self::CumulativeMin { min_periods, .. }
+            | Self::CumulativeMax { min_periods, .. }
+            | Self::CumulativeVariance { min_periods, .. }
             | Self::Count { min_periods, .. }
             | Self::Sum { min_periods, .. }
             | Self::Mean { min_periods, .. }
@@ -1059,7 +1151,8 @@ impl RollingOutputSpec {
 
     const fn ddof(&self) -> Option<u8> {
         match self {
-            Self::Variance { ddof, .. }
+            Self::CumulativeVariance { ddof, .. }
+            | Self::Variance { ddof, .. }
             | Self::Stddev { ddof, .. }
             | Self::Covariance { ddof, .. }
             | Self::Correlation { ddof, .. } => Some(*ddof),
@@ -1072,6 +1165,16 @@ impl RollingOutputSpec {
             Self::Ewma { span, .. } => Some(*span),
             _ => None,
         }
+    }
+
+    const fn requires_cumulative_layout(&self) -> bool {
+        matches!(
+            self,
+            Self::CumulativeSum { .. }
+                | Self::CumulativeMin { .. }
+                | Self::CumulativeMax { .. }
+                | Self::CumulativeVariance { .. }
+        )
     }
 
     const fn requires_ewma_layout(&self) -> bool {
@@ -1094,7 +1197,8 @@ pub struct RollingSpec {
     pub configuration_version: u32,
     /// Durable state-layout version. Existing primitives use
     /// [`ROLLING_STATE_LAYOUT_VERSION`]; EWMA requires
-    /// [`ROLLING_EWMA_STATE_LAYOUT_VERSION`].
+    /// [`ROLLING_EWMA_STATE_LAYOUT_VERSION`]. Cumulative sum/min/max/variance
+    /// require [`ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION`].
     pub state_layout_version: u32,
     /// Versioned floating-point behavior. `stable_v1` is omitted from the
     /// canonical configuration so existing project and checkpoint hashes stay
@@ -1945,6 +2049,7 @@ impl RollingOperator {
                         .iter()
                         .filter(|window| {
                             matches!(window, WindowState::Ewma(state) if state.valid_count > 0)
+                                || matches!(window, WindowState::Cumulative(_))
                         })
                         .count()
                 })
@@ -2071,6 +2176,7 @@ enum CompiledEvaluation {
     Lag { periods: u64 },
     Delta { periods: u64 },
     Ewma(CompiledEwma),
+    Cumulative(CompiledAggregate),
     Aggregate(CompiledAggregate),
     Pair(CompiledPairAggregate),
     Difference(CompiledDifference),
@@ -2158,6 +2264,10 @@ impl Statistic {
 /// duplicate windows.
 #[derive(Clone)]
 enum CompiledWindowGroup {
+    Cumulative {
+        input_index: usize,
+        statistic: Statistic,
+    },
     /// Reversible numeric accumulator shared by count/sum/mean/variance/
     /// stddev outputs on one `(input column, frame)`.
     Numeric {
@@ -2453,6 +2563,7 @@ enum WindowState {
     Extrema(ExtremaAccumulator),
     Pair(PairAccumulator),
     Ewma(EwmaAccumulator),
+    Cumulative(CumulativeAccumulator),
 }
 
 fn fresh_windows(compiled: &CompiledRollingSpec) -> Vec<WindowState> {
@@ -2468,6 +2579,9 @@ fn fresh_windows(compiled: &CompiledRollingSpec) -> Vec<WindowState> {
             }
             CompiledWindowGroup::Pair { .. } => WindowState::Pair(PairAccumulator::default()),
             CompiledWindowGroup::Ewma { .. } => WindowState::Ewma(EwmaAccumulator::default()),
+            CompiledWindowGroup::Cumulative { .. } => {
+                WindowState::Cumulative(CumulativeAccumulator::default())
+            }
         })
         .collect()
 }
@@ -3391,6 +3505,18 @@ fn slide_windows(
             CompiledWindowGroup::Ewma {
                 input_index, alpha, ..
             } => slide_ewma_window(&context, *input_index, *alpha, state)?,
+            CompiledWindowGroup::Cumulative {
+                input_index,
+                statistic,
+            } => {
+                let WindowState::Cumulative(accumulator) = state else {
+                    return Err(internal_error("cumulative group has the wrong state"));
+                };
+                let current = &context.view.rows[context.row_index].values[*input_index];
+                if is_valid_sample(current) {
+                    accumulator.add(current, *statistic, node_id)?;
+                }
+            }
         }
     }
     Ok(())
@@ -3800,6 +3926,12 @@ fn compute_output_value(
         }
         CompiledEvaluation::Aggregate(aggregate) => {
             return evaluate_aggregate(aggregate, windows, output, node_id);
+        }
+        CompiledEvaluation::Cumulative(aggregate) => {
+            let WindowState::Cumulative(state) = &windows[aggregate.group] else {
+                return Err(internal_error("cumulative output has the wrong state"));
+            };
+            return state.read(aggregate, &output.output_type, node_id);
         }
         CompiledEvaluation::Ewma(ewma) => {
             return evaluate_ewma(ewma, windows, output);
@@ -4244,7 +4376,7 @@ fn evaluate_aggregate(
                 "rolling pair group serves a numeric aggregate output",
             ));
         }
-        WindowState::Ewma(_) => {
+        WindowState::Cumulative(_) | WindowState::Ewma(_) => {
             return Err(internal_error(
                 "rolling EWMA group serves a numeric aggregate output",
             ));

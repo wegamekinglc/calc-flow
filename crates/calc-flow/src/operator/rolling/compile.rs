@@ -5,10 +5,11 @@ use super::{
     CompiledFloatReadout, CompiledFrame, CompiledKeyColumn, CompiledPairAggregate,
     CompiledRollingOutput, CompiledRollingSpec, CompiledScan, CompiledWindowGroup, DataType,
     Digest, Field, JsonMap, ROLLING_COLUMNAR_STATE_LAYOUT_VERSION, ROLLING_CONFIGURATION_VERSION,
-    ROLLING_EWMA_STATE_LAYOUT_VERSION, ROLLING_STATE_LAYOUT_VERSION, Result,
-    RollingFloatPrimitiveSpec, RollingFrameSpec, RollingKernelPlan, RollingOutputSpec, RollingSpec,
-    ScanKind, Schema, Sha256, Statistic, SumClass, TimeUnit, Value, canonical_json, compile_error,
-    internal_error, json, state_schema_fingerprint,
+    ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION, ROLLING_EWMA_STATE_LAYOUT_VERSION,
+    ROLLING_STATE_LAYOUT_VERSION, Result, RollingFloatPrimitiveSpec, RollingFrameSpec,
+    RollingKernelPlan, RollingOutputSpec, RollingSpec, ScanKind, Schema, Sha256, Statistic,
+    SumClass, TimeUnit, Value, canonical_json, compile_error, internal_error, json,
+    state_schema_fingerprint,
 };
 
 pub(super) fn validate_arguments(spec: &RollingSpec) -> Result<()> {
@@ -20,7 +21,9 @@ pub(super) fn validate_arguments(spec: &RollingSpec) -> Result<()> {
     }
     if !matches!(
         spec.state_layout_version,
-        ROLLING_STATE_LAYOUT_VERSION | ROLLING_EWMA_STATE_LAYOUT_VERSION
+        ROLLING_STATE_LAYOUT_VERSION
+            | ROLLING_EWMA_STATE_LAYOUT_VERSION
+            | ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
     ) {
         return Err(invalid_argument(
             "rolling.state_layout_version",
@@ -31,11 +34,25 @@ pub(super) fn validate_arguments(spec: &RollingSpec) -> Result<()> {
         .outputs
         .iter()
         .any(RollingOutputSpec::requires_ewma_layout)
-        && spec.state_layout_version != ROLLING_EWMA_STATE_LAYOUT_VERSION
+        && !matches!(
+            spec.state_layout_version,
+            ROLLING_EWMA_STATE_LAYOUT_VERSION | ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
+        )
     {
         return Err(invalid_argument(
             "rolling.state_layout_version",
             "EWMA outputs require rolling state layout version 2",
+        ));
+    }
+    if spec
+        .outputs
+        .iter()
+        .any(RollingOutputSpec::requires_cumulative_layout)
+        && spec.state_layout_version != ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
+    {
+        return Err(invalid_argument(
+            "rolling.state_layout_version",
+            "cumulative outputs require state layout version 4",
         ));
     }
     validate_key_names("rolling.partition_by", &spec.partition_by)?;
@@ -101,6 +118,7 @@ fn validate_outputs(outputs: &[RollingOutputSpec]) -> Result<()> {
             }
         } else if output.span().is_none()
             && output.retained_rows() == 0
+            && !output.requires_cumulative_layout()
             && !matches!(
                 output,
                 RollingOutputSpec::Difference { .. } | RollingOutputSpec::CumulativeMean { .. }
@@ -301,9 +319,18 @@ fn compile_spec_against_schema(
         .iter()
         .filter_map(RollingOutputSpec::retained_micros)
         .max();
+    let state_layout_version = if spec
+        .outputs
+        .iter()
+        .any(RollingOutputSpec::requires_cumulative_layout)
+    {
+        ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
+    } else {
+        ROLLING_COLUMNAR_STATE_LAYOUT_VERSION
+    };
     let kernel_plan = RollingKernelPlan::compile(
         input_schema,
-        ROLLING_COLUMNAR_STATE_LAYOUT_VERSION,
+        state_layout_version,
         spec.numerical_profile,
         event_time_index,
         &partition_columns,
@@ -312,7 +339,7 @@ fn compile_spec_against_schema(
         &window_groups,
     );
     Ok(CompiledRollingSpec {
-        state_layout_version: ROLLING_COLUMNAR_STATE_LAYOUT_VERSION,
+        state_layout_version,
         legacy_state_layout_version: spec.state_layout_version,
         event_time_index,
         partition_columns,
@@ -323,10 +350,7 @@ fn compile_spec_against_schema(
         max_row_retention,
         max_duration_micros,
         configuration_hash,
-        state_schema_fingerprint: state_schema_fingerprint(
-            input_schema,
-            ROLLING_COLUMNAR_STATE_LAYOUT_VERSION,
-        ),
+        state_schema_fingerprint: state_schema_fingerprint(input_schema, state_layout_version),
         legacy_state_schema_fingerprint: state_schema_fingerprint(
             input_schema,
             spec.state_layout_version,
@@ -413,6 +437,16 @@ fn compile_output(
                 min_periods: *min_periods,
             })
         }
+        RollingOutputSpec::CumulativeSum { min_periods, .. }
+        | RollingOutputSpec::CumulativeMin { min_periods, .. }
+        | RollingOutputSpec::CumulativeMax { min_periods, .. }
+        | RollingOutputSpec::CumulativeVariance { min_periods, .. } => compile_cumulative_output(
+            output,
+            input_index,
+            &input_type,
+            *min_periods,
+            window_groups,
+        )?,
         RollingOutputSpec::CumulativeMean { min_periods, .. } => {
             require_numeric(output.input(), &input_type, "cumulative_mean")?;
             let group = compile_ewma_group(input_index, 0, window_groups);
@@ -476,6 +510,43 @@ fn compile_output(
     })
 }
 
+fn compile_cumulative_output(
+    output: &RollingOutputSpec,
+    input_index: usize,
+    input_type: &DataType,
+    min_periods: u64,
+    window_groups: &mut Vec<CompiledWindowGroup>,
+) -> Result<CompiledEvaluation> {
+    require_numeric(output.input(), input_type, "cumulative")?;
+    let statistic = match output {
+        RollingOutputSpec::CumulativeSum { .. } => Statistic::Sum,
+        RollingOutputSpec::CumulativeMin { .. } => Statistic::Min,
+        RollingOutputSpec::CumulativeMax { .. } => Statistic::Max,
+        _ => Statistic::Variance,
+    };
+    let group = window_groups
+        .iter()
+        .position(|group| {
+            matches!(group,
+                CompiledWindowGroup::Cumulative { input_index: existing, statistic: kind }
+                if *existing == input_index && *kind == statistic
+            )
+        })
+        .unwrap_or_else(|| {
+            window_groups.push(CompiledWindowGroup::Cumulative {
+                input_index,
+                statistic,
+            });
+            window_groups.len() - 1
+        });
+    Ok(CompiledEvaluation::Cumulative(CompiledAggregate {
+        group,
+        statistic,
+        min_periods,
+        ddof: output.ddof().unwrap_or(0),
+    }))
+}
+
 fn compiled_output_type(evaluation: &CompiledEvaluation, input_type: &DataType) -> DataType {
     match evaluation {
         CompiledEvaluation::Lag { .. } | CompiledEvaluation::Delta { .. } => input_type.clone(),
@@ -488,18 +559,20 @@ fn compiled_output_type(evaluation: &CompiledEvaluation, input_type: &DataType) 
             }
             ScanKind::Quantile | ScanKind::Decay => DataType::Float64,
         },
-        CompiledEvaluation::Aggregate(aggregate) => match aggregate.statistic {
-            Statistic::Count => DataType::UInt64,
-            Statistic::Sum => match SumClass::from_input(input_type) {
-                SumClass::Signed => DataType::Int64,
-                SumClass::Unsigned => DataType::UInt64,
-                _ => DataType::Float64,
-            },
-            Statistic::Mean | Statistic::Variance | Statistic::Stddev => DataType::Float64,
-            // Min/max preserve the input type (SCE-00 D3, contract
-            // section 5.2).
-            Statistic::Min | Statistic::Max => input_type.clone(),
-        },
+        CompiledEvaluation::Cumulative(aggregate) | CompiledEvaluation::Aggregate(aggregate) => {
+            match aggregate.statistic {
+                Statistic::Count => DataType::UInt64,
+                Statistic::Sum => match SumClass::from_input(input_type) {
+                    SumClass::Signed => DataType::Int64,
+                    SumClass::Unsigned => DataType::UInt64,
+                    _ => DataType::Float64,
+                },
+                Statistic::Mean | Statistic::Variance | Statistic::Stddev => DataType::Float64,
+                // Min/max preserve the input type (SCE-00 D3, contract
+                // section 5.2).
+                Statistic::Min | Statistic::Max => input_type.clone(),
+            }
+        }
     }
 }
 
@@ -738,6 +811,10 @@ fn compile_aggregate_output(
         | RollingOutputSpec::Delta { .. }
         | RollingOutputSpec::Ewma { .. }
         | RollingOutputSpec::CumulativeMean { .. }
+        | RollingOutputSpec::CumulativeSum { .. }
+        | RollingOutputSpec::CumulativeMin { .. }
+        | RollingOutputSpec::CumulativeMax { .. }
+        | RollingOutputSpec::CumulativeVariance { .. }
         | RollingOutputSpec::Covariance { .. }
         | RollingOutputSpec::Correlation { .. }
         | RollingOutputSpec::Argmax { .. }

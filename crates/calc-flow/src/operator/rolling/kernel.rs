@@ -40,7 +40,9 @@ use crate::{
     operator::rolling_metrics::{RollingMetricsRecorder, RollingStage, RollingWork},
 };
 
+mod cumulative;
 mod mean;
+use cumulative::TypedCumulativeState;
 mod sorted;
 pub(super) use sorted::SortedRollingState;
 pub(super) mod entity_parallel;
@@ -84,10 +86,16 @@ pub(super) struct RollingKernelPlan {
     fallback_reason: Option<String>,
     estimated_state_bytes_per_entity: usize,
     fingerprint: String,
+    checkpoint_fingerprint: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug)]
 enum TypedGroupPlan {
+    Cumulative {
+        input_index: usize,
+        statistic: Statistic,
+        storage: OutputStorage,
+    },
     Numeric {
         input_index: usize,
         frame: TypedFrame,
@@ -132,7 +140,7 @@ impl TypedGroupPlan {
             | Self::Extrema { frame, .. }
             | Self::Pair { frame, .. } => Some(frame),
             Self::Scan { window, .. } => Some(TypedFrame::Rows(window)),
-            Self::Ewma { .. } => None,
+            Self::Ewma { .. } | Self::Cumulative { .. } => None,
         }
     }
 }
@@ -372,6 +380,13 @@ pub(crate) struct StreamKernelUpdate {
     execution: RollingKernelExecution,
 }
 
+/// Durable recurrences which cannot be reconstructed from a retained row tail.
+#[derive(Clone, Debug)]
+pub(super) enum RecurrenceSeed {
+    Ewma(u64, f64),
+    Cumulative(super::CumulativeAccumulator),
+}
+
 impl StreamKernelUpdate {
     pub(super) fn entity_ids(&self) -> &[usize] {
         &self.execution.entity_ids
@@ -385,7 +400,7 @@ impl StreamKernelUpdate {
         std::mem::take(&mut self.execution.columns)
     }
 
-    pub(super) fn ewma_seeds(&self) -> Vec<Vec<Option<(u64, f64)>>> {
+    pub(super) fn recurrence_seeds(&self) -> Vec<Vec<Option<RecurrenceSeed>>> {
         self.execution
             .state
             .states
@@ -396,7 +411,10 @@ impl StreamKernelUpdate {
                     .iter()
                     .map(|group| match group {
                         TypedWindowState::Ewma(state) if state.valid_count > 0 => {
-                            Some((state.valid_count, state.value))
+                            Some(RecurrenceSeed::Ewma(state.valid_count, state.value))
+                        }
+                        TypedWindowState::Cumulative(state) => {
+                            Some(RecurrenceSeed::Cumulative(state.accumulator.clone()))
                         }
                         _ => None,
                     })
@@ -672,7 +690,8 @@ impl RollingKernelPlan {
                 ),
             )
         });
-        let fingerprint = kernel_fingerprint(&KernelFingerprintInput {
+        let identity_reason = cumulative::legacy_fallback_reason(input_schema, window_groups);
+        let fingerprint_input = KernelFingerprintInput {
             input_schema,
             state_layout_version,
             numerical_profile,
@@ -685,7 +704,11 @@ impl RollingKernelPlan {
             groups: &groups,
             outputs: &typed_outputs,
             fallback_reason: fallback_reason.as_deref(),
-        });
+        };
+        let fingerprint = kernel_fingerprint(&fingerprint_input);
+        let checkpoint_fingerprint = identity_reason
+            .as_deref()
+            .map(|reason| checkpoint_kernel_fingerprint(fingerprint_input, reason));
         Self {
             version: ROLLING_KERNEL_PLAN_VERSION,
             state_layout_version,
@@ -702,6 +725,7 @@ impl RollingKernelPlan {
             fallback_reason,
             estimated_state_bytes_per_entity,
             fingerprint,
+            checkpoint_fingerprint,
         }
     }
 
@@ -714,7 +738,9 @@ impl RollingKernelPlan {
     }
 
     pub(super) fn fingerprint(&self) -> &str {
-        &self.fingerprint
+        self.checkpoint_fingerprint
+            .as_deref()
+            .unwrap_or(&self.fingerprint)
     }
 
     pub(super) fn with_nan_as_value(mut self) -> Self {
@@ -770,6 +796,44 @@ impl RollingKernelPlan {
         self.update_and_fill(&RollingKernelState::default(), input, node_id)
     }
 
+    /// Rebuilds finite windows without replaying durable recurrences or
+    /// reading temporary tail aggregates. The caller installs saved recurrence
+    /// summaries and transition counts before making the state resident.
+    pub(super) fn rebuild_history(
+        &self,
+        input: &RecordBatch,
+        node_id: &str,
+    ) -> Result<Option<RollingKernelState>> {
+        let mut replay = self.clone();
+        replay.groups.retain(|group| group.frame().is_some());
+        replay.outputs.clear();
+        let Some(mut rebuilt) = replay.open_and_fill(input, node_id)? else {
+            return Ok(None);
+        };
+        for entity in &mut rebuilt.state.states {
+            self.restore_group_positions(Arc::make_mut(entity))?;
+        }
+        Ok(Some(rebuilt.state))
+    }
+
+    fn restore_group_positions(&self, entity: &mut TypedEntityState) -> Result<()> {
+        let mut replayed = std::mem::take(&mut entity.groups).into_iter();
+        entity.groups = self
+            .groups
+            .iter()
+            .map(|group| {
+                if group.frame().is_some() {
+                    replayed
+                        .next()
+                        .ok_or_else(|| internal_error("typed restore history group is missing"))
+                } else {
+                    Ok(TypedWindowState::new(*group, 0))
+                }
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(())
+    }
+
     /// Installs durable per-entity transition counts and EWMA recurrence values
     /// into an otherwise reconstructed typed state. This is used only after
     /// checkpoint restore; ordinary live transitions keep both values directly.
@@ -778,7 +842,7 @@ impl RollingKernelPlan {
         state: &RollingKernelState,
         entities: &RecordBatch,
         transition_counts: &[u64],
-        seeds: &[Vec<Option<(u64, f64)>>],
+        seeds: &[Vec<Option<RecurrenceSeed>>],
         node_id: &str,
     ) -> Result<RollingKernelState> {
         self.validate_state(state, node_id)?;
@@ -805,20 +869,20 @@ impl RollingKernelPlan {
         &self,
         entity: &mut TypedEntityState,
         transition_count: u64,
-        values: &[Option<(u64, f64)>],
+        values: &[Option<RecurrenceSeed>],
         node_id: &str,
     ) -> Result<()> {
         if self.numerical_profile == RollingNumericalProfile::StableV2Preview {
             entity.force_stable_v2_rebase(node_id)?;
         }
         entity.transition_count = transition_count;
-        self.seed_ewma_entity(entity, values)
+        self.seed_recurrence_entity(entity, values)
     }
 
-    fn seed_ewma_entity(
+    fn seed_recurrence_entity(
         &self,
         entity: &mut TypedEntityState,
-        seeds: &[Option<(u64, f64)>],
+        seeds: &[Option<RecurrenceSeed>],
     ) -> Result<()> {
         if seeds.len() != self.groups.len() {
             return Err(internal_error(
@@ -826,6 +890,19 @@ impl RollingKernelPlan {
             ));
         }
         for ((group, state), seed) in self.groups.iter().zip(&mut entity.groups).zip(seeds) {
+            if let TypedGroupPlan::Cumulative { .. } = group {
+                let (
+                    TypedWindowState::Cumulative(state),
+                    Some(RecurrenceSeed::Cumulative(summary)),
+                ) = (state, seed)
+                else {
+                    return Err(internal_error(
+                        "typed cumulative restore summary is missing",
+                    ));
+                };
+                state.accumulator = summary.clone();
+                continue;
+            }
             let TypedGroupPlan::Ewma {
                 alpha, cumulative, ..
             } = group
@@ -841,7 +918,7 @@ impl RollingKernelPlan {
                 return Err(internal_error("typed EWMA restore state mismatch"));
             };
             *state = TypedEwmaState::new(*alpha, *cumulative);
-            if let Some((valid_count, value)) = seed {
+            if let Some(RecurrenceSeed::Ewma(valid_count, value)) = seed {
                 if *valid_count == 0 {
                     return Err(internal_error(
                         "typed EWMA restore populated a zero sample count",
@@ -849,6 +926,8 @@ impl RollingKernelPlan {
                 }
                 state.valid_count = *valid_count;
                 state.value = *value;
+            } else if seed.is_some() {
+                return Err(internal_error("typed EWMA restore seed type mismatch"));
             }
         }
         Ok(())
@@ -1266,6 +1345,11 @@ fn typed_group_input(
             input_index,
             storage,
             ..
+        }
+        | TypedGroupPlan::Cumulative {
+            input_index,
+            storage,
+            ..
         } => extrema_group_input(input.column(input_index), storage, node_id),
         TypedGroupPlan::Signed { input_index, .. } => {
             cast_signed(input.column(input_index), node_id).map(TypedGroupInput::Signed)
@@ -1583,6 +1667,10 @@ fn compile_typed_group(
     group: &CompiledWindowGroup,
 ) -> std::result::Result<TypedGroupPlan, String> {
     match group {
+        CompiledWindowGroup::Cumulative {
+            input_index,
+            statistic,
+        } => cumulative::compile_group(input_schema, *input_index, *statistic),
         CompiledWindowGroup::Numeric {
             input_index,
             frame,
@@ -1721,6 +1809,7 @@ fn compile_typed_output(
     groups: &[TypedGroupPlan],
 ) -> std::result::Result<TypedOutputPlan, String> {
     match &output.evaluation {
+        CompiledEvaluation::Cumulative(aggregate) => cumulative::compile_output(output, aggregate),
         CompiledEvaluation::Aggregate(aggregate) => compile_aggregate_output(aggregate, groups),
         CompiledEvaluation::Pair(pair) => compile_pair_output(pair),
         CompiledEvaluation::Ewma(ewma) => compile_ewma_output(ewma, groups),
@@ -1984,6 +2073,18 @@ struct KernelFingerprintInput<'a> {
     fallback_reason: Option<&'a str>,
 }
 
+fn checkpoint_kernel_fingerprint<'a>(
+    mut input: KernelFingerprintInput<'a>,
+    legacy_reason: &'a str,
+) -> String {
+    input.selection = KernelSelection::General;
+    input.complexity = KernelComplexity::General;
+    input.groups = &[];
+    input.outputs = &[];
+    input.fallback_reason = Some(legacy_reason);
+    kernel_fingerprint(&input)
+}
+
 fn kernel_fingerprint(input: &KernelFingerprintInput<'_>) -> String {
     let schema = input
         .input_schema
@@ -2233,6 +2334,7 @@ impl TypedEntityState {
 
 #[derive(Clone, Debug)]
 enum TypedWindowState {
+    Cumulative(TypedCumulativeState),
     Numeric(Float64NumericState),
     Exact(ExactNumericState),
     Extrema(TypedExtremaState),
@@ -2271,6 +2373,9 @@ impl TypedScanState {
 impl TypedWindowState {
     fn new(group: TypedGroupPlan, entity_rows: usize) -> Self {
         match group {
+            TypedGroupPlan::Cumulative { statistic, .. } => {
+                Self::Cumulative(TypedCumulativeState::new(statistic))
+            }
             TypedGroupPlan::Numeric { frame, .. } => {
                 Self::Numeric(Float64NumericState::new(frame, entity_rows))
             }
@@ -2312,6 +2417,7 @@ impl TypedWindowState {
         node_id: &str,
     ) -> Result<()> {
         match (self, input) {
+            (Self::Cumulative(state), input) => state.update(input, row_index, node_id),
             (Self::Numeric(state), TypedGroupInput::Single(input)) => state.update(
                 event_time,
                 valid_float64(input, row_index, nan_as_value),
@@ -2319,39 +2425,12 @@ impl TypedWindowState {
                 transition_count,
                 node_id,
             ),
-            (Self::Exact(state), TypedGroupInput::Signed(input)) => state.update(
-                event_time,
-                input
-                    .is_valid(row_index)
-                    .then(|| ExactValue::Signed(input.value(row_index))),
-                node_id,
-            ),
-            (Self::Exact(state), TypedGroupInput::Unsigned(input)) => state.update(
-                event_time,
-                input
-                    .is_valid(row_index)
-                    .then(|| ExactValue::Unsigned(input.value(row_index))),
-                node_id,
-            ),
-            (Self::Extrema(state), TypedGroupInput::Single(input)) => state.update(
-                event_time,
-                valid_float64(input, row_index, false).map(ExtremaValue::Float),
-                node_id,
-            ),
-            (Self::Extrema(state), TypedGroupInput::Signed(input)) => state.update(
-                event_time,
-                input
-                    .is_valid(row_index)
-                    .then(|| ExtremaValue::Signed(input.value(row_index))),
-                node_id,
-            ),
-            (Self::Extrema(state), TypedGroupInput::Unsigned(input)) => state.update(
-                event_time,
-                input
-                    .is_valid(row_index)
-                    .then(|| ExtremaValue::Unsigned(input.value(row_index))),
-                node_id,
-            ),
+            (Self::Exact(state), input) => {
+                update_exact_input(state, input, event_time, row_index, node_id)
+            }
+            (Self::Extrema(state), input) => {
+                update_extrema_input(state, input, event_time, row_index, node_id)
+            }
             (Self::Pair(state), TypedGroupInput::Pair(left, right)) => state.update(
                 event_time,
                 valid_float64_pair(left, right, row_index),
@@ -2375,12 +2454,17 @@ impl TypedWindowState {
         match self {
             Self::Numeric(state) => state.rebase_stable_v2(node_id),
             Self::Pair(state) => state.rebase_stable_v2(node_id),
-            Self::Exact(_) | Self::Extrema(_) | Self::Ewma(_) | Self::Scan(_) => Ok(()),
+            Self::Exact(_)
+            | Self::Extrema(_)
+            | Self::Ewma(_)
+            | Self::Scan(_)
+            | Self::Cumulative(_) => Ok(()),
         }
     }
 
     fn estimated_bytes(&self) -> usize {
         match self {
+            Self::Cumulative(_) => size_of::<TypedCumulativeState>(),
             Self::Numeric(state) => state.estimated_bytes(),
             Self::Exact(state) => state.estimated_bytes(),
             Self::Extrema(state) => state.estimated_bytes(),
@@ -2391,6 +2475,53 @@ impl TypedWindowState {
             }
         }
     }
+}
+
+fn update_exact_input(
+    state: &mut ExactNumericState,
+    input: &TypedGroupInput,
+    event_time: i64,
+    row: usize,
+    node: &str,
+) -> Result<()> {
+    let sample = match input {
+        TypedGroupInput::Signed(input) => input
+            .is_valid(row)
+            .then(|| ExactValue::Signed(input.value(row))),
+        TypedGroupInput::Unsigned(input) => input
+            .is_valid(row)
+            .then(|| ExactValue::Unsigned(input.value(row))),
+        _ => {
+            return Err(internal_error(
+                "typed rolling group state does not match its input plan",
+            ));
+        }
+    };
+    state.update(event_time, sample, node)
+}
+
+fn update_extrema_input(
+    state: &mut TypedExtremaState,
+    input: &TypedGroupInput,
+    event_time: i64,
+    row: usize,
+    node: &str,
+) -> Result<()> {
+    let sample = match input {
+        TypedGroupInput::Single(input) => valid_float64(input, row, false).map(ExtremaValue::Float),
+        TypedGroupInput::Signed(input) => input
+            .is_valid(row)
+            .then(|| ExtremaValue::Signed(input.value(row))),
+        TypedGroupInput::Unsigned(input) => input
+            .is_valid(row)
+            .then(|| ExtremaValue::Unsigned(input.value(row))),
+        TypedGroupInput::Pair(..) => {
+            return Err(internal_error(
+                "typed rolling group state does not match its input plan",
+            ));
+        }
+    };
+    state.update(event_time, sample, node)
 }
 
 #[inline]
@@ -3409,7 +3540,17 @@ impl DerivedBuilder {
             self.append_null();
             return Ok(());
         }
+        self.append_state(state, output, node_id)
+    }
+
+    fn append_state(
+        &mut self,
+        state: &TypedWindowState,
+        output: &TypedOutputPlan,
+        node_id: &str,
+    ) -> Result<()> {
         match state {
+            TypedWindowState::Cumulative(state) => state.append(self, output, node_id),
             TypedWindowState::Numeric(state) => self.append_numeric(state, output),
             TypedWindowState::Exact(state) => self.append_exact(state, output, node_id),
             TypedWindowState::Extrema(state) => self.append_extrema(state, output),
@@ -3609,6 +3750,7 @@ fn append_unsigned_extrema(builder: &mut UInt64Builder, state: &TypedExtremaStat
 
 fn typed_valid_count(state: &TypedWindowState) -> u64 {
     match state {
+        TypedWindowState::Cumulative(state) => state.accumulator.valid_count(),
         TypedWindowState::Numeric(state) => state.accumulator.valid_count,
         TypedWindowState::Exact(state) => state.accumulator.valid_count,
         TypedWindowState::Extrema(state) => state.valid_count,
@@ -4048,6 +4190,7 @@ mod tests {
             fallback_reason: None,
             estimated_state_bytes_per_entity: 0,
             fingerprint: "test-kernel".to_owned(),
+            checkpoint_fingerprint: None,
         }
     }
 
@@ -4535,7 +4678,10 @@ mod tests {
             vec!["a", "b"],
             vec![None, None],
         );
-        let seeds = vec![vec![None, Some((3, 12.5))], vec![None, None]];
+        let seeds = vec![
+            vec![None, Some(RecurrenceSeed::Ewma(3, 12.5))],
+            vec![None, None],
+        ];
         let seeded = kernel
             .seed_restored_state(
                 &RollingKernelState::default(),
@@ -4575,7 +4721,7 @@ mod tests {
                     &RollingKernelState::default(),
                     &entities.slice(0, 1),
                     &[1],
-                    &[vec![Some((1, 1.0)), None]],
+                    &[vec![Some(RecurrenceSeed::Ewma(1, 1.0)), None]],
                     "r",
                 )
                 .is_err()
@@ -4586,7 +4732,7 @@ mod tests {
                     &RollingKernelState::default(),
                     &entities.slice(0, 1),
                     &[1],
-                    &[vec![None, Some((0, 1.0))]],
+                    &[vec![None, Some(RecurrenceSeed::Ewma(0, 1.0))]],
                     "r",
                 )
                 .is_err()

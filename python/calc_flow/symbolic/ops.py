@@ -548,6 +548,61 @@ class TsNamespace:
             )
         )
 
+    def _cumulative(
+        self, kind: str, value: ColumnExpr, min_periods: int, ddof: int | None = None
+    ) -> ColumnExpr:
+        function = f"ts.{kind}"
+        attrs = {
+            "min_periods": CInt(
+                require_positive_int(
+                    min_periods, f"calc_flow.symbolic.{function}.min_periods"
+                )
+            ),
+        }
+        if ddof is not None:
+            attrs["ddof"] = CInt(_ddof(ddof, function))
+        return ColumnExpr(
+            build(kind, (_column(value, function, "value")._node,), attrs)
+        )
+
+    def cumulative_sum(
+        self, value: ColumnExpr, /, *, min_periods: int = 1
+    ) -> ColumnExpr:
+        """Checked sum of all valid samples per entity; skip null and NaN."""
+        return self._cumulative("cumulative_sum", value, min_periods)
+
+    def cumulative_min(
+        self, value: ColumnExpr, /, *, min_periods: int = 1
+    ) -> ColumnExpr:
+        """Minimum of all valid samples per entity, preserving input type."""
+        return self._cumulative("cumulative_min", value, min_periods)
+
+    def cumulative_max(
+        self, value: ColumnExpr, /, *, min_periods: int = 1
+    ) -> ColumnExpr:
+        """Maximum of all valid samples per entity, preserving input type."""
+        return self._cumulative("cumulative_max", value, min_periods)
+
+    def cumulative_variance(
+        self,
+        value: ColumnExpr,
+        /,
+        *,
+        min_periods: int = 1,
+        ddof: Literal[0, 1] = 1,
+    ) -> ColumnExpr:
+        """Online Float64 variance; null until n >= min_periods and n > ddof.
+
+        Null and NaN inputs are skipped. Infinity is a valid sample and makes
+        variance NaN once the count gates pass.
+        """
+        return self._cumulative(
+            "cumulative_variance",
+            value,
+            min_periods,
+            _ddof(ddof, "ts.cumulative_variance"),
+        )
+
     def last(self, value: ColumnExpr, /) -> ColumnExpr:
         """Latest valid numeric sample for each entity."""
 

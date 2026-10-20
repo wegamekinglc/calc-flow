@@ -193,10 +193,22 @@ value. Order statistics, distinct counts, and linear decay scan only the
 retained frame history, which the existing checkpoint layout preserves.
 
 Project declarations carry the validated configuration and declaration layout
-versions. The current checkpoint writer uses columnar state layout `3`, with
+versions. Operators without cumulative sum/min/max/variance write columnar state layout `3`, with
 an entity dictionary, projected history, a reorder buffer, recurrence state,
 and kernel/numerical fingerprints. Restore also supports the declaration's
 layout `1` or `2` state. Writer layout is distinct from the declaration fields.
+Cumulative sum/min/max/variance use declaration and writer layout `4`, adding
+complete per-entity/per-group summaries. Counts, exact integer totals, extrema,
+the variance origin/mean/M2 IEEE bits and infinity classification survive
+recovery without replaying prefix history. Layout `4` requires an entity
+processed-row count for both numerical profiles, distinguishing cumulative
+prefixes from entities with only pending rows; snapshots without this evidence
+fail closed. Missing, duplicate, malformed or mismatched summaries fail closed
+before state installation. Primitive numeric cumulative outputs use the typed
+Arrow transition and ordered columnar buffering, including stages shared with
+cumulative mean or supported rolling outputs. Other shapes retain the general
+fallback. Both paths update the same constant summaries; checkpoint encodings
+and kernel identities remain compatible with earlier layout `4` snapshots.
 The [columnar state implementation](../crates/calc-flow/src/operator/rolling/state_v3.rs)
 owns this encoding.
 

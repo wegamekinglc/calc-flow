@@ -633,6 +633,38 @@ valid truth values over a frame. `ts.count_positive` and `ts.mean_positive`
 ignore null and NaN, return zero when a frame has valid nonpositive values but
 no positive values, and return null below `min_periods` valid input samples.
 
+`ts.cumulative_sum`, `ts.cumulative_min`, `ts.cumulative_max`, and
+`ts.cumulative_variance` compute an unbounded prefix per entity, in the declared
+`(event_time, sequence_by...)` order. Each accepts a numeric column or row-local
+expression and positive `min_periods=1`; null and NaN samples leave the count
+and summary unchanged, including on the current row. Results are null until
+the valid count reaches `min_periods`. Empty input emits no rows. Min/max
+preserve the input type and its existing extrema ordering (including signed
+zero); sum promotes signed/unsigned integers to `int64`/`uint64` with checked
+overflow, and floating inputs to `float64` with ordered IEEE addition.
+Variance emits `float64` using an online mean/M2 recurrence shifted by the first valid value. Its `ddof` is
+`0` or `1` (default `1`); it also returns null while `count <= ddof`. Infinity
+counts as valid and makes variance NaN once both count gates pass. Floating
+sums and variance can overflow to infinity; these are binary64 calculations,
+not arbitrary precision statistics.
+
+```python
+features = quotes.with_columns(
+    running_high=ts.cumulative_max(quotes["price"]),
+    running_low=ts.cumulative_min(quotes["price"]),
+    total=ts.cumulative_sum(quotes["price"]),
+    population_variance=ts.cumulative_variance(quotes["price"], ddof=0),
+)
+```
+
+These declarations retain constant summaries per entity, share state across
+compatible readouts, and continue across native batches and checkpoints.
+Entity cardinality and pending reorder rows still consume the configured
+state budget. Supported primitive inputs use typed Arrow transitions and
+ordered columnar stream buffering, including compatible mixed stages with
+Mean or rolling outputs; other shapes retain the general fallback. Updates
+retain constant summaries rather than the prefix or a large rolling frame.
+
 A filter declared below every rolling feature becomes a deterministic
 `<output>__cf_prefilter` expression node feeding the rolling node; a filter
 declared above them applies after it. The lowered node's frozen spec carries
@@ -647,10 +679,11 @@ rejection and `drop` to a metrics-recorded drop — and the
 referenced value. Batch lowering writes the default lateness values, batch
 evaluation classifies no late rows. Cross-section stages consume the same
 options; event-window programs apply the option checks described above.
-Declarations without EWMA or cumulative mean use `state_layout_version` 1;
-either recurrence kind requires version 2.
-The native checkpoint writer uses columnar layout 3 and persists exponential
-accumulators exactly; see [native rolling state](symbolic-design.md#native-rolling-state).
+Cumulative sum/min/max/variance require declaration and writer
+`state_layout_version` 4, persisting exact summaries and progress. Other
+declarations use version 1, or version 2 when they include EWMA/cumulative mean,
+and retain writer layout 3. Existing checkpoint identities remain unchanged;
+see [native rolling state](symbolic-design.md#native-rolling-state).
 
 `cs.rank`, `cs.percentile`, `cs.demean`, `cs.mean`, `cs.zscore`, `cs.winsorize`,
 `cs.top`, `cs.bottom`, `cs.top_quantile`, `cs.bottom_quantile`, and
