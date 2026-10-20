@@ -141,3 +141,10 @@ not replace the uninstrumented regression gate. All inputs, release seals,
 rounds, worker IPC, host/resource records and diagnostic source hashes remain
 in the uploaded artifact.
 
+The `dal392_part=fresh` follow-up keeps the completed persistent-worker
+controls and runs only fixed fresh-worker A/A and A/B observations. Every
+invocation owns a new worker, one untimed warmup and one measured sample;
+two rounds of ten AB/BA pairs retain the same oracle and paired statistics.
+This diagnoses process reuse as a possible confounder, rather than retrying
+the original samples to select a verdict.
+

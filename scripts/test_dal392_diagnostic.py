@@ -65,6 +65,50 @@ class FixedEvidenceTests(unittest.TestCase):
 
 
 class PhaseBoundaryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_fresh_pairs_use_distinct_workers_and_alternate_order(self):
+        events = []
+        workers = []
+
+        class Worker:
+            input_hashes = {"table": "same", "dimension": "same"}
+
+            def __init__(self, side):
+                self.side = side
+                self.process = SimpleNamespace(pid=len(workers))
+                self.closed = False
+                workers.append(self)
+
+            async def request(self, *, operation, **kwargs):
+                if operation == "sample":
+                    events.append(self.side)
+                    return {"seconds": 0.1, "correctness": {"passed": True}}
+                return {"state": "completed"}
+
+            async def close(self):
+                self.closed = True
+
+        async def start(site, root):
+            return Worker(str(site))
+
+        async def prepare(*args):
+            return {"host": "same"}
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(dal392.DiagnosticWorker, "start", side_effect=start),
+            patch.object(dal392, "_prepare", side_effect=prepare),
+        ):
+            result = await dal392.fresh_round(
+                {"baseline": Path("A"), "candidate": Path("B")},
+                {"baseline": {}, "candidate": {}},
+                Path(directory),
+                0,
+            )
+        self.assertEqual(events, ["A", "B", "B", "A"] * 5)
+        self.assertEqual(len(workers), 20)
+        self.assertTrue(all(worker.closed for worker in workers))
+        self.assertEqual([len(v) for v in result["samples"].values()], [10, 10])
+
     async def test_phase_probe_preserves_original_timer_and_oracle(self):
         class Clock:
             def __init__(self, scope):

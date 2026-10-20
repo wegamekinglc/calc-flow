@@ -15,9 +15,11 @@ from unittest.mock import patch
 
 from scripts.benchmark_suite.catalog import engine_cases
 from scripts.benchmark_suite.issue406_measurement import PhaseClock
+from scripts.benchmark_suite.measure import _measured_row, _prepare, validate_sample
 from scripts.benchmark_suite.process import ROOT, install
 from scripts.benchmark_suite.provenance import harness_sha256
 from scripts.benchmark_suite.release import load_release
+from scripts.benchmark_suite.report import comparison
 from scripts.benchmark_suite.worker import dispatch
 from scripts.groupby_diagnostic.contract import host, require_host
 from scripts.groupby_diagnostic.controller import observed_collect, paired
@@ -64,6 +66,10 @@ def plan() -> dict:
         "harness_sha256": HARNESS,
         "comparisons": ["AA", "BB", "AB"],
         "phase_comparison": "AB",
+        "fresh_comparisons": ["AA", "AB"],
+        "fresh_observation": (
+            "One warmup and one sample per newly started worker; no process reuse."
+        ),
         "rounds": 2,
         "pairs_per_round": 10,
         "budget_seconds": 600,
@@ -217,22 +223,100 @@ def preflight(root: Path, release_root: Path) -> dict:
     return releases
 
 
-async def collect(root: Path, releases: dict, *, phase_only: bool) -> None:
+async def fresh_round(sites: dict, releases: dict, root: Path, index: int) -> dict:
+    samples = {side: [] for side in releases}
+    environment = None
+    hashes = None
+    processes = []
+    for number in range(plan()["pairs_per_round"]):
+        order = (
+            ("baseline", "candidate") if number % 2 == 0 else ("candidate", "baseline")
+        )
+        for side in order:
+            worker = await DiagnosticWorker.start(
+                sites[side], root / f"pair-{number}" / side
+            )
+            context = {
+                side: {
+                    "side": side,
+                    "round": index,
+                    "case_id": case()["id"],
+                    "release": releases[side],
+                }
+            }
+            try:
+                identity = await _prepare(
+                    {side: worker}, {side: releases[side]}, case(), context
+                )
+                if environment is not None and identity != environment:
+                    raise ValueError("fresh-worker environment differs")
+                if hashes is not None and worker.input_hashes != hashes:
+                    raise ValueError("fresh-worker input IPC differs")
+                environment, hashes = identity, worker.input_hashes
+                sample = await worker.request(
+                    operation="sample",
+                    context={**context[side], "phase": "measurement", "sample": number},
+                )
+                validate_sample(sample)
+                samples[side].append(sample)
+                processes.append(
+                    {"side": side, "sample": number, "pid": worker.process.pid}
+                )
+                complete = await worker.request(operation="finish")
+                if complete["state"] != "completed":
+                    raise ValueError("fresh worker did not finish")
+                write_json(
+                    root / "partial.json", {"samples": samples, "workers": processes}
+                )
+            finally:
+                await worker.close()
+    return {
+        "environment": environment,
+        "samples": samples,
+        "workers": processes,
+        "input_hashes": hashes,
+    }
+
+
+async def fresh_paired(sites: dict, releases: dict, root: Path) -> dict:
+    rounds = []
+    for index in range(plan()["rounds"]):
+        rounds.append(
+            await fresh_round(sites, releases, root / f"round-{index}", index)
+        )
+        write_json(root / "rounds.json", rounds)
+    if rounds[0]["environment"] != rounds[1]["environment"]:
+        raise ValueError("fresh-worker confirmation environment changed")
+    row = _measured_row(case(), rounds, "interleaved")
+    return {**row, "result": comparison(row)}
+
+
+async def collect(root: Path, releases: dict, *, part: str) -> None:
     sites = {}
     for side, value in releases.items():
         sites[side] = await install(value, root / "sites" / side)
     results = []
-    labels = ["phase-AB"] if phase_only else [*plan()["comparisons"], "phase-AB"]
-    for label in labels:
-        left, right = ("A", "B") if label == "phase-AB" else label
-        selected = {"baseline": left, "candidate": right}
-        row = await paired(
-            case(),
-            {side: sites[value] for side, value in selected.items()},
-            {side: releases[value] for side, value in selected.items()},
-            root / label,
-            worker_type=PhaseWorker if label == "phase-AB" else DiagnosticWorker,
+    if part == "fresh":
+        labels = [f"fresh-{pair}" for pair in plan()["fresh_comparisons"]]
+    else:
+        labels = (
+            ["phase-AB"] if part == "phases" else [*plan()["comparisons"], "phase-AB"]
         )
+    for label in labels:
+        left, right = label.rsplit("-", 1)[-1]
+        selected = {"baseline": left, "candidate": right}
+        selected_sites = {side: sites[value] for side, value in selected.items()}
+        selected_releases = {side: releases[value] for side, value in selected.items()}
+        if part == "fresh":
+            row = await fresh_paired(selected_sites, selected_releases, root / label)
+        else:
+            row = await paired(
+                case(),
+                selected_sites,
+                selected_releases,
+                root / label,
+                worker_type=PhaseWorker if label == "phase-AB" else DiagnosticWorker,
+            )
         results.append({"label": label, "sources": selected, **row})
         write_json(root / "results.json", results)
         print(label, json.dumps(row["result"]), flush=True)
@@ -241,14 +325,16 @@ async def collect(root: Path, releases: dict, *, phase_only: bool) -> None:
 async def run(root: Path, releases: Path) -> int:
     started = float(os.environ["DAL392_START_UNIX"])
     root.mkdir(parents=True, exist_ok=True)
-    phase_only = os.environ.get("DAL392_PART", "all") == "phases"
+    part = os.environ.get("DAL392_PART", "all")
+    if part not in ("all", "phases", "fresh"):
+        raise ValueError("unknown diagnostic part")
     write_json(
         root / "plan.json",
         {
             **plan(),
             "job_started_unix": started,
-            "phase_only": phase_only,
-            "reused_control_run": 39458710899 if phase_only else None,
+            "part": part,
+            "reused_control_run": 39458710899 if part != "all" else None,
         },
     )
     outcome = {"status": "failed"}
@@ -258,9 +344,7 @@ async def run(root: Path, releases: Path) -> int:
             raise TimeoutError("preparation exhausted measurement budget")
         async with asyncio.timeout(remaining):
             manifests = preflight(root, releases)
-            await observed_collect(
-                root, lambda: collect(root, manifests, phase_only=phase_only)
-            )
+            await observed_collect(root, lambda: collect(root, manifests, part=part))
         outcome = {"status": "completed"}
     except (Exception, asyncio.CancelledError) as error:
         outcome = {"status": "failed", "error": f"{type(error).__name__}: {error}"}
