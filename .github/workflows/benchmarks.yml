@@ -5,7 +5,7 @@ on:
       mode:
         description: Standard benchmarks, fixed diagnostics, or sealed-wheel recovery
         type: choice
-        options: [standard, dal301-groupby, suite-recovery, issue406-groupby]
+        options: [standard, dal301-groupby, suite-recovery, issue406-groupby, dal392-groupby]
         default: standard
       release_run_id:
         description: Original complete-suite run containing both sealed wheels
@@ -295,6 +295,62 @@ jobs:
           path: target/dal301-evidence/
           include-hidden-files: true
           if-no-files-found: error
+
+  dal392-groupby:
+    name: Diagnose original 1M group_by wheel pair
+    if: inputs.mode == 'dal392-groupby'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      UV_CACHE_DIR: ${{ github.workspace }}/target/uv-cache
+    steps:
+      - name: Start fixed ten-minute preparation and measurement budget
+        run: |
+          python - <<'PY'
+          import os
+          import time
+          with open(os.environ["GITHUB_ENV"], "a") as stream:
+              stream.write(f"DAL392_START_UNIX={time.time()}\n")
+          PY
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13.16'
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - name: Install original locked dependencies
+        run: |
+          uv venv target/diagnostic-venv
+          uv pip sync --python target/diagnostic-venv/bin/python \
+            --require-hashes benchmarks/requirements.lock
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          github-token: ${{ github.token }}
+          run-id: 39423189143
+          name: benchmark-release-baseline-39423189143-1
+          path: target/dal392-releases/A
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          github-token: ${{ github.token }}
+          run-id: 39423189143
+          name: benchmark-release-candidate-39423189143-1
+          path: target/dal392-releases/B
+      - name: Collect fixed original-wheel controls and phase CPU evidence
+        run: |
+          target/diagnostic-venv/bin/python -m unittest scripts.test_dal392_diagnostic
+          target/diagnostic-venv/bin/python -m scripts.groupby_diagnostic.dal392 run \
+            --releases target/dal392-releases --output target/dal392-evidence
+      - name: Retain all diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: dal392-groupby-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            target/dal392-evidence/**/*.json
+            target/dal392-evidence/**/*.jsonl
+            target/dal392-evidence/**/*.log
+            !target/dal392-evidence/sites/**/site/**
+          if-no-files-found: error
+          retention-days: 30
 
   issue406-groupby:
     name: Profile original October 12 group_by wheels

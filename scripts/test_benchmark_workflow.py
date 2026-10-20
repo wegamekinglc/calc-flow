@@ -15,7 +15,8 @@ class BenchmarkWorkflowTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn(
-            "options: [standard, dal301-groupby, suite-recovery, issue406-groupby]",
+            "options: [standard, dal301-groupby, suite-recovery, "
+            "issue406-groupby, dal392-groupby]",
             workflow,
         )
         for job in ("sql-datafusion-paired", "sql-datafusion-matrix"):

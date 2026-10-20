@@ -124,3 +124,20 @@ IPC and command/exit logs survive failure. Installed package directories and
 local Arrow fixture intermediates are excluded from upload. A completed collector
 does not turn a regression verdict into a pass. See the
 [fixed diagnosis specification](../../.codex/artifacts/specs/issue406-groupby-regression.md).
+# DAL-392: original 1M group-by wheel attribution
+
+The manual `Benchmarks` workflow mode `dal392-groupby` reuses both sealed
+wheels from run `39423189143`. It accepts only the original EPYC 7763
+four-logical-CPU GitHub host, Python 3.13.16 and common harness identity.
+It fixes A/A, B/B and A/B at two rounds of ten alternating pairs, then collects
+a separate A/B with the existing process/thread phase clocks. Preparation,
+measurement and cleanup share a ten-minute budget; no native build is needed.
+
+The phase probe preserves the ready-to-Arrow timer and correctness oracle.
+Setup/readiness, processing, terminal work and validation have separate CPU
+clocks. Native operator status reports wall durations and DataFusion creation,
+not per-operator CPU time. Instrumented rows are attribution evidence; they do
+not replace the uninstrumented regression gate. All inputs, release seals,
+rounds, worker IPC, host/resource records and diagnostic source hashes remain
+in the uploaded artifact.
+
