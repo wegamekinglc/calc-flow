@@ -116,7 +116,7 @@ class RetainedBenchmarkSuiteTests(unittest.TestCase):
             case for case in variants if case["checkpoint_interval_millis"] == 100
         ]
         self.assertEqual({case["rows"] for case in durations}, {100_000, 1_000_000})
-        self.assertEqual({case["batch_rows"] for case in durations}, {1024, 64_000})
+        self.assertEqual({case["batch_rows"] for case in durations}, {1024, 1_000_000})
         for case in durations:
             self.assertEqual(case["workload"], "checkpoint-duration")
             self.assertEqual(case["replay_mode"], "exact-cursor")
