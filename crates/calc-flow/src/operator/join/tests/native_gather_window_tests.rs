@@ -61,6 +61,22 @@ async fn gather_fixture_side(
     gather_fixture_rows(owner, incoming_is_left, missing, pool, None).await
 }
 
+fn gather_fixture_opposite_times(fanout: Option<usize>) -> Vec<i64> {
+    if let Some(fanout) = fanout {
+        vec![10; fanout]
+    } else {
+        let mut right_times = Vec::new();
+        for index in 0..40_i64 {
+            let time = index * 3;
+            right_times.push(time);
+            if index % 4 == 0 {
+                right_times.push(time);
+            }
+        }
+        right_times
+    }
+}
+
 async fn gather_fixture_rows(
     owner: JobGatherOwner,
     incoming_is_left: bool,
@@ -86,19 +102,7 @@ async fn gather_fixture_rows(
         .with_gather_owner(owner);
     let context = StreamOperatorContext::new(&job, "probe", None);
     let mut output = EdgeCollector::new(operator.output_ports().to_vec());
-    let right_times = if let Some(fanout) = fanout {
-        vec![10; fanout]
-    } else {
-        let mut right_times = Vec::new();
-        for index in 0..40_i64 {
-            let time = index * 3;
-            right_times.push(time);
-            if index % 4 == 0 {
-                right_times.push(time);
-            }
-        }
-        right_times
-    };
+    let right_times = gather_fixture_opposite_times(fanout);
     operator
         .process_data(
             if incoming_is_left { "right" } else { "left" },

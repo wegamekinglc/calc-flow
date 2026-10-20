@@ -244,7 +244,6 @@ impl Selection {
         if view.len() == 0 {
             return;
         }
-        let offset = self.opposite.len();
         match view {
             View::Pairs(mut pairs) => {
                 while let Some(first) = pairs.first() {
@@ -260,6 +259,7 @@ impl Selection {
                 }
             }
             View::Identity { start, opposite } => {
+                let offset = self.opposite.len();
                 match &mut self.incoming {
                     Incoming::Identity { start: destination } if offset == 0 => {
                         *destination = start;
@@ -278,19 +278,22 @@ impl Selection {
                 runs,
                 base,
                 opposite,
-            } => {
-                let end = base + opposite.len();
-                for (index, &(first, position)) in runs.iter().enumerate() {
-                    if first >= end {
-                        break;
-                    }
-                    let start = first.max(base);
-                    let next = runs.get(index + 1).map_or(end, |&(next, _)| next.min(end));
-                    self.append_incoming(position, offset + start - base, next - start);
-                }
-                self.opposite.extend_from_slice(opposite);
-            }
+            } => self.append_runs(runs, base, opposite),
         }
+    }
+
+    fn append_runs(&mut self, runs: &[(usize, usize)], base: usize, opposite: &[usize]) {
+        let offset = self.opposite.len();
+        let end = base + opposite.len();
+        for (index, &(first, position)) in runs.iter().enumerate() {
+            if first >= end {
+                break;
+            }
+            let start = first.max(base);
+            let next = runs.get(index + 1).map_or(end, |&(next, _)| next.min(end));
+            self.append_incoming(position, offset + start - base, next - start);
+        }
+        self.opposite.extend_from_slice(opposite);
     }
     pub(super) fn extend(&mut self, pairs: impl IntoIterator<Item = MatchedPair>) {
         for pair in pairs {
