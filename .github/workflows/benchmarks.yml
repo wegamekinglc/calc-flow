@@ -12,9 +12,9 @@ on:
         type: string
         default: ""
       dal392_part:
-        description: Fixed DAL-392 collection or missing phase evidence only
+        description: DAL-392 old hardware replication or independent assigned hardware controls
         type: choice
-        options: [all, phases, fresh]
+        options: [all, phases, fresh, fresh-current]
         default: all
       release_run_attempt:
         description: Original release artifact attempt

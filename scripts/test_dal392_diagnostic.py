@@ -11,6 +11,56 @@ from scripts.groupby_diagnostic import dal392
 
 
 class FixedEvidenceTests(unittest.TestCase):
+    def test_replication_still_rejects_a_different_cpu(self):
+        cpu = {"lscpu": [{"field": "Model name:", "data": "different CPU"}]}
+        with (
+            patch.object(dal392, "host", return_value={}),
+            patch.object(dal392, "require_host"),
+            patch.object(dal392, "write_json"),
+            patch.object(
+                dal392.subprocess, "check_output", return_value=json.dumps(cpu)
+            ),
+            self.assertRaisesRegex(ValueError, "CPU model differs"),
+        ):
+            dal392.preflight(Path("output"), Path("releases"))
+
+    def test_independent_mode_locks_the_assigned_cpu(self):
+        cpu = {"lscpu": [{"field": "Model name:", "data": "different CPU"}]}
+        hardware = {
+            "identity": {
+                "machine": "x86_64",
+                "processors": [{"model name": "different CPU"}],
+            },
+            "sha256": "locked",
+        }
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(dal392, "host", return_value={}),
+            patch.object(dal392, "require_host"),
+            patch.object(
+                dal392.subprocess, "check_output", return_value=json.dumps(cpu)
+            ),
+            patch.object(dal392, "hardware_identity", return_value=hardware),
+            patch.object(dal392.platform, "python_version", return_value="3.13.16"),
+            patch.object(dal392, "harness_sha256", return_value=dal392.HARNESS),
+            patch.object(dal392, "sealed", return_value={"native_sha256": "sealed"}),
+            patch.object(dal392, "git_output", return_value="diagnostic-commit"),
+        ):
+            root = Path(directory)
+            dal392.preflight(root, Path("releases"), independent=True)
+            self.assertEqual(
+                json.loads((root / "locked-hardware.json").read_text()), hardware
+            )
+            identity = json.loads((root / "identity.json").read_text())
+            self.assertEqual(identity["diagnostic_kind"], "independent-new-environment")
+
+    def test_changed_runner_or_worker_hardware_is_rejected(self):
+        with patch.object(dal392, "hardware_identity", return_value={"sha256": "same"}):
+            with self.assertRaisesRegex(ValueError, "assigned hardware"):
+                dal392.check_hardware({"sha256": "changed"})
+            with self.assertRaisesRegex(ValueError, "worker hardware"):
+                dal392.check_hardware({"sha256": "same"}, {"dal392_hardware": {}})
+
     def test_large_thread_snapshots_are_preserved_without_overflowing_ipc(self):
         phases = {
             scope: {
@@ -65,6 +115,42 @@ class FixedEvidenceTests(unittest.TestCase):
 
 
 class PhaseBoundaryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_independent_collection_includes_all_three_fresh_controls(self):
+        async def install(release, root):
+            return root
+
+        async def row(*args, **kwargs):
+            return {"evidence": [{"environment": {}, "samples": {}}], "result": {}}
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(dal392, "install", side_effect=install),
+            patch.object(dal392, "fresh_paired", side_effect=row) as fresh,
+            patch.object(dal392, "paired", side_effect=row) as persistent,
+            patch.object(dal392, "check_hardware"),
+        ):
+            await dal392.collect(
+                Path(directory),
+                {"A": {}, "B": {}},
+                part="fresh-current",
+                locked_hardware={"sha256": "same"},
+            )
+            results = json.loads((Path(directory) / "results.json").read_text())
+        self.assertEqual(
+            [r["label"] for r in results],
+            dal392.plan()["independent_environment_order"],
+        )
+        self.assertEqual(fresh.await_count, 3)
+        self.assertEqual(persistent.await_count, 2)
+        self.assertEqual(
+            [r["sources"] for r in results if r["label"].startswith("fresh-")],
+            [
+                {"baseline": "A", "candidate": "A"},
+                {"baseline": "B", "candidate": "B"},
+                {"baseline": "A", "candidate": "B"},
+            ],
+        )
+
     async def test_one_baseline_worker_preserves_side_and_validates_native(self):
         contexts = []
 

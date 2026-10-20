@@ -148,3 +148,17 @@ two rounds of ten AB/BA pairs retain the same oracle and paired statistics.
 This diagnoses process reuse as a possible confounder, rather than retrying
 the original samples to select a verdict.
 
+`dal392_part=fresh-current` is a separate, independent environment diagnostic.
+It records the CPU actually assigned to one four-vCPU GitHub runner, locks its
+model/topology/flags, affinity and kernel, and checks every worker and observation
+against that identity. It runs persistent A/A, fresh A/A, fresh B/B, persistent
+A/B and fresh A/B, in that fixed order, with two rounds of ten pairs each.
+Each fresh observation has a new process and one untimed warmup. All five
+comparisons share the ten-minute preparation/measurement/cleanup budget and the
+original wheels, oracle, timing boundary and +5% paired rule.
+
+These results describe only that run's recorded environment. They are never
+pooled with other runs and cannot overturn the historical EPYC 7763 failure.
+The original replication modes still require EPYC 7763; the formal suite is
+unchanged.
+

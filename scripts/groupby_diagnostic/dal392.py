@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import platform
@@ -71,6 +72,17 @@ def plan() -> dict:
         "comparisons": ["AA", "BB", "AB"],
         "phase_comparison": "AB",
         "fresh_comparisons": ["AA", "AB"],
+        "independent_environment_order": [
+            "persistent-AA",
+            "fresh-AA",
+            "fresh-BB",
+            "persistent-AB",
+            "fresh-AB",
+        ],
+        "independent_environment_scope": (
+            "Lock the assigned CPU for this run. No cross-run pooling or "
+            "replacement of the original EPYC7763 failure."
+        ),
         "fresh_observation": (
             "One warmup and one sample per newly started worker; no process reuse."
         ),
@@ -181,15 +193,27 @@ def persist_phases(sample: dict, root: Path, number: int) -> dict:
 
 def worker(root: Path, *, phases: bool = False) -> None:
     active = None
+    independent = os.environ.get("DAL392_PART") == "fresh-current"
+    locked = None
     try:
         for line in sys.stdin:
             message = json.loads(line)
+            if independent:
+                if locked is None:
+                    locked = hardware_identity()
+                check_hardware(locked)
             if message["operation"] == "prepare" and message["case"] != case():
                 raise ValueError("only fixed group_by/1M workload is permitted")
             if phases and message["operation"] == "sample":
                 response = persist_phases(phase_sample(active), root, active.count)
             else:
                 response, active = dispatch(message, active, root)
+            if independent:
+                check_hardware(locked)
+                if message["operation"] == "hello":
+                    response = {**response, "dal392_hardware": locked}
+                if message["operation"] == "sample":
+                    response = {**response, "dal392_hardware_sha256": locked["sha256"]}
             if message["operation"] == "prepare":
                 response = {**response, "input_hashes": input_hashes(active, root)}
             print(json.dumps(response, allow_nan=False), flush=True)
@@ -198,15 +222,69 @@ def worker(root: Path, *, phases: bool = False) -> None:
             active.close()
 
 
-def preflight(root: Path, release_root: Path) -> dict:
+def hardware_identity() -> dict:
+    """Fingerprint stable hardware fields; frequency and load can vary."""
+
+    fields = (
+        "processor",
+        "vendor_id",
+        "cpu family",
+        "model",
+        "model name",
+        "stepping",
+        "microcode",
+        "physical id",
+        "core id",
+        "flags",
+    )
+    processors = []
+    for block in Path("/proc/cpuinfo").read_text().strip().split("\n\n"):
+        values = dict(
+            (key.strip(), value.strip())
+            for line in block.splitlines()
+            if ":" in line
+            for key, value in (line.split(":", 1),)
+        )
+        processors.append({key: values.get(key) for key in fields})
+    if not processors or any(not p["model name"] for p in processors):
+        raise ValueError("CPU model inventory is unavailable")
+    value = {
+        "processors": processors,
+        "logical_cpus": os.cpu_count(),
+        "affinity": sorted(os.sched_getaffinity(0)),
+        "machine": platform.machine(),
+        "kernel": platform.release(),
+    }
+    digest = hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return {"identity": value, "sha256": digest}
+
+
+def check_hardware(expected: dict, environment: dict | None = None) -> None:
+    if hardware_identity() != expected:
+        raise ValueError("assigned hardware or affinity changed during collection")
+    if environment is not None and environment.get("dal392_hardware") != expected:
+        raise ValueError("worker hardware differs from the locked runner")
+
+
+def preflight(root: Path, release_root: Path, *, independent: bool = False) -> dict:
     machine = host()
     write_json(root / "host.json", machine)
     require_host(machine)
     cpu = json.loads(subprocess.check_output(["lscpu", "--json"], text=True))
     write_json(root / "host-cpu.json", cpu)
     model = next(x["data"] for x in cpu["lscpu"] if x["field"] == "Model name:")
-    if model != "AMD EPYC 7763 64-Core Processor":
+    if not independent and model != "AMD EPYC 7763 64-Core Processor":
         raise ValueError(f"CPU model differs from failed CI: {model}")
+    locked = None
+    if independent:
+        locked = hardware_identity()
+        if locked["identity"]["machine"] != "x86_64" or {
+            p["model name"] for p in locked["identity"]["processors"]
+        } != {model}:
+            raise ValueError("assigned CPU inventory is inconsistent")
+        write_json(root / "locked-hardware.json", locked)
     if platform.python_version() != "3.13.16" or harness_sha256() != HARNESS:
         raise ValueError("Python or common harness differs from original CI")
     releases = {
@@ -218,6 +296,12 @@ def preflight(root: Path, release_root: Path) -> dict:
             "releases": releases,
             "checkout": git_output(ROOT, "rev-parse", "HEAD"),
             "harness_sha256": harness_sha256(),
+            "diagnostic_kind": (
+                "independent-new-environment"
+                if independent
+                else "old-hardware-replication"
+            ),
+            "locked_hardware": locked,
             "diagnostic_sha256": {
                 name: sha256_file(Path(__file__).with_name(name))
                 for name in ("dal392.py", "dal392_phase.py")
@@ -310,23 +394,29 @@ async def fresh_paired(sites: dict, releases: dict, root: Path) -> dict:
     return {**row, "result": comparison(row)}
 
 
-async def collect(root: Path, releases: dict, *, part: str) -> None:
+async def collect(
+    root: Path, releases: dict, *, part: str, locked_hardware: dict | None = None
+) -> None:
     sites = {}
     for side, value in releases.items():
         sites[side] = await install(value, root / "sites" / side)
     results = []
-    if part == "fresh":
+    if part == "fresh-current":
+        labels = plan()["independent_environment_order"]
+    elif part == "fresh":
         labels = [f"fresh-{pair}" for pair in plan()["fresh_comparisons"]]
     else:
         labels = (
             ["phase-AB"] if part == "phases" else [*plan()["comparisons"], "phase-AB"]
         )
     for label in labels:
+        if locked_hardware is not None:
+            check_hardware(locked_hardware)
         left, right = label.rsplit("-", 1)[-1]
         selected = {"baseline": left, "candidate": right}
         selected_sites = {side: sites[value] for side, value in selected.items()}
         selected_releases = {side: releases[value] for side, value in selected.items()}
-        if part == "fresh":
+        if part == "fresh" or label.startswith("fresh-"):
             row = await fresh_paired(selected_sites, selected_releases, root / label)
         else:
             row = await paired(
@@ -336,6 +426,20 @@ async def collect(root: Path, releases: dict, *, part: str) -> None:
                 root / label,
                 worker_type=PhaseWorker if label == "phase-AB" else DiagnosticWorker,
             )
+        if locked_hardware is not None:
+            for evidence in row["evidence"]:
+                check_hardware(locked_hardware, evidence["environment"])
+                for samples in evidence["samples"].values():
+                    if any(
+                        s.get("dal392_hardware_sha256") != locked_hardware["sha256"]
+                        for s in samples
+                    ):
+                        raise ValueError("sample hardware attestation differs")
+            if results and (
+                results[0]["evidence"][0]["environment"]
+                != row["evidence"][0]["environment"]
+            ):
+                raise ValueError("environment changed between control comparisons")
         results.append({"label": label, "sources": selected, **row})
         write_json(root / "results.json", results)
         print(label, json.dumps(row["result"]), flush=True)
@@ -345,7 +449,7 @@ async def run(root: Path, releases: Path) -> int:
     started = float(os.environ["DAL392_START_UNIX"])
     root.mkdir(parents=True, exist_ok=True)
     part = os.environ.get("DAL392_PART", "all")
-    if part not in ("all", "phases", "fresh"):
+    if part not in ("all", "phases", "fresh", "fresh-current"):
         raise ValueError("unknown diagnostic part")
     write_json(
         root / "plan.json",
@@ -353,7 +457,15 @@ async def run(root: Path, releases: Path) -> int:
             **plan(),
             "job_started_unix": started,
             "part": part,
-            "reused_control_run": 39458710899 if part != "all" else None,
+            "reused_control_run": (
+                39458710899 if part in ("phases", "fresh") else None
+            ),
+            "diagnostic_kind": (
+                "independent-new-environment"
+                if part == "fresh-current"
+                else "old-hardware-replication"
+            ),
+            "historical_failure_overridden": False,
         },
     )
     outcome = {"status": "failed"}
@@ -362,8 +474,20 @@ async def run(root: Path, releases: Path) -> int:
         if remaining <= 0:
             raise TimeoutError("preparation exhausted measurement budget")
         async with asyncio.timeout(remaining):
-            manifests = preflight(root, releases)
-            await observed_collect(root, lambda: collect(root, manifests, part=part))
+            independent = part == "fresh-current"
+            manifests = preflight(root, releases, independent=independent)
+            locked = (
+                json.loads((root / "locked-hardware.json").read_text())
+                if independent
+                else None
+            )
+            await observed_collect(
+                root,
+                lambda: collect(root, manifests, part=part, locked_hardware=locked),
+            )
+            if locked is not None:
+                check_hardware(locked)
+                write_json(root / "hardware-after.json", hardware_identity())
         outcome = {"status": "completed"}
     except (Exception, asyncio.CancelledError) as error:
         outcome = {"status": "failed", "error": f"{type(error).__name__}: {error}"}
