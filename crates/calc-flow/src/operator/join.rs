@@ -3258,13 +3258,11 @@ impl DeltaTracking {
         Ok(())
     }
 
-    /// An evicted row at or above the watermark was never captured and
-    /// coalesces away (spec FR2).
-    fn note_coalesced_eviction(&mut self, side: JoinSide, name: &str) -> Result<()> {
-        self.dirty[side.index()] = self.dirty[side.index()]
-            .checked_sub(1)
-            .ok_or_else(|| counter_overflow(name, "dirty rows"))?;
-        Ok(())
+    /// Preflights the aggregate removal of never-captured rows (spec FR2).
+    fn dirty_after_eviction(&self, side: JoinSide, count: u64, name: &str) -> Result<u64> {
+        self.dirty[side.index()]
+            .checked_sub(count)
+            .ok_or_else(|| counter_overflow(name, "dirty rows"))
     }
 
     fn is_clean(&self) -> bool {
@@ -3433,6 +3431,13 @@ impl Rows for RetainedRows {
     }
     fn payload(&self, index: usize) -> PayloadRef<'_> {
         self.0.payload(index)
+    }
+    fn cursor_payload<'a>(
+        &'a self,
+        index: usize,
+        cursor: &mut Option<(usize, &'a retained::Chunk)>,
+    ) -> PayloadRef<'a> {
+        self.0.cursor_payload(index, cursor)
     }
     fn key(&self, index: usize) -> &Arc<columnar::FramedKey> {
         self.0.key(index)
@@ -7297,28 +7302,48 @@ struct EvictionPolicy<'a> {
 struct EvictionPlan {
     cuts: Vec<(usize, usize)>,
     entries: Vec<PlannedEntry>,
+    coordinates: BTreeMap<usize, Vec<usize>>,
+    per_key: Vec<(Arc<columnar::FramedKey>, u64)>,
+    count: u64,
+    bytes: u64,
+    captured: usize,
+    coalesced: u64,
+}
+
+#[cfg(test)]
+thread_local! {
+    static EVICTION_RAW_KEY_CLONES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 struct PlannedEntry {
-    index: usize,
     row_id: u64,
-    time: EventTime,
-    charge: u64,
-    key: Arc<columnar::FramedKey>,
+    tombstone: Option<(EventTime, Arc<columnar::FramedKey>)>,
 }
 
 impl EvictionPlan {
     fn plan(
-        &mut self,
         rows: &RetainedRows,
         expirations: &ExpirationIndex,
         expired: &dyn Fn(EventTime) -> bool,
-    ) {
-        for (id, cut) in expirations.expired_cuts(rows, expired) {
+        bindings: &key_dictionary::SideBindings,
+        watermark: Option<u64>,
+        name: &str,
+    ) -> Result<Self> {
+        let mut plan = Self {
+            cuts: expirations.expired_cuts(rows, expired),
+            ..Self::default()
+        };
+        let capacity = plan
+            .cuts
+            .iter()
+            .fold(0usize, |count, (_, cut)| count.saturating_add(*cut))
+            .min(64);
+        let mut per_key_index = HashMap::with_capacity(capacity);
+        for ordinal in 0..plan.cuts.len() {
+            let (id, cut) = plan.cuts[ordinal];
             #[cfg(test)]
             note_join_work(|work| work.expiration_run_cuts += 1);
-            self.cuts.push((id, cut));
-            self.entries.reserve(cut);
+            plan.entries.reserve(cut);
             let mut batch = None;
             let mut previous_chunk = usize::MAX;
             for index in expirations.run_entries(id, cut) {
@@ -7328,18 +7353,68 @@ impl EvictionPlan {
                     previous_chunk = chunk;
                 }
                 let batch = batch.as_ref().expect("bound expiration chunk");
-                let (time, row_id) = batch.identity(index);
-                self.entries.push(PlannedEntry {
-                    index,
-                    row_id,
-                    time,
-                    charge: batch.charge(index),
-                    // The row key is the canonical interned identity shared
-                    // with the dictionary and native index.
-                    key: Arc::clone(batch.key(index)),
-                });
+                plan.append_entry(index, batch, bindings, watermark, &mut per_key_index, name)?;
             }
         }
+        Ok(plan)
+    }
+
+    fn append_entry(
+        &mut self,
+        index: usize,
+        batch: &retained::RowBatch<'_>,
+        bindings: &key_dictionary::SideBindings,
+        watermark: Option<u64>,
+        per_key_index: &mut HashMap<*const columnar::FramedKey, usize>,
+        name: &str,
+    ) -> Result<()> {
+        let (time, row_id) = batch.identity(index);
+        self.bytes = self
+            .bytes
+            .checked_add(batch.charge(index))
+            .ok_or_else(|| counter_overflow(name, "evicted bytes"))?;
+        self.count = self
+            .count
+            .checked_add(1)
+            .ok_or_else(|| counter_overflow(name, "evicted rows"))?;
+        let key = batch.key(index);
+        let tombstone = if watermark.is_some_and(|watermark| row_id < watermark) {
+            self.captured = self
+                .captured
+                .checked_add(1)
+                .ok_or_else(|| counter_overflow(name, "tombstone entries"))?;
+            #[cfg(test)]
+            EVICTION_RAW_KEY_CLONES.set(EVICTION_RAW_KEY_CLONES.get() + 1);
+            Some((time, Arc::clone(key)))
+        } else {
+            if watermark.is_some() {
+                self.coalesced = self
+                    .coalesced
+                    .checked_add(1)
+                    .ok_or_else(|| counter_overflow(name, "evicted rows"))?;
+            }
+            None
+        };
+        // Resolve restored leases in first-appearance expiration-plan order.
+        let canonical = bindings.canonical_key(row_id, key);
+        match per_key_index.entry(Arc::as_ptr(canonical)) {
+            std::collections::hash_map::Entry::Occupied(slot) => {
+                let count = &mut self.per_key[*slot.get()].1;
+                *count = count
+                    .checked_add(1)
+                    .ok_or_else(|| counter_overflow(name, "key_references"))?;
+            }
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(self.per_key.len());
+                self.per_key.push((Arc::clone(canonical), 1));
+            }
+        }
+        self.coordinates
+            .entry(index / retained::CHUNK_ROWS)
+            .or_default()
+            .push(index % retained::CHUNK_ROWS);
+        self.entries.push(PlannedEntry { row_id, tombstone });
+        Ok(())
     }
 
     fn is_empty(&self) -> bool {
@@ -7408,41 +7483,29 @@ fn evict_expired(
         operator_id,
     } = policy;
     let expired = expired_predicate(progress, extension_micros);
-    let mut plan = EvictionPlan::default();
-    plan.plan(rows, expirations, &expired);
+    let watermark = deltas.as_ref().map(|deltas| deltas.watermark[side.index()]);
+    let plan = EvictionPlan::plan(
+        rows,
+        expirations,
+        &expired,
+        retirement.bindings,
+        watermark,
+        operator_id,
+    )?;
     if plan.is_empty() {
         return Ok(());
     }
-    // Rows below the watermark leave tombstones; rows at or above it
-    // coalesce away (spec FR2).
-    let watermark = deltas
-        .as_ref()
-        .map_or(u64::MAX, |deltas| deltas.watermark[side.index()]);
-    let mut count = 0_u64;
-    let mut bytes = 0_u64;
-    let mut below_watermark = 0_usize;
-    for entry in &plan.entries {
-        bytes = bytes
-            .checked_add(entry.charge)
-            .ok_or_else(|| counter_overflow(operator_id, "evicted bytes"))?;
-        count = count
-            .checked_add(1)
-            .ok_or_else(|| counter_overflow(operator_id, "evicted rows"))?;
-        if deltas.is_some() && entry.row_id < watermark {
-            below_watermark += 1;
-        }
-    }
+    let mut next_metrics = metrics.clone();
+    update_evicted_metrics(&mut next_metrics, plan.count, plan.bytes, operator_id)?;
+    let next_dirty = deltas.as_ref().map_or(Ok(0), |deltas| {
+        deltas.dirty_after_eviction(side, plan.coalesced, operator_id)
+    })?;
     if let Some(deltas) = &mut deltas {
         deltas.tombstones[side.index()].reserve(
             expirations.tombstone_origin(),
-            below_watermark,
+            plan.captured,
             operator_id,
         )?;
-        for entry in &plan.entries {
-            if entry.row_id >= watermark {
-                deltas.note_coalesced_eviction(side, operator_id)?;
-            }
-        }
     }
     apply_eviction_plan(
         rows,
@@ -7453,17 +7516,15 @@ fn evict_expired(
         operator_id,
     )?;
     if let Some(deltas) = deltas {
-        for entry in &plan.entries {
-            if entry.row_id < watermark {
-                deltas.tombstones[side.index()].push(
-                    entry.row_id,
-                    entry.time,
-                    Arc::clone(&entry.key),
-                );
+        for entry in plan.entries {
+            if let Some((time, key)) = entry.tombstone {
+                deltas.tombstones[side.index()].push(entry.row_id, time, key);
             }
         }
+        deltas.dirty[side.index()] = next_dirty;
     }
-    update_evicted_metrics(metrics, count, bytes, operator_id)
+    *metrics = next_metrics;
+    Ok(())
 }
 
 fn apply_eviction_plan(
@@ -7474,41 +7535,14 @@ fn apply_eviction_plan(
     expired: &dyn Fn(EventTime) -> bool,
     operator_id: &str,
 ) -> Result<()> {
-    // Aggregated retirement resolves each entry's canonical interned key,
-    // exactly as per-row removal did, so the dictionary and the native index
-    // decrement once per key (spec FR13). Keys retire in first-appearance
-    // plan order, so slot recycling stays deterministic run to run instead
-    // of following HashMap iteration order.
-    let mut per_key: Vec<(Arc<columnar::FramedKey>, u64)> = Vec::new();
-    let mut per_key_index: HashMap<*const columnar::FramedKey, usize> =
-        HashMap::with_capacity(plan.entries.len().min(64));
-    for entry in &plan.entries {
-        let canonical = retirement.bindings.canonical_key(entry.row_id, &entry.key);
-        match per_key_index.entry(Arc::as_ptr(canonical)) {
-            std::collections::hash_map::Entry::Occupied(index) => {
-                per_key[*index.get()].1 += 1;
-            }
-            std::collections::hash_map::Entry::Vacant(slot) => {
-                slot.insert(per_key.len());
-                per_key.push((Arc::clone(canonical), 1));
-            }
-        }
-    }
     expirations.apply_cuts(&plan.cuts, &*rows, expired);
-    let mut coordinates = BTreeMap::new();
-    for entry in &plan.entries {
-        coordinates
-            .entry(entry.index / retained::CHUNK_ROWS)
-            .or_insert_with(Vec::new)
-            .push(entry.index % retained::CHUNK_ROWS);
-    }
-    rows.remove_bulk(&coordinates);
+    rows.remove_bulk(&plan.coordinates);
     let (state, native) = (&rows.0, &mut rows.1);
     if let Some(native) = native
         .as_mut()
         .map(|native| Arc::get_mut(native).expect("native probe released before eviction"))
     {
-        for (key, count) in &per_key {
+        for (key, count) in &plan.per_key {
             native.truncate_key(
                 key,
                 *count,
@@ -7525,7 +7559,7 @@ fn apply_eviction_plan(
     for entry in &plan.entries {
         retirement.bindings.remove(entry.row_id);
     }
-    for (key, count) in &per_key {
+    for (key, count) in &plan.per_key {
         retirement.retire_n(key, *count, operator_id)?;
     }
     Ok(())

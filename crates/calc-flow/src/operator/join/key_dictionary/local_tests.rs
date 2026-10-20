@@ -556,3 +556,162 @@ async fn test_single_string_blocks_keep_generic_work_and_cancellation_boundaries
         }
     }
 }
+
+fn string_array(large: bool, values: Vec<String>) -> ArrayRef {
+    if large {
+        Arc::new(LargeStringArray::from(values))
+    } else {
+        Arc::new(StringArray::from(values))
+    }
+}
+
+#[tokio::test]
+async fn test_local_string_hash_charges_bounded_blocks_instead_of_values() {
+    for large in [false, true] {
+        for width in [0, 4, 15, 64] {
+            let array = string_array(large, vec!["x".repeat(width); COPY_VISITS]);
+            let column = LocalColumn::bind(array.as_ref()).unwrap();
+            let positions = (0..COPY_VISITS).map(|row| (row, true)).collect::<Vec<_>>();
+            let mut hashes = [(0, 0); COPY_VISITS];
+            let mut key_flow = KeyFlow::new(None);
+            let mut flow = LocalFlow::new(&mut key_flow);
+            flow.visits = COPY_VISITS;
+            flow.bytes = COPY_BYTES;
+            column
+                .hash_column(&positions, &mut hashes, &mut flow)
+                .await
+                .unwrap();
+            assert!(
+                flow.debits <= 2,
+                "large={large}, width={width}: {} accounting calls for one bounded block",
+                flow.debits
+            );
+        }
+    }
+}
+
+fn reference_string_hash(seed: u64, value: &str) -> u64 {
+    let mut hash = mix(seed, value.len() as u64);
+    for chunk in value.as_bytes().chunks(8) {
+        let mut word = [0; 8];
+        word[..chunk.len()].copy_from_slice(chunk);
+        hash = mix(hash, u64::from_le_bytes(word));
+    }
+    hash
+}
+
+async fn check_string_hash_reference(array: ArrayRef, values: &[String]) {
+    let column = LocalColumn::bind(array.as_ref()).unwrap();
+    let positions = (0..values.len())
+        .rev()
+        .map(|row| (row, row % 2 == 0))
+        .collect::<Vec<_>>();
+    let mut hashes = positions
+        .iter()
+        .map(|&(row, _)| (row as u64, 17))
+        .collect::<Vec<_>>();
+    column
+        .hash_column(
+            &positions,
+            &mut hashes,
+            &mut LocalFlow::new(&mut KeyFlow::new(None)),
+        )
+        .await
+        .unwrap();
+    let expected = positions
+        .iter()
+        .map(|&(row, _)| {
+            (
+                reference_string_hash(row as u64, &values[row]),
+                17 + values[row].len(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(hashes, expected);
+}
+
+#[tokio::test]
+async fn test_local_string_hash_matches_word_reference_for_short_and_mixed_slices() {
+    let mut values = (0..=16).map(|width| "x".repeat(width)).collect::<Vec<_>>();
+    values.extend([
+        "\0".to_owned(),
+        "é\0tail".to_owned(),
+        "12345678\0tail".to_owned(),
+    ]);
+    for large in [false, true] {
+        let short = string_array(large, values.clone());
+        check_string_hash_reference(
+            short.slice(1, values.len() - 2),
+            &values[1..values.len() - 1],
+        )
+        .await;
+        let mut mixed = values.clone();
+        mixed.extend(["x".repeat(COPY_BYTES), "é".repeat(COPY_BYTES + 1)]);
+        check_string_hash_reference(string_array(large, mixed.clone()), &mixed).await;
+    }
+}
+
+#[tokio::test]
+async fn test_local_string_block_hash_stop_stays_within_visit_and_byte_quanta() {
+    for large in [false, true] {
+        for width in [15, 64] {
+            for deadline in [false, true] {
+                let array = string_column(large, COPY_VISITS * 2, width);
+                let columns = [LocalColumn::bind(array.as_ref()).unwrap()];
+                let rows = admitted(vec![Arc::clone(&array)]);
+                let mut local = local_table(rows.len());
+                let (job, processed, _hook) =
+                    stop_after_work(typed_key::KeyPhase::LocalHash, deadline);
+                let context = StreamOperatorContext::new(&job, "match", None);
+                let error = local
+                    .intern_group(
+                        &columns,
+                        AdmittedGroup::new(&rows, 0..rows.len()),
+                        "match",
+                        &mut KeyFlow::new(Some(&context)),
+                    )
+                    .await
+                    .unwrap_err();
+                assert!(matches!(error, CalcFlowError::Cancelled { .. }));
+                assert_eq!(processed.load(Ordering::SeqCst), COPY_VISITS * width);
+                assert!(local.locals.is_empty());
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_local_string_hash_byte_refill_cannot_reuse_block_visit_allowance() {
+    for large in [false, true] {
+        let array = string_column(large, COPY_VISITS, 4);
+        let columns = [LocalColumn::bind(array.as_ref()).unwrap()];
+        let (job, _, _hook) = stop_after_work(typed_key::KeyPhase::LocalHash, false);
+        let context = StreamOperatorContext::new(&job, "match", None);
+        let mut key_flow = KeyFlow::new(Some(&context));
+        let mut flow = LocalFlow::new(&mut key_flow);
+        flow.step(0, COPY_BYTES).await.unwrap();
+        let positions = (0..COPY_VISITS).map(|row| (row, true)).collect::<Vec<_>>();
+        let mut hashes = [(0x243F_6A88_85A3_08D3, 0); COPY_VISITS];
+        columns[0]
+            .hash_column(&positions, &mut hashes, &mut flow)
+            .await
+            .unwrap();
+        let mut local = local_table(COPY_VISITS);
+        let error = local
+            .intern_positions(
+                &columns,
+                &positions,
+                &hashes,
+                "match",
+                &mut flow,
+                |left, right| values_equal(&columns, left, right),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, CalcFlowError::Cancelled { .. }));
+        assert!(
+            local.locals.len() <= 1,
+            "a byte refill must not grant a second block of visits after hashing"
+        );
+    }
+}

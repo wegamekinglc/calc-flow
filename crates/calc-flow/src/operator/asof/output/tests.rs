@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 mod all_shared;
+mod compact_positions;
 mod cpu_pipeline;
 
 fn fixture() -> (StreamAsofJoinSpec, [SchemaRef; 3], RowPayload) {
@@ -587,7 +588,7 @@ fn parallel_column_input(count: i64) -> (MaterializationInput, std::sync::Weak<d
         },
         right: OutputSide {
             batches: Vec::new(),
-            positions: Vec::new(),
+            positions: Vec::new().into(),
             spans: Vec::new(),
             has_nulls: false,
         },

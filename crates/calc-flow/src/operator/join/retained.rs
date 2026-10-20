@@ -21,6 +21,13 @@ pub(super) trait Rows: Send + Sync {
         (row.event_time, row.row_id)
     }
     fn payload(&self, index: usize) -> PayloadRef<'_>;
+    fn cursor_payload<'a>(
+        &'a self,
+        index: usize,
+        _chunk: &mut Option<(usize, &'a Chunk)>,
+    ) -> PayloadRef<'a> {
+        self.payload(index)
+    }
     fn key(&self, index: usize) -> &Arc<super::columnar::FramedKey>;
     fn indexed(&self) -> Box<dyn Iterator<Item = (usize, StoredRow)> + Send + '_>;
     fn references(&self) -> Box<dyn Iterator<Item = usize> + Send + '_> {
@@ -42,10 +49,30 @@ pub(super) trait Rows: Send + Sync {
     }
 }
 
-#[cfg(any(test, feature = "benchmark-checkpoint-diagnostic"))]
 impl dyn Rows + '_ {
+    pub(super) fn cursor(&self) -> PayloadCursor<'_> {
+        PayloadCursor {
+            rows: self,
+            chunk: None,
+        }
+    }
+
+    #[cfg(any(test, feature = "benchmark-checkpoint-diagnostic"))]
     pub(super) fn iter(&self) -> Box<dyn Iterator<Item = StoredRow> + Send + '_> {
         Box::new(self.indexed().map(|(_, row)| row))
+    }
+}
+
+/// A borrowed chunk cannot outlive the immutable state snapshot or overlap a
+/// removal/repair. Storage stays constant even when stable coordinates are sparse.
+pub(super) struct PayloadCursor<'a> {
+    rows: &'a dyn Rows,
+    chunk: Option<(usize, &'a Chunk)>,
+}
+
+impl<'a> PayloadCursor<'a> {
+    pub(super) fn payload(&mut self, index: usize) -> PayloadRef<'a> {
+        self.rows.cursor_payload(index, &mut self.chunk)
     }
 }
 
@@ -300,6 +327,12 @@ pub(super) struct StateRows {
 }
 
 impl StateRows {
+    fn payload_chunk(&self, id: usize) -> &Chunk {
+        #[cfg(test)]
+        tests::PAYLOAD_LOOKUPS.with(|count| count.set(count.get() + 1));
+        &self.chunks[&id]
+    }
+
     #[cfg(test)]
     fn reference(&self, mut ordinal: usize) -> usize {
         for (&id, chunk) in &self.chunks {
@@ -747,7 +780,25 @@ impl Rows for StateRows {
     }
 
     fn payload(&self, index: usize) -> PayloadRef<'_> {
-        let chunk = &self.chunks[&(index / CHUNK_ROWS)];
+        let chunk = self.payload_chunk(index / CHUNK_ROWS);
+        let offset = index % CHUNK_ROWS;
+        PayloadRef::Payload(chunk.owner(offset), chunk.offsets[offset])
+    }
+
+    fn cursor_payload<'a>(
+        &'a self,
+        index: usize,
+        cursor: &mut Option<(usize, &'a Chunk)>,
+    ) -> PayloadRef<'a> {
+        let id = index / CHUNK_ROWS;
+        let chunk = match *cursor {
+            Some((previous, chunk)) if previous == id => chunk,
+            _ => {
+                let chunk = self.payload_chunk(id);
+                *cursor = Some((id, chunk));
+                chunk
+            }
+        };
         let offset = index % CHUNK_ROWS;
         PayloadRef::Payload(chunk.owner(offset), chunk.offsets[offset])
     }
@@ -829,6 +880,13 @@ impl Rows for Arc<StateRows> {
     }
     fn payload(&self, index: usize) -> PayloadRef<'_> {
         self.as_ref().payload(index)
+    }
+    fn cursor_payload<'a>(
+        &'a self,
+        index: usize,
+        cursor: &mut Option<(usize, &'a Chunk)>,
+    ) -> PayloadRef<'a> {
+        self.as_ref().cursor_payload(index, cursor)
     }
     fn key(&self, index: usize) -> &Arc<super::columnar::FramedKey> {
         self.as_ref().key(index)

@@ -29,6 +29,8 @@ pub(super) struct LocalFlow<'a, 'c, 'j> {
     flow: &'a mut KeyFlow<'c, 'j>,
     visits: usize,
     bytes: usize,
+    #[cfg(test)]
+    debits: usize,
 }
 
 impl<'a, 'c, 'j> LocalFlow<'a, 'c, 'j> {
@@ -37,6 +39,8 @@ impl<'a, 'c, 'j> LocalFlow<'a, 'c, 'j> {
             flow,
             visits: 0,
             bytes: 0,
+            #[cfg(test)]
+            debits: 0,
         }
     }
 
@@ -52,6 +56,10 @@ impl<'a, 'c, 'j> LocalFlow<'a, 'c, 'j> {
     /// Debit only prepaid work. Failure leaves both allowances untouched.
     #[inline]
     fn take(&mut self, visits: usize, bytes: usize) -> bool {
+        #[cfg(test)]
+        {
+            self.debits += 1;
+        }
         debug_assert!(visits <= COPY_VISITS && bytes <= COPY_BYTES);
         if visits > self.visits || bytes > self.bytes {
             return false;
@@ -988,11 +996,90 @@ async fn hash_strings<'a>(
     value: impl Fn(usize) -> &'a str,
     flow: &mut LocalFlow<'_, '_, '_>,
 ) -> Result<()> {
-    for (&(row, _), (hash, bytes)) in positions.iter().zip(hashes) {
+    // Offset reads cost visits but do not read the value bytes. Prepay those
+    // reads before capturing borrowed values in bounded stack scratch.
+    if !flow.take(positions.len(), 0) {
+        flow.step(positions.len(), 0).await?;
+    }
+    let (values, bytes) = string_values(positions, value);
+    let values = &values[..positions.len()];
+    if bytes <= COPY_BYTES {
+        if !flow.take(0, bytes) {
+            // A byte refill starts a fresh quantum. Reserve the block's
+            // visits in that quantum too, before reading its value bytes.
+            flow.step(positions.len(), bytes).await?;
+        }
+        hash_string_block(values, hashes);
+        return Ok(());
+    }
+    hash_string_chunks(values, hashes, flow).await
+}
+
+fn string_values<'a>(
+    positions: &[(usize, bool)],
+    value: impl Fn(usize) -> &'a str,
+) -> ([&'a str; COPY_VISITS], usize) {
+    let mut values = [""; COPY_VISITS];
+    let mut bytes = 0_usize;
+    for (&(row, _), target) in positions.iter().zip(&mut values) {
+        *target = value(row);
+        bytes = bytes.saturating_add(target.len());
+    }
+    (values, bytes)
+}
+
+fn hash_string_block(values: &[&str], hashes: &mut [(u64, usize)]) {
+    for (value, (hash, bytes)) in values.iter().zip(hashes) {
+        *hash = mix(*hash, value.len() as u64);
+        *hash = if value.len() <= 15 {
+            hash_short_string(*hash, value.as_bytes())
+        } else {
+            hash_words(*hash, value.as_bytes())
+        };
+        *bytes += value.len();
+        #[cfg(test)]
+        if !value.is_empty() {
+            super::super::typed_key::note(
+                super::super::typed_key::KeyPhase::LocalHash,
+                value.len(),
+            );
+        }
+    }
+}
+
+/// A short value fits two stack-local words. Length has already been mixed,
+/// and zero padding agrees exactly with the generic word hash's final chunk.
+fn hash_short_string(seed: u64, bytes: &[u8]) -> u64 {
+    debug_assert!(bytes.len() <= 15);
+    if bytes.is_empty() {
+        return seed;
+    }
+    let mut packed = [0_u8; 16];
+    packed[..bytes.len()].copy_from_slice(bytes);
+    let packed = u128::from_le_bytes(packed);
+    let hash = mix(
+        seed,
+        u64::try_from(packed & u128::from(u64::MAX)).expect("masked short-key word fits u64"),
+    );
+    if bytes.len() > 8 {
+        mix(hash, (packed >> 64) as u64)
+    } else {
+        hash
+    }
+}
+
+async fn hash_string_chunks(
+    values: &[&str],
+    hashes: &mut [(u64, usize)],
+    flow: &mut LocalFlow<'_, '_, '_>,
+) -> Result<()> {
+    // The oversized path retains per-value/chunk charging so a long value
+    // or a block of wide strings cannot outrun either cooperation quantum.
+    for (value, (hash, bytes)) in values.iter().zip(hashes) {
         if !flow.take(1, 0) {
             flow.step(1, 0).await?;
         }
-        let value = value(row).as_bytes();
+        let value = value.as_bytes();
         *hash = mix(*hash, value.len() as u64);
         for chunk in value.chunks(COPY_BYTES) {
             if !flow.take(0, chunk.len()) {

@@ -1,4 +1,5 @@
 use super::*;
+use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryConsumer, MemoryPool};
 
 /// Admission under checkpointing performs no per-row delta bookkeeping: the
 /// lazy watermark design records nothing until a capture derives the upserts
@@ -20,6 +21,7 @@ async fn eviction_of_never_captured_rows_records_no_tombstones() {
         .await
         .unwrap();
     reset_join_work();
+    EVICTION_RAW_KEY_CLONES.set(0);
     let progress = progress_context(
         &job_context,
         (IngressState::Active, None),
@@ -35,6 +37,11 @@ async fn eviction_of_never_captured_rows_records_no_tombstones() {
     assert_eq!(join_work().tombstone_appends, 0);
     assert_eq!(operator.state.deltas.dirty[0], 2);
     assert!(operator.state.deltas.tombstones[0].is_empty());
+    assert_eq!(
+        EVICTION_RAW_KEY_CLONES.get(),
+        0,
+        "uncaptured evictions need no per-row retained raw key owner"
+    );
 }
 
 /// The fresh-preparation branch of `install_v2_writer_base` must not drain
@@ -105,6 +112,7 @@ async fn captured_row_eviction_appends_one_tombstone_then_drains() {
         (IngressState::Active, Some(60_000_001)),
     );
     reset_join_work();
+    EVICTION_RAW_KEY_CLONES.set(0);
     operator
         .on_ingress_progress("right", &progress)
         .await
@@ -112,6 +120,11 @@ async fn captured_row_eviction_appends_one_tombstone_then_drains() {
     assert_eq!(join_work().tombstone_appends, 1);
     assert_eq!(operator.state.deltas.tombstones[0].len(), 1);
     assert_eq!(operator.state.deltas.tombstones[0].row_ids[0], 0);
+    assert_eq!(
+        EVICTION_RAW_KEY_CLONES.get(),
+        1,
+        "a captured key owner must move into its tombstone without a second clone"
+    );
     let second = operator.checkpoint(Epoch::new(2).unwrap()).unwrap();
     assert!(
         second.segments.contains_key("left-delta-2"),
@@ -293,4 +306,218 @@ async fn tombstones_round_trip_their_own_gap_carrying_id_lists() {
     assert_eq!(restored.status().left.retained_rows, 0);
     assert_eq!(restored.status().left.evicted_rows, 2);
     assert_eq!(restored.state.next_left_row_id, 3);
+}
+
+fn keyed_left_batch(keys: Vec<i64>, times: Vec<i64>) -> Batch {
+    let source = left_batch(times);
+    let record = &source.table_payload().unwrap().batches()[0];
+    let mut columns = record.columns().to_vec();
+    columns[0] = Arc::new(Int64Array::from(keys));
+    Batch::table(
+        vec![RecordBatch::try_new(record.schema(), columns).unwrap()],
+        BatchMetadata::default(),
+    )
+    .unwrap()
+}
+
+fn canonical_left_slot(operator: &StreamJoinOperator, row_id: u64) -> u32 {
+    let position = operator
+        .state
+        .left
+        .0
+        .references()
+        .find(|&position| operator.state.left.0.row_id(position) == row_id)
+        .unwrap();
+    operator
+        .key_bindings
+        .left
+        .canonical_key(row_id, operator.state.left.0.key(position))
+        .address()
+        .unwrap()
+        .slot()
+}
+
+fn expiration_observation(operator: &StreamJoinOperator) -> Vec<(u64, EventTime, Vec<u8>)> {
+    operator
+        .state
+        .left_expirations
+        .identities(&*operator.state.left)
+        .into_iter()
+        .map(|(row_id, time, key)| (row_id, time, key.to_vec()))
+        .collect()
+}
+
+#[tokio::test]
+async fn test_partial_eviction_preserves_restored_canonical_order_and_moves_captured_owners() {
+    let mut source =
+        StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "match", None);
+    let mut output = EdgeCollector::new(source.output_ports().to_vec());
+    source
+        .process_data(
+            "left",
+            keyed_left_batch(vec![9, 3, 9, 7], vec![0, 2, 1, 100]),
+            &context,
+            &mut output,
+        )
+        .await
+        .unwrap();
+    let snapshot = source.checkpoint(Epoch::INITIAL).unwrap();
+    let mut operator =
+        StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+    operator.restore(&snapshot).unwrap();
+    let raw = operator.state.left.0.key(0);
+    assert!(
+        !Arc::ptr_eq(raw, operator.key_bindings.left.canonical_key(0, raw)),
+        "restored raw owners require canonical lease resolution"
+    );
+    let first_slot = canonical_left_slot(&operator, 0);
+    let second_slot = canonical_left_slot(&operator, 1);
+    operator
+        .process_data(
+            "left",
+            keyed_left_batch(vec![3, 9, 7], vec![1, 0, 200]),
+            &context,
+            &mut output,
+        )
+        .await
+        .unwrap();
+    assert!(operator.ensure_native_index(true).unwrap());
+    EVICTION_RAW_KEY_CLONES.set(0);
+    operator
+        .evict_progress(
+            "right",
+            IngressProgress::new(
+                IngressState::Active,
+                Some(EventTime::from_micros(60_000_003)),
+            ),
+            true,
+        )
+        .unwrap();
+    assert_eq!(operator.state.deltas.tombstones[0].row_ids, [0, 2, 1]);
+    assert_eq!(operator.state.deltas.dirty[0], 1);
+    assert_eq!(operator.state.left.len(), 2);
+    assert_eq!(operator.key_dictionary.inventory().0, 1);
+    assert_eq!(operator.key_dictionary.inventory().1, 2);
+    assert_eq!(
+        EVICTION_RAW_KEY_CLONES.get(),
+        3,
+        "only captured rows retain a raw owner, moved directly into tombstones"
+    );
+    operator
+        .process_data(
+            "left",
+            keyed_left_batch(vec![11, 13], vec![400, 401]),
+            &context,
+            &mut output,
+        )
+        .await
+        .unwrap();
+    assert_eq!(canonical_left_slot(&operator, 7), second_slot);
+    assert_eq!(canonical_left_slot(&operator, 8), first_slot);
+    let continued = operator.checkpoint(Epoch::new(2).unwrap()).unwrap();
+    let mut restored =
+        StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+    restored.restore(&continued).unwrap();
+    assert_eq!(restored.status(), operator.status());
+    assert_eq!(restored.state.next_left_row_id, 9);
+    assert_eq!(restored.state.left.len(), 4);
+}
+
+#[tokio::test]
+async fn test_partial_eviction_preflights_metric_failure_before_removal() {
+    check_partial_eviction_counter_failure(false).await;
+}
+
+#[tokio::test]
+async fn test_partial_eviction_preflights_dirty_failure_before_removal() {
+    check_partial_eviction_counter_failure(true).await;
+}
+
+async fn check_partial_eviction_counter_failure(dirty_underflow: bool) {
+    let mut operator =
+        StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "match", None);
+    let mut output = EdgeCollector::new(operator.output_ports().to_vec());
+    operator
+        .process_data("left", left_batch(vec![0, 1, 100]), &context, &mut output)
+        .await
+        .unwrap();
+    if dirty_underflow {
+        operator.state.deltas.dirty[0] = 1;
+    } else {
+        operator.state.metrics.left.evicted_rows = u64::MAX;
+    }
+    let status = operator.status();
+    let dirty = operator.state.deltas.dirty;
+    let identities = expiration_observation(&operator);
+    let inventory = operator.key_dictionary.inventory();
+    let error = operator
+        .evict_progress(
+            "right",
+            IngressProgress::new(
+                IngressState::Active,
+                Some(EventTime::from_micros(60_000_002)),
+            ),
+            true,
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains(if dirty_underflow {
+        "dirty rows"
+    } else {
+        "evicted_rows"
+    }));
+    assert_eq!(operator.state.left.len(), 3);
+    assert_eq!(operator.status(), status);
+    assert_eq!(operator.state.deltas.dirty, dirty);
+    assert_eq!(operator.key_dictionary.inventory(), inventory);
+    assert_eq!(expiration_observation(&operator), identities);
+    assert!(operator.state.deltas.tombstones[0].is_empty());
+}
+
+#[tokio::test]
+async fn test_partial_eviction_tombstone_funding_refusal_preserves_plan_and_allows_retry() {
+    let limit = 16 << 20;
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(limit));
+    let mut operator =
+        StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+    operator
+        .runtime
+        .initialize_benchmark_pool(pool.clone())
+        .unwrap();
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "match", None);
+    let mut output = EdgeCollector::new(operator.output_ports().to_vec());
+    operator
+        .process_data("left", left_batch(vec![0, 1, 100]), &context, &mut output)
+        .await
+        .unwrap();
+    let snapshot = operator.checkpoint(Epoch::INITIAL).unwrap();
+    let status = operator.status();
+    let identities = expiration_observation(&operator);
+    let blocker = MemoryConsumer::new("eviction-refusal").register(&pool);
+    blocker.try_grow(limit - pool.reserved()).unwrap();
+    let progress = IngressProgress::new(
+        IngressState::Active,
+        Some(EventTime::from_micros(60_000_002)),
+    );
+    let error = operator
+        .evict_progress("right", progress, true)
+        .unwrap_err();
+    assert!(error.to_string().contains("credit admission"));
+    assert_eq!(operator.status(), status);
+    assert_eq!(operator.state.left.len(), 3);
+    assert_eq!(operator.state.deltas.watermark[0], 3);
+    assert!(operator.state.deltas.tombstones[0].is_empty());
+    assert_eq!(expiration_observation(&operator), identities);
+    drop(blocker);
+    operator.evict_progress("right", progress, true).unwrap();
+    assert_eq!(operator.state.left.len(), 1);
+    assert_eq!(operator.state.deltas.tombstones[0].row_ids, [0, 1]);
+    drop((snapshot, operator, output, context));
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop(job);
+    assert_eq!(pool.reserved(), 0);
 }

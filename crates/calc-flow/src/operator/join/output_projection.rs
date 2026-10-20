@@ -89,12 +89,13 @@ fn gather_columns(
 ) -> Result<Vec<ArrayRef>> {
     let left_width = output.records(&matched.pair(0)).0.num_columns();
     let mut cursor = output.admitted.cursor();
+    let mut retained = output.opposite.cursor();
     let incoming =
         output_gather::SideGather::new(matched.iter().map(|pair| cursor.payload(pair.pos)));
     let opposite = output_gather::SideGather::new(
         matched
             .iter()
-            .map(|pair| output.opposite.payload(pair.opposite_index)),
+            .map(|pair| retained.payload(pair.opposite_index)),
     );
     let (left_gather, right_gather) = if output.incoming_is_left {
         (incoming, opposite)

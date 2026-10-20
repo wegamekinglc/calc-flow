@@ -58,6 +58,16 @@ async fn gather_fixture_side(
     missing: bool,
     pool: Option<Arc<dyn MemoryPool>>,
 ) -> (StreamJoinOperator, Arc<ProbeInputs>, StreamJobContext) {
+    gather_fixture_rows(owner, incoming_is_left, missing, pool, None).await
+}
+
+async fn gather_fixture_rows(
+    owner: JobGatherOwner,
+    incoming_is_left: bool,
+    missing: bool,
+    pool: Option<Arc<dyn MemoryPool>>,
+    fanout: Option<usize>,
+) -> (StreamJoinOperator, Arc<ProbeInputs>, StreamJobContext) {
     let spec = StreamJoinSpec::inner(
         ["key"],
         ["key"],
@@ -76,14 +86,19 @@ async fn gather_fixture_side(
         .with_gather_owner(owner);
     let context = StreamOperatorContext::new(&job, "probe", None);
     let mut output = EdgeCollector::new(operator.output_ports().to_vec());
-    let mut right_times = Vec::new();
-    for index in 0..40_i64 {
-        let time = index * 3;
-        right_times.push(time);
-        if index % 4 == 0 {
+    let right_times = if let Some(fanout) = fanout {
+        vec![10; fanout]
+    } else {
+        let mut right_times = Vec::new();
+        for index in 0..40_i64 {
+            let time = index * 3;
             right_times.push(time);
+            if index % 4 == 0 {
+                right_times.push(time);
+            }
         }
-    }
+        right_times
+    };
     operator
         .process_data(
             if incoming_is_left { "right" } else { "left" },
@@ -151,6 +166,58 @@ fn count_windows(inputs: &Arc<ProbeInputs>, job: &StreamJobContext, limit: u64) 
 }
 
 #[test]
+fn test_bulk_window_fill_stops_inside_large_fanout_at_existing_item_quantum() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let service = crate::runtime::streaming::gather_work::TestService::new(2, 1).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let (_operator, inputs, job) = gather_fixture_rows(
+            service.owner("bulk-window-stop".into()),
+            true,
+            false,
+            None,
+            Some(10_000),
+        )
+        .await;
+        let counts = count_windows(&inputs, &job, 1_000_000);
+        for full_checks in [false, true] {
+            let polls = Arc::new(AtomicUsize::new(0));
+            let observed = Arc::clone(&polls);
+            let plain = GatherStop::from_job(&job);
+            let signal = plain.clone();
+            let stop = plain.with_check_hook(Arc::new(move |atomic_only| {
+                assert_ne!(atomic_only, full_checks);
+                if observed.fetch_add(1, Ordering::SeqCst) == 1 {
+                    signal.abandon_for_test();
+                }
+            }));
+            crate::operator::join::reset_join_work();
+            let result = if full_checks {
+                super::super::worker::fill_all(&inputs, &counts, &stop)
+            } else {
+                super::super::worker::fill_range(&inputs, &counts, 0, &stop)
+            };
+            assert!(matches!(
+                result,
+                Err(crate::CalcFlowError::Cancelled { .. })
+            ));
+            assert_eq!(polls.load(Ordering::SeqCst), 2);
+            let visits = crate::operator::join::join_work().native_range_visits;
+            assert!(
+                (4_095..=4_097).contains(&visits),
+                "a large native window must stop at the existing item quantum: {visits}"
+            );
+        }
+    });
+    drop(runtime);
+    service.shutdown();
+}
+
+#[test]
 fn test_gather_probe_windows_use_cursors_instead_of_per_row_searches() {
     let service = crate::runtime::streaming::gather_work::TestService::new(2, 1).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -187,10 +254,16 @@ async fn check_gather_windows(owner: JobGatherOwner) {
         funding,
     };
     reset_window_run_searches();
+    crate::operator::join::matches::reset_pair_pushes();
     let fragments = (0..units)
         .map(|unit| fill.run(unit, &stop).unwrap())
         .collect::<Vec<_>>();
     let filled = window_run_searches();
+    assert_eq!(
+        crate::operator::join::matches::pair_pushes(),
+        0,
+        "worker fill must append native windows without per-pair selection bookkeeping"
+    );
     let output = pairs::ordered_output(fragments, credit, total).unwrap();
     let identities = output
         .pairs
@@ -438,8 +511,14 @@ fn test_interval_cached_windows_bind_snapshot_and_survive_input_relocation() {
             JoinTimeBounds::new(Duration::from_micros(10), Duration::from_micros(20)).unwrap();
         let inputs = Arc::new(inputs);
         reset_window_run_searches();
+        crate::operator::join::matches::reset_pair_pushes();
         let pairs =
             super::super::worker::fill_all(&inputs, &counts, &GatherStop::from_job(&job)).unwrap();
+        assert_eq!(
+            crate::operator::join::matches::pair_pushes(),
+            0,
+            "serial fill must append native windows without per-pair selection bookkeeping"
+        );
         assert_eq!(
             window_run_searches(),
             0,

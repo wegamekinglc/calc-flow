@@ -3,6 +3,21 @@
 use super::MatchedPair;
 use std::ops::Range;
 
+#[cfg(test)]
+thread_local! {
+    static PAIR_PUSHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(in crate::operator::join) fn reset_pair_pushes() {
+    PAIR_PUSHES.set(0);
+}
+
+#[cfg(test)]
+pub(in crate::operator::join) fn pair_pushes() -> usize {
+    PAIR_PUSHES.get()
+}
+
 pub(super) trait Matches: Sync {
     fn view(&self) -> View<'_>;
     fn len(&self) -> usize {
@@ -183,31 +198,99 @@ impl Selection {
         }
     }
     pub(super) fn push(&mut self, pair: MatchedPair) {
-        let length = self.opposite.len();
+        #[cfg(test)]
+        PAIR_PUSHES.set(PAIR_PUSHES.get() + 1);
+        self.append_incoming(pair.pos, self.opposite.len(), 1);
+        self.opposite.push(pair.opposite_index);
+    }
+
+    fn append_incoming(&mut self, position: usize, length: usize, count: usize) {
+        debug_assert_ne!(count, 0);
         match &mut self.incoming {
-            Incoming::Identity { start } if length == 0 => *start = pair.pos,
-            Incoming::Identity { start } if pair.pos != *start + length => {
+            Incoming::Identity { start } if length == 0 && count == 1 => *start = position,
+            Incoming::Identity { start } if count != 1 || position != *start + length => {
                 let mut runs = Vec::with_capacity(self.incoming_capacity.max(length + 1));
                 runs.extend((0..length).map(|index| (index, *start + index)));
                 if runs
                     .last()
-                    .is_none_or(|(_, position)| *position != pair.pos)
+                    .is_none_or(|(_, previous)| *previous != position)
                 {
-                    runs.push((length, pair.pos));
+                    runs.push((length, position));
                 }
                 self.incoming = Incoming::Runs(runs);
             }
             Incoming::Runs(runs) => {
                 if runs
                     .last()
-                    .is_none_or(|(_, position)| *position != pair.pos)
+                    .is_none_or(|(_, previous)| *previous != position)
                 {
-                    runs.push((length, pair.pos));
+                    runs.push((length, position));
                 }
             }
             Incoming::Identity { .. } => {}
         }
-        self.opposite.push(pair.opposite_index);
+    }
+
+    pub(super) fn append_run(&mut self, position: usize, opposite: impl Iterator<Item = usize>) {
+        let start = self.opposite.len();
+        self.opposite.extend(opposite);
+        let count = self.opposite.len() - start;
+        if count != 0 {
+            self.append_incoming(position, start, count);
+        }
+    }
+
+    pub(super) fn append_view(&mut self, view: View<'_>) {
+        if view.len() == 0 {
+            return;
+        }
+        let offset = self.opposite.len();
+        match view {
+            View::Pairs(mut pairs) => {
+                while let Some(first) = pairs.first() {
+                    let count = pairs
+                        .iter()
+                        .position(|pair| pair.pos != first.pos)
+                        .unwrap_or(pairs.len());
+                    self.append_run(
+                        first.pos,
+                        pairs[..count].iter().map(|pair| pair.opposite_index),
+                    );
+                    pairs = &pairs[count..];
+                }
+            }
+            View::Identity { start, opposite } => {
+                match &mut self.incoming {
+                    Incoming::Identity { start: destination } if offset == 0 => {
+                        *destination = start;
+                    }
+                    Incoming::Identity { start: destination } if start == *destination + offset => {
+                    }
+                    _ => {
+                        for index in 0..opposite.len() {
+                            self.append_incoming(start + index, offset + index, 1);
+                        }
+                    }
+                }
+                self.opposite.extend_from_slice(opposite);
+            }
+            View::Runs {
+                runs,
+                base,
+                opposite,
+            } => {
+                let end = base + opposite.len();
+                for (index, &(first, position)) in runs.iter().enumerate() {
+                    if first >= end {
+                        break;
+                    }
+                    let start = first.max(base);
+                    let next = runs.get(index + 1).map_or(end, |&(next, _)| next.min(end));
+                    self.append_incoming(position, offset + start - base, next - start);
+                }
+                self.opposite.extend_from_slice(opposite);
+            }
+        }
     }
     pub(super) fn extend(&mut self, pairs: impl IntoIterator<Item = MatchedPair>) {
         for pair in pairs {
@@ -270,6 +353,94 @@ mod tests {
 
     thread_local! {
         pub(super) static RUN_SEARCHES: Cell<usize> = const { Cell::new(0) };
+    }
+
+    #[test]
+    fn test_bulk_append_preserves_sliced_runs_and_identity_transitions() {
+        let identity: Selection = (10..14)
+            .map(|pos| MatchedPair {
+                pos,
+                opposite_index: pos * 2,
+            })
+            .collect::<Vec<_>>()
+            .into();
+        let fanout: Selection = [(13, 7), (13, 5), (13, 9), (17, 1), (17, 8), (19, 4)]
+            .map(|(pos, opposite_index)| MatchedPair {
+                pos,
+                opposite_index,
+            })
+            .to_vec()
+            .into();
+        let raw = [(19, 3), (19, 2), (25, 6)].map(|(pos, opposite_index)| MatchedPair {
+            pos,
+            opposite_index,
+        });
+        let views = [
+            identity.view().slice(1..4),
+            fanout.view().slice(1..5),
+            View::Pairs(&raw),
+            fanout.view().slice(2..2),
+            identity.view().slice(0..1),
+        ];
+        let expected = views
+            .iter()
+            .flat_map(|view| view.iter())
+            .map(|pair| (pair.pos, pair.opposite_index))
+            .collect::<Vec<_>>();
+        let mut selection = Selection::with_capacity(expected.len(), expected.len());
+        reset_pair_pushes();
+        selection.append_run(999, std::iter::empty());
+        for view in views {
+            selection.append_view(view);
+        }
+        assert_eq!(pair_pushes(), 0);
+        assert_eq!(
+            selection
+                .iter()
+                .map(|pair| (pair.pos, pair.opposite_index))
+                .collect::<Vec<_>>(),
+            expected
+        );
+        for (index, expected) in expected.into_iter().enumerate() {
+            let pair = selection.pair(index);
+            assert_eq!((pair.pos, pair.opposite_index), expected);
+        }
+
+        let mut contiguous = Selection::with_capacity(4, 4);
+        contiguous.append_view(identity.view().slice(0..2));
+        contiguous.append_view(identity.view().slice(2..4));
+        assert!(matches!(
+            contiguous.incoming,
+            Incoming::Identity { start: 10 }
+        ));
+    }
+
+    #[test]
+    fn test_bulk_fanout_append_reuses_existing_incoming_run_without_pair_storage() {
+        let count = 100_000;
+        reset_pair_pushes();
+        let allocations = allocation_counter::measure(|| {
+            let mut selection = Selection::with_capacity(count, 1);
+            for first in (0..count).step_by(4_096) {
+                selection.append_run(7, first..(first + 4_096).min(count));
+            }
+            assert_eq!(selection.len(), count);
+            let Incoming::Runs(runs) = &selection.incoming else {
+                panic!("fanout has a constant incoming run");
+            };
+            assert_eq!(runs.as_slice(), [(0, 7)]);
+            assert!(
+                selection
+                    .iter()
+                    .enumerate()
+                    .all(|(index, pair)| { pair.pos == 7 && pair.opposite_index == index })
+            );
+        });
+        assert_eq!(pair_pushes(), 0);
+        assert!(
+            allocations.bytes_max <= (count * size_of::<usize>() + 64) as u64,
+            "bulk fanout must retain one incoming run: {allocations:?}"
+        );
     }
 
     #[test]

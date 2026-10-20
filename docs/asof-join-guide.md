@@ -252,8 +252,14 @@ order and choose at most one candidate per left row. Large ordered left prefixes
 reuse a per-key right cursor; smaller outputs and constrained workspace use
 binary search. Candidate
 rows are gathered directly from retained Arrow batches in final left-row order;
-consecutive left source rows are copied as spans, while right candidates are
-assembled with Arrow interleave on a blocking worker. This is
+consecutive left source rows are copied as spans. Eligible right candidates with
+one established source use compact 64-bit indices with explicit null validity
+and Arrow `take`
+on a blocking worker. Multiple sources retain the `interleave` path; converting
+the compact indices checks cancellation in bounded blocks and uses the existing
+workspace reservation. The async owner uses the original tuple layout when its
+bounded source check cannot establish a single right source, so it does not
+convert a growing prefix on the executor. This is
 the stream-only ASOF operator's output assembly; DataFusion remains the SQL and
 table-expression engine. Python only declares and lowers
 the graph. Admission retains each accepted payload batch and charges an upper

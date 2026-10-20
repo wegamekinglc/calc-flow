@@ -26,7 +26,7 @@ fn right_sharing_rejects_missing_reordered_repeated_and_unpaid_backing() {
             .is_none()
     );
     let mut reordered = side();
-    reordered.positions.swap(2, 3);
+    reordered.positions.legacy_mut().swap(2, 3);
     assert!(
         GatherPlan::new(&reordered, true)
             .shared_column(0)
@@ -34,7 +34,8 @@ fn right_sharing_rejects_missing_reordered_repeated_and_unpaid_backing() {
             .is_none()
     );
     let mut repeated = side();
-    repeated.positions[3] = repeated.positions[2];
+    let positions = repeated.positions.legacy_mut();
+    positions[3] = positions[2];
     assert!(
         GatherPlan::new(&repeated, true)
             .shared_column(0)
@@ -43,7 +44,7 @@ fn right_sharing_rejects_missing_reordered_repeated_and_unpaid_backing() {
     );
     let mut sliced = side();
     sliced.batches[0][0] = sliced.batches[0][0].slice(0, 7);
-    sliced.positions.pop();
+    sliced.positions.legacy_mut().pop();
     assert!(
         GatherPlan::new(&sliced, true)
             .shared_column(0)
@@ -151,7 +152,7 @@ fn shared_plan() -> (OutputPlan, SchemaRef, std::sync::Weak<dyn Array>) {
         },
         right: OutputSide {
             batches: Vec::new(),
-            positions: Vec::new(),
+            positions: Vec::new().into(),
             spans: Vec::new(),
             has_nulls: false,
         },

@@ -582,7 +582,12 @@ impl OperatorCooperation {
 
 #[cfg(test)]
 async fn run_operator_task(inputs: OperatorTaskInputs, task_id: TaskId) -> Result<()> {
-    run_operator_task_with_cooperation(inputs, task_id, OperatorCooperation::Disabled).await
+    Box::pin(run_operator_task_with_cooperation(
+        inputs,
+        task_id,
+        OperatorCooperation::Disabled,
+    ))
+    .await
 }
 
 #[cfg(test)]

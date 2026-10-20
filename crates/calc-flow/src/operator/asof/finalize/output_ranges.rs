@@ -16,6 +16,9 @@ use datafusion::{
 };
 use std::sync::OnceLock;
 
+#[path = "output_ranges/owner_positions.rs"]
+mod owner_positions;
+
 fn operator(count: usize) -> StreamAsofJoinOperator {
     let (template, _) = super::super::tests::fixture();
     let schema = template.schemas[0].clone();
