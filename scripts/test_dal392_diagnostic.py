@@ -65,6 +65,29 @@ class FixedEvidenceTests(unittest.TestCase):
 
 
 class PhaseBoundaryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_one_baseline_worker_preserves_side_and_validates_native(self):
+        contexts = []
+
+        class Worker:
+            async def request(self, *, operation, context, **kwargs):
+                contexts.append(context)
+                if operation == "hello":
+                    return {
+                        "native_sha256": "original",
+                        "polars_threads": 32,
+                        "tokio_worker_threads": "32",
+                    }
+                return {
+                    "case": dal392.case(),
+                    "warmup": {"seconds": 0.1, "correctness": {"passed": True}},
+                }
+
+        identity = await dal392.prepare_one(
+            Worker(), {"native_sha256": "original"}, {"side": "baseline"}
+        )
+        self.assertEqual(identity["tokio_worker_threads"], "32")
+        self.assertTrue(all(c["side"] == "baseline" for c in contexts))
+
     async def test_fresh_pairs_use_distinct_workers_and_alternate_order(self):
         events = []
         workers = []
@@ -96,7 +119,7 @@ class PhaseBoundaryTests(unittest.IsolatedAsyncioTestCase):
         with (
             tempfile.TemporaryDirectory() as directory,
             patch.object(dal392.DiagnosticWorker, "start", side_effect=start),
-            patch.object(dal392, "_prepare", side_effect=prepare),
+            patch.object(dal392, "prepare_one", side_effect=prepare),
         ):
             result = await dal392.fresh_round(
                 {"baseline": Path("A"), "candidate": Path("B")},

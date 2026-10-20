@@ -15,7 +15,11 @@ from unittest.mock import patch
 
 from scripts.benchmark_suite.catalog import engine_cases
 from scripts.benchmark_suite.issue406_measurement import PhaseClock
-from scripts.benchmark_suite.measure import _measured_row, _prepare, validate_sample
+from scripts.benchmark_suite.measure import (
+    _measured_row,
+    validate_environment,
+    validate_sample,
+)
 from scripts.benchmark_suite.process import ROOT, install
 from scripts.benchmark_suite.provenance import harness_sha256
 from scripts.benchmark_suite.release import load_release
@@ -223,6 +227,23 @@ def preflight(root: Path, release_root: Path) -> dict:
     return releases
 
 
+async def prepare_one(worker, release: dict, context: dict) -> dict:
+    identity = validate_environment(
+        await worker.request(operation="hello", context={**context, "phase": "hello"}),
+        release,
+        backend=case()["backend"],
+    )
+    response = await worker.request(
+        operation="prepare",
+        case=case(),
+        context={**context, "phase": "warmup", "sample": None},
+    )
+    if response["case"] != case():
+        raise ValueError("fresh worker prepared a different workload")
+    validate_sample(response["warmup"])
+    return identity
+
+
 async def fresh_round(sites: dict, releases: dict, root: Path, index: int) -> dict:
     samples = {side: [] for side in releases}
     environment = None
@@ -245,9 +266,7 @@ async def fresh_round(sites: dict, releases: dict, root: Path, index: int) -> di
                 }
             }
             try:
-                identity = await _prepare(
-                    {side: worker}, {side: releases[side]}, case(), context
-                )
+                identity = await prepare_one(worker, releases[side], context[side])
                 if environment is not None and identity != environment:
                     raise ValueError("fresh-worker environment differs")
                 if hashes is not None and worker.input_hashes != hashes:
