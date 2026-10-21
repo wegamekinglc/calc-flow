@@ -43,7 +43,7 @@
     "crates/calc-flow/src/runtime/streaming/runner/checkpoint_task.rs": 3,
     "crates/calc-flow/src/runtime/streaming/sink_task.rs": 1,
     "crates/calc-flow/src/state/manifest.rs": 1,
-    "python/calc_flow/symbolic/lower/planners.py": 3,
+    "python/calc_flow/symbolic/lower/planners.py": 1,
     "python/calc_flow/symbolic/lower/program.py": 2,
     "python/tests/test_symbolic_high_cardinality.py": 1,
     "python/tests/test_symbolic_rolling_acceptance.py": 1,
@@ -87,10 +87,10 @@
       "PLR0913": 3
     },
     "python/calc_flow/symbolic/lower/planners.py": {
-      "C901": 2,
-      "PLR0912": 2,
+      "C901": 1,
+      "PLR0912": 1,
       "PLR0913": 3,
-      "PLR0915": 2
+      "PLR0915": 1
     },
     "python/calc_flow/symbolic/lower/program.py": {
       "C901": 1,

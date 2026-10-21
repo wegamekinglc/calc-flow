@@ -22,6 +22,9 @@ from calc_flow.symbolic import (
     ts,
 )
 from calc_flow.symbolic.lower import lower_program_document
+from calc_flow.symbolic.lower.planners import _plan_cross_section
+from calc_flow.symbolic.lower.segments import _Segment
+from calc_flow.symbolic.nodes import CEnum, CInt, CMap, CStr, Node, build
 
 
 def _ordered() -> TableExpr:
@@ -376,6 +379,157 @@ def test_percentile_and_demean_carry_their_own_options() -> None:
         "output": "resid",
         "min_samples": 2,
     }
+
+
+def test_residual_materializes_its_independent_operand_before_quantile_outputs() -> (
+    None
+):
+    quotes = _ordered()
+    group = _group(quotes)
+    program = _program(
+        [
+            ("resid", cs.residual(quotes["x"], quotes["x"] + 1.0, group=group)),
+            ("upper", cs.top_quantile(quotes["x"], group=group, fraction=0.25)),
+            (
+                "lower",
+                cs.bottom_quantile(
+                    quotes["x"], group=group, fraction=0.5, min_samples=3
+                ),
+            ),
+        ]
+    )
+
+    document = lower_program_document(program, Runtime(), "batch")
+
+    (node,) = _cross_section_nodes(document)
+    assert node["operator"]["spec"]["outputs"] == [  # type: ignore[index]
+        {
+            "kind": "residual",
+            "primitive_version": 1,
+            "input": "x",
+            "output": "resid",
+            "independent": "signals__cf_cs_input_0",
+            "min_samples": 2,
+        },
+        {
+            "kind": "top_quantile",
+            "primitive_version": 1,
+            "input": "x",
+            "output": "upper",
+            "fraction": 0.25,
+            "min_samples": 1,
+        },
+        {
+            "kind": "bottom_quantile",
+            "primitive_version": 1,
+            "input": "x",
+            "output": "lower",
+            "fraction": 0.5,
+            "min_samples": 3,
+        },
+    ]
+    assert node["output_ports"][0]["schema"][-3:] == [  # type: ignore[index]
+        {"name": "resid", "data_type": "float64", "nullable": True},
+        {"name": "upper", "data_type": "bool", "nullable": True},
+        {"name": "lower", "data_type": "bool", "nullable": True},
+    ]
+    materialization = document["graph"]["nodes"][0]  # type: ignore[index]
+    assert materialization["operator"]["select"][-1] == (
+        '("x" + 1.0) AS "signals__cf_cs_input_0"'
+    )
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected"),
+    [
+        (
+            "input",
+            "outputs.signals.second: schema_mismatch: cross-section residual"
+            " argument column 'missing' is not in the input schema",
+        ),
+        (
+            "partition",
+            "outputs.signals.second: unsupported_type: cross-section group columns"
+            " must be input columns in this release",
+        ),
+        (
+            "mixed_grouping",
+            "outputs.signals: schema_mismatch: cross-section primitives in one"
+            " output must share one grouping declaration",
+        ),
+        (
+            "independent",
+            "outputs.signals.second: schema_mismatch: cross-section residual"
+            " independent column 'missing' is not in the input schema",
+        ),
+    ],
+)
+def test_cross_section_validation_preserves_the_first_error(
+    failure: str, expected: str
+) -> None:
+    # Exercise the lowerer's boundary directly: analysis rejects malformed
+    # declarations before these ordered checks can run through Program.compile.
+    quotes = _ordered()
+    first = cs.rank(quotes["x"], group=_group(quotes))._node
+    missing = build("column_ref", (), {"name": CStr("missing")})
+    partition = (
+        (quotes["x"] + 1.0)._node
+        if failure == "partition"
+        else quotes["industry"]._node
+    )
+    grouping = (
+        first.attr("grouping")
+        if failure == "independent"
+        else CEnum("grouping", "invalid")
+    )
+    second = build(
+        "residual",
+        (
+            missing if failure == "input" else quotes["x"]._node,
+            missing,
+            quotes["ts"]._node,
+            partition,
+        ),
+        {"grouping": grouping},
+    )
+    segment = _Segment(quotes._node, (), (("first", first), ("second", second)), None)
+
+    with pytest.raises(CompileError) as error:
+        _plan_cross_section("signals", segment, "outputs.signals", 0, "error", None)
+
+    assert str(error.value) == expected
+
+
+@pytest.mark.parametrize(
+    "grouping",
+    [
+        CEnum("grouping", "invalid"),
+        CMap((("grouping", CEnum("grouping", "fixed_bucket")),)),
+        CMap(
+            (
+                ("grouping", CEnum("grouping", "fixed_bucket")),
+                ("width_micros", CInt(0)),
+            )
+        ),
+    ],
+)
+def test_invalid_cross_section_grouping_retains_its_error_path(
+    grouping: CEnum | CMap,
+) -> None:
+    quotes = _ordered()
+    rank: Node = cs.rank(quotes["x"], group=_group(quotes))._node
+    malformed = build(
+        "rank", rank.args, {**dict(rank.attrs.entries), "grouping": grouping}
+    )
+    segment = _Segment(quotes._node, (), (("rank", malformed),), None)
+
+    with pytest.raises(CompileError) as error:
+        _plan_cross_section("signals", segment, "outputs.signals", 0, "error", None)
+
+    assert str(error.value) == (
+        "outputs.signals.signals: unsupported_type: cross-section grouping is"
+        " neither exact_time nor a fixed bucket"
+    )
 
 
 def test_winsorize_lowers_with_bounds_and_preserves_the_input_type() -> None:
