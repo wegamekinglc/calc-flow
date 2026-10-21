@@ -208,7 +208,7 @@ def test_polars_single_thread_reference_matches_oracles_in_a_fresh_process(
     result = _fresh_polars_samples(tmp_path, rows, site, source)
     assert result["pid"] != os.getpid()
     assert result["threads"] == 1
-    assert result["samples"] == [True] * 8
+    assert result["samples"] == [True] * 14
 
 
 def test_single_thread_reference_rejects_a_process_with_a_larger_pool(

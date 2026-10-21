@@ -31,6 +31,12 @@ POLARS_CASES = (
     "interval_join",
     "sma20",
     "dual_sma",
+    "average",
+    "argmax64",
+    "argmax256",
+    "unique64",
+    "cs_mean",
+    "window_sum",
     "asof_join",
 )
 POLARS_SINGLE_THREAD_CASES = POLARS_CASES[:]

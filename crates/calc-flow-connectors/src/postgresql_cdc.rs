@@ -52,6 +52,10 @@ use crate::postgresql::{
 const POSTGRES_EPOCH_UNIX_MICROS: i64 = 946_684_800_000_000;
 const SNAPSHOT_OPERATION: &str = "snapshot";
 
+#[cfg(test)]
+#[path = "postgresql_tls_tests.rs"]
+mod tls_tests;
+
 fn cdc_error(operation: &str, detail: impl Into<String>) -> CalcFlowError {
     CalcFlowError::InvalidArgument {
         field: format!("postgresql.logical_cdc.{operation}"),

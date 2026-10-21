@@ -330,28 +330,41 @@ impl StreamSource for WebSocketSource {
 
 type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
+#[cfg(test)]
+#[path = "websocket_tls_tests.rs"]
+mod tls_tests;
+
 async fn connect_websocket(url: &str, insecure: bool) -> Result<Socket> {
-    let connected = if insecure {
-        let mut tls = rustls::ClientConfig::builder()
-            .with_root_certificates(rustls::RootCertStore::empty())
-            .with_no_client_auth();
+    let roots = rustls::RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    };
+    let tls = websocket_tls_config(roots, insecure);
+    tokio_tungstenite::connect_async_tls_with_config(
+        url,
+        None,
+        false,
+        Some(tokio_tungstenite::Connector::Rustls(Arc::new(tls))),
+    )
+    .await
+    .map(|(stream, _)| stream)
+    .map_err(|_| fail("open", "WebSocket connection failed"))
+}
+
+fn websocket_tls_config(roots: rustls::RootCertStore, insecure: bool) -> rustls::ClientConfig {
+    let mut tls = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("ring supports the default TLS protocol versions")
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    if insecure {
         // This bypass is reachable only through the explicit `insecure: true`
         // connector option, which is off by default and emits a warning.
         tls.dangerous() // nosemgrep: rust.lang.security.rustls-dangerous.rustls-dangerous
             .set_certificate_verifier(Arc::new(InsecureCertificateVerifier));
-        tokio_tungstenite::connect_async_tls_with_config(
-            url,
-            None,
-            false,
-            Some(tokio_tungstenite::Connector::Rustls(Arc::new(tls))),
-        )
-        .await
-    } else {
-        tokio_tungstenite::connect_async(url).await
-    };
-    connected
-        .map(|(stream, _)| stream)
-        .map_err(|_| fail("open", "WebSocket connection failed"))
+    }
+    tls
 }
 
 #[derive(Debug)]
