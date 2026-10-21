@@ -18,7 +18,6 @@ import os
 import platform
 import resource
 import statistics
-import subprocess
 import sys
 import time
 from contextlib import redirect_stdout, suppress
@@ -30,6 +29,7 @@ import numpy as np
 import psutil
 import psycopg
 import pyarrow as pa
+from psycopg import sql
 
 import calc_flow as cf
 from benchmarks.warm_stream import _InteractiveSource, _QueueSink
@@ -51,6 +51,23 @@ SCHEMA = pa.schema(
 CASES = (("projection", 640), ("grouped", 640), ("grouped", 64_000), ("window", 640))
 ROUNDS, WARMUP, SAMPLES = 2, 2, 10
 QUERY = "SELECT k, SUM(v) AS total, COUNT(v) AS n FROM input GROUP BY k"
+_CASE_NAMES = tuple(
+    f"bench_{kind}_{rows}_{rid}" for rid in range(ROUNDS) for kind, rows in CASES
+) + ("window_semantics",)
+# These unquoted tokens are built exclusively from the fixed case catalog.
+# Lookup rejects arbitrary identifiers while preserving the measured SQL bytes.
+_RELATIONS = {
+    name: sql.SQL(name) for base in _CASE_NAMES for name in (base, base + "_mv")
+}
+_VIEW_QUERIES = {
+    "projection": sql.SQL("SELECT id, v * 2 + 1 AS value FROM {} WHERE v >= 0"),
+    "grouped": sql.SQL("SELECT k, SUM(v) AS total, COUNT(v) AS n FROM {} GROUP BY k"),
+    "window": sql.SQL(
+        "SELECT window_start, window_end, k, SUM(v) AS total, COUNT(v) AS n "
+        "FROM TUMBLE({}, ts, INTERVAL '10 seconds') WHERE k >= 0 "
+        "GROUP BY window_start, window_end, k EMIT ON WINDOW CLOSE"
+    ),
+}
 
 
 def require(condition: bool, message: str) -> None:
@@ -86,46 +103,102 @@ def fixture(batch: int, rows: int, *, progress: bool) -> pa.Table:
     return pa.table({"id": ids, "k": keys, "v": values, "ts": times}, schema=SCHEMA)
 
 
+def _relation(name: str) -> sql.SQL:
+    require(name in _RELATIONS, "unknown benchmark relation")
+    return _RELATIONS[name]
+
+
+def _integer_literal(value: int | None) -> sql.SQL:
+    require(value is None or type(value) is int, "expected an integer or NULL")
+    # Psycopg guards negative literals with a leading space. Each value here
+    # has its own comma/parenthesis delimiter, so trim only that guard space
+    # to retain the original wire text; no string payload enters this path.
+    return sql.SQL(sql.Literal(value).as_string().lstrip())
+
+
+def _insert_row(row: dict) -> sql.Composed:
+    return sql.SQL("({},{},{},CAST({} AS TIMESTAMPTZ))").format(
+        *(_integer_literal(row[field]) for field in ("id", "k", "v")),
+        sql.Literal(row["ts"].isoformat()),
+    )
+
+
 def insert_sql(table: pa.Table, name: str) -> str:
-    # Only harness-owned numeric values/timestamps reach this SQL serializer.
-    values = []
-    for row in table.to_pylist():
-        value = "NULL" if row["v"] is None else str(row["v"])
-        values.append(
-            f"({row['id']},{row['k']},{value},"
-            f"CAST('{row['ts'].isoformat()}' AS TIMESTAMPTZ))"
+    relation = _relation(name)
+    require(table.schema == SCHEMA, "benchmark insert schema differs")
+    values = sql.SQL(",").join(_insert_row(row) for row in table.to_pylist())
+    return sql.SQL("INSERT INTO {} VALUES {}").format(relation, values).as_string()
+
+
+def _select_view(name: str) -> sql.Composed:
+    return sql.SQL("SELECT * FROM {}").format(_relation(name + "_mv"))
+
+
+def _sample_selection(name: str, kind: str, index: int, rows: int) -> str:
+    selection = _select_view(name)
+    if kind == "projection":
+        selection += sql.SQL(" WHERE id >= {} AND id < {}").format(
+            _integer_literal(index * rows), _integer_literal((index + 1) * rows)
         )
-    return f"INSERT INTO {name} VALUES " + ",".join(values)
+    elif kind == "window":
+        start = (BASE + timedelta(seconds=index * 10)).isoformat()
+        selection += sql.SQL(" WHERE window_start = CAST({} AS TIMESTAMPTZ)").format(
+            sql.Literal(start)
+        )
+    return selection.as_string()
 
 
-def expected(kind: str, tables: list[pa.Table]) -> list[list]:
+def _oracle_rows(kind: str, tables: list[pa.Table]) -> list[dict]:
     columns = SCHEMA.names if kind == "window" else ["id", "k", "v"]
-    rows = [
+    return [
         r
         for t in tables
         for r in t.select(columns).to_pylist()
         if r["k"] >= 0 and r["id"] >= 0
     ]
-    if kind == "projection":
-        return [
-            [r["id"], r["v"] * 2 + 1]
-            for r in rows
-            if r["v"] is not None and r["v"] >= 0
-        ]
+
+
+def _project_rows(rows: list[dict]) -> list[list]:
+    return [
+        [row["id"], row["v"] * 2 + 1]
+        for row in rows
+        if row["v"] is not None and row["v"] >= 0
+    ]
+
+
+def _window_key(row: dict) -> tuple:
+    micros = int((row["ts"] - BASE).total_seconds() * 1_000_000)
+    start = BASE_US + micros // 10_000_000 * 10_000_000
+    return start, start + 10_000_000, row["k"]
+
+
+def _aggregate_result(key, aggregate: tuple) -> list:
+    total, count = aggregate
+    return [
+        *(key if isinstance(key, tuple) else (key,)),
+        total if count else None,
+        count,
+    ]
+
+
+def _aggregate_rows(rows: list[dict], key_for) -> list[list]:
     groups = {}
     for row in rows:
-        key = row["k"]
-        if kind == "window":
-            micros = int((row["ts"] - BASE).total_seconds() * 1_000_000)
-            start = BASE_US + micros // 10_000_000 * 10_000_000
-            key = (start, start + 10_000_000, key)
+        key = key_for(row)
         total, count = groups.get(key, (0, 0))
         value = row["v"]
         groups[key] = (total + (value or 0), count + (value is not None))
     return [
-        [*(key if isinstance(key, tuple) else (key,)), total if n else None, n]
-        for key, (total, n) in sorted(groups.items())
+        _aggregate_result(key, aggregate) for key, aggregate in sorted(groups.items())
     ]
+
+
+def expected(kind: str, tables: list[pa.Table]) -> list[list]:
+    rows = _oracle_rows(kind, tables)
+    if kind == "projection":
+        return _project_rows(rows)
+    key_for = _window_key if kind == "window" else lambda row: row["k"]
+    return _aggregate_rows(rows, key_for)
 
 
 def normalize(rows: list | tuple) -> list[list]:
@@ -305,27 +378,37 @@ class RisingWave:
 
     async def setup(self, name: str, kind: str):
         await self.execute(
-            f"SET streaming_parallelism = {1 if kind == 'window' else 4}"
+            "SET streaming_parallelism = 1"
+            if kind == "window"
+            else "SET streaming_parallelism = 4"
         )
-        watermark = ", WATERMARK FOR ts AS ts" if kind == "window" else ""
+        watermark = sql.SQL(", WATERMARK FOR ts AS ts" if kind == "window" else "")
         await self.execute(
-            f"CREATE TABLE {name}(id BIGINT, k BIGINT, v BIGINT, ts TIMESTAMPTZ"
-            f"{watermark}) APPEND ONLY"
-        )
-        if kind == "window":
-            query = (
-                f"SELECT window_start, window_end, k, SUM(v) AS total, COUNT(v) AS n "
-                f"FROM TUMBLE({name}, ts, INTERVAL '10 seconds') WHERE k >= 0 "
-                "GROUP BY window_start, window_end, k EMIT ON WINDOW CLOSE"
+            sql.SQL(
+                "CREATE TABLE {}(id BIGINT, k BIGINT, v BIGINT, ts TIMESTAMPTZ"
+                "{}) APPEND ONLY"
             )
-        else:
-            query = (
-                "SELECT id, v * 2 + 1 AS value FROM input WHERE v >= 0"
-                if kind == "projection"
-                else QUERY
-            ).replace("input", name)
-        await self.execute(f"CREATE MATERIALIZED VIEW {name}_mv AS {query}")
+            .format(_relation(name), watermark)
+            .as_string()
+        )
+        query = _VIEW_QUERIES[kind].format(_relation(name))
+        await self.execute(
+            sql.SQL("CREATE MATERIALIZED VIEW {} AS {}")
+            .format(_relation(name + "_mv"), query)
+            .as_string()
+        )
         await self.execute("FLUSH")
+
+    async def drop(self, name: str, *, if_exists: bool):
+        optional = sql.SQL("IF EXISTS " if if_exists else "")
+        await self.execute(
+            sql.SQL("DROP MATERIALIZED VIEW {}{}")
+            .format(optional, _relation(name + "_mv"))
+            .as_string()
+        )
+        await self.execute(
+            sql.SQL("DROP TABLE {}{}").format(optional, _relation(name)).as_string()
+        )
 
     async def append(self, statement: str, selection: str):
         started = time.perf_counter()
@@ -401,29 +484,89 @@ async def measured_call(call, pids: list[int]):
     }
 
 
-async def case(rw: RisingWave, kind: str, rows: int, round_id: int, output: Path):
-    name = f"bench_{kind}_{rows}_{round_id}"
-    prepared = [
+def _prepared_tables(kind: str, rows: int) -> list[pa.Table]:
+    return [
         fixture(i, rows, progress=kind == "window") for i in range(WARMUP + SAMPLES)
     ]
-    statements = [insert_sql(t, name) for t in prepared]
+
+
+def _case_inputs(name: str, kind: str, rows: int) -> tuple:
+    prepared = _prepared_tables(kind, rows)
+    statements = [insert_sql(table, name) for table in prepared]
     events = [
         cf.Data(
-            cf.Batch.from_pyarrow(t),
+            cf.Batch.from_pyarrow(table),
             cf.Cursor((i + 1).to_bytes(8, "big"), {"i": i + 1}),
         )
-        for i, t in enumerate(prepared)
+        for i, table in enumerate(prepared)
     ]
-    # All data serialization and oracle construction are outside performance samples.
     oracles = [
-        expected(kind, prepared[: i + 1] if kind == "grouped" else [t])
-        for i, t in enumerate(prepared)
+        expected(kind, prepared[: i + 1] if kind == "grouped" else [table])
+        for i, table in enumerate(prepared)
     ]
+    return prepared, statements, events, oracles
+
+
+async def _engine_sample(rw, stream, engine, event, watermark, statement, selection):
+    if engine == "calc_flow":
+        return await measured_call(
+            lambda e=event, w=watermark: stream.append(e, w), [os.getpid()]
+        )
+    return await measured_call(
+        lambda s=statement, q=selection: rw.append(s, q),
+        [os.getpid(), rw.process.pid],
+    )
+
+
+async def _sample_pair(rw, stream, kind, rows, round_id, index, inputs) -> list[dict]:
+    table, event, statement, oracle = inputs
+    name = f"bench_{kind}_{rows}_{round_id}"
+    watermark = (
+        cf.Watermark(BASE + timedelta(seconds=(index + 1) * 10, microseconds=1))
+        if kind == "window"
+        else None
+    )
+    selection = _sample_selection(name, kind, index, rows)
+    order = (
+        ("calc_flow", "risingwave")
+        if (index + round_id) % 2 == 0
+        else ("risingwave", "calc_flow")
+    )
+    samples = []
+    for engine in order:
+        actual, sample = await _engine_sample(
+            rw, stream, engine, event, watermark, statement, selection
+        )
+        require(
+            actual == oracle,
+            f"{name}/{index}/{engine} differs: {actual[:4]} != {oracle[:4]}",
+        )
+        samples.append(
+            {
+                **sample,
+                "engine": engine,
+                "index": index,
+                "warmup": index < WARMUP,
+                "input_rows": table.num_rows,
+                "payload_rows": rows,
+                "output_rows": len(actual),
+                "oracle_sha256": digest(oracle),
+                "actual_sha256": digest(actual),
+                "order": list(order),
+            }
+        )
+    return samples
+
+
+async def case(rw: RisingWave, kind: str, rows: int, round_id: int, output: Path):
+    name = f"bench_{kind}_{rows}_{round_id}"
+    # Preparing SQL, Arrow events and oracles remains outside every sample timer.
+    prepared, statements, events, oracles = _case_inputs(name, kind, rows)
     record = {
         "case": f"{kind}_{rows}",
         "round": round_id,
         "batch_rows": rows,
-        "input_sha256": digest([t.to_pydict() for t in prepared]),
+        "input_sha256": digest([table.to_pydict() for table in prepared]),
         "samples": [],
     }
     stream = CalcStream(kind, rows, output / f"cf-{name}")
@@ -434,53 +577,12 @@ async def case(rw: RisingWave, kind: str, rows: int, round_id: int, output: Path
             "driver": process_usage(os.getpid()),
             "risingwave": process_usage(rw.process.pid),
         }
-        for i, (table, event, statement, oracle) in enumerate(
+        for index, inputs in enumerate(
             zip(prepared, events, statements, oracles, strict=True)
         ):
-            watermark = (
-                cf.Watermark(BASE + timedelta(seconds=(i + 1) * 10, microseconds=1))
-                if kind == "window"
-                else None
+            record["samples"].extend(
+                await _sample_pair(rw, stream, kind, rows, round_id, index, inputs)
             )
-            selection = f"SELECT * FROM {name}_mv"
-            if kind == "projection":
-                selection += f" WHERE id >= {i * rows} AND id < {(i + 1) * rows}"
-            elif kind == "window":
-                start = (BASE + timedelta(seconds=i * 10)).isoformat()
-                selection += f" WHERE window_start = CAST('{start}' AS TIMESTAMPTZ)"
-            order = (
-                ("calc_flow", "risingwave")
-                if (i + round_id) % 2 == 0
-                else ("risingwave", "calc_flow")
-            )
-            for engine in order:
-                if engine == "calc_flow":
-                    actual, sample = await measured_call(
-                        lambda e=event, w=watermark: stream.append(e, w), [os.getpid()]
-                    )
-                else:
-                    actual, sample = await measured_call(
-                        lambda s=statement, q=selection: rw.append(s, q),
-                        [os.getpid(), rw.process.pid],
-                    )
-                require(
-                    actual == oracle,
-                    f"{name}/{i}/{engine} differs: {actual[:4]} != {oracle[:4]}",
-                )
-                record["samples"].append(
-                    {
-                        **sample,
-                        "engine": engine,
-                        "index": i,
-                        "warmup": i < WARMUP,
-                        "input_rows": table.num_rows,
-                        "payload_rows": rows,
-                        "output_rows": len(actual),
-                        "oracle_sha256": digest(oracle),
-                        "actual_sha256": digest(actual),
-                        "order": list(order),
-                    }
-                )
             # Preserve each complete pair before advancing state.
             write_json(output / f"{name}.json", record)
         record["calc_flow_status"] = stream.job.status()
@@ -488,8 +590,7 @@ async def case(rw: RisingWave, kind: str, rows: int, round_id: int, output: Path
         return record
     finally:
         await stream.close()
-        await rw.execute(f"DROP MATERIALIZED VIEW IF EXISTS {name}_mv")
-        await rw.execute(f"DROP TABLE IF EXISTS {name}")
+        await rw.drop(name, if_exists=True)
 
 
 async def window_semantics(rw: RisingWave, output: Path) -> dict:
@@ -513,7 +614,7 @@ async def window_semantics(rw: RisingWave, output: Path) -> dict:
         )
         await rw.execute(insert_sql(first, name))
         await rw.execute("FLUSH")
-        rw_equal = normalize(await rw.execute(f"SELECT * FROM {name}_mv"))
+        rw_equal = normalize(await rw.execute(_select_view(name).as_string()))
         wanted_first = [[BASE_US, BASE_US + 10_000_000, 0, 2, 1]]
         require(cf_first == wanted_first, "CF window-end equality oracle")
         require(
@@ -538,7 +639,7 @@ async def window_semantics(rw: RisingWave, output: Path) -> dict:
         )
         await rw.execute(insert_sql(late, name))
         await rw.execute("FLUSH")
-        rw_final = normalize(await rw.execute(f"SELECT * FROM {name}_mv"))
+        rw_final = normalize(await rw.execute(_select_view(name).as_string()))
         wanted_second = [[BASE_US + 10_000_000, BASE_US + 20_000_000, 0, 3, 1]]
         require(cf_second == wanted_second, "CF late row changed a closed window")
         write_json(
@@ -584,8 +685,7 @@ async def window_semantics(rw: RisingWave, output: Path) -> dict:
         }
     finally:
         await stream.close()
-        await rw.execute(f"DROP MATERIALIZED VIEW {name}_mv")
-        await rw.execute(f"DROP TABLE {name}")
+        await rw.drop(name, if_exists=False)
 
 
 async def semantics(rw: RisingWave, output: Path) -> dict:
@@ -677,58 +777,90 @@ async def semantics(rw: RisingWave, output: Path) -> dict:
     return result
 
 
-def summaries(records: list[dict]) -> list[dict]:
-    output = []
-    for kind, rows in CASES:
-        for engine in ("calc_flow", "risingwave"):
-            samples = [
-                s
-                for r in records
-                if r["case"] == f"{kind}_{rows}"
-                for s in r["samples"]
-                if s["engine"] == engine and not s["warmup"]
-            ]
-            durations = [s["seconds"] for s in samples]
-            quantiles = np.percentile(durations, [50, 95, 99]).tolist()
-            output.append(
-                {
-                    "case": f"{kind}_{rows}",
-                    "engine": engine,
-                    "count": len(samples),
-                    "p50_seconds": quantiles[0],
-                    "p95_seconds": quantiles[1],
-                    "p99_seconds": quantiles[2],
-                    "min_seconds": min(durations),
-                    "max_seconds": max(durations),
-                    "payload_rows_per_second": sum(s["payload_rows"] for s in samples)
-                    / sum(durations),
-                    "cpu_seconds": sum(s["cpu_seconds"] for s in samples),
-                    "cpu_seconds_per_million_rows": sum(
-                        s["cpu_seconds"] for s in samples
-                    )
-                    / sum(s["payload_rows"] for s in samples)
-                    * 1_000_000,
-                    "rss_peak_bytes": max(s["rss_peak_bytes"] for s in samples),
-                    "engine_rss_peak_bytes": max(
-                        s["engine_rss_peak_bytes"] for s in samples
-                    ),
-                    "write_bytes": sum(s["write_bytes"] for s in samples),
-                    "round_p50_seconds": [
-                        statistics.median(
-                            s["seconds"]
-                            for r in records
-                            if r["case"] == f"{kind}_{rows}" and r["round"] == rid
-                            for s in r["samples"]
-                            if s["engine"] == engine and not s["warmup"]
-                        )
-                        for rid in range(ROUNDS)
-                    ],
-                }
+def _case_samples(records: list[dict], case_id: str, engine: str) -> list[dict]:
+    return [
+        sample
+        for record in records
+        if record["case"] == case_id
+        for sample in record["samples"]
+        if sample["engine"] == engine and not sample["warmup"]
+    ]
+
+
+def _latency_summary(samples: list[dict]) -> dict:
+    durations = [sample["seconds"] for sample in samples]
+    quantiles = np.percentile(durations, [50, 95, 99]).tolist()
+    return {
+        "count": len(samples),
+        "p50_seconds": quantiles[0],
+        "p95_seconds": quantiles[1],
+        "p99_seconds": quantiles[2],
+        "min_seconds": min(durations),
+        "max_seconds": max(durations),
+        "payload_rows_per_second": sum(sample["payload_rows"] for sample in samples)
+        / sum(durations),
+    }
+
+
+def _resource_summary(samples: list[dict]) -> dict:
+    cpu_seconds = sum(sample["cpu_seconds"] for sample in samples)
+    payload_rows = sum(sample["payload_rows"] for sample in samples)
+    return {
+        "cpu_seconds": cpu_seconds,
+        "cpu_seconds_per_million_rows": cpu_seconds / payload_rows * 1_000_000,
+        "rss_peak_bytes": max(sample["rss_peak_bytes"] for sample in samples),
+        "engine_rss_peak_bytes": max(
+            sample["engine_rss_peak_bytes"] for sample in samples
+        ),
+        "write_bytes": sum(sample["write_bytes"] for sample in samples),
+    }
+
+
+def _round_medians(records: list[dict], case_id: str, engine: str) -> list[float]:
+    return [
+        statistics.median(
+            sample["seconds"]
+            for sample in _case_samples(
+                [record for record in records if record["round"] == rid],
+                case_id,
+                engine,
             )
-    return output
+        )
+        for rid in range(ROUNDS)
+    ]
 
 
-def provenance(args) -> dict:
+def _case_summary(records: list[dict], case_id: str, engine: str) -> dict:
+    samples = _case_samples(records, case_id, engine)
+    return {
+        "case": case_id,
+        "engine": engine,
+        **_latency_summary(samples),
+        **_resource_summary(samples),
+        "round_p50_seconds": _round_medians(records, case_id, engine),
+    }
+
+
+def summaries(records: list[dict]) -> list[dict]:
+    return [
+        _case_summary(records, f"{kind}_{rows}", engine)
+        for kind, rows in CASES
+        for engine in ("calc_flow", "risingwave")
+    ]
+
+
+async def _cpu_description() -> str:
+    # This Linux-only collector invokes a fixed system binary, never PATH or
+    # command text supplied by a workload, CLI argument, or shell.
+    process = await asyncio.create_subprocess_exec(
+        "/usr/bin/lscpu", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    stdout, stderr = await process.communicate()
+    require(process.returncode == 0, f"lscpu failed: {stderr.decode()}")
+    return stdout.decode()
+
+
+async def provenance(args) -> dict:
     import calc_flow._native as native
 
     run = json.loads(args.ci_run.read_text())
@@ -755,7 +887,7 @@ def provenance(args) -> dict:
         "address_space_limit": list(resource.getrlimit(resource.RLIMIT_AS)),
         "ram": dict(psutil.virtual_memory()._asdict()),
         "load_average": os.getloadavg(),
-        "lscpu": subprocess.check_output(["lscpu"], text=True),
+        "lscpu": await _cpu_description(),
         "packages": {
             n: importlib.metadata.version(n)
             for n in (
@@ -832,6 +964,70 @@ def validate_reuse(previous: Path, identity: dict) -> None:
     )
 
 
+def _record_reuse(args, identity: dict, output: Path) -> None:
+    if args.reuse is None:
+        return
+    validate_reuse(args.reuse, identity)
+    write_json(
+        output / "reuse.json",
+        {
+            "source": str(args.reuse.resolve()),
+            "provenance_sha256": sha256_file(args.reuse / "provenance.json"),
+            "reason": "untimed oracle conversion changed; timed AST equal",
+        },
+    )
+
+
+def _reused_case(args, kind: str, rows: int, rid: int, output: Path) -> dict | None:
+    if args.reuse is None:
+        return None
+    previous = args.reuse / f"bench_{kind}_{rows}_{rid}.json"
+    if not previous.is_file():
+        return None
+    record = json.loads(previous.read_text())
+    if len(record["samples"]) != 2 * (WARMUP + SAMPLES):
+        return None
+    tables = _prepared_tables(kind, rows)
+    require(
+        record["input_sha256"] == digest([t.to_pydict() for t in tables]),
+        "reused inputs changed",
+    )
+    write_json(output / previous.name, record)
+    return record
+
+
+async def _collect_cases(args, rw: RisingWave, output: Path):
+    for rid in range(ROUNDS):
+        for kind, rows in CASES:
+            record = _reused_case(args, kind, rows, rid, output)
+            if record is not None:
+                yield record, False
+            else:
+                print(f"round={rid} case={kind}_{rows}", flush=True)
+                yield await case(rw, kind, rows, rid, output), True
+
+
+async def _start_collection(rw: RisingWave, output: Path) -> None:
+    await rw.start()
+    version = await rw.execute("SELECT version()")
+    require(RW_COMMIT[:10] in str(version), "RisingWave binary version mismatch")
+    write_json(output / "rw-version.json", version)
+    write_json(output / "rw-parameters.json", await rw.execute("SHOW PARAMETERS"))
+    await semantics(rw, output)
+
+
+def _write_completion(rw, output: Path, start: float, records: list[dict]) -> None:
+    write_json(
+        output / "completion.json",
+        {
+            "elapsed_seconds": time.perf_counter() - start,
+            "completed_cases": len(records),
+            "load_average_after": os.getloadavg(),
+            "risingwave_returncode": rw.process.returncode if rw.process else None,
+        },
+    )
+
+
 async def run(args):
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
@@ -839,59 +1035,18 @@ async def run(args):
         "[server]\ntelemetry_enabled = false\n", encoding="utf-8"
     )
     start = time.perf_counter()
-    identity = provenance(args)
+    identity = await provenance(args)
     identity["budget_seconds"] = args.budget_seconds
     write_json(output / "provenance.json", identity)
     rw = RisingWave(args, output)
     records = []
     try:
         async with asyncio.timeout(args.budget_seconds):
-            if args.reuse is not None:
-                validate_reuse(args.reuse, identity)
-                write_json(
-                    output / "reuse.json",
-                    {
-                        "source": str(args.reuse.resolve()),
-                        "provenance_sha256": sha256_file(
-                            args.reuse / "provenance.json"
-                        ),
-                        "reason": "untimed oracle conversion changed; timed AST equal",
-                    },
-                )
-            await rw.start()
-            version = await rw.execute("SELECT version()")
-            require(
-                RW_COMMIT[:10] in str(version), "RisingWave binary version mismatch"
-            )
-            write_json(output / "rw-version.json", version)
-            write_json(
-                output / "rw-parameters.json", await rw.execute("SHOW PARAMETERS")
-            )
-            await semantics(rw, output)
-            for rid in range(ROUNDS):
-                for kind, rows in CASES:
-                    previous = (
-                        args.reuse / f"bench_{kind}_{rows}_{rid}.json"
-                        if args.reuse is not None
-                        else None
-                    )
-                    if previous is not None and previous.is_file():
-                        record = json.loads(previous.read_text())
-                        if len(record["samples"]) == 2 * (WARMUP + SAMPLES):
-                            tables = [
-                                fixture(i, rows, progress=kind == "window")
-                                for i in range(WARMUP + SAMPLES)
-                            ]
-                            require(
-                                record["input_sha256"]
-                                == digest([t.to_pydict() for t in tables]),
-                                "reused inputs changed",
-                            )
-                            records.append(record)
-                            write_json(output / previous.name, record)
-                            continue
-                    print(f"round={rid} case={kind}_{rows}", flush=True)
-                    records.append(await case(rw, kind, rows, rid, output))
+            _record_reuse(args, identity, output)
+            await _start_collection(rw, output)
+            async for record, measured in _collect_cases(args, rw, output):
+                records.append(record)
+                if measured:
                     write_json(output / "summary.json", summaries_partial(records))
             write_json(output / "summary.json", summaries(records))
     except BaseException as error:
@@ -902,15 +1057,7 @@ async def run(args):
         raise
     finally:
         await rw.stop()
-        write_json(
-            output / "completion.json",
-            {
-                "elapsed_seconds": time.perf_counter() - start,
-                "completed_cases": len(records),
-                "load_average_after": os.getloadavg(),
-                "risingwave_returncode": rw.process.returncode if rw.process else None,
-            },
-        )
+        _write_completion(rw, output, start, records)
 
 
 def summaries_partial(records: list[dict]) -> dict:
