@@ -185,7 +185,12 @@ RW 小批投影则是 57.213→68.372 ms。存在明显轮间漂移；进程/缓
 表/视图名只允许固定场景目录，未知名称直接拒绝，值通过 psycopg 的类型适配与 SQL 模板生成。
 保留原小写标识符和负整数的既有编码形式，以免改变已经测量的 SQL 字节。
 `lscpu` 改用固定绝对路径的异步子进程，消除 PATH 查找；四个函数拆出计时外准备、oracle、统计和采集编排。
-所有函数圈复杂度均不超过既有上限 8，没有新增安全规则豁免或修改门禁。
+所有函数圈复杂度均不超过既有上限 8，未修改全局规则或门禁。
+`d525d67c` 的 Codacy 已从 22 条降为 1 条：固定 `/usr/bin/lscpu` 无参数调用被标为非静态命令。
+对应[上游审计规则][asyncio-audit-rule]只排除程序名后还有常量参数的调用，因而误标这个无参数调用。
+仅在此调用处豁免 `dangerous-asyncio-create-exec-audit`；无外部输入、无 shell、绝对路径，
+定向测试检查完整调用参数并在无效 PATH 下执行。原规则本地复现 1 条，局部豁免后 0 条，
+关闭豁免检查仍为 1 条；没有忽略其他规则或整个文件。
 
 历史结果仍归属原始脚本与构建身份，不改写 `results/`，也不把修复后的脚本标成一次新实测。
 离线复核确认 15 个计时/执行方法 AST 不变、8 个模拟场景轮次的 SQL/数据/AB-BA/清理调用轨迹一致，
@@ -241,3 +246,4 @@ RW 小批投影则是 57.213→68.372 ms。存在明显轮间漂移；进程/缓
 [rw-flush-source]: https://github.com/risingwavelabs/risingwave/blob/45baf6460ea942e4ff57a5aa057d5b8db7f3b563/src/frontend/src/handler/flush.rs
 [rw-compactor]: https://github.com/risingwavelabs/risingwave/blob/45baf6460ea942e4ff57a5aa057d5b8db7f3b563/src/storage/compactor/src/server.rs
 [rw-premium]: https://docs.risingwave.com/get-started/premium-features
+[asyncio-audit-rule]: https://github.com/semgrep/semgrep-rules/blob/17e31e11ebac99fb7dfe1cd288f7a32151b6f3f9/python/lang/security/audit/dangerous-asyncio-create-exec-audit.yaml

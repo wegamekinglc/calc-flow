@@ -119,8 +119,20 @@ class CollectionLifecycleTests(unittest.IsolatedAsyncioTestCase):
             await self._failed_collection(Path(directory), asyncio.CancelledError())
 
     async def test_cpu_probe_uses_absolute_executable_without_path_lookup(self):
-        with patch.dict("os.environ", {"PATH": "/does-not-exist"}):
+        with (
+            patch.dict("os.environ", {"PATH": "/does-not-exist"}),
+            patch.object(
+                comparison.asyncio,
+                "create_subprocess_exec",
+                wraps=comparison.asyncio.create_subprocess_exec,
+            ) as spawn,
+        ):
             description = await comparison._cpu_description()
+        spawn.assert_awaited_once_with(
+            "/usr/bin/lscpu",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
         self.assertIn("Architecture:", description)
 
 

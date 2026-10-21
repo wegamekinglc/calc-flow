@@ -852,6 +852,8 @@ def summaries(records: list[dict]) -> list[dict]:
 async def _cpu_description() -> str:
     # This Linux-only collector invokes a fixed system binary, never PATH or
     # command text supplied by a workload, CLI argument, or shell.
+    # The audit rule expects a constant second argument; lscpu needs no arguments.
+    # nosemgrep: dangerous-asyncio-create-exec-audit
     process = await asyncio.create_subprocess_exec(
         "/usr/bin/lscpu", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
     )

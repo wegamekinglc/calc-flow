@@ -5,8 +5,17 @@
     "relation_names": "closed CASES x ROUNDS catalog plus window_semantics; arbitrary identifiers rejected",
     "values": "exact Arrow schema; psycopg Literal; integer/NULL-only adaptation; timestamps quoted by adapter",
     "command": "absolute /usr/bin/lscpu via asyncio subprocess, no shell/PATH lookup",
-    "security_suppressions_added": false,
-    "global_gate_changes": false
+    "security_suppressions_added": true,
+    "global_gate_changes": false,
+    "local_waiver": {
+      "rule": "dangerous-asyncio-create-exec-audit",
+      "scope": "one fixed /usr/bin/lscpu call in _cpu_description",
+      "reason": "No arguments, external inputs, PATH lookup or shell. Upstream pattern excludes constant second arguments but not an argument-free call.",
+      "source": "https://github.com/semgrep/semgrep-rules/blob/17e31e11ebac99fb7dfe1cd288f7a32151b6f3f9/python/lang/security/audit/dangerous-asyncio-create-exec-audit.yaml",
+      "reproduced_without_waiver": 1,
+      "after_local_waiver": 0,
+      "smoke": "Exact executable and keyword arguments asserted; executes with invalid PATH."
+    }
   },
   "complexity": {
     "limit": 8,
@@ -51,7 +60,7 @@
   "compatibility": {
     "baseline_commit": "aca2a5e97592ca6e44e3a23b06659084a89b105c",
     "baseline_script_sha256": "f6eec15d67185a5c1ffb2969fceb0bea9f4927181253a7d8137cfa4337459ae2",
-    "candidate_script_sha256": "1be44b49f0132581743ee5c3fe76419fd347ac3cc8204c955ea6a56f50ccf214",
+    "candidate_script_sha256": "db7dfb9a394a435f1499887a1c3247327ea9d37b97fe630b5055810468dbe372",
     "identical_timer_or_execution_asts": [
       "fixture",
       "program",
@@ -141,5 +150,16 @@
     "summary_recomputed": true,
     "semantic_probes_passed": true
   },
-  "remote_codacy": "baseline action_required; updated commit result must be reported separately"
+  "remote_codacy": {
+    "aca2a5e9": {
+      "conclusion": "action_required",
+      "new_issues": 22
+    },
+    "d525d67c": {
+      "conclusion": "action_required",
+      "new_issues": 1,
+      "remaining": "argument-free lscpu false positive; locally waived in follow-up"
+    },
+    "final_commit": "Report check result separately; local scans do not replace remote Codacy."
+  }
 }
