@@ -34,6 +34,72 @@ def test_account_market_value_feeds_use_requested_default_scale(example):
     assert pc.count_distinct(pa.concat_tables(quotes)["stock"]).as_py() == 100
 
 
+def test_account_values_reprice_live_positions_before_either_source_ends(example):
+    async def run():
+        trade_input = asyncio.Queue()
+        quote_input = asyncio.Queue()
+        closed = {"trades": asyncio.Event(), "quotes": asyncio.Event()}
+
+        async def feed(queue, name):
+            try:
+                while True:
+                    yield await queue.get()
+            finally:
+                closed[name].set()
+
+        def trade(quantity, side="buy", flow_type="trade"):
+            return pa.table(
+                {
+                    "account": ["alice"],
+                    "stock": ["AAA"],
+                    "quantity": [quantity],
+                    "side": [side],
+                    "price": [1.0],
+                    "flow_type": [flow_type],
+                },
+                schema=example["TRADE_SCHEMA"],
+            )
+
+        def quote(price, timestamp):
+            return pa.table(
+                {"stock": ["AAA"], "latest_price": [price], "timestamp": [timestamp]},
+                schema=example["QUOTE_SCHEMA"],
+            )
+
+        await trade_input.put(trade(10))
+        await quote_input.put(quote(2.0, 1_000_000))
+        async with example["market_value_stream"](
+            feed(trade_input, "trades"), feed(quote_input, "quotes")
+        ) as updates:
+
+            async def next_value():
+                table = await asyncio.wait_for(updates.__anext__(), 5)
+                assert not closed["trades"].is_set()
+                assert not closed["quotes"].is_set()
+                assert table["account"].equals(pa.chunked_array([["alice"]]))
+                return table["market_value"][0].as_py()
+
+            assert await next_value() == 20.0
+            # Price changes alone must revalue existing positions while trades wait.
+            await quote_input.put(quote(3.0, 3_000_000))
+            assert await next_value() == 30.0
+            # An old quote cannot replace the latest price.
+            await quote_input.put(quote(99.0, 2_000_000))
+            assert await next_value() == 30.0
+            # Trades also revalue immediately at the latest known price.
+            await trade_input.put(trade(4, side="sell"))
+            assert await next_value() == 18.0
+            await trade_input.put(trade(999, flow_type="order"))
+            assert await next_value() == 18.0
+            await trade_input.put(trade(6, side="sell"))
+            assert await next_value() == 0.0
+
+        assert closed["trades"].is_set()
+        assert closed["quotes"].is_set()
+
+    asyncio.run(run())
+
+
 def test_account_values_use_latest_timestamp_after_trade_stream_ends(example):
     trade_tables = tuple(
         example["demo_batches"](

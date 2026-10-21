@@ -265,22 +265,39 @@ after newer ones; `LAST_VALUE(latest_price ORDER BY timestamp)` selects the
 price at the greatest timestamp rather than the last arrival.
 
 One owning streaming `Program` drains two named outputs: cumulative positions
-and latest quotes. Python retains only the final Arrow snapshot of each
-output. Once both streams finish, a native SQL query joins those snapshots on
-stock and calculates `SUM(position * latest_price)` per account. The current
-streaming SQL surface accepts one input alias, so this final two-input join
-runs as a finite `collect_async` query. Results are available after both
-streams end. Ordered `LAST_VALUE` currently follows the retained-input SQL
-path and keeps quote history; this demo uses finite quote inputs. The position
-branch uses the compact incremental grouped sum.
+and latest quotes. Python retains only the current Arrow snapshot of each
+output. Once both have produced their first snapshot, every new position or
+quote snapshot immediately triggers `SUM(position * latest_price)` per account.
+A new quote revalues existing holdings even when no new trades arrive; a trade
+uses the latest price received so far. Intermediate quotes are used while the
+sources remain open. Older quote timestamps cannot roll the price back.
+The update unit is an Arrow batch/native snapshot. If a quote batch contains
+several updates for one stock, that batch's greatest timestamp supplies its
+price; the example does not emit one valuation per row within the batch.
+
+`market_value_stream(trades, quotes)` owns the job through `async with` and
+yields an async iterator of account-value tables. Exiting the context closes
+both sources, including when the consumer stops before EOF. The CLI consumes
+every intermediate valuation and keeps only the last table for printing.
+The two outputs are asynchronous: each valuation uses the most recently
+consumed snapshot of the other branch, without claiming an atomic arrival
+order across independent inputs.
+
+The current streaming SQL surface accepts one input alias, so the example
+compiles a separate native two-input SQL plan once and awaits its execution
+on each update inside the streaming loop. The join and account sum recompute
+over current positions and prices, with no historical trade replay or Python
+row conversion. Position state uses the compact incremental grouped sum.
+Ordered `LAST_VALUE` currently follows the retained-input SQL path and keeps
+quote history; this demo uses finite quote inputs.
 
 The output has one row per known account, with `account` and `market_value`.
 Zero-quantity seeds retain accounts without executions. Quotes cover every
 stock in the position table. Every position contributes its quantity times
 the latest price, including zero positions. The default run produces 100
 account rows. Execution prints only the final table and total elapsed time,
-including data preparation, both streams, awaited cleanup, and the final
-valuation query.
+including data preparation, both streams, every live valuation query, and
+awaited cleanup. Console rendering is excluded.
 
 ## Route late rows
 

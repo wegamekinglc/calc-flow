@@ -232,14 +232,17 @@ external services and are included in the default example runner.
 - [31_streaming_account_market_values.py](31_streaming_account_market_values.py)
   — consume trade and quote streams through one owning streaming Program.
   Keep cumulative account/stock positions and the price with the latest quote
-  timestamp, then join the final Arrow snapshots and sum position times price
-  per account after both streams finish. Defaults to 10,000,000 business-flow
+  timestamp. On every position or quote snapshot, reuse one compiled native
+  SQL plan to join the current snapshots and sum position times price per
+  account. Price-only updates revalue existing holdings while both inputs stay
+  open. The CLI drains every valuation and prints only the final table.
+  Defaults to 10,000,000 business-flow
   rows, 100 accounts, 100 stocks, and 10,000 quotes. Both streams use batches
   of 1,000 rows with no sleep; 10,000 zero-position seed rows are additional.
   The trade generator is shared with example 30 in
   [stock_account_data.py](stock_account_data.py).
   Prints only the final account-value table and total elapsed seconds,
-  including data preparation, stream cleanup, and the final SQL query.
+  including data preparation, every live valuation, and stream cleanup.
   Override `--rows`, `--accounts`, `--stocks`, `--batch-size`, and `--quote-rows`
   for smaller runs. No external service is needed.
   Guide and execution boundaries: [account market values](../docs/streaming-guide.md#account-market-values).

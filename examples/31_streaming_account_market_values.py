@@ -1,10 +1,11 @@
-"""Stream positions and quotes, then print each account's final market value."""
+"""Revalue accounts on live position and quote updates; print the final snapshot."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
 from collections.abc import AsyncIterator, Iterable, Iterator
+from contextlib import asynccontextmanager
 from time import perf_counter
 
 import pyarrow as pa
@@ -28,11 +29,8 @@ QUOTE_SCHEMA = pa.schema(
         ("timestamp", pa.timestamp("us", tz="UTC")),
     ]
 )
-POSITION_SCHEMA = pa.schema(
-    [("account", pa.string()), ("stock", pa.string()), ("position", pa.int64())]
-)
-LATEST_QUOTE_SCHEMA = pa.schema(
-    [("stock", pa.string()), ("latest_price", pa.float64())]
+MARKET_VALUE_SCHEMA = pa.schema(
+    [("account", pa.string()), ("market_value", pa.float64())]
 )
 
 
@@ -62,33 +60,61 @@ def make_program() -> cf.Program:
     )
 
 
-async def account_market_values(
+@asynccontextmanager
+async def market_value_stream(
     trades: AsyncIterator[pa.Table], quotes: AsyncIterator[pa.Table]
-) -> pa.Table:
-    snapshots = {
-        "positions": pa.Table.from_batches([], schema=POSITION_SCHEMA),
-        "latest_quotes": pa.Table.from_batches([], schema=LATEST_QUOTE_SCHEMA),
-    }
+) -> AsyncIterator[AsyncIterator[pa.Table]]:
+    """Own both sources and value every position or quote batch snapshot."""
+    valuation = (
+        cf.PipelineBuilder("live-account-market-values")
+        .sql(
+            "values",
+            """
+            SELECT p.account,
+                   SUM(p.position * q.latest_price) AS market_value
+            FROM p LEFT JOIN q ON p.stock = q.stock
+            GROUP BY p.account
+            ORDER BY p.account
+            """,
+            aliases=("p", "q"),
+        )
+        .compile_batch()
+    )
+    snapshots: dict[str, pa.Table] = {}
     async with make_program().stream(
         {"trades": trades, "quotes": quotes},
         config=cf.StreamRuntimeConfig(checkpointing=False),
     ) as results:
-        async for output in results:
-            snapshots[output.name] = output.table
 
-    # Streaming SQL accepts one alias. Join the two final Arrow snapshots at EOF.
-    values = cf.sql(
-        """
-        SELECT p.account,
-               SUM(p.position * q.latest_price) AS market_value
-        FROM p LEFT JOIN q ON p.stock = q.stock
-        GROUP BY p.account
-        ORDER BY p.account
-        """,
-        p=cf.table_input("positions", schema=snapshots["positions"].schema),
-        q=cf.table_input("latest_quotes", schema=snapshots["latest_quotes"].schema),
-    )
-    return await values.collect_async(snapshots)
+        async def updates() -> AsyncIterator[pa.Table]:
+            async for output in results:
+                snapshots[output.name] = output.table
+                if len(snapshots) < 2:
+                    continue
+                # Reuse one compiled SQL plan on the current Arrow snapshots.
+                result = await valuation.execute_async(
+                    {
+                        "p": cf.Batch.from_pyarrow(snapshots["positions"]),
+                        "q": cf.Batch.from_pyarrow(snapshots["latest_quotes"]),
+                    }
+                )
+                yield result.outputs["output"].to_pyarrow()
+
+        iterator = updates()
+        try:
+            yield iterator
+        finally:
+            await iterator.aclose()
+
+
+async def account_market_values(
+    trades: AsyncIterator[pa.Table], quotes: AsyncIterator[pa.Table]
+) -> pa.Table:
+    last = pa.Table.from_batches([], schema=MARKET_VALUE_SCHEMA)
+    async with market_value_stream(trades, quotes) as updates:
+        async for table in updates:
+            last = table
+    return last
 
 
 def quote_batches(
