@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import replace
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, TypeVar, Union
 
 from calc_flow._compat import dataclass
 from calc_flow.pipeline import (
@@ -684,7 +684,7 @@ _CrossSectionOutputs = tuple[
     list[str],
     list[Field],
     dict[str, Field],
-    tuple[str, int] | None,
+    Union[tuple[str, int], None],
 ]
 
 
