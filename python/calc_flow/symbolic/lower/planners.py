@@ -494,14 +494,14 @@ def _cross_section_occurrences(segment: _Segment, /) -> tuple[Node, ...]:
     return tuple(occurrences.values())
 
 
-def _cross_section_input_name(
+def _cross_section_input_field(
     subtree: Node,
     materializations: dict[str, str],
     input_types: dict[str, Field],
     path: str,
     name: str,
     /,
-) -> str:
+) -> Field:
     """Resolve an operand and retain its role in schema errors."""
 
     argument = subtree.args[0]
@@ -510,14 +510,15 @@ def _cross_section_input_name(
         if argument.op.name == "column_ref"
         else materializations[argument.digest]
     )
-    if input_name not in input_types:
+    field = input_types.get(input_name)
+    if field is None:
         errors.raise_compile(
             f"{path}.{name}",
             errors.SCHEMA_MISMATCH,
             f"cross-section {subtree.op.name} argument column {input_name!r} is not"
             " in the input schema",
         )
-    return input_name
+    return field
 
 
 def _cross_section_partition_columns(
@@ -566,6 +567,7 @@ def _cross_section_partition_columns(
 
 
 def _cross_section_declaration_prefix(
+    kind: str,
     subtree: Node,
     name: str,
     input_field: Field,
@@ -574,7 +576,6 @@ def _cross_section_declaration_prefix(
 ) -> dict[str, object]:
     """Build the declaration through its operand and ordering options."""
 
-    kind = subtree.op.name
     declaration: dict[str, object] = {
         "kind": "mean" if kind == "cross_mean" else kind,
         "primitive_version": 1,
@@ -603,6 +604,7 @@ def _cross_section_output_type(kind: str, input_field: Field, /) -> str:
 
 
 def _cross_section_declaration(
+    kind: str,
     subtree: Node,
     name: str,
     input_field: Field,
@@ -611,9 +613,8 @@ def _cross_section_declaration(
 ) -> dict[str, object]:
     """Render primitive options in wire declaration order."""
 
-    kind = subtree.op.name
     declaration = _cross_section_declaration_prefix(
-        subtree, name, input_field, independent_name
+        kind, subtree, name, input_field, independent_name
     )
     declaration["min_samples"] = _cint(subtree.attr("min_samples")) or 1
     if kind == _CROSS_SECTION_DDOF:
@@ -629,21 +630,14 @@ def _cross_section_declaration(
     return declaration
 
 
-def _require_cross_section_grouping(
-    partition_columns: list[str],
-    declared_grouping: tuple[str, int] | None,
-    group_partitions: list[str],
-    grouping_shape: tuple[str, int] | None,
-    path: str,
-    /,
-) -> None:
-    if partition_columns != group_partitions or declared_grouping != grouping_shape:
-        errors.raise_compile(
-            path,
-            errors.SCHEMA_MISMATCH,
-            "cross-section primitives in one output must share one"
-            " grouping declaration",
-        )
+def _cross_section_feature_names(segment: _Segment, /) -> dict[str, str]:
+    """Index whole-feature names once before processing occurrences."""
+
+    return {
+        tree.digest: name
+        for name, tree in segment.env
+        if tree.op.name in _CROSS_SECTION_PRIMITIVES
+    }
 
 
 def _cross_section_independent_name(
@@ -704,11 +698,7 @@ def _cross_section_outputs(
 ) -> _CrossSectionOutputs:
     """Validate and build outputs in declaration order, including shared grouping."""
 
-    whole_feature = {
-        tree.digest: name
-        for name, tree in segment.env
-        if tree.op.name in _CROSS_SECTION_PRIMITIVES
-    }
+    whole_feature = _cross_section_feature_names(segment)
     input_types = {field.name: field for field in materialization.input_fields}
     materializations = dict(materialization.names)
     used_names = set(materialization.used_names)
@@ -724,7 +714,7 @@ def _cross_section_outputs(
             name = _cross_section_hidden_name(output_name, index, used_names, path)
             used_names.add(name)
         replacements[subtree.digest] = name
-        input_name = _cross_section_input_name(
+        input_field = _cross_section_input_field(
             subtree, materializations, input_types, path, name
         )
         group_partitions = _cross_section_partition_columns(
@@ -734,13 +724,14 @@ def _cross_section_outputs(
         if index == 0:
             partition_columns = group_partitions
             declared_grouping = grouping_shape
-        else:
-            _require_cross_section_grouping(
-                partition_columns,
-                declared_grouping,
-                group_partitions,
-                grouping_shape,
+        elif (
+            partition_columns != group_partitions or declared_grouping != grouping_shape
+        ):
+            errors.raise_compile(
                 path,
+                errors.SCHEMA_MISMATCH,
+                "cross-section primitives in one output must share one"
+                " grouping declaration",
             )
         independent_name = (
             _cross_section_independent_name(
@@ -750,13 +741,13 @@ def _cross_section_outputs(
             else None
         )
         declaration = _cross_section_declaration(
-            subtree, name, input_types[input_name], independent_name
+            kind, subtree, name, input_field, independent_name
         )
         declarations.append(declaration)
         derived_fields.append(
             Field(
                 name,
-                _cross_section_output_type(kind, input_types[input_name]),
+                _cross_section_output_type(kind, input_field),
                 nullable=True,
             )
         )
