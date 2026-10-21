@@ -195,6 +195,26 @@ def test_nested_cross_section_materializes_before_final_rewrite() -> None:
     )
 
 
+def test_repeated_cross_section_preserves_order_across_features_and_filter() -> None:
+    quotes = _ordered()
+    rank = cs.rank(quotes["x"], group=_group(quotes))
+    signals = quotes.with_columns(
+        first=rank + 1.0,
+        second=rank + 2.0,
+        centered=cs.demean(quotes["x"], group=_group(quotes)),
+    ).filter(rank > 0.0)
+    program = Program("p", engine="sql", inputs=[quotes], outputs={"signals": signals})
+
+    document = lower_program_document(program, Runtime(), "batch")
+
+    (node,) = _cross_section_nodes(document)
+    declarations = node["operator"]["spec"]["outputs"]  # type: ignore[index]
+    assert [(item["kind"], item["output"]) for item in declarations] == [
+        ("rank", "signals__cf_cs_0"),
+        ("demean", "centered"),
+    ]
+
+
 def test_row_local_cross_section_operand_materializes_before_grouping() -> None:
     quotes = _ordered()
     adjusted = row.coalesce(quotes["x"], 0.0) + 1.0

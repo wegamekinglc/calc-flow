@@ -442,7 +442,12 @@ class _CrossSectionPlan:
 def _cross_section_grouping(subtree: Node, path: str, /) -> dict[str, object]:
     """Render the frozen exact-time or fixed-bucket grouping JSON."""
 
-    shape = _grouping_shape(subtree)
+    return _cross_section_grouping_json(_grouping_shape(subtree), path)
+
+
+def _cross_section_grouping_json(
+    shape: tuple[str, int] | None, path: str, /
+) -> dict[str, object]:
     if shape is not None:
         kind, width = shape
         if kind == "exact_time":
@@ -478,30 +483,28 @@ def _grouping_shape(subtree: Node, /) -> tuple[str, int] | None:
 def _cross_section_occurrences(segment: _Segment, /) -> tuple[Node, ...]:
     """Collect unique occurrences in environment, predicate, then post-filter order."""
 
-    occurrences: list[Node] = []
-    seen: set[str] = set()
+    occurrences: dict[str, Node] = {}
     ordered_trees = [tree for _, tree in segment.env]
     ordered_trees += [
         tree for tree in (segment.predicate, segment.post_predicate) if tree is not None
     ]
     for tree in ordered_trees:
         for subtree in _find_cross_section(tree):
-            if subtree.digest not in seen:
-                seen.add(subtree.digest)
-                occurrences.append(subtree)
-    return tuple(occurrences)
+            occurrences.setdefault(subtree.digest, subtree)
+    return tuple(occurrences.values())
 
 
 def _cross_section_input_name(
-    argument: Node,
+    subtree: Node,
     materializations: dict[str, str],
     input_types: dict[str, Field],
     path: str,
-    label: str,
+    name: str,
     /,
 ) -> str:
     """Resolve an operand and retain its role in schema errors."""
 
+    argument = subtree.args[0]
     input_name = (
         _cstr(argument.attr("name"))
         if argument.op.name == "column_ref"
@@ -509,9 +512,10 @@ def _cross_section_input_name(
     )
     if input_name not in input_types:
         errors.raise_compile(
-            path,
+            f"{path}.{name}",
             errors.SCHEMA_MISMATCH,
-            f"cross-section {label} column {input_name!r} is not in the input schema",
+            f"cross-section {subtree.op.name} argument column {input_name!r} is not"
+            " in the input schema",
         )
     return input_name
 
@@ -521,6 +525,7 @@ def _cross_section_partition_columns(
     event_time: str,
     input_types: dict[str, Field],
     path: str,
+    name: str,
     /,
 ) -> list[str]:
     """Validate event time before partition columns for one occurrence."""
@@ -529,14 +534,14 @@ def _cross_section_partition_columns(
     event_time_argument = subtree.args[group_offset]
     if event_time_argument.op.name != "column_ref":
         errors.raise_compile(
-            path,
+            f"{path}.{name}",
             errors.UNSUPPORTED_TYPE,
             "cross-section grouping event time must be an input column in this release",
         )
     event_time_name = _cstr(event_time_argument.attr("name"))
     if event_time_name != event_time:
         errors.raise_compile(
-            path,
+            f"{path}.{name}",
             errors.SCHEMA_MISMATCH,
             f"cross-section grouping event time {event_time_name!r} does not"
             " match the declared input event time",
@@ -545,14 +550,14 @@ def _cross_section_partition_columns(
     for group_argument in subtree.args[group_offset + 1 :]:
         if group_argument.op.name != "column_ref":
             errors.raise_compile(
-                path,
+                f"{path}.{name}",
                 errors.UNSUPPORTED_TYPE,
                 "cross-section group columns must be input columns in this release",
             )
         group_name = _cstr(group_argument.attr("name"))
         if group_name not in input_types:
             errors.raise_compile(
-                path,
+                f"{path}.{name}",
                 errors.SCHEMA_MISMATCH,
                 f"cross-section group column {group_name!r} is not in the input schema",
             )
@@ -603,8 +608,8 @@ def _cross_section_declaration(
     input_field: Field,
     independent_name: str | None,
     /,
-) -> tuple[dict[str, object], Field]:
-    """Render primitive options and the corresponding nullable output field."""
+) -> dict[str, object]:
+    """Render primitive options in wire declaration order."""
 
     kind = subtree.op.name
     declaration = _cross_section_declaration_prefix(
@@ -621,8 +626,7 @@ def _cross_section_declaration(
         declaration["include_ties"] = _cbool(subtree.attr("include_ties"))
     if kind in ("top_quantile", "bottom_quantile"):
         declaration["fraction"] = _cnumber(subtree.attr("fraction"))
-    output_type = _cross_section_output_type(kind, input_field)
-    return declaration, Field(name, output_type, nullable=True)
+    return declaration
 
 
 def _require_cross_section_grouping(
@@ -647,17 +651,46 @@ def _cross_section_independent_name(
     materializations: dict[str, str],
     input_types: dict[str, Field],
     path: str,
+    name: str,
     /,
-) -> str | None:
-    if subtree.op.name == "residual":
-        return _cross_section_input_name(
-            subtree.args[1], materializations, input_types, path, "residual independent"
+) -> str:
+    argument = subtree.args[1]
+    independent_name = (
+        _cstr(argument.attr("name"))
+        if argument.op.name == "column_ref"
+        else materializations[argument.digest]
+    )
+    if independent_name not in input_types:
+        errors.raise_compile(
+            f"{path}.{name}",
+            errors.SCHEMA_MISMATCH,
+            f"cross-section residual independent column {independent_name!r}"
+            " is not in the input schema",
         )
-    return None
+    return independent_name
+
+
+def _cross_section_hidden_name(
+    output_name: str, index: int, used_names: set[str], path: str, /
+) -> str:
+    name = f"{output_name}__cf_cs_{index}"
+    if name in used_names:
+        errors.raise_compile(
+            f"{path}.{name}",
+            errors.DUPLICATE_NAME,
+            f"materialized cross-section column {name!r} collides with a"
+            " declared field",
+        )
+    return name
 
 
 _CrossSectionOutputs = tuple[
-    dict[str, str], list[dict[str, object]], list[str], list[Field], dict[str, Field]
+    dict[str, str],
+    list[dict[str, object]],
+    list[str],
+    list[Field],
+    dict[str, Field],
+    tuple[str, int] | None,
 ]
 
 
@@ -688,26 +721,14 @@ def _cross_section_outputs(
         kind = subtree.op.name
         name = whole_feature.get(subtree.digest)
         if name is None:
-            name = f"{output_name}__cf_cs_{index}"
-            if name in used_names:
-                errors.raise_compile(
-                    f"{path}.{name}",
-                    errors.DUPLICATE_NAME,
-                    f"materialized cross-section column {name!r} collides with a"
-                    " declared field",
-                )
+            name = _cross_section_hidden_name(output_name, index, used_names, path)
             used_names.add(name)
         replacements[subtree.digest] = name
-        output_path = f"{path}.{name}"
         input_name = _cross_section_input_name(
-            subtree.args[0],
-            materializations,
-            input_types,
-            output_path,
-            f"{kind} argument",
+            subtree, materializations, input_types, path, name
         )
         group_partitions = _cross_section_partition_columns(
-            subtree, event_time, input_types, output_path
+            subtree, event_time, input_types, path, name
         )
         grouping_shape = _grouping_shape(subtree)
         if index == 0:
@@ -721,15 +742,32 @@ def _cross_section_outputs(
                 grouping_shape,
                 path,
             )
-        independent_name = _cross_section_independent_name(
-            subtree, materializations, input_types, output_path
+        independent_name = (
+            _cross_section_independent_name(
+                subtree, materializations, input_types, path, name
+            )
+            if kind == "residual"
+            else None
         )
-        declaration, field = _cross_section_declaration(
+        declaration = _cross_section_declaration(
             subtree, name, input_types[input_name], independent_name
         )
         declarations.append(declaration)
-        derived_fields.append(field)
-    return replacements, declarations, partition_columns, derived_fields, input_types
+        derived_fields.append(
+            Field(
+                name,
+                _cross_section_output_type(kind, input_types[input_name]),
+                nullable=True,
+            )
+        )
+    return (
+        replacements,
+        declarations,
+        partition_columns,
+        derived_fields,
+        input_types,
+        declared_grouping,
+    )
 
 
 def _cross_section_node(
@@ -799,6 +837,15 @@ def _materialize_cross_section_inputs(
     used_names = {field.name for field in input_fields} | {
         name for name, _ in segment.env
     }
+    arguments = tuple(
+        (subtree.op.name, argument)
+        for subtree in occurrences
+        for argument in subtree.args[: (2 if subtree.op.name == "residual" else 1)]
+    )
+    if all(argument.op.name == "column_ref" for _, argument in arguments):
+        return _StatefulInputPlan(
+            (), (), None, None, input_fields, frozenset(used_names)
+        )
     return _plan_stateful_inputs(
         _StatefulInputRequest(
             output_name,
@@ -809,11 +856,7 @@ def _materialize_cross_section_inputs(
         ),
         input_fields,
         used_names,
-        tuple(
-            (subtree.op.name, argument)
-            for subtree in occurrences
-            for argument in subtree.args[: (2 if subtree.op.name == "residual" else 1)]
-        ),
+        arguments,
     )
 
 
@@ -837,9 +880,14 @@ def _plan_cross_section(
         output_name, segment, input_fields, occurrences, path
     )
     state_input_fields = materialization.input_fields
-    replacements, declarations, partition_columns, derived_fields, input_types = (
-        _cross_section_outputs(output_name, segment, occurrences, materialization, path)
-    )
+    (
+        replacements,
+        declarations,
+        partition_columns,
+        derived_fields,
+        input_types,
+        grouping_shape,
+    ) = _cross_section_outputs(output_name, segment, occurrences, materialization, path)
     node_id = f"{output_name}__cf_cross_section"
     spec: dict[str, object] = {
         "configuration_version": 1,
@@ -848,7 +896,9 @@ def _plan_cross_section(
         "entity_by": list(entity_by),
         "partition_by": list(partition_columns),
         "sequence_by": list(sequence_by),
-        "grouping": _cross_section_grouping(occurrences[0], f"{path}.{output_name}"),
+        "grouping": _cross_section_grouping_json(
+            grouping_shape, f"{path}.{output_name}"
+        ),
         "outputs": declarations,
         "allowed_lateness_micros": allowed_lateness_micros,
         "late_policy": (
