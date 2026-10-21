@@ -69,9 +69,17 @@ cd target/arroyo-comparison-baseline
 bash .codex/artifacts/arroyo-comparison/reproduce.sh
 ```
 
-`reproduce.sh` 拒绝不同 HEAD、tracked diff 和已存在的输出目录，检查 Arroyo 下载件哈希，
+`reproduce.sh` 在下载或构建前拒绝不同 HEAD 及相对 HEAD 的 tracked diff（含已暂存和
+未暂存改动），并拒绝已存在的输出目录，检查 Arroyo 下载件哈希，
 构建 release wheel、预检正确性，再采集固定的四个场景。所有新输出在该 worktree 的
 `target/arroyo-comparison-reproduction/`，不改调用者已有证据。
 
 新构建的 binary/native/harness 哈希应单独记录，不应假称是原 sealed binary 的重复。
 特别是 Python/依赖版本、CPU 资源、适配层或输入变动时，不能套用原比较结论。
+
+前置检查的定向回归验证使用临时本地 checkout，覆盖干净基线、已暂存和未暂存的
+产品源码改动；以占位 `uv` 命令终止依赖准备，不下载、构建或采样：
+
+```bash
+python3.13 .codex/artifacts/arroyo-comparison/test_reproduce.py -v
+```

@@ -4,7 +4,7 @@ set -euo pipefail
 # Run from a dedicated calc-flow checkout at the recorded baseline.
 expected_ref=dab98a559314bd46d866ed7a6489abcdd3810afe
 test "$(git rev-parse HEAD)" = "$expected_ref"
-git diff --exit-code
+git diff --exit-code HEAD --
 artifact_dir=.codex/artifacts/arroyo-comparison
 run_dir=target/arroyo-comparison-reproduction
 test ! -e "$run_dir"
