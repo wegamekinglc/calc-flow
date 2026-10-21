@@ -628,9 +628,11 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tokio-postgres-rustls",
+ "tokio-rustls",
  "tokio-tungstenite",
  "tracing",
  "uuid",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -2674,7 +2676,7 @@ dependencies = [
  "tokio-util",
  "twox-hash",
  "url",
- "webpki-roots 1.0.10",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -2987,8 +2989,6 @@ dependencies = [
 [[package]]
 name = "pgwire-replication"
 version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62dd737cbc9ef6eb7d0702a80b5a53ca974088a4edf04da40bc2b946747ca810"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3002,7 +3002,7 @@ dependencies = [
  "tokio-rustls",
  "tokio-util",
  "tracing",
- "webpki-roots 0.26.11",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -4492,7 +4492,7 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tokio-rustls",
- "webpki-roots 1.0.10",
+ "webpki-roots",
  "x509-cert",
 ]
 
@@ -4531,7 +4531,6 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tungstenite",
- "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -4938,15 +4937,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "58ec80e73fd8baf57bf0d9615554c75348bda990d6d5bbeab964dd068319fecb"
 dependencies = [
  "rustls-pki-types",
-]
-
-[[package]]
-name = "webpki-roots"
-version = "0.26.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
-dependencies = [
- "webpki-roots 1.0.10",
 ]
 
 [[package]]

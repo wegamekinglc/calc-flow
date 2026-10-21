@@ -49,6 +49,8 @@ pub use mysql::{MySqlSinkFactory, MySqlSourceFactory, register_mysql_connectors}
 mod options;
 #[cfg(feature = "file")]
 pub mod parquet;
+#[cfg(all(test, any(feature = "websocket", feature = "postgresql")))]
+mod tls_test_support;
 
 #[cfg(feature = "clickhouse")]
 pub mod clickhouse;

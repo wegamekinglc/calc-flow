@@ -279,8 +279,11 @@ matrix and shared-controller validation remain valid and were not repeated.
 
 The subsequent security-only lockfile update moves `rustls-webpki` from
 0.103.14 to 0.103.16, and `webpki-root-certs` / `webpki-roots` from 1.0.9 to
-1.0.10. The 0.26.11 roots compatibility crate now forwards to 1.0.10. The
-adapter and all historical evidence JSON, including the original native seals,
+1.0.10. A later connector adaptation removes the 0.26.11 compatibility crate
+entirely: WebSocket selects roots v1 directly and the unchanged PostgreSQL
+replication implementation uses a local, registry-verified dependency backport.
+See the [connector TLS dependency note](../../crates/calc-flow-connectors/README.md#tls-dependencies).
+The adapter and all historical evidence JSON, including the original native seals,
 remain unchanged. The saved measurements describe the original sealed wheel;
 they do not measure the updated dependency graph. No benchmark was rerun and
 no dependency migration or native equivalence claim was added.

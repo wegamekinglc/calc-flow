@@ -1,6 +1,11 @@
 [workspace]
 members = ["crates/calc-flow", "crates/calc-flow-connectors", "crates/calc-flow-python"]
+exclude = ["vendor/pgwire-replication"]
 resolver = "3"
+
+[patch.crates-io]
+# Registry 0.4.0 protocol implementation; roots v1 backport (see vendor note).
+pgwire-replication = { path = "vendor/pgwire-replication" }
 
 [workspace.package]
 version = "2026.10.13"

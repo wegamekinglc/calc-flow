@@ -24,3 +24,19 @@ feature set is `file`.
 The available identities and per-transport options are documented in
 [the connector guides](../../docs/connectors/README.md); the running process is
 authoritative through its capability response.
+
+## TLS dependencies
+
+WebSocket connections use the Mozilla trust anchors from `webpki-roots` 1.0.10
+directly through a custom Rustls connector. Certificate and hostname validation
+remain enabled by default; only the existing explicit `insecure` option bypasses
+verification. Plain `ws://` connections remain supported.
+
+PostgreSQL retains its existing TLS negotiation and verification modes. Until
+`pgwire-replication` publishes a release using roots v1, a library-only copy of
+its registry 0.4.0 release replaces only that dependency requirement. Its Rust
+executable sources are unchanged; the original registry checksum, per-file
+hashes and whitespace normalization are recorded in
+[the backport provenance](../../vendor/pgwire-replication/provenance.json), with
+maintenance instructions in [the backport note](../../vendor/pgwire-replication/README.calc-flow.md).
+No Git/alternate registry source, audit ignore or deny-policy exception is added.
