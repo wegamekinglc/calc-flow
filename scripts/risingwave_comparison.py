@@ -509,7 +509,8 @@ def _case_inputs(name: str, kind: str, rows: int) -> tuple:
     return prepared, statements, events, oracles
 
 
-async def _engine_sample(rw, stream, engine, event, watermark, statement, selection):
+async def _engine_sample(rw, stream, engine, inputs):
+    event, watermark, statement, selection = inputs
     if engine == "calc_flow":
         return await measured_call(
             lambda e=event, w=watermark: stream.append(e, w), [os.getpid()]
@@ -520,7 +521,8 @@ async def _engine_sample(rw, stream, engine, event, watermark, statement, select
     )
 
 
-async def _sample_pair(rw, stream, kind, rows, round_id, index, inputs) -> list[dict]:
+async def _sample_pair(rw, stream, case_spec, index, inputs) -> list[dict]:
+    kind, rows, round_id = case_spec
     table, event, statement, oracle = inputs
     name = f"bench_{kind}_{rows}_{round_id}"
     watermark = (
@@ -537,7 +539,7 @@ async def _sample_pair(rw, stream, kind, rows, round_id, index, inputs) -> list[
     samples = []
     for engine in order:
         actual, sample = await _engine_sample(
-            rw, stream, engine, event, watermark, statement, selection
+            rw, stream, engine, (event, watermark, statement, selection)
         )
         require(
             actual == oracle,
@@ -583,7 +585,7 @@ async def case(rw: RisingWave, kind: str, rows: int, round_id: int, output: Path
             zip(prepared, events, statements, oracles, strict=True)
         ):
             record["samples"].extend(
-                await _sample_pair(rw, stream, kind, rows, round_id, index, inputs)
+                await _sample_pair(rw, stream, (kind, rows, round_id), index, inputs)
             )
             # Preserve each complete pair before advancing state.
             write_json(output / f"{name}.json", record)
