@@ -76,6 +76,11 @@ The separate engine and warm-state matrices still run every decade
 through 10M rows. Dynamic pytest and Criterion inventories preserve
 benchmark cases without a second hand-written case list.
 
+The 10M-row engine shard has a 240-minute job budget; other measurement shards
+have 180 minutes. This includes dependency setup, measurements and artifact
+retention. All engine tiers retain the complete case inventory, two rounds of ten
+samples and the +5% regression gate.
+
 | Family         | Dimensions                                          | Cases per dimension                                       |
 |----------------|-----------------------------------------------------|-----------------------------------------------------------|
 | Python         | overhead 1k, small 10k, standard 100k, nightly 1M   | All collected non-lifecycle pytest benchmarks             |

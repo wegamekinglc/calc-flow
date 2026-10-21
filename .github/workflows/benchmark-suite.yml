@@ -172,7 +172,9 @@ jobs:
     name: Benchmark ${{ matrix.id }}
     needs: [prepare, build]
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    # The full 10M engine inventory exceeds three hours with paired SQL windows.
+    # Include dependency setup and artifact retention in that tier's job budget.
+    timeout-minutes: ${{ matrix.id == 'engines-10000000' && 240 || 180 }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
