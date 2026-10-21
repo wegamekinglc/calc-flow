@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "measured_sha256": "3eda6a69c32fee0b12b799d9d3a46be4a920cf8bdc398e7265a12b3bcd9b171e",
+  "pre_refactor_delivery_commit": "830c633c70edd83dd0d5420e1a0e4b68443ec6e3",
+  "pre_refactor_delivery_sha256": "7899c4103b9d1ec8e034ee2dc4c8876e0666b60f53440ec6861f70d56efcc2fe",
+  "refactored_delivery_sha256": "0efc4bcd51bec8b87792976de2bdae14eb80e4bfd685f948e278513823a0c418",
+  "change": "Extract worker setup, owned output observers, output waits, metrics, and child shutdown from acquisition",
+  "validation": {
+    "unchanged_function_ast_identical": true,
+    "observer_bodies_ast_identical": true,
+    "acquisition_ast_identical_after_helper_inlining_and_observer_scope_normalization": true,
+    "recorded_sample_replays": [
+      {
+        "sample": "stateless-gap0-pair0-calc_flow",
+        "metrics_exact": true,
+        "missing_output_rejected": true
+      },
+      {
+        "sample": "window-gap0-pair0-calc_flow",
+        "metrics_exact": true,
+        "missing_output_rejected": true
+      }
+    ]
+  },
+  "measurement_status": "No new acquisition; historical identity and raw data retained unchanged"
+}

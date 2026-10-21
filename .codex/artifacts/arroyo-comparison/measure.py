@@ -192,6 +192,156 @@ def quantiles(values: list[float]) -> dict[str, float]:
     }
 
 
+def prepare_worker(args, engine: str, case: str, directory: Path, server):
+    endpoint = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+    query_path = directory / "query.sql"
+    query_path.write_text(sql(case, endpoint))
+    command = (
+        [
+            str(args.arroyo),
+            "run",
+            "-p",
+            "1",
+            "--state-dir",
+            str(directory / "state"),
+            str(query_path),
+        ]
+        if engine == "arroyo"
+        else [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "--worker",
+            case,
+            "--endpoint",
+            endpoint,
+        ]
+    )
+    command = ["taskset", "-c", args.cpus, *command]
+    environment = {
+        **os.environ,
+        "TOKIO_WORKER_THREADS": "4",
+        "OMP_NUM_THREADS": "1",
+        "OPENBLAS_NUM_THREADS": "1",
+        "ARROW_NUM_THREADS": "1",
+        "RUST_LOG": "warn",
+        "ARROYO__DISABLE_TELEMETRY": "true",
+        "ARROYO__DEFAULT_CHECKPOINT_INTERVAL": "1h",
+        "ARROYO__PIPELINE__SOURCE_BATCH_SIZE": str(CHUNK),
+        "ARROYO__PIPELINE__SOURCE_BATCH_LINGER": "100ms",
+        "ARROYO__PIPELINE__ALLOWED_RESTARTS": "0",
+        "ARROYO__ADMIN__HTTP_PORT": "0",
+        "ARROYO__ADMIN__BIND_ADDRESS": "127.0.0.1",
+        "ARROYO__API__BIND_ADDRESS": "127.0.0.1",
+        "ARROYO__CONTROLLER__BIND_ADDRESS": "127.0.0.1",
+        "ARROYO__WORKER__BIND_ADDRESS": "127.0.0.1",
+    }
+    save(
+        directory / "command.json",
+        {
+            "argv": command,
+            "cwd": str(Path.cwd()),
+            "settings": {
+                k: v
+                for k, v in environment.items()
+                if k.startswith(
+                    (
+                        "ARROYO__",
+                        "TOKIO_",
+                        "OMP_",
+                        "OPENBLAS_",
+                        "ARROW_",
+                        "RUST_LOG",
+                    )
+                )
+            },
+        },
+    )
+    return command, environment
+
+
+def output_observers(directory: Path, expected_count: int):
+    arrivals: list[tuple[float, dict]] = []
+    memory: list[dict] = []
+    done = asyncio.Event()
+
+    async def read(process):
+        with (directory / "stdout.jsonl").open("wb") as raw:
+            while line := await process.stdout.readline():
+                now = time.perf_counter()
+                raw.write(line)
+                try:
+                    row = json.loads(line)
+                except (ValueError, UnicodeError):
+                    continue
+                if isinstance(row, dict) and (("id" in row) or ("ws" in row)):
+                    arrivals.append((now, row))
+                    if len(arrivals) >= expected_count:
+                        done.set()
+
+    async def sample_memory(process):
+        parent = psutil.Process(process.pid)
+        while process.returncode is None:
+            try:
+                tree = [parent, *parent.children(recursive=True)]
+                rss = sum(p.memory_info().rss for p in tree if p.is_running())
+                memory.append({"at": time.perf_counter(), "rss_bytes": rss})
+            except psutil.Error:
+                pass
+            await asyncio.sleep(0.01)
+
+    return arrivals, memory, done, read, sample_memory
+
+
+async def await_output(connected, release, done, send_done, memory):
+    await asyncio.wait_for(connected.wait(), 25)
+    ready = time.perf_counter()
+    ready_rss = memory[-1]["rss_bytes"] if memory else None
+    release.set()
+    await asyncio.wait_for(done.wait(), 15)
+    await asyncio.wait_for(send_done.wait(), 5)
+    # Observe duplicates while the input remains open.
+    await asyncio.sleep(0.1)
+    return ready, ready_rss
+
+
+def output_metrics(case: str, frames, expected, sent, arrivals):
+    actual = [row for _, row in arrivals]
+    key = (
+        (lambda row: row["id"])
+        if case == "stateless"
+        else (lambda row: (row["ws"], row["k"]))
+    )
+    if sorted(actual, key=key) != sorted(expected, key=key):
+        raise ValueError(f"wrong output: {len(actual)} rows, expected {len(expected)}")
+    latencies = []
+    finalization = []
+    for at, row in arrivals:
+        index = (
+            (row["id"] // CHUNK)
+            if case == "stateless"
+            else int((row["ws"] - BASE.timestamp() * 1_000_000) // 2_000_000)
+        )
+        # Window index is its first frame. Each window spans two frames.
+        contribution = index if case == "stateless" else index + 1
+        latencies.append((at - sent[contribution]) * 1000)
+        if case == "window":
+            progress = min(index + 3, len(frames) - 1)
+            finalization.append((at - sent[progress]) * 1000)
+    elapsed = arrivals[-1][0] - sent[0]
+    return actual, elapsed, latencies, finalization
+
+
+async def stop_process(process) -> None:
+    # Stop this exact child only. The open source is released after stop.
+    if process.returncode is None:
+        process.send_signal(signal.SIGINT)
+        try:
+            await asyncio.wait_for(process.wait(), 12)
+        except TimeoutError:
+            process.kill()
+            await process.wait()
+
+
 async def acquisition(
     args, engine: str, case: str, gap: float, directory: Path
 ) -> dict:
@@ -200,11 +350,11 @@ async def acquisition(
     expected = oracle(case, records)
     save(directory / "expected.json", expected)
     sent: list[float] = []
-    arrivals: list[tuple[float, dict]] = []
-    memory: list[dict] = []
+    arrivals, memory, done, read, sample_memory = output_observers(
+        directory, len(expected)
+    )
     connected = asyncio.Event()
     release = asyncio.Event()
-    done = asyncio.Event()
     closed = asyncio.Event()
     send_done = asyncio.Event()
     started = time.perf_counter()
@@ -224,69 +374,7 @@ async def acquisition(
         await closed.wait()
 
     async with serve(source, "127.0.0.1", 0, compression=None) as server:
-        endpoint = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
-        query_path = directory / "query.sql"
-        query_path.write_text(sql(case, endpoint))
-        command = (
-            [
-                str(args.arroyo),
-                "run",
-                "-p",
-                "1",
-                "--state-dir",
-                str(directory / "state"),
-                str(query_path),
-            ]
-            if engine == "arroyo"
-            else [
-                sys.executable,
-                str(Path(__file__).resolve()),
-                "--worker",
-                case,
-                "--endpoint",
-                endpoint,
-            ]
-        )
-        command = ["taskset", "-c", args.cpus, *command]
-        environment = {
-            **os.environ,
-            "TOKIO_WORKER_THREADS": "4",
-            "OMP_NUM_THREADS": "1",
-            "OPENBLAS_NUM_THREADS": "1",
-            "ARROW_NUM_THREADS": "1",
-            "RUST_LOG": "warn",
-            "ARROYO__DISABLE_TELEMETRY": "true",
-            "ARROYO__DEFAULT_CHECKPOINT_INTERVAL": "1h",
-            "ARROYO__PIPELINE__SOURCE_BATCH_SIZE": str(CHUNK),
-            "ARROYO__PIPELINE__SOURCE_BATCH_LINGER": "100ms",
-            "ARROYO__PIPELINE__ALLOWED_RESTARTS": "0",
-            "ARROYO__ADMIN__HTTP_PORT": "0",
-            "ARROYO__ADMIN__BIND_ADDRESS": "127.0.0.1",
-            "ARROYO__API__BIND_ADDRESS": "127.0.0.1",
-            "ARROYO__CONTROLLER__BIND_ADDRESS": "127.0.0.1",
-            "ARROYO__WORKER__BIND_ADDRESS": "127.0.0.1",
-        }
-        save(
-            directory / "command.json",
-            {
-                "argv": command,
-                "cwd": str(Path.cwd()),
-                "settings": {
-                    k: v
-                    for k, v in environment.items()
-                    if k.startswith(
-                        (
-                            "ARROYO__",
-                            "TOKIO_",
-                            "OMP_",
-                            "OPENBLAS_",
-                            "ARROW_",
-                            "RUST_LOG",
-                        )
-                    )
-                },
-            },
-        )
+        command, environment = prepare_worker(args, engine, case, directory, server)
         with (directory / "stderr.log").open("wb") as errors:
             process = await asyncio.create_subprocess_exec(
                 *command,
@@ -296,71 +384,17 @@ async def acquisition(
                 limit=4 * 1024 * 1024,
             )
 
-            async def read():
-                with (directory / "stdout.jsonl").open("wb") as raw:
-                    while line := await process.stdout.readline():
-                        now = time.perf_counter()
-                        raw.write(line)
-                        try:
-                            row = json.loads(line)
-                        except (ValueError, UnicodeError):
-                            continue
-                        if isinstance(row, dict) and (("id" in row) or ("ws" in row)):
-                            arrivals.append((now, row))
-                            if len(arrivals) >= len(expected):
-                                done.set()
-
-            async def sample_memory():
-                parent = psutil.Process(process.pid)
-                while process.returncode is None:
-                    try:
-                        tree = [parent, *parent.children(recursive=True)]
-                        rss = sum(p.memory_info().rss for p in tree if p.is_running())
-                        memory.append({"at": time.perf_counter(), "rss_bytes": rss})
-                    except psutil.Error:
-                        pass
-                    await asyncio.sleep(0.01)
-
-            reader = asyncio.create_task(read())
-            sampler = asyncio.create_task(sample_memory())
+            reader = asyncio.create_task(read(process))
+            sampler = asyncio.create_task(sample_memory(process))
             failure = None
             result = {}
             try:
-                await asyncio.wait_for(connected.wait(), 25)
-                ready = time.perf_counter()
-                ready_rss = memory[-1]["rss_bytes"] if memory else None
-                release.set()
-                await asyncio.wait_for(done.wait(), 15)
-                await asyncio.wait_for(send_done.wait(), 5)
-                # Observe duplicates while the input remains open.
-                await asyncio.sleep(0.1)
-                actual = [row for _, row in arrivals]
-                key = (
-                    (lambda row: row["id"])
-                    if case == "stateless"
-                    else (lambda row: (row["ws"], row["k"]))
+                ready, ready_rss = await await_output(
+                    connected, release, done, send_done, memory
                 )
-                if sorted(actual, key=key) != sorted(expected, key=key):
-                    raise ValueError(
-                        f"wrong output: {len(actual)} rows, expected {len(expected)}"
-                    )
-                latencies = []
-                finalization = []
-                for at, row in arrivals:
-                    index = (
-                        (row["id"] // CHUNK)
-                        if case == "stateless"
-                        else int(
-                            (row["ws"] - BASE.timestamp() * 1_000_000) // 2_000_000
-                        )
-                    )
-                    # Window index is its first frame. Each window spans two frames.
-                    contribution = index if case == "stateless" else index + 1
-                    latencies.append((at - sent[contribution]) * 1000)
-                    if case == "window":
-                        progress = min(index + 3, len(frames) - 1)
-                        finalization.append((at - sent[progress]) * 1000)
-                elapsed = arrivals[-1][0] - sent[0]
+                actual, elapsed, latencies, finalization = output_metrics(
+                    case, frames, expected, sent, arrivals
+                )
                 result = {
                     "engine": engine,
                     "case": case,
@@ -392,14 +426,7 @@ async def acquisition(
                     "sent_frames": len(sent),
                 }
             finally:
-                # Stop this exact child only. The open source is released after stop.
-                if process.returncode is None:
-                    process.send_signal(signal.SIGINT)
-                    try:
-                        await asyncio.wait_for(process.wait(), 12)
-                    except TimeoutError:
-                        process.kill()
-                        await process.wait()
+                await stop_process(process)
                 closed.set()
                 await reader
                 await sampler

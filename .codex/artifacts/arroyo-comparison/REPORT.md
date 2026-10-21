@@ -196,9 +196,12 @@ query、原始 stdout、完整 expected/arrivals/send_times、RSS 时间序列�
 不能冒称同一个 sealed binary 的重复测量。
 
 正式采样时的精确脚本另存为 raw-data 根目录的 `measure-measured.py`，其 SHA-256 与
-`results/identity.json` 完全一致。交付的 `measure.py` 随后仅把 oracle 的列表推导式
-按 Ruff 折为一行；AST 完全相同，双哈希与核对结果见 `format-provenance.json`。
-离线审计优先检查原始测量脚本，保留证据对应关系。
+`results/identity.json` 完全一致。初次交付的 `measure.py` 仅把 oracle 的列表推导式
+按 Ruff 折为一行；当时 AST 完全相同，双哈希与核对结果见 `format-provenance.json`。
+当前交付脚本又为原有复杂度门禁拆分了 `acquisition`，完整 AST 和哈希已改变；
+新旧三版哈希、展开 helper 并对齐观察器声明后的 AST 等价性及两份既有样本的离线指标比对见
+`refactor-provenance.json`。此次重构没有重新采样，以下实测命令和 40 次数据仍对应
+原始测量脚本；新脚本的哈希不替换历史身份。离线审计优先检查原始测量脚本。
 
 本次实际执行的主要命令（均从 calc-flow repository root）：
 

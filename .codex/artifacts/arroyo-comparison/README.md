@@ -29,9 +29,17 @@ send_times、RSS 时间序列及结果；根目录还包含构建日志、双方
 无需访问原机器。数据压缩包不含 native library、wheel 或 Arroyo 可执行文件。
 
 `raw-data/measure-measured.py` 是正式采样的精确脚本，哈希与采样 identity 一致。
-本目录 `measure.py` 只对原脚本的一处列表推导式做过 Ruff 换行整理，AST 相同；
-双哈希见压缩包内 `format-provenance.json`。本轮仅为 `audit.py` 增加拒绝 Python
-`-O/-OO` 的检查，防止离线复核中的断言被优化关闭；测量驱动及原始数据未改。
+初次交付的 `measure.py` 只整理过一处列表推导式的 Ruff 换行，AST 与采样脚本相同；
+双哈希见压缩包内 `format-provenance.json`。当前 `measure.py` 随后从 `acquisition`
+抽出 worker 准备、输出观察器、等待、指标计算及子进程停止函数，以通过原有复杂度门禁。
+`refactor-provenance.json` 单独记录采样版、初次交付版和重构版的哈希及定向等价性证据：
+展开 helper 并对齐观察器的状态与闭包声明后，采集流程的 AST、观察器函数体及其余
+原函数均与采样版一致；无状态和窗口各一份既有样本的指标精确相同。
+当前完整脚本的 AST 和哈希已改变，未用于原 40 次采样；
+采样身份、原始脚本和数据包保持原样，新采样仍由 controller 记录实际脚本哈希。
+
+`audit.py` 拒绝 Python `-O/-OO`，防止离线复核中的断言被优化关闭；审计仍优先使用
+数据包内的原始采样脚本核对历史身份。
 
 ## 离线复核
 
