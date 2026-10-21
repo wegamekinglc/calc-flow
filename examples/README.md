@@ -215,6 +215,35 @@ external services and are included in the default example runner.
   then `total=6`. The default runs both and checks their final result.
   Guide: [SQL stream boundaries](../docs/streaming-guide.md#stream-ownership-and-sql-boundaries).
 
+- [30_streaming_stock_positions.py](30_streaming_stock_positions.py) — filter
+  real trades, sign buy/sell quantities, then use SQL `GROUP BY account, stock`
+  and `SUM(delta)` with the streaming engine's native incremental state.
+  Prints only the final Arrow position table and total elapsed
+  seconds, with no Python position cache or row conversion. Timing includes
+  data preparation, execution, and cleanup. Defaults to 10,000,000 business-flow
+  rows, 100 accounts, 100 stocks, and 1,000 rows per batch with no batch sleep.
+  An Arrow template
+  feeds batches lazily; 10,000 zero-quantity initialization rows are additional
+  and also batched by 1,000.
+  Override `--rows`, `--accounts`, `--stocks`, and `--batch-size` for smaller
+  runs. No external service is needed.
+  Guide and input fields: [stock account positions](../docs/streaming-guide.md#stock-account-positions).
+
+- [31_streaming_account_market_values.py](31_streaming_account_market_values.py)
+  — consume trade and quote streams through one owning streaming Program.
+  Keep cumulative account/stock positions and the price with the latest quote
+  timestamp, then join the final Arrow snapshots and sum position times price
+  per account after both streams finish. Defaults to 10,000,000 business-flow
+  rows, 100 accounts, 100 stocks, and 10,000 quotes. Both streams use batches
+  of 1,000 rows with no sleep; 10,000 zero-position seed rows are additional.
+  The trade generator is shared with example 30 in
+  [stock_account_data.py](stock_account_data.py).
+  Prints only the final account-value table and total elapsed seconds,
+  including data preparation, stream cleanup, and the final SQL query.
+  Override `--rows`, `--accounts`, `--stocks`, `--batch-size`, and `--quote-rows`
+  for smaller runs. No external service is needed.
+  Guide and execution boundaries: [account market values](../docs/streaming-guide.md#account-market-values).
+
 The explicitly registered [symbolic_event_window.py](symbolic_event_window.py)
 example computes grouped one-minute trade count, volume, low, high, and
 arithmetic average price. It checks native final output with explicit source

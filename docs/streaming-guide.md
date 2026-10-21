@@ -18,6 +18,8 @@ On this page:
 - [Choose batch or stream](#choose-batch-or-stream)
 - [First Python continuous job](#first-python-continuous-job)
 - [Named streaming outputs](#named-streaming-outputs)
+- [Stock account positions](#stock-account-positions)
+- [Account market values](#account-market-values)
 - [Materialized Arrow inputs](#materialized-arrow-inputs)
 - [Route late rows](#route-late-rows)
 - [Stream ownership and SQL boundaries](#stream-ownership-and-sql-boundaries)
@@ -178,6 +180,107 @@ The stream preserves each output's order without promising a total order
 between independent outputs or synchronized dictionaries across branches.
 The example accumulates values for verification; that is not required by the
 stream interface.
+
+## Stock account positions
+
+[30_streaming_stock_positions.py](../examples/30_streaming_stock_positions.py)
+composes `filter` for real trades, a signed quantity projection, and SQL
+`GROUP BY account, stock` with `SUM(delta)` in a streaming `Program`.
+
+Run it from the repository root:
+
+```bash
+uv run --no-sync python examples/30_streaming_stock_positions.py
+```
+
+The defaults are 10,000,000 business-flow rows, 100 accounts, 100 stocks, and
+1,000 rows per batch. There is no sleep between batches and no fixed execution
+deadline. Override `--rows`, `--accounts`, `--stocks`, or `--batch-size` for a
+smaller run, for example:
+
+```bash
+uv run --no-sync python examples/30_streaming_stock_positions.py --rows 80 --accounts 2 --stocks 2 --batch-size 4
+```
+
+The native runtime updates per-group accumulators with newly arrived rows
+and emits full current-position snapshots. Signing quantities before the SQL
+stage leaves a plain grouped Int64 `SUM(delta)`, which uses the native
+incremental aggregate path. Python receives Arrow tables directly;
+there is no Python position cache, row loop, timestamp, or watermark adapter.
+Each output is a full snapshot, including unchanged groups and positions that
+return to zero.
+
+The six input columns are `account` (account name), `stock` (stock name),
+`quantity` (nonnegative Int64 shares), `side` (`"buy"` or `"sell"`), `price`
+(Float64), and `flow_type` (`"trade"` for real executions; other types are
+filtered out). The demo uses valid non-null rows. Prices do not enter the
+position calculation. Replace `trade_batches` with your async Arrow source.
+
+Initialization supplies one zero-quantity seed per configured account/stock
+pair, tagged `"trade"` only to pass through the same filter. These are
+initialization rows, not broker executions. With the defaults, 10,000 seeds
+arrive in ten batches before the 10,000 business-flow batches, all of size
+1,000. The ten million business rows exclude these seeds. Once initialized,
+all 10,000 account/stock pairs are visible at zero.
+
+The lazy feed slices a reusable Arrow template rather than allocating ten
+million rows at once. It deterministically covers every account/stock pair,
+with 200-share buys, 100-share sells, and 80% real trades, 10% orders, and 10%
+cancellations per complete template.
+
+The example consumes every native snapshot and prints only the final position
+table, followed by `total elapsed: ... s`. Timing covers data preparation,
+plan construction, execution, and cleanup, excluding final console rendering.
+
+This example disables checkpointing and resets to zero on each invocation.
+It counts every real-trade row once per arrival, so upstream redelivery would
+be counted again. Use explicit replayable source bindings and stable managed
+checkpoints when positions must survive process restarts; see
+[checkpoints and recovery](#checkpoints-and-recovery).
+
+## Account market values
+
+[31_streaming_account_market_values.py](../examples/31_streaming_account_market_values.py)
+adds an independent quote stream to the stock-position calculation:
+
+```bash
+uv run --no-sync python examples/31_streaming_account_market_values.py
+```
+
+Defaults are 10,000,000 business-flow rows, 100 accounts, 100 stocks, and
+10,000 quotes (100 updates per stock). Both streams use batches of 1,000
+rows with no sleep. The trade stream additionally starts with 10,000
+zero-position seed rows, also batched by 1,000. Trade data comes from the
+same lazy Arrow generator as the position example. For a smaller run:
+
+```bash
+uv run --no-sync python examples/31_streaming_account_market_values.py --rows 10000 --accounts 10 --stocks 10 --batch-size 1000 --quote-rows 1000
+```
+
+The trade stream uses the same six business fields and real-execution filter
+as the position example. The quote stream has `stock` (String), `latest_price`
+(Float64), and `timestamp` (`timestamp[us, UTC]`). Quote timestamps identify a
+unique update per stock. The example deliberately delivers older quotes
+after newer ones; `LAST_VALUE(latest_price ORDER BY timestamp)` selects the
+price at the greatest timestamp rather than the last arrival.
+
+One owning streaming `Program` drains two named outputs: cumulative positions
+and latest quotes. Python retains only the final Arrow snapshot of each
+output. Once both streams finish, a native SQL query joins those snapshots on
+stock and calculates `SUM(position * latest_price)` per account. The current
+streaming SQL surface accepts one input alias, so this final two-input join
+runs as a finite `collect_async` query. Results are available after both
+streams end. Ordered `LAST_VALUE` currently follows the retained-input SQL
+path and keeps quote history; this demo uses finite quote inputs. The position
+branch uses the compact incremental grouped sum.
+
+The output has one row per known account, with `account` and `market_value`.
+Zero-quantity seeds retain accounts without executions. Quotes cover every
+stock in the position table. Every position contributes its quantity times
+the latest price, including zero positions. The default run produces 100
+account rows. Execution prints only the final table and total elapsed time,
+including data preparation, both streams, awaited cleanup, and the final
+valuation query.
 
 ## Route late rows
 
@@ -524,14 +627,21 @@ input batch; schema mismatches and oversized batches fail with the input name.
 This does not bound tables that application code accumulates after reading them.
 
 A streaming SQL stage supports exactly one alias. Ordinary aggregates and
-`GROUP BY` retain input and emit a full cumulative result after each batch.
+`GROUP BY` emit a full cumulative result after each batch.
 For example, `SELECT SUM(value) AS total FROM input` emits `1` after `[1]` and
 `6` after `[2, 3]`; grouped snapshots include every current group, including
-unchanged ones. Each batch reruns the query over retained input, and the state
-is checkpointed. There is no fixed SQL state cap by default. Supply
+unchanged ones. Eligible aggregate queries use native incremental accumulators
+and update them with only the new input rows, without retaining historical
+input batches. For example, the plain grouped Int64 `SUM(delta)` in
+[stock account positions](#stock-account-positions) follows this path.
+Full snapshots still materialize all current groups. Queries outside the
+supported native shapes retain input and rerun over it; their memory,
+checkpoint size, and query cost can grow with stream length. State is
+checkpointed when checkpointing is enabled. There is no fixed SQL state cap
+by default. Supply
 `StreamRuntimeConfig(sql_state_budget=StateBudget(20_000_000, 8 << 30))`
-to enforce application limits; retained memory, checkpoint size, and query
-cost grow with stream length.
+to enforce application limits. The budget's cumulative input row/byte
+accounting also applies when native compact state is selected.
 Other SQL remains batch-local. `ORDER BY` and `LIMIT` apply to each snapshot;
 SQL window functions alone remain batch-local. Downstream stages receive each
 snapshot as new rows. Multi-alias SQL is a batch operation. Use native `ts`
