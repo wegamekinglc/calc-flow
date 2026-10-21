@@ -1,0 +1,49 @@
+{
+  "crate": "pgwire-replication",
+  "version": "0.4.0",
+  "registry": "registry+https://github.com/rust-lang/crates.io-index",
+  "crate_sha256": "62dd737cbc9ef6eb7d0702a80b5a53ca974088a4edf04da40bc2b946747ca810",
+  "upstream_git_commit": "aab0e51fea14dc5ba291bc3a9de9247be36a2209",
+  "rust_sources_sha256": {
+    "src/auth/mod.rs": "9b3c6bfefaa78972f95f2719b506a3f08318a2c3fc29c5b48b5f9d40cee1f73d",
+    "src/auth/scram.rs": "b7c8d3c9e67cfe71c80d328a33da8f7b0f508218ed505723b0760adb0e7f92e7",
+    "src/client/metrics.rs": "036d33d992f837fe9f101289d339d805a78ec102018c05444e7dc698eff3f4d1",
+    "src/client/mod.rs": "2f6f1fa0816a420077bc2abfeb43cc400c9b59861f1c547d4785e43d3e130c62",
+    "src/client/tokio_client.rs": "d82a7a7948f7d305e6f58b27407e51af1d39a36921b66ac82afd4e45324a7e42",
+    "src/client/worker.rs": "a974fc27dede6875977bcc79d0a42068f1f71b28740c7524a42eb9fe250862c8",
+    "src/config.rs": "8c3bb90a0b802a05bbec39b32f92438ffd4fbdadcaea7dde186d97f537a830b4",
+    "src/error.rs": "2d88adf06f1201a90a9407f69029521a00c484245965971522f9ca1e796d79d7",
+    "src/lib.rs": "8232c52d2940ca2a17310340af9467db9789b9f1746bd2fe358f9466c3a9e501",
+    "src/lsn.rs": "6a34181bb33f56500c9803df7f7c0562523a51f873168f5007ab947b2ff4290b",
+    "src/protocol/framing.rs": "98a10f7a3cb4441cfecdddf8f85e4c52f3aa1b3b9a7d34d726fd66924a8f67c1",
+    "src/protocol/messages.rs": "828535b705823709e4ca25153ce520f4d0bde454835421824d1ee5f3cbb29da9",
+    "src/protocol/mod.rs": "3203c4365b335815c0206ae5477b67b3029d2a125d557c850aae257f8dfa0dd9",
+    "src/protocol/replication.rs": "e1f960f063d98ec773f7e75c3e12a50071395b1aaabafe7fa0f0764dddf42c35",
+    "src/tls/mod.rs": "fdee491f68bfb2dc2ef050fee0d1413c9c92dcb3adcdaca90fdc719e8f177589",
+    "src/tls/rustls.rs": "b1f141e123565f713e27d883471b31b0a35d4d9f644f76eaa318618ffe7aa247"
+  },
+  "changes": [
+    "Executable Rust source unchanged; only trailing whitespace in one rustdoc comment removed.",
+    "webpki-roots dependency 0.26 -> =1.0.10.",
+    "Library-only manifest; examples, benches and development dependencies omitted.",
+    "Manifest/readme trailing whitespace and blank EOF lines normalized."
+  ],
+  "upstream_rust_sources_sha256": {
+    "src/auth/mod.rs": "9b3c6bfefaa78972f95f2719b506a3f08318a2c3fc29c5b48b5f9d40cee1f73d",
+    "src/auth/scram.rs": "b7c8d3c9e67cfe71c80d328a33da8f7b0f508218ed505723b0760adb0e7f92e7",
+    "src/client/metrics.rs": "036d33d992f837fe9f101289d339d805a78ec102018c05444e7dc698eff3f4d1",
+    "src/client/mod.rs": "2f6f1fa0816a420077bc2abfeb43cc400c9b59861f1c547d4785e43d3e130c62",
+    "src/client/tokio_client.rs": "d82a7a7948f7d305e6f58b27407e51af1d39a36921b66ac82afd4e45324a7e42",
+    "src/client/worker.rs": "a974fc27dede6875977bcc79d0a42068f1f71b28740c7524a42eb9fe250862c8",
+    "src/config.rs": "8c3bb90a0b802a05bbec39b32f92438ffd4fbdadcaea7dde186d97f537a830b4",
+    "src/error.rs": "2d88adf06f1201a90a9407f69029521a00c484245965971522f9ca1e796d79d7",
+    "src/lib.rs": "b26712fc555722498be89171e2e131488eccc02234fded9e6c9d3795f6070557",
+    "src/lsn.rs": "6a34181bb33f56500c9803df7f7c0562523a51f873168f5007ab947b2ff4290b",
+    "src/protocol/framing.rs": "98a10f7a3cb4441cfecdddf8f85e4c52f3aa1b3b9a7d34d726fd66924a8f67c1",
+    "src/protocol/messages.rs": "828535b705823709e4ca25153ce520f4d0bde454835421824d1ee5f3cbb29da9",
+    "src/protocol/mod.rs": "3203c4365b335815c0206ae5477b67b3029d2a125d557c850aae257f8dfa0dd9",
+    "src/protocol/replication.rs": "e1f960f063d98ec773f7e75c3e12a50071395b1aaabafe7fa0f0764dddf42c35",
+    "src/tls/mod.rs": "fdee491f68bfb2dc2ef050fee0d1413c9c92dcb3adcdaca90fdc719e8f177589",
+    "src/tls/rustls.rs": "b1f141e123565f713e27d883471b31b0a35d4d9f644f76eaa318618ffe7aa247"
+  }
+}

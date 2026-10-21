@@ -1,0 +1,24 @@
+{
+  "kind": "untimed-equivalent-function-extraction",
+  "base_commit": "ac8da003d08e7e10da635302bdcaa1a023967aec",
+  "base_adapter_sha256": "d5c6a4b2ef9911d6abbac1128927505458afb6893ee7454aa4556ba4cade180e",
+  "adapter_sha256": "e977b6e3683c437060429298d4f1e91f3e1b040d8972e84fae27971b6ded826e",
+  "harness_sha256": "8e79773e6148894810e911778bb34e952683ee0822efe5419028551290dff0f6",
+  "historical_measurement_harnesses": {
+    "initial": "9f630e4ab28f4528fc33c26032f41695d804e799998d24a46860572395f9c18d",
+    "completion": "0fdbb51133114dce1a6131cc37f0d169bee5d75c8e170eef74b72e4f3dc29c61",
+    "remaining": "0fdbb51133114dce1a6131cc37f0d169bee5d75c8e170eef74b72e4f3dc29c61"
+  },
+  "historical_results_sha256": "aa5a4e443cc02386267864c08ab0cc997cfd146f12b149b4a96f33ff56fdc1e0",
+  "extracted_statements_ast_equal": true,
+  "other_module_statements_ast_equal": true,
+  "collect_to_arrow_wrapper_and_sample_timer_ast_equal": true,
+  "unoptimized_plan_sha256": {
+    "average": "37aa8f1ab02295376f47fba1d58451c6acc31e6eafa155d37e4b328cb4efd2ad",
+    "argmax64": "ed1c37852900999ef45e7e1c980e7641595d5d6dae03c15fbf5088d52c59b971",
+    "argmax256": "625235cc05a21acf95aa066eb13d80085c6bd7b55e3f3901ca23c5a125282f18",
+    "unique64": "f293efc7187ce491dc4f5ef8e98d44264e43fb977021e244249bf0fc29e11c4c"
+  },
+  "historical_evidence_bytes_unchanged": true,
+  "remeasured": false
+}

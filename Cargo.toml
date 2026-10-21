@@ -1,7 +1,11 @@
 [workspace]
 members = ["crates/calc-flow", "crates/calc-flow-connectors", "crates/calc-flow-python"]
-exclude = ["vendor/pgwire-replication", "vendor/tokio-tungstenite"]
+exclude = ["vendor/pgwire-replication"]
 resolver = "3"
+
+[patch.crates-io]
+# Registry 0.4.0 protocol implementation; roots v1 backport (see vendor note).
+pgwire-replication = { path = "vendor/pgwire-replication" }
 
 [workspace.package]
 version = "2026.10.21"
@@ -51,9 +55,3 @@ must_use_candidate = "allow"
 [profile.release]
 lto = "thin"
 codegen-units = 1
-
-# Preserve the transport APIs while migrating their root bundle to the patched
-# major version. See vendor/README.md for upstream provenance and removal.
-[patch.crates-io]
-pgwire-replication = { path = "vendor/pgwire-replication" }
-tokio-tungstenite = { path = "vendor/tokio-tungstenite" }

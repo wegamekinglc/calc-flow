@@ -1,0 +1,31 @@
+{
+  "inventory_expected": 84,
+  "cases": 84,
+  "artifact_integrity_valid": true,
+  "inventory_complete": true,
+  "unmeasured": [],
+  "by_backend": {
+    "polars": 42,
+    "polars-1t": 42
+  },
+  "by_cohort": {
+    "initial": 49,
+    "completion": 32,
+    "remaining": 3
+  },
+  "measured_checks": 1680,
+  "warmup_checks": 168,
+  "previous_accepted_cases_reused": 81,
+  "previous_accepted_results_sha256": "15bc3eac166dd1d4e0db68eb845a8c48bbeea135a8c4afa18d0fbeca0f7862f1",
+  "max_abs_error": 0.0,
+  "elapsed_seconds": 2119.13601961502,
+  "results_sha256": "aa5a4e443cc02386267864c08ab0cc997cfd146f12b149b4a96f33ff56fdc1e0",
+  "validator_sha256": "7df7e01f6bd62f12fa9677afed1d40c7216799a49a106b20ad3532beca76012a",
+  "retained_plan_sha256": {
+    "average": "37aa8f1ab02295376f47fba1d58451c6acc31e6eafa155d37e4b328cb4efd2ad",
+    "unique64": "f293efc7187ce491dc4f5ef8e98d44264e43fb977021e244249bf0fc29e11c4c",
+    "cs_mean": "530255eac4ce7217275ade67c751f1731d6a6c61e3a97887ac46aaa6adf2f674",
+    "window_sum": "e436e28c942c2716ab5e4d2262b453baead19856c26779ff55e89e498a77118c"
+  },
+  "python_executable": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-389-61b4dc82f747/workdir/calc-flow/target/benchmark-venv/bin/python"
+}
