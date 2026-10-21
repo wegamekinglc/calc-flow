@@ -34,6 +34,7 @@ from psycopg import sql
 import calc_flow as cf
 from benchmarks.warm_stream import _InteractiveSource, _QueueSink
 from calc_flow import window
+from scripts.risingwave_isolation import network_isolation
 from scripts.toolkit import sha256_file, wheel_native_sha256
 
 BASE = datetime(2026, 1, 1, tzinfo=UTC)
@@ -310,6 +311,7 @@ class RisingWave:
         self.starts = 0
 
     async def start(self):
+        network_isolation()
         self.starts += 1
         self.log = (self.output / f"risingwave-{self.starts}.log").open("wb")
         env = dict(
@@ -913,6 +915,7 @@ async def provenance(args) -> dict:
             "risingwave": "local persistent single_node; INSERT + FLUSH + SELECT",
         },
         "verdict": "descriptive only; unequal durability/serving; no engine ranking",
+        "network_isolation": network_isolation(),
     }
 
 
@@ -1076,6 +1079,7 @@ def main():
     parser.add_argument("--reuse", type=Path)
     parser.add_argument("--budget-seconds", type=int, default=600)
     args = parser.parse_args()
+    network_isolation()
     require(0 < args.budget_seconds <= 600, "budget must be within 1..600 seconds")
     args.risingwave = args.risingwave.resolve()
     # Identical process CPU/address-space ceilings; RSS is observed, not capped.

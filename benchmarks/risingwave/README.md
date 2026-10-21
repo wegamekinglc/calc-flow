@@ -193,13 +193,46 @@ RW 小批投影则是 57.213→68.372 ms。存在明显轮间漂移；进程/缓
 关闭豁免检查仍为 1 条；没有忽略其他规则或整个文件。
 
 历史结果仍归属原始脚本与构建身份，不改写 `results/`，也不把修复后的脚本标成一次新实测。
-离线复核确认 15 个计时/执行方法 AST 不变、8 个模拟场景轮次的 SQL/数据/AB-BA/清理调用轨迹一致，
+`890b7539` 的离线复核确认 15 个计时/执行方法 AST 不变、8 个模拟场景轮次的 SQL/数据/AB-BA/清理调用轨迹一致，
 以及完整 64000 行 INSERT 的逐字节一致；模拟轨迹不产生新的性能样本。
 原 160 个正式样本和 32 个 warmup 的输入/oracle/汇总复核通过，因此没有重跑引擎。
 新增 8 个定向测试覆盖非法名称/数值、NULL/窗口边界、统计、失败与取消清理，以及不依赖 PATH 的元数据读取。
 本地 Bandit 与 Semgrep 无标注；线上 Codacy 状态需以修复提交的检查为准。
 细项见 [静态修复与等价性证据](codacy-verification.json)。原有 `--reuse` 的严格 AST 校验保持不变，
 不会自动接受跨脚本版本的采集记录。
+
+## 管理端口隔离与退出验证
+
+固定 RW 源码会[覆盖 Dashboard 为 `0.0.0.0:5691`][rw-single]，SQL frontend 的 loopback
+参数不能限制它。复现入口现通过 `isolate.sh` 使用 bubblewrap 创建私有网络和 PID 命名空间，
+只保留 loopback，删除全部 capabilities，以 PID reaper 和 `--die-with-parent` 约束子进程生命周期。
+启动前逐项检查命名空间不同于外层、只有 `lo`、完整 capability 集合为零及 reaper 存在；
+缺少 bubblewrap、命名空间支持或任一条件时直接失败。直接在宿主网络调用 `RisingWave.start()`
+也会在创建日志和进程前被拒绝，不依赖会被 RW 覆盖的 Dashboard 配置。
+隔离依据见 [Linux 网络命名空间][netns]、[PID 命名空间退出语义][pidns]及 [bubblewrap][bwrap]。
+
+本机 bubblewrap 0.11.1 的定向实测确认，管理路由在隔离内返回 HTTP 200，
+实际监听包含 Dashboard `0.0.0.0:5691` 及其他 RW 端口；宿主监听表没有 Dashboard，
+对宿主 IPv4/IPv6 loopback 和网卡地址的连接均未成功。命名空间仅有 `lo`，无 veth、
+端口转发或到宿主外部的接口；这使 wildcard 监听限于该私有网络。未使用独立远端机器探测。
+正常退出、注入异常、SIGKILL 采集器及 SIGKILL 启动器四种路径，均确认受控 PID 不再存活；
+随后复核全部 PID 已消失。禁用嵌套 user namespace 时启动返回 ENOSPC，目标命令未执行。
+原始监听、连接尝试、进程身份、退出状态和资源探针见 [隔离验证证据](isolation-verification.json)。
+
+本次没有新增性能样本：两个 SQL 端点仍位于同一个命名空间，经直接 TCP loopback 通信，
+没有增加代理或转发。14 个计时/执行方法与 `aca2a5e9` 的 AST 一致，`RisingWave.start()`
+仅增加计时前的隔离检查；CPU affinity、16 GiB 地址空间上限、cgroup 及 Python + RW 的
+CPU/I/O/RSS 采样口径保持相同，实际资源读取通过。历史 160 正式 / 32 warmup 仍归属原采集，
+不把它们改称隔离后的实测；复用 reviewer 已核对的数据及统计，不据此推断隔离前后性能等价。
+
+安全探针从仓库根目录运行，限时 180 秒，不产生基准样本：
+
+```bash
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 ARROW_NUM_THREADS=4 TOKIO_WORKER_THREADS=4 \
+  python -m scripts.verify_risingwave_isolation \
+  --risingwave <固定的 RW 二进制> --python312-lib <Python 3.12 LIBDIR> \
+  --output <新的证据目录>
+```
 
 ## 证据、失败与复现
 
@@ -220,7 +253,8 @@ RW 小批投影则是 57.213→68.372 ms。存在明显轮间漂移；进程/缓
 不完整轮次、早期 cursor/SQL serializer/启动就绪问题及失败的窗口 warmup 均不进入最终统计。
 
 从仓库根目录执行 `bash benchmarks/risingwave/reproduce.sh`，需要 Linux x86_64、`uv`、
-可读取原仓库 Actions artifact 的 `gh` 凭据，且本地端口 14566/5690/5688/6660/5691 空闲。
+可读取原仓库 Actions artifact 的 `gh` 凭据、`/usr/bin/bwrap` 和非特权 user/network/PID
+命名空间支持。RW 端口属于新建的私有网络，不占用宿主端口。
 脚本创建独立 `target/risingwave-reproduction/` 环境，校验原 wheel 和 RW 包 hash，
 同步启动、检查、停止其子进程。结果目录已存在会拒绝覆盖，请另选输出目录或保留旧证据后自行整理。
 依赖见 `requirements.lock`；工作负载入口是 `python -m scripts.risingwave_comparison --help`。
@@ -247,3 +281,6 @@ RW 小批投影则是 57.213→68.372 ms。存在明显轮间漂移；进程/缓
 [rw-compactor]: https://github.com/risingwavelabs/risingwave/blob/45baf6460ea942e4ff57a5aa057d5b8db7f3b563/src/storage/compactor/src/server.rs
 [rw-premium]: https://docs.risingwave.com/get-started/premium-features
 [asyncio-audit-rule]: https://github.com/semgrep/semgrep-rules/blob/17e31e11ebac99fb7dfe1cd288f7a32151b6f3f9/python/lang/security/audit/dangerous-asyncio-create-exec-audit.yaml
+[netns]: https://man7.org/linux/man-pages/man7/network_namespaces.7.html
+[pidns]: https://man7.org/linux/man-pages/man7/pid_namespaces.7.html
+[bwrap]: https://github.com/containers/bubblewrap/blob/v0.11.1/README.md

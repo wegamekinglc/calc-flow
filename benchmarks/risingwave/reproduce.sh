@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Requires Linux x86_64, uv, gh authentication and unoccupied single_node ports.
+# Requires Linux x86_64, uv, gh authentication and bubblewrap/user namespaces.
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.."
 
@@ -54,6 +54,7 @@ uv pip install --python "$comparison_root/venv/bin/python" \
 "$comparison_root/venv/bin/ruff" format --check scripts/risingwave_comparison.py
 
 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 ARROW_NUM_THREADS=4 TOKIO_WORKER_THREADS=4 \
+  bash benchmarks/risingwave/isolate.sh \
   "$comparison_root/venv/bin/python" -m scripts.risingwave_comparison \
   --risingwave "$comparison_root/tools/risingwave" \
   --python312-lib "$comparison_python_lib" \

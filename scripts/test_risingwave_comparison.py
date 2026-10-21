@@ -87,6 +87,23 @@ class ComparisonInputTests(unittest.TestCase):
 
 
 class CollectionLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_start_refuses_host_network_before_spawning(self):
+        with TemporaryDirectory() as directory:
+            args = SimpleNamespace(
+                risingwave=Path("/must-not-execute"), python312_lib=Path("/unused")
+            )
+            with (
+                patch.object(
+                    comparison.asyncio,
+                    "create_subprocess_exec",
+                    AsyncMock(return_value=SimpleNamespace(returncode=1)),
+                ) as spawn,
+                self.assertRaisesRegex(RuntimeError, "isolation"),
+            ):
+                await comparison.RisingWave(args, Path(directory)).start()
+            spawn.assert_not_awaited()
+            self.assertEqual(list(Path(directory).iterdir()), [])
+
     async def _failed_collection(self, directory: Path, error: BaseException):
         async def records(*_):
             yield {"case": "projection_640", "samples": []}, False
