@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "source": "DAL-417 original evidence; copied without resampling",
+  "files": {
+    "DAL-417-raw-data.tar.gz": {
+      "bytes": 6713650,
+      "sha256": "c8bf1ea160b16f54bf0744f6ca1383a10017107630b0cd63aaf95a816b318cfc"
+    },
+    "audit.json": {
+      "bytes": 1504,
+      "sha256": "c5bad1b431477226219f8bbd2a3379d21b7a4681510a6b76e5971670c43371ee"
+    },
+    "identity.json": {
+      "bytes": 1146,
+      "sha256": "f4e402d0377e194717d7b19d7d50c2d5d781d5afe1b1efcab26745adfa964ecb"
+    },
+    "samples.json": {
+      "bytes": 34383,
+      "sha256": "7937801b94d1972514c1ccb302b5912aea181870dabc54a71721318810e2afe5"
+    },
+    "summary.json": {
+      "bytes": 7985,
+      "sha256": "b0acf2012c36451d3bdb919f165b1c3e6cb804e8853ee924818e5f798f32feb4"
+    }
+  }
+}

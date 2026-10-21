@@ -1,0 +1,23 @@
+{
+  "calc_flow_commit": "dab98a559314bd46d866ed7a6489abcdd3810afe",
+  "arroyo_commit": "4ef15f6336a596651f10cf27c1ee29c29bf81577",
+  "arroyo_binary_sha256": "558b28b4c2aa3153500308684fd121dea2f040b5599d9f3342830834c24a319f",
+  "harness_sha256": "3eda6a69c32fee0b12b799d9d3a46be4a920cf8bdc398e7265a12b3bcd9b171e",
+  "python": "3.13.9 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 19:16:10) [GCC 11.2.0]",
+  "platform": "Linux-5.15.167.4-microsoft-standard-WSL2-x86_64-with-glibc2.43",
+  "cpus": "4-7",
+  "rows": 32768,
+  "pairs": 5,
+  "budget_s": 600.0,
+  "contract": "cross-engine-live-integration-v1-informational",
+  "created_utc": "2026-10-21T18:09:49.940371+00:00",
+  "native_sha256": "b9e63aef83465ba675ff96c449729f3d474abeac7abbec65af6f21ab12c8f267",
+  "native_path": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-417-34c29c5ad70b/workdir/calc-flow/target/arroyo-comparison/venv/lib/python3.13/site-packages/calc_flow/_native.cpython-313-x86_64-linux-gnu.so",
+  "dependencies": {
+    "calc-flow-python": "2026.10.21",
+    "pyarrow": "24.0.0",
+    "numpy": "2.5.4",
+    "psutil": "7.2.2",
+    "websockets": "15.0.1"
+  }
+}
