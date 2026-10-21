@@ -1,0 +1,97 @@
+{
+  "contract": "dal416-application-boundary-v1",
+  "utc": "2026-10-21T17:59:13.610710+00:00",
+  "calc_flow_commit": "dab98a559314bd46d866ed7a6489abcdd3810afe",
+  "risingwave_commit": "45baf6460ea942e4ff57a5aa057d5b8db7f3b563",
+  "ci_run_url": "https://github.com/wegamekinglc/calc-flow/actions/runs/39640281625",
+  "wheel": "calc_flow_python-2026.10.21-cp313-abi3-linux_x86_64.whl",
+  "wheel_sha256": "1f5d7fe8e57e2a118856857d6d961301e94a3d1865392c592e26a7922cb6c695",
+  "native_sha256": "30d227722aeeeeeaba7642b41ce9d4581f145832af069a1bfda4c85285013a0c",
+  "native_import": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-416-b32d8f7660a1/workdir/calc-flow/target/risingwave-comparison/venv/lib/python3.13/site-packages/calc_flow/_native.abi3.so",
+  "rw_binary_sha256": "afc76fa6509906ef35e910695830a692f9f03044f0c166e7b5d0275b6a744a20",
+  "python": "3.13.9 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 19:16:10) [GCC 11.2.0]",
+  "kernel": "Linux-5.15.167.4-microsoft-standard-WSL2-x86_64-with-glibc2.43",
+  "argv": [
+    "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-416-b32d8f7660a1/workdir/calc-flow/scripts/risingwave_comparison.py",
+    "--risingwave",
+    "target/risingwave-comparison/tools/risingwave",
+    "--python312-lib",
+    "/home/wegamekinglc/.local/share/uv/python/cpython-3.12-linux-x86_64-gnu/lib",
+    "--wheel",
+    "target/risingwave-comparison/ci-wheel/calc_flow_python-2026.10.21-cp313-abi3-linux_x86_64.whl",
+    "--ci-run",
+    "target/risingwave-comparison/ci-run.json",
+    "--output",
+    "target/risingwave-comparison/run-11",
+    "--reuse",
+    "target/risingwave-comparison/run-9",
+    "--budget-seconds",
+    "150"
+  ],
+  "cpu_affinity": [
+    0,
+    1,
+    2,
+    3
+  ],
+  "address_space_limit": [
+    17179869184,
+    17179869184
+  ],
+  "ram": {
+    "total": 33453572096,
+    "available": 27292975104,
+    "percent": 18.4,
+    "used": 6160596992,
+    "free": 19258355712,
+    "active": 5811003392,
+    "inactive": 7051960320,
+    "buffers": 764534784,
+    "cached": 8995913728,
+    "shared": 1255153664,
+    "slab": 693305344
+  },
+  "load_average": [
+    5.42529296875,
+    4.2724609375,
+    3.91357421875
+  ],
+  "lscpu": "Architecture:                         x86_64\nCPU op-mode(s):                       32-bit, 64-bit\nAddress sizes:                        39 bits physical, 48 bits virtual\nByte Order:                           Little Endian\nCPU(s):                               32\nOn-line CPU(s) list:                  0-31\nVendor ID:                            GenuineIntel\nModel name:                           13th Gen Intel(R) Core(TM) i9-13900HX\nCPU family:                           6\nModel:                                183\nThread(s) per core:                   2\nCore(s) per socket:                   16\nSocket(s):                            1\nStepping:                             1\nBogoMIPS:                             4838.39\nFlags:                                fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch invpcid_single ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow vnmi ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize flush_l1d arch_capabilities\nVirtualization:                       VT-x\nHypervisor vendor:                    Microsoft\nVirtualization type:                  full\nL1d cache:                            768 KiB (16 instances)\nL1i cache:                            512 KiB (16 instances)\nL2 cache:                             32 MiB (16 instances)\nL3 cache:                             36 MiB (1 instance)\nVulnerability Gather data sampling:   Not affected\nVulnerability Itlb multihit:          Not affected\nVulnerability L1tf:                   Not affected\nVulnerability Mds:                    Not affected\nVulnerability Meltdown:               Not affected\nVulnerability Mmio stale data:        Not affected\nVulnerability Reg file data sampling: Vulnerable: No microcode\nVulnerability Retbleed:               Mitigation; Enhanced IBRS\nVulnerability Spec rstack overflow:   Not affected\nVulnerability Spec store bypass:      Mitigation; Speculative Store Bypass disabled via prctl and seccomp\nVulnerability Spectre v1:             Mitigation; usercopy/swapgs barriers and __user pointer sanitization\nVulnerability Spectre v2:             Mitigation; Enhanced / Automatic IBRS; IBPB conditional; RSB filling; PBRSB-eIBRS SW sequence; BHI BHI_DIS_S\nVulnerability Srbds:                  Not affected\nVulnerability Tsx async abort:        Not affected\n",
+  "packages": {
+    "calc-flow-python": "2026.10.21",
+    "numpy": "2.5.4",
+    "pyarrow": "24.0.0",
+    "psutil": "7.2.2",
+    "psycopg": "3.3.4",
+    "psycopg-binary": "3.3.4"
+  },
+  "harness_sha256": "07645e2ca3105b45111ba6b0eb2a09b8388a3e7a4e9ea7aa250b5a3765ca1e2d",
+  "warm_source_sha256": "22e67f48926dda8a0bd80391ea1bcb5ce155e8eed1b32e4fe916910bcb571e77",
+  "cases": [
+    [
+      "projection",
+      640
+    ],
+    [
+      "grouped",
+      640
+    ],
+    [
+      "grouped",
+      64000
+    ],
+    [
+      "window",
+      640
+    ]
+  ],
+  "rounds": 2,
+  "warmup_per_round": 2,
+  "measured_per_round": 10,
+  "budget_seconds": 150,
+  "durability": {
+    "calc_flow": "checkpointing=False; Arrow ordinary sink",
+    "risingwave": "local persistent single_node; INSERT + FLUSH + SELECT"
+  },
+  "verdict": "descriptive only; unequal durability/serving; no engine ranking"
+}

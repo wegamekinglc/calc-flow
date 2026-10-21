@@ -1,0 +1,10 @@
+{
+  "elapsed_seconds": 124.62654684099834,
+  "completed_cases": 8,
+  "load_average_after": [
+    2.4560546875,
+    3.25390625,
+    3.56640625
+  ],
+  "risingwave_returncode": 0
+}

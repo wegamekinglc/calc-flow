@@ -1,0 +1,142 @@
+{
+  "rw_update_delete": {
+    "initial": [
+      [
+        0,
+        30,
+        2
+      ],
+      [
+        1,
+        null,
+        0
+      ]
+    ],
+    "after": [
+      [
+        0,
+        50,
+        1
+      ],
+      [
+        1,
+        null,
+        0
+      ]
+    ],
+    "passed": true
+  },
+  "cf_repeated_id_is_append": {
+    "snapshots": [
+      [
+        [
+          0,
+          10,
+          1
+        ]
+      ],
+      [
+        [
+          0,
+          60,
+          2
+        ]
+      ]
+    ],
+    "passed": true
+  },
+  "cf_update_sql_rejected": {
+    "type": "CompileError",
+    "message": "outputs.result.sql.schema: unsupported_type: invalid query: exactly one SELECT or CTE query is required"
+  },
+  "cf_managed_recovery": {
+    "passed": true,
+    "stdout": "recovered rolling values: [None, 10.0, 5.0, 6.666666666666667, 3.333333333333333, 5.0]\nsource cursors: [0, 3] terminal epoch: 2\n",
+    "mode": "checkpoint/cancel/new-runner/terminal-restart"
+  },
+  "rw_recovery": {
+    "passed": true,
+    "after_sigkill": [
+      [
+        0,
+        50,
+        1
+      ],
+      [
+        1,
+        null,
+        0
+      ]
+    ],
+    "resumed": [
+      [
+        0,
+        57,
+        2
+      ],
+      [
+        1,
+        null,
+        0
+      ]
+    ],
+    "mode": "FLUSH/SIGKILL/same-store/restart"
+  },
+  "window_boundary_and_late": {
+    "passed": true,
+    "cf_at_end_equality": [
+      [
+        1767225600000000,
+        1767225610000000,
+        0,
+        2,
+        1
+      ]
+    ],
+    "rw_at_end_equality": [
+      [
+        1767225600000000,
+        1767225610000000,
+        0,
+        2,
+        1
+      ]
+    ],
+    "cf_after_late": [
+      [
+        1767225610000000,
+        1767225620000000,
+        0,
+        3,
+        1
+      ]
+    ],
+    "rw_after_late": [
+      [
+        1767225600000000,
+        1767225610000000,
+        0,
+        2,
+        1
+      ],
+      [
+        1767225610000000,
+        1767225620000000,
+        0,
+        3,
+        1
+      ]
+    ],
+    "cf_eof_open_window": [
+      [
+        1767225620000000,
+        1767225630000000,
+        0,
+        null,
+        0
+      ]
+    ],
+    "late_value": 7,
+    "window": "[start,end); ts=10 belongs to [10,20)"
+  }
+}
