@@ -1,0 +1,706 @@
+{
+  "baseline": "aca2a5e97592ca6e44e3a23b06659084a89b105c",
+  "harness_sha256": "32598241a1dbdf08cf18deb68a04f8e6a023f41a9bc0e835d5ea9c86ec830231",
+  "performance_samples_collected": 0,
+  "results": [
+    {
+      "exit_code": 0,
+      "host_connect_attempts": [
+        {
+          "address": "10.255.255.254",
+          "error": "ConnectionRefusedError",
+          "port": 5691,
+          "reachable": false
+        },
+        {
+          "address": "127.0.0.1",
+          "error": "TimeoutError",
+          "port": 5691,
+          "reachable": false
+        },
+        {
+          "address": "192.168.1.16",
+          "error": "ConnectionRefusedError",
+          "port": 5691,
+          "reachable": false
+        },
+        {
+          "address": "2409:8a1e:4d31:810:e26a:abad:9214:77c0",
+          "error": "ConnectionRefusedError",
+          "port": 5691,
+          "reachable": false
+        },
+        {
+          "address": "::1",
+          "error": "ConnectionRefusedError",
+          "port": 5691,
+          "reachable": false
+        },
+        {
+          "address": "fe80::e47:cba7:3185:4757",
+          "error": "OSError",
+          "port": 5691,
+          "reachable": false
+        }
+      ],
+      "host_dashboard_listeners": [],
+      "live_children_after": [],
+      "mode": "normal",
+      "owned_processes": [
+        {
+          "created": 1792608657.05,
+          "name": "bwrap",
+          "pid": 2061819
+        },
+        {
+          "created": 1792608657.06,
+          "name": "bwrap",
+          "pid": 2061823
+        },
+        {
+          "created": 1792608657.06,
+          "name": "python",
+          "pid": 2061824
+        },
+        {
+          "created": 1792608657.34,
+          "name": "risingwave",
+          "pid": 2061827
+        }
+      ],
+      "worker": {
+        "address_space_limit": [
+          17179869184,
+          17179869184
+        ],
+        "cpu_affinity": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "dashboard_http": "HTTP/1.1 200 OK",
+        "isolation": {
+          "capabilities": {
+            "CapAmb": "0000000000000000",
+            "CapBnd": "0000000000000000",
+            "CapEff": "0000000000000000",
+            "CapInh": "0000000000000000",
+            "CapPrm": "0000000000000000"
+          },
+          "contract": "private-loopback-pid-v1",
+          "interfaces": [
+            "lo"
+          ],
+          "namespaces": {
+            "net": {
+              "current": "net:[4026532620]",
+              "parent": "net:[4026531840]"
+            },
+            "pid": {
+              "current": "pid:[4026532619]",
+              "parent": "pid:[4026532502]"
+            }
+          },
+          "pid_reaper": "bwrap"
+        },
+        "listeners": [
+          {
+            "address": "0.0.0.0",
+            "pid": 4,
+            "port": 4560
+          },
+          {
+            "address": "0.0.0.0",
+            "pid": 4,
+            "port": 6786
+          },
+          {
+            "address": "127.0.0.1",
+            "pid": 4,
+            "port": 1260
+          },
+          {
+            "address": "127.0.0.1",
+            "pid": 4,
+            "port": 14566
+          },
+          {
+            "address": "127.0.0.1",
+            "pid": 4,
+            "port": 5688
+          },
+          {
+            "address": "0.0.0.0",
+            "pid": 4,
+            "port": 5691
+          },
+          {
+            "address": "127.0.0.1",
+            "pid": 4,
+            "port": 6660
+          },
+          {
+            "address": "127.0.0.1",
+            "pid": 4,
+            "port": 5690
+          }
+        ],
+        "resource_probe": {
+          "python": {
+            "cpu_seconds": 0.25,
+            "read_bytes": 356352,
+            "rss_bytes": 114061312,
+            "threads": 3,
+            "write_bytes": 4096
+          },
+          "risingwave": {
+            "cpu_seconds": 0.21,
+            "read_bytes": 13594624,
+            "rss_bytes": 218238976,
+            "threads": 46,
+            "write_bytes": 6787072
+          }
+        },
+        "version": [
+          [
+            "PostgreSQL 13.14.0-RisingWave-3.1.0 (45baf6460ea942e4ff57a5aa057d5b8db7f3b563)"
+          ]
+        ]
+      }
+    },
+    {
+      "exit_code": 1,
+      "host_connect_attempts": [
+        {
+          "address": "10.255.255.254",
+          "error": "ConnectionRefusedError",
+          "port": 5691,
+          "reachable": false
+        },
+        {
+          "address": "127.0.0.1",
+          "error": "TimeoutError",
+          "port": 5691,
+          "reachable": false
+        },
+        {
+          "address": "192.168.1.16",
+          "error": "ConnectionRefusedError",
+          "port": 5691,
+          "reachable": false
+        },
+        {
+          "address": "2409:8a1e:4d31:810:e26a:abad:9214:77c0",
+          "error": "ConnectionRefusedError",
+          "port": 5691,
+          "reachable": false
+        },
+        {
+          "address": "::1",
+          "error": "ConnectionRefusedError",
+          "port": 5691,
+          "reachable": false
+        },
+        {
+          "address": "fe80::e47:cba7:3185:4757",
+          "error": "OSError",
+          "port": 5691,
+          "reachable": false
+        }
+      ],
+      "host_dashboard_listeners": [],
+      "live_children_after": [],
+      "mode": "exception",
+      "owned_processes": [
+        {
+          "created": 1792608666.27,
+          "name": "bwrap",
+          "pid": 2061964
+        },
+        {
+          "created": 1792608666.28,
+          "name": "bwrap",
+          "pid": 2061968
+        },
+        {
+          "created": 1792608666.28,
+          "name": "python",
+          "pid": 2061969
+        },
+        {
+          "created": 1792608666.51,
+          "name": "risingwave",
+          "pid": 2061971
+        }
+      ],
+      "worker": {
+        "address_space_limit": [
+          17179869184,
+          17179869184
+        ],
+        "cpu_affinity": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "dashboard_http": "HTTP/1.1 200 OK",
+        "isolation": {
+          "capabilities": {
+            "CapAmb": "0000000000000000",
+            "CapBnd": "0000000000000000",
+            "CapEff": "0000000000000000",
+            "CapInh": "0000000000000000",
+            "CapPrm": "0000000000000000"
+          },
+          "contract": "private-loopback-pid-v1",
+          "interfaces": [
+            "lo"
+          ],
+          "namespaces": {
+            "net": {
+              "current": "net:[4026532733]",
+              "parent": "net:[4026531840]"
+            },
+            "pid": {
+              "current": "pid:[4026532732]",
+              "parent": "pid:[4026532502]"
+            }
+          },
+          "pid_reaper": "bwrap"
+        },
+        "listeners": [
+          {
+            "address": "127.0.0.1",
+            "pid": 4,
+            "port": 14566
+          },
+          {
+            "address": "127.0.0.1",
+            "pid": 4,
+            "port": 1260
+          },
+          {
+            "address": "127.0.0.1",
+            "pid": 4,
+            "port": 6660
+          },
+          {
+            "address": "0.0.0.0",
+            "pid": 4,
+            "port": 5691
+          },
+          {
+            "address": "0.0.0.0",
+            "pid": 4,
+            "port": 6786
+          },
+          {
+            "address": "127.0.0.1",
+            "pid": 4,
+            "port": 5690
+          },
+          {
+            "address": "0.0.0.0",
+            "pid": 4,
+            "port": 4560
+          }
+        ],
+        "resource_probe": {
+          "python": {
+            "cpu_seconds": 0.24,
+            "read_bytes": 0,
+            "rss_bytes": 113565696,
+            "threads": 3,
+            "write_bytes": 4096
+          },
+          "risingwave": {
+            "cpu_seconds": 0.2,
+            "read_bytes": 8192,
+            "rss_bytes": 212213760,
+            "threads": 47,
+            "write_bytes": 6713344
+          }
+        },
+        "version": [
+          [
+            "PostgreSQL 13.14.0-RisingWave-3.1.0 (45baf6460ea942e4ff57a5aa057d5b8db7f3b563)"
+          ]
+        ]
+      }
+    },
+    {
+      "exit_code": 137,
+      "host_connect_attempts": [
+        {
+          "address": "10.255.255.254",
+          "error": "ConnectionRefusedError",
+          "port": 5691,
+          "reachable": false
+        },
+        {
+          "address": "127.0.0.1",
+          "error": "TimeoutError",
+          "port": 5691,
+          "reachable": false
+        },
+        {
+          "address": "192.168.1.16",
+          "error": "ConnectionRefusedError",
+          "port": 5691,
+          "reachable": false
+        },
+        {
+          "address": "2409:8a1e:4d31:810:e26a:abad:9214:77c0",
+          "error": "ConnectionRefusedError",
+          "port": 5691,
+          "reachable": false
+        },
+        {
+          "address": "::1",
+          "error": "ConnectionRefusedError",
+          "port": 5691,
+          "reachable": false
+        },
+        {
+          "address": "fe80::e47:cba7:3185:4757",
+          "error": "OSError",
+          "port": 5691,
+          "reachable": false
+        }
+      ],
+      "host_dashboard_listeners": [],
+      "live_children_after": [],
+      "mode": "worker-kill",
+      "owned_processes": [
+        {
+          "created": 1792608674.81,
+          "name": "bwrap",
+          "pid": 2062022
+        },
+        {
+          "created": 1792608674.82,
+          "name": "bwrap",
+          "pid": 2062026
+        },
+        {
+          "created": 1792608674.82,
+          "name": "python",
+          "pid": 2062027
+        },
+        {
+          "created": 1792608675.04,
+          "name": "risingwave",
+          "pid": 2062029
+        }
+      ],
+      "worker": {
+        "address_space_limit": [
+          17179869184,
+          17179869184
+        ],
+        "cpu_affinity": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "dashboard_http": "HTTP/1.1 200 OK",
+        "isolation": {
+          "capabilities": {
+            "CapAmb": "0000000000000000",
+            "CapBnd": "0000000000000000",
+            "CapEff": "0000000000000000",
+            "CapInh": "0000000000000000",
+            "CapPrm": "0000000000000000"
+          },
+          "contract": "private-loopback-pid-v1",
+          "interfaces": [
+            "lo"
+          ],
+          "namespaces": {
+            "net": {
+              "current": "net:[4026532622]",
+              "parent": "net:[4026531840]"
+            },
+            "pid": {
+              "current": "pid:[4026532620]",
+              "parent": "pid:[4026532502]"
+            }
+          },
+          "pid_reaper": "bwrap"
+        },
+        "listeners": [
+          {
+            "address": "0.0.0.0",
+            "pid": 4,
+            "port": 6786
+          },
+          {
+            "address": "127.0.0.1",
+            "pid": 4,
+            "port": 5690
+          },
+          {
+            "address": "127.0.0.1",
+            "pid": 4,
+            "port": 1260
+          },
+          {
+            "address": "127.0.0.1",
+            "pid": 4,
+            "port": 14566
+          },
+          {
+            "address": "0.0.0.0",
+            "pid": 4,
+            "port": 5691
+          },
+          {
+            "address": "127.0.0.1",
+            "pid": 4,
+            "port": 6660
+          }
+        ],
+        "resource_probe": {
+          "python": {
+            "cpu_seconds": 0.24,
+            "read_bytes": 0,
+            "rss_bytes": 113770496,
+            "threads": 3,
+            "write_bytes": 4096
+          },
+          "risingwave": {
+            "cpu_seconds": 0.19,
+            "read_bytes": 16384,
+            "rss_bytes": 210792448,
+            "threads": 34,
+            "write_bytes": 6701056
+          }
+        },
+        "version": [
+          [
+            "PostgreSQL 13.14.0-RisingWave-3.1.0 (45baf6460ea942e4ff57a5aa057d5b8db7f3b563)"
+          ]
+        ]
+      }
+    },
+    {
+      "exit_code": -9,
+      "host_connect_attempts": [
+        {
+          "address": "10.255.255.254",
+          "error": "ConnectionRefusedError",
+          "port": 5691,
+          "reachable": false
+        },
+        {
+          "address": "127.0.0.1",
+          "error": "TimeoutError",
+          "port": 5691,
+          "reachable": false
+        },
+        {
+          "address": "192.168.1.16",
+          "error": "ConnectionRefusedError",
+          "port": 5691,
+          "reachable": false
+        },
+        {
+          "address": "2409:8a1e:4d31:810:e26a:abad:9214:77c0",
+          "error": "ConnectionRefusedError",
+          "port": 5691,
+          "reachable": false
+        },
+        {
+          "address": "::1",
+          "error": "ConnectionRefusedError",
+          "port": 5691,
+          "reachable": false
+        },
+        {
+          "address": "fe80::e47:cba7:3185:4757",
+          "error": "OSError",
+          "port": 5691,
+          "reachable": false
+        }
+      ],
+      "host_dashboard_listeners": [],
+      "live_children_after": [],
+      "mode": "launcher-kill",
+      "owned_processes": [
+        {
+          "created": 1792608678.94,
+          "name": "bwrap",
+          "pid": 2062076
+        },
+        {
+          "created": 1792608678.95,
+          "name": "bwrap",
+          "pid": 2062080
+        },
+        {
+          "created": 1792608678.95,
+          "name": "python",
+          "pid": 2062081
+        },
+        {
+          "created": 1792608679.19,
+          "name": "risingwave",
+          "pid": 2062083
+        }
+      ],
+      "worker": {
+        "address_space_limit": [
+          17179869184,
+          17179869184
+        ],
+        "cpu_affinity": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "dashboard_http": "HTTP/1.1 200 OK",
+        "isolation": {
+          "capabilities": {
+            "CapAmb": "0000000000000000",
+            "CapBnd": "0000000000000000",
+            "CapEff": "0000000000000000",
+            "CapInh": "0000000000000000",
+            "CapPrm": "0000000000000000"
+          },
+          "contract": "private-loopback-pid-v1",
+          "interfaces": [
+            "lo"
+          ],
+          "namespaces": {
+            "net": {
+              "current": "net:[4026532733]",
+              "parent": "net:[4026531840]"
+            },
+            "pid": {
+              "current": "pid:[4026532732]",
+              "parent": "pid:[4026532502]"
+            }
+          },
+          "pid_reaper": "bwrap"
+        },
+        "listeners": [
+          {
+            "address": "0.0.0.0",
+            "pid": 4,
+            "port": 6786
+          },
+          {
+            "address": "127.0.0.1",
+            "pid": 4,
+            "port": 5688
+          },
+          {
+            "address": "127.0.0.1",
+            "pid": 4,
+            "port": 5690
+          },
+          {
+            "address": "0.0.0.0",
+            "pid": 4,
+            "port": 5691
+          },
+          {
+            "address": "127.0.0.1",
+            "pid": 4,
+            "port": 14566
+          },
+          {
+            "address": "127.0.0.1",
+            "pid": 4,
+            "port": 6660
+          },
+          {
+            "address": "0.0.0.0",
+            "pid": 4,
+            "port": 4560
+          },
+          {
+            "address": "127.0.0.1",
+            "pid": 4,
+            "port": 1260
+          }
+        ],
+        "resource_probe": {
+          "python": {
+            "cpu_seconds": 0.22999999999999998,
+            "read_bytes": 0,
+            "rss_bytes": 113790976,
+            "threads": 3,
+            "write_bytes": 4096
+          },
+          "risingwave": {
+            "cpu_seconds": 0.2,
+            "read_bytes": 8192,
+            "rss_bytes": 227942400,
+            "threads": 47,
+            "write_bytes": 6787072
+          }
+        },
+        "version": [
+          [
+            "PostgreSQL 13.14.0-RisingWave-3.1.0 (45baf6460ea942e4ff57a5aa057d5b8db7f3b563)"
+          ]
+        ]
+      }
+    }
+  ],
+  "risingwave_sha256": "afc76fa6509906ef35e910695830a692f9f03044f0c166e7b5d0275b6a744a20",
+  "wrapper_sha256": "0fe0bcbe300fb784ab6516ee77db37be58c7f261423303d07437f1fe4d5245f1",
+  "bubblewrap": "0.11.1",
+  "namespace_unavailable": {
+    "exit_code": 1,
+    "command_executed": false,
+    "stderr": "bwrap: Creating new namespace failed: nesting depth or /proc/sys/user/max_*_namespaces exceeded (ENOSPC)\n"
+  },
+  "measurement_compatibility": {
+    "baseline": "aca2a5e97592ca6e44e3a23b06659084a89b105c",
+    "harness_sha256": "32598241a1dbdf08cf18deb68a04f8e6a023f41a9bc0e835d5ea9c86ec830231",
+    "unchanged_asts": [
+      "fixture",
+      "program",
+      "normalize",
+      "process_usage",
+      "observe_peak",
+      "measured_call",
+      "CalcStream.__init__",
+      "CalcStream.start",
+      "CalcStream.append",
+      "CalcStream.close",
+      "RisingWave.__init__",
+      "RisingWave.execute",
+      "RisingWave.stop",
+      "RisingWave.append"
+    ],
+    "start_change": "only one pre-spawn network_isolation() call added",
+    "cgroup_unchanged": true,
+    "measurement_path": "same direct TCP loopback SQL; both client and engine in one private network namespace; no proxy, veth, NAT or port forwarding",
+    "resource_scope": "same Python + RW process CPU/IO/RSS sampler; same affinity 0..3 and 16 GiB address-space limit; no cgroup change; wrapper reapers excluded as existing non-engine processes were",
+    "original_results_untouched": true,
+    "performance_samples_collected": 0
+  },
+  "targeted_checks": {
+    "unittest_passed": 14,
+    "ruff": "passed",
+    "py_compile": "passed",
+    "shell_syntax": "passed",
+    "bandit_findings": 0,
+    "semgrep_findings": 0,
+    "semgrep_rules_run": 200,
+    "new_functions_maximum_ccn": 7
+  },
+  "post_exit_pid_recheck": "All recorded PIDs absent, including after launcher SIGKILL.",
+  "direct_host_launch": {
+    "exit_code": 1,
+    "output_created": false,
+    "error": "RuntimeError: RisingWave isolation requires a private net namespace"
+  }
+}

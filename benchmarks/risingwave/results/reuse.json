@@ -1,0 +1,5 @@
+{
+  "source": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-416-b32d8f7660a1/workdir/calc-flow/target/risingwave-comparison/run-11",
+  "provenance_sha256": "b5ac1ea1d62caf268515ca7020a14e78788c6d249cd90a1f874c5d4985fe36dd",
+  "reason": "untimed oracle conversion changed; timed AST equal"
+}

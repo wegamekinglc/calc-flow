@@ -1,0 +1,8 @@
+{
+  "complete_case_rounds": 8,
+  "formal_samples": 160,
+  "warmup_samples": 32,
+  "all_oracle_checks": 192,
+  "summary_recomputed": true,
+  "semantic_probes_passed": true
+}

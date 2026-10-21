@@ -1,0 +1,34 @@
+{
+  "bench_projection_640_1.json": {
+    "cohort": 12,
+    "sha256": "518d89a06edf00d0d85a0027f6c12ac10c12649be2e755cb213f647051106516"
+  },
+  "bench_grouped_64000_1.json": {
+    "cohort": 12,
+    "sha256": "45764353a96d0af36eb3ede03e187d9c13cfa81855e5412651be3e59a71bee29"
+  },
+  "bench_grouped_640_0.json": {
+    "cohort": 9,
+    "sha256": "9304d92e3fcdfc3ed787f76bdd026c257308c8d9275e1f73cfaea6ed0d1cf089"
+  },
+  "bench_grouped_640_1.json": {
+    "cohort": 12,
+    "sha256": "1874f74001930c270ef815fdcd06ebe93e7a63d5baa28845c99a951928e302ef"
+  },
+  "bench_grouped_64000_0.json": {
+    "cohort": 9,
+    "sha256": "2b012097565511dff7ef8b050d56efeca16f02cf818b22e1a67f6dba82249873"
+  },
+  "bench_projection_640_0.json": {
+    "cohort": 9,
+    "sha256": "3aa40f4747e99365629b947347fe3c69978eea497e6fd499e66514b89f1a7c2f"
+  },
+  "bench_window_640_1.json": {
+    "cohort": 12,
+    "sha256": "70ee937ca7028154db0abf0f51c62681d2437088986304e04dfedf86936b43cf"
+  },
+  "bench_window_640_0.json": {
+    "cohort": 12,
+    "sha256": "deabecef884ec5c53df49dff40c1653d802d136555d979e92defba28cc8cd4ea"
+  }
+}
