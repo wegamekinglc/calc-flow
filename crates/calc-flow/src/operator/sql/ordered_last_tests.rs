@@ -6,6 +6,10 @@ use datafusion::{
 };
 use std::sync::Arc;
 
+mod corruption;
+mod faults;
+mod recovery;
+
 const QUERY: &str = "SELECT stock, LAST_VALUE(latest_price ORDER BY timestamp) AS latest_price FROM input GROUP BY stock";
 type Row = (Option<&'static str>, Option<f64>, Option<i64>, Option<i64>);
 

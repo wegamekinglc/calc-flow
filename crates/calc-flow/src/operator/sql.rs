@@ -1535,7 +1535,7 @@ fn encode_checkpoint_input(
     };
     #[cfg(test)]
     if let (Some(name), Some(export)) = (&materialized.native_name, &materialized.native) {
-        compact::direct_async_tests::before_ipc(name, export.records(), export.reserved_bytes());
+        compact::direct_async_tests::before_ipc(name, export.records(), export.reserved_bytes())?;
     }
     let result = ipc::encode_with_owner(
         materialized.batch(),

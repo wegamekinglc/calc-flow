@@ -28,6 +28,7 @@ static PROBES: LazyLock<Mutex<BTreeMap<String, Arc<Probe>>>> = LazyLock::new(Mut
 
 #[derive(Default)]
 struct Probe {
+    reject_ipc: bool,
     ticks: AtomicUsize,
     census: Mutex<Vec<(usize, usize)>>,
     arrays: Mutex<Vec<Weak<dyn Array>>>,
@@ -83,8 +84,27 @@ pub(in crate::operator::sql) fn after_bytes(name: &str, copied: usize) {
     }
 }
 
-pub(in crate::operator::sql) fn before_ipc(name: &str, records: &[RecordBatch], funded: usize) {
-    let Some(probe) = probe(name) else { return };
+pub(in crate::operator::sql) fn reject_ipc(name: &str) -> impl Drop {
+    Registration::new(
+        name,
+        &Arc::new(Probe {
+            reject_ipc: true,
+            ..Probe::default()
+        }),
+    )
+}
+
+pub(in crate::operator::sql) fn before_ipc(
+    name: &str,
+    records: &[RecordBatch],
+    funded: usize,
+) -> Result<()> {
+    let Some(probe) = probe(name) else {
+        return Ok(());
+    };
+    if probe.reject_ipc {
+        return Err(sql_state_error("injected native IPC failure"));
+    }
     *probe.encoder.lock().unwrap() = Some((thread::current().id(), funded));
     probe.arrays.lock().unwrap().extend(
         records
@@ -102,6 +122,7 @@ pub(in crate::operator::sql) fn before_ipc(name: &str, records: &[RecordBatch], 
             released = ready.wait(released).unwrap();
         }
     }
+    Ok(())
 }
 
 struct Release {
