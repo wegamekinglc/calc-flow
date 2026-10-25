@@ -15,7 +15,7 @@ use crate::{BatchMetadata, CancellationToken, EdgeCollector, Epoch, JsonMap, Str
 
 const NATIVE: &str = "SELECT key, SUM(value) AS total, COUNT(*) AS rows FROM events GROUP BY key";
 const RETAINED: &str = "SELECT key, SUM(abs(value)) AS total, COUNT(*) AS rows FROM events WHERE value > 0 GROUP BY key";
-const LAYOUT_REFUSAL: &str = "SQL checkpoint layout is unsupported (expected 3 or 4)";
+const LAYOUT_REFUSAL: &str = "SQL checkpoint layout is unsupported (expected 3, 4 or 5)";
 
 fn schema() -> SchemaRef {
     Arc::new(Schema::new_with_metadata(
@@ -189,7 +189,7 @@ async fn test_current_sql_checkpoints_bind_the_datafusion_release() {
 
 #[test]
 fn test_old_sql_layouts_are_rejected_before_input_decode() {
-    for layout in [None, Some(0), Some(1), Some(2), Some(5)] {
+    for layout in [None, Some(0), Some(1), Some(2), Some(6)] {
         let mut inline_metadata = BTreeMap::new();
         if let Some(layout) = layout {
             inline_metadata.insert("state_layout".into(), json!(layout));
