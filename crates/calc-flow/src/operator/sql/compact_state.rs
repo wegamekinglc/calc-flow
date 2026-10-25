@@ -39,8 +39,14 @@ pub(in crate::operator::sql) struct NativeStateDescriptor {
     pub(in crate::operator::sql) post_order: Option<super::output_order::OrderDescriptor>,
     pub(in crate::operator::sql) expression_identity_bytes: usize,
     pub(in crate::operator::sql) group_count: usize,
+    pub(in crate::operator::sql) ordered_last: Option<OrderedLastDescriptor>,
     pub(in crate::operator::sql) policy: &'static str,
     _reservation: MemoryReservation,
+}
+
+pub(in crate::operator::sql) struct OrderedLastDescriptor {
+    pub keys: Vec<(NativeAggregateInput, bool, bool)>,
+    pub ignore_nulls: bool,
 }
 
 pub(in crate::operator::sql) struct PaidNativeStateRecords {
@@ -119,6 +125,7 @@ impl IncrementalSql {
             post_filter,
             post_order,
         } = self.native_output_descriptor(name)?;
+        let (state_fields, ordered_last) = self.native_state_layout(name)?;
         let expression_identity_bytes = aggregate_inputs
             .iter()
             .flatten()
@@ -132,18 +139,14 @@ impl IncrementalSql {
                     .iter()
                     .flat_map(|order| order.keys.iter().map(|key| &key.0)),
             )
+            .chain(
+                ordered_last
+                    .iter()
+                    .flat_map(|ordered| ordered.keys.iter().map(|key| &key.0)),
+            )
             .try_fold(0, |bytes, input| {
                 checked_bytes(bytes, [(input.identity_bytes(name)?, 1)], name)
             })?;
-        let state_fields = self
-            .aggregates
-            .iter()
-            .map(|expression| {
-                expression
-                    .state_fields()
-                    .map_err(|error| df_error(name, error))
-            })
-            .collect::<Result<Vec<_>>>()?;
         let result_fields = self
             .aggregates
             .iter()
@@ -185,6 +188,7 @@ impl IncrementalSql {
             post_order,
             expression_identity_bytes,
             group_count: self.groups.len(),
+            ordered_last,
             policy: self.native_policy(),
             _reservation: reservation,
         })
@@ -246,6 +250,55 @@ impl IncrementalSql {
             .iter()
             .map(|expression| describe_input(expression.as_ref(), &self.schema, 0, name))
             .collect()
+    }
+
+    fn native_state_layout(
+        &self,
+        name: &str,
+    ) -> Result<(Vec<Vec<FieldRef>>, Option<OrderedLastDescriptor>)> {
+        let fields = self
+            .aggregates
+            .iter()
+            .map(|expression| {
+                let fields = expression
+                    .state_fields()
+                    .map_err(|error| df_error(name, error))?;
+                let last = fields.len().saturating_sub(1);
+                Ok(fields
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, field)| {
+                        if self.ordered_last {
+                            Arc::new(field.as_ref().clone().with_nullable(index != last))
+                        } else {
+                            field
+                        }
+                    })
+                    .collect())
+            })
+            .collect::<Result<_>>()?;
+        Ok((fields, self.ordered_last_descriptor(name)?))
+    }
+
+    fn ordered_last_descriptor(&self, name: &str) -> Result<Option<OrderedLastDescriptor>> {
+        if !self.ordered_last {
+            return Ok(None);
+        }
+        let expression = &self.aggregates[0];
+        Ok(Some(OrderedLastDescriptor {
+            keys: expression
+                .order_bys()
+                .iter()
+                .map(|sort| {
+                    Ok((
+                        describe_input(sort.expr.as_ref(), &self.schema, 0, name)?,
+                        sort.options.descending,
+                        sort.options.nulls_first,
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?,
+            ignore_nulls: expression.ignore_nulls(),
+        }))
     }
 
     fn native_keys_descriptor(
@@ -779,7 +832,9 @@ impl IncrementalSql {
         state: &[ScalarValue],
         name: &str,
     ) -> Result<ScalarValue> {
-        if let Some(global) = &self.global_records {
+        if self.ordered_last {
+            super::ordered_last::result(state, expression.ignore_nulls(), name)
+        } else if let Some(global) = &self.global_records {
             global.result(aggregate, state, name)
         } else if self.requires_grouped_float_proof() && super::grouped_float::selected(expression)
         {

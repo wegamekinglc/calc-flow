@@ -35,6 +35,9 @@ use crate::{
 
 const CHUNK_ROWS: usize = 8192;
 
+#[path = "ordered_last.rs"]
+pub(in crate::operator::sql) mod ordered_last;
+
 #[path = "compact_state.rs"]
 pub(super) mod compact_state;
 
@@ -76,6 +79,7 @@ mod output_order;
 
 pub(super) struct IncrementalSql {
     schema: SchemaRef,
+    ordered_last: bool,
     aggregate_schema: SchemaRef,
     output_schema: SchemaRef,
     aggregates: Vec<Arc<AggregateFunctionExpr>>,
@@ -428,6 +432,9 @@ impl PartialGroups {
         name: &str,
     ) -> Result<()> {
         context.check_cancelled()?;
+        if self.slots.is_empty() {
+            return Ok(());
+        }
         let states = self.emit_states(name)?;
         for (rank, slot) in self.slots.iter().enumerate() {
             if rank % 128 == 0 {
@@ -469,7 +476,11 @@ impl PartialGroups {
                             .map_err(|error| df_error(name, error))
                     })
                     .collect::<Result<Vec<_>>>()?;
-                candidate.group.results[index] = grouped_sum::result(&state, name)?;
+                candidate.group.results[index] = if self.accumulators[index].ordered_last() {
+                    ordered_last::result(&state, self.accumulators[index].ignore_nulls(), name)?
+                } else {
+                    grouped_sum::result(&state, name)?
+                };
                 candidate.group.states[index] = state;
             } else {
                 let arrays = arrays
@@ -555,6 +566,11 @@ fn native_state_charge(
             let count = checked_bytes(count, [(fields.len(), 1)], name)?;
             let bytes = fields.iter().try_fold(bytes, |bytes, field| {
                 let width = variable_extrema::state_width(field.data_type(), name)?;
+                let width = if ordered_last::selected(aggregate) {
+                    width + size_of::<ScalarValue>() + 128
+                } else {
+                    width
+                };
                 checked_bytes(bytes, [(3, width)], name)
             })?;
             Ok((bytes, count))
@@ -702,8 +718,9 @@ impl IncrementalSql {
             return Ok(None);
         };
         let (converter, finalizer_bytes) = grouped_layout(&keys, &aggregates, name)?;
-        let variable_extrema = variable_extrema_slots(&aggregates);
         Ok(Some(Self {
+            ordered_last: aggregates.iter().any(|expr| ordered_last::selected(expr)),
+            variable_extrema: variable_extrema_slots(&aggregates),
             schema,
             aggregate_schema: Arc::new(aggregate.schema.as_arrow().clone()),
             output_schema: Arc::new(analyzed.schema().as_arrow().clone()),
@@ -722,7 +739,6 @@ impl IncrementalSql {
             input_columns,
             keys,
             variable_columns,
-            variable_extrema,
             converter,
             groups: Vec::new(),
             dirty: dirty::DirtyGroups::empty(reservation.new_empty()),
@@ -740,6 +756,10 @@ impl IncrementalSql {
             #[cfg(test)]
             encoded_rows: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }))
+    }
+
+    pub(super) fn requires_ordered_last_proof(&self) -> bool {
+        self.ordered_last
     }
 
     pub(super) fn requires_grouped_float_proof(&self) -> bool {
@@ -761,7 +781,9 @@ impl IncrementalSql {
     }
 
     fn native_policy(&self) -> &'static str {
-        if self.requires_global_record_proof() {
+        if self.ordered_last {
+            "ordered_last_grouped_v1"
+        } else if self.requires_global_record_proof() {
             "global-record-float-v1"
         } else if self.requires_grouped_float_proof() {
             "sequential-grouped-float-v1"
@@ -771,6 +793,9 @@ impl IncrementalSql {
     }
 
     pub(in crate::operator::sql) fn checkpoint_policy(&self) -> grouped_float::Policy {
+        if self.ordered_last {
+            return grouped_float::Policy::OrderedLastGroupedV1;
+        }
         if let Some(global) = &self.global_records {
             return grouped_float::Policy::GlobalRecordFloatV1(global.policy.clone());
         }
@@ -902,6 +927,12 @@ impl IncrementalSql {
         })
     }
 
+    fn uses_grouped_accumulator(&self, expr: &AggregateFunctionExpr) -> bool {
+        self.ordered_last
+            || self.global_records.is_some()
+            || (self.sequential.is_some() && grouped_float::selected(expr))
+    }
+
     fn candidate_accumulators(
         &self,
         previous: Option<&Group>,
@@ -911,9 +942,7 @@ impl IncrementalSql {
             .iter()
             .enumerate()
             .map(|(index, expr)| {
-                if self.global_records.is_some()
-                    || (self.sequential.is_some() && grouped_float::selected(expr))
-                {
+                if self.uses_grouped_accumulator(expr) {
                     return Ok(None);
                 }
                 let mut accumulator = expr
@@ -1100,7 +1129,7 @@ impl IncrementalSql {
     ) -> Result<(MemoryReservation, usize, InputCandidates)> {
         let (reservation, workspace) = self.input_workspace(rows, name)?;
         let partial = self.partial_groups(name)?;
-        let native = if self.sequential.is_some() {
+        let native = if self.ordered_last || self.sequential.is_some() {
             None
         } else {
             self.native_keys(rows, name)?
@@ -1126,7 +1155,9 @@ impl IncrementalSql {
             return Ok(None);
         }
         let mut partial = PartialGroups::new(&self.aggregates, self.reservation.new_empty(), name)?;
-        if self.sequential.is_some() {
+        if self.ordered_last {
+            partial.sequential = vec![true; self.aggregates.len()];
+        } else if self.sequential.is_some() {
             partial.sequential = self
                 .aggregates
                 .iter()
@@ -1683,8 +1714,10 @@ impl IncrementalSql {
                         name,
                     );
                 }
-                expr.expressions()
+                let arguments = expr.expressions();
+                arguments
                     .iter()
+                    .chain(expr.order_bys().iter().map(|sort| &sort.expr))
                     .map(|arg| {
                         arg.evaluate(chunk)
                             .and_then(|value| value.into_array(chunk.num_rows()))
@@ -2115,6 +2148,7 @@ fn input_columns(
             aggregate
                 .expressions()
                 .iter()
+                .chain(aggregate.order_bys().iter().map(|sort| &sort.expr))
                 .flat_map(collect_columns)
                 .map(|column| column.index())
                 .collect::<BTreeSet<_>>()
@@ -2440,6 +2474,21 @@ fn eligible(expr: &Expr, logical: &DFSchema, floating_extrema: bool, global: boo
         return false;
     };
     let params = &function.params;
+    if function.func.name() == "last_value" {
+        return !global
+            && ordered_last::parameters(params, logical)
+            && function.func == datafusion::functions_aggregate::first_last::last_value_udaf();
+    }
+    eligible_unordered(function, logical, floating_extrema, global)
+}
+
+fn eligible_unordered(
+    function: &datafusion::logical_expr::expr::AggregateFunction,
+    logical: &DFSchema,
+    floating_extrema: bool,
+    global: bool,
+) -> bool {
+    let params = &function.params;
     if !aggregate_parameters_supported(params) {
         return false;
     }
@@ -2669,6 +2718,14 @@ fn native_strategy(
     input: (bool, usize),
     name: &str,
 ) -> Result<Option<NativeStrategy>> {
+    if aggregates.iter().any(|expr| ordered_last::selected(expr)) {
+        return runtime.ordered_last_model_supported(name).map(|supported| {
+            supported.then_some(NativeStrategy {
+                global_records: None,
+                sequential: None,
+            })
+        });
+    }
     if !grouped_aggregates_supported(keys, aggregates) {
         return Ok(None);
     }
@@ -2751,6 +2808,9 @@ fn plan_inputs(raw: &LogicalPlan, schema: &SchemaRef, name: &str) -> Result<Opti
     let Some((_, raw_aggregate)) = shape(raw) else {
         return Ok(None);
     };
+    if !ordered_last::supported_shape(raw, &raw_aggregate.aggr_expr) {
+        return Ok(None);
+    }
     if !supported_input_filter(raw_aggregate, schema) {
         return Ok(None);
     }
@@ -2764,12 +2824,7 @@ fn plan_inputs(raw: &LogicalPlan, schema: &SchemaRef, name: &str) -> Result<Opti
     {
         return Ok(None);
     }
-    if raw_aggregate.group_expr.iter().any(|expression| {
-        native_expression::aggregate_filter_work(expression, raw_aggregate.input.schema()).is_none()
-            || !expression
-                .get_type(raw_aggregate.input.schema())
-                .is_ok_and(|dtype| key_type(&dtype))
-    }) {
+    if !floating_extrema {
         return Ok(None);
     }
     let predicate = match raw_aggregate.input.as_ref() {

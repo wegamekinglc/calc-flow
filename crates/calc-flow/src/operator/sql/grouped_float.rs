@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub(in crate::operator::sql) enum Policy {
     ExactNumericV1,
+    OrderedLastGroupedV1,
     SequentialGroupedFloatV1(SequentialPolicy),
     GlobalRecordFloatV1(super::global_record::Policy),
 }
@@ -204,6 +205,7 @@ impl Policy {
     pub fn label(&self) -> &'static str {
         match self {
             Self::ExactNumericV1 => "exact_numeric_v1",
+            Self::OrderedLastGroupedV1 => "ordered_last_grouped_v1",
             Self::SequentialGroupedFloatV1(_) => "sequential_grouped_float_v1",
             Self::GlobalRecordFloatV1(_) => "global_record_float_v1",
         }
@@ -211,7 +213,8 @@ impl Policy {
 
     pub fn validate(&self, expected: &Self, rows: u64, name: &str) -> Result<()> {
         match (self, expected) {
-            (Self::ExactNumericV1, Self::ExactNumericV1) => Ok(()),
+            (Self::ExactNumericV1, Self::ExactNumericV1)
+            | (Self::OrderedLastGroupedV1, Self::OrderedLastGroupedV1) => Ok(()),
             (Self::GlobalRecordFloatV1(actual), Self::GlobalRecordFloatV1(trusted))
                 if actual == trusted && rows != 0 =>
             {

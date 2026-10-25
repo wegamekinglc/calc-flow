@@ -68,7 +68,7 @@ impl SqlOperator {
         layout: u64,
         check_cancelled: &dyn Fn() -> Result<()>,
     ) -> Result<PreparedSqlRestore> {
-        if layout == 3 {
+        if layout == 3 || layout == 5 {
             let compact = super::compact::prepare_restore(self, snapshot, check_cancelled)?;
             #[cfg(test)]
             recovery_test_hooks::prepared_compact(self, &compact.state, &compact.native)?;
@@ -164,9 +164,9 @@ fn current_layout(snapshot: &OperatorStateSnapshot) -> Result<u64> {
         .get("state_layout")
         .and_then(Value::as_u64)
     {
-        Some(layout @ (3 | 4)) => Ok(layout),
+        Some(layout @ 3..=5) => Ok(layout),
         _ => Err(sql_state_error(
-            "SQL checkpoint layout is unsupported (expected 3 or 4)",
+            "SQL checkpoint layout is unsupported (expected 3, 4 or 5)",
         )),
     }
 }

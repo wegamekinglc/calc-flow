@@ -67,6 +67,8 @@ fn observe(accumulator: PartialAccumulator) -> (PartialAccumulator, MergeRows) {
     let merge_rows = Arc::new(Mutex::new(Vec::new()));
     (
         PartialAccumulator {
+            ordered_last: false,
+            ignore_nulls: false,
             native: Box::new(ObservedAccumulator {
                 native: accumulator.native,
                 merge_rows: merge_rows.clone(),

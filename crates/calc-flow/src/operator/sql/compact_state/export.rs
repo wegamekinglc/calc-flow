@@ -1,8 +1,9 @@
 use datafusion::arrow::array::builder::{
     ArrayBuilder, BooleanBuilder, Decimal32Builder, Decimal64Builder, Decimal128Builder,
     Decimal256Builder, Float32Builder, Float64Builder, Int8Builder, Int16Builder, Int32Builder,
-    Int64Builder, LargeStringBuilder, NullBuilder, StringBuilder, UInt8Builder, UInt16Builder,
-    UInt32Builder, UInt64Builder, make_builder,
+    Int64Builder, LargeStringBuilder, NullBuilder, StringBuilder, TimestampMicrosecondBuilder,
+    TimestampMillisecondBuilder, TimestampNanosecondBuilder, TimestampSecondBuilder, UInt8Builder,
+    UInt16Builder, UInt32Builder, UInt64Builder, make_builder,
 };
 
 use super::{
@@ -305,7 +306,8 @@ impl ColumnExport {
             | DataType::Decimal32(..)
             | DataType::Decimal64(..)
             | DataType::Decimal128(..)
-            | DataType::Decimal256(..) => make_builder(data_type, rows),
+            | DataType::Decimal256(..)
+            | DataType::Timestamp(..) => make_builder(data_type, rows),
             _ => {
                 return Err(df_error(
                     name,
@@ -450,6 +452,18 @@ fn append_other_fixed(
         ScalarValue::Boolean(value) => append!(builder, BooleanBuilder, value, name),
         ScalarValue::Float32(value) => append!(builder, Float32Builder, value, name),
         ScalarValue::Float64(value) => append!(builder, Float64Builder, value, name),
+        ScalarValue::TimestampSecond(value, _) => {
+            append!(builder, TimestampSecondBuilder, value, name);
+        }
+        ScalarValue::TimestampMillisecond(value, _) => {
+            append!(builder, TimestampMillisecondBuilder, value, name);
+        }
+        ScalarValue::TimestampMicrosecond(value, _) => {
+            append!(builder, TimestampMicrosecondBuilder, value, name);
+        }
+        ScalarValue::TimestampNanosecond(value, _) => {
+            append!(builder, TimestampNanosecondBuilder, value, name);
+        }
         _ => {
             return Err(df_error(
                 name,
