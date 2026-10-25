@@ -166,6 +166,24 @@ Full regression, cross-platform checks and the existing combined Rust 90%
 coverage gate remain with CI. This stage does not establish those CI results
 or merge readiness; T5/T6 remain outside its scope.
 
+## Workflow expectation synchronization
+
+The follow-up Linux wheel job failed before building the wheel because
+`scripts/test_run_rust_tests.py::WINDOWS_CHECKPOINT_REGRESSIONS` still listed
+four cases after the workflow moved three more ASOF cases into the serial
+stage. The exact failing unittest was reproduced locally before editing. The
+independent literal tuple now lists all seven names in workflow order; both
+exact list/argument comparisons remain unchanged, including
+`--exact --test-threads=1`. No expected data is generated from the YAML and no
+subset assertion or exemption replaces the comparisons.
+
+`python -m unittest scripts.test_run_rust_tests.WindowsCheckpointSoakIsolationTests scripts.test_run_rust_tests.RustTestHarnessTests.test_lib_skip_appends_every_filter_to_the_calc_flow_leg_only scripts.test_run_rust_tests.RustTestHarnessTests.test_lib_skip_is_ignored_by_compile_only_runs -v`
+passed 7/7 in 0.329 seconds. This expectation-only synchronization does not
+change the workflow, Rust behavior, deadlines or gates; the preceding Rust
+evidence remains applicable. `uv tool run --from ruff==0.16.0 ruff check scripts/test_run_rust_tests.py`
+and `uv tool run --from ruff==0.16.0 ruff format --check scripts/test_run_rust_tests.py`
+passed. Native Windows confirmation and the full CI result remain pending.
+
 ## Preserved work
 
 The original DAL-431 checkout on `agent/cf-implementer/5ceb4eb9b8b4` still has
