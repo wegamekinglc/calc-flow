@@ -387,7 +387,9 @@ envelope under `error`, dropping each late row and recording metrics under
 [late-row policy contract](#late-row-policy-contract) for diagnostic routing
 and recovery. Duplicate row identities are rejected. Rolling
 stream state checkpoints at the aligned epoch cut using columnar writer
-layout `3`. It stores projected history, buffered rows, and recurrence state;
+layout `3`, or layout `4` when cumulative sum/min/max/variance are present.
+It stores projected history, buffered rows, recurrence state, and any
+cumulative summaries and processed-row counts;
 restore validates the schema and fingerprints before rebuilding the kernel.
 See [symbolic compiler design](symbolic-design.md#native-rolling-state) for
 the distinction between declaration versions and checkpoint writer layout.
@@ -541,7 +543,8 @@ restart. Delivery remains a per-output contract: exactly-once requires the
 normal source, operator, and transactional sink proofs; ordinary sinks can
 observe replay duplicates. The [file connector](connectors/file.md) describes
 transactional Parquet recovery. Project and manifest formats remain 3, with
-rolling writer layout 3 and cross-section state layout 1.
+rolling writer layout 3 or 4 according to the declared outputs, and
+cross-section state layout 1.
 
 Python declares paired outputs through
 [`with_late_output`](python-api.md#lateoutputs-and-local-late-policy).

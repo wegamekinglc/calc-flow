@@ -12,18 +12,18 @@ this directory, never in the reverse direction.
 
 ## Team Roster
 
-| Role         | Agent             | Color  | Reads                                      | Writes                                      |
-|--------------|-------------------|--------|--------------------------------------------|---------------------------------------------|
-| Orchestrator | `cf-orchestrator` | purple | authorized context and completion reports  | task list                                   |
-| Spec writer  | `cf-spec-writer`  | orange | issues, introduction.md, AGENTS.md, rules  | `.codex/artifacts/specs/<slug>.md`          |
-| API designer | `cf-api-designer` | pink   | spec, crate exports, stubs                 | `.codex/artifacts/api-notes/<slug>.md`      |
-| Critic       | `cf-critic`       | red    | spec, api-note                             | `.codex/artifacts/critiques/<slug>.md`      |
-| Implementer  | `cf-implementer`  | green  | spec, api-note, critique                   | source code, tests, TDD in worktree         |
-| Tester       | `cf-tester`       | cyan   | source under-test, conventions             | tests for the touched surfaces, in worktree |
-| Reviewer     | `cf-reviewer`     | amber  | diff, requirements, tests, documentation   | review report and requested remediations    |
-| Performancer | `cf-performancer` | yellow | finished impl, benchmark suites, baselines | perf-regression report, coverage advisory   |
-| Simplifier   | `cf-simplifier`   | blue   | finished impl, existing modules            | simplification report; optional apply edits |
-| Doc writer   | `cf-doc-writer`   | teal   | current source, AGENTS.md, docs            | `docs/` and `CHANGELOG.md`                  |
+| Role           | Agent               | Color    | Reads                                        | Writes                                        |
+|----------------|---------------------|----------|----------------------------------------------|-----------------------------------------------|
+| Orchestrator   | `cf-orchestrator`   | purple   | request and specialist reports               | task plan and consolidated hand-offs          |
+| Spec writer    | `cf-spec-writer`    | orange   | request, issues, architecture, guidance      | `.codex/artifacts/specs/<slug>.md`            |
+| API designer   | `cf-api-designer`   | pink     | spec, exports, stubs, examples               | `.codex/artifacts/api-notes/<slug>.md`        |
+| Critic         | `cf-critic`         | red      | spec and API note                            | `.codex/artifacts/critiques/<slug>.md`        |
+| Implementer    | `cf-implementer`    | green    | approved artifacts and relevant source       | source and focused tests in a worktree        |
+| Tester         | `cf-tester`         | cyan     | behavior, source, and existing tests         | tests for the affected surfaces               |
+| Reviewer       | `cf-reviewer`       | amber    | diff, requirements, tests, documentation     | review report and requested remediations      |
+| Performancer   | `cf-performancer`   | yellow   | finished change, benchmarks, baselines       | performance and coverage advisory             |
+| Simplifier     | `cf-simplifier`     | blue     | finished change and adjacent modules         | simplification report or approved edits       |
+| Doc writer     | `cf-doc-writer`     | teal     | current source, guidance, normative docs     | `docs/` and qualifying `CHANGELOG.md` entries |
 
 ## Workflow
 
@@ -112,10 +112,10 @@ Filenames share a single kebab-case slug derived from the request, so work trace
 
 ## Team Working Agreements
 
-Two practices are mandatory for every agent that changes files in the repository
+Worktree isolation applies to agents that change files in the repository
 (`cf-implementer`, `cf-tester`, `cf-doc-writer`, `cf-performancer` when it adds a benchmark,
-and `cf-simplifier` when the user has opted into apply mode; `cf-reviewer` also reviews
-inside a worktree):
+and `cf-simplifier` when the user has opted into apply mode). A read-only review
+does not itself require a new worktree.
 
 - **Worktree isolation.** Enter an isolated git worktree (`EnterWorktree`) before creating
   or editing any file. All edits, builds, iteration, and any explicitly requested

@@ -512,7 +512,8 @@ create the independent `stream_asof_join@1` primitive. Required `tolerance` and
 Each unique declaration digest owns one native ASOF state across outputs.
 Analysis verifies the native stream-only, watermark-requiring,
 `group_final_append_only`, checkpointed-stateful capability with
-`state_version=3` and `state_layouts=(3,)`;
+`state_version=3` and a `state_layouts` inventory containing `10`
+(currently `(10,)`);
 missing or inconsistent evidence fails closed. All ordered side settings,
 tolerance, late policy, prefixes, and limits participate in identity. Output
 ordering derives from the left side, and every right field is nullable.
