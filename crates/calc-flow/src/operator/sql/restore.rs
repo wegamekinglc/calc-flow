@@ -78,16 +78,29 @@ impl SqlOperator {
                 retained_capture: None,
             })
         } else {
-            let (retained, capture) =
-                super::current_retained::prepare_restore(self, snapshot, check_cancelled)?;
-            #[cfg(test)]
-            recovery_test_hooks::prepared(self, &retained)?;
-            Ok(PreparedSqlRestore {
-                retained: Some(retained),
-                compact: None,
-                retained_capture: Some(capture),
-            })
+            self.prepare_retained_restore(snapshot, check_cancelled)
         }
+    }
+
+    fn prepare_retained_restore(
+        &self,
+        snapshot: &OperatorStateSnapshot,
+        check_cancelled: &dyn Fn() -> Result<()>,
+    ) -> Result<PreparedSqlRestore> {
+        let (retained, capture) =
+            super::current_retained::prepare_restore(self, snapshot, check_cancelled)?;
+        if self.compact_state_budget.is_some() && retained.rows != 0 {
+            return Err(self.compact_required_error(
+                "nonempty retained checkpoint requires a new lineage and replay",
+            ));
+        }
+        #[cfg(test)]
+        recovery_test_hooks::prepared(self, &retained)?;
+        Ok(PreparedSqlRestore {
+            retained: Some(retained),
+            compact: None,
+            retained_capture: Some(capture),
+        })
     }
 
     pub(crate) fn install_restore(&mut self, prepared: PreparedSqlRestore) {

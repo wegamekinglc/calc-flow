@@ -207,6 +207,7 @@ pub struct DataFusionQueryMetric {
 }
 
 pub struct DataFusionRuntime {
+    compact_pool: Arc<compact_budget::CompactStatePool>,
     config: DataFusionConfig,
     runtime_env: Arc<RuntimeEnv>,
     context: OnceLock<SessionContext>,
@@ -267,6 +268,9 @@ impl DataFusionRuntime {
         let runtime_acquire_ns = nanos(started.elapsed());
         Ok(Self {
             config,
+            compact_pool: Arc::new(compact_budget::CompactStatePool::new(
+                runtime_env.memory_pool.clone(),
+            )),
             runtime_env,
             context: OnceLock::new(),
             selected_udfs: Vec::new(),
@@ -464,6 +468,32 @@ impl DataFusionRuntime {
             "sql-incremental:{node_id}"
         ))
         .register(&self.runtime_env.memory_pool)
+    }
+
+    pub(crate) fn compact_state_reservation(
+        &self,
+        node: &str,
+    ) -> datafusion::execution::memory_pool::MemoryReservation {
+        let pool: Arc<dyn datafusion::execution::memory_pool::MemoryPool> =
+            self.compact_pool.clone();
+        datafusion::execution::memory_pool::MemoryConsumer::new(format!("sql-compact:{node}"))
+            .register(&pool)
+    }
+
+    pub(crate) fn set_compact_state_limit(&self, bytes: Option<u64>, node: &str) -> Result<()> {
+        self.compact_pool
+            .set_limit(bytes)
+            .map_err(|error| datafusion_error(Some(node), error))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn compact_state_bytes(&self) -> usize {
+        datafusion::execution::memory_pool::MemoryPool::reserved(self.compact_pool.as_ref())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_compact_state_peak(&self) -> usize {
+        self.compact_pool.take_peak()
     }
 
     pub(crate) fn incremental_memory_pool(
@@ -1804,5 +1834,7 @@ mod ordered_last_proof_tests;
 #[path = "datafusion_global_float_plan_tests.rs"]
 mod global_float_plan_tests;
 
+#[path = "datafusion_compact_budget.rs"]
+mod compact_budget;
 #[path = "datafusion_ordered_last.rs"]
 mod ordered_last;

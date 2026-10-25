@@ -51,7 +51,7 @@ impl<'a> ExportCursor<'a> {
         descriptor.group_count = rows;
         let width = descriptor.wire_schema.fields().len();
         let (record_count, charge) = export_structure_charge(native, rows, width, dirty, name)?;
-        let reservation = native.reservation.new_empty();
+        let reservation = native.scratch.new_empty();
         ensure_reservation(&reservation, charge, name)?;
         let selected_slots = dirty.then(|| {
             let mut slots = native.dirty.slots().to_vec();

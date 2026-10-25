@@ -123,7 +123,7 @@ pub(super) fn encode(
     check_cancelled: &dyn Fn() -> Result<()>,
 ) -> Result<PaidControl> {
     check_cancelled()?;
-    let reservation = runtime.incremental_reservation(name);
+    let reservation = runtime.compact_state_reservation(name);
     let bound = encode_bound(control, name)?;
     incremental::ensure_reservation(&reservation, bound, name)?;
     let bytes = serde_json::to_vec(control).map_err(|error| sql_state_error(&error.to_string()))?;

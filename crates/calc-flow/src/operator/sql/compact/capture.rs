@@ -147,7 +147,7 @@ fn sync_capture_parts(
     check()?;
     let metadata = metadata::encode(
         &state.metadata,
-        metadata::reserve(runtime, &state.metadata, &operator.name)?,
+        metadata::reserve_compact(runtime, &state.metadata, &operator.name)?,
         check,
     )?;
     let parts = CaptureParts {
@@ -211,7 +211,7 @@ async fn prepare_async_input(
         None => None,
     };
     let runtime = operator.retention_runtime()?;
-    let metadata_fee = metadata::reserve(runtime, &state.metadata, &operator.name)?;
+    let metadata_fee = metadata::reserve_compact(runtime, &state.metadata, &operator.name)?;
     let metadata = Some((state.metadata.clone(), metadata_fee));
     Ok(AsyncCaptureInput {
         input,
@@ -336,6 +336,7 @@ async fn native_checkpoint_input(
         metadata: BatchMetadata::default(),
         reservation,
         input_reservation: runtime.incremental_reservation(&operator.name),
+        owned_reservation: Some(runtime.compact_state_reservation(&operator.name)),
         native: Some(export),
         #[cfg(test)]
         native_name,
@@ -467,11 +468,12 @@ fn encode_native_segment(
         export.records(),
         export.reserved_bytes(),
     );
-    let encoded = ipc::encode(
+    let encoded = ipc::encode_with_owner(
         &wire,
         operator
             .retention_runtime()?
             .incremental_reservation(&operator.name),
+        Some(runtime.compact_state_reservation(&operator.name)),
         check,
     )?;
     drop(wire);
@@ -482,7 +484,7 @@ fn encode_native_segment(
 fn capture_credit(operator: &SqlOperator, frames: usize) -> Result<MemoryReservation> {
     let reservation = operator
         .retention_runtime()?
-        .incremental_reservation(&operator.name);
+        .compact_state_reservation(&operator.name);
     let bytes = incremental::checked_bytes(16384, [(frames, 2048)], &operator.name)?;
     incremental::ensure_reservation(&reservation, bytes, &operator.name)?;
     Ok(reservation)

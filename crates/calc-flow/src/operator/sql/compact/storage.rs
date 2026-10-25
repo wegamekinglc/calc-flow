@@ -181,7 +181,7 @@ pub(super) fn columns(
     projection: Option<Arc<retention::SqlProjection>>,
 ) -> Result<Arc<CompactColumns>> {
     let runtime = operator.retention_runtime()?;
-    let reservation = runtime.incremental_reservation(&operator.name);
+    let reservation = runtime.compact_state_reservation(&operator.name);
     let bytes =
         incremental::checked_bytes(8192, [(ipc::schema_bytes(&logical)?, 16)], &operator.name)?;
     incremental::ensure_reservation(&reservation, bytes, &operator.name)?;
@@ -263,7 +263,8 @@ pub(super) fn validate_budget(operator: &SqlOperator, ledger: QuotaLedger) -> Re
 }
 
 fn state_credit(operator: &SqlOperator, latest: &BatchMetadata) -> Result<MemoryReservation> {
-    let reservation = metadata::reserve(operator.retention_runtime()?, latest, &operator.name)?;
+    let reservation =
+        metadata::reserve_compact(operator.retention_runtime()?, latest, &operator.name)?;
     let bytes = incremental::checked_bytes(reservation.size(), [(1, 8192)], &operator.name)?;
     incremental::ensure_reservation(&reservation, bytes, &operator.name)?;
     Ok(reservation)

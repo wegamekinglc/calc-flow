@@ -120,3 +120,19 @@ fn test_checkpointing_hash_records_disabled_mode_without_changing_the_plan() {
     );
     assert_eq!(runner.plan.fingerprint(), fingerprint);
 }
+
+#[test]
+fn test_compact_budget_changes_runtime_hash_but_preserves_semantic_fingerprint() {
+    let runner = runner(None);
+    let fingerprint = runner.plan.fingerprint().to_owned();
+    let default = StreamRuntimeConfig::default();
+    let configured = StreamRuntimeConfig {
+        sql_compact_state_budget: Some(crate::StateBudget::new(8, 1 << 20).unwrap()),
+        ..default
+    };
+    assert_ne!(
+        runner.plan.runtime_config_hash(&default).unwrap(),
+        runner.plan.runtime_config_hash(&configured).unwrap()
+    );
+    assert_eq!(runner.plan.fingerprint(), fingerprint);
+}

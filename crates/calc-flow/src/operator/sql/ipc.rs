@@ -28,6 +28,15 @@ impl SqlInputSegment {
 pub(super) fn encode(
     batch: &Batch,
     reservation: MemoryReservation,
+    check_cancelled: impl FnMut() -> Result<()>,
+) -> Result<Arc<SqlInputSegment>> {
+    encode_with_owner(batch, reservation, None, check_cancelled)
+}
+
+pub(super) fn encode_with_owner(
+    batch: &Batch,
+    reservation: MemoryReservation,
+    owner: Option<MemoryReservation>,
     mut check_cancelled: impl FnMut() -> Result<()>,
 ) -> Result<Arc<SqlInputSegment>> {
     let scratch = scratch_bytes(batch)?;
@@ -35,6 +44,7 @@ pub(super) fn encode(
         bytes: Vec::new(),
         reservation: &reservation,
         scratch,
+        owner: owner.as_ref(),
     };
     let mut started = false;
     super::encode_sql_state_into(batch, &mut buffer, || {
@@ -46,12 +56,26 @@ pub(super) fn encode(
         Ok(())
     })?;
     let bytes = buffer.bytes;
-    settle_reservation(bytes.capacity(), &reservation)?;
+    let reservation = settle_owner(bytes.capacity(), reservation, owner)?;
     let reservation = Arc::new(reservation);
     Ok(Arc::new(SqlInputSegment {
         segment: StateSegment::new(bytes).with_owner(reservation.clone()),
         _reservation: reservation,
     }))
+}
+
+fn settle_owner(
+    capacity: usize,
+    reservation: MemoryReservation,
+    owner: Option<MemoryReservation>,
+) -> Result<MemoryReservation> {
+    Ok(if let Some(owner) = owner {
+        settle_reservation(capacity, &owner)?;
+        owner
+    } else {
+        settle_reservation(capacity, &reservation)?;
+        reservation
+    })
 }
 
 fn settle_reservation(capacity: usize, reservation: &MemoryReservation) -> Result<()> {
@@ -129,6 +153,7 @@ struct PaidBuffer<'a> {
     bytes: Vec<u8>,
     reservation: &'a MemoryReservation,
     scratch: usize,
+    owner: Option<&'a MemoryReservation>,
 }
 
 impl PaidBuffer<'_> {
@@ -137,15 +162,34 @@ impl PaidBuffer<'_> {
             .max(256)
             .checked_next_power_of_two()
             .ok_or_else(|| std::io::Error::other("SQL IPC capacity overflowed"))?;
-        let charge = self
-            .scratch
-            .checked_add(capacity)
-            .and_then(|bytes| bytes.checked_add(self.bytes.capacity()))
-            .and_then(|bytes| bytes.checked_add(256))
-            .ok_or_else(|| std::io::Error::other("SQL IPC buffer charge overflowed"))?;
+        let owned = self.buffer_charge(capacity)?;
+        let charge = self.scratch_charge(owned)?;
+        self.reserve_owner(owned)?;
         incremental::ensure_reservation(self.reservation, charge, "SQL checkpoint IPC")
             .map_err(|error| std::io::Error::other(error.to_string()))?;
         Ok(capacity)
+    }
+
+    fn buffer_charge(&self, capacity: usize) -> std::io::Result<usize> {
+        capacity
+            .checked_add(self.bytes.capacity())
+            .and_then(|n| n.checked_add(256))
+            .ok_or_else(|| std::io::Error::other("SQL IPC buffer charge overflowed"))
+    }
+
+    fn scratch_charge(&self, owned: usize) -> std::io::Result<usize> {
+        // The ownership lease already pays the engine pool for the wire buffer.
+        self.scratch
+            .checked_add(if self.owner.is_some() { 0 } else { owned })
+            .ok_or_else(|| std::io::Error::other("SQL IPC scratch charge overflowed"))
+    }
+
+    fn reserve_owner(&self, owned: usize) -> std::io::Result<()> {
+        if let Some(owner) = self.owner {
+            incremental::ensure_reservation(owner, owned, "SQL compact checkpoint")
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+        }
+        Ok(())
     }
 
     fn grow(&mut self, length: usize) -> std::io::Result<()> {

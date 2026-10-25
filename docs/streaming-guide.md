@@ -659,6 +659,18 @@ by default. Supply
 `StreamRuntimeConfig(sql_state_budget=StateBudget(20_000_000, 8 << 30))`
 to enforce application limits. The budget's cumulative input row/byte
 accounting also applies when native compact state is selected.
+
+Use `StreamRuntimeConfig(sql_compact_state_budget=StateBudget(100_000, 64 << 20))`
+to limit each aggregate SQL node to 100,000 live groups and 64 MiB of conservative
+owned state charges. These include keys, winners and ordering tuples, container
+capacity, results, dirty tracking, cached checkpoint/log segments, and old plus
+candidate state during a transaction. Input/output buffers and serialization
+scratch use separate reservations; this is not an RSS limit. An explicit compact
+budget rejects aggregate shapes that cannot compact, and rejects nonempty
+retained checkpoints instead of discarding history. Restore recomputes charges
+under the current budget. Row-local SQL is unaffected. Both SQL budgets default
+to `None`; when both are supplied, both must be satisfied.
+
 Other SQL remains batch-local. `ORDER BY` and `LIMIT` apply to each snapshot;
 SQL window functions alone remain batch-local. Downstream stages receive each
 snapshot as new rows. Multi-alias SQL is a batch operation. Use native `ts`

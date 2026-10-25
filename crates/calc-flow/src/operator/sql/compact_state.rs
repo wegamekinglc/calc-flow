@@ -359,7 +359,7 @@ impl IncrementalSql {
             ],
             name,
         )?;
-        let reservation = self.reservation.new_empty();
+        let reservation = self.scratch.new_empty();
         ensure_reservation(&reservation, bytes, name)?;
         Ok(reservation)
     }
@@ -494,6 +494,7 @@ impl IncrementalSql {
             check_cancelled,
             name,
         )?;
+        self.check_import_group_budget(groups, name)?;
         self.validate_import_history(records, groups, (historical_rows, seen_input), name)?;
         Ok(ValidatedNativeImport {
             descriptor,
@@ -526,7 +527,7 @@ impl IncrementalSql {
     }
 
     fn validation_credit(&self, base: usize, name: &str) -> Result<MemoryReservation> {
-        let reservation = self.reservation.new_empty();
+        let reservation = self.scratch.new_empty();
         ensure_reservation(
             &reservation,
             checked_bytes(base, [(self.aggregates.len(), size_of::<u64>())], name)?,
@@ -609,7 +610,7 @@ impl IncrementalSql {
         check_cancelled: &mut impl FnMut() -> Result<()>,
         name: &str,
     ) -> Result<()> {
-        let workspace = self.reservation.new_empty();
+        let workspace = self.scratch.new_empty();
         let mut seen = std::collections::BTreeSet::new();
         let _seen_credit = self.load_seen_credit(records, replace, name)?;
         for record in records {
@@ -661,7 +662,7 @@ impl IncrementalSql {
             sum.checked_add(record.num_rows())
                 .ok_or_else(|| df_error(name, "native delta row count overflowed"))
         })?;
-        let seen_credit = self.reservation.new_empty();
+        let seen_credit = self.scratch.new_empty();
         ensure_reservation(
             &seen_credit,
             checked_bytes(4096, [(usize::from(replace) * rows, 128)], name)?,
@@ -725,11 +726,20 @@ impl IncrementalSql {
         for row in 0..chunk.num_rows() {
             let key = encoded.as_ref().map(|encoded| encoded.row(row));
             let key = key.as_ref().map_or(&[][..], |key| key.as_ref());
-            if !replace && self.index.contains_key(key) {
-                return Err(df_error(name, "native state contains duplicate keys"));
-            }
+            self.validate_import_key(key, replace, name)?;
             let group = self.import_group(chunk, row, key, descriptor, name)?;
             self.install_imported_group(group, replace, seen, name)?;
+        }
+        Ok(())
+    }
+
+    fn validate_import_key(&self, key: &[u8], replace: bool, name: &str) -> Result<()> {
+        if self.index.contains_key(key) {
+            if !replace {
+                return Err(df_error(name, "native state contains duplicate keys"));
+            }
+        } else {
+            self.check_import_group_budget(self.groups.len() + 1, name)?;
         }
         Ok(())
     }
@@ -750,6 +760,19 @@ impl IncrementalSql {
             let slot = self.groups.len();
             self.index.insert(group.key.clone(), slot);
             self.groups.push(group);
+        }
+        Ok(())
+    }
+
+    fn check_import_group_budget(&self, count: usize, name: &str) -> Result<()> {
+        if self
+            .compact_budget
+            .is_some_and(|b| count as u64 > b.max_rows())
+        {
+            return Err(df_error(
+                name,
+                "SQL compact state group budget exceeded on restore",
+            ));
         }
         Ok(())
     }
