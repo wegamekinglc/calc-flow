@@ -24,6 +24,12 @@ WINDOWS_CHECKPOINT_REGRESSIONS = (
     "test_asof_idle_never_forwards_with_or_without_pending_left",
     "runtime::streaming::operator_task::tests::asof_tests::"
     "test_asof_minimum_watermark_has_no_underflow_and_maximum_requires_eof",
+    "runtime::streaming::operator_task::tests::asof_tests::"
+    "test_asof_reactivation_drains_without_new_aggregate_watermark",
+    "runtime::streaming::operator_task::tests::asof_tests::"
+    "test_asof_safe_frontier_preserves_later_equal_time_in_rolling_and_cross_section",
+    "runtime::streaming::operator_task::tests::asof_tests::"
+    "test_asof_idle_cannot_advance_a_multi_input_downstream_past_reactivated_rows",
     "runtime::streaming::runner::tests::asof_tests::"
     "test_asof_collector_backpressure_cancellation_restores_last_published_pending_cut",
     "runtime::streaming::runner::tests::"

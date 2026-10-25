@@ -87,7 +87,7 @@ pub(super) fn result(state: &[ScalarValue], ignore_nulls: bool, name: &str) -> R
         ));
     };
     let value = &state[0];
-    if (!is_set && state[..state.len() - 1].iter().any(|v| !v.is_null()))
+    if (!is_set && (!ignore_nulls || state[..state.len() - 1].iter().any(|v| !v.is_null())))
         || (*is_set && ignore_nulls && value.is_null())
     {
         return Err(df_error(

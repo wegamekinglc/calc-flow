@@ -467,7 +467,7 @@ fn encode_native_segment(
         &operator.name,
         export.records(),
         export.reserved_bytes(),
-    );
+    )?;
     let encoded = ipc::encode_with_owner(
         &wire,
         operator

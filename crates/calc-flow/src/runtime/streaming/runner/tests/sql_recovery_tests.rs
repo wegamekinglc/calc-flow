@@ -1,6 +1,7 @@
 mod queued_stop;
 
 mod managed_capture;
+mod ordered_last;
 
 use super::*;
 use crate::runtime::streaming::progress::WatermarkPolicy;
