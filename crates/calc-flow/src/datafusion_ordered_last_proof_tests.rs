@@ -244,7 +244,7 @@ fn physical_last_value(expressions: &[Arc<AggregateFunctionExpr>]) -> bool {
 }
 
 #[tokio::test]
-async fn test_ordered_last_baseline_retained_example_and_fallback_paths() {
+async fn test_ordered_last_compact_example_and_retained_fallback_paths() {
     use crate::{
         CancellationToken, EdgeCollector, OperatorMetadata, SqlOperator, StreamJobContext,
         StreamOperator, StreamOperatorContext,
@@ -273,6 +273,7 @@ async fn test_ordered_last_baseline_retained_example_and_fallback_paths() {
     ] {
         let mut operator =
             SqlOperator::new("ordered-proof", query, vec!["input".into()], vec![]).unwrap();
+        let compact = query == QUERY && config == DataFusionConfig::default();
         operator.set_stream_resources(config, UdfRegistrySnapshot::default(), vec![]);
         let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
         for rows in [2, 4] {
@@ -295,10 +296,10 @@ async fn test_ordered_last_baseline_retained_example_and_fallback_paths() {
             let captured = operator.checkpoint(crate::Epoch::INITIAL).unwrap();
             assert_eq!(
                 captured.inline_metadata["state_layout"],
-                serde_json::json!(4)
+                serde_json::json!(if compact { 5 } else { 4 })
             );
             assert_eq!(captured.inline_metadata["rows"], serde_json::json!(rows));
-            assert!(captured.segments.contains_key("input-retained"));
+            assert_eq!(captured.segments.contains_key("input-retained"), !compact);
         }
     }
 }
@@ -543,8 +544,19 @@ impl Model {
 }
 
 async fn assert_prefixes(sql: &str, records: &[RecordBatch]) -> Model {
+    use crate::{OperatorMetadata, StreamOperator};
     let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
     let mut model = Model::default();
+    let job = crate::StreamJobContext::new(
+        439,
+        "ordered-production",
+        crate::JsonMap::new(),
+        None,
+        crate::CancellationToken::new(),
+    );
+    let context = crate::StreamOperatorContext::new(&job, "ordered-production", None);
+    let mut operator =
+        crate::SqlOperator::new("ordered-production", sql, vec!["input".into()], vec![]).unwrap();
     for end in 1..=records.len() {
         let part = batch(vec![records[end - 1].clone()]);
         let decision = admission(&runtime, sql, &part).await;
@@ -558,6 +570,33 @@ async fn assert_prefixes(sql: &str, records: &[RecordBatch]) -> Model {
             "{sql}"
         );
         let actual = model.update(&runtime, sql, &part).await;
+        let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data("input", part.clone(), &context, &mut output)
+            .await
+            .unwrap();
+        let produced = output.drain("output");
+        assert_eq!(
+            snapshot(
+                produced[0]
+                    .as_data()
+                    .unwrap()
+                    .table_payload()
+                    .unwrap()
+                    .batches()
+            ),
+            actual,
+            "production {sql}, prefix {end}"
+        );
+        if records[..end].iter().any(|r| r.num_rows() != 0) {
+            assert_eq!(
+                operator
+                    .checkpoint(crate::Epoch::INITIAL)
+                    .unwrap()
+                    .inline_metadata["state_layout"],
+                serde_json::json!(5)
+            );
+        }
         let expected = runtime
             .sql(
                 sql,

@@ -162,6 +162,7 @@ pub(super) fn result_bytes(group: &Group, name: &str) -> Result<usize> {
 
 pub(super) fn state_width(dtype: &DataType, name: &str) -> Result<usize> {
     match dtype {
+        DataType::Boolean => Ok(1),
         DataType::Utf8 | DataType::LargeUtf8 => Ok(size_of::<Option<Vec<u8>>>()),
         _ => dtype
             .primitive_width()

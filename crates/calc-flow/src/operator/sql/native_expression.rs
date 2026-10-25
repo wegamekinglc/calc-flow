@@ -251,6 +251,7 @@ pub(super) fn input_work(aggregate: &datafusion::logical_expr::Aggregate) -> Opt
                 .params
                 .args
                 .iter()
+                .chain(function.params.order_by.iter().map(|sort| &sort.expr))
                 .try_fold(nodes, |nodes, argument| {
                     nodes.checked_add(input_expression_work(argument, aggregate.input.schema())?)
                 })?;

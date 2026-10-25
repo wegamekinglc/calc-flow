@@ -65,9 +65,11 @@ pub(super) struct DecodedControl {
 
 impl CompactControl {
     pub(super) fn validate_identity(&self, trusted: &CompactIdentity) -> Result<()> {
-        if self.state_layout != 3
+        let ordered = trusted.native_descriptor["policy"] == "ordered_last_grouped_v1";
+        let (layout, semantics) = incremental::ordered_last::checkpoint_versions(ordered);
+        if self.state_layout != layout
             || self.state_accounting != 3
-            || self.native_semantics != 1
+            || self.native_semantics != semantics
             || self.datafusion_version != datafusion::DATAFUSION_VERSION
             || self.identity != *trusted
             || !self.ledger.seen_input

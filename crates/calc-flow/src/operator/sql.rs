@@ -42,6 +42,8 @@ mod metadata;
 mod recovery_test_hooks;
 mod restore;
 pub(crate) use restore::PreparedSqlRestore;
+#[cfg(test)]
+mod ordered_last_tests;
 mod retention;
 
 #[cfg(test)]
@@ -1041,6 +1043,13 @@ impl SqlOperator {
         context: &StreamOperatorContext<'_>,
     ) -> Result<bool> {
         context.check_cancelled()?;
+        if plan.is_some_and(incremental::IncrementalSql::requires_ordered_last_proof) {
+            return self
+                .stream_state
+                .runtime()?
+                .prove_ordered_last_plan(&self.validated, alias, batch, &self.name)
+                .await;
+        }
         if plan.is_some_and(incremental::IncrementalSql::requires_grouped_float_proof)
             && !self
                 .stream_state

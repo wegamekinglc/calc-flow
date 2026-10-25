@@ -350,10 +350,13 @@ fn finish(
 ) -> Result<Arc<CompactCapture>> {
     let runtime = operator.retention_runtime()?;
     let logical = state.columns.logical_segment.clone();
+    let (state_layout, native_semantics) = incremental::ordered_last::checkpoint_versions(
+        parts.policy == incremental::grouped_float::Policy::OrderedLastGroupedV1,
+    );
     let control = CompactControl {
-        state_layout: 3,
+        state_layout,
         state_accounting: 3,
-        native_semantics: 1,
+        native_semantics,
         datafusion_version: datafusion::DATAFUSION_VERSION.into(),
         state_policy: parts.policy,
         coalescer: parts.coalescer.as_ref().map_or(

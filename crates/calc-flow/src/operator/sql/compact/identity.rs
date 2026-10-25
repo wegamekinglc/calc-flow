@@ -241,13 +241,23 @@ fn native_output_json(
     key_inputs: &[Value],
     input_checks: &[Value],
 ) -> Result<Value> {
-    Ok(json!({"policy":descriptor.policy, "keys":keys,
+    let mut value = json!({"policy":descriptor.policy, "keys":keys,
         "key_inputs":key_inputs, "input_checks":input_checks, "aggregates":aggregates,
         "projection":descriptor.projection.iter().map(input_json).collect::<Result<Vec<_>>>()?,
         "post_filter":descriptor.post_filter.as_ref().map(input_json).transpose()?,
         "post_order":descriptor.post_order.as_ref().map(|order| order_json(&order.keys, order.skip, order.fetch)).transpose()?,
         "wire_schema_sha256":retention::schema_digest(&descriptor.wire_schema)?,
-        "output_schema_sha256":retention::schema_digest(&descriptor.output_schema)?}))
+        "output_schema_sha256":retention::schema_digest(&descriptor.output_schema)?});
+    if let Some(ordered) = &descriptor.ordered_last {
+        value["ordered_last"] = json!({
+            "version":1, "model":"df55_single_linear_fifo_groups_v1",
+            "datafusion":"55.0.0", "arrow_ordering":"59.2.0",
+            "tie":"first_maximal_tuple", "group_slots":"first_seen",
+            "ignore_nulls":ordered.ignore_nulls,
+            "order":order_json(&ordered.keys, 0, None)?,
+        });
+    }
+    Ok(value)
 }
 
 fn order_json(

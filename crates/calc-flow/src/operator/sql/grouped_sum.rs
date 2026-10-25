@@ -16,6 +16,8 @@ pub(super) fn selected(expression: &AggregateFunctionExpr) -> bool {
 pub(super) struct PartialAccumulator {
     native: Box<dyn GroupsAccumulator>,
     numeric: bool,
+    ordered_last: bool,
+    ignore_nulls: bool,
 }
 
 impl PartialAccumulator {
@@ -25,6 +27,8 @@ impl PartialAccumulator {
                 .create_groups_accumulator()
                 .map_err(|error| df_error(name, error))?,
             numeric: selected(expression),
+            ordered_last: super::ordered_last::selected(expression),
+            ignore_nulls: expression.ignore_nulls(),
         })
     }
 
@@ -34,7 +38,8 @@ impl PartialAccumulator {
         count: usize,
         name: &str,
     ) -> Result<()> {
-        let saved = saved.filter(|(_, state)| state.last().is_some_and(|value| !value.is_null()));
+        let ordered_last = self.ordered_last;
+        let saved = saved.filter(|(_, state)| seed_present(state, ordered_last));
         let Some((_, first)) = saved.clone().next() else {
             return Ok(());
         };
@@ -45,6 +50,12 @@ impl PartialAccumulator {
             })
             .collect::<DataFusionResult<Vec<_>>>()
             .map_err(|error| df_error(name, error))?;
+        if self.ordered_last {
+            return self
+                .native
+                .merge_batch(&values, &ranks, count)
+                .map_err(|error| df_error(name, error));
+        }
         // Sparse merges must track unseen groups even when all saved values are valid.
         let empty = new_empty_array(&first.last().expect("sequential state").data_type());
         self.native
@@ -72,6 +83,13 @@ impl PartialAccumulator {
         }
     }
 
+    pub fn ordered_last(&self) -> bool {
+        self.ordered_last
+    }
+    pub fn ignore_nulls(&self) -> bool {
+        self.ignore_nulls
+    }
+
     pub fn update_batch(
         &mut self,
         values: &[ArrayRef],
@@ -88,6 +106,14 @@ impl PartialAccumulator {
 
     pub fn size(&self) -> usize {
         self.native.size()
+    }
+}
+
+fn seed_present(state: &[ScalarValue], ordered_last: bool) -> bool {
+    if ordered_last {
+        !state.is_empty()
+    } else {
+        state.last().is_some_and(|value| !value.is_null())
     }
 }
 
