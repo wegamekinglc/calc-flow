@@ -2,10 +2,11 @@
 
 Baseline: `37d8371e24c76f03ab9409eae21a78673d58371a`, merged T3 / PR #498.
 The dedicated DAL-441 checkout starts at the fetched main containing that
-commit. This stage adds acceptance coverage; no production defect was found.
-The only changes outside test modules propagate a test-only IPC hook's error
-inside existing `cfg(test)` blocks. Public APIs, project-v3, manifest-v3,
-layout-3/4 encoders, dependencies and runtime behavior are unchanged.
+commit. This stage adds acceptance coverage and rejects impossible unset
+RESPECT NULLS winners during recovery. The initial delivery was
+`41f23060c87559f7451b3975b76050ea19e89b60`; the focused review found the
+missing null-state boundary described below. Public APIs, project-v3,
+manifest-v3, layout-3/4 encoders, identities and dependencies are unchanged.
 
 ## Coverage mapping
 
@@ -65,6 +66,56 @@ retained compatibility. Existing emit-error/cancellation and layout-4 ordered
 continuation tests also run with the new tests. The existing SUM/COUNT layout-3
 roundtrip is a control for the shared capture hook.
 
+## Focused review correction
+
+The original corruption fixture used IGNORE NULLS and missed the impossible
+unset state for default/RESPECT NULLS when the value and entire ordering tuple
+are null. The reviewer supplied a production-library probe showing that a
+checksum-valid checkpoint with only `is_set` changed from true to false restored
+successfully, then replaced the null winner with an earlier quote. Independent
+DF55 and uninterrupted execution both retained null.
+
+`ordered_last.rs::result` now rejects unset candidates unless IGNORE NULLS is
+active and every candidate scalar is null. Set null winners remain valid under
+default/RESPECT NULLS; legitimate unset IGNORE NULLS groups are unchanged.
+`corruption/respect_nulls.rs` runs default and explicit RESPECT NULLS with full
+and delta checkpoints, changes only the target group's flag, preserves schema
+and census, updates digests and removes segment owners. Before the fix both
+new tests failed because restore returned Ok. After the fix rejection reaches
+the candidate-state consistency error, preserves the native owner, winner/key
+census, uncaptured dirty state, quota ledger, metadata and old capture, and
+refunds both actual engine and compact-state fees exactly. Legal restore and
+continuation with an earlier quote match uninterrupted execution and DF55,
+including the null winner; the result can be recaptured/restored again.
+
+## Windows ASOF failure diagnosis and scheduling
+
+The Windows Rust job
+[121238214507](https://github.com/wegamekinglc/calc-flow/actions/runs/40216341910/job/121238214507)
+reported 2400 passed, three ASOF barrier-ACK timeouts and six ignored cases.
+It uses all features, dev debug=0 and parallel libtest execution. All three
+failures are at the same five-second wait in `TaskFixture::fence`. That wait
+includes native capture admission and durable segment staging, validation and
+publication before ACK. The ASOF/gather/state production code and fixture are
+byte-identical between main and the initial T4 head; SQL IPC probes are scoped
+to unique SQL node names and are not called by ASOF.
+
+On Linux, the unmodified all-features fixture passed 10/10 with four test
+threads. A bounded five-run comparison mixed that module, T4 restore/encoder
+faults, managed captures and shared async IPC tests on two CPU cores with four
+test threads: 22/22 each time (110 total), 0.86–0.95 seconds per run. Thus no
+hook leak or native lifecycle defect was reproduced; this does not establish a
+native Windows result or prove that all possible resource races are absent.
+
+The existing Windows job already isolates two other cases using the same
+durable ASOF fixture to avoid checkpoint deadline contention. The three new
+failures now execute in that same exact-name serial stage. Static command
+mapping proves all seven cases excluded from the parallel phase execute in
+the subsequent required serial phase. No test is removed or ignored overall;
+test bodies, five/ten-second waits, assertions and required gates are unchanged.
+This addresses scheduling contention as the working diagnosis, not a claimed
+production lifecycle fix. The actual Windows confirmation remains with CI.
+
 ## Validation
 
 Run against the Rust content of this stage, reusing the original checkout's
@@ -83,6 +134,27 @@ DAL-441 checkout, not the old WIP.
   Four lint-only fixes add statement semicolons, use a checked conversion of
   the known-positive prefix counter and remove a Copy type's clone. The test
   evidence above is reused after these behavior-preserving changes.
+
+After the review correction, with the same target/debug settings and all
+features:
+
+- `cargo test --locked -p calc-flow --lib --all-features -- corruption::respect_nulls ordered_last_tests::corruption test_ordered_last_layout_five_roundtrip_preserves_null_groups_and_ties test_ordered_last_full_delta_preserve_all_timestamp_units_and_timezones test_ordered_last_delta_rewrite_and_every_cold_prefix_match_uninterrupted_and_df55 compact_budget_restores_full_and_delta compact_budget_group_limit test_ordered_last_rejects_inconsistent_winner_state --nocapture`:
+  11/11 passed, 0.65 seconds. Covers the two new regressions, actual restore
+  rejection/refunds, legitimate IGNORE NULLS, full/delta rewrite and budgets.
+- `cargo test --locked -p calc-flow --lib --all-features runtime::streaming::operator_task::tests::asof_tests:: -- --nocapture --test-threads=4`:
+  baseline 10/10 passed, 0.05 seconds. The bounded mixed-module comparison
+  described above passed 110/110 without source changes between runs.
+- Exact serial execution of the three failing ASOF names with
+  `cargo test --locked -p calc-flow --lib --all-features -- <three exact names> --exact --test-threads=1 --nocapture`:
+  3/3 passed, 0.05 seconds. The exact names are preserved in the workflow.
+- Windows workflow YAML parses; its seven-case parallel/serial command sets
+  match exactly. No overall test exclusion or deadline change was introduced.
+- `cargo test --locked -p calc-flow --lib --all-features test_ordered_last_every_prefix_matches_datafusion_across_batch_splits -- --nocapture`:
+  the existing DF55 oracle passed, including default/RESPECT/IGNORE NULLS,
+  ASC/DESC, composite order and batch splits; 0.50 seconds.
+- `cargo clippy --locked -p calc-flow --lib --tests --all-features -- -D warnings`,
+  formatting, changed Rust complexity threshold 8 and diff/schema/lock checks
+  passed. The ASOF fixture and production lifecycle code were not modified.
 
 The first run exposed two fixture errors: the encoder hook shared a node name
 with other concurrent tests, and a cold restore was incorrectly expected to
