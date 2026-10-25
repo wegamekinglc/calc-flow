@@ -215,9 +215,13 @@ selectors.
 - SQL result schemas come from private native planning without reading rows.
   SQL output has a new row lineage and no inherited temporal ordering.
   Batch SQL supports multiple aliases; stream SQL accepts one. Ordinary and
-  grouped SQL aggregates retain input and emit a full cumulative snapshot
-  after each batch; other SQL runs per batch. SQL aggregate state has
-  no fixed default row or byte cap; a stream runtime budget can be supplied.
+  grouped SQL aggregates emit a full cumulative snapshot after each batch.
+  Eligible queries, including admitted grouped ordered LAST_VALUE, use compact
+  state; unsupported aggregate shapes retain input and rerun over history.
+  Other SQL runs per batch. SQL state has no fixed default cap;
+  `sql_state_budget` limits cumulative input and `sql_compact_state_budget`
+  independently requires and limits compact state per aggregate node. See
+  `docs/streaming-guide.md` for admission, ordering and recovery boundaries.
 - `compute` and `collect` return Arrow tables using logical declaration names.
   Each convenience call owns a fresh batch plan. Async calls capture mappings
   and Batch references at entry; Arrow buffers remain shared and read-only.

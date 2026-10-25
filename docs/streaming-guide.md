@@ -263,6 +263,13 @@ as the position example. The quote stream has `stock` (String), `latest_price`
 unique update per stock. The example deliberately delivers older quotes
 after newer ones; `LAST_VALUE(latest_price ORDER BY timestamp)` selects the
 price at the greatest timestamp rather than the last arrival.
+The SQL is unchanged: omitted direction resolves to `ASC NULLS LAST`, and
+omitted null treatment means `RESPECT NULLS`. The generated quotes have no
+nulls or complete timestamp ties. With other feeds, a null timestamp sorts
+last and a winning null price remains null; equal complete ordering tuples
+keep the first encountered winner. Declare an additional business sequence
+in SQL's ordering tuple when that is the intended tie rule; see
+[ordered LAST_VALUE](#compact-ordered-last_value).
 
 One owning streaming `Program` drains two named outputs: cumulative positions
 and latest quotes. Python retains only the current Arrow snapshot of each
@@ -288,8 +295,27 @@ compiles a separate native two-input SQL plan once and awaits its execution
 on each update inside the streaming loop. The join and account sum recompute
 over current positions and prices, with no historical trade replay or Python
 row conversion. Position state uses the compact incremental grouped sum.
-Ordered `LAST_VALUE` currently follows the retained-input SQL path and keeps
-quote history; this demo uses finite quote inputs.
+Ordered `LAST_VALUE` keeps one winner and its ordering tuple per stock without
+retaining quote history. The example explicitly requires compact execution:
+
+```python
+cf.StreamRuntimeConfig(
+    checkpointing=False,
+    sql_compact_state_budget=cf.StateBudget(100_000, 64 << 20),
+)
+```
+
+Each aggregate node independently allows up to 100,000 live groups and 64 MiB
+of conservative owned-state charges: `(account, stock)` groups for positions,
+stock groups for quotes. Increase the limits for larger key sets; exceeding
+either limit fails the job. The example leaves `sql_state_budget=None`, so
+there is no cumulative input quota. The compact budget does not cap process
+RSS or the Python-held Arrow snapshots. Both branches still emit complete
+cumulative snapshots with O(keys) output work on every update; there is no
+delta-output contract. This is Python-managed composition of independent
+streams and a batch valuation, with no atomic multi-input streaming SQL join.
+Checkpointing is disabled, so each invocation starts from zero; durable
+recovery and exactly-once delivery require capable explicit sources/sinks.
 
 The output has one row per known account, with `account` and `market_value`.
 Zero-quantity seeds retain accounts without executions. Quotes cover every
@@ -662,14 +688,33 @@ accounting also applies when native compact state is selected.
 
 Use `StreamRuntimeConfig(sql_compact_state_budget=StateBudget(100_000, 64 << 20))`
 to limit each aggregate SQL node to 100,000 live groups and 64 MiB of conservative
-owned state charges. These include keys, winners and ordering tuples, container
-capacity, results, dirty tracking, cached checkpoint/log segments, and old plus
-candidate state during a transaction. Input/output buffers and serialization
-scratch use separate reservations; this is not an RSS limit. An explicit compact
-budget rejects aggregate shapes that cannot compact, and rejects nonempty
-retained checkpoints instead of discarding history. Restore recomputes charges
-under the current budget. Row-local SQL is unaffected. Both SQL budgets default
-to `None`; when both are supplied, both must be satisfied.
+owned-state charges. `StateBudget.max_rows` means live groups here, including
+null-only groups, rather than cumulative input rows. Charges include plans,
+encoded keys, owned key/value/ordering scalars, container capacity, cached
+results, dirty tracking, checkpoint metadata and cached checkpoint/log segments.
+The installed state and transaction or restore candidate pay simultaneously;
+held captures remain charged until released. A candidate or checkpoint can
+therefore exceed the budget even when the installed winners alone fit. Failed
+candidates release their leases without installing new state.
+
+Input/output buffers, expression workspaces, physical-proof headroom, decoded
+validation buffers and serialization scratch use separate engine reservations.
+An IPC buffer's ownership lease pays its engine reservation once. The compact
+budget limits owned state, not serialization peak memory or process RSS.
+There is no fixed RSS guarantee even for a fixed key set.
+
+An explicit compact budget requires supported compact execution at every
+aggregate SQL node; row-local SQL is unaffected. Registered UDFs and unsupported
+aggregate shapes, types or execution models are rejected. A declared schema
+allows admission checks during preflight; otherwise checks occur before the
+first nonempty input can commit or emit. The ordered physical proof below still
+needs nonempty input. Unsupported admission reports an invalid
+`sql_compact_state_budget`; exceeding a group/byte limit is a state-budget
+failure. Convenience streams surface native job failures as
+`StreamingRuntimeError`; errors do not cause a switch to retained history after
+compact state has been installed. Both SQL budgets default to `None`; when
+configured together, the cumulative input quota and compact-state limits both
+apply. Neither changes the semantic plan fingerprint.
 
 Other SQL remains batch-local. `ORDER BY` and `LIMIT` apply to each snapshot;
 SQL window functions alone remain batch-local. Downstream stages receive each
@@ -699,6 +744,77 @@ For a job that does not need checkpoint recovery, pass
 storage, snapshots (including at EOF), and recovery-only journals. State needed
 for computation, watermarks, edge/state budgets, output delivery, and awaited
 cleanup still apply. See [checkpoint modes](#checkpoints-and-recovery).
+
+### Compact ordered LAST_VALUE
+
+The ordered MVP admits one built-in `LAST_VALUE(value ORDER BY ...)` over a
+single plain input scan with a nonempty, direct-column `GROUP BY`. Group keys
+may be signed/unsigned integers, Boolean or Utf8/LargeUtf8, including composite
+and null keys. The value must be a direct integer, Float32 or Float64 column;
+each ordering term must be a direct integer or Timestamp column. Timestamp
+units `s`, `ms`, `us`, `ns` and timezone information are preserved. Projection
+may select/alias group keys and the aggregate result, with an optional final
+full-result sort.
+
+Filters inside this SQL node, HAVING, LIMIT, DISTINCT, mixed/global/window
+aggregates, expression operands/orderings, other types, joins and subqueries
+are outside this ordered compact shape. Without an explicit compact budget,
+they use retained execution where the underlying SQL supports them. This does
+not extend compact support to every ordered aggregate or to session windows.
+
+Admission also certifies the default DataFusion 55 session/options and standard
+rules, an unbounded DataFusion memory pool, one FIFO input partition with no
+advertised ordering, and exactly one native Single/Linear grouped accumulator.
+Alternate/custom engine pools or execution models fall back to retained
+execution without an explicit compact requirement. The independent compact
+budget can still bound owned state with that default engine pool. An empty
+first batch defers the ordered physical decision until nonempty input arrives.
+After compact admission the mode is fixed; later failures cannot recover
+discarded input by changing modes.
+
+Each group owns a nullable winner, its entire ordering tuple and an `is_set`
+flag, without owning historical input arrays. Comparison follows the resolved
+SQL sort options lexicographically. `ORDER BY t` resolves to `ASC NULLS LAST`;
+`ORDER BY t DESC` resolves to `DESC NULLS FIRST`.
+Explicit `ASC`/`DESC` and `NULLS FIRST`/`NULLS LAST` apply independently to every
+term. `LAST_VALUE` selects the last tuple in that ordering, so descending order
+can select the smallest non-null timestamp. Null ordering keys participate in
+comparison. Default and explicit `RESPECT NULLS` permit a null winning value;
+`IGNORE NULLS` skips null values, while retaining null-only groups with a null
+result and an unset flag. NaN is a value, not SQL null.
+
+Equal complete tuples preserve the first encountered winner within/across
+batches and compatible recovery. If the business rule requires a sequence
+tie-breaker, explicitly write it in SQL, for example
+`LAST_VALUE(price ORDER BY timestamp ASC NULLS LAST, sequence ASC NULLS LAST)`.
+No hidden sequence is added. Complete cumulative results still require
+O(keys) output materialization and have no extra group-order guarantee; request
+an outer `ORDER BY` when result order matters.
+
+Existing Rust debug tracing reports retained fallback with `node`, `mode` and
+`reason`. Explicit operator checkpoints expose `state_layout`: ordered compact
+state uses layout 5 and has no `input-retained` segment. Its `rows` metadata
+continues to count cumulative accepted input, not live groups.
+
+### SQL aggregate recovery compatibility
+
+Compatible layout-3 compact and layout-4 retained checkpoints remain supported.
+A nonempty retained checkpoint resumes retained execution even if its query
+would compact in a fresh job. An explicit compact budget rejects that restore;
+switching requires a new lineage/state root and replayable input, rather than
+discarding history during restore.
+
+Ordered compact checkpoints use layout 5, including full/delta captures. Their
+identity binds query/aliases, schemas, resolved ordering columns/options,
+Timestamp units/timezones, null treatment, tie/grouped execution model and
+engine versions. Unknown versions, incompatible identities and corrupt state
+fail closed, including checksum-valid impossible winner/flag combinations.
+Restore rebuilds group and byte charges from actual state under the current
+budgets; a tighter budget may reject an otherwise compatible checkpoint.
+Failed restores preserve the previously installed state. Checkpoint format
+compatibility alone does not supply replay or exactly-once delivery: those
+also depend on the source/sink route described in
+[checkpoints and recovery](#checkpoints-and-recovery).
 
 ## Explicit connectors and recovery
 
