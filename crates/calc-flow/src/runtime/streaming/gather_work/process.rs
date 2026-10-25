@@ -649,6 +649,25 @@ fn settled_slot(slot: &Slot) -> bool {
 }
 
 #[cfg(test)]
+impl super::JobGatherOwner {
+    // Observe refunded work independently of the reusable executor's lifetime.
+    pub(crate) async fn retire_idle_generation_for_test(&self) {
+        let home = &self.0.home;
+        let generation = {
+            let state = home.state.lock();
+            assert!(
+                matches!(state.slot, Slot::Empty),
+                "work must finish before retiring its executor"
+            );
+            assert!(!matches!(state.phase, PoolPhase::Initializing));
+            state.generation
+        };
+        home.retire_generation(generation);
+        home.wait_generation_cleanup(generation).await;
+    }
+}
+
+#[cfg(test)]
 pub(crate) struct TestService {
     control: Option<ProcessControl>,
 }

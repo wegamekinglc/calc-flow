@@ -1191,15 +1191,25 @@ fn runtime_config(config: &Bound<'_, PyDict>) -> PyResult<calc_flow::StreamRunti
         Some(_) => return Err(PyTypeError::new_err("checkpointing must be a bool")),
         None => true,
     };
-    let sql_state_max_rows = config
-        .get_item("sql_state_max_rows")?
-        .map(|value| value.extract::<u64>())
-        .transpose()?;
-    let sql_state_max_bytes = config
-        .get_item("sql_state_max_bytes")?
-        .map(|value| value.extract::<u64>())
-        .transpose()?;
-    let sql_state_budget = match (sql_state_max_rows, sql_state_max_bytes) {
+    let sql_state_budget = legacy_sql_budget_config(config)?;
+    let sql_compact_state_budget = compact_state_budget_config(config)?;
+    Ok(calc_flow::StreamRuntimeConfig {
+        checkpointing,
+        checkpoint_interval: duration_config(config, "checkpoint_interval_micros")?,
+        checkpoint_timeout: duration_config(config, "checkpoint_timeout_micros")?,
+        edge_budget: edge_budget_config(config)?,
+        sql_state_budget,
+        sql_compact_state_budget,
+        retained_epochs: required_item(config, "retained_epochs")?.extract()?,
+    })
+}
+
+fn legacy_sql_budget_config(
+    config: &Bound<'_, PyDict>,
+) -> PyResult<Option<calc_flow::StateBudget>> {
+    let sql_state_max_rows = optional_u64_config(config, "sql_state_max_rows")?;
+    let sql_state_max_bytes = optional_u64_config(config, "sql_state_max_bytes")?;
+    Ok(match (sql_state_max_rows, sql_state_max_bytes) {
         (None, None) => None,
         (Some(rows), Some(bytes)) => {
             Some(calc_flow::StateBudget::new(rows, bytes).map_err(crate::error::to_py_err)?)
@@ -1209,15 +1219,46 @@ fn runtime_config(config: &Bound<'_, PyDict>) -> PyResult<calc_flow::StreamRunti
                 "sql_state_max_rows and sql_state_max_bytes must be supplied together",
             ));
         }
-    };
-    Ok(calc_flow::StreamRuntimeConfig {
-        checkpointing,
-        checkpoint_interval: duration_config(config, "checkpoint_interval_micros")?,
-        checkpoint_timeout: duration_config(config, "checkpoint_timeout_micros")?,
-        edge_budget: edge_budget_config(config)?,
-        sql_state_budget,
-        retained_epochs: required_item(config, "retained_epochs")?.extract()?,
     })
+}
+
+fn optional_u64_config(config: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<u64>> {
+    config
+        .get_item(key)?
+        .map(|value| value.extract())
+        .transpose()
+}
+
+fn compact_state_budget_config(
+    config: &Bound<'_, PyDict>,
+) -> PyResult<Option<calc_flow::StateBudget>> {
+    Ok(
+        match (
+            config.get_item("sql_compact_state_max_groups")?,
+            config.get_item("sql_compact_state_max_bytes")?,
+        ) {
+            (None, None) => None,
+            (Some(groups), Some(bytes)) => Some(compact_budget_limits(&groups, &bytes)?),
+            _ => {
+                return Err(PyValueError::new_err(
+                    "sql_compact_state_max_groups and sql_compact_state_max_bytes must be supplied together",
+                ));
+            }
+        },
+    )
+}
+
+fn compact_budget_limits(
+    groups: &Bound<'_, PyAny>,
+    bytes: &Bound<'_, PyAny>,
+) -> PyResult<calc_flow::StateBudget> {
+    if groups.is_instance_of::<PyBool>() || bytes.is_instance_of::<PyBool>() {
+        return Err(PyTypeError::new_err(
+            "sql_compact_state limits must be integers",
+        ));
+    }
+    calc_flow::StateBudget::new(groups.extract()?, bytes.extract()?)
+        .map_err(crate::error::to_py_err)
 }
 
 #[pymethods]
@@ -2432,6 +2473,56 @@ mod tests {
         PyContinuousStreamingRunner, PyManagedCheckpointRuntime, checked_static_array_shape,
     };
     use crate::{batch::PyBatch, pipeline::PyStreamExecutionPlan};
+
+    #[test]
+    fn test_compact_budget_native_pairs_and_parameter_validation() {
+        Python::initialize();
+        Python::attach(|py| {
+            let config = PyDict::new(py);
+            assert!(
+                super::compact_state_budget_config(&config)
+                    .unwrap()
+                    .is_none()
+            );
+            config.set_item("sql_compact_state_max_groups", 8).unwrap();
+            assert!(
+                super::compact_state_budget_config(&config)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("supplied together")
+            );
+            config
+                .set_item("sql_compact_state_max_bytes", 1 << 20)
+                .unwrap();
+            let budget = super::compact_state_budget_config(&config)
+                .unwrap()
+                .unwrap();
+            assert_eq!((budget.max_rows(), budget.max_bytes()), (8, 1 << 20));
+            config.del_item("sql_compact_state_max_groups").unwrap();
+            assert!(super::compact_state_budget_config(&config).is_err());
+            for field in [
+                "sql_compact_state_max_groups",
+                "sql_compact_state_max_bytes",
+            ] {
+                for value in ["True", "False", "1.5", "'8'", "0", "-1", "9007199254740992"] {
+                    config.set_item("sql_compact_state_max_groups", 8).unwrap();
+                    config
+                        .set_item("sql_compact_state_max_bytes", 1 << 20)
+                        .unwrap();
+                    config
+                        .set_item(
+                            field,
+                            py.eval(&CString::new(value).unwrap(), None, None).unwrap(),
+                        )
+                        .unwrap();
+                    assert!(
+                        super::compact_state_budget_config(&config).is_err(),
+                        "{field}={value}"
+                    );
+                }
+            }
+        });
+    }
 
     #[test]
     fn benchmark_dispatch_trace_methods_follow_feature_gate() {

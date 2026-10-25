@@ -92,7 +92,7 @@ pub(super) struct Proof {
     pub coalesced: Option<Arc<coalescer::State>>,
     kinds: Arc<[Kind]>,
     operator: GatherOperatorId,
-    _reservation: MemoryReservation,
+    reservation: MemoryReservation,
 }
 
 fn saved_values<'a>(
@@ -188,7 +188,7 @@ impl Proof {
         {
             return Ok(None);
         }
-        let reservation = runtime.incremental_reservation(name);
+        let reservation = runtime.compact_state_reservation(name);
         super::ensure_reservation(
             &reservation,
             checked_bytes(4096, [(name.len(), 2), (expressions.len(), 512)], name)?,
@@ -211,7 +211,7 @@ impl Proof {
                 .map(|expression| Kind::of(expression).expect("selected kind"))
                 .collect(),
             operator: GatherOperatorId::new(name.to_owned().into()),
-            _reservation: reservation,
+            reservation,
         }))
     }
 
@@ -286,7 +286,7 @@ impl Proof {
             predicate: predicate.cloned(),
             input_checks: input_checks.to_vec(),
             previous: self.coalesced.clone(),
-            coalesced_scratch: coalesced_credit.as_ref().map(|owner| owner.new_empty()),
+            coalesced_scratch: coalesced_credit.as_ref().map(|_| credit.new_empty()),
             coalesced_credit,
             batch_size: self.policy.config.batch_size,
             name: name.to_owned(),
@@ -322,7 +322,7 @@ impl Proof {
         let charge =
             self.update_charge(records, has_owner, !filters.is_empty(), predicate, name)?;
         let coalesced_credit =
-            (!empty && predicate.is_some()).then(|| Arc::new(credit.new_empty()));
+            (!empty && predicate.is_some()).then(|| Arc::new(self.reservation.new_empty()));
         super::ensure_reservation(credit, charge, name)?;
         Ok((empty, coalesced_credit))
     }

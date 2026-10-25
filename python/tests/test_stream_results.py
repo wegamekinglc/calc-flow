@@ -24,6 +24,15 @@ def test_stream_runtime_config_preserves_retained_epochs_position() -> None:
     assert config._native()["retained_epochs"] == 7
 
 
+def test_stream_compact_state_budget_serializes_group_and_byte_limits() -> None:
+    config = cf.StreamRuntimeConfig(sql_compact_state_budget=cf.StateBudget(8, 1 << 20))
+    assert config._native()["sql_compact_state_max_groups"] == 8
+    assert config._native()["sql_compact_state_max_bytes"] == 1 << 20
+    assert "sql_compact_state_max_groups" not in cf.StreamRuntimeConfig()._native()
+    with pytest.raises(TypeError, match="sql_compact_state_budget"):
+        cf.StreamRuntimeConfig(sql_compact_state_budget=object())._native()
+
+
 class _Feed:
     def __init__(
         self, batches: list[pa.Table | pa.RecordBatch | cf.Batch | cf.Watermark]
@@ -182,6 +191,65 @@ def test_stream_sql_aggregate_uses_configured_state_budget() -> None:
                     pass
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("group_limit", [1, 2])
+def test_stream_sql_compact_budget_reaches_native_nodes(group_limit: int) -> None:
+    source = cf.table_input(
+        "events",
+        schema=pa.schema([("k", pa.string()), ("v", pa.int64()), ("t", pa.int64())]),
+    )
+    query = source.sql(
+        "SELECT k, LAST_VALUE(v ORDER BY t) AS v FROM input GROUP BY k ORDER BY k"
+    )
+    feed = _Feed(
+        [
+            pa.table({"k": ["a"], "v": [1], "t": [1]}),
+            pa.table({"k": ["a", "b"], "v": [2, 3], "t": [2, 3]}),
+        ]
+    )
+    config = cf.StreamRuntimeConfig(
+        sql_compact_state_budget=cf.StateBudget(group_limit, 16 << 20)
+    )
+
+    async def run() -> list[dict[str, list[object]]]:
+        async with query.stream(feed, config=config) as results:
+            return [table.to_pydict() async for table in results]
+
+    if group_limit == 1:
+        with pytest.raises(cf.StreamingRuntimeError):
+            asyncio.run(run())
+    else:
+        assert asyncio.run(run()) == [
+            {"k": ["a"], "v": [1]},
+            {"k": ["a", "b"], "v": [2, 3]},
+        ]
+
+
+def test_stream_compact_budget_applies_independently_to_each_aggregate() -> None:
+    source = cf.table_input("events", schema=pa.schema([("value", pa.int64())]))
+    program = cf.Program(
+        "budgets",
+        engine="streaming",
+        outputs={
+            "count": source.sql("SELECT COUNT(*) AS n FROM input"),
+            "sum": source.sql("SELECT SUM(value) AS total FROM input"),
+        },
+    )
+    config = cf.StreamRuntimeConfig(
+        sql_compact_state_budget=cf.StateBudget(1, 16 << 20)
+    )
+
+    async def run() -> dict[str, list[int]]:
+        values: dict[str, list[int]] = {"count": [], "sum": []}
+        async with program.stream(
+            {"events": _Feed([pa.table({"value": [1, 2]})])}, config=config
+        ) as results:
+            async for output in results:
+                values[output.name].append(output.table.column(0)[0].as_py())
+        return values
+
+    assert asyncio.run(run()) == {"count": [2], "sum": [3]}
 
 
 class _IdleFeed(_Feed):

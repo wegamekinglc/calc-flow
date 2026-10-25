@@ -205,6 +205,9 @@ async fn reject_duplicate_snapshot(
         owner.gather_owner().close_admission();
         owner.gather_owner().wait_closed_generation_for_test().await;
     }
+    // Global capacity pressure may retire the checkpoint's reusable executor.
+    // Compare refunds after the same retirement boundary on both sides.
+    owner.gather_owner().retire_idle_generation_for_test().await;
     let baseline = FundingObservation::observe(&target, &pool, &owner);
     let mut candidate = snapshot.clone();
     if bad_charge {
@@ -229,6 +232,7 @@ async fn reject_duplicate_snapshot(
         && history_observation(&target) == history
         && target.v2_writer.observation_for_test() == writer
         && Arc::ptr_eq(&old, &canonical_right(&target));
+    owner.gather_owner().retire_idle_generation_for_test().await;
     let current = FundingObservation::observe(&target, &pool, &owner);
     let credit = unchanged_funding(route, baseline, current);
     eprintln!("duplicate credit {route:?}: before={baseline:?}, after={current:?}");

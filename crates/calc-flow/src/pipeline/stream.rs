@@ -118,6 +118,12 @@ pub struct StreamRuntimeConfig {
     /// Optional retained-input limit for each aggregate SQL node.
     pub sql_state_budget: Option<crate::StateBudget>,
     pub retained_epochs: usize,
+    /// Optional per-node compact ownership limit (rows count groups).
+    /// Supplying this requires every aggregate SQL node to admit compact execution.
+    /// Candidate copies and cached checkpoints share the byte limit.
+    /// Input/output buffers and serialization scratch use separate reservations;
+    /// this is not a process RSS limit. Both SQL budgets apply when configured.
+    pub sql_compact_state_budget: Option<crate::StateBudget>,
 }
 
 impl Default for StreamRuntimeConfig {
@@ -129,6 +135,7 @@ impl Default for StreamRuntimeConfig {
             edge_budget: EdgeBudget::default(),
             sql_state_budget: None,
             retained_epochs: 2,
+            sql_compact_state_budget: None,
         }
     }
 }
@@ -1086,15 +1093,35 @@ impl StreamExecutionPlan {
         if !config.checkpointing {
             fields.insert("checkpointing".into(), json!(false));
         }
-        if let Some(budget) = config.sql_state_budget {
-            fields.insert("sql_state_budget".into(), json!(budget));
-        }
+        insert_sql_budget_fields(fields, config);
         let canonical = canonical_json(&value)?;
         Ok(hex::encode(Sha256::digest(canonical.as_bytes())))
     }
 
     pub const fn requirements(&self) -> &StreamRequirements {
         &self.requirements
+    }
+
+    pub(crate) fn set_sql_budgets(&mut self, config: &StreamRuntimeConfig) -> Result<()> {
+        if let Some(budget) = config.sql_state_budget {
+            self.set_sql_state_budget(Some(budget))?;
+        }
+        if let Some(budget) = config.sql_compact_state_budget {
+            self.set_sql_compact_state_budget(Some(budget))?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn set_sql_compact_state_budget(
+        &mut self,
+        budget: Option<crate::StateBudget>,
+    ) -> Result<()> {
+        for node in &mut self.nodes {
+            if let CompiledStreamOperator::Sql(operator) = &mut node.operator {
+                operator.set_compact_state_budget(budget)?;
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn set_sql_state_budget(
@@ -1949,5 +1976,17 @@ mod volatile_query_tests {
             );
         assert!(plan.is_ok(), "{:?}", plan.err());
         let _ = default_function_registry();
+    }
+}
+
+fn insert_sql_budget_fields(
+    fields: &mut serde_json::Map<String, serde_json::Value>,
+    config: &StreamRuntimeConfig,
+) {
+    if let Some(budget) = config.sql_state_budget {
+        fields.insert("sql_state_budget".into(), json!(budget));
+    }
+    if let Some(budget) = config.sql_compact_state_budget {
+        fields.insert("sql_compact_state_budget".into(), json!(budget));
     }
 }

@@ -71,7 +71,8 @@ fn prepare_binding(
     let runtime = operator.retention_runtime()?;
     let decode = decode_credit(operator, snapshot)?;
     let decoded = restored_control(operator, runtime, snapshot, check)?;
-    let (columns, native) = restored_columns(operator, runtime, snapshot, check)?;
+    let (columns, mut native) = restored_columns(operator, runtime, snapshot, check)?;
+    native.set_compact_budget(operator.compact_state_budget, &operator.name)?;
     let (descriptor, identity) = restored_identity(operator, &columns, &native, &decoded.value)?;
     Ok(RestoreBinding {
         decoded,
@@ -160,7 +161,7 @@ fn restored_compact_state(
     columns: Arc<storage::CompactColumns>,
     control: &control::CompactControl,
 ) -> Result<CompactSqlState> {
-    let (latest, metadata_owner) = metadata::decode(
+    let (latest, metadata_owner) = metadata::decode_compact(
         operator.retention_runtime()?,
         &snapshot.segments["batch-metadata"],
         &operator.name,

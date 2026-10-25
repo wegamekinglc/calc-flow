@@ -32,6 +32,7 @@ use super::expression::required_input;
 #[cfg(test)]
 mod checkpoint_test_hooks;
 mod compact;
+mod compact_budget;
 #[cfg(test)]
 mod current_checkpoint_tests;
 mod current_retained;
@@ -70,6 +71,7 @@ pub struct SqlOperator {
     compact: Option<Box<compact::CompactSqlState>>,
     retained_capture: Option<std::sync::Arc<current_retained::RetainedCapture>>,
     state_budget: Option<StateBudget>,
+    compact_state_budget: Option<StateBudget>,
     incremental: Option<Box<incremental::IncrementalSql>>,
     incremental_checked: bool,
     #[cfg(test)]
@@ -107,6 +109,7 @@ struct SqlCheckpointInput {
     native_name: Option<String>,
     reservation: datafusion::execution::memory_pool::MemoryReservation,
     input_reservation: datafusion::execution::memory_pool::MemoryReservation,
+    owned_reservation: Option<datafusion::execution::memory_pool::MemoryReservation>,
 }
 
 type EncodedSqlState = (
@@ -272,6 +275,7 @@ impl RetainedSqlInput {
                 metadata,
                 reservation,
                 input_reservation: runtime.incremental_reservation(name),
+                owned_reservation: None,
                 native: None,
                 #[cfg(test)]
                 native_name: None,
@@ -350,6 +354,7 @@ impl Clone for SqlOperator {
             compact: None,
             retained_capture: None,
             state_budget: self.state_budget,
+            compact_state_budget: self.compact_state_budget,
             incremental: None,
             incremental_checked: false,
             #[cfg(test)]
@@ -424,6 +429,7 @@ impl SqlOperator {
             compact: None,
             retained_capture: None,
             state_budget: None,
+            compact_state_budget: None,
             incremental: None,
             incremental_checked: false,
             #[cfg(test)]
@@ -561,12 +567,18 @@ impl SqlOperator {
     }
 
     fn retention_runtime(&self) -> Result<&DataFusionRuntime> {
-        self.stream_state
-            .runtime
-            .as_ref()
-            .ok_or_else(|| CalcFlowError::Internal {
-                message: "SQL retention runtime has not been initialized".into(),
-            })
+        let runtime =
+            self.stream_state
+                .runtime
+                .as_ref()
+                .ok_or_else(|| CalcFlowError::Internal {
+                    message: "SQL retention runtime has not been initialized".into(),
+                })?;
+        runtime.set_compact_state_limit(
+            self.compact_state_budget.map(StateBudget::max_bytes),
+            &self.name,
+        )?;
+        Ok(runtime)
     }
 
     async fn prepare_retention(
@@ -960,6 +972,7 @@ impl SqlOperator {
             return Ok(None);
         }
         let mut initialized = self.plan_incremental(alias, batch, plans).await?;
+        self.configure_incremental_budget(&mut initialized)?;
         if !self
             .prove_incremental_plan(initialized.as_deref(), alias, batch, context)
             .await?
@@ -1174,6 +1187,7 @@ impl SqlOperator {
     ) -> Result<PreparedRetention> {
         if self.stream_aggregate {
             self.stream_state.runtime()?;
+            self.retention_runtime()?;
         }
         self.prepare_retention(batch, alias, context).await
     }
@@ -1345,7 +1359,7 @@ impl StreamOperator for SqlOperator {
                     .await;
             }
         }
-        self.process_retained(prepared, alias, context, output)
+        self.process_retained_fallback(prepared, alias, context, output)
             .await
     }
 
@@ -1507,6 +1521,7 @@ fn encode_checkpoint_input(
         metadata,
         reservation,
         input_reservation,
+        owned_reservation,
         native,
         #[cfg(test)]
         native_name,
@@ -1522,9 +1537,12 @@ fn encode_checkpoint_input(
     if let (Some(name), Some(export)) = (&materialized.native_name, &materialized.native) {
         compact::direct_async_tests::before_ipc(name, export.records(), export.reserved_bytes());
     }
-    let result = ipc::encode(materialized.batch(), input_reservation, || {
-        check_encoding_cancelled(job, attempt)
-    });
+    let result = ipc::encode_with_owner(
+        materialized.batch(),
+        input_reservation,
+        owned_reservation,
+        || check_encoding_cancelled(job, attempt),
+    );
     #[cfg(test)]
     tests::after_encode(materialized.batch());
     result.map(|segment| (segment, materialized.native.take()))

@@ -80,6 +80,8 @@ mod output_order;
 pub(super) struct IncrementalSql {
     schema: SchemaRef,
     ordered_last: bool,
+    pub(in crate::operator::sql) compact_budget: Option<crate::StateBudget>,
+    scratch: MemoryReservation,
     aggregate_schema: SchemaRef,
     output_schema: SchemaRef,
     aggregates: Vec<Arc<AggregateFunctionExpr>>,
@@ -680,7 +682,6 @@ impl IncrementalSql {
         else {
             return Ok(None);
         };
-        let reservation = runtime.incremental_reservation(name);
         let plan_bytes = initial_plan_charge(
             query,
             aggregate,
@@ -690,9 +691,7 @@ impl IncrementalSql {
             input_nodes,
             name,
         )?;
-        reservation
-            .try_grow(plan_bytes)
-            .map_err(|error| df_error(name, error))?;
+        let reservation = plan_reservation(runtime, plan_bytes, name)?;
         let Some((plan, post_order)) = bound_plan(projection, aggregate, &schema, analyzed, name)
         else {
             return Ok(None);
@@ -707,7 +706,7 @@ impl IncrementalSql {
             sequential,
         }) = native_strategy(
             runtime,
-            &reservation,
+            &runtime.incremental_reservation(name),
             raw,
             &aggregates,
             &keys,
@@ -721,6 +720,8 @@ impl IncrementalSql {
         Ok(Some(Self {
             ordered_last: aggregates.iter().any(|expr| ordered_last::selected(expr)),
             variable_extrema: variable_extrema_slots(&aggregates),
+            compact_budget: None,
+            scratch: runtime.incremental_reservation(name),
             schema,
             aggregate_schema: Arc::new(aggregate.schema.as_arrow().clone()),
             output_schema: Arc::new(analyzed.schema().as_arrow().clone()),
@@ -760,6 +761,27 @@ impl IncrementalSql {
 
     pub(super) fn requires_ordered_last_proof(&self) -> bool {
         self.ordered_last
+    }
+
+    pub(in crate::operator::sql) fn set_compact_budget(
+        &mut self,
+        budget: Option<crate::StateBudget>,
+        name: &str,
+    ) -> Result<()> {
+        Self::check_group_budget(self.groups.len(), budget, name)?;
+        self.compact_budget = budget;
+        Ok(())
+    }
+
+    pub(in crate::operator::sql) fn check_group_budget(
+        count: usize,
+        budget: Option<crate::StateBudget>,
+        name: &str,
+    ) -> Result<()> {
+        if budget.is_some_and(|budget| count as u64 > budget.max_rows()) {
+            return Err(df_error(name, "SQL compact state group budget exceeded"));
+        }
+        Ok(())
     }
 
     pub(super) fn requires_grouped_float_proof(&self) -> bool {
@@ -822,7 +844,7 @@ impl IncrementalSql {
             let rows =
                 usize::try_from(policy.max_record_rows).map_err(|error| df_error(name, error))?;
             self.sequential = Some(grouped_float::Proof::new(
-                self.reservation.new_empty(),
+                self.scratch.new_empty(),
                 policy.config,
                 groups,
                 rows,
@@ -851,7 +873,7 @@ impl IncrementalSql {
                 let layout =
                     grouped_float::group_layout(&self.keys).expect("certified grouped key");
                 grouped_float::Proof::new(
-                    self.reservation.new_empty(),
+                    self.scratch.new_empty(),
                     previous.policy.config,
                     self.groups.len(),
                     rows,
@@ -1076,7 +1098,7 @@ impl IncrementalSql {
                     self.predicate.as_ref(),
                     &self.input_checks,
                 ),
-                self.reservation.new_empty(),
+                self.scratch.new_empty(),
                 context,
                 name,
             )
@@ -1122,6 +1144,10 @@ impl IncrementalSql {
         Ok(())
     }
 
+    fn requires_explicit_grouping(&self) -> bool {
+        self.ordered_last || self.sequential.is_some() || self.compact_budget.is_some()
+    }
+
     fn input_candidates(
         &self,
         rows: usize,
@@ -1129,7 +1155,7 @@ impl IncrementalSql {
     ) -> Result<(MemoryReservation, usize, InputCandidates)> {
         let (reservation, workspace) = self.input_workspace(rows, name)?;
         let partial = self.partial_groups(name)?;
-        let native = if self.ordered_last || self.sequential.is_some() {
+        let native = if self.requires_explicit_grouping() {
             None
         } else {
             self.native_keys(rows, name)?
@@ -1173,7 +1199,7 @@ impl IncrementalSql {
         } else {
             rows
         };
-        let reservation = self.reservation.new_empty();
+        let reservation = self.scratch.new_empty();
         let workspace = self.input_workspace_charge(rows, name)?;
         reservation
             .try_grow(workspace)
@@ -1285,7 +1311,7 @@ impl IncrementalSql {
                     &key.field,
                     rows.min(CHUNK_ROWS),
                     width,
-                    self.reservation.new_empty(),
+                    self.scratch.new_empty(),
                     name,
                 )
             })
@@ -1622,6 +1648,7 @@ impl IncrementalSql {
                 .ok_or_else(|| df_error(name, "new group count overflowed"))?;
             (slot, None, count)
         };
+        Self::check_group_budget(self.groups.len() + new_count, self.compact_budget, name)?;
         Ok((slot, previous, new_count))
     }
 
@@ -4048,3 +4075,13 @@ mod compact_checkpoint_tests;
 #[cfg(test)]
 #[path = "compact_plan_tests.rs"]
 mod compact_plan_tests;
+
+fn plan_reservation(
+    runtime: &DataFusionRuntime,
+    bytes: usize,
+    name: &str,
+) -> Result<MemoryReservation> {
+    let reservation = runtime.compact_state_reservation(name);
+    ensure_reservation(&reservation, bytes, name)?;
+    Ok(reservation)
+}

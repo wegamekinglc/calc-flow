@@ -99,7 +99,7 @@ impl IncrementalSql {
     }
 
     fn coalescer_capture_credit(&self, state: &State, name: &str) -> Result<MemoryReservation> {
-        let reservation = self.reservation.new_empty();
+        let reservation = self.scratch.new_empty();
         let bytes = state
             .tail
             .columns()
@@ -125,14 +125,16 @@ impl IncrementalSql {
         };
         check()?;
         let tail_rows = tail.num_rows() as u64;
-        let complete = ipc::encode(
+        let complete = ipc::encode_with_owner(
             &Batch::table(vec![complete], BatchMetadata::default())?,
             reservation.new_empty(),
+            Some(self.reservation.new_empty()),
             check,
         )?;
-        let tail = ipc::encode(
+        let tail = ipc::encode_with_owner(
             &Batch::table(vec![tail], BatchMetadata::default())?,
             reservation.new_empty(),
+            Some(self.reservation.new_empty()),
             check,
         )?;
         Ok(Some(Capture {
@@ -152,8 +154,22 @@ impl IncrementalSql {
         };
         context.check_cancelled()?;
         let tail_rows = tail.num_rows() as u64;
-        let complete = encode(complete, &reservation, context, name).await?;
-        let tail = encode(tail, &reservation, context, name).await?;
+        let complete = encode(
+            complete,
+            &reservation,
+            self.reservation.new_empty(),
+            context,
+            name,
+        )
+        .await?;
+        let tail = encode(
+            tail,
+            &reservation,
+            self.reservation.new_empty(),
+            context,
+            name,
+        )
+        .await?;
         Ok(Some(Capture {
             complete,
             tail,
@@ -234,13 +250,47 @@ impl IncrementalSql {
         name: &str,
     ) -> Result<(SavedStates, RecordBatch, MemoryReservation)> {
         let record = &input.complete.table_payload()?.batches()[0];
-        let (reservation, predicate) = self.coalescer_restore_workspace(&input.tail, name)?;
+        let (_scratch, predicate) = self.coalescer_restore_workspace(&input.tail, name)?;
+        let tail = &input.tail.table_payload()?.batches()[0];
+        let reservation = self.coalescer_ownership_credit(tail, name)?;
         let states = complete_states(record, &input.descriptor, self.aggregates.len(), name)?;
-        let tail = input.tail.table_payload()?.batches()[0].clone();
+        let tail = tail.clone();
         validate_tail_selection(predicate, &tail, name)?;
-        self.validate_coalescer_counts(&states, rows, tail.num_rows(), name)?;
-        self.validate_coalescer_prefix(&states, &tail, check, name)?;
+        self.validate_restored_coalescer(&states, &tail, rows, check, name)?;
         Ok((states, tail, reservation))
+    }
+
+    fn validate_restored_coalescer(
+        &self,
+        states: &SavedStates,
+        tail: &RecordBatch,
+        rows: u64,
+        check: &dyn Fn() -> Result<()>,
+        name: &str,
+    ) -> Result<()> {
+        self.validate_coalescer_counts(states, rows, tail.num_rows(), name)?;
+        self.validate_coalescer_prefix(states, tail, check, name)
+    }
+
+    fn coalescer_ownership_credit(
+        &self,
+        tail: &RecordBatch,
+        name: &str,
+    ) -> Result<MemoryReservation> {
+        let reservation = self.reservation.new_empty();
+        let owned = checked_bytes(
+            8192,
+            [
+                (self.aggregates.len(), 4096),
+                (ipc::schema_bytes(&tail.schema())?, 4),
+            ],
+            name,
+        )?;
+        let owned = tail.columns().iter().try_fold(owned, |bytes, array| {
+            checked_bytes(bytes, [(array.get_array_memory_size(), 1)], name)
+        })?;
+        super::super::super::ensure_reservation(&reservation, owned, name)?;
+        Ok(reservation)
     }
 
     fn coalescer_restore_workspace(
@@ -248,7 +298,7 @@ impl IncrementalSql {
         tail: &Batch,
         name: &str,
     ) -> Result<(MemoryReservation, &InputPredicate)> {
-        let reservation = self.reservation.new_empty();
+        let reservation = self.scratch.new_empty();
         let bytes = tail.table_payload()?.batches()[0]
             .columns()
             .iter()
@@ -423,6 +473,7 @@ fn scalar_equal(a: &ScalarValue, b: &ScalarValue) -> bool {
 async fn encode(
     record: RecordBatch,
     credit: &MemoryReservation,
+    owner: MemoryReservation,
     context: &StreamOperatorContext<'_>,
     name: &str,
 ) -> Result<StateSegment> {
@@ -446,6 +497,7 @@ async fn encode(
         native_name: None,
         reservation,
         input_reservation,
+        owned_reservation: Some(owner),
     };
     let attempt = tokio_util::sync::CancellationToken::new();
     let _cancel_on_drop = attempt.clone().drop_guard();

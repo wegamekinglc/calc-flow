@@ -1159,9 +1159,7 @@ impl ContinuousRunner {
             });
         }
         spec.context = spec.context.with_checkpointing(config.checkpointing);
-        if let Some(budget) = config.sql_state_budget
-            && let Err(error) = spec.plan.set_sql_state_budget(Some(budget))
-        {
+        if let Err(error) = spec.plan.set_sql_budgets(&config) {
             return preflight_error_observer(error);
         }
         let runtime_config_hash = match checkpoint.as_ref() {

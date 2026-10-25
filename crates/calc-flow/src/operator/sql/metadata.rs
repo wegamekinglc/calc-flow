@@ -16,6 +16,22 @@ pub(super) fn reserve(
     metadata: &BatchMetadata,
     name: &str,
 ) -> Result<MemoryReservation> {
+    reserve_with(metadata, name, runtime.incremental_reservation(name))
+}
+
+pub(super) fn reserve_compact(
+    runtime: &DataFusionRuntime,
+    metadata: &BatchMetadata,
+    name: &str,
+) -> Result<MemoryReservation> {
+    reserve_with(metadata, name, runtime.compact_state_reservation(name))
+}
+
+fn reserve_with(
+    metadata: &BatchMetadata,
+    name: &str,
+    reservation: MemoryReservation,
+) -> Result<MemoryReservation> {
     let attributes = metadata
         .attributes()
         .iter()
@@ -28,7 +44,6 @@ pub(super) fn reserve(
         .checked_mul(6)
         .ok_or_else(overflow)?;
     let bound = incremental::checked_bytes(4096, [(add(source, attributes)?, 2)], name)?;
-    let reservation = runtime.incremental_reservation(name);
     incremental::ensure_reservation(&reservation, bound, name)?;
     Ok(reservation)
 }
@@ -61,7 +76,22 @@ pub(super) fn decode(
     segment: &StateSegment,
     name: &str,
 ) -> Result<(BatchMetadata, Arc<SqlMetadata>)> {
-    let reservation = runtime.incremental_reservation(name);
+    decode_with(segment, name, runtime.incremental_reservation(name))
+}
+
+pub(super) fn decode_compact(
+    runtime: &DataFusionRuntime,
+    segment: &StateSegment,
+    name: &str,
+) -> Result<(BatchMetadata, Arc<SqlMetadata>)> {
+    decode_with(segment, name, runtime.compact_state_reservation(name))
+}
+
+fn decode_with(
+    segment: &StateSegment,
+    name: &str,
+    reservation: MemoryReservation,
+) -> Result<(BatchMetadata, Arc<SqlMetadata>)> {
     let bound = incremental::checked_bytes(4096, [(segment.bytes().len(), 32)], name)?;
     incremental::ensure_reservation(&reservation, bound, name)?;
     let value = crate::json::parse_json_value(segment.bytes(), "SQL batch metadata")?;

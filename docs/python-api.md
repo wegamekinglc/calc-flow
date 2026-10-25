@@ -238,14 +238,21 @@ and standalone array Program outputs are unsupported; the
 [composition reference](symbolic-api.md#sql-composition) gives the full boundary.
 
 Batch SQL accepts multiple aliases. Stream SQL accepts exactly one. Queries with
-ordinary aggregates or `GROUP BY` retain input across batches and emit the full
+ordinary aggregates or `GROUP BY` accumulate state across batches and emit the full
 current result after each batch: `SELECT SUM(value) AS total` emits `1`, then
 `6` for input batches `[1]` and `[2, 3]`. A grouped result includes unchanged
 groups in each snapshot. By default, retained SQL input has no fixed row or
 byte cap. Set `StreamRuntimeConfig.sql_state_budget` to
-`StateBudget(20_000_000, 8 << 30)` to enforce application limits. The query is
-recomputed over retained input on each batch, so memory, checkpoint size, and
-query cost grow with stream length. SQL without aggregation remains batch-local,
+`StateBudget(20_000_000, 8 << 30)` to limit cumulative accepted input, including
+compact execution. Eligible aggregates keep compact state; unsupported shapes
+recompute over retained input, so their memory, checkpoint size, and query cost
+grow with stream length. Set `sql_compact_state_budget=StateBudget(100_000, 64 << 20)`
+to require compact execution and limit each aggregate node's live groups and
+conservative owned bytes, including candidate copies and checkpoint caches.
+This separate budget defaults to `None`, excludes input/output and serialization
+scratch, and is not an RSS limit. Both budgets apply when configured together;
+neither changes the semantic plan fingerprint. See [SQL stream boundaries](streaming-guide.md#stream-ownership-and-sql-boundaries).
+SQL without aggregation remains batch-local,
 as do SQL window functions when used without a grouped or ordinary aggregate.
 `ORDER BY` and `LIMIT` apply to each emitted snapshot.
 
