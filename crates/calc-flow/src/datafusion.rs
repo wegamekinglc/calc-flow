@@ -1797,5 +1797,9 @@ mod global_record;
 mod eager_input;
 
 #[cfg(test)]
+#[path = "datafusion_ordered_last_proof_tests.rs"]
+mod ordered_last_proof_tests;
+
+#[cfg(test)]
 #[path = "datafusion_global_float_plan_tests.rs"]
 mod global_float_plan_tests;
