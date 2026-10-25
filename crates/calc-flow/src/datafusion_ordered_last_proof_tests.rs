@@ -12,8 +12,8 @@ use datafusion::{
     },
     common::{DFSchema, ScalarValue},
     execution::context::SessionConfig,
-    logical_expr::{EmitTo, Expr, ExprSchemable, LogicalPlan},
-    physical_expr::{PhysicalExpr, expressions::Column},
+    logical_expr::{Aggregate, EmitTo, Expr, ExprSchemable, LogicalPlan, TableScan},
+    physical_expr::{PhysicalExpr, aggregate::AggregateFunctionExpr, expressions::Column},
     physical_plan::{
         ExecutionPlan, InputOrderMode,
         aggregates::{AggregateExec, AggregateMode},
@@ -102,6 +102,14 @@ fn key_type(dtype: &DataType) -> bool {
         )
 }
 
+fn value_type(dtype: &DataType) -> bool {
+    dtype.is_integer() || matches!(dtype, DataType::Float32 | DataType::Float64)
+}
+
+fn ordering_type(dtype: &DataType) -> bool {
+    dtype.is_integer() || matches!(dtype, DataType::Timestamp(..))
+}
+
 // Inspect the raw shape, before optimizers can erase a forbidden filter/limit.
 fn logical_shape(plan: &LogicalPlan, alias: &str) -> bool {
     let plan = match plan {
@@ -114,39 +122,51 @@ fn logical_shape(plan: &LogicalPlan, alias: &str) -> bool {
     let LogicalPlan::Aggregate(aggregate) = projection.input.as_ref() else {
         return false;
     };
+    projection
+        .expr
+        .iter()
+        .all(|e| matches!(unalias(e), Expr::Column(_)))
+        && logical_aggregate_shape(aggregate, alias)
+}
+
+fn logical_aggregate_shape(aggregate: &Aggregate, alias: &str) -> bool {
     let LogicalPlan::TableScan(scan) = aggregate.input.as_ref() else {
         return false;
     };
-    let [expr] = aggregate.aggr_expr.as_slice() else {
+    let schema = aggregate.input.schema();
+    !aggregate.group_expr.is_empty()
+        && aggregate
+            .group_expr
+            .iter()
+            .all(|e| column_type(e, schema, key_type))
+        && logical_scan_shape(scan, alias)
+        && logical_last_value(&aggregate.aggr_expr, schema)
+}
+
+fn logical_scan_shape(scan: &TableScan, alias: &str) -> bool {
+    scan.table_name.table() == alias && scan.filters.is_empty() && scan.fetch.is_none()
+}
+
+fn logical_last_value(expressions: &[Expr], schema: &DFSchema) -> bool {
+    let [expr] = expressions else {
         return false;
     };
     let Expr::AggregateFunction(function) = unalias(expr) else {
         return false;
     };
-    let schema = aggregate.input.schema();
     let params = &function.params;
-    projection
-        .expr
-        .iter()
-        .all(|e| matches!(unalias(e), Expr::Column(_)))
-        && !aggregate.group_expr.is_empty()
-        && aggregate
-            .group_expr
-            .iter()
-            .all(|e| column_type(e, schema, key_type))
-        && scan.table_name.table() == alias
-        && scan.filters.is_empty()
-        && scan.fetch.is_none()
-        && function.func == datafusion::functions_aggregate::first_last::last_value_udaf()
+    function.func == datafusion::functions_aggregate::first_last::last_value_udaf()
         && !params.distinct
         && params.filter.is_none()
-        && matches!(params.args.as_slice(), [value] if column_type(value, schema, |t| t.is_integer() || matches!(t, DataType::Float32 | DataType::Float64)))
-        && !params.order_by.is_empty()
-        && params.order_by.iter().all(|sort| {
-            column_type(&sort.expr, schema, |t| {
-                t.is_integer() || matches!(t, DataType::Timestamp(..))
-            })
-        })
+        && matches!(params.args.as_slice(), [value] if column_type(value, schema, value_type))
+        && logical_ordering(&params.order_by, schema)
+}
+
+fn logical_ordering(order_by: &[datafusion::logical_expr::SortExpr], schema: &DFSchema) -> bool {
+    !order_by.is_empty()
+        && order_by
+            .iter()
+            .all(|sort| column_type(&sort.expr, schema, ordering_type))
 }
 
 fn physical_shape(
@@ -158,20 +178,26 @@ fn physical_shape(
     if plan.output_partitioning().partition_count() != 1 {
         return false;
     }
-    let valid = if let Some(aggregate) = plan.downcast_ref::<AggregateExec>() {
+    physical_node_shape(plan, input, below_aggregate, census)
+        && plan.children().iter().all(|child| {
+            physical_shape(
+                child.as_ref(),
+                input,
+                below_aggregate || plan.is::<AggregateExec>(),
+                census,
+            )
+        })
+}
+
+fn physical_node_shape(
+    plan: &dyn ExecutionPlan,
+    input: &Batch,
+    below_aggregate: bool,
+    census: &mut [usize; 2],
+) -> bool {
+    if let Some(aggregate) = plan.downcast_ref::<AggregateExec>() {
         census[0] += 1;
-        *aggregate.mode() == AggregateMode::Single
-            && *aggregate.input_order_mode() == InputOrderMode::Linear
-            && aggregate.limit_options().is_none()
-            && aggregate.group_expr().groups().len() == 1
-            && !aggregate.group_expr().expr().is_empty()
-            && aggregate
-                .group_expr()
-                .expr()
-                .iter()
-                .all(|(e, _)| e.is::<Column>())
-            && aggregate.filter_expr().iter().all(Option::is_none)
-            && matches!(aggregate.aggr_expr(), [e] if *e.fun() == *datafusion::functions_aggregate::first_last::last_value_udaf() && e.groups_accumulator_supported() && !e.order_bys().is_empty() && e.expressions().iter().all(|arg| arg.is::<Column>()) && e.order_bys().iter().all(|sort| sort.expr.is::<Column>()))
+        physical_aggregate_shape(aggregate)
     } else if let Some(source) =
         plan.downcast_ref::<datafusion::datasource::memory::DataSourceExec>()
     {
@@ -184,16 +210,37 @@ fn physical_shape(
             && plan
                 .downcast_ref::<SortExec>()
                 .is_some_and(|sort| sort.fetch().is_none())
+    }
+}
+
+fn physical_aggregate_shape(aggregate: &AggregateExec) -> bool {
+    *aggregate.mode() == AggregateMode::Single
+        && *aggregate.input_order_mode() == InputOrderMode::Linear
+        && aggregate.limit_options().is_none()
+        && physical_group_shape(aggregate)
+        && physical_last_value(aggregate.aggr_expr())
+}
+
+fn physical_group_shape(aggregate: &AggregateExec) -> bool {
+    aggregate.group_expr().groups().len() == 1
+        && !aggregate.group_expr().expr().is_empty()
+        && aggregate
+            .group_expr()
+            .expr()
+            .iter()
+            .all(|(e, _)| e.is::<Column>())
+        && aggregate.filter_expr().iter().all(Option::is_none)
+}
+
+fn physical_last_value(expressions: &[Arc<AggregateFunctionExpr>]) -> bool {
+    let [expr] = expressions else {
+        return false;
     };
-    valid
-        && plan.children().iter().all(|child| {
-            physical_shape(
-                child.as_ref(),
-                input,
-                below_aggregate || plan.is::<AggregateExec>(),
-                census,
-            )
-        })
+    *expr.fun() == *datafusion::functions_aggregate::first_last::last_value_udaf()
+        && expr.groups_accumulator_supported()
+        && !expr.order_bys().is_empty()
+        && expr.expressions().iter().all(|arg| arg.is::<Column>())
+        && expr.order_bys().iter().all(|sort| sort.expr.is::<Column>())
 }
 
 #[tokio::test]
