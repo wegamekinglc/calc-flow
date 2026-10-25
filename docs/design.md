@@ -192,20 +192,23 @@ declarations, analysis, and lowering.
 
 Pending left rows keep compact columnar identities and references into retained
 Arrow payload batches. Right history uses ordered per-key indexes and the same
-payload pool. State/layout/accounting version 3 charges retained capacities,
-unique identity buffers, payload batches, and the reserved canonical checkpoint
-index. A separate workspace budget equal to the configured state-byte limit
+payload pool. Semantic state version `3` uses native layout/accounting version
+`10`. Accounting covers retained capacities, unique identity buffers, payload
+batches, and checkpoint journal and retained segment storage. A separate
+workspace budget equal to the configured state-byte limit
 covers admission copies, candidate/output arrays, compaction, encoding, and
 restore. It is not a process RSS ceiling.
 
 Admission and output-prefix preparation preflight incremental state and index
 charges. An accepted output chunk synchronously commits its prepared prefix
 without re-encoding the complete state. Right-side eviction runs once after
-the ready chunks in a progress tick have been accepted. A changing eviction
-sweep still traverses retained right buckets; bounded chunks do not imply
-constant-cost handlers. Managed checkpoint preparation writes the canonical
-index and encodes uncached retained payloads before synchronous capture shares
-the immutable segments and bounded metadata. The runtime owns persisted ingress
+the ready chunks in a progress tick have been accepted, using expiration
+indexes to select due keys and rows. Bounded chunks do not imply constant-cost
+handlers. Native checkpoints retain an immutable base plus bounded delta
+frames and shared payload segments. Eligible managed source-history routes can
+instead use a versioned callback replay log with native anchors. Managed
+preparation, capture, and restore use awaited CPU work; direct operator
+checkpoint calls remain synchronous. The runtime owns persisted ingress
 progress and output frontier, which ASOF cross-validates with restored state.
 It closes left rows only after both sides strictly pass their time, retains idle
 watermarks, and forwards a conservative frontier. See the
@@ -222,10 +225,13 @@ Compatible outputs share retained data and accumulators. Stream execution
 buffers rows until the input watermark passes their finality coordinate;
 batch execution orders the complete input and classifies no late rows.
 
-The current checkpoint writer uses columnar state layout `3`, including
-projected history, buffered rows, recurrence state, and numerical/kernel
-fingerprints. This is distinct from the declaration's validated layout
-fields. See [native rolling state](symbolic-design.md#native-rolling-state)
+The checkpoint writer uses columnar state layout `3` for ordinary rolling,
+EWMA, and cumulative mean, including projected history, buffered rows,
+recurrence state, and numerical/kernel fingerprints. Cumulative
+sum/min/max/variance use declaration and writer layout `4`, adding exact
+per-entity summaries and processed-row counts. Writer layouts are distinct
+from the declaration's validated layout fields. See
+[native rolling state](symbolic-design.md#native-rolling-state)
 for storage ownership and [Rust rolling API](rust-api.md#rolling-windows)
 for the exact type, numerical, null/NaN, and finality contracts.
 

@@ -172,7 +172,7 @@ ready 持续使用 26 或 28 核。较高瞬时峰值与约 1.8–1.9 的平均 
 ready 结束后，ASOF 两版各有三个 finalize 事件，其 scope 墙钟合计为基线
 0.005562 ms、候选 0.004381 ms，均单独保留且未纳入表中。Interval 本次没有
 ready 之后的 instrumented 阶段事件，这不代表 EOF/清理没有成本。
-完整事件、裁剪索引、阶段聚合和限制见 [诊断离线分析](/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/join-cpu-pipeline/diagnostic-analysis.json)。
+完整事件、裁剪索引、阶段聚合和限制见诊断离线分析（`target/performance/join-cpu-pipeline/diagnostic-analysis.json`）。
 
 ## 构建与来源
 
@@ -205,19 +205,19 @@ Polars 1.44.1、Cargo.lock、default features、release profile 和空 RUSTFLAGS
 
 每配置 machine、dependency、workload 指纹在两版及两轮之间完全一致；跨 CPU
 的 machine 指纹因 affinity 不同而不同，因此跨 CPU 只提供描述比值。
-完整逐配置 SHA-256 见 [正式离线审计](/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/join-cpu-pipeline/formal-offline-audit.json)。正式报告 SHA-256：
+完整逐配置 SHA-256 见正式离线审计（`target/performance/join-cpu-pipeline/formal-offline-audit.json`）。正式报告 SHA-256：
 `d99d28e559fcf6d6613830f7b9522463a846ace49bb2444fdb357f4f6b2c1879`；固定计划 SHA-256：
 `294f1047f15bb11e1735f716fa5d6136f9e1b1020b32bb2226f9f6160a2065d4`。
 
 诊断基线使用按 case 封存的 instrumentation-only 派生构建：ASOF 为 `c164c635`，
 interval 为 `0094d7ca`；它们不能冒充正式默认基线。完整来源及修复记录见
-[诊断恢复离线审计](/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/join-cpu-pipeline/diagnostic-recovery-offline-audit.json)。候选与逐 case 基线的
+诊断恢复离线审计（`target/performance/join-cpu-pipeline/diagnostic-recovery-offline-audit.json`）。候选与逐 case 基线的
 诊断 machine/dependency/workload 及 compiled-plan 指纹一致；诊断与正式构建
 仅在依赖指纹的 features 中不同，因此不混合它们的计时样本。
 候选诊断报告 SHA-256：
 `0afdf7708dfcc2d2b3d91dfdaf9e4e155002eeb6f91e3e19a8dd9d851920d99c`。
 全部四个成功配置（共八次调用）来源、trace、oracle 与自然完成校验见
-[诊断来源离线审计](/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/join-cpu-pipeline/diagnostic-offline-audit.json)。
+诊断来源离线审计（`target/performance/join-cpu-pipeline/diagnostic-offline-audit.json`）。
 
 ## 预算、恢复及证据
 
@@ -249,20 +249,21 @@ operator 名称为空而失败，随后只补一次预热和一次观察。原�
 离线审核核实正式报告和全部原始 stdout 一致、独立状态目录库存、正确性及
 完成证据、三类指纹与全部来源哈希、nearest-rank P95 和维护配对统计重算；
 没有运行 native、构建或重新采集。以下原始证据保存在本机测量目录，
-链接为本机路径；本报告与来源摘要随仓库归档。证据入口：
+下列路径仅标识原测量机文件，不随仓库提供，也不是下载链接。
+本报告与来源摘要随仓库归档；原始文件清单：
 
-- [预声明采集口径](/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/join-cpu-pipeline/acquisition-plan.md)
-- [固定计划](/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/join-cpu-pipeline/plan.json)
-- [正式测量原始报告](/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/join-cpu-pipeline/reports/measurement.json)
-- [正式测量逐配置摘要](/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/join-cpu-pipeline/formal-measurement.log)
-- [正式来源与统计离线审计](/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/join-cpu-pipeline/formal-offline-audit.json)
-- [基线诊断合并报告](/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/join-cpu-pipeline/diagnostics/base/report.json)
-- [原失败报告原字节备份](/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/join-cpu-pipeline/diagnostics/base-interval-repair/original-failed-base-report.json)
-- [一次 interval 修复报告](/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/join-cpu-pipeline/diagnostics/base-interval-repair/report.json)
-- [诊断恢复离线审计](/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/join-cpu-pipeline/diagnostic-recovery-offline-audit.json)
-- [候选诊断报告](/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/join-cpu-pipeline/diagnostics/candidate/report.json)
-- [全部诊断来源与 trace 离线审计](/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/join-cpu-pipeline/diagnostic-offline-audit.json)
-- [ready 裁剪与阶段聚合](/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/performance/join-cpu-pipeline/diagnostic-analysis.json)
+- 预声明采集口径（`target/performance/join-cpu-pipeline/acquisition-plan.md`）
+- 固定计划（`target/performance/join-cpu-pipeline/plan.json`）
+- 正式测量原始报告（`target/performance/join-cpu-pipeline/reports/measurement.json`）
+- 正式测量逐配置摘要（`target/performance/join-cpu-pipeline/formal-measurement.log`）
+- 正式来源与统计离线审计（`target/performance/join-cpu-pipeline/formal-offline-audit.json`）
+- 基线诊断合并报告（`target/performance/join-cpu-pipeline/diagnostics/base/report.json`）
+- 原失败报告原字节备份（`target/performance/join-cpu-pipeline/diagnostics/base-interval-repair/original-failed-base-report.json`）
+- 一次 interval 修复报告（`target/performance/join-cpu-pipeline/diagnostics/base-interval-repair/report.json`）
+- 诊断恢复离线审计（`target/performance/join-cpu-pipeline/diagnostic-recovery-offline-audit.json`）
+- 候选诊断报告（`target/performance/join-cpu-pipeline/diagnostics/candidate/report.json`）
+- 全部诊断来源与 trace 离线审计（`target/performance/join-cpu-pipeline/diagnostic-offline-audit.json`）
+- ready 裁剪与阶段聚合（`target/performance/join-cpu-pipeline/diagnostic-analysis.json`）
 
 ## 适用范围与覆盖建议
 

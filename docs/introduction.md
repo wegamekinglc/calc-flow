@@ -143,8 +143,10 @@ These protocol versions are separate from this checkout's package version `2026.
 
 The DataFusion 55 / Arrow 59 upgrade changes engine-specific checkpoint
 identity. SQL checkpoints created with DataFusion 54 and ASOF checkpoints
-marked with Arrow 58 cannot be restored directly by this version. Resume them
-with the prior version and replay input into a new job when upgrading. An
+marked with Arrow 58 cannot be restored directly by this version. Native ASOF
+snapshots also require the current layout/accounting version `10`; semantic
+state version `3` alone does not establish compatibility. Resume incompatible
+checkpoints with the prior version and replay input into a new job when upgrading. An
 unchanged project/checkpoint format version does not imply engine or state
 layout compatibility; incompatible identities fail closed.
 

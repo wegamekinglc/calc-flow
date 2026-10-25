@@ -584,14 +584,18 @@ microsecond; no watermark is emitted for an underflowing predecessor. This
 preserves downstream acceptance of later legal rows at `C`. The public
 `StreamOperator` trait gains no new control-injection or callback requirement.
 
-ASOF admission charges the projected index length and installs accepted rows
-without cloning the retained maps. Output prefix commits update the deferred
-index length and release obsolete prepared index bytes. Right-side eviction
-prepares required copies and resource deltas before changing state in place
-once per completed progress tick; a changing sweep still traverses retained
-right buckets. It also defers index encoding. Managed barrier preparation
-encodes the canonical index and uncached retained payloads asynchronously;
-synchronous capture then shares the immutable segments.
+ASOF admission preflights retained capacities and, when checkpointing is
+enabled, checkpoint journal storage, then installs accepted rows without
+cloning the retained maps. Output prefix
+commits install prepared state and journal changes after output acceptance.
+Right-side eviction uses expiration indexes to select due keys and rows,
+preparing required copies and resource deltas before changing state in place
+once per completed progress tick. Its semantic state version is `3`; native
+layout/accounting version `10` stores an immutable base, bounded delta frames,
+and shared payload segments. Eligible source-history routes instead retain
+versioned callback replay records with native anchors. Managed preparation,
+capture, and native restore use awaited CPU work; direct operator checkpoint
+calls can prepare synchronously.
 Restore cross-validates native rows/counters/terminal state
 with the wrapper's ingress progress and output frontier before readiness is
 acknowledged. All sources reaching ASOF must have a non-disabled valid watermark

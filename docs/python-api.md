@@ -606,8 +606,10 @@ and optional `array_rules`. The vocabularies are closed: execution modes are
 `none` or `row_axis_independent`. `state_version` is a positive integer
 exactly when `checkpoint_support` is `checkpointed_stateful` and `None`
 otherwise, a `stateless` capability must set `stateful=False`, and
-`state_layouts` is a strictly ascending tuple of positive integers that must
-be empty unless `checkpointed_stateful` and must contain `state_version`.
+`state_layouts` is a strictly ascending tuple of positive integers. It must
+be nonempty for `checkpointed_stateful` and empty otherwise. The semantic
+`state_version` and physical layout numbers are independent; the inventory
+does not have to contain `state_version`.
 Construction validates strictly and fails closed: closed-vocabulary and
 cross-field violations raise `ValueError`, while non-strict data (a `list`
 where a tuple is declared, a non-`bool` boolean field) raises `TypeError`.
@@ -624,20 +626,21 @@ The `operators` tuple contains exactly `cross_section@1`, `expression@1`,
 with truths anchored in
 the engine implementation:
 
-| Operator             | Modes         | Finality                | Checkpoint support    | State version | State layouts |
-|----------------------|---------------|-------------------------|-----------------------|---------------|---------------|
-| `cross_section@1`    | batch, stream | group_final_append_only | checkpointed_stateful | 1             | 1             |
-| `expression@1`       | batch, stream | per_row_final           | stateless             | —             | —             |
-| `rolling@1`          | batch, stream | per_row_final           | checkpointed_stateful | 1             | 1, 2          |
-| `sql@1`              | batch, stream | unproven                | checkpointed_stateful | 1             | 1             |
-| `stream_asof_join@1` | stream        | group_final_append_only | checkpointed_stateful | 3             | 3             |
-| `stream_join@1`      | stream        | unproven                | checkpointed_stateful | 1             | 1             |
-| `window@1`           | stream        | group_final_append_only | checkpointed_stateful | 1             | 1             |
+| Operator               | Modes           | Finality                  | Checkpoint support      | State version   | State layouts   |
+|------------------------|-----------------|---------------------------|-------------------------|-----------------|-----------------|
+| `cross_section@1`      | batch, stream   | group_final_append_only   | checkpointed_stateful   | 1               | 1               |
+| `expression@1`         | batch, stream   | per_row_final             | stateless               | —               | —               |
+| `rolling@1`            | batch, stream   | per_row_final             | checkpointed_stateful   | 1               | 1, 2            |
+| `sql@1`                | batch, stream   | unproven                  | checkpointed_stateful   | 2               | 3, 4            |
+| `stream_asof_join@1`   | stream          | group_final_append_only   | checkpointed_stateful   | 3               | 10              |
+| `stream_join@1`        | stream          | unproven                  | checkpointed_stateful   | 1               | 1, 2, 3         |
+| `window@1`             | stream          | group_final_append_only   | checkpointed_stateful   | 1               | 1               |
 
 The Python capability catalog currently reports only layouts `1` and `2`
 for `rolling@1`, while the native operator writes columnar checkpoint layout
-`3`. The catalog therefore omits the current writer layout; do not use this
-inventory alone to decide rolling checkpoint compatibility. See
+`3`, or layout `4` for cumulative sum/min/max/variance. The catalog therefore
+omits the current writer layouts; do not use this inventory alone to decide
+rolling checkpoint compatibility. See
 [native rolling state](symbolic-design.md#native-rolling-state) for the
 implemented encoding and restore rules.
 

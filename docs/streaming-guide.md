@@ -1350,8 +1350,12 @@ after progress. Read the [ASOF guide](asof-join-guide.md) for the exact non-null
 schema/identity contract, late error/drop policies, whole-operator state and
 workspace budgets, composition, and recovery guarantees.
 
-ASOF uses the `stream_asof_join@1` operator identity and independent checkpoint
-state/layout/accounting version 3. Earlier ASOF checkpoint versions are rejected. Its
+ASOF uses the `stream_asof_join@1` operator identity and semantic checkpoint
+state version `3`. Native snapshots require layout/accounting version `10`;
+other native layouts fail closed even when their semantic version is `3`.
+Eligible managed source-history routes can use the separate versioned replay
+representation described in
+[ASOF recovery](asof-join-guide.md#recovery-status-and-delivery). Its
 `job.status()["stream_asof_joins"]` mapping is separate from `stream_joins`.
 Python keeps ASOF counters and watermark microseconds as integers. Ordinary
 sink replay and temporary iterable checkpoints
