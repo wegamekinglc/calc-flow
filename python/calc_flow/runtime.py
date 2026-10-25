@@ -614,7 +614,7 @@ class EdgeBudget:
 
 @dataclass(frozen=True, slots=True)
 class StateBudget:
-    """Optional logical row and byte limit for retained SQL aggregate input."""
+    """Limit SQL input rows/bytes or compact groups/owned bytes, by config field."""
 
     max_rows: int
     max_bytes: int

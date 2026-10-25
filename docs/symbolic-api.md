@@ -182,10 +182,14 @@ use the documented table-attachment shape and explicit provider registration.
 
 Batch SQL can join multiple aliases. Stream compilation rejects more than one
 alias before any source opens, even if aliases share a root. Stream SQL with an
-ordinary aggregate or `GROUP BY` retains input and emits the full cumulative
-result after every batch. There is no fixed SQL state cap by default; an
-optional `StreamRuntimeConfig.sql_state_budget` enforces application limits.
-Each snapshot reruns the query over all retained input. Other SQL stays
+ordinary aggregate or `GROUP BY` emits the full cumulative result after every
+batch. Eligible queries, including admitted grouped ordered `LAST_VALUE`,
+update compact state; unsupported aggregate shapes rerun over retained input.
+There is no fixed SQL state cap by default. `sql_state_budget` limits cumulative
+accepted input; `sql_compact_state_budget` requires compact execution and limits
+each aggregate node's live groups and owned bytes. See
+[SQL stream boundaries](streaming-guide.md#stream-ownership-and-sql-boundaries)
+for admission, ordering, budget and recovery contracts. Other SQL stays
 batch-local. `ORDER BY` and `LIMIT` apply to the current
 snapshot; SQL window functions alone remain batch-local. These aggregate
 snapshots repeat unchanged groups, so downstream operators receive them as new

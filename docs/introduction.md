@@ -122,9 +122,11 @@ advanced graph, UDF, provider, and lifecycle controls. Rust crate APIs are docum
 
 DataFusion 55 executes table expressions and SQL. SQL nodes accept one
 read-only `SELECT` or CTE. Batch SQL supports multiple aliases; streaming SQL
-accepts one alias. Ordinary aggregates and `GROUP BY` retain input and emit a
-full cumulative snapshot after each native batch; other SQL evaluates each
-batch separately. See
+accepts one alias. Ordinary aggregates and `GROUP BY` emit a full cumulative
+snapshot after each native batch. Eligible queries, including the supported
+grouped ordered `LAST_VALUE`, update compact state; other aggregate shapes
+retain input and rerun over its history. Other SQL evaluates each batch
+separately. See
 [SQL stream boundaries](streaming-guide.md#stream-ownership-and-sql-boundaries).
 SQL output has a new row lineage and does not inherit temporal ordering.
 Row-local expressions may follow SQL; compute rolling features before a SQL stage.

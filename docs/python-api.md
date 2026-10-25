@@ -248,10 +248,41 @@ compact execution. Eligible aggregates keep compact state; unsupported shapes
 recompute over retained input, so their memory, checkpoint size, and query cost
 grow with stream length. Set `sql_compact_state_budget=StateBudget(100_000, 64 << 20)`
 to require compact execution and limit each aggregate node's live groups and
-conservative owned bytes, including candidate copies and checkpoint caches.
-This separate budget defaults to `None`, excludes input/output and serialization
-scratch, and is not an RSS limit. Both budgets apply when configured together;
-neither changes the semantic plan fingerprint. See [SQL stream boundaries](streaming-guide.md#stream-ownership-and-sql-boundaries).
+conservative owned bytes. For this field, `StateBudget.max_rows` counts live
+groups, including null-only groups. Owned bytes include keys, winners, complete
+ordering tuples, capacities, cached results, dirty tracking, checkpoint caches
+and the simultaneously held installed/candidate state. Held captures remain
+charged until released. This separate budget defaults to `None`; input/output,
+validation and serialization scratch use separate engine reservations. It is
+not a serialization-peak or RSS limit. Both budgets apply when configured
+together; neither changes the semantic plan fingerprint.
+
+Grouped ordered `LAST_VALUE` can compact when it has one built-in aggregate,
+direct group/value/ordering columns, supported types and the certified default
+DataFusion execution model. The value supports integer/Float32/Float64;
+ordering supports integer/Timestamp columns. Unsupported shapes use retained
+execution unless an explicit compact budget requires rejection. Empty first
+input defers the ordered physical proof; compact admission fixes the mode.
+Explicit budgets reject unsupported aggregates/UDFs at schema preflight when
+possible, otherwise before the first nonempty input commits or emits. Native
+job failures propagate through convenience streams as `StreamingRuntimeError`.
+
+Ordering uses the parsed per-term direction/null placement: defaults are
+`ASC NULLS LAST` and `DESC NULLS FIRST`. Equal complete tuples keep the first
+encountered winner. Default/`RESPECT NULLS` can select null; `IGNORE NULLS`
+skips null values but preserves null-only groups. Declare a business sequence
+in the SQL ordering tuple if needed; no tie-breaker is implicit. Full snapshots
+still cost O(keys) output work, without delta output or fixed RSS guarantees.
+See [ordered LAST_VALUE](streaming-guide.md#compact-ordered-last_value) for
+the exact MVP shape and existing runtime evidence.
+
+Compatible layout-3/4 checkpoints remain supported. Nonempty retained state
+does not automatically migrate and conflicts with an explicit compact budget;
+use a new lineage/state root and replay to switch. Ordered layout-5 full/delta
+recovery checks identity, typed state and actual fees under current budgets,
+rejecting unknown/corrupt state atomically. See
+[SQL recovery compatibility](streaming-guide.md#sql-aggregate-recovery-compatibility)
+and [SQL stream boundaries](streaming-guide.md#stream-ownership-and-sql-boundaries).
 SQL without aggregation remains batch-local,
 as do SQL window functions when used without a grouped or ordinary aggregate.
 `ORDER BY` and `LIMIT` apply to each emitted snapshot.

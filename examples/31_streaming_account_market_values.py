@@ -1,4 +1,9 @@
-"""Revalue accounts on live position and quote updates; print the final snapshot."""
+"""Revalue accounts with compact position/quote state; print the final snapshot.
+
+Python combines two single-input streams using a reusable batch SQL valuation.
+Each aggregate has an independent 100,000-group / 64 MiB owned-state budget.
+Full snapshots and valuation queries still visit the current keys on each update.
+"""
 
 from __future__ import annotations
 
@@ -83,7 +88,10 @@ async def market_value_stream(
     snapshots: dict[str, pa.Table] = {}
     async with make_program().stream(
         {"trades": trades, "quotes": quotes},
-        config=cf.StreamRuntimeConfig(checkpointing=False),
+        config=cf.StreamRuntimeConfig(
+            checkpointing=False,
+            sql_compact_state_budget=cf.StateBudget(100_000, 64 << 20),
+        ),
     ) as results:
 
         async def updates() -> AsyncIterator[pa.Table]:
