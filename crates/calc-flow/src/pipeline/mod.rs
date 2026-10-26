@@ -182,6 +182,9 @@ impl PipelineBuilder {
                 OperatorCheckpointCapability::CheckpointedStateful { state_version: 2 }
             }
             NodeOperator::Sql(_) => OperatorCheckpointCapability::Stateless,
+            NodeOperator::SnapshotSql(_) | NodeOperator::StreamJoin(_) => {
+                OperatorCheckpointCapability::CheckpointedStateful { state_version: 1 }
+            }
             NodeOperator::Window(_) => OperatorCheckpointCapability::CheckpointedStateful {
                 state_version: crate::operator::WINDOW_STATE_LAYOUT_VERSION,
             },
@@ -191,9 +194,6 @@ impl PipelineBuilder {
             NodeOperator::CrossSection(_) => OperatorCheckpointCapability::CheckpointedStateful {
                 state_version: crate::operator::CROSS_SECTION_STATE_LAYOUT_VERSION,
             },
-            NodeOperator::StreamJoin(_) => {
-                OperatorCheckpointCapability::CheckpointedStateful { state_version: 1 }
-            }
             NodeOperator::StreamAsofJoin(_) => {
                 OperatorCheckpointCapability::CheckpointedStateful { state_version: 3 }
             }

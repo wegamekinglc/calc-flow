@@ -1280,6 +1280,38 @@
         },
         {
           "additionalProperties": false,
+          "description": "Complete-relation replacement SQL for stream graphs.",
+          "properties": {
+            "aliases": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "kind": {
+              "const": "snapshot_sql",
+              "type": "string"
+            },
+            "query": {
+              "type": "string"
+            },
+            "udfs": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/UdfReference"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "query",
+            "aliases"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
           "description": "Same-schema multi-input forwarding for stream graphs.",
           "properties": {
             "kind": {

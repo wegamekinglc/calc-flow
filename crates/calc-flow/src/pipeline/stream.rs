@@ -124,6 +124,9 @@ pub struct StreamRuntimeConfig {
     /// Input/output buffers and serialization scratch use separate reservations;
     /// this is not a process RSS limit. Both SQL budgets apply when configured.
     pub sql_compact_state_budget: Option<crate::StateBudget>,
+    /// Per-node latest-relation rows and owned bytes for snapshot SQL.
+    /// Includes candidates, metadata and cached segments; scratch is separate.
+    pub sql_snapshot_state_budget: Option<crate::StateBudget>,
 }
 
 impl Default for StreamRuntimeConfig {
@@ -136,6 +139,7 @@ impl Default for StreamRuntimeConfig {
             sql_state_budget: None,
             retained_epochs: 2,
             sql_compact_state_budget: None,
+            sql_snapshot_state_budget: None,
         }
     }
 }
@@ -177,6 +181,7 @@ pub(crate) enum CompiledStreamOperator {
     External(Box<dyn StreamOperator>),
     Expression(crate::ExpressionOperator),
     Sql(crate::SqlOperator),
+    SnapshotSql(crate::SnapshotSqlOperator),
     CheckpointLoan,
     Union(UnionOperator),
     Window(crate::WindowAggregateOperator),
@@ -402,6 +407,7 @@ impl CompiledStreamOperator {
             Self::External(_)
             | Self::Expression(_)
             | Self::Sql(_)
+            | Self::SnapshotSql(_)
             | Self::Union(_)
             | Self::Window(_)
             | Self::Rolling(_)
@@ -424,6 +430,7 @@ impl CompiledStreamOperator {
             Self::Expression(operator) => operator.on_ingress_progress(ingress, context).await,
             Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::Sql(operator) => operator.on_ingress_progress(ingress, context).await,
+            Self::SnapshotSql(operator) => operator.on_ingress_progress(ingress, context).await,
             Self::Union(operator) => operator.on_ingress_progress(ingress, context).await,
             Self::Window(operator) => operator.on_ingress_progress(ingress, context).await,
             Self::Rolling(operator) => operator.on_ingress_progress(ingress, context).await,
@@ -459,6 +466,16 @@ impl CompiledStreamOperator {
                 }
                 Ok(Self::Sql(operator))
             }
+            NodeOperator::SnapshotSql(mut operator) => {
+                if let Some(table) = table {
+                    operator.set_stream_resources(
+                        table.config,
+                        table.udfs.clone(),
+                        table.selected_udfs.clone(),
+                    );
+                }
+                Ok(Self::SnapshotSql(operator))
+            }
             NodeOperator::Union(operator) => Ok(Self::Union(operator)),
             NodeOperator::Window(operator) => Ok(Self::Window(operator)),
             NodeOperator::Rolling(operator) => Ok(Self::Rolling(operator)),
@@ -491,6 +508,7 @@ impl CompiledStreamOperator {
             Self::Expression(operator) => operator.reset(),
             Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::Sql(operator) => operator.reset(),
+            Self::SnapshotSql(operator) => operator.reset(),
             Self::Union(operator) => operator.reset(),
             Self::Window(operator) => operator.reset(),
             Self::Rolling(operator) => operator.reset(),
@@ -509,6 +527,7 @@ impl CompiledStreamOperator {
             Self::Expression(operator) => operator.prepare_checkpoint_async(context).await,
             Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::Sql(operator) => operator.prepare_checkpoint_async(context).await,
+            Self::SnapshotSql(operator) => operator.prepare_checkpoint_async(context).await,
             Self::Union(operator) => operator.prepare_checkpoint_async(context).await,
             Self::Window(operator) => operator.prepare_checkpoint_async(context).await,
             Self::Rolling(operator) => operator.prepare_checkpoint_async(context).await,
@@ -531,6 +550,7 @@ impl CompiledStreamOperator {
             Self::Expression(operator) => operator.checkpoint(epoch),
             Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::Sql(operator) => operator.checkpoint(epoch),
+            Self::SnapshotSql(operator) => operator.checkpoint(epoch),
             Self::Union(operator) => operator.checkpoint(epoch),
             Self::Window(operator) => operator.checkpoint(epoch),
             Self::Rolling(operator) => operator.checkpoint(epoch),
@@ -550,6 +570,7 @@ impl CompiledStreamOperator {
             Self::Expression(operator) => operator.restore(snapshot),
             Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::Sql(operator) => operator.restore(snapshot),
+            Self::SnapshotSql(operator) => operator.restore(snapshot),
             Self::Union(operator) => operator.restore(snapshot),
             Self::Window(operator) => operator.restore(snapshot),
             Self::Rolling(operator) => operator.restore(snapshot),
@@ -589,6 +610,9 @@ impl CompiledStreamOperator {
             }
             Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::Sql(operator) => operator.process_data(ingress, batch, context, output).await,
+            Self::SnapshotSql(operator) => {
+                operator.process_data(ingress, batch, context, output).await
+            }
             Self::Union(operator) => operator.process_data(ingress, batch, context, output).await,
             Self::Window(operator) => operator.process_data(ingress, batch, context, output).await,
             Self::Rolling(operator) => operator.process_data(ingress, batch, context, output).await,
@@ -615,6 +639,7 @@ impl CompiledStreamOperator {
             Self::Expression(operator) => operator.on_watermark(watermark, context, output).await,
             Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::Sql(operator) => operator.on_watermark(watermark, context, output).await,
+            Self::SnapshotSql(operator) => operator.on_watermark(watermark, context, output).await,
             Self::Union(operator) => operator.on_watermark(watermark, context, output).await,
             Self::Window(operator) => operator.on_watermark(watermark, context, output).await,
             Self::Rolling(operator) => operator.on_watermark(watermark, context, output).await,
@@ -635,6 +660,7 @@ impl CompiledStreamOperator {
             Self::Expression(operator) => operator.on_end(context, output).await,
             Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::Sql(operator) => operator.on_end(context, output).await,
+            Self::SnapshotSql(operator) => operator.on_end(context, output).await,
             Self::Union(operator) => operator.on_end(context, output).await,
             Self::Window(operator) => operator.on_end(context, output).await,
             Self::Rolling(operator) => operator.on_end(context, output).await,
@@ -648,6 +674,7 @@ impl CompiledStreamOperator {
         match self {
             Self::Expression(operator) => operator.stream_runtime_initialized(),
             Self::Sql(operator) => operator.stream_runtime_initialized(),
+            Self::SnapshotSql(operator) => operator.stream_runtime_initialized(),
             Self::StreamJoin(operator) => operator.stream_runtime_initialized(),
             Self::CheckpointLoan
             | Self::StreamAsofJoin(_)
@@ -725,6 +752,7 @@ impl PipelineBuilder {
             )?;
         }
         let graph = compile_graph(&self, "stream", udfs)?;
+        validate_snapshot_nodes(&self, requirements, &graph.external_outputs)?;
         for output in requirements.delivery.keys() {
             if !graph.external_outputs.contains_key(output) {
                 return Err(CalcFlowError::Compile {
@@ -857,6 +885,19 @@ fn build_runtime_nodes(
 
 fn validate_stream_node(node_id: &str, operator: &NodeOperator) -> Result<()> {
     match operator {
+        NodeOperator::SnapshotSql(operator) => {
+            if operator
+                .input_ports()
+                .iter()
+                .chain(operator.output_ports())
+                .any(|p| p.schema().is_none())
+            {
+                return Err(CalcFlowError::Compile {
+                    message: format!("snapshot_sql node {node_id:?} requires exact schemas"),
+                });
+            }
+            Ok(())
+        }
         NodeOperator::Expression(_)
         | NodeOperator::Union(_)
         | NodeOperator::Window(_)
@@ -894,6 +935,7 @@ pub(crate) fn validate_stream_query(
     let query = match operator {
         NodeOperator::Expression(operator) => operator.query_text(),
         NodeOperator::Sql(operator) => operator.query_text(),
+        NodeOperator::SnapshotSql(operator) => operator.query_text(),
         _ => return Ok(()),
     };
     crate::expression::validate_no_volatile_functions(node_id, query, registry)
@@ -1103,6 +1145,13 @@ impl StreamExecutionPlan {
     }
 
     pub(crate) fn set_sql_budgets(&mut self, config: &StreamRuntimeConfig) -> Result<()> {
+        if let Some(budget) = config.sql_snapshot_state_budget {
+            for node in &mut self.nodes {
+                if let CompiledStreamOperator::SnapshotSql(operator) = &mut node.operator {
+                    operator.set_budget(Some(budget))?;
+                }
+            }
+        }
         if let Some(budget) = config.sql_state_budget {
             self.set_sql_state_budget(Some(budget))?;
         }
@@ -1134,6 +1183,22 @@ impl StreamExecutionPlan {
             }
         }
         Ok(())
+    }
+
+    /// Binding IDs feeding snapshot SQL directly. Each message on these
+    /// inputs must contain one complete replacement relation.
+    #[doc(hidden)]
+    pub fn snapshot_source_binding_ids(&self) -> Vec<String> {
+        self.external_inputs
+            .iter()
+            .filter(|(_, endpoint)| {
+                self.nodes.iter().any(|n| {
+                    n.node_id == endpoint.node_id
+                        && matches!(n.operator, CompiledStreamOperator::SnapshotSql(_))
+                })
+            })
+            .map(|(name, _)| name.clone())
+            .collect()
     }
 
     /// The stable source binding slots: external graph input names in
@@ -1986,7 +2051,42 @@ fn insert_sql_budget_fields(
     if let Some(budget) = config.sql_state_budget {
         fields.insert("sql_state_budget".into(), json!(budget));
     }
+    if let Some(budget) = config.sql_snapshot_state_budget {
+        fields.insert("sql_snapshot_state_budget".into(), json!(budget));
+    }
     if let Some(budget) = config.sql_compact_state_budget {
         fields.insert("sql_compact_state_budget".into(), json!(budget));
     }
+}
+
+fn validate_snapshot_nodes(
+    builder: &PipelineBuilder,
+    requirements: &StreamRequirements,
+    outputs: &BTreeMap<String, PortEndpoint>,
+) -> Result<()> {
+    for (node_id, node) in &builder.nodes {
+        if !matches!(node.operator, NodeOperator::SnapshotSql(_)) {
+            continue;
+        }
+        if builder.edges.iter().any(|e| e.source.node_id == *node_id) {
+            return Err(CalcFlowError::Compile {
+                message: format!(
+                    "snapshot_sql node {node_id:?} outputs must connect directly to sinks"
+                ),
+            });
+        }
+        for (output, _) in outputs
+            .iter()
+            .filter(|(_, endpoint)| endpoint.node_id == *node_id)
+        {
+            if requirements.delivery.get(output) == Some(&DeliveryGuarantee::ExactlyOnce) {
+                return Err(CalcFlowError::Compile {
+                    message: format!(
+                        "snapshot_sql output {output:?} does not support exactly-once replay ordering"
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
 }

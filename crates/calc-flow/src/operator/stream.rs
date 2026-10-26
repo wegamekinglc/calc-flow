@@ -102,6 +102,21 @@ impl StateSegment {
         self.owner.is_some()
     }
 
+    pub(crate) fn accounting_owner<T: std::any::Any>(&self) -> Option<&T> {
+        self.owner.as_ref()?.downcast_ref()
+    }
+
+    /// Adds a typed accounting boundary while retaining the previous owner.
+    pub(crate) fn map_owner(
+        mut self,
+        wrap: impl FnOnce(
+            Option<Arc<dyn std::any::Any + Send + Sync>>,
+        ) -> Arc<dyn std::any::Any + Send + Sync>,
+    ) -> Self {
+        self.owner = Some(wrap(self.owner.take()));
+        self
+    }
+
     #[cfg(test)]
     pub(crate) fn owner_for_test<T: std::any::Any>(&self) -> Option<&T> {
         self.owner.as_ref()?.downcast_ref()

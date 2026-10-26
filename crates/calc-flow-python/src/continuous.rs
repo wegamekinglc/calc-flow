@@ -888,6 +888,7 @@ fn build_sources(
     awaits: &Arc<PythonAwaitRegistry>,
     context: &Arc<Mutex<Option<Arc<PythonAsyncContext>>>>,
     ownership: &Arc<ConnectorOwnership>,
+    snapshot_inputs: &[String],
 ) -> PyResult<PythonSourceBindings> {
     let mut native = BTreeMap::new();
     let mut roots = Vec::new();
@@ -897,6 +898,11 @@ fn build_sources(
             .map_err(|_| PyTypeError::new_err("source binding IDs must be strings"))?;
         let policy = source_policy(&binding)?;
         if let Some(source) = materialized_source(&binding)? {
+            if snapshot_inputs.contains(&source_id) {
+                return Err(PyValueError::new_err(format!(
+                    "source {source_id:?} directly feeds snapshot_sql; ArrowSource slices relations. Use a source yielding one complete table per data event"
+                )));
+            }
             native.insert(
                 source_id,
                 calc_flow::SourceBinding::new(source).with_watermark_policy(policy),
@@ -1200,6 +1206,7 @@ fn runtime_config(config: &Bound<'_, PyDict>) -> PyResult<calc_flow::StreamRunti
         edge_budget: edge_budget_config(config)?,
         sql_state_budget,
         sql_compact_state_budget,
+        sql_snapshot_state_budget: snapshot_state_budget_config(config)?,
         retained_epochs: required_item(config, "retained_epochs")?.extract()?,
     })
 }
@@ -1227,6 +1234,30 @@ fn optional_u64_config(config: &Bound<'_, PyDict>, key: &str) -> PyResult<Option
         .get_item(key)?
         .map(|value| value.extract())
         .transpose()
+}
+
+fn snapshot_state_budget_config(
+    config: &Bound<'_, PyDict>,
+) -> PyResult<Option<calc_flow::StateBudget>> {
+    match (
+        config.get_item("sql_snapshot_state_max_rows")?,
+        config.get_item("sql_snapshot_state_max_bytes")?,
+    ) {
+        (None, None) => Ok(None),
+        (Some(rows), Some(bytes)) => {
+            if rows.is_instance_of::<PyBool>() || bytes.is_instance_of::<PyBool>() {
+                return Err(PyTypeError::new_err(
+                    "sql_snapshot_state limits must be integers",
+                ));
+            }
+            calc_flow::StateBudget::new(rows.extract()?, bytes.extract()?)
+                .map(Some)
+                .map_err(crate::error::to_py_err)
+        }
+        _ => Err(PyValueError::new_err(
+            "sql_snapshot_state_max_rows and sql_snapshot_state_max_bytes must be supplied together",
+        )),
+    }
 }
 
 fn compact_state_budget_config(
@@ -1286,7 +1317,10 @@ impl PyContinuousStreamingRunner {
         let awaits = Arc::new(PythonAwaitRegistry::new());
         let context = Arc::new(Mutex::new(None));
         let ownership = Arc::new(ConnectorOwnership::new());
-        let (sources, mut roots) = build_sources(sources, &awaits, &context, &ownership)?;
+        let snapshot_inputs =
+            plan.with_plan(calc_flow::StreamExecutionPlan::snapshot_source_binding_ids)?;
+        let (sources, mut roots) =
+            build_sources(sources, &awaits, &context, &ownership, &snapshot_inputs)?;
         let (sinks, sink_roots) = build_sinks(sinks, &awaits, &context, &ownership)?;
         roots.extend(sink_roots);
         let (plan, plan_owner) = plan.take()?;
@@ -2517,6 +2551,56 @@ mod tests {
                         .unwrap();
                     assert!(
                         super::compact_state_budget_config(&config).is_err(),
+                        "{field}={value}"
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn test_snapshot_budget_native_pairs_and_parameter_validation() {
+        Python::initialize();
+        Python::attach(|py| {
+            let config = PyDict::new(py);
+            assert!(
+                super::snapshot_state_budget_config(&config)
+                    .unwrap()
+                    .is_none()
+            );
+            config.set_item("sql_snapshot_state_max_rows", 8).unwrap();
+            assert!(
+                super::snapshot_state_budget_config(&config)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("supplied together")
+            );
+            config
+                .set_item("sql_snapshot_state_max_bytes", 1 << 20)
+                .unwrap();
+            let budget = super::snapshot_state_budget_config(&config)
+                .unwrap()
+                .unwrap();
+            assert_eq!((budget.max_rows(), budget.max_bytes()), (8, 1 << 20));
+            config.del_item("sql_snapshot_state_max_rows").unwrap();
+            assert!(super::snapshot_state_budget_config(&config).is_err());
+            for field in [
+                "sql_snapshot_state_max_rows",
+                "sql_snapshot_state_max_bytes",
+            ] {
+                for value in ["True", "False", "1.5", "'8'", "0", "-1", "9007199254740992"] {
+                    config.set_item("sql_snapshot_state_max_rows", 8).unwrap();
+                    config
+                        .set_item("sql_snapshot_state_max_bytes", 1 << 20)
+                        .unwrap();
+                    config
+                        .set_item(
+                            field,
+                            py.eval(&CString::new(value).unwrap(), None, None).unwrap(),
+                        )
+                        .unwrap();
+                    assert!(
+                        super::snapshot_state_budget_config(&config).is_err(),
                         "{field}={value}"
                     );
                 }

@@ -90,7 +90,10 @@ impl PyStreamExecutionPlan {
         Ok((state.inner, state.owner))
     }
 
-    fn with_plan<T>(&self, read: impl FnOnce(&calc_flow::StreamExecutionPlan) -> T) -> PyResult<T> {
+    pub(crate) fn with_plan<T>(
+        &self,
+        read: impl FnOnce(&calc_flow::StreamExecutionPlan) -> T,
+    ) -> PyResult<T> {
         self.state
             .lock()
             .as_ref()

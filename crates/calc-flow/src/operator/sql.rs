@@ -37,8 +37,8 @@ mod compact_budget;
 mod current_checkpoint_tests;
 mod current_retained;
 mod incremental;
-mod ipc;
-mod metadata;
+pub(super) mod ipc;
+pub(super) mod metadata;
 #[cfg(test)]
 mod recovery_test_hooks;
 mod restore;

@@ -544,7 +544,7 @@ impl DataFusionRuntime {
         let parse_start = Instant::now();
         let query = parse_select_query(query)?;
         let sql_parse_ns = nanos(parse_start.elapsed());
-        self.execute_query(&query, sql_parse_ns, tables, node_id)
+        self.execute_query(&query, sql_parse_ns, tables, node_id, None)
             .await
     }
 
@@ -560,7 +560,28 @@ impl DataFusionRuntime {
         require_tables(tables)?;
         #[cfg(test)]
         owned::note_legacy_inputs(tables);
-        self.execute_query(query, 0, tables, node_id).await
+        self.execute_query(query, 0, tables, node_id, None).await
+    }
+
+    pub(crate) async fn snapshot_sql(
+        &self,
+        query: &ValidatedQuery,
+        tables: &BTreeMap<String, Batch>,
+        node: &str,
+        budget: crate::EdgeBudget,
+    ) -> Result<Batch> {
+        self.ensure_open()?;
+        require_tables(tables)?;
+        self.execute_query(query, 0, tables, Some(node), Some(budget))
+            .await
+    }
+
+    pub(crate) fn snapshot_state_pool(&self) -> Arc<crate::state_memory_pool::OwnedStatePool> {
+        Arc::new(crate::state_memory_pool::OwnedStatePool::new(
+            self.runtime_env.memory_pool.clone(),
+            "snapshot-sql-owned",
+            "snapshot_sql owned state exceeds max_bytes",
+        ))
     }
 
     pub(crate) async fn stream_expression(
@@ -591,6 +612,7 @@ impl DataFusionRuntime {
         sql_parse_ns: u64,
         tables: &BTreeMap<String, Batch>,
         node_id: Option<&str>,
+        snapshot_budget: Option<crate::EdgeBudget>,
     ) -> Result<Batch> {
         // Declared before registrations so alias cleanup runs before unlock.
         let _query_guard = self.query_lock.lock().await;
@@ -604,7 +626,19 @@ impl DataFusionRuntime {
         let context = self.context_for_rows(input_rows, active_entities, active_entities_source);
         let session_state_create_ns =
             u64::from(!context_preexisting) * nanos(session_state_create_start.elapsed());
-        let planned = self.prepare_query(context, query, tables, node_id).await?;
+        let planned = if snapshot_budget.is_some() {
+            let (registrations, input_adapter_ns, table_register_ns) =
+                register_tables(context, tables, node_id)?;
+            let planned = self.plan_query(context, query, tables, node_id).await?;
+            PlannedQuery {
+                input_adapter_ns,
+                table_register_ns,
+                _registrations: Some(registrations),
+                ..planned
+            }
+        } else {
+            self.prepare_query(context, query, tables, node_id).await?
+        };
         let planning_ns = sql_parse_ns
             .saturating_add(planned.logical_planning_ns)
             .saturating_add(planned.physical_planning_ns);
@@ -614,8 +648,14 @@ impl DataFusionRuntime {
         let stream = execute_stream(planned.physical_plan, Arc::clone(&planned.task_ctx))
             .map_err(|error| datafusion_error(node_id, error))?;
         let stream_open_ns = nanos(execution_start.elapsed());
-        let collected =
-            collect_bounded(stream, metrics_plan.schema(), execution_start, node_id).await?;
+        let collected = collect_bounded(
+            stream,
+            metrics_plan.schema(),
+            execution_start,
+            node_id,
+            snapshot_budget,
+        )
+        .await?;
         let execution_ns = stream_open_ns.saturating_add(collected.collect_ns);
         let batch_envelope_start = Instant::now();
         let output = Batch::table(collected.batches, merged_metadata(tables))?;
@@ -1343,6 +1383,7 @@ async fn collect_bounded(
     result_schema: SchemaRef,
     execution_start: Instant,
     node_id: Option<&str>,
+    budget: Option<crate::EdgeBudget>,
 ) -> Result<CollectedOutput> {
     let collect_start = Instant::now();
     let first_batch = stream
@@ -1360,8 +1401,10 @@ async fn collect_bounded(
             &mut output_rows,
             &mut output_bytes,
             batch,
-            MAX_SQL_RESULT_ROWS,
-            MAX_SQL_RESULT_BYTES,
+            budget.map_or(MAX_SQL_RESULT_ROWS, |b| b.max_rows.min(MAX_SQL_RESULT_ROWS)),
+            budget.map_or(MAX_SQL_RESULT_BYTES, |b| {
+                b.max_bytes.min(MAX_SQL_RESULT_BYTES)
+            }),
         )?;
     }
     let remaining_start = Instant::now();
@@ -1371,8 +1414,10 @@ async fn collect_bounded(
             &mut output_rows,
             &mut output_bytes,
             batch.map_err(|error| datafusion_error(node_id, error))?,
-            MAX_SQL_RESULT_ROWS,
-            MAX_SQL_RESULT_BYTES,
+            budget.map_or(MAX_SQL_RESULT_ROWS, |b| b.max_rows.min(MAX_SQL_RESULT_ROWS)),
+            budget.map_or(MAX_SQL_RESULT_BYTES, |b| {
+                b.max_bytes.min(MAX_SQL_RESULT_BYTES)
+            }),
         )?;
     }
     let execution_remaining_ns = nanos(remaining_start.elapsed());

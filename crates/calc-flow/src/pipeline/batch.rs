@@ -35,7 +35,8 @@ impl CompiledBatchOperator {
             NodeOperator::Rolling(operator) => Ok(Self::Rolling(operator)),
             NodeOperator::CrossSection(operator) => Ok(Self::CrossSection(operator)),
             NodeOperator::Batch(operator) => Ok(Self::External(operator)),
-            NodeOperator::Union(_)
+            NodeOperator::SnapshotSql(_)
+            | NodeOperator::Union(_)
             | NodeOperator::Window(_)
             | NodeOperator::StreamJoin(_)
             | NodeOperator::StreamAsofJoin(_)
@@ -191,7 +192,8 @@ impl PipelineBuilder {
         for (node_id, node) in &self.nodes {
             if matches!(
                 node.operator,
-                NodeOperator::Union(_)
+                NodeOperator::SnapshotSql(_)
+                    | NodeOperator::Union(_)
                     | NodeOperator::Window(_)
                     | NodeOperator::StreamJoin(_)
                     | NodeOperator::StreamAsofJoin(_)

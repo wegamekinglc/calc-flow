@@ -636,7 +636,9 @@ class StreamRuntimeConfig:
     compact execution. ``sql_compact_state_budget`` caps each aggregate node's
     live groups and conservative owned state bytes, including candidate copies
     and cached checkpoints. It requires compact execution; input/output and
-    serialization scratch use separate reservations. Neither is an RSS limit.
+    serialization scratch use separate reservations. ``sql_snapshot_state_budget``
+    limits latest-relation rows and owned state bytes per snapshot SQL node,
+    including candidate replacements and cached segments. These are not RSS limits.
     """
 
     checkpoint_interval: timedelta = timedelta(seconds=60)
@@ -646,6 +648,7 @@ class StreamRuntimeConfig:
     sql_state_budget: StateBudget | None = None
     checkpointing: bool = True
     sql_compact_state_budget: StateBudget | None = None
+    sql_snapshot_state_budget: StateBudget | None = None
 
     def _native(self) -> dict[str, int | bool]:
         if type(self.checkpointing) is not bool:
@@ -663,6 +666,12 @@ class StreamRuntimeConfig:
         ):
             raise TypeError(
                 "sql_compact_state_budget must be a calc_flow.StateBudget or None"
+            )
+        if self.sql_snapshot_state_budget is not None and not isinstance(
+            self.sql_snapshot_state_budget, StateBudget
+        ):
+            raise TypeError(
+                "sql_snapshot_state_budget must be a calc_flow.StateBudget or None"
             )
         values = {
             "checkpointing": self.checkpointing,
@@ -685,6 +694,13 @@ class StreamRuntimeConfig:
             )
             values["sql_compact_state_max_bytes"] = (
                 self.sql_compact_state_budget.max_bytes
+            )
+        if self.sql_snapshot_state_budget is not None:
+            values["sql_snapshot_state_max_rows"] = (
+                self.sql_snapshot_state_budget.max_rows
+            )
+            values["sql_snapshot_state_max_bytes"] = (
+                self.sql_snapshot_state_budget.max_bytes
             )
         return values
 
