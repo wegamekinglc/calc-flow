@@ -223,8 +223,10 @@ selectors.
   independently requires and limits compact state per aggregate node. See
   `docs/streaming-guide.md` for admission, ordering and recovery boundaries.
   `snapshot_sql` is a separate stream-only complete-replacement query over
-  latest initialized relations with exact schemas. Its independent state budget
-  includes candidates/captures; full input/output messages must fit edges.
+  latest initialized relations with exact schemas. In the current MVP, its
+  independent state budget accounts for candidates and checkpoint captures.
+  Edge admission checks complete input and output messages against configured
+  row/byte budgets and rejects oversized messages.
   Outputs currently connect directly to sinks and reject ExactlyOnce.
 - `compute` and `collect` return Arrow tables using logical declaration names.
   Each convenience call owns a fresh batch plan. Async calls capture mappings
