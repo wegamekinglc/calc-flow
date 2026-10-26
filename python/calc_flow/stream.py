@@ -285,8 +285,7 @@ class StreamResults(Generic[T]):
             else:
                 binding, adapter = _source_binding(
                     data,
-                    name,
-                    value,
+                    (name, value),
                     budget,
                     policies.get(name),
                     complete_snapshot=name in snapshots,

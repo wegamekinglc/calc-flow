@@ -229,8 +229,7 @@ class _IterableSource:
 
 def _source_binding(
     data: StreamInput,
-    name: str,
-    value: TableExpr,
+    logical_input: tuple[str, TableExpr],
     budget: EdgeBudget,
     policy: WatermarkPolicy | None,
     *,
@@ -238,6 +237,7 @@ def _source_binding(
 ) -> tuple[SourceBinding, _IterableSource | None]:
     if isinstance(data, SourceBinding):
         return data, None
+    name, value = logical_input
     config = _source_config(name, value, budget, policy)
     if isinstance(data, (pa.Table, pa.RecordBatch, Batch)):
         return _materialized_binding(data, config, complete_snapshot)
