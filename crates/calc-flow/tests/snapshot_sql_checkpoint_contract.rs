@@ -249,6 +249,61 @@ async fn test_graph_rejects_batch_successors_and_exactly_once() {
 }
 
 #[tokio::test]
+async fn test_snapshot_ingress_traces_expressions_and_stops_at_append_sql() {
+    use calc_flow::{BatchKind, Edge, ExpressionOperator, Port, PortEndpoint, SqlOperator};
+
+    let snapshot = operator(QUERY).await;
+    let fields = snapshot.input_ports()[0]
+        .schema()
+        .unwrap()
+        .fields()
+        .iter()
+        .map(|field| field.as_ref().clone())
+        .collect::<Vec<_>>();
+    let input = Port::new("input", BatchKind::Table, true, Some(fields.clone())).unwrap();
+    let output = Port::new("output", BatchKind::Table, true, Some(fields)).unwrap();
+    let row = ExpressionOperator::new("row", "", vec!["value".into()], None, vec![])
+        .unwrap()
+        .with_ports(input.clone(), output.clone())
+        .unwrap();
+    let append = SqlOperator::new(
+        "append",
+        "SELECT value FROM input",
+        vec!["input".into()],
+        vec![],
+    )
+    .unwrap()
+    .with_ports(vec![input], output)
+    .unwrap();
+    let builder = PipelineBuilder::new("snapshot-ingress")
+        .unwrap()
+        .add_node("row", Box::new(row))
+        .unwrap()
+        .add_node("append", Box::new(append))
+        .unwrap()
+        .add_node("snapshot", snapshot)
+        .unwrap();
+    let builder =
+        [("row", "p"), ("append", "q")]
+            .into_iter()
+            .fold(builder, |builder, (source, alias)| {
+                builder
+                    .connect(Edge::new(
+                        PortEndpoint::new(source, "output").unwrap(),
+                        PortEndpoint::new("snapshot", alias).unwrap(),
+                    ))
+                    .unwrap()
+            });
+    let plan = builder
+        .compile_stream(
+            &UdfRegistrySnapshot::default(),
+            &StreamRequirements::default(),
+        )
+        .unwrap();
+    assert_eq!(plan.snapshot_source_binding_ids(), ["row.input"]);
+}
+
+#[tokio::test]
 async fn test_snapshot_output_cannot_feed_an_append_sql_successor() {
     use calc_flow::{BatchKind, Edge, Port, PortEndpoint, SqlOperator};
     let snapshot = operator(QUERY).await;

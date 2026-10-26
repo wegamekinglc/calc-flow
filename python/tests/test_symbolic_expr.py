@@ -104,6 +104,7 @@ def test_public_surface_is_the_frozen_export_list() -> None:
         "row",
         "rows",
         "sql",
+        "snapshot_sql",
         "table",
         "table_input",
         "ts",

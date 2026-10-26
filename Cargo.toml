@@ -1,11 +1,14 @@
 [workspace]
 members = ["crates/calc-flow", "crates/calc-flow-connectors", "crates/calc-flow-python"]
-exclude = ["vendor/pgwire-replication"]
+exclude = ["vendor/pgwire-replication", "vendor/arrow-ipc", "vendor/parquet"]
 resolver = "3"
 
 [patch.crates-io]
 # Registry 0.4.0 protocol implementation; roots v1 backport (see vendor note).
 pgwire-replication = { path = "vendor/pgwire-replication" }
+# Preserve Arrow 59.2 APIs and formats while selecting the safe zstd chain.
+arrow-ipc = { path = "vendor/arrow-ipc" }
+parquet = { path = "vendor/parquet" }
 
 [workspace.package]
 version = "2026.10.21"

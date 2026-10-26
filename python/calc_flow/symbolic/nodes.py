@@ -334,6 +334,7 @@ _NO_ATTRS: dict[str, PrimitiveSpec] = {
 
 _PRIMITIVES: dict[str, PrimitiveSpec] = {
     "sql": PrimitiveSpec(frozenset({"query", "aliases"}), CMap(())),
+    "snapshot_sql": PrimitiveSpec(frozenset({"query", "aliases"}), CMap(())),
     "late_output": PrimitiveSpec(
         frozenset({"allowed_lateness_micros", "schema_version", "metrics_version"}),
         CMap(()),
@@ -534,7 +535,9 @@ def build(
 ) -> Node:
     """Build one normalized node with materialized defaults and its digest."""
 
-    if name == "stream_asof_join" and (type(version) is not int or version != 1):
+    if name in {"stream_asof_join", "snapshot_sql"} and (
+        type(version) is not int or version != 1
+    ):
         raise ValueError(
             f"unknown_primitive_version: symbolic primitive {name!r}@{version}"
         )

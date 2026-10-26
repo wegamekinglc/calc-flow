@@ -20,7 +20,7 @@ from calc_flow.symbolic.expr import (
 from calc_flow.symbolic.late_output import LateOutputs, with_late_output
 from calc_flow.symbolic.ops import cs, linalg, row, table, ts, window
 from calc_flow.symbolic.program import FeatureSet, Program
-from calc_flow.symbolic.sql import sql
+from calc_flow.symbolic.sql import snapshot_sql, sql
 from calc_flow.symbolic.types import Field
 from calc_flow.symbolic.windows import (
     CrossSectionGroup,
@@ -61,6 +61,7 @@ __all__ = [
     "row",
     "rows",
     "sql",
+    "snapshot_sql",
     "table",
     "table_input",
     "ts",

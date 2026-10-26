@@ -52,7 +52,11 @@ manifest-path = "crates/calc-flow-python/Cargo.toml"
 python-source = "python"
 module-name = "calc_flow._native"
 strip = true
-include = [{ path = "vendor/pgwire-replication/**/*", format = "sdist" }]
+include = [
+    { path = "vendor/pgwire-replication/**/*", format = "sdist" },
+    { path = "vendor/arrow-ipc/**/*", format = "sdist" },
+    { path = "vendor/parquet/**/*", format = "sdist" },
+]
 
 [tool.pytest.ini_options]
 testpaths = ["python/tests"]

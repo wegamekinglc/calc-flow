@@ -38,6 +38,7 @@ if TYPE_CHECKING:
 _PROGRAM_TAG = 0x21
 _STREAM_ONLY_OPS = frozenset(
     {
+        "snapshot_sql",
         "stream_join",
         "stream_asof_join",
         "window_tumbling",
@@ -51,6 +52,11 @@ _STREAM_ONLY_OPS = frozenset(
 def _validate_engine_node(
     engine: Literal["sql", "streaming"], node: Node, path: str
 ) -> None:
+    if any(child.op.name == "snapshot_sql" for child in node.args):
+        raise ValueError(
+            f"{path}: unsupported_mode: snapshot_sql outputs must connect "
+            "directly to sinks"
+        )
     if engine == "streaming" and node.op.name == "sql":
         aliases = node.attr("aliases")
         if isinstance(aliases, CSeq) and len(aliases.items) != 1:

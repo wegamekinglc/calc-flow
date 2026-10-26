@@ -670,7 +670,14 @@ def lower_program_document(
     _check_stateful_lowering(
         program, capabilities, mode_value, allowed_lateness_micros, late_policy
     )
-    from calc_flow.symbolic.lower.sql import lower_sql_program
+    from calc_flow.symbolic.lower.sql import _walk_nodes, lower_sql_program
+
+    if any(
+        node.op.name == "snapshot_sql"
+        for _, value in program.outputs
+        for node in _walk_nodes(value._node)
+    ):
+        _check_snapshot_sql_capability(program, capabilities, mode_value)
 
     sql_project = lower_sql_program(
         program, analyzer, allowed_lateness_micros, late_policy
@@ -693,6 +700,32 @@ def lower_program_document(
         return join_project
     return _lower_program(
         program, mode_value, allowed_lateness_micros, late_policy, bindings=_bindings
+    )
+
+
+def _check_snapshot_sql_capability(
+    program: Program, capabilities: RuntimeCapabilities, mode: str
+) -> None:
+    operator = next(
+        (item for item in capabilities.operators if item.kind == "snapshot_sql"), None
+    )
+    if operator is not None and all(
+        (
+            operator.version == "1",
+            mode in operator.modes,
+            operator.stateful,
+            operator.checkpoint_support == "checkpointed_stateful",
+            operator.state_version == 1,
+            1 in operator.state_layouts,
+            operator.deterministic,
+            operator.replay_safe,
+        )
+    ):
+        return
+    errors.raise_compile(
+        program.name,
+        errors.CAPABILITY_MISMATCH,
+        "the capability snapshot does not prove snapshot_sql@1 state and stream facts",
     )
 
 
