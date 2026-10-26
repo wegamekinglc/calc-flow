@@ -99,7 +99,7 @@ def _node_schema(
         return _expression_schema(
             operator, runtime, fallback if source is None else source
         )
-    if operator["kind"] == "sql":
+    if operator["kind"] in {"sql", "snapshot_sql"}:
         return runtime._infer_symbolic_sql_schema(operator["query"], inputs)
     declared = _port_schema(node.get("output_ports", []), "output")
     if declared is None:

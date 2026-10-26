@@ -900,7 +900,7 @@ fn build_sources(
         if let Some(source) = materialized_source(&binding)? {
             if snapshot_inputs.contains(&source_id) {
                 return Err(PyValueError::new_err(format!(
-                    "source {source_id:?} directly feeds snapshot_sql; ArrowSource slices relations. Use a source yielding one complete table per data event"
+                    "source {source_id:?} feeds snapshot_sql; ArrowSource slices relations. Use a source yielding one complete table per data event"
                 )));
             }
             native.insert(

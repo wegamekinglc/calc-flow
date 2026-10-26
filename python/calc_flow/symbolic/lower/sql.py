@@ -70,6 +70,7 @@ _TABLE_BOUNDARIES = frozenset(
     {
         *_EVENT_WINDOW_OPS,
         "sql",
+        "snapshot_sql",
         "late_output",
         "late_rows",
         "attach_columns",
@@ -173,7 +174,7 @@ class _SQLGraph:
         if node.op.name == "table_input":
             self.schemas[node.digest] = self.analyzer.table(node, "sql.input").schema
             return self.graph.source(node)
-        if node.op.name != "sql":
+        if node.op.name not in {"sql", "snapshot_sql"}:
             return self._append_expression(node)
         output_id = self.graph.allocate(f"cf_sql_{node.digest[:24]}")
         self._append_sql(node, output_id)
@@ -207,7 +208,7 @@ class _SQLGraph:
                     for alias, fields in zip(aliases, schemas, strict=True)
                 ],
                 "operator": {
-                    "kind": "sql",
+                    "kind": node.op.name,
                     "query": _cstr(node.attr("query")),
                     "aliases": list(aliases),
                     "udfs": [],
@@ -232,7 +233,14 @@ class _SQLGraph:
                 continue
             if (
                 boundary.op.name
-                in {"sql", "attach_columns", "stream_join", "late_output", "late_rows"}
+                in {
+                    "sql",
+                    "snapshot_sql",
+                    "attach_columns",
+                    "stream_join",
+                    "late_output",
+                    "late_rows",
+                }
                 or boundary.digest in self.shared
             ):
                 self.table(boundary)
@@ -378,6 +386,9 @@ class _SQLGraph:
             self._append_expressions(frontiers)
         for name, value in self.graph.program.outputs:
             upstream = self.table(value._node)
+            if value._node.op.name == "snapshot_sql":
+                self.graph.bindings.outputs[name] = (upstream, "output")
+                continue
             fields = self.schemas[value.digest]
             self.graph.nodes.append(
                 _expression_node(
@@ -405,7 +416,7 @@ def lower_sql_program(
     late_policy: str,
 ) -> dict[str, object] | None:
     if not any(
-        node.op.name in {"sql", "late_output", "late_rows"}
+        node.op.name in {"sql", "snapshot_sql", "late_output", "late_rows"}
         for _, value in program.outputs
         for node in _walk_nodes(value._node)
     ):

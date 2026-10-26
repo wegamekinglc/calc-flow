@@ -8,7 +8,7 @@ import tempfile
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import fields, replace
 from types import TracebackType
-from typing import Generic, TypeVar, cast
+from typing import Any, Generic, TypeVar, cast
 
 import pyarrow as pa
 
@@ -103,7 +103,12 @@ def _validate_request(request: _StreamRequest) -> dict[str, TableExpr | Paramete
 
 def _compile_stream(
     request: _StreamRequest,
-) -> tuple[StreamExecutionPlan, dict[str, tuple[str, ...]], dict[str, tuple[str, str]]]:
+) -> tuple[
+    StreamExecutionPlan,
+    dict[str, tuple[str, ...]],
+    dict[str, tuple[str, str]],
+    frozenset[str],
+]:
     from calc_flow.symbolic.lower.program import lower_program_document
 
     selected = _selected_runtime(request.runtime)
@@ -120,7 +125,51 @@ def _compile_stream(
             sink_id += "_"
         reserved.add(sink_id)
         sinks[logical] = (physical, sink_id)
-    return selected._compile_stream_graph_project(_canonical(document)), names, sinks
+    return (
+        selected._compile_stream_graph_project(_canonical(document)),
+        names,
+        sinks,
+        _snapshot_inputs(document, bindings),
+    )
+
+
+def _snapshot_inputs(
+    document: dict[str, Any], bindings: _BatchBindings
+) -> frozenset[str]:
+    """Trace snapshot ingress through row expressions to logical sources.
+
+    Native SQL/state boundaries own their output batches. In particular, an
+    append aggregate before snapshot SQL must retain its existing source slicing.
+    """
+    upstreams = _snapshot_upstreams(document["graph"])
+    return frozenset(
+        name
+        for name, endpoints in bindings.inputs.items()
+        if any(node in upstreams for node, _ in endpoints)
+    )
+
+
+def _snapshot_upstreams(graph: dict[str, Any]) -> frozenset[str]:
+    nodes = {node["id"]: node for node in graph["nodes"]}
+    parents: dict[str, list[str]] = {}
+    for edge in graph["edges"]:
+        parents.setdefault(edge["target_node"], []).append(edge["source_node"])
+    pending = [
+        node["id"]
+        for node in graph["nodes"]
+        if node["operator"]["kind"] == "snapshot_sql"
+    ]
+    visited: set[str] = set()
+    while pending:
+        node_id = pending.pop()
+        if node_id in visited:
+            continue
+        node = nodes[node_id]
+        if node["operator"]["kind"] not in {"expression", "snapshot_sql"}:
+            continue
+        visited.add(node_id)
+        pending.extend(parents.get(node_id, ()))
+    return frozenset(visited)
 
 
 def _outcome_error(
@@ -195,18 +244,19 @@ class StreamResults(Generic[T]):
         )
         config = _runner_config(self._request.config)
         config._native()
-        plan, names, outputs = await _run_blocking_compile(
+        plan, names, outputs, snapshots = await _run_blocking_compile(
             _compile_stream, self._request
         )
-        sources, static = self._bindings(expected, names, config.edge_budget, policies)
-        sinks = {
-            outputs[name][0]: [
+        sources, static = self._bindings(
+            expected, names, config.edge_budget, policies, snapshots
+        )
+        sinks: dict[str, list[SinkBinding]] = {}
+        for name, _ in self._request.program.outputs:
+            sinks.setdefault(outputs[name][0], []).append(
                 SinkBinding.ordinary(
                     outputs[name][1], _QueueSink(name, self._queue, self._ready)
                 )
-            ]
-            for name, _ in self._request.program.outputs
-        }
+            )
         checkpoints = None
         if config.checkpointing:
             await self._create_root()
@@ -224,6 +274,7 @@ class StreamResults(Generic[T]):
         names: dict[str, tuple[str, ...]],
         budget: EdgeBudget,
         policies: Mapping[str, WatermarkPolicy],
+        snapshots: frozenset[str],
     ) -> tuple[dict[str, SourceBinding], dict[str, Batch]]:
         sources: dict[str, SourceBinding] = {}
         static: dict[str, Batch] = {}
@@ -233,7 +284,12 @@ class StreamResults(Generic[T]):
                 static[name] = _input_batch(data, value, f"stream.inputs.{name}")
             else:
                 binding, adapter = _source_binding(
-                    data, name, value, budget, policies.get(name)
+                    data,
+                    name,
+                    value,
+                    budget,
+                    policies.get(name),
+                    complete_snapshot=name in snapshots,
                 )
                 ports = names.get(name, ())
                 if len(ports) != 1:

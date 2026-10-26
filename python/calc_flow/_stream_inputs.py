@@ -115,7 +115,7 @@ class _IterableSource:
         source: AsyncIterable[TableData | Watermark],
         config: _IterableConfig,
     ) -> None:
-        self._source = source
+        self._source: AsyncIterable[TableData | Watermark] | None = source
         self._config = config
         self._path = f"stream.inputs.{config.name}"
         self._iterator: AsyncIterator[TableData | Watermark] | None = None
@@ -138,6 +138,8 @@ class _IterableSource:
         )
 
     async def open(self, cursor: Cursor | None) -> None:
+        if self._source is None:
+            raise RuntimeError(f"{self._path}: source is closed")
         self._iterator = self._source.__aiter__()
 
     async def next(self) -> Data | Watermark | None:
@@ -166,14 +168,17 @@ class _IterableSource:
         return value
 
     def _validate_batch(self, table: pa.Table | pa.RecordBatch) -> None:
+        self._validate_structure(table)
+        if self._config.ordered_column is not None:
+            self._validate_time(table[self._config.ordered_column])
+
+    def _validate_structure(self, table: pa.Table | pa.RecordBatch) -> None:
         if not table.schema.equals(self._config.schema):
             self._reject(".schema: expected declared Arrow schema")
         if table.num_rows > self._config.budget.max_rows:
             self._reject(": batch exceeds edge_budget.max_rows")
         if table.nbytes > self._config.budget.max_bytes:
             self._reject(": batch exceeds edge_budget.max_bytes")
-        if self._config.ordered_column is not None:
-            self._validate_time(table[self._config.ordered_column])
 
     def _validate_time(self, column: pa.ChunkedArray | pa.Array) -> None:
         if column.null_count:
@@ -210,12 +215,16 @@ class _IterableSource:
         raise ValueError(self.failure)
 
     async def close(self) -> None:
-        if self._closed or self._iterator is None:
+        if self._closed:
             return
         self._closed = True
-        close = getattr(self._iterator, "aclose", None)
-        if close is not None:
-            await close()
+        try:
+            close = getattr(self._iterator, "aclose", None)
+            if close is not None:
+                await close()
+        finally:
+            self._source = None
+            self._iterator = None
 
 
 def _source_binding(
@@ -224,22 +233,14 @@ def _source_binding(
     value: TableExpr,
     budget: EdgeBudget,
     policy: WatermarkPolicy | None,
+    *,
+    complete_snapshot: bool = False,
 ) -> tuple[SourceBinding, _IterableSource | None]:
     if isinstance(data, SourceBinding):
         return data, None
     config = _source_config(name, value, budget, policy)
     if isinstance(data, (pa.Table, pa.RecordBatch, Batch)):
-        table = _arrow_table(data, f"stream.inputs.{name}")
-        if not table.schema.equals(config.schema):
-            raise ValueError(
-                f"stream.inputs.{name}.schema: expected declared Arrow schema"
-            )
-        return _arrow_source_binding(
-            _table_batch(data, f"stream.inputs.{name}"),
-            budget,
-            config.policy,
-            config.ordered_column,
-        ), None
+        return _materialized_binding(data, config, complete_snapshot)
     if not isinstance(data, AsyncIterable):
         raise TypeError(
             f"stream.inputs.{name}: expected async iterable, materialized Arrow "
@@ -247,3 +248,30 @@ def _source_binding(
         )
     source = _IterableSource(data, config)
     return SourceBinding(source, watermark_policy=config.policy), source
+
+
+def _materialized_binding(
+    data: TableData, config: _IterableConfig, complete_snapshot: bool
+) -> tuple[SourceBinding, _IterableSource | None]:
+    path = f"stream.inputs.{config.name}"
+    table = _arrow_table(data, path)
+    if not table.schema.equals(config.schema):
+        raise ValueError(f"{path}.schema: expected declared Arrow schema")
+    if complete_snapshot:
+        if isinstance(config.policy, SourceProvidedWatermarks):
+            raise ValueError(
+                f"{path}: materialized input cannot emit native watermarks"
+            )
+        source = _IterableSource(_whole_table(data), config)
+        source._validate_structure(table)
+        return SourceBinding(source, watermark_policy=config.policy), source
+    return _arrow_source_binding(
+        _table_batch(data, path),
+        config.budget,
+        config.policy,
+        config.ordered_column,
+    ), None
+
+
+async def _whole_table(data: TableData) -> AsyncIterator[TableData]:
+    yield data

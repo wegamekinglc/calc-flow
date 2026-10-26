@@ -619,6 +619,7 @@ class _Analyzer:
         if self._runtime is None or node.op.name in {
             "table_input",
             "sql",
+            "snapshot_sql",
             "attach_columns",
         }:
             return expected
@@ -660,6 +661,7 @@ class _Analyzer:
             elif current.op.name in {
                 *_EVENT_WINDOW_OPS,
                 "sql",
+                "snapshot_sql",
                 "late_output",
                 "late_rows",
                 "attach_columns",
@@ -689,6 +691,7 @@ class _Analyzer:
             "window_tumbling": self._window_table,
             "window_hopping": self._window_table,
             "sql": self._sql_table,
+            "snapshot_sql": self._sql_table,
         }.get(name)
         if handler is not None:
             return handler(node, path)
@@ -700,14 +703,20 @@ class _Analyzer:
         return TableFacts((), None, frozenset(), None, (), ())
 
     def _sql_table(self, node: Node, path: str, /) -> TableFacts:
+        kind = node.op.name
         aliases = _cstr_seq(node.attr("aliases"))
         inputs = {
-            alias: self.table(child, f"{path}.sql.tables.{alias}")
+            alias: self.table(child, f"{path}.{kind}.tables.{alias}")
             for alias, child in zip(aliases, node.args, strict=True)
         }
         state = frozenset().union(*(facts.state for facts in inputs.values()))
+        if kind == "snapshot_sql":
+            state = state | {"snapshot_sql"}
         empty = TableFacts((), _SQLRowOrigin(node.digest), state, None, (), ())
-        if self._mode == "stream" and len(aliases) != 1:
+        if kind == "snapshot_sql" and self._mode != "stream":
+            self.issue(path, "unsupported_mode", "snapshot_sql requires stream mode")
+            return empty
+        if kind == "sql" and self._mode == "stream" and len(aliases) != 1:
             self.issue(
                 path,
                 "unsupported_mode",
@@ -720,7 +729,7 @@ class _Analyzer:
             schema = self._sql_schema(node, inputs, path)
             return replace(empty, schema=schema)
         except (CompileError, ConfigError, ExecutionError, ValueError) as error:
-            self.issue(f"{path}.sql.schema", "unsupported_type", str(error))
+            self.issue(f"{path}.{kind}.schema", "unsupported_type", str(error))
             return empty
 
     def _sql_schema(
@@ -733,7 +742,7 @@ class _Analyzer:
                 self._native_row_schema(
                     child,
                     inputs[alias].schema,
-                    f"{path}.sql.tables.{alias}",
+                    f"{path}.{node.op.name}.tables.{alias}",
                 )
             )
             for alias, child in zip(

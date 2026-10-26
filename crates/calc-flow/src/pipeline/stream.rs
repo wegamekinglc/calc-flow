@@ -1185,20 +1185,44 @@ impl StreamExecutionPlan {
         Ok(())
     }
 
-    /// Binding IDs feeding snapshot SQL directly. Each message on these
-    /// inputs must contain one complete replacement relation.
+    /// Binding IDs feeding snapshot SQL through per-batch expressions. Each
+    /// message on these inputs must contain one complete replacement relation.
+    /// SQL and stateful boundaries retain their own output batch semantics.
     #[doc(hidden)]
     pub fn snapshot_source_binding_ids(&self) -> Vec<String> {
+        let whole_inputs = self.snapshot_input_nodes();
         self.external_inputs
             .iter()
-            .filter(|(_, endpoint)| {
-                self.nodes.iter().any(|n| {
-                    n.node_id == endpoint.node_id
-                        && matches!(n.operator, CompiledStreamOperator::SnapshotSql(_))
-                })
-            })
+            .filter(|(_, endpoint)| whole_inputs.contains(endpoint.node_id.as_str()))
             .map(|(name, _)| name.clone())
             .collect()
+    }
+
+    fn snapshot_input_nodes(&self) -> BTreeSet<&str> {
+        let nodes: BTreeMap<_, _> = self.nodes.iter().map(|n| (n.node_id.as_str(), n)).collect();
+        let mut pending: Vec<_> = self
+            .nodes
+            .iter()
+            .filter(|n| matches!(n.operator, CompiledStreamOperator::SnapshotSql(_)))
+            .map(|n| n.node_id.as_str())
+            .collect();
+        let mut visited = BTreeSet::new();
+        while let Some(node_id) = pending.pop() {
+            if !matches!(
+                nodes[node_id].operator,
+                CompiledStreamOperator::SnapshotSql(_) | CompiledStreamOperator::Expression(_)
+            ) || !visited.insert(node_id)
+            {
+                continue;
+            }
+            pending.extend(
+                self.edges
+                    .values()
+                    .filter(|edge| edge.target.node_id == node_id)
+                    .map(|edge| edge.source.node_id.as_str()),
+            );
+        }
+        visited
     }
 
     /// The stable source binding slots: external graph input names in
