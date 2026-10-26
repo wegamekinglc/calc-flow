@@ -237,8 +237,8 @@ work after SQL and rolling before SQL are supported. SQL-to-event-window paths
 and standalone array Program outputs are unsupported; the
 [composition reference](symbolic-api.md#sql-composition) gives the full boundary.
 
-Batch SQL accepts multiple aliases. Stream SQL accepts exactly one. Queries with
-ordinary aggregates or `GROUP BY` accumulate state across batches and emit the full
+Batch SQL accepts multiple aliases. Append stream SQL accepts exactly one.
+Queries with ordinary aggregates or `GROUP BY` accumulate state across batches and emit the full
 current result after each batch: `SELECT SUM(value) AS total` emits `1`, then
 `6` for input batches `[1]` and `[2, 3]`. A grouped result includes unchanged
 groups in each snapshot. By default, retained SQL input has no fixed row or
@@ -287,6 +287,35 @@ SQL without aggregation remains batch-local,
 as do SQL window functions when used without a grouped or ordinary aggregate.
 `ORDER BY` and `LIMIT` apply to each emitted snapshot.
 
+`cf.snapshot_sql(query: str, /, **tables: TableExpr) -> TableExpr` provides
+stream-only SQL over complete replacement relations, including multiple
+aliases. Inputs need fixed Arrow schemas and valid SQL aliases without
+case-insensitive duplicates.
+Each data Batch (all RecordBatches together) replaces one relation. Empty data
+initializes or clears it; missing data does not. After all aliases initialize,
+each update emits one complete latest-available result. EOF retains the last
+relation, idle does not recompute, and no cross-source event-time atomicity or
+delta JOIN is promised. The output has new lineage, no inherited ordering and
+must connect directly to sinks in this MVP.
+
+Set `StreamRuntimeConfig.sql_snapshot_state_budget=StateBudget(rows, bytes)`
+to bound each node's total latest rows and conservative owned state, including
+installed/candidate relations and held captures. It defaults to `None` and is
+independent of the two append-SQL budgets. Every full input/result must fit its
+edge budget; oversize fails without splitting. Convenience materialized inputs
+at snapshot ingress are delivered whole; explicit `SourceBinding.from_arrow`
+is rejected there, including through row-local expressions, because it slices
+tables. It can still feed an upstream append aggregate. Custom sources own the
+complete-message boundary.
+
+Durable recovery requires an explicit runner, replayable source bindings and a
+stable checkpoint root. Ordinary iterables have no replay, even with temporary
+checkpoints enabled. Snapshot initialization and relations restore together
+with upstream state, with strict identity/version/digest/current-budget checks.
+MVP ExactlyOnce requests involving this node are rejected before sources open.
+See [snapshot semantics, budgets and recovery](streaming-guide.md#complete-replacement-snapshot-sql)
+and [example 31](../examples/31_streaming_account_market_values.py).
+
 ## Streaming results
 
 `TableExpr.stream(inputs, /, *, runtime=None, config=None, watermarks=None)` returns
@@ -300,7 +329,8 @@ config=None, watermarks=None)` returns `StreamResults[StreamOutput]`. Both requi
 A dynamic input accepts a materialized Arrow `Table`, `RecordBatch`, table
 `Batch`, an `AsyncIterable` of those values, or a `SourceBinding`.
 Materialized inputs are imported once and sliced by a native source within
-`config.edge_budget`; they do not call a Python source per batch. With
+`config.edge_budget`, except complete relations feeding snapshot ingress,
+which must fit the budget whole. They do not call a Python source per batch. With
 `SourceProvidedWatermarks`, the
 iterable may also yield `Watermark` values. A single-table root without static
 parameters accepts that source directly. Otherwise pass a mapping by logical

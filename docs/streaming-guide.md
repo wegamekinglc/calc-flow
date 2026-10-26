@@ -20,6 +20,7 @@ On this page:
 - [Named streaming outputs](#named-streaming-outputs)
 - [Stock account positions](#stock-account-positions)
 - [Account market values](#account-market-values)
+- [Complete-replacement snapshot SQL](#complete-replacement-snapshot-sql)
 - [Materialized Arrow inputs](#materialized-arrow-inputs)
 - [Route late rows](#route-late-rows)
 - [Stream ownership and SQL boundaries](#stream-ownership-and-sql-boundaries)
@@ -271,10 +272,21 @@ keep the first encountered winner. Declare an additional business sequence
 in SQL's ordering tuple when that is the intended tie rule; see
 [ordered LAST_VALUE](#compact-ordered-last_value).
 
-One owning streaming `Program` drains two named outputs: cumulative positions
-and latest quotes. Python retains only the current Arrow snapshot of each
-output. Once both have produced their first snapshot, every new position or
-quote snapshot immediately triggers `SUM(position * latest_price)` per account.
+One owning streaming `Program` connects cumulative positions and latest quotes
+to a native `cf.snapshot_sql` valuation and the `market_values` output:
+
+```python
+values = cf.snapshot_sql(
+    "SELECT p.account, SUM(p.position * q.latest_price) AS market_value "
+    "FROM p LEFT JOIN q ON p.stock = q.stock "
+    "GROUP BY p.account ORDER BY p.account",
+    p=positions,
+    q=latest,
+)
+```
+
+Once both aggregates have produced their first snapshot, every new position or
+quote snapshot triggers `SUM(position * latest_price)` per account.
 A new quote revalues existing holdings even when no new trades arrive; a trade
 uses the latest price received so far. Intermediate quotes are used while the
 sources remain open. Older quote timestamps cannot roll the price back.
@@ -286,22 +298,21 @@ price; the example does not emit one valuation per row within the batch.
 yields an async iterator of account-value tables. Exiting the context closes
 both sources, including when the consumer stops before EOF. The CLI consumes
 every intermediate valuation and keeps only the last table for printing.
-The two outputs are asynchronous: each valuation uses the most recently
-consumed snapshot of the other branch, without claiming an atomic arrival
-order across independent inputs.
-
-The current streaming SQL surface accepts one input alias, so the example
-compiles a separate native two-input SQL plan once and awaits its execution
-on each update inside the streaming loop. The join and account sum recompute
-over current positions and prices, with no historical trade replay or Python
-row conversion. Position state uses the compact incremental grouped sum.
+Each valuation uses the latest available relation from the other branch. This
+does not define an atomic arrival order or an event-time cut across sources.
+The native job owns all three states and their lifecycle; Python only consumes
+valuation tables. The join and account sum are planned and recomputed over
+current positions and prices on every update. Position state uses compact
+incremental grouped sum.
 Ordered `LAST_VALUE` keeps one winner and its ordering tuple per stock without
 retaining quote history. The example explicitly requires compact execution:
 
 ```python
 cf.StreamRuntimeConfig(
     checkpointing=False,
+    edge_budget=cf.EdgeBudget(100_000, 64 << 20),
     sql_compact_state_budget=cf.StateBudget(100_000, 64 << 20),
+    sql_snapshot_state_budget=cf.StateBudget(200_000, 128 << 20),
 )
 ```
 
@@ -310,12 +321,16 @@ of conservative owned-state charges: `(account, stock)` groups for positions,
 stock groups for quotes. Increase the limits for larger key sets; exceeding
 either limit fails the job. The example leaves `sql_state_budget=None`, so
 there is no cumulative input quota. The compact budget does not cap process
-RSS or the Python-held Arrow snapshots. Both branches still emit complete
-cumulative snapshots with O(keys) output work on every update; there is no
-delta-output contract. This is Python-managed composition of independent
-streams and a batch valuation, with no atomic multi-input streaming SQL join.
-Checkpointing is disabled, so each invocation starts from zero; durable
-recovery and exactly-once delivery require capable explicit sources/sinks.
+RSS. The snapshot node separately allows 200,000 rows across its latest
+relations and 128 MiB of conservative owned charges, including candidates and
+checkpoint captures. Every complete aggregate result and valuation must fit
+the 100,000-row / 64 MiB edge limit; it cannot be sliced into replacement
+messages. These are illustrative limits, checked with small inputs, not a
+validated capacity guarantee for the defaults or arbitrary key sets. Both
+aggregates still emit complete snapshots with O(keys) output work per update.
+Checkpointing is disabled, so each invocation starts from zero. Durable
+restart needs an explicit runner, replayable bindings and a stable state root;
+the MVP rejects ExactlyOnce for the valuation output.
 
 The output has one row per known account, with `account` and `market_value`.
 Zero-quantity seeds retain accounts without executions. Quotes cover every
@@ -324,6 +339,60 @@ the latest price, including zero positions. The default run produces 100
 account rows. Execution prints only the final table and total elapsed time,
 including data preparation, both streams, every live valuation query, and
 awaited cleanup. Console rendering is excluded.
+
+## Complete-replacement snapshot SQL
+
+`cf.snapshot_sql(query: str, /, **tables: TableExpr) -> TableExpr` is a
+stream-only, read-only DataFusion query over one or more named latest
+relations. Aliases must be valid SQL identifiers without case-insensitive
+duplicates, and each input requires a fixed Arrow schema. It emits a new row
+lineage without inherited temporal ordering. Outputs currently connect
+directly to sinks; expressions or other operators after this node are rejected.
+Existing `cf.sql`, `TableExpr.sql`, and `PipelineBuilder.sql` retain their
+one-alias append behavior in streams and multi-alias behavior in batch mode.
+
+Each incoming data Batch replaces one alias's **entire** relation; all of its
+RecordBatches belong to that replacement. An empty table initializes or clears
+the relation. No output is emitted until every alias has received data;
+uninitialized and initialized-empty are distinct, including after recovery.
+Every subsequent update runs the query using the latest available relations
+and emits a complete result, even when empty or unchanged. Idle does not clear
+or recompute. EOF retains that alias's last relation for the remaining inputs;
+EOF without any data leaves it uninitialized. Final EOF emits no extra result.
+This is neither a delta JOIN nor a cross-source event-time atomic snapshot.
+
+Inputs and complete outputs must fit every traversed `EdgeBudget`, including
+the aggregate-to-snapshot edge. Oversize messages fail whole: no fragment
+reassembly is available. Convenience materialized Arrow inputs feeding a
+snapshot ingress, including through row-local expressions, are delivered as
+one whole relation. An explicit `SourceBinding.from_arrow` is rejected on that
+path because it slices tables. It remains usable upstream of append aggregates,
+as in the account example. Custom sources must yield complete relations at a
+snapshot ingress; ordinary async iterables provide no replay.
+
+`StreamRuntimeConfig.sql_snapshot_state_budget` defaults to `None` and applies
+independently to each snapshot node. `max_rows` counts all aliases' current
+rows after replacement, rather than historical input. `max_bytes` charges
+owned Arrow backing, metadata, handles, candidates and held encoded captures
+while installed state remains alive. Slices may retain larger backing buffers.
+DataFusion execution, serialization scratch and edges use separate reservations;
+this is not an RSS cap. The old input and compact SQL budgets are independent.
+Successful emission precedes state commit; failed or cancelled emission releases
+the candidate. Downstream delivery already performed cannot be rolled back.
+
+For durable restart, use `program.compile_stream()` with `StreamingRunner`,
+capable replayable `SourceBinding` values, explicit sinks and a stable
+`ManagedCheckpointRuntime` root. The managed cut includes both upstream
+aggregates and every snapshot alias's initialization flag and relation.
+Snapshot state uses its independent layout/accounting version 1 and replacement
+identity; restore checks the query, aliases, schemas, engine identity, digests
+and current budgets before installing state. Unknown or corrupt state fails
+closed. Existing append-SQL layouts 3/4/5 keep their compatibility rules.
+Temporary convenience checkpoints cannot turn an iterable into a replayable
+source. MVP delivery requests through `snapshot_sql` reject ExactlyOnce before
+sources open; unrelated outputs keep their existing proofs. See
+[explicit connectors and recovery](#explicit-connectors-and-recovery) and the
+[native state contract](snapshot-sql-native.md).
 
 ## Route late rows
 
@@ -629,6 +698,9 @@ emits record slices that fit both row and visible-byte limits, without Python
 source calls per batch. A single row that cannot fit fails the job. Empty inputs
 retain their schema. Record boundaries can produce smaller batches; chunking
 affects per-batch outputs such as cumulative SQL snapshots.
+At a snapshot SQL ingress, convenience materialized inputs instead form one
+complete relation and must fit the budget whole; explicit sliced Arrow bindings
+are rejected there. See [snapshot SQL](#complete-replacement-snapshot-sql).
 
 Default event-time ordering checks and generated watermarks match iterable
 inputs. An explicit bounded-disorder or disabled policy replaces those checks.
@@ -669,8 +741,8 @@ slow consumers. `StreamRuntimeConfig.edge_budget` also bounds each iterable
 input batch; schema mismatches and oversized batches fail with the input name.
 This does not bound tables that application code accumulates after reading them.
 
-A streaming SQL stage supports exactly one alias. Ordinary aggregates and
-`GROUP BY` emit a full cumulative result after each batch.
+An append streaming SQL stage supports exactly one alias. Ordinary aggregates
+and `GROUP BY` emit a full cumulative result after each batch.
 For example, `SELECT SUM(value) AS total FROM input` emits `1` after `[1]` and
 `6` after `[2, 3]`; grouped snapshots include every current group, including
 unchanged ones. Eligible aggregate queries use native incremental accumulators
@@ -718,7 +790,9 @@ apply. Neither changes the semantic plan fingerprint.
 
 Other SQL remains batch-local. `ORDER BY` and `LIMIT` apply to each snapshot;
 SQL window functions alone remain batch-local. Downstream stages receive each
-snapshot as new rows. Multi-alias SQL is a batch operation. Use native `ts`
+snapshot as new rows. Multi-alias append SQL is a batch operation;
+[`cf.snapshot_sql`](#complete-replacement-snapshot-sql) replaces complete
+relations in streams. Use native `ts`
 operations for rolling state and the documented window/join declarations for
 event-time aggregation and matching.
 
@@ -1601,6 +1675,8 @@ preserve caller-provided batch boundaries and reject oversized batches rather
 than combining or splitting them. Neither path waits to assemble a full
 1,000,000-row batch. Larger batches can improve throughput while increasing
 per-batch latency and working memory.
+Snapshot SQL ingress requires whole relations rather than slices, as described
+in [snapshot SQL](#complete-replacement-snapshot-sql).
 
 Each stream SQL or expression node accounts for its own DataFusion memory
 reservations without an implicit byte limit. Explicit operator state budgets

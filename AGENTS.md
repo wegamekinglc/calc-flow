@@ -214,7 +214,7 @@ selectors.
   and SQL stages lower through one immutable expression graph to project-v3.
 - SQL result schemas come from private native planning without reading rows.
   SQL output has a new row lineage and no inherited temporal ordering.
-  Batch SQL supports multiple aliases; stream SQL accepts one. Ordinary and
+  Batch SQL supports multiple aliases; append stream SQL accepts one. Ordinary and
   grouped SQL aggregates emit a full cumulative snapshot after each batch.
   Eligible queries, including admitted grouped ordered LAST_VALUE, use compact
   state; unsupported aggregate shapes retain input and rerun over history.
@@ -222,6 +222,13 @@ selectors.
   `sql_state_budget` limits cumulative input and `sql_compact_state_budget`
   independently requires and limits compact state per aggregate node. See
   `docs/streaming-guide.md` for admission, ordering and recovery boundaries.
+  `snapshot_sql` is a separate stream-only complete-replacement query over
+  latest initialized relations with exact schemas. In the current minimum
+  viable product (MVP), its independent state budget accounts for candidates
+  and checkpoint captures.
+  Edge admission checks complete input and output messages against configured
+  row/byte budgets and rejects oversized messages.
+  Outputs currently connect directly to sinks and reject ExactlyOnce.
 - `compute` and `collect` return Arrow tables using logical declaration names.
   Each convenience call owns a fresh batch plan. Async calls capture mappings
   and Batch references at entry; Arrow buffers remain shared and read-only.

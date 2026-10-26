@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-import itertools
 import runpy
 from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.compute as pc
 import pytest
+
+import calc_flow as cf
 
 
 @pytest.fixture
@@ -18,24 +19,63 @@ def example(monkeypatch):
 
 
 def test_account_market_value_feeds_use_requested_default_scale(example):
-    trades = example["demo_batches"]()
-    initial = pa.concat_tables(list(itertools.islice(trades, 10)))
-    assert initial.num_rows == 10_000
-    assert pc.count_distinct(initial["account"]).as_py() == 100
-    assert pc.count_distinct(initial["stock"]).as_py() == 100
-    rows = 0
-    for batch in trades:
-        assert batch.num_rows == 1_000
-        rows += batch.num_rows
-    assert rows == 10_000_000
-    quotes = list(example["quote_batches"]())
-    assert len(quotes) == 10
-    assert all(batch.num_rows == 1_000 for batch in quotes)
-    assert pc.count_distinct(pa.concat_tables(quotes)["stock"]).as_py() == 100
+    assert example["demo_batches"].__kwdefaults__ == {
+        "row_count": 10_000_000,
+        "account_count": 100,
+        "stock_count": 100,
+        "batch_size": 1_000,
+    }
+    assert example["quote_batches"].__kwdefaults__ == {
+        "row_count": 10_000,
+        "stock_count": 100,
+        "batch_size": 1_000,
+    }
+    trades = list(
+        example["demo_batches"](
+            row_count=80, account_count=2, stock_count=2, batch_size=4
+        )
+    )
+    assert trades[0]["quantity"].to_pylist() == [0] * 4
+    assert sum(batch.num_rows for batch in trades[1:]) == 80
+    assert all(batch.num_rows == 4 for batch in trades)
+    assert pc.count_distinct(pa.concat_tables(trades)["account"]).as_py() == 2
+    assert pc.count_distinct(pa.concat_tables(trades)["stock"]).as_py() == 2
+    quotes = list(example["quote_batches"](row_count=20, stock_count=2, batch_size=4))
+    assert len(quotes) == 5
+    assert all(batch.num_rows == 4 for batch in quotes)
+    assert pc.count_distinct(pa.concat_tables(quotes)["stock"]).as_py() == 2
+
+
+def legacy_oracle(example):
+    # The old two-input batch path independently aggregates the full histories.
+    return (
+        cf.PipelineBuilder("legacy-account-values")
+        .sql(
+            "values",
+            """
+            WITH deltas AS (
+                SELECT account, stock,
+                       CASE WHEN side = 'buy' THEN quantity ELSE -quantity END AS delta
+                FROM trades WHERE flow_type = 'trade'
+            ), p AS (
+                SELECT account, stock, SUM(delta) AS position
+                FROM deltas GROUP BY account, stock
+            ), q AS (
+                SELECT stock,
+                       LAST_VALUE(latest_price ORDER BY "timestamp") AS latest_price
+                FROM quotes GROUP BY stock
+            )
+            """
+            + example["VALUATION_SQL"],
+            aliases=("trades", "quotes"),
+        )
+        .compile_batch()
+    )
 
 
 def test_account_values_reprice_live_positions_before_either_source_ends(example):
     async def run():
+        oracle = legacy_oracle(example)
         trade_input = asyncio.Queue()
         quote_input = asyncio.Queue()
         closed = {"trades": asyncio.Event(), "quotes": asyncio.Event()}
@@ -66,8 +106,9 @@ def test_account_values_reprice_live_positions_before_either_source_ends(example
                 schema=example["QUOTE_SCHEMA"],
             )
 
-        await trade_input.put(trade(10))
-        await quote_input.put(quote(2.0, 1_000_000))
+        history = {"trades": [trade(10)], "quotes": [quote(2.0, 1_000_000)]}
+        await trade_input.put(history["trades"][0])
+        await quote_input.put(history["quotes"][0])
         async with example["market_value_stream"](
             feed(trade_input, "trades"), feed(quote_input, "quotes")
         ) as updates:
@@ -76,26 +117,51 @@ def test_account_values_reprice_live_positions_before_either_source_ends(example
                 table = await asyncio.wait_for(updates.__anext__(), 5)
                 assert not closed["trades"].is_set()
                 assert not closed["quotes"].is_set()
-                assert table["account"].equals(pa.chunked_array([["alice"]]))
+                expected = await oracle.execute_async(
+                    {
+                        name: cf.Batch.from_pyarrow(pa.concat_tables(tables))
+                        for name, tables in history.items()
+                    }
+                )
+                assert table.equals(expected.outputs["output"].to_pyarrow())
                 return table["market_value"][0].as_py()
 
             assert await next_value() == 20.0
+
+            async def update(name, table):
+                history[name].append(table)
+                await (trade_input if name == "trades" else quote_input).put(table)
+                return await next_value()
+
             # Price changes alone must revalue existing positions while trades wait.
-            await quote_input.put(quote(3.0, 3_000_000))
-            assert await next_value() == 30.0
+            assert await update("quotes", quote(3.0, 3_000_000)) == 30.0
             # An old quote cannot replace the latest price.
-            await quote_input.put(quote(99.0, 2_000_000))
-            assert await next_value() == 30.0
+            assert await update("quotes", quote(99.0, 2_000_000)) == 30.0
             # Trades also revalue immediately at the latest known price.
-            await trade_input.put(trade(4, side="sell"))
-            assert await next_value() == 18.0
-            await trade_input.put(trade(999, flow_type="order"))
-            assert await next_value() == 18.0
-            await trade_input.put(trade(6, side="sell"))
-            assert await next_value() == 0.0
+            assert await update("trades", trade(4, side="sell")) == 18.0
+            assert await update("trades", trade(999, flow_type="order")) == 18.0
+            assert await update("trades", trade(6, side="sell")) == 0.0
 
         assert closed["trades"].is_set()
         assert closed["quotes"].is_set()
+
+    asyncio.run(run())
+
+
+def test_account_values_initialize_from_empty_aggregate_snapshots(example):
+    async def run():
+        trades = pa.Table.from_batches([], schema=example["TRADE_SCHEMA"])
+        quotes = pa.Table.from_batches([], schema=example["QUOTE_SCHEMA"])
+        results = example["make_program"]().stream(
+            {"trades": trades, "quotes": quotes},
+            config=cf.StreamRuntimeConfig(checkpointing=False),
+        )
+        async with results:
+            outputs = [output async for output in results]
+        assert results.job.status()["task_count"] == 0
+        assert [output.name for output in outputs] == ["market_values"]
+        assert outputs[0].table.column_names == ["account", "market_value"]
+        assert outputs[0].table.num_rows == 0
 
     asyncio.run(run())
 

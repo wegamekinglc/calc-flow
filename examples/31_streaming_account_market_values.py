@@ -1,7 +1,7 @@
-"""Revalue accounts with compact position/quote state; print the final snapshot.
+"""Revalue accounts in one native streaming Program; print the final snapshot.
 
-Python combines two single-input streams using a reusable batch SQL valuation.
-Each aggregate has an independent 100,000-group / 64 MiB owned-state budget.
+Compact positions/latest quotes feed a complete-replacement snapshot SQL query.
+The configured budgets are illustrative limits, not verified capacity guarantees.
 Full snapshots and valuation queries still visit the current keys on each update.
 """
 
@@ -37,6 +37,13 @@ QUOTE_SCHEMA = pa.schema(
 MARKET_VALUE_SCHEMA = pa.schema(
     [("account", pa.string()), ("market_value", pa.float64())]
 )
+VALUATION_SQL = """
+    SELECT p.account,
+           SUM(p.position * q.latest_price) AS market_value
+    FROM p LEFT JOIN q ON p.stock = q.stock
+    GROUP BY p.account
+    ORDER BY p.account
+"""
 
 
 def make_program() -> cf.Program:
@@ -58,10 +65,11 @@ def make_program() -> cf.Program:
         'SELECT stock, LAST_VALUE(latest_price ORDER BY "timestamp") AS latest_price '
         "FROM input GROUP BY stock"
     )
+    values = cf.snapshot_sql(VALUATION_SQL, p=positions, q=latest)
     return cf.Program(
         "account-market-values",
         engine="streaming",
-        outputs={"positions": positions, "latest_quotes": latest},
+        outputs={"market_values": values},
     )
 
 
@@ -69,44 +77,20 @@ def make_program() -> cf.Program:
 async def market_value_stream(
     trades: AsyncIterator[pa.Table], quotes: AsyncIterator[pa.Table]
 ) -> AsyncIterator[AsyncIterator[pa.Table]]:
-    """Own both sources and value every position or quote batch snapshot."""
-    valuation = (
-        cf.PipelineBuilder("live-account-market-values")
-        .sql(
-            "values",
-            """
-            SELECT p.account,
-                   SUM(p.position * q.latest_price) AS market_value
-            FROM p LEFT JOIN q ON p.stock = q.stock
-            GROUP BY p.account
-            ORDER BY p.account
-            """,
-            aliases=("p", "q"),
-        )
-        .compile_batch()
-    )
-    snapshots: dict[str, pa.Table] = {}
+    """Own both sources and yield latest-available account valuations."""
     async with make_program().stream(
         {"trades": trades, "quotes": quotes},
         config=cf.StreamRuntimeConfig(
             checkpointing=False,
+            edge_budget=cf.EdgeBudget(100_000, 64 << 20),
             sql_compact_state_budget=cf.StateBudget(100_000, 64 << 20),
+            sql_snapshot_state_budget=cf.StateBudget(200_000, 128 << 20),
         ),
     ) as results:
 
         async def updates() -> AsyncIterator[pa.Table]:
             async for output in results:
-                snapshots[output.name] = output.table
-                if len(snapshots) < 2:
-                    continue
-                # Reuse one compiled SQL plan on the current Arrow snapshots.
-                result = await valuation.execute_async(
-                    {
-                        "p": cf.Batch.from_pyarrow(snapshots["positions"]),
-                        "q": cf.Batch.from_pyarrow(snapshots["latest_quotes"]),
-                    }
-                )
-                yield result.outputs["output"].to_pyarrow()
+                yield output.table
 
         iterator = updates()
         try:
