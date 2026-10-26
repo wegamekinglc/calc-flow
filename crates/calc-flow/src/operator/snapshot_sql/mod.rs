@@ -144,12 +144,10 @@ impl SnapshotSqlOperator {
 
     pub(crate) fn set_budget(&mut self, budget: Option<StateBudget>) -> Result<()> {
         check_rows(&self.relations, budget)?;
-        self.ensure_pool()?;
-        self.pool
-            .as_ref()
-            .expect("initialized pool")
-            .set_limit(budget.map(StateBudget::max_bytes))
-            .map_err(engine_error)?;
+        if let Some(pool) = &self.pool {
+            pool.set_limit(budget.map(StateBudget::max_bytes))
+                .map_err(engine_error)?;
+        }
         self.budget = budget;
         Ok(())
     }

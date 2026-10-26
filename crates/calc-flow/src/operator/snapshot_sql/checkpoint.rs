@@ -240,7 +240,11 @@ impl SnapshotSqlOperator {
             );
             segments.insert(
                 format!("metadata-{index}"),
-                relation.metadata.segment.clone(),
+                tag_segment(
+                    relation.metadata.segment.clone(),
+                    self.pool.as_ref().expect("pool"),
+                    None,
+                ),
             );
         }
         Ok((segments, relations))
@@ -355,9 +359,16 @@ impl SnapshotSqlOperator {
             let owned_data =
                 paid_segment(data, self.reservation(), self.pool.as_ref().expect("pool"))?;
             let relation = self.restore_relation_payload(data, metadata, descriptor, check)?;
+            // The retained control digest describes these validated bytes,
+            // which may differ from the re-encoded runtime metadata.
+            let owned_metadata = paid_segment(
+                metadata,
+                self.reservation(),
+                self.pool.as_ref().expect("pool"),
+            )?;
             owners.push(relation);
             paid.insert(data_name, owned_data);
-            paid.insert(metadata_name, owners[index].metadata.segment.clone());
+            paid.insert(metadata_name, owned_metadata);
         }
         Ok(owners)
     }

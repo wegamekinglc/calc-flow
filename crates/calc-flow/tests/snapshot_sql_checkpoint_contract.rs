@@ -352,12 +352,63 @@ async fn test_valid_digest_with_invalid_ipc_or_schema_still_fails_atomically() {
         let mut bad = good.clone();
         bad.segments.insert("relation-0".into(), segment.clone());
         let bad = change_control(&bad, |v| {
-            v["relations"][0]["data_sha256"] = segment.sha256().into()
+            v["relations"][0]["data_sha256"] = segment.sha256().into();
         });
         assert!(operator.restore(&bad).is_err());
         assert_eq!(
             operator.checkpoint(Epoch::INITIAL).unwrap().segments,
             good.segments
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_metadata_checkpoint_remains_restorable_after_restore() {
+    use calc_flow::{Batch, BatchMetadata, JsonMap};
+    for pretty in [false, true] {
+        let mut original = operator(QUERY).await;
+        let job = job();
+        let context = StreamOperatorContext::new(&job, "valuation", None);
+        let mut collector = EdgeCollector::new(vec![]);
+        let input = batch(&[&[1]]);
+        let input = Batch::table(
+            input.table_payload().unwrap().batches().to_vec(),
+            BatchMetadata::new(
+                "source",
+                3,
+                JsonMap::from([("float".into(), serde_json::json!(0.845_512_408_225_570_1))]),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        original
+            .process_data("p", input, &context, &mut collector)
+            .await
+            .unwrap();
+        let mut saved = original.checkpoint(Epoch::INITIAL).unwrap();
+        if pretty {
+            let value: serde_json::Value =
+                serde_json::from_slice(saved.segments["metadata-0"].bytes()).unwrap();
+            let metadata = StateSegment::new(serde_json::to_vec_pretty(&value).unwrap());
+            let mut control: serde_json::Value =
+                serde_json::from_slice(saved.segments["control"].bytes()).unwrap();
+            control["relations"][0]["metadata_sha256"] = metadata.sha256().into();
+            saved.segments.insert("metadata-0".into(), metadata);
+            let control = StateSegment::new(serde_json::to_vec(&control).unwrap());
+            saved
+                .inline_metadata
+                .insert("control_sha256".into(), control.sha256().into());
+            saved.segments.insert("control".into(), control);
+        }
+        let mut restored = operator(QUERY).await;
+        restored.restore(&saved).unwrap();
+        let carried = restored.checkpoint(Epoch::INITIAL).unwrap();
+        assert_eq!(carried.segments, saved.segments);
+        let mut fresh = operator(QUERY).await;
+        let result = fresh.restore(&carried);
+        assert!(
+            result.is_ok(),
+            "accepted metadata must stay restorable (pretty={pretty}): {result:?}"
         );
     }
 }

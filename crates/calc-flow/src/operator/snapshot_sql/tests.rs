@@ -248,8 +248,52 @@ async fn test_same_node_restore_shares_encoded_segment_leases_under_tight_budget
         &saved.segments["relation-0"].bytes_arc(),
         &restored.segments["relation-0"].bytes_arc()
     ));
+    assert!(Arc::ptr_eq(
+        &saved.segments["metadata-0"].bytes_arc(),
+        &restored.segments["metadata-0"].bytes_arc()
+    ));
     operator.reset().unwrap();
     drop(saved);
     drop(restored);
     assert_eq!(pool.reserved(), 0);
+}
+
+#[test]
+fn test_precompile_budget_preserves_configured_runtime_identity() {
+    let compile = |preset_budget: bool| {
+        let mut snapshot = operator();
+        if preset_budget {
+            snapshot
+                .set_state_budget(StateBudget::new(10, 1 << 20).unwrap())
+                .unwrap();
+        }
+        let plan = crate::PipelineBuilder::new("snapshot-config")
+            .unwrap()
+            .with_datafusion_config(DataFusionConfig {
+                batch_size: 17,
+                ..DataFusionConfig::default()
+            })
+            .add_node("snapshot", snapshot)
+            .unwrap()
+            .compile_stream(
+                &UdfRegistrySnapshot::default(),
+                &crate::StreamRequirements::default(),
+            )
+            .unwrap();
+        let fingerprint = plan.fingerprint().to_owned();
+        let mut parts = plan.into_runtime_parts(EdgeBudget::default()).unwrap();
+        (fingerprint, parts.nodes.remove(0).operator)
+    };
+    let (before_fingerprint, mut before) = compile(true);
+    let saved = before.checkpoint(Epoch::INITIAL).unwrap();
+    let control: serde_json::Value =
+        serde_json::from_slice(saved.segments["control"].bytes()).unwrap();
+    assert_eq!(control["identity"]["runtime_config"]["batch_size"], 17);
+    let (after_fingerprint, mut after) = compile(false);
+    assert_eq!(before_fingerprint, after_fingerprint);
+    let result = after.restore(&saved);
+    assert!(
+        result.is_ok(),
+        "same graph and engine configuration must restore: {result:?}"
+    );
 }
