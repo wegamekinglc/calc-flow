@@ -181,6 +181,7 @@ class TestProjectV3Surface:
             "cross_section",
             "expression",
             "rolling",
+            "snapshot_sql",
             "sql",
             "stream_asof_join",
             "stream_join",
