@@ -10,6 +10,11 @@ mod runner;
 mod support;
 use support::*;
 
+#[path = "snapshot_sql/account_recovery.rs"]
+mod account_recovery;
+#[path = "snapshot_sql/account_support.rs"]
+mod account_support;
+
 #[tokio::test]
 async fn test_uninitialized_partial_and_initialized_roundtrips() {
     for initialized in 0..=2 {

@@ -122,14 +122,30 @@ advanced graph, UDF, provider, and lifecycle controls. Rust crate APIs are docum
 
 DataFusion 55 executes table expressions and SQL. SQL nodes accept one
 read-only `SELECT` or CTE. Batch SQL supports multiple aliases; streaming SQL
-accepts one alias. Ordinary aggregates and `GROUP BY` emit a full cumulative
-snapshot after each native batch. Eligible queries, including the supported
+accepts one alias for append SQL. Ordinary aggregates and `GROUP BY` emit a
+full cumulative snapshot after each native batch. Eligible queries, including the supported
 grouped ordered `LAST_VALUE`, update compact state; other aggregate shapes
 retain input and rerun over its history. Other SQL evaluates each batch
 separately. See
 [SQL stream boundaries](streaming-guide.md#stream-ownership-and-sql-boundaries).
 SQL output has a new row lineage and does not inherit temporal ordering.
-Row-local expressions may follow SQL; compute rolling features before a SQL stage.
+Row-local expressions may follow append SQL; compute rolling features before
+a SQL stage.
+
+`cf.snapshot_sql(query, **tables)` adds stream-only SQL over complete latest
+relations. Every data Batch replaces an alias, including empty data; all
+aliases must initialize before output. Updates use latest-available relations,
+EOF retains the last relation, and idle does not recompute. This does not
+promise an atomic event-time cut or delta JOIN. Complete inputs/results must
+fit edge budgets; the separate `sql_snapshot_state_budget` bounds current
+relations and owned candidates/captures. Materialized convenience inputs are
+delivered whole at snapshot ingress; sliced `SourceBinding.from_arrow` inputs
+are rejected there, but may feed upstream append aggregates. Outputs currently
+connect directly to sinks, and MVP ExactlyOnce is rejected. Durable recovery
+needs an explicit runner, replayable sources and a stable state root; ordinary
+iterables have no replay. See [snapshot SQL](streaming-guide.md#complete-replacement-snapshot-sql)
+and the [native account valuation example](streaming-guide.md#account-market-values).
+
 Recursive CTEs and the `generate_series` and `range` table generators are
 rejected. Each DataFusion runtime accounts for its own memory reservations without
 an implicit byte limit. SQL result collection stops above 100 million rows or

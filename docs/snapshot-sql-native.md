@@ -4,7 +4,8 @@
 replacement query. Supply exact input and output Arrow schemas with
 `with_ports`. Project format 3 represents this as
 `{"kind":"snapshot_sql","query":"SELECT * FROM p","aliases":["p"],"udfs":[]}`.
-The Python symbolic declaration is delivered separately.
+Python declares the same node with `cf.snapshot_sql(query, **tables)`; see the
+[streaming guide](streaming-guide.md#complete-replacement-snapshot-sql).
 
 Each data `Batch`, including all of its RecordBatches, replaces one alias's
 complete relation. An empty table initializes and clears that relation. No

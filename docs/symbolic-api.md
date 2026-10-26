@@ -180,8 +180,8 @@ establish symbolic temporal ordering. SQL-to-event-window composition and
 standalone array Program outputs are not supported. Matrix calculations must
 use the documented table-attachment shape and explicit provider registration.
 
-Batch SQL can join multiple aliases. Stream compilation rejects more than one
-alias before any source opens, even if aliases share a root. Stream SQL with an
+Batch SQL can join multiple aliases. Append stream compilation rejects more
+than one alias before any source opens, even if aliases share a root. Stream SQL with an
 ordinary aggregate or `GROUP BY` emits the full cumulative result after every
 batch. Eligible queries, including admitted grouped ordered `LAST_VALUE`,
 update compact state; unsupported aggregate shapes rerun over retained input.
@@ -200,6 +200,13 @@ separately declared cross-batch semantics. Use
 [rolling-to-SQL stream](../examples/20_streaming_pipeline.py) as executable examples.
 The [engine selection example](../examples/29_sql_stream_switch.py) executes
 the same SQL declaration through two separately selected `Program` instances.
+
+For full replacement relations, `cf.snapshot_sql(query, **tables)` is a separate
+stream-only declaration supporting multiple aliases and fixed Arrow schemas.
+It waits for every alias to initialize, then emits the complete latest-available
+result after each replacement. Outputs currently connect directly to sinks.
+See [snapshot SQL](streaming-guide.md#complete-replacement-snapshot-sql) for
+empty/EOF behavior, whole-message budgets, source restrictions and recovery.
 
 ## Symbolic compilation
 

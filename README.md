@@ -122,8 +122,10 @@ The Python package is not a second engine.
   deep-copied strict-JSON settings and a cooperative, timezone-aware deadline
   normalized to UTC.
 - `TableExpr.stream` and `Program.stream` own a single native job with bounded
-  backpressure. SQL accepts one alias in a stream. Ordinary aggregates and
+  backpressure. Append SQL accepts one alias in a stream. Ordinary aggregates and
   `GROUP BY` emit full cumulative snapshots; other SQL runs per batch.
+  Stream-only `cf.snapshot_sql` queries complete latest relations across aliases;
+  see [semantics and recovery](docs/streaming-guide.md#complete-replacement-snapshot-sql).
 - `Program(name, engine="sql")` or `Program(name, engine="streaming")` fixes
   the engine when the immutable program is created. `Program.execute` returns
   finite named tables or owned streaming results, respectively. Calls for the
