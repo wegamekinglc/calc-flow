@@ -48,6 +48,7 @@ mod pipeline;
 mod project_store;
 mod runtime;
 mod state;
+mod state_memory_pool;
 mod static_input;
 mod time;
 mod udf;

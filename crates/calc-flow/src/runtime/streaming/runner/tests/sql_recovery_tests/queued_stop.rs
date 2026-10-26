@@ -1,7 +1,5 @@
 use super::*;
-use crate::runtime::streaming::sql_recovery_work::{
-    JobSqlRecoveryOwner, OwnedSqlRestoreCompletion,
-};
+use crate::runtime::streaming::sql_recovery_work::{JobSqlRecoveryOwner, OwnedSqlWorkCompletion};
 use std::{future::Future, pin::Pin, task::Wake};
 
 #[derive(Clone, Copy)]
@@ -119,7 +117,7 @@ struct DrainObservation {
 
 async fn observe_queued_stop(
     stop: QueuedStop,
-    mut queued_join: Pin<&mut impl Future<Output = Result<OwnedSqlRestoreCompletion>>>,
+    mut queued_join: Pin<&mut impl Future<Output = Result<OwnedSqlWorkCompletion>>>,
     owner: &JobSqlRecoveryOwner,
     active_gate: &Gate,
     refunds: &RefundProbes<'_>,
@@ -208,7 +206,7 @@ async fn observe_queued_stop(
 async fn settle_held_predecessor(
     owner: &JobSqlRecoveryOwner,
     active_gate: &Gate,
-    first_join: &mut Option<impl Future<Output = Result<OwnedSqlRestoreCompletion>>>,
+    first_join: &mut Option<impl Future<Output = Result<OwnedSqlWorkCompletion>>>,
     refunds: &RefundProbes<'_>,
 ) -> DrainObservation {
     owner.close_admission();

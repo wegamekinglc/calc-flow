@@ -207,7 +207,7 @@ pub struct DataFusionQueryMetric {
 }
 
 pub struct DataFusionRuntime {
-    compact_pool: Arc<compact_budget::CompactStatePool>,
+    compact_pool: Arc<crate::state_memory_pool::OwnedStatePool>,
     config: DataFusionConfig,
     runtime_env: Arc<RuntimeEnv>,
     context: OnceLock<SessionContext>,
@@ -268,8 +268,10 @@ impl DataFusionRuntime {
         let runtime_acquire_ns = nanos(started.elapsed());
         Ok(Self {
             config,
-            compact_pool: Arc::new(compact_budget::CompactStatePool::new(
+            compact_pool: Arc::new(crate::state_memory_pool::OwnedStatePool::new(
                 runtime_env.memory_pool.clone(),
+                "SQL compact state budget",
+                "SQL compact state exceeds the requested byte budget",
             )),
             runtime_env,
             context: OnceLock::new(),
@@ -1834,7 +1836,5 @@ mod ordered_last_proof_tests;
 #[path = "datafusion_global_float_plan_tests.rs"]
 mod global_float_plan_tests;
 
-#[path = "datafusion_compact_budget.rs"]
-mod compact_budget;
 #[path = "datafusion_ordered_last.rs"]
 mod ordered_last;
