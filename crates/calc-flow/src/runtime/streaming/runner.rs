@@ -79,7 +79,7 @@ use super::{
         SourceBinding, SourceProgress, SourceProgressSnapshot,
         spawn_source_tasks_gated_with_live_progress,
     },
-    sql_recovery_work::{JobSqlRecoveryOwner, SqlRecoveryClient},
+    sql_recovery_work::{CheckpointWorkOperator, JobSqlRecoveryOwner, SqlRecoveryClient},
     supervisor::{
         SupervisionReport, TaskFailure, TaskId, TaskRegistry, TaskStatus, TaskSupervisor,
         terminal::{TerminalArbiter, TerminalDecision},
@@ -2051,12 +2051,7 @@ async fn run_job_driver(
     if let Err(error) = core.sql_recovery.configure(
         plan.nodes
             .iter()
-            .filter(|node| {
-                matches!(
-                    node.operator,
-                    crate::pipeline::CompiledStreamOperator::Sql(_)
-                )
-            })
+            .filter(|node| CheckpointWorkOperator::handles(&node.operator))
             .count(),
     ) {
         return core.prepare_driver_report(checkpoint_start_failure(launch_id, error));
@@ -3511,11 +3506,7 @@ fn prepare_operator_task(
     let node_order = registration.next_node_order;
     registration.next_node_order += 1;
     let inputs = OperatorTaskInputs {
-        sql_recovery: matches!(
-            &node.operator,
-            crate::pipeline::CompiledStreamOperator::Sql(_)
-        )
-        .then(|| SqlRecoveryClient {
+        sql_recovery: CheckpointWorkOperator::handles(&node.operator).then(|| SqlRecoveryClient {
             owner: registration.core.sql_recovery.clone(),
             node_order,
             task_id: None,

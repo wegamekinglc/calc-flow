@@ -5,6 +5,7 @@ mod ordered_last;
 
 use super::*;
 use crate::runtime::streaming::progress::WatermarkPolicy;
+use crate::runtime::streaming::sql_recovery_work::CheckpointWorkOperator;
 use crate::{Epoch, OperatorStateSnapshot, SqlOperator, StateSegment};
 use datafusion::arrow::{
     array::{Array, StringArray},
@@ -1282,7 +1283,7 @@ async fn compact_sql_aborted_driver_returns_live_join_to_job_home() {
 #[tokio::test(flavor = "current_thread")]
 async fn compact_sql_request_fee_refusal_returns_actual_operator_before_launch() {
     use crate::runtime::streaming::sql_recovery_work::{
-        JobSqlRecoveryOwner, SqlRecoveryContext, SqlRestoreIdentity, SqlRestoreRequest,
+        JobSqlRecoveryOwner, SqlRecoveryContext, SqlRestoreRequest, SqlWorkIdentity,
     };
     let directory = tempfile::tempdir().unwrap();
     let source = "managed-request-fee-source";
@@ -1302,9 +1303,11 @@ async fn compact_sql_request_fee_refusal_returns_actual_operator_before_launch()
         CancellationToken::new(),
     );
     let submitted = owner.submit(SqlRestoreRequest {
-        operator,
+        operator: CheckpointWorkOperator::from_compiled(
+            crate::pipeline::CompiledStreamOperator::Sql(operator),
+        ),
         snapshot: saved.clone(),
-        identity: SqlRestoreIdentity {
+        identity: SqlWorkIdentity {
             node_id: NODE.into(),
             node_order: 0,
             task_id: None,
@@ -1313,7 +1316,11 @@ async fn compact_sql_request_fee_refusal_returns_actual_operator_before_launch()
         launch_cancel: CancellationToken::new(),
     });
     let refused = submitted.result.err();
-    let mut original = submitted.operator.unwrap();
+    let crate::pipeline::CompiledStreamOperator::Sql(mut original) =
+        submitted.operator.unwrap().into_compiled()
+    else {
+        unreachable!();
+    };
     assert!(
         matches!(refused, Some(CalcFlowError::DataFusion { node_id: Some(ref id), .. }) if id == NODE)
     );
@@ -1322,9 +1329,11 @@ async fn compact_sql_request_fee_refusal_returns_actual_operator_before_launch()
     assert_eq!(pressure.size(), 1 << 30);
     drop(pressure);
     let submitted = owner.submit(SqlRestoreRequest {
-        operator: original,
+        operator: CheckpointWorkOperator::from_compiled(
+            crate::pipeline::CompiledStreamOperator::Sql(original),
+        ),
         snapshot: saved,
-        identity: SqlRestoreIdentity {
+        identity: SqlWorkIdentity {
             node_id: NODE.into(),
             node_order: 0,
             task_id: None,
@@ -1332,15 +1341,19 @@ async fn compact_sql_request_fee_refusal_returns_actual_operator_before_launch()
         context: SqlRecoveryContext::from(&context),
         launch_cancel: CancellationToken::new(),
     });
-    let mut completion = submitted.result.unwrap().join().await.unwrap();
-    let current = completion.check_current();
-    original = completion.operator;
-    let prepared = current
-        .and(completion.prepared)
+    let mut operator = None;
+    submitted
+        .result
         .unwrap()
-        .into_restore()
+        .join()
+        .await
+        .unwrap()
+        .install_restore(&mut operator)
         .unwrap();
-    original.install_restore(prepared);
+    let Some(crate::pipeline::CompiledStreamOperator::Sql(restored)) = operator else {
+        unreachable!();
+    };
+    original = restored;
     let restored = StreamOperator::checkpoint(&mut original, Epoch::INITIAL).unwrap();
     assert_eq!(restored.inline_metadata["rows"], serde_json::json!(2));
     assert_eq!(
@@ -1358,7 +1371,7 @@ async fn compact_sql_request_fee_refusal_returns_actual_operator_before_launch()
 #[tokio::test(flavor = "current_thread")]
 async fn compact_sql_dropped_queued_request_does_not_block_next_join() {
     use crate::runtime::streaming::sql_recovery_work::{
-        JobSqlRecoveryOwner, SqlRecoveryContext, SqlRestoreIdentity, SqlRestoreRequest,
+        JobSqlRecoveryOwner, SqlRecoveryContext, SqlRestoreRequest, SqlWorkIdentity,
     };
     let directory = tempfile::tempdir().unwrap();
     let source = "queued-request-drop-source";
@@ -1402,9 +1415,11 @@ async fn compact_sql_dropped_queued_request_does_not_block_next_join() {
     );
     let first = owner
         .submit(SqlRestoreRequest {
-            operator: first,
+            operator: CheckpointWorkOperator::from_compiled(
+                crate::pipeline::CompiledStreamOperator::Sql(first),
+            ),
             snapshot: saved.clone(),
-            identity: SqlRestoreIdentity {
+            identity: SqlWorkIdentity {
                 node_id: NODE.into(),
                 node_order: 0,
                 task_id: None,
@@ -1416,9 +1431,11 @@ async fn compact_sql_dropped_queued_request_does_not_block_next_join() {
         .unwrap();
     let second = owner
         .submit(SqlRestoreRequest {
-            operator: second,
+            operator: CheckpointWorkOperator::from_compiled(
+                crate::pipeline::CompiledStreamOperator::Sql(second),
+            ),
             snapshot: saved,
-            identity: SqlRestoreIdentity {
+            identity: SqlWorkIdentity {
                 node_id: NODE.into(),
                 node_order: 1,
                 task_id: None,
@@ -1501,13 +1518,15 @@ fn submit_sql_restore(
     launch_cancel: CancellationToken,
 ) -> crate::runtime::streaming::sql_recovery_work::SqlRecoveryTicket {
     use crate::runtime::streaming::sql_recovery_work::{
-        SqlRecoveryContext, SqlRestoreIdentity, SqlRestoreRequest,
+        SqlRecoveryContext, SqlRestoreRequest, SqlWorkIdentity,
     };
     owner
         .submit(SqlRestoreRequest {
-            operator,
+            operator: CheckpointWorkOperator::from_compiled(
+                crate::pipeline::CompiledStreamOperator::Sql(operator),
+            ),
             snapshot: saved,
-            identity: SqlRestoreIdentity {
+            identity: SqlWorkIdentity {
                 node_id: NODE.into(),
                 node_order,
                 task_id: None,

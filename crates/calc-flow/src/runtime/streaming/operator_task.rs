@@ -22,8 +22,8 @@ use super::{
         prepare::BindingOrdinal,
     },
     sql_recovery_work::{
-        SqlCaptureRequest, SqlRecoveryClient, SqlRecoveryContext, SqlRestoreIdentity,
-        SqlRestoreRequest,
+        CheckpointWorkOperator, SqlCaptureRequest, SqlRecoveryClient, SqlRecoveryContext,
+        SqlRestoreRequest, SqlWorkIdentity,
     },
     supervisor::{
         PreparedLogicalTask, PreparedTaskGroup, RetainedTaskResult, TaskFailureSignal, TaskId,
@@ -337,7 +337,7 @@ impl RetainedOperatorInputs {
     fn new(inputs: OperatorTaskInputs) -> Self {
         if inputs.sql_recovery.is_none()
             || inputs.restore.is_none()
-            || !matches!(inputs.operator, CompiledStreamOperator::Sql(_))
+            || !CheckpointWorkOperator::handles(&inputs.operator)
         {
             return Self {
                 inputs: Some(inputs),
@@ -650,13 +650,11 @@ async fn run_retained_body(
         Ok(progress) => {
             let client = frame.sql_recovery.as_ref().expect("job SQL client");
             let operator = retained.operator.take().expect("actual SQL operator");
-            let CompiledStreamOperator::Sql(operator) = operator else {
-                unreachable!("entry routing checked SQL variant");
-            };
+            let operator = CheckpointWorkOperator::from_compiled(operator);
             let request = SqlRestoreRequest {
                 operator,
                 snapshot: std::mem::take(&mut restored.snapshot),
-                identity: SqlRestoreIdentity {
+                identity: SqlWorkIdentity {
                     node_id: frame.node_id.clone(),
                     node_order: client.node_order,
                     task_id: Some(task_id),
@@ -668,14 +666,16 @@ async fn run_retained_body(
             let completion = match submitted.result {
                 Ok(ticket) => ticket.join().await,
                 Err(error) => {
-                    retained.operator = submitted.operator.map(CompiledStreamOperator::Sql);
+                    retained.operator = submitted
+                        .operator
+                        .map(CheckpointWorkOperator::into_compiled);
                     Err(error)
                 }
             };
             match completion {
-                Ok(completion) => {
-                    install_entry_sql_restore(&mut retained.operator, completion).map(|()| progress)
-                }
+                Ok(completion) => completion
+                    .install_restore(&mut retained.operator)
+                    .map(|()| progress),
                 Err(error) => Err(error),
             }
         }
@@ -711,20 +711,6 @@ async fn run_retained_body(
         return Ok(());
     };
     run_after_operator_entry(inputs, progress, task_id, cooperation, Some(failure_signal)).await
-}
-
-fn install_entry_sql_restore(
-    target: &mut Option<CompiledStreamOperator>,
-    mut completion: super::sql_recovery_work::OwnedSqlRestoreCompletion,
-) -> Result<()> {
-    let current = completion.check_current();
-    *target = Some(CompiledStreamOperator::Sql(completion.operator));
-    let prepared = current.and(completion.prepared)?.into_restore()?;
-    let Some(CompiledStreamOperator::Sql(operator)) = target.as_mut() else {
-        unreachable!("SQL completion returns the original SQL operator");
-    };
-    operator.install_restore(prepared);
-    Ok(())
 }
 
 async fn run_operator_task_body(
@@ -1673,10 +1659,7 @@ async fn complete_barrier_if_ready(
 async fn prepare_sql_checkpoint(
     inputs: &mut OperatorTaskInputs,
 ) -> Result<Option<crate::OperatorStateSnapshot>> {
-    let CompiledStreamOperator::Sql(operator) = &mut inputs.operator else {
-        return Ok(None);
-    };
-    if !operator.has_stream_aggregate() || !operator.stream_runtime_initialized() {
+    if !CheckpointWorkOperator::needs_checkpoint(&inputs.operator) {
         return Ok(None);
     }
     let client = inputs
@@ -1688,14 +1671,13 @@ async fn prepare_sql_checkpoint(
     let task_id = client.task_id.ok_or_else(|| CalcFlowError::Internal {
         message: "SQL checkpoint work has no registered task identity".into(),
     })?;
-    let reservation = operator.reserve_checkpoint_envelope(inputs.node_id.len())?;
+    let reservation =
+        CheckpointWorkOperator::reserve_checkpoint(&mut inputs.operator, inputs.node_id.len())?;
     let operator = std::mem::replace(&mut inputs.operator, CompiledStreamOperator::CheckpointLoan);
-    let CompiledStreamOperator::Sql(operator) = operator else {
-        unreachable!("checkpoint routing checked SQL variant");
-    };
+    let operator = CheckpointWorkOperator::from_compiled(operator);
     let submitted = client.owner.submit_capture(SqlCaptureRequest {
         operator,
-        identity: SqlRestoreIdentity {
+        identity: SqlWorkIdentity {
             node_id: inputs.node_id.clone(),
             node_order: client.node_order,
             task_id: Some(task_id),
@@ -1707,22 +1689,17 @@ async fn prepare_sql_checkpoint(
     let ticket = match submitted.result {
         Ok(ticket) => ticket,
         Err(error) => {
-            inputs.operator = CompiledStreamOperator::Sql(
-                submitted
-                    .operator
-                    .expect("refused work returns its operator"),
-            );
+            inputs.operator = submitted
+                .operator
+                .expect("refused work returns its operator")
+                .into_compiled();
             return Err(error);
         }
     };
-    let mut completion = ticket.join().await?;
-    let current = completion.check_current();
-    inputs.operator = CompiledStreamOperator::Sql(completion.operator);
-    let prepared = current.and(completion.prepared)?.into_checkpoint()?;
-    let snapshot = prepared.snapshot()?;
-    if let CompiledStreamOperator::Sql(operator) = &mut inputs.operator {
-        operator.install_checkpoint_work(prepared);
-    }
+    let snapshot = ticket
+        .join()
+        .await?
+        .install_checkpoint(&mut inputs.operator)?;
     Ok(Some(snapshot))
 }
 

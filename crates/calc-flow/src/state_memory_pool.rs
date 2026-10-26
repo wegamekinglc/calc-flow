@@ -9,17 +9,25 @@ use parking_lot::Mutex;
 use std::{fmt, sync::Arc};
 
 #[derive(Debug)]
-pub(super) struct CompactStatePool {
+pub(crate) struct OwnedStatePool {
     parent: Arc<dyn MemoryPool>,
+    name: &'static str,
+    limit_error: &'static str,
     state: Mutex<(usize, usize)>,
     #[cfg(test)]
     peak: std::sync::atomic::AtomicUsize,
 }
 
-impl CompactStatePool {
-    pub(super) fn new(parent: Arc<dyn MemoryPool>) -> Self {
+impl OwnedStatePool {
+    pub(crate) fn new(
+        parent: Arc<dyn MemoryPool>,
+        name: &'static str,
+        limit_error: &'static str,
+    ) -> Self {
         Self {
             parent,
+            name,
+            limit_error,
             state: Mutex::new((0, usize::MAX)),
             #[cfg(test)]
             peak: std::sync::atomic::AtomicUsize::new(0),
@@ -27,33 +35,31 @@ impl CompactStatePool {
     }
 
     #[cfg(test)]
-    pub(super) fn take_peak(&self) -> usize {
+    pub(crate) fn take_peak(&self) -> usize {
         self.peak
             .swap(self.reserved(), std::sync::atomic::Ordering::SeqCst)
     }
 
-    pub(super) fn set_limit(&self, limit: Option<u64>) -> DFResult<()> {
+    pub(crate) fn set_limit(&self, limit: Option<u64>) -> DFResult<()> {
         let limit = limit.map_or(usize::MAX, |n| usize::try_from(n).unwrap_or(usize::MAX));
         let mut state = self.state.lock();
         if state.0 > limit {
-            return Err(DataFusionError::ResourcesExhausted(
-                "SQL compact state exceeds the requested byte budget".into(),
-            ));
+            return Err(DataFusionError::ResourcesExhausted(self.limit_error.into()));
         }
         state.1 = limit;
         Ok(())
     }
 }
 
-impl fmt::Display for CompactStatePool {
+impl fmt::Display for OwnedStatePool {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "SQL compact state budget")
+        f.write_str(self.name)
     }
 }
 
-impl MemoryPool for CompactStatePool {
+impl MemoryPool for OwnedStatePool {
     fn name(&self) -> &'static str {
-        "SQL compact state budget"
+        self.name
     }
     fn register(&self, consumer: &MemoryConsumer) {
         self.parent.register(consumer);
@@ -79,7 +85,8 @@ impl MemoryPool for CompactStatePool {
             .filter(|n| *n <= state.1)
             .ok_or_else(|| {
                 DataFusionError::ResourcesExhausted(format!(
-                    "SQL compact state budget exceeded at {}: {} + {additional} bytes > {}",
+                    "{} exceeded at {}: {} + {additional} bytes > {}",
+                    self.name,
                     reservation.consumer().name(),
                     state.0,
                     state.1

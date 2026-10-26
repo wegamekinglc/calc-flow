@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{OpenedCheckpointRuntime, OperatorProgress};
 use crate::{
-    CalcFlowError, CancellationToken, Port, Result, SqlOperator,
+    CalcFlowError, CancellationToken, Port, Result,
     pipeline::{
         CompiledStreamOperator, OperatorCheckpointCapability, RuntimeStreamNode, StableOperatorId,
         StreamRuntimePlanParts,
@@ -11,7 +11,8 @@ use crate::{
         context::StreamJobContext,
         operator_task::validate_sql_restore_progress,
         sql_recovery_work::{
-            JobSqlRecoveryOwner, SqlRecoveryContext, SqlRestoreIdentity, SqlRestoreRequest,
+            CheckpointWorkOperator, JobSqlRecoveryOwner, SqlRecoveryContext, SqlRestoreRequest,
+            SqlWorkIdentity,
         },
     },
 };
@@ -22,7 +23,7 @@ pub(super) struct TerminalSqlFrames {
     completed: Vec<RuntimeStreamNode>,
     current: Option<RuntimeStreamNode>,
     frame: Option<NodeFrame>,
-    operator: Option<SqlOperator>,
+    operator: Option<CompiledStreamOperator>,
 }
 
 struct NodeFrame {
@@ -37,7 +38,7 @@ struct NodeFrame {
 }
 
 impl NodeFrame {
-    fn split(node: RuntimeStreamNode) -> (Self, SqlOperator) {
+    fn split(node: RuntimeStreamNode) -> (Self, CheckpointWorkOperator) {
         let RuntimeStreamNode {
             node_id,
             operator_id,
@@ -49,9 +50,7 @@ impl NodeFrame {
             output_edges,
             late_output_ports,
         } = node;
-        let CompiledStreamOperator::Sql(operator) = operator else {
-            unreachable!("terminal routing checked SQL variant");
-        };
+        let operator = CheckpointWorkOperator::from_compiled(operator);
         (
             Self {
                 node_id,
@@ -67,11 +66,11 @@ impl NodeFrame {
         )
     }
 
-    fn assemble(self, operator: SqlOperator) -> RuntimeStreamNode {
+    fn assemble(self, operator: CompiledStreamOperator) -> RuntimeStreamNode {
         RuntimeStreamNode {
             node_id: self.node_id,
             operator_id: self.operator_id,
-            operator: CompiledStreamOperator::Sql(operator),
+            operator,
             checkpoint_capability: self.checkpoint_capability,
             input_ports: self.input_ports,
             output_ports: self.output_ports,
@@ -100,7 +99,7 @@ pub(super) async fn restore_terminal(
     while let Some(node) = frames.remaining.as_mut().unwrap().next() {
         frames.current = Some(node);
         let node = frames.current.as_ref().unwrap();
-        if !matches!(node.operator, CompiledStreamOperator::Sql(_)) {
+        if !CheckpointWorkOperator::handles(&node.operator) {
             frames.completed.push(frames.current.take().unwrap());
             order += 1;
             continue;
@@ -139,7 +138,7 @@ impl TerminalSqlFrames {
         launch_cancel: &CancellationToken,
     ) -> Result<()> {
         let (frame, operator) = NodeFrame::split(self.current.take().unwrap());
-        let identity = SqlRestoreIdentity {
+        let identity = SqlWorkIdentity {
             node_id: frame.node_id.clone(),
             node_order: order,
             task_id: None,
@@ -155,16 +154,13 @@ impl TerminalSqlFrames {
         let ticket = match submitted.result {
             Ok(ticket) => ticket,
             Err(error) => {
-                self.operator = submitted.operator;
+                self.operator = submitted
+                    .operator
+                    .map(CheckpointWorkOperator::into_compiled);
                 return Err(error);
             }
         };
-        let mut completion = ticket.join().await?;
-        let current = completion.check_current();
-        self.operator = Some(completion.operator);
-        let prepared = current.and(completion.prepared)?.into_restore()?;
-        self.operator.as_mut().unwrap().install_restore(prepared);
-        Ok(())
+        ticket.join().await?.install_restore(&mut self.operator)
     }
 }
 

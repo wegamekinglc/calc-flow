@@ -1,3 +1,8 @@
+mod operator;
+
+pub(crate) use operator::CheckpointWorkOperator;
+use operator::PreparedCheckpointWork;
+
 use std::{
     collections::BTreeMap,
     panic::{AssertUnwindSafe, catch_unwind},
@@ -18,8 +23,8 @@ use super::{
     supervisor::TaskId,
 };
 use crate::{
-    CalcFlowError, CancellationToken, OperatorStateSnapshot, Result, SqlOperator,
-    operator::{PreparedSqlCheckpoint, PreparedSqlRestore},
+    CalcFlowError, CancellationToken, OperatorStateSnapshot, Result,
+    pipeline::CompiledStreamOperator,
 };
 
 #[derive(Clone)]
@@ -78,11 +83,11 @@ impl From<&StreamJobContext> for SqlRecoveryContext {
 
 pub(crate) struct SqlRecoverySubmission {
     pub(crate) result: Result<SqlRecoveryTicket>,
-    pub(crate) operator: Option<SqlOperator>,
+    pub(crate) operator: Option<CheckpointWorkOperator>,
 }
 
 impl SqlRecoverySubmission {
-    fn refused(operator: SqlOperator, error: CalcFlowError) -> Self {
+    fn refused(operator: CheckpointWorkOperator, error: CalcFlowError) -> Self {
         Self {
             result: Err(error),
             operator: Some(operator),
@@ -90,23 +95,23 @@ impl SqlRecoverySubmission {
     }
 }
 
-pub(crate) struct SqlRestoreIdentity {
+pub(crate) struct SqlWorkIdentity {
     pub(crate) node_id: String,
     pub(crate) node_order: usize,
     pub(crate) task_id: Option<TaskId>,
 }
 
 pub(crate) struct SqlRestoreRequest {
-    pub(crate) operator: SqlOperator,
+    pub(crate) operator: CheckpointWorkOperator,
     pub(crate) snapshot: OperatorStateSnapshot,
-    pub(crate) identity: SqlRestoreIdentity,
+    pub(crate) identity: SqlWorkIdentity,
     pub(crate) context: SqlRecoveryContext,
     pub(crate) launch_cancel: CancellationToken,
 }
 
 pub(crate) struct SqlCaptureRequest {
-    pub(crate) operator: SqlOperator,
-    pub(crate) identity: SqlRestoreIdentity,
+    pub(crate) operator: CheckpointWorkOperator,
+    pub(crate) identity: SqlWorkIdentity,
     pub(crate) context: SqlRecoveryContext,
     pub(crate) launch_cancel: CancellationToken,
     pub(crate) reservation: MemoryReservation,
@@ -118,46 +123,19 @@ enum SqlWorkOperation {
 }
 
 struct SqlWorkRequest {
-    operator: SqlOperator,
+    operator: CheckpointWorkOperator,
     operation: SqlWorkOperation,
-    identity: SqlRestoreIdentity,
+    identity: SqlWorkIdentity,
     context: SqlRecoveryContext,
     launch_cancel: CancellationToken,
-}
-
-pub(crate) enum PreparedSqlWork {
-    Restore(Box<PreparedSqlRestore>),
-    Capture(PreparedSqlCheckpoint),
-}
-
-impl PreparedSqlWork {
-    pub(crate) fn into_restore(self) -> Result<PreparedSqlRestore> {
-        match self {
-            Self::Restore(prepared) => Ok(*prepared),
-            Self::Capture(_) => Err(wrong_work_operation()),
-        }
-    }
-
-    pub(crate) fn into_checkpoint(self) -> Result<PreparedSqlCheckpoint> {
-        match self {
-            Self::Capture(prepared) => Ok(prepared),
-            Self::Restore(_) => Err(wrong_work_operation()),
-        }
-    }
-}
-
-fn wrong_work_operation() -> CalcFlowError {
-    CalcFlowError::Internal {
-        message: "SQL work returned a different checkpoint operation".into(),
-    }
 }
 
 struct Work {
     home: Weak<Home>,
     id: u64,
-    operator: SqlOperator,
+    operator: CheckpointWorkOperator,
     operation: SqlWorkOperation,
-    identity: SqlRestoreIdentity,
+    identity: SqlWorkIdentity,
     context: SqlRecoveryContext,
     launch_cancel: CancellationToken,
     stop: CancellationToken,
@@ -166,20 +144,20 @@ struct Work {
 }
 
 struct Attempt {
-    identity: SqlRestoreIdentity,
+    identity: SqlWorkIdentity,
     stop: CancellationToken,
     work: Option<Work>,
-    handle: Option<JoinHandle<OwnedSqlRestoreCompletion>>,
+    handle: Option<JoinHandle<OwnedSqlWorkCompletion>>,
     loaned: bool,
     abandoned: bool,
 }
 
-pub(crate) struct OwnedSqlRestoreCompletion {
+pub(crate) struct OwnedSqlWorkCompletion {
     home: Weak<Home>,
     id: u64,
-    identity: SqlRestoreIdentity,
-    pub(crate) operator: SqlOperator,
-    pub(crate) prepared: Result<PreparedSqlWork>,
+    identity: SqlWorkIdentity,
+    operator: CheckpointWorkOperator,
+    pub(crate) prepared: Result<PreparedCheckpointWork>,
     context: SqlRecoveryContext,
     launch_cancel: CancellationToken,
     stop: CancellationToken,
@@ -187,8 +165,29 @@ pub(crate) struct OwnedSqlRestoreCompletion {
     _reservation: MemoryReservation,
 }
 
-impl OwnedSqlRestoreCompletion {
-    pub(crate) fn check_current(&mut self) -> Result<()> {
+impl OwnedSqlWorkCompletion {
+    // Keep the work envelope paid through candidate installation.
+    pub(crate) fn install_restore(
+        mut self,
+        target: &mut Option<CompiledStreamOperator>,
+    ) -> Result<()> {
+        let current = self.check_current();
+        *target = Some(self.operator.into_compiled());
+        current
+            .and(self.prepared)?
+            .install_restore(target.as_mut().unwrap())
+    }
+
+    pub(crate) fn install_checkpoint(
+        mut self,
+        target: &mut CompiledStreamOperator,
+    ) -> Result<OperatorStateSnapshot> {
+        let current = self.check_current();
+        *target = self.operator.into_compiled();
+        current.and(self.prepared)?.install_checkpoint(target)
+    }
+
+    fn check_current(&mut self) -> Result<()> {
         let current = check_stop(
             &self.context,
             &self.launch_cancel,
@@ -268,10 +267,7 @@ impl JobSqlRecoveryOwner {
     }
 
     pub(crate) fn submit(&self, mut request: SqlRestoreRequest) -> SqlRecoverySubmission {
-        let reservation = match request
-            .operator
-            .reserve_recovery_envelope(&request.snapshot)
-        {
+        let reservation = match request.operator.reserve_restore(&request.snapshot) {
             Ok(reservation) => reservation,
             Err(error) => return SqlRecoverySubmission::refused(request.operator, error),
         };
@@ -320,7 +316,7 @@ impl JobSqlRecoveryOwner {
         };
         state.next = id;
         let stop = CancellationToken::new();
-        let identity = SqlRestoreIdentity {
+        let identity = SqlWorkIdentity {
             node_id: request.identity.node_id.clone(),
             node_order: request.identity.node_order,
             task_id: request.identity.task_id,
@@ -558,7 +554,7 @@ impl JobSqlRecoveryOwner {
         Ok(())
     }
 
-    async fn join(&self, id: u64, run_id: u64) -> Result<OwnedSqlRestoreCompletion> {
+    async fn join(&self, id: u64, run_id: u64) -> Result<OwnedSqlWorkCompletion> {
         loop {
             let changed = self.0.changed.notified();
             tokio::pin!(changed);
@@ -651,7 +647,7 @@ pub(crate) struct SqlRecoveryTicket {
 }
 
 impl SqlRecoveryTicket {
-    pub(crate) async fn join(mut self) -> Result<OwnedSqlRestoreCompletion> {
+    pub(crate) async fn join(mut self) -> Result<OwnedSqlWorkCompletion> {
         let completion = self.owner.join(self.id, self.run_id).await;
         self.completed = true;
         completion
@@ -674,7 +670,7 @@ impl Drop for SqlRecoveryTicket {
 struct SqlRecoveryJoinLoan {
     owner: JobSqlRecoveryOwner,
     id: u64,
-    handle: Option<JoinHandle<OwnedSqlRestoreCompletion>>,
+    handle: Option<JoinHandle<OwnedSqlWorkCompletion>>,
 }
 
 impl SqlRecoveryJoinLoan {
@@ -711,7 +707,7 @@ impl SqlRecoveryJoinLoan {
                 .attempts
                 .get(&self.id)
                 .expect("registered SQL attempt");
-            SqlRestoreIdentity {
+            SqlWorkIdentity {
                 node_id: attempt.identity.node_id.clone(),
                 node_order: attempt.identity.node_order,
                 task_id: attempt.identity.task_id,
@@ -723,7 +719,7 @@ impl SqlRecoveryJoinLoan {
         push_cleanup(&mut state, identity.node_order, self.id, origin, error);
     }
 
-    async fn join(mut self) -> Result<OwnedSqlRestoreCompletion> {
+    async fn join(mut self) -> Result<OwnedSqlWorkCompletion> {
         let result = self.handle.as_mut().expect("owned SQL join").await;
         self.handle = None;
         let attempt = self.finish();
@@ -765,7 +761,7 @@ impl Drop for SqlRecoveryJoinLoan {
 fn launch_work(
     work: Work,
     gate: std::sync::mpsc::Receiver<()>,
-) -> std::thread::Result<JoinHandle<OwnedSqlRestoreCompletion>> {
+) -> std::thread::Result<JoinHandle<OwnedSqlWorkCompletion>> {
     catch_unwind(AssertUnwindSafe(|| {
         tokio::task::spawn_blocking(move || {
             let _ = gate.recv();
@@ -774,7 +770,7 @@ fn launch_work(
     }))
 }
 
-fn prepare_work(work: &mut Work) -> Result<PreparedSqlWork> {
+fn prepare_work(work: &mut Work) -> Result<PreparedCheckpointWork> {
     let check = || {
         check_stop(
             &work.context,
@@ -785,18 +781,14 @@ fn prepare_work(work: &mut Work) -> Result<PreparedSqlWork> {
     };
     check()?;
     let prepared = match &work.operation {
-        SqlWorkOperation::Restore(snapshot) => {
-            PreparedSqlWork::Restore(Box::new(work.operator.prepare_restore(snapshot, &check)?))
-        }
-        SqlWorkOperation::Capture => {
-            PreparedSqlWork::Capture(work.operator.prepare_checkpoint_work(&check)?)
-        }
+        SqlWorkOperation::Restore(snapshot) => work.operator.prepare_restore(snapshot, &check)?,
+        SqlWorkOperation::Capture => work.operator.prepare_checkpoint(&check)?,
     };
     check()?;
     Ok(prepared)
 }
 
-fn run(mut work: Work) -> OwnedSqlRestoreCompletion {
+fn run(mut work: Work) -> OwnedSqlWorkCompletion {
     let prepared = match catch_unwind(AssertUnwindSafe(|| prepare_work(&mut work))) {
         Ok(result) => result,
         Err(payload) => Err(panicked(
@@ -811,7 +803,7 @@ fn run(mut work: Work) -> OwnedSqlRestoreCompletion {
     {
         *home.panic_identity.lock() = Some(*task_id);
     }
-    OwnedSqlRestoreCompletion {
+    OwnedSqlWorkCompletion {
         home: work.home,
         id: work.id,
         identity: work.identity,
@@ -825,7 +817,7 @@ fn run(mut work: Work) -> OwnedSqlRestoreCompletion {
     }
 }
 
-fn record_cleanup(home: &Home, identity: &SqlRestoreIdentity, id: u64, error: CalcFlowError) {
+fn record_cleanup(home: &Home, identity: &SqlWorkIdentity, id: u64, error: CalcFlowError) {
     let mut state = home.state.lock();
     push_cleanup(
         &mut state,
@@ -836,7 +828,7 @@ fn record_cleanup(home: &Home, identity: &SqlRestoreIdentity, id: u64, error: Ca
     );
 }
 
-fn cleanup_origin(identity: &SqlRestoreIdentity) -> FailureOrigin {
+fn cleanup_origin(identity: &SqlWorkIdentity) -> FailureOrigin {
     identity
         .task_id
         .map_or(FailureOrigin::Preflight, |task_id| FailureOrigin::Task {
@@ -861,7 +853,7 @@ fn push_cleanup(
     }
 }
 
-fn native_join_error(error: JoinError, identity: &SqlRestoreIdentity) -> CalcFlowError {
+fn native_join_error(error: JoinError, identity: &SqlWorkIdentity) -> CalcFlowError {
     if error.is_panic() {
         panicked(
             identity.task_id,
