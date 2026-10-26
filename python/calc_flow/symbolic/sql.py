@@ -39,6 +39,20 @@ def snapshot_sql(query: str, /, **tables: TableExpr) -> TableExpr:
 
 def _sql_declaration(kind: str, query: str, tables: dict[str, TableExpr]) -> TableExpr:
     require_non_empty_str(query, f"{kind}.query")
+    names = _sql_aliases(kind, tables)
+    return TableExpr(
+        build(
+            kind,
+            tuple(tables[name]._node for name in names),
+            {
+                "query": CStr(query),
+                "aliases": CSeq(tuple(CStr(name) for name in names)),
+            },
+        )
+    )
+
+
+def _sql_aliases(kind: str, tables: dict[str, TableExpr]) -> list[str]:
     if not tables:
         raise ValueError(f"{kind}.tables: provide at least one table alias")
     names = sorted(tables)
@@ -53,13 +67,4 @@ def _sql_declaration(kind: str, query: str, tables: dict[str, TableExpr]) -> Tab
         raise ValueError(
             "snapshot_sql.tables: aliases conflict after SQL normalization"
         )
-    return TableExpr(
-        build(
-            kind,
-            tuple(tables[name]._node for name in names),
-            {
-                "query": CStr(query),
-                "aliases": CSeq(tuple(CStr(name) for name in names)),
-            },
-        )
-    )
+    return names
