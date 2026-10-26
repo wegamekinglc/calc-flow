@@ -14,7 +14,9 @@ mod retained_columns;
 pub(crate) mod rolling;
 pub(crate) mod rolling_metrics;
 pub(crate) mod row_cost;
+mod snapshot_sql;
 mod sql;
+pub(crate) use snapshot_sql::{PreparedSnapshotCapture, PreparedSnapshotRestore};
 pub(crate) use sql::{PreparedSqlCheckpoint, PreparedSqlRestore};
 mod state_budget;
 mod stream;
@@ -56,6 +58,7 @@ pub use rolling::{
     RollingFrameSpec, RollingNumericalProfile, RollingOperator, RollingOutputSpec, RollingSpec,
     RollingValuePolicy,
 };
+pub use snapshot_sql::SnapshotSqlOperator;
 pub use sql::SqlOperator;
 pub use state_budget::StateBudget;
 pub use stream::{
@@ -302,6 +305,7 @@ pub trait OperatorMetadata: Send + Sync + std::any::Any {
 pub enum NodeOperator {
     Expression(ExpressionOperator),
     Sql(SqlOperator),
+    SnapshotSql(SnapshotSqlOperator),
     Union(UnionOperator),
     Window(WindowAggregateOperator),
     Rolling(RollingOperator),
@@ -317,6 +321,7 @@ impl NodeOperator {
         match self {
             Self::Expression(operator) => operator,
             Self::Sql(operator) => operator,
+            Self::SnapshotSql(operator) => operator,
             Self::Union(operator) => operator,
             Self::Window(operator) => operator,
             Self::Rolling(operator) => operator,
@@ -347,7 +352,11 @@ impl NodeOperator {
     pub(crate) const fn requires_datafusion(&self) -> bool {
         matches!(
             self,
-            Self::Expression(_) | Self::Sql(_) | Self::StreamJoin(_) | Self::StreamAsofJoin(_)
+            Self::Expression(_)
+                | Self::Sql(_)
+                | Self::SnapshotSql(_)
+                | Self::StreamJoin(_)
+                | Self::StreamAsofJoin(_)
         )
     }
 }
@@ -707,3 +716,9 @@ impl From<Box<StreamAsofJoinOperator>> for NodeOperator {
 
 #[cfg(test)]
 pub(crate) use asof::gather_lifecycle_bridge;
+
+impl From<SnapshotSqlOperator> for NodeOperator {
+    fn from(value: SnapshotSqlOperator) -> Self {
+        Self::SnapshotSql(value)
+    }
+}

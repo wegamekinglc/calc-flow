@@ -21,7 +21,7 @@ use crate::{
     Epoch, ExpressionOperator, ExternalOperatorSpec, FormatIdentity, JsonMap, NodeOperator,
     ParticipantRole, PipelineBuilder, Port, PortEndpoint, ProviderRegistry, Result, RetentionClass,
     RollingOperator, RollingSpec, SecretHandle, SecretReference, SecretResolver,
-    SecretResolverKind, SinkBinding as RuntimeSinkBinding, SinkRecovery,
+    SecretResolverKind, SinkBinding as RuntimeSinkBinding, SinkRecovery, SnapshotSqlOperator,
     SourceBinding as RuntimeSourceBinding, SourceCapabilities, SourceEvent, SourceSchema,
     SqlOperator, StaticInputSpec, StreamAsofJoinSpec, StreamExecutionPlan, StreamJoinOperator,
     StreamJoinSpec, StreamRequirements, StreamSink, StreamSource, TransactionSupport,
@@ -157,6 +157,13 @@ pub enum OperatorSpec {
         udfs: Vec<UdfReference>,
     },
     Sql {
+        query: String,
+        aliases: Vec<String>,
+        #[serde(default)]
+        udfs: Vec<UdfReference>,
+    },
+    /// Complete-relation replacement SQL for stream graphs.
+    SnapshotSql {
         query: String,
         aliases: Vec<String>,
         #[serde(default)]
@@ -1323,6 +1330,19 @@ fn project_node_operator(
             aliases,
             udfs: references,
         } => sql_node(node, inputs, outputs, query, aliases, references),
+        OperatorSpec::SnapshotSql {
+            query,
+            aliases,
+            udfs: references,
+        } => {
+            let expected = aliases.iter().map(String::as_str).collect::<Vec<_>>();
+            let (inputs, outputs) =
+                builtin_ports(inputs, outputs, &expected, &["output"], BatchKind::Table)?;
+            Ok(NodeOperator::SnapshotSql(
+                SnapshotSqlOperator::new(&node.id, query, aliases.clone(), references.clone())?
+                    .with_ports(inputs, outputs.into_iter().next().unwrap())?,
+            ))
+        }
         OperatorSpec::Union => union_node(node, inputs, &outputs, mode),
         OperatorSpec::Window { spec } => window_node(node, &inputs, &outputs, spec, mode),
         OperatorSpec::Rolling { spec } => rolling_node(node, &inputs, &outputs, spec),
@@ -1796,6 +1816,7 @@ fn project_requires_datafusion(project: &ProjectSpec) -> bool {
             node.operator,
             OperatorSpec::Expression { .. }
                 | OperatorSpec::Sql { .. }
+                | OperatorSpec::SnapshotSql { .. }
                 | OperatorSpec::StreamJoin { .. }
                 | OperatorSpec::StreamAsofJoin { .. }
         )
@@ -2064,6 +2085,44 @@ fn validate_static_input_name(
     }
 }
 
+fn validate_snapshot_sql_declaration(
+    node: &NodeSpec,
+    mode: CompileMode,
+    base: &str,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let OperatorSpec::SnapshotSql {
+        query,
+        aliases,
+        udfs,
+    } = &node.operator
+    else {
+        return;
+    };
+    if matches!(mode, CompileMode::Batch) {
+        issues.push(issue(
+            base,
+            "unsupported_mode",
+            "snapshot_sql requires stream mode",
+        ));
+    }
+    if let Err(error) = SnapshotSqlOperator::new(&node.id, query, aliases.clone(), udfs.clone()) {
+        issues.push(issue(base, "invalid_operator", error.to_string()));
+    }
+    if node
+        .input_ports
+        .iter()
+        .chain(&node.output_ports)
+        .any(|p| p.schema.is_empty())
+    {
+        issues.push(issue(
+            base,
+            "missing_schema",
+            "snapshot_sql requires exact schemas",
+        ));
+    }
+}
+
 fn validate_operator(
     node: &NodeSpec,
     index: usize,
@@ -2104,6 +2163,14 @@ fn validate_operator(
             aliases,
             udfs: references,
         } => validate_sql_operator(query, aliases, references, &base, udfs, issues),
+        OperatorSpec::SnapshotSql {
+            query,
+            aliases,
+            udfs: references,
+        } => {
+            validate_snapshot_sql_declaration(node, mode, &base, issues);
+            validate_sql_operator(query, aliases, references, &base, udfs, issues)
+        }
         OperatorSpec::Union => {
             validate_union_operator(node, index, mode, &base, issues);
             (None, Some(vec!["output"]))
@@ -3099,7 +3166,9 @@ pub(crate) fn canonical_arrow_field_type(field: &Field) -> Option<String> {
 
 fn operator_udfs(operator: &OperatorSpec) -> &[UdfReference] {
     match operator {
-        OperatorSpec::Expression { udfs, .. } | OperatorSpec::Sql { udfs, .. } => udfs,
+        OperatorSpec::Expression { udfs, .. }
+        | OperatorSpec::Sql { udfs, .. }
+        | OperatorSpec::SnapshotSql { udfs, .. } => udfs,
         OperatorSpec::Union
         | OperatorSpec::Window { .. }
         | OperatorSpec::Rolling { .. }

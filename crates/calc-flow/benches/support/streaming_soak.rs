@@ -4108,6 +4108,7 @@ async fn run_checkpoint_soak_child(
         },
         sql_state_budget: None,
         sql_compact_state_budget: None,
+        sql_snapshot_state_budget: None,
     };
     let job = start_checkpoint_restart_generation(
         &plan.run_root,
@@ -5145,6 +5146,7 @@ async fn checkpoint_soak_cancel_window_preserves_clean_terminal_metrics() {
         },
         sql_state_budget: None,
         sql_compact_state_budget: None,
+        sql_snapshot_state_budget: None,
     };
     let job = start_checkpoint_restart_generation(
         directory.path(),

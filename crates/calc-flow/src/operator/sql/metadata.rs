@@ -6,12 +6,12 @@ use serde_json::Value;
 use super::{StateSegment, incremental, sql_state_error};
 use crate::{BatchMetadata, DataFusionRuntime, JsonMap, Result};
 
-pub(super) struct SqlMetadata {
+pub(crate) struct SqlMetadata {
     pub segment: StateSegment,
     _reservation: Arc<MemoryReservation>,
 }
 
-pub(super) fn reserve(
+pub(crate) fn reserve(
     runtime: &DataFusionRuntime,
     metadata: &BatchMetadata,
     name: &str,
@@ -19,7 +19,7 @@ pub(super) fn reserve(
     reserve_with(metadata, name, runtime.incremental_reservation(name))
 }
 
-pub(super) fn reserve_compact(
+pub(crate) fn reserve_compact(
     runtime: &DataFusionRuntime,
     metadata: &BatchMetadata,
     name: &str,
@@ -27,7 +27,7 @@ pub(super) fn reserve_compact(
     reserve_with(metadata, name, runtime.compact_state_reservation(name))
 }
 
-fn reserve_with(
+pub(crate) fn reserve_with(
     metadata: &BatchMetadata,
     name: &str,
     reservation: MemoryReservation,
@@ -48,7 +48,7 @@ fn reserve_with(
     Ok(reservation)
 }
 
-pub(super) fn encode(
+pub(crate) fn encode(
     metadata: &BatchMetadata,
     reservation: MemoryReservation,
     mut check_cancelled: impl FnMut() -> Result<()>,
@@ -71,7 +71,7 @@ pub(super) fn encode(
     }))
 }
 
-pub(super) fn decode(
+pub(crate) fn decode(
     runtime: &DataFusionRuntime,
     segment: &StateSegment,
     name: &str,
@@ -79,7 +79,7 @@ pub(super) fn decode(
     decode_with(segment, name, runtime.incremental_reservation(name))
 }
 
-pub(super) fn decode_compact(
+pub(crate) fn decode_compact(
     runtime: &DataFusionRuntime,
     segment: &StateSegment,
     name: &str,
@@ -87,7 +87,7 @@ pub(super) fn decode_compact(
     decode_with(segment, name, runtime.compact_state_reservation(name))
 }
 
-fn decode_with(
+pub(crate) fn decode_with(
     segment: &StateSegment,
     name: &str,
     reservation: MemoryReservation,

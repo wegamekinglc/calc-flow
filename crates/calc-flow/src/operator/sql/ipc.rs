@@ -8,13 +8,13 @@ use datafusion::{
 use super::{StateSegment, incremental, sql_ipc_buffer_bytes, sql_state_error};
 use crate::{Batch, Result};
 
-pub(super) struct SqlInputSegment {
+pub(crate) struct SqlInputSegment {
     pub segment: StateSegment,
     _reservation: Arc<MemoryReservation>,
 }
 
 impl SqlInputSegment {
-    pub(super) fn restored(
+    pub(crate) fn restored(
         segment: StateSegment,
         reservation: Arc<MemoryReservation>,
     ) -> Arc<Self> {
@@ -25,7 +25,7 @@ impl SqlInputSegment {
     }
 }
 
-pub(super) fn encode(
+pub(crate) fn encode(
     batch: &Batch,
     reservation: MemoryReservation,
     check_cancelled: impl FnMut() -> Result<()>,
@@ -33,7 +33,7 @@ pub(super) fn encode(
     encode_with_owner(batch, reservation, None, check_cancelled)
 }
 
-pub(super) fn encode_with_owner(
+pub(crate) fn encode_with_owner(
     batch: &Batch,
     reservation: MemoryReservation,
     owner: Option<MemoryReservation>,
@@ -124,7 +124,7 @@ fn largest_batch_bytes(records: &[RecordBatch]) -> Result<usize> {
     })
 }
 
-pub(super) fn schema_bytes(schema: &Schema) -> Result<usize> {
+pub(crate) fn schema_bytes(schema: &Schema) -> Result<usize> {
     let slots = incremental::checked_bytes(
         size_of::<Schema>(),
         [(

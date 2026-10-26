@@ -164,7 +164,7 @@ async fn observe(
     let stream = execute_stream(plan.clone(), planned.task_ctx.clone())
         .map_err(|error| datafusion_error(Some(label), error));
     let result = match stream {
-        Ok(stream) => collect_bounded(stream, plan.schema(), started, Some(label)).await,
+        Ok(stream) => collect_bounded(stream, plan.schema(), started, Some(label), None).await,
         Err(error) => Err(error),
     };
     let rows = result.as_ref().map_or(0, |output| {
