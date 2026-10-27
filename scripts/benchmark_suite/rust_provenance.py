@@ -40,28 +40,40 @@ def _vendored_packages(root: Path, locked: list[dict]) -> dict:
         relative = Path(patch["path"])
         if not relative.is_relative_to("vendor") or ".." in relative.parts:
             continue
-        directory = root / relative
-        if directory.is_symlink() or not directory.resolve().is_relative_to(
-            root.resolve() / "vendor"
-        ):
-            raise ValueError(f"vendored dependency escapes source tree: {relative}")
-        package = tomllib.loads((directory / "Cargo.toml").read_text(encoding="utf-8"))[
-            "package"
-        ]
-        identity = {key: package[key] for key in ("name", "version")}
-        if identity["name"] != patch.get("package", name) or not any(
-            all(item[key] == value for key, value in identity.items())
-            and "source" not in item
-            for item in locked
-        ):
-            raise ValueError(f"vendored dependency differs from Cargo.lock: {relative}")
         source = f"path+{relative.as_posix()}"
-        packages[source] = {
-            **identity,
-            "source": source,
-            "source_sha256": _vendored_source_fingerprint(directory),
-        }
+        packages[source] = _vendored_package(
+            root, relative, patch.get("package", name), locked
+        )
     return packages
+
+
+def _vendored_package(root: Path, relative: Path, name: str, locked: list[dict]) -> dict:
+    directory = root / relative
+    if directory.is_symlink() or not directory.resolve().is_relative_to(
+        root.resolve() / "vendor"
+    ):
+        raise ValueError(f"vendored dependency escapes source tree: {relative}")
+    package = tomllib.loads((directory / "Cargo.toml").read_text(encoding="utf-8"))[
+        "package"
+    ]
+    identity = {key: package[key] for key in ("name", "version")}
+    _validate_vendored_identity(identity, name, locked, relative)
+    return {
+        **identity,
+        "source": f"path+{relative.as_posix()}",
+        "source_sha256": _vendored_source_fingerprint(directory),
+    }
+
+
+def _validate_vendored_identity(
+    identity: dict, name: str, locked: list[dict], relative: Path
+) -> None:
+    if identity["name"] != name or not any(
+        all(item[key] == value for key, value in identity.items())
+        and "source" not in item
+        for item in locked
+    ):
+        raise ValueError(f"vendored dependency differs from Cargo.lock: {relative}")
 
 
 def _vendored_source_fingerprint(directory: Path) -> str:
