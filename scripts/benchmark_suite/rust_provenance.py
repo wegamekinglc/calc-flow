@@ -47,7 +47,9 @@ def _vendored_packages(root: Path, locked: list[dict]) -> dict:
     return packages
 
 
-def _vendored_package(root: Path, relative: Path, name: str, locked: list[dict]) -> dict:
+def _vendored_package(
+    root: Path, relative: Path, name: str, locked: list[dict]
+) -> dict:
     directory = root / relative
     if directory.is_symlink() or not directory.resolve().is_relative_to(
         root.resolve() / "vendor"
