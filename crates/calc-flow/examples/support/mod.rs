@@ -29,7 +29,11 @@ pub type ExampleResult<T = ()> = std::result::Result<T, Box<dyn std::error::Erro
 pub type Collected = Arc<Mutex<Vec<Batch>>>;
 
 pub fn arguments() -> ExampleResult<Vec<String>> {
-    std::env::args_os().skip(1).map(argument_text).collect()
+    // Discard argv[0]; validated demo options do not make security decisions.
+    std::env::args_os() // nosemgrep: args-os
+        .skip(1)
+        .map(argument_text)
+        .collect()
 }
 
 fn argument_text(value: std::ffi::OsString) -> ExampleResult<String> {

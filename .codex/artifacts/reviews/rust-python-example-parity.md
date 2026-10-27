@@ -89,7 +89,8 @@ Author-provided final evidence:
 - The Codacy snapshot reported four argument-API findings and 31 complexity
   findings. Local Lizard reproduced those plus one pre-existing SQL example
   function above eight; the final scan reports no threshold violations.
-  No rule suppression or threshold adjustment was introduced.
+  No complexity-rule suppression or threshold adjustment was introduced.
+  The later, narrowly scoped argument-audit exemptions are reviewed below.
 - Four argument entry points now use `args_os` and return a UTF-8 decoding
   error. Actual invalid-byte invocations of all four return errors without
   panicking. The original panic reproduction is retained in
@@ -111,9 +112,49 @@ Author-provided final evidence:
 The reviewer did not duplicate Cargo checks or read another CI status snapshot.
 Local evidence does not establish that the hosted Codacy/CI checks have cleared.
 
+## Argument-audit follow-up after `32d36537`
+
+The author supplied a newer annotation snapshot reporting that the complexity
+findings cleared, with two remaining `args-os` audit findings on the shared
+argument readers. The [official rule](https://github.com/semgrep/semgrep-rules/blob/develop/rust/lang/security/args-os.yml)
+is an audit rule for relying on untrusted process arguments in security
+decisions, specifically the executable-name convention for the first element.
+The reviewer inspected the actual consumers and the two proposed call-site
+comments without querying CI.
+
+The two exact `// nosemgrep: args-os` annotations are justified for the current
+consumers:
+
+- Both readers discard `argv[0]` and retain fallible UTF-8 conversion.
+- Core consumers accept a fixed execution-mode selection or validated numeric
+  demo counts. Connector consumers accept only the fixed produce/consume
+  selectors. These arguments do not determine authentication identity,
+  authorization, keys, executable paths, SQL text, file paths, or endpoint
+  URLs, and are not passed to a shell. Kafka connection configuration remains
+  independent of these selectors.
+- The adjacent explanation states the reviewed boundary: discarded executable
+  identity and validated demo options without security decisions. The same
+  rule-specific annotation already appears in the maintained join, ASOF,
+  aggregate, and window benchmark selectors.
+
+Keeping `args_os` preserves the graceful invalid-UTF-8 error behavior. Replacing
+it with another argument parser would not address the rule's underlying audit
+question. Approval covers the two audited call sites, not a blanket exemption
+for future security-sensitive uses of the helper.
+
+Author-provided official-rule scans reproduced two findings with exit code 1,
+then zero findings with exit code 0; both scans had zero scanner errors.
+Evidence is in `target/pr507-args-audit-{red,green}.{json,log}`. Formatting,
+whitespace, and schema-drift checks passed. The source change consists only of
+the two explanatory comments, exact rule annotations, and call formatting;
+no runtime behavior changed, so the existing runtime evidence remains
+applicable. No complexity threshold or repository-wide security rule was
+disabled.
+
 ## Verdict
 
-**Approve** for the example-porting scope and the reviewed PR #507 corrections.
+**Approve** for the example-porting scope, reviewed PR #507 corrections, and
+the two justified `args-os` audit annotations.
 No unaddressed blocking finding remains. Validation covers all core examples
 and the local connector paths listed above; it does not establish CI success,
 coverage-gate success, or merge readiness.
