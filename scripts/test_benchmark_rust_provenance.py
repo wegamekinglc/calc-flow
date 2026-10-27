@@ -60,7 +60,161 @@ def measure(root: Path, log: Path, messages: list[dict]) -> dict:
     return compiled_dependencies(root, {"core": log})
 
 
+def add_vendored_dependency(root: Path, messages: list[dict]) -> list[dict]:
+    root.joinpath("Cargo.toml").write_text(
+        '[patch.crates-io]\narrow-ipc = { path = "vendor/arrow-ipc" }\n',
+        encoding="utf-8",
+    )
+    vendor = root / "vendor/arrow-ipc"
+    (vendor / "src").mkdir(parents=True)
+    (vendor / "Cargo.toml").write_text(
+        '[package]\nname = "arrow-ipc"\nversion = "59.2.0"\n', encoding="utf-8"
+    )
+    (vendor / "src/lib.rs").write_text("pub fn patched() {}\n", encoding="utf-8")
+    with (root / "Cargo.lock").open("a", encoding="utf-8") as lock:
+        lock.write('\n[[package]]\nname = "arrow-ipc"\nversion = "59.2.0"\n')
+    dependency = {
+        **messages[0],
+        "package_id": f"path+{vendor.as_uri()}#59.2.0",
+        "manifest_path": str(vendor / "Cargo.toml"),
+        "target": {**messages[0]["target"], "name": "arrow_ipc"},
+    }
+    return [*messages[:-1], dependency, messages[-1]]
+
+
 class CompiledDependencyTests(unittest.TestCase):
+    def test_vendored_patch_records_relative_source_and_content_fingerprint(self):
+        with TemporaryDirectory() as raw:
+            root = Path(raw)
+            log, messages = write_inputs(root)
+            messages = add_vendored_dependency(root, messages)
+            original = copy.deepcopy(messages)
+            result = measure(root, log, messages)
+            package = next(
+                row["package"]
+                for row in result["core"]
+                if row["package"].get("name") == "arrow-ipc"
+            )
+            self.assertEqual(package["source"], "path+vendor/arrow-ipc")
+            self.assertEqual(package["version"], "59.2.0")
+            self.assertRegex(package["source_sha256"], r"^[a-f0-9]{64}$")
+            self.assertEqual(messages, original)
+            messages[-2]["package_id"] = messages[-2]["package_id"].replace(
+                "#59.2.0", "#arrow-ipc@59.2.0"
+            )
+            self.assertEqual(measure(root, log, messages), result)
+
+    def test_vendor_identity_is_stable_across_checkouts_and_removed_build_mirrors(self):
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            identities = []
+            for raw in (left, right):
+                root = Path(raw)
+                log, messages = write_inputs(root)
+                messages = add_vendored_dependency(root, messages)
+                identities.append(measure(root, log, messages))
+                mirror = root / "removed-mirror/source"
+                for row in messages[:-1]:
+                    manifest = Path(row["manifest_path"])
+                    if manifest.is_relative_to(root):
+                        relocated = mirror / manifest.relative_to(root)
+                        row["manifest_path"] = str(relocated)
+                        row["package_id"] = f"path+{relocated.parent.as_uri()}#59.2.0"
+                log.write_text("\n".join(json.dumps(row) for row in messages))
+                identities.append(
+                    compiled_dependencies(
+                        root, {"core": log}, build_roots={"core": mirror}
+                    )
+                )
+            self.assertTrue(all(value == identities[0] for value in identities))
+
+    def test_vendor_source_changes_invalidate_dependency_comparisons(self):
+        with TemporaryDirectory() as raw:
+            root = Path(raw)
+            log, messages = write_inputs(root)
+            messages = add_vendored_dependency(root, messages)
+            identity = {
+                "dependency_identity": {"rustc": "1.94", "cargo": "1.94"},
+                "machine_fingerprint": "a" * 64,
+                "scoped_workload_fingerprints": {"core": "b" * 64},
+            }
+            measure(root, log, messages)
+            baseline = with_compiled_dependencies(identity, root, {"core": log})
+            source = root / "vendor/arrow-ipc/src/lib.rs"
+            source.write_text("pub fn changed_patch() {}\n", encoding="utf-8")
+            candidate = with_compiled_dependencies(identity, root, {"core": log})
+            stamps = _stamp_fingerprints(
+                {"baseline": baseline, "candidate": candidate}, {}
+            )
+            blocks = {
+                side: [
+                    {
+                        "core/case": {
+                            "rows": 1,
+                            "scope": "native",
+                            "samples": [1.0] * 20,
+                            "metadata": targets["core"],
+                        }
+                    }
+                ]
+                * 2
+                for side, targets in stamps.items()
+            }
+            case = combine_blocks({"id": "rust", "family": "rust"}, blocks)[0]
+            self.assertEqual(case["status"], "error")
+            self.assertIn("dependency_fingerprint changed", case["error"])
+
+    def test_vendor_file_inventory_changes_and_symlinks_cannot_reuse_identity(self):
+        with TemporaryDirectory() as raw:
+            root = Path(raw)
+            log, messages = write_inputs(root)
+            messages = add_vendored_dependency(root, messages)
+            before = measure(root, log, messages)
+            vendor = root / "vendor/arrow-ipc"
+            extra = vendor / "build.rs"
+            extra.write_text("fn main() {}\n", encoding="utf-8")
+            self.assertNotEqual(measure(root, log, messages), before)
+            extra.unlink()
+            self.assertEqual(measure(root, log, messages), before)
+            try:
+                extra.symlink_to(root / "Cargo.lock")
+            except OSError as error:
+                self.skipTest(f"symlinks unavailable: {error}")
+            with self.assertRaisesRegex(ValueError, "symlink"):
+                measure(root, log, messages)
+
+    def test_undeclared_or_mismatched_local_dependencies_are_rejected(self):
+        with TemporaryDirectory() as raw:
+            root = Path(raw)
+            log, messages = write_inputs(root)
+            messages = add_vendored_dependency(root, messages)
+            for field, value in (
+                ("package_id", "path+file:///external#59.2.0"),
+                ("package_id", "path+vendor/arrow-ipc"),
+                ("package_id", f"path+{(root / 'vendor/arrow-ipc').as_uri()}#60.0.0"),
+                ("manifest_path", str(root / "vendor/unknown/Cargo.toml")),
+                ("manifest_path", str(root / "vendor/arrow-ipc/other.toml")),
+            ):
+                changed = copy.deepcopy(messages)
+                changed[-2][field] = value
+                with (
+                    self.subTest(field=field, value=value),
+                    self.assertRaises(ValueError),
+                ):
+                    measure(root, log, changed)
+            for path, text in (
+                ("Cargo.toml", "[patch.crates-io]\n"),
+                (
+                    "Cargo.lock",
+                    (root / "Cargo.lock").read_text().replace("59.2.0", "60.0.0"),
+                ),
+            ):
+                file = root / path
+                original = file.read_text()
+                file.write_text(text)
+                with self.subTest(path=path), self.assertRaises(ValueError):
+                    measure(root, log, messages)
+                file.write_text(original)
+
     def test_comparison_uses_compiled_identity_and_retains_the_full_lock_hash(self):
         with TemporaryDirectory() as raw:
             root = Path(raw)
