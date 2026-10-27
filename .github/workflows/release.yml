@@ -1,278 +1,100 @@
-name: Python package release
+name: Publish verified calc-flow-python 2026.10.27
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - "calc-flow-python-v*"
 permissions:
   contents: read
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+  group: publish-calc-flow-python-2026.10.27
+  cancel-in-progress: false
 jobs:
-  prepare-python-release:
-    name: Validate release version and tag
+  publish-verified-release:
     runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/calc-flow-python/2026.10.27/
+    permissions:
+      actions: read
+      contents: write
+      id-token: write
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
+          ref: f40076cf4f3aa95b1682ae31a917829d2cda57c5
           fetch-depth: 0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.13"
-      - name: Validate version, tag, and PyPI availability
-        shell: bash
+      - name: Verify the exact successful rehearsal and installed-wheel gates
         run: |
-          args=(--version-only)
-          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            git fetch --no-tags origin main
-            test "$(git rev-parse FETCH_HEAD)" = "${GITHUB_SHA}"
-            test "$(git cat-file -t "${GITHUB_REF}")" = "tag"
-            args+=(--tag "${GITHUB_REF_NAME}" --check-pypi)
-          fi
-          python scripts/verify_python_release.py "${args[@]}"
+          test "$(git rev-parse HEAD)" = f40076cf4f3aa95b1682ae31a917829d2cda57c5
+          gh api repos/wegamekinglc/calc-flow/actions/runs/40532934622 > source-run.json
+          gh api 'repos/wegamekinglc/calc-flow/actions/runs/40532934622/jobs?filter=latest&per_page=100' > source-jobs.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
 
-  wheels:
-    name: Wheel ${{ matrix.os }} ${{ matrix.target }} ${{ matrix.python_tag }}
-    needs: prepare-python-release
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64
-            python_tag: cp313
-            manylinux: "2_28"
-          - os: ubuntu-latest
-            target: x86_64
-            python_tag: cp39
-            manylinux: "2_28"
-          - os: ubuntu-latest
-            target: aarch64
-            python_tag: cp313
-            manylinux: "2_28"
-          - os: ubuntu-latest
-            target: aarch64
-            python_tag: cp39
-            manylinux: "2_28"
-          - os: macos-15-intel
-            target: x86_64
-            python_tag: cp313
-            manylinux: "off"
-          - os: macos-15-intel
-            target: x86_64
-            python_tag: cp39
-            manylinux: "off"
-          - os: macos-15
-            target: aarch64
-            python_tag: cp313
-            manylinux: "off"
-          - os: macos-15
-            target: aarch64
-            python_tag: cp39
-            manylinux: "off"
-          - os: windows-latest
-            target: x64
-            python_tag: cp313
-            manylinux: "off"
-          - os: windows-latest
-            target: x64
-            python_tag: cp39
-            manylinux: "off"
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: "3.13"
-      - name: Build modern abi3 wheel
-        if: matrix.python_tag == 'cp313'
-        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
-        with:
-          command: build
-          maturin-version: v1.14.1
-          rust-toolchain: "1.94.0"
-          target: ${{ matrix.target }}
-          args: --release --locked --out dist --find-interpreter --features pyo3/abi3-py313
-          manylinux: ${{ matrix.manylinux }}
-      - name: Build legacy abi3 wheel
-        if: matrix.python_tag == 'cp39'
-        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
-        with:
-          command: build
-          maturin-version: v1.14.1
-          rust-toolchain: "1.94.0"
-          target: ${{ matrix.target }}
-          args: --release --locked --out dist --find-interpreter --features legacy-python
-          manylinux: ${{ matrix.manylinux }}
-      - name: Add explicit Python version tags
-        shell: bash
-        run: |
-          python -m pip install wheel==0.46.3
-          shopt -s nullglob
-          wheels=(dist/*.whl)
-          test "${#wheels[@]}" -eq 1
-          case "${{ matrix.python_tag }}" in
-            cp39) tags=(cp310 cp311 cp312) ;;
-            cp313) tags=(cp314) ;;
-            *) exit 1 ;;
-          esac
-          for tag in "${tags[@]}"; do
-            python -m wheel tags --python-tag="$tag" "${wheels[0]}"
-          done
-      - name: Upload wheel
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: wheel-${{ matrix.os }}-${{ matrix.target }}-${{ matrix.python_tag }}
-          path: dist/*.whl
-          if-no-files-found: error
-          retention-days: 30
-
-  sdist:
-    name: Python source distribution
-    needs: prepare-python-release
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: "3.13"
-      - name: Build source distribution
-        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
-        with:
-          command: sdist
-          maturin-version: v1.14.1
-          rust-toolchain: "1.94.0"
-          args: --out dist
-      - name: Upload source distribution
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: python-sdist
-          path: dist/*.tar.gz
-          if-no-files-found: error
-          retention-days: 30
-
-  wheel-python-versions:
-    name: Installed wheel unit tests (Python ${{ matrix.python_version }})
-    needs: [wheels, sdist]
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - python_version: "3.9"
-            python_tag: cp39
-            base_tag: cp39
-          - python_version: "3.10"
-            python_tag: cp310
-            base_tag: cp39
-          - python_version: "3.11"
-            python_tag: cp311
-            base_tag: cp39
-          - python_version: "3.12"
-            python_tag: cp312
-            base_tag: cp39
-          - python_version: "3.13"
-            python_tag: cp313
-            base_tag: cp313
-          - python_version: "3.14"
-            python_tag: cp314
-            base_tag: cp313
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: ${{ matrix.python_version }}
-      - name: Download matching Linux wheel
+          run = json.loads(Path("source-run.json").read_text(encoding="utf-8"))
+          assert run["repository"]["full_name"] == "wegamekinglc/calc-flow"
+          assert run["path"] == ".github/workflows/release.yml"
+          assert run["head_sha"] == "f40076cf4f3aa95b1682ae31a917829d2cda57c5"
+          assert run["event"] == "workflow_dispatch"
+          assert run["status"] == "completed" and run["conclusion"] == "success"
+          assert run["run_attempt"] == 1
+          data = json.loads(Path("source-jobs.json").read_text(encoding="utf-8"))
+          jobs = {job["name"]: job for job in data["jobs"]}
+          required = {
+              "Validate release version and tag",
+              "Python source distribution",
+              "Verify Python package artifacts",
+              *(f"Installed wheel unit tests (Python {v})" for v in
+                ("3.9", "3.10", "3.11", "3.12", "3.13", "3.14")),
+              *(f"Wheel {os} {target} {tier}" for os, target in (
+                  ("ubuntu-latest", "x86_64"), ("ubuntu-latest", "aarch64"),
+                  ("macos-15-intel", "x86_64"), ("macos-15", "aarch64"),
+                  ("windows-latest", "x64"),
+              ) for tier in ("cp39", "cp313")),
+          }
+          assert data["total_count"] == len(data["jobs"]) == 20
+          assert required <= jobs.keys()
+          assert all(jobs[name]["status"] == "completed" and
+                     jobs[name]["conclusion"] == "success" for name in required)
+          PY
+      - name: Download the original verified wheels
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: wheel-ubuntu-latest-x86_64-${{ matrix.base_tag }}
-          path: dist
-      - name: Run installed wheel unit tests
-        run: |
-          python -m pip install dist/calc_flow_python-*-${{ matrix.python_tag }}-abi3-*.whl pytest numpy
-          python -m pytest -q \
-            python/tests/test_import.py \
-            python/tests/test_python_version_contract.py \
-            python/tests/test_compute.py \
-            python/tests/test_symbolic_expr.py \
-            python/tests/test_stream_entrypoints.py \
-            python/tests/test_execution_options.py \
-            python/tests/test_batch.py \
-            python/tests/test_config.py \
-            python/tests/test_udf.py
-      - name: Test Python 3.9 JAX array extra
-        if: matrix.python_version == '3.9'
-        run: |
-          python -m pip install 'jax==0.4.30'
-          JAX_PLATFORMS=cpu python -m pytest -q python/tests/test_array.py
-
-  verify-core-artifacts:
-    name: Verify Python package artifacts
-    needs: [wheels, sdist]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: "3.13"
-      - name: Download Linux, Windows, and macOS wheels
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
+          github-token: ${{ github.token }}
+          run-id: 40532934622
           pattern: wheel-*
           path: dist
           merge-multiple: true
-      - name: Download core source distribution
+      - name: Download the original source distribution
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
+          github-token: ${{ github.token }}
+          run-id: 40532934622
           name: python-sdist
           path: dist
-      - name: Verify wheel matrix, metadata, and source distribution
-        shell: bash
+      - name: Download the original artifact manifest
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          github-token: ${{ github.token }}
+          run-id: 40532934622
+          name: python-release-manifest
+          path: original-manifest
+      - name: Verify all original bytes, package contents, and unused version
         run: |
-          args=(--dist-dir dist --core-only)
-          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            args+=(--tag "${GITHUB_REF_NAME}")
-          fi
-          python scripts/verify_python_release.py "${args[@]}" > release-manifest.txt
-      - name: Upload verified artifact manifest
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: python-release-manifest
-          path: release-manifest.txt
-          if-no-files-found: error
-          retention-days: 30
-
-  publish-python-core:
-    name: Publish calc-flow-python to PyPI
-    if: github.event_name == 'push' && github.ref_type == 'tag'
-    needs: [verify-core-artifacts, wheel-python-versions]
-    runs-on: ubuntu-latest
-    environment:
-      name: pypi
-      url: https://pypi.org/project/calc-flow-python/
-    permissions:
-      id-token: write
-    steps:
-      - name: Download Linux, Windows, and macOS wheels
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          pattern: wheel-*
-          path: dist
-          merge-multiple: true
-      - name: Download core source distribution
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: python-sdist
-          path: dist
-      - name: Download verified artifact manifest
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: python-release-manifest
-      - name: Confirm artifact integrity
-        run: sha256sum --check ../release-manifest.txt
-        working-directory: dist
-      - name: Publish core artifacts
+          printf '%s  %s\n' 1247d8979b0c98bbf66df5cf8d16c75ab6d50b89345b8af41d52e6f192d6abbb original-manifest/release-manifest.txt | sha256sum --check
+          (cd dist && sha256sum --check ../original-manifest/release-manifest.txt)
+          python scripts/verify_python_release.py --version-only --tag calc-flow-python-v2026.10.27 --check-pypi
+          python scripts/verify_python_release.py --dist-dir dist --core-only --tag calc-flow-python-v2026.10.27 > verified-manifest.txt
+          cmp original-manifest/release-manifest.txt verified-manifest.txt
+      - name: Create the new annotated tag at the user-selected release commit
+        run: |
+          git -c user.name='Cheng Li' -c user.email='scrappedprince.li@gmail.com' tag -a calc-flow-python-v2026.10.27 f40076cf4f3aa95b1682ae31a917829d2cda57c5 -m 'Release calc-flow-python 2026.10.27; verified artifacts from run 40532934622'
+          git push origin refs/tags/calc-flow-python-v2026.10.27
+      - name: Publish the original verified artifacts
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
           packages-dir: dist
