@@ -28,12 +28,37 @@ SERVICE_PYTHON_EXAMPLES = (
     "examples/27_kafka_protobuf_source.py",
     "examples/28_kafka_custom_decoder.py",
 )
-RUST_EXAMPLES = (
-    "expression_pipeline",
-    "sql_join",
-    "continuous_runtime",
-    "windowed_streaming",
+RUST_CONNECTOR_FEATURES = {
+    "file_source": "file",
+    "kafka_source": "file,kafka",
+    "postgresql_source": "file,postgresql",
+    "mysql_source": "file,mysql",
+    "clickhouse_source": "file,clickhouse",
+    "http_source": "file,http",
+    "websocket_source": "file,websocket",
+    "kafka_sink": "file,kafka",
+    "postgresql_sink": "file,postgresql",
+    "mysql_sink": "file,mysql",
+    "clickhouse_sink": "file,clickhouse",
+    "kafka_protobuf_source": "file,kafka",
+    "kafka_custom_decoder": "file,kafka",
+    "late_output_recovery": "file",
+}
+
+
+def _rust_name(path: str) -> str:
+    stem = Path(path).stem
+    return stem.split("_", 1)[1] if stem[:2].isdigit() else stem
+
+
+RUST_EXAMPLES = tuple(
+    dict.fromkeys(
+        ("expression_pipeline", "windowed_streaming")
+        + tuple(_rust_name(path) for path in PYTHON_EXAMPLES)
+        + ("late_output_recovery",)
+    )
 )
+SERVICE_RUST_EXAMPLES = tuple(_rust_name(path) for path in SERVICE_PYTHON_EXAMPLES)
 
 
 def _commands(surface: str, *, include_services: bool = False) -> tuple[list[str], ...]:
@@ -45,20 +70,36 @@ def _commands(surface: str, *, include_services: bool = False) -> tuple[list[str
             if include_services or path not in SERVICE_PYTHON_EXAMPLES
         )
     if surface in {"all", "rust"}:
-        commands.extend(
-            ["cargo", "run", "-p", "calc-flow", "--example", name]
-            for name in RUST_EXAMPLES
-        )
-        commands.append(
-            [
-                "cargo",
-                "run",
-                "-p",
-                "calc-flow-connectors",
-                "--example",
-                "late_output_recovery",
-            ]
-        )
+        for name in RUST_EXAMPLES:
+            if not include_services and name in SERVICE_RUST_EXAMPLES:
+                continue
+            features = RUST_CONNECTOR_FEATURES.get(name)
+            package = "calc-flow-connectors" if features else "calc-flow"
+            command = ["cargo", "run", "-p", package, "--example", name]
+            if features:
+                command.extend(["--features", features])
+            if name in {"kafka_protobuf_source", "kafka_custom_decoder"}:
+                command.extend(["--", "--consume"])
+            if name in {
+                "streaming_stock_positions",
+                "streaming_account_market_values",
+            }:
+                command.extend(
+                    [
+                        "--",
+                        "--rows",
+                        "30",
+                        "--accounts",
+                        "2",
+                        "--stocks",
+                        "3",
+                        "--batch-size",
+                        "4",
+                    ]
+                )
+                if name == "streaming_account_market_values":
+                    command.extend(["--quote-rows", "9"])
+            commands.append(command)
     return tuple(commands)
 
 

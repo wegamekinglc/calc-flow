@@ -45,7 +45,8 @@ The runnable inventories cover both surfaces; the SQL examples share a dataset:
   SQL join, registered UDF, continuous execution and recovery, async batch
   execution, and NumPy arrays plus NumPy/JAX `pyarrow.Table` matrix multiplication.
 - Rust: [`crates/calc-flow/examples/README.md`](../crates/calc-flow/examples/README.md)
-  — expression, SQL, continuous lifecycle, event-time window, and schema tools.
+  — native counterparts for every runnable Python example, including connectors,
+  financial features, recovery, windows, arrays, and account valuation.
 
 Run the user examples that need no external service with
 `JAX_PLATFORMS=cpu uv run --no-sync python scripts/run_examples.py`.

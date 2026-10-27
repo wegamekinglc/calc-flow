@@ -134,12 +134,60 @@ required-features = ["file"]
 
 [[example]]
 name = "kafka_protobuf_source"
-required-features = ["kafka"]
+required-features = ["file", "kafka"]
 
 [[example]]
 name = "kafka_custom_decoder"
-required-features = ["kafka"]
+required-features = ["file", "kafka"]
 
 [package.metadata.release]
 # Packaging and publication follow the M7-04 release decision.
 release = false
+
+[[example]]
+name = "file_source"
+required-features = ["file"]
+
+[[example]]
+name = "kafka_source"
+required-features = ["file", "kafka"]
+
+[[example]]
+name = "postgresql_source"
+required-features = ["file", "postgresql"]
+
+[[example]]
+name = "mysql_source"
+required-features = ["file", "mysql"]
+
+[[example]]
+name = "clickhouse_source"
+required-features = ["file", "clickhouse"]
+
+[[example]]
+name = "http_source"
+required-features = ["file", "http"]
+
+[[example]]
+name = "websocket_source"
+required-features = ["file", "websocket"]
+
+[[example]]
+name = "kafka_sink"
+required-features = ["file", "kafka"]
+
+[[example]]
+name = "postgresql_sink"
+required-features = ["file", "postgresql"]
+
+[[example]]
+name = "mysql_sink"
+required-features = ["file", "mysql"]
+
+[[example]]
+name = "clickhouse_sink"
+required-features = ["file", "clickhouse"]
+
+[[example]]
+name = "websocket_orders"
+required-features = ["websocket"]

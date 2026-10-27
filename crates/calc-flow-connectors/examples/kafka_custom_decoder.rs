@@ -8,21 +8,18 @@
 //! `calc-flow-example-orders-pipe` topic; see docs/connectors/kafka.md.
 
 use std::collections::BTreeMap;
-use std::error::Error;
+mod support;
 use std::sync::Arc;
-use std::time::Duration;
+use support::ExampleResult;
 
 use arrow::array::{ArrayRef, Float64Array, Int64Array};
 use arrow::record_batch::RecordBatch;
 use calc_flow::{
     ArrowFieldSpec, Batch, BatchMetadata, CalcFlowError, ConnectorRegistry,
-    ConnectorSourceFactory as _, DecodeBounds, FormatDecoder, FormatIdentity, JsonMap, SourceEvent,
-    StreamSource as _,
+    ConnectorSourceFactory as _, DecodeBounds, FormatDecoder, FormatIdentity, JsonMap,
 };
 use calc_flow_connectors::arrow_schema::schema_from_spec;
-use calc_flow_connectors::kafka::{
-    KafkaDecoderRegistry, KafkaSource, KafkaSourceConfig, KafkaSourceFactory,
-};
+use calc_flow_connectors::kafka::{KafkaDecoderRegistry, KafkaSourceFactory};
 use calc_flow_connectors::register_kafka_connectors_with_decoders;
 
 /// The pipe-delimited orders decoder identity.
@@ -144,29 +141,19 @@ fn order_schema() -> Vec<ArrowFieldSpec> {
         .expect("the example schema is a field list")
 }
 
-async fn consume_topic(
-    bootstrap: &str,
-    decoders: &KafkaDecoderRegistry,
-) -> Result<(), Box<dyn Error>> {
-    let config = KafkaSourceConfig::from_options(&source_options(bootstrap))?;
-    let mut source = KafkaSource::with_decoders(config, decoders)?;
-    source.open(None).await?;
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    let mut delivered = 0_u64;
-    while delivered < 2 && std::time::Instant::now() < deadline {
-        match source.next().await? {
-            Some(SourceEvent::Data { batch, .. }) => {
-                delivered += batch.num_rows() as u64;
-                println!("kafka batch: {} row(s)", batch.num_rows());
-            }
-            _ => tokio::time::sleep(Duration::from_millis(100)).await,
-        }
-    }
-    println!("consumed {delivered} custom-decoded row(s) from the broker");
-    Ok(())
+async fn consume_topic(bootstrap: &str, decoders: &KafkaDecoderRegistry) -> ExampleResult {
+    let mut registry = support::registry()?;
+    register_kafka_connectors_with_decoders(&mut registry, decoders.clone())?;
+    let source = support::source(
+        "kafka",
+        serde_json::to_value(source_options(bootstrap))?,
+        Some("custom"),
+        None,
+    );
+    support::read_source(source, &registry, true, "at_least_once").await
 }
 
-fn offline_demo(decoders: &KafkaDecoderRegistry) -> Result<(), Box<dyn Error>> {
+fn offline_demo(decoders: &KafkaDecoderRegistry) -> ExampleResult {
     let batch = decoders.resolve(&PipeOrdersDecoder::identity())?.decode(
         b"1|2|10.0",
         &DecodeBounds::new(1024, 1 << 20)?,
@@ -185,11 +172,17 @@ fn offline_demo(decoders: &KafkaDecoderRegistry) -> Result<(), Box<dyn Error>> {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+async fn main() -> ExampleResult {
+    let arguments: Vec<_> = std::env::args().skip(1).collect();
+    if !arguments.is_empty() && arguments != ["--consume"] {
+        return Err("usage: kafka_custom_decoder [--consume]".into());
+    }
     let decoders = KafkaDecoderRegistry::default();
     decoders.register(Arc::new(PipeOrdersDecoder))?;
     offline_demo(&decoders)?;
-    if let Ok(bootstrap) = std::env::var("CALC_FLOW_KAFKA_BOOTSTRAP") {
+    if arguments == ["--consume"] || std::env::var_os("CALC_FLOW_KAFKA_BOOTSTRAP").is_some() {
+        let bootstrap =
+            std::env::var("CALC_FLOW_KAFKA_BOOTSTRAP").unwrap_or_else(|_| "127.0.0.1:9092".into());
         consume_topic(&bootstrap, &decoders).await?;
     } else {
         println!("set CALC_FLOW_KAFKA_BOOTSTRAP to consume a prepared topic");
@@ -219,6 +212,42 @@ mod tests {
 
     #[test]
     fn example_options_parse() {
-        KafkaSourceConfig::from_options(&source_options("127.0.0.1:1")).expect("options parse");
+        calc_flow_connectors::kafka::KafkaSourceConfig::from_options(&source_options(
+            "127.0.0.1:1",
+        ))
+        .expect("options parse");
+    }
+
+    #[test]
+    fn managed_project_compiles_with_the_registered_decoder() {
+        let root = tempfile::tempdir().expect("temporary root");
+        let decoders = KafkaDecoderRegistry::default();
+        decoders
+            .register(Arc::new(PipeOrdersDecoder))
+            .expect("decoder registers");
+        let mut registry = support::registry().expect("file registry");
+        register_kafka_connectors_with_decoders(&mut registry, decoders).expect("Kafka registry");
+        let source = support::source(
+            "kafka",
+            serde_json::to_value(source_options("127.0.0.1:1")).unwrap(),
+            Some("custom"),
+            None,
+        );
+        let project = support::project(
+            root.path(),
+            source,
+            support::file_sink(root.path(), "at_least_once"),
+        )
+        .unwrap();
+        let plan = calc_flow::compile_stream_project(
+            &project,
+            &calc_flow::ProviderRegistry::default(),
+            &calc_flow::UdfRegistry::new().snapshot(),
+            &registry.snapshot(),
+            &calc_flow::StreamRequirements::default(),
+        )
+        .expect("custom decoder graph compiles");
+        assert_eq!(plan.source_binding_ids(), ["input"]);
+        assert_eq!(plan.sink_binding_ids(), ["output"]);
     }
 }

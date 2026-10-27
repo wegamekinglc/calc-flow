@@ -140,7 +140,8 @@ aliases with `Edge`/`PortEndpoint`, or leave them unconnected as graph inputs.
 DDL, DML, utility commands, and multiple statements are rejected before
 execution. The canonical SQL example is
 [`crates/calc-flow/examples/sql_join.rs`](../crates/calc-flow/examples/sql_join.rs),
-which joins `orders` to `fees` for `net = amount - fee`:
+which joins `orders` to `fees` for `net = amount - fee`, then doubles the net
+amounts in an expression stage:
 
 The run-scoped physical planner can rewrite bounded ascending `AVG(Float64)`
 windows and compatible same-column, same-frame `COUNT` guards through the
@@ -184,6 +185,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Vec::new(),
             )?),
         )?
+        .add_node(
+            "double",
+            Box::new(calc_flow::ExpressionOperator::new(
+                "double",
+                "",
+                vec!["order_id".into(), "net * 2 AS doubled".into()],
+                None,
+                Vec::new(),
+            )?),
+        )?
+        .connect(calc_flow::Edge::new(
+            calc_flow::PortEndpoint::new("join", "output")?,
+            calc_flow::PortEndpoint::new("double", "input")?,
+        ))?
         .compile_batch(&UdfRegistry::new().snapshot())?;
     let orders = RecordBatch::try_from_iter(vec![
         (
@@ -216,14 +231,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     let output = result.outputs["output"].table_payload()?;
     let net = output.batches()[0]
-        .column_by_name("net")
-        .expect("sql output contains net")
+        .column_by_name("doubled")
+        .expect("sql output contains doubled")
         .as_any()
         .downcast_ref::<Int64Array>()
         .expect("net is an Int64 column");
 
-    assert_eq!(net.values(), &[70, 108, 36]);
-    println!("net amounts: {net:?}");
+    assert_eq!(net.values(), &[140, 216, 72]);
+    println!("doubled net amounts: {net:?}");
     Ok(())
 }
 ```
@@ -757,6 +772,10 @@ cargo run -p calc-flow --example sql_join
 cargo run -p calc-flow --example continuous_runtime
 cargo run -p calc-flow --example windowed_streaming
 ```
+
+The [complete Rust inventory](../crates/calc-flow/examples/README.md) includes
+counterparts for every runnable Python example, with connector features and
+small stock/account commands.
 
 The [continuous streaming guide](streaming-guide.md) explains cursor,
 watermark, window, delivery, checkpoint, and recovery behavior across both

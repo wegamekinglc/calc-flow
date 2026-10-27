@@ -6,6 +6,8 @@ The runnable inventory, commands, dependencies, and expected results live in
 [examples/README.md](../examples/README.md). Choose a path below after
 [installation](getting-started.md). Every numbered Python file runs on its own;
 the learning order does not require importing or running an earlier example.
+The [Rust inventory](../crates/calc-flow/examples/README.md) maps every runnable
+Python example to a native Rust counterpart.
 
 ## Calculate a finite dataset
 
@@ -20,10 +22,10 @@ and a following column expression, then
 [19_sql_expression_pipeline.py](../examples/19_sql_expression_pipeline.py)
 for reusable `pipe` functions around SQL. The checked final values are
 `doubled=[140, 216, 72]` and `net=[18.0, 27.0]`, respectively.
-Example 03 covers explicit typed UDF registration. Runtime contributors can pair Rust's
-`expression_pipeline` with `sql_join`. The Rust expression
-program uses the small `[3, 7]` addition from the introduction; Python 01 uses
-order totals. The SQL programs share the same order/fee dataset.
+Example 03 covers explicit typed UDF registration. Runtime contributors can pair
+Rust's `datafusion_pipeline` with `sql_join` for the same order datasets and
+results as Python 01 and 02. The additional `expression_pipeline` keeps the
+small `[3, 7]` addition from the introduction.
 
 Run [29_sql_stream_switch.py](../examples/29_sql_stream_switch.py) to compare
 batch SQL and cumulative streaming for the same declaration. Each `Program`
