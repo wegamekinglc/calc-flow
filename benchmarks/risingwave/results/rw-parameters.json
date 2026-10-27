@@ -1,0 +1,110 @@
+[
+  [
+    "barrier_interval_ms",
+    "1000",
+    "The interval of periodic barrier.",
+    true
+  ],
+  [
+    "checkpoint_frequency",
+    "1",
+    "There will be a checkpoint for every n barriers.",
+    true
+  ],
+  [
+    "sstable_size_mb",
+    "256",
+    "Target size of the Sstable.",
+    false
+  ],
+  [
+    "parallel_compact_size_mb",
+    "512",
+    "The size of parallel task for one compact/flush job.",
+    false
+  ],
+  [
+    "block_size_kb",
+    "64",
+    "Size of each block in bytes in SST.",
+    false
+  ],
+  [
+    "bloom_false_positive",
+    "0.001",
+    "DEPRECATED: Bloom filter is no longer a supported SST filter implementation. This field is kept for backward compatibility and no longer controls whether SST filters are emitted.",
+    false
+  ],
+  [
+    "state_store",
+    "hummock+fs:///home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-416-b32d8f7660a1/workdir/calc-flow/target/risingwave-comparison/run-12/rw-store/state_store",
+    "URL for the state store",
+    false
+  ],
+  [
+    "data_directory",
+    "hummock_001",
+    "Remote directory for storing data and metadata objects.",
+    false
+  ],
+  [
+    "backup_storage_url",
+    "fs:///home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-416-b32d8f7660a1/workdir/calc-flow/target/risingwave-comparison/run-12/rw-store/state_store",
+    "Remote storage url for storing snapshots.",
+    true
+  ],
+  [
+    "backup_storage_directory",
+    "hummock_001/backup",
+    "Remote directory for storing snapshots.",
+    true
+  ],
+  [
+    "max_concurrent_creating_streaming_jobs",
+    "1",
+    "Max number of concurrent creating streaming jobs.",
+    true
+  ],
+  [
+    "pause_on_next_bootstrap",
+    "false",
+    "Whether to pause all data sources on next bootstrap.",
+    true
+  ],
+  [
+    "enable_tracing",
+    "false",
+    "Whether to enable distributed tracing.",
+    true
+  ],
+  [
+    "use_new_object_prefix_strategy",
+    "true",
+    "Whether to split object prefix.",
+    false
+  ],
+  [
+    "license_key",
+    "<default>",
+    "The license key to activate enterprise features.",
+    true
+  ],
+  [
+    "time_travel_retention_ms",
+    "600000",
+    "The data retention period for time travel.",
+    true
+  ],
+  [
+    "per_database_isolation",
+    "true",
+    "Whether per database isolation is enabled",
+    true
+  ],
+  [
+    "enforce_secret",
+    "false",
+    "Whether to enforce secret on cloud.",
+    true
+  ]
+]

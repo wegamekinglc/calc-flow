@@ -1,0 +1,165 @@
+{
+  "baseline_commit": "aca2a5e97592ca6e44e3a23b06659084a89b105c",
+  "scope": "Codacy 22 annotations in scripts/risingwave_comparison.py",
+  "security_boundary": {
+    "relation_names": "closed CASES x ROUNDS catalog plus window_semantics; arbitrary identifiers rejected",
+    "values": "exact Arrow schema; psycopg Literal; integer/NULL-only adaptation; timestamps quoted by adapter",
+    "command": "absolute /usr/bin/lscpu via asyncio subprocess, no shell/PATH lookup",
+    "security_suppressions_added": true,
+    "global_gate_changes": false,
+    "local_waiver": {
+      "rule": "dangerous-asyncio-create-exec-audit",
+      "scope": "one fixed /usr/bin/lscpu call in _cpu_description",
+      "reason": "No arguments, external inputs, PATH lookup or shell. Upstream pattern excludes constant second arguments but not an argument-free call.",
+      "source": "https://github.com/semgrep/semgrep-rules/blob/17e31e11ebac99fb7dfe1cd288f7a32151b6f3f9/python/lang/security/audit/dangerous-asyncio-create-exec-audit.yaml",
+      "reproduced_without_waiver": 1,
+      "after_local_waiver": 0,
+      "smoke": "Exact executable and keyword arguments asserted; executes with invalid PATH."
+    }
+  },
+  "complexity": {
+    "limit": 8,
+    "maximum_after": 8,
+    "functions": {
+      "expected": {
+        "before": 16,
+        "after": 3
+      },
+      "case": {
+        "before": 15,
+        "after": 4
+      },
+      "summaries": {
+        "before": 23,
+        "after": 3
+      },
+      "run": {
+        "before": 13,
+        "after": 5
+      }
+    }
+  },
+  "bandit": {
+    "version": "1.9.4",
+    "before_findings": 8,
+    "after_findings": 0
+  },
+  "semgrep": {
+    "configs": [
+      "p/python",
+      "p/security-audit"
+    ],
+    "rules_run": 200,
+    "files": 2,
+    "findings": 0
+  },
+  "smoke": {
+    "unittest_passed": 8,
+    "engine_processes_started": 0
+  },
+  "compatibility": {
+    "baseline_commit": "aca2a5e97592ca6e44e3a23b06659084a89b105c",
+    "baseline_script_sha256": "f6eec15d67185a5c1ffb2969fceb0bea9f4927181253a7d8137cfa4337459ae2",
+    "candidate_script_sha256": "db7dfb9a394a435f1499887a1c3247327ea9d37b97fe630b5055810468dbe372",
+    "identical_timer_or_execution_asts": [
+      "fixture",
+      "program",
+      "normalize",
+      "process_usage",
+      "observe_peak",
+      "measured_call",
+      "CalcStream.__init__",
+      "CalcStream.start",
+      "CalcStream.append",
+      "CalcStream.close",
+      "RisingWave.__init__",
+      "RisingWave.start",
+      "RisingWave.execute",
+      "RisingWave.stop",
+      "RisingWave.append"
+    ],
+    "control_flow_cases": [
+      {
+        "case": "projection",
+        "rows": 640,
+        "round": 0,
+        "trace_sha256": "cd2ad432ea8d53a71a6c887793f61f9981d9bd01d0d153def4ab485de1ebc71e",
+        "samples_checked": 24
+      },
+      {
+        "case": "grouped",
+        "rows": 640,
+        "round": 0,
+        "trace_sha256": "0cbfa8f33f182b4a215525a0fcd8521bbfbd9a840a73ce74f99d3497b3ca9134",
+        "samples_checked": 24
+      },
+      {
+        "case": "grouped",
+        "rows": 64000,
+        "round": 0,
+        "trace_sha256": "31956bfa0bc19da6eb1aa3b433f3ece2b609f9d7cb21bff897ee4b0e7fd5ed25",
+        "samples_checked": 24
+      },
+      {
+        "case": "window",
+        "rows": 640,
+        "round": 0,
+        "trace_sha256": "7574f925674a92c3054b6993f365f69fcc24fc5e6328e491783f532e2592ee0b",
+        "samples_checked": 24
+      },
+      {
+        "case": "projection",
+        "rows": 640,
+        "round": 1,
+        "trace_sha256": "f45b5a50f3d2d3ede2563a4e07c5aa20b564e61c384d1b2f82a4200d5e4f86b6",
+        "samples_checked": 24
+      },
+      {
+        "case": "grouped",
+        "rows": 640,
+        "round": 1,
+        "trace_sha256": "ab400b1e8013a0f56f3d5ccc8aa185c769703c5c9722cef9de11fc81b68d066b",
+        "samples_checked": 24
+      },
+      {
+        "case": "grouped",
+        "rows": 64000,
+        "round": 1,
+        "trace_sha256": "5cd786a66cd97c478944f37843baaaabe221bd9a3a66e40ad234504aa60cce97",
+        "samples_checked": 24
+      },
+      {
+        "case": "window",
+        "rows": 640,
+        "round": 1,
+        "trace_sha256": "a8c8f4bd2ff88da1f4a8cbdebc19528294edce1c9fdc55a0569b54613ae077b6",
+        "samples_checked": 24
+      }
+    ],
+    "full_64000_row_insert_sha256": "d2f197441b972c16227208f6700b276f3f245e4d5e6c9589544a97624f34daf7",
+    "full_64000_row_insert_bytes": 4135525,
+    "engine_processes_started": 0,
+    "performance_samples_reused": 160,
+    "warmup_samples_reused": 32
+  },
+  "original_results_validation": {
+    "complete_case_rounds": 8,
+    "formal_samples": 160,
+    "warmup_samples": 32,
+    "all_oracle_checks": 192,
+    "summary_recomputed": true,
+    "semantic_probes_passed": true
+  },
+  "remote_codacy": {
+    "aca2a5e9": {
+      "conclusion": "action_required",
+      "new_issues": 22
+    },
+    "d525d67c": {
+      "conclusion": "action_required",
+      "new_issues": 1,
+      "remaining": "argument-free lscpu false positive; locally waived in follow-up"
+    },
+    "final_commit": "Report check result separately; local scans do not replace remote Codacy."
+  }
+}
