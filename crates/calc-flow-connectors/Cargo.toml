@@ -49,7 +49,7 @@ postgresql = [
 
 [dependencies]
 mysql_async = { version = "=0.37.1", default-features = false, features = ["minimal-rust", "rustls-tls", "ring", "tls12"], optional = true }
-calc-flow = { path = "../calc-flow", version = "=2026.10.21" }
+calc-flow = { path = "../calc-flow", version = "=2026.10.27" }
 arrow = { version = "=59.2.0", default-features = false }
 arrow-csv = "=59.2.0"
 arrow-json = "=59.2.0"
