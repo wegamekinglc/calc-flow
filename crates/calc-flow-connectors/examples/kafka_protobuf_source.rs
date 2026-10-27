@@ -11,6 +11,14 @@ use std::time::Duration;
 use support::ExampleResult;
 
 use calc_flow::{ArrowFieldSpec, DecodeBounds, FormatDecoder as _, JsonMap};
+fn arguments() -> ExampleResult<Vec<String>> {
+    let arguments = support::arguments()?;
+    if !arguments.is_empty() && arguments != ["--consume"] && arguments != ["--produce"] {
+        return Err("usage: kafka_protobuf_source [--produce|--consume]".into());
+    }
+    Ok(arguments)
+}
+
 #[cfg(test)]
 use calc_flow_connectors::kafka::KafkaSourceConfig;
 use calc_flow_connectors::protobuf::ProtobufCodec;
@@ -155,15 +163,13 @@ async fn produce_orders(bootstrap: &str) -> ExampleResult {
 
 #[tokio::main]
 async fn main() -> ExampleResult {
-    let arguments: Vec<_> = std::env::args().skip(1).collect();
+    let arguments = arguments()?;
     let bootstrap =
         std::env::var("CALC_FLOW_KAFKA_BOOTSTRAP").unwrap_or_else(|_| "127.0.0.1:9092".into());
     if arguments == ["--produce"] {
         return produce_orders(&bootstrap).await;
     }
-    if !arguments.is_empty() && arguments != ["--consume"] {
-        return Err("usage: kafka_protobuf_source [--produce|--consume]".into());
-    }
+
     decode_samples()?;
     if arguments == ["--consume"] || std::env::var_os("CALC_FLOW_KAFKA_BOOTSTRAP").is_some() {
         consume_topic(&bootstrap).await?;

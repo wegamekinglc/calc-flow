@@ -17,21 +17,7 @@ async fn main() -> ExampleResult {
         ("seq", uints(&[0, 1])),
         ("x", floats(&[10.0, 20.0])),
     ]);
-    let mut spec = rolling(vec![RollingOutputSpec::Mean {
-        primitive_version: 1,
-        input: "x".into(),
-        output: "avg".into(),
-        frame: RollingFrameSpec::Rows { size: 2 },
-        min_periods: 1,
-    }]);
-    spec.late_policy = LatePolicySpec::SideOutput {
-        metrics_version: 1,
-        schema_version: 1,
-    };
-    let plan = stream_plan(PipelineBuilder::new("late")?.add_node(
-        "rolling",
-        RollingOperator::new("rolling", schema(&input), spec)?,
-    )?)?;
+    let plan = plan(&input)?;
     let output_names = plan
         .sink_binding_ids()
         .iter()
@@ -54,4 +40,22 @@ async fn main() -> ExampleResult {
         support::print(&batches)?;
     }
     Ok(())
+}
+
+fn plan(input: &calc_flow::Batch) -> calc_flow::Result<calc_flow::StreamExecutionPlan> {
+    let mut spec = rolling(vec![RollingOutputSpec::Mean {
+        primitive_version: 1,
+        input: "x".into(),
+        output: "avg".into(),
+        frame: RollingFrameSpec::Rows { size: 2 },
+        min_periods: 1,
+    }]);
+    spec.late_policy = LatePolicySpec::SideOutput {
+        metrics_version: 1,
+        schema_version: 1,
+    };
+    stream_plan(PipelineBuilder::new("late")?.add_node(
+        "rolling",
+        RollingOperator::new("rolling", schema(input), spec)?,
+    )?)
 }

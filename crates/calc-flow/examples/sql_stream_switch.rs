@@ -13,8 +13,19 @@ fn declaration() -> calc_flow::Result<PipelineBuilder> {
 
 #[tokio::main]
 async fn main() -> ExampleResult {
-    let args: Vec<_> = std::env::args().skip(1).collect();
-    let engine = match args.as_slice() {
+    let args: Vec<_> = support::arguments()?;
+    let engine = selected_engine(&args)?;
+    if engine != "streaming" {
+        batch_total().await?;
+    }
+    if engine != "sql" {
+        streaming_totals().await?;
+    }
+    Ok(())
+}
+
+fn selected_engine(args: &[String]) -> ExampleResult<&str> {
+    let engine = match args {
         [] => "both",
         [flag, value] if flag == "--engine" => value.as_str(),
         _ => return Err("usage: sql_stream_switch [--engine sql|streaming|both]".into()),
@@ -22,32 +33,36 @@ async fn main() -> ExampleResult {
     if !["sql", "streaming", "both"].contains(&engine) {
         return Err("unknown engine".into());
     }
-    if engine != "streaming" {
-        let result = declaration()?
-            .compile_batch(&UdfRegistry::new().snapshot())?
-            .execute(
-                BTreeMap::from([("input".into(), table(vec![("x", ints(&[1, 2, 3]))]))]),
-                ExecutionOptions::default(),
-            )
-            .await?;
-        assert_eq!(
-            i64_values(&[result.outputs["output"].clone()], "total"),
-            [Some(6)]
-        );
-        println!("sql: [6]");
-    }
-    if engine != "sql" {
-        let source = ReplaySource::batches(vec![
-            table(vec![("x", ints(&[1]))]),
-            table(vec![("x", ints(&[2, 3]))]),
-        ])?;
-        let result = collect(
-            stream_plan(declaration()?)?,
-            BTreeMap::from([("input".into(), source.binding())]),
+    Ok(engine)
+}
+
+async fn batch_total() -> ExampleResult {
+    let result = declaration()?
+        .compile_batch(&UdfRegistry::new().snapshot())?
+        .execute(
+            BTreeMap::from([("input".into(), table(vec![("x", ints(&[1, 2, 3]))]))]),
+            ExecutionOptions::default(),
         )
         .await?;
-        assert_eq!(i64_values(&result["output"], "total"), [Some(1), Some(6)]);
-        println!("streaming: [1, 6]");
-    }
+    assert_eq!(
+        i64_values(&[result.outputs["output"].clone()], "total"),
+        [Some(6)]
+    );
+    println!("sql: [6]");
+    Ok(())
+}
+
+async fn streaming_totals() -> ExampleResult {
+    let source = ReplaySource::batches(vec![
+        table(vec![("x", ints(&[1]))]),
+        table(vec![("x", ints(&[2, 3]))]),
+    ])?;
+    let result = collect(
+        stream_plan(declaration()?)?,
+        BTreeMap::from([("input".into(), source.binding())]),
+    )
+    .await?;
+    assert_eq!(i64_values(&result["output"], "total"), [Some(1), Some(6)]);
+    println!("streaming: [1, 6]");
     Ok(())
 }

@@ -11,19 +11,41 @@ use support::{ExampleResult, i64_values, ints, table};
 
 #[tokio::main]
 async fn main() -> ExampleResult {
+    let project = sample_project()?;
+    let canonical = export_project_json(&project)?;
+    let from_yaml = round_trips(&project)?;
+    let root = tempfile::tempdir()?;
+    let loaded = stored_project(root.path(), &from_yaml).await?;
+    execute_project(&loaded).await?;
+    assert_eq!(export_project_json(&project)?, canonical);
+    Ok(())
+}
+
+fn sample_project() -> ExampleResult<ProjectSpec> {
     let project: ProjectSpec = serde_json::from_value(json!({
         "format_version":3,"id":"saved-totals","name":"saved-totals","runtime":{"mode":"batch","options":{}},
         "data_sources":[{"id":"numbers","input":"input","format":"inline_json","data":[{"a":1,"b":2},{"a":3,"b":4}]}],
         "graph":{"name":"saved-totals","nodes":[{"id":"calculate","operator":{"kind":"expression","expression":"total = a + b"}}]}
     }))?;
-    let canonical = export_project_json(&project)?;
+    Ok(project)
+}
+
+fn round_trips(project: &ProjectSpec) -> ExampleResult<ProjectSpec> {
+    let canonical = export_project_json(project)?;
     let from_json = import_project_json(canonical.as_bytes())?;
-    let from_yaml = import_project_yaml(export_project_yaml(&project)?.as_bytes())?;
+    let from_yaml = import_project_yaml(export_project_yaml(project)?.as_bytes())?;
     assert_eq!(export_project_json(&from_json)?, canonical);
     assert_eq!(export_project_json(&from_yaml)?, canonical);
-    let root = tempfile::tempdir()?;
-    let store = FileProjectStore::new(root.path()).await?;
-    store.create(&from_yaml).await?;
+    Ok(from_yaml)
+}
+
+async fn stored_project(
+    root: &std::path::Path,
+    project: &ProjectSpec,
+) -> ExampleResult<ProjectSpec> {
+    let canonical = export_project_json(project)?;
+    let store = FileProjectStore::new(root).await?;
+    store.create(project).await?;
     let loaded = store.get(&project.id).await?;
     assert_eq!(export_project_json(&loaded)?, canonical);
     assert_eq!(
@@ -35,8 +57,12 @@ async fn main() -> ExampleResult {
             .collect::<Vec<_>>(),
         ["saved-totals"]
     );
+    Ok(loaded)
+}
+
+async fn execute_project(loaded: &ProjectSpec) -> ExampleResult {
     let plan = compile_project(
-        &loaded,
+        loaded,
         &ProviderRegistry::default(),
         &UdfRegistry::new().snapshot(),
     )?;
@@ -53,7 +79,6 @@ async fn main() -> ExampleResult {
         i64_values(&[result.outputs["output"].clone()], "total"),
         [Some(3), Some(7)]
     );
-    assert_eq!(export_project_json(&project)?, canonical);
     println!("JSON, YAML, and file-store round trips agree");
     support::print(&[result.outputs["output"].clone()])
 }

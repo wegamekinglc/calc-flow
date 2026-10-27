@@ -2,10 +2,10 @@
 mod support;
 use calc_flow::{ExecutionOptions, PipelineBuilder, UdfRegistry};
 use std::collections::BTreeMap;
-use support::{ExampleResult, edge, expression, f64_values, floats, ints, sql, table};
+use support::{ExampleResult, connect_all, expression, f64_values, floats, ints, sql, table};
 
 fn pipeline() -> calc_flow::Result<PipelineBuilder> {
-    PipelineBuilder::new("sql-expression-pipeline")?
+    let builder = PipelineBuilder::new("sql-expression-pipeline")?
         .add_node(
             "gross",
             expression(
@@ -26,9 +26,14 @@ fn pipeline() -> calc_flow::Result<PipelineBuilder> {
         .add_node(
             "discount",
             expression("discount", "net = gross * 0.9", &["order_id", "net"], None)?,
-        )?
-        .connect(edge("gross", "output", "sql", "input")?)?
-        .connect(edge("sql", "output", "discount", "input")?)
+        )?;
+    connect_all(
+        builder,
+        &[
+            ("gross", "output", "sql", "input"),
+            ("sql", "output", "discount", "input"),
+        ],
+    )
 }
 
 #[tokio::main]

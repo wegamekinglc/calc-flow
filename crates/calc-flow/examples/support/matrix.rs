@@ -94,82 +94,86 @@ fn float_values(snapshot: &StaticArraySnapshot) -> &[f64] {
 }
 impl Matrix {
     fn multiply(&self, table: &Batch, weights: &[f64], copy_bytes: usize) -> Result<Batch> {
-        let columns = if self.attach { 1 } else { 2 };
-        let names = if self.attach {
-            ["return", "volatility"]
-        } else {
-            ["quantity", "unit_price"]
-        };
-        let mut records = Vec::new();
-        let mut values = Vec::new();
-        for record in table.table_payload()?.batches() {
-            let a = record
-                .column_by_name(names[0])
-                .and_then(|a| a.as_any().downcast_ref::<Float64Array>())
-                .ok_or_else(|| invalid("table", "expected float64 columns"))?;
-            let b = record
-                .column_by_name(names[1])
-                .and_then(|a| a.as_any().downcast_ref::<Float64Array>())
-                .ok_or_else(|| invalid("table", "expected float64 columns"))?;
-            if self.attach {
-                let scores: Vec<_> = a
-                    .iter()
-                    .zip(b.iter())
-                    .map(|(a, b)| a.zip(b).map(|(a, b)| a * weights[0] + b * weights[1]))
-                    .collect();
-                let mut fields = record.schema().fields().to_vec();
-                fields.push(Arc::new(datafusion::arrow::datatypes::Field::new(
-                    "risk_score",
-                    datafusion::arrow::datatypes::DataType::Float64,
-                    true,
-                )));
-                let mut arrays = record.columns().to_vec();
-                arrays.push(Arc::new(Float64Array::from(scores)));
-                records.push(
-                    RecordBatch::try_new(
-                        Arc::new(datafusion::arrow::datatypes::Schema::new(fields)),
-                        arrays,
-                    )
-                    .map_err(|e| invalid("output", e.to_string()))?,
-                );
-            } else {
-                for (a, b) in a.iter().zip(b.iter()) {
-                    let (a, b) = a
-                        .zip(b)
-                        .ok_or_else(|| invalid("table", "non-null demo columns required"))?;
-                    values.extend([
-                        a * weights[0] + b * weights[2],
-                        a * weights[1] + b * weights[3],
-                    ]);
-                }
-            }
-        }
         if self.attach {
-            Batch::table(
-                records,
-                BatchMetadata::new(
-                    "rust-array",
-                    0,
-                    BTreeMap::from([(
-                        "copy_bytes".into(),
-                        serde_json::json!({"weights":copy_bytes}),
-                    )]),
-                )?,
-            )
+            attach_scores(table, weights, copy_bytes)
         } else {
-            Batch::static_array_float(
-                "rust-array",
-                "float64",
-                vec![
-                    u64::try_from(table.num_rows()).unwrap(),
-                    u64::try_from(columns).unwrap(),
-                ],
-                None,
-                values,
-            )
+            multiply_columns(table, weights)
         }
     }
 }
+
+fn float_column<'a>(record: &'a RecordBatch, name: &str) -> Result<&'a Float64Array> {
+    record
+        .column_by_name(name)
+        .and_then(|a| a.as_any().downcast_ref::<Float64Array>())
+        .ok_or_else(|| invalid("table", "expected float64 columns"))
+}
+
+fn attach_record(record: &RecordBatch, weights: &[f64]) -> Result<RecordBatch> {
+    let a = float_column(record, "return")?;
+    let b = float_column(record, "volatility")?;
+    let scores: Vec<_> = a
+        .iter()
+        .zip(b.iter())
+        .map(|(a, b)| a.zip(b).map(|(a, b)| a * weights[0] + b * weights[1]))
+        .collect();
+    let mut fields = record.schema().fields().to_vec();
+    fields.push(Arc::new(datafusion::arrow::datatypes::Field::new(
+        "risk_score",
+        datafusion::arrow::datatypes::DataType::Float64,
+        true,
+    )));
+    let mut arrays = record.columns().to_vec();
+    arrays.push(Arc::new(Float64Array::from(scores)));
+    RecordBatch::try_new(
+        Arc::new(datafusion::arrow::datatypes::Schema::new(fields)),
+        arrays,
+    )
+    .map_err(|e| invalid("output", e.to_string()))
+}
+
+fn attach_scores(table: &Batch, weights: &[f64], copy_bytes: usize) -> Result<Batch> {
+    let records = table
+        .table_payload()?
+        .batches()
+        .iter()
+        .map(|record| attach_record(record, weights))
+        .collect::<Result<Vec<_>>>()?;
+    let metadata = BatchMetadata::new(
+        "rust-array",
+        0,
+        BTreeMap::from([(
+            "copy_bytes".into(),
+            serde_json::json!({"weights":copy_bytes}),
+        )]),
+    )?;
+    Batch::table(records, metadata)
+}
+
+fn multiply_columns(table: &Batch, weights: &[f64]) -> Result<Batch> {
+    let mut values = Vec::new();
+    for record in table.table_payload()?.batches() {
+        let a = float_column(record, "quantity")?;
+        let b = float_column(record, "unit_price")?;
+        for (a, b) in a.iter().zip(b.iter()) {
+            let (a, b) = a
+                .zip(b)
+                .ok_or_else(|| invalid("table", "non-null demo columns required"))?;
+            values.extend([
+                a * weights[0] + b * weights[2],
+                a * weights[1] + b * weights[3],
+            ]);
+        }
+    }
+    Batch::static_array_float(
+        "rust-array",
+        "float64",
+        vec![u64::try_from(table.num_rows()).unwrap(), 2],
+        None,
+        values,
+    )
+}
+
 #[async_trait]
 impl BatchOperator for Matrix {
     async fn process(

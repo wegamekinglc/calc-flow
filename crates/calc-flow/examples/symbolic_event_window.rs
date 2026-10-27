@@ -11,8 +11,8 @@ use datafusion::arrow::{
 };
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use support::{
-    ExampleResult, ReplaySource, check_floats, collect, data, edge, expression, f64_values,
-    i64_values, schema, stream_plan, strings, table, uints, watermark,
+    ExampleResult, ReplaySource, check_floats, collect, data, expression, f64_values, i64_values,
+    schema, stream_plan, strings, table, uints, watermark,
 };
 
 fn trade_data() -> ExampleResult<Batch> {
@@ -74,57 +74,14 @@ fn trade_data() -> ExampleResult<Batch> {
 #[tokio::main]
 async fn main() -> ExampleResult {
     let input = trade_data()?;
-    let spec = WindowSpec::tumbling("ts", Duration::from_secs(60))?
-        .group_by(["symbol"])?
-        .aggregate(AggregateFunction::Count, "trade_id", "trade_count")?
-        .aggregate(AggregateFunction::Sum, "quantity", "volume")?
-        .aggregate(AggregateFunction::Min, "price", "low")?
-        .aggregate(AggregateFunction::Max, "price", "high")?
-        .aggregate(AggregateFunction::Avg, "price", "avg_price")?;
-    let window = WindowAggregateOperator::new("window", schema(&input), spec)?;
-    let output_schema = window.output_ports()[0].schema().unwrap().clone();
-    let plan = stream_plan(
-        PipelineBuilder::new("minute-bars")?
-            .add_node("window", window)?
-            .add_node(
-                "minute",
-                support::expression_schemas(
-                    expression("minute", "", &["*"], None)?,
-                    Some(output_schema.clone()),
-                    None,
-                )?,
-            )?
-            .add_node(
-                "summary",
-                support::expression_schemas(
-                    expression("summary", "price_range = high - low", &[], None)?,
-                    Some(output_schema),
-                    None,
-                )?,
-            )?
-            .connect(edge("window", "output", "minute", "input")?)?
-            .connect(edge("window", "output", "summary", "input")?)?,
-    )?;
+    let plan = stream_plan(program(schema(&input))?)?;
     let source = ReplaySource::new(vec![
         data(input, 1)?,
         watermark(60_000_000),
         watermark(120_000_000),
     ]);
     let outputs = collect(plan, BTreeMap::from([("input".into(), source.binding())])).await?;
-    let minute = &outputs["minute.output"];
-    let summary = &outputs["summary.output"];
-    assert_eq!(i64_values(minute, "volume"), [Some(40), None, Some(20)]);
-    check_floats(
-        &f64_values(minute, "avg_price"),
-        &[Some(101.0), None, Some(100.0)],
-    );
-    assert_eq!(
-        f64_values(summary, "price_range"),
-        [Some(2.0), None, Some(20.0)]
-    );
-    check_schema_and_rows(minute)?;
-    support::print(minute)?;
-    support::print(summary)
+    check_outputs(&outputs)
 }
 
 fn check_schema_and_rows(minute: &[Batch]) -> ExampleResult {
@@ -174,4 +131,70 @@ fn check_schema_and_rows(minute: &[Batch]) -> ExampleResult {
     )?;
     assert_eq!(actual, expected);
     Ok(())
+}
+
+fn window_operator(
+    schema: datafusion::arrow::datatypes::SchemaRef,
+) -> calc_flow::Result<WindowAggregateOperator> {
+    let spec = WindowSpec::tumbling("ts", Duration::from_secs(60))?
+        .group_by(["symbol"])?
+        .aggregate(AggregateFunction::Count, "trade_id", "trade_count")?
+        .aggregate(AggregateFunction::Sum, "quantity", "volume")?
+        .aggregate(AggregateFunction::Min, "price", "low")?
+        .aggregate(AggregateFunction::Max, "price", "high")?
+        .aggregate(AggregateFunction::Avg, "price", "avg_price")?;
+    WindowAggregateOperator::new("window", schema, spec)
+}
+
+fn branch_nodes(
+    window: WindowAggregateOperator,
+) -> calc_flow::Result<Vec<(&'static str, calc_flow::NodeOperator)>> {
+    let schema = window.output_ports()[0].schema().unwrap().clone();
+    let minute = support::expression_schemas(
+        expression("minute", "", &["*"], None)?,
+        Some(schema.clone()),
+        None,
+    )?;
+    let summary = support::expression_schemas(
+        expression("summary", "price_range = high - low", &[], None)?,
+        Some(schema),
+        None,
+    )?;
+    Ok(vec![
+        ("window", window.into()),
+        ("minute", minute.into()),
+        ("summary", summary.into()),
+    ])
+}
+
+fn program(schema: datafusion::arrow::datatypes::SchemaRef) -> calc_flow::Result<PipelineBuilder> {
+    let nodes = branch_nodes(window_operator(schema)?)?;
+    let builder = nodes.into_iter().try_fold(
+        PipelineBuilder::new("minute-bars")?,
+        |builder, (id, node)| builder.add_node(id, node),
+    )?;
+    support::connect_all(
+        builder,
+        &[
+            ("window", "output", "minute", "input"),
+            ("window", "output", "summary", "input"),
+        ],
+    )
+}
+
+fn check_outputs(outputs: &BTreeMap<String, Vec<Batch>>) -> ExampleResult {
+    let minute = &outputs["minute.output"];
+    let summary = &outputs["summary.output"];
+    assert_eq!(i64_values(minute, "volume"), [Some(40), None, Some(20)]);
+    check_floats(
+        &f64_values(minute, "avg_price"),
+        &[Some(101.0), None, Some(100.0)],
+    );
+    assert_eq!(
+        f64_values(summary, "price_range"),
+        [Some(2.0), None, Some(20.0)]
+    );
+    check_schema_and_rows(minute)?;
+    support::print(minute)?;
+    support::print(summary)
 }

@@ -1,8 +1,8 @@
 //! Python 01: order expressions, filtering, and two named outputs.
 mod support;
-use calc_flow::{ExecutionOptions, PipelineBuilder, UdfRegistry};
+use calc_flow::{Batch, ExecutionOptions, PipelineBuilder, UdfRegistry};
 use std::collections::BTreeMap;
-use support::{ExampleResult, edge, expression, i64_values, ints, strings, table};
+use support::{ExampleResult, connect_all, expression, i64_values, ints, strings, table};
 
 #[tokio::main]
 async fn main() -> ExampleResult {
@@ -11,8 +11,12 @@ async fn main() -> ExampleResult {
         ("quantity", ints(&[3, 1, 4])),
         ("unit_price", ints(&[10, 12, 10])),
     ]);
-    let registry = UdfRegistry::new().snapshot();
-    let plan = PipelineBuilder::new("large-orders")?
+    filtered_orders(&orders).await?;
+    named_outputs(orders).await
+}
+
+fn filtered_graph() -> calc_flow::Result<PipelineBuilder> {
+    let builder = PipelineBuilder::new("large-orders")?
         .add_node(
             "gross",
             expression("gross", "gross = quantity * unit_price", &[], None)?,
@@ -25,9 +29,12 @@ async fn main() -> ExampleResult {
                 &["order_id", "gross"],
                 Some("gross >= 20"),
             )?,
-        )?
-        .connect(edge("gross", "output", "large", "input")?)?
-        .compile_batch(&registry)?;
+        )?;
+    connect_all(builder, &[("gross", "output", "large", "input")])
+}
+
+async fn filtered_orders(orders: &Batch) -> ExampleResult {
+    let plan = filtered_graph()?.compile_batch(&UdfRegistry::new().snapshot())?;
     let result = plan
         .execute(
             BTreeMap::from([("input".into(), orders.clone())]),
@@ -38,9 +45,11 @@ async fn main() -> ExampleResult {
         i64_values(&[result.outputs["output"].clone()], "gross"),
         [Some(30), Some(40)]
     );
-    support::print(&[result.outputs["output"].clone()])?;
+    support::print(&[result.outputs["output"].clone()])
+}
 
-    let program = PipelineBuilder::new("order-outputs")?
+fn named_graph() -> calc_flow::Result<PipelineBuilder> {
+    let builder = PipelineBuilder::new("order-outputs")?
         .add_node(
             "source",
             expression("source", "gross = quantity * unit_price", &[], None)?,
@@ -52,10 +61,18 @@ async fn main() -> ExampleResult {
         .add_node(
             "quantities",
             expression("quantities", "", &["order_id", "quantity"], None)?,
-        )?
-        .connect(edge("source", "output", "totals", "input")?)?
-        .connect(edge("source", "output", "quantities", "input")?)?
-        .compile_batch(&registry)?;
+        )?;
+    connect_all(
+        builder,
+        &[
+            ("source", "output", "totals", "input"),
+            ("source", "output", "quantities", "input"),
+        ],
+    )
+}
+
+async fn named_outputs(orders: Batch) -> ExampleResult {
+    let program = named_graph()?.compile_batch(&UdfRegistry::new().snapshot())?;
     let result = program
         .execute(
             BTreeMap::from([("input".into(), orders)]),

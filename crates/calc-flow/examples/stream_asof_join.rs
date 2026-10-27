@@ -82,17 +82,7 @@ fn side(prefix: &str) -> Result<AsofJoinSide> {
 async fn main() -> ExampleResult {
     let trades = rows(&[105, 121], &[10.4, 10.6]);
     let quotes = rows(&[90, 100, 110], &[10.0, 10.2, 10.5]);
-    let spec = StreamAsofJoinSpec::new(
-        side("trade")?,
-        side("quote")?,
-        Duration::from_micros(10),
-        AsofStateLimits::new(100_000, 64 << 20)?,
-    )?;
-    let operator = StreamAsofJoinOperator::new("match", schema(&trades), schema(&quotes), spec)?;
-    let plan = stream_plan(
-        PipelineBuilder::new("stream-asof-join")?
-            .add_node("match", NodeOperator::StreamAsofJoin(Box::new(operator)))?,
-    )?;
+    let plan = plan(&trades, &quotes)?;
     let advance = Arc::new(AtomicBool::new(false));
     let sources = [("left", trades), ("right", quotes)]
         .into_iter()
@@ -118,6 +108,38 @@ async fn main() -> ExampleResult {
     )?
     .start()
     .await?;
+    wait_for_equal_watermarks(&job).await?;
+    assert!(
+        output.lock().await.iter().all(|b| b.num_rows() == 0),
+        "equal watermarks finalized too early"
+    );
+    println!("Both watermarks equal 105: no final output yet.");
+    advance.store(true, Ordering::Release);
+    completed(&job).await?;
+    let batches = output.lock().await;
+    assert_eq!(f64_values(&batches, "quote__price"), [Some(10.2), None]);
+    support::print(&batches)
+}
+
+fn join_spec() -> Result<StreamAsofJoinSpec> {
+    StreamAsofJoinSpec::new(
+        side("trade")?,
+        side("quote")?,
+        Duration::from_micros(10),
+        AsofStateLimits::new(100_000, 64 << 20)?,
+    )
+}
+
+fn plan(trades: &Batch, quotes: &Batch) -> Result<calc_flow::StreamExecutionPlan> {
+    let operator =
+        StreamAsofJoinOperator::new("match", schema(trades), schema(quotes), join_spec()?)?;
+    stream_plan(
+        PipelineBuilder::new("stream-asof-join")?
+            .add_node("match", NodeOperator::StreamAsofJoin(Box::new(operator)))?,
+    )
+}
+
+async fn wait_for_equal_watermarks(job: &calc_flow::StreamingJob) -> ExampleResult {
     let ready = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if job.stream_asof_join_status().values().any(|s| {
@@ -137,14 +159,5 @@ async fn main() -> ExampleResult {
         job.cancel().await;
         return Err(error.into());
     }
-    assert!(
-        output.lock().await.iter().all(|b| b.num_rows() == 0),
-        "equal watermarks finalized too early"
-    );
-    println!("Both watermarks equal 105: no final output yet.");
-    advance.store(true, Ordering::Release);
-    completed(&job).await?;
-    let batches = output.lock().await;
-    assert_eq!(f64_values(&batches, "quote__price"), [Some(10.2), None]);
-    support::print(&batches)
+    Ok(())
 }

@@ -173,10 +173,8 @@ fn offline_demo(decoders: &KafkaDecoderRegistry) -> ExampleResult {
 
 #[tokio::main]
 async fn main() -> ExampleResult {
-    let arguments: Vec<_> = std::env::args().skip(1).collect();
-    if !arguments.is_empty() && arguments != ["--consume"] {
-        return Err("usage: kafka_custom_decoder [--consume]".into());
-    }
+    let arguments = arguments()?;
+
     let decoders = KafkaDecoderRegistry::default();
     decoders.register(Arc::new(PipeOrdersDecoder))?;
     offline_demo(&decoders)?;
@@ -188,6 +186,14 @@ async fn main() -> ExampleResult {
         println!("set CALC_FLOW_KAFKA_BOOTSTRAP to consume a prepared topic");
     }
     Ok(())
+}
+
+fn arguments() -> ExampleResult<Vec<String>> {
+    let arguments = support::arguments()?;
+    if !arguments.is_empty() && arguments != ["--consume"] {
+        return Err("usage: kafka_custom_decoder [--consume]".into());
+    }
+    Ok(arguments)
 }
 
 #[cfg(test)]

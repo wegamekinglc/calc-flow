@@ -28,6 +28,16 @@ use tokio::sync::{Mutex, Notify};
 pub type ExampleResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 pub type Collected = Arc<Mutex<Vec<Batch>>>;
 
+pub fn arguments() -> ExampleResult<Vec<String>> {
+    std::env::args_os().skip(1).map(argument_text).collect()
+}
+
+fn argument_text(value: std::ffi::OsString) -> ExampleResult<String> {
+    value
+        .into_string()
+        .map_err(|_| "arguments must be UTF-8".into())
+}
+
 pub fn ints(values: &[i64]) -> ArrayRef {
     Arc::new(Int64Array::from(values.to_vec()))
 }
@@ -105,6 +115,17 @@ pub fn edge(from: &str, output: &str, to: &str, input: &str) -> Result<Edge> {
         PortEndpoint::new(from, output)?,
         PortEndpoint::new(to, input)?,
     ))
+}
+
+pub fn connect_all(
+    builder: PipelineBuilder,
+    connections: &[(&str, &str, &str, &str)],
+) -> Result<PipelineBuilder> {
+    connections
+        .iter()
+        .try_fold(builder, |builder, &(from, output, to, input)| {
+            builder.connect(edge(from, output, to, input)?)
+        })
 }
 
 pub fn table_port(name: &str, schema: Option<SchemaRef>) -> Result<Port> {
@@ -408,5 +429,26 @@ pub fn invalid(field: &str, message: impl Into<String>) -> CalcFlowError {
     CalcFlowError::InvalidArgument {
         field: field.into(),
         message: message.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::argument_text;
+
+    #[test]
+    fn unicode_arguments_are_preserved() {
+        assert_eq!(argument_text("计算".into()).unwrap(), "计算");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invalid_unicode_arguments_return_an_error() {
+        use std::os::unix::ffi::OsStringExt;
+        let value = std::ffi::OsString::from_vec(vec![0xff]);
+        assert_eq!(
+            argument_text(value).unwrap_err().to_string(),
+            "arguments must be UTF-8"
+        );
     }
 }

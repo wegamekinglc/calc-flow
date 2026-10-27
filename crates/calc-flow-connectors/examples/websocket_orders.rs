@@ -14,22 +14,26 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         let (socket, _) = listener.accept().await?;
         let payload = payload.clone();
         tokio::spawn(async move {
-            let result = async {
-                let mut socket = accept_async(socket).await?;
-                for line in payload.lines() {
-                    socket.send(Message::Text(line.into())).await?;
-                }
-                while let Some(message) = socket.next().await {
-                    if matches!(message?, Message::Close(_)) {
-                        break;
-                    }
-                }
-                Ok::<_, tokio_tungstenite::tungstenite::Error>(())
-            }
-            .await;
+            let result = send_orders(socket, payload).await;
             if let Err(error) = result {
                 eprintln!("WebSocket client: {error}");
             }
         });
     }
+}
+
+async fn send_orders(
+    socket: tokio::net::TcpStream,
+    payload: String,
+) -> Result<(), tokio_tungstenite::tungstenite::Error> {
+    let mut socket = accept_async(socket).await?;
+    for line in payload.lines() {
+        socket.send(Message::Text(line.into())).await?;
+    }
+    while let Some(message) = socket.next().await {
+        if matches!(message?, Message::Close(_)) {
+            break;
+        }
+    }
+    Ok(())
 }

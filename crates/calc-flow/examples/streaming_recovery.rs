@@ -10,12 +10,7 @@ use support::{
 async fn run(
     root: &Path,
 ) -> ExampleResult<(Vec<Option<i64>>, Vec<usize>, Option<calc_flow::Epoch>)> {
-    let plan = stream_plan(
-        PipelineBuilder::new("streaming-recovery-example")?.add_node(
-            "calculate",
-            expression("calculate", "result = value * 2", &[], None)?,
-        )?,
-    )?;
+    let plan = plan()?;
     let source = ReplaySource::batches(
         [10, 20, 30]
             .map(|value| table(vec![("value", ints(&[value]))]))
@@ -50,4 +45,13 @@ async fn main() -> ExampleResult {
     assert_eq!(second.2, first.2);
     println!("first run: {first:?}\nterminal restart: {second:?}");
     Ok(())
+}
+
+fn plan() -> calc_flow::Result<calc_flow::StreamExecutionPlan> {
+    stream_plan(
+        PipelineBuilder::new("streaming-recovery-example")?.add_node(
+            "calculate",
+            expression("calculate", "result = value * 2", &[], None)?,
+        )?,
+    )
 }

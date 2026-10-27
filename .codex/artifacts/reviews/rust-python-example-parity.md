@@ -4,8 +4,10 @@
 
 Reviewed the 36-entry Python/Rust inventory, core and connector examples,
 shared source/sink and array helpers, Cargo feature gates, runner selection,
-and README changes. This is a local working-tree review; no PR or CI status
-was consulted.
+and README changes. The initial review covers `ce73bb8e`; the follow-up reviews
+the PR #507 working-tree corrections against that commit. The follow-up used
+the author's supplied Codacy annotations and validation evidence. The reviewer
+did not query or poll CI status.
 
 ## Findings
 
@@ -59,12 +61,59 @@ within the prepared demo destinations documented for the Python versions.
 - Author reports formatting, 251 local Markdown links, whitespace, and schema
   drift checks passed. The reviewer inspected the final binding/sink-ID changes
   and documentation synchronization without duplicating the author's checks.
-- Real Kafka/database service runs, full regression/coverage, CI, and
-  performance measurements were not performed.
+- Real Kafka/database service runs, full regression/coverage, and performance
+  measurements were not performed locally. Hosted CI results remain separate.
+
+## PR #507 Codacy follow-up
+
+Reviewed the extraction of graph construction, execution, and cleanup helpers,
+the shared `connect_all` helper, argument decoding, stock CLI parsing, and the
+corresponding SQL documentation update. Static comparison found no changes to
+node IDs, operator configurations, SQL, exact schemas, edge order, or physical
+bindings that would change graph fingerprints. Matrix shapes, metadata and
+placement behavior, trade seed/period generation, and older-last quote ordering
+remain intact. Connector startup and waiting share one deadline; failed or
+timed-out startup awaits cleanup, and waiting timeouts cancel the job before
+dropping ownership and awaiting cleanup.
+
+One blocking regression was found and fixed during this follow-up: collecting
+raw repeated stock options before parsing discarded earlier invalid values.
+Each occurrence now validates against its u64/u32 target type before collection.
+The final value still wins for valid duplicates, and final positive/count
+constraints retain the prior `--accounts 0 --accounts 1` behavior. Two focused
+tests first failed for invalid earlier row/account values, then passed with the
+fix; a third test preserves valid duplicate handling.
+
+Author-provided final evidence:
+
+- The Codacy snapshot reported four argument-API findings and 31 complexity
+  findings. Local Lizard reproduced those plus one pre-existing SQL example
+  function above eight; the final scan reports no threshold violations.
+  No rule suppression or threshold adjustment was introduced.
+- Four argument entry points now use `args_os` and return a UTF-8 decoding
+  error. Actual invalid-byte invocations of all four return errors without
+  panicking. The original panic reproduction is retained in
+  `target/pr507-argv-red.log`.
+- Stock CLI tests passed all five tests, including Unicode and repeated-option
+  cases. Red/green evidence is in `target/pr507-stock-cli-{red,green}.log`.
+  Both Kafka example test targets passed five tests each.
+- All 25 core demos again returned zero in
+  `target/pr507-core-results.json`. The five affected connector demos—file,
+  both Kafka offline decoders, local HTTP, and local WebSocket—passed in
+  `target/pr507-local-connector-results.log`. Unchanged late-output recovery
+  retains its earlier passing evidence.
+- Native example builds, core example Clippy, connector example Clippy with
+  all features, and the final focused persistence Clippy check passed. The
+  persistence example retains its original-project immutability assertion.
+  Kafka argument helpers were moved before their test modules, and the SQL
+  documentation was synchronized with the self-contained executable source.
+
+The reviewer did not duplicate Cargo checks or read another CI status snapshot.
+Local evidence does not establish that the hosted Codacy/CI checks have cleared.
 
 ## Verdict
 
-**Approve** for this example-porting scope. No unaddressed blocking finding
-remains. Validation covers all core examples and the local connector paths
-listed above; it does not establish CI success, coverage-gate success, or
-merge readiness.
+**Approve** for the example-porting scope and the reviewed PR #507 corrections.
+No unaddressed blocking finding remains. Validation covers all core examples
+and the local connector paths listed above; it does not establish CI success,
+coverage-gate success, or merge readiness.
