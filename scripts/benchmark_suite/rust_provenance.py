@@ -6,7 +6,7 @@ import json
 import tomllib
 from pathlib import Path
 
-from scripts.toolkit import canonical_json, fingerprint_json
+from scripts.toolkit import canonical_json, fingerprint_json, sha256_file
 
 
 def _encoded(value: object) -> str:
@@ -16,19 +16,85 @@ def _encoded(value: object) -> str:
 def _locked_packages(root: Path) -> dict:
     lock = tomllib.loads((root / "Cargo.lock").read_text(encoding="utf-8"))
     return {
-        f"{item['source']}#{item['name']}@{item['version']}": {
-            key: item[key] for key in ("name", "version", "source", "checksum")
-        }
-        for item in lock["package"]
-        if item.get("source", "").startswith("registry+")
+        **{
+            f"{item['source']}#{item['name']}@{item['version']}": {
+                key: item[key] for key in ("name", "version", "source", "checksum")
+            }
+            for item in lock["package"]
+            if item.get("source", "").startswith("registry+")
+        },
+        **_vendored_packages(root, lock["package"]),
     }
+
+
+def _vendored_packages(root: Path, locked: list[dict]) -> dict:
+    manifest = root / "Cargo.toml"
+    if not manifest.is_file():
+        return {}
+    workspace = tomllib.loads(manifest.read_text(encoding="utf-8"))
+    patches = workspace.get("patch", {}).get("crates-io", {})
+    packages = {}
+    for name, patch in patches.items():
+        if not isinstance(patch, dict) or "path" not in patch:
+            continue
+        relative = Path(patch["path"])
+        if not relative.is_relative_to("vendor") or ".." in relative.parts:
+            continue
+        directory = root / relative
+        if directory.is_symlink() or not directory.resolve().is_relative_to(
+            root.resolve() / "vendor"
+        ):
+            raise ValueError(f"vendored dependency escapes source tree: {relative}")
+        package = tomllib.loads((directory / "Cargo.toml").read_text(encoding="utf-8"))[
+            "package"
+        ]
+        identity = {key: package[key] for key in ("name", "version")}
+        if identity["name"] != patch.get("package", name) or not any(
+            all(item[key] == value for key, value in identity.items())
+            and "source" not in item
+            for item in locked
+        ):
+            raise ValueError(f"vendored dependency differs from Cargo.lock: {relative}")
+        source = f"path+{relative.as_posix()}"
+        packages[source] = {
+            **identity,
+            "source": source,
+            "source_sha256": _vendored_source_fingerprint(directory),
+        }
+    return packages
+
+
+def _vendored_source_fingerprint(directory: Path) -> str:
+    paths = sorted(directory.rglob("*"))
+    if any(path.is_symlink() for path in paths):
+        raise ValueError(f"vendored dependency contains a symlink: {directory}")
+    return fingerprint_json(
+        {
+            path.relative_to(directory).as_posix(): sha256_file(path)
+            for path in paths
+            if path.is_file()
+        }
+    )
 
 
 def _package_identity(root: Path, artifact: dict, locked: dict) -> dict:
     manifest = Path(artifact["manifest_path"])
     if manifest == root / "crates/calc-flow/Cargo.toml":
         return {"workspace_package": "crates/calc-flow"}
-    package = locked.get(artifact["package_id"])
+    package_id = artifact["package_id"]
+    package = locked.get(package_id) if package_id.startswith("registry+") else None
+    if (
+        package is None
+        and manifest.name == "Cargo.toml"
+        and manifest.is_relative_to(root)
+    ):
+        source = f"path+{manifest.parent.relative_to(root).as_posix()}"
+        package = locked.get(source)
+        if package is not None and package_id not in (
+            f"path+{manifest.parent.as_uri()}#{package['version']}",
+            f"path+{manifest.parent.as_uri()}#{package['name']}@{package['version']}",
+        ):
+            package = None
     if package is None:
         raise ValueError(f"unrecognized compiled dependency: {artifact['package_id']}")
     return package
@@ -89,8 +155,8 @@ def compiled_dependencies(
     """Retain package checksums, enabled features and profiles per bench build.
 
     Cargo's compiler-artifact messages cover fresh and cached builds alike.
-    Only the measured core package is normalized across checkout locations;
-    unsupported dependency sources fail closed pending an explicit migration.
+    Registry checksums and declared vendor patch contents identify dependencies
+    independently of checkout locations. Other dependency sources fail closed.
     """
     if not logs:
         raise ValueError("missing Rust benchmark build logs")

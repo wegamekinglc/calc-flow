@@ -635,8 +635,14 @@ retain their more specific contract-v2 identities.
 
 The Rust suite retains the full `Cargo.lock` hash and aggregate compiled
 dependency identity for provenance. Each case's comparison fingerprint covers
-only its own benchmark target's compiled registry packages, their lockfile
-checksums, enabled features, target kinds, profiles, and Rust/Cargo versions.
+only its own benchmark target's compiled packages, enabled features, target
+kinds, profiles, and Rust/Cargo versions. Registry packages retain lockfile
+checksums. Local patches declared under `[patch.crates-io]` in `vendor/` retain
+their relative source paths and SHA-256 fingerprints of all file paths and
+contents, with package names and versions checked against the manifest and
+lockfile. Identical vendor sources compare across checkout and temporary harness
+locations; changing patch contents invalidates the comparison even when the
+package version stays the same.
 Adding a target does not invalidate comparisons for unchanged shared targets.
 The inventory comes from Cargo's
 [compiler-artifact messages](https://doc.rust-lang.org/cargo/reference/external-tools.html#artifact-messages),
