@@ -9,6 +9,17 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-27: Prepare the `calc-flow-python` 2026.10.27 release, aligning
+  workspace crates, exact native dependencies, Python metadata, and current
+  documentation. This release adds cumulative extrema, sum, and variance;
+  compact grouped ordered `LAST_VALUE` with explicit compact SQL state budgets;
+  and complete-replacement `snapshot_sql` over latest initialized relations.
+  The stock account valuation example now uses native snapshot SQL. It also
+  includes checkpoint recovery and null-handling fixes, shared owned-state
+  quotas, and SQL checkpoint work dispatch. Project and managed checkpoint
+  manifest format versions remain 3; engine and operator state compatibility
+  checks still apply when restoring checkpoints.
+
 - 2026-10-21: Prepare the `calc-flow-python` 2026.10.21 release, aligning
   workspace crates, exact native dependencies, Python metadata, and current
   documentation. This release includes the DataFusion 55 / Arrow 59 upgrade,
