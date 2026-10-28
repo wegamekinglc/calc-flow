@@ -59,31 +59,38 @@ class RunExamplesTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         commands = [call.args[0] for call in run.call_args_list]
-        self.assertEqual(
-            commands,
-            [
-                ["cargo", "run", "-p", "calc-flow", "--example", name]
-                for name in (
-                    "expression_pipeline",
-                    "sql_join",
-                    "continuous_runtime",
-                    "windowed_streaming",
-                )
-            ]
-            + [
-                [
-                    "cargo",
-                    "run",
-                    "-p",
-                    "calc-flow-connectors",
-                    "--example",
-                    "late_output_recovery",
-                ]
-            ],
-        )
+        names = [command[command.index("--example") + 1] for command in commands]
+        self.assertIn("datafusion_pipeline", names)
+        self.assertIn("streaming_account_market_values", names)
+        self.assertIn("file_source", names)
+        self.assertIn("late_output_recovery", names)
+        for name in run_examples.SERVICE_RUST_EXAMPLES:
+            self.assertNotIn(name, names)
         self.assertFalse(
             any("schema" in part for command in commands for part in command)
         )
+
+    def test_rust_service_inventory_covers_every_python_example(self) -> None:
+        commands = run_examples._commands("rust", include_services=True)
+        names = [command[command.index("--example") + 1] for command in commands]
+        for path in run_examples.PYTHON_EXAMPLES:
+            stem = Path(path).stem
+            name = stem.split("_", 1)[1] if stem[:2].isdigit() else stem
+            self.assertIn(name, names, path)
+        self.assertEqual(len(names), len(set(names)))
+        for command in commands:
+            package = command[command.index("-p") + 1]
+            name = command[command.index("--example") + 1]
+            self.assertTrue(Path(f"crates/{package}/examples/{name}.rs").is_file())
+            if package == "calc-flow-connectors":
+                self.assertIn("--features", command)
+        self.assertIn("kafka_custom_decoder", names)
+        for command in commands:
+            if command[command.index("--example") + 1] in {
+                "kafka_protobuf_source",
+                "kafka_custom_decoder",
+            }:
+                self.assertEqual(command[-2:], ["--", "--consume"])
 
     def test_failed_example_exit_code_is_preserved(self) -> None:
         failure = run_examples.subprocess.CalledProcessError(

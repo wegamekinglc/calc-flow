@@ -1,5 +1,7 @@
 # Calc Flow examples
 
+Every runnable example has a [Rust counterpart](../crates/calc-flow/examples/README.md), including connector sources/sinks, recovery, and financial streams.
+
 Start with the [documentation overview](../docs/introduction.md) and
 [installation guide](../docs/getting-started.md). Start with Python expressions
 in 01, SQL composition in `19_sql_expression_pipeline.py`, and streams in
@@ -263,7 +265,8 @@ Run a Rust example with `cargo run -p calc-flow --example NAME`:
 - [expression_pipeline.rs](../crates/calc-flow/examples/expression_pipeline.rs)
   (`expression_pipeline`) calculates the introductory totals `[3, 7]`.
 - [sql_join.rs](../crates/calc-flow/examples/sql_join.rs) (`sql_join`) uses the
-  same order/fee dataset as Python 02 and checks net values `[70, 108, 36]`.
+  same order/fee dataset as Python 02, then doubles the net amounts and checks
+  `[140, 216, 72]`.
 - [continuous_runtime.rs](../crates/calc-flow/examples/continuous_runtime.rs)
   (`continuous_runtime`) demonstrates native source/sink traits and the owning
   job lifecycle.
@@ -285,7 +288,9 @@ For separate-process recovery with a persistent root, follow the
 [three-phase commands](../docs/streaming-guide.md#run-the-file-recovery-example).
 The user-example runner includes this native example too.
 
-The [Rust inventory](../crates/calc-flow/examples/README.md) also lists schema
+The [complete Rust inventory](../crates/calc-flow/examples/README.md) maps every
+runnable Python example to its Rust version, with connector feature flags and
+small stock/account commands. It also lists schema
 export/generation tools. They are excluded from the user-example runner
 because schema generation updates a tracked artifact.
 

@@ -5,14 +5,22 @@
 //! consume the prepared `calc-flow-example-orders-proto` topic with the
 //! managed source; see docs/connectors/kafka.md for topic preparation.
 
-use std::error::Error;
+mod support;
 use std::path::PathBuf;
 use std::time::Duration;
+use support::ExampleResult;
 
-use calc_flow::{
-    ArrowFieldSpec, DecodeBounds, FormatDecoder as _, JsonMap, SourceEvent, StreamSource as _,
-};
-use calc_flow_connectors::kafka::{KafkaSource, KafkaSourceConfig};
+use calc_flow::{ArrowFieldSpec, DecodeBounds, FormatDecoder as _, JsonMap};
+fn arguments() -> ExampleResult<Vec<String>> {
+    let arguments = support::arguments()?;
+    if !arguments.is_empty() && arguments != ["--consume"] && arguments != ["--produce"] {
+        return Err("usage: kafka_protobuf_source [--produce|--consume]".into());
+    }
+    Ok(arguments)
+}
+
+#[cfg(test)]
+use calc_flow_connectors::kafka::KafkaSourceConfig;
 use calc_flow_connectors::protobuf::ProtobufCodec;
 use prost::Message as _;
 use prost_reflect::{DescriptorPool, DynamicMessage, Value};
@@ -47,7 +55,7 @@ fn order_schema() -> Vec<ArrowFieldSpec> {
 }
 
 /// Encodes one sample order with the same descriptor set the source loads.
-fn encode_order(id: i64, quantity: i64, price: f64) -> Result<Vec<u8>, Box<dyn Error>> {
+fn encode_order(id: i64, quantity: i64, price: f64) -> ExampleResult<Vec<u8>> {
     let set =
         prost_types::FileDescriptorSet::decode(std::fs::read(descriptor_set_path())?.as_slice())?;
     let pool = DescriptorPool::from_file_descriptor_set(set)?;
@@ -106,7 +114,7 @@ fn source_options(bootstrap: &str) -> JsonMap {
     ])
 }
 
-fn decode_samples() -> Result<(), Box<dyn Error>> {
+fn decode_samples() -> ExampleResult {
     let codec = ProtobufCodec::new("1", &descriptor_set_path(), MESSAGE)?;
     let bounds = DecodeBounds::new(1024, 1 << 20)?;
     for (id, quantity, price) in [(1, 2, 10.0), (2, 3, 20.0)] {
@@ -117,31 +125,53 @@ fn decode_samples() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn consume_topic(bootstrap: &str) -> Result<(), Box<dyn Error>> {
-    let config = KafkaSourceConfig::from_options(&source_options(bootstrap))?;
-    let mut source = KafkaSource::new(config)?;
-    source.open(None).await?;
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    let mut delivered = 0_u64;
-    while delivered < 2 && std::time::Instant::now() < deadline {
-        match source.next().await? {
-            Some(SourceEvent::Data { batch, .. }) => {
-                delivered += batch.num_rows() as u64;
-                println!("kafka batch: {} row(s)", batch.num_rows());
-            }
-            _ => tokio::time::sleep(Duration::from_millis(100)).await,
-        }
+async fn consume_topic(bootstrap: &str) -> ExampleResult {
+    let mut registry = support::registry()?;
+    calc_flow_connectors::register_kafka_connectors(&mut registry)?;
+    let source = support::source(
+        "kafka",
+        serde_json::to_value(source_options(bootstrap))?,
+        Some("protobuf"),
+        None,
+    );
+    support::read_source(source, &registry, true, "at_least_once").await
+}
+
+async fn produce_orders(bootstrap: &str) -> ExampleResult {
+    use rdkafka::{
+        ClientConfig,
+        producer::{FutureProducer, FutureRecord},
+    };
+    let producer: FutureProducer = ClientConfig::new()
+        .set("bootstrap.servers", bootstrap)
+        .create()?;
+    for (id, quantity, price) in [(1, 2, 10.0), (2, 3, 20.0)] {
+        let bytes = encode_order(id, quantity, price)?;
+        producer
+            .send(
+                FutureRecord::<(), _>::to("calc-flow-example-orders-proto")
+                    .partition(0)
+                    .payload(&bytes),
+                Duration::from_secs(10),
+            )
+            .await
+            .map_err(|(error, _)| error)?;
     }
-    println!("consumed {delivered} protobuf row(s) from the broker");
+    println!("produced two protobuf orders");
     Ok(())
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
-    decode_samples()?;
+async fn main() -> ExampleResult {
+    let arguments = arguments()?;
     let bootstrap =
         std::env::var("CALC_FLOW_KAFKA_BOOTSTRAP").unwrap_or_else(|_| "127.0.0.1:9092".into());
-    if std::env::var_os("CALC_FLOW_KAFKA_BOOTSTRAP").is_some() {
+    if arguments == ["--produce"] {
+        return produce_orders(&bootstrap).await;
+    }
+
+    decode_samples()?;
+    if arguments == ["--consume"] || std::env::var_os("CALC_FLOW_KAFKA_BOOTSTRAP").is_some() {
         consume_topic(&bootstrap).await?;
     } else {
         println!("set CALC_FLOW_KAFKA_BOOTSTRAP to consume a prepared topic");
@@ -167,5 +197,34 @@ mod tests {
     #[test]
     fn example_options_parse() {
         KafkaSourceConfig::from_options(&source_options("127.0.0.1:1")).expect("options parse");
+    }
+
+    #[test]
+    fn managed_project_compiles_without_connecting_to_kafka() {
+        let root = tempfile::tempdir().expect("temporary root");
+        let mut registry = support::registry().expect("file registry");
+        calc_flow_connectors::register_kafka_connectors(&mut registry).expect("Kafka registry");
+        let source = support::source(
+            "kafka",
+            serde_json::to_value(source_options("127.0.0.1:1")).unwrap(),
+            Some("protobuf"),
+            None,
+        );
+        let project = support::project(
+            root.path(),
+            source,
+            support::file_sink(root.path(), "at_least_once"),
+        )
+        .unwrap();
+        let plan = calc_flow::compile_stream_project(
+            &project,
+            &calc_flow::ProviderRegistry::default(),
+            &calc_flow::UdfRegistry::new().snapshot(),
+            &registry.snapshot(),
+            &calc_flow::StreamRequirements::default(),
+        )
+        .expect("managed source and sink compile");
+        assert_eq!(plan.source_binding_ids(), ["input"]);
+        assert_eq!(plan.sink_binding_ids(), ["output"]);
     }
 }

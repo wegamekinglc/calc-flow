@@ -7,7 +7,24 @@ use datafusion::arrow::{array::Int64Array, record_batch::RecordBatch};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let plan = PipelineBuilder::new("orders-and-fees")?
+    let result = plan()?
+        .execute(inputs()?, ExecutionOptions::default())
+        .await?;
+    let output = result.outputs["output"].table_payload()?;
+    let net = output.batches()[0]
+        .column_by_name("doubled")
+        .expect("sql output contains doubled")
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .expect("net is an Int64 column");
+
+    assert_eq!(net.values(), &[140, 216, 72]);
+    println!("doubled net amounts: {net:?}");
+    Ok(())
+}
+
+fn nodes() -> calc_flow::Result<PipelineBuilder> {
+    PipelineBuilder::new("orders-and-fees")?
         .add_node(
             "join",
             Box::new(SqlOperator::new(
@@ -19,7 +36,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Vec::new(),
             )?),
         )?
-        .compile_batch(&UdfRegistry::new().snapshot())?;
+        .add_node(
+            "double",
+            Box::new(calc_flow::ExpressionOperator::new(
+                "double",
+                "",
+                vec!["order_id".into(), "net * 2 AS doubled".into()],
+                None,
+                Vec::new(),
+            )?),
+        )
+}
+
+fn plan() -> calc_flow::Result<calc_flow::BatchExecutionPlan> {
+    nodes()?
+        .connect(calc_flow::Edge::new(
+            calc_flow::PortEndpoint::new("join", "output")?,
+            calc_flow::PortEndpoint::new("double", "input")?,
+        ))?
+        .compile_batch(&UdfRegistry::new().snapshot())
+}
+
+fn inputs() -> Result<BTreeMap<String, Batch>, Box<dyn std::error::Error>> {
     let orders = RecordBatch::try_from_iter(vec![
         (
             "order_id",
@@ -34,30 +72,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
         ("fee", Arc::new(Int64Array::from(vec![5, 12, 4])) as _),
     ])?;
-    let result = plan
-        .execute(
-            BTreeMap::from([
-                (
-                    "orders".into(),
-                    Batch::table(vec![orders], BatchMetadata::default())?,
-                ),
-                (
-                    "fees".into(),
-                    Batch::table(vec![fees], BatchMetadata::default())?,
-                ),
-            ]),
-            ExecutionOptions::default(),
-        )
-        .await?;
-    let output = result.outputs["output"].table_payload()?;
-    let net = output.batches()[0]
-        .column_by_name("net")
-        .expect("sql output contains net")
-        .as_any()
-        .downcast_ref::<Int64Array>()
-        .expect("net is an Int64 column");
-
-    assert_eq!(net.values(), &[70, 108, 36]);
-    println!("net amounts: {net:?}");
-    Ok(())
+    Ok(BTreeMap::from([
+        (
+            "orders".into(),
+            Batch::table(vec![orders], BatchMetadata::default())?,
+        ),
+        (
+            "fees".into(),
+            Batch::table(vec![fees], BatchMetadata::default())?,
+        ),
+    ]))
 }

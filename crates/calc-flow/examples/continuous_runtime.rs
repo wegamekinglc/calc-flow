@@ -80,7 +80,8 @@ impl StreamSink for CollectSink {
 
     async fn write(&mut self, batch: &Batch) -> Result<()> {
         let values = batch.table_payload().expect("table output").batches()[0]
-            .column(0)
+            .column_by_name("result")
+            .expect("result column")
             .as_any()
             .downcast_ref::<Int64Array>()
             .expect("i64 result")
@@ -153,6 +154,10 @@ async fn main() -> Result<()> {
     let runner = example_runner(example_plan()?, &values, checkpoints)?;
     let job = runner.start().await?;
     let outcome = job.wait().await;
+
+    assert_eq!(outcome.state, calc_flow::JobState::Completed, "{outcome:?}");
+    assert!(outcome.completed_epoch.is_some());
+    assert_eq!(*values.lock().await, [2, 3, 4]);
 
     println!("terminal state: {:?}", outcome.state);
     println!("completed epoch: {:?}", outcome.completed_epoch);
