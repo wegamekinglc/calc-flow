@@ -262,6 +262,29 @@ class BenchmarkWorkflowTests(unittest.TestCase):
             counts, {module: 2 if module in shared else 1 for module in expected}
         )
 
+    def test_risingwave_tests_use_their_required_environments(self):
+        suite = (ROOT / ".github/workflows/benchmark-suite.yml").read_text(
+            encoding="utf-8"
+        )
+        prepare = suite.split("  build:", 1)[0]
+        self.assertIn("scripts.test_risingwave_isolation", prepare)
+        self.assertNotIn("scripts.test_risingwave_comparison", prepare)
+        comparison = suite.split(
+            "      - name: Verify RisingWave comparison support\n", 1
+        )[1].split("      - name:", 1)[0]
+        for required in (
+            "if: matrix.id == 'warm-10'",
+            "uv venv target/risingwave-test-venv",
+            "uv pip sync --python target/risingwave-test-venv/bin/python",
+            "benchmarks/risingwave/requirements.lock",
+            "uv pip install --python target/risingwave-test-venv/bin/python --no-deps",
+            "target/releases/candidate/*.whl",
+            'python -c "import calc_flow, numpy, psutil, psycopg, pyarrow"',
+            "python -m unittest scripts.test_risingwave_comparison",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, comparison)
+
     def test_retained_script_checks_are_collected_by_unittest(self):
         checks = unittest.defaultTestLoader.loadTestsFromName(
             "scripts.test_retained_benchmark_suite"

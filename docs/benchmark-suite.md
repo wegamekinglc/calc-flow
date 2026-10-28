@@ -18,6 +18,13 @@ the candidate wheel are installed. A preparation failure skips builds and
 measurements; the summary then reports missing shards, without establishing a
 performance regression.
 
+RisingWave isolation checks run during preparation. Its comparison support tests
+run once in `warm-10`, using a separate environment from
+`benchmarks/risingwave/requirements.lock` and the candidate wheel. Required
+imports are checked before test discovery so missing dependencies fail rather
+than skip the module. These tests use fixtures and mocked service lifecycles;
+they do not start RisingWave or collect new performance samples.
+
 Historical JSON results under `benchmarks/rolling/` are stored with Git LFS.
 Install Git LFS and run `git lfs pull --include='benchmarks/rolling/*.json'`
 when inspecting those results locally. Scheduled benchmark runs generate their

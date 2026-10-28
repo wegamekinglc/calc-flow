@@ -106,6 +106,7 @@ jobs:
           scripts.test_release_evidence
           scripts.test_release_pairs
           scripts.test_release_performance
+          scripts.test_risingwave_isolation
           scripts.test_run_sql_datafusion_matrix
           scripts.test_verify_perf_gates
           scripts.test_verify_sql_datafusion_performance
@@ -277,6 +278,16 @@ jobs:
             scripts.test_interval_acceptance
           PYTHONPATH=target/adapter-site:. JAX_PLATFORMS=cpu \
             target/benchmark-venv/bin/python -m pytest benchmarks/test_warm_stream.py -q
+      - name: Verify RisingWave comparison support
+        if: matrix.id == 'warm-10'
+        run: |
+          uv venv target/risingwave-test-venv
+          uv pip sync --python target/risingwave-test-venv/bin/python \
+            benchmarks/risingwave/requirements.lock
+          uv pip install --python target/risingwave-test-venv/bin/python --no-deps \
+            target/releases/candidate/*.whl
+          target/risingwave-test-venv/bin/python -c "import calc_flow, numpy, psutil, psycopg, pyarrow"
+          target/risingwave-test-venv/bin/python -m unittest scripts.test_risingwave_comparison
       - name: Record benchmark CPU topology
         run: |
           mkdir -p target/benchmark-results
