@@ -1,0 +1,32 @@
+{
+  "source_ref": "b9a10d4fa4b109b810d2f5839951912b92e597f8",
+  "arroyo_ref": "4ef15f6336a596651f10cf27c1ee29c29bf81577",
+  "native_sha256": "a0708fcf5fa84a1cf2c5347a66b73680d7426a3313746a1ef99519d5b2c7bfb8",
+  "arroyo_sha256": "558b28b4c2aa3153500308684fd121dea2f040b5599d9f3342830834c24a319f",
+  "python": "3.13.9 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 19:16:10) [GCC 11.2.0]",
+  "platform": "Linux-5.15.167.4-microsoft-standard-WSL2-x86_64-with-glibc2.43",
+  "dependencies": {
+    "calc-flow-python": "2026.10.27",
+    "pyarrow": "24.0.0",
+    "psutil": "7.2.2",
+    "websockets": "15.0.1"
+  },
+  "harnesses": {
+    "probe.py": "08cd55daee41dd654a40e7cc361ece508712d0e826d81663dd5d3393db682901",
+    "run.py": "e19468a5c29f2bf1c6cd04092184a5cd93cdfb4c620d73dd14b09d6b7e555240",
+    "capture.py": "9cbbd6b60e678f6b930b1cdf26ec38d2b2ae323838eb1970568a4c8a592ab2ce",
+    "profiling.py": "60a8b475d116db5c6f02b0e421b513f591ca985f25288465c6d507d37849b803",
+    "engines.py": "12b7fa2aacceeca876bee1b574f94b0f7f31de147e15e027b325ecd2ca6767b6",
+    "common.py": "1fdf2257cc6ee3f0590677b52ba4a59fa7e467b05c83de4cdff92cfed2edbf14"
+  },
+  "historical_harness_sha256": "0efc4bcd51bec8b87792976de2bdae14eb80e4bfd685f948e278513823a0c418",
+  "resource": {
+    "controller_affinity": "0-1",
+    "worker_affinity": "4-7",
+    "tokio_workers": 4,
+    "arroyo_parallelism": 1
+  },
+  "pairs": 5,
+  "budget_s": 550.0,
+  "contract": "DAL-417 current cross-engine attribution; informational"
+}

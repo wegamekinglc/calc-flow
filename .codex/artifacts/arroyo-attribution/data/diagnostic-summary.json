@@ -1,0 +1,718 @@
+[
+  {
+    "name": "profile-arrow-512-sql_plan",
+    "instrumented_elapsed_ms": 57.129711960442364,
+    "stages": {
+      "sql.lower_once": {
+        "calls": 1,
+        "sum_ms": 1.685698
+      },
+      "sql.compile_once": {
+        "calls": 1,
+        "sum_ms": 0.462318
+      },
+      "sql.input_bridge": {
+        "calls": 64,
+        "sum_ms": 1.910961
+      },
+      "sql.plan_execute_async": {
+        "calls": 64,
+        "sum_ms": 49.609655
+      },
+      "sql.output_bridge": {
+        "calls": 64,
+        "sum_ms": 1.657906
+      },
+      "bridge.from_pyarrow": {
+        "calls": 64,
+        "sum_ms": 0.329775
+      },
+      "bridge.to_pyarrow": {
+        "calls": 64,
+        "sum_ms": 0.340689
+      }
+    },
+    "datafusion_sum_ms": {
+      "runtime_acquire_ns": 0.26988,
+      "session_state_create_ns": 5.55068,
+      "input_adapter_ns": 0.029821,
+      "table_register_ns": 0.256862,
+      "sql_parse_ns": 0.0,
+      "logical_planning_ns": 6.224673,
+      "physical_planning_ns": 15.957648,
+      "planning_ns": 22.182321,
+      "stream_open_ns": 0.335146,
+      "execution_to_first_batch_ns": 2.014151,
+      "execution_remaining_ns": 0.014192,
+      "execution_ns": 2.072012,
+      "collect_ns": 1.736866,
+      "output_arrow_wrap_ns": 0.001303,
+      "audit_ns": 0.004507,
+      "metrics_traversal_ns": 0.143132,
+      "logical_plan_string_ns": 0.303815,
+      "physical_plan_string_ns": 0.340544,
+      "batch_envelope_ns": 0.028625,
+      "run_result_ns": 0.010083,
+      "elapsed_compute_ns": 1.43955,
+      "window_compute_ns": 0.0,
+      "repartition_sort_compute_ns": 0.0
+    },
+    "datafusion_queries": 64,
+    "physical_planning_count": 64
+  },
+  {
+    "name": "profile-arrow-512-streaming",
+    "instrumented_elapsed_ms": 26.661215000785887,
+    "stages": {
+      "bridge.from_pyarrow": {
+        "calls": 64,
+        "sum_ms": 0.320798
+      },
+      "bridge.to_pyarrow": {
+        "calls": 64,
+        "sum_ms": 0.360148
+      }
+    },
+    "operators": {
+      "result": {
+        "input_batches": 64,
+        "input_rows": 32768,
+        "input_bytes": 1048576,
+        "fanned_out_batches": 64,
+        "fanned_out_rows": 16384,
+        "fanned_out_bytes": 262144,
+        "processing_duration_micros": 3172,
+        "watermark_processing_duration_micros": 0,
+        "errors": 0,
+        "ended": false,
+        "late_rows": 0,
+        "late_affected_batches": 0,
+        "max_lateness_micros": null,
+        "null_event_time_rows": 0,
+        "null_event_time_batches": 0,
+        "datafusion_runtime_created": true
+      }
+    },
+    "sinks": {
+      "stream_sink_0": {
+        "output_id": "output",
+        "effective_delivery": {
+          "kind": "ordinary"
+        },
+        "delivered_batches": 64,
+        "delivered_rows": 16384,
+        "delivered_bytes": 262144,
+        "write_duration_micros": 21970,
+        "errors": 0,
+        "ended": false
+      }
+    },
+    "edge_blocked_sends": 0,
+    "callback_dropped": 0,
+    "callbacks": [
+      {
+        "callback": "source.next",
+        "completed_records": 63,
+        "exclusive_lifecycle_phase_ms": {
+          "attached_ns": 2.398106,
+          "queued_ns": 0.593654,
+          "dispatched_ns": 8.588907,
+          "completed_ns": 6.862295,
+          "elapsed_ns": 1.910952
+        },
+        "elapsed_sum_ms": 20.353914
+      },
+      {
+        "callback": "_native_write",
+        "completed_records": 64,
+        "exclusive_lifecycle_phase_ms": {
+          "attached_ns": 6.056688,
+          "queued_ns": 0.561713,
+          "dispatched_ns": 8.259351,
+          "completed_ns": 5.336782,
+          "elapsed_ns": 1.585768
+        },
+        "elapsed_sum_ms": 21.800302
+      },
+      {
+        "callback": "_native_close",
+        "completed_records": 1,
+        "exclusive_lifecycle_phase_ms": {
+          "attached_ns": 0.001049,
+          "queued_ns": 0.008015,
+          "dispatched_ns": 0.073999,
+          "completed_ns": 0.015902,
+          "elapsed_ns": 0.17041
+        },
+        "elapsed_sum_ms": 0.269375
+      },
+      {
+        "callback": "source.close",
+        "completed_records": 1,
+        "exclusive_lifecycle_phase_ms": {
+          "attached_ns": 0.036725,
+          "queued_ns": 0.003163,
+          "dispatched_ns": 0.037949,
+          "completed_ns": 0.01778,
+          "elapsed_ns": 0.027524
+        },
+        "elapsed_sum_ms": 0.123141
+      }
+    ]
+  },
+  {
+    "name": "profile-arrow-full-sql_plan",
+    "instrumented_elapsed_ms": 3.1335639068856835,
+    "stages": {
+      "sql.lower_once": {
+        "calls": 1,
+        "sum_ms": 1.383851
+      },
+      "sql.compile_once": {
+        "calls": 1,
+        "sum_ms": 0.440434
+      },
+      "sql.input_bridge": {
+        "calls": 1,
+        "sum_ms": 0.12982
+      },
+      "sql.plan_execute_async": {
+        "calls": 1,
+        "sum_ms": 2.657204
+      },
+      "sql.output_bridge": {
+        "calls": 1,
+        "sum_ms": 0.258417
+      },
+      "bridge.from_pyarrow": {
+        "calls": 1,
+        "sum_ms": 0.070354
+      },
+      "bridge.to_pyarrow": {
+        "calls": 1,
+        "sum_ms": 0.046883
+      }
+    },
+    "datafusion_sum_ms": {
+      "runtime_acquire_ns": 0.055084,
+      "session_state_create_ns": 0.469416,
+      "input_adapter_ns": 0.001048,
+      "table_register_ns": 0.014883,
+      "sql_parse_ns": 0.0,
+      "logical_planning_ns": 0.352817,
+      "physical_planning_ns": 0.691828,
+      "planning_ns": 1.044645,
+      "stream_open_ns": 0.014459,
+      "execution_to_first_batch_ns": 0.241086,
+      "execution_remaining_ns": 0.077698,
+      "execution_ns": 0.320699,
+      "collect_ns": 0.30624,
+      "output_arrow_wrap_ns": 2.1e-05,
+      "audit_ns": 0.000155,
+      "metrics_traversal_ns": 0.007055,
+      "logical_plan_string_ns": 0.009514,
+      "physical_plan_string_ns": 0.018057,
+      "batch_envelope_ns": 0.000905,
+      "run_result_ns": 0.00028,
+      "elapsed_compute_ns": 0.290185,
+      "window_compute_ns": 0.0,
+      "repartition_sort_compute_ns": 0.0
+    },
+    "datafusion_queries": 1,
+    "physical_planning_count": 1
+  },
+  {
+    "name": "profile-live-512-sql",
+    "instrumented_elapsed_ms": 206.39854099135846,
+    "stages": {
+      "input.json_decode": {
+        "calls": 65,
+        "sum_ms": 28.231643
+      },
+      "sql.input_bridge": {
+        "calls": 65,
+        "sum_ms": 2.646986
+      },
+      "sql.lower_compile": {
+        "calls": 65,
+        "sum_ms": 11.528637
+      },
+      "sql.output_bridge": {
+        "calls": 65,
+        "sum_ms": 2.36542
+      },
+      "sql.collect_async": {
+        "calls": 65,
+        "sum_ms": 90.621121
+      },
+      "output.to_pylist": {
+        "calls": 65,
+        "sum_ms": 10.832078
+      },
+      "output.json_encode": {
+        "calls": 65,
+        "sum_ms": 57.562548
+      },
+      "output.pipe_write": {
+        "calls": 65,
+        "sum_ms": 0.057786
+      },
+      "output.pipe_flush": {
+        "calls": 65,
+        "sum_ms": 1.162056
+      },
+      "output.thread_await": {
+        "calls": 65,
+        "sum_ms": 84.793906
+      }
+    }
+  },
+  {
+    "name": "profile-live-512-streaming",
+    "instrumented_elapsed_ms": 151.20629698503762,
+    "stages": {
+      "input.json_decode": {
+        "calls": 65,
+        "sum_ms": 39.892751
+      },
+      "output.to_pylist": {
+        "calls": 65,
+        "sum_ms": 11.510909
+      },
+      "output.json_encode": {
+        "calls": 65,
+        "sum_ms": 59.18436
+      },
+      "output.pipe_write": {
+        "calls": 65,
+        "sum_ms": 0.064177
+      },
+      "output.pipe_flush": {
+        "calls": 65,
+        "sum_ms": 4.720223
+      },
+      "output.thread_await": {
+        "calls": 65,
+        "sum_ms": 139.142139
+      }
+    },
+    "operators": {
+      "result": {
+        "input_batches": 65,
+        "input_rows": 33280,
+        "input_bytes": 1064960,
+        "fanned_out_batches": 65,
+        "fanned_out_rows": 16384,
+        "fanned_out_bytes": 262144,
+        "processing_duration_micros": 3535,
+        "watermark_processing_duration_micros": 0,
+        "errors": 0,
+        "ended": false,
+        "late_rows": 0,
+        "late_affected_batches": 0,
+        "max_lateness_micros": null,
+        "null_event_time_rows": 0,
+        "null_event_time_batches": 0,
+        "datafusion_runtime_created": true
+      }
+    },
+    "sinks": {
+      "stream_sink_0": {
+        "output_id": "output",
+        "effective_delivery": {
+          "kind": "ordinary"
+        },
+        "delivered_batches": 65,
+        "delivered_rows": 16384,
+        "delivered_bytes": 262144,
+        "write_duration_micros": 143579,
+        "errors": 0,
+        "ended": false
+      }
+    },
+    "edge_blocked_sends": 0,
+    "callback_dropped": 0,
+    "callbacks": [
+      {
+        "callback": "source.next",
+        "completed_records": 64,
+        "exclusive_lifecycle_phase_ms": {
+          "attached_ns": 44.856239,
+          "queued_ns": 0.822549,
+          "dispatched_ns": 23.919224,
+          "completed_ns": 47.840611,
+          "elapsed_ns": 4.340591
+        },
+        "elapsed_sum_ms": 121.779214
+      },
+      {
+        "callback": "_native_write",
+        "completed_records": 65,
+        "exclusive_lifecycle_phase_ms": {
+          "attached_ns": 42.821795,
+          "queued_ns": 0.821824,
+          "dispatched_ns": 48.25735,
+          "completed_ns": 47.030492,
+          "elapsed_ns": 4.449731
+        },
+        "elapsed_sum_ms": 143.381192
+      },
+      {
+        "callback": "_native_close",
+        "completed_records": 1,
+        "exclusive_lifecycle_phase_ms": {
+          "attached_ns": 0.003951,
+          "queued_ns": 0.027322,
+          "dispatched_ns": 0.119433,
+          "completed_ns": 0.021758,
+          "elapsed_ns": 0.030587
+        },
+        "elapsed_sum_ms": 0.203051
+      },
+      {
+        "callback": "source.close",
+        "completed_records": 0,
+        "exclusive_lifecycle_phase_ms": {
+          "attached_ns": 0.0,
+          "queued_ns": 0.0,
+          "dispatched_ns": 0.0,
+          "completed_ns": 0.0,
+          "elapsed_ns": 0.0
+        },
+        "elapsed_sum_ms": 0.0
+      }
+    ]
+  },
+  {
+    "name": "profile-live-8192-sql",
+    "instrumented_elapsed_ms": 135.37371007259935,
+    "stages": {
+      "input.json_decode": {
+        "calls": 5,
+        "sum_ms": 18.918848
+      },
+      "sql.input_bridge": {
+        "calls": 5,
+        "sum_ms": 0.55361
+      },
+      "sql.lower_compile": {
+        "calls": 5,
+        "sum_ms": 3.358024
+      },
+      "sql.output_bridge": {
+        "calls": 5,
+        "sum_ms": 0.545231
+      },
+      "sql.collect_async": {
+        "calls": 5,
+        "sum_ms": 15.22777
+      },
+      "output.to_pylist": {
+        "calls": 5,
+        "sum_ms": 9.509607
+      },
+      "output.json_encode": {
+        "calls": 5,
+        "sum_ms": 55.954815
+      },
+      "output.pipe_write": {
+        "calls": 5,
+        "sum_ms": 2.296115
+      },
+      "output.pipe_flush": {
+        "calls": 5,
+        "sum_ms": 0.011253
+      },
+      "output.thread_await": {
+        "calls": 5,
+        "sum_ms": 69.934424
+      }
+    }
+  },
+  {
+    "name": "profile-live-8192-streaming",
+    "instrumented_elapsed_ms": 115.54068501573056,
+    "stages": {
+      "input.json_decode": {
+        "calls": 5,
+        "sum_ms": 22.988016
+      },
+      "output.to_pylist": {
+        "calls": 5,
+        "sum_ms": 9.663939
+      },
+      "output.json_encode": {
+        "calls": 5,
+        "sum_ms": 55.560935
+      },
+      "output.pipe_write": {
+        "calls": 5,
+        "sum_ms": 0.834375
+      },
+      "output.pipe_flush": {
+        "calls": 5,
+        "sum_ms": 0.01108
+      },
+      "output.thread_await": {
+        "calls": 5,
+        "sum_ms": 72.678309
+      }
+    },
+    "operators": {
+      "result": {
+        "input_batches": 5,
+        "input_rows": 33280,
+        "input_bytes": 1064960,
+        "fanned_out_batches": 5,
+        "fanned_out_rows": 16384,
+        "fanned_out_bytes": 262144,
+        "processing_duration_micros": 1882,
+        "watermark_processing_duration_micros": 0,
+        "errors": 0,
+        "ended": false,
+        "late_rows": 0,
+        "late_affected_batches": 0,
+        "max_lateness_micros": null,
+        "null_event_time_rows": 0,
+        "null_event_time_batches": 0,
+        "datafusion_runtime_created": true
+      }
+    },
+    "sinks": {
+      "stream_sink_0": {
+        "output_id": "output",
+        "effective_delivery": {
+          "kind": "ordinary"
+        },
+        "delivered_batches": 5,
+        "delivered_rows": 16384,
+        "delivered_bytes": 262144,
+        "write_duration_micros": 24378,
+        "errors": 0,
+        "ended": false
+      }
+    },
+    "edge_blocked_sends": 0,
+    "callback_dropped": 0,
+    "callbacks": [
+      {
+        "callback": "_native_write",
+        "completed_records": 5,
+        "exclusive_lifecycle_phase_ms": {
+          "attached_ns": 0.273719,
+          "queued_ns": 0.076239,
+          "dispatched_ns": 10.193495,
+          "completed_ns": 13.355032,
+          "elapsed_ns": 0.451331
+        },
+        "elapsed_sum_ms": 24.349816
+      },
+      {
+        "callback": "source.next",
+        "completed_records": 4,
+        "exclusive_lifecycle_phase_ms": {
+          "attached_ns": 0.029254,
+          "queued_ns": 0.058896,
+          "dispatched_ns": 0.318376,
+          "completed_ns": 51.999592,
+          "elapsed_ns": 0.216082
+        },
+        "elapsed_sum_ms": 52.6222
+      },
+      {
+        "callback": "_native_close",
+        "completed_records": 1,
+        "exclusive_lifecycle_phase_ms": {
+          "attached_ns": 0.003664,
+          "queued_ns": 0.032508,
+          "dispatched_ns": 0.156801,
+          "completed_ns": 0.018092,
+          "elapsed_ns": 0.037564
+        },
+        "elapsed_sum_ms": 0.248629
+      },
+      {
+        "callback": "source.close",
+        "completed_records": 0,
+        "exclusive_lifecycle_phase_ms": {
+          "attached_ns": 0.0,
+          "queued_ns": 0.0,
+          "dispatched_ns": 0.0,
+          "completed_ns": 0.0,
+          "elapsed_ns": 0.0
+        },
+        "elapsed_sum_ms": 0.0
+      }
+    ]
+  },
+  {
+    "name": "profile-window-live-512-streaming",
+    "instrumented_elapsed_ms": 97.85483905579895,
+    "stages": {
+      "input.json_decode": {
+        "calls": 65,
+        "sum_ms": 28.88004
+      },
+      "output.to_pylist": {
+        "calls": 32,
+        "sum_ms": 1.475701
+      },
+      "output.json_encode": {
+        "calls": 32,
+        "sum_ms": 2.568693
+      },
+      "output.pipe_write": {
+        "calls": 32,
+        "sum_ms": 0.045665
+      },
+      "output.pipe_flush": {
+        "calls": 32,
+        "sum_ms": 2.70112
+      },
+      "output.thread_await": {
+        "calls": 32,
+        "sum_ms": 47.127256
+      }
+    },
+    "operators": {
+      "cf_window_572a24c078bc521b8e88c850": {
+        "input_batches": 65,
+        "input_rows": 32768,
+        "input_bytes": 1048576,
+        "fanned_out_batches": 32,
+        "fanned_out_rows": 512,
+        "fanned_out_bytes": 20480,
+        "processing_duration_micros": 2408,
+        "watermark_processing_duration_micros": 536,
+        "errors": 0,
+        "ended": false,
+        "late_rows": 0,
+        "late_affected_batches": 0,
+        "max_lateness_micros": null,
+        "null_event_time_rows": 0,
+        "null_event_time_batches": 0,
+        "datafusion_runtime_created": false
+      },
+      "cf_window_572a24c078bc521b8e88c850__input": {
+        "input_batches": 65,
+        "input_rows": 33280,
+        "input_bytes": 1064960,
+        "fanned_out_batches": 65,
+        "fanned_out_rows": 32768,
+        "fanned_out_bytes": 1048576,
+        "processing_duration_micros": 2902,
+        "watermark_processing_duration_micros": 4,
+        "errors": 0,
+        "ended": false,
+        "late_rows": 0,
+        "late_affected_batches": 0,
+        "max_lateness_micros": null,
+        "null_event_time_rows": 0,
+        "null_event_time_batches": 0,
+        "datafusion_runtime_created": true
+      },
+      "events": {
+        "input_batches": 65,
+        "input_rows": 33280,
+        "input_bytes": 1064960,
+        "fanned_out_batches": 65,
+        "fanned_out_rows": 33280,
+        "fanned_out_bytes": 1064960,
+        "processing_duration_micros": 427,
+        "watermark_processing_duration_micros": 40,
+        "errors": 0,
+        "ended": false,
+        "late_rows": 0,
+        "late_affected_batches": 0,
+        "max_lateness_micros": null,
+        "null_event_time_rows": 0,
+        "null_event_time_batches": 0,
+        "datafusion_runtime_created": false
+      },
+      "result": {
+        "input_batches": 32,
+        "input_rows": 512,
+        "input_bytes": 20480,
+        "fanned_out_batches": 32,
+        "fanned_out_rows": 512,
+        "fanned_out_bytes": 20480,
+        "processing_duration_micros": 130,
+        "watermark_processing_duration_micros": 5,
+        "errors": 0,
+        "ended": false,
+        "late_rows": 0,
+        "late_affected_batches": 0,
+        "max_lateness_micros": null,
+        "null_event_time_rows": 0,
+        "null_event_time_batches": 0,
+        "datafusion_runtime_created": false
+      }
+    },
+    "sinks": {
+      "stream_sink_0": {
+        "output_id": "output",
+        "effective_delivery": {
+          "kind": "ordinary"
+        },
+        "delivered_batches": 32,
+        "delivered_rows": 512,
+        "delivered_bytes": 20480,
+        "write_duration_micros": 26124,
+        "errors": 0,
+        "ended": false
+      }
+    },
+    "edge_blocked_sends": 0,
+    "callback_dropped": 0,
+    "callbacks": [
+      {
+        "callback": "source.next",
+        "completed_records": 129,
+        "exclusive_lifecycle_phase_ms": {
+          "attached_ns": 9.035173,
+          "queued_ns": 1.504058,
+          "dispatched_ns": 12.283463,
+          "completed_ns": 51.061805,
+          "elapsed_ns": 6.898667
+        },
+        "elapsed_sum_ms": 80.783166
+      },
+      {
+        "callback": "_native_write",
+        "completed_records": 32,
+        "exclusive_lifecycle_phase_ms": {
+          "attached_ns": 0.797769,
+          "queued_ns": 0.403795,
+          "dispatched_ns": 18.347516,
+          "completed_ns": 3.770635,
+          "elapsed_ns": 2.703921
+        },
+        "elapsed_sum_ms": 26.023636
+      },
+      {
+        "callback": "_native_close",
+        "completed_records": 1,
+        "exclusive_lifecycle_phase_ms": {
+          "attached_ns": 0.004113,
+          "queued_ns": 0.03299,
+          "dispatched_ns": 0.163659,
+          "completed_ns": 0.023095,
+          "elapsed_ns": 0.020729
+        },
+        "elapsed_sum_ms": 0.244586
+      },
+      {
+        "callback": "source.close",
+        "completed_records": 0,
+        "exclusive_lifecycle_phase_ms": {
+          "attached_ns": 0.0,
+          "queued_ns": 0.0,
+          "dispatched_ns": 0.0,
+          "completed_ns": 0.0,
+          "elapsed_ns": 0.0
+        },
+        "elapsed_sum_ms": 0.0
+      }
+    ]
+  }
+]
