@@ -70,8 +70,6 @@
       "C901": 2
     },
     "python/calc_flow/config.py": {
-      "C901": 1,
-      "PLR0912": 1,
       "PLR0913": 1
     },
     "python/calc_flow/pipeline.py": {

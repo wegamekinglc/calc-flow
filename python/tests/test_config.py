@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections import UserDict
+from copy import deepcopy
 from types import MappingProxyType
 
 import pytest
@@ -19,6 +20,21 @@ from calc_flow.config import _openapi_project_schema
 
 def _minimal_project() -> dict[str, object]:
     return PipelineBuilder("config").expression("calc", "b = a + 1").project
+
+
+def _project_with_data(value: object) -> dict[str, object]:
+    project = _minimal_project()
+    project["data_sources"][0]["data"] = value
+    return project
+
+
+def _assert_json_error(project: object, message: str) -> None:
+    with pytest.raises(ValidationError) as caught:
+        ProjectDocument.model_validate(project)
+    assert [
+        (error["type"], error["loc"], error["msg"])
+        for error in caught.value.errors(include_url=False)
+    ] == [("value_error", (), f"Value error, {message}")]
 
 
 def test_project_document_delegates_schema_and_rust_defaults() -> None:
@@ -71,22 +87,54 @@ def test_project_document_converts_native_errors_to_validation_errors() -> None:
 
 
 @pytest.mark.parametrize(
-    "invalid",
+    ("invalid", "message"),
     [
-        {1: "not a string key"},
-        {"value": object()},
-        {"value": (1, 2)},
-        {"value": float("nan")},
-        {"value": float("inf")},
+        ({1: "not a string key"}, "project JSON object keys must be strings"),
+        (object(), "project contains a non-JSON value of type object"),
+        ((1, 2), "project contains a non-JSON value of type tuple"),
+        (b"x", "project contains a non-JSON value of type bytes"),
+        ({1}, "project contains a non-JSON value of type set"),
+        (float("nan"), "project JSON numbers must be finite"),
+        (float("inf"), "project JSON numbers must be finite"),
+        (float("-inf"), "project JSON numbers must be finite"),
+        (-(2**63) - 1, "project integer is outside the portable JSON range"),
+        (2**64, "project integer is outside the portable JSON range"),
     ],
 )
-def test_project_document_rejects_non_json_values(invalid: object) -> None:
-    project = _minimal_project()
-    project["data_sources"] = [
-        {"id": "input", "input": "calc.input", "format": "json", "data": invalid}
-    ]
-    with pytest.raises(ValidationError):
-        ProjectDocument.model_validate(project)
+def test_project_document_rejects_non_json_values(
+    invalid: object, message: str
+) -> None:
+    _assert_json_error(_project_with_data(invalid), message)
+
+
+@pytest.mark.parametrize("key", [1, None, False, (1,)])
+def test_project_document_rejects_non_string_json_keys(key: object) -> None:
+    _assert_json_error(
+        _project_with_data({key: "value"}), "project JSON object keys must be strings"
+    )
+
+
+@pytest.mark.parametrize(
+    "value", [None, False, True, "", "中文", -(2**63), 2**64 - 1, 0, 1.25, [], {}]
+)
+def test_project_document_accepts_portable_json_values(value: object) -> None:
+    document = ProjectDocument.model_validate(_project_with_data(value))
+    assert document.root["data_sources"][0]["data"] == value
+
+
+def test_project_document_accepts_scalar_subclasses_and_string_subclass_keys() -> None:
+    class IntSubclass(int):
+        pass
+
+    class FloatSubclass(float):
+        pass
+
+    class StrSubclass(str):
+        pass
+
+    value = {StrSubclass("key"): [IntSubclass(1), FloatSubclass(1.5), StrSubclass("x")]}
+    document = ProjectDocument.model_validate(_project_with_data(value))
+    assert document.root["data_sources"][0]["data"] == {"key": [1, 1.5, "x"]}
 
 
 def test_project_document_rejects_non_builtin_json_containers_without_hooks() -> None:
@@ -111,33 +159,104 @@ def test_project_document_rejects_non_builtin_json_containers_without_hooks() ->
         MappingProxyType({"value": 1}),
     )
     for container in containers:
-        project = _minimal_project()
-        project["data_sources"] = [
-            {
-                "id": "input",
-                "input": "calc.input",
-                "format": "inline_json",
-                "data": container,
-            }
-        ]
-        with pytest.raises(ValidationError, match="non-JSON"):
-            ProjectDocument.model_validate(project)
+        _assert_json_error(
+            _project_with_data(container),
+            f"project contains a non-JSON value of type {type(container).__name__}",
+        )
 
     assert HostileDict.hooks_called is False
     assert HostileList.hooks_called is False
 
 
-def test_project_document_rejects_cycles_and_excessive_depth() -> None:
-    cyclic: dict[str, object] = {}
-    cyclic["self"] = cyclic
-    with pytest.raises(ValidationError, match="cycle"):
-        ProjectDocument.model_validate(cyclic)
+@pytest.mark.parametrize("kind", ["dict", "list", "mixed"])
+def test_project_document_rejects_cycles_without_mutating_them(kind: str) -> None:
+    mapping: dict[str, object] = {}
+    items: list[object] = []
+    if kind == "dict":
+        mapping["self"] = mapping
+        cyclic = mapping
+    elif kind == "list":
+        items.append(items)
+        cyclic = items
+    else:
+        mapping["items"] = items
+        items.append(mapping)
+        cyclic = mapping
 
+    _assert_json_error(_project_with_data(cyclic), "project contains a cycle")
+    if kind == "dict":
+        assert mapping["self"] is mapping
+    elif kind == "list":
+        assert items[0] is items
+    else:
+        assert mapping["items"] is items
+        assert items[0] is mapping
+
+
+@pytest.mark.parametrize("kind", ["dict", "list"])
+@pytest.mark.parametrize("depth", [32, 33])
+def test_project_document_preserves_json_depth_boundary(kind: str, depth: int) -> None:
     nested: object = None
-    for _ in range(34):
-        nested = {"value": nested}
-    with pytest.raises(ValidationError, match="depth"):
-        ProjectDocument.model_validate(nested)
+    # Source data starts at depth 3 in the project document.
+    for _ in range(depth - 3):
+        nested = {"value": nested} if kind == "dict" else [nested]
+    project = _project_with_data(nested)
+    if depth == 32:
+        document = ProjectDocument.model_validate(project)
+        assert document.root["data_sources"][0]["data"] == nested
+    else:
+        _assert_json_error(project, "project exceeds the maximum JSON depth of 32")
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        (
+            {"nested": [object()], 1: "bad key"},
+            "project JSON object keys must be strings",
+        ),
+        ([float("nan"), (1,)], "project contains a non-JSON value of type tuple"),
+        (
+            {"first": float("nan"), "last": (1,)},
+            "project contains a non-JSON value of type tuple",
+        ),
+        (
+            {"nested": {1: "bad key"}, "last": (1,)},
+            "project contains a non-JSON value of type tuple",
+        ),
+    ],
+)
+def test_project_document_preserves_first_json_error(
+    value: object, message: str
+) -> None:
+    _assert_json_error(_project_with_data(value), message)
+
+
+def test_project_document_checks_depth_before_scalar_type_or_cycle() -> None:
+    cyclic: list[object] = []
+    cyclic.append(cyclic)
+    for leaf in (object(), cyclic):
+        nested = leaf
+        for _ in range(30):
+            nested = [nested]
+        _assert_json_error(
+            _project_with_data(nested), "project exceeds the maximum JSON depth of 32"
+        )
+
+
+def test_project_document_accepts_shared_children_without_mutating_inputs() -> None:
+    shared = [1, {"x": False}]
+    value = {"left": shared, "right": [shared, shared]}
+    project = _project_with_data(value)
+    original = deepcopy(project)
+
+    document = ProjectDocument.model_validate(project)
+
+    assert project == original
+    assert project["data_sources"][0]["data"] is value
+    assert value["left"] is shared
+    assert all(child is shared for child in value["right"])
+    assert document.root["data_sources"][0]["data"] == value
 
 
 def test_project_document_json_rejects_duplicate_keys() -> None:
