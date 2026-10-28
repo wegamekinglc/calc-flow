@@ -57,6 +57,22 @@ def _structured_project_error(issues: tuple[dict[str, str], ...]) -> ValidationE
     )
 
 
+def _validate_json_scalar(value: object) -> None:
+    if value is None or isinstance(value, (bool, str)):
+        return
+    if isinstance(value, int):
+        if not -(2**63) <= value <= 2**64 - 1:
+            raise _json_error("project integer is outside the portable JSON range")
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise _json_error("project JSON numbers must be finite")
+        return
+    raise _json_error(
+        f"project contains a non-JSON value of type {type(value).__name__}"
+    )
+
+
 def _validate_json_value(value: object) -> None:
     pending: list[tuple[object, int, frozenset[int]]] = [(value, 0, frozenset())]
     while pending:
@@ -65,36 +81,20 @@ def _validate_json_value(value: object) -> None:
             raise _json_error(
                 f"project exceeds the maximum JSON depth of {_MAX_JSON_DEPTH}"
             )
-        if current is None or isinstance(current, (bool, str)):
+        if type(current) is not dict and type(current) is not list:
+            _validate_json_scalar(current)
             continue
-        if isinstance(current, int):
-            if not -(2**63) <= current <= 2**64 - 1:
-                raise _json_error("project integer is outside the portable JSON range")
-            continue
-        if isinstance(current, float):
-            if not math.isfinite(current):
-                raise _json_error("project JSON numbers must be finite")
-            continue
+        identity = id(current)
+        if identity in ancestors:
+            raise _json_error("project contains a cycle")
+        nested_ancestors = ancestors | {identity}
         if type(current) is dict:
-            identity = id(current)
-            if identity in ancestors:
-                raise _json_error("project contains a cycle")
-            nested_ancestors = ancestors | {identity}
             for key, child in current.items():
                 if not isinstance(key, str):
                     raise _json_error("project JSON object keys must be strings")
                 pending.append((child, depth + 1, nested_ancestors))
-            continue
-        if type(current) is list:
-            identity = id(current)
-            if identity in ancestors:
-                raise _json_error("project contains a cycle")
-            nested_ancestors = ancestors | {identity}
+        else:
             pending.extend((child, depth + 1, nested_ancestors) for child in current)
-            continue
-        raise _json_error(
-            f"project contains a non-JSON value of type {type(current).__name__}"
-        )
 
 
 def _canonicalize(value: object) -> dict[str, JSONValue]:

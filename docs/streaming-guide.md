@@ -686,6 +686,7 @@ data = pa.table({"value": [1, 2, 3]})
 source = cf.table_input("events", schema=data.schema)
 output = source.select(doubled=source["value"] * 2)
 
+
 async def replay():
     config = cf.StreamRuntimeConfig(edge_budget=cf.EdgeBudget(2, 1024))
     async with output.stream(data, config=config) as results:
