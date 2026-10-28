@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "source_ref": "b9a10d4fa4b109b810d2f5839951912b92e597f8",
+  "files": {
+    "DAL-417-current-raw.tar.gz": {
+      "bytes": 14340504,
+      "sha256": "dd68fd066940c652f0ded1080c881383f9380bf257c14ddf2ca2705973379e83"
+    },
+    "audit.json": {
+      "bytes": 69,
+      "sha256": "c693e546153d23dfa855ed3c3326f399d09e7666f31b28a4b818237fa9c2d2e2"
+    },
+    "diagnostic-summary.json": {
+      "bytes": 18880,
+      "sha256": "1de0f2c94a5b8c9f949d5a36546c58b1d272779aae57c02ae3b55f5b3d926e26"
+    },
+    "identity.json": {
+      "bytes": 1487,
+      "sha256": "0e899031a0f7993c6981bb377b23013999ac50740b5c583a2d89aaa06a7e4ab5"
+    },
+    "paired-ratios.json": {
+      "bytes": 4372,
+      "sha256": "73cb761b7a68866f17a310554513dc46fe207904431be329dbca8a7a7548422d"
+    },
+    "samples.json": {
+      "bytes": 95966,
+      "sha256": "db867297dd7eb2be1b3c48e3da5631c6c252ed449d7204ee032afb2bc6541396"
+    },
+    "summary.json": {
+      "bytes": 11313,
+      "sha256": "d8f65e738ec0a09cd976743f1ffec74ab5acaa2c6319f3268d40a035a51ec14b"
+    }
+  }
+}
