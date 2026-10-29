@@ -1,0 +1,26 @@
+{
+  "DAL-417-sql-prepare-raw.tar.gz": {
+    "bytes": 9929877,
+    "sha256": "0d84f4ef1117f46adeb57289680a8cb323abbbf162dca2c375085bc7cbceb04f"
+  },
+  "budget.json": {
+    "bytes": 877,
+    "sha256": "7541ca46a1cceecb581b3d827c76fbbdba51d1f027cdab39397c2561589895f4"
+  },
+  "identity.json": {
+    "bytes": 3942,
+    "sha256": "7347a653c95b970f1e30026b4daa5e942615879aa613d709230b6554a5290904"
+  },
+  "seals.json": {
+    "bytes": 1144,
+    "sha256": "208589d324f9c30e0476fdf3ff1e61291ab5da4d69a7bbfb1c07d60902332ce9"
+  },
+  "summary.json": {
+    "bytes": 4212,
+    "sha256": "951ea9c9c38bd962f7eb694e7fc262f554dfed28c40bc78e43611045890ba269"
+  },
+  "validation.json": {
+    "bytes": 1612,
+    "sha256": "113fec6f4e3a2756b372b9eb22946f537d52348346ff9dd9e4ad7bdabeb3f3f5"
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "source_product_ref": "9db6d10b29bc6349b529d2807cfd23ba4dd6aace",
+  "python_regressions": {
+    "command": "target/sql-prepare-reuse/env-head/bin/python -m pytest python/tests/test_batch_query_templates.py -q",
+    "passed": 9
+  },
+  "rust_batch_tests": {
+    "command": "CARGO_TARGET_DIR=<task-build> CARGO_BUILD_JOBS=4 cargo test --release -p calc-flow --lib pipeline::batch:: -- --nocapture",
+    "passed": 11,
+    "filtered_out": 2463,
+    "compile_s": 1408,
+    "execution_s": 0.07
+  },
+  "static_checks": [
+    "cargo fmt --all --check",
+    "ruff check and format --check on changed Python files",
+    "UV_PROJECT_ENVIRONMENT=target/sql-prepare-reuse/env-base uv run --no-sync python scripts/verify_complexity_gates.py",
+    "git diff --check",
+    "schema unchanged"
+  ],
+  "formal_observations": 80,
+  "formal_output_rows_checked": 1310720,
+  "preflight_observations": 4,
+  "diagnostic_sequences": 8,
+  "quiet_build_monitor": {
+    "poll_interval_s": 0.1,
+    "elapsed_s": 40.9884594399482,
+    "compiler_observations": []
+  },
+  "negative_controls": {
+    "preflight_samples_checked": 4,
+    "checks": [
+      {
+        "case": "wrong_values_with_updated_hash",
+        "rejected": true,
+        "error": "complete Arrow columns, values or original sequence differ"
+      },
+      {
+        "case": "missing_normal_execute_span",
+        "rejected": true,
+        "error": "missing normal API span"
+      }
+    ],
+    "initial_probe_error": "in-place overwrite of a mapped temporary copy failed with EFAULT; corrected by writing and renaming a separate file; original measurements untouched"
+  }
+}
