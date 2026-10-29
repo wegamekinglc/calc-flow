@@ -132,6 +132,7 @@ proxy = LoopProxy()
             py,
             PythonAwaitScheduler {
                 awaitable: Some(future.unbind()),
+                is_coroutine: false,
                 context: None,
                 state: Some(Arc::new(PythonAwaitState::new(event_loop.clone().unbind()))),
                 completion: Arc::new(PythonAwaitCompletion {

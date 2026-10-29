@@ -939,6 +939,12 @@ and runtime settings.
 
 ## Source contract
 
+Native Python coroutine callbacks are classified once when submitted to the
+job's event loop, avoiding repeated general awaitable inspection per batch.
+Custom awaitables and configured task factories retain their asyncio scheduling
+policy. Batches, source polling, sink backpressure and awaited cancellation
+cleanup retain the same boundaries.
+
 A Python source implements:
 
 ```python

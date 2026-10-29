@@ -38,6 +38,7 @@ pub(crate) struct PythonAsyncContext {
     context: Arc<PythonRoot>,
     dispatcher: Arc<PythonRoot>,
     is_awaitable: Arc<PythonRoot>,
+    coroutine_type: Arc<PythonRoot>,
 }
 
 impl PythonAsyncContext {
@@ -52,11 +53,15 @@ impl PythonAsyncContext {
         let is_awaitable = py
             .import(pyo3::intern!(py, "inspect"))?
             .getattr(pyo3::intern!(py, "isawaitable"))?;
+        let coroutine_type = py
+            .import(pyo3::intern!(py, "types"))?
+            .getattr(pyo3::intern!(py, "CoroutineType"))?;
         Ok(Self {
             event_loop: Arc::new(PythonRoot::new(event_loop.unbind())),
             context: Arc::new(PythonRoot::new(context.unbind())),
             dispatcher: Arc::new(PythonRoot::new(dispatcher.into_any())),
             is_awaitable: Arc::new(PythonRoot::new(is_awaitable.unbind())),
+            coroutine_type: Arc::new(PythonRoot::new(coroutine_type.unbind())),
         })
     }
 
@@ -64,7 +69,8 @@ impl PythonAsyncContext {
         visit.call(self.event_loop.object())?;
         visit.call(self.context.object())?;
         visit.call(self.dispatcher.object())?;
-        visit.call(self.is_awaitable.object())
+        visit.call(self.is_awaitable.object())?;
+        visit.call(self.coroutine_type.object())
     }
 }
 
@@ -240,6 +246,7 @@ impl PythonAwaitCompleter {
 #[pyclass]
 struct PythonAwaitScheduler {
     awaitable: Option<Py<PyAny>>,
+    is_coroutine: bool,
     context: Option<Py<PyAny>>,
     state: Option<Arc<PythonAwaitState>>,
     completion: Arc<PythonAwaitCompletion>,
@@ -251,10 +258,15 @@ impl PythonAwaitScheduler {
         py: Python<'py>,
         awaitable: Py<PyAny>,
         state: &PythonAwaitState,
+        is_coroutine: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let asyncio = py.import(pyo3::intern!(py, "asyncio"))?;
         let event_loop = state.event_loop.object().bind(py);
-        if Self::uses_default_coroutine_task(py, &awaitable, event_loop)? {
+        if is_coroutine
+            && event_loop
+                .call_method0(pyo3::intern!(py, "get_task_factory"))?
+                .is_none()
+        {
             Self::eager_task(&asyncio, awaitable, state)
         } else {
             // Futures, custom awaitables, and configured task factories keep
@@ -263,21 +275,6 @@ impl PythonAwaitScheduler {
                 .getattr(pyo3::intern!(py, "ensure_future"))?
                 .call1((awaitable,))
         }
-    }
-
-    fn uses_default_coroutine_task(
-        py: Python<'_>,
-        awaitable: &Py<PyAny>,
-        event_loop: &Bound<'_, PyAny>,
-    ) -> PyResult<bool> {
-        let is_coroutine = py
-            .import(pyo3::intern!(py, "inspect"))?
-            .call_method1(pyo3::intern!(py, "iscoroutine"), (awaitable,))?
-            .is_truthy()?;
-        Ok(is_coroutine
-            && event_loop
-                .call_method0(pyo3::intern!(py, "get_task_factory"))?
-                .is_none())
     }
 
     fn eager_task<'py>(
@@ -335,7 +332,7 @@ impl PythonAwaitScheduler {
 
     fn schedule(&mut self, py: Python<'_>) -> PyResult<()> {
         let (awaitable, state) = self.take_request()?;
-        let task = Self::create_task(py, awaitable, &state)?;
+        let task = Self::create_task(py, awaitable, &state, self.is_coroutine)?;
         if state.cancel_requested.load(Ordering::Acquire) {
             task.call_method0(pyo3::intern!(py, "cancel"))?;
         }
@@ -478,6 +475,7 @@ fn schedule_python_await(
     awaits: &Arc<PythonAwaitRegistry>,
     context: &PythonAsyncContext,
     trace: Option<&Arc<CallbackTrace>>,
+    is_coroutine: bool,
 ) -> PyResult<(PythonAwaitReceiver, PythonAwaitCancelGuard)> {
     let (event_loop, python_context) = python_async_context(py, context)?;
     let state = Arc::new(PythonAwaitState::new(event_loop.clone_ref(py)));
@@ -491,6 +489,7 @@ fn schedule_python_await(
         py,
         PythonAwaitScheduler {
             awaitable: Some(value),
+            is_coroutine,
             context: Some(python_context.clone_ref(py)),
             state: Some(Arc::clone(&state)),
             completion,
@@ -540,14 +539,28 @@ pub(crate) async fn call_python_in_context(
             trace.attached();
         }
         let value = callback(py)?;
-        if !is_python_awaitable(py, &value, context)
-            .map_err(|error| provider_error(callback_name, error))?
+        // Native coroutine objects have an immutable exact type. Classify once
+        // at the bridge and retain the result through dispatch; other awaitables
+        // keep inspect/asyncio's existing policy.
+        let is_coroutine = value
+            .bind(py)
+            .get_type()
+            .is(context.coroutine_type.object().bind(py));
+        if !is_coroutine
+            && !is_python_awaitable(py, &value, context)
+                .map_err(|error| provider_error(callback_name, error))?
         {
             return Ok(PreparedPythonCall::Ready(value));
         }
-        let (receiver, cancellation) =
-            schedule_python_await(py, value, awaits, context, probe.trace.as_ref())
-                .map_err(|error| provider_error(callback_name, error))?;
+        let (receiver, cancellation) = schedule_python_await(
+            py,
+            value,
+            awaits,
+            context,
+            probe.trace.as_ref(),
+            is_coroutine,
+        )
+        .map_err(|error| provider_error(callback_name, error))?;
         Ok(PreparedPythonCall::Pending(receiver, cancellation))
     });
     finish_python_call(prepared, &mut probe, callback_name).await
@@ -658,6 +671,10 @@ mod tests {
         awaitable: Py<PyAny>,
         event_loop: Py<PyAny>,
     ) -> PyResult<Py<PythonAwaitScheduler>> {
+        let is_coroutine = py
+            .import("inspect")?
+            .call_method1("iscoroutine", (&awaitable,))?
+            .is_truthy()?;
         let context = py
             .import("contextvars")?
             .call_method0("copy_context")?
@@ -666,6 +683,7 @@ mod tests {
             py,
             PythonAwaitScheduler {
                 awaitable: Some(awaitable),
+                is_coroutine,
                 context: Some(context),
                 state: Some(Arc::new(PythonAwaitState::new(event_loop))),
                 completion: completion(),
@@ -719,6 +737,7 @@ asyncio.run(exercise())
             let (sender, mut receiver) = tokio::sync::oneshot::channel();
             let mut scheduler = PythonAwaitScheduler {
                 awaitable: Some(future.unbind()),
+                is_coroutine: false,
                 context: None,
                 state: Some(Arc::new(PythonAwaitState::new(event_loop.clone().unbind()))),
                 completion: Arc::new(PythonAwaitCompletion {
@@ -901,6 +920,7 @@ asyncio.run(exercise())
             let (sender, mut receiver) = tokio::sync::oneshot::channel();
             let mut scheduler = PythonAwaitScheduler {
                 awaitable: Some(future.unbind()),
+                is_coroutine: false,
                 context: None,
                 state: Some(Arc::new(PythonAwaitState::new(event_loop.clone().unbind()))),
                 completion: Arc::new(PythonAwaitCompletion {
@@ -932,8 +952,12 @@ asyncio.run(exercise())
         let awaits = Arc::new(PythonAwaitRegistry::new());
         for _ in 0..count {
             let value = callback.call0()?.unbind();
+            let is_coroutine = value
+                .bind(py)
+                .get_type()
+                .is(context.coroutine_type.object().bind(py));
             let (_receiver, mut cancellation) =
-                schedule_python_await(py, value, &awaits, &context, None)?;
+                schedule_python_await(py, value, &awaits, &context, None, is_coroutine)?;
             cancellation.disarm();
         }
         Ok(())
@@ -1042,6 +1066,7 @@ asyncio.run(exercise())
                 py,
                 PythonAwaitScheduler {
                     awaitable: Some(awaitable.clone_ref(py)),
+                    is_coroutine: false,
                     context: Some(context.clone_ref(py)),
                     state: Some(Arc::clone(&state)),
                     completion: completion(),
