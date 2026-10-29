@@ -506,3 +506,38 @@ Package versions use calendar versioning (`YYYY.M.D` release dates).
 
 Projects accept strict format `3`. See
 [projects and persistence](projects-guide.md) for validation and storage.
+
+## Optional Arrow adapters
+
+The core wheel imports and performs built-in table calculations without Python
+PyArrow, NumPy or JAX. Use a finite CPU Arrow C Stream producer or a struct
+record batch producer with `Batch.from_arrow(table, metadata=None)`.
+`Batch.__arrow_c_stream__(requested_schema=None)` exports a fresh capsule on
+each call; the requested schema is negotiated by Arrow, not assumed satisfied.
+Column arrays and nullable struct roots are rejected as tables. Imported tables
+are materialized; this protocol does not replace asynchronous source bindings.
+Compatible data buffers stay shared; exporting slices may realign a validity
+bitmap, as on the previous adapter path. Protocol support is not a zero-copy
+guarantee for every buffer and layout.
+
+`compute`, `compute_async`, `TableExpr.collect`, `collect_async`, `stream`, and
+`Program.collect`, `collect_async`, `stream`, `execute` accept
+`output_format="batch"` for native results. Named outputs and stream event names
+are preserved. The default remains `"pyarrow"` and requires
+`calc-flow-python[pyarrow]`; availability never changes the result type.
+`from_pyarrow` and `to_pyarrow` retain their compatibility contracts.
+
+Schema declarations accept `Sequence[Field]` or `__arrow_c_schema__`. Internal
+normalization removes schema metadata from a new envelope, preserves
+`Batch.metadata`, and shares read-only column buffers without changing callers.
+NumPy/JAX adapters stay optional and retain their existing operation, dtype,
+placement and static digest contracts. Matrix bridges assemble dense inputs and
+copy attached result columns in Rust without requiring Python PyArrow. Input
+snapshots and host/device transfers still have their necessary costs.
+
+PyArrow remains restricted to `>=21,<22` on Python 3.9 and `>=24,<25` on newer
+Python. Adapter entrypoints reject unsupported versions before FFI; the known
+PyArrow 25 capsule lifetime risk is not waived by a standalone core install.
+Python scalar UDF callbacks continue to receive PyArrow arrays and require that
+extra. Protocol support does not promise arbitrary producer lifetimes, all Arrow
+types, GPU Arrow execution, or version-independent array backend behavior.

@@ -385,40 +385,26 @@ def _validated_table_dtypes(
     columns: tuple[str, ...],
 ) -> tuple[object, ...]:
     import numpy as np
-    import pyarrow as pa
 
     if table.num_rows <= 0:
         raise ValueError("invalid table_matmul table.rows: expected at least one row")
     dtypes: list[object] = []
     for name in columns:
-        indices = table.schema.get_all_field_indices(name)
-        if not indices:
-            raise ValueError(
-                f"invalid table_matmul columns: selected column {name!r} is missing"
-            )
-        if len(indices) != 1:
-            raise ValueError(
-                f"invalid table_matmul columns: selected column {name!r} is ambiguous"
-            )
-        column = table.column(indices[0])
-        if column.null_count:
+        data_type, null_count = table._column_info(name)
+        if null_count:
             raise ValueError(
                 f"invalid table_matmul columns: selected column {name!r} contains nulls"
             )
-        data_type = column.type
-        if not (pa.types.is_integer(data_type) or pa.types.is_floating(data_type)):
+        try:
+            dtype = np.dtype(data_type)
+        except (TypeError, ValueError):
+            dtype = None
+        if dtype is None or dtype.kind not in "iuf":
             raise TypeError(
-                "invalid table_matmul columns: "
-                f"selected column {name!r} has unsupported Arrow dtype {data_type}"
+                f"invalid table_matmul columns: selected column {name!r} "
+                f"has unsupported Arrow dtype {data_type}"
             )
-        family = (
-            "int"
-            if pa.types.is_signed_integer(data_type)
-            else "uint"
-            if pa.types.is_unsigned_integer(data_type)
-            else "float"
-        )
-        dtypes.append(np.dtype(f"{family}{data_type.bit_width}"))
+        dtypes.append(dtype)
     return tuple(dtypes)
 
 
@@ -512,22 +498,7 @@ def _numpy_table_matrix(
 ) -> object:
     import numpy as np
 
-    matrix, _token = _native.Batch._new_owned_numpy(
-        (table.num_rows, len(columns)),
-        np.dtype(dtype).name,
-    )
-    for column_index, name in enumerate(columns):
-        offset = 0
-        for chunk in table[name].chunks:
-            values = chunk.to_numpy(zero_copy_only=True)
-            next_offset = offset + len(values)
-            np.copyto(
-                matrix[offset:next_offset, column_index],
-                values,
-                casting="safe",
-            )
-            offset = next_offset
-    return matrix
+    return table._table_matrix(columns, np.dtype(dtype).name)
 
 
 def _owned_numpy(value: object) -> object:
@@ -687,12 +658,17 @@ def _owned_jax(value: object) -> object:
 
 
 def _prepare_array(value: object, backend: str) -> tuple[object, int]:
-    if backend == "numpy":
-        owned = _owned_numpy(value)
-    elif backend == "jax":
-        owned = _owned_jax(value)
-    else:
-        owned = value
+    try:
+        if backend == "numpy":
+            owned = _owned_numpy(value)
+        elif backend == "jax":
+            owned = _owned_jax(value)
+        else:
+            owned = value
+    except ImportError as error:
+        raise ImportError(
+            f"array backend requires calc-flow-python[{backend}]"
+        ) from error
     shape = getattr(owned, "shape", None)
     length = int(shape[0]) if shape else 1
     if length < 0:
@@ -791,7 +767,7 @@ class _TableMatmulProvider:
     ) -> dict[str, _native.Batch]:
         columns = _table_matmul_columns(options)
         table_batch, weights_batch = _table_matmul_inputs(inputs, self.backend)
-        table = table_batch.to_pyarrow()
+        table = table_batch
         table_dtypes = _validated_table_dtypes(table, columns)
         weights = _validated_weights(weights_batch, self.backend, len(columns))
         result_dtype = _common_matrix_dtype(
@@ -1158,11 +1134,10 @@ class _SymbolicMatrixProvider:
         options: Mapping[str, object],
     ) -> dict[str, _native.Batch]:
         import numpy as np
-        import pyarrow as pa
 
         columns, names, expression = _symbolic_matrix_options(options)
         table_batch, weights_batch = _symbolic_matrix_inputs(inputs, self.backend)
-        table = table_batch.to_pyarrow()
+        table = table_batch
         table_dtypes = _validated_table_dtypes(table, columns)
         weights = _validated_weights(weights_batch, self.backend, len(columns))
         result_dtype = _common_matrix_dtype(
@@ -1212,9 +1187,9 @@ class _SymbolicMatrixProvider:
                 "invalid symbolic_matrix output.dtype: expected "
                 f"{expected_dtype}, received {actual_dtype}"
             )
-        attached = table
-        for index, name in enumerate(names):
-            attached = attached.append_column(name, pa.array(output_host[:, index]))
+        attached = table._append_numpy(
+            names, [output_host[:, index] for index in range(len(names))]
+        )
         metadata = table_batch.metadata
         metadata.update(
             {
@@ -1230,11 +1205,14 @@ class _SymbolicMatrixProvider:
                 "provider_calls": 1,
             }
         )
-        return {"output": _native.Batch.from_pyarrow(attached, metadata)}
+        return {"output": attached._with_metadata(metadata)}
 
 
 def register_numpy(runtime: Runtime) -> None:
-    import numpy as np
+    try:
+        import numpy as np
+    except ImportError as error:
+        raise ImportError("NumPy provider requires calc-flow-python[numpy]") from error
 
     expression = _ArrayProvider("numpy", np)
     runtime.register_provider(
@@ -1286,7 +1264,10 @@ def register_numpy(runtime: Runtime) -> None:
 
 
 def register_jax(runtime: Runtime) -> None:
-    import jax.numpy as jnp
+    try:
+        import jax.numpy as jnp
+    except ImportError as error:
+        raise ImportError("JAX provider requires calc-flow-python[jax]") from error
 
     expression = _ArrayProvider("jax", jnp)
     runtime.register_provider(

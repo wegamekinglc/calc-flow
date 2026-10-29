@@ -68,8 +68,10 @@ uv --version
 
 ## Install published packages
 
-Create a Python project and add the core package. Add only the optional array
-providers your application uses.
+Create a Python project and add the core package. For the table examples in this
+guide, also install `calc-flow-python[pyarrow]`. A standalone application can use
+Arrow protocol producers and explicit `output_format="batch"` without PyArrow.
+Add only the optional array providers your application uses.
 
 ### Linux and WSL
 
@@ -77,6 +79,7 @@ providers your application uses.
 uv init calc-flow-example
 cd calc-flow-example
 uv add calc-flow-python
+uv add "calc-flow-python[pyarrow]"
 
 # Optional providers
 uv add "calc-flow-python[numpy]"
@@ -89,6 +92,7 @@ uv add "calc-flow-python[jax]"
 uv init calc-flow-example
 Set-Location calc-flow-example
 uv add calc-flow-python
+uv add "calc-flow-python[pyarrow]"
 
 # Optional providers
 uv add "calc-flow-python[numpy]"

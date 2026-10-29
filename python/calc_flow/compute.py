@@ -5,11 +5,14 @@ from __future__ import annotations
 import asyncio
 import inspect
 from collections.abc import Awaitable, Callable, Mapping
-from typing import TypeVar, Union, cast
+from typing import TYPE_CHECKING, Literal, TypeVar, cast, overload
 
-import pyarrow as pa
+if TYPE_CHECKING:
+    import pyarrow as pa
 
-from calc_flow._compat import TypeAliasType, dataclass
+from calc_flow._arrow import OutputFormat, _validate_output_format
+from calc_flow._arrow import TableData as TableData
+from calc_flow._compat import dataclass
 from calc_flow._native import Batch, ExecutionOptions, RunResult
 from calc_flow.pipeline import BatchExecutionPlan, Runtime, _canonical
 from calc_flow.symbolic import errors
@@ -17,7 +20,6 @@ from calc_flow.symbolic.expr import Parameter, TableExpr, table_input
 from calc_flow.symbolic.lower.bindings import _BatchBindings
 from calc_flow.symbolic.program import Program, _node_name, _selected_runtime
 
-TableData = TypeAliasType("TableData", Union[pa.Table, pa.RecordBatch, Batch])
 T = TypeVar("T")
 
 
@@ -31,39 +33,21 @@ def _require_blocking(entry: str) -> None:
     )
 
 
-def _arrow_table(data: TableData, path: str) -> pa.Table | pa.RecordBatch:
+def _arrow_table(data: TableData, path: str) -> Batch:
     if isinstance(data, Batch):
         if data.kind != "table":
             raise TypeError(f"{path}: expected table input, got {data.kind} Batch")
-        return data.to_pyarrow()
-    if isinstance(data, (pa.Table, pa.RecordBatch)):
         return data
-    raise TypeError(
-        f"{path}: expected Arrow Table, RecordBatch or table Batch; "
-        f"got {type(data).__name__}"
-    )
+    if not (hasattr(data, "__arrow_c_stream__") or hasattr(data, "__arrow_c_array__")):
+        raise TypeError(
+            f"{path}: expected Arrow Table, RecordBatch or table Batch; "
+            f"got {type(data).__name__}"
+        )
+    return Batch.from_arrow(data)
 
 
 def _table_batch(data: TableData, path: str) -> Batch:
-    table = _arrow_table(data, path)
-    if table.schema.metadata is not None or any(
-        field.metadata is not None for field in table.schema
-    ):
-        # Symbolic schemas omit Arrow metadata; rewrap the same column buffers.
-        schema = pa.schema([field.remove_metadata() for field in table.schema])
-        if table.num_columns:
-            normalized = pa.Table.from_arrays(table.columns, schema=schema)
-        else:
-            # RecordBatch metadata replacement preserves zero-column row counts.
-            batches = table.to_batches() if isinstance(table, pa.Table) else [table]
-            normalized = pa.Table.from_batches(
-                [batch.replace_schema_metadata(None) for batch in batches],
-                schema=schema,
-            )
-        return Batch.from_pyarrow(
-            normalized, metadata=data.metadata if isinstance(data, Batch) else None
-        )
-    return data if isinstance(data, Batch) else Batch.from_pyarrow(table)
+    return _arrow_table(data, path)._without_schema_metadata()
 
 
 def _input_kind(value: TableExpr | Parameter[object]) -> str:
@@ -187,10 +171,17 @@ def _prepare_collect_batches(
     return plan, physical, {name: output_names[name] for name, _ in program.outputs}
 
 
-def _tables(result: RunResult, outputs: dict[str, str]) -> dict[str, pa.Table]:
+def _tables(
+    result: RunResult, outputs: dict[str, str], output_format: OutputFormat = "pyarrow"
+) -> dict[str, pa.Table | Batch]:
     # Each RunResult.outputs read rebuilds every Batch wrapper; read it once.
     batches = result.outputs
-    return {name: batches[port].to_pyarrow() for name, port in outputs.items()}
+    return {
+        name: (
+            batches[port] if output_format == "batch" else batches[port].to_pyarrow()
+        )
+        for name, port in outputs.items()
+    }
 
 
 def _collect(
@@ -198,11 +189,13 @@ def _collect(
     inputs: Mapping[str, TableData],
     runtime: Runtime | None,
     options: ExecutionOptions | None,
-) -> dict[str, pa.Table]:
+    output_format: OutputFormat = "pyarrow",
+) -> dict[str, pa.Table | Batch]:
     _require_blocking("collect")
+    _validate_output_format(output_format)
     plan, bound, outputs = _prepare_collect(program, inputs, runtime)
     _validate_options(options)
-    return _tables(plan.execute(bound, options=options), outputs)
+    return _tables(plan.execute(bound, options=options), outputs, output_format)
 
 
 def _as_input_mapping(
@@ -225,6 +218,7 @@ def _table_inputs(
     )
 
 
+@overload
 def compute(
     data: TableData,
     build: Callable[[TableExpr], TableExpr],
@@ -232,15 +226,54 @@ def compute(
     *,
     runtime: Runtime | None = None,
     options: ExecutionOptions | None = None,
-) -> pa.Table:
+    output_format: Literal["pyarrow"] = "pyarrow",
+) -> pa.Table: ...
+
+
+@overload
+def compute(
+    data: TableData,
+    build: Callable[[TableExpr], TableExpr],
+    /,
+    *,
+    runtime: Runtime | None = None,
+    options: ExecutionOptions | None = None,
+    output_format: Literal["batch"],
+) -> Batch: ...
+
+
+@overload
+def compute(
+    data: TableData,
+    build: Callable[[TableExpr], TableExpr],
+    /,
+    *,
+    runtime: Runtime | None = None,
+    options: ExecutionOptions | None = None,
+    output_format: OutputFormat,
+) -> pa.Table | Batch: ...
+
+
+def compute(
+    data: TableData,
+    build: Callable[[TableExpr], TableExpr],
+    /,
+    *,
+    runtime: Runtime | None = None,
+    options: ExecutionOptions | None = None,
+    output_format: OutputFormat = "pyarrow",
+) -> pa.Table | Batch:
     """Build from Arrow fields and independently compute the result.
 
     The inferred input has no ordering. For temporal expressions, declare
     ordering with ``table_input`` and execute through ``TableExpr.collect``.
     """
     _require_blocking("compute")
+    _validate_output_format(output_format)
     program, batch = _build_program(data, build)
-    return _collect(program, {"input": batch}, runtime, options)["output"]
+    return _collect(program, {"input": batch}, runtime, options, output_format)[
+        "output"
+    ]
 
 
 def _build_program(
@@ -248,7 +281,7 @@ def _build_program(
     build: Callable[[TableExpr], TableExpr],
 ) -> tuple[Program, Batch]:
     batch = _table_batch(data, "compute.data")
-    source = table_input("input", schema=batch.to_pyarrow().schema)
+    source = table_input("input", schema=batch._schema)
     if not callable(build):
         raise TypeError("compute.build: expected a callable returning TableExpr")
     output = build(source)
@@ -267,16 +300,18 @@ def _collect_async(
     inputs: Mapping[str, TableData],
     runtime: Runtime | None,
     options: ExecutionOptions | None,
-) -> Awaitable[dict[str, pa.Table]]:
+    output_format: OutputFormat = "pyarrow",
+) -> Awaitable[dict[str, pa.Table | Batch]]:
+    _validate_output_format(output_format)
     batches = _collect_batches(program, inputs)
     selected = _selected_runtime(runtime)
     _validate_options(options)
 
-    async def execute() -> dict[str, pa.Table]:
+    async def execute() -> dict[str, pa.Table | Batch]:
         plan, bound, outputs = await _run_blocking_compile(
             _prepare_collect_batches, program, batches, selected
         )
-        return await _execute_collect(plan, bound, outputs, options)
+        return await _execute_collect(plan, bound, outputs, options, output_format)
 
     return execute()
 
@@ -305,8 +340,11 @@ async def _execute_collect(
     bound: dict[str, Batch],
     outputs: dict[str, str],
     options: ExecutionOptions | None,
-) -> dict[str, pa.Table]:
-    return _tables(await plan.execute_async(bound, options=options), outputs)
+    output_format: OutputFormat = "pyarrow",
+) -> dict[str, pa.Table | Batch]:
+    return _tables(
+        await plan.execute_async(bound, options=options), outputs, output_format
+    )
 
 
 def _collect_table_async(
@@ -314,18 +352,58 @@ def _collect_table_async(
     inputs: Mapping[str, TableData],
     runtime: Runtime | None,
     options: ExecutionOptions | None,
-) -> Awaitable[pa.Table]:
+    output_format: OutputFormat = "pyarrow",
+) -> Awaitable[pa.Table | Batch]:
+    _validate_output_format(output_format)
     batches = _collect_batches(program, inputs)
     selected = _selected_runtime(runtime)
     _validate_options(options)
 
-    async def execute() -> pa.Table:
+    async def execute() -> pa.Table | Batch:
         plan, bound, outputs = await _run_blocking_compile(
             _prepare_collect_batches, program, batches, selected
         )
-        return (await _execute_collect(plan, bound, outputs, options))["output"]
+        return (await _execute_collect(plan, bound, outputs, options, output_format))[
+            "output"
+        ]
 
     return execute()
+
+
+@overload
+def compute_async(
+    data: TableData,
+    build: Callable[[TableExpr], TableExpr],
+    /,
+    *,
+    runtime: Runtime | None = None,
+    options: ExecutionOptions | None = None,
+    output_format: Literal["pyarrow"] = "pyarrow",
+) -> Awaitable[pa.Table]: ...
+
+
+@overload
+def compute_async(
+    data: TableData,
+    build: Callable[[TableExpr], TableExpr],
+    /,
+    *,
+    runtime: Runtime | None = None,
+    options: ExecutionOptions | None = None,
+    output_format: Literal["batch"],
+) -> Awaitable[Batch]: ...
+
+
+@overload
+def compute_async(
+    data: TableData,
+    build: Callable[[TableExpr], TableExpr],
+    /,
+    *,
+    runtime: Runtime | None = None,
+    options: ExecutionOptions | None = None,
+    output_format: OutputFormat,
+) -> Awaitable[pa.Table | Batch]: ...
 
 
 def compute_async(
@@ -335,7 +413,8 @@ def compute_async(
     *,
     runtime: Runtime | None = None,
     options: ExecutionOptions | None = None,
-) -> Awaitable[pa.Table]:
+    output_format: OutputFormat = "pyarrow",
+) -> Awaitable[pa.Table | Batch]:
     """Capture the input Batch and await cancellation-aware native execution.
 
     Arrow buffers are shared. Keep their underlying storage read-only until
@@ -344,5 +423,8 @@ def compute_async(
     The inferred input has no ordering. For temporal expressions, declare
     ordering with ``table_input`` and await ``TableExpr.collect_async``.
     """
+    _validate_output_format(output_format)
     program, batch = _build_program(data, build)
-    return _collect_table_async(program, {"input": batch}, runtime, options)
+    return _collect_table_async(
+        program, {"input": batch}, runtime, options, output_format
+    )

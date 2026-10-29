@@ -295,6 +295,7 @@ fn source_schema(value: &Bound<'_, PyDict>) -> PyResult<calc_flow::SourceSchema>
     if schema.is_none() {
         return Ok(calc_flow::SourceSchema::DynamicOrUnknown);
     }
+    crate::arrow::guard_input(&schema)?;
     let capsule = schema
         .call_method0("__arrow_c_schema__")?
         .cast_into::<PyCapsule>()?;

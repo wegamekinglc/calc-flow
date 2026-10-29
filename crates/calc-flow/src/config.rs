@@ -210,6 +210,38 @@ pub struct ArrowFieldSpec {
     pub nullable: bool,
 }
 
+impl ArrowFieldSpec {
+    /// Convert a portable field declaration into an Arrow field.
+    ///
+    /// # Errors
+    /// Returns an invalid-argument error for unsupported portable types.
+    pub fn to_arrow(&self) -> Result<Field> {
+        arrow_field(self).ok_or_else(|| CalcFlowError::InvalidArgument {
+            field: format!("schema.{}", self.name),
+            message: format!("unsupported Arrow type {:?}", self.data_type),
+        })
+    }
+
+    /// Describe an Arrow field using the canonical project type spelling.
+    ///
+    /// Arrow metadata is deliberately outside the portable declaration.
+    ///
+    /// # Errors
+    /// Returns an invalid-argument error when the type is not portable.
+    pub fn from_arrow(field: &Field) -> Result<Self> {
+        let data_type =
+            canonical_arrow_field_type(field).ok_or_else(|| CalcFlowError::InvalidArgument {
+                field: format!("schema.{}", field.name()),
+                message: format!("unsupported Arrow type {}", field.data_type()),
+            })?;
+        Ok(Self {
+            name: field.name().clone(),
+            data_type,
+            nullable: field.is_nullable(),
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EdgeSpec {

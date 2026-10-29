@@ -366,6 +366,11 @@ class SourceBinding:
         The binding retains its imported buffers for reuse; each job releases its
         own references on close. No durable replay or source-native watermarks.
         """
+        if not isinstance(data, _native.Batch) and not hasattr(data, "num_rows"):
+            raise TypeError(
+                "source.arrow: expected Arrow Table, RecordBatch or table Batch; "
+                "materialize protocol readers with Batch.from_arrow"
+            )
         return _arrow_source_binding(
             data,
             EdgeBudget() if budget is None else budget,
@@ -468,7 +473,7 @@ def _arrow_source_binding(
     if isinstance(data, _native.Batch) and data.kind == "table":
         batch = data
     else:
-        batch = _native.Batch.from_pyarrow(_arrow_table(data, "source.arrow"))
+        batch = _arrow_table(data, "source.arrow")
     source = _native._ArrowSource(
         batch, budget.max_rows, budget.max_bytes, ordered_column
     )

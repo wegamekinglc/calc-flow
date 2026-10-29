@@ -767,11 +767,15 @@ class ReleaseConfigTests(unittest.TestCase):
         core = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         self.assertIn(
             "pyarrow>=21.0.0,<22; python_version < '3.10'",
-            core["project"]["dependencies"],
+            core["project"]["optional-dependencies"]["pyarrow"],
         )
         self.assertIn(
             "pyarrow>=24.0.0,<25; python_version >= '3.10'",
-            core["project"]["dependencies"],
+            core["project"]["optional-dependencies"]["pyarrow"],
+        )
+
+        self.assertFalse(
+            any("pyarrow" in dep for dep in core["project"]["dependencies"])
         )
 
     def test_final_release_error_docs_do_not_claim_alpha_status(self) -> None:

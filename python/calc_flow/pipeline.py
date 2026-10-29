@@ -193,7 +193,7 @@ class Runtime:
         self, select: Sequence[str], filter_sql: str | None, schema: Any, /
     ) -> Any:
         """Cache native planning metadata independently of owning stream plans."""
-        key = (tuple(select), filter_sql, schema.serialize().to_pybytes())
+        key = (tuple(select), filter_sql, _canonical_schema(schema))
         with self._registration_lock:
             cached = self._symbolic_schema_cache.get(key)
             if cached is not None:
@@ -214,7 +214,7 @@ class Runtime:
         key = (
             "sql",
             query,
-            tuple((name, schema.serialize().to_pybytes()) for name, schema in ordered),
+            tuple((name, _canonical_schema(schema)) for name, schema in ordered),
         )
         with self._registration_lock:
             cached = self._symbolic_schema_cache.get(key)
@@ -1317,3 +1317,7 @@ def project_json_schema() -> str:
 
 def validate_project_json(project_json: str) -> str:
     return _native.validate_project_json(project_json)
+
+
+def _canonical_schema(schema: object) -> str:
+    return _native._schema_key(schema)

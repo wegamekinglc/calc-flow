@@ -155,6 +155,7 @@ impl PythonKafkaDecoder {
         if let Some(module) = &*cached {
             return Ok(module.clone_ref(py));
         }
+        crate::arrow::require_pyarrow(py).map_err(|error| error.to_string())?;
         let module = py
             .import("pyarrow")
             .map_err(|error| error.to_string())?

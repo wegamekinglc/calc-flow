@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Awaitable, Mapping, Sequence
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Literal, cast, overload
 
 from calc_flow._compat import dataclass
 from calc_flow.symbolic.domains import type_name
@@ -26,7 +26,8 @@ from calc_flow.symbolic.types import CompileMode
 if TYPE_CHECKING:
     import pyarrow as pa
 
-    from calc_flow._native import ExecutionOptions
+    from calc_flow._arrow import OutputFormat
+    from calc_flow._native import Batch, ExecutionOptions
     from calc_flow.compute import TableData
     from calc_flow.config import ProjectDocument
     from calc_flow.pipeline import BatchExecutionPlan, Runtime, StreamExecutionPlan
@@ -428,6 +429,7 @@ class Program:
                 f"Program engine is {self._engine!r}; cannot use {engine!r}"
             )
 
+    @overload
     def execute(
         self,
         inputs: Mapping[str, StreamInput | TableData],
@@ -435,9 +437,50 @@ class Program:
         *,
         runtime: Runtime | None = None,
         options: ExecutionOptions | None = None,
+        output_format: Literal["pyarrow"] = "pyarrow",
         config: StreamRuntimeConfig | None = None,
         watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None = None,
-    ) -> dict[str, pa.Table] | StreamResults[StreamOutput]:
+    ) -> dict[str, pa.Table] | StreamResults[StreamOutput[pa.Table]]: ...
+
+    @overload
+    def execute(
+        self,
+        inputs: Mapping[str, StreamInput | TableData],
+        /,
+        *,
+        runtime: Runtime | None = None,
+        options: ExecutionOptions | None = None,
+        output_format: Literal["batch"],
+        config: StreamRuntimeConfig | None = None,
+        watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None = None,
+    ) -> dict[str, Batch] | StreamResults[StreamOutput[Batch]]: ...
+
+    @overload
+    def execute(
+        self,
+        inputs: Mapping[str, StreamInput | TableData],
+        /,
+        *,
+        runtime: Runtime | None = None,
+        options: ExecutionOptions | None = None,
+        output_format: OutputFormat,
+        config: StreamRuntimeConfig | None = None,
+        watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None = None,
+    ) -> (
+        dict[str, pa.Table | Batch] | StreamResults[StreamOutput[pa.Table | Batch]]
+    ): ...
+
+    def execute(
+        self,
+        inputs: Mapping[str, StreamInput | TableData],
+        /,
+        *,
+        runtime: Runtime | None = None,
+        options: ExecutionOptions | None = None,
+        output_format: OutputFormat = "pyarrow",
+        config: StreamRuntimeConfig | None = None,
+        watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None = None,
+    ) -> dict[str, pa.Table | Batch] | StreamResults[StreamOutput]:
         """Execute through the selected engine.
 
         SQL returns named Arrow tables immediately. Streaming returns owned
@@ -455,14 +498,55 @@ class Program:
                 cast("Mapping[str, TableData]", inputs),
                 runtime=runtime,
                 options=options,
+                output_format=output_format,
             )
         if self._engine == "streaming":
             if options is not None:
                 raise ValueError("execute.options is available for the sql engine")
             return self.stream(
-                inputs, runtime=runtime, config=config, watermarks=watermarks
+                inputs,
+                runtime=runtime,
+                config=config,
+                watermarks=watermarks,
+                output_format=output_format,
             )
         raise RuntimeError(f"Program has unsupported engine {self._engine!r}")
+
+    @overload
+    def stream(
+        self,
+        inputs: Mapping[str, StreamInput | TableData],
+        /,
+        *,
+        runtime: Runtime | None = None,
+        config: StreamRuntimeConfig | None = None,
+        watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None = None,
+        output_format: Literal["pyarrow"] = "pyarrow",
+    ) -> StreamResults[StreamOutput[pa.Table]]: ...
+
+    @overload
+    def stream(
+        self,
+        inputs: Mapping[str, StreamInput | TableData],
+        /,
+        *,
+        runtime: Runtime | None = None,
+        config: StreamRuntimeConfig | None = None,
+        watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None = None,
+        output_format: Literal["batch"],
+    ) -> StreamResults[StreamOutput[Batch]]: ...
+
+    @overload
+    def stream(
+        self,
+        inputs: Mapping[str, StreamInput | TableData],
+        /,
+        *,
+        runtime: Runtime | None = None,
+        config: StreamRuntimeConfig | None = None,
+        watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None = None,
+        output_format: OutputFormat,
+    ) -> StreamResults[StreamOutput[pa.Table | Batch]]: ...
 
     def stream(
         self,
@@ -472,6 +556,7 @@ class Program:
         runtime: Runtime | None = None,
         config: StreamRuntimeConfig | None = None,
         watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None = None,
+        output_format: OutputFormat = "pyarrow",
     ) -> StreamResults[StreamOutput]:
         """Yield named output events from one owned native streaming job.
 
@@ -482,7 +567,7 @@ class Program:
         self._require_engine("streaming")
         from calc_flow.stream import _stream_program
 
-        return _stream_program(self, inputs, runtime, config, watermarks)
+        return _stream_program(self, inputs, runtime, config, watermarks, output_format)
 
     def output(self, name: str, value: TableExpr | ArrayExpr, /) -> Program:
         """Return a new program with one declared output appended."""
@@ -566,6 +651,7 @@ class Program:
             self, _selected_runtime(runtime), allowed_lateness_micros, late_policy
         )
 
+    @overload
     def collect(
         self,
         inputs: Mapping[str, TableData],
@@ -573,12 +659,78 @@ class Program:
         *,
         runtime: Runtime | None = None,
         options: ExecutionOptions | None = None,
-    ) -> dict[str, pa.Table]:
+        output_format: Literal["pyarrow"] = "pyarrow",
+    ) -> dict[str, pa.Table]: ...
+
+    @overload
+    def collect(
+        self,
+        inputs: Mapping[str, TableData],
+        /,
+        *,
+        runtime: Runtime | None = None,
+        options: ExecutionOptions | None = None,
+        output_format: Literal["batch"],
+    ) -> dict[str, Batch]: ...
+
+    @overload
+    def collect(
+        self,
+        inputs: Mapping[str, TableData],
+        /,
+        *,
+        runtime: Runtime | None = None,
+        options: ExecutionOptions | None = None,
+        output_format: OutputFormat,
+    ) -> dict[str, pa.Table | Batch]: ...
+
+    def collect(
+        self,
+        inputs: Mapping[str, TableData],
+        /,
+        *,
+        runtime: Runtime | None = None,
+        options: ExecutionOptions | None = None,
+        output_format: OutputFormat = "pyarrow",
+    ) -> dict[str, pa.Table | Batch]:
         """Execute a fresh plan and return Arrow tables by declaration name."""
         self._require_engine("sql")
         from calc_flow.compute import _collect
 
-        return _collect(self, inputs, runtime, options)
+        return _collect(self, inputs, runtime, options, output_format)
+
+    @overload
+    def collect_async(
+        self,
+        inputs: Mapping[str, TableData],
+        /,
+        *,
+        runtime: Runtime | None = None,
+        options: ExecutionOptions | None = None,
+        output_format: Literal["pyarrow"] = "pyarrow",
+    ) -> Awaitable[dict[str, pa.Table]]: ...
+
+    @overload
+    def collect_async(
+        self,
+        inputs: Mapping[str, TableData],
+        /,
+        *,
+        runtime: Runtime | None = None,
+        options: ExecutionOptions | None = None,
+        output_format: Literal["batch"],
+    ) -> Awaitable[dict[str, Batch]]: ...
+
+    @overload
+    def collect_async(
+        self,
+        inputs: Mapping[str, TableData],
+        /,
+        *,
+        runtime: Runtime | None = None,
+        options: ExecutionOptions | None = None,
+        output_format: OutputFormat,
+    ) -> Awaitable[dict[str, pa.Table | Batch]]: ...
 
     def collect_async(
         self,
@@ -587,7 +739,8 @@ class Program:
         *,
         runtime: Runtime | None = None,
         options: ExecutionOptions | None = None,
-    ) -> Awaitable[dict[str, pa.Table]]:
+        output_format: OutputFormat = "pyarrow",
+    ) -> Awaitable[dict[str, pa.Table | Batch]]:
         """Copy input mappings, capture Batch references and await execution.
 
         Arrow buffers are shared; keep their underlying storage read-only until
@@ -596,7 +749,7 @@ class Program:
         self._require_engine("sql")
         from calc_flow.compute import _collect_async
 
-        return _collect_async(self, inputs, runtime, options)
+        return _collect_async(self, inputs, runtime, options, output_format)
 
     def to_project(
         self,

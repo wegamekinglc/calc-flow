@@ -11,7 +11,6 @@ import inspect
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Generic, Literal, TypeVar, Union, overload
 
-import pyarrow as pa
 from typing_extensions import Concatenate, ParamSpec, Unpack
 
 from calc_flow._compat import TypeAliasType, dataclass
@@ -39,7 +38,6 @@ from calc_flow.symbolic.nodes import (
     literal_value,
 )
 from calc_flow.symbolic.types import (
-    TABLE_FIELD_TYPES,
     BatchKind,
     Field,
     ScalarLiteral,
@@ -52,7 +50,10 @@ from calc_flow.symbolic.types import (
 if TYPE_CHECKING:
     from datetime import timedelta
 
-    from calc_flow._native import ExecutionOptions
+    import pyarrow as pa
+
+    from calc_flow._arrow import ArrowSchema, OutputFormat
+    from calc_flow._native import Batch, ExecutionOptions
     from calc_flow.asof_join_spec import AsofStateLimits
     from calc_flow.compute import TableData
     from calc_flow.pipeline import Runtime
@@ -491,6 +492,7 @@ class TableExpr(Expr[object]):
 
         return declare_asof(self, right, tolerance, limits, _AsofOptions(**options))
 
+    @overload
     def stream(
         self,
         inputs: StreamInput | Mapping[str, StreamInput | TableData],
@@ -499,7 +501,43 @@ class TableExpr(Expr[object]):
         runtime: Runtime | None = None,
         config: StreamRuntimeConfig | None = None,
         watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None = None,
-    ) -> StreamResults[pa.Table]:
+        output_format: Literal["pyarrow"] = "pyarrow",
+    ) -> StreamResults[pa.Table]: ...
+
+    @overload
+    def stream(
+        self,
+        inputs: StreamInput | Mapping[str, StreamInput | TableData],
+        /,
+        *,
+        runtime: Runtime | None = None,
+        config: StreamRuntimeConfig | None = None,
+        watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None = None,
+        output_format: Literal["batch"],
+    ) -> StreamResults[Batch]: ...
+
+    @overload
+    def stream(
+        self,
+        inputs: StreamInput | Mapping[str, StreamInput | TableData],
+        /,
+        *,
+        runtime: Runtime | None = None,
+        config: StreamRuntimeConfig | None = None,
+        watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None = None,
+        output_format: OutputFormat,
+    ) -> StreamResults[pa.Table | Batch]: ...
+
+    def stream(
+        self,
+        inputs: StreamInput | Mapping[str, StreamInput | TableData],
+        /,
+        *,
+        runtime: Runtime | None = None,
+        config: StreamRuntimeConfig | None = None,
+        watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None = None,
+        output_format: OutputFormat = "pyarrow",
+    ) -> StreamResults[pa.Table | Batch]:
         """Own a native stream with ``async with`` and ``async for``.
 
         Declared event-time inputs advance safe watermarks by default and require
@@ -509,7 +547,40 @@ class TableExpr(Expr[object]):
         """
         from calc_flow.stream import _stream_table
 
-        return _stream_table(self, inputs, runtime, config, watermarks)
+        return _stream_table(self, inputs, runtime, config, watermarks, output_format)
+
+    @overload
+    def collect(
+        self,
+        inputs: TableData | Mapping[str, TableData],
+        /,
+        *,
+        runtime: Runtime | None = None,
+        options: ExecutionOptions | None = None,
+        output_format: Literal["pyarrow"] = "pyarrow",
+    ) -> pa.Table: ...
+
+    @overload
+    def collect(
+        self,
+        inputs: TableData | Mapping[str, TableData],
+        /,
+        *,
+        runtime: Runtime | None = None,
+        options: ExecutionOptions | None = None,
+        output_format: Literal["batch"],
+    ) -> Batch: ...
+
+    @overload
+    def collect(
+        self,
+        inputs: TableData | Mapping[str, TableData],
+        /,
+        *,
+        runtime: Runtime | None = None,
+        options: ExecutionOptions | None = None,
+        output_format: OutputFormat,
+    ) -> pa.Table | Batch: ...
 
     def collect(
         self,
@@ -518,7 +589,8 @@ class TableExpr(Expr[object]):
         *,
         runtime: Runtime | None = None,
         options: ExecutionOptions | None = None,
-    ) -> pa.Table:
+        output_format: OutputFormat = "pyarrow",
+    ) -> pa.Table | Batch:
         """Execute with named inputs, or a single table when there is one table root."""
         from calc_flow.compute import _require_blocking, _table_inputs
         from calc_flow.symbolic.program import Program
@@ -526,8 +598,44 @@ class TableExpr(Expr[object]):
         _require_blocking("collect")
         program = Program("collect", engine="sql", outputs={"output": self})
         return program.collect(
-            _table_inputs(program, inputs), runtime=runtime, options=options
+            _table_inputs(program, inputs),
+            runtime=runtime,
+            options=options,
+            output_format=output_format,
         )["output"]
+
+    @overload
+    def collect_async(
+        self,
+        inputs: TableData | Mapping[str, TableData],
+        /,
+        *,
+        runtime: Runtime | None = None,
+        options: ExecutionOptions | None = None,
+        output_format: Literal["pyarrow"] = "pyarrow",
+    ) -> Awaitable[pa.Table]: ...
+
+    @overload
+    def collect_async(
+        self,
+        inputs: TableData | Mapping[str, TableData],
+        /,
+        *,
+        runtime: Runtime | None = None,
+        options: ExecutionOptions | None = None,
+        output_format: Literal["batch"],
+    ) -> Awaitable[Batch]: ...
+
+    @overload
+    def collect_async(
+        self,
+        inputs: TableData | Mapping[str, TableData],
+        /,
+        *,
+        runtime: Runtime | None = None,
+        options: ExecutionOptions | None = None,
+        output_format: OutputFormat,
+    ) -> Awaitable[pa.Table | Batch]: ...
 
     def collect_async(
         self,
@@ -536,7 +644,8 @@ class TableExpr(Expr[object]):
         *,
         runtime: Runtime | None = None,
         options: ExecutionOptions | None = None,
-    ) -> Awaitable[pa.Table]:
+        output_format: OutputFormat = "pyarrow",
+    ) -> Awaitable[pa.Table | Batch]:
         """Copy input mappings, capture Batch references and await execution.
 
         Arrow buffers are shared; keep their underlying storage read-only until
@@ -547,7 +656,7 @@ class TableExpr(Expr[object]):
 
         program = Program("collect", engine="sql", outputs={"output": self})
         return _collect_table_async(
-            program, _table_inputs(program, inputs), runtime, options
+            program, _table_inputs(program, inputs), runtime, options, output_format
         )
 
 
@@ -574,34 +683,19 @@ class Parameter(Expr[T]):
         raise TypeError("parameter node is missing its kind attribute")
 
 
-def _arrow_fields(schema: pa.Schema, path: str, /) -> tuple[Field, ...]:
-    special = {
-        "time32[s]": pa.time32("s"),
-        "time64[us]": pa.time64("us"),
-        "timestamp[ms]": pa.timestamp("ms"),
-        "timestamp[us]": pa.timestamp("us"),
-        "timestamp[us, UTC]": pa.timestamp("us", tz="UTC"),
-    }
-    types = {
-        special[name] if name in special else pa.type_for_alias(name): name
-        for name in TABLE_FIELD_TYPES
-    }
-    fields = []
-    for field in schema:
-        data_type = types.get(field.type)
-        if data_type is None:
-            raise ValueError(
-                f"{path}.{field.name}: unsupported_type: "
-                f"unsupported Arrow type {field.type}"
-            )
-        fields.append(Field(field.name, data_type, nullable=field.nullable))
-    return tuple(fields)
+def _arrow_fields(schema: ArrowSchema, path: str, /) -> tuple[Field, ...]:
+    from calc_flow.symbolic.lower.schema import _fields
+
+    fields = _fields(schema)
+    for field in fields:
+        check_table_field_type(field.data_type, f"{path}.{field.name}")
+    return fields
 
 
 def _validate_schema(
-    schema: pa.Schema | Sequence[Field], path: str, /
+    schema: ArrowSchema | Sequence[Field], path: str, /
 ) -> tuple[Field, ...]:
-    if isinstance(schema, pa.Schema):
+    if hasattr(schema, "__arrow_c_schema__"):
         schema = _arrow_fields(schema, path)
     fields: list[Field] = []
     seen: set[str] = set()
@@ -652,7 +746,7 @@ def table_input(
     name: str,
     /,
     *,
-    schema: pa.Schema | Sequence[Field],
+    schema: ArrowSchema | Sequence[Field],
     entity_by: Sequence[str] = (),
     event_time: str | None = None,
     sequence_by: Sequence[str] = (),

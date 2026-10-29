@@ -3,7 +3,8 @@
 [Documentation](README.md) / 5.5 Releases
 
 The [Python package release workflow](../.github/workflows/release.yml) publishes
-only `calc-flow-python`. Install it with `pip install calc-flow-python` and
+only `calc-flow-python`. Install the core with `pip install calc-flow-python`;
+add `[pyarrow]` for default table output and Python UDFs, and
 import `calc_flow`.
 
 ## Version and artifacts
