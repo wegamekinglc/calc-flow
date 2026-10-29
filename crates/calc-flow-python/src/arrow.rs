@@ -12,6 +12,7 @@ use pyo3::{
     exceptions::{PyAttributeError, PyException, PyTypeError, PyValueError},
     intern,
     prelude::*,
+    sync::PyOnceLock,
     types::{PyBytes, PyCapsule, PyModule, PyString, PyType},
 };
 use pyo3_arrow::{
@@ -37,24 +38,28 @@ pub(crate) fn guard_input(value: &Bound<'_, PyAny>) -> PyResult<()> {
 
 fn is_pyarrow_type(value: &Bound<'_, PyAny>) -> PyResult<bool> {
     let module = value.cast::<PyType>()?.module()?;
-    let module = module.to_str()?;
+    let module = module.to_cow()?;
     Ok(module == "pyarrow" || module.starts_with("pyarrow."))
 }
 
 pub(crate) fn require_pyarrow(py: Python<'_>) -> PyResult<Bound<'_, PyModule>> {
     use pyo3::exceptions::PyImportError;
+    // An abi3 wheel selects from the running interpreter, once per process.
+    static EXPECTED_MAJOR: PyOnceLock<u32> = PyOnceLock::new();
+
     let module = py.import(intern!(py, "pyarrow")).map_err(|_| {
         PyImportError::new_err("PyArrow output and Python UDFs require calc-flow-python[pyarrow]")
     })?;
     let version = module
         .getattr(intern!(py, "__version__"))?
         .cast_into::<PyString>()?;
-    let version = version.to_str()?;
+    let version = version.to_cow()?;
     let major = version
         .split('.')
         .next()
         .and_then(|v| v.parse::<u32>().ok());
-    let expected = if py.version_info().minor < 10 { 21 } else { 24 };
+    let expected =
+        *EXPECTED_MAJOR.get_or_init(py, || if py.version_info().minor < 10 { 21 } else { 24 });
     if major != Some(expected) {
         return Err(PyImportError::new_err(
             "unsupported PyArrow version; install calc-flow-python[pyarrow] (PyArrow 25 capsule lifetimes are not supported)",
