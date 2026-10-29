@@ -10,8 +10,8 @@ use datafusion::execution::memory_pool::MemoryReservation;
 use std::sync::Arc;
 
 pub(super) mod frame;
-mod input;
 use super::restore_bases::inspector;
+use super::restore_input as input;
 mod inventory;
 
 #[cfg(test)]

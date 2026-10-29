@@ -42,7 +42,7 @@ impl OwnedInput {
     ) -> Result<()> {
         self.segments = Vec::with_capacity(snapshot.segments.len());
         for (id, segment) in &snapshot.segments {
-            super::super::super::copy_boundary(job).await?;
+            super::super::copy_boundary(job).await?;
             self.segments.push((
                 String::with_capacity(id.len()),
                 Vec::with_capacity(segment.bytes().len()),
@@ -50,11 +50,11 @@ impl OwnedInput {
             let (copied_id, copied_bytes) =
                 self.segments.last_mut().expect("owned partial segment");
             for part in id.as_bytes().chunks(4096) {
-                super::super::super::copy_boundary(job).await?;
+                super::super::copy_boundary(job).await?;
                 copied_id.push_str(std::str::from_utf8(part).expect("recognized ASCII segment id"));
             }
             for part in segment.bytes().chunks(4096) {
-                super::super::super::copy_boundary(job).await?;
+                super::super::copy_boundary(job).await?;
                 copied_bytes.extend_from_slice(part);
             }
         }

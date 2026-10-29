@@ -333,6 +333,46 @@ async fn expression_operator_processes_assignment_with_real_datafusion() {
 }
 
 #[tokio::test]
+async fn expression_input_schema_is_enforced_at_graph_and_direct_boundaries() {
+    let mut operator = ExpressionOperator::new("calc", "", vec!["a".into()], None, vec![])
+        .unwrap()
+        .with_ports(
+            Port::new(
+                "input",
+                BatchKind::Table,
+                true,
+                Some(vec![Field::new("a", DataType::Utf8, false)]),
+            )
+            .unwrap(),
+            Port::new("output", BatchKind::Table, true, None).unwrap(),
+        )
+        .unwrap();
+    let inputs = BTreeMap::from([("input".into(), table(vec![("a", vec![1])]))]);
+    let plan = PipelineBuilder::new("schema boundary")
+        .unwrap()
+        .add_node("calc", Box::new(operator.clone()))
+        .unwrap()
+        .compile_batch(&UdfRegistry::new().snapshot())
+        .unwrap();
+    let graph_error = plan
+        .execute(inputs.clone(), ExecutionOptions::default())
+        .await
+        .unwrap_err();
+    let run = RunContext::new(BTreeMap::new(), None, CancellationToken::new()).unwrap();
+    let direct_error = operator
+        .process(&inputs, &BatchOperatorContext { run: &run })
+        .await
+        .unwrap_err();
+
+    for error in [graph_error, direct_error] {
+        assert!(matches!(
+            error,
+            CalcFlowError::Compile { message } if message.contains("schema mismatch")
+        ));
+    }
+}
+
+#[tokio::test]
 async fn expression_operator_processes_projection_and_filter() {
     let inputs = BTreeMap::from([(
         "input".into(),

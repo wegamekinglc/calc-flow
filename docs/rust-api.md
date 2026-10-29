@@ -13,6 +13,7 @@ On this page:
 - [Build and document](#build-and-document)
 - [Expression pipeline](#expression-pipeline)
 - [SQL operators](#sql-operators)
+- [Snapshot SQL](#snapshot-sql)
 - [Rolling windows](#rolling-windows)
 - [Cross-section statistics](#cross-section-statistics)
 - [Late-row policy contract](#late-row-policy-contract)
@@ -250,6 +251,24 @@ fn inputs() -> Result<BTreeMap<String, Batch>, Box<dyn std::error::Error>> {
     ]))
 }
 ```
+
+## Snapshot SQL
+
+`SnapshotSqlOperator::new(name, query, aliases, udfs)` declares a stream-only
+read-only query over complete replacement relations. Set exact input and output
+schemas with `with_ports`. Each incoming `Batch` replaces one alias's entire
+relation; an empty table initializes or clears that alias. The operator waits
+for every alias to initialize, then emits a complete result after each update.
+Cross-source arrival order does not define an event-time atomic snapshot.
+
+Input relations and results must fit their edge budgets as whole batches.
+`StreamRuntimeConfig.sql_snapshot_state_budget` independently limits each
+node's latest relations, replacement candidates, and held checkpoint captures.
+Outputs currently connect directly to sinks and reject ExactlyOnce requests.
+See the [native snapshot SQL contract](snapshot-sql-native.md) for accounting,
+initialization, EOF, checkpoint, and recovery rules, and the
+[Python streaming guide](streaming-guide.md#complete-replacement-snapshot-sql)
+for application composition.
 
 ## Rolling windows
 

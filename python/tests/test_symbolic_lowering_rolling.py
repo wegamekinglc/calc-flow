@@ -18,10 +18,10 @@ from calc_flow.symbolic import (
     table_input,
     ts,
 )
-from calc_flow.symbolic.lower import (
+from calc_flow.symbolic.lower import lower_program_document
+from calc_flow.symbolic.lower.segments import (
     _fused_float_leaf,
     _rolling_input_name,
-    lower_program_document,
 )
 
 

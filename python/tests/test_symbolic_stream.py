@@ -198,6 +198,10 @@ def test_execution_never_calls_symbolic_python(tmp_path: Path) -> None:
     import calc_flow.symbolic.analyzer as analyzer_module
     import calc_flow.symbolic.expr as expr_module
     import calc_flow.symbolic.lower as lower_module
+    import calc_flow.symbolic.lower.planners as planners_module
+    import calc_flow.symbolic.lower.program as lower_program_module
+    import calc_flow.symbolic.lower.segments as segments_module
+    import calc_flow.symbolic.lower.strategies as strategies_module
     import calc_flow.symbolic.nodes as nodes_module
     import calc_flow.symbolic.ops as ops_module
     import calc_flow.symbolic.optimizer as optimizer_module
@@ -219,6 +223,10 @@ def test_execution_never_calls_symbolic_python(tmp_path: Path) -> None:
         analyzer_module,
         expr_module,
         lower_module,
+        planners_module,
+        lower_program_module,
+        segments_module,
+        strategies_module,
         nodes_module,
         ops_module,
         optimizer_module,

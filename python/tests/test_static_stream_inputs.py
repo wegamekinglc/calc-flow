@@ -212,17 +212,26 @@ def test_static_inputs_are_exempt_from_the_project_plan_rejection(
 def test_static_input_mapping_is_defensively_copied(tmp_path: Path) -> None:
     import asyncio
 
-    plan = _plan(_table_declaration())
-    supplied = {"w": _weights_table()}
-    runner = _runner(plan, tmp_path, supplied)
+    plan = _plan(_array_declaration())
+    supplied = {"weights": Batch.from_array(np.array([[4.0]]), backend="numpy")}
+    source = _Source(
+        Batch.from_pyarrow(
+            pyarrow.table({"x": pyarrow.array([2.0, 3.0], type=pyarrow.float64())})
+        )
+    )
+    sink = _Sink()
+    runner = _runner(plan, tmp_path, supplied, source=source, sink=sink)
     supplied.clear()
 
     async def exercise() -> None:
         job = await runner.start_async()
-        outcome = await job.shutdown_async()
-        assert outcome is not None
+        outcome = await job.wait_async()
+        assert outcome.state == "completed"
+        assert not outcome.errors
 
     asyncio.run(exercise())
+    observed = pyarrow.concat_tables([batch.to_pyarrow() for batch in sink.batches])
+    assert observed.to_pydict() == {"x": [2.0, 3.0], "score": [8.0, 12.0]}
 
 
 def test_latched_array_values_survive_caller_mutation(tmp_path: Path) -> None:

@@ -46,7 +46,6 @@ from calc_flow.symbolic.lower.planners import (
 from calc_flow.symbolic.lower.segments import (
     _TABLE_OUTPUT_PRIMITIVES,
     _U64_MAX,
-    _CompileCacheKey,
     _cstr,
     _expression_node,
     _find_cross_section,
@@ -665,6 +664,28 @@ def lower_program_document(
 
     selected = _require_runtime(runtime, "lower_program_document")
     mode_value = _require_mode(mode)
+    with selected._registration_lock:
+        return _lower_program_document(
+            program,
+            selected,
+            mode_value,
+            allowed_lateness_micros=allowed_lateness_micros,
+            late_policy=late_policy,
+            _bindings=_bindings,
+        )
+
+
+def _lower_program_document(
+    program: Program,
+    selected: Runtime,
+    mode_value: str,
+    /,
+    *,
+    allowed_lateness_micros: int = 0,
+    late_policy: str = "error",
+    _bindings: _BatchBindings | None = None,
+) -> dict[str, object]:
+    """Lower validated declarations while their registration revision is locked."""
     analyzer, capabilities = _check_expression_capability(program, selected, mode_value)
     analyzer._bindings = _bindings
     _check_stateful_lowering(
@@ -729,89 +750,29 @@ def _check_snapshot_sql_capability(
     )
 
 
-def _cache_graph_nodes(document: dict[str, object], /) -> list[dict[str, object]]:
-    graph = document["graph"]
-    return graph["nodes"]  # type: ignore[index,return-value]
-
-
-def _cache_operator_versions(
-    nodes: list[dict[str, object]], capabilities: RuntimeCapabilities, /
-) -> tuple[tuple[str, str], ...]:
-    operator_kinds = {
-        node["operator"]["kind"]  # type: ignore[index]
-        for node in nodes
-        if node["operator"]["kind"] != "external"  # type: ignore[index]
-    }
-    return tuple(
-        sorted(
-            (operator.kind, operator.version)
-            for operator in capabilities.operators
-            if operator.kind in operator_kinds
-        )
-    )
-
-
-def _cache_provider_versions(
-    nodes: list[dict[str, object]], /
-) -> tuple[tuple[str, str, str], ...]:
-    versions: set[tuple[str, str, str]] = set()
-    for node in nodes:
-        operator = node["operator"]
-        if operator["kind"] == "external":  # type: ignore[index]
-            versions.add(  # type: ignore[arg-type]
-                (operator["provider"], operator["name"], operator["version"])  # type: ignore[index]
-            )
-    return tuple(sorted(versions))
-
-
-def _cache_udf_versions(
-    nodes: list[dict[str, object]], /
-) -> tuple[tuple[str, str, str], ...]:
-    versions: set[tuple[str, str, str]] = set()
-    for node in nodes:
-        operator = node["operator"]
-        for udf in operator.get("udfs", ()):  # type: ignore[union-attr]
-            if isinstance(udf, dict):
-                versions.add((udf["provider"], udf["name"], udf["version"]))  # type: ignore[arg-type]
-    return tuple(sorted(versions))
-
-
-def _compile_cache_key(
-    program: Program,
-    mode: str,
-    document: dict[str, object],
-    capabilities: RuntimeCapabilities,
-    allowed_lateness_micros: int,
-    late_policy: str,
-    /,
-) -> _CompileCacheKey:
-    nodes = _cache_graph_nodes(document)
-    return _CompileCacheKey(
-        program_fingerprint=program.fingerprint,
-        mode=mode,
-        input_declarations=tuple(
-            value._node.node_bytes.hex() for value in program.inputs
-        ),
-        capability_schema_version=capabilities.schema_version,
-        capability_session_id=capabilities.scope.session_id,
-        capability_revision=capabilities.scope.revision,
-        operator_versions=_cache_operator_versions(nodes, capabilities),
-        provider_versions=_cache_provider_versions(nodes),
-        udf_versions=_cache_udf_versions(nodes),
-        allowed_lateness_micros=allowed_lateness_micros,
-        late_policy=late_policy,
+def _preparation_key(
+    program: Program, mode: str, allowed_lateness_micros: int, late_policy: str, /
+) -> tuple[object, ...]:
+    # Runtime ownership and registration invalidation supply session/revision scope.
+    return (
+        "program",
+        mode,
+        program.fingerprint,
+        tuple(value._node.node_bytes for value in program.inputs),
+        allowed_lateness_micros,
+        late_policy,
     )
 
 
 def compile_program_batch(program: Program, runtime: object, /) -> BatchExecutionPlan:
     """Lower one program to a strict project-v3 batch plan."""
-
     selected = _require_runtime(runtime, "compile_batch")
-    document = lower_program_document(program, selected, "batch")
-    capabilities = selected.capabilities()
-    key = _compile_cache_key(program, "batch", document, capabilities, 0, "error")
+    key = _preparation_key(program, "batch", 0, "error")
     return selected._cached_symbolic_compile(
-        key, lambda: selected.compile_batch_project(_canonical(document))
+        key,
+        lambda: selected.compile_batch_project(
+            _canonical(_lower_program_document(program, selected, "batch"))
+        ),
     )  # type: ignore[return-value]
 
 
@@ -822,31 +783,22 @@ def compile_program_stream(
     late_policy: object,
     /,
 ) -> StreamExecutionPlan:
-    """Lower one program to a strict project-v3 continuous plan.
-
-    The validated lateness arguments configure unmarked stateful stages;
-    paired declarations retain their local policy and row-local programs are unaffected.
-    """
-
+    """Cache stream declarations while giving every call an owning native plan."""
     selected = _require_runtime(runtime, "compile_stream")
     _validate_lateness(allowed_lateness_micros, late_policy)
-    document = lower_program_document(
-        program,
-        selected,
-        "stream",
-        allowed_lateness_micros=allowed_lateness_micros,
-        late_policy=late_policy,
+    key = _preparation_key(program, "stream", allowed_lateness_micros, late_policy)
+    return selected._compile_symbolic_stream(
+        key,
+        lambda: _canonical(
+            _lower_program_document(
+                program,
+                selected,
+                "stream",
+                allowed_lateness_micros=allowed_lateness_micros,
+                late_policy=late_policy,
+            )
+        ),
     )
-    capabilities = selected.capabilities()
-    key = _compile_cache_key(
-        program,
-        "stream",
-        document,
-        capabilities,
-        allowed_lateness_micros,
-        late_policy,
-    )
-    return selected._compile_symbolic_stream(key, _canonical(document))
 
 
 def _validate_lateness(allowed_lateness_micros: object, late_policy: object, /) -> None:

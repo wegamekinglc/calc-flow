@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import dataclasses
-from copy import deepcopy
 
 import pyarrow as pa
 import pytest
@@ -22,7 +21,7 @@ from calc_flow.symbolic import (
     table_input,
     ts,
 )
-from calc_flow.symbolic.lower import _compile_cache_key, lower_program_document
+from calc_flow.symbolic.lower import lower_program_document
 from calc_flow.symbolic.optimizer import (
     _rolling_group_key,
     _rolling_input_columns,
@@ -339,46 +338,6 @@ def test_compile_cache_reuses_immutable_values_and_revision_invalidates() -> Non
     runtime.register_provider("test", "unused", "2", lambda _inputs, _options: {})
     after_revision = program.compile_batch(runtime)
     assert after_revision is not first
-
-
-def test_compile_cache_key_captures_every_frozen_identity_dimension() -> None:
-    quotes = _ordered()
-    output = quotes.with_columns(FeatureSet((("score", quotes["x"] + 1.0),)))
-    program = Program(
-        "cache-key", engine="sql", inputs=(quotes,), outputs=(("output", output),)
-    )
-    runtime = Runtime()
-    document = lower_program_document(program, runtime, "batch")
-    augmented = deepcopy(document)
-    nodes = augmented["graph"]["nodes"]  # type: ignore[index]
-    nodes[0]["operator"]["udfs"] = [  # type: ignore[index]
-        {"provider": "trusted", "name": "score", "version": "7"}
-    ]
-    nodes.append(
-        {
-            "id": "provider",
-            "operator": {
-                "kind": "external",
-                "name": "kernel",
-                "options": {},
-                "provider": "numpy",
-                "version": "3",
-            },
-        }
-    )
-    capabilities = runtime.capabilities()
-
-    key = _compile_cache_key(program, "batch", augmented, capabilities, 0, "error")
-
-    assert key.program_fingerprint == program.fingerprint
-    assert key.mode == "batch"
-    assert key.input_declarations == (quotes._node.node_bytes.hex(),)
-    assert key.capability_schema_version == capabilities.schema_version
-    assert key.capability_session_id == capabilities.scope.session_id
-    assert key.capability_revision == capabilities.scope.revision
-    assert ("expression", "1") in key.operator_versions
-    assert key.provider_versions == (("numpy", "kernel", "3"),)
-    assert key.udf_versions == (("trusted", "score", "7"),)
 
 
 def test_explain_reports_deterministic_optimization_and_cost_facts() -> None:
