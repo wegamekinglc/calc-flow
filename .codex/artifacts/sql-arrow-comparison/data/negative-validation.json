@@ -1,0 +1,14 @@
+{
+  "status": "passed",
+  "cases": [
+    {
+      "corruption": "values",
+      "rejected": "complete Arrow columns, values or original sequence differ"
+    },
+    {
+      "corruption": "normal_api_span",
+      "rejected": "normal API calls were omitted or moved out of timer"
+    }
+  ],
+  "source_results_unchanged": true
+}

@@ -1,0 +1,31 @@
+{
+  "archive_inventory_files": 543,
+  "archive_roundtrip": "passed",
+  "audit": {
+    "audit": "passed",
+    "preflight": false,
+    "samples": 30,
+    "output_rows": 491520
+  },
+  "summary_paired_audit_recomputed": "byte-identical",
+  "negative_counterexamples": {
+    "status": "passed",
+    "cases": [
+      {
+        "corruption": "values",
+        "rejected": "complete Arrow columns, values or original sequence differ"
+      },
+      {
+        "corruption": "normal_api_span",
+        "rejected": "normal API calls were omitted or moved out of timer"
+      }
+    ],
+    "source_results_unchanged": true
+  },
+  "static_checks": [
+    "Ruff check",
+    "Ruff format check",
+    "explicit C901 PLR0912 PLR0913 PLR0915",
+    "repository complexity ratchet holds"
+  ]
+}

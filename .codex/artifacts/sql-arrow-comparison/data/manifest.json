@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "product_baseline": "b5ae227e48ac9bb8a81583a23485e2c6064cee52",
+  "checkout_base": "816a9174373d7df659748d5775977eadb308779a",
+  "formal_samples": 30,
+  "interleaved_triplets": 10,
+  "pair_comparisons": 20,
+  "formal_output_rows": 491520,
+  "excluded_preflight_samples": 6,
+  "measurement_budget_s": 600,
+  "measurement_spent_s": 80.28385911101941,
+  "new_product_build_s": 0,
+  "files": {
+    "DAL-417-sql-arrow-raw.tar.gz": {
+      "bytes": 3511154,
+      "sha256": "7679d76df733d286a86faf6d00f889b99d1000825fe483e234e37bb7846ae7f3"
+    },
+    "audit.json": {
+      "bytes": 88,
+      "sha256": "4e1376e5f38c0e31a2e1f1775717f8dc09d1d292b4405f2a3b98893c55ccad72"
+    },
+    "budget.json": {
+      "bytes": 561,
+      "sha256": "db82cb0621b657d7e8af8f6aacc3092437e23f73d85b5876f99baf8c09fe2af5"
+    },
+    "identity.json": {
+      "bytes": 2645,
+      "sha256": "23dc72cf3096e6637ea216945da08d2320fe23c6a23025f5a4e4606bafd6b327"
+    },
+    "negative-validation.json": {
+      "bytes": 324,
+      "sha256": "3de06feb78bc937658ee0f45497fd02924ba6e01973a3032ce9c557304f8eea0"
+    },
+    "paired.json": {
+      "bytes": 6752,
+      "sha256": "9f23f0d15c53d2c1f50afd13b620ff8e0cb52b21b16c0fcaf2faffc51bfcff4b"
+    },
+    "summary.json": {
+      "bytes": 10553,
+      "sha256": "e9e807a07ffeaeb4c861301fde4b3e8acb439650782c3072cb8de470fcb249ad"
+    },
+    "validation.json": {
+      "bytes": 772,
+      "sha256": "600815d434dfadd78c21ad1e44614ec3ad16102d26ef911666d35f958cec501a"
+    }
+  }
+}

@@ -1,0 +1,9 @@
+7679d76df733d286a86faf6d00f889b99d1000825fe483e234e37bb7846ae7f3  .codex/artifacts/sql-arrow-comparison/data/DAL-417-sql-arrow-raw.tar.gz
+4e1376e5f38c0e31a2e1f1775717f8dc09d1d292b4405f2a3b98893c55ccad72  .codex/artifacts/sql-arrow-comparison/data/audit.json
+db82cb0621b657d7e8af8f6aacc3092437e23f73d85b5876f99baf8c09fe2af5  .codex/artifacts/sql-arrow-comparison/data/budget.json
+23dc72cf3096e6637ea216945da08d2320fe23c6a23025f5a4e4606bafd6b327  .codex/artifacts/sql-arrow-comparison/data/identity.json
+7f3dbe1f63ff4513f358a667c7849b6b68a29986a576d5bde6d457be39fd924e  .codex/artifacts/sql-arrow-comparison/data/manifest.json
+3de06feb78bc937658ee0f45497fd02924ba6e01973a3032ce9c557304f8eea0  .codex/artifacts/sql-arrow-comparison/data/negative-validation.json
+9f23f0d15c53d2c1f50afd13b620ff8e0cb52b21b16c0fcaf2faffc51bfcff4b  .codex/artifacts/sql-arrow-comparison/data/paired.json
+e9e807a07ffeaeb4c861301fde4b3e8acb439650782c3072cb8de470fcb249ad  .codex/artifacts/sql-arrow-comparison/data/summary.json
+600815d434dfadd78c21ad1e44614ec3ad16102d26ef911666d35f958cec501a  .codex/artifacts/sql-arrow-comparison/data/validation.json
