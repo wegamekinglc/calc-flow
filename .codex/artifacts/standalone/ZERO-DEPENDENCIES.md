@@ -1,5 +1,7 @@
 DAL-475 follow-up to PR #515: remove every required third-party Python package,
 including Pydantic and typing-extensions, as requested in the issue discussion.
+Subsequent single-use stream and Arrow entry repairs, with the latest build
+identity and directed results, are recorded in [REVIEW-REPAIRS.md](REVIEW-REPAIRS.md).
 
 ## Package and public compatibility
 
@@ -93,13 +95,14 @@ success on `cbbf4cc5`; it does not substitute for checks on the newest commit.
 
 ## Performance and remaining acceptance
 
-No timing sample was added by this follow-up. The performance specialist's
-issue attachment reports 248.69/600 seconds used in total, including the original
-177.23 seconds. The Arrow signal remains statistically inconclusive, including
-same-version noise controls; performance equivalence has **not** passed.
-Those measurements cover `5c2c3515`, not the final dependency/Codacy build.
-`data/final-build.json` identifies the final wheel variants, native libraries,
-source manifest and build settings for subsequent focused measurement.
+No timing sample was added by dependency removal. The initial specialist audit
+used 248.69/600 seconds in total and left Arrow statistically inconclusive.
+The subsequent fixed-plan audit of `35f37e5b` confirmed an Arrow regression;
+NumPy remained inconclusive, and cumulative usage became 481.99/600 seconds.
+The latest code repair adds no measurements and awaits final-build confirmation;
+see [REVIEW-REPAIRS.md](REVIEW-REPAIRS.md). `data/final-build.json` retains the
+preceding dependency/Codacy build identity; the latest source/native/wheel
+identity is in `data/arrow-entrypoints-build.json`.
 Python/native allocation equality, GPU behavior, minimum optional backend
 combinations, and full CI/coverage remain outside these local checks. The final
 performance verification and focused review remain with the coordinator.
