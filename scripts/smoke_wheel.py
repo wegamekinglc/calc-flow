@@ -7,6 +7,8 @@ import importlib.util
 from importlib.metadata import metadata
 from pathlib import Path
 
+from smoke_wheel_recovery import check_recovery
+
 import calc_flow as cf
 
 
@@ -139,6 +141,7 @@ async def check_async() -> None:
 
 
 asyncio.run(check_async())
+check_recovery(batch)
 
 for register, extra in ((cf.register_numpy, "numpy"), (cf.register_jax, "jax")):
     try:
@@ -173,5 +176,5 @@ _check(
 )
 print(
     "standalone wheel: import, declarations, compute, collect, Program, stream "
-    "and missing-extra checks passed"
+    "checkpoint recovery and missing-extra checks passed"
 )
