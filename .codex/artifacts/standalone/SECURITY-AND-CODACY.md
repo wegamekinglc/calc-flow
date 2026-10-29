@@ -38,6 +38,31 @@ the changes, the same CCN limit of 8 is met by both `arrow.rs` and its extracted
 `arrow/buffers.rs`. Bandit 1.9.4 reports no findings in `scripts/smoke_wheel.py`.
 No analysis exclusions, forgiveness markers or thresholds were added.
 
+The original check was on `9ca97c6a`; its 19 exact annotations are preserved in
+[`data/codacy-original-annotations.json`](data/codacy-original-annotations.json).
+The seven complexity locations in `crates/calc-flow-python/src/arrow.rs` were:
+
+- Line 26, `guard_input`: CCN 10; decomposed guard, now 8.
+- Line 130, `validate_time`: CCN 11; separated checks, now 7.
+- Line 162, `numpy_array`: CCN 19; split dtype families into small dispatchers
+  in `arrow/buffers.rs`.
+- Line 223, `register`: CCN 11; split stream/schema registration, now 4.
+- Line 255, `table_matrix`: CCN 37; separated dispatch and owned allocation in
+  `arrow/buffers.rs`, now 4.
+- Line 386, `validate_matrix_casts`: CCN 10; separated per-column validation in
+  `arrow/buffers.rs`, now 5.
+- Line 417, `import_table`: CCN 15; separated import and validation, now 5.
+
+The twelve security findings all match Bandit B101 in `scripts/smoke_wheel.py`,
+at original lines **12, 19, 32, 33, 34, 40, 42, 50, 72, 73, 82, 99**.
+Every reported assert was replaced by an explicit check; all original
+predicates remain enforced under normal and optimized Python. These locations
+refer to the original commit, not the refactored file's shifted line numbers.
+Codacy subsequently reported success on both `cbbf4cc5` and `ee2af8a4`; the
+latter also passed the remote Rust dependency policy check. No service-side
+authorization action was necessary. Later CI fixes are recorded in
+[`CI-REPAIR.md`](CI-REPAIR.md).
+
 ## Focused verification
 
 - Release Clippy for `calc-flow-python`, Cargo formatting, smoke-script Ruff

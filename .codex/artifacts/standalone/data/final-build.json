@@ -1,9 +1,9 @@
 {
-  "source_commit": "b6419b7ac001455c74ba0b39ddbac260577581d7",
+  "source_commit": "494a7539f64afaf6b762ca1ba8aa136c120f9ed6",
   "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
   "maturin": "maturin 1.15.0",
   "target": "x86_64-unknown-linux-gnu, WSL2",
-  "source_manifest_sha256": "d25771f80274d39a8e4b860d42a1b4c435e1ec13c1bb70090a0d9a446f751971",
+  "source_manifest_sha256": "d3de86954f51c1acb6255d55d0edd10d39a5770f1650a54a21dbcda9746a0550",
   "source_manifest": {
     "Cargo.lock": "228b17f6384d1b1275755306dfe6c18d81d145f46de7994c1092080cbd38454e",
     "Cargo.toml": "3ff85b40f66a8e9796773f9981744d482de5dc30c01a2e5c1d22a63e514595e0",
@@ -959,14 +959,14 @@
     "python/calc_flow/asof_join_spec.py": "4160dd0e541da6e0be5b812f461706240a6b675199106d4029d69adb87c7ac06",
     "python/calc_flow/capabilities.py": "f0c2fee0e269b4d628be376c44a01166ecfc0f23a9fbf37b612341287fb43774",
     "python/calc_flow/compute.py": "176f8a74ca80e9ce66baca01b93c06abee5f6badc9a457e20320af7facb68db5",
-    "python/calc_flow/config.py": "4f481fe4c91f2de4e7c3a8c3abee3a4a73fde4497691e9eba6a8fdfc8b1a3ee5",
+    "python/calc_flow/config.py": "5911bbfc617f11ef9cfb5c482bc1023042b10b645e8593ba45d11340777b988b",
     "python/calc_flow/errors.py": "34f20d8266cd6bcfb78927649eb449307db0183b3322fe967433fe3722ffb626",
     "python/calc_flow/join_spec.py": "9440cabf1ce87f900270b1159246f52f99fcea32e1b9c46987a422dce93efa5d",
     "python/calc_flow/pipeline.py": "77405003ae732643ab3c466f3543ac1097814ef509c2a7f7fbc805e2e1487cb6",
     "python/calc_flow/py.typed": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "python/calc_flow/runtime.py": "856e15bc43db50409138f6eccd58acab07c7864e5de63d0309050cdef6027029",
     "python/calc_flow/store.py": "de6580386c9a72492818684cde7a2cdf14d02e70a76473715e2d52b62dfffa23",
-    "python/calc_flow/stream.py": "516cf7774c59ecabe0b8f6e1603f09d655c4bc9c4c81fe9a853a28fd4f7ae7f4",
+    "python/calc_flow/stream.py": "95d9ff21436c4a0c6b0ce69d898a946a4df65f0de73b73fbb356bdc693724803",
     "python/calc_flow/symbolic/__init__.py": "a15ea24a2652c15c59c5cb9dcbc275648b1060c441dc4055231537aa9850c842",
     "python/calc_flow/symbolic/_generated_rolling_kernels.py": "969630d8e962d59dabf6bb8830713d5be39ffd4bc43a8953b18a12fc03a3bebd",
     "python/calc_flow/symbolic/analyzer.py": "70af346f2eca6db51280760c1dc2f1e05f2c820afbdfcd58024f019bd0cb4daf",
@@ -974,7 +974,7 @@
     "python/calc_flow/symbolic/asof_analysis.py": "ad615bde0928471286f31a0a63c73654ce3ac8ce7038232f230c7ebb25eea57b",
     "python/calc_flow/symbolic/domains.py": "880483d1ca29bb75c92cb47e2cef82e708d553ff6e62ec1132685901f66a7cf8",
     "python/calc_flow/symbolic/errors.py": "3ca76aeb5f64004a712649ce3307cfe40b8ebdb921a613e3661be0314db90a91",
-    "python/calc_flow/symbolic/expr.py": "1ca56074a895a83e561144bbe5f34a1d268f8bb120e71c4e5a230bd6fdf5b26b",
+    "python/calc_flow/symbolic/expr.py": "dff8f3244569e7209778e372c7aaa191a07ed7d0a58f46b95c66d39c0a4e5159",
     "python/calc_flow/symbolic/late_output.py": "f0122b4c9f9eae46ffbe04d6dd35110041137f871e39ebea68faa04945c1a692",
     "python/calc_flow/symbolic/lower/__init__.py": "fae196c03e286c4db475d12ea6803343694d99ea19a5d1f09edd566d7370ed6b",
     "python/calc_flow/symbolic/lower/asof.py": "b79b4b52e0ba977f1d51848678a041c602da42332674681a2218164b06b3d774",
@@ -990,7 +990,7 @@
     "python/calc_flow/symbolic/nodes.py": "b30938dbee3f72291908a119b863f2322c30a87d08f8b61badf9af8716262e54",
     "python/calc_flow/symbolic/ops.py": "6372e62ebb7e11f2c49531e9e3f4611ab4e41ede7bd96f2e088f7aeb81893229",
     "python/calc_flow/symbolic/optimizer.py": "07b16f90679ee1f70382fb139e68a39b1a935e63574d270ed3c190855b9d86b3",
-    "python/calc_flow/symbolic/program.py": "7079617af30752e7dc68cd4a6c767bbf9a6a42b0c11e09743cf6233171ce045e",
+    "python/calc_flow/symbolic/program.py": "a90599c70dbbb25ae4a0be30856d42ede1360eeb81fc8dc4b5dc4504d06318db",
     "python/calc_flow/symbolic/sql.py": "7a47d0fe153897461b4b7cfde9866c3e6ee6e4074f7986d04c088b676b452876",
     "python/calc_flow/symbolic/types.py": "8954131dd38007dbb21e328f103748a1266c16bdefe3374f9017225ed2d09c89",
     "python/calc_flow/symbolic/windows.py": "cbae86d2276663ca1696e73d92c4b61bc1669da234864ed02892ab34ce74d813",
@@ -1001,7 +1001,7 @@
     {
       "variant": "cp313",
       "wheel": "calc_flow_python-2026.10.27-cp313-cp313-linux_x86_64.whl",
-      "wheel_sha256": "e2faac51f05182801518afff00ee2f9d1a983b61bdad7488530356de7893ec6c",
+      "wheel_sha256": "09d1e33772be5b3d194d7fd45be5221d5ecc7281388e5f2066518bad58e9338d",
       "native_module": "calc_flow/_native.cpython-313-x86_64-linux-gnu.so",
       "native_sha256": "93bc757deccb8b8e8eb317d28b63bdd27356d7d63ce598ff9f8494fddd37498b",
       "cargo_features": [
@@ -1010,12 +1010,13 @@
       "profile": "release, opt-level=3, thin LTO, codegen-units=1",
       "unconditional_requires_dist": [],
       "python_and_stub_asts_match": true,
-      "format_only_python_differences": []
+      "format_only_python_differences": [],
+      "local_artifact_directory": "target/ci-repair-wheels"
     },
     {
       "variant": "legacy",
       "wheel": "calc_flow_python-2026.10.27-cp39-abi3-linux_x86_64.whl",
-      "wheel_sha256": "9fb991a3f1c6824b8d4f6a5d27bc6ec01e5cf7061432f104f86aeb3cf97f2e3b",
+      "wheel_sha256": "408868086e3bb70f951c670930e9b6691b86699a87b8c7ca1508f0329d313a7d",
       "native_module": "calc_flow/_native.abi3.so",
       "native_sha256": "4b0bb021feff35839d123547c502862412793b844e158085d74a9b8c3faf9886",
       "cargo_features": [
@@ -1025,10 +1026,8 @@
       "profile": "release, opt-level=3, thin LTO, codegen-units=1",
       "unconditional_requires_dist": [],
       "python_and_stub_asts_match": true,
-      "format_only_python_differences": [
-        "calc_flow/_compat.py",
-        "calc_flow/_native.pyi"
-      ]
+      "format_only_python_differences": [],
+      "local_artifact_directory": "target/ci-repair-legacy-wheels"
     }
   ],
   "clean_install_smoke_environments": [
@@ -1087,6 +1086,10 @@
     "unknown_version_rejected_before_source_open": true,
     "tasks_after_cleanup": 0
   },
-  "verification_commit": "95de5d82c2cf705298ab4e923029382fded12af7",
-  "sdist_sha256": "75a94f99f8e599aecf7d6e50d9fc7458f862ebc9c9f6bdff7db3703f4ab1ae64"
+  "verification_commit": "494a7539f64afaf6b762ca1ba8aa136c120f9ed6",
+  "source_manifest_encoding": "UTF-8 JSON, sorted keys, compact separators, no final newline",
+  "historical_sdist": {
+    "source_commit": "b6419b7ac001455c74ba0b39ddbac260577581d7",
+    "sha256": "75a94f99f8e599aecf7d6e50d9fc7458f862ebc9c9f6bdff7db3703f4ab1ae64"
+  }
 }

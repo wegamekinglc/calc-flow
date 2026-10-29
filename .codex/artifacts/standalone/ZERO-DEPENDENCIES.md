@@ -55,10 +55,11 @@ manifests through its existing `checkpoint_mismatch` error category.
 
 The `legacy-python` wheel was normally resolved and smoke-tested with real
 CPython 3.9.25, 3.10.20, 3.11.15 and 3.12.13 interpreters. Every package module
-and stub AST matches the final source. The legacy wheel was packaged before
-Ruff added one blank line and collapsed one stub alias expression; those two
-formatting differences do not change its AST. CPython 3.13 uses the separate
-wheel built with the original default features and release configuration.
+and stub AST matches the final source. Both variants were rebuilt for the
+[CI repair](CI-REPAIR.md), and their Python/stub contents now match the source
+exactly. CPython 3.13 uses the separate wheel built with the original default
+features and release configuration. The manifest identifies implementation
+commit `494a7539` and the rebuilt wheels; prior sdist evidence is historical.
 
 Final installed-wheel regressions: **130 passed**, including strict JSON,
 duplicate keys, cycles, depth/range boundaries, structured join errors, defensive
