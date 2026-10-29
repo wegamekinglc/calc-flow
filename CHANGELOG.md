@@ -9,6 +9,13 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-29: Reuse Python declaration preparation before repeated batch or
+  stream compilation, with registration-scoped invalidation and independently
+  owned stream plans. Convenience collection still creates a fresh native plan.
+  Share join recovery input ownership and checked workspace helpers, and remove
+  duplicate batch-input validation along trusted internal paths. Clarify append
+  SQL compact state and complete-replacement snapshot SQL in the references.
+
 - 2026-10-27: Prepare the `calc-flow-python` 2026.10.27 release, aligning
   workspace crates, exact native dependencies, Python metadata, and current
   documentation. This release adds cumulative extrema, sum, and variance;

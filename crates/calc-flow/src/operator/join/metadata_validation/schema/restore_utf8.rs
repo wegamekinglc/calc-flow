@@ -9,8 +9,8 @@ use crate::{Result, StateSegment};
 use datafusion::execution::memory_pool::MemoryReservation;
 use std::sync::Arc;
 
+use super::restore_input as input;
 use super::restore_segments::frame;
-mod input;
 mod inspector;
 mod inventory;
 

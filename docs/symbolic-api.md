@@ -216,9 +216,9 @@ late_policy="error")` lower a program to the
 existing execution plans. Batch compilation requires `engine="sql"`; stream
 compilation requires `engine="streaming"`. Project export follows the same
 engine selection and rejects a conflicting explicit mode.
-Compilation is declaration processing only: it captures one immutable
-capability snapshot, lowers one strict project-v3
-document, and invokes the Rust graph compiler for final port, kind, schema,
+Compilation is declaration processing only. On a preparation-cache miss, it
+captures one immutable capability snapshot and lowers one strict project-v3
+document. Native compilation performs final port, kind, schema,
 topology, and fingerprint validation. No data object, source, sink, or runner
 is accepted, and no symbolic Python runs while a compiled plan executes.
 
@@ -268,10 +268,13 @@ state persists inside that job until termination.
 
 Each `Runtime` keeps a bounded, runtime-scoped symbolic compile cache.
 The deterministic key contains the program fingerprint, batch/stream mode,
-stream lateness policy, exact input declaration bytes (including schemas),
-capability schema/session/revision, and selected operator, provider, and UDF
-versions. Python object identity is never a key input. Batch compilation
-returns the cached immutable plan for the same key. Stream compilation caches
+stream lateness policy, and exact input declaration bytes (including schemas).
+Runtime ownership scopes the cache to its session, and successful registrations
+invalidate its entries. A cache miss keeps capability analysis, lowering, and
+native compilation under the same registration lock. A hit skips repeated
+analysis and capability reconstruction. Python object identity is never a key
+input. Batch compilation returns the cached immutable plan for the same key.
+Stream compilation caches
 the immutable project JSON after successful native compilation and returns a
 fresh owning native plan on every call: a `StreamingRunner` consumes its plan.
 Compile again and create fresh bindings and a runner for each job or restart.

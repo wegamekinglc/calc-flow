@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pyarrow as pa
 
+import calc_flow.symbolic.lower.segments as segments
 from calc_flow import Batch, Runtime, compute
 from calc_flow.symbolic import (
     ColumnExpr,
@@ -14,7 +15,7 @@ from calc_flow.symbolic import (
     table_input,
     ts,
 )
-from calc_flow.symbolic.lower import lower_program_document, segments
+from calc_flow.symbolic.lower import lower_program_document
 
 
 def _ordered() -> TableExpr:

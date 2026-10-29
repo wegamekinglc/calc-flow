@@ -90,24 +90,31 @@ collection state, streaming ownership, and logical versus physical bindings.
 
 ### SQL, pipelines, and streaming results
 
-| Entry point                                                                    | Contract                                                          |
-| ------------------------------------------------------------------------------ | ----------------------------------------------------------------- |
-| `sql(query, /, **tables)`                                                      | Lazy `TableExpr`; explicit aliases mapped to table declarations   |
-| `TableExpr.sql(query, /)`                                                      | Single-table SQL with the local alias `input`                     |
-| `Expr.pipe(function, /, *args, **kwargs)`                                      | Call the synchronous builder once and preserve its return type    |
-| `TableExpr.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`   | `StreamResults[pyarrow.Table]`                                    |
-| `Program.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`     | `StreamResults[StreamOutput]`; logical input mapping required     |
-| `Program(name, engine=...)`                                                    | Fix `"sql"` or `"streaming"` at construction                      |
-| `Program.execute(inputs, /, *, ...)`                                           | SQL: named Arrow tables; streaming: owned named events            |
-| `StreamOutput.name` / `.table`                                                 | Immutable named Arrow output event                                |
-| `StreamResults` async context / iteration / `aclose()` / `.job`                | One native job, one consumer, bounded output and owned cleanup    |
+| Entry point                                                                  | Contract                                                        |
+|------------------------------------------------------------------------------|-----------------------------------------------------------------|
+| `sql(query, /, **tables)`                                                    | Lazy `TableExpr`; explicit aliases mapped to table declarations |
+| `snapshot_sql(query, /, **tables)`                                           | Stream-only query over complete latest replacement relations    |
+| `TableExpr.sql(query, /)`                                                    | Single-table SQL with the local alias `input`                   |
+| `Expr.pipe(function, /, *args, **kwargs)`                                    | Call the synchronous builder once and preserve its return type  |
+| `TableExpr.stream(inputs, /, *, runtime=None, config=None, watermarks=None)` | `StreamResults[pyarrow.Table]`                                  |
+| `Program.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`   | `StreamResults[StreamOutput]`; logical input mapping required   |
+| `Program(name, engine=...)`                                                  | Fix `"sql"` or `"streaming"` at construction                    |
+| `Program.execute(inputs, /, *, ...)`                                         | SQL: named Arrow tables; streaming: owned named events          |
+| `StreamOutput.name` / `.table`                                               | Immutable named Arrow output event                              |
+| `StreamResults` async context / iteration / `aclose()` / `.job`              | One native job, one consumer, bounded output and owned cleanup  |
 
 SQL schema planning reads declarations, not data. Batch SQL accepts multiple
-aliases; a stream accepts one alias. Ordinary aggregates and `GROUP BY` emit
-full cumulative snapshots after each batch; other SQL executes per batch.
-SQL output does not inherit temporal ordering. Row-local expressions after SQL
-and rolling before SQL are supported; SQL-to-event-window paths and standalone
-array Program outputs are unsupported.
+aliases; append stream SQL accepts one alias. Ordinary aggregates and `GROUP BY`
+emit full cumulative snapshots after each batch. Eligible aggregate queries
+update compact state; unsupported shapes rerun over retained input. Other append
+SQL executes per batch. `snapshot_sql` supports multiple aliases, waits for all
+relations to initialize, then emits a complete result after each replacement.
+Its outputs currently connect directly to sinks and reject ExactlyOnce. See
+[snapshot SQL](streaming-guide.md#complete-replacement-snapshot-sql) for the
+whole-message, state-budget, and recovery contracts.
+SQL output does not inherit temporal ordering. Row-local expressions after
+ordinary `sql` stages and rolling before those stages are supported.
+SQL-to-event-window paths and standalone array Program outputs are unsupported.
 
 `stream` requires `async with` and `async for`. It preserves state across batches
 and binds inputs by logical declaration name. Event-time iterables default to

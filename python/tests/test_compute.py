@@ -442,7 +442,7 @@ def test_async_cancellation_drains_native_bridge(monkeypatch):
             await task
         assert cleaned.is_set()
 
-    asyncio.run(run())
+    asyncio.run(asyncio.wait_for(run(), timeout=5))
 
 
 def test_compute_preserves_batch_identity_metadata_and_sync_options(monkeypatch):

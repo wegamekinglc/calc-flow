@@ -1026,6 +1026,55 @@ async fn invalid_external_input_does_not_touch_operator_lifecycle() {
 }
 
 #[tokio::test]
+async fn expression_graph_rejects_schema_drift_from_external_upstream() {
+    let probe = Arc::new(Probe::default());
+    let plan = PipelineBuilder::new("untyped upstream")
+        .unwrap()
+        .add_node(
+            "upstream",
+            Box::new(TestOperator::ports(
+                "upstream",
+                vec![untyped_table_port("input", true)],
+                vec![table_port("output", true)],
+                Action::Pass,
+                Arc::clone(&probe),
+            )) as Box<dyn BatchOperator>,
+        )
+        .unwrap()
+        .add_node(
+            "calc",
+            Box::new(
+                ExpressionOperator::new("calc", "", vec!["value".into()], None, vec![])
+                    .unwrap()
+                    .with_ports(
+                        table_port("input", true),
+                        untyped_table_port("output", true),
+                    )
+                    .unwrap(),
+            ),
+        )
+        .unwrap()
+        .connect(edge("upstream", "calc"))
+        .unwrap()
+        .compile_batch(&UdfRegistry::new().snapshot())
+        .unwrap();
+    let error = plan
+        .execute(
+            BTreeMap::from([("input".into(), support::string_batch(&["wrong schema"]))]),
+            ExecutionOptions::default(),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        CalcFlowError::Compile { message }
+            if message.contains("output upstream.output schema mismatch")
+    ));
+    assert_eq!(probe.calls(), 1);
+}
+
+#[tokio::test]
 async fn each_run_registers_only_compile_time_selected_native_udfs() {
     let selected = UdfReference::new("rust", "chosen", "1", UdfKind::DataFusionScalar).unwrap();
     let unselected = UdfReference::new("plugin", "chosen", "2", UdfKind::DataFusionScalar).unwrap();

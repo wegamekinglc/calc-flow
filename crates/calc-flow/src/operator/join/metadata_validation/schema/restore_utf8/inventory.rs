@@ -1,3 +1,4 @@
+use super::super::inventory::{delta_diagnostics, sum};
 use super::super::restore_bases::{inspector as scalar_inspector, inventory as base};
 use super::{
     PreparedSides, RestoreUtf8Construction, RestoreUtf8Decision, RestoreUtf8Work, frame, input,
@@ -118,29 +119,6 @@ fn tail_workspace(geometry: &frame::Geometry, deltas: usize) -> Option<usize> {
         ),
         geometry.longest_id.checked_mul(2),
     ])
-}
-
-fn delta_diagnostics(name: &str) -> Option<usize> {
-    let templates = [
-        "stream Join   delta segment repeats one row identity",
-        "stream Join   delta upsert key does not match its record",
-        "stream Join   delta segment has trailing bytes",
-        "stream Join   delta magic is invalid",
-        "stream Join   delta op count is invalid",
-        "stream Join   delta key length is invalid",
-        "stream Join   delta op tag is invalid",
-        "stream Join  segment id is invalid",
-    ];
-    let literal = templates.iter().map(|text| text.len()).max()?;
-    let debug_name = name.len().checked_mul(6)?.checked_add(2)?;
-    let output = literal.checked_add(5)?.checked_add(debug_name)?;
-    base::formatted_peak(output, literal)
-}
-
-fn sum(parts: &[Option<usize>]) -> Option<usize> {
-    parts
-        .iter()
-        .try_fold(0_usize, |sum, part| sum.checked_add((*part)?))
 }
 
 pub(super) fn eligible(operator: &StreamJoinOperator) -> bool {

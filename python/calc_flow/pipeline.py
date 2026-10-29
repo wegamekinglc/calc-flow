@@ -153,6 +153,9 @@ class Runtime:
     _registrations: list[dict[str, Any]] = field(
         default_factory=list, repr=False, compare=False
     )
+    _symbolic_cache_generation: int = field(
+        default_factory=int, init=False, repr=False, compare=False
+    )
     _symbolic_compile_cache: dict[object, object] = field(
         default_factory=dict, repr=False, compare=False
     )
@@ -169,7 +172,10 @@ class Runtime:
             cached = self._symbolic_compile_cache.get(key)
             if cached is not None:
                 return cached
+            generation = self._symbolic_cache_generation
             compiled = factory()
+            if generation != self._symbolic_cache_generation:
+                return compiled
             if len(self._symbolic_compile_cache) >= _SYMBOLIC_COMPILE_CACHE_MAX_ENTRIES:
                 oldest = next(iter(self._symbolic_compile_cache))
                 del self._symbolic_compile_cache[oldest]
@@ -177,6 +183,9 @@ class Runtime:
             return compiled
 
     def _invalidate_symbolic_compile_cache(self) -> None:
+        object.__setattr__(
+            self, "_symbolic_cache_generation", self._symbolic_cache_generation + 1
+        )
         self._symbolic_compile_cache.clear()
         self._symbolic_schema_cache.clear()
 
@@ -218,7 +227,7 @@ class Runtime:
             return inferred
 
     def _compile_symbolic_stream(
-        self, key: object, project_json: str, /
+        self, key: object, document_factory: Callable[[], str], /
     ) -> StreamExecutionPlan:
         """Cache immutable graph data, then create a separately owned stream plan.
 
@@ -227,12 +236,14 @@ class Runtime:
         Only successfully compiled documents enter the bounded runtime cache.
         """
         with self._registration_lock:
+            generation = self._symbolic_cache_generation
             cached = self._symbolic_compile_cache.get(key)
-            document = cached if isinstance(cached, str) else project_json
+            document = cached if isinstance(cached, str) else document_factory()
             plan = self._compile_stream_graph_project(
                 document, requirements=StreamRequirements()
             )
-            self._cached_symbolic_compile(key, lambda: document)
+            if generation == self._symbolic_cache_generation:
+                self._cached_symbolic_compile(key, lambda: document)
             return plan
 
     def register_provider(

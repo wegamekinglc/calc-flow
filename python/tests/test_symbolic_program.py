@@ -277,13 +277,17 @@ def test_program_fingerprint_ignores_construction_order_not_declaration_order() 
     assert direct.fingerprint != reordered_outputs.fingerprint
 
 
-def test_program_fingerprint_needs_no_runtime() -> None:
+def test_program_fingerprint_needs_no_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    import calc_flow.pipeline as pipeline_module
+
+    def forbidden_runtime(*args: object, **kwargs: object) -> None:
+        raise AssertionError("declaration fingerprint must not construct a Runtime")
+
+    monkeypatch.setattr(pipeline_module.Runtime, "__init__", forbidden_runtime)
     quotes = _quotes()
     program = Program("p", engine="sql", inputs=[quotes], outputs=[("signals", quotes)])
 
-    assert program.fingerprint == program.fingerprint
-    assert len(program.fingerprint) == 64
-    assert program.fingerprint == program.fingerprint.lower()
+    assert len(bytes.fromhex(program.fingerprint)) == 32
 
 
 def test_analysis_issue_and_result_are_frozen_value_objects() -> None:

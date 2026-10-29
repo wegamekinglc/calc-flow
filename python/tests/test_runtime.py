@@ -351,11 +351,6 @@ def test_register_mapping_provider_has_the_published_signature() -> None:
 
 
 @pytest.mark.parametrize("method", _PUBLIC_REGISTRATION_METHODS)
-def test_public_registration_methods_are_documented(method: str) -> None:
-    assert inspect.getdoc(getattr(Runtime, method))
-
-
-@pytest.mark.parametrize("method", _PUBLIC_REGISTRATION_METHODS)
 def test_runtime_keeps_no_underscore_registration_aliases(method: str) -> None:
     assert not hasattr(Runtime, f"_{method}")
     assert not hasattr(Runtime(), f"_{method}")

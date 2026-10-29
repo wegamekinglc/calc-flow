@@ -105,7 +105,9 @@ impl CompiledBatchOperator {
             }
             Self::Expression(operator) => {
                 let datafusion = required_datafusion(datafusion, operator.name())?;
-                operator.process_table(inputs, run, datafusion).await
+                operator
+                    .process_validated_table(inputs, run, datafusion)
+                    .await
             }
             Self::Sql(operator) => {
                 let datafusion = required_datafusion(datafusion, operator.name())?;
@@ -810,7 +812,10 @@ fn gather_node_inputs(
             });
         match batch {
             Some(batch) => {
-                port.validate(batch, &format!("input {}.{}", node.node_id, port.name()))?;
+                // External inputs were validated before any operator lifecycle ran.
+                if source.is_some() {
+                    port.validate(batch, &format!("input {}.{}", node.node_id, port.name()))?;
+                }
                 inputs.insert(port.name().into(), batch.clone());
             }
             None if port.required() => {

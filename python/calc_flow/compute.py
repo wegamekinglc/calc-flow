@@ -166,18 +166,19 @@ def _lowered_collect(program: Program, selected: Runtime) -> _LoweredCollect:
 def _prepare_collect_batches(
     program: Program, batches: Mapping[str, Batch], selected: Runtime
 ) -> tuple[BatchExecutionPlan, dict[str, Batch], dict[str, str]]:
-    lowered = _lowered_collect(program, selected)
-    input_names = dict(lowered.input_names)
-    output_names = dict(lowered.output_names)
-    for name in batches:
-        if name not in input_names:
-            errors.raise_compile(
-                f"inputs.{name}",
-                errors.INVALID_LITERAL,
-                "unconsumed explicit input; remove it from Program.inputs",
-            )
-    # Each call still compiles a fresh native plan from the immutable template.
-    plan = selected.compile_batch_project(lowered.project_json)
+    with selected._registration_lock:
+        lowered = _lowered_collect(program, selected)
+        input_names = dict(lowered.input_names)
+        output_names = dict(lowered.output_names)
+        for name in batches:
+            if name not in input_names:
+                errors.raise_compile(
+                    f"inputs.{name}",
+                    errors.INVALID_LITERAL,
+                    "unconsumed explicit input; remove it from Program.inputs",
+                )
+        # Each call still compiles a fresh native plan from the immutable template.
+        plan = selected.compile_batch_project(lowered.project_json)
     physical = {
         endpoint: batches[name]
         for name, endpoints in input_names.items()

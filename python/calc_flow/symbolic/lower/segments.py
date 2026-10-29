@@ -1,4 +1,4 @@
-"""Segment constants, cache identity, and SQL rendering for the lowerer."""
+"""Segment constants and SQL rendering for the lowerer."""
 
 from __future__ import annotations
 
@@ -29,23 +29,6 @@ from calc_flow.symbolic.types import Field
 
 if TYPE_CHECKING:
     pass
-
-
-@dataclass(frozen=True, slots=True)
-class _CompileCacheKey:
-    """Deterministic, runtime-scoped identity for one symbolic compilation."""
-
-    program_fingerprint: str
-    mode: str
-    input_declarations: tuple[str, ...]
-    capability_schema_version: int
-    capability_session_id: str
-    capability_revision: int
-    operator_versions: tuple[tuple[str, str], ...]
-    provider_versions: tuple[tuple[str, str, str], ...]
-    udf_versions: tuple[tuple[str, str, str], ...]
-    allowed_lateness_micros: int
-    late_policy: str
 
 
 _TABLE_OUTPUT_PRIMITIVES: Final = frozenset(

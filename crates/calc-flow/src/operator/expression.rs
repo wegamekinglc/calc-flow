@@ -268,8 +268,8 @@ impl ExpressionOperator {
         self.stream_state.is_initialized()
     }
 
-    #[doc(hidden)]
-    pub(crate) async fn process_table(
+    /// Executes input already validated by the batch plan.
+    pub(crate) async fn process_validated_table(
         &mut self,
         inputs: &BTreeMap<String, Batch>,
         run: &RunContext,
@@ -277,7 +277,6 @@ impl ExpressionOperator {
     ) -> Result<BTreeMap<String, Batch>> {
         run.check_cancelled()?;
         let input = required_input(inputs, "input", self.name(), run.node_id())?;
-        self.input_ports[0].validate(input, &format!("{}.input", self.name))?;
         let tables = BTreeMap::from([("input".into(), input.clone())]);
         let output = datafusion
             .sql_validated(&self.query, &tables, run.node_id())
