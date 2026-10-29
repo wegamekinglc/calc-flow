@@ -45,6 +45,13 @@ target/zero-dependency-venv/bin/python -O scripts/smoke_wheel.py
 The smoke checks cover package absence and metadata, project validation and
 canonical round trips, declarations, Arrow capsules, finite/async computation,
 Program execution, owned streaming and missing-adapter diagnostics.
+They also run `smoke_wheel_recovery.py` entirely in those clean environments:
+checkpoint a cumulative SQL sum of 3, cancel and await cleanup, reject a copied
+checkpoint with unknown format version before opening its source, restore cursor
+1 into a fresh runner, and verify the next cumulative result is 6 with no tasks
+or source/sink resources left open. CPython 3.9–3.13 all passed this recovery
+check; 3.13 also passed under `-O`. The recovery wrapper reports corrupted
+manifests through its existing `checkpoint_mismatch` error category.
 
 The `legacy-python` wheel was normally resolved and smoke-tested with real
 CPython 3.9.25, 3.10.20, 3.11.15 and 3.12.13 interpreters. Every package module
@@ -74,6 +81,8 @@ sdist passed its inspector (1181 files). The same core-wheel inspector rejects
 the local CPython-specific 3.13 wheel because it requires an abi3 module; this
 is an artifact-format limitation, not an installed-wheel failure. Release/CI
 uses its existing abi3 build settings, which were not changed.
+Smoke scripts are repository CI assets, not files distributed inside wheels or
+sdists; the source archive contains the package and native build sources.
 
 `cargo audit` and `cargo deny` results from
 [the security/Codacy repair](SECURITY-AND-CODACY.md) remain applicable: Cargo.lock,

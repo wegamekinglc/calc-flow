@@ -1065,5 +1065,28 @@
   ],
   "performance_samples_added": 0,
   "performance_budget_used_seconds_reported_by_specialist": 248.69,
-  "performance_acceptance": "not satisfied; old measurements cannot establish final-build equivalence"
+  "performance_acceptance": "not satisfied; old measurements cannot establish final-build equivalence",
+  "verification_scripts": {
+    "scripts/smoke_wheel.py": "4450a637bc3a49c925d4ca0d472e338246bac0c5d0092eec3f0b7d172d9acaa5",
+    "scripts/smoke_wheel_recovery.py": "0b18a173e2235a4e4a297ed6798ae7ebf73ca53a6e4ed94caa6778b8a7b654b2"
+  },
+  "standalone_recovery": {
+    "python_versions": [
+      "3.9",
+      "3.10",
+      "3.11",
+      "3.12",
+      "3.13"
+    ],
+    "checkpoint_epoch": 1,
+    "restored_source_offset": 1,
+    "cumulative_results": [
+      3,
+      6
+    ],
+    "unknown_version_rejected_before_source_open": true,
+    "tasks_after_cleanup": 0
+  },
+  "verification_commit": "95de5d82c2cf705298ab4e923029382fded12af7",
+  "sdist_sha256": "75a94f99f8e599aecf7d6e50d9fc7458f862ebc9c9f6bdff7db3703f4ab1ae64"
 }
