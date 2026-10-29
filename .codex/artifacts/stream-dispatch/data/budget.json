@@ -1,0 +1,46 @@
+{
+  "limit_s": 600,
+  "spent_s": 107.45040305890143,
+  "stages": [
+    {
+      "stage": "diagnostic",
+      "elapsed_s": 1.8043631539912894,
+      "samples": 4
+    },
+    {
+      "stage": "setup_and_identity_conservative_allowance",
+      "elapsed_s": 10
+    },
+    {
+      "stage": "source_guard_validation",
+      "elapsed_s": 0.3166582640260458
+    },
+    {
+      "stage": "preflight",
+      "elapsed_s": 2.063147010980174,
+      "samples": 4
+    },
+    {
+      "stage": "formal",
+      "elapsed_s": 30.946612528990954,
+      "samples": 80
+    },
+    {
+      "stage": "summary",
+      "elapsed_s": 0.04070130200125277
+    },
+    {
+      "stage": "raw_audit",
+      "elapsed_s": 0.4275763019686565
+    },
+    {
+      "stage": "collector_startup_and_monitor_overhead",
+      "elapsed_s": 1.8513444969430566
+    },
+    {
+      "stage": "negative_checks_and_final_archive_audit_conservative_allowance",
+      "elapsed_s": 60
+    }
+  ],
+  "allowance_note": "60s conservatively includes remaining source/evidence counterexamples, IPC shape audit, archive writing/extraction, final statistics and hash verification; actual work must stay below allowance."
+}

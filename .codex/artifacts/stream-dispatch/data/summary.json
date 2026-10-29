@@ -1,0 +1,106 @@
+[
+  {
+    "case": "transform-full",
+    "arms": {
+      "base": {
+        "consumable_p50_ms": 2.739598,
+        "consumable_p95_ms": 4.445085,
+        "input_rows_s_median": 11964910.090987075,
+        "phases_median": {
+          "input_ipc_ms": 0.30191349999999995,
+          "caller_table_views_ms": 0.0145015,
+          "declaration_ms": 0.891417,
+          "start_ms": 5.3689975,
+          "warmup_ms": 2.0284645,
+          "execute_ms": 0.7154635,
+          "concat_ms": 0.010780000000000001,
+          "output_ipc_ms": 0.43143050000000005,
+          "close_ms": 0.698393
+        }
+      },
+      "head": {
+        "consumable_p50_ms": 2.6448090000000004,
+        "consumable_p95_ms": 4.276478,
+        "input_rows_s_median": 12390431.008717466,
+        "phases_median": {
+          "input_ipc_ms": 0.300745,
+          "caller_table_views_ms": 0.013121500000000001,
+          "declaration_ms": 0.997193,
+          "start_ms": 6.047183,
+          "warmup_ms": 2.3348899999999997,
+          "execute_ms": 0.7263625,
+          "concat_ms": 0.010932500000000001,
+          "output_ipc_ms": 0.3704805,
+          "close_ms": 0.787061
+        }
+      }
+    },
+    "rounds": [
+      {
+        "median": -1.560003675306565,
+        "low": -45.19535621928489,
+        "high": 43.50148105891536,
+        "coverage": 0.978515625
+      },
+      {
+        "median": 2.297317429610235,
+        "low": -39.86713777439724,
+        "high": 12.86283727542996,
+        "coverage": 0.978515625
+      }
+    ],
+    "verdict": "inconclusive"
+  },
+  {
+    "case": "transform-512",
+    "arms": {
+      "base": {
+        "consumable_p50_ms": 23.032789,
+        "consumable_p95_ms": 29.795524,
+        "input_rows_s_median": 1422686.1389073713,
+        "phases_median": {
+          "input_ipc_ms": 0.48742050000000003,
+          "caller_table_views_ms": 0.066289,
+          "declaration_ms": 0.7909645000000001,
+          "start_ms": 5.307345,
+          "warmup_ms": 1.7316799999999999,
+          "execute_ms": 20.560712000000002,
+          "concat_ms": 0.0759645,
+          "output_ipc_ms": 0.6293519999999999,
+          "close_ms": 0.6530549999999999
+        }
+      },
+      "head": {
+        "consumable_p50_ms": 22.441068,
+        "consumable_p95_ms": 29.218797,
+        "input_rows_s_median": 1460181.1470413697,
+        "phases_median": {
+          "input_ipc_ms": 0.500659,
+          "caller_table_views_ms": 0.068077,
+          "declaration_ms": 0.8484365,
+          "start_ms": 5.6228855,
+          "warmup_ms": 1.940078,
+          "execute_ms": 19.565143,
+          "concat_ms": 0.07525899999999999,
+          "output_ipc_ms": 0.7038150000000001,
+          "close_ms": 0.6673755
+        }
+      }
+    },
+    "rounds": [
+      {
+        "median": -1.9115528459819953,
+        "low": -17.570797893479085,
+        "high": 11.324001813207474,
+        "coverage": 0.978515625
+      },
+      {
+        "median": 0.3053588494538073,
+        "low": -15.185656528092684,
+        "high": 12.660698754914822,
+        "coverage": 0.978515625
+      }
+    ],
+    "verdict": "inconclusive"
+  }
+]

@@ -1,0 +1,20 @@
+{
+  "archive": "DAL-417-stream-dispatch-raw.tar.gz",
+  "sha256": "5ad78d7920c27634a081b8a30760206349db946ca93763a5cdeaa861865c28e6",
+  "size_bytes": 9707695,
+  "pack_elapsed_s": 0.6797247580252588,
+  "contains": "all formal/preflight/initial diagnostic Arrow IPC, clocks, commands, process cleanup, dependency/source/native identity, actual tests and negative validation; no wheels/native binaries",
+  "script_sha256": {
+    "validate.py": "be0d99bd10eaaca3e4881b7cb388514cfa95c7ea47adf93d0c7855905718e7f0",
+    "stream_worker.py": "cceddf243fada0ade27de1c2d2119387554a83c5c4f2fe8613ec4d314872447f",
+    "collect.py": "17518ccdffd87310e1cd0b2500cf91336e33f3936a476a7e90aae1c5b799d2cf",
+    "summarize.py": "d3e91addc5c289e58092ec5c34aeb3a4e0da10e01c5a5027227435959b7d8033",
+    "audit.py": "1e797d2bd84abee13c7d6a7bc335603fd62100ce6c466c6f96b1abdc0908d30a"
+  },
+  "build_separate_s": 207.3709433078766,
+  "source_guard": "combined staged/worktree diff and untracked check before worker launch",
+  "unpack_audit": {
+    "result": "passed; extracted script hashes, ledger/seals/statistics exact; all 80 formal observations and Arrow rows re-audited",
+    "elapsed_s": 0.9826323769520968
+  }
+}

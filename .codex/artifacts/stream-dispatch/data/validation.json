@@ -1,0 +1,58 @@
+{
+  "product_ref": "cfa2a2a2f2d5a84cc5171c11261a3c8f1ce7dece",
+  "python": {
+    "command": "target/stream-dispatch/env-head/bin/python -m pytest python/tests/test_stream_callback_dispatch.py python/tests/test_stream_results.py::test_stream_full_output_queue_applies_backpressure_and_cancels python/tests/test_stream_results.py::test_stream_source_failure_wakes_consumer_with_safe_native_error python/tests/test_stream_results.py::test_stream_cancels_idle_source_and_cleans_owned_tasks python/tests/test_stream_results.py::test_stream_manual_watermarks_preserve_cursors_and_close_paused_source python/tests/test_continuous_runtime.py::test_checkpoint_restart_restores_owned_source_cursor python/tests/test_continuous_runtime.py::test_terminal_job_releases_cyclic_connector_roots -q",
+    "result": "9 passed in 0.81s"
+  },
+  "rust": {
+    "compile_command": "CARGO_BUILD_JOBS=4 PYO3_PYTHON=<base-python> CARGO_TARGET_DIR=<task-cache> cargo test --release --locked -p calc-flow-python --lib runtime:: -- --nocapture",
+    "initial_result": "compiled in 3m37s; executable exited127 before tests: missing libpython3.13.so.1.0 dynamic loader path",
+    "executed_command": "LD_LIBRARY_PATH=<python sysconfig LIBDIR> <task-cache>/release/deps/calc_flow_python-ae1c0a7e36dfb659 runtime:: --nocapture",
+    "result": "18 passed, 108 filtered, 0.07s",
+    "source_tree": "task-owned cached build tree, 813 product/config files and Cargo.lock compared to product_ref"
+  },
+  "clippy": {
+    "command": "cargo clippy --release --locked -p calc-flow-python --lib --tests -- -D warnings",
+    "result": "passed, 3m10s, task-owned same source/cache"
+  },
+  "static": {
+    "commands": [
+      "cargo fmt --all --check",
+      "target/stream-dispatch/env-head/bin/ruff check .codex/artifacts/stream-dispatch python/tests/test_stream_callback_dispatch.py",
+      "target/stream-dispatch/env-head/bin/ruff format --check .codex/artifacts/stream-dispatch python/tests/test_stream_callback_dispatch.py",
+      "target/stream-dispatch/env-head/bin/ruff check .codex/artifacts/stream-dispatch python/tests/test_stream_callback_dispatch.py --select C901,PLR0912,PLR0913,PLR0915",
+      "UV_PROJECT_ENVIRONMENT=target/stream-dispatch/env-head uv run --no-sync python scripts/verify_complexity_gates.py",
+      "git diff --check",
+      "git diff --exit-code -- schemas/project-v3.schema.json"
+    ],
+    "result": "passed; policies/baselines unchanged"
+  },
+  "perf": {
+    "command": "target/sql-prepare-reuse/env-head/bin/python target/stream-dispatch/run-measurements.py",
+    "formal_observations": 80,
+    "preflight_observations": 4,
+    "diagnostic_observations": 4,
+    "diagnostic_note": "All initial diagnostic side labels used baseline native; not compared as candidate. No extra diagnostic or favorable-result retries.",
+    "verdicts": [
+      "transform-full: inconclusive",
+      "transform-512: inconclusive"
+    ]
+  },
+  "audit": {
+    "command": "target/stream-dispatch/env-head/bin/python .codex/artifacts/stream-dispatch/audit.py --directory target/stream-dispatch/results --seals target/stream-dispatch/seals.json --summary target/stream-dispatch/summary.json",
+    "result": "80 samples, 1310720 Arrow output rows; exact columns/values/order, input and output IPC batch shapes, clocks, seals and paired statistics passed"
+  },
+  "counterexamples": {
+    "clean_product": "accepted",
+    "staged_product": "rejected",
+    "unstaged_product": "rejected",
+    "untracked_vendor": "rejected",
+    "wrong_values_with_updated_hash": "rejected",
+    "missing_batch_clock": "rejected"
+  },
+  "full_regression": "not run locally; CI owns full, cross-platform, coverage",
+  "mechanism_regression": {
+    "baseline": "14 inspect calls for three input batches; focused test failed expected optimization assertion",
+    "candidate": "0 inspect calls; passed"
+  }
+}

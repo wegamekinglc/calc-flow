@@ -1,0 +1,586 @@
+[
+  {
+    "directory": "transform-512-r0-p0-base",
+    "native_sha256": "0d3e1adf946466a2fca4b73df3c2111adaecf8522dc3f86573b4e2e91c1a79c9",
+    "note": "Both side labels in this initial diagnosis used the baseline wheel. Callback stages overlap across calls/tasks. First next was waiting before profiling enabled.",
+    "execute_ms": 24.404583,
+    "callbacks": [
+      {
+        "name": "source.next",
+        "records": 63,
+        "phase_deltas_sum_ms": {
+          "attached_ns": 2.362914,
+          "queued_ns": 0.755915,
+          "dispatched_ns": 5.664349,
+          "completed_ns": 6.734223,
+          "elapsed_ns": 2.126804
+        }
+      },
+      {
+        "name": "_native_write",
+        "records": 64,
+        "phase_deltas_sum_ms": {
+          "attached_ns": 2.629456,
+          "queued_ns": 0.570147,
+          "dispatched_ns": 9.336634,
+          "completed_ns": 4.471945,
+          "elapsed_ns": 1.944766
+        }
+      }
+    ],
+    "status": {
+      "job_id": 1,
+      "state": "running",
+      "terminal_cause": null,
+      "delivery": {
+        "output": {
+          "requested": "at_least_once",
+          "effective": "best_effort"
+        }
+      },
+      "task_count": 5,
+      "task_errors": 0,
+      "metrics_overflowed": false,
+      "watermark_micros": null,
+      "edges": {
+        "sink/726573756c74/6f7574707574/6f7574707574": {
+          "current_envelopes": 0,
+          "current_rows": 0,
+          "current_bytes": 0,
+          "high_water_envelopes": 1,
+          "high_water_rows": 256,
+          "high_water_bytes": 4096,
+          "blocked_sends": 0,
+          "blocked_duration_micros": 0,
+          "envelope_limit": 1000000,
+          "row_limit": 1000000,
+          "byte_limit": 18446744073709551615
+        },
+        "source/696e707574/726573756c74/696e707574": {
+          "current_envelopes": 0,
+          "current_rows": 0,
+          "current_bytes": 0,
+          "high_water_envelopes": 1,
+          "high_water_rows": 512,
+          "high_water_bytes": 16384,
+          "blocked_sends": 0,
+          "blocked_duration_micros": 0,
+          "envelope_limit": 1000000,
+          "row_limit": 1000000,
+          "byte_limit": 18446744073709551615
+        }
+      },
+      "sources": {
+        "input": {
+          "replay_positioning": "unsupported",
+          "delivery": "lossy",
+          "max_batch_rows": 1000000,
+          "max_batch_bytes": 18446744073709551615,
+          "next_sequence": 65,
+          "ended": false,
+          "polls": 66,
+          "data_batches": 65,
+          "data_rows": 33280,
+          "data_bytes": 1064960,
+          "fanned_out_batches": 65,
+          "fanned_out_rows": 33280,
+          "fanned_out_bytes": 1064960,
+          "errors": 0
+        }
+      },
+      "operators": {
+        "result": {
+          "input_batches": 65,
+          "input_rows": 33280,
+          "input_bytes": 1064960,
+          "fanned_out_batches": 65,
+          "fanned_out_rows": 16640,
+          "fanned_out_bytes": 266240,
+          "processing_duration_micros": 3787,
+          "watermark_processing_duration_micros": 0,
+          "errors": 0,
+          "ended": false,
+          "late_rows": 0,
+          "late_affected_batches": 0,
+          "max_lateness_micros": null,
+          "null_event_time_rows": 0,
+          "null_event_time_batches": 0,
+          "datafusion_runtime_created": true
+        }
+      },
+      "sinks": {
+        "stream_sink_0": {
+          "output_id": "output",
+          "effective_delivery": {
+            "kind": "ordinary"
+          },
+          "delivered_batches": 65,
+          "delivered_rows": 16640,
+          "delivered_bytes": 266240,
+          "write_duration_micros": 19501,
+          "errors": 0,
+          "ended": false
+        }
+      },
+      "checkpoint": {
+        "current_epoch": null,
+        "phase": null,
+        "terminal": false,
+        "source_acks": 0,
+        "expected_sources": 0,
+        "operator_acks": 0,
+        "expected_operators": 0,
+        "sink_precommit_acks": 0,
+        "expected_sink_precommits": 0,
+        "sink_commit_acks": 0,
+        "expected_sink_commits": 0,
+        "elapsed_micros": null,
+        "last_completed_epoch": null,
+        "installed_unknown_epoch": null,
+        "failure_category": null,
+        "runtime_config_changed": false
+      },
+      "stream_joins": {},
+      "stream_asof_joins": {},
+      "rolling_metrics": {}
+    }
+  },
+  {
+    "directory": "transform-512-r0-p0-head",
+    "native_sha256": "0d3e1adf946466a2fca4b73df3c2111adaecf8522dc3f86573b4e2e91c1a79c9",
+    "note": "Both side labels in this initial diagnosis used the baseline wheel. Callback stages overlap across calls/tasks. First next was waiting before profiling enabled.",
+    "execute_ms": 25.885328,
+    "callbacks": [
+      {
+        "name": "source.next",
+        "records": 63,
+        "phase_deltas_sum_ms": {
+          "attached_ns": 1.84842,
+          "queued_ns": 0.749849,
+          "dispatched_ns": 5.97271,
+          "completed_ns": 7.198697,
+          "elapsed_ns": 2.263228
+        }
+      },
+      {
+        "name": "_native_write",
+        "records": 64,
+        "phase_deltas_sum_ms": {
+          "attached_ns": 2.793774,
+          "queued_ns": 0.650341,
+          "dispatched_ns": 9.266971,
+          "completed_ns": 4.217845,
+          "elapsed_ns": 1.975254
+        }
+      }
+    ],
+    "status": {
+      "job_id": 1,
+      "state": "running",
+      "terminal_cause": null,
+      "delivery": {
+        "output": {
+          "requested": "at_least_once",
+          "effective": "best_effort"
+        }
+      },
+      "task_count": 5,
+      "task_errors": 0,
+      "metrics_overflowed": false,
+      "watermark_micros": null,
+      "edges": {
+        "sink/726573756c74/6f7574707574/6f7574707574": {
+          "current_envelopes": 0,
+          "current_rows": 0,
+          "current_bytes": 0,
+          "high_water_envelopes": 1,
+          "high_water_rows": 256,
+          "high_water_bytes": 4096,
+          "blocked_sends": 0,
+          "blocked_duration_micros": 0,
+          "envelope_limit": 1000000,
+          "row_limit": 1000000,
+          "byte_limit": 18446744073709551615
+        },
+        "source/696e707574/726573756c74/696e707574": {
+          "current_envelopes": 0,
+          "current_rows": 0,
+          "current_bytes": 0,
+          "high_water_envelopes": 1,
+          "high_water_rows": 512,
+          "high_water_bytes": 16384,
+          "blocked_sends": 0,
+          "blocked_duration_micros": 0,
+          "envelope_limit": 1000000,
+          "row_limit": 1000000,
+          "byte_limit": 18446744073709551615
+        }
+      },
+      "sources": {
+        "input": {
+          "replay_positioning": "unsupported",
+          "delivery": "lossy",
+          "max_batch_rows": 1000000,
+          "max_batch_bytes": 18446744073709551615,
+          "next_sequence": 65,
+          "ended": false,
+          "polls": 66,
+          "data_batches": 65,
+          "data_rows": 33280,
+          "data_bytes": 1064960,
+          "fanned_out_batches": 65,
+          "fanned_out_rows": 33280,
+          "fanned_out_bytes": 1064960,
+          "errors": 0
+        }
+      },
+      "operators": {
+        "result": {
+          "input_batches": 65,
+          "input_rows": 33280,
+          "input_bytes": 1064960,
+          "fanned_out_batches": 65,
+          "fanned_out_rows": 16640,
+          "fanned_out_bytes": 266240,
+          "processing_duration_micros": 3722,
+          "watermark_processing_duration_micros": 0,
+          "errors": 0,
+          "ended": false,
+          "late_rows": 0,
+          "late_affected_batches": 0,
+          "max_lateness_micros": null,
+          "null_event_time_rows": 0,
+          "null_event_time_batches": 0,
+          "datafusion_runtime_created": true
+        }
+      },
+      "sinks": {
+        "stream_sink_0": {
+          "output_id": "output",
+          "effective_delivery": {
+            "kind": "ordinary"
+          },
+          "delivered_batches": 65,
+          "delivered_rows": 16640,
+          "delivered_bytes": 266240,
+          "write_duration_micros": 19538,
+          "errors": 0,
+          "ended": false
+        }
+      },
+      "checkpoint": {
+        "current_epoch": null,
+        "phase": null,
+        "terminal": false,
+        "source_acks": 0,
+        "expected_sources": 0,
+        "operator_acks": 0,
+        "expected_operators": 0,
+        "sink_precommit_acks": 0,
+        "expected_sink_precommits": 0,
+        "sink_commit_acks": 0,
+        "expected_sink_commits": 0,
+        "elapsed_micros": null,
+        "last_completed_epoch": null,
+        "installed_unknown_epoch": null,
+        "failure_category": null,
+        "runtime_config_changed": false
+      },
+      "stream_joins": {},
+      "stream_asof_joins": {},
+      "rolling_metrics": {}
+    }
+  },
+  {
+    "directory": "transform-full-r0-p0-base",
+    "native_sha256": "0d3e1adf946466a2fca4b73df3c2111adaecf8522dc3f86573b4e2e91c1a79c9",
+    "note": "Both side labels in this initial diagnosis used the baseline wheel. Callback stages overlap across calls/tasks. First next was waiting before profiling enabled.",
+    "execute_ms": 0.826725,
+    "callbacks": [
+      {
+        "name": "source.next",
+        "records": 0,
+        "phase_deltas_sum_ms": {
+          "attached_ns": 0.0,
+          "queued_ns": 0.0,
+          "dispatched_ns": 0.0,
+          "completed_ns": 0.0,
+          "elapsed_ns": 0.0
+        }
+      },
+      {
+        "name": "_native_write",
+        "records": 1,
+        "phase_deltas_sum_ms": {
+          "attached_ns": 0.002299,
+          "queued_ns": 0.011543,
+          "dispatched_ns": 0.055202,
+          "completed_ns": 0.072213,
+          "elapsed_ns": 0.072316
+        }
+      }
+    ],
+    "status": {
+      "job_id": 1,
+      "state": "running",
+      "terminal_cause": null,
+      "delivery": {
+        "output": {
+          "requested": "at_least_once",
+          "effective": "best_effort"
+        }
+      },
+      "task_count": 5,
+      "task_errors": 0,
+      "metrics_overflowed": false,
+      "watermark_micros": null,
+      "edges": {
+        "sink/726573756c74/6f7574707574/6f7574707574": {
+          "current_envelopes": 0,
+          "current_rows": 0,
+          "current_bytes": 0,
+          "high_water_envelopes": 1,
+          "high_water_rows": 16384,
+          "high_water_bytes": 262144,
+          "blocked_sends": 0,
+          "blocked_duration_micros": 0,
+          "envelope_limit": 1000000,
+          "row_limit": 1000000,
+          "byte_limit": 18446744073709551615
+        },
+        "source/696e707574/726573756c74/696e707574": {
+          "current_envelopes": 0,
+          "current_rows": 0,
+          "current_bytes": 0,
+          "high_water_envelopes": 1,
+          "high_water_rows": 32768,
+          "high_water_bytes": 1048576,
+          "blocked_sends": 0,
+          "blocked_duration_micros": 0,
+          "envelope_limit": 1000000,
+          "row_limit": 1000000,
+          "byte_limit": 18446744073709551615
+        }
+      },
+      "sources": {
+        "input": {
+          "replay_positioning": "unsupported",
+          "delivery": "lossy",
+          "max_batch_rows": 1000000,
+          "max_batch_bytes": 18446744073709551615,
+          "next_sequence": 2,
+          "ended": false,
+          "polls": 3,
+          "data_batches": 2,
+          "data_rows": 65536,
+          "data_bytes": 2097152,
+          "fanned_out_batches": 2,
+          "fanned_out_rows": 65536,
+          "fanned_out_bytes": 2097152,
+          "errors": 0
+        }
+      },
+      "operators": {
+        "result": {
+          "input_batches": 2,
+          "input_rows": 65536,
+          "input_bytes": 2097152,
+          "fanned_out_batches": 2,
+          "fanned_out_rows": 32768,
+          "fanned_out_bytes": 524288,
+          "processing_duration_micros": 1837,
+          "watermark_processing_duration_micros": 0,
+          "errors": 0,
+          "ended": false,
+          "late_rows": 0,
+          "late_affected_batches": 0,
+          "max_lateness_micros": null,
+          "null_event_time_rows": 0,
+          "null_event_time_batches": 0,
+          "datafusion_runtime_created": true
+        }
+      },
+      "sinks": {
+        "stream_sink_0": {
+          "output_id": "output",
+          "effective_delivery": {
+            "kind": "ordinary"
+          },
+          "delivered_batches": 2,
+          "delivered_rows": 32768,
+          "delivered_bytes": 524288,
+          "write_duration_micros": 643,
+          "errors": 0,
+          "ended": false
+        }
+      },
+      "checkpoint": {
+        "current_epoch": null,
+        "phase": null,
+        "terminal": false,
+        "source_acks": 0,
+        "expected_sources": 0,
+        "operator_acks": 0,
+        "expected_operators": 0,
+        "sink_precommit_acks": 0,
+        "expected_sink_precommits": 0,
+        "sink_commit_acks": 0,
+        "expected_sink_commits": 0,
+        "elapsed_micros": null,
+        "last_completed_epoch": null,
+        "installed_unknown_epoch": null,
+        "failure_category": null,
+        "runtime_config_changed": false
+      },
+      "stream_joins": {},
+      "stream_asof_joins": {},
+      "rolling_metrics": {}
+    }
+  },
+  {
+    "directory": "transform-full-r0-p0-head",
+    "native_sha256": "0d3e1adf946466a2fca4b73df3c2111adaecf8522dc3f86573b4e2e91c1a79c9",
+    "note": "Both side labels in this initial diagnosis used the baseline wheel. Callback stages overlap across calls/tasks. First next was waiting before profiling enabled.",
+    "execute_ms": 0.869127,
+    "callbacks": [
+      {
+        "name": "source.next",
+        "records": 0,
+        "phase_deltas_sum_ms": {
+          "attached_ns": 0.0,
+          "queued_ns": 0.0,
+          "dispatched_ns": 0.0,
+          "completed_ns": 0.0,
+          "elapsed_ns": 0.0
+        }
+      },
+      {
+        "name": "_native_write",
+        "records": 1,
+        "phase_deltas_sum_ms": {
+          "attached_ns": 0.002134,
+          "queued_ns": 0.011046,
+          "dispatched_ns": 0.060604,
+          "completed_ns": 0.071289,
+          "elapsed_ns": 0.034215
+        }
+      }
+    ],
+    "status": {
+      "job_id": 1,
+      "state": "running",
+      "terminal_cause": null,
+      "delivery": {
+        "output": {
+          "requested": "at_least_once",
+          "effective": "best_effort"
+        }
+      },
+      "task_count": 5,
+      "task_errors": 0,
+      "metrics_overflowed": false,
+      "watermark_micros": null,
+      "edges": {
+        "sink/726573756c74/6f7574707574/6f7574707574": {
+          "current_envelopes": 0,
+          "current_rows": 0,
+          "current_bytes": 0,
+          "high_water_envelopes": 1,
+          "high_water_rows": 16384,
+          "high_water_bytes": 262144,
+          "blocked_sends": 0,
+          "blocked_duration_micros": 0,
+          "envelope_limit": 1000000,
+          "row_limit": 1000000,
+          "byte_limit": 18446744073709551615
+        },
+        "source/696e707574/726573756c74/696e707574": {
+          "current_envelopes": 0,
+          "current_rows": 0,
+          "current_bytes": 0,
+          "high_water_envelopes": 1,
+          "high_water_rows": 32768,
+          "high_water_bytes": 1048576,
+          "blocked_sends": 0,
+          "blocked_duration_micros": 0,
+          "envelope_limit": 1000000,
+          "row_limit": 1000000,
+          "byte_limit": 18446744073709551615
+        }
+      },
+      "sources": {
+        "input": {
+          "replay_positioning": "unsupported",
+          "delivery": "lossy",
+          "max_batch_rows": 1000000,
+          "max_batch_bytes": 18446744073709551615,
+          "next_sequence": 2,
+          "ended": false,
+          "polls": 3,
+          "data_batches": 2,
+          "data_rows": 65536,
+          "data_bytes": 2097152,
+          "fanned_out_batches": 2,
+          "fanned_out_rows": 65536,
+          "fanned_out_bytes": 2097152,
+          "errors": 0
+        }
+      },
+      "operators": {
+        "result": {
+          "input_batches": 2,
+          "input_rows": 65536,
+          "input_bytes": 2097152,
+          "fanned_out_batches": 2,
+          "fanned_out_rows": 32768,
+          "fanned_out_bytes": 524288,
+          "processing_duration_micros": 1899,
+          "watermark_processing_duration_micros": 0,
+          "errors": 0,
+          "ended": false,
+          "late_rows": 0,
+          "late_affected_batches": 0,
+          "max_lateness_micros": null,
+          "null_event_time_rows": 0,
+          "null_event_time_batches": 0,
+          "datafusion_runtime_created": true
+        }
+      },
+      "sinks": {
+        "stream_sink_0": {
+          "output_id": "output",
+          "effective_delivery": {
+            "kind": "ordinary"
+          },
+          "delivered_batches": 2,
+          "delivered_rows": 32768,
+          "delivered_bytes": 524288,
+          "write_duration_micros": 564,
+          "errors": 0,
+          "ended": false
+        }
+      },
+      "checkpoint": {
+        "current_epoch": null,
+        "phase": null,
+        "terminal": false,
+        "source_acks": 0,
+        "expected_sources": 0,
+        "operator_acks": 0,
+        "expected_operators": 0,
+        "sink_precommit_acks": 0,
+        "expected_sink_precommits": 0,
+        "sink_commit_acks": 0,
+        "expected_sink_commits": 0,
+        "elapsed_micros": null,
+        "last_completed_epoch": null,
+        "installed_unknown_epoch": null,
+        "failure_category": null,
+        "runtime_config_changed": false
+      },
+      "stream_joins": {},
+      "stream_asof_joins": {},
+      "rolling_metrics": {}
+    }
+  }
+]

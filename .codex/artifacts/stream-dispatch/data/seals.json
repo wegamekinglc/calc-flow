@@ -1,0 +1,14 @@
+{
+  "base": {
+    "python": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-417-8b350a7f0467/workdir/calc-flow/target/sql-prepare-reuse/env-head/bin/python",
+    "native_sha256": "0d3e1adf946466a2fca4b73df3c2111adaecf8522dc3f86573b4e2e91c1a79c9",
+    "wheel_sha256": "7bae728a9d768864e51077e706a5ee63b40ac71687b56fe56058923d24c959f2",
+    "source_ref": "9db6d10b29bc6349b529d2807cfd23ba4dd6aace"
+  },
+  "head": {
+    "python": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-417-8b350a7f0467/workdir/calc-flow/target/stream-dispatch/env-head/bin/python",
+    "native_sha256": "d7b690a6c97c9bcc6def157907b5d321cb22f66c79cd1415ba5da932634c64f4",
+    "source_ref": "cfa2a2a2f2d5a84cc5171c11261a3c8f1ce7dece",
+    "wheel_sha256": "5e9b0c9da2c244ce1ee18a95ebc5082254d1eedcda3eb95da56642da12dbf45e"
+  }
+}
