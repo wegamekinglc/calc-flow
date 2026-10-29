@@ -135,3 +135,26 @@ def test_async_stream_keeps_owned_result_lifecycle() -> None:
         assert results.job.status()["task_count"] == 0
 
     asyncio.run(asyncio.wait_for(run(), timeout=5))
+
+
+def test_python39_runtime_registration_initializes_cache_invalidation(monkeypatch):
+    import calc_flow.pipeline as pipeline
+
+    compat_spec = importlib.util.spec_from_file_location(
+        "calc_flow._compat_runtime_python39_test", _compat.__file__
+    )
+    legacy = importlib.util.module_from_spec(compat_spec)
+    runtime_spec = importlib.util.spec_from_file_location(
+        "calc_flow._pipeline_python39_test", pipeline.__file__
+    )
+    legacy_pipeline = importlib.util.module_from_spec(runtime_spec)
+    with monkeypatch.context() as patch:
+        patch.setattr(sys, "version_info", (3, 9, 0))
+        compat_spec.loader.exec_module(legacy)
+        patch.setattr(_compat, "dataclass", legacy.dataclass)
+        patch.setitem(sys.modules, runtime_spec.name, legacy_pipeline)
+        runtime_spec.loader.exec_module(legacy_pipeline)
+
+    runtime = legacy_pipeline.Runtime()
+    runtime.register_provider("test", "identity", "1", lambda batch, options: batch)
+    assert runtime.capabilities().providers[0].name == "identity"

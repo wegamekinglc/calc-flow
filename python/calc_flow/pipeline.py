@@ -154,7 +154,7 @@ class Runtime:
         default_factory=list, repr=False, compare=False
     )
     _symbolic_cache_generation: int = field(
-        default=0, init=False, repr=False, compare=False
+        default_factory=int, init=False, repr=False, compare=False
     )
     _symbolic_compile_cache: dict[object, object] = field(
         default_factory=dict, repr=False, compare=False
