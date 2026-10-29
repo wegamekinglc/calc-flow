@@ -110,3 +110,19 @@ CPU 4–7 跑 worker、0–1 跑 controller，Tokio 四线程，其余 helper �
 [预记方案](PLAN.md)、[实际命令与重现](REPRODUCE.md)、[成对摘要](data/summary.json)、
 [身份](data/identity.json)、[验证](data/validation.json)、[预算](data/budget.json)。
 新机器的新哈希和结果应另行记录，不回写这些已采样身份。
+
+## 测量后的依赖策略修复
+
+PR #516 的依赖策略检查发现 `libz-sys 1.1.29` 命中 `RUSTSEC-2026-0418`。
+核对远端 `main@d9e2759f` 尚无修复后，仅将锁文件中的该包及 checksum 更新至修复版
+1.1.31；其他包、依赖边、忽略策略和门禁保持原样。原 `cargo audit` 三项 ignore 参数
+及 `cargo deny --locked check` 均退出 0，保留既有 duplicate/yanked warning。
+
+`cargo tree --locked -p calc-flow-python` 确认本次默认 wheel/有限 SQL 的实际依赖图不含
+`libz-sys`；全特性反向图显示它仅由可选 Kafka 的 `rdkafka-sys` 引入。上游修复移除了
+构建脚本的环境命令日志；FFI `src/lib.rs` 与旧版相同，另有 WASI/aarch64 构建调整，
+可选特性的跨平台构建兼容性由 CI 验证。本次没有重新构建或采样，复用前述 SQL 证据。
+
+测量仍对应产品提交 `9db6d10b`、原 wheel/native/source 和锁文件身份。原始数据与
+`data/identity.json` 不改写；依赖修复后的 head 并非新增已采样版本。新 `Cargo.lock`
+SHA-256 为 `228b17f6384d1b1275755306dfe6c18d81d145f46de7994c1092080cbd38454e`。
