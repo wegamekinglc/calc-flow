@@ -8,15 +8,25 @@ from pathlib import Path
 
 import calc_flow as cf
 
+
+def _check(condition: bool, message: str) -> None:
+    if not condition:
+        raise AssertionError(message)
+
+
 for name in ("pyarrow", "numpy", "jax"):
-    assert importlib.util.find_spec(name) is None, (
-        f"unexpected optional package: {name}"
+    _check(
+        importlib.util.find_spec(name) is None,
+        f"unexpected optional package: {name}",
     )
 
 # IPC is read by bundled Rust Arrow, without importing a Python Arrow producer.
 fixture = Path(__file__).with_name("fixtures") / "standalone.arrow"
 batch = cf._native._batch_from_ipc(fixture.read_bytes())
-assert batch.num_rows == 2
+_check(
+    batch.num_rows == 2,
+    "IPC fixture row count changed",
+)
 
 
 class Producer:
@@ -29,35 +39,57 @@ source = cf.table_input(
 )
 expression = source.select(total=source["a"] + source["b"])
 output = expression.collect(Producer(), output_format="batch")
-assert isinstance(output, cf.Batch)
-assert output.num_rows == 2
-assert (
+_check(
+    isinstance(output, cf.Batch),
+    "collect did not return Batch",
+)
+_check(
+    output.num_rows == 2,
+    "collect changed the row count",
+)
+_check(
     cf.compute(
         output, lambda t: t.filter(t["total"] != 3), output_format="batch"
     ).num_rows
-    == 0
+    == 0,
+    "compute returned incorrect totals",
 )
-assert cf.Batch.from_arrow(output).num_rows == 2
+_check(
+    cf.Batch.from_arrow(output).num_rows == 2,
+    "Arrow round trip changed the row count",
+)
 program = cf.Program("standalone", engine="sql", outputs={"sum": expression})
-assert isinstance(
-    program.execute({"input": batch}, output_format="batch")["sum"], cf.Batch
+_check(
+    isinstance(
+        program.execute({"input": batch}, output_format="batch")["sum"], cf.Batch
+    ),
+    "Program.execute did not return Batch",
 )
 
 for call in (lambda: output.to_pyarrow(), lambda: cf.compute(batch, lambda t: t)):
     try:
         call()
     except ImportError as error:
-        assert "calc-flow-python[pyarrow]" in str(error)
+        _check(
+            "calc-flow-python[pyarrow]" in str(error),
+            "missing PyArrow diagnostic omitted the extra",
+        )
     else:
         raise AssertionError("PyArrow adapter should report its missing extra")
 
 
 async def check_async() -> None:
-    assert isinstance(
-        await cf.compute_async(batch, lambda t: t, output_format="batch"), cf.Batch
+    _check(
+        isinstance(
+            await cf.compute_async(batch, lambda t: t, output_format="batch"), cf.Batch
+        ),
+        "compute_async did not return Batch",
     )
-    assert isinstance(
-        await expression.collect_async(batch, output_format="batch"), cf.Batch
+    _check(
+        isinstance(
+            await expression.collect_async(batch, output_format="batch"), cf.Batch
+        ),
+        "collect_async did not return Batch",
     )
 
     async def inputs():
@@ -69,8 +101,14 @@ async def check_async() -> None:
         config=cf.StreamRuntimeConfig(checkpointing=False),
     ) as results:
         observed = [part async for part in results]
-    assert sum(part.num_rows for part in observed) == 2
-    assert all(isinstance(part, cf.Batch) for part in observed)
+    _check(
+        sum(part.num_rows for part in observed) == 2,
+        "stream changed the row count",
+    )
+    _check(
+        all(isinstance(part, cf.Batch) for part in observed),
+        "stream did not return Batch values",
+    )
 
 
 asyncio.run(check_async())
@@ -79,7 +117,10 @@ for register, extra in ((cf.register_numpy, "numpy"), (cf.register_jax, "jax")):
     try:
         register(cf.Runtime())
     except ImportError as error:
-        assert f"calc-flow-python[{extra}]" in str(error)
+        _check(
+            f"calc-flow-python[{extra}]" in str(error),
+            "missing array backend diagnostic omitted the extra",
+        )
     else:
         raise AssertionError("missing array backend accepted")
 try:
@@ -93,11 +134,15 @@ try:
         function=lambda x: x,
     )
 except ImportError as error:
-    assert "calc-flow-python[pyarrow]" in str(error)
+    _check(
+        "calc-flow-python[pyarrow]" in str(error),
+        "missing PyArrow diagnostic omitted the extra",
+    )
 else:
     raise AssertionError("missing PyArrow UDF adapter accepted")
-assert not any(
-    name in __import__("sys").modules for name in ("pyarrow", "numpy", "jax")
+_check(
+    not any(name in __import__("sys").modules for name in ("pyarrow", "numpy", "jax")),
+    "optional array packages were imported",
 )
 print(
     "standalone wheel: import, declarations, compute, collect, Program, stream "
