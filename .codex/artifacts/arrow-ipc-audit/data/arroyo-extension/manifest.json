@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "cf_source": "b5ae227e48ac9bb8a81583a23485e2c6064cee52",
+  "arroyo_source": "4ef15f6336a596651f10cf27c1ee29c29bf81577",
+  "accepted_samples": 20,
+  "pairs": 10,
+  "accepted_output_rows": 327680,
+  "separate_window_semantic_observations": 2,
+  "window_rows_each": 512,
+  "excluded_preflights": true,
+  "old_cf_samples_reused_as_new_pairs": false,
+  "raw_inventory_files": 487,
+  "files": {
+    "DAL-417-arroyo-adjacent-raw.tar.gz": {
+      "bytes": 2206945,
+      "sha256": "04004e1a61ff7dc9bc33596b372f12d908127abc9c2cf00c8ab98ecc0ea0de7c"
+    },
+    "audit.json": {
+      "bytes": 81,
+      "sha256": "905e8ce457e38f309307ccd547485b7db1aa187e0d45ca45e785a12e7b9c5f15"
+    },
+    "build-budget.json": {
+      "bytes": 5313,
+      "sha256": "0bfb6a18b6c9c3378ecb07bea82481bbcac37562ccb5e6061803c084b060a43a"
+    },
+    "identity.json": {
+      "bytes": 2079,
+      "sha256": "bd93266806178531cb905d3e9afe6106c869c4da3b2a96eeaf0ef7a4e88bd160"
+    },
+    "measurement-budget.json": {
+      "bytes": 1239,
+      "sha256": "86b322cc362358524e81006f3a72a0889436d3faa5b79f3e03780bf652721de6"
+    },
+    "negative-validation.json": {
+      "bytes": 224,
+      "sha256": "74cf1b51466941c3ff72f281552a46a869e08e5dc6ea1ffbee668ebe99d1ebeb"
+    },
+    "pairs.json": {
+      "bytes": 1977,
+      "sha256": "a186cb399039cbfe50ff19ebcb5f6674cabe5d92da5aff9dbf983a05a0facb57"
+    },
+    "phase-summary.json": {
+      "bytes": 5358,
+      "sha256": "ebad0d1a3f2d38dfebd888f78f765cf632009162cef3aa5838364041df983c9a"
+    },
+    "summary.json": {
+      "bytes": 1202,
+      "sha256": "19b912037fc31105b061212392d53bd63840b4046ecbcd2095a7f3c9ee5a7390"
+    },
+    "window-alignment.json": {
+      "bytes": 3849,
+      "sha256": "6c080e1cfd23cd566e51fc758e7a9dac737e09e08bcf65a324de78fdc3bf8662"
+    },
+    "validation.json": {
+      "bytes": 968,
+      "sha256": "42c3fbaaf529401442a43da89e8218b044c74a4c69d18e99a36185f4c8f26389"
+    }
+  }
+}

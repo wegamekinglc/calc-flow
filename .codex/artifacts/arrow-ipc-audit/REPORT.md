@@ -1,5 +1,8 @@
 # DAL-417：Arrow/IPC 重测、benchmark 计时审计与优先级更新
 
+> 接续说明：本文保留首阶段数字与当时的构建状态。真实 Arroyo Arrow/Batch 运行、窗口
+> 对齐探针及新五对比较已在[补测报告](ARROYO-RESULTS.md)交付，不与本文样本混合统计。
+
 本轮取得了 **CF 两种引擎的 Arrow 核心 API/完整 IPC 往返结果，以及维护中 benchmark
 集合的逐组计时审计**。没有取得 Arroyo 同口径的可运行 release/窗口语义证据，因此没有
 新的 Arroyo/CF 纯计算倍数排名。#494/#510 的旧数字完整保留，只适用于原 JSON 集成出口，

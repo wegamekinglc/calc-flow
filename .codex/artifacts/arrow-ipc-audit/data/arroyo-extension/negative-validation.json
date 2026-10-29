@@ -1,0 +1,6 @@
+{
+  "status": "passed",
+  "counterexample": "all y values +1; output SHA and master/per-run metadata updated consistently",
+  "rejection": "raw Arrow values, columns or sequence differ",
+  "source_results_unchanged": true
+}

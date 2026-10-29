@@ -1,0 +1,28 @@
+{
+  "archive_inventory_files": 487,
+  "archive_roundtrip": "passed",
+  "offline_audit": {
+    "samples": 20,
+    "pairs": 10,
+    "output_rows": 327680
+  },
+  "summary_pairs_phases_recomputed": "byte-identical (summary structural equality)",
+  "window_rows_each": 512,
+  "window_width_us": 4000000,
+  "window_order_equal": true,
+  "window_actual_watermark_count_each": 65,
+  "window_actual_watermarks_equal": true,
+  "semantic_corruption_rejected": {
+    "status": "passed",
+    "counterexample": "all y values +1; output SHA and master/per-run metadata updated consistently",
+    "rejection": "raw Arrow values, columns or sequence differ",
+    "source_results_unchanged": true
+  },
+  "static_checks": [
+    "Ruff check and format",
+    "explicit C901 PLR0912 PLR0913 PLR0915",
+    "scripts/verify_complexity_gates.py: complexity ratchet holds",
+    "bash -n frontend_build.sh extract_arroyo_plans.sh",
+    "reverse apply --check --unidiff-zero observed patch"
+  ]
+}

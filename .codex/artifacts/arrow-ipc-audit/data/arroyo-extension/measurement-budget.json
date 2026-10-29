@@ -1,0 +1,41 @@
+{
+  "limit_s": 600,
+  "prior_phase_reserve_s": 120,
+  "spent_s": 235.21986494702287,
+  "entries": [
+    {
+      "kind": "conservative reserve for preceding Arrow/IPC measurements and audits",
+      "seconds": 120
+    },
+    {
+      "kind": "real native v1 preflight",
+      "elapsed_s": 30.009284766972996
+    },
+    {
+      "output": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-417-34c29c5ad70b/workdir/calc-flow/target/arrow-ipc-extension/preflight",
+      "elapsed_s": 1.755361294024624,
+      "samples": 0,
+      "preflight": true
+    },
+    {
+      "output": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-417-34c29c5ad70b/workdir/calc-flow/target/arrow-ipc-extension/preflight-v2",
+      "elapsed_s": 13.850273536052555,
+      "samples": 4,
+      "preflight": true
+    },
+    {
+      "kind": "window alignment probe",
+      "elapsed_s": 0.7837827359326184
+    },
+    {
+      "kind": "window alignment probe",
+      "elapsed_s": 6.387110088020563
+    },
+    {
+      "output": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-417-34c29c5ad70b/workdir/calc-flow/target/arrow-ipc-extension/results",
+      "elapsed_s": 62.434052526019514,
+      "samples": 20,
+      "preflight": false
+    }
+  ]
+}

@@ -1,0 +1,171 @@
+{
+  "budget_seconds": 1800,
+  "spent_seconds": 717.1843861999223,
+  "attempts": [
+    {
+      "command": [
+        "timeout",
+        "--kill-after=10s",
+        "1800",
+        "cargo",
+        "build",
+        "--release",
+        "--locked",
+        "--manifest-path",
+        "target/arroyo-arrow-source/Cargo.toml",
+        "-p",
+        "arroyo",
+        "--bin",
+        "arroyo"
+      ],
+      "start_utc": "2026-10-29T02:14:38.932935+00:00",
+      "config": {
+        "CARGO_BUILD_JOBS": "8",
+        "CFLAGS": "-std=gnu17",
+        "CMAKE": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-417-34c29c5ad70b/workdir/calc-flow/.codex/artifacts/arrow-ipc-audit/cmake-compat.sh"
+      },
+      "exit_code": 101,
+      "end_utc": "2026-10-29T02:17:54.391860+00:00",
+      "elapsed_s": 195.4715385249583
+    },
+    {
+      "command": [
+        "timeout",
+        "--kill-after=10s",
+        "1594",
+        "cargo",
+        "build",
+        "--release",
+        "--locked",
+        "--manifest-path",
+        "target/arroyo-arrow-source/Cargo.toml",
+        "-p",
+        "arroyo",
+        "--bin",
+        "arroyo"
+      ],
+      "config": {
+        "CARGO_BUILD_JOBS": "8",
+        "CFLAGS": "-std=gnu17",
+        "CMAKE": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-417-34c29c5ad70b/workdir/calc-flow/.codex/artifacts/arrow-ipc-audit/cmake-compat.sh",
+        "DATABASE_URL": "postgresql://dal417@127.0.0.1:47836/arroyo_build"
+      },
+      "start_utc": "2026-10-29T02:22:07.749350+00:00",
+      "remaining_budget_s": 1594,
+      "setup_reserve_s": 10,
+      "exit_code": 101,
+      "end_utc": "2026-10-29T02:22:32.243218+00:00",
+      "elapsed_s": 24.494981569005176
+    },
+    {
+      "command": [
+        "timeout",
+        "--kill-after=10s",
+        "1570",
+        "bash",
+        "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-417-34c29c5ad70b/workdir/calc-flow/.codex/artifacts/arrow-ipc-audit/frontend_build.sh"
+      ],
+      "config": {
+        "CARGO_BUILD_JOBS": "8",
+        "CFLAGS": "-std=gnu17",
+        "CMAKE": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-417-34c29c5ad70b/workdir/calc-flow/.codex/artifacts/arrow-ipc-audit/cmake-compat.sh",
+        "DATABASE_URL": "postgresql://dal417@127.0.0.1:47836/arroyo_build"
+      },
+      "start_utc": "2026-10-29T02:28:31.905249+00:00",
+      "remaining_budget_s": 1570,
+      "setup_reserve_s": 10,
+      "exit_code": 0,
+      "end_utc": "2026-10-29T02:31:19.569326+00:00",
+      "elapsed_s": 167.67454909300432
+    },
+    {
+      "command": [
+        "timeout",
+        "--kill-after=10s",
+        "1402",
+        "cargo",
+        "build",
+        "--release",
+        "--locked",
+        "--manifest-path",
+        "target/arroyo-arrow-source/Cargo.toml",
+        "-p",
+        "arroyo",
+        "--bin",
+        "arroyo"
+      ],
+      "config": {
+        "CARGO_BUILD_JOBS": "8",
+        "CFLAGS": "-std=gnu17",
+        "CMAKE": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-417-34c29c5ad70b/workdir/calc-flow/.codex/artifacts/arrow-ipc-audit/cmake-compat.sh",
+        "DATABASE_URL": "postgresql://dal417@127.0.0.1:47836/arroyo_build"
+      },
+      "start_utc": "2026-10-29T02:32:20.056155+00:00",
+      "remaining_budget_s": 1402,
+      "setup_reserve_s": 10,
+      "exit_code": 0,
+      "end_utc": "2026-10-29T02:33:40.784548+00:00",
+      "elapsed_s": 80.73404762998689
+    },
+    {
+      "command": [
+        "timeout",
+        "--kill-after=10s",
+        "1321",
+        "cargo",
+        "build",
+        "--release",
+        "--locked",
+        "--manifest-path",
+        "target/arroyo-arrow-source/Cargo.toml",
+        "-p",
+        "arroyo",
+        "--bin",
+        "arroyo"
+      ],
+      "config": {
+        "CARGO_BUILD_JOBS": "8",
+        "CFLAGS": "-std=gnu17",
+        "CMAKE": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-417-34c29c5ad70b/workdir/calc-flow/.codex/artifacts/arrow-ipc-audit/cmake-compat.sh",
+        "DATABASE_URL": "postgresql://dal417@127.0.0.1:47836/arroyo_build"
+      },
+      "start_utc": "2026-10-29T02:39:28.022119+00:00",
+      "remaining_budget_s": 1321,
+      "setup_reserve_s": 10,
+      "exit_code": 0,
+      "end_utc": "2026-10-29T02:41:31.681627+00:00",
+      "elapsed_s": 123.66667586704716
+    },
+    {
+      "command": [
+        "timeout",
+        "--kill-after=10s",
+        "1197",
+        "cargo",
+        "build",
+        "--release",
+        "--locked",
+        "--manifest-path",
+        "target/arroyo-arrow-source/Cargo.toml",
+        "-p",
+        "arroyo",
+        "--bin",
+        "arroyo"
+      ],
+      "config": {
+        "CARGO_BUILD_JOBS": "8",
+        "CFLAGS": "-std=gnu17",
+        "CMAKE": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-417-34c29c5ad70b/workdir/calc-flow/.codex/artifacts/arrow-ipc-audit/cmake-compat.sh",
+        "DATABASE_URL": "postgresql://dal417@127.0.0.1:47836/arroyo_build"
+      },
+      "start_utc": "2026-10-29T02:44:00.549958+00:00",
+      "remaining_budget_s": 1197,
+      "setup_reserve_s": 10,
+      "exit_code": 0,
+      "end_utc": "2026-10-29T02:46:05.685604+00:00",
+      "elapsed_s": 125.14259351592045
+    }
+  ],
+  "base_cf": "b5ae227e48ac9bb8a81583a23485e2c6064cee52",
+  "head_start": "c4dc6b585097c442267f37f28effbb36850251c9"
+}

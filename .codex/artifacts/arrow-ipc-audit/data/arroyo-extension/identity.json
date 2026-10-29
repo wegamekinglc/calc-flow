@@ -1,0 +1,30 @@
+{
+  "cf_source": "b5ae227e48ac9bb8a81583a23485e2c6064cee52",
+  "cf_native": "a0708fcf5fa84a1cf2c5347a66b73680d7426a3313746a1ef99519d5b2c7bfb8",
+  "arroyo_ref": "4ef15f6336a596651f10cf27c1ee29c29bf81577",
+  "arroyo_binary_sha256": "40588f3d036faf05520103a149a1b5e46680ace8e4e98b68c85082a1cdf68cb0",
+  "arroyo_binary_bytes": 1374457408,
+  "arroyo_patch_sha256": "7ed240bd3907b79ccfae007e2a3234f8fcfcfe30adf2a46d85413f57e6d80b15",
+  "harnesses": {
+    "probe_boundaries.py": "19082f42e371a434d5994f66414fa3cef23f79fbf26f70443451cf62446a072e",
+    "incremental_build.py": "82f547a03309db7bcd0019095bb1ca9ebe85195e499aada2746973da84ffcb99",
+    "audit_inventory.py": "98ce73d9afd56c4663f4c002c495d4290fb943c944a4a1654c6c31d81dc4a130",
+    "verify_columns.py": "057184050df3ea912b5c6e9dbfa412c778161f3d12130d6a094ee3f4ef9b4814",
+    "cf_batch_worker.py": "57afcf58796e5bc34cef983ffa78216d998c6792369d0d6f1720408d443a6bbb",
+    "audit_results.py": "9160c2cbfd21f1ee64bc738e1fa16836c7f07940208fda40b1d45c06f57b8380",
+    "worker.py": "f3a11c1d8f2de33cdf887dbd0a38af454162da2ac458a3c0f21ca8f86da62668",
+    "extension_transport.py": "15f207cef5932e69125aee0abab3608a066957833aea034a653308eb398f947e",
+    "collect.py": "5358cdec9c571c2c4886a5cceea1607c8219d513e5e42b01168de184e29dde82",
+    "collect_adjacent.py": "023ad6aaa5974e169aded3f113aadc52b9d9ecd89360f5d110fd81a64e626046",
+    "fixtures.py": "ad28108947487eab85cf829c0c14c1a22123ffe06031fada8e468c5bb9339d93",
+    "probe_arroyo.py": "a90d9b44e4ce134eeaad3c1089a8f42665b83f78f7d79e003cf1910b00715b4d",
+    "transport.py": "92489e59ce6a2c5e66f6f85db32fc595a56dd20ace7254d1f5fec58afd7402e9",
+    "probe_window_alignment.py": "0b6c25c68f4d804a4d477dfc443f90119d55b42348481b5fa3cea991206f8c99",
+    "audit_adjacent.py": "afbdc122fde74c46f65284aad188e6fc6d3c3c56009ec5ee54a461beb389b4a5"
+  },
+  "boundary": "ready native Batch-to-Batch, input/output bindings separate",
+  "ipc_comparability": "CF pipes vs Arroyo files; no observer/IPC speed ranking",
+  "worker_affinity": "4-7",
+  "controller_affinity": "0-1",
+  "tokio_threads": 4
+}

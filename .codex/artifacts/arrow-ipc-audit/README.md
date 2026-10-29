@@ -1,5 +1,9 @@
 # DAL-417 Arrow/IPC 重测与计时审计
 
+接续更新：真实 Arroyo release/Arrow 输出及 20 次邻近 CF 对照已完成，见
+[补测报告](ARROYO-RESULTS.md) 与[复现/离线审计](ARROYO-REPRODUCE.md)。
+下面保留首阶段原始记录；当时的 Arroyo 构建缺口由补测补足，旧 CF 数字不回写。
+
 [中文报告](REPORT.md) 给出本轮结果、Arroyo 实际缺口和调整后的优化优先级；
 [benchmark 逐组审计](BENCHMARK-AUDIT.md) 追踪维护入口到 CI 汇总的完整边界。
 [预记约定](PLAN.md) 与[计时修正记录](MEASUREMENT-CORRECTION.md) 同时保留。
