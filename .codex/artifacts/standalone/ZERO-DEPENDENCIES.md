@@ -4,6 +4,9 @@ Subsequent single-use stream and Arrow entry repairs, with the latest build
 identity and directed results, are recorded in [REVIEW-REPAIRS.md](REVIEW-REPAIRS.md).
 The latest interpreter-threshold and abi3 follow-up is recorded in
 [EXPECTED-MAJOR.md](EXPECTED-MAJOR.md), with its own final build identities.
+The subsequent compatibility-import repair and current default wheel identity
+are recorded in [SINGLE-EXPORTER.md](SINGLE-EXPORTER.md). Performance acceptance
+remains open; this increment adds no timing samples.
 
 ## Package and public compatibility
 

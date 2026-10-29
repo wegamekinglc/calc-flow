@@ -1,0 +1,61 @@
+{
+  "source_commit": "fc52433da013123beafbb5c5125ad0e8a92631ed",
+  "base_revision": "83d99b05f073984a2207ed0cfb486f9ad726b521",
+  "source_manifest_parent": {
+    "revision": "83d99b05f073984a2207ed0cfb486f9ad726b521",
+    "path": ".codex/artifacts/standalone/data/expected-major-build.json",
+    "sha256": "04dc3d739d86c9b9886276bc318e5ae700569c0b47605ac2110a170fdaad0b9e"
+  },
+  "source_manifest_overrides": {
+    "crates/calc-flow-python/src/arrow.rs": "54e8f5d72a2e1f26efc6029a9132db655cd97947680950aadbf734868b63f78c",
+    "crates/calc-flow-python/src/batch.rs": "4e5a59ea7aa5249eed71cd2faf105244108bc0617af2916d10863e380d50939e"
+  },
+  "source_manifest_sha256": "015d58b3be6425738f45c94b2519c64f252b1a7362762b231faea0533e06de02",
+  "source_manifest_encoding": "UTF-8 JSON, sorted keys, compact separators, no final newline",
+  "source_manifest_entries_checked": 991,
+  "wheel": "calc_flow_python-2026.10.27-cp313-cp313-linux_x86_64.whl",
+  "local_artifact_directory": "target/single-exporter-wheels",
+  "wheel_sha256": "5f534ced7e5d2a8c4aa8e2bf286a44aab3dbc37d72e3aa63c33d6988b6e1df7d",
+  "native_module": "calc_flow/_native.cpython-313-x86_64-linux-gnu.so",
+  "native_sha256": "35bed3efd27116908ee0c372ff1943dcf3f20d1ceba92bfcef021da854aa3c19",
+  "cargo_features": [
+    "default"
+  ],
+  "profile": "release, opt-level=3, thin LTO, codegen-units=1",
+  "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+  "maturin": "1.15.0",
+  "python": "3.13.9 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 19:16:10) [GCC 11.2.0]",
+  "target": "x86_64-unknown-linux-gnu, WSL2",
+  "packages": {
+    "pyarrow": "24.0.0",
+    "numpy": "2.5.4",
+    "pytest": "9.2.0"
+  },
+  "unconditional_requires_dist": [],
+  "all_python_and_stub_bytes_match_source_and_installed_wheel": true,
+  "matched_python_and_stub_file_count": 44,
+  "core_packages": [
+    {
+      "name": "calc-flow-python",
+      "version": "2026.10.27"
+    }
+  ],
+  "core_native_sha256": "35bed3efd27116908ee0c372ff1943dcf3f20d1ceba92bfcef021da854aa3c19",
+  "directed_pytest": {
+    "passed": 56,
+    "deselected": 5
+  },
+  "test_sources": {
+    "python/tests/test_arrow_protocol.py": "3bde574db9b457a1caef848a9671f2763870c60e6559dd6b204f074f422c4f30"
+  },
+  "abi3_status": "not rebuilt; prior threshold branch evidence applies only to unchanged guard code",
+  "performance_samples_added": 0,
+  "performance_budget_used_seconds_reported_by_specialist": 796.31,
+  "performance_budget_limit_seconds": 900,
+  "performance_budget_remaining_seconds": 103.69,
+  "performance_acceptance": "unmet; candidate unmeasured, prior Arrow import regressed, round-trip and NumPy uncertain",
+  "previous_measured_report": {
+    "attachment_id": "01a18915-f038-7d95-b82a-b24132ba7027",
+    "sha256": "f2595d3c12255cee105b41c9de1bc4f1c5ea290978cf3577ef9f4ac655d20f2b"
+  }
+}
