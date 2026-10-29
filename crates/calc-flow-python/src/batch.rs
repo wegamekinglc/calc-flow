@@ -342,12 +342,10 @@ impl PyBatch {
         table: &Bound<'_, PyAny>,
         metadata: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
-        if !table.hasattr(intern!(py, "__arrow_c_stream__"))? {
-            return Err(PyTypeError::new_err(
-                "table must implement the Arrow C stream interface",
-            ));
-        }
-        Self::from_arrow(py, table, metadata)
+        let batches = crate::arrow::import_stream_table(table)?;
+        let metadata = metadata_from_python(py, metadata)?;
+        let inner = calc_flow::Batch::table(batches, metadata).map_err(crate::error::to_py_err)?;
+        Ok(Self::from_inner(inner))
     }
 
     /// Import a finite CPU Arrow table or struct record batch through `PyCapsules`.

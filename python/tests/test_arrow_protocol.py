@@ -2,12 +2,60 @@ from __future__ import annotations
 
 import gc
 import sys
+import weakref
 from types import ModuleType
 
 import pyarrow as pa
 import pytest
 
 import calc_flow as cf
+
+
+@pytest.mark.parametrize("importer", [cf.Batch.from_pyarrow, cf.Batch.from_arrow])
+def test_stream_exporter_is_resolved_once_and_releases_producer(importer) -> None:
+    schema = pa.schema([("a", pa.int64())], metadata={"owner": "caller"})
+    table = pa.table({"a": [1, 2]}, schema=schema)
+    address = table[0].chunk(0).buffers()[1].address
+
+    class Producer:
+        def __init__(self, table):
+            self.table = table
+            self.lookups = 0
+            self.exports = 0
+
+        @property
+        def __arrow_c_stream__(self):
+            self.lookups += 1
+            if self.lookups != 1:
+                raise AssertionError("stream exporter was resolved twice")
+            return self.export
+
+        def export(self):
+            self.exports += 1
+            return self.table.__arrow_c_stream__()
+
+    producer = Producer(table)
+    reference = weakref.ref(producer)
+    batch = importer(producer)
+    assert (producer.lookups, producer.exports) == (1, 1)
+    assert table.schema.equals(schema, check_metadata=True)
+    assert table.to_pydict() == {"a": [1, 2]}
+    del producer, table
+    gc.collect()
+    assert reference() is None
+    result = batch.to_pyarrow()
+    assert result.schema.equals(schema, check_metadata=True)
+    assert result.to_pydict() == {"a": [1, 2]}
+    assert result[0].chunk(0).buffers()[1].address == address
+
+
+def test_compatibility_import_requires_stream_without_array_fallback() -> None:
+    class Producer:
+        def __arrow_c_array__(self):
+            raise AssertionError("compatibility entry must require a stream")
+
+    with pytest.raises(TypeError, match="table must implement the Arrow C stream"):
+        cf.Batch.from_pyarrow(Producer())
 
 
 def test_protocol_batch_preserves_buffers_schema_and_repeated_exports() -> None:
@@ -73,7 +121,10 @@ def test_unsafe_pyarrow_version_is_rejected_before_export(monkeypatch) -> None:
 
 
 @pytest.mark.parametrize("base", [pa.Table, pa.RecordBatch, pa.RecordBatchReader])
-def test_unsafe_pyarrow_subclass_is_rejected_before_ffi(monkeypatch, base) -> None:
+@pytest.mark.parametrize("importer", [cf.Batch.from_pyarrow, cf.Batch.from_arrow])
+def test_unsafe_pyarrow_subclass_is_rejected_before_ffi(
+    monkeypatch, base, importer
+) -> None:
     class Producer(base):
         def __init__(self):
             self.exports = 0
@@ -85,7 +136,7 @@ def test_unsafe_pyarrow_subclass_is_rejected_before_ffi(monkeypatch, base) -> No
     producer = Producer()
     monkeypatch.setattr(pa, "__version__", "25.0.0")
     with pytest.raises(ImportError, match="PyArrow"):
-        cf.Batch.from_arrow(producer)
+        importer(producer)
     assert producer.exports == 0
 
 
@@ -103,6 +154,7 @@ def test_pyarrow_guard_revalidates_live_module_and_version(monkeypatch, changed)
         monkeypatch.setitem(sys.modules, "pyarrow", replacement)
     for call in (
         lambda: cf.Batch.from_arrow(table),
+        lambda: cf.Batch.from_pyarrow(table),
         batch.to_pyarrow,
         lambda: cf._native._schema_fields(schema),
     ):
@@ -110,16 +162,18 @@ def test_pyarrow_guard_revalidates_live_module_and_version(monkeypatch, changed)
             call()
 
 
-def test_stream_protocol_rejects_schema_capsule_as_stream() -> None:
+@pytest.mark.parametrize("importer", [cf.Batch.from_pyarrow, cf.Batch.from_arrow])
+def test_stream_protocol_rejects_schema_capsule_as_stream(importer) -> None:
     class Producer:
         def __arrow_c_stream__(self):
             return pa.schema([("a", pa.int64())]).__arrow_c_schema__()
 
     with pytest.raises(ValueError, match="name|arrow_array_stream"):
-        cf.Batch.from_arrow(Producer())
+        importer(Producer())
 
 
-def test_stream_protocol_attribute_error_propagates_without_array_fallback() -> None:
+@pytest.mark.parametrize("importer", [cf.Batch.from_pyarrow, cf.Batch.from_arrow])
+def test_stream_protocol_attribute_error_propagates_without_array_fallback(importer):
     failure = RuntimeError("stream attribute failed")
 
     class Producer:
@@ -131,7 +185,7 @@ def test_stream_protocol_attribute_error_propagates_without_array_fallback() -> 
             raise AssertionError("broken stream must not fall back to array")
 
     with pytest.raises(RuntimeError) as caught:
-        cf.Batch.from_arrow(Producer())
+        importer(Producer())
     assert caught.value is failure
 
 

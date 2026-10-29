@@ -278,6 +278,20 @@ pub(crate) fn import_table(
     }
 }
 
+pub(crate) fn import_stream_table(value: &Bound<'_, PyAny>) -> PyResult<Vec<RecordBatch>> {
+    guard_input(value)?;
+    let exporter = value
+        .getattr(intern!(value.py(), "__arrow_c_stream__"))
+        .map_err(|error| {
+            if error.is_instance_of::<PyAttributeError>(value.py()) {
+                PyTypeError::new_err("table must implement the Arrow C stream interface")
+            } else {
+                error
+            }
+        })?;
+    stream_records(&exporter, None)
+}
+
 fn stream_reader(exporter: &Bound<'_, PyAny>) -> PyResult<Box<dyn ArrayReader + Send>> {
     let capsule = exporter.call0()?.cast_into::<PyCapsule>()?;
     PyArrayReader::from_arrow_pycapsule(&capsule)?.into_reader()
