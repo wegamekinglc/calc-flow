@@ -5,15 +5,19 @@ use std::{collections::BTreeMap, sync::Arc};
 use datafusion::arrow::{
     array::{Array, ArrayRef, Int64Array, StructArray},
     compute::cast,
-    datatypes::{DataType, FieldRef, Schema, SchemaRef},
+    datatypes::{DataType, Schema, SchemaRef},
     record_batch::{RecordBatch, RecordBatchOptions},
 };
 use pyo3::{
-    exceptions::{PyTypeError, PyValueError},
+    exceptions::{PyAttributeError, PyException, PyTypeError, PyValueError},
+    intern,
     prelude::*,
-    types::{PyBytes, PyCapsule},
+    types::{PyBytes, PyCapsule, PyModule, PyString, PyType},
 };
-use pyo3_arrow::{PySchema, ffi::to_schema_pycapsule};
+use pyo3_arrow::{
+    PyArrayReader, PySchema,
+    ffi::{ArrayReader, to_schema_pycapsule},
+};
 
 mod buffers;
 pub(crate) use buffers::{numpy_array, table_matrix};
@@ -22,8 +26,8 @@ pub(crate) use buffers::{numpy_array, table_matrix};
 pub(crate) struct ArrowSchema(pub(crate) SchemaRef);
 
 pub(crate) fn guard_input(value: &Bound<'_, PyAny>) -> PyResult<()> {
-    for base in value.get_type().getattr("__mro__")?.try_iter()? {
-        if is_pyarrow_type(&base?)? {
+    for base in value.get_type().mro().iter() {
+        if is_pyarrow_type(&base)? {
             require_pyarrow(value.py())?;
             break;
         }
@@ -32,16 +36,20 @@ pub(crate) fn guard_input(value: &Bound<'_, PyAny>) -> PyResult<()> {
 }
 
 fn is_pyarrow_type(value: &Bound<'_, PyAny>) -> PyResult<bool> {
-    let module = value.getattr("__module__")?.extract::<String>()?;
+    let module = value.cast::<PyType>()?.module()?;
+    let module = module.to_str()?;
     Ok(module == "pyarrow" || module.starts_with("pyarrow."))
 }
 
-pub(crate) fn require_pyarrow(py: Python<'_>) -> PyResult<()> {
+pub(crate) fn require_pyarrow(py: Python<'_>) -> PyResult<Bound<'_, PyModule>> {
     use pyo3::exceptions::PyImportError;
-    let module = py.import("pyarrow").map_err(|_| {
+    let module = py.import(intern!(py, "pyarrow")).map_err(|_| {
         PyImportError::new_err("PyArrow output and Python UDFs require calc-flow-python[pyarrow]")
     })?;
-    let version = module.getattr("__version__")?.extract::<String>()?;
+    let version = module
+        .getattr(intern!(py, "__version__"))?
+        .cast_into::<PyString>()?;
+    let version = version.to_str()?;
     let major = version
         .split('.')
         .next()
@@ -52,7 +60,7 @@ pub(crate) fn require_pyarrow(py: Python<'_>) -> PyResult<()> {
             "unsupported PyArrow version; install calc-flow-python[pyarrow] (PyArrow 25 capsule lifetimes are not supported)",
         ));
     }
-    Ok(())
+    Ok(module)
 }
 
 pub(crate) fn schema(value: &Bound<'_, PyAny>) -> PyResult<SchemaRef> {
@@ -256,28 +264,50 @@ pub(crate) fn import_table(
     ordered_column: Option<&str>,
 ) -> PyResult<Vec<RecordBatch>> {
     guard_input(value)?;
-    let (arrays, field) = import_arrays(value)?;
-    let schema = table_schema(&field)?;
-    if arrays.is_empty() {
-        return Ok(vec![RecordBatch::new_empty(schema)]);
+    match value.getattr(intern!(value.py(), "__arrow_c_stream__")) {
+        Ok(exporter) => stream_records(&exporter, ordered_column),
+        Err(error) if error.is_instance_of::<PyAttributeError>(value.py()) => {
+            array_records(value, ordered_column)
+        }
+        Err(error) => Err(error),
     }
-    arrays
-        .iter()
-        .map(|values| table_record(values, &schema, ordered_column))
-        .collect()
 }
 
-fn import_arrays(value: &Bound<'_, PyAny>) -> PyResult<(Vec<ArrayRef>, FieldRef)> {
-    if value.hasattr("__arrow_c_stream__")? {
-        Ok(value.extract::<pyo3_arrow::PyChunkedArray>()?.into_inner())
-    } else if value.hasattr("__arrow_c_array__")? {
-        let (array, field) = value.extract::<pyo3_arrow::PyArray>()?.into_inner();
-        Ok((vec![array], field))
-    } else {
-        Err(PyTypeError::new_err(
-            "table must implement the Arrow C stream or struct array interface",
-        ))
+fn stream_reader(exporter: &Bound<'_, PyAny>) -> PyResult<Box<dyn ArrayReader + Send>> {
+    let capsule = exporter.call0()?.cast_into::<PyCapsule>()?;
+    PyArrayReader::from_arrow_pycapsule(&capsule)?.into_reader()
+}
+
+fn stream_records(
+    exporter: &Bound<'_, PyAny>,
+    ordered_column: Option<&str>,
+) -> PyResult<Vec<RecordBatch>> {
+    let reader = stream_reader(exporter)?;
+    let schema = table_schema(&reader.field())?;
+    let mut batches = reader
+        .map(|array| {
+            let array = array.map_err(|error| PyException::new_err(error.to_string()))?;
+            table_record(&array, &schema, ordered_column)
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    if batches.is_empty() {
+        batches.push(RecordBatch::new_empty(schema));
     }
+    Ok(batches)
+}
+
+fn array_records(
+    value: &Bound<'_, PyAny>,
+    ordered_column: Option<&str>,
+) -> PyResult<Vec<RecordBatch>> {
+    if !value.hasattr(intern!(value.py(), "__arrow_c_array__"))? {
+        return Err(PyTypeError::new_err(
+            "table must implement the Arrow C stream or struct array interface",
+        ));
+    }
+    let (array, field) = value.extract::<pyo3_arrow::PyArray>()?.into_inner();
+    let schema = table_schema(&field)?;
+    Ok(vec![table_record(&array, &schema, ordered_column)?])
 }
 
 fn table_schema(field: &datafusion::arrow::datatypes::Field) -> PyResult<SchemaRef> {

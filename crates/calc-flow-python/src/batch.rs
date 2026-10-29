@@ -416,8 +416,11 @@ impl PyBatch {
         let table = inner
             .table_payload()
             .map_err(|_| PyTypeError::new_err("array batches do not contain a PyArrow table"))?;
-        crate::arrow::require_pyarrow(py)?;
-        PyTable::try_new(table.batches().to_vec(), table.schema().clone())?.into_pyarrow(py)
+        let module = crate::arrow::require_pyarrow(py)?;
+        let table = PyTable::try_new(table.batches().to_vec(), table.schema().clone())?;
+        module
+            .getattr(intern!(py, "table"))?
+            .call1((table.into_pyobject(py)?,))
     }
 
     /// Export a fresh, independently owned Arrow stream capsule on every call.

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import gc
+import sys
+from types import ModuleType
 
 import pyarrow as pa
 import pytest
@@ -68,6 +70,69 @@ def test_unsafe_pyarrow_version_is_rejected_before_export(monkeypatch) -> None:
     monkeypatch.setattr(pa, "__version__", "25.0.0")
     with pytest.raises(ImportError, match="PyArrow"):
         cf.Batch.from_arrow(table)
+
+
+@pytest.mark.parametrize("base", [pa.Table, pa.RecordBatch, pa.RecordBatchReader])
+def test_unsafe_pyarrow_subclass_is_rejected_before_ffi(monkeypatch, base) -> None:
+    class Producer(base):
+        def __init__(self):
+            self.exports = 0
+
+        def __arrow_c_stream__(self):
+            self.exports += 1
+            raise AssertionError("unsafe PyArrow producer reached FFI")
+
+    producer = Producer()
+    monkeypatch.setattr(pa, "__version__", "25.0.0")
+    with pytest.raises(ImportError, match="PyArrow"):
+        cf.Batch.from_arrow(producer)
+    assert producer.exports == 0
+
+
+@pytest.mark.parametrize("changed", ["version", "module"])
+def test_pyarrow_guard_revalidates_live_module_and_version(monkeypatch, changed):
+    table = pa.table({"a": [1]})
+    schema = table.schema
+    batch = cf.Batch.from_arrow(table)
+    assert batch.to_pyarrow().to_pydict() == {"a": [1]}
+    if changed == "version":
+        monkeypatch.setattr(pa, "__version__", "25.0.0")
+    else:
+        replacement = ModuleType("pyarrow")
+        replacement.__version__ = "25.0.0"
+        monkeypatch.setitem(sys.modules, "pyarrow", replacement)
+    for call in (
+        lambda: cf.Batch.from_arrow(table),
+        batch.to_pyarrow,
+        lambda: cf._native._schema_fields(schema),
+    ):
+        with pytest.raises(ImportError, match="PyArrow"):
+            call()
+
+
+def test_stream_protocol_rejects_schema_capsule_as_stream() -> None:
+    class Producer:
+        def __arrow_c_stream__(self):
+            return pa.schema([("a", pa.int64())]).__arrow_c_schema__()
+
+    with pytest.raises(ValueError, match="name|arrow_array_stream"):
+        cf.Batch.from_arrow(Producer())
+
+
+def test_stream_protocol_attribute_error_propagates_without_array_fallback() -> None:
+    failure = RuntimeError("stream attribute failed")
+
+    class Producer:
+        @property
+        def __arrow_c_stream__(self):
+            raise failure
+
+        def __arrow_c_array__(self):
+            raise AssertionError("broken stream must not fall back to array")
+
+    with pytest.raises(RuntimeError) as caught:
+        cf.Batch.from_arrow(Producer())
+    assert caught.value is failure
 
 
 @pytest.mark.parametrize("named", [False, True])
