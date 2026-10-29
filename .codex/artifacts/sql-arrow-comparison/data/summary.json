@@ -1,0 +1,454 @@
+[
+  {
+    "case": "transform-full",
+    "arm": "sql",
+    "samples": 5,
+    "phases": {
+      "engine_ready_ms": {
+        "median": 5.518895,
+        "min": 5.193131,
+        "max": 6.075541
+      },
+      "consumable_ms": {
+        "median": 7.144975,
+        "min": 6.970355,
+        "max": 7.861788
+      },
+      "consumable_wan_rows_s": {
+        "median": 458.6160203499663,
+        "min": 416.80086005880594,
+        "max": 470.10518115648347
+      },
+      "engine_ready_wan_rows_s": {
+        "median": 593.7420443766371,
+        "min": 539.3429161287859,
+        "max": 630.9873561826189
+      },
+      "launch_to_ready_ms": {
+        "median": 268.140652,
+        "min": 244.52227,
+        "max": 282.286983
+      },
+      "rss_peak_mib": {
+        "median": 202.02734375,
+        "min": 201.93359375,
+        "max": 202.1484375
+      },
+      "input_ipc_ms": {
+        "median": 0.186458,
+        "min": 0.179519,
+        "max": 0.254476
+      },
+      "caller_table_views_ms": {
+        "median": 0.015152,
+        "min": 0.012644,
+        "max": 0.025038
+      },
+      "declaration_ms": {
+        "median": 0.77312,
+        "min": 0.763558,
+        "max": 0.865893
+      },
+      "precompile_ms": {
+        "median": 0.000247,
+        "min": 0.000221,
+        "max": 0.000281
+      },
+      "output_ipc_ms": {
+        "median": 0.352248,
+        "min": 0.308126,
+        "max": 0.480093
+      },
+      "normal_input_binding_ms": {
+        "median": 0.300453,
+        "min": 0.268167,
+        "max": 0.405032
+      },
+      "normal_prepare_compile_ms": {
+        "median": 2.316505,
+        "min": 2.262263,
+        "max": 2.370391
+      },
+      "result_packaging_ms": {
+        "median": 0.174251,
+        "min": 0.162335,
+        "max": 0.18735
+      },
+      "final_concat_ms": {
+        "median": 0.006954,
+        "min": 0.005827,
+        "max": 0.011518
+      }
+    }
+  },
+  {
+    "case": "transform-full",
+    "arm": "arroyo",
+    "samples": 5,
+    "phases": {
+      "engine_ready_ms": {
+        "median": 1.310472,
+        "min": 1.221416,
+        "max": 1.5152689999999998
+      },
+      "consumable_ms": {
+        "median": 3.518039,
+        "min": 2.31938,
+        "max": 5.91711
+      },
+      "consumable_wan_rows_s": {
+        "median": 931.4279915600707,
+        "min": 553.78385732224,
+        "max": 1412.791349412343
+      },
+      "engine_ready_wan_rows_s": {
+        "median": 2500.4731119779744,
+        "min": 2162.520318174529,
+        "max": 2682.787846237482
+      },
+      "launch_to_ready_ms": {
+        "median": 721.903241,
+        "min": 714.523979,
+        "max": 788.458356
+      },
+      "rss_peak_mib": {
+        "median": 129.703125,
+        "min": 126.3046875,
+        "max": 131.16015625
+      },
+      "native_core_ms": {
+        "median": 1.306986,
+        "min": 1.217935,
+        "max": 1.5118289999999999
+      },
+      "result_packaging_ms": {
+        "median": 0.0034860000000000004,
+        "min": 0.00344,
+        "max": 0.003948
+      },
+      "output_ipc_ms": {
+        "median": 0.23106,
+        "min": 0.196176,
+        "max": 1.57578
+      },
+      "input_ipc_ms": {
+        "median": 0.531942,
+        "min": 0.32249,
+        "max": 0.935489
+      },
+      "pre_ready_input_binding_ms": {
+        "median": 0.12921100000000002,
+        "min": 0.09007,
+        "max": 0.16375299999999998
+      }
+    }
+  },
+  {
+    "case": "transform-full",
+    "arm": "sql_plan",
+    "samples": 5,
+    "phases": {
+      "engine_ready_ms": {
+        "median": 2.561618,
+        "min": 2.506879,
+        "max": 3.12105
+      },
+      "consumable_ms": {
+        "median": 4.698461,
+        "min": 4.659694,
+        "max": 9.582155
+      },
+      "consumable_wan_rows_s": {
+        "median": 697.4198572681565,
+        "min": 341.969003840994,
+        "max": 703.2221429132471
+      },
+      "engine_ready_wan_rows_s": {
+        "median": 1279.1915109903193,
+        "min": 1049.9030774899472,
+        "max": 1307.1233194741349
+      },
+      "launch_to_ready_ms": {
+        "median": 256.993528,
+        "min": 245.655729,
+        "max": 268.518825
+      },
+      "rss_peak_mib": {
+        "median": 201.74609375,
+        "min": 201.51171875,
+        "max": 202.14453125
+      },
+      "input_ipc_ms": {
+        "median": 0.212375,
+        "min": 0.183515,
+        "max": 0.268725
+      },
+      "caller_table_views_ms": {
+        "median": 0.010413,
+        "min": 0.009557,
+        "max": 0.014607
+      },
+      "declaration_ms": {
+        "median": 0.903363,
+        "min": 0.722928,
+        "max": 2.180134
+      },
+      "precompile_ms": {
+        "median": 2.242789,
+        "min": 2.06617,
+        "max": 2.36551
+      },
+      "output_ipc_ms": {
+        "median": 0.39171,
+        "min": 0.352355,
+        "max": 5.964899
+      },
+      "normal_input_binding_ms": {
+        "median": 0.262304,
+        "min": 0.244254,
+        "max": 0.277702
+      },
+      "native_execute_ms": {
+        "median": 2.138147,
+        "min": 2.077376,
+        "max": 2.670814
+      },
+      "result_packaging_ms": {
+        "median": 0.170968,
+        "min": 0.152735,
+        "max": 0.203583
+      },
+      "final_concat_ms": {
+        "median": 0.005643,
+        "min": 0.004779,
+        "max": 0.006138
+      }
+    }
+  },
+  {
+    "case": "transform-512",
+    "arm": "sql",
+    "samples": 5,
+    "phases": {
+      "engine_ready_ms": {
+        "median": 62.848792,
+        "min": 61.844402,
+        "max": 64.097848
+      },
+      "consumable_ms": {
+        "median": 65.306731,
+        "min": 63.723527,
+        "max": 66.220705
+      },
+      "consumable_wan_rows_s": {
+        "median": 50.17553244243691,
+        "min": 49.483012903592616,
+        "max": 51.42213801191513
+      },
+      "engine_ready_wan_rows_s": {
+        "median": 52.13783583939052,
+        "min": 51.121841095195585,
+        "max": 52.984585411627066
+      },
+      "launch_to_ready_ms": {
+        "median": 247.872539,
+        "min": 247.005982,
+        "max": 265.740898
+      },
+      "rss_peak_mib": {
+        "median": 201.89453125,
+        "min": 201.51953125,
+        "max": 202.25390625
+      },
+      "input_ipc_ms": {
+        "median": 0.35525,
+        "min": 0.351046,
+        "max": 0.417358
+      },
+      "caller_table_views_ms": {
+        "median": 0.06307,
+        "min": 0.055806,
+        "max": 0.06481
+      },
+      "declaration_ms": {
+        "median": 0.775692,
+        "min": 0.742747,
+        "max": 1.226195
+      },
+      "precompile_ms": {
+        "median": 0.000249,
+        "min": 0.00023,
+        "max": 0.000295
+      },
+      "output_ipc_ms": {
+        "median": 0.594676,
+        "min": 0.567576,
+        "max": 0.667366
+      },
+      "normal_input_binding_ms": {
+        "median": 2.376427,
+        "min": 2.327136,
+        "max": 2.432128
+      },
+      "normal_prepare_compile_ms": {
+        "median": 8.949293,
+        "min": 8.816438,
+        "max": 9.03736
+      },
+      "result_packaging_ms": {
+        "median": 1.750752,
+        "min": 1.716974,
+        "max": 2.045154
+      },
+      "final_concat_ms": {
+        "median": 0.064629,
+        "min": 0.061188,
+        "max": 0.067739
+      }
+    }
+  },
+  {
+    "case": "transform-512",
+    "arm": "arroyo",
+    "samples": 5,
+    "phases": {
+      "engine_ready_ms": {
+        "median": 1.2857100000000001,
+        "min": 1.1219,
+        "max": 1.360803
+      },
+      "consumable_ms": {
+        "median": 3.617673,
+        "min": 2.956423,
+        "max": 4.610583
+      },
+      "consumable_wan_rows_s": {
+        "median": 905.7756187471891,
+        "min": 710.7127233150342,
+        "max": 1108.366427943498
+      },
+      "engine_ready_wan_rows_s": {
+        "median": 2548.6307176579476,
+        "min": 2407.989988264282,
+        "max": 2920.759425973795
+      },
+      "launch_to_ready_ms": {
+        "median": 744.736027,
+        "min": 709.663518,
+        "max": 757.339885
+      },
+      "rss_peak_mib": {
+        "median": 123.328125,
+        "min": 121.69140625,
+        "max": 125.51171875
+      },
+      "native_core_ms": {
+        "median": 1.2698900000000002,
+        "min": 1.106379,
+        "max": 1.3442560000000001
+      },
+      "result_packaging_ms": {
+        "median": 0.016014,
+        "min": 0.015521,
+        "max": 0.018288
+      },
+      "output_ipc_ms": {
+        "median": 0.380236,
+        "min": 0.36028600000000005,
+        "max": 0.579941
+      },
+      "input_ipc_ms": {
+        "median": 0.5364140000000001,
+        "min": 0.457658,
+        "max": 0.681949
+      },
+      "pre_ready_input_binding_ms": {
+        "median": 0.255664,
+        "min": 0.230226,
+        "max": 0.333534
+      }
+    }
+  },
+  {
+    "case": "transform-512",
+    "arm": "sql_plan",
+    "samples": 5,
+    "phases": {
+      "engine_ready_ms": {
+        "median": 47.217483,
+        "min": 43.978843,
+        "max": 51.831252
+      },
+      "consumable_ms": {
+        "median": 49.635468,
+        "min": 46.128072,
+        "max": 55.168789
+      },
+      "consumable_wan_rows_s": {
+        "median": 66.01730842952865,
+        "min": 59.39590227365694,
+        "max": 71.03700323742123
+      },
+      "engine_ready_wan_rows_s": {
+        "median": 69.39802360917882,
+        "min": 63.22054501018034,
+        "max": 74.50855403358383
+      },
+      "launch_to_ready_ms": {
+        "median": 262.803313,
+        "min": 250.151172,
+        "max": 287.772873
+      },
+      "rss_peak_mib": {
+        "median": 202.08984375,
+        "min": 201.83203125,
+        "max": 202.4609375
+      },
+      "input_ipc_ms": {
+        "median": 0.340713,
+        "min": 0.320232,
+        "max": 0.416278
+      },
+      "caller_table_views_ms": {
+        "median": 0.061499,
+        "min": 0.057058,
+        "max": 0.071451
+      },
+      "declaration_ms": {
+        "median": 0.817882,
+        "min": 0.767118,
+        "max": 1.029047
+      },
+      "precompile_ms": {
+        "median": 2.222389,
+        "min": 2.147806,
+        "max": 2.454547
+      },
+      "output_ipc_ms": {
+        "median": 0.664793,
+        "min": 0.582195,
+        "max": 0.696588
+      },
+      "normal_input_binding_ms": {
+        "median": 1.7528409999999999,
+        "min": 1.703105,
+        "max": 1.869457
+      },
+      "native_execute_ms": {
+        "median": 43.170224,
+        "min": 40.119912,
+        "max": 47.815893
+      },
+      "result_packaging_ms": {
+        "median": 1.665384,
+        "min": 1.594645,
+        "max": 1.733992
+      },
+      "final_concat_ms": {
+        "median": 0.07203,
+        "min": 0.058124,
+        "max": 0.078955
+      }
+    }
+  }
+]

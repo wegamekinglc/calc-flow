@@ -1,0 +1,290 @@
+[
+  {
+    "case": "transform-full",
+    "cf_arm": "sql",
+    "direction": "Arroyo/CF input throughput",
+    "consumable_ratio": {
+      "median": 2.0895784984627594,
+      "min": 1.1779999019791756,
+      "max": 3.3896075675396005
+    },
+    "engine_stage_ratio": {
+      "median": 4.211379564004419,
+      "min": 3.5371541290688326,
+      "max": 4.810796921680866
+    },
+    "groups": [
+      {
+        "group": 0,
+        "order": [
+          "sql",
+          "arroyo",
+          "sql_plan"
+        ],
+        "consumable_ratio": 2.821326300460259,
+        "engine_stage_ratio": 4.810796921680866,
+        "adjacent_gap_ms": 1.313502
+      },
+      {
+        "group": 1,
+        "order": [
+          "sql_plan",
+          "arroyo",
+          "sql"
+        ],
+        "consumable_ratio": 1.1779999019791756,
+        "engine_stage_ratio": 3.5371541290688326,
+        "adjacent_gap_ms": 12.50237
+      },
+      {
+        "group": 2,
+        "order": [
+          "sql",
+          "arroyo",
+          "sql_plan"
+        ],
+        "consumable_ratio": 3.3896075675396005,
+        "engine_stage_ratio": 4.541256214099046,
+        "adjacent_gap_ms": 1.55865
+      },
+      {
+        "group": 3,
+        "order": [
+          "sql_plan",
+          "arroyo",
+          "sql"
+        ],
+        "consumable_ratio": 2.0895784984627594,
+        "engine_stage_ratio": 4.211379564004419,
+        "adjacent_gap_ms": 1.704905
+      },
+      {
+        "group": 4,
+        "order": [
+          "sql",
+          "arroyo",
+          "sql_plan"
+        ],
+        "consumable_ratio": 2.0027310669381437,
+        "engine_stage_ratio": 3.8319779458371364,
+        "adjacent_gap_ms": 1.18248
+      }
+    ]
+  },
+  {
+    "case": "transform-full",
+    "cf_arm": "sql_plan",
+    "direction": "Arroyo/CF input throughput",
+    "consumable_ratio": {
+      "median": 1.4211914649041695,
+      "min": 0.7939159488331298,
+      "max": 3.783692163595642
+    },
+    "engine_stage_ratio": {
+      "median": 2.0972526968698624,
+      "min": 1.654411856904616,
+      "max": 2.3816228046078054
+    },
+    "groups": [
+      {
+        "group": 0,
+        "order": [
+          "sql",
+          "arroyo",
+          "sql_plan"
+        ],
+        "consumable_ratio": 3.783692163595642,
+        "engine_stage_ratio": 2.017989590600025,
+        "adjacent_gap_ms": 3.126506
+      },
+      {
+        "group": 1,
+        "order": [
+          "sql_plan",
+          "arroyo",
+          "sql"
+        ],
+        "consumable_ratio": 0.7939159488331298,
+        "engine_stage_ratio": 1.654411856904616,
+        "adjacent_gap_ms": 1.111551
+      },
+      {
+        "group": 2,
+        "order": [
+          "sql",
+          "arroyo",
+          "sql_plan"
+        ],
+        "consumable_ratio": 2.0090256878993524,
+        "engine_stage_ratio": 2.0972526968698624,
+        "adjacent_gap_ms": 9.549527
+      },
+      {
+        "group": 3,
+        "order": [
+          "sql_plan",
+          "arroyo",
+          "sql"
+        ],
+        "consumable_ratio": 1.3313670817925505,
+        "engine_stage_ratio": 2.3816228046078054,
+        "adjacent_gap_ms": 4.010138
+      },
+      {
+        "group": 4,
+        "order": [
+          "sql",
+          "arroyo",
+          "sql_plan"
+        ],
+        "consumable_ratio": 1.4211914649041695,
+        "engine_stage_ratio": 2.186408886009464,
+        "adjacent_gap_ms": 1.388729
+      }
+    ]
+  },
+  {
+    "case": "transform-512",
+    "cf_arm": "sql",
+    "direction": "Arroyo/CF input throughput",
+    "consumable_ratio": {
+      "median": 18.13288155120709,
+      "min": 13.821143009463228,
+      "max": 22.089779101299104
+    },
+    "engine_stage_ratio": {
+      "median": 49.113153043843475,
+      "min": 46.18507748733652,
+      "max": 55.1247009537392
+    },
+    "groups": [
+      {
+        "group": 0,
+        "order": [
+          "sql",
+          "arroyo",
+          "sql_plan"
+        ],
+        "consumable_ratio": 17.412059298043985,
+        "engine_stage_ratio": 46.18507748733652,
+        "adjacent_gap_ms": 1.654446
+      },
+      {
+        "group": 1,
+        "order": [
+          "sql_plan",
+          "arroyo",
+          "sql"
+        ],
+        "consumable_ratio": 13.821143009463228,
+        "engine_stage_ratio": 55.1247009537392,
+        "adjacent_gap_ms": 1.591116
+      },
+      {
+        "group": 2,
+        "order": [
+          "sql",
+          "arroyo",
+          "sql_plan"
+        ],
+        "consumable_ratio": 18.708237102203462,
+        "engine_stage_ratio": 49.113153043843475,
+        "adjacent_gap_ms": 1.383086
+      },
+      {
+        "group": 3,
+        "order": [
+          "sql_plan",
+          "arroyo",
+          "sql"
+        ],
+        "consumable_ratio": 22.089779101299104,
+        "engine_stage_ratio": 53.1970314893843,
+        "adjacent_gap_ms": 1.476119
+      },
+      {
+        "group": 4,
+        "order": [
+          "sql",
+          "arroyo",
+          "sql_plan"
+        ],
+        "consumable_ratio": 18.13288155120709,
+        "engine_stage_ratio": 48.595073048265924,
+        "adjacent_gap_ms": 1.523494
+      }
+    ]
+  },
+  {
+    "case": "transform-512",
+    "cf_arm": "sql_plan",
+    "direction": "Arroyo/CF input throughput",
+    "consumable_ratio": {
+      "median": 13.322136062992296,
+      "min": 10.004824118771964,
+      "max": 17.726392671143472
+    },
+    "engine_stage_ratio": {
+      "median": 39.2003235582494,
+      "min": 34.698250224316084,
+      "max": 42.20630020067822
+    },
+    "groups": [
+      {
+        "group": 0,
+        "order": [
+          "sql",
+          "arroyo",
+          "sql_plan"
+        ],
+        "consumable_ratio": 13.322136062992296,
+        "engine_stage_ratio": 34.698250224316084,
+        "adjacent_gap_ms": 3.103283
+      },
+      {
+        "group": 1,
+        "order": [
+          "sql_plan",
+          "arroyo",
+          "sql"
+        ],
+        "consumable_ratio": 10.004824118771964,
+        "engine_stage_ratio": 39.2003235582494,
+        "adjacent_gap_ms": 1.552285
+      },
+      {
+        "group": 2,
+        "order": [
+          "sql",
+          "arroyo",
+          "sql_plan"
+        ],
+        "consumable_ratio": 13.227825593172215,
+        "engine_stage_ratio": 35.106232354107846,
+        "adjacent_gap_ms": 8.082632
+      },
+      {
+        "group": 3,
+        "order": [
+          "sql_plan",
+          "arroyo",
+          "sql"
+        ],
+        "consumable_ratio": 17.726392671143472,
+        "engine_stage_ratio": 42.20630020067822,
+        "adjacent_gap_ms": 2.961654
+      },
+      {
+        "group": 4,
+        "order": [
+          "sql",
+          "arroyo",
+          "sql_plan"
+        ],
+        "consumable_ratio": 15.249799802248573,
+        "engine_stage_ratio": 40.26141087862989,
+        "adjacent_gap_ms": 1.633663
+      }
+    ]
+  }
+]

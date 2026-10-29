@@ -1,0 +1,18 @@
+{
+  "limit_s": 600,
+  "spent_s": 80.28385911101941,
+  "runs": [
+    {
+      "output": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-417-34c29c5ad70b/workdir/calc-flow/target/sql-arrow-comparison/preflight",
+      "elapsed_s": 14.65160347300116,
+      "samples": 6,
+      "preflight": true
+    },
+    {
+      "output": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-417-34c29c5ad70b/workdir/calc-flow/target/sql-arrow-comparison/results",
+      "elapsed_s": 65.63225563801825,
+      "samples": 30,
+      "preflight": false
+    }
+  ]
+}
