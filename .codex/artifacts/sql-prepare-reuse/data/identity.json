@@ -1,0 +1,68 @@
+{
+  "base_ref": "d9e2759fb31bfd0c915d31f0cc534665ece72ee9",
+  "head_product_ref": "9db6d10b29bc6349b529d2807cfd23ba4dd6aace",
+  "platform": "Linux-5.15.167.4-microsoft-standard-WSL2-x86_64-with-glibc2.43",
+  "python": "3.13.9",
+  "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+  "Cargo.lock_sha256": "40fbbc0d7e1d45942b633a01f2988da19b33aab6053bbb09cc2b72fd026e8896",
+  "scripts": {
+    ".codex/artifacts/sql-prepare-reuse/diagnose.py": "f807cdff44664c5682b1ab5dd4fe438b8009584e752bdf1bee50413e6bf62dc8",
+    ".codex/artifacts/sql-prepare-reuse/worker.py": "12c70ec18574591c380f3631025027dfbd934edaf2d1ab4decf8c81a42bd08eb",
+    ".codex/artifacts/sql-prepare-reuse/collect.py": "27bea7007e1cc86fd8ab6617e0f73d2c80e8c6ffb27d61c7d057ef6b358f1ef2",
+    ".codex/artifacts/sql-prepare-reuse/summarize.py": "486a1b81395f76839139ce75961b2a7973d008a20fb18039fc36e6456867f821",
+    ".codex/artifacts/sql-prepare-reuse/audit.py": "0f5a04b537eb811c9e72be6e86c558e3f4de5774838cd0d15727ca44f1cd0d06",
+    ".codex/artifacts/sql-arrow-comparison/sql_worker.py": "41d5fe00a28da0fc098e0223bcd767837b0700db686f866513f7d55f322e0bab",
+    ".codex/artifacts/sql-arrow-comparison/common.py": "c7802c7d854c866725fbf1d91c44a4a78492e8b732d73384430266b441cb0b86",
+    ".codex/artifacts/arrow-ipc-audit/fixtures.py": "ad28108947487eab85cf829c0c14c1a22123ffe06031fada8e468c5bb9339d93",
+    ".codex/artifacts/arrow-ipc-audit/worker.py": "f3a11c1d8f2de33cdf887dbd0a38af454162da2ac458a3c0f21ca8f86da62668",
+    ".codex/artifacts/arrow-ipc-audit/extension_transport.py": "15f207cef5932e69125aee0abab3608a066957833aea034a653308eb398f947e",
+    ".codex/artifacts/arrow-ipc-audit/transport.py": "92489e59ce6a2c5e66f6f85db32fc595a56dd20ace7254d1f5fec58afd7402e9"
+  },
+  "same_dependency_versions": {
+    "annotated-types": "0.8.0",
+    "calc-flow-python": "2026.10.27",
+    "iniconfig": "2.3.1",
+    "maturin": "1.14.1",
+    "numpy": "2.5.4",
+    "packaging": "26.3",
+    "pluggy": "1.7.0",
+    "psutil": "7.2.2",
+    "pyarrow": "24.0.0",
+    "pydantic": "2.14.1",
+    "pydantic-core": "2.50.1",
+    "pygments": "2.21.0",
+    "pytest": "9.2.0",
+    "ruff": "0.16.0",
+    "typing-extensions": "4.16.0",
+    "typing-inspection": "0.4.4",
+    "websockets": "15.0.1"
+  },
+  "resources": {
+    "worker_cpus": "4-7",
+    "controller_cpus": "0-1",
+    "tokio_workers": 4,
+    "helper_threads": 1
+  },
+  "source_build_note": "Both release wheels built at the same dedicated build-source path; only committed core Rust changes were copied for the candidate. Installed native hashes are sealed separately.",
+  "seals": {
+    "base": {
+      "python": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-417-8b350a7f0467/workdir/calc-flow/target/sql-prepare-reuse/env-base/bin/python",
+      "native_sha256": "08ea6427c7dd57f8f537b9c9dba9234f9f10659f7e311433f17ad50c36b993d5",
+      "source_ref": "d9e2759fb31bfd0c915d31f0cc534665ece72ee9",
+      "wheel_sha256": "cca4ae92a2d655b66f0dd42bcd5e77595fcc1221e2751485eb219a76d336cc50"
+    },
+    "head": {
+      "python": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-417-8b350a7f0467/workdir/calc-flow/target/sql-prepare-reuse/env-head/bin/python",
+      "native_sha256": "0d3e1adf946466a2fca4b73df3c2111adaecf8522dc3f86573b4e2e91c1a79c9",
+      "wheel_sha256": "7bae728a9d768864e51077e706a5ee63b40ac71687b56fe56058923d24c959f2",
+      "base_ref": "d9e2759fb31bfd0c915d31f0cc534665ece72ee9",
+      "product_changes": {
+        "crates/calc-flow/src/datafusion.rs": "cac78639019fdd0aff0aacb0a397afba89e0d5511c07960ab6853f3e3706dfc0",
+        "crates/calc-flow/src/pipeline/batch.rs": "847bfc67ea1abb8ee11a577970a378d5f2019087ef8171182caaa2d1ebe11c24"
+      },
+      "source_ref": "9db6d10b29bc6349b529d2807cfd23ba4dd6aace"
+    }
+  },
+  "guard_script_sha256": "26164a9214cbf93035619c1bd88b88bf334297ce1a8af1ac3dff92728488b9dc",
+  "requirements_sha256": "24484d4d8333bce17a3f5579b18cbd454d6ebf786a7c191b505aa7bf19b18960"
+}

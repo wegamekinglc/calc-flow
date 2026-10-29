@@ -223,7 +223,7 @@ pub struct DataFusionRuntime {
     effective_target_partitions: AtomicUsize,
     parallelism_decision: OnceLock<DataFusionParallelismDecision>,
     rolling_rewrite_audit: Arc<RollingRewriteAudit>,
-    templates: QueryTemplates,
+    templates: Arc<QueryTemplates>,
     runtime_acquire_ns: u64,
     closed: AtomicBool,
 }
@@ -245,6 +245,23 @@ impl DataFusionRuntime {
     pub fn new(config: DataFusionConfig) -> Result<Self> {
         let started = Instant::now();
         Self::new_with_pool(config, Arc::new(UnboundedMemoryPool::default()), started)
+    }
+
+    /// Reuses only immutable preparation owned by this compiled batch graph.
+    /// Each invocation still creates its own session, pool, metrics and tasks.
+    pub(crate) fn with_batch_templates(
+        config: DataFusionConfig,
+        templates: Arc<QueryTemplates>,
+    ) -> Result<Self> {
+        let mut runtime = Self::new(config)?;
+        // Other partition policies can choose different physical layouts as
+        // row counts or trusted entity statistics change between runs.
+        if config.parallelism_mode == DataFusionParallelismMode::Fixed
+            && config.target_partitions == 1
+        {
+            runtime.templates = templates;
+        }
+        Ok(runtime)
     }
 
     #[cfg(any(test, feature = "benchmark-internals"))]
@@ -287,7 +304,7 @@ impl DataFusionRuntime {
             effective_target_partitions: AtomicUsize::new(0),
             parallelism_decision: OnceLock::new(),
             rolling_rewrite_audit: Arc::new(RollingRewriteAudit::default()),
-            templates: QueryTemplates::default(),
+            templates: Arc::default(),
             runtime_acquire_ns,
             closed: AtomicBool::new(false),
         })

@@ -207,6 +207,16 @@ Rolling state does not carry between those calls, and explicitly compiled cached
 plans are neither reused nor reset. Use explicit plans for snapshot/restore/reset,
 state reuse, timings, and DataFusion metrics.
 
+Explicit batch plans also retain up to eight input-free DataFusion query templates
+for repeated single-table, immutable filter/projection queries with a fixed
+single-partition policy. Reuse requires the same query, alias and exact Arrow
+schema, including metadata. The compiled graph owns its configuration and UDF
+snapshot; templates are private to that graph. Each execution binds new input
+rows into a fresh physical tree and retains its own session, memory accounting,
+metrics and cancellation. Other partition policies and ineligible queries retain
+normal planning. The first execution prepares the template; convenience
+collection calls keep creating fresh plans as described above.
+
 Project export saves the native graph and data-only input placeholders. It does
 not save data, builder functions, Python expression objects, logical aliases, or
 a running job. Reloaded projects and explicit runners use the physical binding

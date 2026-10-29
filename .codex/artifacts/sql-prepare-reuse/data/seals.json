@@ -1,0 +1,19 @@
+{
+  "base": {
+    "python": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-417-8b350a7f0467/workdir/calc-flow/target/sql-prepare-reuse/env-base/bin/python",
+    "native_sha256": "08ea6427c7dd57f8f537b9c9dba9234f9f10659f7e311433f17ad50c36b993d5",
+    "source_ref": "d9e2759fb31bfd0c915d31f0cc534665ece72ee9",
+    "wheel_sha256": "cca4ae92a2d655b66f0dd42bcd5e77595fcc1221e2751485eb219a76d336cc50"
+  },
+  "head": {
+    "python": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-417-8b350a7f0467/workdir/calc-flow/target/sql-prepare-reuse/env-head/bin/python",
+    "native_sha256": "0d3e1adf946466a2fca4b73df3c2111adaecf8522dc3f86573b4e2e91c1a79c9",
+    "wheel_sha256": "7bae728a9d768864e51077e706a5ee63b40ac71687b56fe56058923d24c959f2",
+    "base_ref": "d9e2759fb31bfd0c915d31f0cc534665ece72ee9",
+    "product_changes": {
+      "crates/calc-flow/src/datafusion.rs": "cac78639019fdd0aff0aacb0a397afba89e0d5511c07960ab6853f3e3706dfc0",
+      "crates/calc-flow/src/pipeline/batch.rs": "847bfc67ea1abb8ee11a577970a378d5f2019087ef8171182caaa2d1ebe11c24"
+    },
+    "source_ref": "9db6d10b29bc6349b529d2807cfd23ba4dd6aace"
+  }
+}
