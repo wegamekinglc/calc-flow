@@ -5,9 +5,7 @@ Moved verbatim from ``symbolic/lower.py``."""
 from __future__ import annotations
 
 import sys
-from typing import TYPE_CHECKING
-
-from typing_extensions import Never
+from typing import TYPE_CHECKING, NoReturn
 
 from calc_flow._compat import dataclass
 from calc_flow.join_spec import (
@@ -401,7 +399,7 @@ def _matrix_upstream_project(
     )
 
 
-def _raise_lowering_invariant(message: str, /) -> Never:
+def _raise_lowering_invariant(message: str, /) -> NoReturn:
     raise RuntimeError(f"symbolic lowering invariant violated: {message}")
 
 

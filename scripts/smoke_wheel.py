@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+from importlib.metadata import metadata
 from pathlib import Path
 
 import calc_flow as cf
@@ -14,7 +15,21 @@ def _check(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
-for name in ("pyarrow", "numpy", "jax"):
+_check(
+    all(
+        "extra ==" in item
+        for item in metadata("calc-flow-python").get_all("Requires-Dist", [])
+    ),
+    "core wheel has a required Python dependency",
+)
+for name in (
+    "pyarrow",
+    "numpy",
+    "jax",
+    "pydantic",
+    "pydantic_core",
+    "typing_extensions",
+):
     _check(
         importlib.util.find_spec(name) is None,
         f"unexpected optional package: {name}",
@@ -59,6 +74,18 @@ _check(
     "Arrow round trip changed the row count",
 )
 program = cf.Program("standalone", engine="sql", outputs={"sum": expression})
+document = program.to_project()
+_check(
+    cf.ProjectDocument.model_validate_json(document.model_dump_json()).canonical_json()
+    == document.canonical_json(),
+    "project serialization changed the canonical document",
+)
+try:
+    cf.ProjectDocument.model_validate({"format_version": 999})
+except cf.ProjectValidationError as error:
+    _check(bool(error.errors()), "invalid project omitted its issue records")
+else:
+    raise AssertionError("invalid project accepted")
 _check(
     isinstance(
         program.execute({"input": batch}, output_format="batch")["sum"], cf.Batch

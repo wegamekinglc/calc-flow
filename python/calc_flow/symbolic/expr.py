@@ -8,10 +8,9 @@ structural comparison instead of symbolic equality or truth testing.
 from __future__ import annotations
 
 import inspect
+import sys
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Generic, Literal, TypeVar, Union, overload
-
-from typing_extensions import Concatenate, ParamSpec, Unpack
 
 from calc_flow._compat import TypeAliasType, dataclass
 from calc_flow.symbolic.domains import (
@@ -47,6 +46,14 @@ from calc_flow.symbolic.types import (
     require_non_negative_int,
 )
 
+if sys.version_info >= (3, 10):
+    from typing import Concatenate, ParamSpec
+
+    P = ParamSpec("P")
+
+if sys.version_info >= (3, 11):
+    from typing import Unpack
+
 if TYPE_CHECKING:
     from datetime import timedelta
 
@@ -68,7 +75,6 @@ ArrayOperand = TypeAliasType(
 )
 T = TypeVar("T")
 SelfExpr = TypeVar("SelfExpr", bound="Expr")
-P = ParamSpec("P")
 R = TypeVar("R")
 
 

@@ -6,12 +6,12 @@ from copy import deepcopy
 from types import MappingProxyType
 
 import pytest
-from pydantic import ValidationError
 
 from calc_flow import (
     ConfigError,
     PipelineBuilder,
     ProjectDocument,
+    ProjectValidationError,
     Runtime,
     project_json_schema,
 )
@@ -29,7 +29,7 @@ def _project_with_data(value: object) -> dict[str, object]:
 
 
 def _assert_json_error(project: object, message: str) -> None:
-    with pytest.raises(ValidationError) as caught:
+    with pytest.raises(ProjectValidationError) as caught:
         ProjectDocument.model_validate(project)
     assert [
         (error["type"], error["loc"], error["msg"])
@@ -82,7 +82,7 @@ def test_project_document_converts_native_errors_to_validation_errors() -> None:
         {**project, "format_version": 1},
         {**project, "callable": "os.system"},
     ):
-        with pytest.raises(ValidationError):
+        with pytest.raises(ProjectValidationError):
             ProjectDocument.model_validate(invalid)
 
 
@@ -260,7 +260,7 @@ def test_project_document_accepts_shared_children_without_mutating_inputs() -> N
 
 
 def test_project_document_json_rejects_duplicate_keys() -> None:
-    with pytest.raises(ValidationError, match="duplicate"):
+    with pytest.raises(ProjectValidationError, match="duplicate"):
         ProjectDocument.model_validate_json('{"format_version":3,"format_version":3}')
 
 
@@ -271,7 +271,7 @@ def test_project_document_json_translates_decoder_recursion_errors() -> None:
     nested = "[" * 10_000 + "null" + "]" * 10_000
     encoded = encoded.replace('"deep-value"', nested)
 
-    with pytest.raises(ValidationError, match="depth|nesting"):
+    with pytest.raises(ProjectValidationError, match="depth|nesting"):
         ProjectDocument.model_validate_json(encoded)
 
 
@@ -289,6 +289,44 @@ def test_project_document_does_not_mutate_inputs_or_expose_owned_values() -> Non
 
     assert document.root["graph"]["nodes"]
     assert ProjectDocument.model_json_schema()["title"] == "Calc Flow Project V3"
+
+
+def test_project_document_constructor_and_json_exports_keep_owned_data() -> None:
+    project = _minimal_project()
+    document = ProjectDocument(root=project)
+    copied = ProjectDocument.model_validate(document)
+    exported = copied.model_dump(mode="json")
+    exported["graph"]["nodes"].clear()
+
+    assert copied.root == document.root
+    assert copied.root is not document.root
+    assert copied.root["graph"]["nodes"]
+    assert json.loads(document.model_dump_json(indent=2)) == document.root
+    with pytest.raises(ValueError, match="mode"):
+        document.model_dump(mode="unsupported")
+
+
+def test_project_validation_error_returns_independent_issue_records() -> None:
+    with pytest.raises(ProjectValidationError) as caught:
+        ProjectDocument.model_validate({"format_version": 999})
+    error = caught.value
+    entries = error.errors(include_input=False, include_url=False)
+    assert isinstance(error, ValueError)
+    assert error.error_count() == len(entries)
+    assert all("input" not in entry for entry in entries)
+    entries[0]["msg"] = "changed"
+    assert error.errors()[0]["msg"] != "changed"
+
+
+def test_project_document_integrates_with_caller_installed_pydantic() -> None:
+    pydantic = pytest.importorskip("pydantic")
+    adapter = pydantic.TypeAdapter(ProjectDocument)
+    document = adapter.validate_python(_minimal_project())
+    assert isinstance(document, ProjectDocument)
+    assert adapter.dump_python(document) == document.root
+    assert json.loads(adapter.dump_json(document)) == document.root
+    with pytest.raises(pydantic.ValidationError):
+        adapter.validate_python({"format_version": 999})
 
 
 def test_runtime_validation_report_uses_runtime_snapshots_defensively() -> None:

@@ -11,6 +11,7 @@ from calc_flow._native import (
     ProviderError,
     StreamingRuntimeError,
 )
+from calc_flow.config import ProjectValidationError
 
 __all__ = [
     "CalcFlowError",
@@ -21,5 +22,6 @@ __all__ = [
     "ConfigError",
     "ExecutionError",
     "ProviderError",
+    "ProjectValidationError",
     "StreamingRuntimeError",
 ]

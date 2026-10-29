@@ -1235,10 +1235,21 @@ through the physical `input`/`output` bindings.
 `ProjectDocument` validates a strict `format_version: 3` mapping with the Rust
 schema. `project_json_schema()` returns the generated schema;
 `validate_project_json(document)` returns canonical JSON. Invalid documents
-raise a pydantic `ValidationError` whose entries carry the engine's stable
+raise `cf.ProjectValidationError`, a `ValueError` whose `errors()` entries carry the engine's stable
 issue codes as `type` and the failing project path as `loc`; malformed stream
 Join input reports codes such as `invalid_time_bound` and
 `unsupported_join_type` instead of a flattened message.
+
+`ProjectDocument` is an owned data container with no Pydantic dependency.
+`model_validate`, `model_validate_json`, `model_dump`, `model_dump_json`,
+`model_json_schema`, `canonical_json`, and the root mapping remain available.
+`model_dump()` returns an independent copy. Applications that previously caught
+`pydantic.ValidationError` around these calls must catch
+`cf.ProjectValidationError` (or `ValueError`) instead. The container is no longer
+a Pydantic `RootModel`; inherited model configuration, field selection and
+unchecked construction APIs are not part of its interface. Caller-installed
+Pydantic can still validate and serialize it through its custom-type protocol;
+Calc Flow does not import Pydantic or require it to use projects and stores.
 
 Project v3 selects `runtime.mode` explicitly. Stream projects carry exact
 connector and format identities, non-secret options, named secret references,

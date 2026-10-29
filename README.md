@@ -46,7 +46,8 @@ result = cf.compute(data, lambda t: t.select(total=t["a"] + t["b"]))
 assert result.to_pydict() == {"total": [3, 7]}
 ```
 
-The core wheel needs no Python PyArrow, NumPy or JAX installation. Install
+The core wheel has no required third-party Python dependencies, including
+Pydantic and typing-extensions. Install
 `calc-flow-python[pyarrow]` for the default table results and trusted Python UDFs;
 install `[numpy]` or `[jax]` only for the corresponding array backend.
 PyArrow adapters retain their tested ranges (21 on Python 3.9, 24 on newer

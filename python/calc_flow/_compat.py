@@ -13,7 +13,12 @@ from typing import Any
 if sys.version_info >= (3, 12):
     from typing import TypeAliasType as TypeAliasType
 else:
-    from typing_extensions import TypeAliasType as TypeAliasType
+
+    def TypeAliasType(name: str, value: Any) -> Any:
+        """Use a conventional runtime alias before stdlib named aliases exist."""
+        del name
+        return value
+
 
 if sys.version_info >= (3, 10):
     dataclass = _stdlib_dataclass

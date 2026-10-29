@@ -4,10 +4,9 @@ import json
 from typing import Any
 
 import pytest
-from pydantic import ValidationError
 
 from calc_flow import _native
-from calc_flow.config import ProjectDocument
+from calc_flow.config import ProjectDocument, ProjectValidationError
 
 
 def _join_document() -> dict[str, Any]:
@@ -95,7 +94,7 @@ def test_config_error_issues_stay_empty_for_ordinary_format_errors() -> None:
 def test_project_document_maps_raw_join_issues_to_typed_errors() -> None:
     document = _join_document()
     document["graph"]["nodes"][0]["operator"]["spec"]["join_type"] = "outer"
-    with pytest.raises(ValidationError) as info:
+    with pytest.raises(ProjectValidationError) as info:
         ProjectDocument.model_validate(document)
     entries = info.value.errors(include_input=False, include_url=False)
     assert entries[0]["type"] == "unsupported_join_type"

@@ -9,8 +9,6 @@ from types import MappingProxyType
 from typing import Any, Literal, Union
 from uuid import uuid4
 
-from typing_extensions import TypeAlias
-
 from calc_flow import _native
 from calc_flow._compat import StrEnum, dataclass
 from calc_flow.asof_join_spec import AsofJoinSide, AsofJoinSpec
@@ -37,7 +35,7 @@ from calc_flow.join_spec import (
 )
 from calc_flow.store import _copy_json_value, _run_blocking
 
-JSONValue: TypeAlias = Union[
+JSONValue = Union[
     None, bool, int, float, str, list["JSONValue"], dict[str, "JSONValue"]
 ]
 UdfReference = tuple[str, str, str]

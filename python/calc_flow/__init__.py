@@ -30,6 +30,7 @@ from calc_flow.errors import (
     CompileError,
     ConfigError,
     ExecutionError,
+    ProjectValidationError,
     ProviderError,
     StreamingRuntimeError,
 )
@@ -206,6 +207,7 @@ __all__ = [
     "ProviderError",
     "ProviderContext",
     "ProjectDocument",
+    "ProjectValidationError",
     "ExecutionPlan",
     "PipelineBuilder",
     "ConnectorCapabilities",

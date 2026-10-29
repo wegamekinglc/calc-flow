@@ -3,20 +3,17 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import datetime
-from typing import Literal, Protocol, TypedDict, final
+from typing import Literal, NoReturn, Protocol, TypedDict, final
 
 import pyarrow as pa
-from typing_extensions import Never, TypeAlias
 
 from calc_flow._arrow import ArrowCStream, ArrowRecordBatch, ArrowSchema
 
-JSONValue: TypeAlias = (
-    None | bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"]
-)
-_JSONInput: TypeAlias = (
+JSONValue = None | bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"]
+_JSONInput = (
     None | bool | int | float | str | list["_JSONInput"] | Mapping[str, "_JSONInput"]
 )
-StreamingFailureReasonCode: TypeAlias = Literal[
+StreamingFailureReasonCode = Literal[
     "join_state_limit_exceeded",
     "join_match_limit_exceeded",
     "join_counter_overflow",
@@ -96,7 +93,7 @@ class ExecutionOptions:
 
 @final
 class ProviderContext:
-    def __new__(cls) -> Never:
+    def __new__(cls) -> NoReturn:
         """Engine-created; application construction is not public API."""
         ...
     @property

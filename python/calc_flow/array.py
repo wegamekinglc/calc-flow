@@ -5,9 +5,7 @@ import math
 import operator
 from collections.abc import Callable, Mapping
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any
-
-from typing_extensions import Never
+from typing import TYPE_CHECKING, Any, NoReturn
 
 from calc_flow import _native
 from calc_flow._compat import dataclass
@@ -938,7 +936,7 @@ def _apply_symbolic_primitive(
     return _SYMBOLIC_BINARY[operation](left, right)
 
 
-def _raise_invalid_symbolic_node(node: Mapping[str, object]) -> Never:
+def _raise_invalid_symbolic_node(node: Mapping[str, object]) -> NoReturn:
     raise ValueError(
         f"invalid symbolic_matrix expression: unsupported node {node.get('op')!r}"
     )
@@ -997,7 +995,7 @@ def _validated_symbolic_tree(value: object, *, depth: int = 0) -> dict[str, obje
     return node
 
 
-def _raise_invalid_symbolic_names(field: str) -> Never:
+def _raise_invalid_symbolic_names(field: str) -> NoReturn:
     raise ValueError(
         f"invalid symbolic_matrix {field}: expected unique non-empty strings"
     )
