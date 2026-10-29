@@ -2,11 +2,13 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::Mutex as StdMutex,
+    sync::{Arc, Mutex as StdMutex},
     time::Instant,
 };
 
 use serde_json::Value;
+
+use crate::datafusion_template::QueryTemplates;
 
 use crate::{
     Batch, BatchOperator, BatchOperatorContext, CalcFlowError, DataFusionConfig, DataFusionRuntime,
@@ -145,6 +147,9 @@ pub struct BatchExecutionPlan {
     pub(crate) external_outputs: BTreeMap<String, PortEndpoint>,
     pub(crate) fingerprint: String,
     table: Option<TablePlanResources>,
+    /// Graph, configuration and selected UDF snapshot are fixed for this owner.
+    /// Templates match query, alias and exact schema and never contain input rows.
+    query_templates: Arc<QueryTemplates>,
     /// Built-in batch operators hold no run state; only external ones can.
     has_operator_state: bool,
     row_parallel_sql: bool,
@@ -228,6 +233,7 @@ impl PipelineBuilder {
             external_outputs: graph.external_outputs,
             fingerprint: graph.fingerprint,
             table: graph.table,
+            query_templates: Arc::default(),
             has_operator_state,
             row_parallel_sql,
             run_lock: tokio::sync::Mutex::new(()),
@@ -410,7 +416,10 @@ impl BatchExecutionPlan {
             .table
             .as_ref()
             .map(|table| {
-                let mut runtime = DataFusionRuntime::new(table.config)?;
+                let mut runtime = DataFusionRuntime::with_batch_templates(
+                    table.config,
+                    Arc::clone(&self.query_templates),
+                )?;
                 runtime.register_udfs(&table.udfs, &table.selected_udfs)?;
                 if self.row_parallel_sql {
                     let input_rows = inputs
@@ -1332,6 +1341,10 @@ mod lifecycle_tests {
 #[cfg(test)]
 #[path = "batch/parallelism_tests.rs"]
 mod parallelism_tests;
+
+#[cfg(test)]
+#[path = "batch/template_tests.rs"]
+mod template_tests;
 
 #[cfg(test)]
 mod data_tests {
