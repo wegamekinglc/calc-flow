@@ -347,7 +347,7 @@ def test_native_schema_cache_is_bounded_and_registration_invalidates(monkeypatch
     assert runtime._infer_symbolic_expression_schema(select, None, source) is first
     select[0] = "value AS renamed"
     renamed = runtime._infer_symbolic_expression_schema(select, None, source)
-    assert renamed.names == ["renamed"]
+    assert pa.schema(renamed).names == ["renamed"]
     runtime._infer_symbolic_expression_schema(["value AS third"], None, source)
     assert len(runtime._symbolic_schema_cache) == 2
     assert (
@@ -365,5 +365,6 @@ def test_native_schema_cache_never_retains_failed_planning():
     assert runtime._symbolic_schema_cache == {}
     expected = pa.schema([pa.field("value", pa.int64())])
     assert (
-        runtime._infer_symbolic_expression_schema(["value"], None, source) == expected
+        pa.schema(runtime._infer_symbolic_expression_schema(["value"], None, source))
+        == expected
     )

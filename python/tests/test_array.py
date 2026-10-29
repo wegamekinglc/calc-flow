@@ -1236,41 +1236,25 @@ def test_numpy_table_matmul_honors_copy_and_ownership_ceiling(
 def test_numpy_table_matrix_does_not_combine_chunks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class ChunkedColumn:
-        def __init__(self, chunks: list[pa.Array]) -> None:
-            self.chunks = chunks
-
-        def combine_chunks(self) -> None:
-            pytest.fail("table_matmul must not combine Arrow chunks")
-
-    class ChunkedTable:
-        num_rows = 3
-
-        def __init__(self) -> None:
-            self.columns = {
-                "left": ChunkedColumn([pa.array([1.0, 2.0]), pa.array([3.0])]),
-                "right": ChunkedColumn([pa.array([4.0]), pa.array([5.0, 6.0])]),
-            }
-
-        def __getitem__(self, name: str) -> ChunkedColumn:
-            return self.columns[name]
-
-    def reject_combine_chunks(*_args: object, **_kwargs: object) -> None:
-        pytest.fail("table_matmul must not combine Arrow chunks")
-
-    monkeypatch.setattr(
-        ChunkedColumn,
-        "combine_chunks",
-        reject_combine_chunks,
+    table = pa.table(
+        {
+            "left": pa.chunked_array([[1.0, 2.0], [3.0]]),
+            "right": pa.chunked_array([[4.0], [5.0, 6.0]]),
+        }
     )
+    batch = Batch.from_arrow(table)
 
+    def reject_pyarrow(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("native table matrix must not export through PyArrow")
+
+    monkeypatch.setattr(Batch, "to_pyarrow", reject_pyarrow)
     matrix = array_module._numpy_table_matrix(
-        ChunkedTable(),
-        ("left", "right"),
-        np.dtype(np.float64),
+        batch, ("left", "right"), np.dtype(np.float64)
     )
-
     assert matrix.tolist() == [[1.0, 4.0], [2.0, 5.0], [3.0, 6.0]]
+    matrix[0, 0] = -1
+    assert table["left"].to_pylist() == [1.0, 2.0, 3.0]
+    assert table["left"].num_chunks == 2
 
 
 @pytest.mark.parametrize(

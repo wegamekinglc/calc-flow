@@ -3,18 +3,17 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import datetime
-from typing import Literal, Protocol, TypedDict, final
+from typing import Literal, NoReturn, Protocol, TypedDict, final
 
 import pyarrow as pa
-from typing_extensions import Never, TypeAlias
 
-JSONValue: TypeAlias = (
-    None | bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"]
-)
-_JSONInput: TypeAlias = (
+from calc_flow._arrow import ArrowCStream, ArrowRecordBatch, ArrowSchema
+
+JSONValue = None | bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"]
+_JSONInput = (
     None | bool | int | float | str | list["_JSONInput"] | Mapping[str, "_JSONInput"]
 )
-StreamingFailureReasonCode: TypeAlias = Literal[
+StreamingFailureReasonCode = Literal[
     "join_state_limit_exceeded",
     "join_match_limit_exceeded",
     "join_counter_overflow",
@@ -94,7 +93,7 @@ class ExecutionOptions:
 
 @final
 class ProviderContext:
-    def __new__(cls) -> Never:
+    def __new__(cls) -> NoReturn:
         """Engine-created; application construction is not public API."""
         ...
     @property
@@ -105,7 +104,43 @@ class ProviderContext:
 class _ExecutionCancellation(Protocol):
     def cancel(self) -> None: ...
 
+class _ArrowSchema:
+    def __init__(self, fields: Sequence[tuple[str, str, bool]]) -> None: ...
+    def __arrow_c_schema__(self) -> object: ...
+    def equals(self, other: ArrowSchema) -> bool: ...
+
+class _ArrowValidationError(ValueError): ...
+
+def _stream_input_batch(
+    value: ArrowCStream | ArrowRecordBatch, ordered_column: str | None
+) -> Batch: ...
+def _schema_fields(schema: ArrowSchema) -> list[tuple[str, str, bool]]: ...
+def _schema_key(schema: ArrowSchema) -> str: ...
+def _batch_from_ipc(data: bytes) -> Batch: ...
+
 class Batch:
+    @staticmethod
+    def from_arrow(
+        table: ArrowCStream | ArrowRecordBatch,
+        metadata: Mapping[str, object] | None = None,
+    ) -> Batch:
+        """Import a finite CPU Arrow table or a non-null struct record batch."""
+        ...
+    def __arrow_c_stream__(self, requested_schema: object | None = None) -> object: ...
+    @property
+    def _schema(self) -> _ArrowSchema: ...
+    @property
+    def _nbytes(self) -> int: ...
+    def _without_schema_metadata(self) -> Batch: ...
+    def _with_metadata(self, metadata: Mapping[str, object]) -> Batch: ...
+    def _validate_event_time(
+        self, column: str, last: int | None = None
+    ) -> int | None: ...
+    def _column_info(self, name: str) -> tuple[str, int]: ...
+    def _table_matrix(self, columns: Sequence[str], dtype: str) -> object: ...
+    def _append_numpy(
+        self, names: Sequence[str], arrays: Sequence[object]
+    ) -> Batch: ...
     @staticmethod
     def from_pyarrow(
         table: _ArrowCStream, metadata: Mapping[str, object] | None = None
@@ -215,9 +250,12 @@ class Runtime:
         function: Callable[[bytes], object],
     ) -> None: ...
     def catalog(self) -> list[dict[str, object]]: ...
+    def _infer_expression_schema(
+        self, select: Sequence[str], filter: str | None, input_schema: ArrowSchema
+    ) -> _ArrowSchema: ...
     def _infer_sql_schema(
-        self, query: str, schemas: Mapping[str, pa.Schema]
-    ) -> pa.Schema: ...
+        self, query: str, schemas: Mapping[str, ArrowSchema]
+    ) -> _ArrowSchema: ...
     def validation_report(self, project_json: str) -> dict[str, object]: ...
     def compile_project(self, project_json: str) -> ExecutionPlan:
         """Compile project-v3, including rolling cumulative summary declarations."""

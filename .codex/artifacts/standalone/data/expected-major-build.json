@@ -1,0 +1,98 @@
+{
+  "source_commit": "9adf1315551ce4f22f2b28054d726b69f54f1a0b",
+  "base_revision": "48e92fd8c46393b3f01a069e4f565527baeb7e0b",
+  "source_manifest_parent": {
+    "revision": "48e92fd8c46393b3f01a069e4f565527baeb7e0b",
+    "path": ".codex/artifacts/standalone/data/arrow-entrypoints-build.json",
+    "sha256": "5c4de71c0344a02d04c5977284534bd6719d87e19a9d1e109431212685989bfd"
+  },
+  "source_manifest_overrides": {
+    "crates/calc-flow-python/src/arrow.rs": "71b3002efa17278a3f6af21e0e6c73bc2eac9c10ae53c4e974c5bfa74d621b8e"
+  },
+  "source_manifest_sha256": "6b2757a84375de5f273036281a57e95d5f93116473c30644fc6d4c4f96d790fd",
+  "source_manifest_encoding": "UTF-8 JSON, sorted keys, compact separators, no final newline",
+  "variants": [
+    {
+      "variant": "cp313",
+      "wheel": "calc_flow_python-2026.10.27-cp313-cp313-linux_x86_64.whl",
+      "local_artifact_directory": "target/expected-major-wheels",
+      "wheel_sha256": "516d89e83a0c9f43ab3a091ed72bc41d602d579186a85c428640b7fa10d5ff2d",
+      "native_module": "calc_flow/_native.cpython-313-x86_64-linux-gnu.so",
+      "native_sha256": "d55978279ca50d0787795e4dfe10202e82d67810bd827c767a5b674429076cdf",
+      "cargo_features": [
+        "default"
+      ],
+      "python_and_stub_bytes_match_source": true,
+      "matched_python_and_stub_files": 44,
+      "unconditional_requires_dist": []
+    },
+    {
+      "variant": "abi3",
+      "wheel": "calc_flow_python-2026.10.27-cp39-abi3-linux_x86_64.whl",
+      "local_artifact_directory": "target/expected-major-legacy-wheels",
+      "wheel_sha256": "02b089e10fc658ec90462ffd59474a427a2a29acf2e628163dc2bb2614bb1b91",
+      "native_module": "calc_flow/_native.abi3.so",
+      "native_sha256": "33e03532b693e08d3ef6fa5b35112c0a7f6dc878b650fd410c458c1351d1c855",
+      "cargo_features": [
+        "default",
+        "legacy-python"
+      ],
+      "python_and_stub_bytes_match_source": true,
+      "matched_python_and_stub_files": 44,
+      "unconditional_requires_dist": []
+    }
+  ],
+  "profile": "release, opt-level=3, thin LTO, codegen-units=1",
+  "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+  "maturin": "maturin 1.15.0",
+  "target": "x86_64-unknown-linux-gnu, WSL2",
+  "modern_protocol_environment": {
+    "python": "3.13.9",
+    "protocol_pytest_passed": 19,
+    "native_sha256": "d55978279ca50d0787795e4dfe10202e82d67810bd827c767a5b674429076cdf"
+  },
+  "abi3_runtime_guard_branches": [
+    {
+      "python": "3.9.25",
+      "pyarrow": "21.0.0",
+      "native_file": "_native.abi3.so",
+      "native_sha256": "33e03532b693e08d3ef6fa5b35112c0a7f6dc878b650fd410c458c1351d1c855",
+      "protocol_pytest": {
+        "passed": 18,
+        "skipped": 1,
+        "skip_reason": "optional nanoarrow is absent"
+      },
+      "expected_pyarrow_major": 21
+    },
+    {
+      "python": "3.13.9",
+      "pyarrow": "24.0.0",
+      "native_file": "_native.abi3.so",
+      "native_sha256": "33e03532b693e08d3ef6fa5b35112c0a7f6dc878b650fd410c458c1351d1c855",
+      "protocol_pytest": {
+        "passed": 18,
+        "skipped": 1,
+        "skip_reason": "optional nanoarrow is absent"
+      },
+      "expected_pyarrow_major": 24
+    }
+  ],
+  "core_environment_packages": [
+    "calc-flow-python"
+  ],
+  "real_pyarrow_25_rejected": [
+    "Table",
+    "RecordBatch",
+    "Schema",
+    "output"
+  ],
+  "protocol_test_sha256": "c948cb6991d6d12e593009cf0a7abfc11eda5e65a661e74972a48184866e4635",
+  "performance_samples_added": 0,
+  "performance_budget_used_seconds_reported_by_specialist": 640,
+  "performance_budget_limit_seconds": 900,
+  "performance_acceptance": "unmet; final safe-path measurement remains with the coordinator",
+  "localization_report": {
+    "attachment_id": "01a188df-705d-78be-b202-314e3f7d7d5d",
+    "sha256": "5fe684e748a4d120c3b2c2157e3dbcd5315feb7774a29266f2d71970771dcf7e"
+  }
+}

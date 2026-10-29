@@ -22,6 +22,12 @@ CPython 3.9 or newer:
 uv add calc-flow-python
 ```
 
+For the PyArrow quickstart below:
+
+```bash
+uv add "calc-flow-python[pyarrow]"
+```
+
 Optional array providers:
 
 ```bash
@@ -39,6 +45,20 @@ data = pa.table({"a": [1, 3], "b": [2, 4]})
 result = cf.compute(data, lambda t: t.select(total=t["a"] + t["b"]))
 assert result.to_pydict() == {"total": [3, 7]}
 ```
+
+The core wheel has no required third-party Python dependencies, including
+Pydantic and typing-extensions. Install
+`calc-flow-python[pyarrow]` for the default table results and trusted Python UDFs;
+install `[numpy]` or `[jax]` only for the corresponding array backend.
+PyArrow adapters retain their tested ranges (21 on Python 3.9, 24 on newer
+Python); unsupported versions are rejected before Arrow exchange.
+
+For a standalone path, pass a finite CPU Arrow C Stream or a struct C Array
+producer to `cf.Batch.from_arrow(producer)`, and request
+`cf.compute(batch, build, output_format="batch")`. `Batch` exports fresh
+`__arrow_c_stream__` capsules and keeps shared buffers alive. Schema declarations
+accept `Sequence[cf.Field]` or an Arrow C Schema producer. Producers must honor
+Arrow ownership and keep shared storage read-only.
 
 `cf.compute` infers the supported Arrow schema and returns a `pyarrow.Table`.
 The builder receives a `TableExpr`; indexing selects columns, operators compose

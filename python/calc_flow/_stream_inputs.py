@@ -6,9 +6,7 @@ from collections.abc import AsyncIterable, AsyncIterator, Mapping
 from datetime import timedelta
 from typing import NoReturn, Union
 
-import pyarrow as pa
-import pyarrow.compute as pc
-
+from calc_flow import _native
 from calc_flow._compat import TypeAliasType, dataclass
 from calc_flow._native import Batch
 from calc_flow.compute import TableData, _arrow_table, _table_batch
@@ -84,7 +82,7 @@ def _selected_policies(
 @dataclass(frozen=True, slots=True)
 class _IterableConfig:
     name: str
-    schema: pa.Schema
+    schema: _native._ArrowSchema
     budget: EdgeBudget
     policy: WatermarkPolicy
     ordered_column: str | None
@@ -151,64 +149,48 @@ class _IterableSource:
             return None
         if isinstance(data, Watermark):
             return self._watermark(data)
-        self._validate_batch(self._arrow_input(data))
-        batch = _table_batch(data, self._path)
+        batch = self._arrow_input(data)
+        self._validate_batch(batch)
+        batch = _table_batch(batch, self._path)
         self._position += 1
         return Data(batch, Cursor(self._position.to_bytes(16, "big"), {}))
 
-    def _arrow_input(self, data: TableData) -> pa.Table | pa.RecordBatch:
-        try:
-            return _arrow_table(data, self._path)
-        except TypeError:
+    def _arrow_input(self, data: TableData) -> Batch:
+        if not (
+            isinstance(data, Batch)
+            or hasattr(data, "__arrow_c_stream__")
+            or hasattr(data, "__arrow_c_array__")
+        ):
             self._reject(": expected Arrow Table, RecordBatch or table Batch")
+        if isinstance(data, Batch):
+            return _arrow_table(data, self._path)
+        try:
+            return _native._stream_input_batch(data, self._config.ordered_column)
+        except _native._ArrowValidationError as error:
+            self._reject(str(error))
 
     def _watermark(self, value: Watermark) -> Watermark:
         if not isinstance(self._config.policy, SourceProvidedWatermarks):
             self._reject(": Watermark requires SourceProvidedWatermarks")
         return value
 
-    def _validate_batch(self, table: pa.Table | pa.RecordBatch) -> None:
+    def _validate_batch(self, table: Batch) -> None:
         self._validate_structure(table)
         if self._config.ordered_column is not None:
-            self._validate_time(table[self._config.ordered_column])
+            try:
+                self._last_time = table._validate_event_time(
+                    self._config.ordered_column, self._last_time
+                )
+            except ValueError as error:
+                self._reject(".event_time: " + str(error))
 
-    def _validate_structure(self, table: pa.Table | pa.RecordBatch) -> None:
-        if not table.schema.equals(self._config.schema):
+    def _validate_structure(self, table: Batch) -> None:
+        if not table._schema.equals(self._config.schema):
             self._reject(".schema: expected declared Arrow schema")
         if table.num_rows > self._config.budget.max_rows:
             self._reject(": batch exceeds edge_budget.max_rows")
-        if table.nbytes > self._config.budget.max_bytes:
+        if table._nbytes > self._config.budget.max_bytes:
             self._reject(": batch exceeds edge_budget.max_bytes")
-
-    def _validate_time(self, column: pa.ChunkedArray | pa.Array) -> None:
-        if column.null_count:
-            self._reject(".event_time: expected non-null event time")
-        # Compare in the declared unit without datetime/range conversion. Native
-        # generation retains its checked conversion and minimum-minus-delay error.
-        values = column.cast(pa.int64())
-        if not len(values):
-            return
-        if self._is_ordered(values):
-            self._last_time = values[len(values) - 1].as_py()
-            return
-        self._reject_out_of_order(values)
-
-    def _is_ordered(self, values: pa.ChunkedArray | pa.Array) -> bool:
-        if self._last_time is not None and values[0].as_py() < self._last_time:
-            return False
-        decreases = pc.less(values.slice(1), values.slice(0, len(values) - 1))
-        return not pc.any(decreases).as_py()
-
-    def _reject_out_of_order(self, values: pa.ChunkedArray | pa.Array) -> NoReturn:
-        previous = self._last_time
-        for current in values.to_pylist():
-            if previous is not None and current < previous:
-                self._reject(
-                    ".event_time: expected nondecreasing event time; select an "
-                    "explicit watermark policy for out-of-order input"
-                )
-            previous = current
-        raise RuntimeError(f"{self._path}.event_time: ordering violation not found")
 
     def _reject(self, message: str) -> NoReturn:
         self.failure = self._path + message
@@ -239,7 +221,11 @@ def _source_binding(
         return data, None
     name, value = logical_input
     config = _source_config(name, value, budget, policy)
-    if isinstance(data, (pa.Table, pa.RecordBatch, Batch)):
+    if (
+        isinstance(data, Batch)
+        or hasattr(data, "__arrow_c_stream__")
+        or hasattr(data, "__arrow_c_array__")
+    ):
         return _materialized_binding(data, config, complete_snapshot)
     if not isinstance(data, AsyncIterable):
         raise TypeError(
@@ -255,23 +241,23 @@ def _materialized_binding(
 ) -> tuple[SourceBinding, _IterableSource | None]:
     path = f"stream.inputs.{config.name}"
     table = _arrow_table(data, path)
-    if not table.schema.equals(config.schema):
+    if not table._schema.equals(config.schema):
         raise ValueError(f"{path}.schema: expected declared Arrow schema")
     if complete_snapshot:
         if isinstance(config.policy, SourceProvidedWatermarks):
             raise ValueError(
                 f"{path}: materialized input cannot emit native watermarks"
             )
-        source = _IterableSource(_whole_table(data), config)
+        source = _IterableSource(_whole_table(table), config)
         source._validate_structure(table)
         return SourceBinding(source, watermark_policy=config.policy), source
     return _arrow_source_binding(
-        _table_batch(data, path),
+        _table_batch(table, path),
         config.budget,
         config.policy,
         config.ordered_column,
     ), None
 
 
-async def _whole_table(data: TableData) -> AsyncIterator[TableData]:
+async def _whole_table(data: Batch) -> AsyncIterator[Batch]:
     yield data

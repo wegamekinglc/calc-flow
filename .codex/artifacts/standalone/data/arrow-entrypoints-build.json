@@ -1,0 +1,71 @@
+{
+  "source_commit": "99c0acc70d7fb70908b3eaf0e79a37ff9eb898b6",
+  "base_revision": "35f37e5b56fcae213409656470b051cecbad4d1e",
+  "source_manifest_parent": {
+    "revision": "35f37e5b56fcae213409656470b051cecbad4d1e",
+    "path": ".codex/artifacts/standalone/data/final-build.json",
+    "sha256": "1ed8fb37fd04f0463f0f748d59ad632a55878868db4cb723b1b5c1e7f5ad877d"
+  },
+  "source_manifest_overrides": {
+    "crates/calc-flow-python/src/arrow.rs": "d1f407a1bf1162345b97429c7347f066aacdd6f8af0165bf9911f3f7662087a5",
+    "crates/calc-flow-python/src/batch.rs": "88cc9fb30b3da5c82f635f12a9d35104de2f3a2a230c15e32433a3c570e821cf",
+    "python/calc_flow/_stream_inputs.py": "5ef9e91b0f93fb24d57143bcfd7aae1f9bb90ccb82b9c87463dcf7ead18daa5c"
+  },
+  "source_manifest_sha256": "76c21a4ae8bb82564d889b7d3e9f60897e6fddaa96d173f6c41467c89182b922",
+  "source_manifest_encoding": "UTF-8 JSON, sorted keys, compact separators, no final newline",
+  "test_sources": {
+    "python/tests/test_arrow_protocol.py": "c948cb6991d6d12e593009cf0a7abfc11eda5e65a661e74972a48184866e4635",
+    "python/tests/test_arrow_stream_inputs.py": "9dca2288da687feb3368be69bf6cd38d0cd7947f1b098cd184563addec3b57e0"
+  },
+  "wheel": "calc_flow_python-2026.10.27-cp313-cp313-linux_x86_64.whl",
+  "local_artifact_directory": "target/arrow-performance-repair-wheels",
+  "wheel_sha256": "0e5568fbf643a8b418bb0e30b483d2aeddf3913d437c34b9b5d700080fde0b22",
+  "native_module": "calc_flow/_native.cpython-313-x86_64-linux-gnu.so",
+  "native_sha256": "2f7d9fdabb30b7c32fba5f6eb51d464345185fd7ce39b66bd7f31df56e6051e2",
+  "cargo_features": [
+    "default"
+  ],
+  "profile": "release, opt-level=3, thin LTO, codegen-units=1",
+  "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+  "maturin": "maturin 1.15.0",
+  "target": "x86_64-unknown-linux-gnu, WSL2",
+  "python": "3.13.9 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 19:16:10) [GCC 11.2.0]",
+  "packages": {
+    "pyarrow": "24.0.0",
+    "numpy": "2.5.4",
+    "jax": "0.12.0.1",
+    "jaxlib": "0.12.0.1",
+    "pytest": "9.2.0"
+  },
+  "unconditional_requires_dist": [],
+  "all_python_and_stub_bytes_match_source_and_installed_wheel": true,
+  "matched_python_and_stub_file_count": 44,
+  "clean_smoke_environment_packages": [
+    "calc-flow-python"
+  ],
+  "directed_pytest_passed": 128,
+  "review_repro": {
+    "attachment_id": "01a188a6-a7e7-7596-aaff-7b8796c423f1",
+    "sha256": "92c0d764c1cbbb55d0b4d233bbac0f695c2a999ba1ff234da963a84370177297",
+    "paths_passed": 8,
+    "tasks_after_cleanup": 0
+  },
+  "performance_samples_added": 0,
+  "prior_performance_evidence": {
+    "source_commit": "35f37e5b56fcae213409656470b051cecbad4d1e",
+    "report_attachment_id": "01a188ae-113b-79cc-a763-c50e1347b056",
+    "report_sha256": "3f99c1ea98e92341872465f9878e489186f364860d0c66171d0610390c934338",
+    "raw_archive_sha256": "cff6b6d05a564bf4d62304f9430327d1c38453c5b7f3f9ea11901fc5dc16cd63",
+    "budget_used_seconds_reported_by_specialist": 481.99,
+    "remaining_seconds_approx": 118,
+    "arrow_verdict": "stable regression",
+    "numpy_verdict": "inconclusive"
+  },
+  "performance_acceptance": "unmet; new native and wrapper require targeted final-build confirmation",
+  "intermediate_p1_build": {
+    "source_commit": "de405c7a207db429a6fa680c4e4d9cbf3e6a942b",
+    "wheel_sha256": "987b6a095ef4032d276c5cfe7185105be338d4189a616ee8a322b9198ac54f72",
+    "native_sha256": "93bc757deccb8b8e8eb317d28b63bdd27356d7d63ce598ff9f8494fddd37498b",
+    "directed_pytest_passed": 75
+  }
+}

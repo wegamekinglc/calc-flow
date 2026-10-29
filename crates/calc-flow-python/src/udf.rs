@@ -42,6 +42,7 @@ pub(crate) fn prepare_python_scalar_udf(
     volatility_name: String,
     function: Py<PyAny>,
 ) -> PyResult<PreparedPythonUdf> {
+    crate::arrow::require_pyarrow(py)?;
     if input_type_names.len() > MAX_UDF_ARGUMENTS {
         return Err(PyValueError::new_err(format!(
             "input_types must contain at most {MAX_UDF_ARGUMENTS} entries"

@@ -1,0 +1,49 @@
+{
+  "code_sha": "5c2c35154100fb256c6d87844eb27df17697e823",
+  "baseline_sha": "d9e2759fb31bfd0c915d31f0cc534665ece72ee9",
+  "research_sha": "eb30d22523ae62315eb87a9d8685bf1c5b8ac20c",
+  "rustc": "1.94.0 (4a4ef493e 2026-03-02)",
+  "maturin": "1.15.0",
+  "profile": {
+    "release": true,
+    "lto": "thin",
+    "codegen-units": 1,
+    "default_features": [
+      "connector-file"
+    ],
+    "python": "CPython 3.13.9"
+  },
+  "artifacts": {
+    "baseline_editable_wheel": {
+      "name": "calc_flow_python-2026.10.27-cp313-cp313-linux_x86_64.whl",
+      "sha256": "372f8071d2389d65de65171c0f5cde2ee188f2b23668649d3b1ea6bd78d2805c"
+    },
+    "candidate_wheel": {
+      "name": "calc_flow_python-2026.10.27-cp313-cp313-linux_x86_64.whl",
+      "sha256": "3adbc6fd014bfaa2f254a7d5e5dba549072e294797ea9a2584651ad5d1d24108"
+    },
+    "cargo_lock": {
+      "name": "Cargo.lock",
+      "sha256": "40fbbc0d7e1d45942b633a01f2988da19b33aab6053bbb09cc2b72fd026e8896"
+    }
+  },
+  "baseline_runtime": "git archive of baseline Python sources plus separately saved native extension from its editable release build",
+  "candidate_runtime": "unpacked non-editable wheel; normal dependency resolution also verified in clean venv",
+  "directed_pytest": {
+    "passed": 555,
+    "warnings": 1,
+    "baseline_warning_reproduction": {
+      "passed": 541,
+      "deselected": 1,
+      "warnings": 1
+    }
+  },
+  "sdist_inspection": {
+    "verified_files": 1180
+  },
+  "build_seconds": {
+    "baseline_uv_sync": 1024,
+    "initial_candidate": 552,
+    "final_binding_rebuild": 338
+  }
+}

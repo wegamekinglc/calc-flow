@@ -16,8 +16,6 @@ import struct
 from collections.abc import Callable, Mapping, Sequence
 from typing import Final, Union
 
-from typing_extensions import TypeAlias
-
 from calc_flow._compat import TypeAliasType, dataclass
 from calc_flow.symbolic.domains import type_name
 
@@ -171,7 +169,7 @@ class CDType:
     name: str
 
 
-CValue: TypeAlias = Union[
+CValue = Union[
     CNull, CBool, CInt, CFloat, CStr, CBytes, CEnum, CSeq, CMap, CShape, CDType
 ]
 

@@ -1,0 +1,178 @@
+{
+  "source_commit": "9ca97c6a58a653852a150c8f3fb42c0c4fd92fe6",
+  "check_run": 123536653553,
+  "check_url": "https://github.com/wegamekinglc/calc-flow/runs/123536653553",
+  "annotations": [
+    {
+      "annotation_level": "warning",
+      "end_line": 26,
+      "message": "Method guard_input has a cyclomatic complexity of 10 (limit is 8)",
+      "path": "crates/calc-flow-python/src/arrow.rs",
+      "raw_details": null,
+      "start_line": 26,
+      "title": "crates/calc-flow-python/src/arrow.rs#L26"
+    },
+    {
+      "annotation_level": "warning",
+      "end_line": 130,
+      "message": "Method validate_time has a cyclomatic complexity of 11 (limit is 8)",
+      "path": "crates/calc-flow-python/src/arrow.rs",
+      "raw_details": null,
+      "start_line": 130,
+      "title": "crates/calc-flow-python/src/arrow.rs#L130"
+    },
+    {
+      "annotation_level": "warning",
+      "end_line": 162,
+      "message": "Method numpy_array has a cyclomatic complexity of 19 (limit is 8)",
+      "path": "crates/calc-flow-python/src/arrow.rs",
+      "raw_details": null,
+      "start_line": 162,
+      "title": "crates/calc-flow-python/src/arrow.rs#L162"
+    },
+    {
+      "annotation_level": "warning",
+      "end_line": 223,
+      "message": "Method register has a cyclomatic complexity of 11 (limit is 8)",
+      "path": "crates/calc-flow-python/src/arrow.rs",
+      "raw_details": null,
+      "start_line": 223,
+      "title": "crates/calc-flow-python/src/arrow.rs#L223"
+    },
+    {
+      "annotation_level": "warning",
+      "end_line": 255,
+      "message": "Method table_matrix has a cyclomatic complexity of 37 (limit is 8)",
+      "path": "crates/calc-flow-python/src/arrow.rs",
+      "raw_details": null,
+      "start_line": 255,
+      "title": "crates/calc-flow-python/src/arrow.rs#L255"
+    },
+    {
+      "annotation_level": "warning",
+      "end_line": 386,
+      "message": "Method validate_matrix_casts has a cyclomatic complexity of 10 (limit is 8)",
+      "path": "crates/calc-flow-python/src/arrow.rs",
+      "raw_details": null,
+      "start_line": 386,
+      "title": "crates/calc-flow-python/src/arrow.rs#L386"
+    },
+    {
+      "annotation_level": "warning",
+      "end_line": 417,
+      "message": "Method import_table has a cyclomatic complexity of 15 (limit is 8)",
+      "path": "crates/calc-flow-python/src/arrow.rs",
+      "raw_details": null,
+      "start_line": 417,
+      "title": "crates/calc-flow-python/src/arrow.rs#L417"
+    },
+    {
+      "annotation_level": "warning",
+      "end_line": 12,
+      "message": "Use of assert detected. The enclosed code will be removed when compiling to optimised byte code.",
+      "path": "scripts/smoke_wheel.py",
+      "raw_details": null,
+      "start_line": 12,
+      "title": "scripts/smoke_wheel.py#L12"
+    },
+    {
+      "annotation_level": "warning",
+      "end_line": 19,
+      "message": "Use of assert detected. The enclosed code will be removed when compiling to optimised byte code.",
+      "path": "scripts/smoke_wheel.py",
+      "raw_details": null,
+      "start_line": 19,
+      "title": "scripts/smoke_wheel.py#L19"
+    },
+    {
+      "annotation_level": "warning",
+      "end_line": 32,
+      "message": "Use of assert detected. The enclosed code will be removed when compiling to optimised byte code.",
+      "path": "scripts/smoke_wheel.py",
+      "raw_details": null,
+      "start_line": 32,
+      "title": "scripts/smoke_wheel.py#L32"
+    },
+    {
+      "annotation_level": "warning",
+      "end_line": 33,
+      "message": "Use of assert detected. The enclosed code will be removed when compiling to optimised byte code.",
+      "path": "scripts/smoke_wheel.py",
+      "raw_details": null,
+      "start_line": 33,
+      "title": "scripts/smoke_wheel.py#L33"
+    },
+    {
+      "annotation_level": "warning",
+      "end_line": 34,
+      "message": "Use of assert detected. The enclosed code will be removed when compiling to optimised byte code.",
+      "path": "scripts/smoke_wheel.py",
+      "raw_details": null,
+      "start_line": 34,
+      "title": "scripts/smoke_wheel.py#L34"
+    },
+    {
+      "annotation_level": "warning",
+      "end_line": 40,
+      "message": "Use of assert detected. The enclosed code will be removed when compiling to optimised byte code.",
+      "path": "scripts/smoke_wheel.py",
+      "raw_details": null,
+      "start_line": 40,
+      "title": "scripts/smoke_wheel.py#L40"
+    },
+    {
+      "annotation_level": "warning",
+      "end_line": 42,
+      "message": "Use of assert detected. The enclosed code will be removed when compiling to optimised byte code.",
+      "path": "scripts/smoke_wheel.py",
+      "raw_details": null,
+      "start_line": 42,
+      "title": "scripts/smoke_wheel.py#L42"
+    },
+    {
+      "annotation_level": "warning",
+      "end_line": 50,
+      "message": "Use of assert detected. The enclosed code will be removed when compiling to optimised byte code.",
+      "path": "scripts/smoke_wheel.py",
+      "raw_details": null,
+      "start_line": 50,
+      "title": "scripts/smoke_wheel.py#L50"
+    },
+    {
+      "annotation_level": "warning",
+      "end_line": 72,
+      "message": "Use of assert detected. The enclosed code will be removed when compiling to optimised byte code.",
+      "path": "scripts/smoke_wheel.py",
+      "raw_details": null,
+      "start_line": 72,
+      "title": "scripts/smoke_wheel.py#L72"
+    },
+    {
+      "annotation_level": "warning",
+      "end_line": 73,
+      "message": "Use of assert detected. The enclosed code will be removed when compiling to optimised byte code.",
+      "path": "scripts/smoke_wheel.py",
+      "raw_details": null,
+      "start_line": 73,
+      "title": "scripts/smoke_wheel.py#L73"
+    },
+    {
+      "annotation_level": "warning",
+      "end_line": 82,
+      "message": "Use of assert detected. The enclosed code will be removed when compiling to optimised byte code.",
+      "path": "scripts/smoke_wheel.py",
+      "raw_details": null,
+      "start_line": 82,
+      "title": "scripts/smoke_wheel.py#L82"
+    },
+    {
+      "annotation_level": "warning",
+      "end_line": 99,
+      "message": "Use of assert detected. The enclosed code will be removed when compiling to optimised byte code.",
+      "path": "scripts/smoke_wheel.py",
+      "raw_details": null,
+      "start_line": 99,
+      "title": "scripts/smoke_wheel.py#L99"
+    }
+  ]
+}

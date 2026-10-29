@@ -9,8 +9,6 @@ from types import MappingProxyType
 from typing import Any, Literal, Union
 from uuid import uuid4
 
-from typing_extensions import TypeAlias
-
 from calc_flow import _native
 from calc_flow._compat import StrEnum, dataclass
 from calc_flow.asof_join_spec import AsofJoinSide, AsofJoinSpec
@@ -37,7 +35,7 @@ from calc_flow.join_spec import (
 )
 from calc_flow.store import _copy_json_value, _run_blocking
 
-JSONValue: TypeAlias = Union[
+JSONValue = Union[
     None, bool, int, float, str, list["JSONValue"], dict[str, "JSONValue"]
 ]
 UdfReference = tuple[str, str, str]
@@ -193,7 +191,7 @@ class Runtime:
         self, select: Sequence[str], filter_sql: str | None, schema: Any, /
     ) -> Any:
         """Cache native planning metadata independently of owning stream plans."""
-        key = (tuple(select), filter_sql, schema.serialize().to_pybytes())
+        key = (tuple(select), filter_sql, _canonical_schema(schema))
         with self._registration_lock:
             cached = self._symbolic_schema_cache.get(key)
             if cached is not None:
@@ -214,7 +212,7 @@ class Runtime:
         key = (
             "sql",
             query,
-            tuple((name, schema.serialize().to_pybytes()) for name, schema in ordered),
+            tuple((name, _canonical_schema(schema)) for name, schema in ordered),
         )
         with self._registration_lock:
             cached = self._symbolic_schema_cache.get(key)
@@ -1317,3 +1315,7 @@ def project_json_schema() -> str:
 
 def validate_project_json(project_json: str) -> str:
     return _native.validate_project_json(project_json)
+
+
+def _canonical_schema(schema: object) -> str:
+    return _native._schema_key(schema)

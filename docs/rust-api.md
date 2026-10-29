@@ -840,3 +840,22 @@ nor the panic message.
 `RunContext::deadline()` returns the optional absolute UTC deadline by
 reference, allowing providers to observe the authoritative run context without
 duplicating it.
+
+### Portable field conversion
+
+`ArrowFieldSpec::to_arrow` and `ArrowFieldSpec::from_arrow` share the project
+schema spelling with protocol adapters. They reject unsupported types and
+preserve name, type and nullability; portable declarations omit Arrow metadata.
+
+```rust
+use calc_flow::ArrowFieldSpec;
+
+let spec = ArrowFieldSpec {
+    name: "price".into(),
+    data_type: "float64".into(),
+    nullable: false,
+};
+let field = spec.to_arrow()?;
+assert_eq!(ArrowFieldSpec::from_arrow(&field)?, spec);
+# Ok::<(), calc_flow::CalcFlowError>(())
+```

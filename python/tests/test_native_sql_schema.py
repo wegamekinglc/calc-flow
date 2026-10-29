@@ -21,7 +21,7 @@ def test_native_sql_schema_matches_named_join_and_nullable_aggregate():
         "SELECT SUM(value) AS total, COUNT(*) AS count FROM net"
     )
     schemas = MappingProxyType({name: table.schema for name, table in tables.items()})
-    planned = runtime._inner._infer_sql_schema(query, schemas)
+    planned = pa.schema(runtime._inner._infer_sql_schema(query, schemas))
     actual = (
         PipelineBuilder("schema-parity")
         .sql("query", query, aliases=tuple(tables))
@@ -84,8 +84,8 @@ def test_native_sql_schema_preserves_metadata_without_mutating_input():
         [pa.field("x", pa.int64(), nullable=False, metadata={"unit": "USD"})],
         metadata={"origin": "caller"},
     )
-    output = Runtime()._inner._infer_sql_schema(
-        "SELECT x FROM input", {"input": schema}
+    output = pa.schema(
+        Runtime()._inner._infer_sql_schema("SELECT x FROM input", {"input": schema})
     )
     assert output.equals(schema, check_metadata=True)
     assert schema.metadata == {b"origin": b"caller"}
@@ -111,8 +111,10 @@ def test_native_sql_schema_is_available_inside_event_loop_without_selecting_call
 
     async def plan():
         schemas = {"input": pa.schema([pa.field("x", pa.int64(), nullable=False)])}
-        result = runtime._inner._infer_sql_schema(
-            "SELECT x + 1 AS value FROM input", schemas
+        result = pa.schema(
+            runtime._inner._infer_sql_schema(
+                "SELECT x + 1 AS value FROM input", schemas
+            )
         )
         assert result == pa.schema([pa.field("value", pa.int64(), nullable=False)])
         with pytest.raises(ExecutionError, match="forbidden"):

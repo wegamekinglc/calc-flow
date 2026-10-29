@@ -267,6 +267,16 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIn("      - package", compatibility)
         self.assertIn("actions/download-artifact@", compatibility)
         self.assertNotIn("maturin build", compatibility)
+        self.assertIn('"${wheels[0]}[pyarrow]" pytest numpy', compatibility)
+        self.assertLess(
+            compatibility.index("target/compat-core/bin/python scripts/smoke_wheel.py"),
+            compatibility.index('"${wheels[0]}[pyarrow]" pytest numpy'),
+        )
+        self.assertIn("uv venv target/compat-core --python python", compatibility)
+        self.assertIn(
+            'uv pip install --python target/compat-core/bin/python "${wheels[0]}"',
+            compatibility,
+        )
 
     def test_pr_ci_has_a_macos_core_smoke_job(self) -> None:
         workflow = (ROOT / ".github/workflows/ci-macos.yml").read_text(encoding="utf-8")
@@ -767,11 +777,15 @@ class ReleaseConfigTests(unittest.TestCase):
         core = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         self.assertIn(
             "pyarrow>=21.0.0,<22; python_version < '3.10'",
-            core["project"]["dependencies"],
+            core["project"]["optional-dependencies"]["pyarrow"],
         )
         self.assertIn(
             "pyarrow>=24.0.0,<25; python_version >= '3.10'",
-            core["project"]["dependencies"],
+            core["project"]["optional-dependencies"]["pyarrow"],
+        )
+
+        self.assertFalse(
+            any("pyarrow" in dep for dep in core["project"]["dependencies"])
         )
 
     def test_final_release_error_docs_do_not_claim_alpha_status(self) -> None:

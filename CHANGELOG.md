@@ -9,6 +9,12 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-29: Make Python PyArrow optional for the core wheel. Add finite Arrow
+  protocol import/export and explicit native Batch results across compute,
+  collection and streaming, retaining default PyArrow results and unsafe-version
+  guards. Plan schemas and validate streams natively; bridge matrix buffers
+  without a Python PyArrow dependency. Preserve input snapshots and state identity.
+
 - 2026-10-29: Reuse Python declaration preparation before repeated batch or
   stream compilation, with registration-scoped invalidation and independently
   owned stream plans. Convenience collection still creates a fresh native plan.

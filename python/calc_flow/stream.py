@@ -8,10 +8,12 @@ import tempfile
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import fields, replace
 from types import TracebackType
-from typing import Any, Generic, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
-import pyarrow as pa
+if TYPE_CHECKING:
+    import pyarrow as pa
 
+from calc_flow._arrow import OutputFormat, TableResult, _validate_output_format
 from calc_flow._compat import dataclass
 from calc_flow._native import Batch, StreamingRuntimeError
 from calc_flow._stream_inputs import (
@@ -50,11 +52,18 @@ from calc_flow.symbolic.program import Program, _node_name, _selected_runtime
 
 
 @dataclass(frozen=True, slots=True)
-class StreamOutput:
+class StreamOutput(Generic[TableResult]):
     """One logically named output; independent outputs need not arrive together."""
 
     name: str
-    table: pa.Table
+    table: TableResult
+
+
+@dataclass(frozen=True, slots=True)
+class _StreamOptions:
+    runtime: Runtime | None
+    config: StreamRuntimeConfig | None
+    watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +73,7 @@ class _StreamRequest:
     runtime: Runtime | None
     config: StreamRuntimeConfig | None
     watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None
+    output_format: OutputFormat
 
 
 class _QueueSink:
@@ -72,16 +82,23 @@ class _QueueSink:
         name: str,
         queue: asyncio.Queue[StreamOutput],
         ready: asyncio.Event,
+        output_format: OutputFormat,
     ) -> None:
         self._name = name
         self._queue = queue
         self._ready = ready
+        self._output_format = output_format
 
     async def open(self) -> None:
         pass
 
     async def write(self, batch: Batch) -> None:
-        await self._queue.put(StreamOutput(self._name, batch.to_pyarrow()))
+        await self._queue.put(
+            StreamOutput(
+                self._name,
+                batch if self._output_format == "batch" else batch.to_pyarrow(),
+            )
+        )
         self._ready.set()
 
     async def close(self) -> None:
@@ -254,7 +271,10 @@ class StreamResults(Generic[T]):
         for name, _ in self._request.program.outputs:
             sinks.setdefault(outputs[name][0], []).append(
                 SinkBinding.ordinary(
-                    outputs[name][1], _QueueSink(name, self._queue, self._ready)
+                    outputs[name][1],
+                    _QueueSink(
+                        name, self._queue, self._ready, self._request.output_format
+                    ),
                 )
             )
         checkpoints = None
@@ -427,15 +447,20 @@ class StreamResults(Generic[T]):
 def _stream_program(
     program: Program,
     inputs: Mapping[str, StreamInput | TableData],
-    runtime: Runtime | None,
-    config: StreamRuntimeConfig | None,
-    watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None,
+    options: _StreamOptions,
+    output_format: OutputFormat = "pyarrow",
 ) -> StreamResults[StreamOutput]:
+    _validate_output_format(output_format)
     if not isinstance(inputs, Mapping):
         raise TypeError("stream.inputs: expected a mapping by declared input name")
     return StreamResults(
         _StreamRequest(
-            program, dict(inputs), runtime, config, _capture_watermarks(watermarks)
+            program,
+            dict(inputs),
+            options.runtime,
+            options.config,
+            _capture_watermarks(options.watermarks),
+            output_format,
         ),
         table_output=False,
     )
@@ -444,17 +469,22 @@ def _stream_program(
 def _stream_table(
     table: TableExpr,
     inputs: StreamInput | Mapping[str, StreamInput | TableData],
-    runtime: Runtime | None,
-    config: StreamRuntimeConfig | None,
-    watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None,
-) -> StreamResults[pa.Table]:
+    options: _StreamOptions,
+    output_format: OutputFormat = "pyarrow",
+) -> StreamResults[pa.Table | Batch]:
+    _validate_output_format(output_format)
     program = Program("stream", engine="streaming", outputs={"result": table})
     mapped = _as_input_mapping(
         program, inputs, "stream: multiple or static inputs require a name mapping"
     )
     return StreamResults(
         _StreamRequest(
-            program, dict(mapped), runtime, config, _capture_watermarks(watermarks)
+            program,
+            dict(mapped),
+            options.runtime,
+            options.config,
+            _capture_watermarks(options.watermarks),
+            output_format,
         ),
         table_output=True,
     )

@@ -355,7 +355,7 @@ def test_private_native_schema_projection_preserves_arrow_metadata():
         ],
         metadata={"origin": "declared"},
     )
-    planned = runtime._inner._infer_expression_schema(["x"], None, schema)
+    planned = pa.schema(runtime._inner._infer_expression_schema(["x"], None, schema))
     assert planned.equals(
         pa.schema([schema.field("x")], metadata=schema.metadata), check_metadata=True
     )

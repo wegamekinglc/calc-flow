@@ -7,7 +7,6 @@ from dataclasses import FrozenInstanceError, fields, replace
 
 import pyarrow as pa
 import pytest
-from typing_extensions import TypeAliasType
 
 from calc_flow import Field, ReplayPositioning, _compat, table_input
 from calc_flow.runtime import WatermarkPolicy
@@ -63,7 +62,10 @@ def test_python39_compatibility_paths_keep_dataclass_enum_and_zip_behavior(
         patch.setattr(sys, "version_info", (3, 9, 0))
         spec.loader.exec_module(legacy)
 
-    assert legacy.TypeAliasType is TypeAliasType
+    from typing import Literal
+
+    alias = legacy.TypeAliasType("ModeAlias", Literal["batch", "stream"])
+    assert alias == Literal["batch", "stream"]
 
     class Mode(legacy.StrEnum):
         LIVE = "live"

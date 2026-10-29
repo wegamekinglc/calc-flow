@@ -54,13 +54,13 @@ fn validate_owned_numpy_shape(shape: &[usize]) -> Result<(), &'static str> {
 }
 
 #[pyclass(name = "_OwnedArrayToken", frozen, module = "calc_flow._native")]
-struct OwnedArrayToken {
+pub(crate) struct OwnedArrayToken {
     object: RwLock<Option<Py<PyAny>>>,
     consumed: AtomicBool,
 }
 
 impl OwnedArrayToken {
-    fn consume(&self, object: &Bound<'_, PyAny>) -> PyResult<()> {
+    pub(crate) fn consume(&self, object: &Bound<'_, PyAny>) -> PyResult<()> {
         let mut expected = self.object.write();
         let Some(expected_object) = expected.as_ref() else {
             return Err(PyValueError::new_err(
@@ -342,16 +342,21 @@ impl PyBatch {
         table: &Bound<'_, PyAny>,
         metadata: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
-        if !table.hasattr(intern!(py, "__arrow_c_stream__"))? {
-            return Err(PyTypeError::new_err(
-                "table must implement the Arrow C stream interface",
-            ));
-        }
-        let table = table.extract::<PyTable>()?;
-        let (mut batches, schema) = table.into_inner();
-        if batches.is_empty() {
-            batches.push(RecordBatch::new_empty(schema));
-        }
+        let batches = crate::arrow::import_stream_table(table)?;
+        let metadata = metadata_from_python(py, metadata)?;
+        let inner = calc_flow::Batch::table(batches, metadata).map_err(crate::error::to_py_err)?;
+        Ok(Self::from_inner(inner))
+    }
+
+    /// Import a finite CPU Arrow table or struct record batch through `PyCapsules`.
+    #[staticmethod]
+    #[pyo3(signature = (table, metadata=None))]
+    fn from_arrow(
+        py: Python<'_>,
+        table: &Bound<'_, PyAny>,
+        metadata: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        let batches = crate::arrow::import_table(table, None)?;
         let metadata = metadata_from_python(py, metadata)?;
         let inner = calc_flow::Batch::table(batches, metadata).map_err(crate::error::to_py_err)?;
         Ok(Self::from_inner(inner))
@@ -409,7 +414,179 @@ impl PyBatch {
         let table = inner
             .table_payload()
             .map_err(|_| PyTypeError::new_err("array batches do not contain a PyArrow table"))?;
-        PyTable::try_new(table.batches().to_vec(), table.schema().clone())?.into_pyarrow(py)
+        let module = crate::arrow::require_pyarrow(py)?;
+        let table = PyTable::try_new(table.batches().to_vec(), table.schema().clone())?;
+        module
+            .getattr(intern!(py, "table"))?
+            .call1((table.into_pyobject(py)?,))
+    }
+
+    /// Export a fresh, independently owned Arrow stream capsule on every call.
+    #[pyo3(signature = (requested_schema=None))]
+    fn __arrow_c_stream__<'py>(
+        &self,
+        py: Python<'py>,
+        requested_schema: Option<Bound<'py, pyo3::types::PyCapsule>>,
+    ) -> PyResult<Bound<'py, pyo3::types::PyCapsule>> {
+        let inner = self.clone_inner()?;
+        crate::arrow::export_stream(py, &inner, requested_schema)
+    }
+
+    #[getter]
+    fn _schema(&self) -> PyResult<crate::arrow::ArrowSchema> {
+        let inner = self.clone_inner()?;
+        Ok(crate::arrow::ArrowSchema(
+            inner
+                .table_payload()
+                .map_err(crate::error::to_py_err)?
+                .schema()
+                .clone(),
+        ))
+    }
+
+    #[getter]
+    fn _nbytes(&self) -> PyResult<usize> {
+        self.clone_inner()?
+            .estimated_bytes()
+            .map_err(crate::error::to_py_err)
+    }
+
+    fn _without_schema_metadata(slf: PyRef<'_, Self>, py: Python<'_>) -> PyResult<Py<Self>> {
+        use datafusion::arrow::{datatypes::Schema, record_batch::RecordBatchOptions};
+        let inner = slf.clone_inner()?;
+        let table = inner.table_payload().map_err(crate::error::to_py_err)?;
+        if table.schema().metadata().is_empty()
+            && table
+                .schema()
+                .fields()
+                .iter()
+                .all(|f| f.metadata().is_empty())
+        {
+            return Ok(slf.into_pyobject(py)?.unbind());
+        }
+        let fields = table
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| {
+                f.as_ref()
+                    .clone()
+                    .with_metadata(std::collections::HashMap::new())
+            })
+            .collect::<Vec<_>>();
+        let schema = Arc::new(Schema::new(fields));
+        let records = table
+            .batches()
+            .iter()
+            .map(|b| {
+                RecordBatch::try_new_with_options(
+                    schema.clone(),
+                    b.columns().to_vec(),
+                    &RecordBatchOptions::new().with_row_count(Some(b.num_rows())),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let normalized = calc_flow::Batch::table(records, inner.metadata().clone())
+            .map_err(crate::error::to_py_err)?;
+        Py::new(py, Self::from_inner(normalized))
+    }
+
+    fn _with_metadata(&self, py: Python<'_>, metadata: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let inner = self.clone_inner()?;
+        let table = inner.table_payload().map_err(crate::error::to_py_err)?;
+        calc_flow::Batch::table(
+            table.batches().to_vec(),
+            metadata_from_python(py, Some(metadata))?,
+        )
+        .map(Self::from_inner)
+        .map_err(crate::error::to_py_err)
+    }
+
+    #[pyo3(signature = (column, last=None))]
+    fn _validate_event_time(&self, column: &str, last: Option<i64>) -> PyResult<Option<i64>> {
+        crate::arrow::validate_time(&self.clone_inner()?, column, last)
+    }
+
+    fn _column_info(&self, name: &str) -> PyResult<(String, usize)> {
+        let inner = self.clone_inner()?;
+        let table = inner.table_payload().map_err(crate::error::to_py_err)?;
+        let index = crate::arrow::column_index(table.schema(), name)?;
+        let field = &table.schema().fields()[index];
+        let dtype = if field.data_type() == &datafusion::arrow::datatypes::DataType::Float16 {
+            "float16".into()
+        } else {
+            calc_flow::ArrowFieldSpec::from_arrow(field)
+                .map_or_else(|_| field.data_type().to_string(), |s| s.data_type)
+        };
+        Ok((
+            dtype,
+            table
+                .batches()
+                .iter()
+                .map(|r| r.column(index).null_count())
+                .sum(),
+        ))
+    }
+
+    fn _table_matrix(
+        &self,
+        py: Python<'_>,
+        columns: Vec<String>,
+        dtype: &str,
+    ) -> PyResult<Py<PyAny>> {
+        crate::arrow::table_matrix(py, &self.clone_inner()?, columns, dtype)
+    }
+
+    fn _append_numpy(&self, names: Vec<String>, arrays: Vec<Bound<'_, PyAny>>) -> PyResult<Self> {
+        use datafusion::arrow::{
+            datatypes::{Field, Schema},
+            record_batch::RecordBatchOptions,
+        };
+        if names.len() != arrays.len() {
+            return Err(PyValueError::new_err(
+                "array column names and values differ",
+            ));
+        }
+        let inner = self.clone_inner()?;
+        let table = inner.table_payload().map_err(crate::error::to_py_err)?;
+        let arrays = arrays
+            .into_iter()
+            .map(|array| crate::arrow::numpy_array(&array))
+            .collect::<PyResult<Vec<_>>>()?;
+        if arrays.iter().any(|a| a.len() != inner.num_rows()) {
+            return Err(PyValueError::new_err("array column row count differs"));
+        }
+        let mut fields = table.schema().fields().to_vec();
+        fields.extend(
+            names
+                .into_iter()
+                .zip(&arrays)
+                .map(|(name, a)| Arc::new(Field::new(name, a.data_type().clone(), true))),
+        );
+        let schema = Arc::new(Schema::new_with_metadata(
+            fields,
+            table.schema().metadata().clone(),
+        ));
+        let mut offset = 0;
+        let records = table
+            .batches()
+            .iter()
+            .map(|r| {
+                let mut columns = r.columns().to_vec();
+                columns.extend(arrays.iter().map(|a| a.slice(offset, r.num_rows())));
+                offset += r.num_rows();
+                RecordBatch::try_new_with_options(
+                    schema.clone(),
+                    columns,
+                    &RecordBatchOptions::new().with_row_count(Some(r.num_rows())),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        calc_flow::Batch::table(records, inner.metadata().clone())
+            .map(Self::from_inner)
+            .map_err(crate::error::to_py_err)
     }
 
     #[getter]

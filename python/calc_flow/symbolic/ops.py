@@ -8,10 +8,9 @@ wrongly typed expression.
 from __future__ import annotations
 
 import math
+import sys
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Literal
-
-from typing_extensions import Unpack
 
 from calc_flow.symbolic.domains import (
     is_strict_scalar_type,
@@ -50,6 +49,9 @@ from calc_flow.symbolic.windows import (
     RowFrame,
     WindowAggregate,
 )
+
+if sys.version_info >= (3, 11):
+    from typing import Unpack
 
 if TYPE_CHECKING:
     from datetime import timedelta

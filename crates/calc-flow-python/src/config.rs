@@ -741,7 +741,9 @@ impl PyRuntime {
                     .block_on(expression.infer_stream_schema(schema))
             })
             .map_err(crate::error::to_py_err)?;
-        pyo3_arrow::PySchema::new(schema).into_pyarrow(py)
+        Ok(crate::arrow::ArrowSchema(schema)
+            .into_pyobject(py)?
+            .into_any())
     }
 
     fn _infer_sql_schema<'py>(
@@ -763,7 +765,9 @@ impl PyRuntime {
         let schema = py
             .detach(|| runtime.tokio.block_on(operator.infer_schema(&schemas)))
             .map_err(crate::error::to_py_err)?;
-        pyo3_arrow::PySchema::new(schema).into_pyarrow(py)
+        Ok(crate::arrow::ArrowSchema(schema)
+            .into_pyobject(py)?
+            .into_any())
     }
 
     #[allow(

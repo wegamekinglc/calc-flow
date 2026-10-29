@@ -1,0 +1,25 @@
+{
+  "source_digest": "5c569dec138cd945a391debd9bc4501e7c6422bb953e5dc94f402ca24747b21c",
+  "expression_digest": "0c8bde5b438c100499d05155e2ffcb99ad8dcb24589d4e5c0e024367bb6436dc",
+  "program_fingerprint": "4eaef3dcb90147db051023d70bb22b509898732fa9f1b863e21df3a439480956",
+  "stream_fingerprint": "bb42d852bb779b6fd4ac3938c5a501caede7d12f2dedb6bcd90c613d5d35b314",
+  "scores": [
+    8.0
+  ],
+  "resumed_offset": 0,
+  "manifests": [
+    {
+      "path": "manifests/manifest-00000000000000000001.json",
+      "static_inputs": {
+        "weights": {
+          "digest_version": "calc_flow.static_input.digest.v1",
+          "sha256": "152300cb3d524fee22955853431dc26f66dce87a9d60c53ea20d14fc54b81f4a"
+        }
+      },
+      "format_version": 3,
+      "fingerprint": "bb42d852bb779b6fd4ac3938c5a501caede7d12f2dedb6bcd90c613d5d35b314"
+    }
+  ],
+  "source_lineage": "events",
+  "expression_lineage": "events"
+}
