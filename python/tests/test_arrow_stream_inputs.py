@@ -27,6 +27,73 @@ def test_arrow_source_binding_streams_bounded_materialized_input() -> None:
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("named", [False, True], ids=["table", "program"])
+@pytest.mark.parametrize("snapshot", [False, True], ids=["append", "snapshot"])
+@pytest.mark.parametrize("kind", ["reader", "producer", "batch"])
+def test_materialized_stream_imports_single_use_arrow_input_once(named, snapshot, kind):
+    schema = pa.schema(
+        [pa.field("a", pa.int64(), metadata={b"unit": b"count"})],
+        metadata={b"origin": b"caller"},
+    )
+    data = pa.table({"a": [1, 2]}, schema=schema)
+    reader = data.to_reader()
+
+    class Producer:
+        def __init__(self):
+            self.exports = 0
+
+        def __arrow_c_stream__(self, requested_schema=None):
+            self.exports += 1
+            if self.exports != 1:
+                raise AssertionError("single-use producer was imported again")
+            return reader.__arrow_c_stream__(requested_schema)
+
+    producer = Producer()
+    bound = (
+        cf.Batch.from_pyarrow(data, metadata={"caller": [1, 2]})
+        if kind == "batch"
+        else producer
+        if kind == "producer"
+        else reader
+    )
+    source = cf.table_input("events", schema=schema)
+    output = (
+        cf.snapshot_sql("SELECT SUM(a) AS total FROM p", p=source)
+        if snapshot
+        else source.select(value=source["a"] + 1)
+    )
+    owner = (
+        cf.Program("single-use", engine="streaming", outputs={"result": output})
+        if named
+        else output
+    )
+
+    async def run():
+        before = asyncio.all_tasks()
+        async with owner.stream(
+            {"events": bound} if named else bound,
+            output_format="batch",
+            config=cf.StreamRuntimeConfig(checkpointing=False),
+        ) as results:
+            values = [
+                (part.table if named else part).to_pyarrow().to_pydict()
+                async for part in results
+            ]
+        assert results.job.status()["task_count"] == 0
+        assert asyncio.all_tasks() == before
+        return values
+
+    expected = [{"total": [3]}] if snapshot else [{"value": [2, 3]}]
+    assert asyncio.run(run()) == expected
+    assert data.to_pydict() == {"a": [1, 2]}
+    assert data.schema.equals(schema, check_metadata=True)
+    if kind == "producer":
+        assert producer.exports == 1
+    if kind == "batch":
+        assert bound.metadata == {"caller": [1, 2]}
+        assert bound.to_pyarrow().schema.equals(schema, check_metadata=True)
+
+
 @pytest.mark.parametrize("named", [False, True])
 @pytest.mark.parametrize("kind", ["chunks", "slice", "record", "empty"])
 def test_materialized_stream_matches_iterable_without_python_source_calls(

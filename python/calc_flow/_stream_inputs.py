@@ -248,16 +248,16 @@ def _materialized_binding(
             raise ValueError(
                 f"{path}: materialized input cannot emit native watermarks"
             )
-        source = _IterableSource(_whole_table(data), config)
+        source = _IterableSource(_whole_table(table), config)
         source._validate_structure(table)
         return SourceBinding(source, watermark_policy=config.policy), source
     return _arrow_source_binding(
-        _table_batch(data, path),
+        _table_batch(table, path),
         config.budget,
         config.policy,
         config.ordered_column,
     ), None
 
 
-async def _whole_table(data: TableData) -> AsyncIterator[TableData]:
+async def _whole_table(data: Batch) -> AsyncIterator[Batch]:
     yield data
