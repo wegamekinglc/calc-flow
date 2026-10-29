@@ -267,6 +267,16 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIn("      - package", compatibility)
         self.assertIn("actions/download-artifact@", compatibility)
         self.assertNotIn("maturin build", compatibility)
+        self.assertIn('"${wheels[0]}[pyarrow]" pytest numpy', compatibility)
+        self.assertLess(
+            compatibility.index("target/compat-core/bin/python scripts/smoke_wheel.py"),
+            compatibility.index('"${wheels[0]}[pyarrow]" pytest numpy'),
+        )
+        self.assertIn("uv venv target/compat-core --python python", compatibility)
+        self.assertIn(
+            'uv pip install --python target/compat-core/bin/python "${wheels[0]}"',
+            compatibility,
+        )
 
     def test_pr_ci_has_a_macos_core_smoke_job(self) -> None:
         workflow = (ROOT / ".github/workflows/ci-macos.yml").read_text(encoding="utf-8")

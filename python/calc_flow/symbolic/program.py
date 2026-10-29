@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Awaitable, Mapping, Sequence
-from typing import TYPE_CHECKING, Literal, cast, overload
+from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
 from calc_flow._compat import dataclass
 from calc_flow.symbolic.domains import type_name
@@ -48,6 +48,15 @@ _STREAM_ONLY_OPS = frozenset(
         "late_rows",
     }
 )
+
+
+def _execution_keywords(
+    keywords: Mapping[str, Any], excluded: tuple[str, ...], engine: str
+) -> dict[str, Any]:
+    for name in excluded:
+        if keywords.get(name) is not None:
+            raise ValueError(f"execute.{name} is available for the {engine} engine")
+    return {name: value for name, value in keywords.items() if name not in excluded}
 
 
 def _validate_engine_node(
@@ -474,12 +483,7 @@ class Program:
         self,
         inputs: Mapping[str, StreamInput | TableData],
         /,
-        *,
-        runtime: Runtime | None = None,
-        options: ExecutionOptions | None = None,
-        output_format: OutputFormat = "pyarrow",
-        config: StreamRuntimeConfig | None = None,
-        watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None = None,
+        **keywords: Any,
     ) -> dict[str, pa.Table | Batch] | StreamResults[StreamOutput]:
         """Execute through the selected engine.
 
@@ -488,27 +492,14 @@ class Program:
         """
 
         if self._engine == "sql":
-            if config is not None:
-                raise ValueError("execute.config is available for the streaming engine")
-            if watermarks is not None:
-                raise ValueError(
-                    "execute.watermarks is available for the streaming engine"
-                )
             return self.collect(
                 cast("Mapping[str, TableData]", inputs),
-                runtime=runtime,
-                options=options,
-                output_format=output_format,
+                **_execution_keywords(keywords, ("config", "watermarks"), "streaming"),
             )
         if self._engine == "streaming":
-            if options is not None:
-                raise ValueError("execute.options is available for the sql engine")
             return self.stream(
                 inputs,
-                runtime=runtime,
-                config=config,
-                watermarks=watermarks,
-                output_format=output_format,
+                **_execution_keywords(keywords, ("options",), "sql"),
             )
         raise RuntimeError(f"Program has unsupported engine {self._engine!r}")
 
@@ -565,9 +556,11 @@ class Program:
         iterable-provided watermarks without changing SourceBinding policies.
         """
         self._require_engine("streaming")
-        from calc_flow.stream import _stream_program
+        from calc_flow.stream import _stream_program, _StreamOptions
 
-        return _stream_program(self, inputs, runtime, config, watermarks, output_format)
+        return _stream_program(
+            self, inputs, _StreamOptions(runtime, config, watermarks), output_format
+        )
 
     def output(self, name: str, value: TableExpr | ArrayExpr, /) -> Program:
         """Return a new program with one declared output appended."""

@@ -468,10 +468,12 @@ jobs:
           path: target/compat-wheel
       - name: Verify installed compatibility wheel
         run: |
-          uv pip install --system \
-            target/compat-wheel/calc_flow_python-*-${{ steps.wheel.outputs.tag }}-abi3-*.whl \
-            pytest numpy
-          python scripts/smoke_wheel.py
+          wheels=(target/compat-wheel/calc_flow_python-*-${{ steps.wheel.outputs.tag }}-abi3-*.whl)
+          test "${#wheels[@]}" -eq 1
+          uv venv target/compat-core --python python
+          uv pip install --python target/compat-core/bin/python "${wheels[0]}"
+          target/compat-core/bin/python scripts/smoke_wheel.py
+          uv pip install --system "${wheels[0]}[pyarrow]" pytest numpy
           python -m pytest -q \
             python/tests/test_import.py \
             python/tests/test_python_version_contract.py \

@@ -551,9 +551,11 @@ class TableExpr(Expr[object]):
         or iterable-provided watermarks. Supplied SourceBinding policies stay owned
         by their bindings.
         """
-        from calc_flow.stream import _stream_table
+        from calc_flow.stream import _stream_table, _StreamOptions
 
-        return _stream_table(self, inputs, runtime, config, watermarks, output_format)
+        return _stream_table(
+            self, inputs, _StreamOptions(runtime, config, watermarks), output_format
+        )
 
     @overload
     def collect(

@@ -214,12 +214,17 @@ class ProjectDocument:
         value: object,
         *,
         strict: bool | None = None,
-        extra: str | None = None,
         context: Any | None = None,
         by_alias: bool | None = None,
         by_name: bool | None = None,
+        **options: Any,
     ) -> ProjectDocument:
-        del strict, extra, context, by_alias, by_name
+        del strict, context, by_alias, by_name
+        unexpected = options.keys() - {"extra"}
+        if unexpected:
+            raise TypeError(
+                f"unexpected project validation options: {sorted(unexpected)}"
+            )
         return cls(value.root if isinstance(value, cls) else value)
 
     @classmethod

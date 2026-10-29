@@ -306,6 +306,23 @@ def test_project_document_constructor_and_json_exports_keep_owned_data() -> None
         document.model_dump(mode="unsupported")
 
 
+def test_project_validation_keywords_keep_native_strictness() -> None:
+    project = _minimal_project()
+    document = ProjectDocument.model_validate(
+        project,
+        strict=True,
+        context={"caller": "test"},
+        by_alias=True,
+        by_name=True,
+        extra="ignore",
+    )
+    assert document == ProjectDocument.model_validate(project)
+    with pytest.raises(ProjectValidationError):
+        ProjectDocument.model_validate({**project, "unknown": True}, extra="ignore")
+    with pytest.raises(TypeError, match="unexpected project validation options"):
+        ProjectDocument.model_validate(project, unknown=True)
+
+
 def test_project_validation_error_returns_independent_issue_records() -> None:
     with pytest.raises(ProjectValidationError) as caught:
         ProjectDocument.model_validate({"format_version": 999})

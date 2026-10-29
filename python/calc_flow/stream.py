@@ -60,6 +60,13 @@ class StreamOutput(Generic[TableResult]):
 
 
 @dataclass(frozen=True, slots=True)
+class _StreamOptions:
+    runtime: Runtime | None
+    config: StreamRuntimeConfig | None
+    watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None
+
+
+@dataclass(frozen=True, slots=True)
 class _StreamRequest:
     program: Program
     inputs: dict[str, StreamInput | TableData]
@@ -440,9 +447,7 @@ class StreamResults(Generic[T]):
 def _stream_program(
     program: Program,
     inputs: Mapping[str, StreamInput | TableData],
-    runtime: Runtime | None,
-    config: StreamRuntimeConfig | None,
-    watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None,
+    options: _StreamOptions,
     output_format: OutputFormat = "pyarrow",
 ) -> StreamResults[StreamOutput]:
     _validate_output_format(output_format)
@@ -452,9 +457,9 @@ def _stream_program(
         _StreamRequest(
             program,
             dict(inputs),
-            runtime,
-            config,
-            _capture_watermarks(watermarks),
+            options.runtime,
+            options.config,
+            _capture_watermarks(options.watermarks),
             output_format,
         ),
         table_output=False,
@@ -464,9 +469,7 @@ def _stream_program(
 def _stream_table(
     table: TableExpr,
     inputs: StreamInput | Mapping[str, StreamInput | TableData],
-    runtime: Runtime | None,
-    config: StreamRuntimeConfig | None,
-    watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None,
+    options: _StreamOptions,
     output_format: OutputFormat = "pyarrow",
 ) -> StreamResults[pa.Table | Batch]:
     _validate_output_format(output_format)
@@ -478,9 +481,9 @@ def _stream_table(
         _StreamRequest(
             program,
             dict(mapped),
-            runtime,
-            config,
-            _capture_watermarks(watermarks),
+            options.runtime,
+            options.config,
+            _capture_watermarks(options.watermarks),
             output_format,
         ),
         table_output=True,
