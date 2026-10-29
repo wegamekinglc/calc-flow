@@ -1,14 +1,20 @@
 # DAL-417：Arrow/IPC 重测、benchmark 计时审计与优先级更新
 
-> 接续说明：本文保留首阶段数字与当时的构建状态。真实 Arroyo Arrow/Batch 运行、窗口
-> 对齐探针及新五对比较已在[补测报告](ARROYO-RESULTS.md)交付，不与本文样本混合统计。
+> **当前结论：Arroyo 在最新 Arrow 转换对照中更快，整表吞吐为 CF streaming 的约
+> 1.36 倍，64×512 行小批约 8.82 倍。** [一页摘要](README.md)置顶列出绝对吞吐、
+> 引擎身份和两种计时范围，保留原端到端吞吐表；[完整对照证据](ARROYO-RESULTS.md)
+> 包含真实运行和窗口语义探针。窗口尚无新口径成对吞吐结论。
+>
+> **下文为首阶段历史记录。** 当时的 release 构建及 Arrow 运行缺口已由
+> [成功构建与资源记录](ARROYO-RESULTS.md#版本构建与资源)补齐；本文数字和样本边界保留，
+> 不与后续成对样本混合统计。当前归因与优先级见[补测方案](ARROYO-RESULTS.md#更新归因与分阶段方案)。
 
-本轮取得了 **CF 两种引擎的 Arrow 核心 API/完整 IPC 往返结果，以及维护中 benchmark
-集合的逐组计时审计**。没有取得 Arroyo 同口径的可运行 release/窗口语义证据，因此没有
-新的 Arroyo/CF 纯计算倍数排名。#494/#510 的旧数字完整保留，只适用于原 JSON 集成出口，
+首阶段取得了 **CF 两种引擎的 Arrow 核心 API/完整 IPC 往返结果，以及维护中 benchmark
+集合的逐组计时审计**。首阶段当时未取得 Arroyo 同口径的可运行 release/窗口语义证据，
+因此本阶段没有新增 Arroyo/CF 排名。#494/#510 的旧数字完整保留，只适用于各自原计时边界，
 不再用其中的 JSON 编码热点指导核心产品优化。
 
-核心结论：小批 SQL 的声明准备/重复 DataFusion 规划、持续路径的批调度仍值得优先处理。
+首阶段结论：小批 SQL 的声明准备/重复 DataFusion 规划、持续路径的批调度仍值得优先处理。
 维护中的主矩阵未发现把逐行 JSON 出口计入核心 seconds 的证据；它通常计完整 API，
 包含正常的规划、包装、同步或生命周期成本。不能把所有 benchmark 都称为裸算子计算。
 完整逐组矩阵及具体修正建议见 [计时审计](BENCHMARK-AUDIT.md)。
@@ -123,7 +129,10 @@ max，是 invocation 完成时长而不是逐行延迟。未把短 burst/有限�
 核心算法、结果规范化和 parent observer 不一样的路径，必须按这些边界解释，不能从
 当前表推导 JSON→IPC 的因果加速：版本/形状/源与计时契约和 #510 旧 JSON 路径不同。
 
-## Arroyo：实际接口与构建尝试及缺口
+## 历史：Arroyo 首阶段接口、构建尝试及当时缺口
+
+以下记录首阶段状态。发布接口的格式限制仍适用于固定 v0.15.0，但基准适配后的真实
+Arrow 运行与窗口语义证据现已补齐，见[最新结果](ARROYO-RESULTS.md)。
 
 固定源码 `arroyo-rpc/src/formats.rs:360–408` 没有 Arrow/IPC 格式；真实 release CLI
 分别尝试 `arrow`、`arrow_ipc`、`ipc`，三次均 exit=1、明确 unknown format。
@@ -150,12 +159,12 @@ StreamReader 读取/按 schema cast 后送入 SourceCollector，由真实引擎�
    用 raw DataFusion 代替来交差。初段/中断的完整构建墙钟不全，不能虚报精确总和或
    已精确证明 900s 聚合构建预算；日志、已知时长和缺失项一并保留。
 
-因此，Arroyo 本轮没有 Arrow 实际输出或新速度数据。适配也尚未验证窗口的开放源
-watermark 轨迹；当前 file source 的 Final/EOF 不能冒充原窗口输出时机。缺口需要一个
-可运行的封存 release adapter 和语义/完整结果核验之后才能补排名。本报告不据此声称
-Arroyo 内部不能处理 Arrow，也不声称已完成对双方纯计算性能的比较。
+因此，Arroyo 在首阶段结束时没有 Arrow 实际输出或新速度数据，适配当时也未验证窗口的
+开放源 watermark 轨迹；当时 file source 的 Final/EOF 不能冒充原窗口输出时机。
+后续已完成封存 release adapter、真实图/完整结果核验及开放源窗口探针，并取得两组
+转换的成对数据；[最新结果](ARROYO-RESULTS.md)补齐这些缺口，仍不作窗口吞吐排名。
 
-## 新口径下的归因及分阶段优先级
+## 首阶段归因及分阶段优先级
 
 **P0：先修正性能指标的解释和剩余测试适配。** 位置为 `benchmarks/support.py`、
 `symbolic_support.py`、`scripts/benchmark_suite/report.py` 及 acceptance fixture export。
