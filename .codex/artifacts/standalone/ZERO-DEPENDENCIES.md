@@ -2,6 +2,8 @@ DAL-475 follow-up to PR #515: remove every required third-party Python package,
 including Pydantic and typing-extensions, as requested in the issue discussion.
 Subsequent single-use stream and Arrow entry repairs, with the latest build
 identity and directed results, are recorded in [REVIEW-REPAIRS.md](REVIEW-REPAIRS.md).
+The latest interpreter-threshold and abi3 follow-up is recorded in
+[EXPECTED-MAJOR.md](EXPECTED-MAJOR.md), with its own final build identities.
 
 ## Package and public compatibility
 
