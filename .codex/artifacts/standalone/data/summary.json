@@ -1,0 +1,240 @@
+{
+  "baseline_sha": "d9e2759fb31bfd0c915d31f0cc534665ece72ee9",
+  "candidate_sha": "5c2c35154100fb256c6d87844eb27df17697e823",
+  "native_hashes": {
+    "baseline": "1719a1a4351714cbf3a5adf3a4cb4e1560e39b94f6410c2250a893df987ed616",
+    "candidate": "4424f26739d2840424418cffe74ff13f17e7d8a740095d58023c053c851d65f3"
+  },
+  "sources": {
+    "baseline": "12a3cac28c1eb9f4f8aeaa53735a0567629efddbb49a62d9a334ef85f81f05e8",
+    "candidate": "aed4c2f38c865d1437a0e5692a7a11753239500184358729450c44122ce12a53"
+  },
+  "identity": {
+    "python": "3.13.9",
+    "platform": "Linux-5.15.167.4-microsoft-standard-WSL2-x86_64-with-glibc2.43",
+    "machine": "x86_64",
+    "cpu_model": "13th Gen Intel(R) Core(TM) i9-13900HX",
+    "affinity": [
+      0
+    ],
+    "versions": {
+      "pydantic": "2.14.1",
+      "annotated-types": "0.8.0",
+      "scipy": "1.18.1",
+      "maturin": "1.15.0",
+      "pydantic_core": "2.50.1",
+      "typing_extensions": "4.16.0",
+      "packaging": "26.3",
+      "numpy": "2.5.4",
+      "typing-inspection": "0.4.4",
+      "jax": "0.12.0.1",
+      "jaxlib": "0.12.0.1",
+      "pyarrow": "24.0.0",
+      "py-cpuinfo": "9.0.0",
+      "iniconfig": "2.3.1",
+      "psutil": "7.2.2",
+      "nanoarrow": "0.9.0",
+      "coverage": "7.17.0",
+      "ml_dtypes": "0.6.0",
+      "execnet": "2.1.2",
+      "Pygments": "2.21.0",
+      "py-cpuinfo2": "10.1.1",
+      "pytest": "9.2.0",
+      "calc-flow-python": "2026.10.27",
+      "pytest-benchmark": "5.3.0",
+      "pytest-xdist": "3.8.0",
+      "pluggy": "1.7.0",
+      "ruff": "0.16.0",
+      "opt_einsum": "3.4.0",
+      "pytest-cov": "7.1.0"
+    },
+    "threads": {
+      "TOKIO_WORKER_THREADS": "1",
+      "OPENBLAS_NUM_THREADS": "1",
+      "OMP_NUM_THREADS": "1",
+      "XLA_FLAGS": "--xla_cpu_multi_thread_eigen=false intra_op_parallelism_threads=1"
+    }
+  },
+  "harness_sha256": {
+    "worker.py": "292fe2b55aa0c6c2623962a738b94fb3362fc8ee69a82ed98e8d74d2e6e071be",
+    "measure.py": "87435f3fd84cb450fc044464fef05357887d387fda516acc462dc8a1fa65fcf4",
+    "array_support.py": "8899c389850ac600c1bf9c9310a28da56ed641505f3970c35f298747e0865aef",
+    "report.py": "3910e484b601db483d8eed5afc973d7b965164e1452edc71a144fa697455e1f2",
+    "statistics.py": "c84b6065a7c8ca0ee0d123377df3750c7fd82e2eb0f50443af33161117757bcd"
+  },
+  "elapsed_seconds": 177.23050152196083,
+  "budget_seconds": 600,
+  "summary": [
+    {
+      "id": "arrow",
+      "head_p50": 0.000177099,
+      "head_p95": 0.00020775980000000002,
+      "head_min": 0.000149916,
+      "head_max": 0.000212164,
+      "rows_per_second": null,
+      "samples": 20,
+      "base_p50": 0.00015522099999999998,
+      "change_percent": 14.094742335122202,
+      "round_changes": [
+        16.434728019649945,
+        9.556088271521435
+      ],
+      "round_min_changes": [
+        18.541654108143945,
+        17.94101218619946
+      ],
+      "round_intervals": [
+        {
+          "median": 16.434728019649945,
+          "low": 2.9116623492163374,
+          "high": 33.623422239990845,
+          "coverage": 0.978515625
+        },
+        {
+          "median": 9.556088271521435,
+          "low": -0.25828225084373324,
+          "high": 27.26966863043987,
+          "coverage": 0.978515625
+        }
+      ],
+      "verdict": "inconclusive"
+    },
+    {
+      "id": "compute",
+      "head_p50": 0.001989605,
+      "head_p95": 0.00213064975,
+      "head_min": 0.001853018,
+      "head_max": 0.002467211,
+      "rows_per_second": null,
+      "samples": 20,
+      "base_p50": 0.0020662145,
+      "change_percent": -3.707722504125288,
+      "round_changes": [
+        -6.0940426294762045,
+        -3.203350408861838
+      ],
+      "round_min_changes": [
+        -5.550006391222673,
+        -3.9149730959352813
+      ],
+      "round_intervals": [
+        {
+          "median": -6.0940426294762045,
+          "low": -26.105340466287775,
+          "high": 0.08824657337653807,
+          "coverage": 0.978515625
+        },
+        {
+          "median": -3.203350408861838,
+          "low": -23.993998504235492,
+          "high": 6.9783054791462185,
+          "coverage": 0.978515625
+        }
+      ],
+      "verdict": "inconclusive"
+    },
+    {
+      "id": "numpy",
+      "head_p50": 0.00041558899999999995,
+      "head_p95": 0.00053966945,
+      "head_min": 0.000350231,
+      "head_max": 0.000607432,
+      "rows_per_second": null,
+      "samples": 20,
+      "base_p50": 0.000460733,
+      "change_percent": -9.79829966596707,
+      "round_changes": [
+        -1.9423187294691782,
+        -4.1844479119304285
+      ],
+      "round_min_changes": [
+        1.2845984111698128,
+        -5.911209597310307
+      ],
+      "round_intervals": [
+        {
+          "median": -1.9423187294691782,
+          "low": -15.293408750753201,
+          "high": 8.5965257292691,
+          "coverage": 0.978515625
+        },
+        {
+          "median": -4.1844479119304285,
+          "low": -22.457093437227105,
+          "high": 2.9222383535824292,
+          "coverage": 0.978515625
+        }
+      ],
+      "verdict": "inconclusive"
+    },
+    {
+      "id": "cpu_matrix",
+      "head_p50": 0.0004924129999999999,
+      "head_p95": 0.0005899170000000001,
+      "head_min": 0.000422211,
+      "head_max": 0.000737756,
+      "rows_per_second": null,
+      "samples": 20,
+      "base_p50": 0.0005624594999999999,
+      "change_percent": -12.453607770870612,
+      "round_changes": [
+        -17.110848851353133,
+        -16.034819203865418
+      ],
+      "round_min_changes": [
+        -17.758111359905527,
+        -19.464573537686814
+      ],
+      "round_intervals": [
+        {
+          "median": -17.110848851353133,
+          "low": -28.349928196512696,
+          "high": -6.779679091161139,
+          "coverage": 0.978515625
+        },
+        {
+          "median": -16.034819203865418,
+          "low": -18.134365247415918,
+          "high": 1.594840662132091,
+          "coverage": 0.978515625
+        }
+      ],
+      "verdict": "no-confirmed-regression"
+    },
+    {
+      "id": "jax_matrix",
+      "head_p50": 0.0007814745000000001,
+      "head_p95": 0.0009772397,
+      "head_min": 0.000720689,
+      "head_max": 0.001084033,
+      "rows_per_second": null,
+      "samples": 20,
+      "base_p50": 0.0009183165,
+      "change_percent": -14.90139837408998,
+      "round_changes": [
+        -10.396924116181662,
+        -11.239046796171408
+      ],
+      "round_min_changes": [
+        -12.459246656180834,
+        -11.55779449482739
+      ],
+      "round_intervals": [
+        {
+          "median": -10.396924116181662,
+          "low": -15.661989244236507,
+          "high": 2.980456294214817,
+          "coverage": 0.978515625
+        },
+        {
+          "median": -11.239046796171408,
+          "low": -13.678989489390947,
+          "high": -8.17647918690938,
+          "coverage": 0.978515625
+        }
+      ],
+      "verdict": "no-confirmed-regression"
+    }
+  ],
+  "error": null
+}
