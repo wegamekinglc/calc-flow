@@ -1,0 +1,20 @@
+{
+  "source_ref": "b5ae227e48ac9bb8a81583a23485e2c6064cee52",
+  "native_sha256": "a0708fcf5fa84a1cf2c5347a66b73680d7426a3313746a1ef99519d5b2c7bfb8",
+  "python": "3.13.9 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 19:16:10) [GCC 11.2.0]",
+  "platform": "Linux-5.15.167.4-microsoft-standard-WSL2-x86_64-with-glibc2.43",
+  "scripts": {
+    "probe_boundaries.py": "19082f42e371a434d5994f66414fa3cef23f79fbf26f70443451cf62446a072e",
+    "audit_inventory.py": "98ce73d9afd56c4663f4c002c495d4290fb943c944a4a1654c6c31d81dc4a130",
+    "audit_results.py": "9160c2cbfd21f1ee64bc738e1fa16836c7f07940208fda40b1d45c06f57b8380",
+    "worker.py": "f3a11c1d8f2de33cdf887dbd0a38af454162da2ac458a3c0f21ca8f86da62668",
+    "collect.py": "5358cdec9c571c2c4886a5cceea1607c8219d513e5e42b01168de184e29dde82",
+    "fixtures.py": "ad28108947487eab85cf829c0c14c1a22123ffe06031fada8e468c5bb9339d93",
+    "probe_arroyo.py": "a90d9b44e4ce134eeaad3c1089a8f42665b83f78f7d79e003cf1910b00715b4d",
+    "transport.py": "92489e59ce6a2c5e66f6f85db32fc595a56dd20ace7254d1f5fec58afd7402e9"
+  },
+  "controller_affinity": "0-1",
+  "worker_affinity": "4-7",
+  "tokio_threads": 4,
+  "contract": "Arrow IPC bounded-input core/API and round-trip; descriptive"
+}

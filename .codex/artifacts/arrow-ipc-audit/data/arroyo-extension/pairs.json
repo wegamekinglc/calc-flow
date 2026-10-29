@@ -1,0 +1,114 @@
+[
+  {
+    "case": "transform-full",
+    "ratio": "Arroyo/CF core throughput",
+    "ratios": [
+      1.1615332057256396,
+      1.3800630952279993,
+      1.489391838512207,
+      1.3022201373490214,
+      1.3626691671841407
+    ],
+    "median": 1.3626691671841407,
+    "min": 1.1615332057256396,
+    "max": 1.489391838512207,
+    "adjacency": [
+      {
+        "pair": 0,
+        "order": [
+          "cf",
+          "arroyo"
+        ],
+        "gap_ms": 0.542364
+      },
+      {
+        "pair": 1,
+        "order": [
+          "arroyo",
+          "cf"
+        ],
+        "gap_ms": 0.334243
+      },
+      {
+        "pair": 2,
+        "order": [
+          "cf",
+          "arroyo"
+        ],
+        "gap_ms": 0.266486
+      },
+      {
+        "pair": 3,
+        "order": [
+          "arroyo",
+          "cf"
+        ],
+        "gap_ms": 0.327472
+      },
+      {
+        "pair": 4,
+        "order": [
+          "cf",
+          "arroyo"
+        ],
+        "gap_ms": 0.389167
+      }
+    ]
+  },
+  {
+    "case": "transform-512",
+    "ratio": "Arroyo/CF core throughput",
+    "ratios": [
+      8.405594882559273,
+      8.766575020077628,
+      8.88380836550156,
+      9.680263370057025,
+      8.821327192034083
+    ],
+    "median": 8.821327192034083,
+    "min": 8.405594882559273,
+    "max": 9.680263370057025,
+    "adjacency": [
+      {
+        "pair": 0,
+        "order": [
+          "cf",
+          "arroyo"
+        ],
+        "gap_ms": 0.399176
+      },
+      {
+        "pair": 1,
+        "order": [
+          "arroyo",
+          "cf"
+        ],
+        "gap_ms": 8.331179
+      },
+      {
+        "pair": 2,
+        "order": [
+          "cf",
+          "arroyo"
+        ],
+        "gap_ms": 9.711612
+      },
+      {
+        "pair": 3,
+        "order": [
+          "arroyo",
+          "cf"
+        ],
+        "gap_ms": 0.821342
+      },
+      {
+        "pair": 4,
+        "order": [
+          "cf",
+          "arroyo"
+        ],
+        "gap_ms": 3.195821
+      }
+    ]
+  }
+]

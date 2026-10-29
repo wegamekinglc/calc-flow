@@ -1,0 +1,142 @@
+diff --git a/crates/arroyo-connectors/src/lib.rs b/crates/arroyo-connectors/src/lib.rs
+index 6f88d54..54c9acd 100644
+--- a/crates/arroyo-connectors/src/lib.rs
++++ b/crates/arroyo-connectors/src/lib.rs
+@@ -203,0 +204,4 @@ mod test {
++
++// DAL-417 benchmark-only clocks and metadata, one embedded worker.
++pub(crate) static DAL417_IPC_START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
++pub(crate) static DAL417_INPUT_METRICS: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+diff --git a/crates/arroyo-connectors/src/single_file/mod.rs b/crates/arroyo-connectors/src/single_file/mod.rs
+index f03c10c..91f1b41 100644
+--- a/crates/arroyo-connectors/src/single_file/mod.rs
++++ b/crates/arroyo-connectors/src/single_file/mod.rs
+@@ -168,0 +169,3 @@ impl Connector for SingleFileConnector {
++                    ipc_batches: Vec::new(),
++                    ipc_rows: 0,
++                    ipc_emitted: false,
+diff --git a/crates/arroyo-connectors/src/single_file/sink.rs b/crates/arroyo-connectors/src/single_file/sink.rs
+index 8b759d1..c0e0c9e 100644
+--- a/crates/arroyo-connectors/src/single_file/sink.rs
++++ b/crates/arroyo-connectors/src/single_file/sink.rs
+@@ -21,0 +22,3 @@ pub struct SingleFileSink {
++    pub ipc_batches: Vec<RecordBatch>,
++    pub ipc_rows: usize,
++    pub ipc_emitted: bool,
+@@ -39,0 +43,43 @@ impl ArrowOperator for SingleFileSink {
++        // DAL-417 core completion is a complete native RecordBatch collection.
++        if self.output_path.ends_with(".arrow") {
++            if batch.num_rows() == 0 { return; }
++            self.ipc_rows += batch.num_rows();
++            self.ipc_batches.push(batch);
++            let expected: usize = std::env::var("DAL417_EXPECTED_ROWS").unwrap().parse().unwrap();
++            assert!(self.ipc_rows <= expected, "unexpected extra benchmark rows");
++            if self.ipc_rows == expected {
++                assert!(!self.ipc_emitted);
++                let core_seconds = crate::DAL417_IPC_START.get().unwrap().elapsed().as_secs_f64();
++                let binding_start = std::time::Instant::now();
++                let batches: Vec<_> = std::mem::take(&mut self.ipc_batches).into_iter().map(|batch| {
++                    let indexes: Vec<_> = batch.schema().fields().iter().enumerate()
++                        .filter_map(|(i, f)| (f.name() != "_timestamp").then_some(i)).collect();
++                    batch.project(&indexes).unwrap()
++                }).collect();
++                let output_binding_seconds = binding_start.elapsed().as_secs_f64();
++                let schema = format!("{:?}", batches[0].schema());
++                let path = self.output_path.clone();
++                let output_ipc_seconds = tokio::task::spawn_blocking(move || {
++                    let started = std::time::Instant::now();
++                    let temporary = format!("{path}.partial");
++                    let file = std::fs::File::create(&temporary).unwrap();
++                    let mut writer = arrow::ipc::writer::StreamWriter::try_new(file, &batches[0].schema()).unwrap();
++                    for batch in &batches { writer.write(batch).unwrap(); }
++                    writer.finish().unwrap();
++                    drop(writer);
++                    std::fs::rename(temporary, path).unwrap();
++                    started.elapsed().as_secs_f64()
++                }).await.unwrap();
++                let input = std::env::var("DAL417_INPUT_PATH").unwrap();
++                let metadata = serde_json::json!({
++                    "core_seconds": core_seconds, "output_binding_seconds": output_binding_seconds,
++                    "output_ipc_seconds": output_ipc_seconds, "output_rows": self.ipc_rows,
++                    "output_schema": schema, "input": crate::DAL417_INPUT_METRICS.get().unwrap(),
++                    "source_eof_before_output": std::path::Path::new(&format!("{input}.eof")).exists(),
++                    "clock_contract": "ready-native-Batch-v2"
++                });
++                tokio::fs::write(format!("{}.meta.json", self.output_path), serde_json::to_vec(&metadata).unwrap()).await.unwrap();
++                self.ipc_emitted = true;
++            }
++            return;
++        }
+@@ -48,0 +95 @@ impl ArrowOperator for SingleFileSink {
++        if self.output_path.ends_with(".arrow") { return; }
+@@ -85,0 +133,6 @@ impl ArrowOperator for SingleFileSink {
++        if self.output_path.ends_with(".arrow") {
++            let expected: usize = std::env::var("DAL417_EXPECTED_ROWS").unwrap().parse().unwrap();
++            assert!(self.ipc_emitted && self.ipc_rows == expected);
++            tokio::fs::write(format!("{}.closed", self.output_path), b"complete").await.unwrap();
++            return;
++        }
+@@ -96,0 +150 @@ impl ArrowOperator for SingleFileSink {
++        if self.output_path.ends_with(".arrow") { return; }
+diff --git a/crates/arroyo-connectors/src/single_file/source.rs b/crates/arroyo-connectors/src/single_file/source.rs
+index d5f79f8..cb01564 100644
+--- a/crates/arroyo-connectors/src/single_file/source.rs
++++ b/crates/arroyo-connectors/src/single_file/source.rs
+@@ -98,0 +99,46 @@ impl SourceOperator for SingleFileSourceFunc {
++        // DAL-417 benchmark-only Arrow IPC input. No row JSON codec is called.
++        if self.input_file.ends_with(".arrow") {
++            let origin = std::time::Instant::now();
++            let origin_utc = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos() as u64;
++            let path = self.input_file.clone();
++            let batches = tokio::task::spawn_blocking(move || {
++                let file = std::fs::File::open(path).unwrap();
++                arrow::ipc::reader::StreamReader::try_new(file, None).unwrap()
++                    .collect::<Result<Vec<_>, _>>().unwrap()
++            }).await.unwrap();
++            let input_ipc_seconds = origin.elapsed().as_secs_f64();
++            let binding_start = std::time::Instant::now();
++            let batches: Vec<_> = batches.into_iter().map(|batch| {
++                let columns = ctx.out_schema.schema.fields().iter().map(|field| {
++                    let name = if field.name() == "_timestamp" { "ts" } else { field.name() };
++                    let index = batch.schema().index_of(name).unwrap();
++                    arrow::compute::cast(batch.column(index), field.data_type()).unwrap()
++                }).collect();
++                arrow::record_batch::RecordBatch::try_new(ctx.out_schema.schema.clone(), columns).unwrap()
++            }).collect();
++            let metadata = serde_json::json!({
++                "source_entered_utc_ns": origin_utc,
++                "input_ipc_seconds": input_ipc_seconds,
++                "input_binding_seconds": binding_start.elapsed().as_secs_f64(),
++                "input_rows": batches.iter().map(|b| b.num_rows()).sum::<usize>(),
++                "input_batches": batches.len(), "clock_contract": "ready-native-Batch-v2"
++            });
++            crate::DAL417_INPUT_METRICS.set(metadata.clone()).unwrap();
++            tokio::fs::write(format!("{}.ready.json", self.input_file), serde_json::to_vec(&metadata).unwrap()).await.unwrap();
++            if std::env::var_os("DAL417_GATED").is_some() {
++                while !std::path::Path::new(&format!("{}.start", self.input_file)).exists() {
++                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
++                }
++            }
++            crate::DAL417_IPC_START.set(std::time::Instant::now()).unwrap();
++            for batch in batches { collector.collect(batch).await; }
++            tokio::fs::write(format!("{}.fed", self.input_file), b"all batches submitted").await.unwrap();
++            if std::env::var_os("DAL417_GATED").is_some() {
++                while !std::path::Path::new(&format!("{}.finish", self.input_file)).exists() {
++                    if let Some(value) = self.handle_control(ctx.control_rx.try_recv().ok(), ctx, collector).await { return value; }
++                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
++                }
++            }
++            tokio::fs::write(format!("{}.eof", self.input_file), b"source Final follows").await.unwrap();
++            return SourceFinishType::Final;
++        }
+diff --git a/crates/arroyo-worker/src/arrow/watermark_generator.rs b/crates/arroyo-worker/src/arrow/watermark_generator.rs
+index 3ea91b4..480af2f 100644
+--- a/crates/arroyo-worker/src/arrow/watermark_generator.rs
++++ b/crates/arroyo-worker/src/arrow/watermark_generator.rs
+@@ -192,0 +193,6 @@ impl ArrowOperator for WatermarkGenerator {
++            if let Ok(path) = std::env::var("DAL417_TRACE_WM") {
++                use tokio::io::AsyncWriteExt;
++                let mut file = tokio::fs::OpenOptions::new().create(true).append(true).open(path).await.unwrap();
++                let micros = watermark.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_micros();
++                file.write_all(format!("{micros}\n").as_bytes()).await.unwrap();
++            }
