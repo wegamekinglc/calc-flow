@@ -1,0 +1,21 @@
+{
+  "archive": "DAL-417-arrow-wrapping-raw.tar.gz",
+  "sha256": "016f62b7094c55f5b50a3a9626a65bb0adb94e7a8118cd6da6983ea6b876e3a1",
+  "size_bytes": 10342612,
+  "pack_elapsed_s": 1.2905184560222551,
+  "script_sha256": {
+    "validate.py": "3db471bda55e0b19d143d0692f5918392d70bcd12090236680f5eda4bb82af35",
+    "worker.py": "a8e0067e00b20a30df97e261d6f3e7942f4d4084d53e0ebfd7b47c9ff15110fc",
+    "collect.py": "57859ceb78e83b90b80671ee9df74efc2a8961beb926ba89937117f883194959",
+    "summarize.py": "d949e1bc799188ba406dddb22aff774efe352915b8d6b7932c2c41e38c7ef93e",
+    "audit.py": "fbf69246cecf67298b1a55b853532d189c12b6e153c02e1872a7625475be0b13"
+  },
+  "contains": "all80 formal and4 preflight and4 diagnostic Arrow IPC, phase clocks, commands, process cleanup/RSS, source/native/wheel/dependency identity, exact validation logs; no wheels/native binaries",
+  "unpack_audit": {
+    "result": "passed including sampled/delivered script identity; all formal IPC/phase/schema/shape/statistics unchanged",
+    "elapsed_s": 0.7183736989973113
+  },
+  "repack_elapsed_s": 0.6059017670340836,
+  "sampled_collector_sha256": "309216cee0af1bcd2b7c5f6e4ec477bb8312dd91be7f0dbea832f97a26008658",
+  "sampling_identity_note": "Sampling collector retained in sampling/collect.py. Delivered collector adds only a pre-worker cached-index rejection; observer/worker/sample code unchanged. No product rebuild or resampling."
+}

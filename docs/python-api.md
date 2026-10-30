@@ -517,6 +517,14 @@ Builder methods return new values. `Batch.from_pyarrow` and every runner/plan
 boundary treat caller inputs as read-only. Result mappings and metadata are
 defensive copies.
 
+Arrow import resolves the current C stream exporter once per call. Arrow export
+transfers owned record-batch references through the existing stream protocol,
+sharing read-only buffers and preserving schema metadata and native record-batch
+boundaries.
+Repeated exports remain independent; each resolves the current PyArrow table
+constructor. Reading `RunResult.outputs` copies the output mapping without
+copying unrelated query metrics and run metadata.
+
 An expression node accepts exactly one calculation expression or a non-empty
 `select` projection; `filter` may accompany either mode. Connect nodes with
 `connect(source_node, target_node, source_port="output", target_port="input")`.

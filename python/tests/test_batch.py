@@ -49,6 +49,98 @@ def test_multi_chunk_table_reuses_every_arrow_buffer() -> None:
     assert _data_buffer_addresses(result) == _data_buffer_addresses(table)
 
 
+def test_table_import_resolves_current_stream_exporter_once() -> None:
+    table = pa.table({"value": [1, 2]})
+
+    class Exporter:
+        lookups = 0
+        enabled = True
+
+        @property
+        def __arrow_c_stream__(self):
+            self.lookups += 1
+            if not self.enabled:
+                raise RuntimeError("current exporter is disabled")
+            return table.__arrow_c_stream__
+
+    exporter = Exporter()
+    assert Batch.from_pyarrow(exporter).num_rows == 2
+    assert exporter.lookups == 1
+    exporter.enabled = False
+    with pytest.raises(RuntimeError, match="current exporter is disabled"):
+        Batch.from_pyarrow(exporter)
+
+
+def test_repeated_table_export_owns_chunks_nulls_and_exact_metadata() -> None:
+    schema = pa.schema(
+        [pa.field("value", pa.int64(), metadata={b"unit": b"ticks"})],
+        metadata={b"owner": b"caller"},
+    )
+    table = pa.Table.from_arrays(
+        [pa.chunked_array([[None, 1], [2, None]], type=pa.int64())], schema=schema
+    )
+    addresses = _data_buffer_addresses(table)
+    batch = Batch.from_pyarrow(table)
+    first, second = batch.to_pyarrow(), batch.to_pyarrow()
+    assert table.schema.equals(schema, check_metadata=True)
+    assert table["value"].to_pylist() == [None, 1, 2, None]
+    del table, batch
+    gc.collect()
+    for result in (first, second):
+        assert result.schema.equals(schema, check_metadata=True)
+        assert result["value"].to_pylist() == [None, 1, 2, None]
+        assert result["value"].num_chunks == 2
+        assert _data_buffer_addresses(result) == addresses
+
+
+def test_table_export_uses_current_arrow_constructor(monkeypatch) -> None:
+    batch = Batch.from_pyarrow(pa.table({"value": [1]}))
+    assert batch.to_pyarrow().num_rows == 1
+    original = pa.table
+    expected_version = pa.__version__
+
+    def guarded(*args, **kwargs):
+        if pa.__version__ != expected_version:
+            raise RuntimeError("current Arrow version rejected")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(pa, "table", guarded)
+    assert batch.to_pyarrow().num_rows == 1
+    monkeypatch.setattr(pa, "__version__", "unsupported-runtime-version")
+    with pytest.raises(RuntimeError, match="current Arrow version rejected"):
+        batch.to_pyarrow()
+
+
+def test_zero_column_table_preserves_nonzero_row_count() -> None:
+    record = pa.record_batch({"discarded": [1, 2, 3]}).select([])
+    table = pa.Table.from_batches([record])
+    for _ in range(2):
+        result = Batch.from_pyarrow(table).to_pyarrow()
+        assert result.num_rows == 3
+        assert result.num_columns == 0
+
+
+def test_table_stream_failure_precedes_metadata_validation_and_releases_reader() -> (
+    None
+):
+    closed = []
+    schema = pa.schema([("value", pa.int64())])
+
+    def records():
+        try:
+            yield pa.record_batch([[1]], schema=schema)
+            raise ValueError("Arrow input stream failed")
+        finally:
+            closed.append(True)
+
+    reader = pa.RecordBatchReader.from_batches(schema, records())
+    with pytest.raises(TypeError, match="Arrow input stream failed"):
+        Batch.from_pyarrow(reader, metadata={"invalid": object()})
+    del reader
+    gc.collect()
+    assert closed == [True]
+
+
 def test_zero_row_table_preserves_its_exact_schema() -> None:
     schema = pa.schema(
         [pa.field("value", pa.int64(), nullable=False)],

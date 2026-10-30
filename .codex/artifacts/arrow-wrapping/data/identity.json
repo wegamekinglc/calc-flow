@@ -1,0 +1,30 @@
+{
+  "baseline_ref": "1041bb7b6d9bd3a16686b8753e856e9f12f2529f",
+  "candidate_product_ref": "3c66dfefba618ace56cb3430f244f27d37453b96",
+  "baseline_wheel_source": "cfa2a2a2f2d5a84cc5171c11261a3c8f1ce7dece",
+  "baseline_compatibility": "Product Rust/Python sources, manifests, Cargo.lock and toolchain identical between original cfa2a2a2 wheel source and merged baseline 1041bb7b. Default features/CPython/profile and pinned packages reused. No DAL-475 artifact.",
+  "product_sha256": {
+    "crates/calc-flow-python/src/batch.rs": "203b47b77d827d9a993ae6c2360d1ef9126b05f6aee81ac56ae7d805d5572fd2",
+    "crates/calc-flow-python/src/pipeline.rs": "7d46b54637492bbd367144e2c12c0da34c1a500e7ff32adcb5bd4fa85a316dda",
+    "Cargo.toml": "3ff85b40f66a8e9796773f9981744d482de5dc30c01a2e5c1d22a63e514595e0",
+    "Cargo.lock": "228b17f6384d1b1275755306dfe6c18d81d145f46de7994c1092080cbd38454e",
+    "crates/calc-flow-python/Cargo.toml": "069e7b33e5454f8851bc5a6a399dc46a7f5cb1e6bc1533c2f182cc8ceb0adc16",
+    "pyproject.toml": "78875bea8aee387b481e6c429e3540976546773c63a4d73f4bbb2c9026aa762e",
+    "rust-toolchain.toml": "d5b4852bd3d531a5baccd4111bc31b1a250218c4ae0897100c7325722c3e232a"
+  },
+  "platform": "Linux-5.15.167.4-microsoft-standard-WSL2-x86_64-with-glibc2.43",
+  "machine": "x86_64",
+  "cpu_model": "13th Gen Intel(R) Core(TM) i9-13900HX",
+  "logical_cpu_count": 32,
+  "resource_policy": {
+    "controller_cpus": "0-1",
+    "worker_cpus": "4-7",
+    "tokio_workers": 4,
+    "other_threads": 1
+  },
+  "build_source_check": {
+    "product_files_checked": 813,
+    "source_ref": "3c66dfefba618ace56cb3430f244f27d37453b96",
+    "lock_identical": true
+  }
+}

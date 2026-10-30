@@ -7,19 +7,19 @@ use std::{
     },
 };
 
-use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::arrow::record_batch::{RecordBatch, RecordBatchIterator};
 use ndarray::{ArrayD, IxDyn};
 use num_complex::{Complex32, Complex64};
 use numpy::{Element, IntoPyArray};
 use parking_lot::RwLock;
 use pyo3::{
     PyTraverseError, PyVisit,
-    exceptions::{PyRuntimeError, PyTypeError, PyValueError},
+    exceptions::{PyAttributeError, PyRuntimeError, PyTypeError, PyValueError},
     intern,
     prelude::*,
-    types::{PyAny, PyBool, PyDict, PyInt, PyList, PyString, PyTuple},
+    types::{PyAny, PyBool, PyCapsule, PyDict, PyInt, PyList, PyString, PyTuple},
 };
-use pyo3_arrow::PyTable;
+use pyo3_arrow::{PyRecordBatchReader, PyTable};
 
 const MAX_METADATA_DEPTH: usize = calc_flow::MAX_JSON_DEPTH;
 const METADATA_TYPE_MESSAGE: &str = "metadata must be a JSON-compatible mapping";
@@ -342,12 +342,17 @@ impl PyBatch {
         table: &Bound<'_, PyAny>,
         metadata: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
-        if !table.hasattr(intern!(py, "__arrow_c_stream__"))? {
-            return Err(PyTypeError::new_err(
-                "table must implement the Arrow C stream interface",
-            ));
-        }
-        let table = table.extract::<PyTable>()?;
+        let export = table
+            .getattr(intern!(py, "__arrow_c_stream__"))
+            .map_err(|error| {
+                if error.is_instance_of::<PyAttributeError>(py) {
+                    PyTypeError::new_err("table must implement the Arrow C stream interface")
+                } else {
+                    error
+                }
+            })?;
+        let capsule = export.call0()?.cast_into::<PyCapsule>()?;
+        let table = PyTable::from_arrow_pycapsule(&capsule)?;
         let (mut batches, schema) = table.into_inner();
         if batches.is_empty() {
             batches.push(RecordBatch::new_empty(schema));
@@ -409,7 +414,16 @@ impl PyBatch {
         let table = inner
             .table_payload()
             .map_err(|_| PyTypeError::new_err("array batches do not contain a PyArrow table"))?;
-        PyTable::try_new(table.batches().to_vec(), table.schema().clone())?.into_pyarrow(py)
+        // Core TableBatch already validates schemas. Transfer one owned set of
+        // record clones instead of revalidating and cloning a PyTable again.
+        let records = table.batches().to_vec().into_iter().map(Ok);
+        let reader = PyRecordBatchReader::new(Box::new(RecordBatchIterator::new(
+            records,
+            table.schema().clone(),
+        )));
+        py.import(intern!(py, "pyarrow"))?
+            .getattr(intern!(py, "table"))?
+            .call1((reader.into_pyobject(py)?,))
     }
 
     #[getter]
