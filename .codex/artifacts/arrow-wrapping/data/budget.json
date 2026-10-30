@@ -1,0 +1,39 @@
+{
+  "limit_s": 600,
+  "spent_s": 104.25128602003679,
+  "stages": [
+    {
+      "stage": "diagnostic-base",
+      "elapsed_s": 0.8577494790079072,
+      "samples": 2
+    },
+    {
+      "stage": "environment_identity_and_diagnostic_startup_conservative_allowance",
+      "elapsed_s": 15
+    },
+    {
+      "stage": "diagnostic-head",
+      "elapsed_s": 0.8836501210462302,
+      "samples": 2
+    },
+    {
+      "stage": "preflight",
+      "elapsed_s": 1.3999126070411876,
+      "samples": 4
+    },
+    {
+      "stage": "formal",
+      "elapsed_s": 25.57623841695022,
+      "samples": 80
+    },
+    {
+      "stage": "collector_startup_and_monitor_overhead",
+      "elapsed_s": 0.5337353959912434
+    },
+    {
+      "stage": "statistics_counterexamples_archive_and_reaudit_conservative_allowance",
+      "elapsed_s": 60
+    }
+  ],
+  "allowance_note": "60s conservatively includes final statistics, source/evidence negative checks, archive writing/extraction and all raw/hash/schema/shape audits. Actual work must stay below allowance."
+}

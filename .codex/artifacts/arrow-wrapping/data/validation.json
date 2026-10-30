@@ -1,0 +1,209 @@
+{
+  "product_ref": "3c66dfefba618ace56cb3430f244f27d37453b96",
+  "python": [
+    {
+      "argv": [
+        "target/arrow-wrapping/env-head/bin/python",
+        "-m",
+        "pytest",
+        "python/tests/test_batch.py",
+        "-k",
+        "table or metadata or producer or stream",
+        "-q"
+      ],
+      "result": "34 passed, 5 deselected in 0.65s"
+    },
+    {
+      "argv": [
+        "target/arrow-wrapping/env-head/bin/python",
+        "-m",
+        "pytest",
+        "python/tests/test_pipeline.py::test_run_result_properties_return_defensive_values",
+        "python/tests/test_pipeline.py::test_runtime_plan_and_result_are_visible_to_cyclic_gc",
+        "python/tests/test_batch_query_templates.py::test_batch_query_templates_match_exact_schema_and_metadata",
+        "python/tests/test_batch_query_templates.py::test_warm_batch_templates_isolate_concurrent_calls_and_cancellation",
+        "python/tests/test_compute.py::test_compute_preserves_batch_identity_metadata_and_sync_options",
+        "python/tests/test_stream_results.py::test_stream_full_output_queue_applies_backpressure_and_cancels",
+        "-q"
+      ],
+      "result": "6 passed in 0.41s"
+    }
+  ],
+  "rust": {
+    "result": "15 Batch tests plus 3 result boundary tests passed",
+    "commands_and_settings": [
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--release",
+          "--locked",
+          "-p",
+          "calc-flow-python",
+          "--lib",
+          "batch::tests::",
+          "--",
+          "--nocapture"
+        ],
+        "cwd": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-417-8b350a7f0467/workdir/calc-flow/target/sql-prepare-reuse/baseline",
+        "settings": {
+          "CARGO_TARGET_DIR": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-417-8b350a7f0467/workdir/calc-flow/target/sql-prepare-reuse/build",
+          "CARGO_BUILD_JOBS": "4",
+          "PYO3_PYTHON": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-417-8b350a7f0467/workdir/calc-flow/target/stream-dispatch/env-head/bin/python",
+          "LD_LIBRARY_PATH": "/home/wegamekinglc/anaconda3/lib"
+        },
+        "elapsed_s": 231.52887444000226,
+        "exit_code": 0,
+        "log": "rust-tests-0.log"
+      },
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--release",
+          "--locked",
+          "-p",
+          "calc-flow-python",
+          "--lib",
+          "pipeline::tests::sync_execution_and_result_getters_expose_defensive_values",
+          "--",
+          "--nocapture"
+        ],
+        "cwd": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-417-8b350a7f0467/workdir/calc-flow/target/sql-prepare-reuse/baseline",
+        "settings": {
+          "CARGO_TARGET_DIR": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-417-8b350a7f0467/workdir/calc-flow/target/sql-prepare-reuse/build",
+          "CARGO_BUILD_JOBS": "4",
+          "PYO3_PYTHON": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-417-8b350a7f0467/workdir/calc-flow/target/stream-dispatch/env-head/bin/python",
+          "LD_LIBRARY_PATH": "/home/wegamekinglc/anaconda3/lib"
+        },
+        "elapsed_s": 0.22932247503194958,
+        "exit_code": 0,
+        "log": "rust-tests-1.log"
+      },
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--release",
+          "--locked",
+          "-p",
+          "calc-flow-python",
+          "--lib",
+          "pipeline::tests::run_result_gc_collects_cycles_hidden_in_external_outputs",
+          "--",
+          "--nocapture"
+        ],
+        "cwd": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-417-8b350a7f0467/workdir/calc-flow/target/sql-prepare-reuse/baseline",
+        "settings": {
+          "CARGO_TARGET_DIR": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-417-8b350a7f0467/workdir/calc-flow/target/sql-prepare-reuse/build",
+          "CARGO_BUILD_JOBS": "4",
+          "PYO3_PYTHON": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-417-8b350a7f0467/workdir/calc-flow/target/stream-dispatch/env-head/bin/python",
+          "LD_LIBRARY_PATH": "/home/wegamekinglc/anaconda3/lib"
+        },
+        "elapsed_s": 0.18421878793742508,
+        "exit_code": 0,
+        "log": "rust-tests-2.log"
+      },
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--release",
+          "--locked",
+          "-p",
+          "calc-flow-python",
+          "--lib",
+          "pipeline::tests::cleared_plan_and_result_reject_access",
+          "--",
+          "--nocapture"
+        ],
+        "cwd": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-417-8b350a7f0467/workdir/calc-flow/target/sql-prepare-reuse/baseline",
+        "settings": {
+          "CARGO_TARGET_DIR": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-417-8b350a7f0467/workdir/calc-flow/target/sql-prepare-reuse/build",
+          "CARGO_BUILD_JOBS": "4",
+          "PYO3_PYTHON": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-417-8b350a7f0467/workdir/calc-flow/target/stream-dispatch/env-head/bin/python",
+          "LD_LIBRARY_PATH": "/home/wegamekinglc/anaconda3/lib"
+        },
+        "elapsed_s": 0.16980646806769073,
+        "exit_code": 0,
+        "log": "rust-tests-3.log"
+      },
+      {
+        "argv": [
+          "cargo",
+          "clippy",
+          "--release",
+          "--locked",
+          "-p",
+          "calc-flow-python",
+          "--lib",
+          "--tests",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "cwd": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-417-8b350a7f0467/workdir/calc-flow/target/sql-prepare-reuse/baseline",
+        "settings": {
+          "CARGO_TARGET_DIR": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-417-8b350a7f0467/workdir/calc-flow/target/sql-prepare-reuse/build",
+          "CARGO_BUILD_JOBS": "4",
+          "PYO3_PYTHON": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-417-8b350a7f0467/workdir/calc-flow/target/stream-dispatch/env-head/bin/python",
+          "LD_LIBRARY_PATH": "/home/wegamekinglc/anaconda3/lib"
+        },
+        "elapsed_s": 5.98421846202109,
+        "exit_code": 0,
+        "log": "clippy.log"
+      }
+    ]
+  },
+  "static": {
+    "commands": [
+      "cargo fmt --all --check",
+      "target/arrow-wrapping/env-head/bin/ruff check .codex/artifacts/arrow-wrapping python/tests/test_batch.py",
+      "target/arrow-wrapping/env-head/bin/ruff format --check .codex/artifacts/arrow-wrapping python/tests/test_batch.py",
+      "target/stream-dispatch/env-head/bin/ruff check .codex/artifacts/arrow-wrapping --select C901,PLR0912,PLR0913,PLR0915",
+      "UV_PROJECT_ENVIRONMENT=target/arrow-wrapping/env-head uv run --no-sync python scripts/verify_complexity_gates.py",
+      "git diff --check",
+      "git diff --exit-code -- schemas/project-v3.schema.json"
+    ],
+    "result": "passed; gates, baseline and dependencies unchanged"
+  },
+  "mechanism_regression": {
+    "baseline": "test_table_import_resolves_current_stream_exporter_once failed with 3 lookups (expected1)",
+    "candidate": "same focused test passed with 1 lookup; fresh lookup on next call still propagates current exporter failure"
+  },
+  "perf": {
+    "formal": 80,
+    "preflight": 4,
+    "diagnostic": 4,
+    "formal_output_rows_checked": 1310720,
+    "verdicts": {
+      "transform-full": "inconclusive",
+      "transform-512": "inconclusive"
+    },
+    "command": "target/stream-dispatch/env-head/bin/python target/arrow-wrapping/run-measurements.py",
+    "quiet_monitor": "no cargo/rustc/maturin observed, 100ms interval over28.39353654102888s"
+  },
+  "audit": {
+    "argv": [
+      "target/arrow-wrapping/env-head/bin/python",
+      ".codex/artifacts/arrow-wrapping/audit.py",
+      "--directory",
+      "target/arrow-wrapping/results",
+      "--seals",
+      "target/arrow-wrapping/seals.json",
+      "--summary",
+      "target/arrow-wrapping/summary.json"
+    ],
+    "result": "80 samples, 1310720 rows passed; exact output columns/values/order, input IPC/shape, cross-side schema/metadata/batch shapes, all normal phase inventory/clocks, seals, exit code and paired statistics"
+  },
+  "negative_validation": {
+    "clean_product": "accepted",
+    "staged_product": "rejected",
+    "unstaged_product": "rejected",
+    "untracked_vendor": "rejected",
+    "wrong_values_with_updated_hash": "rejected",
+    "missing_input_binding_clock": "rejected"
+  },
+  "negative_command": "target/arrow-wrapping/env-head/bin/python .codex/artifacts/arrow-wrapping/validate.py target/arrow-wrapping",
+  "reused": "Previous SQL/streaming/Arroyo/window and benchmark audits; no full local regression/cross-platform/coverage or extra performance cases"
+}

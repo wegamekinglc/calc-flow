@@ -1,0 +1,18 @@
+{
+  "archive": "DAL-417-arrow-wrapping-raw.tar.gz",
+  "sha256": "31a8f7e2dd5bc802c253d73c544c64cd8ab6eafb178cfd11556f119ce4a69603",
+  "size_bytes": 10340035,
+  "pack_elapsed_s": 1.2905184560222551,
+  "script_sha256": {
+    "validate.py": "14a1abc3cb63635a0d48731cae7df50ec6a5678ac55a28d728b86b16867c5ff9",
+    "worker.py": "a8e0067e00b20a30df97e261d6f3e7942f4d4084d53e0ebfd7b47c9ff15110fc",
+    "collect.py": "309216cee0af1bcd2b7c5f6e4ec477bb8312dd91be7f0dbea832f97a26008658",
+    "summarize.py": "d949e1bc799188ba406dddb22aff774efe352915b8d6b7932c2c41e38c7ef93e",
+    "audit.py": "fbf69246cecf67298b1a55b853532d189c12b6e153c02e1872a7625475be0b13"
+  },
+  "contains": "all80 formal and4 preflight and4 diagnostic Arrow IPC, phase clocks, commands, process cleanup/RSS, source/native/wheel/dependency identity, exact validation logs; no wheels/native binaries",
+  "unpack_audit": {
+    "result": "passed; exact delivered scripts, identity/ledger and all formal Arrow/schema/shape/phase/paired records re-audited",
+    "elapsed_s": 0.9060933979926631
+  }
+}

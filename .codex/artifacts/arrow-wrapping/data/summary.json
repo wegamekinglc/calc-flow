@@ -1,0 +1,126 @@
+[
+  {
+    "case": "transform-full",
+    "arms": {
+      "base": {
+        "consumable_p50_ms": 2.5741795,
+        "consumable_p95_ms": 4.48502,
+        "input_rows_s_median": 12731917.94405306,
+        "phases_median": {
+          "normal_input_binding_ms": 0.0264425,
+          "native_execute_ms": 0.545909,
+          "result_packaging_ms": 0.031416,
+          "final_concat_ms": 0.0070405,
+          "api_ms": 0.616595,
+          "output_ipc_ms": 0.369407,
+          "last_query_runtime_acquire_ms": 0.004404,
+          "last_query_session_state_create_ms": 0.091193,
+          "last_query_logical_planning_ms": 0.0,
+          "last_query_physical_planning_ms": 0.0510465,
+          "last_query_execution_ms": 0.1263195,
+          "last_query_physical_planning_count": 0.0,
+          "cold_prepare_and_execute_ms": 2.9744025,
+          "declaration_and_precompile_ms": 3.1456625000000003
+        }
+      },
+      "head": {
+        "consumable_p50_ms": 2.4321710000000003,
+        "consumable_p95_ms": 3.660024,
+        "input_rows_s_median": 13472798.564983679,
+        "phases_median": {
+          "normal_input_binding_ms": 0.025097500000000002,
+          "native_execute_ms": 0.57578,
+          "result_packaging_ms": 0.030362,
+          "final_concat_ms": 0.007305,
+          "api_ms": 0.646845,
+          "output_ipc_ms": 0.360116,
+          "last_query_runtime_acquire_ms": 0.0039245,
+          "last_query_session_state_create_ms": 0.089655,
+          "last_query_logical_planning_ms": 0.0,
+          "last_query_physical_planning_ms": 0.05727,
+          "last_query_execution_ms": 0.1252495,
+          "last_query_physical_planning_count": 0.0,
+          "cold_prepare_and_execute_ms": 3.0584559999999996,
+          "declaration_and_precompile_ms": 3.186327
+        }
+      }
+    },
+    "rounds": [
+      {
+        "median": -9.989064078394811,
+        "low": -46.57129734092601,
+        "high": -1.4071002337956107,
+        "coverage": 0.978515625
+      },
+      {
+        "median": -1.7774557054178963,
+        "low": -12.906936913063994,
+        "high": 9.00839578768906,
+        "coverage": 0.978515625
+      }
+    ],
+    "verdict": "inconclusive"
+  },
+  {
+    "case": "transform-512",
+    "arms": {
+      "base": {
+        "consumable_p50_ms": 25.104273499999998,
+        "consumable_p95_ms": 27.381488,
+        "input_rows_s_median": 1305275.7753701163,
+        "phases_median": {
+          "normal_input_binding_ms": 1.4711345,
+          "native_execute_ms": 19.53167,
+          "result_packaging_ms": 1.460855,
+          "final_concat_ms": 0.0600745,
+          "api_ms": 23.112225000000002,
+          "output_ipc_ms": 0.6068454999999999,
+          "last_query_runtime_acquire_ms": 0.0026534999999999996,
+          "last_query_session_state_create_ms": 0.059128,
+          "last_query_logical_planning_ms": 0.0,
+          "last_query_physical_planning_ms": 0.038553000000000004,
+          "last_query_execution_ms": 0.024184499999999998,
+          "last_query_physical_planning_count": 0.0,
+          "cold_prepare_and_execute_ms": 2.6287535,
+          "declaration_and_precompile_ms": 3.1954184999999997
+        }
+      },
+      "head": {
+        "consumable_p50_ms": 25.052215500000003,
+        "consumable_p95_ms": 26.576862,
+        "input_rows_s_median": 1308033.2278522379,
+        "phases_median": {
+          "normal_input_binding_ms": 1.4119215,
+          "native_execute_ms": 18.973448500000003,
+          "result_packaging_ms": 1.2990475,
+          "final_concat_ms": 0.059412,
+          "api_ms": 22.173755,
+          "output_ipc_ms": 0.6130845,
+          "last_query_runtime_acquire_ms": 0.0027365000000000002,
+          "last_query_session_state_create_ms": 0.061869499999999994,
+          "last_query_logical_planning_ms": 0.0,
+          "last_query_physical_planning_ms": 0.0383885,
+          "last_query_execution_ms": 0.0245175,
+          "last_query_physical_planning_count": 0.0,
+          "cold_prepare_and_execute_ms": 2.8355325000000002,
+          "declaration_and_precompile_ms": 3.2794309999999998
+        }
+      }
+    },
+    "rounds": [
+      {
+        "median": -0.8063507287857263,
+        "low": -6.513894809433962,
+        "high": 5.812260250095114,
+        "coverage": 0.978515625
+      },
+      {
+        "median": -1.9467145348572024,
+        "low": -14.50920510571747,
+        "high": 5.321494011148165,
+        "coverage": 0.978515625
+      }
+    ],
+    "verdict": "inconclusive"
+  }
+]

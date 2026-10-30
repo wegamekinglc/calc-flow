@@ -1,0 +1,46 @@
+[
+  {
+    "side": "base",
+    "case": "transform-512",
+    "native_sha256": "d7b690a6c97c9bcc6def157907b5d321cb22f66c79cd1415ba5da932634c64f4",
+    "normal_input_binding_ms": 1.491868,
+    "native_execute_ms": 21.586676,
+    "result_packaging_ms": 1.470517,
+    "final_concat_ms": 0.056311,
+    "api_ms": 25.215415,
+    "note": "cProfile diagnostic, not used for paired verdict"
+  },
+  {
+    "side": "base",
+    "case": "transform-full",
+    "native_sha256": "d7b690a6c97c9bcc6def157907b5d321cb22f66c79cd1415ba5da932634c64f4",
+    "normal_input_binding_ms": 0.030226,
+    "native_execute_ms": 0.615669,
+    "result_packaging_ms": 0.033668,
+    "final_concat_ms": 0.011616,
+    "api_ms": 0.703849,
+    "note": "cProfile diagnostic, not used for paired verdict"
+  },
+  {
+    "side": "head",
+    "case": "transform-512",
+    "native_sha256": "fa14e7484c59e172057017de998bf1df1405362ef14b6c90a673908f515d0841",
+    "normal_input_binding_ms": 1.517243,
+    "native_execute_ms": 22.328643,
+    "result_packaging_ms": 1.390561,
+    "final_concat_ms": 0.061686,
+    "api_ms": 25.90844,
+    "note": "cProfile diagnostic, not used for paired verdict"
+  },
+  {
+    "side": "head",
+    "case": "transform-full",
+    "native_sha256": "fa14e7484c59e172057017de998bf1df1405362ef14b6c90a673908f515d0841",
+    "normal_input_binding_ms": 0.024093,
+    "native_execute_ms": 0.553771,
+    "result_packaging_ms": 0.027351,
+    "final_concat_ms": 0.006604,
+    "api_ms": 0.630491,
+    "note": "cProfile diagnostic, not used for paired verdict"
+  }
+]

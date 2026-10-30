@@ -519,7 +519,8 @@ defensive copies.
 
 Arrow import resolves the current C stream exporter once per call. Arrow export
 transfers owned record-batch references through the existing stream protocol,
-sharing read-only buffers and preserving schema metadata and chunk boundaries.
+sharing read-only buffers and preserving schema metadata and native record-batch
+boundaries.
 Repeated exports remain independent; each resolves the current PyArrow table
 constructor. Reading `RunResult.outputs` copies the output mapping without
 copying unrelated query metrics and run metadata.
