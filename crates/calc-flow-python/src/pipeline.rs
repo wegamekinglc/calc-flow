@@ -465,9 +465,17 @@ impl PyRunResult {
 impl PyRunResult {
     #[getter]
     fn outputs<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let inner = self.snapshot_inner()?;
+        let batches = {
+            let state = self.state.read();
+            state
+                .as_ref()
+                .ok_or_else(|| PyRuntimeError::new_err(CLEARED_RESULT_MESSAGE))?
+                .inner
+                .outputs
+                .clone()
+        };
         let outputs = PyDict::new(py);
-        for (name, batch) in inner.outputs {
+        for (name, batch) in batches {
             outputs.set_item(name, Py::new(py, PyBatch::from_inner_python(py, batch)?)?)?;
         }
         Ok(outputs)
