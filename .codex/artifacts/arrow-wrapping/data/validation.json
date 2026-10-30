@@ -200,10 +200,16 @@
     "clean_product": "accepted",
     "staged_product": "rejected",
     "unstaged_product": "rejected",
+    "staged_change_with_baseline_worktree": "rejected",
     "untracked_vendor": "rejected",
     "wrong_values_with_updated_hash": "rejected",
     "missing_input_binding_clock": "rejected"
   },
   "negative_command": "target/arrow-wrapping/env-head/bin/python .codex/artifacts/arrow-wrapping/validate.py target/arrow-wrapping",
-  "reused": "Previous SQL/streaming/Arroyo/window and benchmark audits; no full local regression/cross-platform/coverage or extra performance cases"
+  "reused": "Previous SQL/streaming/Arroyo/window and benchmark audits; no full local regression/cross-platform/coverage or extra performance cases",
+  "source_guard_followup": {
+    "old_masked_index_probe": "accepted (gap reproduced)",
+    "delivered_guard": "explicit cached diff and worktree diff; masked index counterexample rejected",
+    "sampling_note": "Product sources were committed and clean during acquisition. Native/wheel and all observations unchanged. Sampled and delivered collectors separately retained."
+  }
 }
