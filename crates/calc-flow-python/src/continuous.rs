@@ -982,6 +982,20 @@ fn build_one_sink(
     let descriptor = sink_descriptor(&binding)?;
     let kind = required_item(&descriptor, "kind")?.extract::<String>()?;
     let sink_id = binding.getattr("sink_id")?.extract::<String>()?;
+    if let Ok(sink) = binding
+        .getattr("sink")?
+        .extract::<PyRef<'_, crate::stream_results::PyArrowResultSink>>()
+    {
+        if kind != "ordinary" {
+            return Err(PyTypeError::new_err(
+                "native Arrow result sinks support only ordinary delivery",
+            ));
+        }
+        let root = Arc::new(PythonRoot::new(binding.unbind()));
+        let binding = calc_flow::SinkBinding::ordinary(&sink_id, sink.native())
+            .map_err(crate::error::to_py_err)?;
+        return Ok((binding, root));
+    }
     let root = Arc::new(PythonRoot::new(binding.unbind()));
     let sink = PythonContinuousSink {
         binding: Arc::clone(&root),

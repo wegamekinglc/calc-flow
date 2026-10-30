@@ -698,7 +698,10 @@ Batch values. One Arrow import shares immutable buffers; the native source
 emits record slices that fit both row and visible-byte limits, without Python
 source calls per batch. A single row that cannot fit fails the job. Empty inputs
 retain their schema. Record boundaries can produce smaller batches; chunking
-affects per-batch outputs such as cumulative SQL snapshots.
+affects per-batch outputs such as cumulative SQL snapshots. When every dynamic
+input is materialized Arrow, the convenience result queue is also native, so
+result delivery does not call a Python sink per batch. Iterable and mixed inputs
+retain the ordinary Python result bridge with the same bounded backpressure.
 At a snapshot SQL ingress, convenience materialized inputs instead form one
 complete relation and must fit the budget whole; explicit sliced Arrow bindings
 are rejected there. See [snapshot SQL](#complete-replacement-snapshot-sql).

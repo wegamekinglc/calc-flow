@@ -13,7 +13,13 @@ from typing import Any, Generic, TypeVar, cast
 import pyarrow as pa
 
 from calc_flow._compat import dataclass
-from calc_flow._native import Batch, StreamingRuntimeError
+from calc_flow._native import (
+    Batch,
+    StreamingRuntimeError,
+    _ArrowResultQueue,
+    _ArrowResultSink,
+    _ArrowSource,
+)
 from calc_flow._stream_inputs import (
     StreamInput as StreamInput,
 )
@@ -211,6 +217,7 @@ class StreamResults(Generic[T]):
         self._closing: asyncio.Task[None] | None = None
         self._queue: asyncio.Queue[StreamOutput]
         self._ready: asyncio.Event
+        self._native_queue: _ArrowResultQueue | None = None
         self._adapters: list[_IterableSource] = []
         self._root: str | None = None
 
@@ -250,13 +257,22 @@ class StreamResults(Generic[T]):
         sources, static = self._bindings(
             expected, names, config.edge_budget, policies, snapshots
         )
+        if sources and all(
+            isinstance(binding.source, _ArrowSource) for binding in sources.values()
+        ):
+            self._native_queue = _ArrowResultQueue(1)
         sinks: dict[str, list[SinkBinding]] = {}
         for name, _ in self._request.program.outputs:
-            sinks.setdefault(outputs[name][0], []).append(
-                SinkBinding.ordinary(
-                    outputs[name][1], _QueueSink(name, self._queue, self._ready)
-                )
+            sink = (
+                _QueueSink(name, self._queue, self._ready)
+                if self._native_queue is None
+                else _ArrowResultSink(self._native_queue, name)
             )
+            sinks.setdefault(outputs[name][0], []).append(
+                SinkBinding.ordinary(outputs[name][1], sink)
+            )
+        if self._native_queue is not None:
+            self._native_queue.seal()
         checkpoints = None
         if config.checkpointing:
             await self._create_root()
@@ -353,6 +369,8 @@ class StreamResults(Generic[T]):
     async def _next_output(self) -> StreamOutput:
         if self._waiter is None:
             raise RuntimeError("stream: enter with async with before iteration")
+        if self._native_queue is not None:
+            return await self._next_native_output()
         while self._queue.empty():
             if self._waiter.done():
                 await self.aclose()
@@ -360,6 +378,35 @@ class StreamResults(Generic[T]):
             await self._ready.wait()
             self._ready.clear()
         return self._queue.get_nowait()
+
+    async def _next_native_output(self) -> StreamOutput:
+        queue = self._native_queue
+        waiter = self._waiter
+        if queue is None or waiter is None:
+            raise RuntimeError("stream: enter with async with before iteration")
+        while True:
+            output = queue.try_next()
+            if output is not None:
+                name, batch = output
+                return StreamOutput(name, batch.to_pyarrow())
+            if waiter.done():
+                await self.aclose()
+                raise StopAsyncIteration
+            pending = asyncio.ensure_future(queue.next_async())
+            try:
+                done, _ = await asyncio.wait(
+                    (pending, waiter), return_when=asyncio.FIRST_COMPLETED
+                )
+            except asyncio.CancelledError:
+                pending.cancel()
+                await asyncio.gather(pending, return_exceptions=True)
+                raise
+            output = pending.result() if pending in done else await pending
+            if output is None:
+                await self.aclose()
+                raise StopAsyncIteration
+            name, batch = output
+            return StreamOutput(name, batch.to_pyarrow())
 
     def _raise_failure(self, outcome: JobOutcome | None) -> None:
         if outcome is not None and outcome.state in ("failed", "recovery_required"):
@@ -414,14 +461,18 @@ class StreamResults(Generic[T]):
                 await adapter.close()
         finally:
             try:
-                if self._root is not None:
-                    await asyncio.to_thread(shutil.rmtree, self._root)
+                if self._native_queue is not None:
+                    await self._native_queue.close_async()
             finally:
-                self._request = replace(self._request, inputs={})
-                queue = getattr(self, "_queue", None)
-                if queue is not None:
-                    while not queue.empty():
-                        queue.get_nowait()
+                try:
+                    if self._root is not None:
+                        await asyncio.to_thread(shutil.rmtree, self._root)
+                finally:
+                    self._request = replace(self._request, inputs={})
+                    queue = getattr(self, "_queue", None)
+                    if queue is not None:
+                        while not queue.empty():
+                            queue.get_nowait()
 
 
 def _stream_program(

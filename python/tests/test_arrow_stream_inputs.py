@@ -84,6 +84,96 @@ def test_materialized_stream_matches_iterable_without_python_source_calls(
     assert (data.to_pydict(), data.schema) == before
 
 
+def test_materialized_stream_delivers_results_without_python_sink_calls(
+    monkeypatch,
+) -> None:
+    data = pa.table({"value": list(range(9))})
+    source = cf.table_input("events", schema=data.schema)
+
+    async def unexpected_write(self, batch):
+        raise AssertionError(
+            "materialized results must not cross the Python sink bridge"
+        )
+
+    monkeypatch.setattr(cf.SinkBinding, "_native_write", unexpected_write)
+
+    async def run() -> None:
+        config = cf.StreamRuntimeConfig(edge_budget=cf.EdgeBudget(2, 1024))
+        async with source.stream(data, config=config) as results:
+            tables = [table async for table in results]
+        assert pa.concat_tables(tables).equals(data)
+        assert results.job.status()["task_count"] == 0
+
+    asyncio.run(run())
+
+
+def test_materialized_named_results_preserve_names_and_per_output_order() -> None:
+    data = pa.table({"value": list(range(5))})
+    source = cf.table_input("events", schema=data.schema)
+    program = cf.Program(
+        "native-results",
+        engine="streaming",
+        outputs={
+            "double": source.select(doubled=source["value"] * 2),
+            "original": source,
+        },
+    )
+
+    async def run() -> None:
+        values = {"double": [], "original": []}
+        config = cf.StreamRuntimeConfig(edge_budget=cf.EdgeBudget(2, 1024))
+        async with program.stream({"events": data}, config=config) as results:
+            async for event in results:
+                values[event.name].extend(event.table.column(0).to_pylist())
+        assert values == {
+            "double": [0, 2, 4, 6, 8],
+            "original": list(range(5)),
+        }
+        assert results.job.status()["task_count"] == 0
+
+    asyncio.run(run())
+
+
+def test_native_result_wait_preserves_delivery_when_job_finishes_first() -> None:
+    async def run() -> None:
+        data = pa.table({"value": [1, 2]})
+        results = cf.table_input("events", schema=data.schema).stream(data)
+        loop = asyncio.get_running_loop()
+        pending = loop.create_future()
+        closed = loop.create_future()
+        closed.set_result(None)
+
+        class Queue:
+            calls = 0
+
+            def try_next(self):
+                return None
+
+            def next_async(self):
+                self.calls += 1
+                return pending if self.calls == 1 else closed
+
+            async def close_async(self):
+                pass
+
+        queue = Queue()
+        results._native_queue = queue
+        results._waiter = asyncio.create_task(asyncio.sleep(0))
+
+        def deliver() -> None:
+            if not pending.cancelled():
+                pending.set_result(("result", cf.Batch.from_pyarrow(data)))
+
+        loop.call_later(0.01, deliver)
+        output = await results._next_native_output()
+        assert output.name == "result"
+        assert output.table.equals(data)
+        assert queue.calls == 1
+        assert not pending.cancelled()
+
+    asyncio.run(run())
+
+
 def test_materialized_stream_obeys_visible_byte_budget() -> None:
     data = pa.table({"value": ["a" * 10, "b" * 10, None, "c" * 10]})
     source = cf.table_input("events", schema=data.schema)

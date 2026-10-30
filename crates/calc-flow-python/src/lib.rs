@@ -13,6 +13,7 @@ mod pipeline;
 mod provider;
 mod runtime;
 mod store;
+mod stream_results;
 mod udf;
 
 use pyo3::prelude::*;
@@ -35,6 +36,7 @@ fn calc_flow_python(module: &Bound<'_, PyModule>) -> PyResult<()> {
     continuous::register(module)?;
     pipeline::register(module)?;
     store::register(module)?;
+    stream_results::register(module)?;
     Ok(())
 }
 
