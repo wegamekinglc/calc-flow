@@ -453,7 +453,9 @@ jobs:
         if: matrix.python-version == '3.9'
         run: |
           uv python install "${{ matrix.python-version }}"
-          dirname "$(uv python find "${{ matrix.python-version }}")" >> "$GITHUB_PATH"
+          uv venv --python "${{ matrix.python-version }}" "$RUNNER_TEMP/calc-flow-compat"
+          echo "UV_PYTHON=$RUNNER_TEMP/calc-flow-compat/bin/python" >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/calc-flow-compat/bin" >> "$GITHUB_PATH"
       - name: Select the published Python ABI family
         id: wheel
         run: |
