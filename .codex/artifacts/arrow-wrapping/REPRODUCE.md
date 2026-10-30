@@ -21,6 +21,9 @@ uv pip install --python <python> --no-deps <wheel>
 另建 `budget.json` 初值 `{"limit_s":600,"spent_s":0,"stages":[]}`。身份/环境准备、诊断、
 fixture、暖身、预检、进程启动/退出、失败与原始审计都记入累计预算；构建另外记录。
 源码身份检查在启动 worker 前拒绝 staged/unstaged/untracked 产品变化，支持干净固定源。
+交付版同时独立检查 index；封存后补充了“index 改动被工作树反向覆盖”的反例。
+原始包 `sampling/collect.py` 保留实际采样版本，`harness/collect.py` 为加固后的交付版，
+两者哈希见 manifest。加固仅影响 worker 启动前的拒绝条件，没有重新采样或改写观测。
 采集期间持续检查本机 cargo/rustc/maturin，发现即结束 owned collector 并清理其 worker。
 
 从 checkout 根目录运行。原实验 `task` 为 `target/arrow-wrapping`，脚本使用相同路径。

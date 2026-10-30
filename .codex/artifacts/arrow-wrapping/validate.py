@@ -54,6 +54,12 @@ def source_guards(directory):
             else:
                 raise AssertionError("changed product accepted")
         product.write_text("fixed baseline\n")
+        try:
+            collect.verify_product_source(ref)
+        except subprocess.CalledProcessError as error:
+            assert error.returncode == 1
+        else:
+            raise AssertionError("staged change hidden by working tree accepted")
         git("add", "Cargo.toml")
         (directory / "vendor").mkdir()
         (directory / "vendor/new.rs").write_text("// untracked product\n")
@@ -109,6 +115,7 @@ def validate(task):
             "clean_product": "accepted",
             "staged_product": "rejected",
             "unstaged_product": "rejected",
+            "staged_change_with_baseline_worktree": "rejected",
             "untracked_vendor": "rejected",
             "wrong_values_with_updated_hash": "rejected",
             "missing_input_binding_clock": "rejected",

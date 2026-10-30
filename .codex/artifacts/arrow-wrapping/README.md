@@ -82,6 +82,9 @@ Rust fmt、相关 Clippy/Ruff/format、原复杂度门禁、schema/差异检查�
 原始输出逐值/顺序、输入形状、跨双方精确 schema/metadata/输出批形状、阶段库存/时钟、
 seal/hash 和成对统计重算通过。干净固定源通过，staged/unstaged/untracked 产品源均拒绝；
 更新 hash 后的错值、遗漏输入绑定时钟也被拒绝。原始包解包后再次复核全部正式观测。
+封存自检额外覆盖“index 已改、工作树反向恢复基线”的边界，交付入口增加独立 cached diff
+并拒绝此反例。采样时产品源码已提交且干净；采样版 `sampling/collect.py`、交付版
+`harness/collect.py` 及各自哈希分别保留，产品/wheel 和观测数据不变，无重采样。
 实际命令见 `REPRODUCE.md`、`data/validation.json`；包和记录校验见 `data/SHA256SUMS`。
 原 SQL、streaming、Arroyo/窗口和历史 benchmark 审计证据复用，未重跑全量或追加性能场景。
 本批交协调器聚焦审查及完整 CI；代码合并条件与稳定性能收益保持分别记录。

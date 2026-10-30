@@ -107,6 +107,11 @@ def verify_product_source(reference):
         "rust-toolchain.toml",
     ]
     subprocess.run(
+        ["git", "diff", "--cached", "--quiet", reference, "--", *product],
+        cwd=ROOT,
+        check=True,
+    )
+    subprocess.run(
         ["git", "diff", "--quiet", reference, "--", *product],
         cwd=ROOT,
         check=True,
