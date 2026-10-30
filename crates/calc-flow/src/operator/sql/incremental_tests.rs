@@ -172,6 +172,59 @@ async fn test_sql_incremental_grouped_prefixes_touch_only_new_input() {
 }
 
 #[tokio::test]
+async fn test_sql_incremental_bitwise_grouped_prefixes_and_recovery() {
+    let query = "SELECT key, BIT_AND(value) AS all_bits, BIT_OR(value) AS any_bits, BIT_XOR(value) AS parity, COUNT(*) AS rows FROM events GROUP BY key";
+    let first = grouped_batch(
+        &[Some("a"), Some("a"), Some("b"), None],
+        &[Some(12), None, Some(7), Some(3)],
+    );
+    let second = grouped_batch(&[Some("a"), Some("b"), None], &[Some(6), Some(3), Some(3)]);
+    let mut initial = assert_prefix_oracle(query, &[first.clone(), second.clone()], true).await;
+    assert_eq!(initial.incremental_work, (7, 1));
+    let snapshot = initial.checkpoint(Epoch::INITIAL).unwrap();
+    let mut restored = initial.clone();
+    StreamOperator::restore(&mut restored, &snapshot).unwrap();
+    let third = grouped_batch(&[Some("a"), Some("c")], &[Some(10), Some(1)]);
+    let job = StreamJobContext::new(
+        1,
+        "bitwise-restore",
+        JsonMap::new(),
+        None,
+        CancellationToken::new(),
+    );
+    let context = StreamOperatorContext::new(&job, "totals", None);
+    let mut collector = EdgeCollector::new(restored.output_ports().to_vec());
+    restored
+        .process_data("events", third.clone(), &context, &mut collector)
+        .await
+        .unwrap();
+    let output = collector.drain("output");
+    assert_eq!(output.len(), 1);
+    let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+    let expected = runtime
+        .sql(
+            query,
+            &BTreeMap::from([(
+                "events".into(),
+                Batch::table(
+                    [first, second, third]
+                        .iter()
+                        .flat_map(|batch| batch.table_payload().unwrap().batches())
+                        .cloned()
+                        .collect(),
+                    BatchMetadata::default(),
+                )
+                .unwrap(),
+            )]),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows(output[0].as_data().unwrap()), rows(&expected));
+    assert_eq!(restored.incremental_work, (2, 0));
+}
+
+#[tokio::test]
 async fn test_sql_incremental_restore_imports_without_extra_output() {
     let query = "SELECT key, COUNT(*) AS rows, SUM(value) AS total FROM events GROUP BY key";
     let mut initial = SqlOperator::new("totals", query, vec!["events".into()], vec![]).unwrap();
@@ -396,7 +449,7 @@ async fn test_sql_incremental_integer_promotions_and_wrapping_prefix_oracles() {
             )
             .unwrap(),
         ];
-        assert_prefix_oracle("SELECT COUNT(*) AS rows, COUNT(value) AS valid, SUM(value) AS total, MIN(value) AS lo, MAX(value) AS hi FROM events", &incoming, true).await;
+        assert_prefix_oracle("SELECT COUNT(*) AS rows, COUNT(value) AS valid, SUM(value) AS total, MIN(value) AS lo, MAX(value) AS hi, BIT_AND(value) AS all_bits, BIT_OR(value) AS any_bits, BIT_XOR(value) AS parity FROM events", &incoming, true).await;
     }
 }
 
@@ -478,6 +531,10 @@ async fn test_sql_incremental_supported_and_fallback_queries_match_cumulative_or
         (
             "SELECT COUNT(DISTINCT value) AS unique_values FROM events",
             false,
+        ),
+        (
+            "SELECT BIT_AND(value) AS all_bits, BIT_OR(value) AS any_bits, BIT_XOR(value) AS parity FROM events",
+            true,
         ),
         ("SELECT SUM(value + 1) AS computed FROM events", true),
         (

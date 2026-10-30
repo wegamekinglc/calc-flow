@@ -340,8 +340,10 @@ A dynamic input accepts a materialized Arrow `Table`, `RecordBatch`, table
 `Batch`, an `AsyncIterable` of those values, or a `SourceBinding`.
 Materialized inputs are imported once and sliced by a native source within
 `config.edge_budget`, except complete relations feeding snapshot ingress,
-which must fit the budget whole. They do not call a Python source per batch. With
-`SourceProvidedWatermarks`, the
+which must fit the budget whole. They do not call a Python source per batch. If
+all dynamic inputs are materialized Arrow, a native bounded result queue also
+avoids Python sink calls per batch; iterable and mixed inputs retain that bridge.
+With `SourceProvidedWatermarks`, the
 iterable may also yield `Watermark` values. A single-table root without static
 parameters accepts that source directly. Otherwise pass a mapping by logical
 declaration name; Program always requires one. Static parameter entries hold

@@ -2573,6 +2573,7 @@ fn aggregate_argument_supported(
             exact_numeric(data_type) || matches!(data_type, DataType::Float32 | DataType::Float64)
         }
         "min" | "max" => extrema_argument_supported(data_type, floating_extrema),
+        "bit_and" | "bit_or" | "bit_xor" => data_type.is_integer(),
         "avg" => {
             (global && data_type.is_integer())
                 || matches!(

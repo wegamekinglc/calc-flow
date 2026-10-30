@@ -441,6 +441,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - name: Set up Python
+        if: matrix.python-version != '3.9'
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ matrix.python-version }}
@@ -448,6 +449,13 @@ jobs:
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           enable-cache: true
+      - name: Set up Python 3.9 with uv
+        if: matrix.python-version == '3.9'
+        run: |
+          uv python install "${{ matrix.python-version }}"
+          uv venv --python "${{ matrix.python-version }}" "$RUNNER_TEMP/calc-flow-compat"
+          echo "UV_PYTHON=$RUNNER_TEMP/calc-flow-compat/bin/python" >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/calc-flow-compat/bin" >> "$GITHUB_PATH"
       - name: Select the published Python ABI family
         id: wheel
         run: |

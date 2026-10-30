@@ -484,8 +484,11 @@ class SinkBinding:
     delivery: SinkDelivery
 
     @classmethod
-    def ordinary(cls, sink_id: str, sink: StreamSink) -> SinkBinding:
-        _require_async_methods(sink, "sink", ("open", "write", "close"))
+    def ordinary(
+        cls, sink_id: str, sink: StreamSink | _native._ArrowResultSink
+    ) -> SinkBinding:
+        if not isinstance(sink, _native._ArrowResultSink):
+            _require_async_methods(sink, "sink", ("open", "write", "close"))
         return cls(sink_id, sink, OrdinaryDelivery())
 
     @classmethod
