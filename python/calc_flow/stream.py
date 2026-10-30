@@ -380,10 +380,8 @@ class StreamResults(Generic[T]):
         return self._queue.get_nowait()
 
     async def _next_native_output(self) -> StreamOutput:
-        queue = self._native_queue
-        waiter = self._waiter
-        if queue is None or waiter is None:
-            raise RuntimeError("stream: enter with async with before iteration")
+        queue = cast(_ArrowResultQueue, self._native_queue)
+        waiter = cast(asyncio.Task[JobOutcome], self._waiter)
         while True:
             output = queue.try_next()
             if output is not None:

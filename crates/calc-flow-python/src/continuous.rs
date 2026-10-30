@@ -982,10 +982,10 @@ fn build_one_sink(
     let descriptor = sink_descriptor(&binding)?;
     let kind = required_item(&descriptor, "kind")?.extract::<String>()?;
     let sink_id = binding.getattr("sink_id")?.extract::<String>()?;
-    if let Ok(sink) = binding
-        .getattr("sink")?
-        .extract::<PyRef<'_, crate::stream_results::PyArrowResultSink>>()
-    {
+    if let Ok(sink) = binding.getattr("sink").and_then(|sink| {
+        sink.extract::<PyRef<'_, crate::stream_results::PyArrowResultSink>>()
+            .map_err(Into::into)
+    }) {
         if kind != "ordinary" {
             return Err(PyTypeError::new_err(
                 "native Arrow result sinks support only ordinary delivery",
