@@ -177,6 +177,25 @@ impl<'a> OutputPlanBuilder<'a> {
         self.left.record_span(source, row, name)
     }
 
+    fn record_right_range(
+        &mut self,
+        source: usize,
+        row: usize,
+        promotes: bool,
+        name: &str,
+    ) -> Result<()> {
+        let compact_fixed = self.right.columns[source].is_fixed_width()
+            && self
+                .right
+                .positions
+                .as_ref()
+                .is_some_and(positions::Builder::is_compact);
+        if !compact_fixed || promotes {
+            self.right.record_range(source, row..row + 1, name)?;
+        }
+        Ok(())
+    }
+
     pub fn push_right_source(&mut self, right: Option<(usize, usize)>, name: &str) -> Result<()> {
         let promotes =
             self.right.positions.as_ref().is_some_and(|positions| {
@@ -186,16 +205,7 @@ impl<'a> OutputPlanBuilder<'a> {
             self.charge_compact_fixed(name)?;
         }
         if let Some((source, row)) = right {
-            let compact_fixed = self.right.columns[source].is_fixed_width()
-                && self
-                    .right
-                    .positions
-                    .as_ref()
-                    .is_some_and(positions::Builder::is_compact);
-            if !compact_fixed || promotes {
-                let end = row + 1;
-                self.right.record_range(source, row..end, name)?;
-            }
+            self.record_right_range(source, row, promotes, name)?;
         }
         self.right
             .positions

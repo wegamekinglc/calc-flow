@@ -146,6 +146,45 @@ impl ParallelCpuWork for FillWork {
     }
 }
 
+fn prepaid_chunk(
+    remaining: usize,
+    position_prepaid: bool,
+    quantum: &mut ProbeQuantum<'_>,
+) -> usize {
+    if !position_prepaid || remaining == 0 {
+        return 0;
+    }
+    let count = remaining.min(quantum.remaining + 1);
+    quantum.remaining -= count - 1;
+    count
+}
+
+fn append_dense_matches(
+    pairs: &mut super::super::matches::Selection,
+    position: usize,
+    start: usize,
+    mut remaining: usize,
+    position_prepaid: bool,
+    quantum: &mut ProbeQuantum<'_>,
+) -> Result<()> {
+    let mut offset = prepaid_chunk(remaining, position_prepaid, quantum);
+    if offset != 0 {
+        pairs.append_interval(position, start..start + offset);
+        #[cfg(test)]
+        super::super::note_join_work(|work| work.native_range_visits += offset);
+        remaining -= offset;
+    }
+    while remaining != 0 {
+        let count = quantum.take(remaining)?;
+        pairs.append_interval(position, start + offset..start + offset + count);
+        #[cfg(test)]
+        super::super::note_join_work(|work| work.native_range_visits += count);
+        offset += count;
+        remaining -= count;
+    }
+    Ok(())
+}
+
 fn append_matches(
     inputs: &ProbeInputs,
     position: usize,
@@ -157,32 +196,13 @@ fn append_matches(
     let mut remaining = bounds.matches();
     if let Some((start, expected)) = inputs.dense_bounds(position, bounds) {
         debug_assert_eq!(expected, remaining);
-        let mut offset = 0;
-        if position_prepaid && remaining != 0 {
-            let count = remaining.min(quantum.remaining + 1);
-            quantum.remaining -= count - 1;
-            pairs.append_interval(position, start..start + count);
-            #[cfg(test)]
-            super::super::note_join_work(|work| work.native_range_visits += count);
-            offset = count;
-            remaining -= count;
-        }
-        while remaining != 0 {
-            let count = quantum.take(remaining)?;
-            pairs.append_interval(position, start + offset..start + offset + count);
-            #[cfg(test)]
-            super::super::note_join_work(|work| work.native_range_visits += count);
-            offset += count;
-            remaining -= count;
-        }
-        return Ok(());
+        return append_dense_matches(pairs, position, start, remaining, position_prepaid, quantum);
     }
     let mut matches = inputs.matches_bounds(position, bounds);
-    if position_prepaid && remaining != 0 {
-        let count = remaining.min(quantum.remaining + 1);
-        quantum.remaining -= count - 1;
-        pairs.append_run(position, matches.by_ref().take(count));
-        remaining -= count;
+    let first = prepaid_chunk(remaining, position_prepaid, quantum);
+    if first != 0 {
+        pairs.append_run(position, matches.by_ref().take(first));
+        remaining -= first;
     }
     while remaining != 0 {
         let count = quantum.take(remaining)?;
