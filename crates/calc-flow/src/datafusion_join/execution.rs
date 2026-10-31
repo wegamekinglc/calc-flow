@@ -332,18 +332,18 @@ fn band_first(
     offset_index: usize,
     target: i64,
     next_match: Option<usize>,
-    dense_base: Option<i64>,
+    dense_base: Option<i128>,
 ) -> usize {
     if let Some(first) = next_match {
         return first;
     }
     if let Some(step) = band.dense_step {
         let index = if let Some(offset) = band.offset_indices[offset_index] {
-            dense_base.and_then(|base| base.checked_add(offset))
+            dense_base.map(|base| base + i128::from(offset))
         } else {
-            target
-                .checked_sub(band.entries[0].time)
-                .and_then(|delta| (delta >= 0 && delta % step == 0).then(|| delta / step))
+            let step = i128::from(step);
+            let delta = i128::from(target) - i128::from(band.entries[0].time);
+            (delta >= 0 && delta % step == 0).then(|| delta / step)
         };
         return index
             .and_then(|index| usize::try_from(index).ok())
@@ -398,7 +398,7 @@ struct BandState {
     band_row: usize,
     current_band: Option<usize>,
     dense_row: usize,
-    dense_base: Option<i64>,
+    dense_base: Option<i128>,
 }
 
 impl BandState {
@@ -500,7 +500,8 @@ impl BandState {
             if self.dense_row != self.row {
                 self.dense_row = self.row;
                 self.dense_base = band.dense_step.and_then(|step| {
-                    let delta = time.checked_sub(band.entries[0].time)?;
+                    let step = i128::from(step);
+                    let delta = i128::from(time) - i128::from(band.entries[0].time);
                     (delta % step == 0).then(|| delta / step)
                 });
             }

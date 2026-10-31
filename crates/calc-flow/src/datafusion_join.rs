@@ -480,6 +480,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_interval_dense_positions_allow_wide_timestamp_spans() {
+        let query = "WITH offsets(event_offset) AS (VALUES (INTERVAL '0 seconds')) \
+            SELECT probes.left_sequence AS sequence, reference.sequence AS right_sequence, \
+            probes.left_price * reference.price AS value FROM reference JOIN \
+            (SELECT input.sequence AS left_sequence, input.symbol AS left_symbol, \
+            input.price AS left_price, input.event_time + offsets.event_offset AS match_time \
+            FROM input CROSS JOIN offsets) AS probes \
+            ON probes.left_symbol = reference.symbol \
+            AND probes.match_time = reference.event_time";
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "event_time",
+                DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
+                false,
+            ),
+            Field::new("sequence", DataType::UInt64, false),
+            Field::new("symbol", DataType::Utf8, false),
+            Field::new("price", DataType::Float64, true),
+        ]));
+        let make = |rows: &[(i64, u64)]| {
+            let event_time = Arc::new(
+                rows.iter()
+                    .map(|row| Some(row.0))
+                    .collect::<PrimitiveArray<datafusion::arrow::array::types::TimestampNanosecondType>>()
+                    .with_timezone("UTC"),
+            ) as ArrayRef;
+            let sequence =
+                Arc::new(UInt64Array::from_iter_values(rows.iter().map(|row| row.1))) as ArrayRef;
+            let symbol =
+                Arc::new(StringArray::from_iter_values(rows.iter().map(|_| "S0"))) as ArrayRef;
+            let price = Arc::new(Float64Array::from(vec![Some(2.0); rows.len()])) as ArrayRef;
+            Batch::table(
+                vec![
+                    RecordBatch::try_new(
+                        Arc::clone(&schema),
+                        vec![event_time, sequence, symbol, price],
+                    )
+                    .unwrap(),
+                ],
+                BatchMetadata::default(),
+            )
+            .unwrap()
+        };
+        let right = make(&[(i64::MIN, 1), (-1, 2), (i64::MAX - 1, 3)]);
+        let left = make(&[(i64::MAX - 1, 100)]);
+        let (runtime, output) = execute(query, &left, &right).await;
+        assert_eq!(
+            interval_rows(&combined(&output)),
+            interval_rows(&reference(query, &left, &right).await)
+        );
+        assert!(
+            runtime.metrics()[0]
+                .physical_plan
+                .contains("CalcFlowBandJoinExec")
+        );
+    }
+
+    #[tokio::test]
     async fn native_interval_out_of_order_probes_reset_exhausted_cursors() {
         let query = "WITH offsets(event_offset) AS (VALUES (INTERVAL '0 seconds')) \
             SELECT probes.left_sequence AS sequence, reference.sequence AS right_sequence, \
