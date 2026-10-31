@@ -249,6 +249,36 @@ class WorkflowTests(unittest.TestCase):
             install = job.index("uses: dtolnay/rust-toolchain@")
             self.assertLess(repair, install)
 
+    def test_run_identity_stays_out_of_the_rust_cache_key(self) -> None:
+        # Swatinem/rust-cache hashes every CARGO, CC, CFLAGS, CXX, CMAKE and
+        # RUST variable visible to its step into the key. A per-commit value
+        # there gives each push a new key that no later run restores.
+        workflow = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
+        job = workflow.split("  rust-core:\n", 1)[1].split("  rust-coverage:\n", 1)[0]
+        header = job.split("    steps:\n", 1)[0]
+        cache = job.split("      - name: Cache Rust build artifacts\n", 1)[1].split(
+            "      - ", 1
+        )[0]
+        hashed = ("CARGO", "CC", "CFLAGS", "CXX", "CMAKE", "RUST")
+        for line in (header + cache).splitlines():
+            name = line.strip().split(":", 1)[0]
+            if name.startswith(hashed):
+                with self.subTest(variable=name):
+                    self.assertNotIn("${{", line)
+        for phase in ("before", "after"):
+            step = job.split(f"scripts/rust_toolchain_diagnostics.py {phase}", 1)[0]
+            step = step.rsplit("      - name:", 1)[1]
+            with self.subTest(phase=phase):
+                self.assertIn(
+                    "RUST_DIAGNOSTICS_HEAD: "
+                    "${{ github.event.pull_request.head.sha || github.sha }}",
+                    step,
+                )
+                self.assertIn(
+                    "RUST_DIAGNOSTICS_BASE: ${{ github.event.pull_request.base.sha }}",
+                    step,
+                )
+
     def test_failed_install_keeps_snapshots_exit_code_and_artifact_upload(self) -> None:
         workflow = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
         job = workflow.split("  rust-core:\n", 1)[1].split("  rust-coverage:\n", 1)[0]

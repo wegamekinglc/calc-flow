@@ -495,8 +495,6 @@ jobs:
       CARGO_BUILD_JOBS: "3"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
-      RUST_DIAGNOSTICS_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
-      RUST_DIAGNOSTICS_BASE: ${{ github.event.pull_request.base.sha }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - name: Ensure libcurl headers for vendored librdkafka
@@ -536,9 +534,13 @@ jobs:
       - name: Snapshot Rust installation before setup
         id: rust_before
         continue-on-error: true
+        # Keep the commit identity on the snapshot steps: rust-cache hashes
+        # RUST* job variables into its key, so a per-commit one never restores.
         env:
           RUST_TOOLCHAIN_EVIDENCE: ${{ runner.temp }}/rust-toolchain-install
           RUST_DIAGNOSTICS_UV: ${{ toJSON(steps.rust_uv) }}
+          RUST_DIAGNOSTICS_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          RUST_DIAGNOSTICS_BASE: ${{ github.event.pull_request.base.sha }}
         run: python scripts/rust_toolchain_diagnostics.py before
       - name: Repair incomplete pinned Rust toolchain
         run: python scripts/repair_rust_toolchain.py
@@ -556,6 +558,8 @@ jobs:
         env:
           RUST_TOOLCHAIN_EVIDENCE: ${{ runner.temp }}/rust-toolchain-install
           RUST_DIAGNOSTICS_UV: ${{ toJSON(steps.rust_uv) }}
+          RUST_DIAGNOSTICS_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          RUST_DIAGNOSTICS_BASE: ${{ github.event.pull_request.base.sha }}
         run: python scripts/rust_toolchain_diagnostics.py after
       - name: Cache Rust build artifacts
         id: rust_cache
