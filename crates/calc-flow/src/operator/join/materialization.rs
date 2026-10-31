@@ -334,6 +334,9 @@ impl JoinOutput<'_> {
     /// Distinct row coordinates are filtered as before; source-column runs
     /// reuse their immutable width inspection without allocating a source map.
     fn constant_row_bytes(&self) -> Option<usize> {
+        if let Some(bytes) = schema_row_bytes(self.schema) {
+            return Some(bytes);
+        }
         let incoming_columns = self.side_columns(true);
         let opposite_columns = self.side_columns(false);
         let (low, high) = self
@@ -555,6 +558,15 @@ fn flat_row(
         bytes,
         nulls,
         terminal,
+    })
+}
+
+fn schema_row_bytes(schema: &SchemaRef) -> Option<usize> {
+    schema.fields().iter().try_fold(0_usize, |bytes, field| {
+        if field.is_nullable() || terminal_offset_width(field.data_type()) != 0 {
+            return None;
+        }
+        bytes.checked_add(fixed_width(field.data_type())?)
     })
 }
 

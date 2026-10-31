@@ -642,6 +642,19 @@ impl NativeIndex {
         WindowBounds { lower, upper }
     }
 
+    pub(super) fn dense_bounds(&self, id: u32, bounds: WindowBounds) -> Option<(usize, usize)> {
+        let run = self.slots[id as usize]
+            .as_ref()
+            .expect("live key ID")
+            .active();
+        let entries = &run[bounds.lower..bounds.upper];
+        let first = entries.first()?.dense;
+        entries
+            .windows(2)
+            .all(|pair| pair[0].dense.checked_add(1) == Some(pair[1].dense))
+            .then_some((first, entries.len()))
+    }
+
     /// Dense indices of a run slice described by previously computed bounds.
     pub(super) fn range_by_bounds(
         &self,

@@ -184,6 +184,71 @@ async fn test_serial_window_probe_reuses_count_searches_for_fill() {
     );
 }
 
+#[tokio::test]
+async fn test_out_of_order_native_window_gather_preserves_time_sorted_dense_order() {
+    let spec = StreamJoinSpec::inner(
+        ["account_id"],
+        ["account_id"],
+        "authorized_at",
+        "paid_at",
+        JoinTimeBounds::new(Duration::from_micros(60), Duration::from_micros(60)).unwrap(),
+        JoinStateLimits::new(100, 1_000_000, 1_000).unwrap(),
+    )
+    .unwrap();
+    let mut operator =
+        StreamJoinOperator::new("match", window_left_schema(), window_right_schema(), spec)
+            .unwrap();
+    let job = window_job();
+    let context = StreamOperatorContext::new(&job, "match", None);
+    let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+    operator
+        .process_data(
+            "right",
+            window_right_batch(&[10, 40, 20, 50]),
+            &context,
+            &mut collector,
+        )
+        .await
+        .unwrap();
+    let (plan, mut admitted) =
+        window_admitted_probe(&mut operator, "left", &window_left_batch(&[40]), &context).await;
+    let expected = operator
+        .legacy_matches(&plan, &mut admitted, &context)
+        .await
+        .unwrap()
+        .iter()
+        .map(|pair| pair.opposite_index)
+        .collect::<Vec<_>>();
+    let native = operator
+        .native_matches(&plan, &admitted, None)
+        .unwrap()
+        .expect("single Int64 key stays native");
+    assert_eq!(expected, vec![0, 2, 1, 3]);
+    assert_eq!(
+        native
+            .pairs
+            .iter()
+            .map(|pair| pair.opposite_index)
+            .collect::<Vec<_>>(),
+        expected
+    );
+}
+
+#[test]
+fn test_dense_bounds_require_ordered_contiguous_indices() {
+    let (index, ids) = fixture_index(&[&[10, 40, 20, 50]]);
+    let bounds = index.window_bounds_by_id(
+        ids[0],
+        (EventTime::from_micros(0), EventTime::from_micros(60)),
+        None,
+    );
+    assert_eq!(
+        index.range_by_bounds(ids[0], bounds).collect::<Vec<_>>(),
+        vec![0, 2, 1, 3]
+    );
+    assert_eq!(index.dense_bounds(ids[0], bounds), None);
+}
+
 fn fixture_index(times_per_key: &[&[i64]]) -> (NativeIndex, Vec<u32>) {
     let record = RecordBatch::new_empty(Arc::new(Schema::empty()));
     let mut rows = Vec::new();

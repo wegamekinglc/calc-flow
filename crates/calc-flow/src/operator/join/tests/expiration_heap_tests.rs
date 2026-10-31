@@ -227,6 +227,39 @@ async fn test_expiration_clear_preserves_ordinals_and_funded_reuse() {
     assert_eq!(pool.reserved(), 0);
 }
 
+#[test]
+fn eviction_plan_uses_chunk_ranges_instead_of_per_row_entry_storage() {
+    let mut stored = rows(2_048);
+    let key = stored[0].encoded_key.clone();
+    for row in &mut stored {
+        row.encoded_key = Arc::clone(&key);
+    }
+    let retained = RetainedRows(
+        Arc::new(stored.into()),
+        None,
+        columnar::SparseQueue::default(),
+    );
+    let expirations = ExpirationIndex::restored(&retained.0).unwrap();
+    let bindings = key_dictionary::SideBindings::default();
+    let measured = allocation_counter::measure(|| {
+        let plan = EvictionPlan::plan(
+            &retained,
+            &expirations,
+            &|_| true,
+            &bindings,
+            None,
+            "eviction-plan-test",
+        )
+        .unwrap();
+        assert_eq!(plan.count, 2_048);
+        assert_eq!(plan.captured, 0);
+    });
+    assert!(
+        measured.bytes_max < 32_768,
+        "per-row eviction entries dominate the plan allocation: {measured:?}"
+    );
+}
+
 /// The bulk cut must equal repeated per-row pops on random out-of-order runs
 /// (spec FR10/AC5): the retained set, its admission order, and the run heads
 /// stay identical to a per-row pop oracle.
