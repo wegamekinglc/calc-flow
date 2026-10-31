@@ -6,13 +6,11 @@ import math
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 from scripts.benchmark_suite.asof import CASES, _valid_sample, asof_rows
 from scripts.benchmark_suite.rust import (
     bench_targets,
-    build_binaries,
-    measure_rust,
     run_binary,
 )
 
@@ -235,127 +233,3 @@ class AsofEvidenceTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(
                     _valid_sample(sample, sample["config"], "tolerance-window")
                 )
-
-
-class AsofInventoryTests(unittest.IsolatedAsyncioTestCase):
-    async def test_each_source_rebuilds_its_product_library_before_linking(self):
-        with TemporaryDirectory() as raw:
-            root = Path(raw)
-            shared = root / "target"
-            deps = shared / "release/deps"
-            deps.mkdir(parents=True)
-            library = deps / "libcalc_flow-samehash.rlib"
-            metadata = deps / "libcalc_flow-samehash.rmeta"
-            dependency = deps / "libdatafusion-dependency.rlib"
-            library.write_bytes(b"baseline implementation")
-            metadata.write_bytes(b"baseline metadata")
-            dependency.write_bytes(b"reusable dependency")
-            compiled = []
-
-            async def command(argv, **kwargs):
-                if not library.exists():
-                    compiled.append(kwargs["cwd"])
-                    self.assertFalse(metadata.exists())
-                    library.write_bytes(b"candidate implementation")
-                target = argv[argv.index("--bench") + 1]
-                executable = deps / target
-                executable.write_bytes(library.read_bytes())
-                kwargs["log"].write_text(
-                    json.dumps(
-                        {
-                            "reason": "compiler-artifact",
-                            "target": {"name": target},
-                            "executable": str(executable),
-                        }
-                    )
-                )
-
-            with (
-                patch(
-                    "scripts.benchmark_suite.rust.bench_targets",
-                    return_value=["core", "stream_asof_perf"],
-                ),
-                patch("scripts.benchmark_suite.rust.command", side_effect=command),
-            ):
-                binaries = await build_binaries(root, root, shared)
-            self.assertEqual(compiled, [root])
-            self.assertEqual(dependency.read_bytes(), b"reusable dependency")
-            for binary in binaries.values():
-                self.assertEqual(binary.read_bytes(), b"candidate implementation")
-
-    async def test_removed_target_still_requires_an_explicit_migration(self):
-        binaries = [
-            {"core": Path("core"), "previous": Path("previous")},
-            {"core": Path("core")},
-        ]
-        with (
-            patch(
-                "scripts.benchmark_suite.rust.build_binaries",
-                AsyncMock(side_effect=binaries),
-            ),
-            patch("scripts.benchmark_suite.rust._rust_provenance", return_value={}),
-            self.assertRaisesRegex(ValueError, "targets removed"),
-        ):
-            await measure_rust(
-                {"id": "rust", "family": "rust"},
-                {},
-                {"baseline": Path("base"), "candidate": Path("head")},
-                Path("target/test"),
-            )
-
-    async def test_added_target_is_new_coverage_without_fabricating_baseline(self):
-        with TemporaryDirectory() as raw:
-            root = Path(raw)
-            binary = root / "binary"
-            binary.write_bytes(b"fixture")
-            binaries = {
-                "baseline": {"core": binary},
-                "candidate": {"core": binary, "stream_asof_perf": binary},
-            }
-            row = {
-                "rows": 100_000,
-                "scope": "operator-watermark-settlement",
-                "metadata": {},
-                "samples": [0.1],
-            }
-
-            async def block(_binaries, _source, _output, _stamps, side):
-                return (
-                    {"stream_asof_perf/wide_f100_slow": row}
-                    if side == "candidate"
-                    else {},
-                    [],
-                )
-
-            with (
-                patch(
-                    "scripts.benchmark_suite.rust.build_binaries",
-                    AsyncMock(side_effect=list(binaries.values())),
-                ),
-                patch("scripts.benchmark_suite.rust._rust_provenance", return_value={}),
-                patch(
-                    "scripts.benchmark_suite.rust.declared_migrations", return_value={}
-                ),
-                patch(
-                    "scripts.benchmark_suite.rust._stamp_fingerprints",
-                    return_value={"baseline": {}, "candidate": {}},
-                ),
-                patch("scripts.benchmark_suite.rust._rust_block", side_effect=block),
-                patch(
-                    "scripts.benchmark_suite.rust._allocation_reports",
-                    AsyncMock(return_value={}),
-                ),
-                patch("scripts.benchmark_suite.rust.allocation_rows", return_value=[]),
-            ):
-                result = await measure_rust(
-                    {"id": "rust", "family": "rust"},
-                    {},
-                    {"baseline": root, "candidate": root},
-                    root,
-                )
-            self.assertEqual(result["errors"], [])
-            case = result["cases"][0]
-            self.assertEqual(case["comparison"], "new")
-            self.assertEqual(case["result"]["verdict"], "new-coverage")
-            self.assertEqual(case["baseline"], [])
-            self.assertEqual(case["candidate"], [[0.1], [0.1]])

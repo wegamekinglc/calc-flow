@@ -560,8 +560,9 @@ rejected. It retains the configuration, oracle and all raw observations in
 normalized metadata. Oracle-only reports do not satisfy this sampling contract.
 
 The Rust shard measures a target absent from the baseline as candidate-only
-`new-coverage`; removing a baseline target fails. Whole-suite ABBA deltas
-remain informational. A separate version comparison must retain compatible
+`new-coverage`; removing a baseline target fails, and removing a case needs a
+declaration in `benchmarks/rust-workload-migrations.json`. Whole-suite ABBA
+deltas remain informational. A separate version comparison must retain compatible
 machine/dependency/workload identities, actual product refs, benchmark source,
 sealed binaries and the comparison harness, using the existing
 [two-round paired contract](#revision-comparisons-and-regression-gate).
@@ -828,6 +829,10 @@ sides' observed source bytes match it exactly; the accepted cases then carry a
 documents keep their real differing workload identities, and the applied
 migrations are listed in the shard's JSON artifact. Undeclared or mismatched
 workload changes still fail closed, now scoped to the changed target.
+A declaration also retires cases its candidate source removed: when the
+candidate measured that target, a case only the baseline blocks still report
+is dropped instead of failing as a missing block. Without a declaration, a
+removed case still fails.
 The common Join harness above also requires an exact migration declaration
 when replacing an older source. Its revised timing boundary uses new case IDs
 and is compiled on both products, so historical pure-handler timings are never

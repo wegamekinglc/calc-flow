@@ -246,6 +246,76 @@ class AddedRustTargetTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(case["baseline"], [])
             self.assertEqual(case["candidate"], [[0.1], [0.1]])
 
+    async def test_removed_case_needs_its_targets_declared_migration(self):
+        row = {
+            "rows": 1,
+            "scope": "criterion",
+            "metadata": {},
+            "samples": [0.1],
+        }
+
+        async def block(_binaries, _source, _output, _stamps, side):
+            kept = {"core/kept": row}
+            return (kept if side == "candidate" else {**kept, "core/retired": row}), []
+
+        for applied, retired_status in (
+            ({"core": {"target": "core", "reference": "PR"}}, None),
+            ({}, "error"),
+        ):
+            with (
+                self.subTest(migrated=bool(applied)),
+                TemporaryDirectory() as raw,
+            ):
+                root = Path(raw)
+                binary = root / "binary"
+                binary.write_bytes(b"fixture")
+                with (
+                    patch(
+                        "scripts.benchmark_suite.rust.build_binaries",
+                        AsyncMock(return_value={"core": binary}),
+                    ),
+                    patch(
+                        "scripts.benchmark_suite.rust._rust_provenance", return_value={}
+                    ),
+                    patch(
+                        "scripts.benchmark_suite.rust.declared_migrations",
+                        return_value=applied,
+                    ),
+                    patch(
+                        "scripts.benchmark_suite.rust.with_harness_migrations",
+                        side_effect=lambda declared, *_: declared,
+                    ),
+                    patch(
+                        "scripts.benchmark_suite.rust.stamp_dependency_migrations",
+                        return_value={"baseline": {}, "candidate": {}},
+                    ),
+                    patch(
+                        "scripts.benchmark_suite.rust._stamp_fingerprints",
+                        return_value={"baseline": {}, "candidate": {}},
+                    ),
+                    patch(
+                        "scripts.benchmark_suite.rust._rust_block", side_effect=block
+                    ),
+                    patch(
+                        "scripts.benchmark_suite.rust._allocation_reports",
+                        AsyncMock(return_value={}),
+                    ),
+                    patch(
+                        "scripts.benchmark_suite.rust.allocation_rows", return_value=[]
+                    ),
+                ):
+                    result = await measure_rust(
+                        {"id": "rust", "family": "rust"},
+                        {},
+                        {"baseline": root, "candidate": root},
+                        root,
+                    )
+                statuses = {
+                    case["scenario"]: case["status"] for case in result["cases"]
+                }
+                self.assertEqual(statuses.get("core/retired"), retired_status)
+                self.assertIn("core/kept", statuses)
+
 
 def legacy_sql_report() -> dict:
     """A baseline report shape from before the output_rows contract."""

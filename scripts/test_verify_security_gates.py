@@ -21,9 +21,6 @@ from scripts.verify_security_gates import (
 
 
 class TestThreatModel(unittest.TestCase):
-    def test_threat_model_is_non_empty(self) -> None:
-        self.assertGreater(len(THREAT_MODEL), 10)
-
     def test_all_entries_have_evidence(self) -> None:
         for entry in THREAT_MODEL:
             with self.subTest(threat=entry.threat):

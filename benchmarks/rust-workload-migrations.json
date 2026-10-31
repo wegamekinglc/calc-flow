@@ -112,6 +112,13 @@
       "candidate_sha256": "26f40d42e335ae53d1502f4d4758e33ff48f0de7b7aaab22fe4f5d2fb0e8b4f6",
       "reason": "Pin the historical 10,000-row / 64 MiB output budget explicitly in benchmark contexts and the output channel after the runtime default grows. Existing input rows, fanout, join declarations, correctness checks and timing boundaries are unchanged. The directional declaration records these exact harness bytes without rewriting historical dependency attestations or timing evidence.",
       "reference": "PR #482; historical output-budget fixture preservation"
+    },
+    {
+      "target": "core",
+      "baseline_sha256": "1977e38423122a9a4be36d56317cd905d64dd2fb95e37005e05669f436d47c98",
+      "candidate_sha256": "d506749a896357a4902ce60a3bf3b2a2fdb274ad8b168d1450e231b23f967a64",
+      "reason": "Retire execute/external_plan_table_requirement, a 0.6 ns benchmark of the requires_datafusion() bool getter whose timing measures loop alignment rather than calc-flow work. Every other core benchmark, its fixtures and timing boundaries are unchanged; the baseline-only retired case is dropped instead of reported as missing.",
+      "reference": "PR #522; retired sub-nanosecond core getter benchmark"
     }
   ]
 }

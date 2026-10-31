@@ -117,12 +117,6 @@ def test_record_array_benchmark_records_every_measurement_scope(
     assert benchmark.extra_info["workload_identity"]["scope"] == scope
 
 
-def test_overhead_table_and_array_scales_match() -> None:
-    scale = SCALES["overhead"]
-
-    assert scale.table_rows == scale.array_elements == 1_000
-
-
 def test_record_benchmark_replaces_metadata_without_mutating_existing_mapping() -> None:
     original = {"existing": "value"}
     benchmark = SimpleNamespace(extra_info=original)

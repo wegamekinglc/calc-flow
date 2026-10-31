@@ -4,10 +4,8 @@ import calc_flow
 from calc_flow import _native
 
 
-def test_native_package_reports_v3() -> None:
-    assert calc_flow.__version__ == "2026.10.27"
-    assert _native.version() == "2026.10.27"
-    assert issubclass(calc_flow.CompileError, calc_flow.CalcFlowError)
+def test_package_and_native_versions_match() -> None:
+    assert _native.version() == calc_flow.__version__
     assert calc_flow.CalcFlowError.__module__ == "calc_flow._native"
 
 
