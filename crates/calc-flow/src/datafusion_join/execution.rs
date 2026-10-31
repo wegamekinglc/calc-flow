@@ -167,51 +167,71 @@ struct AsofState {
     batch_size: usize,
 }
 
+fn asof_entries<'a>(latest: &'a mut AsofMap, key: &str) -> &'a mut AsofEntries {
+    if !latest.contains_key(key) {
+        latest.insert(
+            key.to_owned(),
+            std::collections::HashMap::with_hasher(RandomState::new()),
+        );
+    }
+    latest.get_mut(key).expect("ASOF key was just inserted")
+}
+
+fn replace_asof_entry(entries: &mut AsofEntries, time: i64, sequence: Option<u64>, row: usize) {
+    let replace = entries
+        .get(&time)
+        .is_none_or(|(current, _)| match (sequence, *current) {
+            (Some(next), Some(current)) => next > current,
+            (None, Some(_)) => true,
+            _ => false,
+        });
+    if replace {
+        entries.insert(time, (sequence, row));
+    }
+}
+
+fn asof_right_inputs<'a>(
+    right: &'a RecordBatch,
+    spec: &AsofSpec,
+) -> DataFusionResult<(&'a StringArray, Vec<Option<i64>>, &'a UInt64Array)> {
+    let right_keys = right
+        .column(spec.right_key)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or_else(|| DataFusionError::Internal("native ASOF key must be Utf8".into()))?;
+    let right_times = timestamps(right.column(spec.right_time))?;
+    let right_sequences = right
+        .column(spec.right_sequence)
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .ok_or_else(|| DataFusionError::Internal("native ASOF sequence must be UInt64".into()))?;
+    Ok((right_keys, right_times, right_sequences))
+}
+
+fn build_asof_latest(right: &RecordBatch, spec: &AsofSpec) -> DataFusionResult<AsofMap> {
+    let (right_keys, right_times, right_sequences) = asof_right_inputs(right, spec)?;
+    let mut latest: AsofMap = std::collections::HashMap::with_hasher(RandomState::new());
+    for (row, time) in right_times.iter().copied().enumerate() {
+        if right_keys.is_null(row) || time.is_none() {
+            continue;
+        }
+        let sequence = (!right_sequences.is_null(row)).then(|| right_sequences.value(row));
+        let entries = asof_entries(&mut latest, right_keys.value(row));
+        replace_asof_entry(
+            entries,
+            time.expect("checked non-null timestamp"),
+            sequence,
+            row,
+        );
+    }
+    Ok(latest)
+}
+
 impl AsofState {
     fn new(spec: &AsofSpec, schema: SchemaRef, batch_size: usize) -> DataFusionResult<Self> {
         let left = concat(&spec.left)?;
         let right = concat(&spec.right)?;
-        let right_keys = right
-            .column(spec.right_key)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or_else(|| DataFusionError::Internal("native ASOF key must be Utf8".into()))?;
-        let right_times = timestamps(right.column(spec.right_time))?;
-        let right_sequences = right
-            .column(spec.right_sequence)
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .ok_or_else(|| {
-                DataFusionError::Internal("native ASOF sequence must be UInt64".into())
-            })?;
-        let mut latest: AsofMap = std::collections::HashMap::with_hasher(RandomState::new());
-        for (row, time) in right_times.iter().copied().enumerate() {
-            if right_keys.is_null(row) || time.is_none() {
-                continue;
-            }
-            let sequence = (!right_sequences.is_null(row)).then(|| right_sequences.value(row));
-            let time = time.expect("checked non-null timestamp");
-            let key = right_keys.value(row);
-            let by_time = if let Some(by_time) = latest.get_mut(key) {
-                by_time
-            } else {
-                latest
-                    .entry(key.to_owned())
-                    .or_insert_with(|| std::collections::HashMap::with_hasher(RandomState::new()))
-            };
-            let replace =
-                by_time
-                    .get(&time)
-                    .is_none_or(|(current, _)| match (sequence, *current) {
-                        (Some(next), Some(current)) => next > current,
-                        (None, Some(_)) => true,
-                        _ => false,
-                    });
-            if replace {
-                by_time.insert(time, (sequence, row));
-            }
-        }
-
+        let latest = build_asof_latest(&right, spec)?;
         let left_keys = left
             .column(spec.left_key)
             .as_any()
@@ -293,7 +313,55 @@ struct BandMap {
     entries: Vec<KeyBand>,
 }
 
-fn build_bands(right: &RecordBatch, spec: &BandSpec) -> DataFusionResult<BandMap> {
+type BandGroups = std::collections::HashMap<String, Vec<BandEntry>, RandomState>;
+
+fn push_band(groups: &mut BandGroups, key: &str, entry: BandEntry) {
+    if let Some(entries) = groups.get_mut(key) {
+        entries.push(entry);
+    } else {
+        groups.insert(key.to_owned(), vec![entry]);
+    }
+}
+
+fn index_bands(groups: BandGroups, spec: &BandSpec) -> BandMap {
+    let mut indices =
+        std::collections::HashMap::with_capacity_and_hasher(groups.len(), RandomState::new());
+    let entries = groups
+        .into_iter()
+        .map(|(key, mut entries)| {
+            if !entries.is_sorted_by_key(|entry| entry.time) {
+                entries.sort_by_key(|entry| entry.time);
+            }
+            let index = indices.len();
+            indices.insert(key, index);
+            let dense_step = band_step(&entries);
+            let offset_indices = dense_step.map_or_else(Vec::new, |step| {
+                spec.offsets
+                    .iter()
+                    .map(|offset| (offset % step == 0).then(|| offset / step))
+                    .collect()
+            });
+            KeyBand {
+                entries,
+                dense_step,
+                offset_indices,
+            }
+        })
+        .collect();
+    BandMap { indices, entries }
+}
+
+type BandRightInputs<'a> = (
+    &'a StringArray,
+    Vec<Option<i64>>,
+    &'a UInt64Array,
+    &'a Float64Array,
+);
+
+fn band_right_inputs<'a>(
+    right: &'a RecordBatch,
+    spec: &BandSpec,
+) -> DataFusionResult<BandRightInputs<'a>> {
     let right_keys = right
         .column(spec.right_key)
         .as_any()
@@ -310,51 +378,33 @@ fn build_bands(right: &RecordBatch, spec: &BandSpec) -> DataFusionResult<BandMap
         .as_any()
         .downcast_ref::<Float64Array>()
         .ok_or_else(|| DataFusionError::Internal("native band price must be Float64".into()))?;
-    let mut by_key: std::collections::HashMap<String, Vec<BandEntry>, RandomState> =
-        std::collections::HashMap::with_hasher(RandomState::new());
+    Ok((right_keys, right_times, right_sequences, right_prices))
+}
+
+fn band_entry(time: i64, row: usize, sequences: &UInt64Array, prices: &Float64Array) -> BandEntry {
+    BandEntry {
+        time,
+        sequence: (!sequences.is_null(row)).then(|| sequences.value(row)),
+        price: (!prices.is_null(row)).then(|| prices.value(row)),
+    }
+}
+
+fn build_bands(right: &RecordBatch, spec: &BandSpec) -> DataFusionResult<BandMap> {
+    let (right_keys, right_times, right_sequences, right_prices) = band_right_inputs(right, spec)?;
+    let mut groups = BandGroups::default();
     for (row, time) in right_times.iter().copied().enumerate() {
         if right_keys.is_null(row) || time.is_none() {
             continue;
         }
-        let entry = BandEntry {
-            time: time.expect("checked non-null timestamp"),
-            sequence: (!right_sequences.is_null(row)).then(|| right_sequences.value(row)),
-            price: (!right_prices.is_null(row)).then(|| right_prices.value(row)),
-        };
-        let key = right_keys.value(row);
-        if let Some(entries) = by_key.get_mut(key) {
-            entries.push(entry);
-        } else {
-            by_key.insert(key.to_owned(), vec![entry]);
-        }
+        let entry = band_entry(
+            time.expect("checked non-null timestamp"),
+            row,
+            right_sequences,
+            right_prices,
+        );
+        push_band(&mut groups, right_keys.value(row), entry);
     }
-    for entries in by_key.values_mut() {
-        if !entries.is_sorted_by_key(|entry| entry.time) {
-            entries.sort_by_key(|entry| entry.time);
-        }
-    }
-    let mut indices =
-        std::collections::HashMap::with_capacity_and_hasher(by_key.len(), RandomState::new());
-    let entries = by_key
-        .into_iter()
-        .enumerate()
-        .map(|(index, (key, entries))| {
-            indices.insert(key, index);
-            let dense_step = band_step(&entries);
-            let offset_indices = dense_step.map_or_else(Vec::new, |step| {
-                spec.offsets
-                    .iter()
-                    .map(|offset| (offset % step == 0).then(|| offset / step))
-                    .collect()
-            });
-            KeyBand {
-                entries,
-                dense_step,
-                offset_indices,
-            }
-        })
-        .collect();
-    Ok(BandMap { indices, entries })
+    Ok(index_bands(groups, spec))
 }
 
 fn band_first(
@@ -428,40 +478,72 @@ pub(super) struct BandPrepared {
     time_bounds: (i64, i64),
 }
 
+type BandLeftInputs = (
+    StringArray,
+    Arc<[Option<i64>]>,
+    UInt64Array,
+    Float64Array,
+    (i64, i64),
+);
+
+fn band_time_bounds(left: &RecordBatch, left_time: usize) -> DataFusionResult<(i64, i64)> {
+    let DataType::Timestamp(unit, timezone) = left.column(left_time).data_type() else {
+        return Err(DataFusionError::Internal(
+            "native band time must be a timestamp".into(),
+        ));
+    };
+    if let Some(zone) = timezone {
+        zone.parse::<datafusion::arrow::array::timezone::Tz>()
+            .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+    }
+    Ok(crate::datafusion_interval::representable_bounds(*unit))
+}
+
+fn band_left_arrays(
+    left: &RecordBatch,
+    spec: &BandSpec,
+) -> DataFusionResult<(StringArray, UInt64Array, Float64Array)> {
+    let left_keys = left
+        .column(spec.left_key)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or_else(|| DataFusionError::Internal("native band key must be Utf8".into()))?
+        .clone();
+    let left_sequences = left
+        .column(spec.left_sequence)
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .ok_or_else(|| DataFusionError::Internal("native band sequence must be UInt64".into()))?
+        .clone();
+    let left_prices = left
+        .column(spec.left_price)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .ok_or_else(|| DataFusionError::Internal("native band price must be Float64".into()))?
+        .clone();
+    Ok((left_keys, left_sequences, left_prices))
+}
+
+fn band_left_inputs(left: &RecordBatch, spec: &BandSpec) -> DataFusionResult<BandLeftInputs> {
+    let (left_keys, left_sequences, left_prices) = band_left_arrays(left, spec)?;
+    let left_times = timestamps(left.column(spec.left_time))?.into();
+    let time_bounds = band_time_bounds(left, spec.left_time)?;
+    Ok((
+        left_keys,
+        left_times,
+        left_sequences,
+        left_prices,
+        time_bounds,
+    ))
+}
+
 impl BandPrepared {
     fn new(spec: &BandSpec) -> DataFusionResult<Self> {
         let left = concat(&spec.left)?;
         let right = concat(&spec.right)?;
         let bands = Arc::new(build_bands(&right, spec)?);
-        let left_keys = left
-            .column(spec.left_key)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or_else(|| DataFusionError::Internal("native band key must be Utf8".into()))?
-            .clone();
-        let left_times = timestamps(left.column(spec.left_time))?.into();
-        let left_sequences = left
-            .column(spec.left_sequence)
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .ok_or_else(|| DataFusionError::Internal("native band sequence must be UInt64".into()))?
-            .clone();
-        let left_prices = left
-            .column(spec.left_price)
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .ok_or_else(|| DataFusionError::Internal("native band price must be Float64".into()))?
-            .clone();
-        let DataType::Timestamp(unit, timezone) = left.column(spec.left_time).data_type() else {
-            return Err(DataFusionError::Internal(
-                "native band time must be a timestamp".into(),
-            ));
-        };
-        if let Some(zone) = timezone {
-            zone.parse::<datafusion::arrow::array::timezone::Tz>()
-                .map_err(|error| DataFusionError::Execution(error.to_string()))?;
-        }
-        let time_bounds = crate::datafusion_interval::representable_bounds(*unit);
+        let (left_keys, left_times, left_sequences, left_prices, time_bounds) =
+            band_left_inputs(&left, spec)?;
         Ok(Self {
             bands,
             left_keys,
@@ -540,56 +622,114 @@ impl BandState {
         })
     }
 
+    fn advance_row(&mut self) {
+        self.row += self.partition_step;
+        self.offset_index = 0;
+        self.next_match = None;
+    }
+
+    fn skip_offset(&mut self) {
+        self.offset_index += 1;
+        self.next_match = None;
+    }
+
+    fn band_index(&mut self) -> Option<usize> {
+        if self.band_row == self.row {
+            return self.current_band;
+        }
+        let index = self
+            .bands
+            .indices
+            .get(self.left_keys.value(self.row))
+            .copied();
+        self.band_row = self.row;
+        self.current_band = index;
+        index
+    }
+
+    fn next_target(&mut self) -> DataFusionResult<Option<(usize, i64, i64)>> {
+        loop {
+            if self.row >= self.left_times.len() {
+                return Ok(None);
+            }
+            if self.offset_index == self.offsets.len() {
+                self.advance_row();
+                continue;
+            }
+            let Some(time) = self.left_times[self.row] else {
+                self.advance_row();
+                continue;
+            };
+            let target = band_target(time, self.offsets[self.offset_index], self.time_bounds)?;
+            if self.left_keys.is_null(self.row) {
+                self.skip_offset();
+                continue;
+            }
+            let Some(index) = self.band_index() else {
+                self.skip_offset();
+                continue;
+            };
+            return Ok(Some((index, time, target)));
+        }
+    }
+
+    fn update_dense_base(&mut self, band_index: usize, time: i64) {
+        if self.dense_row == self.row {
+            return;
+        }
+        let band = &self.bands.entries[band_index];
+        self.dense_row = self.row;
+        self.dense_base = band.dense_step.and_then(|step| {
+            let step = i128::from(step);
+            let delta = i128::from(time) - i128::from(band.entries[0].time);
+            (delta % step == 0).then(|| delta / step)
+        });
+    }
+
+    fn append_matches(
+        &mut self,
+        band_index: usize,
+        first: usize,
+        target: i64,
+        sequences: &mut Vec<Option<u64>>,
+        right_sequences: &mut Vec<Option<u64>>,
+        values: &mut Vec<Option<f64>>,
+    ) {
+        let entries = &self.bands.entries[band_index].entries;
+        let mut next = first;
+        while sequences.len() < self.batch_size
+            && entries.get(next).is_some_and(|entry| entry.time == target)
+        {
+            let entry = entries[next];
+            sequences.push(
+                (!self.left_sequences.is_null(self.row))
+                    .then(|| self.left_sequences.value(self.row)),
+            );
+            right_sequences.push(entry.sequence);
+            let left_price =
+                (!self.left_prices.is_null(self.row)).then(|| self.left_prices.value(self.row));
+            values.push(match (left_price, entry.price) {
+                (Some(left), Some(right)) => Some(left * right),
+                _ => None,
+            });
+            next += 1;
+        }
+        self.next_match = Some(next);
+        if entries.get(next).is_none_or(|entry| entry.time != target) {
+            self.skip_offset();
+        }
+    }
+
     fn next_batch(&mut self) -> DataFusionResult<Option<RecordBatch>> {
         let mut sequences = Vec::with_capacity(self.batch_size);
         let mut right_sequences = Vec::with_capacity(self.batch_size);
         let mut values = Vec::with_capacity(self.batch_size);
-        while sequences.len() < self.batch_size && self.row < self.left_times.len() {
-            if self.offset_index == self.offsets.len() {
-                self.row += self.partition_step;
-                self.offset_index = 0;
-                self.next_match = None;
-                continue;
-            }
-            if self.left_times[self.row].is_none() {
-                self.row += self.partition_step;
-                self.offset_index = 0;
-                self.next_match = None;
-                continue;
-            }
-            let time = self.left_times[self.row].expect("checked non-null timestamp");
-            let target = band_target(time, self.offsets[self.offset_index], self.time_bounds)?;
-            if self.left_keys.is_null(self.row) {
-                self.offset_index += 1;
-                self.next_match = None;
-                continue;
-            }
-            let band_index = if self.band_row == self.row {
-                self.current_band
-            } else {
-                let index = self
-                    .bands
-                    .indices
-                    .get(self.left_keys.value(self.row))
-                    .copied();
-                self.band_row = self.row;
-                self.current_band = index;
-                index
+        while sequences.len() < self.batch_size {
+            let Some((band_index, time, target)) = self.next_target()? else {
+                break;
             };
-            let Some(band_index) = band_index else {
-                self.offset_index += 1;
-                self.next_match = None;
-                continue;
-            };
+            self.update_dense_base(band_index, time);
             let band = &self.bands.entries[band_index];
-            if self.dense_row != self.row {
-                self.dense_row = self.row;
-                self.dense_base = band.dense_step.and_then(|step| {
-                    let step = i128::from(step);
-                    let delta = i128::from(time) - i128::from(band.entries[0].time);
-                    (delta % step == 0).then(|| delta / step)
-                });
-            }
             let first = band_first(
                 band,
                 &mut self.cursors[band_index],
@@ -598,36 +738,14 @@ impl BandState {
                 self.next_match,
                 self.dense_base,
             );
-            let mut next = first;
-            while sequences.len() < self.batch_size
-                && band
-                    .entries
-                    .get(next)
-                    .is_some_and(|entry| entry.time == target)
-            {
-                let entry = band.entries[next];
-                sequences.push(
-                    (!self.left_sequences.is_null(self.row))
-                        .then(|| self.left_sequences.value(self.row)),
-                );
-                right_sequences.push(entry.sequence);
-                let left_price =
-                    (!self.left_prices.is_null(self.row)).then(|| self.left_prices.value(self.row));
-                values.push(match (left_price, entry.price) {
-                    (Some(left), Some(right)) => Some(left * right),
-                    _ => None,
-                });
-                next += 1;
-            }
-            self.next_match = Some(next);
-            if band
-                .entries
-                .get(next)
-                .is_none_or(|entry| entry.time != target)
-            {
-                self.offset_index += 1;
-                self.next_match = None;
-            }
+            self.append_matches(
+                band_index,
+                first,
+                target,
+                &mut sequences,
+                &mut right_sequences,
+                &mut values,
+            );
         }
         if sequences.is_empty() {
             return Ok(None);
