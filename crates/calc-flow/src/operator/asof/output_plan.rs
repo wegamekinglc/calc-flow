@@ -246,9 +246,9 @@ impl<'a> OutputPlanBuilder<'a> {
             raw_bytes: self.left.raw + self.right.raw,
         })
     }
-    fn charge_compact_fixed(&mut self, name: &str) -> Result<()> {
+    fn compact_fixed_source(&self) -> Option<usize> {
         if self.matched == 0 || self.right.run.is_some() {
-            return Ok(());
+            return None;
         }
         let compact = self
             .right
@@ -256,17 +256,20 @@ impl<'a> OutputPlanBuilder<'a> {
             .as_ref()
             .is_some_and(positions::Builder::is_compact);
         if !compact {
-            return Ok(());
+            return None;
         }
-        let Some((_, source)) = self.right.recent else {
+        let (_, source) = self.right.recent?;
+        self.right.columns[source]
+            .is_fixed_width()
+            .then_some(source)
+    }
+
+    fn charge_compact_fixed(&mut self, name: &str) -> Result<()> {
+        let Some(source) = self.compact_fixed_source() else {
             return Ok(());
         };
-        let columns = &self.right.columns[source];
-        if !columns.is_fixed_width() {
-            return Ok(());
-        }
         let rows = usize::try_from(self.matched).map_err(|_| overflow(name))?;
-        let bytes = columns.fixed_bytes(rows, name)?;
+        let bytes = self.right.columns[source].fixed_bytes(rows, name)?;
         self.right.raw = checked(name, self.right.raw, bytes)?;
         Ok(())
     }

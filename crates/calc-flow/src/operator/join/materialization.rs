@@ -1012,6 +1012,7 @@ mod tests {
         };
         let budget = EdgeBudget::new(17, 160).unwrap();
         SIDE_VISITS.with(|count| count.set(0));
+        FLAT_VISITS.with(|count| count.set(0));
         let fast = output.ranges(budget).unwrap();
         let visits = SIDE_VISITS.with(Cell::get);
         let slow = {
@@ -1020,10 +1021,11 @@ mod tests {
         };
         assert_eq!(fast, slow);
         assert_eq!(fast.iter().map(Range::len).sum::<usize>(), rows * fanout);
+        assert_eq!(visits, 0, "schema-width preflight must avoid side visits");
         assert_eq!(
-            visits,
+            FLAT_VISITS.with(Cell::get),
             rows * 2,
-            "fanout must not repeat incoming width checks"
+            "the forced per-pair path must retain incoming width checks"
         );
     }
 
@@ -1274,16 +1276,24 @@ mod tests {
             admitted_charges: None,
         };
         FLAT_VISITS.with(|count| count.set(0));
+        let mut ranges = None;
         let measured = allocation_counter::measure(|| {
-            let ranges = output.ranges(EdgeBudget::new(2, 4096).unwrap()).unwrap();
-            assert_eq!(ranges, vec![0..2, 2..3]);
+            ranges = Some(output.ranges(EdgeBudget::new(2, 4096).unwrap()).unwrap());
         });
-        assert_eq!(FLAT_VISITS.with(Cell::get), 3);
+        let ranges = ranges.unwrap();
+        assert_eq!(ranges, vec![0..2, 2..3]);
+        assert_eq!(FLAT_VISITS.with(Cell::get), 0);
         assert!(
             measured.bytes_max < 64 * 1024,
             "preflight scratch must follow matched rows, not the retained coordinate gap: \
              {measured:?}"
         );
+        let slow = {
+            let _scan = PerPairScan::force();
+            output.ranges(EdgeBudget::new(2, 4096).unwrap()).unwrap()
+        };
+        assert_eq!(slow, ranges);
+        assert_eq!(FLAT_VISITS.with(Cell::get), 3);
         assert_eq!(output.materialize(0..3).unwrap().num_rows(), 3);
     }
 
