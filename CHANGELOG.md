@@ -9,6 +9,11 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-31: Add restricted native batch ASOF top-1 and interval band execution
+  for recognized SQL shapes. Preserve the DataFusion fallback, null and unmatched
+  rows, duplicate matches, timestamp handling, output schemas and query metrics,
+  while avoiding window sorting and offset cross-join expansion.
+
 - 2026-10-29: Reuse Python declaration preparation before repeated batch or
   stream compilation, with registration-scoped invalidation and independently
   owned stream plans. Convenience collection still creates a fresh native plan.
