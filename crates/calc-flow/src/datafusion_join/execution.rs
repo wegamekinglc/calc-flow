@@ -118,13 +118,20 @@ fn asof(spec: &AsofSpec, schema: SchemaRef) -> DataFusionResult<RecordBatch> {
 
 #[derive(Clone, Copy, Debug)]
 struct BandEntry {
+    time: i64,
     sequence: Option<u64>,
     price: Option<f64>,
 }
 
-fn band(spec: &BandSpec, schema: SchemaRef) -> DataFusionResult<RecordBatch> {
-    let left = concat(&spec.left)?;
-    let right = concat(&spec.right)?;
+#[derive(Debug)]
+struct KeyBand {
+    entries: Vec<BandEntry>,
+    cursors: Vec<usize>,
+}
+
+type BandMap<'a> = std::collections::HashMap<&'a str, KeyBand, RandomState>;
+
+fn build_bands<'a>(right: &'a RecordBatch, spec: &BandSpec) -> DataFusionResult<BandMap<'a>> {
     let right_keys = right
         .column(spec.right_key)
         .as_any()
@@ -147,18 +154,36 @@ fn band(spec: &BandSpec, schema: SchemaRef) -> DataFusionResult<RecordBatch> {
             continue;
         }
         let entry = BandEntry {
+            time: time.expect("checked non-null timestamp"),
             sequence: (!right_sequences.is_null(row)).then(|| right_sequences.value(row)),
             price: (!right_prices.is_null(row)).then(|| right_prices.value(row)),
         };
-        let by_time = by_key
+        by_key
             .entry(right_keys.value(row))
-            .or_insert_with(|| std::collections::HashMap::with_hasher(RandomState::new()));
-        by_time
-            .entry(time.expect("checked non-null timestamp"))
             .or_insert_with(Vec::new)
             .push(entry);
     }
+    for entries in by_key.values_mut() {
+        entries.sort_by_key(|entry| entry.time);
+    }
+    Ok(by_key
+        .into_iter()
+        .map(|(key, entries)| {
+            (
+                key,
+                KeyBand {
+                    entries,
+                    cursors: vec![0; spec.offsets.len()],
+                },
+            )
+        })
+        .collect())
+}
 
+fn band(spec: &BandSpec, schema: SchemaRef) -> DataFusionResult<RecordBatch> {
+    let left = concat(&spec.left)?;
+    let right = concat(&spec.right)?;
+    let mut bands = build_bands(&right, spec)?;
     let left_keys = left
         .column(spec.left_key)
         .as_any()
@@ -186,20 +211,36 @@ fn band(spec: &BandSpec, schema: SchemaRef) -> DataFusionResult<RecordBatch> {
         if left_keys.is_null(row) || time.is_none() {
             continue;
         }
-        let Some(by_time) = by_key.get(left_keys.value(row)) else {
+        let Some(band) = bands.get_mut(left_keys.value(row)) else {
             continue;
         };
         let left_sequence = (!left_sequences.is_null(row)).then(|| left_sequences.value(row));
         let left_price = (!left_prices.is_null(row)).then(|| left_prices.value(row));
-        for offset in spec.offsets.iter() {
+        for (offset_index, offset) in spec.offsets.iter().enumerate() {
             let target = time
                 .expect("checked non-null timestamp")
                 .checked_add(*offset)
                 .ok_or_else(|| DataFusionError::Execution("timestamp out of range".into()))?;
-            let Some(entries) = by_time.get(&target) else {
-                continue;
-            };
-            for entry in entries {
+            let entries = &band.entries;
+            let cursor = &mut band.cursors[offset_index];
+            if entries
+                .get(*cursor)
+                .is_some_and(|entry| target < entry.time)
+            {
+                *cursor = entries.partition_point(|entry| entry.time < target);
+            } else {
+                while entries
+                    .get(*cursor)
+                    .is_some_and(|entry| entry.time < target)
+                {
+                    *cursor += 1;
+                }
+            }
+            let first = *cursor;
+            for entry in &entries[first..] {
+                if entry.time != target {
+                    break;
+                }
                 sequences.push(left_sequence);
                 right_sequences_output.push(entry.sequence);
                 values.push(match (left_price, entry.price) {
