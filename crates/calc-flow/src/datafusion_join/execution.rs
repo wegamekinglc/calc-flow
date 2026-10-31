@@ -244,6 +244,17 @@ struct BandEntry {
 struct KeyBand {
     entries: Vec<BandEntry>,
     cursors: Vec<usize>,
+    dense_step: Option<i64>,
+    offset_indices: Vec<Option<i64>>,
+}
+
+fn band_step(entries: &[BandEntry]) -> Option<i64> {
+    let step = entries.get(1)?.time.checked_sub(entries.first()?.time)?;
+    (step > 0
+        && entries
+            .windows(2)
+            .all(|pair| pair[1].time.checked_sub(pair[0].time) == Some(step)))
+    .then_some(step)
 }
 
 struct BandMap {
@@ -298,9 +309,18 @@ fn build_bands(right: &RecordBatch, spec: &BandSpec) -> DataFusionResult<BandMap
         .enumerate()
         .map(|(index, (key, entries))| {
             indices.insert(key, index);
+            let dense_step = band_step(&entries);
+            let offset_indices = dense_step.map_or_else(Vec::new, |step| {
+                spec.offsets
+                    .iter()
+                    .map(|offset| (offset % step == 0).then(|| offset / step))
+                    .collect()
+            });
             KeyBand {
                 entries,
                 cursors: vec![0; spec.offsets.len()],
+                dense_step,
+                offset_indices,
             }
         })
         .collect();
@@ -312,9 +332,27 @@ fn band_first(
     offset_index: usize,
     target: i64,
     next_match: Option<usize>,
+    dense_base: Option<i64>,
 ) -> usize {
     if let Some(first) = next_match {
         return first;
+    }
+    if let Some(step) = band.dense_step {
+        let index = if let Some(offset) = band.offset_indices[offset_index] {
+            dense_base.and_then(|base| base.checked_add(offset))
+        } else {
+            target
+                .checked_sub(band.entries[0].time)
+                .and_then(|delta| (delta >= 0 && delta % step == 0).then(|| delta / step))
+        };
+        return index
+            .and_then(|index| usize::try_from(index).ok())
+            .filter(|index| {
+                band.entries
+                    .get(*index)
+                    .is_some_and(|entry| entry.time == target)
+            })
+            .unwrap_or(band.entries.len());
     }
     let cursor = &mut band.cursors[offset_index];
     if band
@@ -359,6 +397,8 @@ struct BandState {
     next_match: Option<usize>,
     band_row: usize,
     current_band: Option<usize>,
+    dense_row: usize,
+    dense_base: Option<i64>,
 }
 
 impl BandState {
@@ -410,6 +450,8 @@ impl BandState {
             next_match: None,
             band_row: usize::MAX,
             current_band: None,
+            dense_row: usize::MAX,
+            dense_base: None,
         })
     }
 
@@ -455,7 +497,20 @@ impl BandState {
                 continue;
             };
             let band = &mut self.bands.entries[band_index];
-            let first = band_first(band, self.offset_index, target, self.next_match);
+            if self.dense_row != self.row {
+                self.dense_row = self.row;
+                self.dense_base = band.dense_step.and_then(|step| {
+                    let delta = time.checked_sub(band.entries[0].time)?;
+                    (delta % step == 0).then(|| delta / step)
+                });
+            }
+            let first = band_first(
+                band,
+                self.offset_index,
+                target,
+                self.next_match,
+                self.dense_base,
+            );
             let mut next = first;
             while sequences.len() < self.batch_size
                 && band

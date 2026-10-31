@@ -451,6 +451,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_interval_dense_time_positions_match_plain_datafusion() {
+        let right = batch(&[
+            (-2_000_000, 0, "S0", Some(2.0)),
+            (-1_000_000, 1, "S0", Some(3.0)),
+            (0, 2, "S0", Some(5.0)),
+            (1_000_000, 3, "S0", Some(7.0)),
+            (2_000_000, 4, "S0", Some(11.0)),
+        ]);
+        let left = batch(&[
+            (1_000_000, 100, "S0", Some(13.0)),
+            (-2_000_000, 101, "S0", Some(17.0)),
+            (0, 102, "S0", Some(19.0)),
+            (2_000_000, 103, "S0", Some(23.0)),
+        ]);
+        let (runtime, output) = execute(INTERVAL_SQL, &left, &right).await;
+        let actual = combined(&output);
+        assert!(actual.num_rows() > 0);
+        assert_eq!(
+            interval_rows(&actual),
+            interval_rows(&reference(INTERVAL_SQL, &left, &right).await)
+        );
+        assert!(
+            runtime.metrics()[0]
+                .physical_plan
+                .contains("CalcFlowBandJoinExec")
+        );
+    }
+
+    #[tokio::test]
     async fn native_interval_out_of_order_probes_reset_exhausted_cursors() {
         let query = "WITH offsets(event_offset) AS (VALUES (INTERVAL '0 seconds')) \
             SELECT probes.left_sequence AS sequence, reference.sequence AS right_sequence, \
