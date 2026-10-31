@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 use datafusion::{
     arrow::datatypes::{DataType, TimeUnit},
@@ -14,7 +14,7 @@ use datafusion::{
 
 use crate::{Batch, expression::ValidatedQuery};
 
-use super::{AsofSpec, BandSpec, JoinSpec, NativeInput};
+use super::{AsofSpec, BandSpec, JoinSpec, NativeInput, execution};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ColumnRef<'a> {
@@ -563,6 +563,7 @@ fn band(query: &Query, tables: &BTreeMap<String, Batch>) -> Option<BandSpec> {
         left_price: column_index(&left, column(left_price)?.name, &DataType::Float64)?,
         right_price: column_index(&right, right_value.name, &DataType::Float64)?,
         offsets: offsets.into(),
+        shared: Arc::new(execution::BandShared::default()),
         left,
         right,
     })

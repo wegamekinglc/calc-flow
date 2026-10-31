@@ -62,6 +62,7 @@ pub(super) struct BandSpec {
     left_price: usize,
     right_price: usize,
     offsets: Arc<[i64]>,
+    shared: Arc<execution::BandShared>,
 }
 
 #[derive(Clone, Debug)]
@@ -77,6 +78,13 @@ impl JoinSpec {
             Self::Band(_) => "CalcFlowBandJoinExec",
         }
     }
+
+    fn partitions(&self, configured: usize) -> usize {
+        match self {
+            Self::Asof(_) => 1,
+            Self::Band(_) => configured.max(1),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -85,13 +93,15 @@ struct CalcFlowJoinExec {
     schema: SchemaRef,
     properties: Arc<PlanProperties>,
     metrics: ExecutionPlanMetricsSet,
+    partitions: usize,
 }
 
 impl CalcFlowJoinExec {
-    fn new(spec: JoinSpec, schema: SchemaRef) -> Self {
+    fn new(spec: JoinSpec, schema: SchemaRef, partitions: usize) -> Self {
+        let partitions = spec.partitions(partitions);
         let properties = PlanProperties::new(
             EquivalenceProperties::new(Arc::clone(&schema)),
-            Partitioning::UnknownPartitioning(1),
+            Partitioning::UnknownPartitioning(partitions),
             EmissionType::Final,
             Boundedness::Bounded,
         );
@@ -100,6 +110,7 @@ impl CalcFlowJoinExec {
             schema,
             properties: Arc::new(properties),
             metrics: ExecutionPlanMetricsSet::new(),
+            partitions,
         }
     }
 }
@@ -153,10 +164,11 @@ impl ExecutionPlan for CalcFlowJoinExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
-        if partition != 0 {
+        if partition >= self.partitions {
             return Err(DataFusionError::Internal(format!(
-                "{} has exactly one output partition",
-                self.spec.name()
+                "{} has {} output partitions",
+                self.spec.name(),
+                self.partitions
             )));
         }
         let metrics = BaselineMetrics::new(&self.metrics, partition);
@@ -165,6 +177,8 @@ impl ExecutionPlan for CalcFlowJoinExec {
             Arc::clone(&self.schema),
             context.session_config().batch_size(),
             metrics,
+            partition,
+            self.partitions,
         ))
     }
 
@@ -185,9 +199,11 @@ pub(super) fn plan(
     query: &ValidatedQuery,
     tables: &std::collections::BTreeMap<String, Batch>,
     schema: SchemaRef,
+    partitions: usize,
 ) -> Option<Arc<dyn ExecutionPlan>> {
-    planning::plan(query, tables)
-        .map(|spec| Arc::new(CalcFlowJoinExec::new(spec, schema)) as Arc<dyn ExecutionPlan>)
+    planning::plan(query, tables).map(|spec| {
+        Arc::new(CalcFlowJoinExec::new(spec, schema, partitions)) as Arc<dyn ExecutionPlan>
+    })
 }
 
 #[cfg(test)]
@@ -724,6 +740,51 @@ mod tests {
                 || error.to_lowercase().contains("timezone"),
             "{error}"
         );
+    }
+
+    #[tokio::test]
+    async fn native_interval_uses_multiple_partitions_without_changing_results() {
+        let right = batch(&[
+            (-1_000_000, 0, "S0", Some(2.0)),
+            (0, 1, "S0", Some(3.0)),
+            (1_000_000, 2, "S0", Some(5.0)),
+            (2_000_000, 3, "S0", Some(7.0)),
+        ]);
+        let left = batch(
+            &(0..262_144_i64)
+                .map(|index| {
+                    (
+                        index % 4 * 1_000_000,
+                        100_u64 + u64::try_from(index).unwrap(),
+                        "S0",
+                        Some(11.0),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        );
+        let runtime = DataFusionRuntime::new(DataFusionConfig {
+            target_partitions: 4,
+            ..DataFusionConfig::default()
+        })
+        .unwrap();
+        let output = runtime
+            .sql(
+                INTERVAL_SQL,
+                &BTreeMap::from([
+                    ("input".into(), left.clone()),
+                    ("reference".into(), right.clone()),
+                ]),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            interval_rows(&combined(&output)),
+            interval_rows(&reference(INTERVAL_SQL, &left, &right).await)
+        );
+        let metrics = runtime.metrics();
+        assert!(metrics[0].physical_plan.contains("CalcFlowBandJoinExec"));
+        assert_eq!(metrics[0].output_partition_count, 4);
     }
 
     #[tokio::test]

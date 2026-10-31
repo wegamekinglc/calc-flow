@@ -825,6 +825,7 @@ impl DataFusionRuntime {
             query,
             tables,
             Arc::new(dataframe.schema().as_arrow().clone()),
+            context.task_ctx().session_config().target_partitions(),
         ) {
             Some(plan) => plan,
             None => dataframe

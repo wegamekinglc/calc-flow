@@ -30,16 +30,31 @@ pub(super) fn execute(
     schema: SchemaRef,
     batch_size: usize,
     metrics: BaselineMetrics,
+    partition: usize,
+    partitions: usize,
 ) -> SendableRecordBatchStream {
-    let state = StreamState::New(spec.clone(), Arc::clone(&schema), batch_size);
+    let state = StreamState::New(Box::new(NewState {
+        spec: spec.clone(),
+        schema: Arc::clone(&schema),
+        batch_size,
+        partition,
+        partitions,
+    }));
     let metrics = Arc::new(metrics);
     let output = stream::try_unfold(state, move |state| {
         let metrics = Arc::clone(&metrics);
         async move {
             let timer = metrics.elapsed_compute().timer();
             let (state, batch) = match state {
-                StreamState::New(spec, schema, batch_size) => {
-                    let mut state = State::new(&spec, schema, batch_size)?;
+                StreamState::New(state) => {
+                    let NewState {
+                        spec,
+                        schema,
+                        batch_size,
+                        partition,
+                        partitions,
+                    } = *state;
+                    let mut state = State::new(&spec, schema, batch_size, partition, partitions)?;
                     let batch = state.next_batch()?;
                     (state, batch)
                 }
@@ -58,8 +73,16 @@ pub(super) fn execute(
     Box::pin(RecordBatchStreamAdapter::new(schema, output))
 }
 
+struct NewState {
+    spec: JoinSpec,
+    schema: SchemaRef,
+    batch_size: usize,
+    partition: usize,
+    partitions: usize,
+}
+
 enum StreamState {
-    New(JoinSpec, SchemaRef, usize),
+    New(Box<NewState>),
     Running(State),
 }
 
@@ -69,11 +92,19 @@ enum State {
 }
 
 impl State {
-    fn new(spec: &JoinSpec, schema: SchemaRef, batch_size: usize) -> DataFusionResult<Self> {
+    fn new(
+        spec: &JoinSpec,
+        schema: SchemaRef,
+        batch_size: usize,
+        partition: usize,
+        partitions: usize,
+    ) -> DataFusionResult<Self> {
         let batch_size = batch_size.clamp(1, 65_536);
         Ok(match spec {
             JoinSpec::Asof(spec) => Self::Asof(Box::new(AsofState::new(spec, schema, batch_size)?)),
-            JoinSpec::Band(spec) => Self::Band(Box::new(BandState::new(spec, schema, batch_size)?)),
+            JoinSpec::Band(spec) => Self::Band(Box::new(BandState::new(
+                spec, schema, batch_size, partition, partitions,
+            )?)),
         })
     }
 
@@ -243,7 +274,6 @@ struct BandEntry {
 #[derive(Debug)]
 struct KeyBand {
     entries: Vec<BandEntry>,
-    cursors: Vec<usize>,
     dense_step: Option<i64>,
     offset_indices: Vec<Option<i64>>,
 }
@@ -257,6 +287,7 @@ fn band_step(entries: &[BandEntry]) -> Option<i64> {
     .then_some(step)
 }
 
+#[derive(Debug)]
 struct BandMap {
     indices: std::collections::HashMap<String, usize, RandomState>,
     entries: Vec<KeyBand>,
@@ -318,7 +349,6 @@ fn build_bands(right: &RecordBatch, spec: &BandSpec) -> DataFusionResult<BandMap
             });
             KeyBand {
                 entries,
-                cursors: vec![0; spec.offsets.len()],
                 dense_step,
                 offset_indices,
             }
@@ -328,7 +358,8 @@ fn build_bands(right: &RecordBatch, spec: &BandSpec) -> DataFusionResult<BandMap
 }
 
 fn band_first(
-    band: &mut KeyBand,
+    band: &KeyBand,
+    cursors: &mut [usize],
     offset_index: usize,
     target: i64,
     next_match: Option<usize>,
@@ -354,7 +385,7 @@ fn band_first(
             })
             .unwrap_or(band.entries.len());
     }
-    let cursor = &mut band.cursors[offset_index];
+    let cursor = &mut cursors[offset_index];
     if band
         .entries
         .get(*cursor)
@@ -382,37 +413,33 @@ fn band_target(time: i64, offset: i64, bounds: (i64, i64)) -> DataFusionResult<i
         .ok_or_else(|| DataFusionError::Execution("Timestamp out of range".into()))
 }
 
-struct BandState {
-    schema: SchemaRef,
-    bands: BandMap,
-    left_keys: StringArray,
-    left_times: Vec<Option<i64>>,
-    left_sequences: UInt64Array,
-    left_prices: Float64Array,
-    offsets: Arc<[i64]>,
-    time_bounds: (i64, i64),
-    batch_size: usize,
-    row: usize,
-    offset_index: usize,
-    next_match: Option<usize>,
-    band_row: usize,
-    current_band: Option<usize>,
-    dense_row: usize,
-    dense_base: Option<i128>,
+#[derive(Debug, Default)]
+pub(super) struct BandShared {
+    prepared: std::sync::OnceLock<Result<Arc<BandPrepared>, String>>,
 }
 
-impl BandState {
-    fn new(spec: &BandSpec, schema: SchemaRef, batch_size: usize) -> DataFusionResult<Self> {
+#[derive(Debug)]
+pub(super) struct BandPrepared {
+    bands: Arc<BandMap>,
+    left_keys: StringArray,
+    left_times: Arc<[Option<i64>]>,
+    left_sequences: UInt64Array,
+    left_prices: Float64Array,
+    time_bounds: (i64, i64),
+}
+
+impl BandPrepared {
+    fn new(spec: &BandSpec) -> DataFusionResult<Self> {
         let left = concat(&spec.left)?;
         let right = concat(&spec.right)?;
-        let bands = build_bands(&right, spec)?;
+        let bands = Arc::new(build_bands(&right, spec)?);
         let left_keys = left
             .column(spec.left_key)
             .as_any()
             .downcast_ref::<StringArray>()
             .ok_or_else(|| DataFusionError::Internal("native band key must be Utf8".into()))?
             .clone();
-        let left_times = timestamps(left.column(spec.left_time))?;
+        let left_times = timestamps(left.column(spec.left_time))?.into();
         let left_sequences = left
             .column(spec.left_sequence)
             .as_any()
@@ -436,16 +463,74 @@ impl BandState {
         }
         let time_bounds = crate::datafusion_interval::representable_bounds(*unit);
         Ok(Self {
-            schema,
             bands,
             left_keys,
             left_times,
             left_sequences,
             left_prices,
-            offsets: Arc::clone(&spec.offsets),
             time_bounds,
+        })
+    }
+}
+
+struct BandState {
+    schema: SchemaRef,
+    bands: Arc<BandMap>,
+    cursors: Vec<Vec<usize>>,
+    left_keys: StringArray,
+    left_times: Arc<[Option<i64>]>,
+    left_sequences: UInt64Array,
+    left_prices: Float64Array,
+    offsets: Arc<[i64]>,
+    time_bounds: (i64, i64),
+    batch_size: usize,
+    partition_step: usize,
+    row: usize,
+    offset_index: usize,
+    next_match: Option<usize>,
+    band_row: usize,
+    current_band: Option<usize>,
+    dense_row: usize,
+    dense_base: Option<i128>,
+}
+
+impl BandState {
+    fn new(
+        spec: &BandSpec,
+        schema: SchemaRef,
+        batch_size: usize,
+        partition: usize,
+        partitions: usize,
+    ) -> DataFusionResult<Self> {
+        let prepared = spec
+            .shared
+            .prepared
+            .get_or_init(|| {
+                BandPrepared::new(spec)
+                    .map(Arc::new)
+                    .map_err(|error| error.to_string())
+            })
+            .as_ref()
+            .map_err(|error| DataFusionError::Execution(error.clone()))?;
+        let cursors = prepared
+            .bands
+            .entries
+            .iter()
+            .map(|_| vec![0; spec.offsets.len()])
+            .collect();
+        Ok(Self {
+            schema,
+            bands: Arc::clone(&prepared.bands),
+            cursors,
+            left_keys: prepared.left_keys.clone(),
+            left_times: Arc::clone(&prepared.left_times),
+            left_sequences: prepared.left_sequences.clone(),
+            left_prices: prepared.left_prices.clone(),
+            offsets: Arc::clone(&spec.offsets),
+            time_bounds: prepared.time_bounds,
             batch_size,
-            row: 0,
+            partition_step: partitions.max(1),
+            row: partition,
             offset_index: 0,
             next_match: None,
             band_row: usize::MAX,
@@ -461,13 +546,13 @@ impl BandState {
         let mut values = Vec::with_capacity(self.batch_size);
         while sequences.len() < self.batch_size && self.row < self.left_times.len() {
             if self.offset_index == self.offsets.len() {
-                self.row += 1;
+                self.row += self.partition_step;
                 self.offset_index = 0;
                 self.next_match = None;
                 continue;
             }
             if self.left_times[self.row].is_none() {
-                self.row += 1;
+                self.row += self.partition_step;
                 self.offset_index = 0;
                 self.next_match = None;
                 continue;
@@ -496,7 +581,7 @@ impl BandState {
                 self.next_match = None;
                 continue;
             };
-            let band = &mut self.bands.entries[band_index];
+            let band = &self.bands.entries[band_index];
             if self.dense_row != self.row {
                 self.dense_row = self.row;
                 self.dense_base = band.dense_step.and_then(|step| {
@@ -507,6 +592,7 @@ impl BandState {
             }
             let first = band_first(
                 band,
+                &mut self.cursors[band_index],
                 self.offset_index,
                 target,
                 self.next_match,
