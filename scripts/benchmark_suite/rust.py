@@ -487,6 +487,22 @@ def _target(name: str) -> str:
     return name.split("/", 1)[0]
 
 
+def _names(side_blocks: list[dict]) -> set[str]:
+    return {name for block in side_blocks for name in block}
+
+
+def _measured_targets(side_blocks: list[dict]) -> set[str]:
+    """Targets that report at least one case in every block of one side."""
+    targets = [{_target(name) for name in block} for block in side_blocks]
+    return set.intersection(*targets) if targets else set()
+
+
+def _retired_cases(blocks: dict, applied: dict) -> set[str]:
+    removed = _names(blocks["baseline"]) - _names(blocks["candidate"])
+    eligible = _measured_targets(blocks["candidate"]) & applied.keys()
+    return {name for name in removed if _target(name) in eligible}
+
+
 def _without_retired_cases(blocks: dict, applied: dict) -> dict:
     """Drop cases a declared migration removed from the candidate bench source.
 
@@ -494,17 +510,7 @@ def _without_retired_cases(blocks: dict, applied: dict) -> dict:
     measured that target: a case only its baseline blocks still report was
     removed deliberately. Without a declaration it stays a missing-block error.
     """
-    candidate = {name for block in blocks["candidate"] for name in block}
-    measured = [{_target(name) for name in block} for block in blocks["candidate"]]
-    retired = {
-        name
-        for block in blocks["baseline"]
-        for name in block
-        if name not in candidate
-        and _target(name) in applied
-        and measured
-        and all(_target(name) in targets for targets in measured)
-    }
+    retired = _retired_cases(blocks, applied)
     return {
         side: [
             {name: row for name, row in block.items() if name not in retired}
