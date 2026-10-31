@@ -278,7 +278,7 @@ fn row_number_definition(select: &Select) -> Option<(&str, &str, &str, &str)> {
     let [order] = window.order_by.as_slice() else {
         return None;
     };
-    if order.options.asc != Some(false) {
+    if order.options.asc != Some(false) || order.options.nulls_first == Some(false) {
         return None;
     }
     let sequence = column(&order.expr)?.name;
@@ -303,8 +303,11 @@ fn asof(query: &Query, tables: &BTreeMap<String, Batch>) -> Option<AsofSpec> {
     let (left_table, left_alias) = named_table(&from.relation)?;
     let (right_query, right_alias) = derived_table(&join.relation)?;
     let right = query_select(right_query)?;
-    let (right_table, _) = named_table(&right.from.first()?.relation)?;
-    if !right.from.first()?.joins.is_empty() {
+    let [right_from] = right.from.as_slice() else {
+        return None;
+    };
+    let (right_table, _) = named_table(&right_from.relation)?;
+    if !right_from.joins.is_empty() {
         return None;
     }
     let (key, event_time, sequence, position) = row_number_definition(right)?;
@@ -406,7 +409,13 @@ fn offset_seconds(query: &Query) -> Option<(String, Vec<i64>)> {
         return None;
     }
     let cte = with.cte_tables.first()?;
-    if cte.from.is_some() || cte.materialized.is_some() || cte.alias.columns.len() != 1 {
+    if cte.from.is_some()
+        || cte.materialized.is_some()
+        || cte.alias.columns.len() != 1
+        || cte.query.order_by.is_some()
+        || cte.query.limit_clause.is_some()
+        || cte.query.fetch.is_some()
+    {
         return None;
     }
     let SetExpr::Values(values) = cte.query.body.as_ref() else {

@@ -66,7 +66,7 @@ const fn units_per_second(unit: TimeUnit) -> i64 {
 /// arithmetic would diverge from it. Values inside the bounds convert and
 /// reconstruct exactly; values outside make the fallback error, so the fast
 /// path declines them and defers to arrow.
-fn representable_bounds(unit: TimeUnit) -> (i64, i64) {
+pub(super) fn representable_bounds(unit: TimeUnit) -> (i64, i64) {
     if matches!(unit, TimeUnit::Nanosecond) {
         // Every i64 nanosecond timestamp lies inside chrono's range, so the
         // i64 arithmetic itself is the only limit.

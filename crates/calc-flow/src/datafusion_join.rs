@@ -10,10 +10,8 @@ use datafusion::{
         SendableRecordBatchStream, Statistics,
         execution_plan::{Boundedness, EmissionType},
         metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet},
-        stream::RecordBatchStreamAdapter,
     },
 };
-use futures::stream;
 
 use crate::{Batch, expression::ValidatedQuery};
 
@@ -153,7 +151,7 @@ impl ExecutionPlan for CalcFlowJoinExec {
     fn execute(
         &self,
         partition: usize,
-        _context: Arc<TaskContext>,
+        context: Arc<TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
         if partition != 0 {
             return Err(DataFusionError::Internal(format!(
@@ -161,18 +159,13 @@ impl ExecutionPlan for CalcFlowJoinExec {
                 self.spec.name()
             )));
         }
-        let spec = self.spec.clone();
-        let schema = Arc::clone(&self.schema);
-        let execution_schema = Arc::clone(&schema);
         let metrics = BaselineMetrics::new(&self.metrics, partition);
-        let output = stream::once(async move {
-            let timer = metrics.elapsed_compute().timer();
-            let batch = execution::execute(&spec, execution_schema)?;
-            metrics.record_output(batch.num_rows());
-            timer.done();
-            Ok(batch)
-        });
-        Ok(Box::pin(RecordBatchStreamAdapter::new(schema, output)))
+        Ok(execution::execute(
+            &self.spec,
+            Arc::clone(&self.schema),
+            context.session_config().batch_size(),
+            metrics,
+        ))
     }
 
     fn metrics(&self) -> Option<MetricsSet> {
@@ -455,6 +448,304 @@ mod tests {
             plan.contains("CalcFlowBandJoinExec"),
             "interval did not use the native band path: {plan}"
         );
+    }
+
+    #[tokio::test]
+    async fn native_interval_out_of_order_probes_reset_exhausted_cursors() {
+        let query = "WITH offsets(event_offset) AS (VALUES (INTERVAL '0 seconds')) \
+            SELECT probes.left_sequence AS sequence, reference.sequence AS right_sequence, \
+            probes.left_price * reference.price AS value FROM reference JOIN \
+            (SELECT input.sequence AS left_sequence, input.symbol AS left_symbol, \
+            input.price AS left_price, input.event_time + offsets.event_offset AS match_time \
+            FROM input CROSS JOIN offsets) AS probes \
+            ON probes.left_symbol = reference.symbol \
+            AND probes.match_time = reference.event_time";
+        let right = batch(&[(0, 1, "S0", Some(2.0)), (10_000_000, 2, "S0", Some(3.0))]);
+        let left = batch(&[
+            (20_000_000, 100, "S0", Some(11.0)),
+            (10_000_000, 101, "S0", Some(13.0)),
+        ]);
+        let (runtime, output) = execute(query, &left, &right).await;
+        let actual = combined(&output);
+        assert_eq!(
+            interval_rows(&actual),
+            interval_rows(&reference(query, &left, &right).await)
+        );
+        assert!(
+            runtime.metrics()[0]
+                .physical_plan
+                .contains("CalcFlowBandJoinExec")
+        );
+    }
+
+    #[tokio::test]
+    async fn native_asof_explicit_nulls_last_uses_datafusion_fallback() {
+        let right = nullable_batch(&[(0, None, "S0", Some(99.0)), (0, Some(1), "S0", Some(10.0))]);
+        let left = nullable_batch(&[(0, Some(100), "S0", Some(999.0))]);
+        let query = ASOF_SQL.replace("sequence DESC)", "sequence DESC NULLS LAST)");
+        let (runtime, output) = execute(&query, &left, &right).await;
+        assert_eq!(
+            asof_rows(&combined(&output)),
+            asof_rows(&reference(&query, &left, &right).await)
+        );
+        assert!(
+            !runtime.metrics()[0]
+                .physical_plan
+                .contains("CalcFlowAsofJoinExec")
+        );
+    }
+
+    #[tokio::test]
+    async fn native_asof_additional_right_relation_uses_datafusion_fallback() {
+        let right = batch(&[(0, 1, "S0", Some(10.0))]);
+        let left = batch(&[(0, 100, "S0", Some(999.0))]);
+        let query = ASOF_SQL.replace(
+            "FROM reference) AS reference",
+            "FROM reference, (SELECT 1 AS extra WHERE FALSE) AS other) AS reference",
+        );
+        let (runtime, output) = execute(&query, &left, &right).await;
+        assert_eq!(
+            asof_rows(&combined(&output)),
+            asof_rows(&reference(&query, &left, &right).await)
+        );
+        assert!(
+            !runtime.metrics()[0]
+                .physical_plan
+                .contains("CalcFlowAsofJoinExec")
+        );
+    }
+
+    #[tokio::test]
+    async fn native_interval_limited_offsets_use_datafusion_fallback() {
+        let right = batch(&[(0, 1, "S0", Some(2.0))]);
+        let left = batch(&[(0, 100, "S0", Some(11.0))]);
+        let query =
+            INTERVAL_SQL.replace("(INTERVAL '5 seconds'))", "(INTERVAL '5 seconds') LIMIT 1)");
+        let (runtime, output) = execute(&query, &left, &right).await;
+        assert_eq!(
+            interval_rows(&combined(&output)),
+            interval_rows(&reference(&query, &left, &right).await)
+        );
+        assert!(
+            !runtime.metrics()[0]
+                .physical_plan
+                .contains("CalcFlowBandJoinExec")
+        );
+    }
+
+    fn shifted_interval_sql() -> &'static str {
+        "WITH offsets(event_offset) AS (VALUES (INTERVAL '-5 seconds')) \
+        SELECT probes.left_sequence AS sequence, reference.sequence AS right_sequence, \
+        probes.left_price * reference.price AS value FROM reference JOIN \
+        (SELECT input.sequence AS left_sequence, input.symbol AS left_symbol, \
+        input.price AS left_price, input.event_time + offsets.event_offset AS match_time \
+        FROM input CROSS JOIN offsets) AS probes \
+        ON probes.left_symbol = reference.symbol \
+        AND probes.match_time = reference.event_time"
+    }
+
+    fn second_timestamp_batch(rows: &[(i64, Option<&str>)], timezone: &str) -> Batch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "event_time",
+                DataType::Timestamp(TimeUnit::Second, Some(timezone.into())),
+                false,
+            ),
+            Field::new("sequence", DataType::UInt64, false),
+            Field::new("symbol", DataType::Utf8, true),
+            Field::new("price", DataType::Float64, true),
+        ]));
+        let event_time = Arc::new(
+            rows.iter()
+                .map(|row| Some(row.0))
+                .collect::<PrimitiveArray<datafusion::arrow::array::types::TimestampSecondType>>()
+                .with_timezone(timezone),
+        ) as ArrayRef;
+        let sequence = Arc::new(UInt64Array::from_iter_values(
+            rows.iter().enumerate().map(|(index, _)| index as u64),
+        )) as ArrayRef;
+        let symbol = Arc::new(rows.iter().map(|row| row.1).collect::<StringArray>()) as ArrayRef;
+        let price = Arc::new(Float64Array::from(vec![Some(1.0); rows.len()])) as ArrayRef;
+        Batch::table(
+            vec![RecordBatch::try_new(schema, vec![event_time, sequence, symbol, price]).unwrap()],
+            BatchMetadata::default(),
+        )
+        .unwrap()
+    }
+
+    async fn interval_error(query: &str, left: &Batch, right: &Batch) -> String {
+        let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+        runtime
+            .sql(
+                query,
+                &BTreeMap::from([
+                    ("input".into(), left.clone()),
+                    ("reference".into(), right.clone()),
+                ]),
+                None,
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn native_interval_rejects_unrepresentable_timestamp_arithmetic() {
+        let error = interval_error(
+            INTERVAL_SQL,
+            &second_timestamp_batch(&[(i64::MAX - 1_000_000, Some("S0"))], "UTC"),
+            &second_timestamp_batch(&[(0, Some("S0"))], "UTC"),
+        )
+        .await;
+        assert!(error.contains("Timestamp out of range"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn native_interval_rejects_out_of_range_source_before_shift() {
+        let source = crate::datafusion_interval::representable_bounds(TimeUnit::Second).1 + 5;
+        let error = interval_error(
+            shifted_interval_sql(),
+            &second_timestamp_batch(&[(source, Some("S0"))], "UTC"),
+            &second_timestamp_batch(&[(0, Some("S0"))], "UTC"),
+        )
+        .await;
+        assert!(error.contains("Timestamp out of range"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn native_interval_checks_timestamp_before_null_key_join() {
+        let source = crate::datafusion_interval::representable_bounds(TimeUnit::Second).1 + 5;
+        let error = interval_error(
+            shifted_interval_sql(),
+            &second_timestamp_batch(&[(source, None)], "UTC"),
+            &second_timestamp_batch(&[(0, Some("S0"))], "UTC"),
+        )
+        .await;
+        assert!(error.contains("Timestamp out of range"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn native_interval_rejects_invalid_timestamp_timezone() {
+        let error = interval_error(
+            INTERVAL_SQL,
+            &second_timestamp_batch(&[(0, Some("S0"))], "Invalid/Zone"),
+            &second_timestamp_batch(&[(0, Some("S0"))], "Invalid/Zone"),
+        )
+        .await;
+        assert!(
+            error.contains("Cannot coerce arithmetic expression")
+                || error.to_lowercase().contains("timezone"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_asof_stops_materializing_at_the_output_limit() {
+        let left = batch(
+            &(0..8)
+                .map(|index| (0, 100 + index, "S0", Some(11.0)))
+                .collect::<Vec<_>>(),
+        );
+        let right = batch(&[(0, 1, "S0", Some(2.0))]);
+        let runtime = DataFusionRuntime::new(DataFusionConfig {
+            batch_size: 2,
+            ..DataFusionConfig::default()
+        })
+        .unwrap();
+        super::execution::take_asof_output_rows();
+        let query = super::super::parse_select_query(ASOF_SQL).unwrap();
+        runtime
+            .snapshot_sql(
+                &query,
+                &BTreeMap::from([("input".into(), left), ("reference".into(), right)]),
+                "limited",
+                crate::EdgeBudget::new(3, 1_000_000).unwrap(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(super::execution::take_asof_output_rows(), 4);
+    }
+
+    #[tokio::test]
+    async fn native_asof_elapsed_compute_includes_initialization() {
+        let rows = 100_000_i64;
+        let schema = schema();
+        let record =
+            RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(
+                        PrimitiveArray::<datafusion::arrow::array::types::TimestampMicrosecondType>::from_iter_values(0..rows)
+                            .with_timezone("UTC"),
+                    ),
+                    Arc::new(UInt64Array::from_iter_values(
+                        (0..rows).map(|row| u64::try_from(row).unwrap()),
+                    )),
+                    Arc::new(StringArray::from_iter_values(std::iter::repeat_n(
+                        "S0",
+                        usize::try_from(rows).unwrap(),
+                    ))),
+                    Arc::new(Float64Array::from_iter_values(
+                        (0..rows).map(|row| f64::from(u32::try_from(row).unwrap())),
+                    )),
+                ],
+            )
+            .unwrap();
+        let data = Batch::table(vec![record], BatchMetadata::default()).unwrap();
+        let (runtime, _) = execute(ASOF_SQL, &data, &data).await;
+        let metrics = runtime.metrics();
+        let metric = &metrics[0];
+        assert!(metric.physical_plan.contains("CalcFlowAsofJoinExec"));
+        assert!(
+            u64::try_from(metric.elapsed_compute_ns).unwrap() * 4
+                >= metric.execution_to_first_batch_ns,
+            "initialization was excluded from elapsed_compute: {} vs {}",
+            metric.elapsed_compute_ns,
+            metric.execution_to_first_batch_ns
+        );
+    }
+
+    #[tokio::test]
+    async fn native_join_chunks_output_at_configured_batch_size() {
+        let right = batch(&[
+            (0, 1, "S0", Some(2.0)),
+            (0, 2, "S0", Some(3.0)),
+            (0, 3, "S0", Some(5.0)),
+        ]);
+        let left = batch(&[
+            (0, 100, "S0", Some(11.0)),
+            (0, 101, "S0", Some(13.0)),
+            (0, 102, "S0", Some(17.0)),
+            (0, 103, "S0", Some(19.0)),
+        ]);
+        for query in [ASOF_SQL, INTERVAL_SQL] {
+            let runtime = DataFusionRuntime::new(DataFusionConfig {
+                batch_size: 2,
+                ..DataFusionConfig::default()
+            })
+            .unwrap();
+            let output = runtime
+                .sql(
+                    query,
+                    &BTreeMap::from([
+                        ("input".into(), left.clone()),
+                        ("reference".into(), right.clone()),
+                    ]),
+                    None,
+                )
+                .await
+                .unwrap();
+            let batches = output.table_payload().unwrap().batches();
+            assert!(batches.len() > 1, "{query} was not chunked");
+            assert!(batches.iter().all(|batch| batch.num_rows() <= 2));
+            let actual = combined(&output);
+            let expected = reference(query, &left, &right).await;
+            if query == ASOF_SQL {
+                assert_eq!(asof_rows(&actual), asof_rows(&expected));
+            } else {
+                assert_eq!(interval_rows(&actual), interval_rows(&expected));
+            }
+        }
     }
 
     fn nullable_batch(rows: &[(i64, Option<u64>, &str, Option<f64>)]) -> Batch {
