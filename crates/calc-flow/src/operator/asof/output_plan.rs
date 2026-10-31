@@ -179,8 +179,16 @@ impl<'a> OutputPlanBuilder<'a> {
 
     pub fn push_right_source(&mut self, right: Option<(usize, usize)>, name: &str) -> Result<()> {
         if let Some((source, row)) = right {
-            let end = row + 1;
-            self.right.record_range(source, row..end, name)?;
+            let compact_fixed = self.right.columns[source].is_fixed_width()
+                && self
+                    .right
+                    .positions
+                    .as_ref()
+                    .is_some_and(positions::Builder::is_compact);
+            if !compact_fixed {
+                let end = row + 1;
+                self.right.record_range(source, row..end, name)?;
+            }
         }
         self.right
             .positions
@@ -214,6 +222,7 @@ impl<'a> OutputPlanBuilder<'a> {
         self.left.flush_span(name)?;
         self.left.flush_run(name)?;
         self.right.flush_run(name)?;
+        self.charge_compact_fixed(name)?;
         self.reserve_buffers(right_schema, workspace, name)?;
         self.right.rows.positions = self
             .right
@@ -230,6 +239,31 @@ impl<'a> OutputPlanBuilder<'a> {
             raw_bytes: self.left.raw + self.right.raw,
         })
     }
+    fn charge_compact_fixed(&mut self, name: &str) -> Result<()> {
+        if self.matched == 0 || self.right.run.is_some() {
+            return Ok(());
+        }
+        let compact = self
+            .right
+            .positions
+            .as_ref()
+            .is_some_and(positions::Builder::is_compact);
+        if !compact {
+            return Ok(());
+        }
+        let Some((_, source)) = self.right.recent else {
+            return Ok(());
+        };
+        let columns = &self.right.columns[source];
+        if !columns.is_fixed_width() {
+            return Ok(());
+        }
+        let rows = usize::try_from(self.matched).map_err(|_| overflow(name))?;
+        let bytes = columns.fixed_bytes(rows, name)?;
+        self.right.raw = checked(name, self.right.raw, bytes)?;
+        Ok(())
+    }
+
     fn reserve_buffers(
         &self,
         schema: &Schema,

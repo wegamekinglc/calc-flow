@@ -9,6 +9,12 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-31: Compute fixed non-null Join output widths from schema, charge compact
+  ASOF fixed output positions once, skip checkpoint-disabled log projection,
+  store contiguous interval matches as ranges, and plan evictions with per-chunk
+  bitmaps. Preserve cancellation, checkpoint identity, state recovery, pair
+  ordering and output budgets.
+
 - 2026-10-29: Reuse Python declaration preparation before repeated batch or
   stream compilation, with registration-scoped invalidation and independently
   owned stream plans. Convenience collection still creates a fresh native plan.

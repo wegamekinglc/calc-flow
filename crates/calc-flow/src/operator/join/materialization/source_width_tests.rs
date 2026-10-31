@@ -134,8 +134,8 @@ fn test_constant_width_preflight_checks_one_source_for_a_million_distinct_positi
     assert_eq!(tests::FLAT_VISITS.with(Cell::get), 0);
     assert_eq!(
         tests::SIDE_VISITS.with(Cell::get),
-        2,
-        "each immutable source layout needs one width check, independent of row count"
+        0,
+        "fixed non-null output schemas need no source-row width checks"
     );
     assert!(
         measured.count_total < 16,
@@ -170,8 +170,8 @@ fn test_constant_width_preflight_checks_each_source_transition() {
     assert_eq!(ranges, vec![0..2, 2..4, 4..6]);
     assert_eq!(
         tests::SIDE_VISITS.with(Cell::get),
-        4,
-        "bounded caching checks three incoming source runs and one opposite source"
+        0,
+        "fixed non-null output schemas need no source-transition checks"
     );
 }
 

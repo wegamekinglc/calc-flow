@@ -146,6 +146,36 @@ impl ParallelCpuWork for FillWork {
     }
 }
 
+fn append_matches(
+    inputs: &ProbeInputs,
+    position: usize,
+    bounds: super::super::native_lookup::WindowBounds,
+    pairs: &mut super::super::matches::Selection,
+    quantum: &mut ProbeQuantum<'_>,
+) -> Result<()> {
+    let mut remaining = bounds.matches();
+    if let Some((start, expected)) = inputs.dense_bounds(position, bounds) {
+        debug_assert_eq!(expected, remaining);
+        let mut offset = 0;
+        while remaining != 0 {
+            let count = quantum.take(remaining)?;
+            pairs.append_interval(position, start + offset..start + offset + count);
+            #[cfg(test)]
+            super::super::note_join_work(|work| work.native_range_visits += count);
+            offset += count;
+            remaining -= count;
+        }
+        return Ok(());
+    }
+    let mut matches = inputs.matches_bounds(position, bounds);
+    while remaining != 0 {
+        let count = quantum.take(remaining)?;
+        pairs.append_run(position, matches.by_ref().take(count));
+        remaining -= count;
+    }
+    Ok(())
+}
+
 pub(super) fn fill_range(
     inputs: &ProbeInputs,
     counts: &Counts,
@@ -164,19 +194,7 @@ pub(super) fn fill_range(
             Some(windows) => windows[offset],
             None => inputs.window(position, cursors.as_mut().expect("uncached window cursors")),
         };
-        let mut matches = inputs.matches_bounds(position, bounds);
-        let mut remaining = bounds.matches();
-        if remaining != 0 {
-            let count = remaining.min(quantum.remaining + 1);
-            quantum.remaining -= count - 1;
-            pairs.append_run(position, matches.by_ref().take(count));
-            remaining -= count;
-        }
-        while remaining != 0 {
-            let count = quantum.take(remaining)?;
-            pairs.append_run(position, matches.by_ref().take(count));
-            remaining -= count;
-        }
+        append_matches(inputs, position, bounds, &mut pairs, &mut quantum)?;
     }
     debug_assert_eq!(pairs.len(), counts.count(ordinal));
     Ok(pairs)
@@ -201,13 +219,7 @@ pub(super) fn fill_all(
                 Some(windows) => windows[offset],
                 None => inputs.window(pos, cursors.get_or_insert_with(|| inputs.cursors())),
             };
-            let mut matches = inputs.matches_bounds(pos, bounds);
-            let mut remaining = bounds.matches();
-            while remaining != 0 {
-                let count = quantum.take(remaining)?;
-                pairs.append_run(pos, matches.by_ref().take(count));
-                remaining -= count;
-            }
+            append_matches(inputs, pos, bounds, &mut pairs, &mut quantum)?;
         }
     }
     stop.check()?;

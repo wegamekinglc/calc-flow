@@ -3370,7 +3370,7 @@ impl RetainedRows {
         row
     }
 
-    fn remove_bulk(&mut self, groups: &BTreeMap<usize, Vec<usize>>) {
+    fn remove_bulk(&mut self, groups: &BTreeMap<usize, [u64; 16]>) {
         let state = Arc::get_mut(&mut self.0).expect("compaction input released before eviction");
         state.remove_bulk(groups, &mut self.2);
     }
@@ -7301,8 +7301,9 @@ struct EvictionPolicy<'a> {
 #[derive(Default)]
 struct EvictionPlan {
     cuts: Vec<(usize, usize)>,
-    entries: Vec<PlannedEntry>,
-    coordinates: BTreeMap<usize, Vec<usize>>,
+    row_ids: Vec<u64>,
+    tombstones: Vec<(u64, EventTime, Arc<columnar::FramedKey>)>,
+    coordinates: BTreeMap<usize, [u64; 16]>,
     per_key: Vec<(Arc<columnar::FramedKey>, u64)>,
     count: u64,
     bytes: u64,
@@ -7313,11 +7314,6 @@ struct EvictionPlan {
 #[cfg(test)]
 thread_local! {
     static EVICTION_RAW_KEY_CLONES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-struct PlannedEntry {
-    row_id: u64,
-    tombstone: Option<(EventTime, Arc<columnar::FramedKey>)>,
 }
 
 impl EvictionPlan {
@@ -7343,7 +7339,10 @@ impl EvictionPlan {
             let (id, cut) = plan.cuts[ordinal];
             #[cfg(test)]
             note_join_work(|work| work.expiration_run_cuts += 1);
-            plan.entries.reserve(cut);
+            plan.row_ids.reserve(cut);
+            if watermark.is_some() {
+                plan.tombstones.reserve(cut);
+            }
             let mut batch = None;
             let mut previous_chunk = usize::MAX;
             for index in expirations.run_entries(id, cut) {
@@ -7378,23 +7377,20 @@ impl EvictionPlan {
             .checked_add(1)
             .ok_or_else(|| counter_overflow(name, "evicted rows"))?;
         let key = batch.key(index);
-        let tombstone = if watermark.is_some_and(|watermark| row_id < watermark) {
+        if watermark.is_some_and(|watermark| row_id < watermark) {
             self.captured = self
                 .captured
                 .checked_add(1)
                 .ok_or_else(|| counter_overflow(name, "tombstone entries"))?;
             #[cfg(test)]
             EVICTION_RAW_KEY_CLONES.set(EVICTION_RAW_KEY_CLONES.get() + 1);
-            Some((time, Arc::clone(key)))
-        } else {
-            if watermark.is_some() {
-                self.coalesced = self
-                    .coalesced
-                    .checked_add(1)
-                    .ok_or_else(|| counter_overflow(name, "evicted rows"))?;
-            }
-            None
-        };
+            self.tombstones.push((row_id, time, Arc::clone(key)));
+        } else if watermark.is_some() {
+            self.coalesced = self
+                .coalesced
+                .checked_add(1)
+                .ok_or_else(|| counter_overflow(name, "evicted rows"))?;
+        }
         // Resolve restored leases in first-appearance expiration-plan order.
         let canonical = bindings.canonical_key(row_id, key);
         match per_key_index.entry(Arc::as_ptr(canonical)) {
@@ -7409,16 +7405,18 @@ impl EvictionPlan {
                 self.per_key.push((Arc::clone(canonical), 1));
             }
         }
-        self.coordinates
+        self.row_ids.push(row_id);
+        let offset = index % retained::CHUNK_ROWS;
+        let bits = self
+            .coordinates
             .entry(index / retained::CHUNK_ROWS)
-            .or_default()
-            .push(index % retained::CHUNK_ROWS);
-        self.entries.push(PlannedEntry { row_id, tombstone });
+            .or_default();
+        bits[offset / 64] |= 1_u64 << (offset % 64);
         Ok(())
     }
 
     fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.count == 0
     }
 }
 
@@ -7516,10 +7514,8 @@ fn evict_expired(
         operator_id,
     )?;
     if let Some(deltas) = deltas {
-        for entry in plan.entries {
-            if let Some((time, key)) = entry.tombstone {
-                deltas.tombstones[side.index()].push(entry.row_id, time, key);
-            }
+        for (row_id, time, key) in plan.tombstones {
+            deltas.tombstones[side.index()].push(row_id, time, key);
         }
         deltas.dirty[side.index()] = next_dirty;
     }
@@ -7556,8 +7552,8 @@ fn apply_eviction_plan(
             )?;
         }
     }
-    for entry in &plan.entries {
-        retirement.bindings.remove(entry.row_id);
+    for row_id in &plan.row_ids {
+        retirement.bindings.remove(*row_id);
     }
     for (key, count) in &plan.per_key {
         retirement.retire_n(key, *count, operator_id)?;

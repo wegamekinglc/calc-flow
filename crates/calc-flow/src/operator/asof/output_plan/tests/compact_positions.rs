@@ -51,6 +51,35 @@ fn test_single_source_right_positions_avoid_tuple_sized_peak_allocations() {
 }
 
 #[test]
+fn test_single_source_fixed_right_positions_skip_range_bookkeeping() {
+    let rows = 2;
+    let left = rows_payload(rows, 0);
+    let right = rows_payload(rows, 1);
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let mut credit = MemoryConsumer::new("compact-fixed-right-positions").register(&pool);
+    let mut builder = OutputPlanBuilder::new(rows, None, &mut credit, "asof").unwrap();
+    let left_source = builder
+        .left_source(left.view(), &mut credit, "asof")
+        .unwrap();
+    let right_source = builder
+        .right_source(right.view(), &mut credit, "asof")
+        .unwrap();
+    for row in 0..rows {
+        builder.left_position(left_source, row, "asof").unwrap();
+        builder
+            .push_right_source(Some((right_source, row)), "asof")
+            .unwrap();
+    }
+    assert!(builder.right.run.is_none());
+    let plan = builder
+        .finish(&right.batch.record.schema(), &mut credit, "asof")
+        .unwrap();
+    assert_eq!(plan.raw_bytes, 32);
+    drop((plan, credit));
+    assert_eq!(pool.reserved(), 0);
+}
+
+#[test]
 fn test_late_second_right_source_uses_funded_tuple_promotion() {
     let rows = 4_096;
     let left = rows_payload(rows, 0);

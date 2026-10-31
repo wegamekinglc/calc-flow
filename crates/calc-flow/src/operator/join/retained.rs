@@ -554,30 +554,44 @@ impl StateRows {
     /// once. Surviving coordinates stay stable.
     pub(super) fn remove_bulk(
         &mut self,
-        groups: &BTreeMap<usize, Vec<usize>>,
+        groups: &BTreeMap<usize, [u64; 16]>,
         queue: &mut super::columnar::SparseQueue,
     ) {
+        fn visit(bits: &[u64; 16], mut visit: impl FnMut(usize)) {
+            for (word_index, word) in bits.iter().copied().enumerate() {
+                let mut word = word;
+                while word != 0 {
+                    let offset = word_index * 64 + word.trailing_zeros() as usize;
+                    visit(offset);
+                    word &= word - 1;
+                }
+            }
+        }
+
         let mut removed = 0_usize;
         let mut emptied = Vec::new();
-        for (&id, offsets) in groups {
+        for (&id, bits) in groups {
             #[cfg(test)]
             super::note_join_work(|work| work.retained_chunk_visits += 1);
             let Some(chunk) = self.chunks.get_mut(&id) else {
                 continue;
             };
-            for &offset in offsets {
+            visit(bits, |offset| {
                 // The sparse queue tracks the payload offset, which sparse
                 // repairs can move independently of the chunk slot.
                 let payload_offset = chunk.offsets[offset];
                 let owner = chunk.owner(offset);
                 queue.remove(&owner.with_offset(payload_offset));
-            }
-            for &offset in offsets {
+            });
+            visit(bits, |offset| {
                 chunk.release_key(offset);
                 chunk.release_source(offset);
                 chunk.live -= 1;
-            }
-            removed += offsets.len();
+            });
+            removed += bits
+                .iter()
+                .map(|word| word.count_ones() as usize)
+                .sum::<usize>();
             if chunk.live == 0 {
                 emptied.push(id);
             }

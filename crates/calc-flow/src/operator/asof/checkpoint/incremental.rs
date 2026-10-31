@@ -387,6 +387,16 @@ impl crate::runtime::streaming::gather_work::OwnedCpuWork for DeltaWork {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static LOG_PROJECTION_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(in crate::operator::asof) fn take_log_projection_calls() -> usize {
+    LOG_PROJECTION_CALLS.with(|count| count.replace(0))
+}
+
 impl StreamAsofJoinOperator {
     fn log_prefers_base(&self, changes: u64) -> bool {
         let rows = changes.saturating_add(self.checkpoint_log.journal.changes().len() as u64);
@@ -400,6 +410,8 @@ impl StreamAsofJoinOperator {
         journal: &Journal,
         retention_bytes: u64,
     ) -> Result<Inventory> {
+        #[cfg(test)]
+        LOG_PROJECTION_CALLS.with(|count| count.set(count.get() + 1));
         inventory.bytes = inventory
             .bytes
             .checked_sub(if length == 0 { 0 } else { length + 256 })
