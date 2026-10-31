@@ -1,0 +1,35 @@
+name: Actions cache cleanup
+on:
+  schedule:
+    # 30 minutes before each complete benchmark run (05:30 and 17:30
+    # Asia/Shanghai), so its Rust shard cache is not evicted on save.
+    - cron: "30 21 * * *"
+    - cron: "30 9 * * *"
+  pull_request:
+    types: [closed]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: actions-cache-cleanup
+  cancel-in-progress: false
+jobs:
+  prune:
+    name: Prune closed pull request and replaced caches
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: write
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
+      - name: Delete caches no later run will restore
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python -m scripts.prune_actions_caches --repository "$GITHUB_REPOSITORY"
