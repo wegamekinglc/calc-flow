@@ -199,9 +199,6 @@ fn execute_external_passthrough(c: &mut Criterion) {
             }
         });
     });
-    c.bench_function("execute/external_plan_table_requirement", |b| {
-        b.iter(|| black_box(plan.requires_datafusion()));
-    });
 }
 
 fn encode_canonical_json(c: &mut Criterion) {

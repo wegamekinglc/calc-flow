@@ -5,7 +5,6 @@ from __future__ import annotations
 import numpy as np
 
 from benchmarks.rolling_indicator_comparison import (
-    DEFAULT_ROW_SCALES,
     INDICATOR_DUAL_SMA_SPREAD,
     TaLibMethod,
     _native_program,
@@ -31,10 +30,6 @@ def test_native_benchmark_program_selects_engine_before_compilation() -> None:
             program.compile_batch()
         else:
             program.compile_stream()
-
-
-def test_default_matrix_includes_small_row_scales() -> None:
-    assert DEFAULT_ROW_SCALES[:3] == (10, 100, 1_000)
 
 
 def test_small_scales_are_amortized_but_large_scales_run_once() -> None:

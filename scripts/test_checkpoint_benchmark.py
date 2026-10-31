@@ -933,10 +933,23 @@ class OuterManifestTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "artifact hash"):
                 benchmark.validate_artifact_manifest(root, manifest)
 
-    def test_hashed_json_is_published_through_an_atomic_create_only_link(self) -> None:
-        source = Path(benchmark.__file__).read_text(encoding="utf-8")
+    def test_hashed_json_publication_never_replaces_an_existing_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "report.json"
+            benchmark.write_hashed_json(report, {"schema": "first"})
+            published = report.read_bytes(), Path(f"{report}.sha256").read_bytes()
 
-        self.assertIn("os.link", source)
+            with self.assertRaises(FileExistsError):
+                benchmark.write_hashed_json(report, {"schema": "second"})
+
+            self.assertEqual(
+                (report.read_bytes(), Path(f"{report}.sha256").read_bytes()),
+                published,
+            )
+            self.assertEqual(
+                sorted(path.name for path in Path(directory).iterdir()),
+                ["report.json", "report.json.sha256"],
+            )
 
     def test_execution_context_rejects_rehashed_environment_tamper(self) -> None:
         context = {

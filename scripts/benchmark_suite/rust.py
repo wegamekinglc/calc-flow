@@ -98,9 +98,11 @@ async def build_binaries(
         feature_args = ["--features", ",".join(features)] if features else []
         log = output / f"build-{target}.jsonl"
         clear_stale_bench_binary(shared, target)
-        # The sub-nanosecond core getter benchmark changes when its loop crosses
-        # a 64-byte instruction-cache line. Align only the bench target's loops;
-        # cargo rustc passes the extra codegen flag to that target, not its deps.
+        # Loop alignment was added to stabilize a since-retired sub-nanosecond
+        # core getter benchmark. Removing it would shift every core timing, so
+        # it stays until a measured change retires it. Align only the bench
+        # target's loops; cargo rustc passes the extra codegen flag to that
+        # target, not its deps.
         argv = (
             [
                 "cargo",
@@ -458,7 +460,7 @@ async def measure_rust(shard: dict, releases: dict, roots: dict, output: Path) -
         (output / "blocks.json").write_text(
             json.dumps(blocks, indent=2) + "\n", encoding="utf-8"
         )
-    cases = combine_blocks(shard, blocks)
+    cases = combine_blocks(shard, _without_retired_cases(blocks, applied))
     try:
         reports = await _allocation_reports(binaries, roots, output)
         cases.extend(allocation_rows(reports))
@@ -478,6 +480,37 @@ async def measure_rust(shard: dict, releases: dict, roots: dict, output: Path) -
             applied.values(), key=lambda entry: entry["target"]
         ),
         "dependency_migrations": applied_dependency_migrations(stamps),
+    }
+
+
+def _target(name: str) -> str:
+    return name.split("/", 1)[0]
+
+
+def _without_retired_cases(blocks: dict, applied: dict) -> dict:
+    """Drop cases a declared migration removed from the candidate bench source.
+
+    A migrated target's candidate inventory is authoritative once the candidate
+    measured that target: a case only its baseline blocks still report was
+    removed deliberately. Without a declaration it stays a missing-block error.
+    """
+    candidate = {name for block in blocks["candidate"] for name in block}
+    measured = [{_target(name) for name in block} for block in blocks["candidate"]]
+    retired = {
+        name
+        for block in blocks["baseline"]
+        for name in block
+        if name not in candidate
+        and _target(name) in applied
+        and measured
+        and all(_target(name) in targets for targets in measured)
+    }
+    return {
+        side: [
+            {name: row for name, row in block.items() if name not in retired}
+            for block in values
+        ]
+        for side, values in blocks.items()
     }
 
 
