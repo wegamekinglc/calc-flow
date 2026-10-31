@@ -513,15 +513,18 @@ fn interval_text_seconds(text: &str) -> Option<i64> {
     Some(amount)
 }
 
+fn plain_interval(interval: &datafusion::sql::sqlparser::ast::Interval) -> bool {
+    interval.leading_precision.is_none()
+        && interval.last_field.is_none()
+        && interval.fractional_seconds_precision.is_none()
+        && matches!(interval.leading_field, None | Some(DateTimeField::Second))
+}
+
 fn interval_seconds(expr: &Expr) -> Option<i64> {
     let Expr::Interval(interval) = expr else {
         return None;
     };
-    if interval.leading_precision.is_some()
-        || interval.last_field.is_some()
-        || interval.fractional_seconds_precision.is_some()
-        || !matches!(interval.leading_field, None | Some(DateTimeField::Second))
-    {
+    if !plain_interval(interval) {
         return None;
     }
     let Expr::Value(value) = interval.value.as_ref() else {
