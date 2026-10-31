@@ -118,10 +118,8 @@ fn asof(spec: &AsofSpec, schema: SchemaRef) -> DataFusionResult<RecordBatch> {
 
 #[derive(Clone, Copy, Debug)]
 struct BandEntry {
-    time: i64,
     sequence: Option<u64>,
     price: Option<f64>,
-    row: usize,
 }
 
 fn band(spec: &BandSpec, schema: SchemaRef) -> DataFusionResult<RecordBatch> {
@@ -149,18 +147,16 @@ fn band(spec: &BandSpec, schema: SchemaRef) -> DataFusionResult<RecordBatch> {
             continue;
         }
         let entry = BandEntry {
-            time: time.expect("checked non-null timestamp"),
             sequence: (!right_sequences.is_null(row)).then(|| right_sequences.value(row)),
             price: (!right_prices.is_null(row)).then(|| right_prices.value(row)),
-            row,
         };
-        by_key
+        let by_time = by_key
             .entry(right_keys.value(row))
+            .or_insert_with(|| std::collections::HashMap::with_hasher(RandomState::new()));
+        by_time
+            .entry(time.expect("checked non-null timestamp"))
             .or_insert_with(Vec::new)
             .push(entry);
-    }
-    for entries in by_key.values_mut() {
-        entries.sort_unstable_by_key(|entry| (entry.time, entry.row));
     }
 
     let left_keys = left
@@ -190,7 +186,7 @@ fn band(spec: &BandSpec, schema: SchemaRef) -> DataFusionResult<RecordBatch> {
         if left_keys.is_null(row) || time.is_none() {
             continue;
         }
-        let Some(entries) = by_key.get(left_keys.value(row)) else {
+        let Some(by_time) = by_key.get(left_keys.value(row)) else {
             continue;
         };
         let left_sequence = (!left_sequences.is_null(row)).then(|| left_sequences.value(row));
@@ -200,11 +196,10 @@ fn band(spec: &BandSpec, schema: SchemaRef) -> DataFusionResult<RecordBatch> {
                 .expect("checked non-null timestamp")
                 .checked_add(*offset)
                 .ok_or_else(|| DataFusionError::Execution("timestamp out of range".into()))?;
-            let first = entries.partition_point(|entry| entry.time < target);
-            for entry in &entries[first..] {
-                if entry.time != target {
-                    break;
-                }
+            let Some(entries) = by_time.get(&target) else {
+                continue;
+            };
+            for entry in entries {
                 sequences.push(left_sequence);
                 right_sequences_output.push(entry.sequence);
                 values.push(match (left_price, entry.price) {
