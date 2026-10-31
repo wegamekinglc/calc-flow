@@ -51,6 +51,35 @@ fn test_single_source_right_positions_avoid_tuple_sized_peak_allocations() {
 }
 
 #[test]
+fn test_single_source_fixed_right_positions_skip_range_bookkeeping() {
+    let rows = 2;
+    let left = rows_payload(rows, 0);
+    let right = rows_payload(rows, 1);
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let mut credit = MemoryConsumer::new("compact-fixed-right-positions").register(&pool);
+    let mut builder = OutputPlanBuilder::new(rows, None, &mut credit, "asof").unwrap();
+    let left_source = builder
+        .left_source(left.view(), &mut credit, "asof")
+        .unwrap();
+    let right_source = builder
+        .right_source(right.view(), &mut credit, "asof")
+        .unwrap();
+    for row in 0..rows {
+        builder.left_position(left_source, row, "asof").unwrap();
+        builder
+            .push_right_source(Some((right_source, row)), "asof")
+            .unwrap();
+    }
+    assert!(builder.right.run.is_none());
+    let plan = builder
+        .finish(&right.batch.record.schema(), &mut credit, "asof")
+        .unwrap();
+    assert_eq!(plan.raw_bytes, 32);
+    drop((plan, credit));
+    assert_eq!(pool.reserved(), 0);
+}
+
+#[test]
 fn test_late_second_right_source_uses_funded_tuple_promotion() {
     let rows = 4_096;
     let left = rows_payload(rows, 0);
@@ -100,6 +129,47 @@ fn test_late_second_right_source_uses_funded_tuple_promotion() {
     assert_eq!(plan.matched, rows as u64 - 1);
     drop((plan, credit));
     assert_eq!(pool.reserved(), 0);
+}
+
+#[test]
+fn test_mixed_source_fixed_positions_preserve_legacy_raw_accounting() {
+    fn raw_bytes(compact: bool) -> u64 {
+        let left = rows_payload(3, 0);
+        let first = rows_payload(3, 1);
+        let second = rows_payload(1, 2);
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+        let mut credit = MemoryConsumer::new("mixed-source-fixed-positions").register(&pool);
+        let mut builder =
+            OutputPlanBuilder::new_for_owner(3, None, &mut credit, "asof", compact).unwrap();
+        let left_source = builder
+            .left_source(left.view(), &mut credit, "asof")
+            .unwrap();
+        let first_source = builder
+            .right_source(first.view(), &mut credit, "asof")
+            .unwrap();
+        let second_source = builder
+            .right_source(second.view(), &mut credit, "asof")
+            .unwrap();
+        for row in 0..2 {
+            builder.left_position(left_source, row, "asof").unwrap();
+            builder
+                .push_right_source(Some((first_source, row)), "asof")
+                .unwrap();
+        }
+        builder.left_position(left_source, 2, "asof").unwrap();
+        builder
+            .push_right_source(Some((second_source, 0)), "asof")
+            .unwrap();
+        let plan = builder
+            .finish(&first.batch.record.schema(), &mut credit, "asof")
+            .unwrap();
+        let bytes = plan.raw_bytes;
+        drop((plan, credit));
+        assert_eq!(pool.reserved(), 0);
+        bytes
+    }
+
+    assert_eq!(raw_bytes(true), raw_bytes(false));
 }
 
 fn pending_promotion(

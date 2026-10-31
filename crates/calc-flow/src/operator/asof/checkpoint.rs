@@ -6,6 +6,8 @@ pub(super) mod index_v3;
 mod payload_segments;
 mod prepared;
 pub(super) use incremental::LogState;
+#[cfg(test)]
+pub(super) use incremental::take_log_projection_calls;
 mod validation;
 
 #[cfg(test)]

@@ -133,7 +133,8 @@ async fn test_probe_stop_checks_scale_with_groups_and_units() {
         assert_eq!(full_checks.load(Ordering::SeqCst), 2 * units);
         assert_eq!(
             polls.load(Ordering::SeqCst),
-            expected_polls(opposite.max(1))
+            expected_polls(opposite.max(1)),
+            "stop-check count mismatch for rows={rows}, opposite={opposite}, units={units}"
         );
         assert_eq!(output.pairs.len(), rows * opposite);
         for (ordinal, pair) in output.pairs.iter().enumerate() {

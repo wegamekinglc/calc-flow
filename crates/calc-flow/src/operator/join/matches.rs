@@ -1,7 +1,7 @@
 //! Incoming identity/runs plus opposite row references, without pair descriptors.
 
 use super::MatchedPair;
-use std::ops::Range;
+use std::{borrow::Cow, ops::Range};
 
 #[cfg(test)]
 thread_local! {
@@ -44,7 +44,7 @@ impl dyn Matches + '_ {
 }
 
 /// Borrowed pairs; `Runs` starts with the run that contains index `base`.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) enum View<'a> {
     Pairs(&'a [MatchedPair]),
     Identity {
@@ -56,6 +56,7 @@ pub(super) enum View<'a> {
         base: usize,
         opposite: &'a [usize],
     },
+    Intervals(Cow<'a, [RangeMatch]>),
 }
 
 impl<'a> View<'a> {
@@ -63,11 +64,12 @@ impl<'a> View<'a> {
         match self {
             Self::Pairs(pairs) => pairs.len(),
             Self::Identity { opposite, .. } | Self::Runs { opposite, .. } => opposite.len(),
+            Self::Intervals(ranges) => ranges.iter().map(|matched| matched.range.len()).sum(),
         }
     }
 
     pub(super) fn pair(&self, index: usize) -> MatchedPair {
-        match *self {
+        match self {
             Self::Pairs(pairs) => pairs[index],
             Self::Identity { start, opposite } => MatchedPair {
                 pos: start + index,
@@ -81,6 +83,15 @@ impl<'a> View<'a> {
                 pos: runs[run_containing(runs, base + index)].1,
                 opposite_index: opposite[index],
             },
+            Self::Intervals(ranges) => {
+                let base = ranges.first().map_or(0, |matched| matched.first);
+                let index = base + index;
+                let matched = &ranges[run_containing_ranges(ranges, index)];
+                MatchedPair {
+                    pos: matched.position,
+                    opposite_index: matched.range.start + index - matched.first,
+                }
+            }
         }
     }
 
@@ -103,22 +114,40 @@ impl<'a> View<'a> {
                     opposite: &opposite[range],
                 }
             }
+            Self::Intervals(ranges) => {
+                let mut sliced = Vec::new();
+                for matched in ranges.iter() {
+                    let first = matched.first.max(range.start);
+                    let last = (matched.first + matched.range.len()).min(range.end);
+                    if first < last {
+                        sliced.push(RangeMatch {
+                            first,
+                            position: matched.position,
+                            range: matched.range.start + first - matched.first
+                                ..matched.range.start + last - matched.first,
+                        });
+                    }
+                }
+                Self::Intervals(Cow::Owned(sliced))
+            }
         }
     }
 
     /// Visits pairs in order, advancing incoming runs instead of searching.
     pub(super) fn iter(self) -> Cursor<'a> {
+        let remaining = self.len();
         Cursor {
             view: self,
             index: 0,
             run: 0,
+            remaining,
         }
     }
 }
 
 impl Matches for View<'_> {
     fn view(&self) -> View<'_> {
-        *self
+        self.clone()
     }
 }
 
@@ -128,12 +157,37 @@ fn run_containing(runs: &[(usize, usize)], index: usize) -> usize {
     runs.partition_point(|(first, _)| *first <= index) - 1
 }
 
+fn run_containing_ranges(ranges: &[RangeMatch], index: usize) -> usize {
+    ranges.partition_point(|matched| matched.first <= index) - 1
+}
+
 /// Whole-selection iteration in O(pairs + runs).
 #[derive(Clone)]
 pub(super) struct Cursor<'a> {
     view: View<'a>,
     index: usize,
     run: usize,
+    remaining: usize,
+}
+
+fn next_run_pair(
+    runs: &[(usize, usize)],
+    base: usize,
+    index: usize,
+    opposite: &[usize],
+    run: &mut usize,
+) -> Option<MatchedPair> {
+    let opposite_index = *opposite.get(index)?;
+    while runs
+        .get(*run + 1)
+        .is_some_and(|(first, _)| *first <= base + index)
+    {
+        *run += 1;
+    }
+    Some(MatchedPair {
+        pos: runs[*run].1,
+        opposite_index,
+    })
 }
 
 impl Iterator for Cursor<'_> {
@@ -142,7 +196,7 @@ impl Iterator for Cursor<'_> {
     #[inline]
     fn next(&mut self) -> Option<MatchedPair> {
         let index = self.index;
-        let pair = match self.view {
+        let pair = match &self.view {
             View::Pairs(pairs) => *pairs.get(index)?,
             View::Identity { start, opposite } => MatchedPair {
                 pos: start + index,
@@ -152,27 +206,30 @@ impl Iterator for Cursor<'_> {
                 runs,
                 base,
                 opposite,
-            } => {
-                let opposite_index = *opposite.get(index)?;
-                while runs
-                    .get(self.run + 1)
-                    .is_some_and(|(first, _)| *first <= base + index)
-                {
+            } => next_run_pair(runs, *base, index, opposite, &mut self.run)?,
+            View::Intervals(ranges) => {
+                let matched = ranges.get(self.run)?;
+                if index < matched.first {
+                    self.index = matched.first;
+                    return self.next();
+                }
+                if index >= matched.first + matched.range.len() {
                     self.run += 1;
+                    return self.next();
                 }
                 MatchedPair {
-                    pos: runs[self.run].1,
-                    opposite_index,
+                    pos: matched.position,
+                    opposite_index: matched.range.start + index - matched.first,
                 }
             }
         };
         self.index = index + 1;
+        self.remaining -= 1;
         Some(pair)
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = self.view.len() - self.index;
-        (remaining, Some(remaining))
+        (self.remaining, Some(self.remaining))
     }
 }
 
@@ -183,25 +240,136 @@ enum Incoming {
     Runs(Vec<(usize, usize)>),
 }
 
+#[derive(Clone, Debug)]
+pub(super) struct RangeMatch {
+    first: usize,
+    position: usize,
+    range: Range<usize>,
+}
+
+#[derive(Debug)]
+enum Opposite {
+    Indices(Vec<usize>),
+    Ranges { ranges: Vec<RangeMatch>, len: usize },
+}
+
+impl Opposite {
+    fn len(&self) -> usize {
+        match self {
+            Self::Indices(indices) => indices.len(),
+            Self::Ranges { len, .. } => {
+                #[cfg(test)]
+                tests::OPPOSITE_LEN_WORK.with(|count| count.set(count.get() + 1));
+                *len
+            }
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn push_index(&mut self, position: usize, index: usize) {
+        let first = self.len();
+        match self {
+            Self::Indices(indices) => indices.push(index),
+            Self::Ranges { ranges, len } => {
+                ranges.push(RangeMatch {
+                    first,
+                    position,
+                    range: index..index + 1,
+                });
+                *len += 1;
+            }
+        }
+    }
+
+    fn push_range(&mut self, position: usize, range: Range<usize>) {
+        let first = self.len();
+        let range_len = range.len();
+        match self {
+            Self::Indices(indices) if indices.is_empty() => {
+                *self = Self::Ranges {
+                    ranges: vec![RangeMatch {
+                        first: 0,
+                        position,
+                        range,
+                    }],
+                    len: range_len,
+                };
+            }
+            Self::Indices(indices) => indices.extend(range),
+            Self::Ranges { ranges, len } => {
+                ranges.push(RangeMatch {
+                    first,
+                    position,
+                    range,
+                });
+                *len += range_len;
+            }
+        }
+    }
+
+    fn extend_values(
+        &mut self,
+        values: impl IntoIterator<Item = usize>,
+        position: impl Fn(usize) -> usize,
+    ) {
+        if let Self::Indices(indices) = self {
+            indices.extend(values);
+            return;
+        }
+        let base = self.len();
+        let mut current: Option<(usize, usize, usize)> = None;
+        for (offset, value) in values.into_iter().enumerate() {
+            let next_position = position(base + offset);
+            if let Some((start, previous, position)) = current {
+                if value == previous + 1 && next_position == position {
+                    current = Some((start, value, position));
+                    continue;
+                }
+                self.push_range(position, start..previous + 1);
+            }
+            current = Some((value, value, next_position));
+        }
+        if let Some((start, previous, position)) = current {
+            self.push_range(position, start..previous + 1);
+        }
+    }
+}
+
 pub(super) struct Selection {
     incoming: Incoming,
-    opposite: Vec<usize>,
+    opposite: Opposite,
     incoming_capacity: usize,
+    opposite_capacity: usize,
 }
 
 impl Selection {
     pub(super) fn with_capacity(matches: usize, incoming: usize) -> Self {
         Self {
             incoming: Incoming::Identity { start: 0 },
-            opposite: Vec::with_capacity(matches),
+            opposite: Opposite::Indices(Vec::new()),
             incoming_capacity: incoming.min(matches),
+            opposite_capacity: matches,
         }
     }
+
+    fn reserve_indices(&mut self) {
+        let capacity = self.opposite_capacity;
+        if let Opposite::Indices(indices) = &mut self.opposite
+            && indices.capacity() == 0
+        {
+            indices.reserve(capacity);
+        }
+    }
+
     pub(super) fn push(&mut self, pair: MatchedPair) {
         #[cfg(test)]
         PAIR_PUSHES.set(PAIR_PUSHES.get() + 1);
+        self.reserve_indices();
         self.append_incoming(pair.pos, self.opposite.len(), 1);
-        self.opposite.push(pair.opposite_index);
+        self.opposite.push_index(pair.pos, pair.opposite_index);
     }
 
     fn append_incoming(&mut self, position: usize, length: usize, count: usize) {
@@ -232,11 +400,35 @@ impl Selection {
     }
 
     pub(super) fn append_run(&mut self, position: usize, opposite: impl Iterator<Item = usize>) {
+        self.reserve_indices();
         let start = self.opposite.len();
-        self.opposite.extend(opposite);
+        self.opposite.extend_values(opposite, |_| position);
         let count = self.opposite.len() - start;
         if count != 0 {
             self.append_incoming(position, start, count);
+        }
+    }
+
+    pub(super) fn append_interval(&mut self, position: usize, range: Range<usize>) {
+        if range.is_empty() {
+            return;
+        }
+        let start = self.opposite.len();
+        self.append_incoming(position, start, range.len());
+        self.opposite.push_range(position, range);
+    }
+
+    fn append_pairs(&mut self, mut pairs: &[MatchedPair]) {
+        while let Some(first) = pairs.first() {
+            let count = pairs
+                .iter()
+                .position(|pair| pair.pos != first.pos)
+                .unwrap_or(pairs.len());
+            self.append_run(
+                first.pos,
+                pairs[..count].iter().map(|pair| pair.opposite_index),
+            );
+            pairs = &pairs[count..];
         }
     }
 
@@ -245,19 +437,7 @@ impl Selection {
             return;
         }
         match view {
-            View::Pairs(mut pairs) => {
-                while let Some(first) = pairs.first() {
-                    let count = pairs
-                        .iter()
-                        .position(|pair| pair.pos != first.pos)
-                        .unwrap_or(pairs.len());
-                    self.append_run(
-                        first.pos,
-                        pairs[..count].iter().map(|pair| pair.opposite_index),
-                    );
-                    pairs = &pairs[count..];
-                }
-            }
+            View::Pairs(pairs) => self.append_pairs(pairs),
             View::Identity { start, opposite } => {
                 let offset = self.opposite.len();
                 match &mut self.incoming {
@@ -272,13 +452,19 @@ impl Selection {
                         }
                     }
                 }
-                self.opposite.extend_from_slice(opposite);
+                self.opposite
+                    .extend_values(opposite.iter().copied(), |index| start + index - offset);
             }
             View::Runs {
                 runs,
                 base,
                 opposite,
             } => self.append_runs(runs, base, opposite),
+            View::Intervals(ranges) => {
+                for matched in ranges.iter() {
+                    self.append_interval(matched.position, matched.range.clone());
+                }
+            }
         }
     }
 
@@ -293,7 +479,10 @@ impl Selection {
             let next = runs.get(index + 1).map_or(end, |&(next, _)| next.min(end));
             self.append_incoming(position, offset + start - base, next - start);
         }
-        self.opposite.extend_from_slice(opposite);
+        self.opposite
+            .extend_values(opposite.iter().copied(), |index| {
+                runs[run_containing(runs, base + index - offset)].1
+            });
     }
     pub(super) fn extend(&mut self, pairs: impl IntoIterator<Item = MatchedPair>) {
         for pair in pairs {
@@ -316,15 +505,18 @@ impl Selection {
 
 impl Matches for Selection {
     fn view(&self) -> View<'_> {
-        match &self.incoming {
-            Incoming::Identity { start } => View::Identity {
-                start: *start,
-                opposite: &self.opposite,
-            },
-            Incoming::Runs(runs) => View::Runs {
-                runs,
-                base: 0,
-                opposite: &self.opposite,
+        match &self.opposite {
+            Opposite::Ranges { ranges, .. } => View::Intervals(Cow::Borrowed(ranges)),
+            Opposite::Indices(opposite) => match &self.incoming {
+                Incoming::Identity { start } => View::Identity {
+                    start: *start,
+                    opposite,
+                },
+                Incoming::Runs(runs) => View::Runs {
+                    runs,
+                    base: 0,
+                    opposite,
+                },
             },
         }
     }
@@ -356,6 +548,25 @@ mod tests {
 
     thread_local! {
         pub(super) static RUN_SEARCHES: Cell<usize> = const { Cell::new(0) };
+        pub(super) static OPPOSITE_LEN_WORK: Cell<usize> = const { Cell::new(0) };
+    }
+
+    #[test]
+    fn test_many_interval_appends_have_constant_time_length_queries() {
+        let count = 2_048;
+        let mut selection = Selection::with_capacity(count, count);
+        OPPOSITE_LEN_WORK.set(0);
+        for index in 0..count {
+            selection.append_interval(index, index..index + 1);
+        }
+        let work = OPPOSITE_LEN_WORK.get();
+        assert!(
+            work <= count * 2,
+            "length queries must not rescan prior intervals: work={work}, intervals={count}"
+        );
+        assert_eq!(selection.len(), count);
+        assert_eq!(selection.pair(count - 1).pos, count - 1);
+        assert_eq!(selection.pair(count - 1).opposite_index, count - 1);
     }
 
     #[test]
@@ -387,7 +598,7 @@ mod tests {
         ];
         let expected = views
             .iter()
-            .flat_map(|view| view.iter())
+            .flat_map(|view| view.clone().iter())
             .map(|pair| (pair.pos, pair.opposite_index))
             .collect::<Vec<_>>();
         let mut selection = Selection::with_capacity(expected.len(), expected.len());
@@ -416,6 +627,31 @@ mod tests {
             contiguous.incoming,
             Incoming::Identity { start: 10 }
         ));
+    }
+
+    #[test]
+    fn test_contiguous_intervals_avoid_per_match_index_storage() {
+        let count = 100_000;
+        let allocations = allocation_counter::measure(|| {
+            let mut selection = Selection::with_capacity(count, 1);
+            selection.append_interval(7, 0..count);
+            assert_eq!(selection.len(), count);
+            assert_eq!(selection.pair(0).opposite_index, 0);
+            assert_eq!(selection.pair(count - 1).opposite_index, count - 1);
+            let sliced = selection.view().slice(10..20);
+            assert_eq!(sliced.len(), 10);
+            assert_eq!(sliced.pair(0).opposite_index, 10);
+            assert_eq!(sliced.pair(9).opposite_index, 19);
+            let mut merged = Selection::with_capacity(10, 1);
+            merged.append_view(sliced);
+            assert_eq!(merged.len(), 10);
+            assert_eq!(merged.pair(0).opposite_index, 10);
+            assert_eq!(merged.pair(9).opposite_index, 19);
+        });
+        assert!(
+            allocations.bytes_max < 4_096,
+            "one interval must not allocate an index per match: {allocations:?}"
+        );
     }
 
     #[test]
@@ -605,6 +841,50 @@ mod tests {
                 .map(|pair| (pair.pos, pair.opposite_index))
                 .collect::<Vec<_>>(),
             expected[1..5]
+        );
+    }
+
+    #[test]
+    fn test_sliced_interval_cursor_reports_relative_remaining_length() {
+        let mut selection = Selection::with_capacity(100, 1);
+        selection.append_interval(7, 0..100);
+        let mut cursor = selection.view().slice(10..20).iter();
+        assert_eq!(cursor.len(), 10);
+        assert_eq!(cursor.next().unwrap().opposite_index, 10);
+        assert_eq!(cursor.len(), 9);
+        assert_eq!(cursor.size_hint(), (9, Some(9)));
+        assert_eq!(cursor.count(), 9);
+    }
+
+    #[test]
+    fn test_interval_fragments_preserve_later_incoming_run_positions() {
+        let mut intervals = Selection::with_capacity(2, 1);
+        intervals.append_interval(7, 0..2);
+        let identity: Selection = [(9, 2), (10, 3)]
+            .map(|(pos, opposite_index)| MatchedPair {
+                pos,
+                opposite_index,
+            })
+            .to_vec()
+            .into();
+        let runs: Selection = [(12, 4), (12, 5), (15, 6)]
+            .map(|(pos, opposite_index)| MatchedPair {
+                pos,
+                opposite_index,
+            })
+            .to_vec()
+            .into();
+        let mut merged = Selection::with_capacity(6, 4);
+        for selection in [&intervals, &identity] {
+            merged.append_view(selection.view());
+        }
+        merged.append_view(runs.view().slice(1..3));
+        assert_eq!(
+            merged
+                .iter()
+                .map(|pair| (pair.pos, pair.opposite_index))
+                .collect::<Vec<_>>(),
+            vec![(7, 0), (7, 1), (9, 2), (10, 3), (12, 5), (15, 6)]
         );
     }
 }

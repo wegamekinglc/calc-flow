@@ -67,6 +67,19 @@ impl ProbeInputs {
         bounds
     }
 
+    pub(super) fn dense_bounds(
+        &self,
+        position: usize,
+        bounds: WindowBounds,
+    ) -> Option<(usize, usize)> {
+        self.slot(position).and_then(|id| {
+            self.index
+                .as_ref()
+                .expect("owned native index")
+                .dense_bounds(id, bounds)
+        })
+    }
+
     pub(super) fn matches_bounds(
         &self,
         position: usize,

@@ -125,18 +125,28 @@ impl StreamAsofJoinOperator {
             &drain,
             &self.name,
         )?;
-        let journal = self.prepare_log_prefix(prefix, &drain)?;
-        let (credit, retention_bytes) = self.prepare_log_retention(
-            &prefix.owners,
-            &prefix.batches,
-            context.job().checkpointing(),
-        )?;
-        let inventory = self.log_projection(inventory, length, &journal, retention_bytes)?;
-        let workspace = self.reserve_workspace(if context.job().checkpointing() {
-            length
-        } else {
-            0
-        })?;
+        let (journal, credit, retention_bytes, inventory, workspace) =
+            if context.job().checkpointing() {
+                let journal = self.prepare_log_prefix(prefix, &drain)?;
+                let (credit, retention_bytes) = self.prepare_log_retention(
+                    &prefix.owners,
+                    &prefix.batches,
+                    context.job().checkpointing(),
+                )?;
+                let inventory =
+                    self.log_projection(inventory, length, &journal, retention_bytes)?;
+                let workspace = self.reserve_workspace(length)?;
+                (journal, credit, retention_bytes, inventory, workspace)
+            } else {
+                let inventory = Self::index_projection(inventory, length)?;
+                (
+                    crate::operator::asof::checkpoint::index_v3::log::journal::Journal::default(),
+                    None,
+                    0,
+                    inventory,
+                    self.reserve_workspace(0)?,
+                )
+            };
         let pool = self
             .prepare_pool_compaction(&prefix.batches, context)
             .await?;
@@ -193,6 +203,80 @@ mod tests {
     use super::*;
     use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryConsumer, MemoryPool};
     use std::sync::Arc;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn disabled_checkpoint_skips_log_projection() {
+        use crate::{OperatorMetadata, StreamOperator};
+
+        let (mut operator, batch) = cpu::fixture();
+        let job = crate::StreamJobContext::new(
+            1,
+            "asof",
+            crate::JsonMap::new(),
+            None,
+            crate::CancellationToken::new(),
+        )
+        .with_checkpointing(false);
+        let context = StreamOperatorContext::new(&job, "asof", None);
+        let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data("left", batch, &context, &mut output)
+            .await
+            .unwrap();
+        let mut prefix = LeftPrefix::default();
+        for (order, row) in operator.state.left.iter().take(32) {
+            prefix
+                .visit(&order, row, &operator.state.batches, "asof")
+                .unwrap();
+        }
+        crate::operator::asof::checkpoint::take_log_projection_calls();
+        let _prepared = operator
+            .prepare_prefix_checkpoint(&prefix, &context)
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::operator::asof::checkpoint::take_log_projection_calls(),
+            0
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn disabled_checkpoint_prefix_commit_matches_current_inventory() {
+        use crate::{OperatorMetadata, StreamOperator};
+
+        let (mut operator, batch) = cpu::fixture();
+        let job = crate::StreamJobContext::new(
+            1,
+            "asof",
+            crate::JsonMap::new(),
+            None,
+            crate::CancellationToken::new(),
+        )
+        .with_checkpointing(false);
+        let context = StreamOperatorContext::new(&job, "asof", None);
+        let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data("left", batch, &context, &mut output)
+            .await
+            .unwrap();
+        let headroom = operator.checkpoint_workspace(false).unwrap();
+        let (_, prefix_workspace) = operator.finalizable_rows(None, true, &context).unwrap();
+        let mut count = 50;
+        let prepared = operator
+            .prepare_output(&mut count, &prefix_workspace, &context)
+            .await
+            .unwrap();
+        operator
+            .commit_prefix_output(prepared, headroom, &context, &mut output)
+            .await
+            .unwrap();
+        assert!(operator.deferred_index_len.is_some());
+        let inventory = operator
+            .current_inventory(operator.prepared.as_ref())
+            .unwrap();
+        assert_eq!(operator.status.state_bytes, inventory.bytes);
+        assert_eq!(operator.checkpoint_log.retention_bytes, 0);
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn dropped_compaction_worker_retains_input_reservation_until_exit() {

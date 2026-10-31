@@ -177,10 +177,35 @@ impl<'a> OutputPlanBuilder<'a> {
         self.left.record_span(source, row, name)
     }
 
+    fn record_right_range(
+        &mut self,
+        source: usize,
+        row: usize,
+        promotes: bool,
+        name: &str,
+    ) -> Result<()> {
+        let compact_fixed = self.right.columns[source].is_fixed_width()
+            && self
+                .right
+                .positions
+                .as_ref()
+                .is_some_and(positions::Builder::is_compact);
+        if !compact_fixed || promotes {
+            self.right.record_range(source, row..row + 1, name)?;
+        }
+        Ok(())
+    }
+
     pub fn push_right_source(&mut self, right: Option<(usize, usize)>, name: &str) -> Result<()> {
+        let promotes =
+            self.right.positions.as_ref().is_some_and(|positions| {
+                positions.requires_promotion(right.map(|(source, _)| source))
+            });
+        if promotes {
+            self.charge_compact_fixed(name)?;
+        }
         if let Some((source, row)) = right {
-            let end = row + 1;
-            self.right.record_range(source, row..end, name)?;
+            self.record_right_range(source, row, promotes, name)?;
         }
         self.right
             .positions
@@ -214,6 +239,7 @@ impl<'a> OutputPlanBuilder<'a> {
         self.left.flush_span(name)?;
         self.left.flush_run(name)?;
         self.right.flush_run(name)?;
+        self.charge_compact_fixed(name)?;
         self.reserve_buffers(right_schema, workspace, name)?;
         self.right.rows.positions = self
             .right
@@ -230,6 +256,34 @@ impl<'a> OutputPlanBuilder<'a> {
             raw_bytes: self.left.raw + self.right.raw,
         })
     }
+    fn compact_fixed_source(&self) -> Option<usize> {
+        if self.matched == 0 || self.right.run.is_some() {
+            return None;
+        }
+        let compact = self
+            .right
+            .positions
+            .as_ref()
+            .is_some_and(positions::Builder::is_compact);
+        if !compact {
+            return None;
+        }
+        let (_, source) = self.right.recent?;
+        self.right.columns[source]
+            .is_fixed_width()
+            .then_some(source)
+    }
+
+    fn charge_compact_fixed(&mut self, name: &str) -> Result<()> {
+        let Some(source) = self.compact_fixed_source() else {
+            return Ok(());
+        };
+        let rows = usize::try_from(self.matched).map_err(|_| overflow(name))?;
+        let bytes = self.right.columns[source].fixed_bytes(rows, name)?;
+        self.right.raw = checked(name, self.right.raw, bytes)?;
+        Ok(())
+    }
+
     fn reserve_buffers(
         &self,
         schema: &Schema,

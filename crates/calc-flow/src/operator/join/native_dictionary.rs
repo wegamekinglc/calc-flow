@@ -34,6 +34,7 @@ struct KeyRun {
     _identity: Option<Lease>,
     rows: Vec<RunEntry>,
     start: usize,
+    ordered_dense: bool,
 }
 
 impl KeyRun {
@@ -64,6 +65,11 @@ impl KeyRun {
     fn insert(&mut self, entry: RunEntry) {
         self.prepare_append();
         let position = self.start + insertion_position(self.active(), entry);
+        self.ordered_dense &= position == self.rows.len()
+            && self
+                .rows
+                .last()
+                .is_none_or(|last| last.dense.checked_add(1) == Some(entry.dense));
         self.rows.insert(position, entry);
     }
 
@@ -87,6 +93,7 @@ impl KeyRun {
         if position == self.start {
             self.start += 1;
         } else {
+            self.ordered_dense = false;
             #[cfg(test)]
             super::note_join_work(|work| {
                 work.native_shifted_entries += self.rows.len() - position - 1;
@@ -105,6 +112,7 @@ impl KeyRun {
                 .active()
                 .binary_search_by_key(&identity, |entry| entry.identity())
                 .expect("moved retained identity");
+        self.ordered_dense = false;
         self.rows[position].dense = dense;
     }
 }
@@ -447,6 +455,7 @@ impl NativeIndex {
             _identity: identity,
             rows: Vec::new(),
             start: 0,
+            ordered_dense: true,
         });
         let id = if let Some(id) = self.free.pop() {
             self.slots[id as usize] = run;
@@ -640,6 +649,16 @@ impl NativeIndex {
             boundary(entry.time, range.1, true)
         });
         WindowBounds { lower, upper }
+    }
+
+    pub(super) fn dense_bounds(&self, id: u32, bounds: WindowBounds) -> Option<(usize, usize)> {
+        let run = self.slots[id as usize].as_ref().expect("live key ID");
+        if !run.ordered_dense {
+            return None;
+        }
+        let entries = &run.active()[bounds.lower..bounds.upper];
+        let first = entries.first()?.dense;
+        Some((first, entries.len()))
     }
 
     /// Dense indices of a run slice described by previously computed bounds.
