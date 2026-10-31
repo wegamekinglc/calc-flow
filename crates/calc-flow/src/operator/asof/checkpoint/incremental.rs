@@ -403,19 +403,27 @@ impl StreamAsofJoinOperator {
         rows >= 4096 && rows >= self.status.state_rows / 8
     }
 
+    pub(in crate::operator::asof) fn index_projection(
+        mut inventory: Inventory,
+        length: u64,
+    ) -> Result<Inventory> {
+        inventory.bytes = inventory
+            .bytes
+            .checked_sub(if length == 0 { 0 } else { length + 256 })
+            .ok_or_else(|| mismatch("ASOF virtual index accounting differs"))?;
+        Ok(inventory)
+    }
+
     pub(in crate::operator::asof) fn log_projection(
         &self,
-        mut inventory: Inventory,
+        inventory: Inventory,
         length: u64,
         journal: &Journal,
         retention_bytes: u64,
     ) -> Result<Inventory> {
         #[cfg(test)]
         LOG_PROJECTION_CALLS.with(|count| count.set(count.get() + 1));
-        inventory.bytes = inventory
-            .bytes
-            .checked_sub(if length == 0 { 0 } else { length + 256 })
-            .ok_or_else(|| mismatch("ASOF virtual index accounting differs"))?;
+        let mut inventory = Self::index_projection(inventory, length)?;
         let frames = self
             .checkpoint_log
             .segments

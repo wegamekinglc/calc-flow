@@ -178,6 +178,13 @@ impl<'a> OutputPlanBuilder<'a> {
     }
 
     pub fn push_right_source(&mut self, right: Option<(usize, usize)>, name: &str) -> Result<()> {
+        let promotes =
+            self.right.positions.as_ref().is_some_and(|positions| {
+                positions.requires_promotion(right.map(|(source, _)| source))
+            });
+        if promotes {
+            self.charge_compact_fixed(name)?;
+        }
         if let Some((source, row)) = right {
             let compact_fixed = self.right.columns[source].is_fixed_width()
                 && self
@@ -185,7 +192,7 @@ impl<'a> OutputPlanBuilder<'a> {
                     .positions
                     .as_ref()
                     .is_some_and(positions::Builder::is_compact);
-            if !compact_fixed {
+            if !compact_fixed || promotes {
                 let end = row + 1;
                 self.right.record_range(source, row..end, name)?;
             }

@@ -138,6 +138,7 @@ impl StreamAsofJoinOperator {
                 let workspace = self.reserve_workspace(length)?;
                 (journal, credit, retention_bytes, inventory, workspace)
             } else {
+                let inventory = Self::index_projection(inventory, length)?;
                 (
                     crate::operator::asof::checkpoint::index_v3::log::journal::Journal::default(),
                     None,
@@ -237,6 +238,44 @@ mod tests {
             crate::operator::asof::checkpoint::take_log_projection_calls(),
             0
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn disabled_checkpoint_prefix_commit_matches_current_inventory() {
+        use crate::{OperatorMetadata, StreamOperator};
+
+        let (mut operator, batch) = cpu::fixture();
+        let job = crate::StreamJobContext::new(
+            1,
+            "asof",
+            crate::JsonMap::new(),
+            None,
+            crate::CancellationToken::new(),
+        )
+        .with_checkpointing(false);
+        let context = StreamOperatorContext::new(&job, "asof", None);
+        let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data("left", batch, &context, &mut output)
+            .await
+            .unwrap();
+        let headroom = operator.checkpoint_workspace(false).unwrap();
+        let (_, prefix_workspace) = operator.finalizable_rows(None, true, &context).unwrap();
+        let mut count = 50;
+        let prepared = operator
+            .prepare_output(&mut count, &prefix_workspace, &context)
+            .await
+            .unwrap();
+        operator
+            .commit_prefix_output(prepared, headroom, &context, &mut output)
+            .await
+            .unwrap();
+        assert!(operator.deferred_index_len.is_some());
+        let inventory = operator
+            .current_inventory(operator.prepared.as_ref())
+            .unwrap();
+        assert_eq!(operator.status.state_bytes, inventory.bytes);
+        assert_eq!(operator.checkpoint_log.retention_bytes, 0);
     }
 
     #[tokio::test(flavor = "current_thread")]

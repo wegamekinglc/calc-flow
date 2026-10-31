@@ -135,10 +135,12 @@ impl<'a> View<'a> {
 
     /// Visits pairs in order, advancing incoming runs instead of searching.
     pub(super) fn iter(self) -> Cursor<'a> {
+        let remaining = self.len();
         Cursor {
             view: self,
             index: 0,
             run: 0,
+            remaining,
         }
     }
 }
@@ -165,6 +167,7 @@ pub(super) struct Cursor<'a> {
     view: View<'a>,
     index: usize,
     run: usize,
+    remaining: usize,
 }
 
 impl Iterator for Cursor<'_> {
@@ -213,12 +216,12 @@ impl Iterator for Cursor<'_> {
             }
         };
         self.index = index + 1;
+        self.remaining -= 1;
         Some(pair)
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = self.view.len() - self.index;
-        (remaining, Some(remaining))
+        (self.remaining, Some(self.remaining))
     }
 }
 
@@ -297,17 +300,18 @@ impl Opposite {
         let base = self.len();
         let mut current: Option<(usize, usize, usize)> = None;
         for (offset, value) in values.into_iter().enumerate() {
-            if let Some((start, previous, first)) = current {
-                if value == previous + 1 {
-                    current = Some((start, value, first));
+            let next_position = position(base + offset);
+            if let Some((start, previous, position)) = current {
+                if value == previous + 1 && next_position == position {
+                    current = Some((start, value, position));
                     continue;
                 }
-                self.push_range(position(first), start..previous + 1);
+                self.push_range(position, start..previous + 1);
             }
-            current = Some((value, value, base + offset));
+            current = Some((value, value, next_position));
         }
-        if let Some((start, previous, first)) = current {
-            self.push_range(position(first), start..previous + 1);
+        if let Some((start, previous, position)) = current {
+            self.push_range(position, start..previous + 1);
         }
     }
 }
@@ -453,7 +457,7 @@ impl Selection {
         }
         self.opposite
             .extend_values(opposite.iter().copied(), |index| {
-                runs[run_containing(runs, index)].1
+                runs[run_containing(runs, base + index - offset)].1
             });
     }
     pub(super) fn extend(&mut self, pairs: impl IntoIterator<Item = MatchedPair>) {
@@ -794,6 +798,50 @@ mod tests {
                 .map(|pair| (pair.pos, pair.opposite_index))
                 .collect::<Vec<_>>(),
             expected[1..5]
+        );
+    }
+
+    #[test]
+    fn test_sliced_interval_cursor_reports_relative_remaining_length() {
+        let mut selection = Selection::with_capacity(100, 1);
+        selection.append_interval(7, 0..100);
+        let mut cursor = selection.view().slice(10..20).iter();
+        assert_eq!(cursor.len(), 10);
+        assert_eq!(cursor.next().unwrap().opposite_index, 10);
+        assert_eq!(cursor.len(), 9);
+        assert_eq!(cursor.size_hint(), (9, Some(9)));
+        assert_eq!(cursor.count(), 9);
+    }
+
+    #[test]
+    fn test_interval_fragments_preserve_later_incoming_run_positions() {
+        let mut intervals = Selection::with_capacity(2, 1);
+        intervals.append_interval(7, 0..2);
+        let identity: Selection = [(9, 2), (10, 3)]
+            .map(|(pos, opposite_index)| MatchedPair {
+                pos,
+                opposite_index,
+            })
+            .to_vec()
+            .into();
+        let runs: Selection = [(12, 4), (12, 5), (15, 6)]
+            .map(|(pos, opposite_index)| MatchedPair {
+                pos,
+                opposite_index,
+            })
+            .to_vec()
+            .into();
+        let mut merged = Selection::with_capacity(6, 4);
+        for selection in [&intervals, &identity] {
+            merged.append_view(selection.view());
+        }
+        merged.append_view(runs.view().slice(1..3));
+        assert_eq!(
+            merged
+                .iter()
+                .map(|pair| (pair.pos, pair.opposite_index))
+                .collect::<Vec<_>>(),
+            vec![(7, 0), (7, 1), (9, 2), (10, 3), (12, 5), (15, 6)]
         );
     }
 }

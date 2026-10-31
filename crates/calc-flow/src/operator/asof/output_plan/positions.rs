@@ -78,6 +78,12 @@ impl Builder {
         self.compact.is_some()
     }
 
+    pub fn requires_promotion(&self, source: Option<usize>) -> bool {
+        self.compact
+            .as_ref()
+            .is_some_and(|compact| !compact.accepts(source))
+    }
+
     pub fn push(&mut self, right: Option<(usize, usize)>, name: &str) -> Result<()> {
         if let Some(compact) = &mut self.compact
             && compact.accepts(right.map(|(source, _)| source))

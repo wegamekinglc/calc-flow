@@ -649,8 +649,10 @@ impl NativeIndex {
             .active();
         let entries = &run[bounds.lower..bounds.upper];
         let first = entries.first()?.dense;
-        let last = entries.last()?.dense;
-        (last + 1 - first == entries.len()).then_some((first, entries.len()))
+        entries
+            .windows(2)
+            .all(|pair| pair[0].dense.checked_add(1) == Some(pair[1].dense))
+            .then_some((first, entries.len()))
     }
 
     /// Dense indices of a run slice described by previously computed bounds.
