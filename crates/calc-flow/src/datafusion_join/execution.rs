@@ -246,7 +246,10 @@ struct KeyBand {
     cursors: Vec<usize>,
 }
 
-type BandMap = std::collections::HashMap<String, KeyBand, RandomState>;
+struct BandMap {
+    indices: std::collections::HashMap<String, usize, RandomState>,
+    entries: Vec<KeyBand>,
+}
 
 fn build_bands(right: &RecordBatch, spec: &BandSpec) -> DataFusionResult<BandMap> {
     let right_keys = right
@@ -284,20 +287,52 @@ fn build_bands(right: &RecordBatch, spec: &BandSpec) -> DataFusionResult<BandMap
         }
     }
     for entries in by_key.values_mut() {
-        entries.sort_by_key(|entry| entry.time);
+        if !entries.is_sorted_by_key(|entry| entry.time) {
+            entries.sort_by_key(|entry| entry.time);
+        }
     }
-    Ok(by_key
+    let mut indices =
+        std::collections::HashMap::with_capacity_and_hasher(by_key.len(), RandomState::new());
+    let entries = by_key
         .into_iter()
-        .map(|(key, entries)| {
-            (
-                key,
-                KeyBand {
-                    entries,
-                    cursors: vec![0; spec.offsets.len()],
-                },
-            )
+        .enumerate()
+        .map(|(index, (key, entries))| {
+            indices.insert(key, index);
+            KeyBand {
+                entries,
+                cursors: vec![0; spec.offsets.len()],
+            }
         })
-        .collect())
+        .collect();
+    Ok(BandMap { indices, entries })
+}
+
+fn band_first(
+    band: &mut KeyBand,
+    offset_index: usize,
+    target: i64,
+    next_match: Option<usize>,
+) -> usize {
+    if let Some(first) = next_match {
+        return first;
+    }
+    let cursor = &mut band.cursors[offset_index];
+    if band
+        .entries
+        .get(*cursor)
+        .is_none_or(|entry| target < entry.time)
+    {
+        *cursor = band.entries.partition_point(|entry| entry.time < target);
+    } else {
+        while band
+            .entries
+            .get(*cursor)
+            .is_some_and(|entry| entry.time < target)
+        {
+            *cursor += 1;
+        }
+    }
+    *cursor
 }
 
 fn band_target(time: i64, offset: i64, bounds: (i64, i64)) -> DataFusionResult<i64> {
@@ -322,6 +357,8 @@ struct BandState {
     row: usize,
     offset_index: usize,
     next_match: Option<usize>,
+    band_row: usize,
+    current_band: Option<usize>,
 }
 
 impl BandState {
@@ -371,6 +408,8 @@ impl BandState {
             row: 0,
             offset_index: 0,
             next_match: None,
+            band_row: usize::MAX,
+            current_band: None,
         })
     }
 
@@ -398,32 +437,25 @@ impl BandState {
                 self.next_match = None;
                 continue;
             }
-            let Some(band) = self.bands.get_mut(self.left_keys.value(self.row)) else {
+            let band_index = if self.band_row == self.row {
+                self.current_band
+            } else {
+                let index = self
+                    .bands
+                    .indices
+                    .get(self.left_keys.value(self.row))
+                    .copied();
+                self.band_row = self.row;
+                self.current_band = index;
+                index
+            };
+            let Some(band_index) = band_index else {
                 self.offset_index += 1;
                 self.next_match = None;
                 continue;
             };
-            let first = if let Some(first) = self.next_match {
-                first
-            } else {
-                let cursor = &mut band.cursors[self.offset_index];
-                if band
-                    .entries
-                    .get(*cursor)
-                    .is_none_or(|entry| target < entry.time)
-                {
-                    *cursor = band.entries.partition_point(|entry| entry.time < target);
-                } else {
-                    while band
-                        .entries
-                        .get(*cursor)
-                        .is_some_and(|entry| entry.time < target)
-                    {
-                        *cursor += 1;
-                    }
-                }
-                *cursor
-            };
+            let band = &mut self.bands.entries[band_index];
+            let first = band_first(band, self.offset_index, target, self.next_match);
             let mut next = first;
             while sequences.len() < self.batch_size
                 && band
