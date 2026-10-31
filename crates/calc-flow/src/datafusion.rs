@@ -42,6 +42,8 @@ use crate::{
 pub(crate) const MAX_SQL_RESULT_ROWS: usize = 100_000_000;
 pub(crate) const MAX_SQL_RESULT_BYTES: usize = 1 << 30;
 
+#[path = "datafusion_join.rs"]
+mod datafusion_join;
 #[path = "datafusion_owned.rs"]
 pub(crate) mod owned;
 
@@ -819,10 +821,17 @@ impl DataFusionRuntime {
         let logical_planning_ns = nanos(logical_planning_start.elapsed());
 
         let physical_planning_start = Instant::now();
-        let physical_plan = dataframe
-            .create_physical_plan()
-            .await
-            .map_err(|error| datafusion_error(node_id, error))?;
+        let physical_plan = match datafusion_join::plan(
+            query,
+            tables,
+            Arc::new(dataframe.schema().as_arrow().clone()),
+        ) {
+            Some(plan) => plan,
+            None => dataframe
+                .create_physical_plan()
+                .await
+                .map_err(|error| datafusion_error(node_id, error))?,
+        };
         let (physical_plan_text, physical_plan_string_ns) = diagnostic(diagnostics, || {
             displayable(physical_plan.as_ref()).indent(true).to_string()
         });

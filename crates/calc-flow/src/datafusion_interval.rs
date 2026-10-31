@@ -1183,10 +1183,7 @@ mod tests {
             execution::context::{SessionConfig, SessionContext},
         };
 
-        use crate::{
-            Batch, BatchMetadata, DataFusionConfig, DataFusionRuntime,
-            datafusion_interval::interval_udf_names,
-        };
+        use crate::{Batch, BatchMetadata, DataFusionConfig, DataFusionRuntime};
 
         /// Extracts the benchmark's `interval_join` query from
         /// `benchmarks/engine_comparison.py` so the engine test exercises the
@@ -1316,7 +1313,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn timestamp_interval_benchmark_sql_matches_rule_free_datafusion() {
+        async fn interval_benchmark_sql_matches_rule_free_datafusion_and_uses_native_band() {
             let query = benchmark_interval_join_sql();
             let input = input_batch();
             let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
@@ -1338,8 +1335,8 @@ mod tests {
             );
             let plan = &runtime.metrics()[0].physical_plan;
             assert!(
-                plan.contains(interval_udf_names().0),
-                "interval_join did not route through the fast path: {plan}"
+                plan.contains("CalcFlowBandJoinExec"),
+                "interval_join did not route through the native band path: {plan}"
             );
         }
     }
