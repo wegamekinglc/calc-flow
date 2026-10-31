@@ -174,8 +174,10 @@ jobs:
     needs: [prepare, build]
     runs-on: ubuntu-latest
     # The full 10M engine inventory exceeds three hours with paired SQL windows.
-    # Include dependency setup and artifact retention in that tier's job budget.
-    timeout-minutes: ${{ matrix.id == 'engines-10000000' && 240 || 180 }}
+    # The Rust shard nears that limit when its build cache misses and both sides
+    # compile from cold dependencies before four measured blocks.
+    # Include dependency setup and artifact retention in those job budgets.
+    timeout-minutes: ${{ (matrix.id == 'engines-10000000' || matrix.id == 'rust') && 240 || 180 }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
@@ -303,8 +305,34 @@ jobs:
           --candidate target/releases/candidate/release.json
           --baseline-source target/base
           --output target/benchmark-results
+      - name: Retain every measured result
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: benchmark-suite-${{ matrix.id }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            target/benchmark-results/**/*.json
+            target/benchmark-results/**/*.jsonl
+            target/benchmark-results/**/*.log
+            target/benchmark-results/**/*.md
+            !target/benchmark-results/**/site/**
+          if-no-files-found: error
+          retention-days: 30
+
+  decode:
+    name: Connector decode throughput (informational)
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ needs.prepare.outputs.head }}
+      - uses: dtolnay/rust-toolchain@dc08e2af391d489dff6d14cf743e574f7d1229c5 # 1.94.0
+      # The cold Kafka build runs beside the Rust shard instead of on its timed
+      # path. It keeps no Rust cache so the measured shards keep the shared
+      # repository cache budget.
       - name: Ensure libcurl headers for vendored librdkafka
-        if: always() && matrix.id == 'rust'
         run: |
           if dpkg-query -W -f='${Status}' libcurl4-openssl-dev 2>/dev/null \
             | grep -qx 'install ok installed'; then
@@ -326,25 +354,17 @@ jobs:
             install_libcurl_headers
           fi
       - name: Run informational connector decode throughput benchmark
-        if: always() && matrix.id == 'rust'
-        env:
-          CARGO_TARGET_DIR: target/benchmark-rust-build
         run: >-
           mkdir -p target/benchmark-results/decode-throughput
           && cargo test -p calc-flow-connectors --features kafka --lib perf::
           --release -- --ignored --nocapture
           2>&1 | tee target/benchmark-results/decode-throughput/run.log
-      - name: Retain every measured result
+      - name: Retain the decode throughput log
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: benchmark-suite-${{ matrix.id }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            target/benchmark-results/**/*.json
-            target/benchmark-results/**/*.jsonl
-            target/benchmark-results/**/*.log
-            target/benchmark-results/**/*.md
-            !target/benchmark-results/**/site/**
+          name: benchmark-decode-throughput-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/benchmark-results/decode-throughput/run.log
           if-no-files-found: error
           retention-days: 30
 

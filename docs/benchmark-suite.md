@@ -83,10 +83,20 @@ The separate engine and warm-state matrices still run every decade
 through 10M rows. Dynamic pytest and Criterion inventories preserve
 benchmark cases without a second hand-written case list.
 
-The 10M-row engine shard has a 240-minute job budget; other measurement shards
-have 180 minutes. This includes dependency setup, measurements and artifact
-retention. All engine tiers retain the complete case inventory, two rounds of ten
-samples and the +5% regression gate.
+The 10M-row engine shard and the Rust shard have 240-minute job budgets; other
+measurement shards have 180 minutes. This includes dependency setup,
+measurements and artifact retention. The Rust shard needs the extra time when
+its build cache misses and both sides compile from cold dependencies. All engine
+tiers retain the complete case inventory, two rounds of ten samples and the +5%
+regression gate.
+
+The repository's Actions caches share a 10 GB budget, and GitHub evicts the
+least recently used entries past it. The `Actions cache cleanup` workflow runs
+30 minutes before each scheduled suite, when a pull request closes, and on
+manual dispatch. It deletes caches scoped to closed pull requests. It also
+deletes entries a newer cache in the same ref and key family has replaced when
+no run has restored them for 24 hours since. Preview a cleanup with
+`python -m scripts.prune_actions_caches --repository wegamekinglc/calc-flow --dry-run`.
 
 | Family         | Dimensions                                          | Cases per dimension                                       |
 |----------------|-----------------------------------------------------|-----------------------------------------------------------|
@@ -107,12 +117,13 @@ discovered cases. Warm cases use one entity to support one-row appends.
 Compare measurements only when entity count, history depth, append size,
 and timing boundaries match.
 
-The rust shard also runs the informational connector decode comparison
-(`cargo test -p calc-flow-connectors --features kafka --lib perf:: --release
--- --ignored --nocapture`), which prints the protobuf and JSON-lines decode
-throughput side by side in the step log and uploads
-`decode-throughput/run.log` with the shard's measured results. It carries
-no regression verdict.
+A separate job beside the Rust shard runs the informational connector decode
+comparison (`cargo test -p calc-flow-connectors --features kafka --lib perf::
+--release -- --ignored --nocapture`). It prints the protobuf and JSON-lines
+decode throughput side by side in the step log and uploads
+`decode-throughput/run.log` as the `benchmark-decode-throughput-*` artifact.
+Its cold Kafka build stays off the Rust shard's timed path, and it carries no
+regression verdict.
 
 | Backend          | Projection  | Filter      | Group by    | Join        | SMA(20) | Dual SMA | Interval Join |
 |------------------|-------------|-------------|-------------|-------------|---------|----------|---------------|

@@ -403,28 +403,43 @@ class BenchmarkWorkflowTests(unittest.TestCase):
         self.assertIn("--require-hashes benchmarks/requirements.lock", suite)
         self.assertNotIn("--benchmark-disable", suite)
 
-    def test_rust_shard_prints_the_informational_decode_benchmark(self):
+    def test_decode_benchmark_runs_beside_the_rust_shard(self):
         suite = (ROOT / ".github/workflows/benchmark-suite.yml").read_text(
             encoding="utf-8"
         )
-        headers = suite.split(
-            "- name: Ensure libcurl headers for vendored librdkafka\n", 1
-        )[1]
-        self.assertIn("if: always() && matrix.id == 'rust'", headers)
-        step = suite.split(
-            "- name: Run informational connector decode throughput benchmark\n", 1
-        )[1]
-        # The protobuf/JSON decode comparison prints its ns/op table in the
-        # rust shard log even when the gating measurement finds a regression,
-        # and the log uploads with the shard's measured results.
-        self.assertIn("if: always() && matrix.id == 'rust'", step)
-        self.assertIn("CARGO_TARGET_DIR: target/benchmark-rust-build", step)
+        measured = suite.split("  suite:\n", 1)[1].split("  decode:\n", 1)[0]
+        # The informational Kafka build stays off the Rust shard's timed path.
+        self.assertNotIn("calc-flow-connectors", measured)
+        self.assertNotIn("libcurl", measured)
+        decode = suite.split("  decode:\n", 1)[1].split("  summary:\n", 1)[0]
+        self.assertIn("needs: prepare", decode)
+        self.assertIn("ref: ${{ needs.prepare.outputs.head }}", decode)
+        self.assertIn("- name: Ensure libcurl headers for vendored librdkafka", decode)
         self.assertIn(
             "cargo test -p calc-flow-connectors --features kafka --lib perf::",
-            step,
+            decode,
         )
-        self.assertIn("--release -- --ignored --nocapture", step)
-        self.assertIn("tee target/benchmark-results/decode-throughput/run.log", step)
+        self.assertIn("--release -- --ignored --nocapture", decode)
+        self.assertIn("tee target/benchmark-results/decode-throughput/run.log", decode)
+        # The summary ingests only benchmark-suite-* shard artifacts and
+        # carries no decode verdict.
+        self.assertIn(
+            "name: benchmark-decode-throughput-${{ github.run_id }}"
+            "-${{ github.run_attempt }}",
+            decode,
+        )
+        summary = suite.split("  summary:\n", 1)[1]
+        self.assertIn("needs: [prepare, build, suite]", summary)
+
+    def test_rust_shard_budget_covers_cold_dependency_builds(self):
+        suite = (ROOT / ".github/workflows/benchmark-suite.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "timeout-minutes: ${{ (matrix.id == 'engines-10000000' || "
+            "matrix.id == 'rust') && 240 || 180 }}",
+            suite,
+        )
 
 
 if __name__ == "__main__":
