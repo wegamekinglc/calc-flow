@@ -10,6 +10,7 @@ from types import MappingProxyType
 
 import pytest
 
+import calc_flow
 from calc_flow import (
     ConfigError,
     PipelineBuilder,
@@ -44,10 +45,10 @@ def test_project_document_works_without_pydantic_installed() -> None:
     script = """
 import os
 import sys
-expected = os.environ["CALC_FLOW_TEST_PYTHON"]
-assert os.path.samefile(sys.executable, expected)
 sys.modules["pydantic"] = None
 sys.modules["pydantic_core"] = None
+import calc_flow
+assert os.path.samefile(calc_flow.__file__, os.environ["CALC_FLOW_TEST_INIT"])
 from calc_flow import PipelineBuilder, ProjectDocument
 project = PipelineBuilder("config").expression("calc", "b = a + 1").project
 document = ProjectDocument.model_validate(project)
@@ -56,12 +57,10 @@ round_tripped = ProjectDocument.model_validate_json(document.model_dump_json())
 assert round_tripped.root == document.root
 """
     environment = os.environ.copy()
-    environment["PATH"] = (
-        os.path.dirname(sys.executable) + os.pathsep + environment.get("PATH", "")
-    )
-    environment["CALC_FLOW_TEST_PYTHON"] = sys.executable
+    environment["CALC_FLOW_TEST_INIT"] = calc_flow.__file__
     completed = subprocess.run(
         ["python", "-c", script],
+        executable=sys.executable,
         capture_output=True,
         text=True,
         check=False,
