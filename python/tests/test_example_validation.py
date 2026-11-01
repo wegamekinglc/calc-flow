@@ -59,7 +59,7 @@ runpy.run_path(example, run_name="__main__")
         ("14_project_persistence.py", "a"),
         ("15_file_source.py", "quantity"),
         ("29_sql_stream_switch.py", "x"),
-        ("symbolic_event_window.py", "quantity"),
+        ("36_symbolic_event_window.py", "quantity"),
     ),
 )
 def test_example_rejects_incorrect_results_with_python_optimization(

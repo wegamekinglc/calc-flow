@@ -15,15 +15,15 @@ pages explain how the implementation provides those behaviors.
 
 1. [Batch calculations](batch-guide.md): `compute`, expressions, SQL, `pipe`,
    named collection, financial functions, and async execution; examples 01,
-   02, 05, 09, and `19_sql_expression_pipeline.py`. Example 03 covers typed UDFs.
+   02, 05, 09, and `32_sql_expression_pipeline.py`. Example 03 covers typed UDFs.
 2. [Arrays and matrices](array-guide.md): NumPy/JAX registration, array
    expressions, table-to-matrix multiplication, and static weights;
    examples 06, 07, and 11.
 3. [Continuous streaming](streaming-guide.md): start with
-   `20_streaming_pipeline.py` and `21_streaming_outputs.py` for `stream` and
+   `33_streaming_pipeline.py` and `34_streaming_outputs.py` for `stream` and
    named events. Continue to sources, sinks, event time, windows, bounded joins,
    and recovery in examples 04, 08, 10, 12, and 13.
-   [Backward ASOF Join](asof-join-guide.md) uses example 22 for final
+   [Backward ASOF Join](asof-join-guide.md) uses example 35 for final
    trade/quote matching, watermark waiting, state bounds, and recovery.
 4. [Expression workflows](symbolic-workflows.md): financial features, analysis,
    composition, and batch/stream execution; examples 09–13.

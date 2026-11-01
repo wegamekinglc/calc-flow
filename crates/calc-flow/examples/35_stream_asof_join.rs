@@ -1,4 +1,4 @@
-//! Python 22: equal watermarks do not finalize ASOF; tolerance limits quote age.
+//! Python 35: equal watermarks do not finalize ASOF; tolerance limits quote age.
 mod support;
 use async_trait::async_trait;
 use calc_flow::{
@@ -118,7 +118,7 @@ async fn main() -> ExampleResult {
     completed(&job).await?;
     let batches = output.lock().await;
     assert_eq!(f64_values(&batches, "quote__price"), [Some(10.2), None]);
-    support::print(&batches)
+    support::print_columns(&batches, &["trade__time", "trade__price", "quote__price"])
 }
 
 fn join_spec() -> Result<StreamAsofJoinSpec> {

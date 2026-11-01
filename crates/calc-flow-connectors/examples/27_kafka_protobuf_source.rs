@@ -157,7 +157,7 @@ async fn produce_orders(bootstrap: &str) -> ExampleResult {
             .await
             .map_err(|(error, _)| error)?;
     }
-    println!("produced two protobuf orders");
+    println!("produced 2 protobuf orders to calc-flow-example-orders-proto");
     Ok(())
 }
 

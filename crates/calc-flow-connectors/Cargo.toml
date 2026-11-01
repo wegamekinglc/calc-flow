@@ -133,11 +133,11 @@ name = "late_output_recovery"
 required-features = ["file"]
 
 [[example]]
-name = "kafka_protobuf_source"
+name = "27_kafka_protobuf_source"
 required-features = ["file", "kafka"]
 
 [[example]]
-name = "kafka_custom_decoder"
+name = "28_kafka_custom_decoder"
 required-features = ["file", "kafka"]
 
 [package.metadata.release]
@@ -145,47 +145,47 @@ required-features = ["file", "kafka"]
 release = false
 
 [[example]]
-name = "file_source"
+name = "15_file_source"
 required-features = ["file"]
 
 [[example]]
-name = "kafka_source"
+name = "16_kafka_source"
 required-features = ["file", "kafka"]
 
 [[example]]
-name = "postgresql_source"
+name = "17_postgresql_source"
 required-features = ["file", "postgresql"]
 
 [[example]]
-name = "mysql_source"
+name = "18_mysql_source"
 required-features = ["file", "mysql"]
 
 [[example]]
-name = "clickhouse_source"
+name = "19_clickhouse_source"
 required-features = ["file", "clickhouse"]
 
 [[example]]
-name = "http_source"
+name = "20_http_source"
 required-features = ["file", "http"]
 
 [[example]]
-name = "websocket_source"
+name = "21_websocket_source"
 required-features = ["file", "websocket"]
 
 [[example]]
-name = "kafka_sink"
+name = "22_kafka_sink"
 required-features = ["file", "kafka"]
 
 [[example]]
-name = "postgresql_sink"
+name = "23_postgresql_sink"
 required-features = ["file", "postgresql"]
 
 [[example]]
-name = "mysql_sink"
+name = "24_mysql_sink"
 required-features = ["file", "mysql"]
 
 [[example]]
-name = "clickhouse_sink"
+name = "25_clickhouse_sink"
 required-features = ["file", "clickhouse"]
 
 [[example]]

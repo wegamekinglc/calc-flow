@@ -7,7 +7,7 @@ use arrow::{
 };
 use calc_flow::{
     Batch, BatchMetadata, ConnectorRegistry, DecodeBounds, DeliveryGuarantee, FormatDecoder,
-    FormatEncoder, JobState, ManagedCheckpointRuntime, ProjectSpec, ProviderRegistry,
+    FormatEncoder, JobState, JobStatus, ManagedCheckpointRuntime, ProjectSpec, ProviderRegistry,
     StreamRequirements, StreamingRunner, UdfRegistry, compile_stream_project,
 };
 use calc_flow_connectors::{
@@ -140,12 +140,11 @@ fn parquet_paths(root: &Path) -> ExampleResult<Vec<PathBuf>> {
     paths.sort();
     Ok(paths)
 }
-pub async fn check_totals(root: &Path) -> ExampleResult {
+pub async fn check_totals(root: &Path) -> ExampleResult<Vec<f64>> {
     let root = root.join("results");
     let rows = tokio::task::spawn_blocking(move || read_totals(&root)).await??;
     assert_eq!(rows, [(1, 20.0), (2, 60.0)]);
-    println!("Parquet totals: {rows:?}");
-    Ok(())
+    Ok(rows.into_iter().map(|(_, total)| total).collect())
 }
 
 fn read_output(path: &Path) -> ExampleResult<Batch> {
@@ -187,7 +186,7 @@ pub async fn execute(
     registry: &ConnectorRegistry,
     continuous: bool,
     expected: DeliveryGuarantee,
-) -> ExampleResult {
+) -> ExampleResult<JobStatus> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     let runner = project_runner(root, source, sink, registry)?;
     let (job, cleanup) = start_before(runner, deadline).await?;
@@ -202,8 +201,7 @@ pub async fn execute(
         2
     );
     assert_eq!(status.delivery["output"].effective, expected);
-    println!("delivery: {:?}", status.delivery["output"]);
-    Ok(())
+    Ok(status)
 }
 
 fn project_runner(
@@ -288,12 +286,20 @@ pub async fn read_source(
     delivery: &str,
 ) -> ExampleResult {
     let root = tempfile::tempdir()?;
+    let name = match source["format"]["name"].as_str() {
+        Some("protobuf") => "kafka protobuf",
+        Some("custom") => "kafka custom decoder",
+        _ => source["connector"]["name"]
+            .as_str()
+            .ok_or("source connector name")?,
+    }
+    .to_owned();
     let expected = if delivery == "at_least_once" {
         DeliveryGuarantee::AtLeastOnce
     } else {
         DeliveryGuarantee::BestEffort
     };
-    execute(
+    let status = execute(
         root.path(),
         source,
         file_sink(root.path(), delivery),
@@ -302,7 +308,13 @@ pub async fn read_source(
         expected,
     )
     .await?;
-    check_totals(root.path()).await
+    let totals = check_totals(root.path()).await?;
+    println!("{name} -> Parquet: {totals:?}");
+    println!(
+        "delivery: {}",
+        serde_json::to_string(&status.delivery["output"])?
+    );
+    Ok(())
 }
 
 pub async fn write_sink(
@@ -325,7 +337,7 @@ pub async fn write_sink(
     if name == "kafka" {
         sink["format"] = json!({"name":"json","version":"1"});
     }
-    execute(
+    let status = execute(
         root.path(),
         file_source(root.path(), "parquet"),
         sink,
@@ -334,7 +346,11 @@ pub async fn write_sink(
         expected,
     )
     .await?;
-    println!("Parquet -> {name}: wrote (id,total) = (1,20.0), (2,60.0)");
+    println!("Parquet -> {name}: wrote 2 rows; expected (id, total) = (1, 20.0), (2, 60.0)");
+    println!(
+        "delivery: {}",
+        serde_json::to_string(&status.delivery["output"])?
+    );
     Ok(())
 }
 

@@ -140,7 +140,7 @@ accepts one read-only `SELECT` or CTE. Connect upstream node outputs to those
 aliases with `Edge`/`PortEndpoint`, or leave them unconnected as graph inputs.
 DDL, DML, utility commands, and multiple statements are rejected before
 execution. The canonical SQL example is
-[`crates/calc-flow/examples/sql_join.rs`](../crates/calc-flow/examples/sql_join.rs),
+[`crates/calc-flow/examples/02_sql_join.rs`](../crates/calc-flow/examples/02_sql_join.rs),
 which joins `orders` to `fees` for `net = amount - fee`, then doubles the net
 amounts in an expression stage:
 
@@ -766,7 +766,7 @@ that route either.
 ## Continuous execution and recovery
 
 The complete checked example is
-[`continuous_runtime.rs`](../crates/calc-flow/examples/continuous_runtime.rs).
+[`04_continuous_runtime.rs`](../crates/calc-flow/examples/04_continuous_runtime.rs).
 Its central lifecycle is:
 
 ```rust
@@ -797,8 +797,8 @@ Run the checked examples:
 
 ```bash
 cargo run -p calc-flow --example expression_pipeline
-cargo run -p calc-flow --example sql_join
-cargo run -p calc-flow --example continuous_runtime
+cargo run -p calc-flow --example 02_sql_join
+cargo run -p calc-flow --example 04_continuous_runtime
 cargo run -p calc-flow --example windowed_streaming
 ```
 

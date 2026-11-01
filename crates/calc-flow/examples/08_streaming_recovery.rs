@@ -43,7 +43,20 @@ async fn main() -> ExampleResult {
     assert!(second.0.is_empty());
     assert!(second.1.is_empty());
     assert_eq!(second.2, first.2);
-    println!("first run: {first:?}\nterminal restart: {second:?}");
+    println!(
+        "first run: {:?} opened at {}",
+        first.0.iter().flatten().collect::<Vec<_>>(),
+        first.1[0]
+    );
+    println!(
+        "restart: {:?} source reopened: {}",
+        second.0,
+        !second.1.is_empty()
+    );
+    println!(
+        "recovered terminal epoch: {}",
+        second.2.expect("recovered terminal checkpoint").as_u64()
+    );
     Ok(())
 }
 

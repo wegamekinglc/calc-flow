@@ -35,10 +35,11 @@ async fn main() -> ExampleResult {
         .expect("late output");
     assert_eq!(f64_values(&result[normal], "x"), [Some(20.0)]);
     assert_eq!(f64_values(&result[late], "x"), [Some(10.0)]);
-    for (name, batches) in result {
-        println!("{name}");
-        support::print(&batches)?;
-    }
+    println!(
+        "{{'normal': {}, 'late': {}}}",
+        support::format_values(&f64_values(&result[normal], "x")),
+        support::format_values(&f64_values(&result[late], "x")),
+    );
     Ok(())
 }
 

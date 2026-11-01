@@ -332,8 +332,8 @@ and [example 31](../examples/31_streaming_account_market_values.py).
 `StreamResults[pyarrow.Table]`. `Program.stream(inputs, /, *, runtime=None,
 config=None, watermarks=None)` returns `StreamResults[StreamOutput]`. Both require
 `async with` and `async for`; there is no blocking convenience stream. Run the
-[stateful pipeline](../examples/20_streaming_pipeline.py) and
-[named-output example](../examples/21_streaming_outputs.py), or follow the
+[stateful pipeline](../examples/33_streaming_pipeline.py) and
+[named-output example](../examples/34_streaming_outputs.py), or follow the
 [streaming guide](streaming-guide.md#first-python-continuous-job).
 
 A dynamic input accepts a materialized Arrow `Table`, `RecordBatch`, table
@@ -469,7 +469,7 @@ The operator chooses at most one historical right row per accepted left row
 and preserves unmatched left rows with nullable right fields. Equal-time ties
 use a typed sequence order. Both input watermarks must strictly pass the left
 time, or the corresponding input must end, before any final result is emitted.
-Run [example 22](../examples/22_stream_asof_join.py) and read the
+Run [example 35](../examples/35_stream_asof_join.py) and read the
 [ASOF guide](asof-join-guide.md) for exact types, inclusive tolerance, late and
 duplicate rules, composition, bounded resources, status, and delivery.
 
@@ -1237,7 +1237,7 @@ The [expression API reference](symbolic-api.md) covers typed declarations,
 `FeatureSet`, `Program`, static analysis, ordering, and the supported
 batch/stream compilation shapes. Use the [expression workflow guide](symbolic-workflows.md)
 with examples 09–13 and the
-[event-window example](../examples/symbolic_event_window.py) to learn these
+[event-window example](../examples/36_symbolic_event_window.py) to learn these
 features. Fixed UTC tumbling/hopping aggregation uses immutable
 `WindowAggregate` declarations and the existing native window operator;
 see [event-window types and composition](symbolic-api.md#symbolic-event-time-window-aggregation).

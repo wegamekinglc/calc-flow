@@ -1,23 +1,33 @@
 # Calc Flow Rust examples
 
 Every runnable Python example in [`examples/`](../../../examples/README.md)
-has a Rust counterpart below. Core examples live here; examples using native
+has a Rust counterpart with the same number and filename stem below (01–36).
+Core examples live here; examples using native
 connectors live in [`calc-flow-connectors/examples/`](../../calc-flow-connectors/examples/).
 Run commands from the repository root. No Python interpreter or native Python
 extension is needed.
 
 ```bash
-cargo run -p calc-flow --example datafusion_pipeline
-cargo run -p calc-flow --example registered_udf
-cargo run -p calc-flow --example symbolic_streaming_recovery
-cargo run -p calc-flow --example sql_stream_switch -- --engine both
-cargo run -p calc-flow-connectors --example file_source --features file
+cargo run -p calc-flow --example 01_datafusion_pipeline
+cargo run -p calc-flow --example 03_registered_udf
+cargo run -p calc-flow --example 10_symbolic_streaming_recovery
+cargo run -p calc-flow --example 29_sql_stream_switch -- --engine both
+cargo run -p calc-flow-connectors --example 15_file_source --features file
 ```
 
 Rust uses `PipelineBuilder`, native operators, immutable `Batch` values, and
 owned `StreamingRunner` jobs directly. The `symbolic_*` filenames identify
 the matching Python demonstrations; compose their native stages explicitly in
 Rust. Named outputs use physical graph bindings, such as `totals.output`.
+
+The examples retain the Python calculations and output information: result
+columns and values, named branches, source cursors, checkpoint epochs, delivery
+status, and the total elapsed time in examples 30 and 31. Rust displays Arrow
+tables in its native table layout and native graph stages in execution order.
+Provider catalogs and diagnostics identify the actual Rust implementation.
+Elapsed time is printed as `total elapsed: ... s` with three decimal places;
+it covers setup and stream consumption, excludes result printing and Cargo's
+build, and varies between runs.
 
 The array demonstrations register an illustrative `rust-array` provider using
 owned Float64 arrays and Rust arithmetic in place of Python's NumPy/JAX hosts.
@@ -27,44 +37,44 @@ expressions and SQL continue to execute in DataFusion.
 
 ## Python-to-Rust inventory
 
-| Python example                                                                                   | Rust example                                                                             | Connector features |
-|--------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------|--------------------|
-| [01_datafusion_pipeline.py](../../../examples/01_datafusion_pipeline.py)                         | [datafusion_pipeline.rs](datafusion_pipeline.rs)                                         | —                  |
-| [02_sql_join.py](../../../examples/02_sql_join.py)                                               | [sql_join.rs](sql_join.rs)                                                               | —                  |
-| [03_registered_udf.py](../../../examples/03_registered_udf.py)                                   | [registered_udf.rs](registered_udf.rs)                                                   | —                  |
-| [04_continuous_runtime.py](../../../examples/04_continuous_runtime.py)                           | [continuous_runtime.rs](continuous_runtime.rs)                                           | —                  |
-| [05_async_execution.py](../../../examples/05_async_execution.py)                                 | [async_execution.rs](async_execution.rs)                                                 | —                  |
-| [06_numpy_array.py](../../../examples/06_numpy_array.py)                                         | [numpy_array.rs](numpy_array.rs)                                                         | —                  |
-| [07_array_and_dataframe.py](../../../examples/07_array_and_dataframe.py)                         | [array_and_dataframe.rs](array_and_dataframe.rs)                                         | —                  |
-| [08_streaming_recovery.py](../../../examples/08_streaming_recovery.py)                           | [streaming_recovery.rs](streaming_recovery.rs)                                           | —                  |
-| [09_symbolic_financial_features.py](../../../examples/09_symbolic_financial_features.py)         | [symbolic_financial_features.rs](symbolic_financial_features.rs)                         | —                  |
-| [10_symbolic_streaming_recovery.py](../../../examples/10_symbolic_streaming_recovery.py)         | [symbolic_streaming_recovery.rs](symbolic_streaming_recovery.rs)                         | —                  |
-| [11_symbolic_static_matrix.py](../../../examples/11_symbolic_static_matrix.py)                   | [symbolic_static_matrix.rs](symbolic_static_matrix.rs)                                   | —                  |
-| [12_symbolic_stream_join.py](../../../examples/12_symbolic_stream_join.py)                       | [symbolic_stream_join.rs](symbolic_stream_join.rs)                                       | —                  |
-| [13_symbolic_relational_dag.py](../../../examples/13_symbolic_relational_dag.py)                 | [symbolic_relational_dag.rs](symbolic_relational_dag.rs)                                 | —                  |
-| [14_project_persistence.py](../../../examples/14_project_persistence.py)                         | [project_persistence.rs](project_persistence.rs)                                         | —                  |
-| [15_file_source.py](../../../examples/15_file_source.py)                                         | [file_source.rs](../../calc-flow-connectors/examples/file_source.rs)                     | file               |
-| [16_kafka_source.py](../../../examples/16_kafka_source.py)                                       | [kafka_source.rs](../../calc-flow-connectors/examples/kafka_source.rs)                   | file,kafka         |
-| [17_postgresql_source.py](../../../examples/17_postgresql_source.py)                             | [postgresql_source.rs](../../calc-flow-connectors/examples/postgresql_source.rs)         | file,postgresql    |
-| [18_mysql_source.py](../../../examples/18_mysql_source.py)                                       | [mysql_source.rs](../../calc-flow-connectors/examples/mysql_source.rs)                   | file,mysql         |
-| [19_clickhouse_source.py](../../../examples/19_clickhouse_source.py)                             | [clickhouse_source.rs](../../calc-flow-connectors/examples/clickhouse_source.rs)         | file,clickhouse    |
-| [19_sql_expression_pipeline.py](../../../examples/19_sql_expression_pipeline.py)                 | [sql_expression_pipeline.rs](sql_expression_pipeline.rs)                                 | —                  |
-| [20_http_source.py](../../../examples/20_http_source.py)                                         | [http_source.rs](../../calc-flow-connectors/examples/http_source.rs)                     | file,http          |
-| [20_streaming_pipeline.py](../../../examples/20_streaming_pipeline.py)                           | [streaming_pipeline.rs](streaming_pipeline.rs)                                           | —                  |
-| [21_streaming_outputs.py](../../../examples/21_streaming_outputs.py)                             | [streaming_outputs.rs](streaming_outputs.rs)                                             | —                  |
-| [21_websocket_source.py](../../../examples/21_websocket_source.py)                               | [websocket_source.rs](../../calc-flow-connectors/examples/websocket_source.rs)           | file,websocket     |
-| [22_kafka_sink.py](../../../examples/22_kafka_sink.py)                                           | [kafka_sink.rs](../../calc-flow-connectors/examples/kafka_sink.rs)                       | file,kafka         |
-| [22_stream_asof_join.py](../../../examples/22_stream_asof_join.py)                               | [stream_asof_join.rs](stream_asof_join.rs)                                               | —                  |
-| [23_postgresql_sink.py](../../../examples/23_postgresql_sink.py)                                 | [postgresql_sink.rs](../../calc-flow-connectors/examples/postgresql_sink.rs)             | file,postgresql    |
-| [24_mysql_sink.py](../../../examples/24_mysql_sink.py)                                           | [mysql_sink.rs](../../calc-flow-connectors/examples/mysql_sink.rs)                       | file,mysql         |
-| [25_clickhouse_sink.py](../../../examples/25_clickhouse_sink.py)                                 | [clickhouse_sink.rs](../../calc-flow-connectors/examples/clickhouse_sink.rs)             | file,clickhouse    |
-| [26_late_side_output.py](../../../examples/26_late_side_output.py)                               | [late_side_output.rs](late_side_output.rs)                                               | —                  |
-| [27_kafka_protobuf_source.py](../../../examples/27_kafka_protobuf_source.py)                     | [kafka_protobuf_source.rs](../../calc-flow-connectors/examples/kafka_protobuf_source.rs) | file,kafka         |
-| [28_kafka_custom_decoder.py](../../../examples/28_kafka_custom_decoder.py)                       | [kafka_custom_decoder.rs](../../calc-flow-connectors/examples/kafka_custom_decoder.rs)   | file,kafka         |
-| [29_sql_stream_switch.py](../../../examples/29_sql_stream_switch.py)                             | [sql_stream_switch.rs](sql_stream_switch.rs)                                             | —                  |
-| [30_streaming_stock_positions.py](../../../examples/30_streaming_stock_positions.py)             | [streaming_stock_positions.rs](streaming_stock_positions.rs)                             | —                  |
-| [31_streaming_account_market_values.py](../../../examples/31_streaming_account_market_values.py) | [streaming_account_market_values.rs](streaming_account_market_values.rs)                 | —                  |
-| [symbolic_event_window.py](../../../examples/symbolic_event_window.py)                           | [symbolic_event_window.rs](symbolic_event_window.rs)                                     | —                  |
+| Python example                                                                                   | Rust example                                                                                   | Connector features |
+|--------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------|--------------------|
+| [01_datafusion_pipeline.py](../../../examples/01_datafusion_pipeline.py)                         | [01_datafusion_pipeline.rs](01_datafusion_pipeline.rs)                                         | —                  |
+| [02_sql_join.py](../../../examples/02_sql_join.py)                                               | [02_sql_join.rs](02_sql_join.rs)                                                               | —                  |
+| [03_registered_udf.py](../../../examples/03_registered_udf.py)                                   | [03_registered_udf.rs](03_registered_udf.rs)                                                   | —                  |
+| [04_continuous_runtime.py](../../../examples/04_continuous_runtime.py)                           | [04_continuous_runtime.rs](04_continuous_runtime.rs)                                           | —                  |
+| [05_async_execution.py](../../../examples/05_async_execution.py)                                 | [05_async_execution.rs](05_async_execution.rs)                                                 | —                  |
+| [06_numpy_array.py](../../../examples/06_numpy_array.py)                                         | [06_numpy_array.rs](06_numpy_array.rs)                                                         | —                  |
+| [07_array_and_dataframe.py](../../../examples/07_array_and_dataframe.py)                         | [07_array_and_dataframe.rs](07_array_and_dataframe.rs)                                         | —                  |
+| [08_streaming_recovery.py](../../../examples/08_streaming_recovery.py)                           | [08_streaming_recovery.rs](08_streaming_recovery.rs)                                           | —                  |
+| [09_symbolic_financial_features.py](../../../examples/09_symbolic_financial_features.py)         | [09_symbolic_financial_features.rs](09_symbolic_financial_features.rs)                         | —                  |
+| [10_symbolic_streaming_recovery.py](../../../examples/10_symbolic_streaming_recovery.py)         | [10_symbolic_streaming_recovery.rs](10_symbolic_streaming_recovery.rs)                         | —                  |
+| [11_symbolic_static_matrix.py](../../../examples/11_symbolic_static_matrix.py)                   | [11_symbolic_static_matrix.rs](11_symbolic_static_matrix.rs)                                   | —                  |
+| [12_symbolic_stream_join.py](../../../examples/12_symbolic_stream_join.py)                       | [12_symbolic_stream_join.rs](12_symbolic_stream_join.rs)                                       | —                  |
+| [13_symbolic_relational_dag.py](../../../examples/13_symbolic_relational_dag.py)                 | [13_symbolic_relational_dag.rs](13_symbolic_relational_dag.rs)                                 | —                  |
+| [14_project_persistence.py](../../../examples/14_project_persistence.py)                         | [14_project_persistence.rs](14_project_persistence.rs)                                         | —                  |
+| [15_file_source.py](../../../examples/15_file_source.py)                                         | [15_file_source.rs](../../calc-flow-connectors/examples/15_file_source.rs)                     | file               |
+| [16_kafka_source.py](../../../examples/16_kafka_source.py)                                       | [16_kafka_source.rs](../../calc-flow-connectors/examples/16_kafka_source.rs)                   | file,kafka         |
+| [17_postgresql_source.py](../../../examples/17_postgresql_source.py)                             | [17_postgresql_source.rs](../../calc-flow-connectors/examples/17_postgresql_source.rs)         | file,postgresql    |
+| [18_mysql_source.py](../../../examples/18_mysql_source.py)                                       | [18_mysql_source.rs](../../calc-flow-connectors/examples/18_mysql_source.rs)                   | file,mysql         |
+| [19_clickhouse_source.py](../../../examples/19_clickhouse_source.py)                             | [19_clickhouse_source.rs](../../calc-flow-connectors/examples/19_clickhouse_source.rs)         | file,clickhouse    |
+| [20_http_source.py](../../../examples/20_http_source.py)                                         | [20_http_source.rs](../../calc-flow-connectors/examples/20_http_source.rs)                     | file,http          |
+| [21_websocket_source.py](../../../examples/21_websocket_source.py)                               | [21_websocket_source.rs](../../calc-flow-connectors/examples/21_websocket_source.rs)           | file,websocket     |
+| [22_kafka_sink.py](../../../examples/22_kafka_sink.py)                                           | [22_kafka_sink.rs](../../calc-flow-connectors/examples/22_kafka_sink.rs)                       | file,kafka         |
+| [23_postgresql_sink.py](../../../examples/23_postgresql_sink.py)                                 | [23_postgresql_sink.rs](../../calc-flow-connectors/examples/23_postgresql_sink.rs)             | file,postgresql    |
+| [24_mysql_sink.py](../../../examples/24_mysql_sink.py)                                           | [24_mysql_sink.rs](../../calc-flow-connectors/examples/24_mysql_sink.rs)                       | file,mysql         |
+| [25_clickhouse_sink.py](../../../examples/25_clickhouse_sink.py)                                 | [25_clickhouse_sink.rs](../../calc-flow-connectors/examples/25_clickhouse_sink.rs)             | file,clickhouse    |
+| [26_late_side_output.py](../../../examples/26_late_side_output.py)                               | [26_late_side_output.rs](26_late_side_output.rs)                                               | —                  |
+| [27_kafka_protobuf_source.py](../../../examples/27_kafka_protobuf_source.py)                     | [27_kafka_protobuf_source.rs](../../calc-flow-connectors/examples/27_kafka_protobuf_source.rs) | file,kafka         |
+| [28_kafka_custom_decoder.py](../../../examples/28_kafka_custom_decoder.py)                       | [28_kafka_custom_decoder.rs](../../calc-flow-connectors/examples/28_kafka_custom_decoder.rs)   | file,kafka         |
+| [29_sql_stream_switch.py](../../../examples/29_sql_stream_switch.py)                             | [29_sql_stream_switch.rs](29_sql_stream_switch.rs)                                             | —                  |
+| [30_streaming_stock_positions.py](../../../examples/30_streaming_stock_positions.py)             | [30_streaming_stock_positions.rs](30_streaming_stock_positions.rs)                             | —                  |
+| [31_streaming_account_market_values.py](../../../examples/31_streaming_account_market_values.py) | [31_streaming_account_market_values.rs](31_streaming_account_market_values.rs)                 | —                  |
+| [32_sql_expression_pipeline.py](../../../examples/32_sql_expression_pipeline.py)                 | [32_sql_expression_pipeline.rs](32_sql_expression_pipeline.rs)                                 | —                  |
+| [33_streaming_pipeline.py](../../../examples/33_streaming_pipeline.py)                           | [33_streaming_pipeline.rs](33_streaming_pipeline.rs)                                           | —                  |
+| [34_streaming_outputs.py](../../../examples/34_streaming_outputs.py)                             | [34_streaming_outputs.rs](34_streaming_outputs.rs)                                             | —                  |
+| [35_stream_asof_join.py](../../../examples/35_stream_asof_join.py)                               | [35_stream_asof_join.rs](35_stream_asof_join.rs)                                               | —                  |
+| [36_symbolic_event_window.py](../../../examples/36_symbolic_event_window.py)                     | [36_symbolic_event_window.rs](36_symbolic_event_window.rs)                                     | —                  |
 
 `support/` contains shared Arrow fixtures, replay sources, collectors, matrix
 factories, and lazy trade/quote data. In particular,
@@ -82,12 +92,12 @@ linked connector guides. Sink examples leave two rows in the external
 destination; local files and checkpoint directories are temporary.
 
 ```bash
-cargo run -p calc-flow-connectors --example kafka_source --features file,kafka
-cargo run -p calc-flow-connectors --example postgresql_source --features file,postgresql
-cargo run -p calc-flow-connectors --example mysql_sink --features file,mysql
-cargo run -p calc-flow-connectors --example http_source --features file,http
+cargo run -p calc-flow-connectors --example 16_kafka_source --features file,kafka
+cargo run -p calc-flow-connectors --example 17_postgresql_source --features file,postgresql
+cargo run -p calc-flow-connectors --example 24_mysql_sink --features file,mysql
+cargo run -p calc-flow-connectors --example 20_http_source --features file,http
 cargo run -p calc-flow-connectors --example websocket_orders --features websocket
-cargo run -p calc-flow-connectors --example websocket_source --features file,websocket
+cargo run -p calc-flow-connectors --example 21_websocket_source --features file,websocket
 ```
 
 Run `websocket_orders` in a separate terminal as the Rust equivalent of
@@ -95,14 +105,14 @@ Run `websocket_orders` in a separate terminal as the Rust equivalent of
 It serves the same `orders.jsonl` fixture on `127.0.0.1:8765` until interrupted.
 For HTTP, use the static HTTP server command in the HTTP connector guide.
 
-The existing `kafka_protobuf_source` and `kafka_custom_decoder` examples retain
+The existing `27_kafka_protobuf_source` and `28_kafka_custom_decoder` examples retain
 their offline decoder demos. Pass `--consume` after Cargo's `--`, or set
 `CALC_FLOW_KAFKA_BOOTSTRAP`, to additionally run
 the prepared topic through the managed calculation and Parquet sink. Protobuf
 sample production is available with:
 
 ```bash
-cargo run -p calc-flow-connectors --example kafka_protobuf_source --features file,kafka -- --produce
+cargo run -p calc-flow-connectors --example 27_kafka_protobuf_source --features file,kafka -- --produce
 ```
 
 ## Stock and account examples
@@ -114,8 +124,8 @@ Independent arithmetic checks verify final positions and valuations, including
 older quotes delivered last. Use a small input for a quick run:
 
 ```bash
-cargo run -p calc-flow --example streaming_stock_positions -- --rows 30 --accounts 2 --stocks 3 --batch-size 4
-cargo run -p calc-flow --example streaming_account_market_values -- --rows 30 --accounts 2 --stocks 3 --batch-size 4 --quote-rows 9
+cargo run -p calc-flow --example 30_streaming_stock_positions -- --rows 30 --accounts 2 --stocks 3 --batch-size 4
+cargo run -p calc-flow --example 31_streaming_account_market_values -- --rows 30 --accounts 2 --stocks 3 --batch-size 4 --quote-rows 9
 ```
 
 ## Run the inventory

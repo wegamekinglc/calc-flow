@@ -153,6 +153,7 @@ async fn main() -> Result<()> {
     let checkpoints = ManagedCheckpointRuntime::new(directory.path())?;
     let runner = example_runner(example_plan()?, &values, checkpoints)?;
     let job = runner.start().await?;
+    println!("started job: {} {:?}", job.id(), job.status().state);
     let outcome = job.wait().await;
 
     assert_eq!(outcome.state, calc_flow::JobState::Completed, "{outcome:?}");
@@ -160,7 +161,13 @@ async fn main() -> Result<()> {
     assert_eq!(*values.lock().await, [2, 3, 4]);
 
     println!("terminal state: {:?}", outcome.state);
-    println!("completed epoch: {:?}", outcome.completed_epoch);
+    println!(
+        "completed epoch: {}",
+        outcome
+            .completed_epoch
+            .expect("terminal checkpoint")
+            .as_u64()
+    );
     println!("results: {:?}", *values.lock().await);
     Ok(())
 }

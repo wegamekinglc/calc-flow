@@ -163,8 +163,8 @@ payload formats.
 
 Run [27_kafka_protobuf_source.py](../../examples/27_kafka_protobuf_source.py)
 for the same two-orders flow over protobuf payloads, or the connector
-crate's `kafka_protobuf_source` example
-(`cargo run -p calc-flow-connectors --example kafka_protobuf_source --features file,kafka -- --consume`)
+crate's `27_kafka_protobuf_source` example
+(`cargo run -p calc-flow-connectors --example 27_kafka_protobuf_source --features file,kafka -- --consume`)
 for the Rust API. Create the demo topic and produce the sample orders with
 the Python example's `--produce` flag, which requires the confluent-kafka package.
 The Rust example also accepts `--produce` and uses its native Kafka producer:
@@ -233,8 +233,8 @@ let mut registry = ConnectorRegistry::new();
 register_kafka_connectors_with_decoders(&mut registry, decoders)?;
 ```
 
-The connector crate's `kafka_custom_decoder` example
-(`cargo run -p calc-flow-connectors --example kafka_custom_decoder --features file,kafka -- --consume`)
+The connector crate's `28_kafka_custom_decoder` example
+(`cargo run -p calc-flow-connectors --example 28_kafka_custom_decoder --features file,kafka -- --consume`)
 registers a pipe-delimited decoder and consumes a prepared topic.
 
 Python applications register a callable taking the payload `bytes` and

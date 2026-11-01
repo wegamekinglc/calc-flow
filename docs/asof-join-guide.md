@@ -13,10 +13,10 @@ general outer joins, updates, retractions, or batch ASOF execution.
 
 ## Declare and run
 
-Run [22_stream_asof_join.py](../examples/22_stream_asof_join.py):
+Run [35_stream_asof_join.py](../examples/35_stream_asof_join.py):
 
 ```bash
-uv run --no-sync python examples/22_stream_asof_join.py
+uv run --no-sync python examples/35_stream_asof_join.py
 ```
 
 The example declares both inputs using this exact schema and helper:

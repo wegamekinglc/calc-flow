@@ -79,6 +79,13 @@ async fn execute_project(loaded: &ProjectSpec) -> ExampleResult {
         i64_values(&[result.outputs["output"].clone()], "total"),
         [Some(3), Some(7)]
     );
+    println!(
+        "reloaded totals: {:?}",
+        i64_values(&[result.outputs["output"].clone()], "total")
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+    );
     println!("JSON, YAML, and file-store round trips agree");
-    support::print(&[result.outputs["output"].clone()])
+    Ok(())
 }

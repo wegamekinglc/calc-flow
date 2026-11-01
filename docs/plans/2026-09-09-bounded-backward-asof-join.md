@@ -429,7 +429,7 @@ barrier capture 与 drain 不能并发形成半个状态切点：或者 pending 
 ### ASOF-06：示例、资源验证和交付审阅（2–3 人日）
 
 - 新增交易/报价示例，用逻辑 source watermark 展示等待与 finalization，给出 late drop/error 的区别。
-  文件为 `examples/22_stream_asof_join.py`，复用逻辑名称与 SourceProvidedWatermarks。
+  文件为 `examples/35_stream_asof_join.py`，复用逻辑名称与 SourceProvidedWatermarks。
 - 更新 streaming/symbolic/API/project 文档与适用 changelog；注明普通 sink 恢复可重放。
 - 执行第 8 节的资源验证，提交可复现数据生成参数与证据，不能把结果改写为吞吐承诺。
 - 运行实际受影响的 focused tests、contract checks 和最终 specialist review；完整矩阵交 CI。

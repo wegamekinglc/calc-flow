@@ -6,13 +6,14 @@ use calc_flow::{
     PipelineBuilder, SinkBinding, SourceBinding, StreamRuntimeConfig, StreamingRunner,
     WatermarkPolicy,
 };
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc, time::Instant};
 use stock_account_data::{DemoSource, LastSink, Latest, Options, check_positions};
 use support::{ExampleResult, best_effort_plan, expression, sql};
 
 #[tokio::main]
 async fn main() -> ExampleResult {
     let options = Options::parse(false)?;
+    let started_at = Instant::now();
     let last: Latest = Arc::default();
     let job = configured_runner(options, &last)?.start().await?;
     let outcome = job.wait().await;
@@ -21,8 +22,11 @@ async fn main() -> ExampleResult {
     let result = last
         .as_ref()
         .ok_or("stream produced no position snapshots")?;
+    let elapsed = started_at.elapsed();
     check_positions(result, options)?;
-    support::print(std::slice::from_ref(result))
+    support::print(std::slice::from_ref(result))?;
+    println!("total elapsed: {:.3} s", elapsed.as_secs_f64());
+    Ok(())
 }
 
 fn position_plan() -> calc_flow::Result<calc_flow::StreamExecutionPlan> {

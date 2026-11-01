@@ -8,7 +8,7 @@ use calc_flow::{
     WatermarkPolicy,
 };
 use datafusion::arrow::datatypes::{DataType, Field};
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc, time::Instant};
 use stock_account_data::{DemoSource, LastSink, Latest, Options, check_valuation};
 use support::{ExampleResult, best_effort_plan, expression, sql};
 
@@ -19,14 +19,18 @@ fn port(name: &str, fields: Vec<Field>) -> calc_flow::Result<Port> {
 #[tokio::main]
 async fn main() -> ExampleResult {
     let options = Options::parse(true)?;
+    let started_at = Instant::now();
     let last: Latest = Arc::default();
     let job = configured_runner(options, &last)?.start().await?;
     let outcome = job.wait().await;
     assert_eq!(outcome.state, calc_flow::JobState::Completed, "{outcome:?}");
     let last = last.lock().await;
     let result = last.as_ref().ok_or("no valuation snapshots")?;
+    let elapsed = started_at.elapsed();
     check_valuation(result, options)?;
-    support::print(std::slice::from_ref(result))
+    support::print(std::slice::from_ref(result))?;
+    println!("total elapsed: {:.3} s", elapsed.as_secs_f64());
+    Ok(())
 }
 
 fn runtime_config() -> calc_flow::Result<StreamRuntimeConfig> {

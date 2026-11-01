@@ -1,4 +1,4 @@
-//! Python named example: shared minute-window state and derived price ranges.
+//! Python 36: shared minute-window state and derived price ranges.
 mod support;
 use calc_flow::{
     AggregateFunction, Batch, BatchMetadata, OperatorMetadata, PipelineBuilder,
@@ -195,6 +195,21 @@ fn check_outputs(outputs: &BTreeMap<String, Vec<Batch>>) -> ExampleResult {
         [Some(2.0), None, Some(20.0)]
     );
     check_schema_and_rows(minute)?;
-    support::print(minute)?;
-    support::print(summary)
+    println!(
+        "minute rows: {}",
+        minute.iter().map(Batch::num_rows).sum::<usize>()
+    );
+    println!(
+        "volumes: {}",
+        support::format_values(&i64_values(minute, "volume"))
+    );
+    println!(
+        "average prices: {}",
+        support::format_values(&f64_values(minute, "avg_price"))
+    );
+    println!(
+        "price ranges: {}",
+        support::format_values(&f64_values(summary, "price_range"))
+    );
+    Ok(())
 }

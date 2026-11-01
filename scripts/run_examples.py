@@ -13,7 +13,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 PYTHON_EXAMPLES = tuple(
     str(path.relative_to(REPOSITORY_ROOT))
     for path in sorted((REPOSITORY_ROOT / "examples").glob("[0-9][0-9]_*.py"))
-) + ("examples/symbolic_event_window.py",)
+)
 SERVICE_PYTHON_EXAMPLES = (
     "examples/16_kafka_source.py",
     "examples/17_postgresql_source.py",
@@ -29,26 +29,46 @@ SERVICE_PYTHON_EXAMPLES = (
     "examples/28_kafka_custom_decoder.py",
 )
 RUST_CONNECTOR_FEATURES = {
-    "file_source": "file",
-    "kafka_source": "file,kafka",
-    "postgresql_source": "file,postgresql",
-    "mysql_source": "file,mysql",
-    "clickhouse_source": "file,clickhouse",
-    "http_source": "file,http",
-    "websocket_source": "file,websocket",
-    "kafka_sink": "file,kafka",
-    "postgresql_sink": "file,postgresql",
-    "mysql_sink": "file,mysql",
-    "clickhouse_sink": "file,clickhouse",
-    "kafka_protobuf_source": "file,kafka",
-    "kafka_custom_decoder": "file,kafka",
+    "15_file_source": "file",
+    "16_kafka_source": "file,kafka",
+    "17_postgresql_source": "file,postgresql",
+    "18_mysql_source": "file,mysql",
+    "19_clickhouse_source": "file,clickhouse",
+    "20_http_source": "file,http",
+    "21_websocket_source": "file,websocket",
+    "22_kafka_sink": "file,kafka",
+    "23_postgresql_sink": "file,postgresql",
+    "24_mysql_sink": "file,mysql",
+    "25_clickhouse_sink": "file,clickhouse",
+    "27_kafka_protobuf_source": "file,kafka",
+    "28_kafka_custom_decoder": "file,kafka",
     "late_output_recovery": "file",
 }
 
 
 def _rust_name(path: str) -> str:
-    stem = Path(path).stem
-    return stem.split("_", 1)[1] if stem[:2].isdigit() else stem
+    return Path(path).stem
+
+
+def _example_arguments(name: str) -> list[str]:
+    if name not in {
+        "30_streaming_stock_positions",
+        "31_streaming_account_market_values",
+    }:
+        return []
+    arguments = [
+        "--rows",
+        "30",
+        "--accounts",
+        "2",
+        "--stocks",
+        "3",
+        "--batch-size",
+        "4",
+    ]
+    if name == "31_streaming_account_market_values":
+        arguments.extend(["--quote-rows", "9"])
+    return arguments
 
 
 RUST_EXAMPLES = tuple(
@@ -65,7 +85,7 @@ def _commands(surface: str, *, include_services: bool = False) -> tuple[list[str
     commands: list[list[str]] = []
     if surface in {"all", "python"}:
         commands.extend(
-            [sys.executable, path]
+            [sys.executable, path, *_example_arguments(Path(path).stem)]
             for path in PYTHON_EXAMPLES
             if include_services or path not in SERVICE_PYTHON_EXAMPLES
         )
@@ -78,27 +98,11 @@ def _commands(surface: str, *, include_services: bool = False) -> tuple[list[str
             command = ["cargo", "run", "-p", package, "--example", name]
             if features:
                 command.extend(["--features", features])
-            if name in {"kafka_protobuf_source", "kafka_custom_decoder"}:
+            if name in {"27_kafka_protobuf_source", "28_kafka_custom_decoder"}:
                 command.extend(["--", "--consume"])
-            if name in {
-                "streaming_stock_positions",
-                "streaming_account_market_values",
-            }:
-                command.extend(
-                    [
-                        "--",
-                        "--rows",
-                        "30",
-                        "--accounts",
-                        "2",
-                        "--stocks",
-                        "3",
-                        "--batch-size",
-                        "4",
-                    ]
-                )
-                if name == "streaming_account_market_values":
-                    command.extend(["--quote-rows", "9"])
+            arguments = _example_arguments(name)
+            if arguments:
+                command.extend(["--", *arguments])
             commands.append(command)
     return tuple(commands)
 

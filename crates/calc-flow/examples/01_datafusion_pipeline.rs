@@ -87,6 +87,12 @@ async fn named_outputs(orders: Batch) -> ExampleResult {
         i64_values(&[result.outputs["quantities.output"].clone()], "quantity"),
         [Some(3), Some(1), Some(4)]
     );
-    println!("named outputs: {:?}", result.outputs.keys());
+    let names = ["totals", "quantities"];
+    assert!(
+        names
+            .iter()
+            .all(|name| result.outputs.contains_key(&format!("{name}.output")))
+    );
+    println!("named outputs: {names:?}");
     Ok(())
 }

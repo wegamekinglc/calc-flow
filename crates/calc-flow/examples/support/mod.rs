@@ -422,9 +422,37 @@ pub fn check_floats(actual: &[Option<f64>], expected: &[Option<f64>]) {
         }
     }
 }
+pub fn format_values<T: std::fmt::Debug>(values: &[Option<T>]) -> String {
+    let values = values
+        .iter()
+        .map(|value| match value {
+            Some(value) => format!("{value:?}"),
+            None => "None".into(),
+        })
+        .collect::<Vec<_>>();
+    format!("[{}]", values.join(", "))
+}
+
 pub fn print(batches: &[Batch]) -> ExampleResult {
     for batch in batches {
         print_batches(batch.table_payload()?.batches())?;
+    }
+    Ok(())
+}
+
+pub fn print_columns(batches: &[Batch], columns: &[&str]) -> ExampleResult {
+    for batch in batches {
+        let payload = batch.table_payload()?;
+        let indices = columns
+            .iter()
+            .map(|column| payload.schema().index_of(column))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let projected = payload
+            .batches()
+            .iter()
+            .map(|record| record.project(&indices))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        print_batches(&projected)?;
     }
     Ok(())
 }

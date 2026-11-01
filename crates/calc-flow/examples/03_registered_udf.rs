@@ -39,6 +39,7 @@ async fn main() -> ExampleResult {
         [Some(200), Some(500), Some(800)]
     );
     println!("registered catalog: {:?}", snapshot.catalog());
+    println!("result:");
     support::print(&[result.outputs["output"].clone()])
 }
 
