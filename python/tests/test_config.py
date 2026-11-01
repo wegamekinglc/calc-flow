@@ -77,6 +77,35 @@ def test_project_document_delegates_schema_and_rust_defaults() -> None:
     assert document.root["runtime"]["options"]["timeout_seconds"] == 30
 
 
+def test_project_document_exclude_none_preserves_nested_json_nulls() -> None:
+    value = {"keep_null": None, "nested": [{"also_keep": None}]}
+    document = ProjectDocument.model_validate(_project_with_data(value))
+
+    dumped = document.model_dump(exclude_none=True)
+    dumped_json = json.loads(document.model_dump_json(exclude_none=True))
+    assert dumped["data_sources"][0]["data"] == value
+    assert dumped_json["data_sources"][0]["data"] == value
+
+
+def test_project_document_equality_requires_the_same_concrete_type() -> None:
+    class ChildDocument(ProjectDocument):
+        pass
+
+    class OtherChildDocument(ProjectDocument):
+        pass
+
+    project = _minimal_project()
+    document = ProjectDocument.model_validate(project)
+    child = ChildDocument.model_validate(project)
+    other_child = OtherChildDocument.model_validate(project)
+
+    assert child == ChildDocument.model_validate(project)
+    assert document != child
+    assert child != document
+    assert child != other_child
+    assert other_child != child
+
+
 def test_project_document_openapi_schema_rewrites_component_references() -> None:
     schema = _openapi_project_schema(ProjectDocument.__name__)
     references: list[str] = []

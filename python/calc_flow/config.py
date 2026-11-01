@@ -204,18 +204,6 @@ def _openapi_project_schema(component_name: str) -> dict[str, Any]:
     return schema
 
 
-def _exclude_none_values(value: object) -> object:
-    if type(value) is dict:
-        return {
-            key: _exclude_none_values(item)
-            for key, item in value.items()
-            if item is not None
-        }
-    if type(value) is list:
-        return [_exclude_none_values(item) for item in value]
-    return value
-
-
 class ProjectDocument:
     __slots__ = ("root",)
 
@@ -223,7 +211,7 @@ class ProjectDocument:
         self.root = self._validated_root(root)
 
     def __eq__(self, other: object) -> bool:
-        if not isinstance(other, ProjectDocument):
+        if type(self) is not type(other):
             return NotImplemented
         return self.root == other.root
 
@@ -296,14 +284,9 @@ class ProjectDocument:
         exclude: object,
         exclude_none: bool,
     ) -> dict[str, JSONValue]:
+        del exclude_none
         if include is not None or exclude is not None:
             raise TypeError("ProjectDocument does not support include/exclude filters")
-        if exclude_none:
-            return {
-                key: _exclude_none_values(item)
-                for key, item in root.items()
-                if item is not None
-            }
         return root
 
     def model_dump(
