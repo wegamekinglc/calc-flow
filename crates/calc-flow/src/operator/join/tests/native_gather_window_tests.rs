@@ -170,6 +170,43 @@ fn count_windows(inputs: &Arc<ProbeInputs>, job: &StreamJobContext, limit: u64) 
 }
 
 #[test]
+fn test_single_match_windows_keep_compact_index_representation() {
+    let service = crate::runtime::streaming::gather_work::TestService::new(2, 1).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        super::super::relax_probe_cost_gate_for_test();
+        let (_operator, inputs, job) = gather_fixture_rows(
+            service.owner("single-match-window".into()),
+            true,
+            false,
+            None,
+            Some(1),
+        )
+        .await;
+        let counts = count_windows(&inputs, &job, 1_000_000);
+        let pairs =
+            super::super::worker::fill_all(&inputs, &counts, &GatherStop::from_job(&job)).unwrap();
+        assert_eq!(pairs.len(), 5);
+        assert!(matches!(
+            super::super::super::matches::Matches::view(&pairs),
+            super::super::super::matches::View::Runs { .. }
+        ));
+        assert_eq!(
+            pairs
+                .iter()
+                .map(|pair| (pair.pos, pair.opposite_index))
+                .collect::<Vec<_>>(),
+            expected_pairs(&inputs)
+        );
+    });
+    drop(runtime);
+    service.shutdown();
+}
+
+#[test]
 fn test_bulk_window_fill_stops_inside_large_fanout_at_existing_item_quantum() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
