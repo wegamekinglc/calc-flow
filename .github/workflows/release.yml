@@ -155,7 +155,7 @@ jobs:
   wheel-python-versions:
     name: Installed wheel unit tests (Python ${{ matrix.python_version }})
     needs: [wheels, sdist]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
