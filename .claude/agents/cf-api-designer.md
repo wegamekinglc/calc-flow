@@ -107,9 +107,9 @@ def tumbling_window(...) -> ...: ...
 - <decision and the alternative it beat>
 
 ## Error Cases
-| Input violation          | Message text                                          |
-| ------------------------ | ----------------------------------------------------- |
-| window size of zero      | "tumbling window requires a positive row count"       |
+| Input violation     | Message text                                    |
+|---------------------|-------------------------------------------------|
+| window size of zero | "tumbling window requires a positive row count" |
 
 ## Example
 <10-30 lines of pseudo-code or real Rust/Python showing the typical happy path. This
@@ -123,14 +123,15 @@ example itself targets 20-50 lines.>
 ### Step 4: Hand Off
 
 Report a 2-4 sentence summary: where the API note lives, whether the surface is approved
-or has open questions, and the next agent (`cf-critic` for an adversarial pass, then
-`cf-implementer` once the surface is locked).
+or has open questions. Return the result to the orchestrator; recommend `cf-critic`
+only for unresolved high-risk design questions, otherwise proceed to `cf-implementer`
+with the agreed surface under the shared delivery policy.
 
 ## Design Heuristics
 
-- **Match the introduction doc.** If the doc says "micro-batch runner", the type is
-  `MicroBatchRunner`, not `BatchExecutor`. Vocabulary mismatch is a top source of
-  confusion.
+- **Match the introduction doc.** Use `BatchExecutionPlan` for finite execution and
+  `StreamingRunner` for a continuous job. Match the exported types and their lifecycle
+  rather than introducing another name for the same contract.
 - **Group config objects.** Six args is fine; eleven is not. Use a small data-only config
   struct/model with defaults rather than a long positional list.
 - **Required > optional.** Required args first, optional second, advanced/internal last.

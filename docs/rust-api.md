@@ -609,7 +609,9 @@ name, exact left/right `SchemaRef` values, and that spec. Add it through
 
 The operator exposes `spec()` and payload-free `status()` and implements
 `StreamOperator` with `checkpoint`, `restore`, and `reset`. Its independent
-state/layout/accounting version is 3; earlier checkpoint versions are rejected.
+semantic state version is `3`; native snapshots require layout and accounting
+version `10`. Restore rejects other native layouts even when their semantic
+state version is `3`.
 `StreamingJob::stream_asof_join_status()`
 returns status by node ID. The [ASOF guide](asof-join-guide.md) defines exact
 input types, inclusive predecessor selection, dual-watermark finality,

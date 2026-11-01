@@ -170,9 +170,9 @@ dashes span the full column width, including cell spaces.
   `StreamOperator` split finite processing from continuous processing and
   checkpoint lifecycle. `ExpressionOperator`, `SqlOperator`,
   `RollingOperator`, and `CrossSectionOperator` implement both lifecycles;
-  `UnionOperator`, `WindowAggregateOperator`, `StreamJoinOperator`, and
-  `StreamAsofJoinOperator` are stream-only. External operators resolve through
-  lifecycle-specific factories in `ProviderRegistry`.
+  `SnapshotSqlOperator`, `UnionOperator`, `WindowAggregateOperator`,
+  `StreamJoinOperator`, and `StreamAsofJoinOperator` are stream-only. External
+  operators resolve through lifecycle-specific factories in `ProviderRegistry`.
 - `OperatorMetadata: Send + Sync + Any` requires concrete operator types to
   be `'static`. Rolling/cross-section SideOutput exposes required `output`
   and `late` table ports. Late-derived paths allow only built-in single-input

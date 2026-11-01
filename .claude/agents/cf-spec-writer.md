@@ -58,7 +58,7 @@ or the issue body. Cover:
 - **Engine constraints** — table math stays in DataFusion; array providers interpret an
   allowlisted AST (never Python `eval`); UDFs are referenced by
   `UdfReference(provider, name, version)` — configs never carry callables or import paths
-- **Runner semantics** — micro-batch vs streaming; source cursor behavior; at-least-once
+- **Runner semantics** — finite batch vs continuous streaming; source cursor behavior; at-least-once
   sink delivery and what duplicates mean for this change
 - **Inputs and outputs** — types, units, valid ranges, error conditions
 - **Performance constraints** — target workload and scale (`overhead`/`small`/`standard`/
@@ -123,8 +123,9 @@ Verification for local-full-test exceptions.
 ### Step 4: Hand Off
 
 Report a 3-5 sentence summary of the spec and where it lives. Identify the next agent in
-the chain — usually `cf-api-designer` if there's a public API change (crate exports or
-Python API), or `cf-critic` to proceed (the orchestrator routes from there).
+the route under the shared delivery policy: `cf-api-designer` for a public-contract
+design decision, `cf-critic` for unresolved high-risk semantics, otherwise
+`cf-implementer`. The orchestrator schedules any next step.
 
 ## What Not to Do
 
